@@ -165,3 +165,37 @@ fn search_never_finds_sub_agent_or_incognito_chats() {
     );
     assert!(s.search("\"grow\"", None, None, 10).unwrap().is_empty());
 }
+
+/// A renamed chat lists and is found under its new title, not its old one,
+/// also after the index is rebuilt from the log (which keeps the title the
+/// chat was created with); an incognito chat's new title is not indexed.
+#[test]
+fn a_rename_changes_the_row_and_the_index() {
+    let s = Store::open_in_memory().unwrap();
+    let a = chat(&s, "u1", "Lunch ideas", &["pasta"], false);
+    assert!(s.rename_session(a, "Quarterly zeppelin budget").unwrap());
+    assert_eq!(
+        s.session(a).unwrap().unwrap().title,
+        "Quarterly zeppelin budget"
+    );
+    let found = |q: &str| s.search(q, None, None, 10).unwrap().len();
+    assert_eq!(found("\"zeppelin\""), 1);
+    assert_eq!(found("\"lunch\""), 0);
+    assert_eq!(found("\"pasta\""), 1, "the messages stay indexed");
+    s.rebuild_search_index().unwrap();
+    assert_eq!(found("\"zeppelin\""), 1, "after a rebuild");
+    assert_eq!(found("\"lunch\""), 0, "after a rebuild");
+    // Cut to the row's length.
+    assert!(s.rename_session(a, &"x".repeat(500)).unwrap());
+    assert_eq!(
+        s.session(a).unwrap().unwrap().title.chars().count(),
+        harness_store::MAX_TITLE_CHARS
+    );
+    let inc = chat(&s, "u1", "Private", &[], true);
+    assert!(s.rename_session(inc, "Zeppelin secret").unwrap());
+    assert_eq!(found("\"secret\""), 0);
+    assert!(
+        !s.rename_session(SessionId::new(), "x").unwrap(),
+        "no such chat"
+    );
+}

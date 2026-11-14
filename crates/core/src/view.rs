@@ -644,6 +644,7 @@ mod tests {
                 sid,
                 2,
                 EventKind::ToolCallFinished(ToolCallFinished {
+                    seen: None,
                     call_id: "c".into(),
                     ok: true,
                     output: "[S1] A".into(),

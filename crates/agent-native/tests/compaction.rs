@@ -772,6 +772,7 @@ fn forging_history() -> (Vec<RawEvent>, String) {
     }));
     for (call_id, output) in [("c1", file.as_str()), ("c2", "ok\n")] {
         events.push(EventKind::ToolCallFinished(ToolCallFinished {
+            seen: None,
             call_id: call_id.into(),
             ok: true,
             output: output.into(),
@@ -1037,6 +1038,7 @@ async fn a_background_note_and_a_callback_opening_reach_the_summariser_quoted() 
             blocks: vec![],
         }));
         push(EventKind::ToolCallFinished(ToolCallFinished {
+            seen: None,
             call_id,
             ok: true,
             output: TAIL.into(),
@@ -1176,6 +1178,7 @@ fn history_with_todo(kept: usize) -> Vec<RawEvent> {
         items: serde_json::from_value(items).unwrap(),
     }));
     push(EventKind::ToolCallFinished(ToolCallFinished {
+        seen: None,
         call_id: "plan".into(),
         ok: true,
         output: "Task list saved: 3 items.".into(),
@@ -1343,6 +1346,7 @@ fn history_with_a_newer_list() -> Vec<RawEvent> {
             items: serde_json::from_value(items).unwrap(),
         }),
         EventKind::ToolCallFinished(ToolCallFinished {
+            seen: None,
             call_id: "plan2".into(),
             ok: true,
             output: "Task list saved: 1 item.".into(),
@@ -1653,18 +1657,48 @@ async fn a_summary_call_that_gives_up_ends_the_countdown() {
         },
     );
     let host = Host::default();
-    run(&b, &host, history(4, 3_000), agent(None), Default::default()).await;
+    run(
+        &b,
+        &host,
+        history(4, 3_000),
+        agent(None),
+        Default::default(),
+    )
+    .await;
     let evs = host.0.lock().unwrap();
     let names: Vec<&str> = evs.iter().map(|k| k.name()).collect();
-    let last_retry = names.iter().rposition(|n| *n == "model_retry").expect("retried");
-    let given_up = names.iter().position(|n| *n == "retry_given_up").expect("given up");
+    let last_retry = names
+        .iter()
+        .rposition(|n| *n == "model_retry")
+        .expect("retried");
+    let given_up = names
+        .iter()
+        .position(|n| *n == "retry_given_up")
+        .expect("given up");
     assert!(last_retry < given_up, "{names:?}");
     // In the view the countdown is gone at that point.
     let sid = SessionId::new();
     let mut v = harness_core::view::SessionView::default();
     for (i, k) in evs[..=given_up].iter().enumerate() {
         let (kind, payload) = k.clone().into_parts();
-        v.apply(&RawEvent { session_id: sid, seq: i as u64 + 1, ts_ms: 0, kind, payload }).unwrap();
+        v.apply(&RawEvent {
+            session_id: sid,
+            seq: i as u64 + 1,
+            ts_ms: 0,
+            kind,
+            payload,
+        })
+        .unwrap();
     }
     assert_eq!(v.retry, None);
+}
+
+/// A skill's body is a tool result, which a summary replaces: the coding
+/// summary names each skill the work still follows, so the agent loads it
+/// again, without copying its text (X.2; Hermes keeps reload pointers).
+#[test]
+fn the_coding_summary_names_loaded_skills_to_load_again() {
+    let p = harness_agent_native::CODING_SUMMARY_PROMPT;
+    assert!(p.contains("loaded with the skill tool"), "{p}");
+    assert!(p.contains("so you can load it again"), "{p}");
 }

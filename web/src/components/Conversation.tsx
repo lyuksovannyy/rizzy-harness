@@ -1,17 +1,8 @@
 // An open session: header, timeline, reply composer. Loaded lazily so the
 // new-tab home screen stays small.
 import "../lib/i18nPages";
-import { FileText, Package, Trash2 } from "lucide-react";
-import {
-  lazy,
-  Suspense,
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
+import { Download, FileText, Package, Trash2 } from "lucide-react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "../api";
 import { pageApi } from "../apiPages";
 import { endWords, turnStart } from "../lib/callback";
@@ -32,43 +23,17 @@ import {
   webNotice,
 } from "../lib/rich";
 import type { Live } from "../live";
-import {
-  InputCtx,
-  MessageCtx,
-  ProgressCtx,
-  type InputInfo,
-  type Inputs,
-  type MessageInfo,
-} from "../md/context";
+import { InputCtx, MessageCtx, ProgressCtx, type InputInfo, type Inputs, type MessageInfo } from "../md/context";
 import { CopyMessage } from "../md/CopyMessage";
 import { showHidden, shownName } from "../md/hidden";
 import type { History } from "../bg/topics";
-import type {
-  Agent,
-  Item,
-  ModelInfo,
-  NodeInfo,
-  RoutineMark,
-  SessionRow,
-  SessionView,
-} from "../types";
-import {
-  inputBlock,
-  inputState,
-  progressSignature,
-  progressSlots,
-  type ProgressSlots,
-} from "../ui/blocks";
+import type { Agent, Item, ModelInfo, NodeInfo, RoutineMark, SessionRow, SessionView } from "../types";
+import { inputBlock, inputState, progressSignature, progressSlots, type ProgressSlots } from "../ui/blocks";
 import { Composer } from "./Composer";
 import { AgentMark, agentAlert } from "./AgentAvatar";
-import {
-  ChatArtifactsCtx,
-  SaveAsArtifact,
-  SavedItem,
-  stagedKeys,
-  useChatArtifacts,
-} from "./ChatArtifacts";
+import { ChatArtifactsCtx, SaveAsArtifact, SavedItem, stagedKeys, useChatArtifacts } from "./ChatArtifacts";
 import { BubbleImages } from "./ChatImages";
+import { ChatTitle } from "./ChatTitle";
 import { DeleteChat } from "./DeleteChat";
 import { useAvatarState } from "./avatarState";
 import { Markdown } from "./Markdown";
@@ -87,6 +52,8 @@ const ChatGutter = lazy(() => import("../bg/ChatGutter"));
 // Work beside the conversation (sub-agents, background commands): loaded on
 // the chat's first one.
 const SidePanel = lazy(() => import("./SidePanel"));
+// Export as Markdown, loaded on its first click.
+const ExportChat = lazy(() => import("./ExportChat"));
 // Loaded on the chat's first task list (the agent's `todo` tool).
 const TodoPanel = lazy(() => import("./TodoPanel"));
 
@@ -129,8 +96,7 @@ function Undo(props: {
     <div className="undo small">
       <details>
         <summary>
-          {props.files.length} file{props.files.length === 1 ? "" : "s"} changed
-          {props.restored ? " · undone" : ""}
+          {props.files.length} file{props.files.length === 1 ? "" : "s"} changed{props.restored ? " · undone" : ""}
         </summary>
         <ul className="mono">
           {props.files.map((f) => (
@@ -139,12 +105,7 @@ function Undo(props: {
         </ul>
       </details>
       {!props.restored && !props.blocked && (
-        <button
-          type="button"
-          className="link"
-          disabled={busy || props.running}
-          onClick={() => void run(false, false)}
-        >
+        <button type="button" className="link" disabled={busy || props.running} onClick={() => void run(false, false)}>
           Undo file changes
         </button>
       )}
@@ -163,11 +124,7 @@ function Undo(props: {
         <div className="error-text">
           {err}{" "}
           {err.includes("changed after the turn") && (
-            <button
-              type="button"
-              className="link"
-              onClick={() => void run(true)}
-            >
+            <button type="button" className="link" onClick={() => void run(true)}>
               Undo anyway
             </button>
           )}
@@ -179,26 +136,17 @@ function Undo(props: {
 
 /** What ui blocks need from the conversation: where each progress block
  * stands, and whether each question or form can be answered. */
-function BlockCtx(props: {
-  slots: ProgressSlots;
-  inputs: Inputs;
-  children: ReactNode;
-}) {
+function BlockCtx(props: { slots: ProgressSlots; inputs: Inputs; children: ReactNode }) {
   return (
     <ProgressCtx.Provider value={props.slots}>
-      <InputCtx.Provider value={props.inputs}>
-        {props.children}
-      </InputCtx.Provider>
+      <InputCtx.Provider value={props.inputs}>{props.children}</InputCtx.Provider>
     </ProgressCtx.Provider>
   );
 }
 
 /** Each fallback note by the reply it belongs to (the turn's first reply
  * after it); a note whose turn gave no reply stays where it is. */
-function fallbackNotes(items: Item[]): {
-  byReply: Map<number, Extract<Item, { type: "fallback" }>>;
-  attached: Set<number>;
-} {
+function fallbackNotes(items: Item[]): { byReply: Map<number, Extract<Item, { type: "fallback" }>>; attached: Set<number> } {
   const byReply = new Map<number, Extract<Item, { type: "fallback" }>>();
   const attached = new Set<number>();
   let pending: number | null = null;
@@ -226,17 +174,13 @@ function FallbackNote(props: { note: Extract<Item, { type: "fallback" }> }) {
 /** A routine run's chat on screen, in a visible page, is seen once the run
  * has finished (marking a run still going changes nothing on the server). */
 function useRunSeen(mark: RoutineMark | null | undefined) {
-  const due =
-    !!mark &&
-    !mark.seen &&
-    !["pending", "running", "waiting"].includes(mark.status);
+  const due = !!mark && !mark.seen && !["pending", "running", "waiting"].includes(mark.status);
   const routineId = mark?.routine_id;
   const runId = mark?.run_id;
   useEffect(() => {
     if (!due || !routineId || !runId) return;
     const seen = () => {
-      if (document.visibilityState === "visible")
-        void markRunSeen(routineId, runId).catch(() => {});
+      if (document.visibilityState === "visible") void markRunSeen(routineId, runId).catch(() => {});
     };
     seen();
     document.addEventListener("visibilitychange", seen);
@@ -293,11 +237,7 @@ export default function Conversation(props: {
       let info = cache.get(i);
       if (!info) {
         const c = cites(i);
-        info = {
-          provenance: provenanceAt(firstSeen, i),
-          sources: sourceKeys(c),
-          cites: c,
-        };
+        info = { provenance: provenanceAt(firstSeen, i), sources: sourceKeys(c), cites: c };
         cache.set(i, info);
       }
       return info;
@@ -305,10 +245,7 @@ export default function Conversation(props: {
   }, [firstSeen, cites]);
   // Which progress blocks are the turn's live card and which are snapshots.
   const progressSig = view ? progressSignature(items, view) : "";
-  const slots = useMemo(
-    () => (view ? progressSlots(items, view) : new Map()),
-    [view, progressSig],
-  );
+  const slots = useMemo(() => (view ? progressSlots(items, view) : new Map()), [view, progressSig]);
   // Whether each question or form can be answered now, and what the agent
   // read before asking it. It changes with what progressSlots watches and
   // when a web result arrives.
@@ -319,11 +256,7 @@ export default function Conversation(props: {
       const incognito = !!(view.meta?.incognito ?? rowIncognito);
       items.forEach((it, i) => {
         if (it.type !== "assistant" || !inputBlock(it)) return;
-        byMessage.set(it.message_id, {
-          state: inputState(items, i, view),
-          notice: webNotice(items, i),
-          incognito,
-        });
+        byMessage.set(it.message_id, { state: inputState(items, i, view), notice: webNotice(items, i), incognito });
       });
     }
     return { sessionId, byMessage };
@@ -335,9 +268,7 @@ export default function Conversation(props: {
   // Items before the running turn's user message are final even if their
   // stream was cut off (a cancelled, failed or interrupted turn leaves
   // done=false); such a message is shown as cut off.
-  const liveFrom = running
-    ? items.findLastIndex((_, i) => turnStart(items, i))
-    : Infinity;
+  const liveFrom = running ? items.findLastIndex((_, i) => turnStart(items, i)) : Infinity;
   const nodeId = meta?.node_id ?? props.row?.node_id ?? "";
   const node = props.nodes.find((n) => n.node_id === nodeId);
   const agentic = (meta?.profile ?? props.row?.profile) === "agentic";
@@ -365,24 +296,15 @@ export default function Conversation(props: {
   useRunSeen(routine);
   // What the server offers here: "Save as artifact" in agentic chats, images in any.
   const workspaceId = props.row?.workspace_id ?? null;
-  const features = useFeatures(
-    workspaceId,
-    !!props.row && !blocked && !incognito,
-  );
+  const features = useFeatures(workspaceId, !!props.row && !blocked && !incognito);
   const saveable = agentic && !!features?.artifacts.enabled;
-  const imagesUsed = items.reduce(
-    (n, it) => n + (it.type === "user" ? (it.images?.length ?? 0) : 0),
-    0,
-  );
-  const artifacts = useChatArtifacts(
-    sessionId,
-    live,
-    stagedKeys(items),
-    saveable,
-  );
+  const imagesUsed = items.reduce((n, it) => n + (it.type === "user" ? (it.images?.length ?? 0) : 0), 0);
+  const artifacts = useChatArtifacts(sessionId, live, stagedKeys(items), saveable);
   const [savingFile, setSavingFile] = useState(false);
   // Deleting asks in a dialog that also offers the chat's Media files.
   const [deleting, setDeleting] = useState(false);
+  // Export as Markdown: its dialog and the file's builder load on the first click.
+  const [exporting, setExporting] = useState(false);
   const remove = () => setDeleting(true);
   // The background strip: once a command of this chat runs, it stays
   // mounted (it hides itself) so an end this tab asked for can show.
@@ -392,44 +314,25 @@ export default function Conversation(props: {
   if (view?.todo?.length) todoFor.current = sessionId;
 
   const page = (
-    <section
-      className={props.gutter ? "conversation with-gutter" : "conversation"}
-    >
+    <section className={props.gutter ? "conversation with-gutter" : "conversation"}>
       {props.gutter && (
         <Suspense fallback={null}>
-          <ChatGutter
-            sessionId={sessionId}
-            agentic={agentic}
-            history={props.gutter}
-          />
+          <ChatGutter sessionId={sessionId} agentic={agentic} history={props.gutter} />
         </Suspense>
       )}
       <header className="conv-head">
         <div className="conv-title">
-          <h1 className="ellipsis">
-            {shownName(meta?.title ?? props.row?.title ?? "…")}
-          </h1>
+          {/* The row's title: a rename changes only the row (the log keeps the first). */}
+          <ChatTitle sessionId={sessionId} title={props.row?.title ?? meta?.title ?? "…"} canRename={!!props.row} />
           <div className="conv-meta">
-            <span
-              className={`conv-agent${sessionAgent && agentAlert(sessionAgent) ? " bad" : ""}`}
-            >
-              {sessionAgent && (
-                <AgentMark
-                  agent={sessionAgent}
-                  state={answering === activeAgent ? face : "idle"}
-                  size={20}
-                />
-              )}
+            <span className={`conv-agent${sessionAgent && agentAlert(sessionAgent) ? " bad" : ""}`}>
+              {sessionAgent && <AgentMark agent={sessionAgent} state={answering === activeAgent ? face : "idle"} size={20} />}
               {agentName(activeAgent)}
             </span>
             <span className="muted">{meta?.model}</span>
             {agentic && <NodeBadge node={node} nodeId={nodeId} />}
             {agentic && <ExecBadge mode={meta?.exec_mode} node={node} />}
-            {agentic && (
-              <span className="mono muted ellipsis">
-                {shownName(meta?.cwd ?? "")}
-              </span>
-            )}
+            {agentic && <span className="mono muted ellipsis">{shownName(meta?.cwd ?? "")}</span>}
             {view && view.usage.input_tokens + view.usage.output_tokens > 0 && (
               <span
                 className="muted meter"
@@ -439,21 +342,13 @@ export default function Conversation(props: {
                     : ""
                 }`}
               >
-                {compact(view.usage.input_tokens + view.usage.output_tokens)}{" "}
-                {t("conv.tokens")} ·{" "}
-                <ContextMeter
-                  used={view.context_tokens}
-                  window={view.context_window}
-                  summaryAt={view.summary_at}
-                  model={view.context_model ?? meta?.model ?? ""}
-                />
+                {compact(view.usage.input_tokens + view.usage.output_tokens)} {t("conv.tokens")} ·{" "}
+                <ContextMeter used={view.context_tokens} window={view.context_window} summaryAt={view.summary_at} model={view.context_model ?? meta?.model ?? ""} />
               </span>
             )}
           </div>
         </div>
-        {props.row && canJoinProject(props.row) && (
-          <ProjectChip row={props.row} projects={props.projects ?? []} />
-        )}
+        {props.row && canJoinProject(props.row) && <ProjectChip row={props.row} projects={props.projects ?? []} />}
         {saveable && (
           <button
             type="button"
@@ -469,20 +364,27 @@ export default function Conversation(props: {
         <button
           type="button"
           className="icon"
-          aria-label={t("conv.delete")}
-          title={t("conv.delete")}
-          onClick={remove}
+          aria-label={t("conv.export")}
+          title={t("conv.export")}
+          disabled={!view || view.items.length === 0}
+          onClick={() => setExporting(true)}
         >
+          <Download size={18} />
+        </button>
+        <button type="button" className="icon" aria-label={t("conv.delete")} title={t("conv.delete")} onClick={remove}>
           <Trash2 size={18} />
         </button>
       </header>
-      {deleting && (
-        <DeleteChat
-          sessionId={sessionId}
-          workspaceId={workspaceId}
-          incognito={incognito}
-          onClose={() => setDeleting(false)}
-        />
+      {deleting && <DeleteChat sessionId={sessionId} workspaceId={workspaceId} incognito={incognito} onClose={() => setDeleting(false)} />}
+      {exporting && view && (
+        <Suspense fallback={null}>
+          <ExportChat
+            view={view}
+            title={props.row?.title ?? meta?.title ?? ""}
+            agentName={(id) => agentName(id ?? activeAgent)}
+            onClose={() => setExporting(false)}
+          />
+        </Suspense>
       )}
       {savingFile && (
         <div className="incognito-banner save-file-bar">
@@ -491,10 +393,7 @@ export default function Conversation(props: {
       )}
       {routine?.untrusted && (
         <div className="incognito-banner untrusted-banner" role="note">
-          <span>
-            Contains data from an external event, so memory and web tools stay
-            off in this chat.
-          </span>
+          <span>Contains data from an external event, so memory and web tools stay off in this chat.</span>
           <a className="link" href={routineHash(routine.routine_id)}>
             {routine.name}
           </a>
@@ -521,373 +420,271 @@ export default function Conversation(props: {
 
       <div className="conv-body">
         <div className="conv-main">
-          <div
-            className="timeline"
-            ref={scroller}
-            onScroll={() => {
-              const el = scroller.current;
-              if (el)
-                stick.current =
-                  el.scrollHeight - el.scrollTop - el.clientHeight < 80;
-            }}
-          >
-            <BlockCtx slots={slots} inputs={inputs}>
-              <div className="column">
-                {!view || view.head_seq === 0 ? (
-                  <div className="muted pad">Loading…</div>
-                ) : (
-                  view.items.map((it, i) => {
-                    if (i <= groupedUntil) return null;
-                    const web = webGroups.get(i);
-                    if (web) {
-                      groupedUntil = web.end;
-                      return (
-                        <WebGroupCard
-                          key={i}
-                          sessionId={sessionId}
-                          group={web}
-                          blocked={!!blocked}
-                          cwd={meta?.cwd}
-                          tools={web.members.map(
-                            (m) =>
-                              view.items[m] as Extract<
-                                typeof it,
-                                { type: "tool" }
-                              >,
-                          )}
-                        />
-                      );
-                    }
-                    // Parallel answers: render the whole group once, side by side.
-                    if (it.type === "assistant" && it.variant) {
-                      const g = it.variant.group;
-                      const first = view.items.findIndex(
-                        (x) => x.type === "assistant" && x.variant?.group === g,
-                      );
-                      if (first !== i) return null;
-                      const answers = view.items.filter(
-                        (x): x is Extract<typeof x, { type: "assistant" }> =>
-                          x.type === "assistant" && x.variant?.group === g,
-                      );
-                      const chosen =
-                        view.variant_selection[g] ??
-                        answers.find((a) => a.variant?.index === 0)?.message_id;
-                      const busy = running && view.running_turn === g;
-                      return (
-                        <div
-                          key={i}
-                          className="variants"
-                          style={{
-                            gridTemplateColumns: `repeat(${answers.length}, minmax(0, 1fr))`,
-                          }}
-                        >
-                          {answers.map((a) => (
-                            <div
-                              key={a.message_id}
-                              className={`msg assistant variant ${a.message_id === chosen ? "chosen" : ""}`}
-                            >
-                              <div className="variant-head small">
-                                <span className="mono">{a.variant?.model}</span>
-                                {a.message_id === chosen ? (
-                                  <span className="muted">
-                                    continuing from this
-                                  </span>
-                                ) : (
-                                  <button
-                                    type="button"
-                                    className="link"
-                                    disabled={busy}
-                                    onClick={() =>
-                                      void pageApi.selectVariant(
-                                        sessionId,
-                                        g,
-                                        a.message_id,
-                                      )
-                                    }
-                                  >
-                                    Continue with this
-                                  </button>
-                                )}
-                              </div>
-                              <MessageCtx.Provider value={infoAt(i)}>
-                                <Markdown
-                                  text={a.text}
-                                  done={a.done || !busy}
-                                  cut={!a.done && !busy}
-                                  blocks={a.blocks}
-                                  from={a.author ? agentName(a.author) : null}
-                                  messageId={a.message_id}
-                                />
-                              </MessageCtx.Provider>
-                              {(a.done || !busy) && (
-                                <CopyMessage text={a.text} />
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      );
-                    }
-                    switch (it.type) {
-                      case "user":
-                        return (
-                          <div
-                            key={i}
-                            className={
-                              it.queued && !it.queued.read
-                                ? "msg user waiting"
-                                : "msg user"
-                            }
-                          >
-                            {it.reply ? (
-                              <ReplyBubble
-                                text={it.text}
-                                reply={it.reply}
-                                block={repliedBlock(view.items, it.reply)}
-                              />
-                            ) : (
-                              <div className="bubble">{it.text}</div>
-                            )}
-                            {it.attachments && (
-                              <ul className="chips">
-                                {it.attachments.map((n, j) => (
-                                  <li key={j} className="chip">
-                                    <FileText size={14} /> {n}
-                                  </li>
-                                ))}
-                              </ul>
-                            )}
-                            {!!it.images?.length && (
-                              <BubbleImages images={it.images} />
-                            )}
-                            {it.queued && !it.queued.read && (
-                              <div
-                                className="queued-mark muted"
-                                title={t("conv.queuedHint")}
-                              >
-                                {running
-                                  ? t("conv.queued")
-                                  : t("conv.queuedLater")}
-                              </div>
-                            )}
-                          </div>
-                        );
-                      case "assistant": {
-                        const final = it.done || i < liveFrom;
-                        return (
-                          <div
-                            key={i}
-                            className={`msg assistant ${!it.done && running ? "streaming" : ""}`}
-                          >
-                            {it.author && it.author !== activeAgent && (
-                              <div className="author">
-                                {props.agents.some(
-                                  (a) => a.id === it.author,
-                                ) && (
-                                  <AgentMark
-                                    agent={props.agents.find(
-                                      (a) => a.id === it.author,
-                                    )!}
-                                    size={16}
-                                  />
-                                )}
-                                {agentName(it.author)}
-                              </div>
-                            )}
-                            <MessageCtx.Provider value={infoAt(i)}>
-                              <Markdown
-                                text={it.text}
-                                done={final}
-                                cut={final && !it.done}
-                                blocks={it.blocks}
-                                from={it.author ? agentName(it.author) : null}
-                                messageId={it.message_id}
-                              />
-                            </MessageCtx.Provider>
-                            {notes.byReply.has(i) && (
-                              <FallbackNote note={notes.byReply.get(i)!} />
-                            )}
-                            {final && <CopyMessage text={it.text} />}
-                          </div>
-                        );
-                      }
-                      case "fallback":
-                        return notes.attached.has(i) ? null : (
-                          <FallbackNote key={i} note={it} />
-                        );
-                      case "tool":
-                        return (
-                          <ToolCard
-                            key={i}
-                            sessionId={sessionId}
-                            item={it}
-                            blocked={!!blocked}
-                            projectId={props.row?.project_id}
-                            cwd={meta?.cwd}
-                          />
-                        );
-                      case "artifact":
-                        return <SavedItem key={i} staged={it.staged} />;
-                      case "artifact_failed":
-                        return (
-                          <div key={i} className="msg error">
-                            Couldn't save {showHidden(it.path)}:{" "}
-                            {showHidden(it.error)}
-                          </div>
-                        );
-                      case "error":
-                        return (
-                          <div key={i} className="msg error">
-                            {showHidden(it.message)}
-                          </div>
-                        );
-                      case "callback":
-                        // Where the person's message would be: nobody wrote one.
-                        return (
-                          <div key={i} className="divider callback" role="note">
-                            Started by{" "}
-                            {endWords(view.items.slice(0, i), it.bg_ids)}, not
-                            by you
-                          </div>
-                        );
-                      case "callback_refused":
-                        return (
-                          <div key={i} className="msg error">
-                            {endWords(view.items.slice(0, i), it.bg_ids)}; the
-                            agent was not resumed: {showHidden(it.reason)}
-                          </div>
-                        );
-                      case "background_ended":
-                        // Program output: plain text, never rendered.
-                        return (
-                          <details key={i} className="divider">
-                            <summary>
-                              {it.bg_id} ended ({it.reason.replace(/_/g, " ")}
-                              {it.exit_code != null
-                                ? `, code ${it.exit_code}`
-                                : ""}
-                              ) after {Math.round(it.ran_ms / 1000)} s
-                            </summary>
-                            {it.tail && <pre>{showHidden(it.tail)}</pre>}
-                          </details>
-                        );
-                      case "agent_changed":
-                        return (
-                          <div key={i} className="divider">
-                            {it.agent.name}
-                          </div>
-                        );
-                      case "summary":
-                        // Only the latest summary is what the model sees now.
-                        return view.items.findLastIndex(
-                          (x) => x.type === "summary",
-                        ) !== i ? null : (
-                          <details key={i} className="divider summary">
-                            <summary>{t("conv.summary")}</summary>
-                            <p>{it.text}</p>
-                          </details>
-                        );
-                      case "turn_end": {
-                        const cp = view.checkpoints[it.turn_id];
-                        const laterChanges = view.items
-                          .slice(i + 1)
-                          .some((x) => {
-                            if (x.type !== "turn_end") return false;
-                            const c = view.checkpoints[x.turn_id];
-                            return !!c && c.files.length > 0 && !c.restored;
-                          });
-                        const undo =
-                          // Only a rewind would show for a turn that changed nothing.
-                          cp &&
-                          cp.after &&
-                          (cp.files.length > 0 ||
-                            (laterChanges && !blocked)) ? (
-                            <Undo
-                              key={`u${i}`}
-                              sessionId={sessionId}
-                              turnId={it.turn_id}
-                              files={cp.files}
-                              restored={cp.restored || cp.files.length === 0}
-                              running={running}
-                              laterChanges={laterChanges}
-                              blocked={!!blocked}
-                            />
-                          ) : null;
-                        return it.reason === "completed" ? (
-                          undo
-                        ) : (
-                          <div key={i}>
-                            <div className={`divider r-${it.reason}`}>
-                              turn {it.reason}
-                            </div>
-                            {undo}
-                          </div>
-                        );
-                      }
-                    }
-                  })
-                )}
-                {running && view?.running_agent && (
-                  <div className="thinking">
-                    {facing && (
-                      <AgentMark agent={facing} state={face} size={22} />
-                    )}
-                    {agentName(view.running_agent.agent_id)}{" "}
-                    {face === "unsure"
-                      ? "is waiting for you"
-                      : face === "working"
-                        ? "is working…"
-                        : "is thinking…"}
-                  </div>
-                )}
-                {running && view?.retry && <RetryNote retry={view.retry} />}
-              </div>
-            </BlockCtx>
-          </div>
-
-          <div className="bottom">
-            <div className="column">
-              {todoFor.current === sessionId && (
-                <Suspense fallback={null}>
-                  <TodoPanel
-                    key={sessionId}
-                    items={view?.todo ?? []}
-                    running={running}
-                  />
-                </Suspense>
-              )}
-              <Composer
-                where="session"
-                agents={props.agents}
-                models={props.models}
-                workers={[]}
-                agentId={activeAgent}
-                onAgentChange={(id) => void pageApi.setAgent(sessionId, id)}
-                agentState={running ? undefined : face}
-                sessionModel={meta?.model}
-                agenticBlocked={null}
-                readOnly={blocked}
-                running={running}
-                draft={keepsDraft ? sessionId : undefined}
-                voice={props.voice}
-                onStop={() => void pageApi.cancel(sessionId)}
-                images={
-                  features?.media.vision_images
-                    ? { workspace: workspaceId, left: CHAT_IMAGES - imagesUsed }
-                    : null
+      <div
+        className="timeline"
+        ref={scroller}
+        onScroll={() => {
+          const el = scroller.current;
+          if (el) stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+        }}
+      >
+        <BlockCtx slots={slots} inputs={inputs}>
+          <div className="column">
+            {!view || view.head_seq === 0 ? (
+              <div className="muted pad">Loading…</div>
+            ) : (
+              view.items.map((it, i) => {
+                if (i <= groupedUntil) return null;
+                const web = webGroups.get(i);
+                if (web) {
+                  groupedUntil = web.end;
+                  return (
+                    <WebGroupCard
+                      key={i}
+                      sessionId={sessionId}
+                      group={web}
+                      blocked={!!blocked}
+                      cwd={meta?.cwd}
+                      tools={web.members.map((m) => view.items[m] as Extract<typeof it, { type: "tool" }>)}
+                    />
+                  );
                 }
-                onSubmit={async (s) => {
-                  stick.current = true;
-                  await api.prompt(sessionId, s.text, {
-                    ...(s.effort ? { effort: s.effort } : {}),
-                    ...(s.attachments.length
-                      ? { attachments: s.attachments }
-                      : {}),
-                    ...(s.images?.length ? { images: s.images } : {}),
-                  });
-                }}
-              />
-            </div>
+                // Parallel answers: render the whole group once, side by side.
+                if (it.type === "assistant" && it.variant) {
+                  const g = it.variant.group;
+                  const first = view.items.findIndex((x) => x.type === "assistant" && x.variant?.group === g);
+                  if (first !== i) return null;
+                  const answers = view.items.filter(
+                    (x): x is Extract<typeof x, { type: "assistant" }> => x.type === "assistant" && x.variant?.group === g,
+                  );
+                  const chosen =
+                    view.variant_selection[g] ?? answers.find((a) => a.variant?.index === 0)?.message_id;
+                  const busy = running && view.running_turn === g;
+                  return (
+                    <div key={i} className="variants" style={{ gridTemplateColumns: `repeat(${answers.length}, minmax(0, 1fr))` }}>
+                      {answers.map((a) => (
+                        <div key={a.message_id} className={`msg assistant variant ${a.message_id === chosen ? "chosen" : ""}`}>
+                          <div className="variant-head small">
+                            <span className="mono">{a.variant?.model}</span>
+                            {a.message_id === chosen ? (
+                              <span className="muted">continuing from this</span>
+                            ) : (
+                              <button
+                                type="button"
+                                className="link"
+                                disabled={busy}
+                                onClick={() => void pageApi.selectVariant(sessionId, g, a.message_id)}
+                              >
+                                Continue with this
+                              </button>
+                            )}
+                          </div>
+                          <MessageCtx.Provider value={infoAt(i)}>
+                            <Markdown
+                              text={a.text}
+                              done={a.done || !busy}
+                              cut={!a.done && !busy}
+                              blocks={a.blocks}
+                              from={a.author ? agentName(a.author) : null}
+                              messageId={a.message_id}
+                            />
+                          </MessageCtx.Provider>
+                          {(a.done || !busy) && <CopyMessage text={a.text} />}
+                        </div>
+                      ))}
+                    </div>
+                  );
+                }
+                switch (it.type) {
+                  case "user":
+                    return (
+                      <div key={i} className={it.queued && !it.queued.read ? "msg user waiting" : "msg user"}>
+                        {it.reply ? (
+                          <ReplyBubble text={it.text} reply={it.reply} block={repliedBlock(view.items, it.reply)} />
+                        ) : (
+                          <div className="bubble">{it.text}</div>
+                        )}
+                        {it.attachments && (
+                          <ul className="chips">
+                            {it.attachments.map((n, j) => (
+                              <li key={j} className="chip">
+                                <FileText size={14} /> {n}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                        {!!it.images?.length && <BubbleImages images={it.images} />}
+                        {it.queued && !it.queued.read && (
+                          <div className="queued-mark muted" title={t("conv.queuedHint")}>
+                            {running ? t("conv.queued") : t("conv.queuedLater")}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  case "assistant": {
+                    const final = it.done || i < liveFrom;
+                    return (
+                      <div key={i} className={`msg assistant ${!it.done && running ? "streaming" : ""}`}>
+                        {it.author && it.author !== activeAgent && (
+                          <div className="author">
+                            {props.agents.some((a) => a.id === it.author) && (
+                              <AgentMark agent={props.agents.find((a) => a.id === it.author)!} size={16} />
+                            )}
+                            {agentName(it.author)}
+                          </div>
+                        )}
+                        <MessageCtx.Provider value={infoAt(i)}>
+                          <Markdown
+                            text={it.text}
+                            done={final}
+                            cut={final && !it.done}
+                            blocks={it.blocks}
+                            from={it.author ? agentName(it.author) : null}
+                            messageId={it.message_id}
+                          />
+                        </MessageCtx.Provider>
+                        {notes.byReply.has(i) && <FallbackNote note={notes.byReply.get(i)!} />}
+                        {final && <CopyMessage text={it.text} />}
+                      </div>
+                    );
+                  }
+                  case "fallback":
+                    return notes.attached.has(i) ? null : <FallbackNote key={i} note={it} />;
+                  case "tool":
+                    return (
+                      <ToolCard key={i} sessionId={sessionId} item={it} blocked={!!blocked} projectId={props.row?.project_id} cwd={meta?.cwd} />
+                    );
+                  case "artifact":
+                    return <SavedItem key={i} staged={it.staged} />;
+                  case "artifact_failed":
+                    return (
+                      <div key={i} className="msg error">
+                        Couldn't save {showHidden(it.path)}: {showHidden(it.error)}
+                      </div>
+                    );
+                  case "error":
+                    return (
+                      <div key={i} className="msg error">
+                        {showHidden(it.message)}
+                      </div>
+                    );
+                  case "callback":
+                    // Where the person's message would be: nobody wrote one.
+                    return (
+                      <div key={i} className="divider callback" role="note">
+                        Started by {endWords(view.items.slice(0, i), it.bg_ids)}, not by you
+                      </div>
+                    );
+                  case "callback_refused":
+                    return (
+                      <div key={i} className="msg error">
+                        {endWords(view.items.slice(0, i), it.bg_ids)}; the agent was not resumed: {showHidden(it.reason)}
+                      </div>
+                    );
+                  case "background_ended":
+                    // Program output: plain text, never rendered.
+                    return (
+                      <details key={i} className="divider">
+                        <summary>
+                          {it.bg_id} ended ({it.reason.replace(/_/g, " ")}
+                          {it.exit_code != null ? `, code ${it.exit_code}` : ""}) after {Math.round(it.ran_ms / 1000)} s
+                        </summary>
+                        {it.tail && <pre>{showHidden(it.tail)}</pre>}
+                      </details>
+                    );
+                  case "agent_changed":
+                    return (
+                      <div key={i} className="divider">
+                        {it.agent.name}
+                      </div>
+                    );
+                  case "summary":
+                    // Only the latest summary is what the model sees now.
+                    return view.items.findLastIndex((x) => x.type === "summary") !== i ? null : (
+                      <details key={i} className="divider summary">
+                        <summary>{t("conv.summary")}</summary>
+                        <p>{it.text}</p>
+                      </details>
+                    );
+                  case "turn_end": {
+                    const cp = view.checkpoints[it.turn_id];
+                    const laterChanges = view.items.slice(i + 1).some((x) => {
+                      if (x.type !== "turn_end") return false;
+                      const c = view.checkpoints[x.turn_id];
+                      return !!c && c.files.length > 0 && !c.restored;
+                    });
+                    const undo =
+                      // Only a rewind would show for a turn that changed nothing.
+                      cp && cp.after && (cp.files.length > 0 || (laterChanges && !blocked)) ? (
+                        <Undo
+                          key={`u${i}`}
+                          sessionId={sessionId}
+                          turnId={it.turn_id}
+                          files={cp.files}
+                          restored={cp.restored || cp.files.length === 0}
+                          running={running}
+                          laterChanges={laterChanges}
+                          blocked={!!blocked}
+                        />
+                      ) : null;
+                    return it.reason === "completed" ? (
+                      undo
+                    ) : (
+                      <div key={i}>
+                        <div className={`divider r-${it.reason}`}>turn {it.reason}</div>
+                        {undo}
+                      </div>
+                    );
+                  }
+                }
+              })
+            )}
+            {running && view?.running_agent && (
+              <div className="thinking">
+                {facing && <AgentMark agent={facing} state={face} size={22} />}
+                {agentName(view.running_agent.agent_id)}{" "}
+                {face === "unsure" ? "is waiting for you" : face === "working" ? "is working…" : "is thinking…"}
+              </div>
+            )}
+            {running && view?.retry && <RetryNote retry={view.retry} />}
           </div>
+        </BlockCtx>
+      </div>
+
+      <div className="bottom">
+        <div className="column">
+          {todoFor.current === sessionId && (
+            <Suspense fallback={null}>
+              <TodoPanel key={sessionId} items={view?.todo ?? []} running={running} />
+            </Suspense>
+          )}
+          <Composer
+            where="session"
+            agents={props.agents}
+            models={props.models}
+            workers={[]}
+            agentId={activeAgent}
+            onAgentChange={(id) => void pageApi.setAgent(sessionId, id)}
+            agentState={running ? undefined : face}
+            sessionModel={meta?.model}
+            agenticBlocked={null}
+            readOnly={blocked}
+            running={running}
+            draft={keepsDraft ? sessionId : undefined}
+            voice={props.voice}
+            onStop={() => void pageApi.cancel(sessionId)}
+            images={features?.media.vision_images ? { workspace: workspaceId, left: CHAT_IMAGES - imagesUsed } : null}
+            onSubmit={async (s) => {
+              stick.current = true;
+              await api.prompt(sessionId, s.text, {
+                ...(s.effort ? { effort: s.effort } : {}),
+                ...(s.attachments.length ? { attachments: s.attachments } : {}),
+                ...(s.images?.length ? { images: s.images } : {}),
+              });
+            }}
+          />
+        </div>
+      </div>
         </div>
         {sideFor.current === sessionId && (
           <Suspense fallback={null}>
@@ -896,9 +693,7 @@ export default function Conversation(props: {
               sessionId={sessionId}
               view={view ?? null}
               away={!!node && !node.connected}
-              nodeLabel={
-                node ? (node.embedded ? "local" : node.hostname) : nodeId
-              }
+              nodeLabel={node ? (node.embedded ? "local" : node.hostname) : nodeId}
             />
           </Suspense>
         )}
@@ -908,9 +703,7 @@ export default function Conversation(props: {
   // The publish cards, saved-file items and "Save as artifact" share one lookup.
   return (
     <LiveCtx.Provider value={live}>
-      <ChatArtifactsCtx.Provider value={artifacts}>
-        {page}
-      </ChatArtifactsCtx.Provider>
+      <ChatArtifactsCtx.Provider value={artifacts}>{page}</ChatArtifactsCtx.Provider>
     </LiveCtx.Provider>
   );
 }
