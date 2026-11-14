@@ -698,6 +698,7 @@ function ProjectMemory(props: { project: ProjectDetail; version: number; onOpen:
   if (!facts) return error ? <p className="error-text">{error}</p> : <p className="muted">Loading…</p>;
   const proposed = facts.filter((f) => f.status === "proposed");
   const active = facts.filter((f) => f.status === "active");
+  const retired = facts.filter((f) => f.status === "retired");
   return (
     <div className="stack">
       <p className="field-hint">
@@ -767,6 +768,29 @@ function ProjectMemory(props: { project: ProjectDetail; version: number; onOpen:
           ),
         )}
       </ul>
+      {retired.length > 0 && (
+        <>
+          <h3>Replaced or forgotten ({retired.length})</h3>
+          <span className="field-hint">A chat's assistant replaced or dropped these. They are not used.</span>
+          <ul className="facts">
+            {retired.map((f) => (
+              <li key={f.id} className="fact retired">
+                <div className="fact-text">{f.text}</div>
+                {manage && (
+                  <div className="row fact-meta small">
+                    <button className="link" onClick={() => act(projectsApi.updateMemory(pid, f.id, { status: "active" }))}>
+                      Restore
+                    </button>
+                    <button className="link" onClick={() => act(projectsApi.deleteMemory(pid, f.id))}>
+                      Delete
+                    </button>
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
       {manage && (
         <form
           className="row"

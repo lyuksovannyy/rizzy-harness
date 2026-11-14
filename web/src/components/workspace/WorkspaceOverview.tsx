@@ -128,7 +128,7 @@ export function WorkspaceOverview(props: WorkspacePanelProps) {
           <label className="check">
             <input
               type="checkbox"
-              checked={detail?.use_memory ?? true}
+              checked={detail?.use_memory ?? false}
               disabled={!detail || busy}
               onChange={(e) => {
                 const on = e.target.checked;
@@ -138,8 +138,10 @@ export function WorkspaceOverview(props: WorkspacePanelProps) {
             Use my memory in this workspace
           </label>
           <span className="field-hint">
-            On, your chats here recall what your memory holds and can propose new facts for it. Off, they neither read
-            nor add to it. Only you choose this; nobody else here sees your memory.
+            On, your chats here read your own facts and can suggest new ones (they wait for you in Memory). Off, they
+            neither read nor add to it. Private details from your Personal workspace never come here either way. Only
+            you choose this; nobody else here sees your memory.
+            {detail && detail.memory_answered === false && " You have not answered yet, so it is off."}
           </span>
           {errorAt("memory")}
         </div>

@@ -940,8 +940,10 @@ async fn list_memory(
     let owners = chat_owners(&m).await?;
     let shown: Vec<Value> = facts
         .iter()
+        // Retired facts (a chat's `remember` replaced or forgot them) are
+        // shown to every member, restorable by those who may manage.
         .filter(|f| {
-            f.status == harness_memory::Status::Active || proposal_visible(&who, f, &owners)
+            f.status != harness_memory::Status::Proposed || proposal_visible(&who, f, &owners)
         })
         .map(|f| fact_json(&who, f, &owners))
         .collect();
@@ -1000,14 +1002,14 @@ async fn own_project_fact(
     let f = match f {
         Some(f)
             if f.owner_id.as_deref() == Some(p::memory_owner(&row.project_id).as_str())
-                && (f.status == harness_memory::Status::Active
+                && (f.status != harness_memory::Status::Proposed
                     || proposal_visible(&who, &f, &owners)) =>
         {
             f
         }
         _ => return Err(ApiError(StatusCode::NOT_FOUND, "no such memory".into())),
     };
-    if f.status == harness_memory::Status::Active && !p::may_manage(&a) {
+    if f.status != harness_memory::Status::Proposed && !p::may_manage(&a) {
         return Err(may_not_change(&a, "project memory"));
     }
     let may_activate =

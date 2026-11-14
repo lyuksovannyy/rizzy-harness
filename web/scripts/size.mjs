@@ -138,6 +138,15 @@ const X5_KB = 0.3;
 // recorded no line of its own), measured 378.6 (initial 100.6): +0.2.
 const EXPORT_KB = 2.7;
 
+// Memory by default (T.3, owner 2026-11-14), measured 377.9 (initial 100.7)
+// against 375.9: the chat's memory line reads what was saved and has Undo,
+// the Memory page shows each fact's place, moves it and restores retired
+// ones, and the join question (a lazy chunk; Shell only decides whether to
+// load it, +0.2 initial). Review fixes and the owner's memory block,
+// measured 378.6: Keep and Dismiss, the replaced/forgotten/undone wording,
+// project facts' wording, the retry while the call is not filed (+0.7).
+const MEMDEF_KB = 2.7;
+
 // T48, a chat's approval mode, measured 377.0 (initial 100.8) against 375.9
 // (initial 100.5) on main: in the first load the composer's pick for a new
 // chat, the session prop, the Select's disabled and stacked options and the
@@ -149,7 +158,7 @@ const EXPORT_KB = 2.7;
 const T48_KB = 1.2;
 
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
-const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB + EXPORT_KB + T48_KB) * 100) / 10) / 10;
+const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB + EXPORT_KB + MEMDEF_KB + T48_KB) * 100) / 10) / 10;
 // Raised from 103 to 106 once the Phase A pages merged (103.7 measured: the
 // new sidebar, account button and routine-result rows are on the first
 // screen), then lowered to 104 at Phase B (102.3 measured) once the login
