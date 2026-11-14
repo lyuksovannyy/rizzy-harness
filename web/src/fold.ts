@@ -40,6 +40,7 @@ const KNOWN = new Set([
   "history_summarized",
   "model_fallback",
   "model_retry",
+  "retry_given_up",
   "artifact_staged",
   "artifact_stage_failed",
   "background_started",
@@ -57,6 +58,7 @@ const CLEARS_RETRY = new Set([
   "turn_ended",
   "history_summarized",
   "model_fallback",
+  "retry_given_up",
 ]);
 
 function lastTool(v: SessionView, callId: string): Extract<Item, { type: "tool" }> | undefined {
@@ -264,6 +266,8 @@ export function apply(v: SessionView, e: RawEvent): void {
         else delete v.context_window;
         if (p.usage.summary_at != null) v.summary_at = p.usage.summary_at;
         else delete v.summary_at;
+        if (p.usage.model != null) v.context_model = p.usage.model;
+        else delete v.context_model;
       }
       v.running_turn = null;
       v.running_agent = null;

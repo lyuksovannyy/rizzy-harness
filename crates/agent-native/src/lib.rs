@@ -1307,6 +1307,7 @@ impl NativeBackend {
         // For the chat's meter: what this turn's summary check went by.
         usage.window = window_of(&model);
         usage.summary_at = Some(limit as u64);
+        usage.model = Some(model.clone());
         // Failed or useless summaries this turn; two stop further attempts.
         let mut compact_failures = 0u32;
         let estimate = |events: &[RawEvent]| {
@@ -1731,6 +1732,9 @@ impl NativeBackend {
                     tracing::warn!(failed = %model, next = %next, error = %e.log_line(), "model failed; trying a fallback");
                     let reason = from_reason.get_or_insert(why).clone();
                     lead = Some(fallback_event(&ctx.turn_id, &next, &ctx.model, reason));
+                    // The meter's window is the answering model's.
+                    usage.window = window_of(&next);
+                    usage.model = Some(next.clone());
                     model = next;
                     continue;
                 }
@@ -2470,7 +2474,20 @@ impl NativeBackend {
                             return Err(None);
                         }
                     }
-                    None => return Err(Some(e)),
+                    None => {
+                        // The countdown the person saw is over: the turn
+                        // goes on without this summary.
+                        if retries > 0 {
+                            let _ = ctx
+                                .host
+                                .emit(EventKind::RetryGivenUp(RetryGivenUp {
+                                    turn_id: ctx.turn_id.clone(),
+                                    model: req.model.clone(),
+                                }))
+                                .await;
+                        }
+                        return Err(Some(e));
+                    }
                 },
                 Ok(c) => return Ok(c),
             }

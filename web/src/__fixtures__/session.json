@@ -806,6 +806,7 @@
         "usage": {
           "context_tokens": 800,
           "input_tokens": 900,
+          "model": "openai::gpt-4o",
           "output_tokens": 10,
           "summary_at": 102400,
           "window": 128000
@@ -873,6 +874,7 @@
         "restored": false
       }
     },
+    "context_model": "openai::gpt-4o",
     "context_tokens": 800,
     "context_window": 128000,
     "head_seq": 57,

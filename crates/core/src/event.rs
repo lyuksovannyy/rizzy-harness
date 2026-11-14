@@ -75,6 +75,7 @@ pub enum EventKind {
     HistorySummarized(HistorySummarized),
     ModelFallback(ModelFallback),
     ModelRetry(ModelRetry),
+    RetryGivenUp(RetryGivenUp),
     // Boxed: its metadata makes it many times larger than the rest.
     ArtifactStaged(Box<ArtifactStaged>),
     ArtifactStageFailed(ArtifactStageFailed),
@@ -124,6 +125,7 @@ impl EventKind {
             EventKind::HistorySummarized(_) => "history_summarized",
             EventKind::ModelFallback(_) => "model_fallback",
             EventKind::ModelRetry(_) => "model_retry",
+            EventKind::RetryGivenUp(_) => "retry_given_up",
             EventKind::ArtifactStaged(_) => "artifact_staged",
             EventKind::ArtifactStageFailed(_) => "artifact_stage_failed",
             EventKind::BackgroundStarted(_) => "background_started",
@@ -750,6 +752,16 @@ pub struct ModelRetry {
     pub reason: RetryReason,
 }
 
+/// A call that was retried (`model_retry`) is not tried again: the summary
+/// call gave up and the turn goes on without that summary. The wait the
+/// person saw is over. (A turn's own call that gives up is followed by a
+/// fallback or the turn's end, which say so themselves.)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RetryGivenUp {
+    pub turn_id: String,
+    pub model: String,
+}
+
 /// Why a model call is retried, in classes a person can act on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1021,13 +1033,17 @@ pub struct Usage {
     pub cache_write_tokens: u64,
     /// The turn's limits, set once by the loop on the turn's usage (never
     /// summed, never on a single call's): the context window of the model
-    /// the turn started on, when the master knows it...
+    /// that answered (see `model`), when the master knows it...
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window: Option<u64>,
     /// ...and the history size (tokens) above which the next turn writes a
     /// summary first (`0`: never). `None`: the backend did not say.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary_at: Option<u64>,
+    /// The model `window` is of: the one that answered last (a fallback's
+    /// when one answered), so it matches `context_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 fn is_zero(n: &u64) -> bool {

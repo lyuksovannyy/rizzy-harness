@@ -72,11 +72,15 @@ describe("fold: retries and the turn's limits", () => {
     expect(v.retry).toStrictEqual({ turn_id: "t", model: "p::m", attempt: 1, of: 3, at_ms: 5, wait_ms: 2000, reason: "network" });
     apply(v, ev(3, "tool_call_started", { turn_id: "t", call_id: "c", tool: "read", input: {} }));
     expect("retry" in v).toBe(false);
-    apply(v, ev(4, "turn_ended", { turn_id: "t", reason: "completed", usage: { input_tokens: 5, output_tokens: 1, context_tokens: 4, window: 8000, summary_at: 0 } }));
-    expect([v.context_window, v.summary_at]).toEqual([8000, 0]);
+    // A summary call that gave up ends the countdown too.
+    apply(v, ev(4, "model_retry", { turn_id: "t", model: "p::m", attempt: 1, of: 3, at_ms: 5, wait_ms: 2000, reason: "network" }));
+    apply(v, ev(5, "retry_given_up", { turn_id: "t", model: "p::m" }));
+    expect("retry" in v).toBe(false);
+    apply(v, ev(6, "turn_ended", { turn_id: "t", reason: "completed", usage: { input_tokens: 5, output_tokens: 1, context_tokens: 4, window: 8000, summary_at: 0, model: "p::fb" } }));
+    expect([v.context_window, v.summary_at, v.context_model]).toEqual([8000, 0, "p::fb"]);
     expect("window" in v.usage).toBe(false);
     // A turn whose backend says nothing of its limits drops them.
-    apply(v, ev(5, "turn_ended", { turn_id: "u", reason: "completed", usage: { input_tokens: 1, output_tokens: 1, context_tokens: 2 } }));
-    expect("context_window" in v || "summary_at" in v).toBe(false);
+    apply(v, ev(7, "turn_ended", { turn_id: "u", reason: "completed", usage: { input_tokens: 1, output_tokens: 1, context_tokens: 2 } }));
+    expect("context_window" in v || "summary_at" in v || "context_model" in v).toBe(false);
   });
 });

@@ -502,6 +502,7 @@ fn events() -> Vec<RawEvent> {
                 context_tokens: 800,
                 window: Some(128_000),
                 summary_at: Some(102_400),
+                model: Some("openai::gpt-4o".into()),
                 ..Default::default()
             }),
         }),
@@ -676,5 +677,6 @@ fn a_waiting_retry_and_the_turns_limits_are_in_the_view() {
     assert_eq!(view["context_window"], 128_000);
     assert_eq!(view["summary_at"], 102_400);
     assert_eq!(view["context_tokens"], 800);
+    assert_eq!(view["context_model"], "openai::gpt-4o");
     assert!(view["usage"].get("window").is_none());
 }

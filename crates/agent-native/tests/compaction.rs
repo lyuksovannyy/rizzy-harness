@@ -1632,3 +1632,39 @@ async fn a_retried_summary_call_is_recorded() {
         .unwrap();
     assert!(retry < summary);
 }
+
+/// A summary call that uses up its retries says the wait is over: the turn
+/// goes on without the summary, and the countdown must not stay up until
+/// the main call's first output (review 98-2).
+#[tokio::test]
+async fn a_summary_call_that_gives_up_ends_the_countdown() {
+    let p = Windowed::replying(BIG, vec![Reply::Busy; 8]);
+    let b = NativeBackend::new(
+        p.clone(),
+        Vec::new(),
+        NativeConfig {
+            summarize_after_tokens: Some(100),
+            retry: harness_agent_native::RetryPolicy {
+                retries: 2,
+                base: Duration::from_millis(1),
+                max: Duration::from_millis(5),
+            },
+            ..Default::default()
+        },
+    );
+    let host = Host::default();
+    run(&b, &host, history(4, 3_000), agent(None), Default::default()).await;
+    let evs = host.0.lock().unwrap();
+    let names: Vec<&str> = evs.iter().map(|k| k.name()).collect();
+    let last_retry = names.iter().rposition(|n| *n == "model_retry").expect("retried");
+    let given_up = names.iter().position(|n| *n == "retry_given_up").expect("given up");
+    assert!(last_retry < given_up, "{names:?}");
+    // In the view the countdown is gone at that point.
+    let sid = SessionId::new();
+    let mut v = harness_core::view::SessionView::default();
+    for (i, k) in evs[..=given_up].iter().enumerate() {
+        let (kind, payload) = k.clone().into_parts();
+        v.apply(&RawEvent { session_id: sid, seq: i as u64 + 1, ts_ms: 0, kind, payload }).unwrap();
+    }
+    assert_eq!(v.retry, None);
+}

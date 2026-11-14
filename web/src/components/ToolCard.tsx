@@ -11,7 +11,6 @@ import { CallInput, useOpenFields } from "./CallInput";
 import { PublishCard, SaveAsArtifact } from "./ChatArtifacts";
 import { MemoryNotice } from "./MemoryNotice";
 import { ProjectMemoryNotice } from "./ProjectChip";
-import { SubagentActivity } from "./SubagentActivity";
 
 type Tool = Extract<Item, { type: "tool" }>;
 /** Cards that show a file (or ran a command that made one): "Save as artifact" sits on them. */
@@ -243,7 +242,7 @@ export function ToolCard({
           <a className="child-link" href={`#/s/${child}`}>
             Open @{shownName(asText(item.input?.agent))} session{status === "running" ? " (approvals for its tools appear there)" : ""}
           </a>
-          <SubagentActivity sessionId={child} running={status === "running"} />
+          {status === "running" && <span className="muted small">· its progress is in the panel on the right</span>}
           {reported && (
             <span
               className={`tool-status child-status s-${CHILD_STATUS_CLASS[reported]}`}

@@ -94,9 +94,23 @@ function useFollow(running: boolean): [RefObject<HTMLSpanElement | null>, boolea
   return [ref, running || seen];
 }
 
+/** How long an ended child's replay must be still before its line is kept. */
+const QUIET_MS = 1500;
+
+/** A child whose turn is over, as far as its replayed log shows: its line
+ * will not change again. */
+function settled(v: SessionView): boolean {
+  return v.running_turn === null && v.items.some((it) => it.type === "turn_end");
+}
+
+/** `running`: the parent's turn is live and still waits for this child.
+ * An ended child is read once: its line is computed from the replay, kept,
+ * and the subscription (and the folded log it holds) let go (review 98-1). */
 export function SubagentActivity({ sessionId, running }: { sessionId: string; running: boolean }) {
   const live = useContext(LiveCtx);
-  const [ref, follow] = useFollow(running);
+  const [frozen, setFrozen] = useState<string | null>(null);
+  const [ref, wanted] = useFollow(running);
+  const follow = wanted && frozen === null;
   useEffect(() => {
     if (!live || !follow) return;
     live.watch(sessionId);
@@ -107,9 +121,22 @@ export function SubagentActivity({ sessionId, running }: { sessionId: string; ru
   const v = follow ? live?.view(sessionId) : undefined;
   // Nothing until its log arrives: an unknown or refused session shows no line.
   const words = v && v.head_seq > 0 ? activityWords(activityOf(v)) : null;
+  const loaded = !running && !!v && v.head_seq > 0;
+  const head = v?.head_seq ?? 0;
+  useEffect(() => {
+    if (!loaded || words === null) return;
+    if (v && settled(v)) {
+      setFrozen(words);
+      return;
+    }
+    // A child whose log never shows its end (its turn was cut off): once
+    // the replay has stopped moving, what it shows is all there is.
+    const id = setTimeout(() => setFrozen(words), QUIET_MS);
+    return () => clearTimeout(id);
+  }, [loaded, words, head]);
   return (
     <span ref={ref} className="child-activity muted" aria-live="polite">
-      {words}
+      {frozen ?? words}
     </span>
   );
 }

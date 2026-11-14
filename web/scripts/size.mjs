@@ -211,7 +211,7 @@ lazyChunk(/\/BinaryBg-/, "Agentic background");
 lazyChunk(/\/ChatGutter-/, "chat gutter");
 // T.8d step 2: the chat's background strip loads only while a chat has a
 // background command running.
-lazyChunk(/\/BackgroundStrip-/, "background strip");
+lazyChunk(/\/SidePanel-/, "side panel");
 // The agent's task list loads only once a chat has one.
 lazyChunk(/\/TodoPanel-/, "task list panel");
 

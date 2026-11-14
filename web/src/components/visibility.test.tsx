@@ -171,3 +171,47 @@ describe("sub-agent card", () => {
     expect(host.textContent).toBe("");
   });
 });
+
+describe("sub-agent line: an ended child is read once (review 98-1)", () => {
+  const CHILD = "33333333-3333-3333-3333-333333333333";
+  test("its line is kept and the subscription let go", () => {
+    const ended: SessionView = {
+      ...emptyView(),
+      session_id: CHILD,
+      head_seq: 6,
+      running_turn: null,
+      usage: { input_tokens: 1000, output_tokens: 200, context_tokens: 0 },
+      items: [{ type: "turn_end", turn_id: "t", reason: "completed" }],
+    };
+    // No observer here: an ended card is followed at once.
+    vi.stubGlobal("IntersectionObserver", undefined);
+    let watched = false;
+    const live = {
+      watch: vi.fn(() => (watched = true)),
+      unwatch: vi.fn(() => (watched = false)),
+      view: () => (watched ? ended : undefined),
+      subscribe: () => () => {},
+      version: 1,
+    } as unknown as Live;
+    act(() =>
+      root.render(
+        <LiveCtx.Provider value={live}>
+          <SubagentActivity sessionId={CHILD} running={false} />
+        </LiveCtx.Provider>,
+      ),
+    );
+    // Rendered again once the replay is there (the live store's notice).
+    act(() =>
+      root.render(
+        <LiveCtx.Provider value={live}>
+          <SubagentActivity sessionId={CHILD} running={false} />
+        </LiveCtx.Provider>,
+      ),
+    );
+    expect(live.watch).toHaveBeenCalledTimes(1);
+    expect(live.unwatch).toHaveBeenCalledWith(CHILD);
+    expect(watched).toBe(false);
+    expect(host.textContent).toBe("1.2k tokens");
+    vi.unstubAllGlobals();
+  });
+});

@@ -501,8 +501,25 @@ async fn the_turn_reports_its_window_and_summary_point() {
     let u = out.usage.unwrap();
     assert_eq!(u.window, Some(200_000));
     assert_eq!(u.summary_at, Some(160_000));
+    assert_eq!(u.model.as_deref(), Some("m"));
     // Unknown: no window, and the fixed trigger.
     let out = run(&b, &Host::default(), "m", agent(&[])).await;
     let u = out.usage.unwrap();
     assert_eq!((u.window, u.summary_at), (None, Some(24_000)));
+}
+
+/// When a fallback answers, the meter's window is the fallback's, so it
+/// matches the context size its call reported (review 98-3).
+#[tokio::test]
+async fn a_fallback_answer_reports_its_own_window() {
+    let p = Scripted::new(vec![("m", vec![Reply::Fail(404)])]);
+    let b = backend(p.clone(), fast());
+    let mut a = agent(&["fb"]);
+    a.context_windows.insert("m".into(), 200_000);
+    a.context_windows.insert("fb".into(), 32_000);
+    let out = run(&b, &Host::default(), "m", a).await;
+    assert_eq!(out.reason, TurnEndReason::Completed, "{:?}", out.error);
+    assert_eq!(p.calls(), ["m", "fb"]);
+    let u = out.usage.unwrap();
+    assert_eq!((u.window, u.model.as_deref()), (Some(32_000), Some("fb")));
 }

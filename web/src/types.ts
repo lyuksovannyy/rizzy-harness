@@ -297,6 +297,8 @@ export interface SessionView {
    * (0: never). Absent when not known. */
   context_window?: number;
   summary_at?: number;
+  /** The model `context_window` is of (the one that answered last). */
+  context_model?: string;
 }
 
 export type RetryReason = "rate_limit" | "overloaded" | "server_error" | "network";
@@ -346,6 +348,7 @@ export interface Usage {
   /** A turn's own limits (`turn_ended` only, never in the totals). */
   window?: number;
   summary_at?: number;
+  model?: string;
 }
 
 export interface UploadedAttachment {

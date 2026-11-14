@@ -185,6 +185,9 @@ pub struct SessionView {
     pub context_window: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary_at: Option<u64>,
+    /// The model `context_window` is of.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_model: Option<String>,
 }
 
 /// One background command as the log shows it.
@@ -269,6 +272,7 @@ impl SessionView {
                 | EventKind::TurnEnded(_)
                 | EventKind::HistorySummarized(_)
                 | EventKind::ModelFallback(_)
+                | EventKind::RetryGivenUp(_)
         ) {
             self.retry = None;
         }
@@ -439,6 +443,7 @@ impl SessionView {
                     self.context_tokens = u.context_tokens;
                     self.context_window = u.window;
                     self.summary_at = u.summary_at;
+                    self.context_model = u.model.clone();
                 }
                 self.running_turn = None;
                 self.running_agent = None;
@@ -466,6 +471,7 @@ impl SessionView {
                 reason: f.reason,
             }),
             EventKind::ModelRetry(r) => self.retry = Some(r),
+            EventKind::RetryGivenUp(_) => {}
             EventKind::ArtifactStaged(a) => self.stage(a),
             EventKind::ArtifactStageFailed(f) => self.items.push(Item::ArtifactFailed {
                 path: f.path,
