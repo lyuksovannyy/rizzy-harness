@@ -1886,22 +1886,28 @@ sub-agent never delegates further.
 What a sub-agent gets: the task its parent wrote, the repository's instruction
 files, and the context the parent's message had (your settings, memory
 recalled for that message and, in a project chat, the project's instructions,
-facts and board), quoted the same way. It never gets the parent chat's history
-or its images. It works in its own chat, which the `delegate` card links to.
+facts and board), quoted the same way, whatever its own memory switches say:
+it is the same person's chat. It never gets the parent chat's history or its
+images. It works in its own chat, which the `delegate` card links to.
 
 A sub-agent ends with `finish`, a tool only sub-agents have: a status (`done`,
 `partial` or `failed`), a summary, and optional details of what is left open.
 Calling it ends the sub-agent's turn at once; it is not taken beside other
-calls in the same message, so the report is written after their results. A
-sub-agent that never calls it reports its last answer, `done` if its turn
-completed and `failed` (with how the turn ended) if not.
+calls in the same message, so the report is written after their results. Only
+what `finish` carries, and the text of the message that calls it (which leads
+the report), reaches the parent. On its last allowed step, and after the
+repeated-call guard stops it, a sub-agent is told so and offered `finish` alone,
+so it can still report. One that never calls it reports its last answer, `done`
+if its turn completed and `failed` if not. A turn that did not complete is
+`failed` even after `finish`, and the status line then says how it ended (the
+step cap, the guard, a provider error, a cancel).
 
 What the parent sees: the link to the sub-agent's chat, one line of the
 harness's (`Sub-agent @scout finished: partial. Its own report follows …; the
 harness did not check it.`), the report with every line behind `| ` (so
-nothing the sub-agent writes can pass as the harness's), cut at 24,000
-characters with a note when longer, then what became of its changes and the
-pages it cited. The `delegate` card shows the status next to the link.
+nothing the sub-agent writes can pass as the harness's), cut to 24,000
+characters when longer (the first 18,000 and the last 6,000, with a note
+between), then what became of its changes and the pages it cited. The `delegate` card shows the status next to the link.
 
 **Agents** in the sidebar lists every agent. Server admins can make agents there
 (name, handle, summary, instructions and feature switches: memory, project

@@ -1339,10 +1339,15 @@ unversioned, pin the image.
   history. A child ends with `finish {status: done|partial|failed, summary, details?}`
   (offered to children only, handled by the loop, taken only alone in its message; no
   new event: a `tool_call_started`/`tool_call_finished` pair the node reads back from the
-  child's log). The tool result is `session: <id>`, the harness's status line, the
-  child's report with every line behind `| ` (cut at 24,000 characters, with a note),
-  then the harness's merge note; without `finish`, the last text with `done` for a
-  completed turn and `failed` otherwise (`harness_core::subagent`). The status line
+  child's log, with the text of the message that made it, which leads the report). A
+  child's last allowed step, and the step after the repeated-call guard stops it, offer
+  `finish` alone after a harness note. The tool result is `session: <id>`, the harness's
+  status line (with the child turn's own end text when it did not complete), the child's
+  report with every line behind `| ` (over 24,000 characters: the first three quarters
+  and the last quarter, a note between), then the harness's merge note, made one line;
+  without `finish`, the last text with `done` for a completed turn; a turn that did not
+  complete is `failed`, `finish` or not (`harness_core::subagent`). A child's context
+  frame says a task follows, not the person's message. The status line
   carries no `[harness]` lead because tool results escape that lead (R-2); the quote
   alone keeps the child's text from passing as the harness's. The tool card links
   to the child session as soon as it starts and shows the status when it ends. Built-in
