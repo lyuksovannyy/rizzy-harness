@@ -4,6 +4,7 @@
 //! confined to the workspace unless the node policy says otherwise.
 
 pub mod approval;
+pub mod args;
 pub mod background;
 mod bash;
 pub mod contain;

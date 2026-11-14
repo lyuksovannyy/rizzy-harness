@@ -2187,7 +2187,37 @@ impl NativeBackend {
                     };
                 }
             }
-            for call in calls {
+            for mut call in calls {
+                // The arguments against the schema the model was offered,
+                // before the tool card, the approval and the run (Pi's
+                // repair-then-validate): a repaired value is what all three
+                // see; a wrong one is the call's result and nothing runs.
+                let bad_args = match tools.iter().find(|t| t.name == call.tool) {
+                    None => Some(unknown_tool(&call.tool, &tools)),
+                    Some(spec) if call.input.is_object() => {
+                        // The tool's whole schema where it has one: an
+                        // argument this turn's schema leaves out (`bash`'s
+                        // `background` where they are off) reaches the
+                        // tool, which says why it is refused.
+                        let schema = self
+                            .tools
+                            .iter()
+                            .find(|t| t.name() == call.tool)
+                            .map(|t| t.schema_for(self.config.bash_timeout_max))
+                            .unwrap_or_else(|| spec.schema.clone());
+                        match harness_tools::args::check(&schema, &call.input) {
+                            Ok(v) => {
+                                call.input = v;
+                                None
+                            }
+                            Err(e) => Some(format!(
+                                "This tool call was not run: {e}. Call it again with that fixed."
+                            )),
+                        }
+                    }
+                    // Not an object: `run_tool` says so.
+                    Some(_) => None,
+                };
                 if host
                     .emit(EventKind::ToolCallStarted(ToolCallStarted {
                         author: author.clone(),
@@ -2203,23 +2233,37 @@ impl NativeBackend {
                 }
                 // Before approval and dispatch: a refused call never starts.
                 let key = harness_tools::call_key(&ctx.cwd, &call.tool, &call.input);
-                let (outcome, refused) = match guard.admit(key) {
-                    repeat::Admission::Refuse { note, stop } => {
-                        repeat_stop |= stop;
-                        (ToolOutcome::err(repeat::REFUSED_OUTPUT), Some(note))
-                    }
-                    repeat::Admission::Ended => (ToolOutcome::err(repeat::ENDED_OUTPUT), None),
-                    repeat::Admission::Run => {
-                        let mut observed =
-                            observed_text(&messages, &trusted, Some((user_idx, &own_words)));
-                        if let Some(inh) = &ctx.extra.observed {
-                            observed.splice(0..0, inh.iter().cloned());
+                let admission = match bad_args {
+                    Some(e) => Err(e),
+                    None => Ok(guard.admit(key)),
+                };
+                let (outcome, refused) = match admission {
+                    Err(e) => (ToolOutcome::err(e), None),
+                    Ok(admission) => match admission {
+                        repeat::Admission::Refuse { note, stop } => {
+                            repeat_stop |= stop;
+                            (ToolOutcome::err(repeat::REFUSED_OUTPUT), Some(note))
                         }
-                        let o = self
-                            .run_tool(&ctx, host, &call, &mut allowed_this_turn, &observed, &refs)
-                            .await;
-                        (o, None)
-                    }
+                        repeat::Admission::Ended => (ToolOutcome::err(repeat::ENDED_OUTPUT), None),
+                        repeat::Admission::Run => {
+                            let mut observed =
+                                observed_text(&messages, &trusted, Some((user_idx, &own_words)));
+                            if let Some(inh) = &ctx.extra.observed {
+                                observed.splice(0..0, inh.iter().cloned());
+                            }
+                            let o = self
+                                .run_tool(
+                                    &ctx,
+                                    host,
+                                    &call,
+                                    &mut allowed_this_turn,
+                                    &observed,
+                                    &refs,
+                                )
+                                .await;
+                            (o, None)
+                        }
+                    },
                 };
                 let cancelled = ctx.cancel.is_cancelled();
                 let output = self.config.secrets.scrub(&outcome.output);
@@ -2814,6 +2858,27 @@ impl NativeBackend {
             Step::Cancelled => ToolOutcome::err(abandoned_note()),
         }
     }
+}
+
+/// The result of a call to a tool this turn does not offer: the tools it
+/// does, so the model can pick one instead of guessing again.
+fn unknown_tool(name: &str, offered: &[ToolSpec]) -> String {
+    let mut names: Vec<&str> = offered.iter().map(|t| t.name.as_str()).collect();
+    names.sort_unstable();
+    let list = names
+        .iter()
+        .map(|n| format!("`{n}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "unknown tool `{}`: this turn offers {}",
+        harness_core::event::shown_name(name),
+        if list.is_empty() {
+            "no tools".into()
+        } else {
+            list
+        }
+    )
 }
 
 /// The background table a turn's tools get: none for a sub-agent (R14),

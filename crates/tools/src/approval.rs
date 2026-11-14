@@ -139,6 +139,11 @@ mod tests {
         let d = d.path();
         let ls = key(d, "bash", json!({"command": "ls"}));
         assert_eq!(ls, key(d, "bash", json!({"command": "ls"})));
+        // Another working folder is another call.
+        assert_ne!(
+            ls,
+            key(d, "bash", json!({"command": "ls", "workdir": "sub"}))
+        );
         assert_ne!(ls, key(d, "bash", json!({"command": "ls "})));
         assert_ne!(ls, key(d, "bash", json!({"command": "rm -rf x"})));
         assert_ne!(

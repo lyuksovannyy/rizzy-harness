@@ -303,8 +303,11 @@ async fn the_sessions_mode_picks_its_confinement_through_the_loop() {
         };
         let backend = NativeBackend::new(
             Arc::new(Script {
-                // The input asks for the other mode: nothing reads it.
-                calls: vec![("bash", json!({"command": "true", "mode": "host"}))],
+                // An input that asks for another mode (`"mode": "host"`)
+                // is refused by the argument check before any confinement
+                // is chosen (tests/tool_call_checks.rs); the mode comes
+                // from the session alone.
+                calls: vec![("bash", json!({"command": "true"}))],
                 before: Mutex::default(),
             }),
             harness_tools::builtin(),
