@@ -98,6 +98,10 @@ pub(crate) struct Session {
     /// This session's background commands (T.8d): an agentic session that
     /// is not a sub-agent's. Dropping it stops every one.
     bg: Option<Arc<harness_tools::background::SessionBg>>,
+    /// This session's MCP servers (X.3), from node.toml alone: an agentic
+    /// session that is not a sub-agent's, on a node that has some. Started
+    /// by the first turn that offers their tools; dropping it stops them.
+    mcp: Option<Arc<harness_tools::mcp::SessionMcp>>,
     /// Ends that came while a turn ran: recorded at its next step boundary
     /// (`delivered`), or after its end.
     bg_queue: Mutex<Vec<harness_tools::background::Ended>>,
@@ -211,6 +215,19 @@ fn callback_check(history: &[RawEvent], bg_ids: &[String]) -> Result<usize, Stri
     Ok(in_a_row)
 }
 
+/// A session's MCP servers (see [`Session::mcp`]): node.toml's, for an
+/// agentic session that is not a sub-agent's.
+fn mcp_servers(
+    node: &Inner,
+    profile: Profile,
+    parent: Option<SessionId>,
+) -> Option<Arc<harness_tools::mcp::SessionMcp>> {
+    if profile != Profile::Agentic || parent.is_some() {
+        return None;
+    }
+    harness_tools::mcp::SessionMcp::new(&node.cfg.policy.mcp_servers)
+}
+
 /// Pin an agentic session's folder (see [`Session::pin`]).
 fn pin_of(profile: Profile, cwd: &std::path::Path) -> Option<harness_core::folder::FolderPin> {
     if profile != Profile::Agentic {
@@ -284,6 +301,7 @@ impl Session {
         let (bg, ends) = background_table(&node, profile, parent_session, exec_mode, 1);
         let s = Arc::new(Self {
             bg,
+            mcp: mcp_servers(&node, profile, parent_session),
             bg_queue: Mutex::new(Vec::new()),
             bg_flush: Arc::default(),
             bg_failed: AtomicBool::new(false),
@@ -377,6 +395,7 @@ impl Session {
         );
         let s = Arc::new(Self {
             bg,
+            mcp: mcp_servers(&node, meta.profile, meta.parent_session),
             bg_queue: Mutex::new(Vec::new()),
             bg_flush: Arc::default(),
             bg_failed: AtomicBool::new(false),
@@ -566,6 +585,38 @@ impl Session {
                 bg.stop_all(reason);
                 Ok(())
             }
+        }
+    }
+
+    /// Stop this session's MCP servers for good (it is being deleted, or
+    /// the node is stopping) and wait for their processes, at most
+    /// `bound`. True when they are gone.
+    pub(crate) async fn close_mcp(&self, bound: std::time::Duration) -> bool {
+        match &self.mcp {
+            Some(m) => {
+                m.close();
+                m.wait_gone(bound).await
+            }
+            None => true,
+        }
+    }
+
+    /// Order this session's MCP servers to stop for good; not waited for.
+    pub(crate) fn close_mcp_now(&self) {
+        if let Some(m) = &self.mcp {
+            m.close();
+        }
+    }
+
+    /// MCP server processes of this session still alive.
+    pub(crate) fn mcp_running(&self) -> usize {
+        self.mcp.as_ref().map_or(0, |m| m.running())
+    }
+
+    /// Stop the MCP servers no call used for `idle`.
+    pub(crate) fn mcp_idle(&self, idle: std::time::Duration) {
+        if let Some(m) = &self.mcp {
+            m.stop_idle(idle);
         }
     }
 
@@ -2862,6 +2913,12 @@ impl TurnHost for Session {
             .map(|b| b as Arc<dyn std::any::Any + Send + Sync>)
     }
 
+    fn mcp(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+        self.mcp
+            .clone()
+            .map(|m| m as Arc<dyn std::any::Any + Send + Sync>)
+    }
+
     async fn background_notes(
         &self,
     ) -> Result<Vec<BackgroundEnded>, harness_core::backend::LogError> {
@@ -2965,6 +3022,20 @@ impl TurnHost for Session {
         // request, and the loop records the key of the call it is running.
         let background_start = is_background_start(tool, input);
         let approval_id = new_id();
+        let mut reason = approval_reason(tool, risk, input, &self.node.cfg.policy, self.exec_mode);
+        // An MCP tool's card names the server and its own name of the tool
+        // (review N2): a cleaned or hashed public name says little.
+        if let Some(m) = self
+            .mcp
+            .as_ref()
+            .filter(|_| tool.starts_with(harness_tools::mcp::PREFIX))
+            && let Some((server, raw)) = m.origin(tool).await
+        {
+            reason = format!(
+                "{reason} (server `{server}`, its tool `{}`)",
+                harness_core::event::shown_name(&raw)
+            );
+        }
         let (tx, rx) = oneshot::channel();
         self.approvals
             .lock()
@@ -2976,7 +3047,7 @@ impl TurnHost for Session {
                 call_id: call_id.into(),
                 tool: tool.into(),
                 input: input.clone(),
-                reason: approval_reason(tool, risk, input, &self.node.cfg.policy, self.exec_mode),
+                reason,
                 // "For this turn" would cover every identical start of the
                 // turn (N-2): a background start is asked for each time.
                 turn_allow: !background_start,
@@ -3157,6 +3228,12 @@ fn tool_reason(tool: &str, risk: ToolRisk, input: &Value, policy: &crate::NodePo
             s.push_str("; the network is on, so it can accept connections");
         }
         return s;
+    }
+    if tool.starts_with(harness_tools::mcp::PREFIX) {
+        return format!(
+            "`{tool}` is a tool of an MCP server this node runs (node.toml): a program the \
+             harness did not write, in this chat's folder; what it does is up to that server"
+        );
     }
     match (tool, risk) {
         ("publish", _) => "`publish` uploads a copy of a file from this folder to Artifacts".into(),

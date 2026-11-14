@@ -38,6 +38,10 @@ pub struct NodePolicy {
     pub execution: ExecutionPolicy,
     /// Skills (`[skills]`, ADOPTION_PLAN X.2).
     pub skills: SkillsPolicy,
+    /// MCP servers (`[mcp_servers.<name>]`, ADOPTION_PLAN X.3): stdio
+    /// programs each agentic chat may start, in its own confinement, and
+    /// whose tools its agent is offered. Only this file adds one.
+    pub mcp_servers: std::collections::BTreeMap<String, harness_tools::mcp::ServerConfig>,
     /// Folders no session may include and no file tool may touch, in every
     /// mode: the runtime's own data directory (keys, the API token,
     /// databases). Set by the runtime with [`NodePolicy::protect`], never
@@ -352,6 +356,7 @@ impl Default for NodePolicy {
             sandbox: SandboxPolicy::default(),
             execution: ExecutionPolicy::default(),
             skills: SkillsPolicy::default(),
+            mcp_servers: Default::default(),
             protected_dirs: Vec::new(),
             exec: Default::default(),
             sandbox_tmp: None,
@@ -371,8 +376,20 @@ pub enum PolicyError {
 
 impl NodePolicy {
     /// Whether `denied_tools` refuses `tool` outright.
+    /// `mcp` stands for every MCP tool and `mcp__<server>` for one
+    /// server's (X.3, review N2); any other entry is an exact name.
     pub fn denies(&self, tool: &str) -> bool {
-        self.denied_tools.iter().any(|t| t == tool)
+        let prefix = harness_tools::mcp::PREFIX;
+        self.denied_tools.iter().any(|t| {
+            t == tool
+                || (tool.starts_with(prefix)
+                    && (t == harness_core::agent::MCP_ALL
+                        || (t.starts_with(prefix)
+                            && !t[prefix.len()..].contains("__")
+                            && tool
+                                .strip_prefix(t.as_str())
+                                .is_some_and(|rest| rest.starts_with("__")))))
+        })
     }
 
     /// Load `node.toml`; a missing file means defaults.
@@ -473,6 +490,7 @@ impl NodePolicy {
             }
         }
         self.sandbox_settings()?;
+        harness_tools::mcp::validate(&self.mcp_servers)?;
         Ok(())
     }
 
@@ -603,6 +621,62 @@ impl NodePolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review N2: `mcp` denies every MCP tool, `mcp__<server>` one
+    /// server's; anything else stays an exact name.
+    #[test]
+    fn denied_tools_can_name_every_mcp_tool_or_one_servers() {
+        let p = |d: &[&str]| NodePolicy {
+            denied_tools: d.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        };
+        assert!(p(&["mcp"]).denies("mcp__github__create_issue"));
+        assert!(!p(&["mcp"]).denies("bash"));
+        let gh = p(&["mcp__github"]);
+        assert!(gh.denies("mcp__github__create_issue"));
+        assert!(!gh.denies("mcp__git__status"));
+        assert!(!gh.denies("mcp__githubx__a"));
+        let one = p(&["mcp__github__drop"]);
+        assert!(one.denies("mcp__github__drop") && !one.denies("mcp__github__list"));
+        assert!(p(&["bash"]).denies("bash") && !p(&["bash"]).denies("mcp__bash__x"));
+    }
+
+    #[test]
+    fn mcp_servers_are_read_from_node_toml_and_checked() {
+        let p: NodePolicy = toml::from_str(
+            r#"
+[mcp_servers.github]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+env = { GITHUB_PERSONAL_ACCESS_TOKEN = "ghp-test-123456" }
+env_vars = ["SSL_CERT_FILE"]
+disabled_tools = ["delete_repository"]
+tool_timeout_sec = 120
+"#,
+        )
+        .unwrap();
+        p.validate().unwrap();
+        let g = &p.mcp_servers["github"];
+        assert_eq!(g.command, "npx");
+        assert_eq!(
+            g.startup_timeout_sec,
+            harness_tools::mcp::DEFAULT_STARTUP_TIMEOUT_S
+        );
+        assert_eq!(g.tool_timeout_sec, 120);
+        assert!(!format!("{p:?}").contains("ghp-test"));
+        for bad in [
+            "[mcp_servers.Bad]\ncommand = \"x\"\n",
+            "[mcp_servers.a__b]\ncommand = \"x\"\n",
+            "[mcp_servers.a]\ncommand = \"\"\n",
+            "[mcp_servers.a]\ncommand = \"x\"\nenv = { HARNESS_GUARD_STDIN_FIFO = \"/tmp/f\" }\n",
+            "[mcp_servers.a]\ncommand = \"x\"\nstartup_timeout_sec = 0\n",
+        ] {
+            let p: NodePolicy = toml::from_str(bad).unwrap();
+            assert!(p.validate().is_err(), "{bad}");
+        }
+        // Only stdio servers: a URL is not a field.
+        assert!(toml::from_str::<NodePolicy>("[mcp_servers.a]\nurl = \"https://x\"\n").is_err());
+    }
 
     /// Gate 3 review P-2: node.toml bounds what the master's spec asks for
     /// delegation, at every level; it never raises it.

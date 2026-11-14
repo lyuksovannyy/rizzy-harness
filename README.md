@@ -1307,6 +1307,71 @@ Passing `SSH_AUTH_SOCK` lets the agent use every key in your SSH agent. An
 invalid entry stops the node at start; `rizzy-harness doctor` prints the
 effective list.
 
+**MCP servers.** A node can give its agentic chats the tools of Model
+Context Protocol servers (stdio servers only, for now). Only the node's
+own `node.toml` adds one: nothing the server, a prompt, an agent or a
+repository's `.mcp.json` or `.codex/config.toml` says starts anything. The
+fields are Codex's, so a definition can be copied over:
+
+```toml
+[mcp_servers.github]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+env = { GITHUB_PERSONAL_ACCESS_TOKEN = "ghp_..." }  # secrets only: given to this server, scrubbed everywhere
+env_vars = ["SSL_CERT_FILE"]          # more names passed from the node's environment
+# enabled_tools = ["create_issue", "list_issues"]   # only these (default: all it lists)
+disabled_tools = ["delete_repository"]
+startup_timeout_sec = 30              # start, initialize and list its tools (1 .. 300)
+tool_timeout_sec = 300                # one call (1 .. 3600)
+# enabled = false                     # keep the table, start nothing
+```
+
+- **Where it runs.** Each chat starts its own copy, at its first turn
+  that offers MCP tools, exactly where that chat's `bash` runs: in a
+  `sandbox` chat inside bubblewrap (its file view, its network rule, its
+  folder read-write), in a `host` chat as the node's user. So a server
+  needs what a command needs there: `npx` needs `[sandbox] write =
+  ["~/.npm"]` and the network on; a server that reads a config file needs
+  its folder in `[sandbox] read`. Sub-agents get no MCP tools.
+- **Its environment** is the agent's core list above (not `env_pass`),
+  plus its own `env_vars` and `env`. Provider keys, `.env` names and
+  `HARNESS_*` are never passed; `env` values are scrubbed from every
+  output like the provider keys. So put only secrets in `env`: a value
+  such as `/home/me` there would be blanked in every chat's text. Pass
+  ordinary variables with `env_vars`.
+- **Its tools** are offered as `mcp__<server>__<tool>`. An agent gets them
+  when its `tools` list holds `mcp` (Software Developer and Senior
+  Teamlead do; agents made on the Agents page with "commands" do), or names
+  one exactly; `deny_tools: [mcp]` removes them all, and `denied_tools` in
+  node.toml refuses one by name, `mcp__<server>` all of one server's, and
+  `mcp` every MCP tool on the node. A chat carries at most 40 MCP tools and
+  64,000 bytes of their descriptions and schemas, and leaves out a tool
+  whose schema is over 8,000 bytes; what is left out, and a server that
+  did not start, is shown in the chat once (choose with `enabled_tools`).
+- **Every call is asked about** in the `ask` mode, like `bash`: the
+  harness did not write the server, and what a server says about its own
+  tools (`readOnlyHint`) is never believed. A result is tool output like
+  any other: text only (an image or a binary resource is named, not
+  shown), cut at 30,000 characters. A message from the server over 8 MiB,
+  a call past `tool_timeout_sec` or a server that exits fails that call
+  with the reason (and the end of its error output); the server is
+  started again at its next use, at most 3 times in a row (a successful
+  call starts the count again).
+- **It never outlives its chat.** A server is stopped when its chat is
+  deleted, when the node stops, and after 10 minutes without a call (it
+  starts again when needed). A `sandbox` chat's server also dies with the
+  node; a `host` chat's can outlive a `kill -9` of the node, like its
+  commands.
+
+`rizzy-harness doctor` starts each server once and prints how many tools
+it offers, or why it did not start.
+
+Only stdio servers exist: the client library (`rmcp`, pinned at 3.8.0) has
+an advisory against its Streamable HTTP client before 3.9.0
+(RUSTSEC-2026-0462, a response body read without a limit), code this build
+does not enable. An HTTP transport must not be turned on before the pin
+moves to 3.9.0 or newer.
+
 **Streamed output.** What a command prints is shown live and stored, up to
 `[limits] tool_stream_bytes` per call (default 1 MiB). Past it the stream
 ends with `[output truncated: further output is not shown or stored]`; the

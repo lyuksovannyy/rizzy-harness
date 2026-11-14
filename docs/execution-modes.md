@@ -138,6 +138,12 @@ still shown until the node's next hello.
   if a check before the turn were missed. The node's checkpoint git uses
   the twin; graphify uses the session's own confinement through its
   non-shell path, which is Landlock alone in both modes (review N-a).
+* MCP servers (X.3, PLAN.md T47) use the session's confinement through the
+  shell path, as `bash` does: in a `sandbox` session each server is a
+  contained command (guard, bubblewrap, its file view, its network rule)
+  whose stdin is a FIFO the guard hands over (`guard::STDIN_FIFO_ENV`); in
+  a `host` session it runs uncontained in its own process group. One per
+  session, never for a sub-agent.
 * The node's `session.create` audit line names the mode asked for (review
   N-d).
 

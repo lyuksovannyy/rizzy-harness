@@ -428,6 +428,12 @@ impl NodeRuntime {
                 cfg.policy.protect(&s);
             }
         }
+        // MCP servers' `env` values never reach an event (X.3).
+        for server in cfg.policy.mcp_servers.values() {
+            for v in server.env.0.values() {
+                cfg.secrets.add(v.clone());
+            }
+        }
         let rows = cfg.store.call(|s| s.sessions()).await?;
         let hosted: std::collections::HashSet<SessionId> =
             rows.iter().map(|r| r.session_id).collect();
@@ -466,6 +472,27 @@ impl NodeRuntime {
                 loop {
                     tokio::time::sleep(harness_tools::background::PRUNE_EVERY).await;
                     reg.prune_all();
+                }
+            });
+        }
+        // MCP servers no call used for a while are stopped (X.3): every
+        // chat stays loaded, so they would pile up otherwise.
+        if !this.inner.cfg.policy.mcp_servers.is_empty() {
+            let weak = Arc::downgrade(&this.inner);
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(harness_tools::background::PRUNE_EVERY).await;
+                    let Some(inner) = weak.upgrade() else { break };
+                    let sessions: Vec<Arc<Session>> = inner
+                        .sessions
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .values()
+                        .cloned()
+                        .collect();
+                    for s in sessions {
+                        s.mcp_idle(harness_tools::mcp::IDLE_STOP);
+                    }
                 }
             });
         }
@@ -1191,6 +1218,9 @@ impl NodeRuntime {
             // for one a turn started just before the flag.
             for s in &sessions {
                 s.stop_background_now(harness_core::event::BackgroundReason::NodeStopping);
+                // MCP servers (X.3) end with the node, after a stop as after
+                // a crash; waited for below like background commands.
+                s.close_mcp_now();
             }
             // Ends the log did not take are tried again on each pass; once
             // the commands are gone and a try failed, waiting buys nothing
@@ -1212,7 +1242,9 @@ impl NodeRuntime {
                 }
             }
             let background = sessions.iter().any(|s| {
-                s.background_active() || (s.background_unrecorded() && !stuck.contains(&s.id()))
+                s.background_active()
+                    || (s.background_unrecorded() && !stuck.contains(&s.id()))
+                    || s.mcp_running() > 0
             });
             // All marked before any is cancelled: a sub-agent cancelled by
             // its parent's token is the stop's too (review N-7).
@@ -1294,6 +1326,10 @@ impl NodeRuntime {
                 BACKGROUND_STOP_WAIT,
             )
             .await;
+            // And its MCP servers (X.3).
+            if !s.close_mcp(harness_tools::mcp::STOP_WAIT).await {
+                tracing::warn!(session = %sid, "an MCP server of a deleted session did not end in time");
+            }
         }
         self.inner
             .sessions

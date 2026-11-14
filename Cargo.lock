@@ -1653,6 +1653,7 @@ name = "harness-tools"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures",
  "getrandom 0.4.3",
  "globset",
  "harness-codemap",
@@ -1661,6 +1662,7 @@ dependencies = [
  "landlock",
  "nix",
  "regex",
+ "rmcp",
  "serde",
  "serde-saphyr",
  "serde_json",
@@ -3148,6 +3150,26 @@ dependencies = [
  "libc",
  "untrusted 0.9.0",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rmcp"
+version = "3.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8be15815186873ea063bf005011d16c356804973489e40c39116ae3a2878d1f"
+dependencies = [
+ "chrono",
+ "futures",
+ "indexmap 2.14.2",
+ "libc",
+ "pin-project-lite",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
