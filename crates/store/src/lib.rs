@@ -2849,6 +2849,8 @@ impl Store {
     /// [`LEVEL_CHANGED`]) and `setter` (`None`: the API token) still stands
     /// as read ([`SETTER_CHANGED`]), and write `audit` as one `level.workspace` line
     /// in the same transaction. Returns whether they are a member.
+    // Every argument is part of the one condition the write holds on.
+    #[allow(clippy::too_many_arguments)]
     pub fn set_member_level(
         &self,
         ws: &str,
