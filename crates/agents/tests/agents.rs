@@ -43,6 +43,8 @@ fn builtin_roster_is_exactly_the_table() {
         "web_search",
         "web_fetch",
         "remember",
+        // Every MCP tool of the node's servers (X.3).
+        "mcp",
     ];
     struct Row {
         id: &'static str,

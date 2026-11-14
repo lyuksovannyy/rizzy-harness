@@ -13,6 +13,7 @@ pub mod env;
 pub mod filter;
 mod fs;
 pub mod graphify;
+pub mod mcp;
 mod outline;
 pub mod outputs;
 mod publish;
@@ -534,8 +535,10 @@ pub fn cap(s: String) -> (String, bool) {
 
 #[async_trait::async_trait]
 pub trait Tool: Send + Sync {
-    fn name(&self) -> &'static str;
-    fn description(&self) -> &'static str;
+    /// Built-in names are fixed; an MCP tool's (`mcp__<server>__<tool>`,
+    /// [`mcp`]) comes from its server's list.
+    fn name(&self) -> &str;
+    fn description(&self) -> &str;
     /// JSON Schema of the input object.
     fn schema(&self) -> Value;
     /// The schema shown to the model on this node: the same, with this

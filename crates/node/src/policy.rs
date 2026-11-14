@@ -36,6 +36,10 @@ pub struct NodePolicy {
     /// ceiling. What it offers is decided at start, from this and its own
     /// self-test ([`Self::exec`]).
     pub execution: ExecutionPolicy,
+    /// MCP servers (`[mcp_servers.<name>]`, ADOPTION_PLAN X.3): stdio
+    /// programs each agentic chat may start, in its own confinement, and
+    /// whose tools its agent is offered. Only this file adds one.
+    pub mcp_servers: std::collections::BTreeMap<String, harness_tools::mcp::ServerConfig>,
     /// Folders no session may include and no file tool may touch, in every
     /// mode: the runtime's own data directory (keys, the API token,
     /// databases). Set by the runtime with [`NodePolicy::protect`], never
@@ -293,6 +297,7 @@ impl Default for NodePolicy {
             limits: LimitsPolicy::default(),
             sandbox: SandboxPolicy::default(),
             execution: ExecutionPolicy::default(),
+            mcp_servers: Default::default(),
             protected_dirs: Vec::new(),
             exec: Default::default(),
             sandbox_tmp: None,
@@ -413,6 +418,7 @@ impl NodePolicy {
             }
         }
         self.sandbox_settings()?;
+        harness_tools::mcp::validate(&self.mcp_servers)?;
         Ok(())
     }
 
@@ -543,6 +549,43 @@ impl NodePolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mcp_servers_are_read_from_node_toml_and_checked() {
+        let p: NodePolicy = toml::from_str(
+            r#"
+[mcp_servers.github]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+env = { GITHUB_PERSONAL_ACCESS_TOKEN = "ghp-test-123456" }
+env_vars = ["SSL_CERT_FILE"]
+disabled_tools = ["delete_repository"]
+tool_timeout_sec = 120
+"#,
+        )
+        .unwrap();
+        p.validate().unwrap();
+        let g = &p.mcp_servers["github"];
+        assert_eq!(g.command, "npx");
+        assert_eq!(
+            g.startup_timeout_sec,
+            harness_tools::mcp::DEFAULT_STARTUP_TIMEOUT_S
+        );
+        assert_eq!(g.tool_timeout_sec, 120);
+        assert!(!format!("{p:?}").contains("ghp-test"));
+        for bad in [
+            "[mcp_servers.Bad]\ncommand = \"x\"\n",
+            "[mcp_servers.a__b]\ncommand = \"x\"\n",
+            "[mcp_servers.a]\ncommand = \"\"\n",
+            "[mcp_servers.a]\ncommand = \"x\"\nenv = { HARNESS_GUARD_STDIN_FIFO = \"/tmp/f\" }\n",
+            "[mcp_servers.a]\ncommand = \"x\"\nstartup_timeout_sec = 0\n",
+        ] {
+            let p: NodePolicy = toml::from_str(bad).unwrap();
+            assert!(p.validate().is_err(), "{bad}");
+        }
+        // Only stdio servers: a URL is not a field.
+        assert!(toml::from_str::<NodePolicy>("[mcp_servers.a]\nurl = \"https://x\"\n").is_err());
+    }
 
     /// Gate 3 review P-2: node.toml bounds what the master's spec asks for
     /// delegation, at every level; it never raises it.

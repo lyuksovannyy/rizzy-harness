@@ -95,6 +95,15 @@ pub trait TurnHost: Send + Sync {
         None
     }
 
+    /// This session's MCP servers (`harness_tools::mcp::SessionMcp`,
+    /// ADOPTION_PLAN X.3), made by the node from its own node.toml alone.
+    /// Type-erased like [`Self::background`]; `None` where there are none
+    /// (chat sessions, sub-agents, nodes without servers, tests). The loop
+    /// offers none to a sub-agent whatever this returns.
+    fn mcp(&self) -> Option<std::sync::Arc<dyn std::any::Any + Send + Sync>> {
+        None
+    }
+
     /// At a step boundary (after a step's tool results are recorded, before
     /// the next model call): append the background ends queued since the
     /// last one (`delivered: true`) and return them, so the loop adds their

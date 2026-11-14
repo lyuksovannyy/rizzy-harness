@@ -74,6 +74,10 @@ regex = "1.13.1"
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "stream", "json", "http2", "multipart"] }
 rusqlite = { version = "0.41.1", features = ["bundled"] }
 rust-embed = "8.13.0"
+# The MCP client (ADOPTION_PLAN X.3): the protocol's official Rust SDK, the
+# client half only, over our own stdio pipes. Pinned exactly: a 3.x minor
+# ships most weeks and each has changed the client API (MRTR, tasks).
+rmcp = { version = "=3.8.0", default-features = false, features = ["client", "transport-async-rw"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
 serde-saphyr = "=2.0.0"

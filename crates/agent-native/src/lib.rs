@@ -186,6 +186,11 @@ impl harness_core::backend::TurnHost for Logged<'_> {
         self.host.background()
     }
 
+    // Not forwarding it would offer no MCP tool (the trait's default).
+    fn mcp(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+        self.host.mcp()
+    }
+
     async fn background_notes(
         &self,
     ) -> Result<Vec<BackgroundEnded>, harness_core::backend::LogError> {
@@ -608,10 +613,12 @@ impl NativeBackend {
         savings: &harness_core::savings::Savings,
         host: &dyn harness_core::backend::TurnHost,
         background_on: bool,
+        mcp: &[Arc<dyn harness_tools::Tool>],
     ) -> Vec<ToolSpec> {
         let mut specs: Vec<ToolSpec> = self
             .tools
             .iter()
+            .chain(mcp)
             .filter(|t| t.enabled(savings))
             .filter(|t| agent.is_none_or(|a| a.allows_tool(t.name())))
             .filter(|t| background_on || !matches!(t.name(), "bash_output" | "bash_stop"))
@@ -1344,6 +1351,33 @@ impl NativeBackend {
                 error: None,
             };
         }
+        // The chat's MCP servers (X.3), started now if they are not running,
+        // in this chat's confinement; never for a sub-agent, nor for an
+        // agent that may use none. What did not start, or was left out, is
+        // shown to the person (an `error` item) and told to the model with
+        // this turn's context, once each.
+        let (mcp_tools, mcp_notes) = match host
+            .mcp()
+            .and_then(|m| m.downcast::<harness_tools::mcp::SessionMcp>().ok())
+        {
+            Some(m) if !child && agent.is_none_or(|a| a.allows_mcp()) => {
+                let loaded = m.load(&self.start_ctx(&ctx, host)).await;
+                for n in &loaded.notes {
+                    if host
+                        .emit(EventKind::Error(harness_core::event::ErrorEvent {
+                            turn_id: Some(ctx.turn_id.clone()),
+                            message: n.clone(),
+                        }))
+                        .await
+                        .is_err()
+                    {
+                        return stopped(usage);
+                    }
+                }
+                (loaded.tools, loaded.notes)
+            }
+            _ => (Vec::new(), Vec::new()),
+        };
         // System prompt (with the summary) and the history before this turn.
         let base_system = system;
         // The task list as it stood at the summary's end goes with it: the
@@ -1411,6 +1445,15 @@ impl NativeBackend {
                     (Some(i), _) => Some(i.to_string()),
                     (None, c) => c.map(str::to_string),
                 };
+                let context = match (context, mcp_notes.is_empty()) {
+                    (c, true) => c,
+                    (c, false) => Some(
+                        c.into_iter()
+                            .chain(std::iter::once(mcp_notes.join("\n")))
+                            .collect::<Vec<_>>()
+                            .join("\n\n"),
+                    ),
+                };
                 let user_text = match &context {
                     Some(c) if child => provider::with_task_context(c, &ctx.user_text),
                     Some(c) => provider::with_context(c, &ctx.user_text),
@@ -1441,7 +1484,7 @@ impl NativeBackend {
             background_access(&ctx, host),
             harness_tools::background::Access::On(b) if b.limits().per_session > 0
         );
-        let mut tools = self.tool_specs(agent, sv, host, background_on);
+        let mut tools = self.tool_specs(agent, sv, host, background_on, &mcp_tools);
         if child {
             tools.push(finish_spec());
         }
@@ -2128,7 +2171,15 @@ impl NativeBackend {
                             observed.splice(0..0, inh.iter().cloned());
                         }
                         let o = self
-                            .run_tool(&ctx, host, &call, &mut allowed_this_turn, &observed, &refs)
+                            .run_tool(
+                                &ctx,
+                                host,
+                                &call,
+                                &mut allowed_this_turn,
+                                &observed,
+                                &refs,
+                                &mcp_tools,
+                            )
                             .await;
                         (o, None)
                     }
@@ -2136,7 +2187,7 @@ impl NativeBackend {
                 let cancelled = ctx.cancel.is_cancelled();
                 let output = self.config.secrets.scrub(&outcome.output);
                 let note = refused.or_else(|| {
-                    let changes = self.tools.iter().any(|t| {
+                    let changes = self.tools.iter().chain(&mcp_tools).any(|t| {
                         t.name() == call.tool
                             && t.risk() == harness_core::policy::ToolRisk::Mutating
                     });
@@ -2600,6 +2651,7 @@ impl NativeBackend {
         Ok(done)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_tool(
         &self,
         ctx: &TurnCtx<'_>,
@@ -2608,11 +2660,13 @@ impl NativeBackend {
         allowed_this_turn: &mut HashSet<harness_tools::CallKey>,
         observed: &[String],
         refs: &SharedRefs,
+        mcp: &[Arc<dyn harness_tools::Tool>],
     ) -> ToolOutcome {
         let offered = ctx.agent.as_ref().is_none_or(|a| a.allows_tool(&call.tool));
         let Some(tool) = self
             .tools
             .iter()
+            .chain(mcp)
             .find(|t| t.name() == call.tool)
             .filter(|t| offered && t.enabled(&ctx.extra.savings))
         else {
@@ -2722,6 +2776,30 @@ impl NativeBackend {
             // was abandoned: nobody confirmed that what it started has ended
             // (review T8E-3), so the result does not say it was cancelled.
             Step::Cancelled => ToolOutcome::err(abandoned_note()),
+        }
+    }
+}
+
+impl NativeBackend {
+    /// The context an MCP server of this turn's chat is started in: the
+    /// confinement, folder, environment and protected folders of a tool
+    /// call of the same turn (`run_tool`).
+    fn start_ctx(&self, ctx: &TurnCtx<'_>, host: &dyn harness_core::backend::TurnHost) -> ToolCtx {
+        ToolCtx {
+            workspace: ctx.cwd.clone(),
+            cancel: ctx.cancel.child_token(),
+            allow_outside_workspace: self.config.allow_outside_workspace,
+            protected: self.config.protected_dirs.clone(),
+            timeout: self.config.tool_timeout,
+            bash_timeout_max: self.config.bash_timeout_max,
+            env: self.config.tool_env.clone(),
+            sandbox: self
+                .config
+                .confinement(host.exec_mode())
+                .for_session(&ctx.session_id.to_string()),
+            pin: host.folder_pin(),
+            owned: host.owned_folder(),
+            ..ToolCtx::new(ctx.cwd.clone())
         }
     }
 }
@@ -2864,7 +2942,7 @@ mod tests {
         c.agent = Some(scout());
         let b = backend();
         assert_eq!(
-            b.tool_specs(c.agent.as_ref(), &Default::default(), &host, false)
+            b.tool_specs(c.agent.as_ref(), &Default::default(), &host, false, &[])
                 .len(),
             1
         );

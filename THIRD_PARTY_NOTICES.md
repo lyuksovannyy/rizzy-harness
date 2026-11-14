@@ -96,6 +96,12 @@ id checks and the secret lexicon are our own code.
   "The Complexity Trap" (JetBrains Research, MIT). No code copied.
 - Repository map: the approach of aider's repo map (tree-sitter tags ranked by
   PageRank), reimplemented.
+- MCP client (`crates/tools/src/mcp.rs`): node.toml's `[mcp_servers.<name>]`
+  field names follow Codex's `config.toml` (https://github.com/openai/codex,
+  Apache-2.0), and the tool-name rule (`mcp__<server>__<tool>`, cleaned, cut
+  to 64 characters, a 12-hex SHA-256 suffix when changed) follows the
+  DeepSeek harness's `publicToolName`. No code copied. The protocol itself
+  is the `rmcp` crate (the official Rust SDK, Apache-2.0), a dependency.
 
 ## Home-screen wall lists
 
