@@ -17,6 +17,7 @@ const ALL_TOOLS: &[&str] = &[
     "graph_query",
     "publish",
     "todo",
+    "skill",
     "web_search",
     "web_fetch",
     "remember",
@@ -40,6 +41,7 @@ fn builtin_roster_is_exactly_the_table() {
         "graph_query",
         "publish",
         "todo",
+        "skill",
         "web_search",
         "web_fetch",
         "remember",
@@ -130,6 +132,7 @@ fn builtin_roster_is_exactly_the_table() {
                 "web_fetch",
                 "publish",
                 "todo",
+                "skill",
                 "remember",
             ],
             user_facts: false,
@@ -142,7 +145,7 @@ fn builtin_roster_is_exactly_the_table() {
             name: "Scout",
             category: "IT",
             runs_as: (false, true),
-            tools: &["read", "grep", "glob", "outline", "graph_query"],
+            tools: &["read", "grep", "glob", "outline", "graph_query", "skill"],
             user_facts: false,
             project_memory: false,
             delegates: &[],
@@ -153,7 +156,15 @@ fn builtin_roster_is_exactly_the_table() {
             name: "Reviewer",
             category: "IT",
             runs_as: (true, true),
-            tools: &["read", "grep", "glob", "outline", "graph_query", "remember"],
+            tools: &[
+                "read",
+                "grep",
+                "glob",
+                "outline",
+                "graph_query",
+                "skill",
+                "remember",
+            ],
             user_facts: false,
             project_memory: true,
             delegates: &[],
@@ -432,7 +443,8 @@ fn custom_agents_get_tools_and_budget_from_their_features() {
             "grep",
             "glob",
             "outline",
-            "graph_query"
+            "graph_query",
+            "skill"
         ]
     );
     assert_eq!(a.spec.budget, Budget::Lean);
@@ -727,4 +739,28 @@ fn agents_that_build_get_the_task_list() {
     assert!(with(true, false).iter().any(|t| t == "todo"));
     assert!(with(false, true).iter().any(|t| t == "todo"));
     assert!(!with(false, false).iter().any(|t| t == "todo"));
+}
+
+/// Skills come with any switch that works on files or commands: an agent
+/// that reads, edits or runs things can load a skill's instructions; one
+/// that only chats or searches the web cannot (X.2).
+#[test]
+fn agents_that_work_on_files_get_skills() {
+    let with = |read_files: bool, edit_files: bool, commands: bool| {
+        harness_agents::Features {
+            read_files,
+            edit_files,
+            commands,
+            ..features()
+        }
+        .tools()
+    };
+    for (r, e, c) in [
+        (true, false, false),
+        (false, true, false),
+        (false, false, true),
+    ] {
+        assert!(with(r, e, c).iter().any(|t| t == "skill"), "{r} {e} {c}");
+    }
+    assert!(!with(false, false, false).iter().any(|t| t == "skill"));
 }

@@ -415,7 +415,9 @@ text under \"Task list:\" is the assistant's own task list as it stood at the en
 tool); the harness gives it back after the summary, so do not copy it: refer to it. A \
 sub-agent's report (a \"Tool result:\" of a delegate call) is that agent's own account, not \
 checked by the harness: write what it reported as its report (\"the scout reported …\"), not \
-as an established fact. ",
+as an established fact. A skill loaded with the skill tool (a \"Tool result:\" that starts \
+with \"Skill `\") whose instructions the work still follows: name it under Decisions (\"follows \
+the skill `name`\"), so you can load it again; do not copy its text. ",
     transcript_data!()
 );
 
@@ -2749,6 +2751,7 @@ impl NativeBackend {
             pin: host.folder_pin(),
             owned: host.owned_folder(),
             background: background_access(ctx, host),
+            skills: ctx.extra.skills.clone(),
             seen: self.seen.session(ctx.session_id),
         };
         // stdout and stderr are interleaved into one coalesced stream (as a

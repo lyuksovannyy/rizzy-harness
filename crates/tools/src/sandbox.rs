@@ -1001,6 +1001,11 @@ pub struct Grants {
     pub owned_write: Vec<PathBuf>,
     /// More read-only folders (checked against the protected ones).
     pub read: Vec<PathBuf>,
+    /// Read-only folders a session might be able to write or re-point (the
+    /// node owner's skill roots): bound by their identity now, as a
+    /// node.toml `[sandbox] read` entry is, so a swap after this look
+    /// refuses the command (checked against the protected ones too).
+    pub read_identified: Vec<(PathBuf, &'static str)>,
     /// A sub-agent's node-owned folder (see `harness_core::folder::
     /// OwnedFolder`), when the session is one.
     pub owned: Option<harness_core::folder::OwnedFolder>,
@@ -1155,6 +1160,7 @@ impl Confinement {
                     checked.push(ws.clone());
                 }
                 checked.extend(grants.read.iter().cloned());
+                checked.extend(grants.read_identified.iter().map(|(p, _)| p.clone()));
                 let ws_grant = Grant::identified(&ws, ws_id, "the session's folder");
                 if grants.workspace_write {
                     rw.push(ws_grant);
@@ -1199,6 +1205,13 @@ impl Confinement {
                     }
                 }
                 ro.extend(grants.read.iter().map(|p| Grant::system(p)));
+                for (p, label) in &grants.read_identified {
+                    ro.push(Grant::identified(
+                        p,
+                        harness_core::folder::Identity::of(p)?,
+                        label,
+                    ));
+                }
                 for p in &checked {
                     if let Some(d) = exposes(p, &all) {
                         return Err(format!(

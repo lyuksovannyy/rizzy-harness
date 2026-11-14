@@ -191,6 +191,9 @@ const PUBLISH_TOOL: &str = "publish";
 /// The agent's own task list: with the same switches, for the same reason
 /// (work that takes many steps).
 const TODO_TOOL: &str = "todo";
+/// Skills (instructions in a folder, loaded by name): with any switch that
+/// works on files or commands, where a task can call for one.
+const SKILL_TOOL: &str = "skill";
 
 /// What an agent can do, as the Agents page shows it. A custom agent is
 /// made from these; for the others they are read off the definition.
@@ -235,6 +238,10 @@ impl Features {
             (
                 self.edit_files || self.commands,
                 &[PUBLISH_TOOL, TODO_TOOL][..],
+            ),
+            (
+                self.read_files || self.edit_files || self.commands,
+                &[SKILL_TOOL][..],
             ),
         ];
         groups

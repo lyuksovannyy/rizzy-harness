@@ -1,4 +1,4 @@
-//! Built-in tools: bash, read, write, edit, grep, glob.
+//! Built-in tools: bash, read, write, edit, grep, glob, todo, skill.
 //!
 //! Every tool is cancellable through `ToolCtx::cancel`. Path-taking tools are
 //! confined to the workspace unless the node policy says otherwise.
@@ -16,6 +16,7 @@ pub mod env;
 pub mod filter;
 mod fs;
 pub mod graphify;
+pub mod inside;
 pub mod mcp;
 mod outline;
 pub mod outputs;
@@ -23,6 +24,7 @@ mod publish;
 pub mod sandbox;
 mod search;
 pub mod seen;
+pub mod skills;
 pub mod stream;
 pub mod todo;
 
@@ -196,6 +198,9 @@ pub struct ToolCtx {
     /// This session's background commands (`bash` with `background: true`,
     /// `bash_output`, `bash_stop`), or why there are none here.
     pub background: background::Access,
+    /// The skills the node found for this turn (`skill` loads from them);
+    /// `None` where there are none.
+    pub skills: Option<Arc<harness_core::skills::Catalogue>>,
     /// What this session's agent has seen of each file: `edit` and `write`
     /// check it, `read` and they record it (T.2). A table of its own
     /// unless the loop binds the session's.
@@ -223,6 +228,7 @@ impl ToolCtx {
             pin: None,
             owned: None,
             background: Default::default(),
+            skills: None,
             seen: Default::default(),
         }
     }
@@ -596,6 +602,7 @@ pub fn builtin() -> ToolSet {
         Arc::new(Outline),
         Arc::new(Publish),
         Arc::new(todo::Todo),
+        Arc::new(skills::SkillTool),
     ]
 }
 

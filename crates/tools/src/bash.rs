@@ -288,6 +288,7 @@ impl Tool for Bash {
             crate::sandbox::Grants {
                 workspace_write: true,
                 owned: ctx.owned.clone(),
+                read_identified: crate::skills::shell_reads(ctx),
                 ..Default::default()
             },
         ) {

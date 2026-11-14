@@ -212,3 +212,14 @@ describe("sub-agent status", () => {
     expect(childStatus(`session: ${id}\n@scout ended (completed):\nSub-agent @scout finished: done.`)).toBeUndefined();
   });
 });
+
+describe("skill card", () => {
+  const summaryOf = (input: object) =>
+    /<span class="tool-summary[^"]*">([^<]*)<\/span>/.exec(
+      renderToStaticMarkup(<ToolCard sessionId="s" item={web("skill", input)} />),
+    )?.[1];
+  test("its head names the skill and the file, not the JSON", () => {
+    expect(summaryOf({ name: "release" })).toBe("release");
+    expect(summaryOf({ name: "release", file: "scripts/tag.sh" })).toBe("release · scripts/tag.sh");
+  });
+});
