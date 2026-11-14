@@ -119,6 +119,7 @@ export default function Routines(props: RoutinesPageProps) {
           routine={routine}
           seed={id === "new" ? seed : null}
           agents={props.agents}
+          agentDefaults={props.agentDefaults}
           nodes={props.nodes}
           projects={props.projects}
           scope={scope}
@@ -147,7 +148,7 @@ export default function Routines(props: RoutinesPageProps) {
   };
   const running = list ? list.routines.filter((r) => !notRunning(r, list.orphaned)) : [];
   const stopped = list ? list.routines.filter((r) => notRunning(r, list.orphaned)) : [];
-  const defaultAgent = props.agents[0]?.id ?? "general";
+  const defaultAgent = props.agentDefaults.chat;
   return (
     <Page>
       <div className="agents-head">

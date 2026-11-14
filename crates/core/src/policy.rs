@@ -23,7 +23,7 @@ impl ApprovalMode {
 
     pub fn needs_approval(self, risk: ToolRisk) -> bool {
         match self {
-            ApprovalMode::AskAll => true,
+            ApprovalMode::AskAll => risk != ToolRisk::ChatOnly,
             ApprovalMode::Ask => risk == ToolRisk::Mutating,
             ApprovalMode::Auto => false,
         }
@@ -172,6 +172,10 @@ mod level_tests {
 pub enum ToolRisk {
     ReadOnly,
     Mutating,
+    /// Writes nothing but the chat's own log (the agent's task list): no
+    /// mode asks about it, `ask_all` included. A node's `denied_tools`
+    /// still refuses it.
+    ChatOnly,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -213,5 +217,14 @@ mod tests {
         assert!(!ApprovalMode::Ask.needs_approval(ToolRisk::ReadOnly));
         assert!(ApprovalMode::AskAll.needs_approval(ToolRisk::ReadOnly));
         assert!(!ApprovalMode::Auto.needs_approval(ToolRisk::Mutating));
+    }
+
+    /// A tool that writes only the chat's own log (`todo`) is never asked
+    /// about, `ask_all` included (TD-6).
+    #[test]
+    fn chat_only_is_never_asked() {
+        for mode in [ApprovalMode::AskAll, ApprovalMode::Ask, ApprovalMode::Auto] {
+            assert!(!mode.needs_approval(ToolRisk::ChatOnly), "{mode:?}");
+        }
     }
 }
