@@ -527,6 +527,7 @@ mod tests {
                     cause: None,
                     agent: None,
                     turn_id: "t".into(),
+                    environment: None,
                 }),
             ),
             ev(
@@ -612,6 +613,7 @@ mod tests {
                 sid,
                 2,
                 EventKind::ToolCallFinished(ToolCallFinished {
+                    seen: None,
                     call_id: "c".into(),
                     ok: true,
                     output: "[S1] A".into(),
@@ -723,6 +725,7 @@ mod tests {
                 cause: None,
                 agent: None,
                 turn_id: "t".into(),
+                environment: None,
             }),
         );
         let mut v = SessionView::default();

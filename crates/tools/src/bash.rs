@@ -335,6 +335,7 @@ impl Tool for Bash {
                 workspace_write: true,
                 owned: ctx.owned.clone(),
                 cwd,
+                read_identified: crate::skills::shell_reads(ctx),
                 ..Default::default()
             },
         ) {

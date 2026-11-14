@@ -434,6 +434,12 @@ pub struct TurnStarted {
     /// for a person's turn, which has a `user_message` right after.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cause: Option<TurnCause>,
+    /// The node's line about where the turn ran (its clock, OS, shell, git
+    /// branch; `TurnExtra::environment`), which opened the turn's message:
+    /// recorded so every later request rebuilds that message byte for byte
+    /// (the provider's prompt cache). Written by the node only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
 }
 
 /// What started a turn that no person's message started.
@@ -863,6 +869,22 @@ pub struct ToolCallFinished {
     /// the node's loop writes it, never from the tool or the model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// The file this call read or wrote, as the file tools' staleness guard
+    /// must know it (ADOPTION_PLAN T.2): the node rebuilds what the agent
+    /// has seen from these, so the guard survives a restart. Only the
+    /// node's loop writes it, from what `read`, `write` or `edit` did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seen: Option<FileSeen>,
+}
+
+/// A file as a file tool left the agent knowing it: `read` showed it (all
+/// of it, or a part), or `write`/`edit` wrote it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileSeen {
+    /// The real path (links resolved), as the file tools key it.
+    pub path: String,
+    /// SHA-256 of the file's bytes, lowercase hex.
+    pub sha256: String,
 }
 
 /// A web page behind a citation label. Only the harness's web tools write
@@ -1165,6 +1187,7 @@ mod tests {
                 cause: None,
                 turn_id: "t".into(),
                 agent: Some(agent.clone()),
+                environment: None,
             }),
             EventKind::AssistantMessage(AssistantMessage {
                 turn_id: "t".into(),
@@ -1201,6 +1224,7 @@ mod tests {
     #[test]
     fn sources_roundtrip() {
         let k = EventKind::ToolCallFinished(ToolCallFinished {
+            seen: None,
             call_id: "c".into(),
             ok: true,
             output: "[S4] Tokio\n    https://tokio.rs/".into(),
@@ -1331,7 +1355,8 @@ mod tests {
             EventKind::TurnStarted(TurnStarted {
                 cause: None,
                 agent: None,
-                turn_id: "t1".into()
+                turn_id: "t1".into(),
+                environment: None,
             })
         );
     }
@@ -1444,6 +1469,7 @@ mod background_note_tests {
             turn_id: "t".into(),
             agent: None,
             cause: Some(TurnCause::Callback(vec!["bg-1".into(), "bg-3".into()])),
+            environment: None,
         });
         let (kind, payload) = k.clone().into_parts();
         assert_eq!(

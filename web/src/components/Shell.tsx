@@ -45,6 +45,7 @@ const Project = lazy(() => import("./Project"));
 const Routines = lazy(() => import("./Routines"));
 const Media = lazy(() => import("./Media"));
 const Artifacts = lazy(() => import("./Artifacts"));
+const MemoryShareAsk = lazy(() => import("./MemoryShareAsk"));
 // Imported on the first sign of intent (pointer or focus on Search, or a
 // shortcut), so the panel opens without waiting.
 const loadSearch = () => import("./SearchPanel");
@@ -625,6 +626,14 @@ export function Shell(props: {
             </button>
           </div>
         )}
+        {/* The join question of the active team workspace, while unanswered. */}
+        {workspaces?.workspaces
+          .filter((w) => w.workspace_id === workspaceId && !w.personal && w.memory_answered === false)
+          .map((w) => (
+            <Suspense key={w.workspace_id} fallback={null}>
+              <MemoryShareAsk workspace={w} onAnswered={workspacesChanged} />
+            </Suspense>
+          ))}
         <Suspense fallback={<div className="muted pad">Loading…</div>}>
           {route.kind === "session" ? (
             <Conversation

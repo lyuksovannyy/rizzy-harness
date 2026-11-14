@@ -1,5 +1,7 @@
-//! Memory end to end: the model proposes, the user confirms, recall feeds the
-//! next prompt; incognito neither writes nor reads; other users see nothing.
+//! Memory end to end: in the Personal workspace the model's `remember` is
+//! saved at once and recall feeds the next prompt (a fact the person sets
+//! back to proposed is not recalled); incognito neither writes nor reads;
+//! other users see nothing.
 
 mod common;
 use common::{Login as _, SameOrigin as _};
@@ -228,14 +230,23 @@ async fn propose_confirm_recall() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert_eq!(m.len(), 1);
-    assert_eq!(m[0]["status"], "proposed");
+    assert_eq!(m[0]["status"], "active", "Personal saves at once");
     assert_eq!(m[0]["source_session"], sid.as_str());
     let id = m[0]["id"].as_str().unwrap().to_string();
 
     // Proposed facts are not recalled.
+    let (st, _) = req(
+        &t,
+        Method::PATCH,
+        &format!("/api/memory/{id}"),
+        Some(json!({"status": "proposed"})),
+        &c,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
     turn(&t, &c, "which tram do I take?", false).await;
     assert!(!last_system(&t).contains("number 7 tram"));
-    // Confirmed: recalled into the next relevant prompt.
+    // Active again: recalled into the next relevant prompt.
     let (st, _) = req(
         &t,
         Method::PATCH,

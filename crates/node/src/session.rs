@@ -120,6 +120,9 @@ pub(crate) struct Session {
     /// the turn's next model request, or by the next turn (X.5). Rebuilt
     /// from the log at load.
     pending: Mutex<Vec<(u64, UserMessage)>>,
+    /// The environment line the last `turn_started` recorded, by turn id,
+    /// for that turn's run to send (`TurnExtra::environment`).
+    turn_env: Mutex<Option<(String, String)>>,
 }
 
 /// The most messages that wait at once for the running turn to read them
@@ -290,6 +293,7 @@ impl Session {
             bg_gate: tokio::sync::Mutex::new(()),
             queue: tokio::sync::Mutex::new(()),
             pending: Mutex::new(Vec::new()),
+            turn_env: Mutex::new(None),
             node: node.clone(),
             id,
             head: tokio::sync::Mutex::new(0),
@@ -385,6 +389,7 @@ impl Session {
             // Sent while a turn ran that a restart cut: the next turn reads
             // them (X.5).
             pending: Mutex::new(unread(&events)),
+            turn_env: Mutex::new(None),
             node,
             id,
             head: tokio::sync::Mutex::new(view.head_seq),
@@ -1309,11 +1314,13 @@ impl Session {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clear();
+        let environment = self.environment_line(&turn_id).await;
         if let Err(e) = self
             .emit(EventKind::TurnStarted(TurnStarted {
                 turn_id: turn_id.clone(),
                 agent: agent.as_ref().map(AgentSpec::agent_ref),
                 cause: Some(cause.clone()),
+                environment,
             }))
             .await
         {
@@ -1393,11 +1400,13 @@ impl Session {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clear();
+        let environment = self.environment_line(turn_id).await;
         let started = self
             .emit(EventKind::TurnStarted(TurnStarted {
                 cause: None,
                 agent: agent.map(AgentSpec::agent_ref),
                 turn_id: turn_id.into(),
+                environment,
             }))
             .await;
         drop(gate);
@@ -1498,6 +1507,40 @@ impl Session {
         }
     }
 
+    /// The environment line for turn `turn_id` (`crate::environment`),
+    /// composed now, before its `turn_started` records it, and kept for
+    /// the turn's run: the node's clock, OS, shell and the repository's
+    /// `HEAD`, read in the instruction files' bound. `None` for a chat or
+    /// a folder that fails its check.
+    async fn environment_line(&self, turn_id: &str) -> Option<String> {
+        use crate::instructions::{self as ins, Bounded};
+        if self.profile != Profile::Agentic {
+            return None;
+        }
+        let dir = self.checked_folder().ok()?;
+        let granted = match &self.owned {
+            Some(o) => o.top.clone(),
+            None => self.node.cfg.policy.root_of(&dir).ok()?,
+        };
+        let protected = self.node.cfg.policy.protected_dirs.clone();
+        let now = jiff::Zoned::now();
+        let read = ins::bounded(
+            move || crate::environment::repo(&dir, &granted, &protected),
+            &CancellationToken::new(),
+            ins::READ_TIMEOUT,
+        )
+        .await;
+        let repo = match read {
+            Bounded::Done(r) => crate::environment::Looked::Read(r),
+            Bounded::TimedOut => crate::environment::Looked::TimedOut,
+            Bounded::Cancelled | Bounded::Failed(_) => crate::environment::Looked::Failed,
+        };
+        let line = crate::environment::line(&now, &repo);
+        *self.turn_env.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some((turn_id.to_string(), line.clone()));
+        Some(line)
+    }
+
     /// `extra` with the repository's instruction files
     /// ([`crate::instructions`]) in `instructions`, read now from this
     /// session's checked folder, for every agentic turn: the person's, a
@@ -1507,13 +1550,21 @@ impl Session {
     /// [`crate::instructions::READ_TIMEOUT`] and not past `cancel`. A
     /// folder that fails its check adds nothing here (the turn's own checks
     /// refuse it).
+    ///
+    /// When the agent may use the `skill` tool here, the skills found in
+    /// the same read (`harness_tools::skills`, node.toml `[skills]`) go to
+    /// `skills`, and their catalogue after the files, read in a bound of
+    /// their own. `invoking`: the person's own message (never a delegated
+    /// task or a callback turn), which invokes a skill with `/name`.
     async fn with_instructions(
         &self,
         mut extra: TurnExtra,
         agent: Option<&AgentSpec>,
+        invoking: Option<&str>,
         cancel: &CancellationToken,
     ) -> TurnExtra {
         use crate::instructions::{self as ins, Bounded};
+        use harness_tools::skills;
         if self.profile != Profile::Agentic {
             return extra;
         }
@@ -1530,31 +1581,44 @@ impl Session {
         let model = agent
             .and_then(|a| a.model.clone())
             .unwrap_or_else(|| self.model.clone());
-        let cap = ins::cap_for(agent.and_then(|a| a.context_windows.get(&model).copied()));
-        let protected = self.node.cfg.policy.protected_dirs.clone();
-        // The repository's HEAD for the environment line, in the same
-        // bounded read (no process started).
-        let now = jiff::Zoned::now();
-        let read = ins::bounded(
-            move || {
-                (
-                    ins::read(&dir, &granted, &protected, cap),
-                    crate::environment::repo(&dir, &granted, &protected),
-                )
-            },
+        let window = agent.and_then(|a| a.context_windows.get(&model).copied());
+        let cap = ins::cap_for(window);
+        let policy = &self.node.cfg.policy;
+        let mut roots = Vec::new();
+        if agent.is_none_or(|a| a.allows_tool(skills::NAME))
+            && !policy.denies(skills::NAME)
+            && self.node.cfg.backend.has_tool(skills::NAME)
+        {
+            // Checked when node.toml was loaded; a policy built in code
+            // with a bad entry reads none of them.
+            roots.extend(
+                policy
+                    .skills
+                    .roots()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|path| skills::Root {
+                        path,
+                        origin: harness_core::skills::SkillOrigin::Node,
+                        bound: None,
+                    }),
+            );
+            if policy.skills.repository {
+                roots.extend(skills::repo_roots(&dir, &granted));
+            }
+        }
+        let protected = policy.protected_dirs.clone();
+        // The instruction files first, in a bound of their own: a slow
+        // skill folder must not cost the turn its AGENTS.md (review S3).
+        let files_protected = protected.clone();
+        let files = ins::bounded(
+            move || ins::read(&dir, &granted, &files_protected, cap),
             cancel,
             ins::READ_TIMEOUT,
         )
         .await;
-        let repo = match &read {
-            Bounded::Done((_, repo)) => Some(repo.clone()),
-            _ => None,
-        };
-        if !matches!(read, Bounded::Cancelled) {
-            extra.environment = Some(crate::environment::line(&now, repo.as_ref()));
-        }
-        let problems = match read {
-            Bounded::Done((r, _)) => {
+        let problems = match files {
+            Bounded::Done(r) => {
                 extra.instructions = r.text;
                 r.problems
             }
@@ -1563,11 +1627,22 @@ impl Session {
                 vec![format!("timed out after {} s", ins::READ_TIMEOUT.as_secs())]
             }
             // The turn is stopping; the backend sees the cancel itself.
-            Bounded::Cancelled => vec![],
+            Bounded::Cancelled => return extra,
             Bounded::Failed(e) => {
                 tracing::warn!(session = %self.id, error = %e, "reading the instruction files failed");
                 vec![]
             }
+        };
+        let skill_problems = if roots.is_empty() {
+            vec![]
+        } else {
+            let found = ins::bounded(
+                move || skills::discover(&roots, &protected),
+                cancel,
+                ins::READ_TIMEOUT,
+            )
+            .await;
+            ins::with_skills(&mut extra, found, invoking, skills::cap_for(window))
         };
         if !problems.is_empty() {
             tracing::info!(
@@ -1575,6 +1650,14 @@ impl Session {
                 folder = %self.cwd.display(),
                 problems = ?problems,
                 "instruction files: some were not read in full"
+            );
+        }
+        if !skill_problems.is_empty() {
+            tracing::info!(
+                session = %self.id,
+                folder = %self.cwd.display(),
+                problems = ?skill_problems,
+                "skills: some were not used"
             );
         }
         extra
@@ -1602,7 +1685,25 @@ impl Session {
             return (TurnEndReason::Error, None);
         }
 
-        let extra = self.with_instructions(extra, agent.as_ref(), &cancel).await;
+        let extra_cause_none = extra.cause.is_none();
+        let mut extra = self
+            .with_instructions(
+                extra,
+                agent.as_ref(),
+                // Only a person's own message invokes a skill (review S5).
+                (self.parent_session.is_none() && extra_cause_none).then_some(user_text.as_str()),
+                &cancel,
+            )
+            .await;
+        // The environment line this turn's `turn_started` recorded: the
+        // message is sent with exactly what the log rebuilds it with.
+        extra.environment = self
+            .turn_env
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+            .filter(|(t, _)| *t == turn_id)
+            .map(|(_, l)| l);
         // Run the backend in its own task so a panic still ends the turn.
         let this = self.clone();
         let tid = turn_id.clone();

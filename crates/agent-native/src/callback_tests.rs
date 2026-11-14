@@ -147,6 +147,7 @@ fn history(sid: SessionId) -> Vec<RawEvent> {
                 turn_id: "t1".into(),
                 agent: None,
                 cause: None,
+                environment: None,
             }),
         ),
         ev(
@@ -287,6 +288,7 @@ async fn the_opening_has_one_harness_header_quoted_output_and_rebuilds_the_same(
             turn_id: "t2".into(),
             agent: None,
             cause: Some(TurnCause::Callback(vec!["bg-1".into()])),
+            environment: None,
         }),
     ));
     let again = place_notes(history_to_messages(&log));
@@ -376,7 +378,8 @@ async fn the_default_mock_does_not_obey_program_output() {
         tools: vec![],
         effort: None,
         cache: false,
-        idle_timeout: None,
+        limits: None,
+        no_tool_calls: false,
     };
     let mock = || mock::Mock {
         delay: std::time::Duration::from_millis(1),
@@ -420,7 +423,7 @@ async fn a_callback_turn_gets_the_instruction_files_after_its_opening() {
     let tail = format!(
         "\n\n{INSTRUCTIONS_LEAD}, not the person's words and not program output: the 5 line(s) \
          below, each starting with \"{OUTPUT_QUOTE}\", are the repository's AGENTS.md / CLAUDE.md \
-         files as the harness read them for this turn.\n\
+         files and the list of skills, as the harness read them for this turn.\n\
          {OUTPUT_QUOTE}Instruction files\n\
          {OUTPUT_QUOTE}==> AGENTS.md <==\n\
          {OUTPUT_QUOTE}Run cargo fmt.\n\
@@ -437,6 +440,7 @@ async fn a_callback_turn_gets_the_instruction_files_after_its_opening() {
             turn_id: "t2".into(),
             agent: None,
             cause: Some(TurnCause::Callback(vec!["bg-1".into()])),
+            environment: None,
         }),
     ));
     let again = place_notes(history_to_messages(&log));
@@ -449,8 +453,8 @@ async fn a_callback_turn_gets_the_instruction_files_after_its_opening() {
 }
 
 /// The node's environment line reaches a callback turn too, after the
-/// opening (which still starts with the harness's frame) and this turn's
-/// only: a later request rebuilds the opening without it.
+/// opening (which still starts with the harness's frame); `turn_started`
+/// records it, and a later request rebuilds the opening byte for byte.
 #[tokio::test]
 async fn a_callback_turn_gets_the_environment_line() {
     let sid = SessionId::new();
@@ -478,13 +482,9 @@ async fn a_callback_turn_gets_the_environment_line() {
             turn_id: "t2".into(),
             agent: None,
             cause: Some(TurnCause::Callback(vec!["bg-1".into()])),
+            environment: Some(env.into()),
         }),
     ));
     let again = place_notes(history_to_messages(&log));
-    assert_eq!(
-        again.last(),
-        Some(&ChatMsg::User(
-            opening[..opening.len() - env.len() - 2].to_string()
-        ))
-    );
+    assert_eq!(again.last(), Some(&ChatMsg::User(opening.clone())));
 }

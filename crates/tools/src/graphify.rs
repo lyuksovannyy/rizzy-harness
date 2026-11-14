@@ -175,7 +175,7 @@ async fn run(
             owned_write: vec![out.to_path_buf()],
             read: install_dirs(bin),
             owned: ctx.owned.clone(),
-            cwd: None,
+            ..Default::default()
         },
     )?;
     // In a process group of its own, killed as a whole on timeout, cancel

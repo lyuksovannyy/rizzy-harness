@@ -1,7 +1,7 @@
 // An open session: header, timeline, reply composer. Loaded lazily so the
 // new-tab home screen stays small.
 import "../lib/i18nPages";
-import { FileText, Package, Trash2 } from "lucide-react";
+import { Download, FileText, Package, Trash2 } from "lucide-react";
 import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "../api";
 import { pageApi } from "../apiPages";
@@ -25,6 +25,7 @@ import {
 import type { Live } from "../live";
 import { InputCtx, MessageCtx, ProgressCtx, type InputInfo, type Inputs, type MessageInfo } from "../md/context";
 import { CopyMessage } from "../md/CopyMessage";
+import { rt } from "../md/strings";
 import { showHidden, shownName } from "../md/hidden";
 import type { History } from "../bg/topics";
 import type { Agent, Item, ModelInfo, NodeInfo, RoutineMark, SessionRow } from "../types";
@@ -33,6 +34,7 @@ import { Composer } from "./Composer";
 import { AgentMark, agentAlert } from "./AgentAvatar";
 import { ChatArtifactsCtx, SaveAsArtifact, SavedItem, stagedKeys, useChatArtifacts } from "./ChatArtifacts";
 import { BubbleImages } from "./ChatImages";
+import { ChatTitle } from "./ChatTitle";
 import { DeleteChat } from "./DeleteChat";
 import { useAvatarState } from "./avatarState";
 import { Markdown } from "./Markdown";
@@ -47,6 +49,8 @@ import type { ProjectSummary } from "../lib/projects";
 const ChatGutter = lazy(() => import("../bg/ChatGutter"));
 // Loaded on the chat's first running background command (T.8d step 2).
 const BackgroundStrip = lazy(() => import("./BackgroundStrip"));
+// Export as Markdown, loaded on its first click.
+const ExportChat = lazy(() => import("./ExportChat"));
 // Loaded on the chat's first task list (the agent's `todo` tool).
 const TodoPanel = lazy(() => import("./TodoPanel"));
 
@@ -288,6 +292,8 @@ export default function Conversation(props: {
   const [savingFile, setSavingFile] = useState(false);
   // Deleting asks in a dialog that also offers the chat's Media files.
   const [deleting, setDeleting] = useState(false);
+  // Export as Markdown: its dialog and the file's builder load on the first click.
+  const [exporting, setExporting] = useState(false);
   const remove = () => setDeleting(true);
   // The background strip: once a command of this chat runs, it stays
   // mounted (it hides itself) so an end this tab asked for can show.
@@ -305,7 +311,8 @@ export default function Conversation(props: {
       )}
       <header className="conv-head">
         <div className="conv-title">
-          <h1 className="ellipsis">{shownName(meta?.title ?? props.row?.title ?? "…")}</h1>
+          {/* The row's title: a rename changes only the row (the log keeps the first). */}
+          <ChatTitle sessionId={sessionId} title={props.row?.title ?? meta?.title ?? "…"} canRename={!!props.row} />
           <div className="conv-meta">
             <span className={`conv-agent${sessionAgent && agentAlert(sessionAgent) ? " bad" : ""}`}>
               {sessionAgent && <AgentMark agent={sessionAgent} state={answering === activeAgent ? face : "idle"} size={20} />}
@@ -343,11 +350,31 @@ export default function Conversation(props: {
             <Package size={18} />
           </button>
         )}
+        <button
+          type="button"
+          className="icon"
+          aria-label={t("conv.export")}
+          title={t("conv.export")}
+          disabled={!view || view.items.length === 0}
+          onClick={() => setExporting(true)}
+        >
+          <Download size={18} />
+        </button>
         <button type="button" className="icon" aria-label={t("conv.delete")} title={t("conv.delete")} onClick={remove}>
           <Trash2 size={18} />
         </button>
       </header>
       {deleting && <DeleteChat sessionId={sessionId} workspaceId={workspaceId} incognito={incognito} onClose={() => setDeleting(false)} />}
+      {exporting && view && (
+        <Suspense fallback={null}>
+          <ExportChat
+            view={view}
+            title={props.row?.title ?? meta?.title ?? ""}
+            agentName={(id) => agentName(id ?? activeAgent)}
+            onClose={() => setExporting(false)}
+          />
+        </Suspense>
+      )}
       {savingFile && (
         <div className="incognito-banner save-file-bar">
           <SaveAsArtifact autoFocus />
@@ -591,7 +618,9 @@ export default function Conversation(props: {
                       undo
                     ) : (
                       <div key={i}>
-                        <div className={`divider r-${it.reason}`}>turn {it.reason}</div>
+                        <div className={`divider r-${it.reason}`}>
+                          {it.reason === "limit" ? rt("ui.turn.limit") : `turn ${it.reason}`}
+                        </div>
                         {undo}
                       </div>
                     );

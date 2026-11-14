@@ -53,6 +53,11 @@ impl RetryPolicy {
         if n >= self.retries || !e.is_retryable() {
             return None;
         }
+        // A provider that went silent has already cost a whole timeout:
+        // one more try, then the fallbacks or the error (review M4).
+        if matches!(e, ProviderError::Silent(_)) && n >= 1 {
+            return None;
+        }
         Some(match e.retry_after() {
             Some(after) if after > self.max => return None,
             Some(after) => after,
@@ -148,6 +153,10 @@ mod tests {
         }
         assert!(p.delay(&ProviderError::Http("refused".into()), 0).is_some());
         assert!(p.delay(&ProviderError::Stream("cut".into()), 0).is_some());
+        // Silence: once, not three times.
+        let silent = ProviderError::Silent("quiet".into());
+        assert!(p.delay(&silent, 0).is_some());
+        assert!(p.delay(&silent, 1).is_none());
         assert!(
             p.delay(&ProviderError::UnknownModel("x".into()), 0)
                 .is_none()

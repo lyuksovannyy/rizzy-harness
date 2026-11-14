@@ -138,6 +138,8 @@ function summaryRaw(tool: string, input: Tool["input"]): string {
       return `/${asText(i.pattern ?? "")}/ ${asText(i.path ?? "")}${i.glob ? ` (${asText(i.glob)})` : ""}`;
     case "glob":
       return `${asText(i.pattern ?? "")} ${asText(i.path ?? "")}`;
+    case "skill":
+      return `${asText(i.name ?? "")}${i.file ? ` · ${asText(i.file)}` : ""}`;
     case "todo": {
       // The list is pinned above the composer; the card names the change.
       const items: { content?: unknown; status?: unknown }[] = Array.isArray(i.items) ? i.items : [];
@@ -202,11 +204,19 @@ export function ToolCard({
 
   // A proposal the tool accepted: the notice says where it waits. A
   // rejected one stays an ordinary card with the tool's error.
-  if (item.tool === "remember" && status === "ok")
+  // A memory block, not a tool card, from the moment the call is made:
+  // the server says what it did (saved, waiting, refused) and offers Undo.
+  if (item.tool === "remember" && (status === "ok" || status === "running"))
     return item.input?.scope === "project" ? (
       <ProjectMemoryNotice text={asText(item.input?.text)} project={projectId ?? null} />
     ) : (
-      <MemoryNotice text={asText(item.input?.text)} />
+      <MemoryNotice
+        text={asText(item.input?.text ?? "")}
+        sessionId={sessionId}
+        callId={item.call_id}
+        forget={!!item.input?.forget && item.input?.text == null}
+        done={status === "ok"}
+      />
     );
   // A file the agent published: its card says where the upload stands. A
   // refused or failed call stays an ordinary card with the tool's error.

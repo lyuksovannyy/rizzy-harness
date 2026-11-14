@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use harness_agent_native::llm::{ApiKind, LlmProvider};
 use harness_agent_native::{
     ChatMsg, ChatRequest, Completion, NOT_RUN_AT_STEP_LIMIT, NativeBackend, NativeConfig, Provider,
-    ProviderError, history_to_messages,
+    ProviderError, RetryPolicy, StreamLimits, history_to_messages,
 };
 use harness_core::backend::{AgentBackend, TurnCtx, TurnHost};
 use harness_core::event::*;
@@ -158,31 +158,73 @@ fn text_of(req: &ChatRequest) -> String {
 async fn the_last_step_asks_for_a_wrap_up_and_ends_at_a_limit() {
     let dir = tempfile::tempdir().unwrap();
     let host = Host::default();
-    let p = Script::new(|n, _| {
-        if n < 3 {
-            bash_call(n)
+    // A model mid-task: it calls a tool whenever it may.
+    let p = Script::new(|n, req| {
+        if req.no_tool_calls {
+            said("Done: three checks. Left: the rest.")
         } else {
-            said("Done: two checks. Left: the rest.")
+            bash_call(n)
         }
     });
     let b = NativeBackend::new(p.clone(), harness_tools::builtin(), steps(3));
     let out = b.run_turn(turn(&host, dir.path())).await;
     let seen = p.seen();
-    assert_eq!(seen.len(), 3, "the cap counts the wrap-up request");
-    let last = text_of(&seen[2]);
+    assert_eq!(seen.len(), 4, "three steps, then the wrap-up request");
+    let last = text_of(&seen[3]);
     assert!(
-        last.contains("[harness] This is the last step of this turn"),
+        last.contains("[harness] This turn has used its 3 steps"),
         "{last}"
     );
-    assert!(!text_of(&seen[1]).contains("last step"), "only the last");
+    assert!(seen[3].no_tool_calls, "tool_choice none on the wrap-up");
+    assert!(
+        seen[..3]
+            .iter()
+            .all(|r| !r.no_tool_calls && !text_of(r).contains("its 3 steps")),
+        "only the last"
+    );
     assert_eq!(
-        seen[2].tools.len(),
+        seen[3].tools.len(),
         seen[0].tools.len(),
         "the tool list stays (prompt cache)"
     );
     assert_eq!(out.reason, TurnEndReason::Limit);
     assert_eq!(out.error, None, "not an error");
-    assert_eq!(host.finished().len(), 2, "both earlier calls ran");
+    assert_eq!(host.finished().len(), 3, "all three steps' calls ran");
+    let account = host
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            EventKind::AssistantMessage(m) => Some(m.text.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        account, "Done: three checks. Left: the rest.",
+        "the account"
+    );
+}
+
+/// `max_steps = 1` still runs a tool: the wrap-up is a request of its own
+/// after the budget (review L6).
+#[tokio::test]
+async fn one_step_still_runs_a_tool() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = Host::default();
+    let p = Script::new(|n, req| {
+        if req.no_tool_calls {
+            said("ok")
+        } else {
+            bash_call(n)
+        }
+    });
+    let b = NativeBackend::new(p.clone(), harness_tools::builtin(), steps(1));
+    let out = b.run_turn(turn(&host, dir.path())).await;
+    assert_eq!(p.seen().len(), 2);
+    assert!(host.finished()[0].ok, "{}", host.finished()[0].output);
+    assert_eq!(out.reason, TurnEndReason::Limit);
 }
 
 /// A call the model still makes on its last step is not run: it is
@@ -195,7 +237,7 @@ async fn a_call_on_the_last_step_is_not_run() {
     let host = Host::default();
     let m = marker.clone();
     let p = Script::new(move |n, _| {
-        if n < 2 {
+        if n < 3 {
             bash_call(n)
         } else {
             Completion {
@@ -314,33 +356,49 @@ fn a_call_cut_off_by_a_restart_reads_as_unknown() {
     assert!(!content.contains("[no result: the turn was interrupted]"));
 }
 
-/// The node's limit reaches every request the loop sends.
+/// The node's limits reach every request the loop sends.
 #[tokio::test]
-async fn the_idle_timeout_is_on_every_request() {
+async fn the_stream_limits_are_on_every_request() {
     let dir = tempfile::tempdir().unwrap();
     let host = Host::default();
     let p = Script::new(|_, _| said("ok"));
+    let limits = StreamLimits {
+        first_byte: Duration::from_secs(42),
+        idle: Duration::from_secs(7),
+    };
     let b = NativeBackend::new(
         p.clone(),
         harness_tools::builtin(),
         NativeConfig {
-            model_idle_timeout: Duration::from_secs(42),
+            stream_limits: limits,
             ..Default::default()
         },
     );
     b.run_turn(turn(&host, dir.path())).await;
-    assert_eq!(p.seen()[0].idle_timeout, Some(Duration::from_secs(42)));
+    assert_eq!(p.seen()[0].limits, Some(limits));
+    assert!(!p.seen()[0].no_tool_calls);
     assert_eq!(
-        NativeConfig::default().model_idle_timeout,
-        Duration::from_secs(harness_core::policy::DEFAULT_MODEL_IDLE_S)
+        StreamLimits::default(),
+        StreamLimits {
+            first_byte: Duration::from_secs(600),
+            idle: Duration::from_secs(300),
+        }
     );
-    assert_eq!(harness_core::policy::DEFAULT_MODEL_IDLE_S, 300);
 }
 
-/// A server that answers the headers and one chunk, then sends nothing
-/// and keeps the connection open (`stall_after_head`), or never answers
-/// at all.
-async fn stalling(stall_after_head: bool) -> String {
+/// How far a stalling server goes before it sends nothing more.
+#[derive(Clone, Copy)]
+enum Stall {
+    /// No response at all.
+    Nothing,
+    /// The headers, then nothing.
+    Headers,
+    /// The headers and one chunk, then nothing.
+    Chunk,
+}
+
+/// A server that stalls as `how` says and keeps the connection open.
+async fn stalling(how: Stall) -> String {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = l.local_addr().unwrap();
     tokio::spawn(async move {
@@ -351,16 +409,18 @@ async fn stalling(stall_after_head: bool) -> String {
             tokio::spawn(async move {
                 let mut buf = vec![0u8; 64 * 1024];
                 let _ = s.read(&mut buf).await;
-                if stall_after_head {
-                    let chunk = r#"data: {"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"par"},"finish_reason":null}]}"#;
-                    let body = format!("{chunk}\n\n");
-                    let head = format!(
-                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n{:x}\r\n{body}\r\n",
-                        body.len()
-                    );
-                    let _ = s.write_all(head.as_bytes()).await;
-                    let _ = s.flush().await;
-                }
+                let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n";
+                let out = match how {
+                    Stall::Nothing => String::new(),
+                    Stall::Headers => head.to_string(),
+                    Stall::Chunk => {
+                        let chunk = r#"data: {"id":"c","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"par"},"finish_reason":null}]}"#;
+                        let body = format!("{chunk}\n\n");
+                        format!("{head}{:x}\r\n{body}\r\n", body.len())
+                    }
+                };
+                let _ = s.write_all(out.as_bytes()).await;
+                let _ = s.flush().await;
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 drop(s);
             });
@@ -369,55 +429,113 @@ async fn stalling(stall_after_head: bool) -> String {
     format!("http://{addr}/v1")
 }
 
-fn idle_request(idle: Duration) -> ChatRequest {
+fn limited(first_byte: u64, idle: u64) -> ChatRequest {
     ChatRequest {
         model: "m".into(),
         messages: vec![ChatMsg::User("hi".into())],
         tools: vec![],
         effort: None,
         cache: false,
-        idle_timeout: Some(idle),
+        limits: Some(StreamLimits {
+            first_byte: Duration::from_secs(first_byte),
+            idle: Duration::from_secs(idle),
+        }),
+        no_tool_calls: false,
     }
 }
 
-/// A provider that stops sending mid-stream ends the call with the
-/// retryable stream error (the loop's retry and fallback rules then
-/// apply, and a partial answer is never repeated), instead of hanging the
-/// turn until the person presses Stop.
-#[tokio::test]
-async fn a_stream_that_goes_quiet_fails_as_a_broken_stream() {
-    let base = stalling(true).await;
+async fn silent_after(how: Stall, req: ChatRequest) -> (ProviderError, Duration, Vec<String>) {
+    let base = stalling(how).await;
     let p = LlmProvider::new(ApiKind::Openai, &base, None).unwrap();
     let (tx, mut rx) = mpsc::unbounded_channel();
     let t = Instant::now();
-    let r = p.complete(&idle_request(Duration::from_secs(1)), tx).await;
-    assert!(t.elapsed() < Duration::from_secs(10), "{:?}", t.elapsed());
-    assert_eq!(rx.recv().await.as_deref(), Some("par"), "the chunk came");
+    let r = p.complete(&req, tx).await;
+    let took = t.elapsed();
+    let mut shown = vec![];
+    while let Ok(d) = rx.try_recv() {
+        shown.push(d);
+    }
     match r {
-        Err(e @ ProviderError::Stream(_)) => {
-            assert!(e.is_retryable());
-            assert!(e.to_string().contains("model_idle_timeout_s"), "{e}");
-        }
-        other => panic!("{other:?}"),
+        Err(e) => (e, took, shown),
+        Ok(c) => panic!("{c:?}"),
     }
 }
 
-/// No answer at all (not even the headers) within the limit: the provider
-/// cannot be reached, which a fallback model may answer.
+/// No answer at all, the headers and then nothing, or a stream that goes
+/// quiet: each ends as `Silent` (retryable, another model may answer),
+/// naming both keys, instead of hanging the turn until Stop. The first
+/// answer gets the longer limit.
 #[tokio::test]
-async fn a_provider_that_never_answers_fails_as_unreachable() {
-    let base = stalling(false).await;
-    let p = LlmProvider::new(ApiKind::Openai, &base, None).unwrap();
-    let (tx, _rx) = mpsc::unbounded_channel();
-    let t = Instant::now();
-    let r = p.complete(&idle_request(Duration::from_secs(1)), tx).await;
-    assert!(t.elapsed() < Duration::from_secs(10), "{:?}", t.elapsed());
-    match r {
-        Err(e @ ProviderError::Http(_)) => {
-            assert!(e.is_retryable() && e.is_model_level());
-            assert!(e.to_string().contains("model_idle_timeout_s"), "{e}");
+async fn a_silent_provider_ends_the_call_within_its_limits() {
+    for how in [Stall::Nothing, Stall::Headers] {
+        let (e, took, shown) = silent_after(how, limited(1, 30)).await;
+        assert!(took < Duration::from_secs(10), "{took:?}");
+        assert!(matches!(e, ProviderError::Silent(_)), "{e:?}");
+        assert!(e.is_retryable() && e.is_model_level());
+        let m = e.to_string();
+        assert!(
+            m.contains("model_first_byte_timeout_s") && m.contains("model_idle_timeout_s"),
+            "{m}"
+        );
+        assert!(shown.is_empty());
+    }
+    // After the first chunk, the shorter gap applies.
+    let (e, took, shown) = silent_after(Stall::Chunk, limited(30, 1)).await;
+    assert!(took < Duration::from_secs(10), "{took:?}");
+    assert_eq!(shown, ["par"], "the chunk came");
+    assert!(e.to_string().contains("sent nothing more for 1 s"), "{e}");
+}
+
+/// Fails silent every time; shows `shown` first when given.
+struct Quiet {
+    calls: Mutex<usize>,
+    shown: Option<&'static str>,
+}
+
+#[async_trait::async_trait]
+impl Provider for Quiet {
+    fn name(&self) -> &'static str {
+        "quiet"
+    }
+    async fn complete(
+        &self,
+        _: &ChatRequest,
+        tx: mpsc::UnboundedSender<String>,
+    ) -> Result<Completion, ProviderError> {
+        *self.calls.lock().unwrap() += 1;
+        if let Some(s) = self.shown {
+            let _ = tx.send(s.to_string());
         }
-        other => panic!("{other:?}"),
+        Err(ProviderError::Silent("quiet".into()))
+    }
+}
+
+/// A silence that showed nothing is tried once more, not three times (a
+/// whole timeout each); one after visible text is not tried again.
+#[tokio::test]
+async fn silence_is_retried_at_most_once_and_never_after_text() {
+    for (shown, want) in [(None, 2), (Some("half an ans"), 1)] {
+        let dir = tempfile::tempdir().unwrap();
+        let host = Host::default();
+        let p = Arc::new(Quiet {
+            calls: Mutex::new(0),
+            shown,
+        });
+        let b = NativeBackend::new(
+            p.clone(),
+            harness_tools::builtin(),
+            NativeConfig {
+                retry: RetryPolicy {
+                    retries: 3,
+                    base: Duration::from_millis(1),
+                    max: Duration::from_millis(5),
+                },
+                ..Default::default()
+            },
+        );
+        let out = b.run_turn(turn(&host, dir.path())).await;
+        assert_eq!(out.reason, TurnEndReason::Error);
+        assert_eq!(*p.calls.lock().unwrap(), want, "{shown:?}");
     }
 }
 
@@ -460,4 +578,88 @@ async fn a_sub_agent_gets_the_environment_line() {
     let req = &p.seen()[0];
     let user = req.messages.last().and_then(|m| m.user_text()).unwrap();
     assert!(user.starts_with(&format!("{ENV}\n\n")), "{user}");
+}
+
+/// The provider's prompt cache across turns: the next turn's first request
+/// starts with this turn's last request byte for byte, environment line,
+/// half-budget note and wrap-up note included (they are in the log:
+/// `turn_started.environment`, `tool_call_finished.note`).
+#[tokio::test]
+async fn the_next_turn_rebuilds_this_turns_requests_byte_for_byte() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = Host::default();
+    let p = Script::new(|n, req| {
+        if req.no_tool_calls {
+            said("Done: four checks.")
+        } else {
+            bash_call(n)
+        }
+    });
+    let b = NativeBackend::new(p.clone(), harness_tools::builtin(), steps(4));
+    let sid = SessionId::new();
+    let mut t1 = turn(&host, dir.path());
+    t1.session_id = sid;
+    t1.turn_id = "t1".into();
+    t1.extra.environment = Some("[harness] Environment of this turn: one.".into());
+    assert_eq!(b.run_turn(t1).await.reason, TurnEndReason::Limit);
+    let first = p.seen();
+    let last = first.last().unwrap().clone();
+    assert!(text_of(&last).contains("[harness] You have used 2 of the 4 steps"));
+    assert!(text_of(&last).contains("[harness] This turn has used its 4 steps"));
+    // The log as the node writes it.
+    let mut kinds = vec![
+        EventKind::TurnStarted(TurnStarted {
+            turn_id: "t1".into(),
+            agent: None,
+            cause: None,
+            environment: Some("[harness] Environment of this turn: one.".into()),
+        }),
+        EventKind::UserMessage(UserMessage {
+            turn_id: "t1".into(),
+            text: "go".into(),
+            attachments: vec![],
+            reply: None,
+            images: vec![],
+            queued: false,
+        }),
+    ];
+    kinds.extend(host.0.lock().unwrap().iter().cloned());
+    kinds.push(EventKind::TurnEnded(TurnEnded {
+        turn_id: "t1".into(),
+        reason: TurnEndReason::Limit,
+        usage: None,
+    }));
+    let history: Vec<RawEvent> = kinds
+        .into_iter()
+        .enumerate()
+        .map(|(i, k)| {
+            let (kind, payload) = k.into_parts();
+            RawEvent {
+                session_id: sid,
+                seq: i as u64 + 1,
+                ts_ms: 0,
+                kind,
+                payload,
+            }
+        })
+        .collect();
+    let host2 = Host::default();
+    let mut t2 = turn(&host2, dir.path());
+    t2.session_id = sid;
+    t2.turn_id = "t2".into();
+    t2.history = history;
+    t2.user_text = "carry on".into();
+    t2.extra.environment = Some("[harness] Environment of this turn: two.".into());
+    b.run_turn(t2).await;
+    let next = &p.seen()[first.len()];
+    assert!(
+        next.messages.len() > last.messages.len(),
+        "{:#?}",
+        next.messages
+    );
+    assert_eq!(
+        next.messages[..last.messages.len()],
+        last.messages[..],
+        "the cached prefix moved"
+    );
 }

@@ -544,9 +544,9 @@ async fn the_opening_at_the_provider_quotes_every_line_and_rebuilds_the_same() {
         }
     }
     assert!(!opening.contains("script:"), "{opening}");
-    // The person's next message: the history holds the same opening,
-    // without the node's environment line (this turn's only, last).
-    let (rebuilt, env) = opening
+    // The person's next message: the history holds the same opening, the
+    // node's environment line last (recorded on `turn_started`).
+    let (_, env) = opening
         .rsplit_once("\n\n")
         .expect("the environment line ends the opening");
     assert!(
@@ -560,7 +560,7 @@ async fn the_opening_at_the_provider_quotes_every_line_and_rebuilds_the_same() {
     assert!(
         later
             .iter()
-            .any(|m| m == &harness_agent_native::ChatMsg::User(rebuilt.to_string())),
+            .any(|m| m == &harness_agent_native::ChatMsg::User(opening.clone())),
         "not rebuilt the same: {later:?}"
     );
 }

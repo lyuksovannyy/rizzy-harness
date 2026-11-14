@@ -130,6 +130,18 @@ fn holding(req: &ChatRequest, needle: &str) -> usize {
         .count()
 }
 
+/// A node config for a data directory still to be made.
+fn config_as_owned(
+    provider: Arc<dyn Provider>,
+    profile: Profile,
+    max_steps: Option<usize>,
+) -> impl FnOnce(&std::path::Path) -> NodeConfig {
+    move |dir| match max_steps {
+        Some(n) => config_steps(dir, provider, profile, n),
+        None => config_as(dir, provider, profile),
+    }
+}
+
 struct Node {
     dir: tempfile::TempDir,
     node: Option<NodeRuntime>,
@@ -138,6 +150,20 @@ struct Node {
 }
 
 fn config_as(dir: &std::path::Path, provider: Arc<dyn Provider>, profile: Profile) -> NodeConfig {
+    config_steps(
+        dir,
+        provider,
+        profile,
+        harness_core::policy::DEFAULT_MAX_STEPS,
+    )
+}
+
+fn config_steps(
+    dir: &std::path::Path,
+    provider: Arc<dyn Provider>,
+    profile: Profile,
+    max_steps: usize,
+) -> NodeConfig {
     NodeConfig {
         node_id: "local".into(),
         hostname: "test".into(),
@@ -150,7 +176,10 @@ fn config_as(dir: &std::path::Path, provider: Arc<dyn Provider>, profile: Profil
         backend: Arc::new(NativeBackend::new(
             provider,
             harness_tools::builtin(),
-            NativeConfig::default(),
+            NativeConfig {
+                max_steps,
+                ..Default::default()
+            },
         )),
         default_model: "mock".into(),
         secrets: Default::default(),
@@ -181,9 +210,25 @@ impl Node {
     }
 
     async fn on_as(dir: tempfile::TempDir, provider: Arc<dyn Provider>, profile: Profile) -> Self {
-        let node = NodeRuntime::start(config_as(dir.path(), provider, profile))
-            .await
-            .unwrap();
+        Self::on_cfg(dir, config_as_owned(provider, profile, None)).await
+    }
+
+    /// An agentic node whose turns may take `max_steps` steps.
+    async fn start_steps(provider: Arc<dyn Provider>, max_steps: usize) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("ws")).unwrap();
+        Self::on_cfg(
+            dir,
+            config_as_owned(provider, Profile::Agentic, Some(max_steps)),
+        )
+        .await
+    }
+
+    async fn on_cfg(
+        dir: tempfile::TempDir,
+        cfg: impl FnOnce(&std::path::Path) -> NodeConfig,
+    ) -> Self {
+        let node = NodeRuntime::start(cfg(dir.path())).await.unwrap();
         let mut link = node.attach().await;
         assert!(matches!(
             link.from_node.recv().await.unwrap(),
@@ -413,6 +458,37 @@ async fn a_message_during_a_turn_reaches_the_next_step_once() {
     n.ended(2).await;
     let reqs = model.requests();
     assert_eq!(holding(&reqs[2], "also check the README"), 1);
+}
+
+/// A message that arrives before a person's turn's wrap-up request (its
+/// step budget used) is not read by it: the wrap-up answers in text only,
+/// and the message opens the next turn with a full budget (review M2).
+#[tokio::test]
+async fn a_message_before_the_wrap_up_opens_the_next_turn() {
+    let model = Gated::new(|n, req| match n {
+        0 => call("glob", json!({"pattern": "*"})),
+        _ if req.no_tool_calls => answer("Done: listed. Left: nothing."),
+        _ => answer(&format!("answer {n}")),
+    });
+    let mut n = Node::start_steps(model.clone(), 1).await;
+    let sid = n.create(ApprovalMode::Auto).await;
+    n.prompt(sid, "p1", "hello");
+    assert_eq!(n.ack("p1").await, Ok(()));
+    model.entered.notified().await;
+    n.prompt(sid, "p2", "and one more thing");
+    assert_eq!(n.ack("p2").await, Ok(()));
+    model.gate.notify_one();
+    n.ended(2).await;
+    let reqs = model.requests();
+    assert_eq!(reqs.len(), 3, "{reqs:?}");
+    assert!(reqs[1].no_tool_calls, "the wrap-up");
+    assert_eq!(
+        holding(&reqs[1], "and one more thing"),
+        0,
+        "the wrap-up read it"
+    );
+    assert!(!reqs[2].no_tool_calls, "the next turn has its budget");
+    assert_eq!(holding(&reqs[2], "and one more thing"), 1);
 }
 
 /// A message that comes after the model's last step (it answered without

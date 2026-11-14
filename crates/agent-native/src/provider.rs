@@ -308,7 +308,8 @@ pub fn with_instructions_after(opening: &str, instructions: &str) -> String {
     format!(
         "{opening}\n\n{INSTRUCTIONS_LEAD}, not the person's words and not program output: the \
          {lines} line(s) below, each starting with \"{OUTPUT_QUOTE}\", are the repository's \
-         AGENTS.md / CLAUDE.md files as the harness read them for this turn.{quoted}"
+         AGENTS.md / CLAUDE.md files and the list of skills, as the harness read them for this \
+         turn.{quoted}"
     )
 }
 
@@ -356,11 +357,35 @@ pub struct ChatRequest {
     /// Mark the stable prefix (system prompt + tools) and the newest message
     /// as cache breakpoints, where the provider needs explicit markers.
     pub cache: bool,
-    /// The longest the provider may send nothing (before its response
-    /// headers, or between two reads of its body) before the call fails
-    /// as a broken stream (node.toml `[limits] model_idle_timeout_s`).
-    /// `None`: no limit.
-    pub idle_timeout: Option<std::time::Duration>,
+    /// How long the provider may send nothing before the call fails as
+    /// [`ProviderError::Silent`] (node.toml `[limits]
+    /// model_first_byte_timeout_s`, `model_idle_timeout_s`). `None`: no
+    /// limit.
+    pub limits: Option<StreamLimits>,
+    /// Ask the provider for an answer without tool calls (`tool_choice:
+    /// none`), the tools still listed (a person's turn's wrap-up step).
+    /// The loop refuses a call that arrives anyway.
+    pub no_tool_calls: bool,
+}
+
+/// The silences a model call may have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamLimits {
+    /// Until the provider's first answer (headers, then the first event
+    /// after them): a reasoning model may think for minutes before it.
+    pub first_byte: std::time::Duration,
+    /// Between two events once it answers (keep-alive pings count).
+    pub idle: std::time::Duration,
+}
+
+impl Default for StreamLimits {
+    fn default() -> Self {
+        use harness_core::policy::{DEFAULT_MODEL_FIRST_BYTE_S, DEFAULT_MODEL_IDLE_S};
+        Self {
+            first_byte: std::time::Duration::from_secs(DEFAULT_MODEL_FIRST_BYTE_S),
+            idle: std::time::Duration::from_secs(DEFAULT_MODEL_IDLE_S),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -433,6 +458,12 @@ pub enum ProviderError {
     Stream(String),
     #[error("no provider serves model {0:?}")]
     UnknownModel(String),
+    /// The provider sent nothing for longer than the request's
+    /// [`StreamLimits`]: no headers, no first event, or a gap mid-stream.
+    /// Retried at most once (`RetryPolicy::delay`), and only while nothing
+    /// was shown; another model may answer instead.
+    #[error("no answer: {0}")]
+    Silent(String),
 }
 
 impl ProviderError {
@@ -446,7 +477,9 @@ impl ProviderError {
             return false;
         }
         match self {
-            ProviderError::UnknownModel(_) | ProviderError::Http(_) => true,
+            ProviderError::UnknownModel(_) | ProviderError::Http(_) | ProviderError::Silent(_) => {
+                true
+            }
             ProviderError::Status { status, body, .. } => match status {
                 404 | 408 | 429 | 500..=599 => true,
                 400 => body.to_ascii_lowercase().contains("model"),
@@ -463,7 +496,7 @@ impl ProviderError {
     /// sure no output of the failed attempt reached the user.
     pub fn is_retryable(&self) -> bool {
         match self {
-            ProviderError::Http(_) | ProviderError::Stream(_) => true,
+            ProviderError::Http(_) | ProviderError::Stream(_) | ProviderError::Silent(_) => true,
             ProviderError::UnknownModel(_) => false,
             ProviderError::Status { status, body, hint } => {
                 !hint.no_retry
@@ -532,6 +565,7 @@ impl ProviderError {
         match self {
             ProviderError::Http(_) => "connection failed".into(),
             ProviderError::Stream(_) => "stream failed".into(),
+            ProviderError::Silent(_) => "provider silent".into(),
             ProviderError::Status { status, .. } => format!("status {status}"),
             ProviderError::UnknownModel(_) => "unknown model".into(),
         }

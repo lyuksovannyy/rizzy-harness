@@ -10,6 +10,7 @@ pub mod policy;
 pub mod refs;
 pub mod savings;
 pub mod secret;
+pub mod skills;
 pub mod subagent;
 pub mod text;
 pub mod todo;

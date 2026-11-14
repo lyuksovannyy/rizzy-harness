@@ -126,6 +126,17 @@ turn's agent and settings: one sent to another agent (the agent picker, or an
 `@mention` of another agent) is refused with the reason, so pick the agent for
 your next message instead.
 
+A chat is titled from its first message. The pencil next to the title in the
+chat's header renames it (Enter saves, Escape cancels; at most 200
+characters, control and hidden characters dropped); only you can rename your
+chats, and the new title is what the list and search show. The download
+button next to it saves the chat as a Markdown file: your messages, the
+answers, and each tool call as one line (tick **Include tool outputs** for
+their full output). The file is made in your browser from what the chat
+shows; nothing is fetched for it. It holds the model's text as the model
+wrote it, so a Markdown viewer that renders raw HTML or loads remote images
+will do so for that text.
+
 Settings → Account → Preferences → **Appearance** picks the theme (System follows the
 operating system; Light and Dark stay put) and the accent colour, one of eight:
 Blue (the default), Purple, Pink, Red, Orange, Yellow, Green and Graphite
@@ -185,9 +196,10 @@ Settings has four sections:
 - **Account**: your profile, appearance, search engines, default agents (one
   for chats, one for Agentic chats) and model, your memories, your password.
 - **Workspace** (everyone in it): its name, your role, who is in it, the
-  defaults it gives, and whether your facts (your memories) are shared with
-  its chats: always in Personal; in a team workspace off until you turn it
-  on, for the workspace's creator too.
+  defaults it gives, and whether your facts (your memories) are used in its
+  chats: always in Personal; in a team workspace you are asked when you join
+  it (its creator too). Until you answer, the answer is no; you can change it
+  here at any time (see **Memory.** further down).
 - **Workspace admin** (admins and owners; not for Personal): its name, default
   agents (chats and Agentic), the model each agent uses there (the Assistant's, `general`, is the
   workspace's default model), members and roles, deleting it.
@@ -581,8 +593,65 @@ sub-agent keeps its own list in its own session. A new Agentic chat starts
 with the Agentic default agent (your `default_agentic_agent`, else the
 workspace's, else the Software Developer), not the chat default.
 
-Memories are proposed by the assistant during chats and used only after you
-confirm them under Settings → Account → Memory.
+**Memory.** The assistant keeps short facts about you for later chats (Settings → Account
+→ Memory lists every one of them).
+
+- **In your Personal workspace it saves them as you talk**, without asking,
+  in every chat (also one that read web pages or files: the owner's decision
+  of 2026-11-14 was "No, always save"). Each change shows as its own
+  **memory block** in the chat, where the assistant made it: "Saved to your
+  facts: …", "Saved, in this workspace only: …", "Replaced: old → new" or
+  "Forgot: …", each with **Undo**. Undo removes a save, brings back the fact
+  a replacement or forgetting retired, and the block then says it was undone
+  (after a reload too). The next chat already knows a saved fact. Replaced
+  and forgotten facts are kept under "Replaced or forgotten", restorable.
+- **Correcting and dropping facts works for every kind** the chat is given:
+  your facts, facts kept in the workspace, and the project's facts (the
+  owner, 2026-11-14: "replaces / forget - must work in all memory types with
+  ability to revert the change via the block"). A correction stays where the
+  fact was (your facts, the same workspace, the same project). It applies at
+  once where you could make that change yourself, with Undo on the block: in
+  your own chats for your facts, and for a project's facts if you manage the
+  project (or its members may confirm facts). Otherwise the block says it
+  waits for a project manager, and nothing changes. A retired project fact
+  shows on the project's Memory tab under "Replaced or forgotten", with
+  Restore for managers.
+- **Elsewhere it asks, in the chat.** In a team workspace, from a
+  sub-agent, from a message not sent by you signed in (the API token, a
+  routine's run), and for any fact you wrote yourself, the block says what
+  the assistant wants to remember, replace or forget, with **Keep** and
+  **Dismiss**: nothing changes until you click Keep.
+- **Two places.** Ordinary things about you (your preferences, people, how you
+  work) go to **your facts**, which can follow you into team workspaces.
+  Private details (health, money, identity documents, family, anything you
+  would not want a colleague's workspace to see) are **kept in the workspace
+  where they came up**: in your Personal workspace they stay there and are
+  never used anywhere else. The assistant decides which is which when it
+  saves; it can be wrong, so every fact shows its place on the Memory page
+  and **Keep private** / **Move to your facts** moves it.
+- **Team workspaces ask first.** When you join one (or create it), a question
+  at the top of the page asks whether its agents may use your facts. Until
+  you answer yes, nothing of your facts is read or added there. With yes,
+  your chats there read your facts and the assistant *suggests* new ones,
+  which wait under To review until you keep them. Your answer can be changed
+  later in Settings → Workspace. Leaving a workspace deletes what was kept in
+  it about you.
+- **Nobody else sees your memory**: not the workspace's members, not its
+  admins, not the server's admins. Deleting an account deletes its memory.
+- What the assistant reads: your facts, newest first, up to 3,000 characters
+  each turn (older ones only when your message matches them). The facts it
+  saved itself may take up to 3,000 characters; past that, a save is
+  refused and the next turn asks it to merge or drop facts first. Facts you
+  add yourself do not count. A save that waits for you, or was refused, is
+  named to the assistant in the next turn. Only you see these blocks and
+  can use their buttons.
+- Temporary chats, turns started by an external event and turns that
+  report a finished background command read and write no memory. Anything
+  that looks like a password, key or token is refused ("my passwords are in
+  1Password" is fine; the password itself is not).
+
+Project memory works as before: facts proposed for a project wait on the
+project's Memory tab (docs/projects.md).
 
 Who may create workspaces (also a switch under Settings → Server → Workspaces):
 
@@ -760,9 +829,10 @@ env_pass = []                        # extra variables the agent's shell gets (s
 
 [limits]
 tool_stream_bytes = 1048576          # live output one tool call may stream (4096 .. 1 GiB)
-max_steps = 50                       # model calls one turn may make (1 .. 1000)
+max_steps = 50                       # model calls that run tools in one turn; a person's turn then gets one to sum up (1 .. 1000)
 bash_timeout_max_s = 3600            # longest a bash call may run, whatever it asks for (1 .. 3600)
-model_idle_timeout_s = 300           # a model stream silent this long fails and is retried (10 .. 3600)
+model_first_byte_timeout_s = 600     # wait for a model's first answer (10 .. 3600)
+model_idle_timeout_s = 300           # then the longest gap between its events (10 .. 3600)
 max_subagents = 4                    # sub-agents one turn may start; the master may ask for fewer (0 .. 32)
 max_delegation_depth = 1             # 1: the turn's agent may delegate, its sub-agents not; 0: off (0 .. 4)
 background_per_session = 8           # background commands one chat may run at once; 0: off (0 .. 32)
@@ -781,6 +851,10 @@ write = []                           # more read-write folders, e.g. "~/.cache"
 [execution]
 sandbox = "auto"                     # auto | strict | off: offer the sandbox mode (bubblewrap), see "Execution modes"
 host = false                         # offer the host shell: commands as this OS user, no sandbox. Read "Execution modes" first
+
+[skills]
+repository = true                    # read the chat repository's .agents/skills and .claude/skills (see "Skills")
+roots = ["~/.agents/skills", "~/.claude/skills"]  # this machine's skill folders; every chat on the node can read them
 ```
 
 **Execution modes.** Each agentic chat runs its commands in one mode,
@@ -1243,16 +1317,23 @@ rest of its output is read and dropped. The result the model gets has its
 own, smaller cap and says when the live stream was cut.
 
 **Step and time limits.** A turn may make `[limits] max_steps` model calls
-(default 50, 1 to 1000; a sub-agent's turn has the same cap). Halfway through,
-the agent is told how many it has used. Its last call runs no tool: the agent
-is asked to say what is done, what is left and what it would do next, a tool
-call it still makes is answered "not run", and the turn ends as "turn limit",
-not as an error. Reply to let it carry on. A sub-agent's last call may only
-`finish`; a callback turn (see "Background commands") still ends with
-"stopped after N steps". A model whose stream sends nothing for `[limits]
-model_idle_timeout_s` seconds (default 300, 10 to 3600: Codex's value; no
-response headers count too) fails as a broken stream and is retried like a
-dropped connection, never after part of its answer was shown. A `bash` call runs for
+that run tools (default 50, 1 to 1000; a sub-agent's turn has the same cap).
+Halfway through, the agent is told how many it has used. A person's turn then
+gets one more call that runs no tool: the tools stay listed (the provider's
+cache) but the provider is asked for no tool call (`tool_choice: none`), the
+agent is asked to say what is done, what is left and what it would do next, a
+tool call it makes anyway is answered "not run", and the turn ends as "step
+limit reached", not as an error. Reply to let it carry on. A message you send
+just before that last call is not read by it: it starts the next turn, with a
+full budget. A sub-agent's last call may only `finish`; a callback turn (see
+"Background commands") still ends with "stopped after N steps". A model that
+sends nothing is cut off: `[limits] model_first_byte_timeout_s` (default 600)
+bounds the wait for its first answer (a reasoning model may think for minutes,
+a local server may read the prompt before it answers), and
+`model_idle_timeout_s` (default 300, Codex's value) the gaps after it
+(keep-alive pings count); both 10 to 3600. Such a call is tried once more,
+never after part of its answer was shown, then another model of the agent's
+answers or the turn ends with an error naming both keys. A `bash` call runs for
 the `timeout_secs` it states, at least 5 s and at most `[limits]
 bash_timeout_max_s` seconds (default 3600, 1 to 3600, which wins over the
 5 s floor if set lower); **a call that states none stops after 60 s** (it was
@@ -1457,6 +1538,39 @@ Cancelling a turn stops any tool: one that does not return by itself
 within 2 seconds is abandoned. A slow undo or delete in one chat never
 delays Stop or an approval answer, in that chat or any other.
 
+**Editing files.** The agent changes only files it has seen in this chat:
+
+- `edit`, and `write` over an existing file, need the file to have been
+  read with `read` in this chat (any part of it). A new file needs
+  nothing. The agent's own edits and writes count as seen. Viewing a file
+  with `cat` in `bash` does not count.
+- If the file changed on disk since then (you edited it, a command or a
+  formatter did, another chat did), `write` is refused, and `edit` goes
+  ahead only when the text it replaces lies outside the lines that
+  changed; the result then shows those lines as they are now. Otherwise it
+  is refused and shows the changed lines, and the agent reads again. This
+  is decided against the text the agent was shown, kept in memory on the
+  node (files up to 512 KiB, 8 MiB in all; at most 4,096 files remembered
+  per node); after a node restart, or for a larger file, any change means
+  "read it again". What the agent has read is stored with each call in the
+  chat's log, so a restart does not make it read everything again. A
+  sub-agent has its own record; deleting a chat drops it.
+- `edit` takes one replacement (`old_string`, `new_string`, `replace_all`)
+  or several in `edits`, matched against the file as it was before the
+  call, all made or none. Text that does not match exactly is still found
+  when, on whole lines, it differs only in trailing whitespace or in
+  typographic quotes, dashes and spaces, and the result says so (the
+  file's own quotes and dashes are kept where the agent did not change
+  them); indentation must match. A line-number prefix copied from `read` output
+  is taken off. When nothing matches, the agent is shown the nearest lines
+  of the file, or told the change seems to be made already.
+- The result lists the changed lines, numbered as `read` numbers them,
+  with two lines around each. Line endings (CRLF), a byte-order mark and a
+  missing final newline are kept.
+- `read` returns up to 2,000 lines (400 with bounded reads) and about
+  29,000 characters; a longer window ends early at a whole line and names
+  the offset to go on from.
+
 ### Token savings
 
 Settings → Server → Token savings switches each method on or off; it is
@@ -1544,9 +1658,12 @@ The branch is read from the repository's `HEAD` file, the way instruction files
 are read (inside the folder `node.toml` grants, no link out, never waiting on a
 FIFO, within the same 5-second bound); no `git` process is started. The branch
 name is the repository's text: it is shown on one line, at most 120
-characters, with its quotation marks read as `'`. The line goes after the
-history, so the provider's cached prefix stays the same; it costs about 60
-tokens a message. Your own time zone, if you set one in your settings, is
+characters, with its quotation marks read as `'`. The line is recorded with
+the turn, so later messages resend it exactly and the provider's cache still
+covers that message; it costs about 60 tokens a message. (The instruction
+files, a project's context and recalled memory are not recorded: the message
+they come with is resent without them, so the cache stops there; see
+`prompt_cache` below.) Your own time zone, if you set one in your settings, is
 still sent separately with your messages.
 
 ## Repository instructions (AGENTS.md)
@@ -1588,6 +1705,92 @@ request the provider caches: about 1k tokens a message for a typical
 `AGENTS.md`, up to the cap (about 8k tokens), not reused from one message to
 the next (the steps within one message do reuse it). Moving them to a cached
 place is for later (with X.1).
+
+## Skills
+
+A skill is a folder with a `SKILL.md` that the agent loads only when a task
+calls for it: the format Claude Code, Codex, OpenCode, Pi, Cursor and others
+read (the Agent Skills format), so folders you already have work as they are.
+
+```markdown
+---
+name: release
+description: Cut a release of this project: bump the version, tag, write the notes.
+---
+1. Run `scripts/bump.sh <version>` from this folder.
+2. ...
+```
+
+`name` (letters, digits, `.`, `_`, `-`, at most 64; the folder's name when
+left out, or when the given one is not such a name) and `description` (what
+it is for and when to use it; the first paragraph of text when left out) are
+what the agent sees. Front matter that is not strict YAML, such as an
+unquoted `description: Use when: ...`, is read line by line, as other harnesses
+accept it; the rest of the file
+is what it reads when it loads the skill. `disable-model-invocation: true`
+keeps a skill out of the agent's list: it is loaded only when you ask for it
+(below). Other keys (`allowed-tools`, `hooks`, `model`, `context`, ...) are
+ignored: a skill never widens what the agent may do. Files beside `SKILL.md`
+(scripts, references, templates) are read when the skill says so.
+
+**Where the node looks**, at the start of every message of an agentic chat:
+`.agents/skills/<name>/SKILL.md` and `.claude/skills/<name>/SKILL.md` in each
+folder from the top of the chat folder's git repository down to the chat's
+folder (as for `AGENTS.md`), and in the folders `[skills] roots` names in
+`node.toml` (by default `~/.agents/skills` and `~/.claude/skills`). When two
+skills have one name, this machine's folders win over the repository (a
+repository cannot stand in for your own `deploy`), and within the repository
+the folder nearest the chat's folder wins; the node logs what it left out.
+`[skills] repository = false` reads only this machine's folders;
+`denied_tools = ["skill"]` turns skills off.
+
+**What the agent gets.** After the instruction files, in the same block, a
+list of the skills: one line each, `- name: description`, sorted by name, at
+most 150 skills and 8,000 characters (or about 2% of the model's context
+window when that is smaller and known). When they do not fit, descriptions
+are shortened to 120 characters, then skills are left out, with a note saying
+how many; the `skill` tool lists every name when asked for one it does not
+know. The cap never goes below room for about ten skills. A skill folder whose
+`SKILL.md` could not be used (no description, a link out of its folder, ...) is
+named in a line under the list; the node's log says why. Looking for skills
+has its own 5-second limit, after the instruction files, so a slow skill
+folder costs only the list. Like the instruction files, the list is read again every message and
+survives compacting. The agent loads a skill with the `skill` tool: it gets the
+`SKILL.md` without its front matter (cut at 24 KiB with a note), the skill
+folder's path, and the names of the files beside it, which it reads with the
+same tool (`file`) or, inside the chat's folder, with its usual tools. When a
+long chat is summarised, the summary names the skills the work still follows
+so the agent can load them again. The Software Developer, Senior Teamlead,
+Writer, Reviewer and Scout have the tool, as do custom agents that read or edit
+files or run commands; the Assistant and the Researcher do not. A sub-agent
+with the tool gets the list too.
+
+**Asking for one.** A message of yours that starts with `/name` (a skill's
+name, then your text; `/name:` works too) asks the agent to load that skill
+first, a manual one included. A task one agent hands another never does.
+There is no menu for it yet.
+
+**What a skill can do: nothing by itself.** Nothing in a skill runs when it is
+found or loaded (no `` !`command` `` expansion); a script it names runs only
+when the agent runs it with `bash`, under the chat's execution mode and its
+approval like any other command. The folders in `[skills] roots` (their real
+paths, a root that is a link resolved) are readable, never writable, in the
+shell of a chat whose agent has the `skill` tool, so a script beside a skill
+from this machine runs in the sandbox too; chats whose agent lacks the tool do
+not see them. The list is quoted to the model like `AGENTS.md`; a loaded body
+is a tool result, like a file the agent reads. Neither changes a setting,
+permission or tool, and a link only in them is not fetched.
+Only regular files are read: a repository's skill folder must lie inside the
+repository (the chat folder's own skills inside the chat folder), and a
+skill's files inside the skill's folder; links out of them, into the node's
+data directory, FIFOs and devices are refused and logged. This machine's skill
+folders may be links anywhere outside the data directory. On a node other
+people's chats use, they can read the skills in `[skills] roots`: keep secrets
+out of them, or set `roots = []`.
+
+**Cost:** about 25 tokens per listed skill with every message, up to the cap
+(about 2k tokens), sent fresh like the instruction files; a body costs only
+when it is loaded.
 
 ## Rich messages
 

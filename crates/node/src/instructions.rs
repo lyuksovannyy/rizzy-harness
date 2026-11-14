@@ -18,7 +18,6 @@
 //! most [`READ_TIMEOUT`]. A file that is refused or cannot be read is named
 //! with the reason; the turn goes on.
 
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 /// The most text all the files give together (Codex's cap).
@@ -90,6 +89,48 @@ pub(crate) async fn bounded<T: Send + 'static>(
         },
         _ = tokio::time::sleep(limit) => Bounded::TimedOut,
         _ = cancel.cancelled() => Bounded::Cancelled,
+    }
+}
+
+/// Put what skill discovery found into `extra` (`harness_tools::skills`):
+/// the catalogue after the instruction files and the skills for the tool;
+/// `invoking` (the person's own message) may name one with `/name`. A
+/// discovery that timed out keeps the files, adds a note, and leaves no
+/// catalogue. What went wrong, for the log.
+pub(crate) fn with_skills(
+    extra: &mut harness_core::backend::TurnExtra,
+    found: Bounded<harness_tools::skills::Found>,
+    invoking: Option<&str>,
+    cap: usize,
+) -> Vec<String> {
+    use harness_tools::skills;
+    let push = |extra: &mut harness_core::backend::TurnExtra, c: String| {
+        extra.instructions = Some(match extra.instructions.take() {
+            Some(t) => format!("{t}\n\n{c}"),
+            None => c,
+        });
+    };
+    match found {
+        Bounded::Done(mut f) => {
+            f.catalogue.invoked = invoking.and_then(|t| skills::invoked(t, &f.catalogue));
+            if let Some(c) = skills::render(&f.catalogue, cap) {
+                push(extra, c);
+            }
+            extra.skills = Some(std::sync::Arc::new(f.catalogue));
+            f.problems
+        }
+        Bounded::TimedOut => {
+            push(
+                extra,
+                format!(
+                    "[skills not read: looking for them took longer than {} s]",
+                    READ_TIMEOUT.as_secs()
+                ),
+            );
+            vec![format!("timed out after {} s", READ_TIMEOUT.as_secs())]
+        }
+        Bounded::Cancelled => vec![],
+        Bounded::Failed(e) => vec![format!("discovery failed: {e}")],
     }
 }
 
@@ -210,53 +251,16 @@ fn pick(
     None
 }
 
-/// Why a file is not read.
-const OUTSIDE: &str = "it leads outside the folder";
-
 /// At most `cap + 1` bytes of the regular file `path` leads to, when its
-/// real path is inside `bound` and in no `protected` folder (one that holds
-/// `bound` itself does not count: a sub-agent's own folder). The real path
-/// is opened without following a link at its end or waiting on a FIFO, and
-/// the descriptor is checked again, so a folder swapped for a link after
-/// the first check is refused.
+/// real path is inside `bound` and in no `protected` folder
+/// ([`harness_tools::inside::read_inside`], which skills read through too).
 pub(crate) fn read_one(
     path: &Path,
     bound: &Path,
     protected: &[PathBuf],
     cap: usize,
 ) -> Result<Vec<u8>, String> {
-    use nix::fcntl::OFlag;
-    use std::os::unix::fs::OpenOptionsExt;
-    let inside = |p: &Path| {
-        p.starts_with(bound)
-            && !protected
-                .iter()
-                .any(|x| p.starts_with(x) && !bound.starts_with(x))
-    };
-    let unreadable = |e: std::io::Error| format!("it could not be read: {e}");
-    let real = path.canonicalize().map_err(unreadable)?;
-    if !inside(&real) {
-        return Err(OUTSIDE.into());
-    }
-    let f = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags((OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC).bits())
-        .open(&real)
-        .map_err(|e| match e.raw_os_error() {
-            Some(code) if code == nix::libc::ELOOP => OUTSIDE.to_string(),
-            _ => unreadable(e),
-        })?;
-    if !f.metadata().map_err(unreadable)?.is_file() {
-        return Err("it is not a regular file".into());
-    }
-    if !inside(&crate::artifacts::real_path(&f, &real).map_err(unreadable)?) {
-        return Err(OUTSIDE.into());
-    }
-    let mut out = Vec::new();
-    f.take(cap as u64 + 1)
-        .read_to_end(&mut out)
-        .map_err(unreadable)?;
-    Ok(out)
+    harness_tools::inside::read_inside(path, bound, protected, cap)
 }
 
 #[cfg(test)]
@@ -546,6 +550,47 @@ mod tests {
                 format!("{LEAD}\n==> ../AGENTS.md <==\nchild rules\n==> AGENTS.md <==\nsub rules")
             );
         }
+    }
+
+    /// Review S3: a skill discovery that timed out keeps the instruction
+    /// files, says so, and sets no catalogue; a finished one adds the
+    /// catalogue after the files.
+    #[test]
+    fn a_skill_timeout_keeps_the_files_and_sets_no_catalogue() {
+        let mut extra = harness_core::backend::TurnExtra {
+            instructions: Some("FILES".into()),
+            ..Default::default()
+        };
+        let problems = with_skills(&mut extra, Bounded::TimedOut, None, 8000);
+        assert_eq!(
+            extra.instructions.as_deref(),
+            Some("FILES\n\n[skills not read: looking for them took longer than 5 s]")
+        );
+        assert!(extra.skills.is_none());
+        assert_eq!(problems.len(), 1);
+        let t = tree();
+        put(
+            &t.ws.join("s/a/SKILL.md"),
+            "---\nname: a\ndescription: A\n---\nbody",
+        );
+        let found = harness_tools::skills::discover(
+            &[harness_tools::skills::Root {
+                path: t.ws.join("s"),
+                origin: harness_core::skills::SkillOrigin::Node,
+                bound: None,
+            }],
+            &[],
+        );
+        let mut extra = harness_core::backend::TurnExtra {
+            instructions: Some("FILES".into()),
+            ..Default::default()
+        };
+        with_skills(&mut extra, Bounded::Done(found), Some("/a: now"), 8000);
+        let got = extra.instructions.unwrap();
+        assert!(got.starts_with("FILES\n\n"), "{got}");
+        assert!(got.contains("\n- a: A"), "{got}");
+        assert!(got.contains("starts with /a:"), "{got}");
+        assert_eq!(extra.skills.unwrap().skills.len(), 1);
     }
 
     /// The read is waited for at most its limit, and not past a cancel.

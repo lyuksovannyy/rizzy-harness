@@ -75,6 +75,7 @@ fn events() -> Vec<RawEvent> {
             cause: None,
             agent: None,
             turn_id: t(),
+            environment: None,
         }),
         EventKind::UserMessage(UserMessage {
             turn_id: t(),
@@ -137,6 +138,7 @@ fn events() -> Vec<RawEvent> {
             text: "running 3 tests\n".into(),
         }),
         EventKind::ToolCallFinished(ToolCallFinished {
+            seen: None,
             call_id: "c1".into(),
             ok: false,
             output: "1 failed".into(),
@@ -153,6 +155,7 @@ fn events() -> Vec<RawEvent> {
             input: json!({"path": "src/lib.rs"}),
         }),
         EventKind::ToolCallFinished(ToolCallFinished {
+            seen: None,
             call_id: "c2".into(),
             ok: true,
             output: "     1\tfn main() {}".into(),
@@ -170,6 +173,7 @@ fn events() -> Vec<RawEvent> {
             input: json!({"query": "tokio"}),
         }),
         EventKind::ToolCallFinished(ToolCallFinished {
+            seen: None,
             call_id: "c5".into(),
             ok: true,
             output: "[S1] Tokio\n    https://tokio.rs/\n    An async runtime".into(),
@@ -246,6 +250,7 @@ fn events() -> Vec<RawEvent> {
                 name: "Writer".into(),
                 prompt_hash: "h2".into(),
             }),
+            environment: Some("[harness] Environment of this turn: the node's clock reads Saturday 2026-11-14 10:32 (Europe/Riga, UTC+02:00).".into()),
         }),
         // The turn's model failed before any output; a fallback answers.
         EventKind::ModelFallback(ModelFallback {
@@ -356,6 +361,12 @@ fn events() -> Vec<RawEvent> {
             group: "g1".into(),
             message_id: "m4".into(),
         }),
+        // A turn that used its step budget ends at a limit, not an error.
+        EventKind::TurnEnded(TurnEnded {
+            turn_id: "t2".into(),
+            reason: TurnEndReason::Limit,
+            usage: None,
+        }),
         // An answer to a question: the canonical text plus the reply.
         EventKind::UserMessage(UserMessage {
             turn_id: "t3".into(),
@@ -430,6 +441,7 @@ fn events() -> Vec<RawEvent> {
             turn_id: "t4".into(),
             agent: None,
             cause: Some(TurnCause::Callback(vec!["bg-2".into()])),
+            environment: None,
         }),
         EventKind::AssistantMessage(AssistantMessage {
             author: None,
