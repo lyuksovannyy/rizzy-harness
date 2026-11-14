@@ -11,9 +11,8 @@
 //! `yes` (each cut at the default `tool_stream_bytes`, 1 MiB) to fill the
 //! node's out queue while the uplink takes nothing.
 //!
-//! "Full" is read from the node's own log, not from its queue: the test
-//! waits until no watched session's head has moved for a second while the
-//! uplink takes nothing, so every one of them waits for room to send.
+//! "Full" is read from the node (`NodeRuntime::backlog`): the test waits
+//! until every streaming session has waited for room to send for a second.
 //!
 //! node.db is opened `Durability::Normal`, not `Full` as `node run` opens
 //! it: on the slow disk this was measured on, an fsync per event fills the
@@ -261,35 +260,16 @@ impl Node {
         .await;
     }
 
-    /// Stall the uplink, start `n` flooders, and wait until neither they
-    /// nor `also` have appended anything for a second: each of them then
-    /// waits for room to send.
+    /// Stall the uplink, start `n` flooders, and wait until they and
+    /// `also` each wait for room to send.
     async fn fill(&mut self, n: usize, also: Option<SessionId>) {
         self.pace(STALLED);
         for i in 0..n {
             let (sid, _) = self.start(&format!("flood{i}"), FLOOD, false).await;
             self.floods.push(sid);
         }
-        let watch: Vec<SessionId> = self.floods.iter().copied().chain(also).collect();
-        let end = Instant::now() + Duration::from_secs(120);
-        let mut last = Vec::new();
-        let mut since = Instant::now();
-        loop {
-            let heads = self.node.store().call(|s| s.heads()).await.unwrap();
-            let now: Vec<u64> = watch
-                .iter()
-                .map(|w| heads.iter().find(|(s, _)| s == w).map_or(0, |h| h.1))
-                .collect();
-            let total: u64 = now.iter().sum();
-            if now != last {
-                last = now;
-                since = Instant::now();
-            } else if since.elapsed() > Duration::from_secs(1) && total >= 64 {
-                return;
-            }
-            assert!(Instant::now() < end, "the out queue never filled: {last:?}");
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+        let n = self.floods.len() + usize::from(also.is_some());
+        full(&self.node, n).await;
     }
 
     /// Read again, stop the flooders and wait for every turn to end.
@@ -303,6 +283,25 @@ impl Node {
             all.iter().all(|sid| s.ended.contains_key(sid))
         })
         .await;
+    }
+}
+
+/// Until at least `n` senders (one per streaming session) have waited for
+/// room in the node's out queue for a second (review A21-7: read from the
+/// node, not inferred from heads that stop moving).
+async fn full(node: &NodeRuntime, n: usize) {
+    let end = Instant::now() + Duration::from_secs(120);
+    let mut since = None;
+    loop {
+        let b = node.backlog();
+        match (b.waiting >= n && b.queued > 0, since) {
+            (true, None) => since = Some(Instant::now()),
+            (true, Some(t)) if t.elapsed() > Duration::from_secs(1) => return,
+            (false, _) => since = None,
+            _ => {}
+        }
+        assert!(Instant::now() < end, "the out queue never filled: {b:?}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -549,8 +548,8 @@ async fn one_sessions_output_does_not_hold_another_sessions_stop_on_a_trickling_
     assert!(ack < Duration::from_secs(2), "the stop's ack took {ack:?}");
 }
 
-/// The acks of the inline commands go ahead of queued output; a create's
-/// ack does not: `Master::create_session` relies on it arriving after the
+/// The acks of the inline commands (a cancel and a `stop_background` here)
+/// go ahead of queued output; a create's ack does not: `Master::create_session` relies on it arriving after the
 /// session's `session_created`.
 ///
 /// The Stop's ack fails before A.21 (it came after the whole queue); the
@@ -563,31 +562,48 @@ async fn a_stops_ack_goes_ahead_of_queued_output_and_a_creates_ack_does_not() {
     let late = SessionId::new();
     node.create("late", late).await;
     node.cancel("stop", node.floods[0]).await;
+    node.send(MasterToNode::StopBackground {
+        req_id: "stop-bg".into(),
+        session_id: node.floods[1],
+        bg_id: None,
+        by: harness_protocol::StopBackgroundBy::User,
+    })
+    .await;
     // The create has run up to its wait for room.
     tokio::time::sleep(Duration::from_secs(1)).await;
     let from = node.seen.lock().unwrap().log.len();
     node.pace(0);
-    node.wait("both acks", Duration::from_secs(60), |s| {
-        s.acks.contains_key("stop") && s.acks.contains_key("create-late")
+    node.wait("the acks", Duration::from_secs(60), |s| {
+        ["stop", "stop-bg", "create-late"]
+            .iter()
+            .all(|r| s.acks.contains_key(*r))
     })
     .await;
     let log = node.seen.lock().unwrap().log.clone();
     let at = |what: &str| log.iter().position(|l| l == what);
-    let (stop, created, acked) = (
+    let (stop, stop_bg, created, acked) = (
         at("ack stop"),
+        at("ack stop-bg"),
         at(&format!("session_created {late}")),
         at("ack create-late"),
     );
     node.tidy(None).await;
     eprintln!(
-        "A.21 real node, out queue full: the stop's ack was message {stop:?} (reading again \
-         at {from}); session_created {created:?}, the create's ack {acked:?}"
+        "A.21 real node, out queue full: the stop's ack was message {stop:?} and \
+         stop_background's {stop_bg:?} (reading again at {from}); session_created {created:?}, \
+         the create's ack {acked:?}"
     );
     let stop = stop.unwrap();
     assert!(
         stop < from + 3,
         "the stop's ack waited behind {} messages",
         stop - from
+    );
+    let stop_bg = stop_bg.unwrap();
+    assert!(
+        stop_bg < from + 4,
+        "stop_background's ack waited behind {} messages",
+        stop_bg - from
     );
     assert!(
         created.is_some_and(|c| c < acked.unwrap()),

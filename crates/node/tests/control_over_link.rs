@@ -13,7 +13,9 @@
 //! is the node and the link, not the master's mirror.
 //!
 //! The owner's target: the Stop and the approval answer acknowledged within
-//! the master's `ACK_TIMEOUT` (15 s), past which Stop answers 504.
+//! the master's `ACK_TIMEOUT` (15 s), past which Stop answers 504. The test
+//! holds them to 3 s (`ACK_BOUND`), which fails without the socket's cap on
+//! unsent bytes (review A21-4).
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -41,8 +43,13 @@ use tokio_util::sync::CancellationToken;
 /// The uplink: 256 KiB/s, where B.7 measured the cancel's ack at 26.2 s.
 /// `A21_RATE_KIB` sets another rate for a measurement by hand.
 const RATE_KIB: usize = 256;
-/// `crates/master/src/lib.rs` `ACK_TIMEOUT` (private there).
+/// `crates/master/src/lib.rs` `ACK_TIMEOUT` (private there): the owner's
+/// target.
 const ACK_TIMEOUT: Duration = Duration::from_secs(15);
+/// What the test holds the node to: well under the target, so it fails
+/// without the socket's cap on unsent bytes (8.9 s here without it, 0.5 s
+/// to 1.0 s with it; review A21-4).
+const ACK_BOUND: Duration = Duration::from_secs(3);
 /// One line of output and one write of `beat` every 0.0961 s.
 const TALKING: &str = "run: while :; do echo tick; date +%s%N > beat; sleep 961e-4; done";
 const FLOOD: &str = "run: yes 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -107,6 +114,8 @@ struct Seen {
     ended: HashMap<SessionId, Instant>,
     /// Messages read since the start.
     read: usize,
+    /// The master's end of the link closed.
+    closed: bool,
 }
 
 struct Master {
@@ -237,6 +246,7 @@ async fn master(
                 _ => {}
             }
         }
+        s.lock().unwrap().closed = true;
     });
     (url, fp, async move {
         Master {
@@ -301,38 +311,35 @@ async fn stopped_after(dir: &Path, from: Instant, within: Duration) -> Option<Du
     None
 }
 
-/// Until the uplink holds the sessions back: for two seconds running, all
-/// of `sids` together appended something, but no more than about what the
-/// uplink carries (twice its rate in 8 KiB events, plus small ones). A
-/// node producing freely appends far more; one whose flooders reached
-/// their stream budget appends nothing. So every place a byte can wait
-/// on the way out (the node's queue, the kernel's buffers) is full.
-async fn full(node: &NodeRuntime, sids: &[SessionId]) {
-    let pace = (2 * rate() / 8192 + 8) as u64;
+/// The node's out queue in bytes (`OUT_BYTES` in `crates/node/src/outbox.rs`,
+/// private there).
+const OUT_BYTES: usize = 1 << 20;
+
+/// Until the node's out queue has been full (all but 64 KiB of its bytes
+/// taken, a sender waiting for room) for two seconds: the link's channel
+/// and the socket's buffer ahead of it are full too (review A21-7: read
+/// from the node, not inferred from the store). Not "every session
+/// waits": on a link that moves, a session released by the link is
+/// briefly not waiting while it reads its next output.
+async fn full(node: &NodeRuntime, m: &Master) {
     let end = Instant::now() + Duration::from_secs(180);
-    let mut last = 0;
-    let mut held = 0;
+    let mut since: Option<Instant> = None;
     loop {
-        let heads = node.store().call(|s| s.heads()).await.unwrap();
-        let total: u64 = sids
-            .iter()
-            .map(|w| heads.iter().find(|(s, _)| s == w).map_or(0, |h| h.1))
-            .sum();
-        let grew = total - last;
-        last = total;
-        held = if grew > 0 && grew <= pace && total >= 64 {
-            held + 1
-        } else {
-            0
-        };
-        if held >= 2 {
-            return;
+        let b = node.backlog();
+        match (b.waiting > 0 && b.bytes + (64 << 10) >= OUT_BYTES, since) {
+            (true, None) => since = Some(Instant::now()),
+            (true, Some(t)) if t.elapsed() > Duration::from_secs(2) => return,
+            (false, _) => since = None,
+            _ => {}
         }
-        assert!(
-            Instant::now() < end,
-            "the uplink never held the sessions back: {grew} events in the last second, {total} in all"
-        );
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        if Instant::now() > end {
+            let s = m.seen.lock().unwrap();
+            panic!(
+                "the uplink never filled: {b:?}; the master read {} messages, its link closed: {}",
+                s.read, s.closed
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -384,7 +391,7 @@ async fn a_stop_and_an_approval_answer_are_acknowledged_within_the_ack_timeout_o
     }
     let filling = Instant::now();
     let all: Vec<SessionId> = floods.iter().copied().chain([sid]).collect();
-    full(&rt, &all).await;
+    full(&rt, &m).await;
     let filled = filling.elapsed();
     eprintln!("A.21 over the link: held back {filled:?} after the flood started");
     assert!(beating(&beat).await, "the command stopped by itself");
@@ -427,9 +434,12 @@ async fn a_stop_and_an_approval_answer_are_acknowledged_within_the_ack_timeout_o
         stopped.is_some_and(|d| d < Duration::from_secs(1)),
         "still writing: {stopped:?}"
     );
-    assert!(ack < ACK_TIMEOUT, "the Stop's ack took {ack:?}");
     assert!(
-        approval < ACK_TIMEOUT,
+        ack < ACK_TIMEOUT.min(ACK_BOUND),
+        "the Stop's ack took {ack:?}"
+    );
+    assert!(
+        approval < ACK_TIMEOUT.min(ACK_BOUND),
         "the approval answer's ack took {approval:?}"
     );
 }

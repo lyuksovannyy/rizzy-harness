@@ -381,6 +381,32 @@ mod tests {
         assert_eq!(req(&rx.recv().await.unwrap()), "huge");
     }
 
+    /// A retired outbox (a newer link took over) still hands the old link
+    /// everything queued, in order, and then ends it.
+    #[tokio::test]
+    async fn a_retired_outbox_drains_then_ends_its_link() {
+        let (o, mut rx) = Outbox::open();
+        for i in 0..10 {
+            assert!(o.try_send(ack(&format!("o{i}"))));
+        }
+        assert!(o.send_urgent(ack("u")));
+        o.retire();
+        let mut got = vec![];
+        while let Some(m) = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the old link was never ended")
+        {
+            got.push(req(&m).to_string());
+        }
+        let ordered: Vec<_> = got.iter().filter(|g| g.starts_with('o')).cloned().collect();
+        assert_eq!(
+            ordered,
+            (0..10).map(|i| format!("o{i}")).collect::<Vec<_>>()
+        );
+        assert!(got.contains(&"u".to_string()), "{got:?}");
+        assert!(o.is_closed());
+    }
+
     /// A closed link lets every waiting sender go.
     #[tokio::test]
     async fn a_dropped_link_releases_waiting_senders() {
