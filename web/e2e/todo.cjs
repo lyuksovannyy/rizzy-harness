@@ -1,7 +1,9 @@
-// The agent's task list against the real binary: the demo agent calls
-// `todo` twice (`script:`), the list is pinned above the composer with the
-// item in progress in its head, it follows the latest call, it collapses,
-// and a reload shows the same list (a fold of the log).
+// The agent's task list against the real binary: a new Agentic chat from
+// the composer runs as the Agentic default (the Software Developer, TD-1);
+// its demo agent calls `todo` twice (`script:`); the list is pinned above
+// the composer with the item in progress in its head, follows the latest
+// call, folds to its head once the turn ends (TD-2), and a reload shows
+// the same list (a fold of the log).
 // Usage: node web/e2e/todo.cjs <path-to-harness-binary> [work-dir]
 const { chromium } = require('playwright');
 const { spawn } = require('child_process');
@@ -14,7 +16,8 @@ const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2et
 fs.mkdirSync(`${S}/data`, { recursive: true });
 fs.mkdirSync(`${S}/ws`, { recursive: true });
 fs.writeFileSync(`${S}/data/config.toml`, '[[providers]]\nid = "demo"\nname = "Demo"\npreset = "demo"\nkind = "mock"\nmock_delay_ms = 50\nmodels = [{ id = "mock" }]\n');
-fs.writeFileSync(`${S}/data/node.toml`, `workspace_roots = ["${S}/ws"]\n`);
+// The host shell is a fallback only where bubblewrap does not work here.
+fs.writeFileSync(`${S}/data/node.toml`, `workspace_roots = ["${S}/ws"]\n\n[execution]\nhost = true\n`);
 const URL_ = 'http://127.0.0.1:7964/';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (...a) => console.log('•', ...a);
@@ -31,6 +34,8 @@ async function claimCode() {
   throw new Error('the server did not start within a minute');
 }
 let PAGE = null;
+const SELECT = 'select[aria-label="How this chat\'s commands run"]';
+fs.mkdirSync(`${S}/shots`, { recursive: true });
 const step = (items) => ({ tool: 'todo', input: { items } });
 const SCRIPT = [
   step([
@@ -66,41 +71,49 @@ const SCRIPT = [
     await p.click('button:text-is("Continue")');
     await p.click('button:text-is("Finish")');
     await p.waitForSelector('h1.greeting');
-    // An agentic chat with the Software Developer (the default Assistant
-    // has no `todo`, as it has no shell or file tools).
-    const sid = await p.evaluate(async (cwd) => {
-      const json = { 'content-type': 'application/json' };
-      const r = await fetch('/api/sessions', { method: 'POST', headers: json, body: JSON.stringify({ profile: 'agentic', cwd, title: 'Task list', agent_id: 'coder' }) });
-      return (await r.json()).session_id;
-    }, `${S}/ws`);
-    check(typeof sid === 'string', 'the chat was created');
-    await p.goto(`${URL_}#/s/${sid}`);
+    // A new Agentic chat from the composer: it takes the Agentic default
+    // agent (the Software Developer), shown in the picker, without a pick.
+    await p.click('.mode-switch button:has-text("Agentic")');
+    await p.fill('.composer input.mono', `${S}/ws`);
+    const pickerLabel = await p.getAttribute('.agent-pick button[aria-label^="agent: "]', 'aria-label');
+    log('picker:', pickerLabel);
+    check(pickerLabel === 'agent: Software Developer', `the Agentic default is shown (${pickerLabel})`);
+    const local = await p.evaluate(async () => (await (await fetch('/api/nodes')).json()).nodes.find((n) => n.node_id === 'local'));
+    if (!local.exec_modes.includes('sandbox')) {
+      log('bubblewrap does not work here: the chat uses the host shell');
+      await p.selectOption(SELECT, 'host');
+      await p.click('dialog.host-warning button:text-is("Use the host shell")');
+    }
+    await p.fill('.composer textarea', `script: ${JSON.stringify(SCRIPT)}`);
+    await p.keyboard.press('Enter');
     await p.waitForSelector('.conversation');
-    check((await p.locator('.todo-panel').count()) === 0, 'no panel before a list');
-    const status = await p.evaluate(async ([id, text]) => {
-      const r = await fetch(`/api/sessions/${id}/prompt`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text }) });
-      return r.status;
-    }, [sid, `script: ${JSON.stringify(SCRIPT)}`]);
-    check(status === 200, `the prompt was taken (${status})`);
+    const sid = (await p.evaluate(() => location.hash)).split('/').pop();
     await p.waitForSelector('.todo-panel');
+    const created = await p.evaluate(async (id) => (await (await fetch(`/api/sessions/${id}/events`)).json()).events.find((e) => e.kind === 'session_created'), sid);
+    check(created.payload.agent_id === 'coder', `the chat runs as ${created.payload.agent_id}`);
     await p.waitForFunction(() => document.querySelector('.todo-panel .todo-count')?.textContent?.includes('2 of 5'));
-    await sleep(800);
+    // The turn ends with an item still in progress: the panel folds to its head.
+    await p.waitForFunction(() => document.querySelector('.todo-head')?.getAttribute('aria-expanded') === 'false');
+    await sleep(500);
+    await p.screenshot({ path: `${S}/shots/todo-settled-light.png` });
+    await p.click('.todo-head');
     const head = await p.innerText('.todo-head');
     log('panel head:', head.replace(/\s+/g, ' '));
     check(head.includes('2 of 5 done'), 'the head counts the latest list');
     check(head.includes('Add the todo tool and its event'), 'the head names the item in progress');
     check((await p.$$('.todo-row')).length === 5, 'five rows');
-    fs.mkdirSync(`${S}/shots`, { recursive: true });
     await p.screenshot({ path: `${S}/shots/todo-open-light.png` });
 
     await p.click('.todo-head');
     check((await p.$$('.todo-row')).length === 0, 'collapsed');
     await p.screenshot({ path: `${S}/shots/todo-collapsed-light.png` });
 
-    // A reload folds the log again: the same list.
+    // A reload folds the log again: the same list (folded: no turn runs).
     await p.emulateMedia({ colorScheme: 'dark' });
     await p.reload();
     await p.waitForSelector('.todo-panel');
+    check((await p.getAttribute('.todo-head', 'aria-expanded')) === 'false', 'folded after a reload');
+    await p.click('.todo-head');
     check((await p.$$('.todo-row')).length === 5, 'the list after a reload');
     await sleep(500);
     await p.screenshot({ path: `${S}/shots/todo-open-dark.png` });

@@ -532,9 +532,13 @@ or run commands, and agents with `tools: all`; add `todo` to a file agent's
 of one line (200 characters), each `pending`, `in_progress` or `done`, at
 most one in progress. The list is stored in the chat's log, so it survives
 summarising, a node restart and a reload; it is pinned above the composer,
-collapsible, and after older turns are summarised the agent is given the list
-again with the summary. It changes nothing outside the chat (read-only, like
-`read`). A sub-agent keeps its own list in its own session.
+collapsed when every item is done or no turn is running, and after older turns
+are summarised the agent is given the list again with the summary. It writes
+only the chat's own log, so no approval mode asks about it, `ask_all`
+included (a node can still refuse it with `denied_tools = ["todo"]`). A
+sub-agent keeps its own list in its own session. A new Agentic chat starts
+with the Agentic default agent (your `default_agentic_agent`, else the
+workspace's, else the Software Developer), not the chat default.
 
 Memories are proposed by the assistant during chats and used only after you
 confirm them under Settings → Account → Memory.
