@@ -1333,8 +1333,18 @@ unversioned, pin the image.
   node). All delegations of one step run **in parallel**; caps are enforced per turn
   (default 4 sub-agents, 200k tokens) and shown in the tool description. Depth is one
   (sub-agents get no delegates). Cancelling the parent cancels its children. The child's
-  final answer comes back as the tool result (Infinity's "report back as a tool
-  result"); the tool card links to the child session as soon as it starts. Built-in
+  turn gets the task, the repository's instruction files and its parent turn's
+  per-turn context from the master (quoted as the parent's is), never the parent's
+  history. A child ends with `finish {status: done|partial|failed, summary, details?}`
+  (offered to children only, handled by the loop, taken only alone in its message; no
+  new event: a `tool_call_started`/`tool_call_finished` pair the node reads back from the
+  child's log). The tool result is `session: <id>`, the harness's status line, the
+  child's report with every line behind `| ` (cut at 24,000 characters, with a note),
+  then the harness's merge note; without `finish`, the last text with `done` for a
+  completed turn and `failed` otherwise (`harness_core::subagent`). The status line
+  carries no `[harness]` lead because tool results escape that lead (R-2); the quote
+  alone keeps the child's text from passing as the harness's. The tool card links
+  to the child session as soon as it starts and shows the status when it ends. Built-in
   **Ultracode** delegated to Coder, Scout and Writer (since 2026-11 the **Senior Teamlead**
   and the **Software Developer** delegate). Sub-agent sessions are hidden from
   Recents and link back to their parent.

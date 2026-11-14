@@ -26,6 +26,9 @@ struct RunningTurn {
     cancel: CancellationToken,
     /// Sub-agents started by this turn use the same token-saving methods.
     savings: harness_core::savings::Savings,
+    /// This turn's context from the master (project instructions, facts,
+    /// board, the person's settings): its sub-agents get it too.
+    context: Option<String>,
     /// Files this turn published (`publish` is capped per turn).
     publishes: Arc<std::sync::atomic::AtomicUsize>,
     /// Set when the node's stop cancelled this turn (and nothing had
@@ -826,6 +829,7 @@ impl Session {
             turn_id: turn_id.clone(),
             cancel: cancel.clone(),
             savings: extra.savings.clone(),
+            context: extra.context.clone(),
             publishes: Arc::default(),
             by_stop: by_stop.clone(),
         })?;
@@ -915,6 +919,8 @@ impl Session {
             turn_id: turn_id.clone(),
             cancel: cancel.clone(),
             savings: savings.clone(),
+            // A callback turn takes no context, so it passes none on.
+            context: None,
             publishes: Arc::default(),
             by_stop: by_stop.clone(),
         })
@@ -2031,18 +2037,21 @@ impl Session {
             .insert(child_id, child.clone());
         started(child_id);
         let turn_id = new_id();
-        let savings = self
+        // The parent turn's token-saving methods and its context from the
+        // master; never the parent's history.
+        let (savings, context) = self
             .turn
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .as_ref()
-            .map(|t| t.savings.clone())
+            .map(|t| (t.savings.clone(), t.context.clone()))
             .unwrap_or_default();
         let by_stop = Arc::new(AtomicBool::new(false));
         if let Err(e) = child.claim_turn(RunningTurn {
             turn_id: turn_id.clone(),
             cancel: cancel.clone(),
             savings: savings.clone(),
+            context: context.clone(),
             publishes: Arc::default(),
             by_stop: by_stop.clone(),
         }) {
@@ -2060,7 +2069,8 @@ impl Session {
             }
             return Err(harness_protocol::NODE_STOPPING.into());
         }
-        // A sub-agent gets its task as text only, never the images.
+        // A sub-agent gets its task as text, never the images, and its
+        // parent turn's context, quoted like the parent's.
         let msg = UserMessage {
             turn_id,
             text: task,
@@ -2070,6 +2080,7 @@ impl Session {
         };
         let extra = TurnExtra {
             savings,
+            context,
             refs: Some(refs),
             observed: Some(observed),
             ..Default::default()
@@ -2123,14 +2134,16 @@ impl Session {
             .unwrap_or_default();
         // Whatever the answer cites, the parent resolves through these.
         let sources = harness_core::refs::sources_in(&log);
-        let text = if child.log_failed.load(Ordering::SeqCst) {
-            "The sub-agent stopped because its session log could not be written.".to_string()
-        } else {
-            text
-        };
-        let text = match merge_note {
-            Some(n) => format!("{text}\n\n[{n}]"),
-            None => text,
+        let finish = harness_core::subagent::finish_in(log.iter().filter_map(|e| e.typed().ok()));
+        // The harness's own words, after the child's quoted report.
+        let stopped = child
+            .log_failed
+            .load(Ordering::SeqCst)
+            .then_some("the sub-agent stopped because its session log could not be written");
+        let note = match (stopped, merge_note) {
+            (Some(s), Some(n)) => Some(format!("{s}; {n}")),
+            (Some(s), None) => Some(s.to_string()),
+            (None, n) => n,
         };
         Ok(harness_core::backend::DelegateOutcome {
             child: child_id,
@@ -2138,6 +2151,8 @@ impl Session {
             reason,
             usage,
             sources,
+            finish,
+            note,
         })
     }
 

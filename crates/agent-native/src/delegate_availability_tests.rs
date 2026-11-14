@@ -48,6 +48,8 @@ impl TurnHost for Host {
             reason: TurnEndReason::Completed,
             usage: None,
             sources: vec![],
+            finish: None,
+            note: None,
         })
     }
 }

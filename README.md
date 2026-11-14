@@ -1449,7 +1449,7 @@ text stops, which files were left out and why. They are read again at the
 start of every message, so an edit (yours or the agent's) counts from the next
 message on, and they are sent after the history like a project's
 instructions, so compacting a long chat does not lose them. A sub-agent gets
-them too, and so does the turn that resumes a chat after a background command
+them too (with its parent message's context), and so does the turn that resumes a chat after a background command
 ends (a callback turn), the one nobody watches.
 
 Not read: files in folders below the chat's folder, files above the
@@ -1859,6 +1859,26 @@ Delegating agents split big jobs into parallel sub-tasks (at most 4 per turn
 and 200k tokens by default; set `delegates`, `max_subagents` and
 `max_subagent_tokens` in an agent file). Delegation is one level deep: a
 sub-agent never delegates further.
+
+What a sub-agent gets: the task its parent wrote, the repository's instruction
+files, and the context the parent's message had (your settings, memory
+recalled for that message and, in a project chat, the project's instructions,
+facts and board), quoted the same way. It never gets the parent chat's history
+or its images. It works in its own chat, which the `delegate` card links to.
+
+A sub-agent ends with `finish`, a tool only sub-agents have: a status (`done`,
+`partial` or `failed`), a summary, and optional details of what is left open.
+Calling it ends the sub-agent's turn at once; it is not taken beside other
+calls in the same message, so the report is written after their results. A
+sub-agent that never calls it reports its last answer, `done` if its turn
+completed and `failed` (with how the turn ended) if not.
+
+What the parent sees: the link to the sub-agent's chat, one line of the
+harness's (`Sub-agent @scout finished: partial. Its own report follows …; the
+harness did not check it.`), the report with every line behind `| ` (so
+nothing the sub-agent writes can pass as the harness's), cut at 24,000
+characters with a note when longer, then what became of its changes and the
+pages it cited. The `delegate` card shows the status next to the link.
 
 **Agents** in the sidebar lists every agent. Server admins can make agents there
 (name, handle, summary, instructions and feature switches: memory, project

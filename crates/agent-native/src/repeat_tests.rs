@@ -126,6 +126,8 @@ impl TurnHost for Host {
             },
             usage: None,
             sources: vec![],
+            finish: None,
+            note: None,
         })
     }
     async fn background_notes(

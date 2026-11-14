@@ -3461,8 +3461,11 @@ details.summary p {
   font-size: var(--text-xs);
   user-select: all;
 }
-.child-link {
-  display: block;
+.child-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
   padding: 4px 12px 8px;
 }
 .undo {
