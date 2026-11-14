@@ -12,7 +12,7 @@
 //! queue of bounded length and one task, whatever the store's speed.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use harness_store::Store;
@@ -34,6 +34,27 @@ struct Line {
 pub(crate) struct AuditLog {
     tx: mpsc::Sender<Line>,
     lost: Arc<AtomicU64>,
+    /// Lines (and the count) the writer has taken and not written yet.
+    taken: Arc<AtomicU64>,
+    /// The writer is gone (said once).
+    dead: Arc<AtomicBool>,
+}
+
+/// What the writer has not written yet ([`AuditLog::pending`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Pending {
+    /// Lines in the queue.
+    pub queued: usize,
+    /// Lines being written, and the count being recorded.
+    pub taken: u64,
+    /// Lines counted, the count not written yet.
+    pub counted: u64,
+}
+
+impl Pending {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.queued == 0 && self.taken == 0 && self.counted == 0
+    }
 }
 
 impl AuditLog {
@@ -42,8 +63,24 @@ impl AuditLog {
     pub(crate) fn start(store: Store) -> Self {
         let (tx, rx) = mpsc::channel(AUDIT_QUEUE);
         let lost = Arc::new(AtomicU64::new(0));
-        tokio::spawn(write(store, rx, lost.clone()));
-        Self { tx, lost }
+        let taken = Arc::new(AtomicU64::new(0));
+        tokio::spawn(write(store, rx, lost.clone(), taken.clone()));
+        Self {
+            tx,
+            lost,
+            taken,
+            dead: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// What is not written yet: a stop waits for it (`NodeRuntime::flush`,
+    /// re-check D-2).
+    pub(crate) fn pending(&self) -> Pending {
+        Pending {
+            queued: self.tx.max_capacity() - self.tx.capacity(),
+            taken: self.taken.load(Ordering::SeqCst),
+            counted: self.lost.load(Ordering::SeqCst),
+        }
     }
 
     /// Queue one line, never waiting: when the queue is full the line is
@@ -54,13 +91,32 @@ impl AuditLog {
             kind,
             detail,
         };
-        if self.tx.try_send(line).is_err() {
-            self.lost.fetch_add(1, Ordering::SeqCst);
+        match self.tx.try_send(line) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.lost.fetch_add(1, Ordering::SeqCst);
+            }
+            // Only a panic in the writer ends it while an `AuditLog` lives:
+            // said once, and every line from then on is counted in memory
+            // (re-check D-3).
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                if !self.dead.swap(true, Ordering::SeqCst) {
+                    tracing::error!(
+                        "the audit writer is gone; audit lines are counted, not written"
+                    );
+                }
+                self.lost.fetch_add(1, Ordering::SeqCst);
+            }
         }
     }
 }
 
-async fn write(store: Store, mut rx: mpsc::Receiver<Line>, lost: Arc<AtomicU64>) {
+async fn write(
+    store: Store,
+    mut rx: mpsc::Receiver<Line>,
+    lost: Arc<AtomicU64>,
+    taken: Arc<AtomicU64>,
+) {
     loop {
         let first = if lost.load(Ordering::SeqCst) > 0 {
             match tokio::time::timeout(RETRY, rx.recv()).await {
@@ -75,13 +131,21 @@ async fn write(store: Store, mut rx: mpsc::Receiver<Line>, lost: Arc<AtomicU64>)
             }
         };
         let mut batch: Vec<Line> = first.into_iter().collect();
+        // Counted as taken before it leaves the queue's or the count's
+        // books, so `pending` never shows nothing while a line is unwritten.
+        taken.fetch_add(batch.len() as u64, Ordering::SeqCst);
         while batch.len() < AUDIT_QUEUE {
             match rx.try_recv() {
-                Ok(l) => batch.push(l),
+                Ok(l) => {
+                    taken.fetch_add(1, Ordering::SeqCst);
+                    batch.push(l);
+                }
                 Err(_) => break,
             }
         }
-        let counted = lost.swap(0, Ordering::SeqCst);
+        let counted = lost.load(Ordering::SeqCst);
+        taken.fetch_add(counted, Ordering::SeqCst);
+        lost.fetch_sub(counted, Ordering::SeqCst);
         let note = (counted > 0).then(|| serde_json::json!({ "count": counted }).to_string());
         let n = batch.len() as u64;
         let res = store
@@ -101,5 +165,6 @@ async fn write(store: Store, mut rx: mpsc::Receiver<Line>, lost: Arc<AtomicU64>)
             tracing::warn!(error = %e, lines = n, "could not write audit lines; counting them");
             lost.fetch_add(n + counted, Ordering::SeqCst);
         }
+        taken.fetch_sub(n + counted, Ordering::SeqCst);
     }
 }

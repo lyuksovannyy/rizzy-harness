@@ -1237,17 +1237,30 @@ impl NodeRuntime {
     }
 
     /// Wait until every message queued for the master has been taken by the
-    /// link, at most `bound` (a stop's last events reach the master before
-    /// the process ends; anything left replays at the next hello). True
-    /// when the queue emptied or there is no link.
+    /// link, and every audit line queued has been written or counted and
+    /// the count written, at most `bound` (a stop's last events reach the
+    /// master before the process ends; anything left replays at the next
+    /// hello; re-check D-2 for the audit lines). True when both are done
+    /// (no link counts as done for the first); when the bound runs out
+    /// with audit lines unwritten, says at error level how many.
     pub async fn flush(&self, bound: Duration) -> bool {
         let by = tokio::time::Instant::now() + bound;
         loop {
             let empty = self.inner.outbox().is_none_or(|o| o.is_drained());
-            if empty {
+            let audits = self.inner.audit_log.pending();
+            if empty && audits.is_empty() {
                 return true;
             }
             if tokio::time::Instant::now() >= by {
+                if !audits.is_empty() {
+                    tracing::error!(
+                        queued = audits.queued,
+                        being_written = audits.taken,
+                        counted = audits.counted,
+                        "audit lines not written before the stop (and a count of lines not \
+                         recorded, if any)"
+                    );
+                }
                 return false;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
