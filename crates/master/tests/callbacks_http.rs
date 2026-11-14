@@ -927,6 +927,45 @@ async fn memory_chat(t: &T) -> SessionId {
     v["session_id"].as_str().unwrap().parse().unwrap()
 }
 
+/// A fact of `sid`'s owner, active, then a `forget` of it from `turn`
+/// (and a barrier): it must still be active afterwards.
+async fn forget_is_ignored(t: &T, sid: SessionId, turn: &str, n: usize) {
+    let owner = t
+        .master
+        .inner_mirror()
+        .session(sid)
+        .unwrap()
+        .unwrap()
+        .owner_id;
+    let mem = t.master.memory().unwrap();
+    let kept = mem
+        .add(harness_memory::NewFact {
+            owner_id: owner,
+            text: format!("kept through {turn}"),
+            kind: harness_memory::FactKind::Fact,
+            status: harness_memory::Status::Active,
+            source_session: None,
+            dedupe_key: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    t.node.raw(
+        sid,
+        "tool_call_started",
+        json!({"turn_id": turn, "call_id": format!("forget-{turn}"), "tool": "remember",
+               "input": {"forget": kept.id}}),
+    );
+    t.node.raw(sid, "error", json!({"message": "barrier"}));
+    mirrored(t, sid, n).await;
+    let now = mem.get(&kept.id).await.unwrap().unwrap();
+    assert_eq!(
+        now.status,
+        harness_memory::Status::Active,
+        "{turn} forgot a fact"
+    );
+}
+
 /// The memory facts (proposals included) of `sid`'s owner.
 async fn facts(m: &Master, sid: SessionId) -> Vec<String> {
     let owner = m.inner_mirror().session(sid).unwrap().unwrap().owner_id;
@@ -979,6 +1018,8 @@ async fn a_callback_turns_remember_is_never_filed_and_the_persons_turn_keeps_its
             .any(|f| f.contains("steered")),
         "filed after the refused message"
     );
+    // Nor does it retire one (T49).
+    forget_is_ignored(&t, sid, "cb", 8).await;
 
     // The reverse: the person's turn runs, a callback is answered "nothing
     // to resume"; the person's turn still files its proposal.
@@ -1110,6 +1151,8 @@ async fn a_refused_prompt_leaves_the_running_turns_memory_as_it_was() {
         "filed: {:?}",
         facts(&t.master, sid).await
     );
+    // Nor does it retire one (T49).
+    forget_is_ignored(&t, sid, "p", 7).await;
 }
 
 /// Review S3-5 and its re-check (R-1): an end is aged by the older of the

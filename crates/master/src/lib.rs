@@ -17,6 +17,7 @@ mod http;
 pub mod levels;
 pub mod limits;
 pub mod media;
+pub mod memory;
 pub mod model_cache;
 pub mod nodes;
 pub mod notices;
@@ -220,6 +221,9 @@ pub struct MasterInner {
     /// What each chat's latest turn may write to memory, for its `remember`
     /// calls (`projects::TurnMemory`).
     turn_memory: Mutex<HashMap<SessionId, projects::TurnMemory>>,
+    /// `remember` calls the master refused, for the chat line and the next
+    /// turn (`memory::Refusals`).
+    refusals: memory::Refusals,
     /// The routine scheduler, once `start_routines` ran.
     routines: OnceLock<routines::RoutinesHandle>,
     /// The blob store, once `storage::open` ran (before any node links, so
@@ -560,6 +564,7 @@ impl Master {
                 voice_usage: Default::default(),
                 pdf: OnceLock::new(),
                 turn_memory: Mutex::new(HashMap::new()),
+                refusals: Default::default(),
                 routines: OnceLock::new(),
                 storage: OnceLock::new(),
                 pulls: Default::default(),
@@ -707,96 +712,6 @@ impl Master {
 
     pub fn memory(&self) -> Option<Arc<dyn harness_memory::MemoryStore>> {
         lock(&self.inner.memory).clone()
-    }
-
-    /// A mirrored `remember` call becomes a proposal for the chat's owner
-    /// (never for incognito chats, nor where the owner keeps their memory
-    /// out of a team workspace), and only from a node that offers the tool
-    /// (`CAP_REMEMBER`): one whose `node.toml` denies it files nothing,
-    /// whatever its model sends. The call id makes replays harmless.
-    async fn file_proposal(&self, node_id: &str, e: &RawEvent) {
-        let Some(mem) = self.memory() else { return };
-        if !self.node_has(node_id, harness_protocol::CAP_REMEMBER) {
-            return;
-        }
-        let (Some(text), Some(call_id)) = (
-            e.payload.pointer("/input/text").and_then(|v| v.as_str()),
-            e.payload.get("call_id").and_then(|v| v.as_str()),
-        ) else {
-            return;
-        };
-        let sid = e.session_id;
-        // A call of a turn nobody wrote (a callback turn, T.8d step 3) is
-        // never filed, whatever the chat's recorded memory says: decided
-        // from the log, so a restart or a refused message in the meantime
-        // changes nothing (review S3-1). Fails closed.
-        let turn = e
-            .payload
-            .get("turn_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        match self
-            .inner
-            .mirror
-            .call(move |s| s.turn_cause(sid, &turn))
-            .await
-        {
-            Ok(Some(false)) => {}
-            _ => return,
-        }
-        let Ok(Some(row)) = self.inner.mirror.call(move |s| s.session(sid)).await else {
-            return;
-        };
-        if row.incognito {
-            return;
-        }
-        // What the turn that made the call may write (`Master::prompt`
-        // decided it). A project fact goes to the chat's project, if it has
-        // one and project memory is on; otherwise it is the owner's to
-        // review, if personal memory is. A call that names no scope where
-        // the agent's own memory is off (the Software Developer) and only
-        // project memory is on is filed as a project proposal, not dropped
-        // while the chat says it was proposed (review MC-1); the owner reads
-        // it before any other member's agent does. Not where the member
-        // keeps their memory out of the workspace: a personal fact must not
-        // head for a shared project because they did.
-        let allowed = projects::turn_memory(self, &row).await;
-        let project = match e.payload.pointer("/input/scope").and_then(|v| v.as_str()) {
-            Some("project") if allowed.project => projects::proposal_owner(self, &row).await,
-            None if allowed.project
-                && !allowed.personal
-                && workspaces::uses_memory(self, &row).await =>
-            {
-                projects::proposal_owner(self, &row).await
-            }
-            _ => None,
-        };
-        if project.is_none() && !allowed.personal {
-            return;
-        }
-        let kind = match e.payload.pointer("/input/kind").and_then(|v| v.as_str()) {
-            Some("preference") => harness_memory::FactKind::Preference,
-            Some("location") => harness_memory::FactKind::Location,
-            _ => harness_memory::FactKind::Fact,
-        };
-        let res = mem
-            .add(harness_memory::NewFact {
-                owner_id: project.or(row.owner_id),
-                text: text.to_string(),
-                kind,
-                status: harness_memory::Status::Proposed,
-                source_session: Some(sid),
-                dedupe_key: Some(format!("{sid}:{call_id}")),
-            })
-            .await;
-        match res {
-            Ok(Some(_)) => {
-                let _ = self.inner.live.send(Live::MemoryChanged);
-            }
-            Ok(None) => {}
-            Err(err) => tracing::warn!(error = %err, "could not file a memory proposal"),
-        }
     }
 
     pub fn set_models(&self, models: Vec<ModelInfo>) {
@@ -1398,7 +1313,7 @@ impl Master {
                 if e.kind == "tool_call_started"
                     && e.payload.get("tool").and_then(|v| v.as_str()) == Some("remember")
                 {
-                    self.file_proposal(node_id, &e).await;
+                    memory::file(self, node_id, &e).await;
                 }
                 if matches!(e.kind.as_str(), "artifact_staged" | "artifact_stage_failed") {
                     artifacts::on_applied(self, node_id, &e).await;
@@ -1937,16 +1852,10 @@ impl Master {
         if untrusted {
             deny_untrusted(&mut agent);
         }
-        if let Some(mem) = self
-            .memory()
-            .filter(|_| allowed.personal && !text.trim().is_empty())
-        {
-            // An answer with no note has nothing to recall by: the answer
-            // itself is ids and values, written on the node.
-            match mem.recall(row.owner_id.as_deref(), &text, 6).await {
-                Ok(facts) => turn_context.extend(harness_memory::context_block(&facts)),
-                Err(err) => tracing::warn!(error = %err, "memory recall failed"),
-            }
+        // The owner's facts, whole while they fit, each with its id
+        // (`memory::turn_block`).
+        if allowed.personal {
+            turn_context.extend(memory::turn_block(self, &row, &text).await);
         }
         // A callback turn's opening is rebuilt from the log alone on every
         // later request: no per-turn context joins it.
@@ -2017,7 +1926,7 @@ impl Master {
         // recorded only now that nothing but the node can refuse the
         // prompt, and put back as it was when the node does: the turn that
         // runs keeps its own (an untrusted turn's none, say). A callback
-        // turn records nothing at all (it returned above): `file_proposal`
+        // turn records nothing at all (it returned above): `memory::file`
         // files nothing from a turn whose `turn_started` has a cause, which
         // the log decides, also after a restart (review S3-1).
         let before = lock(&self.inner.turn_memory).insert(sid, allowed);

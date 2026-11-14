@@ -15,6 +15,7 @@ import type {
   Decision,
   FactKind,
   GraphifyStatus,
+  MemoryCallState,
   MemoryCfg,
   MemoryFact,
   MemorySource,
@@ -121,8 +122,14 @@ export const pageApi = {
   saveSettings: (p: Prefs) => call<Prefs>("PUT", "/api/me/settings", p),
   addMemory: (text: string, kind: FactKind = "fact") =>
     call<MemoryFact>("POST", "/api/memory", { text, kind }),
-  updateMemory: (id: string, b: { text?: string; status?: "active" }) =>
-    call<MemoryFact>("PATCH", `/api/memory/${id}`, b),
+  updateMemory: (
+    id: string,
+    b: { text?: string; status?: "active" | "retired"; place?: "user" | "workspace"; workspace_id?: string },
+  ) => call<MemoryFact>("PATCH", `/api/memory/${id}`, b),
+  memoryCall: (sessionId: string, callId: string) =>
+    call<MemoryCallState>("GET", `/api/sessions/${sessionId}/memory/${encodeURIComponent(callId)}`),
+  undoMemoryCall: (sessionId: string, callId: string) =>
+    call<MemoryCallState>("POST", `/api/sessions/${sessionId}/memory/${encodeURIComponent(callId)}/undo`),
   deleteMemory: (id: string) => call<{ ok: boolean }>("DELETE", `/api/memory/${id}`),
   memoryCfg: () => call<MemoryCfg>("GET", "/api/admin/memory"),
   saveMemoryCfg: (b: {

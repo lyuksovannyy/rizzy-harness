@@ -206,7 +206,12 @@ export function ToolCard({
     return item.input?.scope === "project" ? (
       <ProjectMemoryNotice text={asText(item.input?.text)} project={projectId ?? null} />
     ) : (
-      <MemoryNotice text={asText(item.input?.text)} />
+      <MemoryNotice
+        text={asText(item.input?.text ?? "")}
+        sessionId={sessionId}
+        callId={item.call_id}
+        forget={!!item.input?.forget && item.input?.text == null}
+      />
     );
   // A file the agent published: its card says where the upload stands. A
   // refused or failed call stays an ordinary card with the tool's error.

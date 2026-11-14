@@ -440,10 +440,10 @@ CREATE TABLE workspace_members (
     role_id      TEXT NOT NULL,          -- owner | admin | member | guest
     joined_ms    INTEGER NOT NULL,
     -- The member's own choice to share their facts (personal memory) with this
-    -- workspace's chats: recall and proposals. Every insert says it (1 in
-    -- Personal, 0 elsewhere); the default only covers an insert that forgets,
-    -- and then it shares nothing.
-    use_memory   INTEGER NOT NULL DEFAULT 0,
+    -- workspace's chats: recall and proposals. 1 in Personal; NULL for a new
+    -- team member until they answer the join question (shares nothing, like
+    -- 0), then 0 or 1.
+    use_memory   INTEGER CHECK (use_memory IN (0, 1)),
     -- The member's level here, set by the workspace's admins; every new
     -- member starts at none. An owner's counts as host (the master).
     exec_level   TEXT NOT NULL DEFAULT 'none'

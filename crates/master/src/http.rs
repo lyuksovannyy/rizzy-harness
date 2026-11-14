@@ -10,6 +10,7 @@ use serde_json::json;
 
 use crate::workspaces::{self as ws, WsError};
 use crate::{CommandError, Master, auth};
+use memory::{memory_err, memory_store};
 
 mod agent_edits;
 mod artifacts;
@@ -18,6 +19,7 @@ mod hooks;
 mod levels;
 mod links;
 mod media;
+mod memory;
 mod projects;
 mod providers;
 mod routines;
@@ -169,7 +171,6 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
                 crate::attachments::MAX_UPLOAD,
             )),
         )
-        .route("/api/memory", get(list_memory).post(add_memory))
         .route("/api/features", get(features))
         .route(
             "/api/transcribe",
@@ -180,10 +181,6 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
         .route("/api/admin/memory", get(get_memory_cfg).put(put_memory_cfg))
         .route("/api/admin/savings", get(get_savings).put(put_savings))
         .route("/api/admin/graphify", get(get_graphify))
-        .route(
-            "/api/memory/{id}",
-            axum::routing::patch(update_memory).delete(delete_memory),
-        )
         .route("/api/attention", get(attention))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/{id}/seen", post(mark_seen))
@@ -203,6 +200,7 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
         .route("/api/sessions/{id}/approvals/{approval_id}", post(approval))
         .route("/api/ws", get(crate::ws::upgrade))
         .merge(projects::routes())
+        .merge(memory::routes())
         .merge(routines::routes())
         .merge(hooks::routes())
         .merge(media::routes())
@@ -1403,115 +1401,6 @@ async fn approval(
     }
     m.respond_approval(row.session_id, approval_id, b.decision)
         .await?;
-    Ok(Json(json!({ "ok": true })))
-}
-
-fn memory_store(m: &Master) -> ApiResult<std::sync::Arc<dyn harness_memory::MemoryStore>> {
-    m.memory().ok_or_else(|| {
-        ApiError(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "memory is not set up on this server".into(),
-        )
-    })
-}
-
-fn memory_err(e: harness_memory::MemoryError) -> ApiError {
-    match e {
-        harness_memory::MemoryError::Invalid(msg) => ApiError(StatusCode::BAD_REQUEST, msg),
-        other => ApiError(StatusCode::INTERNAL_SERVER_ERROR, other.to_string()),
-    }
-}
-
-async fn list_memory(
-    State(m): State<Master>,
-    headers: HeaderMap,
-) -> ApiResult<Json<serde_json::Value>> {
-    let who = require(&m, &headers).await?;
-    let mem = memory_store(&m)?;
-    let facts = mem.list(who.user_id.as_deref()).await.map_err(memory_err)?;
-    Ok(Json(json!({ "memories": facts, "backend": mem.name() })))
-}
-
-#[derive(Deserialize)]
-struct NewMemoryBody {
-    text: String,
-    #[serde(default)]
-    kind: harness_memory::FactKind,
-}
-
-/// Added by the user directly: active at once.
-async fn add_memory(
-    State(m): State<Master>,
-    headers: HeaderMap,
-    Json(b): Json<NewMemoryBody>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let who = require(&m, &headers).await?;
-    let mem = memory_store(&m)?;
-    let f = mem
-        .add(harness_memory::NewFact {
-            owner_id: who.user_id.clone(),
-            text: b.text,
-            kind: b.kind,
-            status: harness_memory::Status::Active,
-            source_session: None,
-            dedupe_key: None,
-        })
-        .await
-        .map_err(memory_err)?;
-    let _ = m.inner.live.send(crate::Live::MemoryChanged);
-    Ok(Json(json!(f)))
-}
-
-/// The fact, if it belongs to the caller (404 otherwise, never 403).
-async fn own_fact(
-    m: &Master,
-    who: &auth::Principal,
-    id: &str,
-) -> ApiResult<(
-    std::sync::Arc<dyn harness_memory::MemoryStore>,
-    harness_memory::Fact,
-)> {
-    let mem = memory_store(m)?;
-    match mem.get(id).await.map_err(memory_err)? {
-        Some(f) if f.owner_id == who.user_id => Ok((mem, f)),
-        _ => Err(ApiError(StatusCode::NOT_FOUND, "no such memory".into())),
-    }
-}
-
-#[derive(Deserialize)]
-struct MemoryPatch {
-    #[serde(default)]
-    text: Option<String>,
-    /// `active` confirms a proposal.
-    #[serde(default)]
-    status: Option<harness_memory::Status>,
-}
-
-async fn update_memory(
-    State(m): State<Master>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-    Json(b): Json<MemoryPatch>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let who = require(&m, &headers).await?;
-    let (mem, _) = own_fact(&m, &who, &id).await?;
-    let f = mem
-        .update(&id, b.text, b.status)
-        .await
-        .map_err(memory_err)?;
-    let _ = m.inner.live.send(crate::Live::MemoryChanged);
-    Ok(Json(json!(f)))
-}
-
-async fn delete_memory(
-    State(m): State<Master>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let who = require(&m, &headers).await?;
-    let (mem, _) = own_fact(&m, &who, &id).await?;
-    mem.delete(&id).await.map_err(memory_err)?;
-    let _ = m.inner.live.send(crate::Live::MemoryChanged);
     Ok(Json(json!({ "ok": true })))
 }
 
