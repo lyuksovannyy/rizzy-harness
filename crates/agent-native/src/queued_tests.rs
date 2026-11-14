@@ -323,3 +323,180 @@ async fn messages_an_earlier_turn_left_go_first() {
         .collect();
     assert_eq!(users, vec![queued_text("left over").as_str(), "go on"]);
 }
+
+/// Records every request and answers as the demo provider does.
+struct Recorder(mock::Mock, Mutex<Vec<ChatRequest>>);
+
+#[async_trait::async_trait]
+impl Provider for Recorder {
+    fn name(&self) -> &'static str {
+        "recorder"
+    }
+    async fn complete(
+        &self,
+        req: &ChatRequest,
+        deltas: mpsc::UnboundedSender<String>,
+    ) -> Result<Completion, ProviderError> {
+        self.1.lock().unwrap().push(req.clone());
+        self.0.complete(req, deltas).await
+    }
+}
+
+/// ST-1: a message sent after turn 1's last step is read at the start of
+/// turn 2. Compaction cuts at turn 2: the summarised part holds the
+/// message without its reading, the kept part the reading without the
+/// message. The summariser reads the message; the turn's request does not
+/// get it again.
+#[tokio::test]
+async fn compaction_keeps_a_message_read_by_the_next_turn_once() {
+    const M: &str = "please also update the docs folder";
+    let sid = SessionId::new();
+    let long = "w ".repeat(400);
+    let kinds = vec![
+        EventKind::TurnStarted(TurnStarted {
+            turn_id: "t1".into(),
+            agent: None,
+            cause: None,
+        }),
+        EventKind::UserMessage(UserMessage {
+            turn_id: "t1".into(),
+            queued: false,
+            ..msg(&format!("question 1 {long}"))
+        }),
+        EventKind::AssistantMessage(AssistantMessage {
+            turn_id: "t1".into(),
+            message_id: "m1".into(),
+            text: format!("answer 1 {long}"),
+            tool_calls: vec![],
+            blocks: vec![],
+            author: None,
+            variant: None,
+        }),
+        // Seq 4: sent after the last step.
+        EventKind::UserMessage(UserMessage {
+            turn_id: "t1".into(),
+            ..msg(M)
+        }),
+        EventKind::TurnEnded(TurnEnded {
+            turn_id: "t1".into(),
+            reason: TurnEndReason::Completed,
+            usage: None,
+        }),
+        EventKind::TurnStarted(TurnStarted {
+            turn_id: "t2".into(),
+            agent: None,
+            cause: None,
+        }),
+        EventKind::QueuedDelivered(QueuedDelivered {
+            turn_id: "t2".into(),
+            seqs: vec![4],
+        }),
+        EventKind::AssistantMessage(AssistantMessage {
+            turn_id: "t2".into(),
+            message_id: "m2".into(),
+            text: format!("answer 2 {long}"),
+            tool_calls: vec![],
+            blocks: vec![],
+            author: None,
+            variant: None,
+        }),
+        EventKind::TurnEnded(TurnEnded {
+            turn_id: "t2".into(),
+            reason: TurnEndReason::Completed,
+            usage: None,
+        }),
+        EventKind::TurnStarted(TurnStarted {
+            turn_id: "t3".into(),
+            agent: None,
+            cause: None,
+        }),
+        EventKind::UserMessage(UserMessage {
+            turn_id: "t3".into(),
+            queued: false,
+            ..msg(&format!("question 3 {long}"))
+        }),
+        EventKind::TurnEnded(TurnEnded {
+            turn_id: "t3".into(),
+            reason: TurnEndReason::Completed,
+            usage: None,
+        }),
+    ];
+    let history: Vec<RawEvent> = kinds
+        .into_iter()
+        .enumerate()
+        .map(|(i, k)| {
+            let (kind, payload) = k.into_parts();
+            RawEvent {
+                session_id: sid,
+                seq: i as u64 + 1,
+                ts_ms: 0,
+                kind,
+                payload,
+            }
+        })
+        .collect();
+    let rec = Arc::new(Recorder(
+        mock::Mock {
+            delay: std::time::Duration::from_millis(0),
+        },
+        Mutex::new(vec![]),
+    ));
+    let b = NativeBackend::new(
+        rec.clone(),
+        vec![],
+        NativeConfig {
+            summarize_after_tokens: Some(300),
+            ..Default::default()
+        },
+    );
+    let host = Host {
+        events: Mutex::new(vec![]),
+        asked: Mutex::new(0),
+    };
+    let mut c = ctx(&host, "next");
+    c.history = history;
+    let out = b.run_turn(c).await;
+    assert_eq!(out.reason, TurnEndReason::Completed, "{out:?}");
+    let summaries: Vec<u64> = host
+        .events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|k| match k {
+            EventKind::HistorySummarized(h) => Some(h.through_seq),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(summaries, vec![5], "turn 1 summarised, cut at turn 2");
+    let reqs = rec.1.lock().unwrap().clone();
+    let all = |r: &ChatRequest| {
+        r.messages
+            .iter()
+            .map(|m| match m {
+                ChatMsg::System(t) | ChatMsg::User(t) => t.clone(),
+                ChatMsg::Assistant { text, .. } => text.clone(),
+                _ => String::new(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let summary_req = &reqs[0];
+    assert!(
+        matches!(&summary_req.messages[0], ChatMsg::System(p) if p == SUMMARY_PROMPT),
+        "the first request summarises"
+    );
+    assert_eq!(
+        all(summary_req).matches(M).count(),
+        1,
+        "the summariser reads it"
+    );
+    // The turn's own request: in the summary at most, never as a message.
+    let main = reqs.last().unwrap();
+    assert!(
+        !main
+            .messages
+            .iter()
+            .any(|m| m.user_text().is_some_and(|t| t.contains(M))),
+        "not sent again"
+    );
+}
