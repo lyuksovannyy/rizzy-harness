@@ -74,6 +74,8 @@ static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 #[derive(Default)]
 struct Seen {
     acks: HashMap<String, Instant>,
+    /// The error of each ack that refused.
+    errors: HashMap<String, String>,
     deltas: HashMap<SessionId, usize>,
     ended: HashMap<SessionId, Instant>,
     /// Every message read, in order: `ack <req_id>` or `<kind> <session>`.
@@ -81,7 +83,7 @@ struct Seen {
 }
 
 struct Node {
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
     ws: PathBuf,
     node: NodeRuntime,
     to_node: mpsc::Sender<MasterToNode>,
@@ -151,8 +153,11 @@ impl Node {
                 match m {
                     Err(_) => {}
                     Ok(None) => return,
-                    Ok(Some(NodeToMaster::Ack { req_id, .. })) => {
+                    Ok(Some(NodeToMaster::Ack { req_id, error, .. })) => {
                         s.log.push(format!("ack {req_id}"));
+                        if let Some(e) = error {
+                            s.errors.insert(req_id.clone(), e);
+                        }
                         s.acks.insert(req_id, at);
                     }
                     Ok(Some(NodeToMaster::Event { event })) => {
@@ -173,7 +178,7 @@ impl Node {
             }
         });
         Self {
-            _dir: dir,
+            dir,
             ws,
             node,
             to_node: link.to_node,
@@ -181,6 +186,14 @@ impl Node {
             pace,
             floods: vec![],
         }
+    }
+
+    /// Hold the store's write lock from a second connection: every write
+    /// of the node's store waits for its busy timeout (5 s), then fails.
+    fn wedge(&self) -> rusqlite::Connection {
+        let db = rusqlite::Connection::open(self.dir.path().join("node.db")).unwrap();
+        db.execute_batch("BEGIN EXCLUSIVE").unwrap();
+        db
     }
 
     fn pace(&self, ms: u64) {
@@ -689,5 +702,69 @@ async fn a_master_flooding_inline_commands_neither_stalls_the_node_nor_starves_i
             .iter()
             .map(|l| if flooded(l) { 'a' } else { 'o' })
             .collect::<String>()
+    );
+}
+
+/// `crates/node/src/lib.rs` `MAX_LANES` (private there).
+const MAX_LANES: usize = 256;
+
+/// Re-check D-1: a command refused "at once" (past `MAX_LANES` here; past
+/// a lane's depth the same) reaches the master while the uplink is full.
+/// The refusal follows no event, so it goes ahead of the queued output.
+///
+/// Fails on c9be431: the refusal was offered to the full ordered queue
+/// and dropped, and the master's request timed out after 15 s (the
+/// re-check's proof: 0 of 44 reached the master).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refusal_past_the_lane_cap_reaches_the_master_while_the_uplink_is_full() {
+    let _one = SERIAL.lock().await;
+    let mut node = Node::new().await;
+    node.fill(FEW, None).await;
+    // Lanes stay busy: each prompt's audit waits for the store.
+    let db = node.wedge();
+    const N: usize = MAX_LANES + 40;
+    for i in 0..N {
+        node.send(MasterToNode::Prompt {
+            savings: None,
+            context: None,
+            reply: None,
+            agent: None,
+            attachments: vec![],
+            compare: vec![],
+            req_id: format!("p{i}"),
+            session_id: SessionId::new(),
+            text: "hi".into(),
+            images: vec![],
+        })
+        .await;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let from = node.seen.lock().unwrap().log.len();
+    node.pace(0);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let (refused, first) = {
+        let s = node.seen.lock().unwrap();
+        let refused: Vec<usize> = s.log[from..]
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| {
+                l.strip_prefix("ack ")
+                    .and_then(|r| s.errors.get(r))
+                    .is_some_and(|e| e.contains("commands in progress"))
+            })
+            .map(|(i, _)| i)
+            .collect();
+        (refused.len(), refused.first().copied())
+    };
+    db.execute_batch("ROLLBACK").unwrap();
+    drop(db);
+    node.tidy(None).await;
+    eprintln!(
+        "D-1, {N} prompts for unknown sessions with the uplink full: {refused} refusals read in \
+         the first second, the first as message {first:?} after reading again"
+    );
+    assert!(
+        refused >= N - MAX_LANES - 5,
+        "only {refused} refusals reached the master"
     );
 }
