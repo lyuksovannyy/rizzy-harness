@@ -4,7 +4,7 @@
 import { describe, expect, test } from "vitest";
 import { emptyView } from "../fold";
 import type { Item, SessionView } from "../types";
-import { chatMarkdown, fence, fileName } from "./exportChat";
+import { chatMarkdown, closeFences, fence, fileName } from "./exportChat";
 
 const tool = (call_id: string, name: string, input: object, output: string, ok = true): Item => ({
   type: "tool",
@@ -78,5 +78,13 @@ describe("export as Markdown", () => {
     expect(fence("``` x ````")).toBe("`````text\n``` x ````\n`````");
     expect(fileName("Build fix: ../../etc/passwd")).toBe("build-fix-etc-passwd.md");
     expect(fileName("///")).toBe("chat.md");
+  });
+
+  test("a fence a message leaves open is closed with its own kind and length", () => {
+    expect(closeFences("a\n```bash\nrm")).toBe("a\n```bash\nrm\n```");
+    expect(closeFences("````\n```\nx")).toBe("````\n```\nx\n````");
+    expect(closeFences("~~~\nx\n")).toBe("~~~\nx\n~~~");
+    expect(closeFences("```\nx\n```")).toBe("```\nx\n```");
+    expect(closeFences("no fence")).toBe("no fence");
   });
 });

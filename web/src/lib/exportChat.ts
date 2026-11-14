@@ -62,6 +62,21 @@ export function fence(text: string, lang = "text"): string {
   return `${f}${lang}\n${text.replace(/\n$/, "")}\n${f}`;
 }
 
+/** `text` with a code fence it leaves open closed at its end, so a cut-off
+ * message (a cancelled answer, pasted text) cannot swallow what follows. */
+export function closeFences(text: string): string {
+  let open: string | null = null;
+  for (const line of text.split("\n")) {
+    const m = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (!m) continue;
+    const f = m[1]!;
+    if (open === null) open = f;
+    // A closing fence: the same character, at least as long, nothing after.
+    else if (f[0] === open[0] && f.length >= open.length && line.trim() === f) open = null;
+  }
+  return open === null ? text : `${text.replace(/\n$/, "")}\n${open}`;
+}
+
 /** A file name from the title: letters, digits, dashes; never empty. */
 export function fileName(title: string): string {
   const base = title
@@ -82,12 +97,12 @@ export function chatMarkdown(view: SessionView, title: string, opts: ExportOptio
   for (const it of view.items) {
     switch (it.type) {
       case "user":
-        out.push("", "## You", "", it.text, "");
+        out.push("", "## You", "", closeFences(it.text), "");
         if (it.attachments?.length) out.push(`Attached: ${it.attachments.map((a) => oneLine(a)).join(", ")}`, "");
         break;
       case "assistant": {
         const variant = it.variant?.model ? ` (${oneLine(it.variant.model)})` : "";
-        out.push("", `## ${oneLine(name(it.author))}${variant}`, "", it.text, "");
+        out.push("", `## ${oneLine(name(it.author))}${variant}`, "", closeFences(it.text), "");
         break;
       }
       case "tool": {

@@ -15,17 +15,23 @@ export function ChatTitle(props: { sessionId: string; title: string; canRename: 
   const [draft, setDraft] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // The title the server returned, shown until the list's refetch brings it
+  // (no flash of the old one after Save).
+  const [saved, setSaved] = useState<string | null>(null);
+  if (saved !== null && saved === props.title) setSaved(null);
+  const title = saved ?? props.title;
   const save = async () => {
     if (draft === null) return;
-    const title = draft.trim();
-    if (!title || title === props.title) {
+    const next = draft.trim();
+    if (!next || next === title) {
       setDraft(null);
       return;
     }
     setBusy(true);
     setErr(null);
     try {
-      await pageApi.renameSession(props.sessionId, title);
+      const r = await pageApi.renameSession(props.sessionId, next);
+      setSaved(r.title);
       setDraft(null);
     } catch (x) {
       setErr(x instanceof Error ? x.message : String(x));
@@ -68,14 +74,14 @@ export function ChatTitle(props: { sessionId: string; title: string; canRename: 
     );
   return (
     <span className="chat-title-row row">
-      <h1 className="ellipsis">{shownName(props.title)}</h1>
+      <h1 className="ellipsis">{shownName(title)}</h1>
       {props.canRename && (
         <button
           type="button"
           className="icon small"
           aria-label={t("conv.rename")}
           title={t("conv.rename")}
-          onClick={() => setDraft(props.title)}
+          onClick={() => setDraft(title)}
         >
           <Pencil size={14} />
         </button>

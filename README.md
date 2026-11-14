@@ -133,7 +133,9 @@ chats, and the new title is what the list and search show. The download
 button next to it saves the chat as a Markdown file: your messages, the
 answers, and each tool call as one line (tick **Include tool outputs** for
 their full output). The file is made in your browser from what the chat
-shows; nothing is fetched for it.
+shows; nothing is fetched for it. It holds the model's text as the model
+wrote it, so a Markdown viewer that renders raw HTML or loads remote images
+will do so for that text.
 
 Settings → Account → Preferences → **Appearance** picks the theme (System follows the
 operating system; Light and Dark stay put) and the accent colour, one of eight:

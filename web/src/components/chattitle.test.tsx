@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 // Renaming a chat in its header: Rename opens a capped field with the
 // title; Enter saves through the API, Escape leaves it unchanged; an
-// unchanged or blank title sends nothing; the server's refusal is shown as
+// unchanged or blank title sends nothing; the saved title shows at once; the server's refusal is shown as
 // text; without a row (not the owner's list) there is no Rename.
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -47,6 +47,13 @@ describe("chat title", () => {
     await submit();
     expect(rename).toHaveBeenCalledWith("s1", "Zeppelin budget");
     expect(host.querySelector("input")).toBeNull();
+    // The saved title shows at once, before the list's refetch brings it.
+    expect(host.querySelector("h1")!.textContent).toBe("Zeppelin budget");
+    act(() => root.render(<ChatTitle sessionId="s1" title="Zeppelin budget" canRename />));
+    expect(host.querySelector("h1")!.textContent).toBe("Zeppelin budget");
+    // A later rename elsewhere (another tab) is shown when it arrives.
+    act(() => root.render(<ChatTitle sessionId="s1" title="Renamed elsewhere" canRename />));
+    expect(host.querySelector("h1")!.textContent).toBe("Renamed elsewhere");
   });
 
   test("Escape leaves it; unchanged or blank sends nothing", async () => {
