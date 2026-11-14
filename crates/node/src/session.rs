@@ -1144,6 +1144,7 @@ impl Session {
             attachments,
             reply,
             images,
+            queued: false,
         })
     }
 
@@ -2067,6 +2068,7 @@ impl Session {
             attachments: vec![],
             reply: None,
             images: vec![],
+            queued: false,
         };
         let extra = TurnExtra {
             savings,

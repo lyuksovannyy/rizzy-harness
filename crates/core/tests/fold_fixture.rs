@@ -74,6 +74,7 @@ fn events() -> Vec<RawEvent> {
             attachments: vec![],
             reply: None,
             images: vec![],
+            queued: false,
         }),
         EventKind::AssistantDelta(AssistantDelta {
             author: None,
@@ -270,6 +271,7 @@ fn events() -> Vec<RawEvent> {
                 width: 1280,
                 height: 720,
             }],
+            queued: false,
         }),
         EventKind::HistorySummarized(HistorySummarized {
             turn_id: "t2".into(),
@@ -335,6 +337,7 @@ fn events() -> Vec<RawEvent> {
                 values: json!({"selected": ["o1"]}).as_object().unwrap().clone(),
             }),
             images: vec![],
+            queued: false,
         }),
         // A `publish` call and the file the node staged for it, then a
         // file the user saved, and one that could not be saved.

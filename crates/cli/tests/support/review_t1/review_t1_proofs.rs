@@ -315,6 +315,7 @@ async fn f5_the_guards_last_note_moves_into_a_callback_turns_opening() {
         attachments: vec![],
         reply: None,
         images: vec![],
+        queued: false,
     })];
     kinds.extend(r.host.0.lock().unwrap().iter().cloned());
     // The chat is idle; a background command it started earlier ends, and

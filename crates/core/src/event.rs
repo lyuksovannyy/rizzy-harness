@@ -80,6 +80,7 @@ pub enum EventKind {
     BackgroundStarted(BackgroundStarted),
     BackgroundEnded(BackgroundEnded),
     CallbackRefused(CallbackRefused),
+    QueuedDelivered(QueuedDelivered),
 }
 
 impl EventKind {
@@ -125,6 +126,7 @@ impl EventKind {
             EventKind::BackgroundStarted(_) => "background_started",
             EventKind::BackgroundEnded(_) => "background_ended",
             EventKind::CallbackRefused(_) => "callback_refused",
+            EventKind::QueuedDelivered(_) => "queued_delivered",
         }
     }
 }
@@ -504,6 +506,38 @@ pub struct UserMessage {
     /// owner's Media on the master and in the node's `session_images`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ImageRef>,
+    /// Sent while its turn ran (X.5): recorded at once, in the running
+    /// turn (or right after it, when the turn ended meanwhile), and read
+    /// by the model only where a [`QueuedDelivered`] names its seq. Still
+    /// the person's message for everything else (search, callback budget,
+    /// an open question it closes, URL provenance).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub queued: bool,
+}
+
+/// The model read these queued messages (`user_message.queued`) here: at a
+/// step boundary of the turn they were sent in, after the step's tool
+/// results, or at the start of the next turn when that turn ended before
+/// a boundary (or was stopped, failed, or cut by a restart). Each seq names
+/// a queued `user_message` of this session, and no seq is named twice. The
+/// model gets each as the person's message under [`queued_text`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedDelivered {
+    pub turn_id: String,
+    pub seqs: Vec<u64>,
+}
+
+/// How the harness's line after a queued message begins.
+pub const QUEUED_LEAD: &str = "[harness] The person wrote the message above while you were working";
+
+/// A queued message as the model is sent it: the message
+/// ([`UserMessage::model_text`]) and, after an empty line, one line of the
+/// harness's saying when it was written. After the text, never in front of
+/// it, so the person's own words ([`own_words`]) stay theirs.
+pub fn queued_text(model_text: &str) -> String {
+    format!(
+        "{model_text}\n\n{QUEUED_LEAD}; it reaches you only now. Take it into account before you go on."
+    )
 }
 
 /// An image a user message carries (`user_message.images`).
@@ -1240,6 +1274,7 @@ mod tests {
                 values,
             }),
             images: vec![],
+            queued: false,
         });
         let (kind, payload) = k.clone().into_parts();
         assert_eq!(
@@ -1486,6 +1521,7 @@ mod attachment_frame_tests {
             ],
             reply: None,
             images: vec![],
+            queued: false,
         }
     }
 

@@ -158,6 +158,7 @@ fn history(sid: SessionId) -> Vec<RawEvent> {
                 attachments: vec![],
                 reply: None,
                 images: vec![],
+                queued: false,
             }),
         ),
         ev(

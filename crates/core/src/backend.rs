@@ -102,6 +102,15 @@ pub trait TurnHost: Send + Sync {
     async fn background_notes(&self) -> Result<Vec<crate::event::BackgroundEnded>, LogError> {
         Ok(Vec::new())
     }
+
+    /// Before each model request of a turn: append one `queued_delivered`
+    /// for the person's messages sent while this turn ran that the model
+    /// has not read (`user_message.queued`, X.5), and return them in the
+    /// order they were sent, so the loop adds them where the log has them.
+    /// On `Err` the turn ends.
+    async fn queued_messages(&self) -> Result<Vec<crate::event::UserMessage>, LogError> {
+        Ok(Vec::new())
+    }
 }
 
 /// An event could not be appended to the session log (full disk, I/O
@@ -188,6 +197,11 @@ pub struct TurnExtra {
     /// A lower step cap for this turn than the backend's own `max_steps`
     /// (a callback turn's `callback_max_steps`). Set only by the node.
     pub max_steps: Option<usize>,
+    /// Messages the person sent while an earlier turn ran that it never
+    /// read (X.5): the node recorded them as read (`queued_delivered`)
+    /// right after this turn's `turn_started`, and the loop sends them, in
+    /// order, before this turn's own message. Set only by the node.
+    pub queued: Vec<crate::event::UserMessage>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

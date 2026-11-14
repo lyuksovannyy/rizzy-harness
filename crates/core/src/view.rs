@@ -24,6 +24,10 @@ pub enum Item {
         /// Images sent with it (references; the bytes stay in Media).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<ImageRef>,
+        /// Sent while a turn ran (`user_message.queued`, X.5): where it was
+        /// sent, and whether the agent has read it yet.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        queued: Option<Queued>,
     },
     /// Turns before this point reach the model only as a summary.
     Summary {
@@ -104,6 +108,14 @@ pub enum Item {
         #[serde(default)]
         reason: Option<String>,
     },
+}
+
+/// A message sent while a turn ran: its seq, which `queued_delivered`
+/// names, and whether that has happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Queued {
+    pub seq: u64,
+    pub read: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -220,7 +232,7 @@ impl SessionView {
         self.session_id = Some(e.session_id);
         self.head_seq = e.seq;
         match e.typed() {
-            Ok(k) => self.apply_kind(k),
+            Ok(k) => self.apply_kind(k, e.seq),
             Err(_) => self.unknown_events += 1,
         }
         Ok(())
@@ -233,7 +245,7 @@ impl SessionView {
             .find(|i| matches!(i, Item::Tool { call_id: c, .. } if c == call_id))
     }
 
-    fn apply_kind(&mut self, k: EventKind) {
+    fn apply_kind(&mut self, k: EventKind, seq: u64) {
         match k {
             EventKind::SessionCreated(m) => {
                 self.active_agent = m.agent_id.clone();
@@ -255,7 +267,19 @@ impl SessionView {
                 attachments: m.attachments.into_iter().map(|a| a.name).collect(),
                 reply: m.reply,
                 images: m.images,
+                queued: m.queued.then_some(Queued { seq, read: false }),
             }),
+            EventKind::QueuedDelivered(d) => {
+                for it in &mut self.items {
+                    if let Item::User {
+                        queued: Some(q), ..
+                    } = it
+                        && d.seqs.contains(&q.seq)
+                    {
+                        q.read = true;
+                    }
+                }
+            }
             EventKind::AssistantDelta(d) => {
                 let found = self.items.iter_mut().rev().find_map(|i| match i {
                     Item::Assistant {
@@ -667,6 +691,7 @@ mod tests {
                 attachments: vec![],
                 reply,
                 images: vec![],
+                queued: false,
             })
         };
         let evs = vec![ev(sid, 1, msg(Some(reply.clone()))), ev(sid, 2, msg(None))];

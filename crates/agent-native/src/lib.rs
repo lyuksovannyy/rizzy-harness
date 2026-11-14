@@ -3628,6 +3628,7 @@ mod tests {
                     attachments: vec![],
                     reply: None,
                     images: vec![],
+                    queued: false,
                 }),
             ),
             mk(
@@ -3654,6 +3655,7 @@ mod tests {
                     attachments: vec![],
                     reply: None,
                     images: vec![],
+                    queued: false,
                 }),
             ),
         ];
@@ -3713,6 +3715,7 @@ mod tests {
                 attachments: vec![],
                 reply: None,
                 images: vec![],
+                queued: false,
             }),
             &mut out,
         );
@@ -3793,6 +3796,7 @@ mod tests {
                 attachments: vec![],
                 reply: None,
                 images: vec![],
+                queued: false,
             }));
             for e in host.events.lock().unwrap().drain(..) {
                 push(e);
@@ -4747,6 +4751,7 @@ mod background_tests {
                     attachments: vec![],
                     reply: None,
                     images: vec![],
+                    queued: false,
                 }),
             ),
         ];

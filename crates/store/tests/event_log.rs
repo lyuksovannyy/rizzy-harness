@@ -407,6 +407,7 @@ fn an_open_message_names_the_agent_that_wrote_it() {
             attachments: vec![],
             reply: None,
             images: vec![],
+            queued: false,
         }),
     );
     for e in [

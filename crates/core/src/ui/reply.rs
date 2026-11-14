@@ -136,6 +136,7 @@ mod tests {
             attachments: vec![],
             reply: None,
             images: vec![],
+            queued: false,
         })
     }
 
