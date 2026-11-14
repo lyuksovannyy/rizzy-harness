@@ -22,6 +22,7 @@ mod media;
 mod projects;
 mod providers;
 mod routines;
+mod sessions;
 mod storage;
 mod users;
 mod workspaces;
@@ -212,6 +213,7 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
         .merge(approval_mode::routes())
         .merge(storage::routes())
         .merge(links::routes())
+        .merge(sessions::routes())
         // Matched routes only (the embedded UI files are not handlers); which
         // routes get which limit is the table in `limits.rs`.
         .route_layer(axum::middleware::from_fn_with_state(

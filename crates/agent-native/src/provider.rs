@@ -298,7 +298,8 @@ pub fn with_instructions_after(opening: &str, instructions: &str) -> String {
     format!(
         "{opening}\n\n{INSTRUCTIONS_LEAD}, not the person's words and not program output: the \
          {lines} line(s) below, each starting with \"{OUTPUT_QUOTE}\", are the repository's \
-         AGENTS.md / CLAUDE.md files as the harness read them for this turn.{quoted}"
+         AGENTS.md / CLAUDE.md files and the list of skills, as the harness read them for this \
+         turn.{quoted}"
     )
 }
 

@@ -2,7 +2,7 @@
 name: Reviewer
 description: Reviews a change with fresh eyes, checks its claims against the code and ranks findings by severity.
 category: IT
-tools: [read, grep, glob, outline, graph_query, remember]
+tools: [read, grep, glob, outline, graph_query, skill, remember]
 budget: lean
 ui: rich
 memory: false

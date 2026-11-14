@@ -419,7 +419,7 @@ async fn a_callback_turn_gets_the_instruction_files_after_its_opening() {
     let tail = format!(
         "\n\n{INSTRUCTIONS_LEAD}, not the person's words and not program output: the 5 line(s) \
          below, each starting with \"{OUTPUT_QUOTE}\", are the repository's AGENTS.md / CLAUDE.md \
-         files as the harness read them for this turn.\n\
+         files and the list of skills, as the harness read them for this turn.\n\
          {OUTPUT_QUOTE}Instruction files\n\
          {OUTPUT_QUOTE}==> AGENTS.md <==\n\
          {OUTPUT_QUOTE}Run cargo fmt.\n\
