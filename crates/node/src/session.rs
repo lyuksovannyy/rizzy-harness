@@ -1157,6 +1157,41 @@ impl Session {
         }
     }
 
+    /// `extra` with the repository's instruction files
+    /// ([`crate::instructions`]), read now from this session's checked
+    /// folder, in front of the master's context: an agentic turn the person
+    /// or a parent started (a sub-agent reads its own folder: its parent's,
+    /// or the copy of it the child works in). A callback turn takes no
+    /// per-turn context; a folder that fails its check adds nothing here
+    /// (the turn's own checks refuse it).
+    async fn with_instructions(&self, mut extra: TurnExtra) -> TurnExtra {
+        if self.profile != Profile::Agentic || extra.cause.is_some() {
+            return extra;
+        }
+        let Ok(dir) = self.checked_folder() else {
+            return extra;
+        };
+        let granted = match &self.owned {
+            Some(o) => o.top.clone(),
+            None => match self.node.cfg.policy.root_of(&dir) {
+                Ok(r) => r,
+                Err(_) => return extra,
+            },
+        };
+        let protected = self.node.cfg.policy.protected_dirs.clone();
+        let read = tokio::task::spawn_blocking(move || {
+            crate::instructions::block(&dir, &granted, &protected)
+        })
+        .await;
+        if let Ok(Some(b)) = read {
+            extra.context = Some(match extra.context.take() {
+                Some(c) if !c.is_empty() => format!("{b}\n\n{c}"),
+                _ => b,
+            });
+        }
+        extra
+    }
+
     /// Run a turn that `begin` recorded.
     #[allow(clippy::too_many_arguments)]
     async fn run_turn(
@@ -1179,6 +1214,7 @@ impl Session {
             return (TurnEndReason::Error, None);
         }
 
+        let extra = self.with_instructions(extra).await;
         // Run the backend in its own task so a panic still ends the turn.
         let this = self.clone();
         let tid = turn_id.clone();

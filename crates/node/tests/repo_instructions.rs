@@ -246,8 +246,12 @@ async fn the_provider_gets_the_files_in_the_context_block_and_edits_next_turn() 
     assert!(first.starts_with(CONTEXT_LEAD), "{first}");
     let (context, rest) = harness_agent_native::provider::split_context(&first).unwrap();
     assert_eq!(rest, "hello");
-    let root = context.find("==> AGENTS.md <==\nRun cargo fmt.").expect(&context);
-    let sub = context.find("==> sub/CLAUDE.md <==\nKeep sub small.").expect(&context);
+    let root = context
+        .find("==> AGENTS.md <==\nRun cargo fmt.")
+        .expect(&context);
+    let sub = context
+        .find("==> sub/CLAUDE.md <==\nKeep sub small.")
+        .expect(&context);
     let master = context.find("Person: Ann").expect(&context);
     assert!(root < sub && sub < master, "{context}");
     // Each file line is quoted in what the provider gets.
@@ -295,8 +299,14 @@ async fn a_sub_agent_gets_the_files_too() {
         .find(|r| r.ends_with("\n\nread: keep.txt"))
         .unwrap_or_else(|| panic!("no request for the sub-agent: {:?}", n.requests()));
     let (context, _) = harness_agent_native::provider::split_context(&child).unwrap();
-    assert!(context.contains("==> AGENTS.md <==\nRun cargo fmt."), "{context}");
-    assert!(context.contains("==> sub/CLAUDE.md <==\nKeep sub small."), "{context}");
+    assert!(
+        context.contains("==> AGENTS.md <==\nRun cargo fmt."),
+        "{context}"
+    );
+    assert!(
+        context.contains("==> sub/CLAUDE.md <==\nKeep sub small."),
+        "{context}"
+    );
     // The master's context is the parent's, not the sub-agent's.
     assert!(!context.contains("Person: Ann"), "{context}");
 }

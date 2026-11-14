@@ -255,13 +255,13 @@ fn open_regular(path: &Path, root: &Path, data_dir: &Path) -> Result<File, OpenE
 /// Where an open descriptor points: `/proc/self/fd` on Linux; elsewhere the
 /// path again, accepted only when it still names the same file.
 #[cfg(target_os = "linux")]
-fn real_path(f: &File, _path: &Path) -> io::Result<PathBuf> {
+pub(crate) fn real_path(f: &File, _path: &Path) -> io::Result<PathBuf> {
     use std::os::fd::AsRawFd;
     std::fs::read_link(format!("/proc/self/fd/{}", f.as_raw_fd()))
 }
 
 #[cfg(not(target_os = "linux"))]
-fn real_path(f: &File, path: &Path) -> io::Result<PathBuf> {
+pub(crate) fn real_path(f: &File, path: &Path) -> io::Result<PathBuf> {
     use std::os::unix::fs::MetadataExt;
     let (a, b) = (f.metadata()?, std::fs::symlink_metadata(path)?);
     if a.dev() != b.dev() || a.ino() != b.ino() {

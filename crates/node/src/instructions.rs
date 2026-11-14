@@ -36,8 +36,126 @@ pub(crate) const LEAD: &str = "Instruction files of this repository (AGENTS.md, 
 /// folder), with `protected` folders (canonical) never read. `None` when
 /// there is no instruction file at all.
 pub(crate) fn block(cwd: &Path, granted: &Path, protected: &[PathBuf]) -> Option<String> {
-    let _ = (cwd, granted, protected);
-    None
+    if !cwd.starts_with(granted) {
+        return None;
+    }
+    // The repository's top: the nearest folder holding a `.git` entry (a
+    // directory, or a gitfile of a worktree or submodule), never above the
+    // granted folder; the session folder itself when there is none.
+    let top = cwd
+        .ancestors()
+        .take_while(|d| d.starts_with(granted))
+        .find(|d| std::fs::symlink_metadata(d.join(".git")).is_ok())
+        .unwrap_or(cwd);
+    let mut dirs: Vec<&Path> = cwd.ancestors().take_while(|d| d.starts_with(top)).collect();
+    dirs.reverse();
+    let mut out = String::from(LEAD);
+    let mut found = false;
+    let mut left = CAP;
+    let mut cut: Option<(usize, String)> = None;
+    let mut dropped: Vec<String> = Vec::new();
+    for d in dirs {
+        let Some(path) = NAMES
+            .iter()
+            .map(|n| d.join(n))
+            .find(|p| std::fs::symlink_metadata(p).is_ok())
+        else {
+            continue;
+        };
+        found = true;
+        let rel = path
+            .strip_prefix(top)
+            .unwrap_or(&path)
+            .display()
+            .to_string();
+        if cut.is_some() {
+            dropped.push(rel);
+            continue;
+        }
+        // The session folder's own file is one the agent may have written:
+        // it may lead only to a file inside that folder.
+        let bound = if d == cwd { cwd } else { top };
+        match read_one(&path, bound, protected, left) {
+            Err(why) => out.push_str(&format!("\n==> {rel} <== (not read: {why})")),
+            Ok(bytes) => {
+                let mut text = String::from_utf8_lossy(&bytes).into_owned();
+                if text.len() > left {
+                    let mut n = left;
+                    while !text.is_char_boundary(n) {
+                        n -= 1;
+                    }
+                    text.truncate(n);
+                    cut = Some((n, rel.clone()));
+                }
+                left -= text.len();
+                out.push_str(&format!("\n==> {rel} <==\n"));
+                out.push_str(text.trim_end_matches(['\n', '\r']));
+            }
+        }
+    }
+    if let Some((n, rel)) = cut {
+        out.push_str(&format!(
+            "\n[cut: the instruction files are longer than {} KiB together; the text above stops \
+             {n} bytes into {rel}",
+            CAP / 1024
+        ));
+        match dropped.len() {
+            0 => {}
+            1 => out.push_str(&format!(", and {} was not read", dropped[0])),
+            _ => out.push_str(&format!(", and {} were not read", dropped.join(", "))),
+        }
+        out.push(']');
+    }
+    found.then_some(out)
+}
+
+/// Why a file is not read.
+const OUTSIDE: &str = "it leads outside the folder";
+
+/// At most `left + 1` bytes of the regular file `path` leads to, when its
+/// real path is inside `bound` and in no `protected` folder (one that holds
+/// `bound` itself does not count: a sub-agent's own folder). The real path
+/// is opened without following a link at its end or waiting on a FIFO, and
+/// the descriptor is checked again, so a folder swapped for a link after
+/// the first check is refused.
+fn read_one(
+    path: &Path,
+    bound: &Path,
+    protected: &[PathBuf],
+    left: usize,
+) -> Result<Vec<u8>, String> {
+    use nix::fcntl::OFlag;
+    use std::os::unix::fs::OpenOptionsExt;
+    let inside = |p: &Path| {
+        p.starts_with(bound)
+            && !protected
+                .iter()
+                .any(|x| p.starts_with(x) && !bound.starts_with(x))
+    };
+    let unreadable = |e: std::io::Error| format!("it could not be read: {e}");
+    let real = path.canonicalize().map_err(unreadable)?;
+    if !inside(&real) {
+        return Err(OUTSIDE.into());
+    }
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags((OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC).bits())
+        .open(&real)
+        .map_err(|e| match e.raw_os_error() {
+            Some(code) if code == nix::libc::ELOOP => OUTSIDE.to_string(),
+            _ => unreadable(e),
+        })?;
+    if !f.metadata().map_err(unreadable)?.is_file() {
+        return Err("it is not a regular file".into());
+    }
+    if !inside(&crate::artifacts::real_path(&f, &real).map_err(unreadable)?) {
+        return Err(OUTSIDE.into());
+    }
+    let mut out = Vec::new();
+    f.take(left as u64 + 1)
+        .read_to_end(&mut out)
+        .map_err(unreadable)?;
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -83,7 +201,10 @@ mod tests {
         put(&t.ws.join("AGENTS.md"), "above the repository");
         put(&top.join("AGENTS.md"), "root rules\nline two\n");
         put(&top.join("crates/foo/AGENTS.md"), "foo rules");
-        put(&top.join("crates/foo/deeper/AGENTS.md"), "below the session");
+        put(
+            &top.join("crates/foo/deeper/AGENTS.md"),
+            "below the session",
+        );
         let cwd = top.join("crates/foo");
         assert_eq!(
             read(&cwd, &t.ws).unwrap(),
@@ -159,7 +280,11 @@ mod tests {
             &got[got.len() - 300..]
         );
         assert!(!got.contains("never reached"));
-        let text: usize = got.lines().filter(|l| l.starts_with('x')).map(|l| l.len()).sum();
+        let text: usize = got
+            .lines()
+            .filter(|l| l.starts_with('x'))
+            .map(|l| l.len())
+            .sum();
         assert!(text <= CAP, "{text}");
         assert!(got.len() < CAP + 1024, "{}", got.len());
     }

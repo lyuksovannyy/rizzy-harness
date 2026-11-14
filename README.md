@@ -1376,6 +1376,29 @@ a team workspace leaves its projects' memory in. Agentic chats started in a proj
 take its default node and folder. Temporary chats cannot join a project.
 Design and open questions: [docs/projects.md](docs/projects.md).
 
+## Repository instructions (AGENTS.md)
+
+In an agentic chat the node reads the repository's own instruction files and
+sends them to the model with every message, the way Codex and Claude Code do:
+the `AGENTS.md` in each folder from the top of the git repository holding the
+chat's folder down to the chat's folder itself (only that folder when it is in
+no repository), and `CLAUDE.md` in a folder that has no `AGENTS.md`. Files in
+folders below the chat's folder are not read. The top folder's file comes
+first, the deepest last, each under its path in the repository; together they
+are cut at 32 KiB, with a note saying where the text stops and which files were
+left out. They are read again at the start of every message, so an edit (yours
+or the agent's) counts from the next message on, and they are sent after the
+history like a project's instructions, so compacting a long chat does not lose
+them. A sub-agent gets them too.
+
+They are text for the model and nothing more: they change no setting in
+`node.toml`, no approval mode, tool or limit, and a link that is only in them is
+not fetched on their say-so. Only regular files inside the folder the node
+grants are read: a link is followed only to a file inside the repository (the
+chat folder's own file only to one inside the chat folder), never out of it or
+into the node's data directory, and a file that cannot be read is named with
+the reason while the message goes on.
+
 ## Rich messages
 
 Replies render as Markdown: headings, lists, GFM tables (click a header to
