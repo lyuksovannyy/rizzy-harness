@@ -1,10 +1,12 @@
 // @vitest-environment happy-dom
-// The chat's background strip (T.8d step 2): shown while a background
-// command of the open chat runs, a fold of the log (the same after a
-// reload), its Stop and Stop all, the state after a click (stopping, ended,
-// failed with the reason), a node that is away, the command's text never
-// rendered as HTML, and a time left that a skewed browser clock cannot
-// push past the command's timeout or below zero.
+// The side panel (work beside the conversation): one list with the turn's
+// sub-agents on top, a separator only when both kinds are there, then the
+// background commands, each a fold of the log (the same after a reload);
+// a command's Stop and Stop all, the state after a click (stopping, ended,
+// failed with the reason), a node that is away, the model's text never
+// rendered as HTML, a time left that a skewed browser clock cannot push
+// past the command's timeout or below zero; closed, a button with the
+// count; nothing above the composer any more.
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -71,7 +73,7 @@ const node = (connected: boolean): NodeInfo => ({ node_id: "n1", hostname: "box"
 let host: HTMLElement;
 let root: Root;
 let current: SessionView;
-const live = { watch: vi.fn(), unwatch: vi.fn(), view: () => current, onTopic: vi.fn(() => () => {}) } as unknown as Live;
+const live = { watch: vi.fn(), unwatch: vi.fn(), view: (id: string) => (id === SID ? current : undefined), onTopic: vi.fn(() => () => {}), subscribe: () => () => {}, version: 0 } as unknown as Live;
 
 const until = (ok: () => unknown) =>
   vi.waitFor(
@@ -88,10 +90,10 @@ async function show(v: SessionView, nodes: NodeInfo[] = [node(true)]) {
   await act(() => new Promise((r) => setTimeout(r, 0)));
 }
 
-const strip = () => host.querySelector<HTMLElement>(".bg-strip");
-const row = (id: string) => host.querySelector<HTMLElement>(`.bg-row[data-bg="${id}"]`);
+const strip = () => host.querySelector<HTMLElement>(".side-panel");
+const row = (id: string) => host.querySelector<HTMLElement>(`.side-row[data-bg="${id}"]`);
 const button = (label: string) =>
-  [...host.querySelectorAll<HTMLButtonElement>(".bg-strip button")].find((b) => b.textContent === label || b.getAttribute("aria-label") === label);
+  [...host.querySelectorAll<HTMLButtonElement>(".side-panel button")].find((b) => b.textContent === label || b.getAttribute("aria-label") === label);
 
 beforeEach(() => {
   vi.spyOn(Date, "now").mockReturnValue(NOW);
@@ -136,10 +138,12 @@ describe("what the strip derives from the log", () => {
   });
 });
 
-describe("the strip", () => {
-  test("nothing runs: no strip", async () => {
-    await show(view({ "bg-1": { ended: true } }));
+describe("the side panel's commands", () => {
+  test("a command that ended in an earlier turn: no panel", async () => {
+    await show(view({ "bg-1": { ended: true } }, [{ type: "turn_end", turn_id: "t1", reason: "completed" }, { type: "user", turn_id: "t2", text: "next" }]));
+    await act(() => new Promise((r) => setTimeout(r, 50)));
     expect(strip()).toBeNull();
+    expect(host.querySelector(".side-toggle")).toBeNull();
   });
 
   test("one runs: its id, its head as text, time left, and Stop ends it", async () => {
@@ -150,7 +154,9 @@ describe("the strip", () => {
     await until(strip);
     expect(row("bg-1")!.textContent).toContain("bg-1");
     expect(row("bg-1")!.querySelector("code")!.textContent).toBe('<img src=x onerror="alert(1)"> npm start');
-    expect(host.querySelector(".bg-strip img")).toBeNull();
+    expect(host.querySelector(".side-panel img")).toBeNull();
+    // Not above the composer: the panel is beside the conversation.
+    expect(host.querySelector(".bottom .side-panel, .bottom .bg-strip")).toBeNull();
     expect(row("bg-1")!.textContent).toContain("5 min left");
     expect(button("Stop all")).toBeUndefined();
 
@@ -168,14 +174,15 @@ describe("the strip", () => {
       { type: "background_ended", bg_id: "bg-1", reason: "stopped_by_user", exit_code: null, ran_ms: 4000, tail: "" },
     ]);
     await show(ended);
-    await until(() => row("bg-1")?.textContent?.includes("ended: stopped"));
+    // It ended in this turn: still listed, as stopped, with nothing to press.
+    await until(() => row("bg-1")?.querySelector(".side-state")?.textContent === "stopped");
     expect(button("Stop bg-1")).toBeUndefined();
   });
 
   test("two run: Stop all asks once for all of them", async () => {
     await show(view({ "bg-1": {}, "bg-2": {} }));
     await until(strip);
-    expect(strip()!.textContent).toContain("2 background commands");
+    expect(strip()!.textContent).toContain("2 active");
     await act(async () => button("Stop all")!.click());
     expect(call).toHaveBeenCalledTimes(1);
     expect(call).toHaveBeenCalledWith("POST", `/api/sessions/${SID}/background/stop`);
@@ -211,7 +218,7 @@ describe("the strip", () => {
     root = createRoot(host);
     await show(view({ "bg-1": {}, "bg-2": {} }));
     await until(strip);
-    expect([...host.querySelectorAll(".bg-row")].map((r) => r.getAttribute("data-bg"))).toEqual(["bg-1", "bg-2"]);
+    expect([...host.querySelectorAll(".side-row")].map((r) => r.getAttribute("data-bg"))).toEqual(["bg-1", "bg-2"]);
     expect(strip()!.textContent).not.toContain("stopping…");
   });
 
@@ -220,7 +227,7 @@ describe("the strip", () => {
     v.running_turn = "t2";
     await show(v);
     await until(strip);
-    expect(strip()!.textContent).toContain("keeps running when the turn stops");
+    expect(strip()!.textContent).toContain("keep running when the turn stops");
     await act(async () => host.querySelector<HTMLButtonElement>(".composer button.send.stop")!.click());
     expect(cancel).toHaveBeenCalledTimes(1);
     const after = view({ "bg-1": {} }, [{ type: "turn_end", turn_id: "t2", reason: "cancelled" }]);
@@ -228,5 +235,79 @@ describe("the strip", () => {
     expect(strip()).not.toBeNull();
     expect(row("bg-1")).not.toBeNull();
     expect(call).not.toHaveBeenCalled();
+  });
+});
+
+describe("the side panel's list", () => {
+  const delegate = (call_id: string, agent: string, task: string, result: { ok: boolean; output: string } | null, child?: string): Item => ({
+    type: "tool",
+    call_id,
+    author: null,
+    tool: "delegate",
+    input: { agent, task },
+    live_output: child ? `session: ${child}\n` : "",
+    result: result ? { ...result, exit_code: null } : null,
+    approval: null,
+  });
+  const KID = "22222222-2222-2222-2222-222222222222";
+  const report = (status: string) => `session: ${KID}\nSub-agent @scout finished: ${status}. Its own report follows, every line behind "| "; the harness did not check it.\n| ok`;
+
+  test("sub-agents on top, a separator, then commands; states as the log says", async () => {
+    const v = view({ "bg-1": {} }, [
+      { type: "user", turn_id: "t2", text: "go" },
+      delegate("d1", "scout", "Find the <b>bug</b>\nand more", null, KID),
+      delegate("d2", "coder", "Fix it", { ok: false, output: report("failed") }),
+    ]);
+    // The command started in this turn too.
+    v.items.push(v.items.shift()!);
+    v.running_turn = "t2";
+    await show(v);
+    await until(strip);
+    const rows = [...host.querySelectorAll<HTMLElement>(".side-rows > li")].map((r) => r.getAttribute("data-kind") ?? r.getAttribute("role"));
+    expect(rows).toEqual(["agent", "agent", "separator", "commands-head", "command"]);
+    const agents = [...host.querySelectorAll<HTMLElement>('.side-row[data-kind="agent"]')];
+    expect(agents[0]!.querySelector(".side-state")!.textContent).toBe("running");
+    expect(agents[0]!.querySelector(".side-what")!.textContent).toBe("Find the <b>bug</b> …");
+    expect(agents[0]!.querySelector("b")).toBeNull();
+    expect(agents[0]!.querySelector<HTMLAnchorElement>("a")!.getAttribute("href")).toBe(`#/s/${KID}`);
+    expect(agents[1]!.querySelector(".side-state")!.textContent).toBe("failed");
+    expect(row("bg-1")!.querySelector(".side-state")!.textContent).toBe("running");
+  });
+
+  test("only sub-agents: no separator, no commands head", async () => {
+    const v = view({}, [{ type: "user", turn_id: "t2", text: "go" }, delegate("d1", "scout", "Look", { ok: true, output: report("done") })]);
+    await show(v);
+    await until(strip);
+    expect(host.querySelector(".side-sep")).toBeNull();
+    expect(host.querySelector('[data-kind="commands-head"]')).toBeNull();
+    expect(host.querySelector(".side-state")!.textContent).toBe("done");
+  });
+
+  test("a sub-agent of an earlier turn is not listed; a delegate left running by an ended turn is stopped", async () => {
+    const v = view({}, [
+      delegate("d0", "old", "Earlier", { ok: true, output: report("done") }),
+      { type: "turn_end", turn_id: "t1", reason: "completed" },
+      { type: "user", turn_id: "t2", text: "go" },
+      delegate("d1", "scout", "Look", null),
+      { type: "turn_end", turn_id: "t2", reason: "interrupted" },
+    ]);
+    await show(v);
+    await until(strip);
+    const agents = [...host.querySelectorAll<HTMLElement>('.side-row[data-kind="agent"]')];
+    expect(agents.map((a) => a.getAttribute("data-call"))).toEqual(["d1"]);
+    expect(agents[0]!.querySelector(".side-state")!.textContent).toBe("stopped");
+  });
+
+  test("closed, a button with the count; it opens again", async () => {
+    const v = view({ "bg-1": {}, "bg-2": {} });
+    await show(v);
+    await until(strip);
+    await act(async () => button("Close the side panel")!.click());
+    expect(strip()).toBeNull();
+    const toggle = host.querySelector<HTMLButtonElement>(".side-toggle")!;
+    expect(toggle.textContent).toBe("2");
+    expect(toggle.getAttribute("aria-label")).toContain("2 active");
+    await act(async () => toggle.click());
+    expect(strip()).not.toBeNull();
   });
 });

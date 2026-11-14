@@ -940,10 +940,16 @@ async fn list_sessions(
         None => true,
     };
     let owner = who.user_id.clone();
-    let rows = m
+    let viewer = owner.clone().unwrap_or_default();
+    let (rows, unread) = m
         .inner
         .mirror
-        .call(move |s| s.sessions_of(owner.as_deref()))
+        .call(move |s| {
+            Ok::<_, harness_store::StoreError>((
+                s.sessions_of(owner.as_deref())?,
+                s.unread(owner.as_deref(), &viewer)?,
+            ))
+        })
         .await?;
     let links = crate::projects::links(&m).await?;
     let mut list: Vec<serde_json::Value> = rows
@@ -956,10 +962,17 @@ async fn list_sessions(
             let blocked = ws::row_refusal(&who, scope.as_ref(), r);
             let mut v = session_json(r, blocked.or(on_local).as_deref());
             v["project_id"] = json!(crate::projects::effective(&links, r));
+            v["unread"] = json!(unread.contains(&r.session_id));
             v
         })
         .collect();
     crate::routines::annotate(&m, &mut list, q.routine_runs).await?;
+    // A routine's run says it is done through the routine's own results.
+    for v in &mut list {
+        if !v["routine"].is_null() {
+            v["unread"] = json!(false);
+        }
+    }
     m.annotate_background(&mut list);
     Ok(Json(json!({ "sessions": list })))
 }

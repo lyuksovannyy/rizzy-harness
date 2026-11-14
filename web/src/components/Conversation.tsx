@@ -28,7 +28,7 @@ import { CopyMessage } from "../md/CopyMessage";
 import { rt } from "../md/strings";
 import { showHidden, shownName } from "../md/hidden";
 import type { History } from "../bg/topics";
-import type { Agent, Item, ModelInfo, NodeInfo, RoutineMark, SessionRow } from "../types";
+import type { Agent, Item, ModelInfo, NodeInfo, RoutineMark, SessionRow, SessionView } from "../types";
 import { inputBlock, inputState, progressSignature, progressSlots, type ProgressSlots } from "../ui/blocks";
 import { Composer } from "./Composer";
 import { AgentMark, agentAlert } from "./AgentAvatar";
@@ -40,6 +40,9 @@ import { useAvatarState } from "./avatarState";
 import { Markdown } from "./Markdown";
 import { NodeBadge } from "./NodeBadge";
 import { ExecBadge } from "./ExecBadge";
+import { ContextMeter } from "./ContextMeter";
+import { RetryNote } from "./RetryNote";
+import { LiveCtx } from "../lib/liveCtx";
 import { repliedBlock, ReplyBubble } from "./ReplyBubble";
 import { ToolCard, WebGroupCard } from "./ToolCard";
 import { canJoinProject, ProjectChip } from "./ProjectChip";
@@ -47,12 +50,21 @@ import type { ProjectSummary } from "../lib/projects";
 
 // Opt-in, and only its own small chunk: most people never load it.
 const ChatGutter = lazy(() => import("../bg/ChatGutter"));
-// Loaded on the chat's first running background command (T.8d step 2).
-const BackgroundStrip = lazy(() => import("./BackgroundStrip"));
+// Work beside the conversation (sub-agents, background commands): loaded on
+// the chat's first one.
+const SidePanel = lazy(() => import("./SidePanel"));
 // Export as Markdown, loaded on its first click.
 const ExportChat = lazy(() => import("./ExportChat"));
 // Loaded on the chat's first task list (the agent's `todo` tool).
 const TodoPanel = lazy(() => import("./TodoPanel"));
+
+/** Whether the chat has anything the side panel could list: its chunk loads
+ * on the first sub-agent or background command. Cheap; builds no rows. */
+function mayHaveSideItems(view: SessionView | undefined): boolean {
+  if (!view) return false;
+  if (view.background && Object.keys(view.background).length > 0) return true;
+  return view.items.some((it) => it.type === "tool" && it.tool === "delegate");
+}
 
 function Undo(props: {
   sessionId: string;
@@ -297,8 +309,8 @@ export default function Conversation(props: {
   const remove = () => setDeleting(true);
   // The background strip: once a command of this chat runs, it stays
   // mounted (it hides itself) so an end this tab asked for can show.
-  const stripFor = useRef<string | null>(null);
-  if (view?.background && Object.values(view.background).some((b) => !b.ended)) stripFor.current = sessionId;
+  const sideFor = useRef<string | null>(null);
+  if (mayHaveSideItems(view)) sideFor.current = sessionId;
   const todoFor = useRef<string | null>(null);
   if (view?.todo?.length) todoFor.current = sessionId;
 
@@ -332,7 +344,7 @@ export default function Conversation(props: {
                 }`}
               >
                 {compact(view.usage.input_tokens + view.usage.output_tokens)} {t("conv.tokens")} ·{" "}
-                {compact(view.context_tokens)} {t("conv.context")}
+                <ContextMeter used={view.context_tokens} window={view.context_window} summaryAt={view.summary_at} model={view.context_model ?? meta?.model ?? ""} />
               </span>
             )}
           </div>
@@ -407,6 +419,8 @@ export default function Conversation(props: {
         </div>
       )}
 
+      <div className="conv-body">
+        <div className="conv-main">
       <div
         className="timeline"
         ref={scroller}
@@ -635,6 +649,7 @@ export default function Conversation(props: {
                 {face === "unsure" ? "is waiting for you" : face === "working" ? "is working…" : "is thinking…"}
               </div>
             )}
+            {running && view?.retry && <RetryNote retry={view.retry} />}
           </div>
         </BlockCtx>
       </div>
@@ -644,17 +659,6 @@ export default function Conversation(props: {
           {todoFor.current === sessionId && (
             <Suspense fallback={null}>
               <TodoPanel key={sessionId} items={view?.todo ?? []} running={running} />
-            </Suspense>
-          )}
-          {stripFor.current === sessionId && (
-            <Suspense fallback={null}>
-              <BackgroundStrip
-                key={sessionId}
-                sessionId={sessionId}
-                view={view ?? null}
-                away={!!node && !node.connected}
-                nodeLabel={node ? (node.embedded ? "local" : node.hostname) : nodeId}
-              />
             </Suspense>
           )}
           <Composer
@@ -684,8 +688,25 @@ export default function Conversation(props: {
           />
         </div>
       </div>
+        </div>
+        {sideFor.current === sessionId && (
+          <Suspense fallback={null}>
+            <SidePanel
+              key={sessionId}
+              sessionId={sessionId}
+              view={view ?? null}
+              away={!!node && !node.connected}
+              nodeLabel={node ? (node.embedded ? "local" : node.hostname) : nodeId}
+            />
+          </Suspense>
+        )}
+      </div>
     </section>
   );
   // The publish cards, saved-file items and "Save as artifact" share one lookup.
-  return <ChatArtifactsCtx.Provider value={artifacts}>{page}</ChatArtifactsCtx.Provider>;
+  return (
+    <LiveCtx.Provider value={live}>
+      <ChatArtifactsCtx.Provider value={artifacts}>{page}</ChatArtifactsCtx.Provider>
+    </LiveCtx.Provider>
+  );
 }
