@@ -61,3 +61,22 @@ describe("fold", () => {
     expect(() => apply(v, events[2]!)).toThrow(FoldError);
   });
 });
+
+describe("fold: retries and the turn's limits", () => {
+  const ev = (seq: number, kind: string, payload: object): RawEvent => ({ session_id: "s", seq, ts_ms: 0, kind, payload }) as RawEvent;
+  it("shows a retry until a tool call starts, and keeps the turn's window and summary point", () => {
+    const v = fold([
+      ev(1, "turn_started", { turn_id: "t" }),
+      ev(2, "model_retry", { turn_id: "t", model: "p::m", attempt: 1, of: 3, at_ms: 5, wait_ms: 2000, reason: "network" }),
+    ]);
+    expect(v.retry).toStrictEqual({ turn_id: "t", model: "p::m", attempt: 1, of: 3, at_ms: 5, wait_ms: 2000, reason: "network" });
+    apply(v, ev(3, "tool_call_started", { turn_id: "t", call_id: "c", tool: "read", input: {} }));
+    expect("retry" in v).toBe(false);
+    apply(v, ev(4, "turn_ended", { turn_id: "t", reason: "completed", usage: { input_tokens: 5, output_tokens: 1, context_tokens: 4, window: 8000, summary_at: 0 } }));
+    expect([v.context_window, v.summary_at]).toEqual([8000, 0]);
+    expect("window" in v.usage).toBe(false);
+    // A turn whose backend says nothing of its limits drops them.
+    apply(v, ev(5, "turn_ended", { turn_id: "u", reason: "completed", usage: { input_tokens: 1, output_tokens: 1, context_tokens: 2 } }));
+    expect("context_window" in v || "summary_at" in v).toBe(false);
+  });
+});

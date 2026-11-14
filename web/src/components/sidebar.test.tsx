@@ -219,6 +219,16 @@ describe("sidebar", () => {
     expect(q(".dot.background")!.getAttribute("title")).toBe("2 background command(s) running");
   });
 
+  test("a finished chat not seen yet has the unread dot, except the open one and a running one", async () => {
+    await render({
+      route: { kind: "session", id: "c" },
+      sessions: [chat("a", { unread: true }), chat("b", { unread: true, running: true }), chat("c", { unread: true }), chat("d")],
+    });
+    const dots = all("a.session-item[href^='#/s/']").map((a) => [...a.querySelectorAll(".dot")].map((d) => d.className));
+    expect(dots).toEqual([["dot unseen"], ["dot running"], [], []]);
+    expect(q(".dot.unseen")!.getAttribute("aria-label")).toBe("Finished; not seen yet");
+  });
+
   test("a section closes and stays closed", async () => {
     await render({ sessions: [chat("a")] });
     const recent = byText(".section-toggle", "Recent");

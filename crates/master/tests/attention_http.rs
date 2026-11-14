@@ -216,4 +216,34 @@ async fn approvals_and_questions_need_attention_until_handled() {
     )
     .await;
     wait(1).await;
+
+    // The plain answer is "finished, unread" in the list (the question is
+    // attention instead) until its owner has seen it.
+    let row = |id: String| async move {
+        for _ in 0..300 {
+            let list = req(Method::GET, "/api/sessions", None).await;
+            let r = list["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["session_id"] == id.as_str())
+                .cloned()
+                .unwrap();
+            if r["running"] == false {
+                return r;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("{id} still running");
+    };
+    let p = row(plain.clone()).await;
+    assert_eq!(p["unread"], true, "{p}");
+    assert_eq!(row(q.clone()).await["unread"], false, "a question");
+    req(
+        Method::POST,
+        &format!("/api/sessions/{plain}/seen"),
+        Some(json!({"seq": p["head_seq"]})),
+    )
+    .await;
+    assert_eq!(row(plain.clone()).await["unread"], false, "seen");
 }

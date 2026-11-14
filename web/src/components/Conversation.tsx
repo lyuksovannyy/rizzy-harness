@@ -38,6 +38,9 @@ import { useAvatarState } from "./avatarState";
 import { Markdown } from "./Markdown";
 import { NodeBadge } from "./NodeBadge";
 import { ExecBadge } from "./ExecBadge";
+import { ContextMeter } from "./ContextMeter";
+import { RetryNote } from "./RetryNote";
+import { LiveCtx } from "../lib/liveCtx";
 import { repliedBlock, ReplyBubble } from "./ReplyBubble";
 import { ToolCard, WebGroupCard } from "./ToolCard";
 import { canJoinProject, ProjectChip } from "./ProjectChip";
@@ -325,7 +328,7 @@ export default function Conversation(props: {
                 }`}
               >
                 {compact(view.usage.input_tokens + view.usage.output_tokens)} {t("conv.tokens")} ·{" "}
-                {compact(view.context_tokens)} {t("conv.context")}
+                <ContextMeter used={view.context_tokens} window={view.context_window} summaryAt={view.summary_at} model={meta?.model ?? ""} />
               </span>
             )}
           </div>
@@ -606,6 +609,7 @@ export default function Conversation(props: {
                 {face === "unsure" ? "is waiting for you" : face === "working" ? "is working…" : "is thinking…"}
               </div>
             )}
+            {running && view?.retry && <RetryNote retry={view.retry} />}
           </div>
         </BlockCtx>
       </div>
@@ -658,5 +662,9 @@ export default function Conversation(props: {
     </section>
   );
   // The publish cards, saved-file items and "Save as artifact" share one lookup.
-  return <ChatArtifactsCtx.Provider value={artifacts}>{page}</ChatArtifactsCtx.Provider>;
+  return (
+    <LiveCtx.Provider value={live}>
+      <ChatArtifactsCtx.Provider value={artifacts}>{page}</ChatArtifactsCtx.Provider>
+    </LiveCtx.Provider>
+  );
 }

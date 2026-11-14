@@ -231,6 +231,7 @@ impl Provider for Mock {
             input_tokens: estimate_tokens(&req.messages),
             output_tokens: 1,
             context_tokens: 0,
+            ..Default::default()
         });
         if let Some(ChatMsg::System(p)) = req.messages.first()
             && (p == crate::SUMMARY_PROMPT || p == crate::CODING_SUMMARY_PROMPT)

@@ -39,6 +39,7 @@ const KNOWN = new Set([
   "variant_selected",
   "history_summarized",
   "model_fallback",
+  "model_retry",
   "artifact_staged",
   "artifact_stage_failed",
   "background_started",
@@ -46,6 +47,16 @@ const KNOWN = new Set([
   "callback_refused",
   "queued_delivered",
   "todo_updated",
+]);
+
+const CLEARS_RETRY = new Set([
+  "turn_started",
+  "assistant_delta",
+  "assistant_message",
+  "tool_call_started",
+  "turn_ended",
+  "history_summarized",
+  "model_fallback",
 ]);
 
 function lastTool(v: SessionView, callId: string): Extract<Item, { type: "tool" }> | undefined {
@@ -102,6 +113,8 @@ export function apply(v: SessionView, e: RawEvent): void {
     return;
   }
   const p = e.payload ?? {};
+  // Anything the turn shows next means the wait is over (as the Rust view).
+  if (CLEARS_RETRY.has(e.kind)) delete v.retry;
   switch (e.kind) {
     case "session_created": {
       // Match serde: optional fields are omitted when absent.
@@ -247,6 +260,10 @@ export function apply(v: SessionView, e: RawEvent): void {
         if (p.usage.cache_read_tokens) v.usage.cache_read_tokens = (v.usage.cache_read_tokens ?? 0) + p.usage.cache_read_tokens;
         if (p.usage.cache_write_tokens) v.usage.cache_write_tokens = (v.usage.cache_write_tokens ?? 0) + p.usage.cache_write_tokens;
         v.context_tokens = p.usage.context_tokens;
+        if (p.usage.window != null) v.context_window = p.usage.window;
+        else delete v.context_window;
+        if (p.usage.summary_at != null) v.summary_at = p.usage.summary_at;
+        else delete v.summary_at;
       }
       v.running_turn = null;
       v.running_agent = null;
@@ -264,6 +281,9 @@ export function apply(v: SessionView, e: RawEvent): void {
       break;
     case "history_summarized":
       v.items.push({ type: "summary", through_seq: p.through_seq, text: p.text });
+      break;
+    case "model_retry":
+      v.retry = { turn_id: p.turn_id, model: p.model, attempt: p.attempt, of: p.of, at_ms: p.at_ms, wait_ms: p.wait_ms, reason: p.reason };
       break;
     case "model_fallback":
       v.items.push({ type: "fallback", turn_id: p.turn_id, model: p.model, from: p.from, reason: p.reason ?? null });

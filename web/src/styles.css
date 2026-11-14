@@ -3417,6 +3417,21 @@ button.swatch:hover:not(:disabled) {
 .meter {
   font-variant-numeric: tabular-nums;
 }
+/* The window is not known: the summary point is a fixed guess (hover says how to set it). */
+.meter .window-unknown {
+  color: var(--warn);
+  text-decoration: underline dotted;
+  cursor: help;
+}
+/* A model call waits to be sent again: under the working line, counting down. */
+.retry-note {
+  color: var(--fg-2);
+  font-variant-numeric: tabular-nums;
+}
+.child-activity {
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
 details.summary {
   cursor: pointer;
 }

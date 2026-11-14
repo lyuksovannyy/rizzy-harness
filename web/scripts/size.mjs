@@ -129,8 +129,16 @@ const SUBAGENT_KB = 0.2;
 // cards and the face (+0.2, recorded +0.3: the total rounds up past 375.7).
 const X5_KB = 0.3;
 
+// What the agent is doing (feat/turn-finished-signal), measured 377.9
+// (initial 101.0) against 375.9 on main (+2.0, not split per chunk): in the
+// conversation chunk the retry countdown, the context meter against the
+// window, the sub-agent card's activity line and their strings; in the
+// first load the fold's `model_retry` and limits, the "finished, unread"
+// hook with its notification, the sidebar's dot and its strings.
+const VISIBILITY_KB = 2.0;
+
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
-const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB) * 100) / 10) / 10;
+const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB + VISIBILITY_KB) * 100) / 10) / 10;
 // Raised from 103 to 106 once the Phase A pages merged (103.7 measured: the
 // new sidebar, account button and routine-result rows are on the first
 // screen), then lowered to 104 at Phase B (102.3 measured) once the login

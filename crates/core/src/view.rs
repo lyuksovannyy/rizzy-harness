@@ -175,6 +175,16 @@ pub struct SessionView {
     /// The agent's task list: the latest `todo_updated`'s (none: empty).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub todo: Vec<crate::todo::TodoItem>,
+    /// A model call waits to be sent again (`model_retry`); gone once
+    /// output resumes, another model answers or the turn ends.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<ModelRetry>,
+    /// The latest turn's limits (`turn_ended.usage`): the window of the
+    /// model it started on, and where the next summary is written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_at: Option<u64>,
 }
 
 /// One background command as the log shows it.
@@ -249,6 +259,19 @@ impl SessionView {
     }
 
     fn apply_kind(&mut self, k: EventKind, seq: u64) {
+        // Anything the turn shows next means the wait is over.
+        if matches!(
+            k,
+            EventKind::TurnStarted(_)
+                | EventKind::AssistantDelta(_)
+                | EventKind::AssistantMessage(_)
+                | EventKind::ToolCallStarted(_)
+                | EventKind::TurnEnded(_)
+                | EventKind::HistorySummarized(_)
+                | EventKind::ModelFallback(_)
+        ) {
+            self.retry = None;
+        }
         match k {
             EventKind::SessionCreated(m) => {
                 self.active_agent = m.agent_id.clone();
@@ -414,6 +437,8 @@ impl SessionView {
                 if let Some(u) = &t.usage {
                     self.usage.add(u);
                     self.context_tokens = u.context_tokens;
+                    self.context_window = u.window;
+                    self.summary_at = u.summary_at;
                 }
                 self.running_turn = None;
                 self.running_agent = None;
@@ -440,6 +465,7 @@ impl SessionView {
                 from: f.from,
                 reason: f.reason,
             }),
+            EventKind::ModelRetry(r) => self.retry = Some(r),
             EventKind::ArtifactStaged(a) => self.stage(a),
             EventKind::ArtifactStageFailed(f) => self.items.push(Item::ArtifactFailed {
                 path: f.path,
@@ -711,6 +737,74 @@ mod tests {
         assert_eq!(replies, [Some(reply), None]);
         let json = serde_json::to_value(&v.items[1]).unwrap();
         assert!(json.get("reply").is_none(), "omitted when absent: {json}");
+    }
+
+    #[test]
+    fn a_retry_shows_until_output_resumes_and_the_turn_keeps_its_limits() {
+        let sid = SessionId::new();
+        let retry = ModelRetry {
+            turn_id: "t".into(),
+            model: "p::m".into(),
+            attempt: 1,
+            of: 3,
+            at_ms: 1_700_000_002_000,
+            wait_ms: 2000,
+            reason: RetryReason::RateLimit,
+        };
+        let mut v = SessionView::default();
+        let kinds = [
+            EventKind::TurnStarted(TurnStarted {
+                cause: None,
+                agent: None,
+                turn_id: "t".into(),
+            }),
+            EventKind::ModelRetry(retry.clone()),
+        ];
+        for (i, k) in kinds.into_iter().enumerate() {
+            v.apply(&ev(sid, i as u64 + 1, k)).unwrap();
+        }
+        assert_eq!(v.retry, Some(retry));
+        let json = serde_json::to_value(&v).unwrap();
+        assert_eq!(json["retry"]["reason"], "rate_limit");
+        v.apply(&ev(
+            sid,
+            3,
+            EventKind::AssistantDelta(AssistantDelta {
+                author: None,
+                variant: None,
+                turn_id: "t".into(),
+                message_id: "m".into(),
+                text: "hi".into(),
+            }),
+        ))
+        .unwrap();
+        assert_eq!(v.retry, None, "output resumed");
+        v.apply(&ev(
+            sid,
+            4,
+            EventKind::TurnEnded(TurnEnded {
+                turn_id: "t".into(),
+                reason: TurnEndReason::Completed,
+                usage: Some(Usage {
+                    input_tokens: 10,
+                    output_tokens: 2,
+                    context_tokens: 9,
+                    window: Some(128_000),
+                    summary_at: Some(102_400),
+                    ..Default::default()
+                }),
+            }),
+        ))
+        .unwrap();
+        assert_eq!(
+            (v.context_tokens, v.context_window, v.summary_at),
+            (9, Some(128_000), Some(102_400))
+        );
+        // The running total never carries a turn's limits.
+        assert_eq!((v.usage.window, v.usage.summary_at), (None, None));
+        let json = serde_json::to_value(&v).unwrap();
+        assert!(json.get("retry").is_none());
+        assert!(json["usage"].get("window").is_none());
     }
 
     #[test]

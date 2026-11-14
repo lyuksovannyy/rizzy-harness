@@ -414,3 +414,95 @@ async fn a_retry_after_within_the_cap_is_still_waited_and_retried() {
     assert_eq!(*hits.lock().unwrap(), 2);
     assert!(t.elapsed() >= Duration::from_secs(1), "{:?}", t.elapsed());
 }
+
+impl Host {
+    fn retries(&self) -> Vec<harness_core::event::ModelRetry> {
+        self.0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|k| match k {
+                EventKind::ModelRetry(r) => Some(r.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// The person sees each wait (model, attempt, when, why) before it starts,
+/// and never the provider's body.
+#[tokio::test]
+async fn each_retry_is_recorded_before_its_wait() {
+    use harness_core::event::RetryReason;
+    let p = Scripted::new(vec![("m", vec![Reply::Fail(429), Reply::Fail(503)])]);
+    let b = backend(p.clone(), fast());
+    let host = Host::default();
+    let before = harness_core::now_ms();
+    let out = run(&b, &host, "m", agent(&[])).await;
+    assert_eq!(out.reason, TurnEndReason::Completed, "{:?}", out.error);
+    let r = host.retries();
+    assert_eq!(r.len(), 2, "{r:?}");
+    assert_eq!(
+        (r[0].attempt, r[0].of, r[0].reason),
+        (1, 3, RetryReason::RateLimit)
+    );
+    assert_eq!((r[1].attempt, r[1].reason), (2, RetryReason::Overloaded));
+    assert!(
+        r.iter()
+            .all(|r| r.model == "m" && r.turn_id == "t" && r.at_ms >= before)
+    );
+    // Before the answer it waited for.
+    let kinds: Vec<&str> = host.0.lock().unwrap().iter().map(|k| k.name()).collect();
+    let last_retry = kinds.iter().rposition(|k| *k == "model_retry").unwrap();
+    let answer = kinds
+        .iter()
+        .position(|k| *k == "assistant_message")
+        .unwrap();
+    assert!(last_retry < answer, "{kinds:?}");
+}
+
+#[tokio::test]
+async fn a_parallel_answer_records_its_retry() {
+    let p = Scripted::new(vec![("b", vec![Reply::Fail(502)])]);
+    let b = backend(p.clone(), fast());
+    let host = Host::default();
+    let out = b
+        .run_turn(TurnCtx {
+            session_id: harness_core::SessionId::new(),
+            turn_id: "t".into(),
+            history: vec![],
+            user_text: "hi".into(),
+            cwd: Default::default(),
+            model: "a".into(),
+            agent: Some(agent(&[])),
+            compare: vec!["a".into(), "b".into()],
+            parent_session: None,
+            extra: Default::default(),
+            cancel: CancellationToken::new(),
+            host: &host,
+        })
+        .await;
+    assert_eq!(out.reason, TurnEndReason::Completed, "{:?}", out.error);
+    let r = host.retries();
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert_eq!(r[0].model, "b");
+    assert_eq!(r[0].reason, harness_core::event::RetryReason::ServerError);
+}
+
+/// The turn's usage carries the window of the model it started on and
+/// where the next summary is written, for the chat's meter.
+#[tokio::test]
+async fn the_turn_reports_its_window_and_summary_point() {
+    let p = Scripted::new(vec![]);
+    let b = backend(p.clone(), fast());
+    let mut a = agent(&[]);
+    a.context_windows.insert("m".into(), 200_000);
+    let out = run(&b, &Host::default(), "m", a).await;
+    let u = out.usage.unwrap();
+    assert_eq!(u.window, Some(200_000));
+    assert_eq!(u.summary_at, Some(160_000));
+    // Unknown: no window, and the fixed trigger.
+    let out = run(&b, &Host::default(), "m", agent(&[])).await;
+    let u = out.usage.unwrap();
+    assert_eq!((u.window, u.summary_at), (None, Some(24_000)));
+}

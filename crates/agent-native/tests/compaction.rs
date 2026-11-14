@@ -69,6 +69,8 @@ enum Reply {
     /// More text than the request held.
     Pad,
     Fail,
+    /// The provider is overloaded (503): retried.
+    Busy,
     /// A short summary under the coding headings.
     Sections,
 }
@@ -209,6 +211,11 @@ impl Provider for Windowed {
                 Reply::Fail => Err(ProviderError::Status {
                     status: 400,
                     body: "bad request".into(),
+                    hint: RetryHint::default(),
+                }),
+                Reply::Busy => Err(ProviderError::Status {
+                    status: 503,
+                    body: "busy".into(),
                     hint: RetryHint::default(),
                 }),
             };
@@ -1585,4 +1592,43 @@ fn the_coding_summary_keeps_a_sub_agents_report_as_its_own_account() {
         !harness_agent_native::SUMMARY_PROMPT.contains("sub-agent's report"),
         "the chat prompt stays as it was"
     );
+}
+
+/// A summary call that waits to be retried says so, like a turn's call.
+#[tokio::test]
+async fn a_retried_summary_call_is_recorded() {
+    let p = Windowed::replying(BIG, vec![Reply::Busy, Reply::Short]);
+    let b = NativeBackend::new(
+        p.clone(),
+        Vec::new(),
+        NativeConfig {
+            summarize_after_tokens: Some(100),
+            retry: harness_agent_native::RetryPolicy {
+                retries: 3,
+                base: Duration::from_millis(1),
+                max: Duration::from_millis(5),
+            },
+            ..Default::default()
+        },
+    );
+    let host = Host::default();
+    let out = run(
+        &b,
+        &host,
+        history(4, 3_000),
+        agent(None),
+        Default::default(),
+    )
+    .await;
+    assert_eq!(out.reason, TurnEndReason::Completed, "{:?}", out.error);
+    let evs = host.0.lock().unwrap();
+    let retry = evs
+        .iter()
+        .position(|k| matches!(k, EventKind::ModelRetry(r) if r.reason == RetryReason::Overloaded && r.attempt == 1))
+        .expect("a model_retry event");
+    let summary = evs
+        .iter()
+        .position(|k| matches!(k, EventKind::HistorySummarized(_)))
+        .unwrap();
+    assert!(retry < summary);
 }

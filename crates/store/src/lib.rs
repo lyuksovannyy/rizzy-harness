@@ -1,7 +1,7 @@
 //! SQLite event log. The same schema serves the node's authoritative log and
 //! the master's mirror; only durability differs. See PLAN.md §2–3.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -327,6 +327,13 @@ CREATE TABLE IF NOT EXISTS sessions (
     last_asks  INTEGER NOT NULL DEFAULT 0,
     asks_user  INTEGER NOT NULL DEFAULT 0,
     attention_seq INTEGER NOT NULL DEFAULT 0,
+    -- The running turn was started by the harness (a callback, T.8d): its
+    -- end is signalled by the callback's own attention row instead.
+    turn_callback INTEGER NOT NULL DEFAULT 0,
+    -- The seq of the last turn end worth telling the owner about (a
+    -- top-level chat's turn that completed or failed, did not end with a
+    -- question and was not a callback): "finished, unread" until seen.
+    finished_seq INTEGER NOT NULL DEFAULT 0,
     -- Set when a second writer sent other content under this seq (PLAN.md
     -- §3): every later append is refused until the session is deleted.
     diverged_seq INTEGER
@@ -910,20 +917,27 @@ impl Store {
                 )?;
             }
             "turn_started" => {
+                let callback = e.payload.get("cause").is_some_and(|c| !c.is_null());
                 tx.execute(
-                    "UPDATE sessions SET running = 1, asks_user = 0, last_asks = 0 WHERE session_id = ?1",
-                    params![sid],
+                    "UPDATE sessions SET running = 1, asks_user = 0, last_asks = 0, turn_callback = ?2 WHERE session_id = ?1",
+                    params![sid, callback],
                 )?;
             }
             "turn_ended" => {
-                let completed =
-                    e.payload.get("reason").and_then(|v| v.as_str()) == Some("completed");
+                let reason = e.payload.get("reason").and_then(|v| v.as_str());
+                let completed = reason == Some("completed");
+                // A cancel is the person's own doing; a stop or an
+                // interruption is the node's, recorded at its next start.
+                let tells = completed || reason == Some("error");
                 tx.execute(
                     "UPDATE sessions SET running = 0,
+                        finished_seq = CASE WHEN ?4 AND parent_id IS NULL AND turn_callback = 0
+                                             AND NOT (?2 AND last_asks = 1)
+                                       THEN ?3 ELSE finished_seq END,
                         asks_user = CASE WHEN ?2 AND last_asks = 1 THEN 1 ELSE 0 END,
                         attention_seq = CASE WHEN ?2 AND last_asks = 1 THEN ?3 ELSE attention_seq END
                      WHERE session_id = ?1",
-                    params![sid, completed, e.seq as i64],
+                    params![sid, completed, e.seq as i64, tells],
                 )?;
             }
             "assistant_message" => {
@@ -1628,6 +1642,28 @@ impl Store {
             }
         }
         Ok(None)
+    }
+
+    /// `owner`'s chats (`None`: every chat) whose last turn finished after
+    /// `viewer` last looked at them ("finished, unread" in the list).
+    pub fn unread(&self, owner: Option<&str>, viewer: &str) -> Result<HashSet<SessionId>> {
+        let conn = self.lock();
+        let mut st = conn.prepare_cached(
+            "SELECT s.session_id FROM sessions s
+             LEFT JOIN seen v ON v.session_id = s.session_id AND v.user_id = ?2
+             WHERE (?1 IS NULL OR s.owner_id = ?1)
+               AND s.finished_seq > COALESCE(v.seq, 0)",
+        )?;
+        let rows = st.query_map(params![owner, viewer], |r| r.get::<_, String>(0))?;
+        let mut out = HashSet::new();
+        for r in rows {
+            let id = r?;
+            out.insert(
+                id.parse()
+                    .map_err(|_| StoreError::Corrupt(format!("session id {id}")))?,
+            );
+        }
+        Ok(out)
     }
 
     /// The seq up to which `user` has seen chat `sid` (0 when never).
