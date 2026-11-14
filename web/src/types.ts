@@ -818,6 +818,23 @@ export interface MemoryFact {
   workspace_id?: string;
   workspace_name?: string | null;
   workspace_personal?: boolean;
+  /** On a Memory tab: a proposal's change besides adding itself. */
+  proposal?: { replaces?: string | null; drop?: boolean };
+  /** On a workspace's Memory tab: made by the viewer's own chat. */
+  mine?: boolean;
+}
+
+/** A workspace's shared memory (Settings → Workspace → Memory). */
+export interface WorkspaceFacts {
+  memories: MemoryFact[];
+  /** The viewer may change it by hand and keep proposals. */
+  can_edit: boolean;
+  /** The viewer may set `members_edit` (admins and owners). */
+  can_set: boolean;
+  /** Every member may change it, and their agents' saves apply at once. */
+  members_edit: boolean;
+  /** Proposals the viewer sees. */
+  waiting: number;
 }
 
 /** What one `remember` call of a chat did (`GET /api/sessions/{id}/memory/{call}`). */
@@ -836,9 +853,11 @@ export interface MemoryCallState {
     | "waiting"
     | "project";
   place?: "user" | "workspace" | "project";
-  /** False: the person may not change this project fact; it waits for a
-   * project manager (Dismiss only). */
+  /** With `workspace`: the viewer's Personal workspace. */
+  workspace_personal?: boolean;
+  /** False: the viewer may not keep it (Dismiss only); `decides` says who. */
   keep?: boolean;
+  decides?: "you" | "admin" | "manager";
   /** The text the call asked for (shown when nothing was filed). */
   text?: string | null;
   /** The fact the call added. */

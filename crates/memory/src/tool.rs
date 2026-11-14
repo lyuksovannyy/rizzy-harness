@@ -1,11 +1,11 @@
 //! `remember`: the model keeps, replaces or forgets a memory. The tool
 //! itself changes nothing; the master sees the mirrored call and files it
-//! (README, Memory): in the person's Personal workspace it is saved at once,
-//! elsewhere it waits for them as a proposal. `sensitive` keeps a fact in
-//! the workspace it was learned in instead of the person's own facts, which
-//! can follow them into other workspaces. `scope: "project"` files it for
-//! the chat's project instead (docs/projects.md, Memory). The master checks
-//! everything again: what the model sends is never trusted.
+//! (README, Memory). `about` says where the fact belongs: `me` (the person,
+//! the default), `workspace` (how this workspace works; in a team, shared
+//! with its members) or `project`. `sensitive` only means something for
+//! `me`: a private detail stays in the person's Personal workspace and never
+//! reaches a team's memory. The master checks everything again: what the
+//! model sends is never trusted.
 
 use harness_core::policy::ToolRisk;
 use harness_tools::{Tool, ToolCtx, ToolOutcome};
@@ -33,34 +33,36 @@ impl Tool for Remember {
         "remember"
     }
     fn description(&self) -> &'static str {
-        "Keep a lasting fact for future chats: about the person (their preferences, people, \
-         projects, where they live, how they like to work) or, in a chat that belongs to a project, \
-         about that project (decisions, conventions). One short sentence each, only things they \
-         would want remembered. Set `sensitive` for anything about the person they would not want a \
-         colleague's workspace to see: health, money, identity documents, details near passwords \
-         or accounts, family, relationships, beliefs, legal matters; a sensitive fact stays in this \
-         workspace only. Never keep a password, key or token. To correct a fact you were shown, \
-         pass its id as `replaces` with the new text; to drop one, pass its id as `forget` alone. \
-         The person sees every call in the chat: some save at once (with undo), others wait for \
-         their Keep."
+        "Keep a lasting fact for future chats, one short sentence, only what the people here would \
+         want remembered. Say what it is `about`: \"me\" (the default) for the person you are \
+         talking with (their preferences, people, how they like to work, where they live); \
+         \"workspace\" for how this workspace works (its conventions, systems, who does what; in \
+         a team workspace every member's agent reads it); \"project\" for the chat's project \
+         (decisions, conventions). With \"me\", set `sensitive` for anything the person would not \
+         want a colleague to see: health, money, identity documents, details near passwords or \
+         accounts, family, relationships, beliefs, legal matters; it stays in their Personal \
+         workspace only. Never put something private about a person in \"workspace\". Never keep a \
+         password, key or token. To correct a fact you were shown, pass its id as `replaces` with \
+         the new text; to drop one, pass its id as `forget` alone. The person sees every call in \
+         the chat: some save at once (with Undo), others wait for someone's Keep."
     }
     fn schema(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
                 "text": { "type": "string", "description": "The fact, one short sentence" },
+                "about": {
+                    "type": "string",
+                    "enum": ["me", "workspace", "project"],
+                    "description": "me (default): the person. workspace: how this workspace works, shared with its members. project: the chat's project"
+                },
                 "kind": { "type": "string", "enum": ["fact", "preference", "location"] },
                 "sensitive": {
                     "type": "boolean",
-                    "description": "true: a private detail (health, money, identity, family...) kept in this workspace only"
+                    "description": "With about \"me\": a private detail (health, money, identity, family...), kept in the person's Personal workspace only"
                 },
-                "replaces": { "type": "string", "description": "Id of a fact this one corrects" },
-                "forget": { "type": "string", "description": "Id of a fact to drop (no text)" },
-                "scope": {
-                    "type": "string",
-                    "enum": ["user", "project"],
-                    "description": "user (default): about the person. project: about the project this chat belongs to"
-                }
+                "replaces": { "type": "string", "description": "Id of a fact this one corrects (it stays in that fact's place)" },
+                "forget": { "type": "string", "description": "Id of a fact to drop (no text)" }
             }
         })
     }
@@ -73,7 +75,13 @@ impl Tool for Remember {
         }
         match input.get("text").and_then(|v| v.as_str()) {
             Some(t) => match crate::clean_text(t) {
-                Ok(_) if input.get("scope").and_then(|v| v.as_str()) == Some("project") => {
+                Ok(_)
+                    if input
+                        .get("about")
+                        .or_else(|| input.get("scope"))
+                        .and_then(|v| v.as_str())
+                        == Some("project") =>
+                {
                     ToolOutcome::ok(
                         "Proposed for the project. The person will confirm or discard it.",
                     )

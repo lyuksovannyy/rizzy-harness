@@ -17,6 +17,7 @@ import type {
   FactKind,
   GraphifyStatus,
   MemoryCallState,
+  WorkspaceFacts,
   MemoryCfg,
   MemoryFact,
   MemorySource,
@@ -156,6 +157,13 @@ export const pageApi = {
   /** `settings` is the whole document. */
   updateWorkspace: (id: string, b: { name?: string; settings?: WorkspaceSettings }) =>
     call<WorkspaceDetail>("PATCH", ws(id), b),
+  workspaceFacts: (id: string) => call<WorkspaceFacts>("GET", `${ws(id)}/facts`),
+  addWorkspaceFact: (id: string, text: string) => call<MemoryFact>("POST", `${ws(id)}/facts`, { text }),
+  updateWorkspaceFact: (id: string, fact: string, b: { text?: string; status?: "active" | "retired" }) =>
+    call<MemoryFact>("PATCH", `${ws(id)}/facts/${fact}`, b),
+  deleteWorkspaceFact: (id: string, fact: string) => call<{ ok: boolean }>("DELETE", `${ws(id)}/facts/${fact}`),
+  setWorkspaceFactsSettings: (id: string, members_edit: boolean) =>
+    call<{ members_edit: boolean }>("PUT", `${ws(id)}/facts/settings`, { members_edit }),
   setWorkspaceMemory: (id: string, use_memory: boolean) =>
     call<WorkspaceDetail>("PUT", `${ws(id)}/memory`, { use_memory }),
   deleteWorkspace: (id: string) => call<{ ok: boolean }>("DELETE", ws(id)),

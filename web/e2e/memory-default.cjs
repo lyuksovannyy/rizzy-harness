@@ -140,6 +140,41 @@ async function chat(p, text) {
     await sleep(500);
     check(!(await p.$('.memory-ask')), 'the question does not come back');
 
+    // 3b. The workspace's memory is shared: Alex (its owner) adds a fact on
+    // its Memory tab; Sam, a member, sees it on the same tab.
+    const SHARED = 'Acme deploys on Fridays after the standup';
+    const made = await api(p, 'POST', '/api/users', { username: 'sam', exec_ceiling: 'none' });
+    check(made.status === 200, `user: ${JSON.stringify(made)}`);
+    check((await api(p, 'POST', `/api/workspaces/${ws}/members`, { username: 'sam', role: 'member' })).status === 200, 'member added');
+    await p.goto(`${URL_}#/settings/workspace/facts`);
+    await p.waitForSelector('input[aria-label="New fact"]');
+    await p.fill('input[aria-label="New fact"]', SHARED);
+    await p.click('button:text-is("Add")');
+    await p.waitForSelector(`text=${SHARED}`);
+    await p.screenshot({ path: `${S}/shots/workspace-memory-owner-light.png` });
+    const ctx2 = await b.newContext({ viewport: { width: 1280, height: 860 } });
+    const login = await ctx2.request.post(`${URL_}api/login`, { data: { username: 'sam', password: made.body.password } });
+    const key1 = (await login.json()).login_key;
+    const changed = await ctx2.request.post(`${URL_}api/me/password`, {
+      data: { current: made.body.password, new: 'sams own password' },
+      headers: { 'x-harness-login': key1, origin: URL_.slice(0, -1) },
+    });
+    check(changed.status() === 200, `password changed: ${changed.status()}`);
+    const key = (await changed.json()).login_key || key1;
+    await ctx2.addInitScript((k) => localStorage.setItem('harness.login', k), key);
+    await keyed(ctx2);
+    const p2 = await ctx2.newPage();
+    p2.on('pageerror', (e) => errors.push(e.message));
+    await p2.goto(URL_);
+    await api(p2, 'PUT', '/api/me/workspace', { workspace_id: ws });
+    await p2.goto(`${URL_}#/settings/workspace/facts`);
+    await p2.waitForSelector(`text=${SHARED}`);
+    check(!(await p2.$('input[aria-label="New fact"]')), 'a member does not edit it by hand');
+    await p2.screenshot({ path: `${S}/shots/workspace-memory-member-light.png` });
+    // What a member's chat there is given is checked in
+    // crates/master/tests/memory_places_http.rs (the demo model does not echo it).
+    await ctx2.close();
+
     // 4. A phone-width view of the question in a second workspace.
     const ws2 = (await api(p, 'POST', '/api/workspaces', { name: 'Beta' })).body.workspace_id;
     await api(p, 'PUT', '/api/me/workspace', { workspace_id: ws2 });

@@ -951,8 +951,9 @@ async fn team_workspace_projects() {
         mine["memories"].as_array().unwrap().is_empty(),
         "nothing personal filed: {mine}"
     );
-    // The proposal is Bob's alone; he keeps it, then it is Alex's to curate.
-    assert!(project_facts(&t, &alex, &id).await.is_empty());
+    // Alex manages the project, so he sees the proposal waiting (T54: a
+    // waiting change reaches those who may keep it); Bob sees his own.
+    assert_eq!(project_facts(&t, &alex, &id).await.len(), 1);
     let fid = facts[0]["id"].as_str().unwrap().to_string();
     let fact = format!("/api/projects/{id}/memory/{fid}");
     // Bob may word his proposal, but activating it needs a manager, unless
@@ -975,7 +976,13 @@ async fn team_workspace_projects() {
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
-    assert!(project_facts(&t, &alex, &id).await.is_empty());
+    // Still only waiting: nothing active for Alex's agents yet.
+    assert!(
+        project_facts(&t, &alex, &id)
+            .await
+            .iter()
+            .all(|f| f["status"] == "proposed")
+    );
     let (st, v) = req(
         &t,
         Method::PATCH,

@@ -340,6 +340,9 @@ pub async fn project_of(m: &Master, row: &SessionRow) -> Option<ProjectRow> {
 pub struct TurnMemory {
     pub personal: bool,
     pub project: bool,
+    /// The workspace's memory (T54): read and written from every member's
+    /// chats there, whatever their join answer.
+    pub workspace: bool,
     /// The turn was sent by the chat's owner, signed in as themselves (not
     /// the API token, a routine or a callback): the only turns whose
     /// `remember` may apply without a click (`memory::saves_without_a_click`).
@@ -353,14 +356,15 @@ pub fn offer_remember(
     spec: &mut harness_core::agent::AgentSpec,
     t: TurnMemory,
 ) {
-    if !t.personal && !t.project {
+    if !t.personal && !t.project && !t.workspace {
         crate::deny_remember(spec);
         return;
     }
     for d in &mut spec.delegates {
         let f = agents.get(&d.agent_id).map(|a| a.features);
         let some = (t.personal && f.is_none_or(|f| f.memory))
-            || (t.project && f.is_none_or(|f| f.project_memory));
+            || (t.project && f.is_none_or(|f| f.project_memory))
+            || (t.workspace && f.is_none_or(|f| f.memory || f.project_memory));
         if !some {
             d.deny_tools.push("remember".into());
         }
@@ -383,6 +387,7 @@ pub async fn turn_memory(m: &Master, row: &SessionRow) -> TurnMemory {
         None => TurnMemory {
             personal: ws::uses_memory(m, row).await,
             project: true,
+            workspace: crate::memory::workspace_switch(m, row, None).await,
             // Not recorded (a restart): who sent it is unknown, so no
             // `remember` of it applies without a click.
             by_owner: false,
@@ -398,6 +403,7 @@ pub async fn turn_memory(m: &Master, row: &SessionRow) -> TurnMemory {
         if let Some(f) = agent.map(|a| a.features) {
             t.personal &= f.memory;
             t.project &= f.project_memory;
+            t.workspace &= crate::memory::workspace_switch(m, row, Some(f)).await;
         }
     }
     t

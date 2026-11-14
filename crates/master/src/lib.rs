@@ -1879,6 +1879,13 @@ impl Master {
         // Nor does a callback turn: nobody wrote anything to recall by, and
         // program output must not steer what is remembered.
         let allowed = projects::TurnMemory {
+            // The workspace's memory reaches every member's chats there,
+            // whatever their join answer (that is about their own facts),
+            // for an agent with any memory switch on (T54).
+            workspace: !row.incognito
+                && memory::workspace_switch(self, &row, features).await
+                && !untrusted
+                && !resume,
             by_owner: by_owner && !untrusted && !resume,
             personal: personal && !untrusted && !resume,
             project: project.is_some()
@@ -1893,8 +1900,10 @@ impl Master {
         // The owner's facts, whole while they fit, each with its id
         // (`memory::turn_block`).
         let mut noted = Vec::new();
-        if allowed.personal {
-            let (block, calls) = memory::turn_block(self, &row, &text, allowed).await;
+        if allowed.personal || allowed.workspace {
+            let offers = agent.allows_tool("remember")
+                && self.node_has(&row.node_id, harness_protocol::CAP_REMEMBER);
+            let (block, calls) = memory::turn_block(self, &row, &text, allowed, offers).await;
             turn_context.extend(block);
             noted = calls;
         }

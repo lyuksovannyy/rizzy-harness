@@ -893,15 +893,19 @@ async fn chat_owners(m: &Master) -> ApiResult<HashMap<SessionId, Option<String>>
         .collect())
 }
 
-/// A proposal came from a private chat: only that chat's owner (or the API
-/// token) sees it until they confirm it.
+/// A proposal is seen by those who may decide it (a project manager, or
+/// every member where `members_activate_facts` is on: T54, so a waiting
+/// change reaches someone who can keep it) and by the owner of the chat it
+/// came from (or the API token).
 fn proposal_visible(
     who: &Principal,
     f: &harness_memory::Fact,
     owners: &HashMap<SessionId, Option<String>>,
+    decides: bool,
 ) -> bool {
     match who.user_id.as_deref() {
         None => true,
+        Some(_) if decides => true,
         Some(me) => f
             .source_session
             .and_then(|s| owners.get(&s).cloned().flatten())
@@ -909,13 +913,23 @@ fn proposal_visible(
     }
 }
 
-/// A fact as the caller sees it: the source chat only when it is theirs.
+/// Whether the caller may keep proposals into project `row`'s memory.
+fn decides(a: &Access, row: &ProjectRow) -> bool {
+    p::may_manage(a) || ProjectSettings::read(&row.settings).members_activate_facts
+}
+
+/// A fact as the caller sees it: the source chat only when it is theirs;
+/// a proposal says what it would replace or drop (`proposal`).
 fn fact_json(
     who: &Principal,
     f: &harness_memory::Fact,
     owners: &HashMap<SessionId, Option<String>>,
+    metas: &HashMap<String, crate::memory::ProposalMeta>,
 ) -> Value {
     let mut v = json!(f);
+    if let Some(meta) = metas.get(&f.id) {
+        v["proposal"] = json!(meta);
+    }
     let own = f
         .source_session
         .and_then(|s| owners.get(&s))
@@ -931,21 +945,24 @@ async fn list_memory(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let (who, row, _) = visible(&m, &headers, &id).await?;
+    let (who, row, a) = visible(&m, &headers, &id).await?;
     let mem = memory_store(&m)?;
     let facts = mem
         .list(Some(&p::memory_owner(&row.project_id)))
         .await
         .map_err(memory_err)?;
     let owners = chat_owners(&m).await?;
+    let metas = crate::memory::proposal_metas(&m).await;
+    let decides = decides(&a, &row);
     let shown: Vec<Value> = facts
         .iter()
         // Retired facts (a chat's `remember` replaced or forgot them) are
         // shown to every member, restorable by those who may manage.
         .filter(|f| {
-            f.status != harness_memory::Status::Proposed || proposal_visible(&who, f, &owners)
+            f.status != harness_memory::Status::Proposed
+                || proposal_visible(&who, f, &owners, decides)
         })
-        .map(|f| fact_json(&who, f, &owners))
+        .map(|f| fact_json(&who, f, &owners, &metas))
         .collect();
     Ok(Json(json!({ "memories": shown })))
 }
@@ -994,6 +1011,7 @@ async fn own_project_fact(
     Principal,
     std::sync::Arc<dyn harness_memory::MemoryStore>,
     bool,
+    harness_memory::Fact,
 )> {
     let (who, row, a) = visible(m, headers, id).await?;
     let mem = memory_store(m)?;
@@ -1003,7 +1021,7 @@ async fn own_project_fact(
         Some(f)
             if f.owner_id.as_deref() == Some(p::memory_owner(&row.project_id).as_str())
                 && (f.status != harness_memory::Status::Proposed
-                    || proposal_visible(&who, &f, &owners)) =>
+                    || proposal_visible(&who, &f, &owners, decides(&a, &row))) =>
         {
             f
         }
@@ -1012,9 +1030,8 @@ async fn own_project_fact(
     if f.status != harness_memory::Status::Proposed && !p::may_manage(&a) {
         return Err(may_not_change(&a, "project memory"));
     }
-    let may_activate =
-        p::may_manage(&a) || ProjectSettings::read(&row.settings).members_activate_facts;
-    Ok((who, mem, may_activate))
+    let may_activate = decides(&a, &row);
+    Ok((who, mem, may_activate, f))
 }
 
 #[derive(Deserialize)]
@@ -1033,12 +1050,32 @@ async fn update_memory(
     Path((id, fact)): Path<(String, String)>,
     Json(b): Json<FactPatch>,
 ) -> ApiResult<Json<Value>> {
-    let (who, mem, may_activate) = own_project_fact(&m, &headers, &id, &fact).await?;
+    let (who, mem, may_activate, cur) = own_project_fact(&m, &headers, &id, &fact).await?;
     if b.status == Some(harness_memory::Status::Active) && !may_activate {
         return Err(ApiError(
             StatusCode::FORBIDDEN,
             "a project manager confirms facts into the project's memory".into(),
         ));
+    }
+    // Keeping a proposal applies what it would change (a replacement
+    // retires the fact it replaces; a drop retires its fact), the same as
+    // the chat's memory block does.
+    if b.status == Some(harness_memory::Status::Active)
+        && cur.status == harness_memory::Status::Proposed
+    {
+        if let Some(t) = b.text {
+            mem.update(&fact, Some(t), None).await.map_err(memory_err)?;
+        }
+        crate::memory::keep_proposal(&m, &*mem, &cur)
+            .await
+            .map_err(memory_err)?;
+        let owners = chat_owners(&m).await?;
+        let metas = crate::memory::proposal_metas(&m).await;
+        let now = mem.get(&fact).await.map_err(memory_err)?;
+        return Ok(Json(match now {
+            Some(f) => fact_json(&who, &f, &owners, &metas),
+            None => json!({ "ok": true }),
+        }));
     }
     let f = mem
         .update(&fact, b.text, b.status)
@@ -1047,7 +1084,8 @@ async fn update_memory(
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no such memory".into()))?;
     let _ = m.inner.live.send(Live::MemoryChanged);
     let owners = chat_owners(&m).await?;
-    Ok(Json(fact_json(&who, &f, &owners)))
+    let metas = crate::memory::proposal_metas(&m).await;
+    Ok(Json(fact_json(&who, &f, &owners, &metas)))
 }
 
 async fn delete_memory(
@@ -1055,8 +1093,9 @@ async fn delete_memory(
     headers: HeaderMap,
     Path((id, fact)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
-    let (_, mem, _) = own_project_fact(&m, &headers, &id, &fact).await?;
+    let (_, mem, _, _) = own_project_fact(&m, &headers, &id, &fact).await?;
     mem.delete(&fact).await.map_err(memory_err)?;
+    crate::memory::clear_meta(&m, &fact).await;
     let _ = m.inner.live.send(Live::MemoryChanged);
     Ok(Json(json!({ "ok": true })))
 }
