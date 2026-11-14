@@ -2,6 +2,7 @@
 //! session's event log, and talks to the master over a `NodeLink`.
 
 pub mod artifacts;
+mod audit;
 pub mod exec;
 mod git;
 mod images;
@@ -70,11 +71,13 @@ pub const SNAPSHOT_BYTES: usize = harness_protocol::MAX_FRAME / 16;
 /// link stops reading the master's socket.
 const IN_QUEUE: usize = 64;
 
-/// Audit lines of inline commands being written by tasks of their own.
-/// Past this the command loop writes the next one itself, at the store's
-/// pace: a master that floods cancels makes the node do work bounded by
-/// its disk, not tasks without bound (A.21).
-const AUDITS_PENDING: usize = 64;
+/// Sessions with a lane (a command queued or running) at once. Past this a
+/// command for another session is refused at once, so a master naming
+/// fresh session ids cannot make the node keep a task per id while each
+/// waits for a slow store (review A21-2). A lane ends when its queue is
+/// empty, and a prompt's lane when its turn has started, so a node rarely
+/// has more than a few.
+const MAX_LANES: usize = 256;
 
 /// Commands that may wait for one session while its lane is busy; past
 /// this the master gets a refusal at once.
@@ -157,8 +160,8 @@ pub(crate) struct Inner {
     pub(crate) restoring: Mutex<Vec<std::path::PathBuf>>,
     /// The current link to the master, if connected.
     link: Mutex<Option<Arc<outbox::Outbox>>>,
-    /// Room for audit lines written in the background (`AUDITS_PENDING`).
-    audits: Arc<tokio::sync::Semaphore>,
+    /// The audit lines of inline commands (`audit.rs`).
+    audit_log: audit::AuditLog,
     /// Where published files are staged; `None` when this runtime does not
     /// publish (the chat runtime, or `[artifacts] enabled = false`).
     pub(crate) stages: Option<Arc<artifacts::Stages>>,
@@ -429,12 +432,13 @@ impl NodeRuntime {
         let stages = open_stages(&cfg, &hosted);
         let bg_limits = cfg.policy.limits.background();
         let bg_secrets = cfg.secrets.clone();
+        let audit_log = audit::AuditLog::start(cfg.store.clone());
         let inner = Arc::new(Inner {
             cfg,
             sessions: Mutex::new(HashMap::new()),
             restoring: Mutex::new(Vec::new()),
             link: Mutex::new(None),
-            audits: Arc::new(tokio::sync::Semaphore::new(AUDITS_PENDING)),
+            audit_log,
             stages,
             stopping: AtomicBool::new(false),
             background: harness_tools::background::Registry::new(bg_limits, bg_secrets),
@@ -582,17 +586,23 @@ impl NodeRuntime {
                     // slow restore or delete (AUDIT S10), nor behind the
                     // output queued for the master (A.21): their acks go
                     // ahead of it and never wait for room. Nothing here
-                    // awaits the link (their audit lines are written from
-                    // tasks of their own, up to `AUDITS_PENDING`).
+                    // awaits the link or the store (their audit lines go to
+                    // the audit writer, `audit.rs`).
                     //
                     // A cancel stops the running turn now, and also leaves a
                     // marker in the lane so a prompt sent before it, still
                     // queued, is stopped too: a cancel covers everything
                     // sent before it, as when the loop was serial. For a
-                    // session that does not exist yet (its create is still
-                    // queued) the cancel waits its turn in the lane.
+                    // session that does not exist yet but has a lane (its
+                    // create is still queued) the cancel waits its turn
+                    // there; for one with neither it is refused here, at
+                    // once (review A21-2).
                     MasterToNode::Cancel { session_id, .. }
-                        if this.session(session_id).is_none() =>
+                        if this.session(session_id).is_none()
+                            && lanes
+                                .lock()
+                                .unwrap_or_else(|p| p.into_inner())
+                                .contains_key(&session_id) =>
                     {
                         this.enqueue(&lanes, session_id, LaneCmd::Msg(Box::new(msg)))
                     }
@@ -628,30 +638,44 @@ impl NodeRuntime {
     fn enqueue(&self, lanes: &Lanes, sid: SessionId, cmd: LaneCmd) {
         let mut map = lanes.lock().unwrap_or_else(|p| p.into_inner());
         let Some(tx) = map.get(&sid) else {
+            if map.len() >= MAX_LANES {
+                drop(map);
+                return self.refuse(
+                    cmd,
+                    format!(
+                        "this node has {MAX_LANES} sessions with commands in progress; try again"
+                    ),
+                );
+            }
             return self.start_lane(lanes, &mut map, sid, cmd);
         };
         let cmd = match tx.try_send(cmd) {
             Ok(()) => return,
             Err(mpsc::error::TrySendError::Full(cmd)) => {
                 drop(map);
-                if let LaneCmd::Msg(msg) = cmd
-                    && let Some(req_id) = msg.req_id()
-                {
-                    self.inner.publish(NodeToMaster::Ack {
-                        req_id: req_id.to_string(),
-                        ok: false,
-                        error: Some(format!(
-                            "this session already has {LANE_DEPTH} commands waiting; try again"
-                        )),
-                    });
-                }
-                return;
+                return self.refuse(
+                    cmd,
+                    format!("this session already has {LANE_DEPTH} commands waiting; try again"),
+                );
             }
             // The lane's task ended without removing itself (it panicked):
             // nothing of its queue is left, so a new lane keeps the order.
             Err(mpsc::error::TrySendError::Closed(cmd)) => cmd,
         };
         self.start_lane(lanes, &mut map, sid, cmd);
+    }
+
+    /// A command no lane takes: a nack at once, never a silent drop.
+    fn refuse(&self, cmd: LaneCmd, error: String) {
+        if let LaneCmd::Msg(msg) = cmd
+            && let Some(req_id) = msg.req_id()
+        {
+            self.inner.publish(NodeToMaster::Ack {
+                req_id: req_id.to_string(),
+                ok: false,
+                error: Some(error),
+            });
+        }
     }
 
     fn start_lane(
@@ -809,21 +833,11 @@ impl NodeRuntime {
             .await;
     }
 
-    /// [`Self::audit`] from a task of its own, for commands that must be
-    /// answered without waiting for the store. Past `AUDITS_PENDING` such
-    /// tasks, written here: the work a flood of commands causes is bounded
-    /// by the disk.
-    async fn audit_later(&self, kind: &'static str, sid: SessionId) {
-        match self.inner.audits.clone().try_acquire_owned() {
-            Ok(room) => {
-                let this = self.clone();
-                tokio::spawn(async move {
-                    this.audit(kind, sid).await;
-                    drop(room);
-                });
-            }
-            Err(_) => self.audit(kind, sid).await,
-        }
+    /// The audit line of an inline command, handed to the audit writer:
+    /// never waits (`audit.rs`).
+    fn audit_inline(&self, kind: &'static str, sid: SessionId) {
+        let detail = serde_json::json!({ "session_id": sid }).to_string();
+        self.inner.audit_log.record(kind, detail);
     }
 
     /// Handle one message from the master.
@@ -833,12 +847,16 @@ impl NodeRuntime {
         // queued output and never wait (A.21). Not a create's ack, nor any
         // other lane command's: the master relies on those coming after
         // the events their command appended.
-        let urgent = matches!(
-            msg,
-            MasterToNode::Cancel { .. }
-                | MasterToNode::ApprovalRespond { .. }
-                | MasterToNode::StopBackground { .. }
-        );
+        let inline = match &msg {
+            MasterToNode::Cancel { session_id, .. } => Some(("session.cancel", *session_id)),
+            MasterToNode::StopBackground { session_id, .. } => {
+                Some(("session.stop_background", *session_id))
+            }
+            MasterToNode::ApprovalRespond { session_id, .. } => {
+                Some(("approval.respond", *session_id))
+            }
+            _ => None,
+        };
         // A stopping node starts nothing new; answers to approvals, cancels,
         // replays, deletes and fetches are still taken.
         if self.inner.is_stopping() && starts_work(&msg) {
@@ -981,41 +999,31 @@ impl NodeRuntime {
                     None => Err("unknown session".into()),
                 }
             }
-            MasterToNode::Cancel { session_id, .. } => {
-                self.audit_later("session.cancel", session_id).await;
-                match self.session(session_id) {
-                    Some(s) => {
-                        s.cancel();
-                        Ok(())
-                    }
-                    None => Err("unknown session".into()),
+            MasterToNode::Cancel { session_id, .. } => match self.session(session_id) {
+                Some(s) => {
+                    s.cancel();
+                    Ok(())
                 }
-            }
+                None => Err("unknown session".into()),
+            },
             MasterToNode::StopBackground {
                 session_id,
                 bg_id,
                 by,
                 ..
-            } => {
-                self.audit_later("session.stop_background", session_id)
-                    .await;
-                match self.session(session_id) {
-                    Some(s) => s.stop_background(bg_id.as_deref(), by),
-                    None => Err("unknown session".into()),
-                }
-            }
+            } => match self.session(session_id) {
+                Some(s) => s.stop_background(bg_id.as_deref(), by),
+                None => Err("unknown session".into()),
+            },
             MasterToNode::ApprovalRespond {
                 session_id,
                 approval_id,
                 decision,
                 ..
-            } => {
-                self.audit_later("approval.respond", session_id).await;
-                match self.session(session_id) {
-                    Some(s) => s.respond(&approval_id, decision),
-                    None => Err("unknown session".into()),
-                }
-            }
+            } => match self.session(session_id) {
+                Some(s) => s.respond(&approval_id, decision),
+                None => Err("unknown session".into()),
+            },
             MasterToNode::ArtifactFetch {
                 req_id,
                 session_id,
@@ -1047,11 +1055,16 @@ impl NodeRuntime {
                 ok: result.is_ok(),
                 error: result.err(),
             };
-            if urgent {
+            if inline.is_some() {
                 self.inner.publish_urgent(ack);
             } else {
                 self.inner.publish_wait(ack).await;
             }
+        }
+        // Acted on and acked first: the audit line never holds them up
+        // (review A21-1).
+        if let Some((kind, sid)) = inline {
+            self.audit_inline(kind, sid);
         }
     }
 

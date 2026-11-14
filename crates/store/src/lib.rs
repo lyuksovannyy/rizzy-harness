@@ -1848,6 +1848,22 @@ impl Store {
         Ok(())
     }
 
+    /// Several audit lines, `(ts_ms, kind, detail)`, in one transaction:
+    /// all or none.
+    pub fn audit_many(&self, lines: &[(i64, &str, &str)]) -> Result<()> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        {
+            let mut stmt =
+                tx.prepare_cached("INSERT INTO audit (ts_ms, kind, detail) VALUES (?1, ?2, ?3)")?;
+            for (ts, kind, detail) in lines {
+                stmt.execute(params![ts, kind, detail])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Audit lines whose kind starts with `prefix`, oldest first, as
     /// `(kind, detail)`.
     pub fn audit_lines(&self, prefix: &str) -> Result<Vec<(String, String)>> {
