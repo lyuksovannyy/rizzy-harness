@@ -21,6 +21,8 @@ pub mod repeat;
 mod repeat_tests;
 pub mod retry;
 pub mod style;
+#[cfg(test)]
+mod todo_tests;
 
 use std::collections::HashSet;
 use std::sync::Arc;
