@@ -1031,6 +1031,17 @@ impl Confinement {
         }
     }
 
+    /// The node's temp root (inside its data directory, which no file view
+    /// holds): only `<tmp_root>/<session>` folders are ever granted, so a
+    /// folder made beside them is out of every contained command's reach
+    /// (an MCP server's request FIFO, [`crate::mcp`]).
+    pub(crate) fn private_root(&self) -> Option<&Path> {
+        match self {
+            Self::Confined { sandbox, .. } => sandbox.tmp_root.as_deref(),
+            _ => None,
+        }
+    }
+
     /// This confinement for one session: its temp directory is
     /// `<tmp_root>/<key>`.
     pub fn for_session(&self, key: &str) -> Self {
@@ -2276,7 +2287,8 @@ fn not_enforced(
 }
 
 /// Remove every per-session temp directory (at node start, before any
-/// session runs).
+/// session runs), and with them the `.mcp-*` folders of MCP servers'
+/// request FIFOs a killed node left beside them (`crate::mcp`).
 pub fn reset_tmp(root: &Path) -> Result<(), String> {
     match std::fs::remove_dir_all(root) {
         Ok(()) => {}

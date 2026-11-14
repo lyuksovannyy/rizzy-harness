@@ -6,6 +6,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::event::AgentRef;
 
+/// Every MCP tool's name starts with this (`harness_tools::mcp::PREFIX`).
+pub const MCP_PREFIX: &str = "mcp__";
+
+/// The `tools` entry that stands for every MCP tool.
+pub const MCP_ALL: &str = "mcp";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ToolSelection {
@@ -141,8 +147,26 @@ impl Default for DelegateCaps {
 }
 
 impl AgentSpec {
+    /// Whether this agent may use `tool`. An entry `mcp` in `tools` (or in
+    /// `deny_tools`) stands for every MCP tool (`mcp__<server>__<tool>`,
+    /// whose names come from the node's servers and cannot be listed ahead).
     pub fn allows_tool(&self, tool: &str) -> bool {
-        self.tools.allows(tool) && !self.deny_tools.iter().any(|t| t == tool)
+        let mcp = tool.starts_with(MCP_PREFIX);
+        (self.tools.allows(tool) || (mcp && self.tools.allows(MCP_ALL)))
+            && !self
+                .deny_tools
+                .iter()
+                .any(|t| t == tool || (mcp && t == MCP_ALL))
+    }
+
+    /// Whether this agent may use any MCP tool: the node starts a chat's
+    /// servers only for a turn whose agent may.
+    pub fn allows_mcp(&self) -> bool {
+        let listed = match &self.tools {
+            ToolSelection::All(_) => true,
+            ToolSelection::List(l) => l.iter().any(|t| t == MCP_ALL || t.starts_with(MCP_PREFIX)),
+        };
+        listed && !self.deny_tools.iter().any(|t| t == MCP_ALL)
     }
 
     pub fn agent_ref(&self) -> AgentRef {
@@ -165,6 +189,33 @@ mod tests {
         let some: ToolSelection = serde_json::from_str("[\"read\"]").unwrap();
         assert!(some.allows("read") && !some.allows("bash"));
         assert_eq!(serde_json::to_string(&all).unwrap(), "\"all\"");
+    }
+
+    #[test]
+    fn mcp_stands_for_every_mcp_tool() {
+        let spec = |tools: ToolSelection, deny: &[&str]| {
+            AgentSpec {
+            tools,
+            deny_tools: deny.iter().map(|d| d.to_string()).collect(),
+            ..serde_json::from_value(serde_json::json!({
+                "agent_id": "a", "name": "A", "system_prompt": "", "tools": "all", "prompt_hash": "h"
+            }))
+            .unwrap()
+        }
+        };
+        let list = |l: &[&str]| ToolSelection::List(l.iter().map(|t| t.to_string()).collect());
+        let a = spec(list(&["bash", "mcp"]), &[]);
+        assert!(a.allows_tool("mcp__github__create_issue") && a.allows_mcp());
+        assert!(!a.allows_tool("read"));
+        let b = spec(list(&["bash"]), &[]);
+        assert!(!b.allows_tool("mcp__github__create_issue") && !b.allows_mcp());
+        let c = spec(list(&["mcp__github__list"]), &[]);
+        assert!(c.allows_tool("mcp__github__list") && !c.allows_tool("mcp__github__drop"));
+        assert!(c.allows_mcp());
+        let d = spec(ToolSelection::All(AllTools::All), &["mcp"]);
+        assert!(!d.allows_tool("mcp__x__y") && !d.allows_mcp() && d.allows_tool("bash"));
+        // `mcp` is not a tool of its own name only.
+        assert!(!spec(list(&["mcp"]), &[]).allows_tool("mcpx"));
     }
 
     #[test]
