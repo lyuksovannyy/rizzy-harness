@@ -13,6 +13,7 @@ import { buildSearchUrl } from "../lib/searchUrl";
 import { titleFrom } from "../lib/title";
 import { applyAppearance, writeBackdropMirror } from "../lib/appearance";
 import { newlyWaiting, notifyEnabled } from "../lib/notify";
+import { useFinishedSignal } from "../lib/finished";
 import { projectsApi, type ProjectSummary } from "../lib/projects";
 import { useRoutineResults } from "../lib/routineResults";
 import type {
@@ -409,6 +410,7 @@ export function Shell(props: {
   };
 
   const listed = useMemo(() => sessions.filter((x) => !x.incognito && !x.parent_id), [sessions]);
+  useFinishedSignal(loadedSessions ? listed : null, viewing);
   // The Ask wall infers topics from the titles the sidebar lists (untitled
   // chats say nothing), and keeps every chat's title off the wall, the
   // incognito and sub-agent ones the sidebar hides included.

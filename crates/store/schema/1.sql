@@ -394,6 +394,13 @@ CREATE TABLE sessions (
     last_asks  INTEGER NOT NULL DEFAULT 0,
     asks_user  INTEGER NOT NULL DEFAULT 0,
     attention_seq INTEGER NOT NULL DEFAULT 0,
+    -- The running turn was started by the harness (a callback, T.8d): its
+    -- end is signalled by the callback's own attention row instead.
+    turn_callback INTEGER NOT NULL DEFAULT 0,
+    -- The seq of the last turn end worth telling the owner about (a
+    -- top-level chat's turn that completed or failed, did not end with a
+    -- question and was not a callback): "finished, unread" until seen.
+    finished_seq INTEGER NOT NULL DEFAULT 0,
     -- Set when a second writer sent other content under this seq (PLAN.md
     -- §3): every later append is refused until the session is deleted.
     diverged_seq INTEGER

@@ -1304,6 +1304,9 @@ impl NativeBackend {
         // trigger is configured (0 = never summarise).
         let configured = self.config.summarize_after_tokens;
         let limit = compact::threshold(configured, window_of(&model));
+        // For the chat's meter: what this turn's summary check went by.
+        usage.window = window_of(&model);
+        usage.summary_at = Some(limit as u64);
         // Failed or useless summaries this turn; two stop further attempts.
         let mut compact_failures = 0u32;
         let estimate = |events: &[RawEvent]| {
@@ -1600,6 +1603,11 @@ impl NativeBackend {
                         wait_ms = wait.as_millis() as u64,
                         "model call failed; retrying"
                     );
+                    // A failed append cancels the turn, and so the wait.
+                    let of = self.config.retry.retries;
+                    let _ = host
+                        .emit(retry::event(&ctx.turn_id, &model, retries, of, wait, e))
+                        .await;
                     if !retry::wait(wait, &ctx.cancel).await {
                         break (Step::Cancelled, false);
                     }
@@ -2357,6 +2365,10 @@ impl NativeBackend {
                     {
                         retries += 1;
                         tracing::warn!(model = %model, error = %e.log_line(), retry = retries, "model call failed; retrying");
+                        let of = self.config.retry.retries;
+                        let _ = host
+                            .emit(retry::event(&ctx.turn_id, model, retries, of, wait, e))
+                            .await;
                         if !retry::wait(wait, &ctx.cancel).await {
                             break Step::Cancelled;
                         }
@@ -2425,9 +2437,10 @@ impl NativeBackend {
     /// with the same retries as a turn's calls. `Err(None)` when cancelled.
     async fn complete_quietly(
         &self,
+        ctx: &TurnCtx<'_>,
         req: &ChatRequest,
-        cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<Completion, Option<ProviderError>> {
+        let cancel = &ctx.cancel;
         let mut retries = 0;
         loop {
             let (tx, _rx) = mpsc::unbounded_channel();
@@ -2441,6 +2454,18 @@ impl NativeBackend {
                     Some(wait) => {
                         retries += 1;
                         tracing::warn!(model = %req.model, error = %e.log_line(), retry = retries, "summary call failed; retrying");
+                        let of = self.config.retry.retries;
+                        let _ = ctx
+                            .host
+                            .emit(retry::event(
+                                &ctx.turn_id,
+                                &req.model,
+                                retries,
+                                of,
+                                wait,
+                                &e,
+                            ))
+                            .await;
                         if !retry::wait(wait, cancel).await {
                             return Err(None);
                         }
@@ -2551,7 +2576,7 @@ impl NativeBackend {
                 effort: None,
                 cache: false,
             };
-            let c = match self.complete_quietly(&req, &ctx.cancel).await {
+            let c = match self.complete_quietly(ctx, &req).await {
                 Ok(c) => c,
                 Err(e) => {
                     // Cancelled (`None`) is not a failure of compaction.

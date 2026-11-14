@@ -126,6 +126,20 @@ turn's agent and settings: one sent to another agent (the agent picker, or an
 `@mention` of another agent) is refused with the reason, so pick the agent for
 your next message instead.
 
+When a turn completes or fails in a chat you are not looking at (another chat
+is open, or the tab is hidden), the chat gets a dot in **Recent** until you
+open it, and with **Desktop notifications** on (Settings → Account →
+Preferences) the browser says "A chat finished: number N in your recent
+chats", never the chat's title. A sub-agent's chat, a turn the harness
+started after a background command ended (it has its own "resumed" row on
+Home) and an answer that asks you something (it waits for you on Home) do
+not get one; neither does a turn you stopped. The chat header shows the
+context of the last request as a share of the model's window and where older
+turns will be summarised ("62% of 128k · summary at 80%"). Without a known
+window it says **window unknown**: hover it for how to set `context` on the
+model. A sub-agent's card shows what the sub-agent is doing while it works
+(its latest tool call and how many it made) and its tokens once it ended.
+
 Settings → Account → Preferences → **Appearance** picks the theme (System follows the
 operating system; Light and Dark stay put) and the accent colour, one of eight:
 Blue (the default), Purple, Pink, Red, Orange, Yellow, Green and Graphite
@@ -483,7 +497,9 @@ is not retried: the agent's next fallback model answers at once, or without
 one the turn ends with a message naming the wait. A refused key, a missing
 permission, an exhausted quota or a bad request is not retried, and nothing
 is retried once part of the answer is on screen. The chat shows the turn as
-still running while it waits. When a turn's
+still running while it waits, with a line under it naming the model, why
+(rate limit, provider overloaded, provider error, connection failed) and a
+countdown to the next attempt ("attempt 2 of 3"). When a turn's
 model is unavailable, or its request still fails before any output with a model
 problem (not found, rate limit, server error, no connection), the agent's
 fallbacks are tried in order, skipping unavailable ones, and the chat notes

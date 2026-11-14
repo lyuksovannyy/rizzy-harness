@@ -17,6 +17,7 @@ const TOPICS: LiveTopic[] = ["routines", "media", "artifacts"];
 export class Live {
   private ws: WebSocket | null = null;
   private views = new Map<string, SessionView>();
+  private watchers = new Map<string, number>();
   private listeners = new Set<Listener>();
   private topics = new Map<LiveTopic, Set<Listener>>(TOPICS.map((t) => [t, new Set()]));
   private backoff = 500;
@@ -76,7 +77,10 @@ export class Live {
     return this.views.get(sessionId);
   }
 
+  /** Follow a session. Counted: the chat and a sub-agent card may follow
+   * the same one, and the subscription ends with the last `unwatch`. */
   watch(sessionId: string) {
+    this.watchers.set(sessionId, (this.watchers.get(sessionId) ?? 0) + 1);
     if (!this.views.has(sessionId)) {
       this.views.set(sessionId, emptyView());
       this.sendSubscribe(sessionId);
@@ -84,6 +88,12 @@ export class Live {
   }
 
   unwatch(sessionId: string) {
+    const n = (this.watchers.get(sessionId) ?? 1) - 1;
+    if (n > 0) {
+      this.watchers.set(sessionId, n);
+      return;
+    }
+    this.watchers.delete(sessionId);
     if (this.views.delete(sessionId)) {
       this.send({ type: "unsubscribe", session_id: sessionId });
     }

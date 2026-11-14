@@ -379,6 +379,7 @@ impl Provider for LlmProvider {
                             context_tokens: 0,
                             cache_read_tokens: n(d.and_then(|d| d.cached_tokens)),
                             cache_write_tokens: n(d.and_then(|d| d.cache_creation_tokens)),
+                            ..Default::default()
                         });
                     }
                     if let Some(content) = end.captured_content {

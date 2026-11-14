@@ -290,6 +290,28 @@ export interface SessionView {
   background?: Record<string, BackgroundState>;
   /** The agent's task list (the latest `todo_updated`); absent when empty. */
   todo?: TodoItem[];
+  /** A model call waits to be sent again (`model_retry`); absent otherwise. */
+  retry?: ModelRetry;
+  /** The latest turn's limits (`turn_ended.usage`): the window of the model it
+   * started on, and the history size at which the next summary is written
+   * (0: never). Absent when not known. */
+  context_window?: number;
+  summary_at?: number;
+}
+
+export type RetryReason = "rate_limit" | "overloaded" | "server_error" | "network";
+
+export interface ModelRetry {
+  turn_id: string;
+  model: string;
+  /** This retry's number, from 1, of `of`. */
+  attempt: number;
+  of: number;
+  /** When it is sent again (ms since the epoch, on the node's clock)... */
+  at_ms: number;
+  /** ...this long after the event: the most a skewed browser clock shows. */
+  wait_ms: number;
+  reason: RetryReason;
 }
 
 /** One item of the agent's task list: the model's text, one line. */
@@ -321,6 +343,9 @@ export interface Usage {
   /** Of input_tokens, read from / written to the provider's prompt cache. */
   cache_read_tokens?: number;
   cache_write_tokens?: number;
+  /** A turn's own limits (`turn_ended` only, never in the totals). */
+  window?: number;
+  summary_at?: number;
 }
 
 export interface UploadedAttachment {
@@ -625,6 +650,8 @@ export interface SessionRow {
   routine?: RoutineMark | null;
   /** Background commands running in it, as far as the server knows. */
   background?: number;
+  /** Its last turn finished (or failed) after the viewer last looked at it. */
+  unread?: boolean;
 }
 
 /** The routine run behind a chat (`SessionRow.routine`). */

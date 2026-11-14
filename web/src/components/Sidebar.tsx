@@ -367,6 +367,9 @@ export function Sidebar(props: SidebarProps) {
               {!s.running && !!s.background && (
                 <span className="dot background" title={`${s.background} background command(s) running`} />
               )}
+              {!s.running && s.unread && s.session_id !== selectedChat && (
+                <span className="dot unseen" title={t("nav.unread")} aria-label={t("nav.unread")} role="img" />
+              )}
               <span className="ellipsis grow">{shownName(s.title) || t("session.untitled")}</span>
               <ChatProjectMark id={s.project_id} projects={props.projects} />
               {s.profile === "agentic" && <NodeBadge node={nodeById.get(s.node_id)} nodeId={s.node_id} />}
