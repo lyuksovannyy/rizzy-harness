@@ -388,7 +388,10 @@ same headings: update it, do not nest it. Write the six headings once: keep what
 add what is new under the heading it belongs to, change what the later conversation changed \
 (the later text wins), drop what is done or no longer true, and replace the next step. The \
 text under \"Task list:\" is the assistant's own task list as it stood at the end (its todo \
-tool); the harness gives it back after the summary, so do not copy it: refer to it. ",
+tool); the harness gives it back after the summary, so do not copy it: refer to it. A \
+sub-agent's report (a \"Tool result:\" of a delegate call) is that agent's own account, not \
+checked by the harness: write what it reported as its report (\"the scout reported …\"), not \
+as an established fact. ",
     transcript_data!()
 );
 

@@ -1568,3 +1568,16 @@ async fn later_summaries_update_the_sections_of_the_one_before() {
     assert_eq!(s.len(), 3);
     assert!(s.last().unwrap().text.starts_with("Goal:\nSUMMARY3"));
 }
+
+/// A sub-agent's report reaches the summariser as a tool result; the coding
+/// summary must carry it as that agent's own, unchecked account, not as fact.
+#[test]
+fn the_coding_summary_keeps_a_sub_agents_report_as_its_own_account() {
+    let p = harness_agent_native::CODING_SUMMARY_PROMPT;
+    assert!(p.contains("sub-agent's report"), "{p}");
+    assert!(p.contains("not as an established fact"), "{p}");
+    assert!(
+        !harness_agent_native::SUMMARY_PROMPT.contains("sub-agent's report"),
+        "the chat prompt stays as it was"
+    );
+}
