@@ -67,6 +67,11 @@ pub const CUT_BY_OUTPUT_LIMIT: &str = "This tool call was not run: your answer r
      output limit before the call was complete. Split the change into smaller calls (for \
      `write`, write the file in parts or use `edit`).";
 
+/// The result of a call a sub-agent makes on its last step, where only
+/// `finish` runs.
+pub const NOT_RUN_ON_LAST_STEP: &str = "This tool call was not run: this was your last step, \
+     where only `finish` runs.";
+
 /// Messages in a row cut by the output limit after which the turn ends.
 pub const MAX_CUT_STEPS: u32 = 3;
 
@@ -215,8 +220,9 @@ fn finish_spec() -> ToolSpec {
     ToolSpec {
         name: harness_core::subagent::FINISH.into(),
         description: "End your turn and hand your report to the agent that gave you this task: \
-                      the status, what you did and found, and anything left open. Call it \
-                      alone, after your other calls have returned."
+                      the status, what you did and found, and anything left open. Only what \
+                      this call carries, and the text of the message that makes it, reaches \
+                      that agent. Call it alone, after your other calls have returned."
             .into(),
         schema: harness_core::subagent::finish_schema(),
     }
@@ -721,6 +727,7 @@ impl NativeBackend {
                     reason: o.reason,
                     finish: o.finish.as_ref(),
                     text: &o.text,
+                    error: o.error.as_deref(),
                     note: o.note.as_deref(),
                 });
                 (
@@ -1274,6 +1281,7 @@ impl NativeBackend {
                     (None, c) => c.map(str::to_string),
                 };
                 let user_text = match &context {
+                    Some(c) if child => provider::with_task_context(c, &ctx.user_text),
                     Some(c) => provider::with_context(c, &ctx.user_text),
                     None => ctx.user_text.clone(),
                 };
@@ -1353,7 +1361,31 @@ impl NativeBackend {
         // Same call, same result (T.1): this turn's only, never the model's.
         let mut guard = repeat::RepeatGuard::default();
         let mut repeat_stop = false;
-        for _ in 0..max_steps {
+        let cap_error = if max_steps < self.config.max_steps || callback.is_some() {
+            format!(
+                "stopped after {max_steps} steps: a turn nobody started may take no more \
+                 (`callback_max_steps` in node.toml)"
+            )
+        } else {
+            format!("stopped after {max_steps} steps (`max_steps` in node.toml)")
+        };
+        // A sub-agent's last request offers `finish` alone, after the
+        // harness's note, so a child the step cap or the repeated-call
+        // guard cuts off can still report (review SB-1). Holds the end text
+        // the turn has if it does not.
+        let mut last: Option<String> = None;
+        let mut steps = 0usize;
+        loop {
+            if last.is_none() {
+                if steps >= max_steps {
+                    break;
+                }
+                if child && steps + 1 == max_steps {
+                    last = Some(cap_error.clone());
+                    messages.push(ChatMsg::Note(harness_core::subagent::LAST_STEP_NOTE.into()));
+                }
+            }
+            steps += 1;
             let message_id = new_id();
             let mut sent = messages.clone();
             if let Some(k) = keep {
@@ -1362,7 +1394,11 @@ impl NativeBackend {
             let req = ChatRequest {
                 model: model.clone(),
                 messages: provider::place_notes(sent),
-                tools: tools.clone(),
+                tools: if last.is_some() {
+                    vec![finish_spec()]
+                } else {
+                    tools.clone()
+                },
                 // Only for models that take one (a fallback may not).
                 effort: effort.filter(|_| !agent.is_some_and(|a| a.no_effort.contains(&model))),
                 cache: sv.prompt_cache,
@@ -1575,10 +1611,16 @@ impl NativeBackend {
                 tool_calls: completion.tool_calls.clone(),
             });
             if completion.tool_calls.is_empty() {
+                // On a child's last step, an answer without `finish` ends
+                // the turn as the step cap or the guard would have.
                 return TurnOutcome {
-                    reason: TurnEndReason::Completed,
+                    reason: if last.is_some() {
+                        TurnEndReason::Error
+                    } else {
+                        TurnEndReason::Completed
+                    },
                     usage: Some(usage),
-                    error: None,
+                    error: last,
                 };
             }
             // A message cut by the output limit: none of its calls runs,
@@ -1618,6 +1660,13 @@ impl NativeBackend {
                         content: CUT_BY_OUTPUT_LIMIT.into(),
                     });
                 }
+                if let Some(e) = last {
+                    return TurnOutcome {
+                        reason: TurnEndReason::Error,
+                        usage: Some(usage),
+                        error: Some(e),
+                    };
+                }
                 if cut_steps >= MAX_CUT_STEPS {
                     return TurnOutcome {
                         reason: TurnEndReason::Error,
@@ -1651,10 +1700,16 @@ impl NativeBackend {
             for call in finishes {
                 let verdict = if alone {
                     harness_core::subagent::Finish::parse(&call.input).map(|_| ())
-                } else {
+                } else if !rest.is_empty() {
                     Err(
                         "`finish` was not taken: call it alone in a message, after the \
                          results of your other calls."
+                            .to_string(),
+                    )
+                } else {
+                    Err(
+                        "`finish` was not taken: call it once, not several times in one \
+                         message."
                             .to_string(),
                     )
                 };
@@ -1698,6 +1753,43 @@ impl NativeBackend {
                     call_id: call.call_id,
                     content: output,
                 });
+            }
+
+            // A child's last step runs nothing but `finish`: the other
+            // calls are recorded as not run, and the turn ends.
+            if let Some(e) = last {
+                for call in rest {
+                    if host
+                        .emit(EventKind::ToolCallStarted(ToolCallStarted {
+                            author: author.clone(),
+                            turn_id: ctx.turn_id.clone(),
+                            call_id: call.call_id.clone(),
+                            tool: call.tool.clone(),
+                            input: call.input,
+                        }))
+                        .await
+                        .is_err()
+                        || host
+                            .emit(EventKind::ToolCallFinished(ToolCallFinished {
+                                call_id: call.call_id,
+                                ok: false,
+                                output: NOT_RUN_ON_LAST_STEP.into(),
+                                exit_code: None,
+                                truncated: false,
+                                sources: vec![],
+                                note: None,
+                            }))
+                            .await
+                            .is_err()
+                    {
+                        return stopped(usage);
+                    }
+                }
+                return TurnOutcome {
+                    reason: TurnEndReason::Error,
+                    usage: Some(usage),
+                    error: Some(e),
+                };
             }
 
             // Delegations of this step run in parallel, within the caps.
@@ -1972,6 +2064,14 @@ impl NativeBackend {
                 Err(_) => return stopped(usage),
             }
             if repeat_stop {
+                // A child gets one more request, `finish` alone, whatever
+                // the step count (review SB-1).
+                if child && last.is_none() {
+                    repeat_stop = false;
+                    last = Some(repeat::STOP_ERROR.into());
+                    messages.push(ChatMsg::Note(harness_core::subagent::LAST_STEP_NOTE.into()));
+                    continue;
+                }
                 return TurnOutcome {
                     reason: TurnEndReason::Error,
                     usage: Some(usage),
@@ -1982,14 +2082,7 @@ impl NativeBackend {
         TurnOutcome {
             reason: TurnEndReason::Error,
             usage: Some(usage),
-            error: Some(if max_steps < self.config.max_steps || callback.is_some() {
-                format!(
-                    "stopped after {max_steps} steps: a turn nobody started may take no more \
-                     (`callback_max_steps` in node.toml)"
-                )
-            } else {
-                format!("stopped after {max_steps} steps (`max_steps` in node.toml)")
-            }),
+            error: Some(cap_error),
         }
     }
 }
@@ -3213,6 +3306,7 @@ mod tests {
                 usage: out.usage,
                 sources,
                 finish,
+                error: out.error.clone(),
                 note: None,
             })
         }
@@ -3222,9 +3316,11 @@ mod tests {
     /// `steps[k]` (text, calls); past the end it answers `"late"` with no
     /// call. The parent's provider (offered `delegate`) delegates `task` to
     /// `researcher` once, then stops. Keeps every request's tool names and
-    /// system prompt, with whether it was the child's.
+    /// system prompt, with whether it was the child's. A child's request
+    /// that offers `finish` alone is answered with `last`, when set.
     struct Briefed {
         steps: Vec<(&'static str, Vec<(&'static str, Value)>)>,
+        last: Option<(&'static str, Vec<(&'static str, Value)>)>,
         task: String,
         seen: Mutex<Vec<(bool, Vec<String>, String)>>,
     }
@@ -3260,7 +3356,16 @@ mod tests {
                 tool: tool.into(),
                 input,
             };
-            let (text, calls) = if is_parent {
+            let only_finish =
+                req.tools.len() == 1 && req.tools[0].name == harness_core::subagent::FINISH;
+            let (text, calls) = if let (false, true, Some((t, cs))) =
+                (is_parent, only_finish, self.last.as_ref())
+            {
+                (
+                    t.to_string(),
+                    cs.iter().map(|(n, i)| call(n, i.clone())).collect(),
+                )
+            } else if is_parent {
                 if answered {
                     ("parent done".to_string(), vec![])
                 } else {
@@ -3296,10 +3401,20 @@ mod tests {
     async fn briefed(
         steps: Vec<(&'static str, Vec<(&'static str, Value)>)>,
     ) -> (ToolCallFinished, Vec<EventKind>, Arc<Briefed>) {
+        briefed_with(steps, None).await
+    }
+
+    type Step = (&'static str, Vec<(&'static str, Value)>);
+
+    async fn briefed_with(
+        steps: Vec<Step>,
+        last: Option<Step>,
+    ) -> (ToolCallFinished, Vec<EventKind>, Arc<Briefed>) {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), "alpha\n").unwrap();
         let provider = Arc::new(Briefed {
             steps,
+            last,
             task: "look into a.txt".into(),
             seen: Mutex::default(),
         });
@@ -3458,20 +3573,148 @@ mod tests {
                 )
             })
             .collect();
-        let (delegated, ..) = briefed(forever).await;
+        let (delegated, child, p) = briefed(forever).await;
+        // The step cap's own text names why (review SB-1).
         assert!(
             delegated.output.contains(
-                "\nSub-agent @researcher finished: failed (its turn ended: error without a `finish` call). "
+                "\nSub-agent @researcher finished: failed (its turn ended without a `finish` \
+                 call: error: stopped after 50 steps (`max_steps` in node.toml)). "
             ),
             "{}",
             delegated.output
         );
+        // Its last request offered `finish` alone; the read it asked for
+        // there did not run.
+        let seen = p.seen.lock().unwrap();
+        let child_tools: Vec<&Vec<String>> = seen
+            .iter()
+            .filter(|(x, ..)| !x)
+            .map(|(_, t, _)| t)
+            .collect();
+        assert_eq!(child_tools.len(), harness_core::policy::DEFAULT_MAX_STEPS);
+        assert_eq!(
+            child_tools.last().unwrap().as_slice(),
+            &["finish".to_string()]
+        );
+        assert!(child_tools[child_tools.len() - 2].len() > 1);
+        assert!(child.iter().any(|e| matches!(e,
+            EventKind::ToolCallFinished(f) if f.output == NOT_RUN_ON_LAST_STEP)));
         assert!(
             delegated.output.ends_with("\n| working"),
             "{}",
             delegated.output
         );
         assert!(!delegated.ok);
+    }
+
+    /// SB-1: a child the step cap would stop is told on its last step and
+    /// can still report with `finish`, which then decides the status.
+    #[tokio::test]
+    async fn a_child_on_its_last_step_can_still_finish() {
+        let forever: Vec<_> = (0..harness_core::policy::DEFAULT_MAX_STEPS)
+            .map(|i| {
+                (
+                    "",
+                    vec![("read", json!({"path": "a.txt", "offset": i + 1}))],
+                )
+            })
+            .collect();
+        let (delegated, ..) =
+            briefed_with(forever, Some(("", finish("partial", "Read half of it.")))).await;
+        assert!(
+            delegated
+                .output
+                .contains("\nSub-agent @researcher finished: partial. "),
+            "{}",
+            delegated.output
+        );
+        assert!(
+            delegated.output.ends_with("\n| Read half of it."),
+            "{}",
+            delegated.output
+        );
+    }
+
+    /// SB-1: the repeated-call guard's stop also leaves the child one
+    /// request with `finish` alone; without it, the guard's text says why.
+    #[tokio::test]
+    async fn a_child_the_guard_stops_can_still_finish() {
+        let same: Vec<_> = (0..20)
+            .map(|_| ("", vec![("read", json!({"path": "a.txt"}))]))
+            .collect();
+        let (delegated, _, p) = briefed_with(
+            same.clone(),
+            Some(("", finish("failed", "Stuck on a.txt."))),
+        )
+        .await;
+        let child_tools: Vec<Vec<String>> = p
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(x, ..)| !x)
+            .map(|(_, t, _)| t.clone())
+            .collect();
+        assert!(child_tools.len() < 20, "{}", child_tools.len());
+        assert_eq!(
+            child_tools.last().unwrap().as_slice(),
+            &["finish".to_string()]
+        );
+        assert!(
+            delegated
+                .output
+                .contains("\nSub-agent @researcher finished: failed. "),
+            "{}",
+            delegated.output
+        );
+        assert!(
+            delegated.output.ends_with("\n| Stuck on a.txt."),
+            "{}",
+            delegated.output
+        );
+
+        let (delegated, ..) = briefed_with(same, None).await;
+        assert!(
+            delegated.output.contains(&format!(
+                "finished: failed (its turn ended without a `finish` call: error: {})",
+                repeat::STOP_ERROR.trim_end_matches('.')
+            )),
+            "{}",
+            delegated.output
+        );
+    }
+
+    /// SB-6: two `finish` calls in one message are refused with their own
+    /// reason; SB-2: the finishing message's text leads the report.
+    #[tokio::test]
+    async fn two_finishes_are_refused_and_the_finishing_text_is_kept() {
+        let mut two = finish("done", "one");
+        two.extend(finish("done", "two"));
+        let (delegated, child, _) = briefed(vec![
+            ("", two),
+            ("Found alpha in a.txt.", finish("done", "See above.")),
+        ])
+        .await;
+        let refused: Vec<String> = child
+            .iter()
+            .filter_map(|e| match e {
+                EventKind::ToolCallFinished(f) if !f.ok => Some(f.output.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(refused.len(), 2, "{refused:?}");
+        assert!(
+            refused.iter().all(|r| r.contains("call it once")),
+            "{refused:?}"
+        );
+        assert!(
+            delegated
+                .output
+                .ends_with("finished: done. Its own report follows, every line behind \"| \"; \
+                            the harness did not check it.\n| Found alpha in a.txt.\n| \n| See above."),
+            "{}",
+            delegated.output
+        );
     }
 
     /// `finish` beside another call is not taken (the other call runs),

@@ -49,6 +49,7 @@ impl TurnHost for Host {
             usage: None,
             sources: vec![],
             finish: None,
+            error: None,
             note: None,
         })
     }

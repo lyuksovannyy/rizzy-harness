@@ -2135,6 +2135,12 @@ impl Session {
         // Whatever the answer cites, the parent resolves through these.
         let sources = harness_core::refs::sources_in(&log);
         let finish = harness_core::subagent::finish_in(log.iter().filter_map(|e| e.typed().ok()));
+        // Why its turn ended, when it did not complete: the parent can tell
+        // the step cap from the guard or a provider error.
+        let error = log.iter().rev().find_map(|e| match e.typed() {
+            Ok(EventKind::Error(err)) => Some(err.message),
+            _ => None,
+        });
         // The harness's own words, after the child's quoted report.
         let stopped = child
             .log_failed
@@ -2152,6 +2158,7 @@ impl Session {
             usage,
             sources,
             finish,
+            error,
             note,
         })
     }

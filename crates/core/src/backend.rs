@@ -133,6 +133,9 @@ pub struct DelegateOutcome {
     pub sources: Vec<Source>,
     /// The `finish` call that ended its turn, from its log.
     pub finish: Option<crate::subagent::Finish>,
+    /// The turn's own end text (its `error` event: the step cap, the
+    /// repeated-call guard, a provider error), from its log.
+    pub error: Option<String>,
     /// The harness's own note after the report: what became of the child's
     /// changes, or why it stopped.
     pub note: Option<String>,

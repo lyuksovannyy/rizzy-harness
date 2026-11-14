@@ -238,16 +238,36 @@ pub const CONTEXT_LEAD: &str = "[harness] Context for this turn";
 /// line ([`split_context`]). It still says what it says; the line in
 /// front only says whose it is. An empty context adds nothing.
 pub fn with_context(context: &str, text: &str) -> String {
+    framed(
+        context,
+        text,
+        "the person's message",
+        "Their message follows the empty line.",
+    )
+}
+
+/// [`with_context`] for a sub-agent's turn (review SB-4): what follows the
+/// frame is the task from the agent that delegated, not the person's
+/// words; the context is its parent turn's.
+pub fn with_task_context(context: &str, text: &str) -> String {
+    framed(
+        context,
+        text,
+        "the task you were given",
+        "The task from the agent that delegated to you follows the empty line.",
+    )
+}
+
+fn framed(context: &str, text: &str, whose: &str, follows: &str) -> String {
     if context.is_empty() {
         return text.to_string();
     }
     let (quoted, lines) = quote_lines(context);
     format!(
-        "{CONTEXT_LEAD}, not part of the person's message: the {lines} line(s) below, each \
-         starting with \"{OUTPUT_QUOTE}\", are what the harness adds to it, such as the person's \
-         settings, memory recalled for it and, in a project chat, the project's instructions, \
-         facts and board, which other people may have written. Their message follows the \
-         empty line.{quoted}\n\n{text}"
+        "{CONTEXT_LEAD}, not part of {whose}: the {lines} line(s) below, each starting with \
+         \"{OUTPUT_QUOTE}\", are what the harness adds to it, such as the person's settings, \
+         memory recalled for it and, in a project chat, the project's instructions, facts and \
+         board, which other people may have written. {follows}{quoted}\n\n{text}"
     )
 }
 
