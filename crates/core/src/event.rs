@@ -81,6 +81,7 @@ pub enum EventKind {
     BackgroundEnded(BackgroundEnded),
     CallbackRefused(CallbackRefused),
     QueuedDelivered(QueuedDelivered),
+    TodoUpdated(TodoUpdated),
 }
 
 impl EventKind {
@@ -127,6 +128,7 @@ impl EventKind {
             EventKind::BackgroundEnded(_) => "background_ended",
             EventKind::CallbackRefused(_) => "callback_refused",
             EventKind::QueuedDelivered(_) => "queued_delivered",
+            EventKind::TodoUpdated(_) => "todo_updated",
         }
     }
 }
@@ -1054,6 +1056,19 @@ pub struct ArtifactStageFailed {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     pub error: String,
+}
+
+/// The agent replaced its task list (the `todo` tool, [`crate::todo`]):
+/// the whole list, the latest event being the list (`[]` clears it).
+/// Appended by the session's own loop, before the call's
+/// `tool_call_finished`, only for a list the tool accepted. The items are
+/// the model's text.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TodoUpdated {
+    pub turn_id: String,
+    pub call_id: String,
+    #[serde(default)]
+    pub items: Vec<crate::todo::TodoItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

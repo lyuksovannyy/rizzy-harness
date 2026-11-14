@@ -252,6 +252,22 @@ async fn some_available_tools_is_enough_and_none_is_refused() {
     );
 }
 
+/// On an agentic node that offers `remember` but no web tools, Researcher
+/// is still not offered: proposing a memory does none of a task's work, so
+/// it alone makes no delegate available (A.11 holds once nodes register it).
+#[tokio::test]
+async fn memory_alone_does_not_make_a_delegate_available() {
+    let all = vec![researcher(), spec("scout", list(&["read"]))];
+    let (offered, started, outs) =
+        run(&["remember"], vec![], all, "delegate: researcher=ask").await;
+    assert_eq!(offered, ["scout"]);
+    assert_eq!(started, 0, "no child session");
+    assert!(
+        outs[0].starts_with("@researcher was not started"),
+        "{outs:?}"
+    );
+}
+
 /// The node's own `denied_tools` count as "not available there".
 #[tokio::test]
 async fn a_tool_the_node_denies_does_not_count() {

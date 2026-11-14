@@ -172,6 +172,9 @@ pub struct SessionView {
     /// Background commands by id (`background_started`, `_ended`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub background: BTreeMap<String, BackgroundState>,
+    /// The agent's task list: the latest `todo_updated`'s (none: empty).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub todo: Vec<crate::todo::TodoItem>,
 }
 
 /// One background command as the log shows it.
@@ -454,6 +457,7 @@ impl SessionView {
                     },
                 );
             }
+            EventKind::TodoUpdated(t) => self.todo = t.items,
             EventKind::CallbackRefused(r) => self.items.push(Item::CallbackRefused {
                 bg_ids: r.bg_ids,
                 reason: r.reason,

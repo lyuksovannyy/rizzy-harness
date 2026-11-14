@@ -719,11 +719,55 @@
       "ts_ms": 1700000000047
     },
     {
+      "kind": "todo_updated",
+      "payload": {
+        "call_id": "c-plan-1",
+        "items": [
+          {
+            "content": "Read the code",
+            "status": "in_progress"
+          },
+          {
+            "content": "Fix the build",
+            "status": "pending"
+          }
+        ],
+        "turn_id": "t4"
+      },
+      "seq": 49,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000048
+    },
+    {
+      "kind": "todo_updated",
+      "payload": {
+        "call_id": "c-plan-2",
+        "items": [
+          {
+            "content": "Read the code",
+            "status": "done"
+          },
+          {
+            "content": "Fix the build",
+            "status": "in_progress"
+          },
+          {
+            "content": "Run the tests",
+            "status": "pending"
+          }
+        ],
+        "turn_id": "t4"
+      },
+      "seq": 50,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000049
+    },
+    {
       "kind": "from_a_newer_node",
       "payload": {
         "anything": true
       },
-      "seq": 49,
+      "seq": 51,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
       "ts_ms": 0
     }
@@ -753,7 +797,7 @@
       }
     },
     "context_tokens": 1,
-    "head_seq": 49,
+    "head_seq": 51,
     "items": [
       {
         "text": "fix the bug",
@@ -1136,6 +1180,20 @@
     "running_agent": null,
     "running_turn": null,
     "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+    "todo": [
+      {
+        "content": "Read the code",
+        "status": "done"
+      },
+      {
+        "content": "Fix the build",
+        "status": "in_progress"
+      },
+      {
+        "content": "Run the tests",
+        "status": "pending"
+      }
+    ],
     "unknown_events": 1,
     "usage": {
       "context_tokens": 0,

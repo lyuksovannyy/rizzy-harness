@@ -1,0 +1,79 @@
+/* The agent's task list (TodoPanel.tsx), above the composer. A card on the
+   Rizzy Glass tokens, no blur (it sits over the transcript). */
+.todo-panel {
+  margin: 0 auto var(--space-2);
+  width: min(760px, 100%);
+  border: 1px solid var(--hairline);
+  border-left: 3px solid var(--accent-2);
+  border-radius: var(--r-md);
+  background: var(--bg-2);
+  box-shadow: inset 0 1px 0 0 var(--edge-hi), var(--shadow-1);
+  font-size: var(--text-sm);
+}
+.todo-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: 32px;
+  padding: 4px 12px;
+  border: 0;
+  border-radius: var(--r-md);
+  background: none;
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.todo-head:focus-visible {
+  outline: 2px solid var(--accent-fg);
+  outline-offset: -2px;
+}
+.todo-title {
+  flex: none;
+  font-weight: 600;
+}
+.todo-count {
+  flex: none;
+  color: var(--fg-2);
+  font-variant-numeric: tabular-nums;
+}
+.todo-now {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--accent-fg);
+}
+.todo-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0 12px 8px 34px;
+  max-height: 30vh;
+  overflow-y: auto;
+}
+.todo-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: 2px 0;
+}
+.todo-row > svg {
+  flex: none;
+  align-self: center;
+}
+.todo-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.todo-done {
+  color: var(--fg-2);
+}
+.todo-done .todo-text {
+  text-decoration: line-through;
+}
+.todo-in_progress {
+  color: var(--accent-fg);
+  font-weight: 600;
+}
+.todo-pending > svg {
+  color: var(--fg-3);
+}

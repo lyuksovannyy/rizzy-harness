@@ -292,8 +292,8 @@ async fn builtin_delegates_outside_a_repository_by_role() {
     );
 }
 
-/// On an agentic node the web and memory tools are not registered, so
-/// Researcher would run with no tools while the parent believes research
+/// On an agentic node the web tools are not registered (and `remember`
+/// alone does no work), so Researcher would run with no tools while the parent believes research
 /// was done: it is not offered, and a call to it by name starts no session.
 #[tokio::test]
 async fn researcher_is_not_offered_on_a_node_without_its_tools() {

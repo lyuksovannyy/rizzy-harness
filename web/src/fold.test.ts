@@ -29,6 +29,30 @@ describe("fold", () => {
     expect(v.unknown_events).toBe(0);
   });
 
+  it("keeps the latest task list only, and drops a cleared one", () => {
+    const sid = "11111111-1111-1111-1111-111111111111";
+    const ev = (seq: number, items: unknown[]): RawEvent => ({
+      session_id: sid,
+      seq,
+      ts_ms: 0,
+      kind: "todo_updated",
+      payload: { turn_id: "t", call_id: `c${seq}`, items },
+    });
+    const v = fold([
+      ev(1, [{ content: "Read", status: "in_progress" }]),
+      ev(2, [
+        { content: "Read", status: "done" },
+        { content: "Fix", status: "in_progress" },
+      ]),
+    ]);
+    expect(v.todo).toStrictEqual([
+      { content: "Read", status: "done" },
+      { content: "Fix", status: "in_progress" },
+    ]);
+    apply(v, ev(3, []));
+    expect("todo" in v).toBe(false);
+  });
+
   it("rejects duplicates and gaps", () => {
     const events = fixture.events as RawEvent[];
     const v = emptyView();

@@ -229,15 +229,26 @@ impl Provider for Mock {
             context_tokens: 0,
         });
         if let Some(ChatMsg::System(p)) = req.messages.first()
-            && p == crate::SUMMARY_PROMPT
+            && (p == crate::SUMMARY_PROMPT || p == crate::CODING_SUMMARY_PROMPT)
         {
             let n = match req.messages.get(1) {
                 // The transcript's own `User:` lines; a quoted one is text.
                 Some(ChatMsg::User(t)) => t.lines().filter(|l| *l == crate::PART_USER).count(),
                 _ => 0,
             };
+            // An agentic chat's summary under its headings, as a real
+            // model would write it.
+            let text = if p == crate::CODING_SUMMARY_PROMPT {
+                format!(
+                    "Goal:\nThe demo conversation's requests (summary of {n} earlier messages).\n\
+                     Decisions:\nnone\nFiles:\nnone\nCommands and results:\nnone\n\
+                     Open:\nnone\nNext step:\nAnswer the next message."
+                )
+            } else {
+                format!("Summary of {n} earlier messages.")
+            };
             return Ok(Completion {
-                text: format!("Summary of {n} earlier messages."),
+                text,
                 tool_calls: vec![],
                 usage,
                 stop: Default::default(),

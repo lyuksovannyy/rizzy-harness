@@ -6,9 +6,17 @@ use harness_core::agent::UiLevel;
 use harness_core::artifacts::{ArtifactMeta, GitInfo, StagedBy};
 use harness_core::event::*;
 use harness_core::policy::{ApprovalMode, Decision, ExecMode};
+use harness_core::todo::{TodoItem, TodoStatus};
 use harness_core::view::SessionView;
 use harness_core::{RawEvent, SessionId};
 use serde_json::json;
+
+fn todo(content: &str, status: TodoStatus) -> TodoItem {
+    TodoItem {
+        content: content.into(),
+        status,
+    }
+}
 
 /// A streamed message: deltas first, then the final message with its block.
 const STREAMED: [&str; 2] = [
@@ -441,6 +449,24 @@ fn events() -> Vec<RawEvent> {
             bg_ids: vec!["bg-5".into()],
             reason: "3 turns in a row without you (node limit)".into(),
         }),
+        // The agent's task list: each event replaces the whole list.
+        EventKind::TodoUpdated(TodoUpdated {
+            turn_id: "t4".into(),
+            call_id: "c-plan-1".into(),
+            items: vec![
+                todo("Read the code", TodoStatus::InProgress),
+                todo("Fix the build", TodoStatus::Pending),
+            ],
+        }),
+        EventKind::TodoUpdated(TodoUpdated {
+            turn_id: "t4".into(),
+            call_id: "c-plan-2".into(),
+            items: vec![
+                todo("Read the code", TodoStatus::Done),
+                todo("Fix the build", TodoStatus::InProgress),
+                todo("Run the tests", TodoStatus::Pending),
+            ],
+        }),
     ];
     let mut out: Vec<RawEvent> = kinds
         .into_iter()
@@ -568,4 +594,21 @@ fn staged_files_join_their_card_or_stand_alone() {
         .iter()
         .filter(|i| i["type"] == "tool" && i["call_id"] != "c-pub");
     assert!(other_tools.into_iter().all(|t| t.get("staged").is_none()));
+}
+
+/// The view holds the latest task list only, as the last event set it.
+#[test]
+fn the_latest_task_list_is_the_list() {
+    let view = SessionView::fold(&events()).unwrap();
+    assert_eq!(
+        view.todo,
+        vec![
+            todo("Read the code", TodoStatus::Done),
+            todo("Fix the build", TodoStatus::InProgress),
+            todo("Run the tests", TodoStatus::Pending),
+        ]
+    );
+    // No list: nothing serialized, as the web fold leaves it out.
+    let empty = serde_json::to_value(SessionView::default()).unwrap();
+    assert!(empty.get("todo").is_none(), "{empty}");
 }

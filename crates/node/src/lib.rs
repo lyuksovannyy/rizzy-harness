@@ -539,6 +539,13 @@ impl NodeRuntime {
                 capabilities.push(harness_protocol::CAP_ARTIFACTS.into());
             }
             capabilities.push(harness_protocol::CAP_IMAGES.into());
+            // `remember` where this node offers it: registered, and not
+            // refused by its own policy (the master files nothing otherwise).
+            if self.inner.cfg.backend.has_tool("remember")
+                && !self.inner.cfg.policy.denies("remember")
+            {
+                capabilities.push(harness_protocol::CAP_REMEMBER.into());
+            }
             if self.inner.cfg.profile == harness_core::event::Profile::Agentic {
                 // The modes it offers and their gaps (N.10a), as decided at
                 // start.

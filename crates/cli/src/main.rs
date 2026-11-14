@@ -356,6 +356,8 @@ async fn serve(
         NativeConfig {
             secrets: secrets.clone(),
             summarize_after_tokens: cfg.chat.summarize_after_tokens,
+            // The generic summary, not the coding one.
+            coding_summary: false,
             ..Default::default()
         },
     );
@@ -618,13 +620,9 @@ async fn agentic_node(
     // graphify: only if this node's own policy allows it (node.toml).
     let graphify =
         harness_tools::graphify::GraphifyState::new(policy.graphify, dir.join("graphify"));
-    let mut tools = harness_tools::builtin();
-    tools.push(Arc::new(harness_tools::graphify::GraphQuery::new(
-        graphify.clone(),
-    )));
     let backend = NativeBackend::new(
         provider,
-        tools,
+        agentic_tools(&graphify),
         NativeConfig {
             tool_env,
             tool_stream_bytes: policy.limits.tool_stream_bytes,
@@ -641,6 +639,9 @@ async fn agentic_node(
             // spec, for models that take one.
             effort: None,
             summarize_after_tokens: cfg.chat.summarize_after_tokens,
+            // Agentic chats: summarised for coding work (the chat runtime
+            // keeps the generic summary).
+            coding_summary: true,
             ..Default::default()
         },
     );
@@ -662,6 +663,19 @@ async fn agentic_node(
     })
     .await?;
     Ok((rt, graphify))
+}
+
+/// The tools an agentic node registers: the built-in ones, `graph_query`
+/// and `remember` (it runs nothing here: the master files the mirrored call
+/// as a proposal the person confirms; `denied_tools` turns it off). Each
+/// turn offers those its agent allows; node policy still gates every call.
+fn agentic_tools(graphify: &Arc<harness_tools::graphify::GraphifyState>) -> harness_tools::ToolSet {
+    let mut tools = harness_tools::builtin();
+    tools.push(Arc::new(harness_tools::graphify::GraphQuery::new(
+        graphify.clone(),
+    )));
+    tools.push(Arc::new(harness_memory::Remember));
+    tools
 }
 
 /// How the node's own git for checkpoints and sub-agents runs, in words
@@ -1310,5 +1324,21 @@ async fn async_main(cli: Cli, dir: PathBuf, dotenv_names: Vec<String>) -> anyhow
                 },
         } => node_join(&dir, &master_url, &token, &fingerprint).await,
         Cmd::Node { cmd: NodeCmd::Run } => node_run(&dir, &dotenv_names).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A coding chat can propose project facts: agentic nodes register
+    /// `remember` (it runs nothing on the node; the master files the
+    /// mirrored call as a proposal the person confirms).
+    #[test]
+    fn agentic_nodes_register_remember() {
+        let graphify = harness_tools::graphify::GraphifyState::new(false, PathBuf::from("unused"));
+        let names: Vec<&str> = agentic_tools(&graphify).iter().map(|t| t.name()).collect();
+        assert!(names.contains(&"remember"), "{names:?}");
+        assert!(names.contains(&"graph_query"), "{names:?}");
     }
 }

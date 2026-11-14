@@ -1,6 +1,7 @@
 // What Shell hands every area page (Routines, Media, Artifacts), so each
 // page is built in its own files without touching Shell again.
 import type { Live } from "../live";
+import type { AgentDefaults } from "../lib/agentDefaults";
 import type { ProjectSummary } from "../lib/projects";
 import type { MediaFilter, Route } from "../lib/routes";
 import type { Agent, Features, Me, NodeInfo } from "../types";
@@ -23,6 +24,8 @@ export type RoutinesPageProps = FeaturePageProps & {
   agents: Agent[];
   nodes: NodeInfo[];
   projects: ProjectSummary[];
+  /** A new routine's agent per mode until one is picked. */
+  agentDefaults: AgentDefaults;
 };
 
 export type MediaPageProps = FeaturePageProps & {

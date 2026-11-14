@@ -13,6 +13,7 @@ import type { History } from "../bg/topics";
 import { readBackdropMirror } from "../lib/appearance";
 import { useFeatures } from "../lib/features";
 import { MEMORY_HASH } from "../lib/routes";
+import { useNewChatAgent, type AgentDefaults } from "../lib/agentDefaults";
 
 // The mode backgrounds load on their own, and not at all when turned off.
 const Backdrop = lazy(() => import("../bg/Backdrop"));
@@ -24,7 +25,8 @@ export function Home(props: {
   username: string;
   timeZone?: string | null;
   agents: Agent[];
-  defaultAgent: string;
+  /** The new chat's agent per mode when none is picked. */
+  agentDefaults: AgentDefaults;
   models: ModelInfo[];
   workers: NodeInfo[];
   prefs: Prefs | null;
@@ -57,12 +59,14 @@ export function Home(props: {
   // they type.
   const [bgMode, setBgMode] = useState<Mode>("ask");
   const settle = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const { agentId, pick, onMode } = useNewChatAgent(props.agentDefaults);
   const onModeChange = useCallback((mode: Mode, by: "user" | "auto") => {
+    onMode(mode);
     if (settle.current) clearTimeout(settle.current);
     settle.current = null;
     if (by === "user") setBgMode(mode);
     else settle.current = setTimeout(() => setBgMode(mode), AUTO_SETTLE_MS);
-  }, []);
+  }, [onMode]);
   useEffect(() => () => {
     if (settle.current) clearTimeout(settle.current);
   }, []);
@@ -72,8 +76,6 @@ export function Home(props: {
   const vision = !!useFeatures(props.workspace)?.media.vision_images;
   const backdrop = props.prefs ? (props.prefs.backdrop ?? "animated") : mirror;
   const similar = useRef<SimilarHandle>(null);
-  const [agentId, setAgentId] = useState(props.defaultAgent);
-  useEffect(() => setAgentId(props.defaultAgent), [props.defaultAgent]);
   // Re-render the greeting if the page stays open across a time bucket.
   const [now, setNow] = useState(() => new Date());
   useEffect(() => {
@@ -103,7 +105,7 @@ export function Home(props: {
           models={props.models}
           workers={props.workers}
           agentId={agentId}
-          onAgentChange={setAgentId}
+          onAgentChange={pick}
           defaultModel={props.prefs?.default_model}
           agenticBlocked={props.agenticBlocked}
           hostRight={props.hostRight}

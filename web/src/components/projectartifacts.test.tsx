@@ -73,7 +73,7 @@ async function show() {
         memoryVersion={0}
         chats={[]}
         agents={[]}
-        defaultAgent=""
+        agentDefaults={{ chat: "", agentic: null }}
         models={[]}
         workers={[]}
         nodes={[]}

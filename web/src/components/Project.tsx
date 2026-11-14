@@ -27,6 +27,7 @@ import { Composer, type Submission } from "./Composer";
 import { ACCENTS } from "./forms";
 import { LinkedA } from "./Linked";
 import { shownName } from "../md/hiddenChars";
+import { useNewChatAgent, type AgentDefaults } from "../lib/agentDefaults";
 
 // Artifacts has no route of its own (lib/routes.ts): the tab is this page's.
 type Tab = ProjectTab | "artifacts";
@@ -51,7 +52,8 @@ export default function Project(props: {
   /** The caller's listed chats. */
   chats: SessionRow[];
   agents: Agent[];
-  defaultAgent: string;
+  /** The new chat's agent per mode when none is picked. */
+  agentDefaults: AgentDefaults;
   models: ModelInfo[];
   workers: NodeInfo[];
   nodes: NodeInfo[];
@@ -73,9 +75,9 @@ export default function Project(props: {
   useEffect(() => {
     if (props.tab) setTab(props.tab);
   }, [props.tab]);
-  const [agentId, setAgentId] = useState(props.defaultAgent);
-  // The default follows the preferences, which may arrive after this page.
-  useEffect(() => setAgentId(props.defaultAgent), [props.defaultAgent]);
+  // The default follows the mode and the preferences (which may arrive
+  // after this page) until the person picks an agent.
+  const { agentId, pick, onMode } = useNewChatAgent(props.agentDefaults);
   const { id, version } = props;
   // What the server offers here: the Artifacts tab, and images on the bar.
   const features = useFeatures(props.workspaceId, id !== "new");
@@ -123,7 +125,8 @@ export default function Project(props: {
           models={props.models}
           workers={props.workers}
           agentId={agentId}
-          onAgentChange={setAgentId}
+          onAgentChange={pick}
+          onModeChange={onMode}
           defaultModel={props.prefs?.default_model}
           agenticBlocked={props.agenticBlocked}
           onSubmit={(s) => props.onSubmit(s, project.project_id)}

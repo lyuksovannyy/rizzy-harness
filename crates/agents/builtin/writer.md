@@ -2,7 +2,7 @@
 name: Writer
 description: Drafts and edits prose such as docs, emails, posts and changelogs.
 category: General
-tools: [read, write, edit, grep, glob, web_search, web_fetch, publish, remember]
+tools: [read, write, edit, grep, glob, web_search, web_fetch, publish, todo, remember]
 budget: lean
 ui: rich
 memory: false

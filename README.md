@@ -544,6 +544,33 @@ away (nothing is logged, the history stays as it was). After two failed or
 useless summaries in one turn, the turn does not try again; if the context
 then does not fit, the error says summarising was tried and did not help.
 
+In agentic chats the summary is written for coding work, under six plain-text
+headings: **Goal** (what you asked for, in your words where possible),
+**Decisions** (and why), **Files** (each path changed or important, with what
+changed), **Commands and results** (builds and tests run, what passed or
+failed), **Open** (what is not done, errors not yet fixed) and **Next step**,
+up to about 1,000 words. The agent's task list is given back on its own, so the
+summary refers to it rather than copying it. A later summary updates these
+sections rather than nesting the earlier one, so the shape holds however often
+a long chat is summarised. Chat-profile chats keep a shorter general summary
+(at most 300 words). The two newest turns are kept as they are. The latest
+summary is shown, collapsed, where it was made in the chat.
+
+In agentic chats the agent keeps its own task list with the `todo` tool
+(Software Developer, Senior Teamlead, Writer, custom agents that edit files
+or run commands, and agents with `tools: all`; add `todo` to a file agent's
+`tools` to give it one). Each call replaces the whole list: at most 50 items
+of one line (200 characters), each `pending`, `in_progress` or `done`, at
+most one in progress. The list is stored in the chat's log, so it survives
+summarising, a node restart and a reload; it is pinned above the composer,
+collapsed when every item is done or no turn is running, and after older turns
+are summarised the agent is given the list again with the summary. It writes
+only the chat's own log, so no approval mode asks about it, `ask_all`
+included (a node can still refuse it with `denied_tools = ["todo"]`). A
+sub-agent keeps its own list in its own session. A new Agentic chat starts
+with the Agentic default agent (your `default_agentic_agent`, else the
+workspace's, else the Software Developer), not the chat default.
+
 Memories are proposed by the assistant during chats and used only after you
 confirm them under Settings → Account → Memory.
 
@@ -1438,14 +1465,22 @@ admins manage projects; every member sees them and works in them with their
 own chats. Start chats from the project's page, or add a chat from its header's
 project picker. Every message in a project's chats gets, after the history:
 the project's **instructions** (Settings tab, up to 4,000 characters), the
-project **memory** recalled for that message, and the open cards of its
-**board**. That context is sent quoted under a line the harness writes, in
+project's confirmed **memory**, and the open cards of its **board**. Memory
+comes whole, newest first, up to about 4,000 characters, so "continue" in a
+new chat still knows the project's decisions; past that, the newest that fit,
+the older facts that match your message, and a line saying how many were left
+out. That context is sent quoted under a line the harness writes, in
 front of your message: a card title or an instruction another member wrote
 can say anything, but it cannot pose as your message (a model may still be
 swayed by what it reads), and a link that is only in it is not fetched on its
 say-so. The model proposes project facts with `remember` (scope
-`project`); a proposal shows only to the owner of the chat it came from until
-they keep it on the project's Memory tab. Keeping your personal memory out of
+`project`), in chats and in Agentic chats alike; a proposal shows only to the
+owner of the chat it came from until they keep it on the project's Memory tab.
+Every node offers `remember` (it runs nothing on the node: the server files
+the call as a proposal); `denied_tools = ["remember"]` in a node's
+`node.toml` turns it off there, and the server then files nothing from that
+node. The model is told about `remember` only where the chat's node offers
+it. Keeping your personal memory out of
 a team workspace leaves its projects' memory in. Agentic chats started in a project
 take its default node and folder. Temporary chats cannot join a project.
 Design and open questions: [docs/projects.md](docs/projects.md).
@@ -1833,8 +1868,8 @@ The built-in agents, grouped by category in the picker:
 | Scout (`@scout`) | IT | sub-agent | read and search files only |
 | Reviewer (`@reviewer`) | IT | agent, sub-agent | read and search files; project memory |
 
-**Researcher in Agentic sessions.** Web and memory tools exist only in chats,
-not on nodes yet. In an Agentic session, Researcher is therefore not offered
+**Researcher in Agentic sessions.** Web tools exist only in chats, not on
+nodes yet (nodes have `remember`, which alone does none of a task's work). In an Agentic session, Researcher is therefore not offered
 to the Senior Teamlead or Software Developer as a sub-agent, and a delegation
 to it by name is refused with the reason, so the lead never believes research
 was done that was not. The rule is general: any sub-agent that lists tools

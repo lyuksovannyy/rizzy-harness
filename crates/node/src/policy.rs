@@ -311,6 +311,11 @@ pub enum PolicyError {
 }
 
 impl NodePolicy {
+    /// Whether `denied_tools` refuses `tool` outright.
+    pub fn denies(&self, tool: &str) -> bool {
+        self.denied_tools.iter().any(|t| t == tool)
+    }
+
     /// Load `node.toml`; a missing file means defaults.
     pub fn load(path: &Path) -> Result<Self, PolicyError> {
         let p: Self = match std::fs::read_to_string(path) {
@@ -821,6 +826,7 @@ mod tests {
         let p = NodePolicy::load(&f).unwrap();
         assert_eq!(p.max_approval_mode, ApprovalMode::Auto);
         assert_eq!(p.denied_tools, vec!["bash".to_string()]);
+        assert!(p.denies("bash") && !p.denies("bas") && !p.denies("read"));
         std::fs::write(&f, "max_aproval_mode = \"auto\"\n").unwrap();
         assert!(NodePolicy::load(&f).is_err());
         std::fs::write(&f, "[artifacts]\nmax_mb = 5\ndeny_globs = [\"*.sqlite\"]\n").unwrap();

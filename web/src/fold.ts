@@ -1,5 +1,5 @@
 // Port of crates/core/src/view.rs. The shared fixture test keeps them equal.
-import type { Item, RawEvent, SessionView, StagedArtifact } from "./types";
+import type { Item, RawEvent, SessionView, StagedArtifact, TodoItem } from "./types";
 
 export function emptyView(): SessionView {
   return {
@@ -45,6 +45,7 @@ const KNOWN = new Set([
   "background_ended",
   "callback_refused",
   "queued_delivered",
+  "todo_updated",
 ]);
 
 function lastTool(v: SessionView, callId: string): Extract<Item, { type: "tool" }> | undefined {
@@ -288,6 +289,13 @@ export function apply(v: SessionView, e: RawEvent): void {
         ran_ms: p.ran_ms,
         tail: p.tail ?? "",
       });
+      break;
+    }
+    case "todo_updated": {
+      // The whole list each time; an empty one is no list (serde omits it).
+      const items = Array.isArray(p.items) ? p.items : [];
+      if (items.length) v.todo = items.map((i: { content: string; status: TodoItem["status"] }) => ({ content: i.content, status: i.status }));
+      else delete v.todo;
       break;
     }
     case "artifact_stage_failed":

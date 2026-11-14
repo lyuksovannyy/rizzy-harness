@@ -153,7 +153,10 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-async function show(id: string | null, opts: { tab?: "runs"; webhooks?: boolean; projects?: ProjectSummary[] } = {}) {
+async function show(
+  id: string | null,
+  opts: { tab?: "runs"; webhooks?: boolean; projects?: ProjectSummary[]; agentDefaults?: { chat: string; agentic: string | null } } = {},
+) {
   await act(async () =>
     root.render(
       <Routines
@@ -167,6 +170,7 @@ async function show(id: string | null, opts: { tab?: "runs"; webhooks?: boolean;
         agents={AGENTS}
         nodes={NODES}
         projects={opts.projects ?? []}
+        agentDefaults={opts.agentDefaults ?? { chat: "general", agentic: "coder" }}
       />,
     ),
   );
@@ -309,6 +313,33 @@ describe("editor", () => {
     act(() => radio("Approvals", "Ask before every tool").click());
     await act(async () => button("Create routine")!.click());
     expect(routinesApi.create.mock.calls[0]![0].spec).toMatchObject({ profile: "agentic", node_id: "n1", cwd: "/src/app", approval_mode: "ask_all" });
+  });
+
+  // TD-1: a blank draft follows the mode's default agent until one is picked.
+  test("switched to Agentic, a blank draft takes the Agentic default; a picked agent stays", async () => {
+    routinesApi.list.mockResolvedValue(LIST());
+    routinesApi.create.mockResolvedValue({ routine: routine(), secrets: {} });
+    await show("new");
+    const agentButton = () => host.querySelector<HTMLButtonElement>('button[aria-label^="Agent: "]')!;
+    expect(agentButton().getAttribute("aria-label")).toBe("Agent: General");
+    act(() => radio("Runs as", "Agentic").click());
+    expect(agentButton().getAttribute("aria-label")).toBe("Agent: Coder");
+    act(() => radio("Runs as", "Chat").click());
+    expect(agentButton().getAttribute("aria-label")).toBe("Agent: General");
+    act(() => radio("Runs as", "Agentic").click());
+    type(host.querySelector<HTMLInputElement>("form input")!, "Check");
+    type(host.querySelector<HTMLInputElement>('input[placeholder="/home/me/project"]')!, "/src/app");
+    await act(async () => button("Create routine")!.click());
+    expect(routinesApi.create.mock.calls[0]![0].spec).toMatchObject({ profile: "agentic", agent_id: "coder" });
+
+    // Picked first: switching the mode leaves the pick alone.
+    act(() => root.unmount());
+    root = createRoot(host);
+    await show("new");
+    act(() => agentButton().click());
+    act(() => [...host.querySelectorAll<HTMLElement>('[role="option"]')].find((o) => o.textContent?.includes("General"))!.click());
+    act(() => radio("Runs as", "Agentic").click());
+    expect(agentButton().getAttribute("aria-label")).toBe("Agent: General");
   });
 
   test("the webhook choice shows only where the server takes webhooks, and saves one webhook", async () => {

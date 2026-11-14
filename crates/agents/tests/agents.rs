@@ -16,6 +16,7 @@ const ALL_TOOLS: &[&str] = &[
     "outline",
     "graph_query",
     "publish",
+    "todo",
     "web_search",
     "web_fetch",
     "remember",
@@ -38,6 +39,7 @@ fn builtin_roster_is_exactly_the_table() {
         "outline",
         "graph_query",
         "publish",
+        "todo",
         "web_search",
         "web_fetch",
         "remember",
@@ -125,6 +127,7 @@ fn builtin_roster_is_exactly_the_table() {
                 "web_search",
                 "web_fetch",
                 "publish",
+                "todo",
                 "remember",
             ],
             user_facts: false,
@@ -705,4 +708,21 @@ fn custom_agents_from_before_the_labels_still_read() {
     )
     .unwrap();
     assert!(c.aliases.is_empty() && c.category.is_none());
+}
+
+/// The task list comes with the switches that build things, as `publish`
+/// does: a custom agent that edits or runs commands keeps a plan.
+#[test]
+fn agents_that_build_get_the_task_list() {
+    let with = |edit_files: bool, commands: bool| {
+        harness_agents::Features {
+            edit_files,
+            commands,
+            ..features()
+        }
+        .tools()
+    };
+    assert!(with(true, false).iter().any(|t| t == "todo"));
+    assert!(with(false, true).iter().any(|t| t == "todo"));
+    assert!(!with(false, false).iter().any(|t| t == "todo"));
 }
