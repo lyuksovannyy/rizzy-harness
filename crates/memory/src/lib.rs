@@ -195,7 +195,9 @@ fn key_shaped(w: &str) -> bool {
     if n >= 16 && KEY_PREFIXES.iter().any(|p| lower.starts_with(p)) {
         return true;
     }
-    let symbols_ok = w.chars().all(|c| c.is_ascii_alphanumeric() || "-_/+=".contains(c));
+    let symbols_ok = w
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "-_/+=".contains(c));
     n >= 20
         && symbols_ok
         && w.chars().any(|c| c.is_ascii_uppercase())
@@ -243,7 +245,9 @@ pub fn looks_secret(t: &str) -> bool {
         let value = if matches!(bare_word(&w), "is" | "are" | "was") {
             after(i + 1)
         } else if let Some((_, v)) = raw.split_once('=') {
-            Some(bare_word(v)).filter(|v| !v.is_empty()).or_else(|| after(i + 1))
+            Some(bare_word(v))
+                .filter(|v| !v.is_empty())
+                .or_else(|| after(i + 1))
         } else if raw.ends_with(':') {
             after(i + 1)
         } else if let Some((_, v)) = raw.split_once(':') {

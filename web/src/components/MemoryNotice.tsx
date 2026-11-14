@@ -10,7 +10,7 @@ import { useEffect, useState } from "react";
 import { pageApi } from "../apiPages";
 import { MEMORY_HASH } from "../lib/routes";
 import { showHidden } from "../md/hidden";
-import { rt } from "../md/strings";
+import { type RichKey, rt } from "../md/strings";
 import type { MemoryCallState } from "../types";
 
 const quote = (t: string) => <span className="memory-fact">“{showHidden(t.trim())}”</span>;
@@ -45,20 +45,25 @@ export function MemoryNotice({
   useEffect(() => {
     if (!sessionId || !callId) return;
     let live = true;
-    const timer = setTimeout(
-      () =>
-        void pageApi
-          .memoryCall(sessionId, callId)
-          .then((v) => {
-            if (!live) return;
-            setSt(v);
-            if (v.state === "waiting" && tries < RETRIES) setTries((n) => n + 1);
-          })
-          .catch(() => {
-            if (live && tries < RETRIES) setTries((n) => n + 1);
-          }),
-      tries === 0 ? 0 : RETRY_MS,
-    );
+    const ask = () =>
+      void pageApi
+        .memoryCall(sessionId, callId)
+        .then((v) => {
+          if (!live) return;
+          setSt(v);
+          if (v.state === "waiting" && tries < RETRIES) setTries((n) => n + 1);
+        })
+        .catch(() => {
+          if (live && tries < RETRIES) setTries((n) => n + 1);
+        });
+    // The first ask at once; a repeat after a pause.
+    if (tries === 0) {
+      ask();
+      return () => {
+        live = false;
+      };
+    }
+    const timer = setTimeout(ask, RETRY_MS);
     return () => {
       live = false;
       clearTimeout(timer);
@@ -94,7 +99,9 @@ export function MemoryNotice({
     </a>
   );
 
-  const fact = st?.fact?.text ?? text;
+  const fact = st?.fact?.text ?? st?.text ?? text;
+  const where = (user: RichKey, here: RichKey, project: RichKey) =>
+    rt(st?.place === "project" ? project : st?.place === "workspace" ? here : user);
   const old = st?.target?.text;
   const isForget = st ? !!st.forget : !!forget;
   let head: React.ReactNode;
@@ -103,11 +110,11 @@ export function MemoryNotice({
     case "saved":
       head = old ? (
         <>
-          {rt(st.place === "workspace" ? "memory.replacedHere" : "memory.replaced")} {quote(old)} → {quote(fact)}
+          {where("memory.replaced", "memory.replacedHere", "memory.replacedProject")} {quote(old)} → {quote(fact)}
         </>
       ) : (
         <>
-          {rt(st.place === "workspace" ? "memory.savedHere" : "memory.saved")} {quote(fact)}
+          {where("memory.saved", "memory.savedHere", "memory.savedProject")} {quote(fact)}
         </>
       );
       foot = (
@@ -119,7 +126,7 @@ export function MemoryNotice({
     case "forgot":
       head = (
         <>
-          {rt("memory.forgot")} {quote(old ?? "")}
+          {where("memory.forgot", "memory.forgot", "memory.forgotProject")} {quote(old ?? "")}
         </>
       );
       foot = button("undo");
@@ -138,11 +145,16 @@ export function MemoryNotice({
           {rt(st.place === "workspace" ? "memory.wantsHere" : "memory.wants")} {quote(fact)}
         </>
       );
-      foot = (
-        <>
-          {rt("memory.waitingHint")} {button("keep", true)} · {button("dismiss")}
-        </>
-      );
+      foot =
+        st.keep === false ? (
+          <>
+            {rt("memory.forManager")} {button("dismiss")}
+          </>
+        ) : (
+          <>
+            {rt("memory.waitingHint")} {button("keep", true)} · {button("dismiss")}
+          </>
+        );
       break;
     case "kept":
       head = (

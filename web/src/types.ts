@@ -796,7 +796,12 @@ export interface MemoryCallState {
     | "gone"
     | "waiting"
     | "project";
-  place?: "user" | "workspace";
+  place?: "user" | "workspace" | "project";
+  /** False: the person may not change this project fact; it waits for a
+   * project manager (Dismiss only). */
+  keep?: boolean;
+  /** The text the call asked for (shown when nothing was filed). */
+  text?: string | null;
   /** The fact the call added. */
   fact?: MemoryFact | null;
   /** The fact it replaces or forgets. */

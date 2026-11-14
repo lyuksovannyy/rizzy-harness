@@ -154,6 +154,14 @@ pub struct CallRecord {
     /// Why it was refused.
     #[serde(default)]
     pub why: Option<String>,
+    /// Whether the chat's owner may Keep it (a project fact they may not
+    /// change waits for a project manager: Dismiss only).
+    #[serde(default = "yes")]
+    pub keep: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -262,7 +270,7 @@ fn one_line(t: &str) -> String {
 }
 
 /// The line a turn reads for `f`.
-fn rendered(f: &Fact) -> String {
+pub(crate) fn rendered(f: &Fact) -> String {
     let mark = if kept_in(f).is_some() {
         "(here only) "
     } else {
@@ -323,12 +331,7 @@ pub async fn file(m: &Master, node_id: &str, e: &RawEvent) {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
-    match m
-        .inner
-        .mirror
-        .call(move |s| s.turn_cause(sid, &turn))
-        .await
-    {
+    match m.inner.mirror.call(move |s| s.turn_cause(sid, &turn)).await {
         Ok(Some(false)) => {}
         _ => return,
     }
@@ -341,28 +344,24 @@ pub async fn file(m: &Master, node_id: &str, e: &RawEvent) {
     if call_record(m, sid, call_id).await.is_some() {
         return; // already filed (a replay)
     }
+    let allowed = projects::turn_memory(m, &row).await;
+    if input.get("replaces").is_some() || input.get("forget").is_some() {
+        change(m, &*mem, &row, call_id, &input, allowed).await;
+        return;
+    }
     let text = input.get("text").and_then(|v| v.as_str());
-    let kind = match input.get("kind").and_then(|v| v.as_str()) {
-        Some("preference") => harness_memory::FactKind::Preference,
-        Some("location") => harness_memory::FactKind::Location,
-        _ => harness_memory::FactKind::Fact,
-    };
-    // What the turn that made the call may write (`Master::prompt` decided
-    // it). A project fact goes to the chat's project, if it has one and
-    // project memory is on; otherwise it is the owner's, if personal memory
-    // is. A call that names no scope where the agent's own memory is off
-    // (the Software Developer) and only project memory is on is filed as a
+    let kind = kind_of(&input);
+    // A project fact goes to the chat's project, if it has one and project
+    // memory is on; otherwise it is the owner's, if personal memory is. A
+    // call that names no scope where the agent's own memory is off (the
+    // Software Developer) and only project memory is on is filed as a
     // project proposal, not dropped while the chat says it was proposed
     // (review MC-1). Not where the member keeps their memory out of the
     // workspace: a personal fact must not head for a shared project
     // because they did.
-    let allowed = projects::turn_memory(m, &row).await;
     let project = match input.get("scope").and_then(|v| v.as_str()) {
         Some("project") if allowed.project => projects::proposal_owner(m, &row).await,
-        None if allowed.project
-            && !allowed.personal
-            && workspaces::uses_memory(m, &row).await =>
-        {
+        None if allowed.project && !allowed.personal && workspaces::uses_memory(m, &row).await => {
             projects::proposal_owner(m, &row).await
         }
         _ => None,
@@ -408,137 +407,26 @@ pub async fn file(m: &Master, node_id: &str, e: &RawEvent) {
         }
         return;
     };
-    let shown = text.map(one_line).unwrap_or_default();
-    let refuse = async |why: &str| {
-        set_record(
-            m,
-            sid,
-            call_id,
-            &CallRecord {
-                state: CallState::Refused,
-                added: None,
-                target: None,
-                retired: false,
-                why: Some(why.to_string()),
-            },
-        )
-        .await;
-        let what = if shown.is_empty() {
-            String::new()
-        } else {
-            format!(" \"{shown}\"")
-        };
-        m.inner
-            .notes
-            .add(sid, call_id, format!("[harness] Not saved{what}: {why}."));
-    };
-    let home = is_personal_of(m, &ws, &user).await;
-    let here = member_owner(&ws, &user);
-    let mut at_once = saves_without_a_click(m, &row, allowed).await;
-    // Replace or forget: only the person's own facts in their Personal
-    // workspace, from either place there; never a project's or anyone
-    // else's, and never in a team (where saving waits for a yes).
-    let target_id = input
-        .get("replaces")
-        .or_else(|| input.get("forget"))
-        .and_then(|v| v.as_str());
-    let target = match target_id {
-        None => None,
-        Some(_) if !home => {
-            refuse("facts are replaced or forgotten only in the Personal workspace").await;
-            return;
-        }
-        Some(id) => match mem.get(id).await {
-            Ok(Some(f))
-                if f.status != Status::Retired
-                    && (f.owner_id.as_deref() == Some(user.as_str())
-                        || f.owner_id.as_deref() == Some(here.as_str())) =>
-            {
-                Some(f)
-            }
-            _ => {
-                refuse("no fact of yours here has that id").await;
-                return;
-            }
-        },
-    };
-    // A fact the person wrote themselves is changed only with their Keep
-    // (review M7).
-    if target.as_ref().is_some_and(|f| !model_saved(f)) {
-        at_once = false;
-    }
-    let forget_only = text.is_none() && input.get("forget").is_some();
-    if forget_only {
-        let Some(f) = target else { return };
-        if at_once {
-            retire(m, &*mem, &f).await;
-        } else {
-            m.inner.notes.add(
-                sid,
-                call_id,
-                format!(
-                    "[harness] Waiting for the person to confirm forgetting \"{}\".",
-                    one_line(&f.text)
-                ),
-            );
-        }
-        set_record(
-            m,
-            sid,
-            call_id,
-            &CallRecord {
-                state: if at_once {
-                    CallState::Saved
-                } else {
-                    CallState::Pending
-                },
-                added: None,
-                target: Some(f.id.clone()),
-                retired: at_once,
-                why: None,
-            },
-        )
-        .await;
-        let _ = m.inner.live.send(Live::MemoryChanged);
-        return;
-    }
     let Some(t) = text else { return };
     let t = one_line(t);
-    // A correction stays where the fact it corrects lives: a fact kept in
-    // a workspace is never widened to the person's own facts by the model;
-    // only the person moves it (review M2). `sensitive` can only narrow.
-    let owner = match &target {
-        Some(f) if kept_in(f).is_some() => here.clone(),
-        _ if input.get("sensitive").and_then(|v| v.as_bool()) == Some(true) => here.clone(),
-        _ => user.clone(),
+    let at_once = saves_without_a_click(m, &row, allowed).await;
+    let owner = if input.get("sensitive").and_then(|v| v.as_bool()) == Some(true) {
+        member_owner(&ws, &user)
+    } else {
+        user.clone()
     };
-    if at_once {
-        let used = model_used(&*mem, &row, target.as_ref().map(|f| f.id.as_str())).await;
-        // The new line as a turn would read it (an id is 32 characters).
-        let probe = Fact {
-            id: "0".repeat(32),
-            owner_id: Some(owner.clone()),
-            text: t.clone(),
-            kind,
-            status: Status::Active,
-            source_session: Some(sid),
-            created_ms: 0,
-            updated_ms: 0,
-        };
-        let new = cost(&probe);
-        if used + new > CARRIED_CHARS {
-            refuse(&format!(
-                "memory is full ({used} of {CARRIED_CHARS} characters of facts you saved): \
-                 replace or forget some of them first"
-            ))
-            .await;
-            return;
-        }
+    if at_once && let Err(why) = cap_check(&*mem, &row, None, &owner, &t, kind, sid).await {
+        refuse(m, sid, call_id, &t, &why).await;
+        return;
     }
-    let res = mem
-        .add(NewFact {
+    save(
+        m,
+        &*mem,
+        sid,
+        call_id,
+        NewFact {
             owner_id: Some(owner),
-            text: t.clone(),
+            text: t,
             kind,
             status: if at_once {
                 Status::Active
@@ -547,19 +435,99 @@ pub async fn file(m: &Master, node_id: &str, e: &RawEvent) {
             },
             source_session: Some(sid),
             dedupe_key: dedupe,
-        })
-        .await;
-    match res {
-        Ok(Some(f)) => {
-            let retired = match (&target, at_once) {
-                (Some(old), true) => {
-                    retire(m, &*mem, old).await;
-                    true
-                }
-                _ => false,
-            };
+        },
+        None,
+        at_once,
+        true,
+    )
+    .await;
+}
+
+fn kind_of(input: &Value) -> harness_memory::FactKind {
+    match input.get("kind").and_then(|v| v.as_str()) {
+        Some("preference") => harness_memory::FactKind::Preference,
+        Some("location") => harness_memory::FactKind::Location,
+        _ => harness_memory::FactKind::Fact,
+    }
+}
+
+async fn refuse(m: &Master, sid: SessionId, call_id: &str, shown: &str, why: &str) {
+    set_record(
+        m,
+        sid,
+        call_id,
+        &CallRecord {
+            state: CallState::Refused,
+            added: None,
+            target: None,
+            retired: false,
+            why: Some(why.to_string()),
+            keep: true,
+        },
+    )
+    .await;
+    let what = if shown.is_empty() {
+        String::new()
+    } else {
+        format!(" \"{shown}\"")
+    };
+    m.inner
+        .notes
+        .add(sid, call_id, format!("[harness] Not saved{what}: {why}."));
+}
+
+/// The cap on the model's saves (`CARRIED_CHARS`): `Err` says how full.
+async fn cap_check(
+    mem: &dyn MemoryStore,
+    row: &SessionRow,
+    replacing: Option<&str>,
+    owner: &str,
+    t: &str,
+    kind: harness_memory::FactKind,
+    sid: SessionId,
+) -> Result<(), String> {
+    let used = model_used(mem, row, replacing).await;
+    // The new line as a turn would read it (an id is 32 characters).
+    let probe = Fact {
+        id: "0".repeat(32),
+        owner_id: Some(owner.to_string()),
+        text: t.to_string(),
+        kind,
+        status: Status::Active,
+        source_session: Some(sid),
+        created_ms: 0,
+        updated_ms: 0,
+    };
+    if used + cost(&probe) > CARRIED_CHARS {
+        return Err(format!(
+            "memory is full ({used} of {CARRIED_CHARS} characters of facts you saved): \
+             replace or forget some of them first"
+        ));
+    }
+    Ok(())
+}
+
+/// Add `f` for call `call_id`, retire `target` when it applies at once, and
+/// record it; a waiting one is noted for the next turn.
+#[allow(clippy::too_many_arguments)]
+async fn save(
+    m: &Master,
+    mem: &dyn MemoryStore,
+    sid: SessionId,
+    call_id: &str,
+    f: NewFact,
+    target: Option<&Fact>,
+    at_once: bool,
+    keep: bool,
+) {
+    let t = f.text.clone();
+    match mem.add(f).await {
+        Ok(Some(added)) => {
+            if at_once && let Some(old) = target {
+                retire(m, mem, old).await;
+            }
             if !at_once {
-                let line = match &target {
+                let line = match target {
                     Some(old) => format!(
                         "[harness] Waiting for the person to confirm: \"{t}\" in place of \"{}\".",
                         one_line(&old.text)
@@ -578,19 +546,210 @@ pub async fn file(m: &Master, node_id: &str, e: &RawEvent) {
                     } else {
                         CallState::Pending
                     },
-                    added: Some(f.id),
-                    target: target.map(|f| f.id),
-                    retired,
+                    added: Some(added.id),
+                    target: target.map(|f| f.id.clone()),
+                    retired: at_once && target.is_some(),
                     why: None,
+                    keep,
                 },
             )
             .await;
             let _ = m.inner.live.send(Live::MemoryChanged);
         }
         Ok(None) => {}
-        Err(MemoryError::Invalid(why)) => refuse(&why).await,
+        Err(MemoryError::Invalid(why)) => refuse(m, sid, call_id, &t, &why).await,
         Err(err) => tracing::warn!(error = %err, "could not file a memory"),
     }
+}
+
+/// Where a fact the model names with `replaces` or `forget` lives, as far
+/// as this chat is concerned. Only a fact this chat's turns are given:
+/// the owner's own facts and theirs kept in the chat's workspace (where
+/// personal memory is on for the turn), and the chat's project's facts
+/// (where project memory is). Anything else is no fact of this chat.
+enum Scope {
+    Own,
+    Project(Box<harness_store::ProjectRow>),
+}
+
+/// A `remember` that replaces or forgets a fact, of any kind the chat was
+/// given (the owner, 2026-11-14: "replaces / forget - must work in all
+/// memory types with ability to revert the change via the block"). The
+/// replacement stays in the place of the fact it replaces (own, the same
+/// workspace's, the same project's); a call never moves a fact between
+/// scopes. It applies at once where the chat's owner may change that fact
+/// by hand and the turn is theirs (`saves_without_a_click` for their own
+/// facts, minus that rule's Personal-only part since the fact was already
+/// given to this chat; `projects::may_change_facts` for a project's);
+/// otherwise it waits for a click in the chat (a project fact the owner may
+/// not change waits for a project manager, and nothing changes).
+async fn change(
+    m: &Master,
+    mem: &dyn MemoryStore,
+    row: &SessionRow,
+    call_id: &str,
+    input: &Value,
+    allowed: TurnMemory,
+) {
+    let sid = row.session_id;
+    let text = input.get("text").and_then(|v| v.as_str()).map(one_line);
+    let shown = text.clone().unwrap_or_default();
+    let Some(user) = row.owner_id.clone() else {
+        return;
+    };
+    let id = input
+        .get("replaces")
+        .or_else(|| input.get("forget"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let found = match mem.get(id).await {
+        Ok(Some(f)) if f.status != Status::Retired => Some(f),
+        _ => None,
+    };
+    let here = row
+        .workspace_id
+        .as_deref()
+        .map(|ws| member_owner(ws, &user));
+    let project = if allowed.project {
+        projects::project_of(m, row).await
+    } else {
+        None
+    };
+    let scope = match &found {
+        Some(f)
+            if allowed.personal
+                && (f.owner_id.as_deref() == Some(user.as_str())
+                    || (here.is_some() && f.owner_id == here)) =>
+        {
+            Some(Scope::Own)
+        }
+        Some(f)
+            if project.as_ref().is_some_and(|p| {
+                f.owner_id.as_deref() == Some(projects::memory_owner(&p.project_id).as_str())
+            }) =>
+        {
+            project.clone().map(|p| Scope::Project(Box::new(p)))
+        }
+        _ => None,
+    };
+    let (Some(target), Some(scope)) = (found, scope) else {
+        refuse(
+            m,
+            sid,
+            call_id,
+            &shown,
+            "no fact given to this chat has that id",
+        )
+        .await;
+        return;
+    };
+    let own_turn = allowed.by_owner && row.parent_id.is_none();
+    let (at_once, keep) = match &scope {
+        // A fact the person wrote themselves changes only with their Keep
+        // (review M7).
+        Scope::Own => (own_turn && model_saved(&target), true),
+        Scope::Project(p) => {
+            let may = projects::may_change_facts(m, &user, p).await;
+            (own_turn && may, may)
+        }
+    };
+    let owner = target.owner_id.clone().unwrap_or_default();
+    let Some(t) = text else {
+        // `forget` alone.
+        if at_once {
+            retire(m, mem, &target).await;
+        } else {
+            let whom = if keep {
+                "the person"
+            } else {
+                "a project manager"
+            };
+            m.inner.notes.add(
+                sid,
+                call_id,
+                format!(
+                    "[harness] Waiting for {whom} to confirm forgetting \"{}\".",
+                    one_line(&target.text)
+                ),
+            );
+        }
+        set_record(
+            m,
+            sid,
+            call_id,
+            &CallRecord {
+                state: if at_once {
+                    CallState::Saved
+                } else {
+                    CallState::Pending
+                },
+                added: None,
+                target: Some(target.id.clone()),
+                retired: at_once,
+                why: None,
+                keep,
+            },
+        )
+        .await;
+        let _ = m.inner.live.send(Live::MemoryChanged);
+        return;
+    };
+    if !keep {
+        // Nothing to file for whoever may decide: the block says it waits
+        // for a project manager, and nothing changes.
+        m.inner.notes.add(
+            sid,
+            call_id,
+            format!(
+                "[harness] Not changed: \"{t}\" in place of \"{}\" waits for a project manager.",
+                one_line(&target.text)
+            ),
+        );
+        set_record(
+            m,
+            sid,
+            call_id,
+            &CallRecord {
+                state: CallState::Pending,
+                added: None,
+                target: Some(target.id.clone()),
+                retired: false,
+                why: None,
+                keep: false,
+            },
+        )
+        .await;
+        return;
+    }
+    if at_once
+        && matches!(scope, Scope::Own)
+        && let Err(why) = cap_check(mem, row, Some(&target.id), &owner, &t, target.kind, sid).await
+    {
+        refuse(m, sid, call_id, &t, &why).await;
+        return;
+    }
+    save(
+        m,
+        mem,
+        sid,
+        call_id,
+        NewFact {
+            owner_id: Some(owner),
+            text: t,
+            kind: target.kind,
+            status: if at_once {
+                Status::Active
+            } else {
+                Status::Proposed
+            },
+            source_session: Some(sid),
+            dedupe_key: Some(format!("{sid}:{call_id}")),
+        },
+        Some(&target),
+        at_once,
+        keep,
+    )
+    .await;
 }
 
 async fn add(m: &Master, mem: &dyn MemoryStore, f: NewFact) {
@@ -609,6 +768,22 @@ async fn retire(m: &Master, mem: &dyn MemoryStore, f: &Fact) {
             let _ = m.inner.live.send(Live::MemoryChanged);
         }
         Err(e) => tracing::warn!(error = %e, "could not retire a memory"),
+    }
+}
+
+/// May `user` change `f` by hand now: one of their own facts, or a fact
+/// of a project whose facts they may change (`projects::may_change_facts`).
+pub async fn may_touch(m: &Master, user: &str, f: &Fact) -> bool {
+    if is_own(Some(user), f) {
+        return true;
+    }
+    let Some(pid) = f.owner_id.as_deref().and_then(projects::key_project) else {
+        return false;
+    };
+    let pid = pid.to_string();
+    match m.inner.mirror.call(move |s| s.project(&pid)).await {
+        Ok(Some(p)) => projects::may_change_facts(m, user, &p).await,
+        _ => false,
     }
 }
 
@@ -634,18 +809,16 @@ pub async fn decide(
     let mut r = call_record(m, sid, call_id)
         .await
         .ok_or("nothing to change: this call saved nothing")?;
-    let own = async |id: &Option<String>| match id {
-        Some(id) => mem
-            .get(id)
-            .await
-            .ok()
-            .flatten()
-            .filter(|f| is_own(Some(user), f)),
-        None => None,
+    let own = async |id: &Option<String>| -> Option<Fact> {
+        let f = mem.get(id.as_deref()?).await.ok().flatten()?;
+        may_touch(m, user, &f).await.then_some(f)
     };
     let added = own(&r.added).await;
     let target = own(&r.target).await;
     match (d, r.state) {
+        (Decision::Keep, CallState::Pending) if !r.keep => {
+            return Err("only someone who manages the project can change its facts");
+        }
         (Decision::Keep, CallState::Pending) => {
             if let Some(f) = &added {
                 mem.update(&f.id, None, Some(Status::Active))
@@ -660,7 +833,9 @@ pub async fn decide(
         }
         (Decision::Dismiss, CallState::Pending) => {
             if let Some(f) = &added {
-                mem.delete(&f.id).await.map_err(|_| "could not dismiss it")?;
+                mem.delete(&f.id)
+                    .await
+                    .map_err(|_| "could not dismiss it")?;
             }
             r.state = CallState::Dismissed;
         }
@@ -780,10 +955,7 @@ pub async fn turn_block(
         s.push('\n');
         s.push_str(line);
     }
-    (
-        Some(s),
-        notes.into_iter().map(|(call, _)| call).collect(),
-    )
+    (Some(s), notes.into_iter().map(|(call, _)| call).collect())
 }
 
 /// Forget `user`'s facts kept in workspace `ws` (they left it, or it was
@@ -858,6 +1030,7 @@ mod tests {
             target: Some("t".into()),
             retired: false,
             why: None,
+            keep: true,
         };
         let s = serde_json::to_string(&r).unwrap();
         assert_eq!(serde_json::from_str::<CallRecord>(&s).unwrap(), r);

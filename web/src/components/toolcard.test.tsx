@@ -282,6 +282,21 @@ describe("memory saves and proposals", () => {
     await done();
   });
 
+  test("a project fact says so; one the person may not change waits for a manager, Dismiss only", async () => {
+    const old = { ...fact("uses kerosene"), id: "f0", owner_id: "project:p1" };
+    vi.spyOn(pageApi, "memoryCall").mockResolvedValue({ state: "saved", place: "project", fact: { ...fact("uses methane"), owner_id: "project:p1" }, target: old });
+    let r = await live(remember("uses methane", proposed));
+    expect(r.host.textContent).toContain("Replaced in the project: “uses kerosene” → “uses methane”");
+    expect(r.host.querySelector(".memory-undo")).not.toBeNull();
+    await r.done();
+    vi.spyOn(pageApi, "memoryCall").mockResolvedValue({ state: "pending", place: "project", keep: false, target: old, text: "uses methane" });
+    r = await live(remember("uses methane", proposed));
+    expect(r.host.textContent).toContain("Wants to replace: “uses kerosene” → “uses methane”");
+    expect(r.host.textContent).toContain("Only someone who manages the project");
+    expect([...r.host.querySelectorAll("button")].map((b) => b.textContent)).toEqual(["Dismiss"]);
+    await r.done();
+  });
+
   test("while the call runs it is already a memory block, not a tool card", () => {
     expect(card(remember("likes tea", null))).toContain("tool-memory");
   });

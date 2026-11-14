@@ -412,6 +412,24 @@ pub async fn proposal_owner(m: &Master, row: &SessionRow) -> Option<String> {
     Some(memory_owner(&p.project_id))
 }
 
+/// The project whose facts `key` holds (`project:<id>`), if any.
+pub fn key_project(key: &str) -> Option<&str> {
+    key.strip_prefix("project:").filter(|p| !p.is_empty())
+}
+
+/// May `user` change project `p`'s facts by hand, as the Memory tab lets
+/// them: "may manage" (the workspace permission `settings`) or the
+/// project's `members_activate_facts` switch for a member. A model's
+/// replace or forget of a project fact applies at once only for such a
+/// person (PLAN.md T49). Unreadable: no.
+pub async fn may_change_facts(m: &Master, user: &str, p: &ProjectRow) -> bool {
+    let (ws, u) = (p.workspace_id.clone(), user.to_string());
+    let member = m.inner.mirror.call(move |s| s.member(&ws, &u)).await;
+    let Ok(Some(mr)) = member else { return false };
+    let manage = ws::Role::parse(&mr.role_id).is_some_and(|r| r.perms().contains(&Perm::Settings));
+    manage || ProjectSettings::read(&p.settings).members_activate_facts
+}
+
 /// Every project's id, before a deletion that may cascade to projects
 /// (a workspace, an account); see [`forget_gone`].
 pub async fn ids(m: &Master) -> HashSet<String> {
@@ -554,7 +572,8 @@ pub async fn turn_context(
     if remember {
         s.push_str(
             "\n\nTo keep a lasting decision or fact about this project, call `remember` with \
-             scope \"project\".",
+             scope \"project\"; to correct or drop one, pass its id as `replaces` (with the new \
+             text) or `forget`.",
         );
         if !allowed.personal {
             s.push_str(" Personal memory is off in this chat: use no other scope.");
@@ -672,11 +691,11 @@ async fn facts_block(
         .unwrap_or(active.len());
     let (newest, older) = active.split_at(fit);
     let mut s = String::from(
-        "What this project has established (confirmed, newest first; may be outdated):",
+        "What this project has established (confirmed, newest first; may be outdated; each line \
+         starts with the fact's id):",
     );
     for f in newest {
-        s.push_str("\n- ");
-        s.push_str(&f.text);
+        s.push_str(&crate::memory::rendered(f));
     }
     if older.is_empty() {
         return Some(s);
@@ -702,8 +721,7 @@ async fn facts_block(
     if !recalled.is_empty() {
         s.push_str("\nOlder ones that match this message:");
         for f in &recalled {
-            s.push_str("\n- ");
-            s.push_str(&f.text);
+            s.push_str(&crate::memory::rendered(f));
         }
     }
     match older.len().saturating_sub(recalled.len()) {

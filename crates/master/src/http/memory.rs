@@ -30,10 +30,7 @@ pub(super) fn routes() -> Router<Master> {
         .route("/api/sessions/{id}/memory/{call_id}", get(call_state))
         .route("/api/sessions/{id}/memory/{call_id}/undo", post(undo))
         .route("/api/sessions/{id}/memory/{call_id}/keep", post(keep))
-        .route(
-            "/api/sessions/{id}/memory/{call_id}/dismiss",
-            post(dismiss),
-        )
+        .route("/api/sessions/{id}/memory/{call_id}/dismiss", post(dismiss))
 }
 
 pub(super) fn memory_store(m: &Master) -> ApiResult<Store> {
@@ -282,7 +279,13 @@ async fn own_call(
 /// What the chat line shows for a call: its recorded state and the facts
 /// it names as they are now. `waiting` when nothing is recorded yet (the
 /// master files a call when the node reports it; the line asks again).
-async fn state_json(m: &Master, who: &Principal, row: &SessionRow, call_id: &str, input: &Value) -> ApiResult<Value> {
+async fn state_json(
+    m: &Master,
+    who: &Principal,
+    row: &SessionRow,
+    call_id: &str,
+    input: &Value,
+) -> ApiResult<Value> {
     if input.get("scope").and_then(|v| v.as_str()) == Some("project") {
         return Ok(json!({ "state": "project" }));
     }
@@ -291,18 +294,28 @@ async fn state_json(m: &Master, who: &Principal, row: &SessionRow, call_id: &str
     };
     let mem = memory_store(m)?;
     let uid = who.user_id.as_deref();
+    // The chat's own facts: the owner's, and its project's (members see
+    // those on the project's Memory tab too).
+    let project = crate::projects::project_of(m, row)
+        .await
+        .map(|p| crate::projects::memory_owner(&p.project_id));
     let get = async |id: &Option<String>| -> ApiResult<Option<Fact>> {
         Ok(match id {
-            Some(id) => mem.get(id).await.map_err(memory_err)?.filter(|f| is_own(uid, f)),
+            Some(id) => mem
+                .get(id)
+                .await
+                .map_err(memory_err)?
+                .filter(|f| is_own(uid, f) || (project.is_some() && f.owner_id == project)),
             None => None,
         })
     };
+    let forget = input.get("forget").is_some() && input.get("text").is_none();
     let fact = get(&r.added).await?;
     let target = get(&r.target).await?;
     use crate::memory::CallState as S;
     let state = match r.state {
         S::Saved | S::Kept if r.added.is_some() && fact.is_none() => "gone",
-        S::Saved if r.added.is_none() => "forgot",
+        S::Saved if forget => "forgot",
         S::Saved => "saved",
         S::Kept => "kept",
         // Kept or discarded on the Memory page meanwhile.
@@ -320,11 +333,28 @@ async fn state_json(m: &Master, who: &Principal, row: &SessionRow, call_id: &str
         "state": state,
         "fact": fact,
         "target": target,
-        "forget": r.added.is_none() && r.target.is_some(),
+        "forget": forget,
         "reason": r.why,
+        "keep": r.keep,
+        // The text the call asked for, when nothing was filed to hold it
+        // (a project change that waits for a manager).
+        "text": input.get("text"),
     });
-    if let Some(f) = &fact {
-        v["place"] = json!(if kept_in(f).is_some() { "workspace" } else { "user" });
+    let place = |f: &Fact| {
+        if f.owner_id
+            .as_deref()
+            .and_then(crate::projects::key_project)
+            .is_some()
+        {
+            "project"
+        } else if kept_in(f).is_some() {
+            "workspace"
+        } else {
+            "user"
+        }
+    };
+    if let Some(f) = fact.as_ref().or(target.as_ref()) {
+        v["place"] = json!(place(f));
     }
     Ok(v)
 }

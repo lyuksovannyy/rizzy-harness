@@ -133,8 +133,10 @@ const X5_KB = 0.3;
 // against 375.9: the chat's memory line reads what was saved and has Undo,
 // the Memory page shows each fact's place, moves it and restores retired
 // ones, and the join question (a lazy chunk; Shell only decides whether to
-// load it, +0.2 initial).
-const MEMDEF_KB = 2.0;
+// load it, +0.2 initial). Review fixes and the owner's memory block,
+// measured 378.6: Keep and Dismiss, the replaced/forgotten/undone wording,
+// project facts' wording, the retry while the call is not filed (+0.7).
+const MEMDEF_KB = 2.7;
 
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
 const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB + MEMDEF_KB) * 100) / 10) / 10;

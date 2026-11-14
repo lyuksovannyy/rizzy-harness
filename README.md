@@ -594,6 +594,17 @@ workspace's, else the Software Developer), not the chat default.
   a replacement or forgetting retired, and the block then says it was undone
   (after a reload too). The next chat already knows a saved fact. Replaced
   and forgotten facts are kept under "Replaced or forgotten", restorable.
+- **Correcting and dropping facts works for every kind** the chat is given:
+  your facts, facts kept in the workspace, and the project's facts (the
+  owner, 2026-11-14: "replaces / forget - must work in all memory types with
+  ability to revert the change via the block"). A correction stays where the
+  fact was (your facts, the same workspace, the same project). It applies at
+  once where you could make that change yourself, with Undo on the block: in
+  your own chats for your facts, and for a project's facts if you manage the
+  project (or its members may confirm facts). Otherwise the block says it
+  waits for a project manager, and nothing changes. A retired project fact
+  shows on the project's Memory tab under "Replaced or forgotten", with
+  Restore for managers.
 - **Elsewhere it asks, in the chat.** In a team workspace, from a
   sub-agent, from a message not sent by you signed in (the API token, a
   routine's run), and for any fact you wrote yourself, the block says what
