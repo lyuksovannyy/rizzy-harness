@@ -185,9 +185,10 @@ Settings has four sections:
 - **Account**: your profile, appearance, search engines, default agents (one
   for chats, one for Agentic chats) and model, your memories, your password.
 - **Workspace** (everyone in it): its name, your role, who is in it, the
-  defaults it gives, and whether your facts (your memories) are shared with
-  its chats: always in Personal; in a team workspace off until you turn it
-  on, for the workspace's creator too.
+  defaults it gives, and whether your facts (your memories) are used in its
+  chats: always in Personal; in a team workspace you are asked when you join
+  it (its creator too). Until you answer, the answer is no; you can change it
+  here at any time (see **Memory.** further down).
 - **Workspace admin** (admins and owners; not for Personal): its name, default
   agents (chats and Agentic), the model each agent uses there (the Assistant's, `general`, is the
   workspace's default model), members and roles, deleting it.
@@ -581,8 +582,43 @@ sub-agent keeps its own list in its own session. A new Agentic chat starts
 with the Agentic default agent (your `default_agentic_agent`, else the
 workspace's, else the Software Developer), not the chat default.
 
-Memories are proposed by the assistant during chats and used only after you
-confirm them under Settings → Account → Memory.
+**Memory.** The assistant keeps short facts about you for later chats (Settings → Account
+→ Memory lists every one of them).
+
+- **In your Personal workspace it saves them as you talk**, without asking:
+  each save shows as one line in the chat ("Remembered: …") with **Undo**, and
+  the next chat already knows it. It can also correct a fact it was shown
+  (the old one is kept under "Replaced or forgotten", restorable) or drop one.
+- **Two places.** Ordinary things about you (your preferences, people, how you
+  work) go to **your facts**, which can follow you into team workspaces.
+  Private details (health, money, identity documents, family, anything you
+  would not want a colleague's workspace to see) are **kept in the workspace
+  where they came up**: in your Personal workspace they stay there and are
+  never used anywhere else. The assistant decides which is which when it
+  saves; it can be wrong, so every fact shows its place on the Memory page
+  and **Keep private** / **Move to your facts** moves it.
+- **Team workspaces ask first.** When you join one (or create it), a question
+  at the top of the page asks whether its agents may use your facts. Until
+  you answer yes, nothing of your facts is read or added there. With yes,
+  your chats there read your facts and the assistant *suggests* new ones,
+  which wait under To review until you keep them. Your answer can be changed
+  later in Settings → Workspace. Leaving a workspace deletes what was kept in
+  it about you.
+- **Nobody else sees your memory**: not the workspace's members, not its
+  admins, not the server's admins. Deleting an account deletes its memory.
+- What the assistant reads: your facts, newest first, up to 3,000 characters
+  each turn (older ones only when your message matches them). It may save
+  facts until they reach that size; past it, a save is refused and the next
+  turn asks it to merge or drop facts first. Facts you add yourself are not
+  limited.
+- **Not saved without a click:** in a turn that read something from outside
+  first (a web page, a file, a command's output) or a sub-agent's turn, a
+  fact is only suggested. Temporary chats, turns started by an external
+  event and turns that report a finished background command read and write
+  no memory. Anything that looks like a password, key or token is refused.
+
+Project memory works as before: facts proposed for a project wait on the
+project's Memory tab (docs/projects.md).
 
 Who may create workspaces (also a switch under Settings → Server → Workspaces):
 

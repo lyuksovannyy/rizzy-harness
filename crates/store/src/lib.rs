@@ -251,6 +251,9 @@ pub struct MemberRow {
     pub joined_ms: i64,
     /// The member's own choice to use their personal memory here.
     pub use_memory: bool,
+    /// Whether they answered that question (a new team member has not:
+    /// the join question; until then `use_memory` is false).
+    pub memory_answered: bool,
     /// Their level here as stored (the master reads an owner's as `host`).
     pub exec_level: ExecLevel,
     /// Their account's ceiling as stored, and whether they are a server
@@ -282,6 +285,8 @@ pub struct Membership {
     pub workspace: WorkspaceRow,
     pub role_id: String,
     pub use_memory: bool,
+    /// Whether they answered the join question (`MemberRow::memory_answered`).
+    pub memory_answered: bool,
     /// Their level there as stored (an owner's counts as `host`).
     pub exec_level: ExecLevel,
     /// How many members the workspace has.
@@ -445,10 +450,10 @@ CREATE TABLE IF NOT EXISTS workspace_members (
     role_id      TEXT NOT NULL,          -- owner | admin | member | guest
     joined_ms    INTEGER NOT NULL,
     -- The member's own choice to share their facts (personal memory) with this
-    -- workspace's chats: recall and proposals. Every insert says it (1 in
-    -- Personal, 0 elsewhere); the default only covers an insert that forgets,
-    -- and then it shares nothing.
-    use_memory   INTEGER NOT NULL DEFAULT 0,
+    -- workspace's chats: recall and proposals. 1 in Personal; NULL for a new
+    -- team member until they answer the join question (shares nothing, like
+    -- 0), then 0 or 1.
+    use_memory   INTEGER CHECK (use_memory IN (0, 1)),
     -- The member's level here, set by the workspace's admins; every new
     -- member starts at none. An owner's counts as host (the master).
     exec_level   TEXT NOT NULL DEFAULT 'none'
@@ -1630,6 +1635,28 @@ impl Store {
         Ok(None)
     }
 
+    /// The input of tool call `call_id` of `sid` and its tool's name, from
+    /// its `tool_call_started`; `None` when the mirror has no such call.
+    pub fn tool_call(
+        &self,
+        sid: SessionId,
+        call_id: &str,
+    ) -> Result<Option<(String, serde_json::Value)>> {
+        let conn = self.lock();
+        let payload: Option<String> = conn
+            .prepare_cached(
+                "SELECT payload FROM events WHERE session_id = ?1 AND kind = 'tool_call_started'
+                   AND json_extract(payload, '$.call_id') = ?2
+                 ORDER BY seq DESC LIMIT 1",
+            )?
+            .query_row(params![sid.to_string(), call_id], |r| r.get(0))
+            .optional()?;
+        let Some(p) = payload else { return Ok(None) };
+        let v: serde_json::Value = serde_json::from_str(&p)?;
+        let tool = v["tool"].as_str().unwrap_or_default().to_string();
+        Ok(Some((tool, v["input"].clone())))
+    }
+
     /// The seq up to which `user` has seen chat `sid` (0 when never).
     pub fn seen_seq(&self, user: &str, sid: SessionId) -> Result<u64> {
         let conn = self.lock();
@@ -2341,15 +2368,16 @@ impl Store {
     // ---- workspaces (master only) ----
 
     /// A membership row. `use_memory` is whether the member shares their
-    /// facts with the workspace: on in Personal, off in a team workspace
-    /// (the creator's own membership included) until they turn it on.
+    /// facts with the workspace: on in Personal; in a team workspace `None`
+    /// (the creator's own membership included), the join question nobody
+    /// answered yet, which shares nothing.
     fn insert_member(
         conn: &Connection,
         ws: &str,
         user_id: &str,
         role_id: &str,
         now: i64,
-        use_memory: bool,
+        use_memory: Option<bool>,
     ) -> rusqlite::Result<usize> {
         conn.execute(
             "INSERT INTO workspace_members (workspace_id, user_id, role_id, joined_ms, use_memory) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -2364,7 +2392,7 @@ impl Store {
             "INSERT INTO workspaces (workspace_id, name, personal_owner, created_ms) VALUES (?1, ?2, ?3, ?4)",
             params![ws, PERSONAL_NAME, user_id, now],
         )?;
-        Self::insert_member(conn, &ws, user_id, OWNER, now, true)?;
+        Self::insert_member(conn, &ws, user_id, OWNER, now, Some(true))?;
         Ok(ws)
     }
 
@@ -2503,7 +2531,8 @@ impl Store {
                 Ok(Membership {
                     workspace: Self::workspace_from_row(r)?,
                     role_id: r.get(5)?,
-                    use_memory: r.get::<_, i64>(6)? != 0,
+                    use_memory: r.get::<_, Option<i64>>(6)? == Some(1),
+                    memory_answered: r.get::<_, Option<i64>>(6)?.is_some(),
                     exec_level: level_col(r, 7)?,
                     members: r.get::<_, i64>(8)? as u64,
                 })
@@ -2531,7 +2560,8 @@ impl Store {
             disabled: r.get::<_, i64>(2)? != 0,
             role_id: r.get(3)?,
             joined_ms: r.get(4)?,
-            use_memory: r.get::<_, i64>(5)? != 0,
+            use_memory: r.get::<_, Option<i64>>(5)? == Some(1),
+            memory_answered: r.get::<_, Option<i64>>(5)?.is_some(),
             exec_level: level_col(r, 6)?,
             exec_ceiling: level_col(r, 7)?,
             server_admin: r.get::<_, String>(8)? == "admin",
@@ -2640,7 +2670,7 @@ impl Store {
             "INSERT INTO workspaces (workspace_id, name, created_ms, settings) VALUES (?1, ?2, ?3, ?4)",
             params![w.workspace_id, w.name, w.created_ms, w.settings],
         )?;
-        Self::insert_member(&tx, &w.workspace_id, owner, OWNER, w.created_ms, false)?;
+        Self::insert_member(&tx, &w.workspace_id, owner, OWNER, w.created_ms, None)?;
         tx.commit()?;
         Ok(w)
     }
@@ -2697,7 +2727,7 @@ impl Store {
         let Some(username) = username else {
             return Ok(false);
         };
-        match Self::insert_member(&tx, ws, user_id, role_id, harness_core::now_ms(), false) {
+        match Self::insert_member(&tx, ws, user_id, role_id, harness_core::now_ms(), None) {
             Ok(_) => {}
             Err(e)
                 if e.sqlite_error().map(|e| e.extended_code)

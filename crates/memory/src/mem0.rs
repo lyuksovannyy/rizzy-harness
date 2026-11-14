@@ -107,10 +107,10 @@ fn parse(v: &Value) -> Option<Fact> {
             Some("location") => FactKind::Location,
             _ => FactKind::Fact,
         },
-        status: if md["status"].as_str() == Some("proposed") {
-            Status::Proposed
-        } else {
-            Status::Active
+        status: match md["status"].as_str() {
+            Some("proposed") => Status::Proposed,
+            Some("retired") => Status::Retired,
+            _ => Status::Active,
         },
         source_session: md["source_session"]
             .as_str()
@@ -131,7 +131,7 @@ fn results(v: &Value) -> Vec<Value> {
 fn metadata(kind: FactKind, status: Status, source: Option<SessionId>, key: Option<&str>) -> Value {
     json!({
         "kind": match kind { FactKind::Fact => "fact", FactKind::Preference => "preference", FactKind::Location => "location" },
-        "status": match status { Status::Proposed => "proposed", Status::Active => "active" },
+        "status": match status { Status::Proposed => "proposed", Status::Active => "active", Status::Retired => "retired" },
         "source_session": source.map(|s| s.to_string()),
         "dedupe_key": key,
     })
@@ -180,6 +180,22 @@ impl MemoryStore for Mem0Memory {
             .and_then(|r| r["id"].as_str().map(str::to_string))
             .ok_or_else(|| MemoryError::Embed("mem0 returned no id".into()))?;
         self.get(&id).await
+    }
+
+    async fn by_key(&self, owner: Option<&str>, key: &str) -> Result<Option<Fact>> {
+        let all = self
+            .call(
+                reqwest::Method::GET,
+                &["memories"],
+                &[("user_id", user(owner)), ("top_k", "1000")],
+                None,
+            )
+            .await?;
+        Ok(results(&all)
+            .iter()
+            .find(|m| m["metadata"]["dedupe_key"].as_str() == Some(key))
+            .and_then(parse)
+            .filter(|f| f.owner_id.as_deref() == owner))
     }
 
     async fn get(&self, id: &str) -> Result<Option<Fact>> {

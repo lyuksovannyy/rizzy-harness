@@ -80,6 +80,7 @@ fn status_str(s: Status) -> &'static str {
     match s {
         Status::Proposed => "proposed",
         Status::Active => "active",
+        Status::Retired => "retired",
     }
 }
 
@@ -93,10 +94,10 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Fact> {
         owner_id: r.get(1)?,
         text: r.get(2)?,
         kind: parse_kind(&r.get::<_, String>(3)?),
-        status: if status == "active" {
-            Status::Active
-        } else {
-            Status::Proposed
+        status: match status.as_str() {
+            "active" => Status::Active,
+            "retired" => Status::Retired,
+            _ => Status::Proposed,
         },
         source_session: source.and_then(|s| s.parse::<SessionId>().ok()),
         created_ms: r.get(6)?,
@@ -389,6 +390,19 @@ impl MemoryStore for SqliteMemory {
             })
             .await?;
         Ok(inserted.then_some(out))
+    }
+
+    async fn by_key(&self, owner: Option<&str>, key: &str) -> Result<Option<Fact>> {
+        let (owner, key) = (owner.map(str::to_string), key.to_string());
+        self.db(move |c| {
+            Ok(c.query_row(
+                &format!("SELECT {COLS} FROM facts WHERE dedupe_key = ?1 AND owner_id IS ?2"),
+                params![key, owner],
+                row,
+            )
+            .optional()?)
+        })
+        .await
     }
 
     async fn get(&self, id: &str) -> Result<Option<Fact>> {

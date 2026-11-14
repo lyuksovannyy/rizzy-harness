@@ -100,8 +100,17 @@ pub(super) fn guard_target(a: &Access, target_role: &str) -> ApiResult<()> {
 
 /// A `WorkspaceSummary` as the web types it. `exec_level` is the caller's
 /// effective level there (N.10a part 2): what the new-chat choice offers.
-fn summary_json(w: &WorkspaceRow, role_id: &str, members: u64, exec_level: ExecLevel) -> Value {
+/// `memory_answered`: whether they answered its join question (README,
+/// Memory); the UI asks until they have.
+fn summary_json(
+    w: &WorkspaceRow,
+    role_id: &str,
+    members: u64,
+    exec_level: ExecLevel,
+    memory_answered: bool,
+) -> Value {
     json!({
+        "memory_answered": memory_answered || w.personal(),
         "workspace_id": w.workspace_id,
         "name": w.name,
         "personal": w.personal(),
@@ -125,7 +134,13 @@ fn level_in(who: &Principal, ms: &harness_store::Membership) -> ExecLevel {
 async fn detail(m: &Master, who: &Principal, a: &Access) -> ApiResult<Json<Value>> {
     let id = a.id().to_string();
     let n = m.inner.mirror.call(move |s| s.member_count(&id)).await?;
-    let mut v = summary_json(&a.workspace, &a.role_id, n, levels::effective(who, Some(a)));
+    let mut v = summary_json(
+        &a.workspace,
+        &a.role_id,
+        n,
+        levels::effective(who, Some(a)),
+        a.memory_answered,
+    );
     v["settings"] = json!(WorkspaceSettings::read(&a.workspace).normalized(m));
     v["use_memory"] = json!(a.use_memory);
     v["created_ms"] = json!(a.workspace.created_ms);
@@ -175,7 +190,15 @@ pub(super) async fn active_summary(m: &Master, who: &Principal) -> ApiResult<Val
     Ok(list
         .iter()
         .find(|ms| ms.workspace.workspace_id == active)
-        .map(|ms| summary_json(&ms.workspace, &ms.role_id, ms.members, level_in(who, ms)))
+        .map(|ms| {
+            summary_json(
+                &ms.workspace,
+                &ms.role_id,
+                ms.members,
+                level_in(who, ms),
+                ms.memory_answered,
+            )
+        })
         .unwrap_or(Value::Null))
 }
 
@@ -192,7 +215,15 @@ pub(super) async fn list(State(m): State<Master>, headers: HeaderMap) -> ApiResu
     Ok(Json(json!({
         "workspaces": list
             .iter()
-            .map(|ms| summary_json(&ms.workspace, &ms.role_id, ms.members, level_in(&who, ms)))
+            .map(|ms| {
+                summary_json(
+                    &ms.workspace,
+                    &ms.role_id,
+                    ms.members,
+                    level_in(&who, ms),
+                    ms.memory_answered,
+                )
+            })
             .collect::<Vec<_>>(),
         "active": active,
         "can_create": may_create(&m, &who),
@@ -231,6 +262,7 @@ pub(super) async fn create(
         Role::Owner.id(),
         1,
         who.exec_ceiling,
+        false,
     )))
 }
 
@@ -315,8 +347,8 @@ pub(super) struct MemoryBody {
     use_memory: bool,
 }
 
-/// The member's own switch: use their personal memory in this workspace's
-/// chats.
+/// The member's own switch, and their answer to the join question: use
+/// their own facts in this workspace's chats.
 pub(super) async fn set_memory(
     State(m): State<Master>,
     headers: HeaderMap,
@@ -367,6 +399,7 @@ pub(super) async fn delete(
 /// their facts.
 async fn delete_workspace(m: &Master, ws: String) -> ApiResult<Option<Vec<String>>> {
     let projects = crate::projects::ids(m).await;
+    let ws_id = ws.clone();
     let gone = m
         .inner
         .mirror
@@ -388,6 +421,11 @@ async fn delete_workspace(m: &Master, ws: String) -> ApiResult<Option<Vec<String
         })
         .await?;
     crate::projects::forget_gone(m, projects).await;
+    if let Some((members, _)) = &gone {
+        for u in members {
+            crate::memory::forget_member(m, &ws_id, u).await;
+        }
+    }
     // What ran in its chats for the team stops, as at a member's removal.
     Ok(gone.map(|(members, chats)| {
         workspaces::stop_removed(m, chats);
@@ -587,6 +625,8 @@ pub(super) async fn remove_member(
     if !removed {
         return Err(no_member());
     }
+    // What was kept about them in this workspace goes with their place in it.
+    crate::memory::forget_member(&m, a.id(), &before.user_id).await;
     let owner = before.role_id == Role::Owner.id();
     let from = levels::workspace_level(false, owner, before.exec_level);
     let detail = json!({"by": levels::by(&who), "user": user_id, "workspace": a.id(),

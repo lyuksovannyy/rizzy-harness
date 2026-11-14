@@ -1,6 +1,9 @@
 //! Long-term memory: short facts about the user, each linked to the chat it
-//! came from. Facts the model suggests (`remember` tool) start as
-//! *proposed* and are only used after the user confirms them.
+//! came from. Where a fact lives (the person's own facts, one workspace's,
+//! a project's) is its owner key, which the master chooses; whether the
+//! model's `remember` saves at once or waits as *proposed* is the master's
+//! call too (README, Memory). A fact the model replaced or forgot is
+//! *retired*: kept, never recalled, restorable.
 //!
 //! The built-in store is SQLite (its own `memory.db`) with FTS5 recall and,
 //! when an embeddings endpoint is configured, vector recall on top
@@ -38,6 +41,9 @@ pub enum Status {
     /// Suggested by the model; not used until the user confirms.
     Proposed,
     Active,
+    /// Replaced or forgotten by the model: never recalled, shown to the
+    /// person, who can restore or delete it.
+    Retired,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -93,6 +99,8 @@ pub trait MemoryStore: Send + Sync {
     /// Returns `None` when `dedupe_key` was seen before.
     async fn add(&self, f: NewFact) -> Result<Option<Fact>>;
     async fn get(&self, id: &str) -> Result<Option<Fact>>;
+    /// The fact of `owner` added with idempotency key `key`, if any.
+    async fn by_key(&self, owner: Option<&str>, key: &str) -> Result<Option<Fact>>;
     /// Every fact of `owner` (`None` = facts without an owner), newest first.
     async fn list(&self, owner: Option<&str>) -> Result<Vec<Fact>>;
     async fn update(
@@ -128,28 +136,131 @@ pub fn clean_text(t: &str) -> Result<String> {
     if cleaned.is_empty() {
         return Err(MemoryError::Invalid("a memory cannot be empty".into()));
     }
+    if looks_secret(&cleaned) {
+        return Err(MemoryError::Invalid(SECRET_REFUSED.into()));
+    }
     Ok(cleaned)
 }
 
-/// The block added to the system prompt for recalled facts.
-pub fn context_block(facts: &[Fact]) -> Option<String> {
-    if facts.is_empty() {
-        return None;
+/// Why a fact that looks like a secret is refused.
+pub const SECRET_REFUSED: &str = "this looks like a password, key or token: memory never keeps \
+     secrets (remember where it is kept, not the value)";
+
+/// Prefixes of well-known API keys and tokens.
+const KEY_PREFIXES: &[&str] = &[
+    "sk-",
+    "sk_live_",
+    "sk_test_",
+    "rk_live_",
+    "pk_live_",
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "ghr_",
+    "github_pat_",
+    "glpat-",
+    "xoxb-",
+    "xoxp-",
+    "xoxa-",
+    "xapp-",
+    "akia",
+    "asia",
+    "aiza",
+    "ya29.",
+    "hf_",
+    "npm_",
+    "pypi-",
+    "dop_v1_",
+    "shpat_",
+    "eyj",
+];
+
+/// Does `t` look like it holds a secret value? A guess that errs towards
+/// refusing (a fact is one sentence; losing one is cheap, keeping a key in
+/// every later prompt is not):
+/// * a word that starts like a well-known key or token (`ghp_`, `sk-`,
+///   `AKIA`, a JWT's `eyJ`, a PEM header), at least 16 characters long;
+/// * a long random-looking word: 20+ characters of letters and digits
+///   mixed (no `://`, so links pass);
+/// * a sentence that names a secret (`secret_like`: password, PIN, API
+///   key, recovery code...) and gives a value (`is`, `:` or `=` after it).
+pub fn looks_secret(t: &str) -> bool {
+    if t.contains("-----BEGIN") {
+        return true;
     }
-    let mut s = String::from(
-        "What you remember about the user (they confirmed these; may be outdated, \
-         do not mention unless relevant):",
-    );
-    for f in facts {
-        s.push_str("\n- ");
-        s.push_str(&f.text);
+    for raw in t.split_whitespace() {
+        let w = raw.trim_matches(|c: char| !c.is_alphanumeric() && !"-_./+=".contains(c));
+        let w = w.trim_end_matches(['.', ',']);
+        if w.contains("://") {
+            continue;
+        }
+        let lower = w.to_ascii_lowercase();
+        let n = w.chars().count();
+        if n >= 16 && KEY_PREFIXES.iter().any(|p| lower.starts_with(p)) {
+            return true;
+        }
+        let letters = w.chars().filter(|c| c.is_ascii_alphabetic()).count();
+        let digits = w.chars().filter(|c| c.is_ascii_digit()).count();
+        let upper = w.chars().any(|c| c.is_ascii_uppercase());
+        let lower_c = w.chars().any(|c| c.is_ascii_lowercase());
+        let symbols_ok = w
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_/+=".contains(c));
+        if n >= 20 && symbols_ok && digits >= 2 && letters >= 4 && (upper && lower_c || n >= 28) {
+            return true;
+        }
+        if n >= 32 && w.chars().all(|c| c.is_ascii_hexdigit()) {
+            return true;
+        }
     }
-    Some(s)
+    if harness_core::ui::secret_like(t) {
+        let words: Vec<String> = t
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .map(str::to_lowercase)
+            .collect();
+        return t.contains(':')
+            || t.contains('=')
+            || words.iter().any(|w| w == "is" || w == "are" || w == "was");
+    }
+    false
 }
 
 #[cfg(test)]
 mod clean_tests {
     use super::*;
+
+    #[test]
+    fn secrets_are_refused() {
+        for t in [
+            "Alex's GitHub token is ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+            "OpenAI key sk-proj-AbCdEf0123456789xyzXYZ",
+            "AWS: AKIAIOSFODNN7EXAMPLE",
+            "uses the key 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+            "Alex's password is tulip",
+            "wifi password: correct horse",
+            "Alex's PIN is 4521",
+            "recovery code = 7781-2231",
+            "deploy token Zq8LmN2pR7sT4vW9xY3bC6dF",
+            "-----BEGIN OPENSSH PRIVATE KEY----- b3BlbnNzaC1rZXk",
+        ] {
+            assert!(looks_secret(t), "{t}");
+            assert!(clean_text(t).is_err(), "{t}");
+        }
+        for t in [
+            "Alex rides the number 7 tram to work",
+            "Alex uses 2FA everywhere",
+            "Prefers a password manager over browser autofill",
+            "Works on https://github.com/acme/rocket-launcher-2024 daily",
+            "Has type 1 diabetes and takes insulin before lunch",
+            "Lives at Brivibas iela 21, Riga",
+            "Their daughter Mia was born on 2019-04-12",
+            "Keeps the API keys for work in 1Password",
+        ] {
+            assert!(!looks_secret(t), "{t}");
+        }
+    }
 
     #[test]
     fn hidden_characters_are_dropped() {
