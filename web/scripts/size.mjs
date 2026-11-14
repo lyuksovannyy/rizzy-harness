@@ -144,7 +144,11 @@ const EXPORT_KB = 2.7;
 // window, the sub-agent card's activity line and their strings; in the
 // first load the fold's `model_retry` and limits, the "finished, unread"
 // hook with its notification, the sidebar's dot and its strings.
-const VISIBILITY_KB = 2.0;
+// After its review and the owner's side panel (sub-agents and background
+// commands beside the conversation, its own lazy chunk, which replaces the
+// background strip's), merged with the export above: measured 382.3
+// (initial 101.1), +1.7 over both lines (the total rounds up).
+const VISIBILITY_KB = 3.7;
 
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
 const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB + EXPORT_KB + VISIBILITY_KB) * 100) / 10) / 10;
