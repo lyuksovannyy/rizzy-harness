@@ -189,6 +189,12 @@ pub struct TurnExtra {
     /// of it; a callback turn, which takes no `context`, gets them after
     /// its opening. Never stored.
     pub instructions: Option<String>,
+    /// One line of the harness's about where the turn runs (the node's
+    /// date and time zone, OS, shell, git branch), composed by the node at
+    /// the start of this turn. Set only by the node, never from the
+    /// protocol. It opens the turn's own message (after the history, so
+    /// the cached prefix stays the same). Never stored.
+    pub environment: Option<String>,
     /// A delegated sub-task's parent book: its labels continue the parent's
     /// numbering, so `[S3]` in the answer it returns names the parent's S3.
     /// `None` means the book comes from this session's own log.
@@ -212,6 +218,9 @@ pub struct TurnExtra {
     /// order, before this turn's own message. Set only by the node.
     pub queued: Vec<crate::event::UserMessage>,
 }
+
+/// How the node's environment line ([`TurnExtra::environment`]) begins.
+pub const ENVIRONMENT_LEAD: &str = "[harness] Environment of this turn";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TurnOutcome {

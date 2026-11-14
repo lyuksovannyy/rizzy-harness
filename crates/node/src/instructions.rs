@@ -219,7 +219,7 @@ const OUTSIDE: &str = "it leads outside the folder";
 /// is opened without following a link at its end or waiting on a FIFO, and
 /// the descriptor is checked again, so a folder swapped for a link after
 /// the first check is refused.
-fn read_one(
+pub(crate) fn read_one(
     path: &Path,
     bound: &Path,
     protected: &[PathBuf],

@@ -628,6 +628,7 @@ async fn agentic_node(
             tool_stream_bytes: policy.limits.tool_stream_bytes,
             max_steps: policy.limits.max_steps,
             bash_timeout_max: std::time::Duration::from_secs(policy.limits.bash_timeout_max_s),
+            model_idle_timeout: std::time::Duration::from_secs(policy.limits.model_idle_timeout_s),
             secrets: secrets.clone(),
             allow_outside_workspace: policy.allow_outside_workspace,
             protected_dirs: Arc::new(policy.protected_dirs.clone()),

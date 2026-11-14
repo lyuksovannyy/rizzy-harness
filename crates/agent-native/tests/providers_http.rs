@@ -47,6 +47,7 @@ fn request() -> ChatRequest {
         }],
         effort: None,
         cache: false,
+        idle_timeout: None,
     }
 }
 

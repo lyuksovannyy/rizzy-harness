@@ -11,7 +11,7 @@ export interface RawEvent {
 export type ApprovalMode = "ask_all" | "ask" | "auto";
 export type Decision = "allow" | "deny" | "allow_session";
 export type ResolvedBy = "user" | "policy" | "cancelled" | "interrupted";
-export type TurnEndReason = "completed" | "cancelled" | "error" | "interrupted" | "stopped";
+export type TurnEndReason = "completed" | "cancelled" | "error" | "interrupted" | "stopped" | "limit";
 
 export type Profile = "chat" | "agentic";
 

@@ -434,6 +434,8 @@ async fn a_message_after_the_last_step_starts_the_next_turn() {
     assert_eq!(reqs.len(), 2, "{reqs:?}");
     assert_eq!(holding(&reqs[0], "and one more thing"), 0);
     let text = reqs[1].messages.last().unwrap().user_text().unwrap();
+    // After the node's environment line, which opens every turn.
+    let text = harness_agent_native::provider::without_environment(text);
     assert!(text.starts_with("and one more thing"), "{text}");
     assert_eq!(holding(&reqs[1], "and one more thing"), 1);
     let log = n.log(sid);

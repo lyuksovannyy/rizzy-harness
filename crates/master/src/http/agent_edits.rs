@@ -278,6 +278,9 @@ pub(super) async fn generate_summary(
         tools: vec![],
         effort: None,
         cache: false,
+        idle_timeout: Some(std::time::Duration::from_secs(
+            harness_core::policy::DEFAULT_MODEL_IDLE_S,
+        )),
     };
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let done = tokio::time::timeout(Duration::from_secs(60), rt.provider.complete(&req, tx))

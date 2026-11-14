@@ -966,6 +966,10 @@ pub enum TurnEndReason {
     /// The node was stopped (SIGTERM or SIGINT, A.19): the turn was
     /// cancelled through the normal cancel path and closed before exit.
     Stopped,
+    /// The turn used its step budget (`[limits] max_steps`): its last
+    /// request asked the model to say what is done and what is left, and
+    /// the person's next message carries on. Not a failure.
+    Limit,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

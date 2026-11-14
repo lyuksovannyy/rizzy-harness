@@ -74,6 +74,44 @@ pub const CUT_BY_OUTPUT_LIMIT: &str = "This tool call was not run: your answer r
 pub const NOT_RUN_ON_LAST_STEP: &str = "This tool call was not run: this was your last step, \
      where only `finish` runs.";
 
+/// The result of a call made on a person's turn's last step, at the step
+/// limit, where no tool runs; the next turn reads it.
+pub const NOT_RUN_AT_STEP_LIMIT: &str = "This tool call was not run: it came on the last step \
+     of its turn, at the step limit (`max_steps` in node.toml), where no tool runs. Make it \
+     again if it is still needed.";
+
+/// What a call reads as when the log holds no result for it: the turn
+/// stopped while it was pending or running (the node restarted, or the log
+/// could not be written). Whether it ran is not known, so the model is
+/// told to look before it repeats it (DeepSeek's and OpenClaw's rule).
+pub const NO_RESULT_RECORDED: &str = "No result was recorded for this call: its turn stopped \
+     while the call was pending or running (the node restarted, or the session's log could not \
+     be written). It may have run fully, partly or not at all. Check the current state (files, \
+     processes, git status) before you repeat it; do not repeat it blindly.";
+
+/// The harness's note on a person's turn's last step (the step limit).
+fn wrap_up_note(max_steps: usize) -> String {
+    format!(
+        "[harness] This is the last step of this turn: it has used {} of its {max_steps} steps \
+         (`max_steps` in node.toml), and no tool runs now. Answer in text only: say what is \
+         done, what is left and what you would do next. The person can reply to let you carry \
+         on.",
+        max_steps - 1
+    )
+}
+
+/// The harness's note at half a turn's step budget (goose's turn-budget
+/// note), for budgets of at least this many steps.
+const HALF_NOTE_MIN_STEPS: usize = 4;
+
+fn half_note(used: usize, max_steps: usize) -> String {
+    format!(
+        "[harness] You have used {used} of the {max_steps} steps this turn may take \
+         (`max_steps` in node.toml). Plan to finish, or to reach a point you can report from, \
+         within the rest."
+    )
+}
+
 /// Messages in a row cut by the output limit after which the turn ends.
 pub const MAX_CUT_STEPS: u32 = 3;
 
@@ -286,6 +324,9 @@ pub struct NativeConfig {
     /// Retries of a model call that failed for a passing reason, before
     /// the agent's fallbacks.
     pub retry: retry::RetryPolicy,
+    /// How long a model's stream may send nothing before the call fails
+    /// as a broken stream (node.toml `[limits] model_idle_timeout_s`).
+    pub model_idle_timeout: Duration,
 }
 
 impl NativeConfig {
@@ -324,6 +365,7 @@ impl Default for NativeConfig {
             summarize_after_tokens: None,
             coding_summary: false,
             retry: Default::default(),
+            model_idle_timeout: Duration::from_secs(harness_core::policy::DEFAULT_MODEL_IDLE_S),
         }
     }
 }
@@ -886,7 +928,7 @@ fn messages_of(history: &[RawEvent], unread_too: bool) -> Vec<ChatMsg> {
         for call_id in open.drain(..) {
             out.push(ChatMsg::Tool {
                 call_id,
-                content: "[no result: the turn was interrupted]".into(),
+                content: NO_RESULT_RECORDED.into(),
             });
         }
     };
@@ -1386,6 +1428,7 @@ impl NativeBackend {
         // images. Anything the node passed in them is ignored.
         let callback = ctx.extra.cause.as_ref().map(|c| c.callback_ids().to_vec());
         let instructions = ctx.extra.instructions.as_deref().filter(|i| !i.is_empty());
+        let environment = ctx.extra.environment.as_deref().filter(|e| !e.is_empty());
         // Where this turn's own messages begin: what an earlier turn never
         // read (X.5), then the person's message or the callback's opening.
         let mut turn_idx = messages.len();
@@ -1398,6 +1441,12 @@ impl NativeBackend {
                 // request rebuilds the opening without them.
                 if let (Some(i), Some(ChatMsg::Opening(t))) = (instructions, messages.last_mut()) {
                     *t = provider::with_instructions_after(t, i);
+                }
+                // The node's environment line, last: the opening still
+                // starts with the harness's frame.
+                if let (Some(env), Some(ChatMsg::Opening(t))) = (environment, messages.last_mut()) {
+                    t.push_str("\n\n");
+                    t.push_str(env);
                 }
             }
             None => {
@@ -1415,6 +1464,11 @@ impl NativeBackend {
                     Some(c) if child => provider::with_task_context(c, &ctx.user_text),
                     Some(c) => provider::with_context(c, &ctx.user_text),
                     None => ctx.user_text.clone(),
+                };
+                // The node's line about where the turn runs opens it.
+                let user_text = match environment {
+                    Some(env) => format!("{env}\n\n{user_text}"),
+                    None => user_text,
                 };
                 // Recorded as read after `turn_started`, where the log has
                 // them on every later request.
@@ -1512,15 +1566,26 @@ impl NativeBackend {
         // guard cuts off can still report (review SB-1). Holds the end text
         // the turn has if it does not.
         let mut last: Option<String> = None;
+        // A person's turn's last request (the step limit): the same tools
+        // (the provider's cached prefix stays), the harness's note asking
+        // for an account of where the work stands, and no call run
+        // (OpenCode's max-steps step). The turn then ends at a limit, not
+        // as an error. A callback turn keeps its error (nobody started it).
+        let mut wrap_up = false;
         let mut steps = 0usize;
         loop {
-            if last.is_none() {
+            if last.is_none() && !wrap_up {
                 if steps >= max_steps {
                     break;
                 }
                 if child && steps + 1 == max_steps {
                     last = Some(cap_error.clone());
                     messages.push(ChatMsg::Note(harness_core::subagent::LAST_STEP_NOTE.into()));
+                } else if callback.is_none() && steps + 1 == max_steps {
+                    wrap_up = true;
+                    messages.push(ChatMsg::Note(wrap_up_note(max_steps)));
+                } else if max_steps >= HALF_NOTE_MIN_STEPS && steps == max_steps / 2 {
+                    messages.push(ChatMsg::Note(half_note(steps, max_steps)));
                 }
             }
             steps += 1;
@@ -1562,6 +1627,7 @@ impl NativeBackend {
                 // Only for models that take one (a fallback may not).
                 effort: effort.filter(|_| !agent.is_some_and(|a| a.no_effort.contains(&model))),
                 cache: sv.prompt_cache,
+                idle_timeout: Some(self.config.model_idle_timeout),
             };
             // A passing failure is retried (bounded, with backoff) before
             // the fallbacks, but only while this attempt has shown nothing:
@@ -1778,6 +1844,8 @@ impl NativeBackend {
                 return TurnOutcome {
                     reason: if last.is_some() {
                         TurnEndReason::Error
+                    } else if wrap_up {
+                        TurnEndReason::Limit
                     } else {
                         TurnEndReason::Completed
                     },
@@ -1827,6 +1895,13 @@ impl NativeBackend {
                         reason: TurnEndReason::Error,
                         usage: Some(usage),
                         error: Some(e),
+                    };
+                }
+                if wrap_up {
+                    return TurnOutcome {
+                        reason: TurnEndReason::Limit,
+                        usage: Some(usage),
+                        error: None,
                     };
                 }
                 if cut_steps >= MAX_CUT_STEPS {
@@ -1917,9 +1992,15 @@ impl NativeBackend {
                 });
             }
 
-            // A child's last step runs nothing but `finish`: the other
-            // calls are recorded as not run, and the turn ends.
-            if let Some(e) = last {
+            // A child's last step runs nothing but `finish`, a person's
+            // turn's runs nothing: the other calls are recorded as not
+            // run, and the turn ends.
+            if last.is_some() || wrap_up {
+                let not_run = if wrap_up {
+                    NOT_RUN_AT_STEP_LIMIT
+                } else {
+                    NOT_RUN_ON_LAST_STEP
+                };
                 for call in rest {
                     if host
                         .emit(EventKind::ToolCallStarted(ToolCallStarted {
@@ -1935,7 +2016,7 @@ impl NativeBackend {
                             .emit(EventKind::ToolCallFinished(ToolCallFinished {
                                 call_id: call.call_id,
                                 ok: false,
-                                output: NOT_RUN_ON_LAST_STEP.into(),
+                                output: not_run.into(),
                                 exit_code: None,
                                 truncated: false,
                                 sources: vec![],
@@ -1947,10 +2028,17 @@ impl NativeBackend {
                         return stopped(usage);
                     }
                 }
-                return TurnOutcome {
-                    reason: TurnEndReason::Error,
-                    usage: Some(usage),
-                    error: Some(e),
+                return match last {
+                    Some(e) => TurnOutcome {
+                        reason: TurnEndReason::Error,
+                        usage: Some(usage),
+                        error: Some(e),
+                    },
+                    None => TurnOutcome {
+                        reason: TurnEndReason::Limit,
+                        usage: Some(usage),
+                        error: None,
+                    },
                 };
             }
 
@@ -2324,6 +2412,7 @@ impl NativeBackend {
                     tools: vec![],
                     effort: None,
                     cache: ctx.extra.savings.prompt_cache,
+                    idle_timeout: Some(self.config.model_idle_timeout),
                 };
                 let mut retries = 0;
                 let step = loop {
@@ -2550,6 +2639,7 @@ impl NativeBackend {
                 tools: vec![],
                 effort: None,
                 cache: false,
+                idle_timeout: Some(self.config.model_idle_timeout),
             };
             let c = match self.complete_quietly(&req, &ctx.cancel).await {
                 Ok(c) => c,

@@ -762,6 +762,7 @@ env_pass = []                        # extra variables the agent's shell gets (s
 tool_stream_bytes = 1048576          # live output one tool call may stream (4096 .. 1 GiB)
 max_steps = 50                       # model calls one turn may make (1 .. 1000)
 bash_timeout_max_s = 3600            # longest a bash call may run, whatever it asks for (1 .. 3600)
+model_idle_timeout_s = 300           # a model stream silent this long fails and is retried (10 .. 3600)
 max_subagents = 4                    # sub-agents one turn may start; the master may ask for fewer (0 .. 32)
 max_delegation_depth = 1             # 1: the turn's agent may delegate, its sub-agents not; 0: off (0 .. 4)
 background_per_session = 8           # background commands one chat may run at once; 0: off (0 .. 32)
@@ -1241,9 +1242,17 @@ command keeps running until it exits, times out or is cancelled, and the
 rest of its output is read and dropped. The result the model gets has its
 own, smaller cap and says when the live stream was cut.
 
-**Step and time limits.** A turn ends after `[limits] max_steps` model calls
-(default 50, 1 to 1000; a sub-agent's turn has the same cap) with the message
-"stopped after N steps (`max_steps` in node.toml)". A `bash` call runs for
+**Step and time limits.** A turn may make `[limits] max_steps` model calls
+(default 50, 1 to 1000; a sub-agent's turn has the same cap). Halfway through,
+the agent is told how many it has used. Its last call runs no tool: the agent
+is asked to say what is done, what is left and what it would do next, a tool
+call it still makes is answered "not run", and the turn ends as "turn limit",
+not as an error. Reply to let it carry on. A sub-agent's last call may only
+`finish`; a callback turn (see "Background commands") still ends with
+"stopped after N steps". A model whose stream sends nothing for `[limits]
+model_idle_timeout_s` seconds (default 300, 10 to 3600: Codex's value; no
+response headers count too) fails as a broken stream and is retried like a
+dropped connection, never after part of its answer was shown. A `bash` call runs for
 the `timeout_secs` it states, at least 5 s and at most `[limits]
 bash_timeout_max_s` seconds (default 3600, 1 to 3600, which wins over the
 5 s floor if set lower); **a call that states none stops after 60 s** (it was
@@ -1501,6 +1510,22 @@ memory off. Keeping your personal memory out of
 a team workspace leaves its projects' memory in. Agentic chats started in a project
 take its default node and folder. Temporary chats cannot join a project.
 Design and open questions: [docs/projects.md](docs/projects.md).
+
+## The environment line
+
+Every message in an agentic chat (a sub-agent's task and a callback turn
+included) opens with one line from the node: its clock (weekday, date, time,
+time zone and UTC offset), its OS, that the `bash` tool runs bash, and whether
+the chat's folder is in a git repository and on which branch (or at which
+commit). The model no longer guesses the date or spends calls finding these.
+The branch is read from the repository's `HEAD` file, the way instruction files
+are read (inside the folder `node.toml` grants, no link out, never waiting on a
+FIFO, within the same 5-second bound); no `git` process is started. The branch
+name is the repository's text: it is shown on one line, at most 120
+characters, with its quotation marks read as `'`. The line goes after the
+history, so the provider's cached prefix stays the same; it costs about 60
+tokens a message. Your own time zone, if you set one in your settings, is
+still sent separately with your messages.
 
 ## Repository instructions (AGENTS.md)
 

@@ -3,6 +3,7 @@
 
 pub mod artifacts;
 mod audit;
+mod environment;
 pub mod exec;
 mod git;
 mod images;
