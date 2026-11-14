@@ -12,6 +12,7 @@ use crate::workspaces::{self as ws, WsError};
 use crate::{CommandError, Master, auth};
 
 mod agent_edits;
+mod approval_mode;
 mod artifacts;
 mod background;
 mod hooks;
@@ -208,6 +209,7 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
         .merge(media::routes())
         .merge(artifacts::routes())
         .merge(background::routes())
+        .merge(approval_mode::routes())
         .merge(storage::routes())
         .merge(links::routes())
         // Matched routes only (the embedded UI files are not handlers); which

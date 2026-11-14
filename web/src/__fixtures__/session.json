@@ -763,11 +763,30 @@
       "ts_ms": 1700000000049
     },
     {
+      "kind": "approval_mode_changed",
+      "payload": {
+        "mode": "auto"
+      },
+      "seq": 51,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000050
+    },
+    {
+      "kind": "approval_mode_changed",
+      "payload": {
+        "mode": "accept_edits",
+        "requested": "auto"
+      },
+      "seq": 52,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000051
+    },
+    {
       "kind": "from_a_newer_node",
       "payload": {
         "anything": true
       },
-      "seq": 51,
+      "seq": 53,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
       "ts_ms": 0
     }
@@ -797,7 +816,7 @@
       }
     },
     "context_tokens": 1,
-    "head_seq": 51,
+    "head_seq": 53,
     "items": [
       {
         "text": "fix the bug",
@@ -1161,10 +1180,19 @@
         ],
         "reason": "3 turns in a row without you (node limit)",
         "type": "callback_refused"
+      },
+      {
+        "mode": "auto",
+        "type": "approval_mode_changed"
+      },
+      {
+        "mode": "accept_edits",
+        "requested": "auto",
+        "type": "approval_mode_changed"
       }
     ],
     "meta": {
-      "approval_mode": "ask",
+      "approval_mode": "accept_edits",
       "backend": "native",
       "cwd": "/w",
       "exec_mode": "sandbox",

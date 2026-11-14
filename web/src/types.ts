@@ -8,7 +8,9 @@ export interface RawEvent {
   payload: any; // eslint-disable-line @typescript-eslint/no-explicit-any
 }
 
-export type ApprovalMode = "ask_all" | "ask" | "auto";
+/** Strictest first (T48): `accept_edits` lets `write`/`edit` inside the chat's
+ * folder run without a card; `auto` runs everything unasked. */
+export type ApprovalMode = "ask_all" | "ask" | "accept_edits" | "auto";
 export type Decision = "allow" | "deny" | "allow_session";
 export type ResolvedBy = "user" | "policy" | "cancelled" | "interrupted";
 export type TurnEndReason = "completed" | "cancelled" | "error" | "interrupted" | "stopped";
@@ -247,6 +249,8 @@ export type Item =
   | { type: "error"; message: string }
   | { type: "turn_end"; turn_id: string; reason: TurnEndReason }
   | { type: "agent_changed"; agent: AgentRef }
+  /** The owner changed the approval mode; `requested` when the node gave less. */
+  | { type: "approval_mode_changed"; mode: ApprovalMode; requested?: ApprovalMode }
   | { type: "summary"; through_seq: number; text: string }
   /** The turn's main model failed or is unavailable: `model` (prefixed) answered instead of `from`. */
   | { type: "fallback"; turn_id: string; model: string; from: string; reason?: string | null }
@@ -659,6 +663,11 @@ export interface NodeInfo {
   exec_modes?: ExecMode[];
   /** Their gaps (`gap:sandbox:netns`, `gap:host:netns`), for the chat to say. */
   exec_gaps?: string[];
+  /** The loosest approval mode its node.toml allows (T48); absent: the node
+   * cannot change a chat's mode. */
+  max_approval?: ApprovalMode | null;
+  /** What a new chat there gets when the person picks none. */
+  default_approval?: ApprovalMode | null;
 }
 
 /** A server-wide account role (Settings → Users), not a workspace role. */

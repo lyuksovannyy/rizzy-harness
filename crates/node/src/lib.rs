@@ -105,6 +105,7 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::Prompt { session_id, .. }
         | MasterToNode::Callback { session_id, .. }
         | MasterToNode::SetAgent { session_id, .. }
+        | MasterToNode::SetApprovalMode { session_id, .. }
         | MasterToNode::ArtifactStage { session_id, .. }
         | MasterToNode::ArtifactRelease { session_id, .. } => Some(*session_id),
         MasterToNode::Welcome { .. }
@@ -550,6 +551,20 @@ impl NodeRuntime {
                 // The modes it offers and their gaps (N.10a), as decided at
                 // start.
                 capabilities.extend(self.inner.cfg.policy.exec.capabilities());
+                // Its approval modes (T48): the ceiling, and what a new chat
+                // gets; each chat's own limit (a `host` chat's) the UI knows
+                // from the chat.
+                let p = &self.inner.cfg.policy;
+                capabilities.push(format!(
+                    "{}{}",
+                    harness_protocol::CAP_APPROVAL_MAX_PREFIX,
+                    p.max_approval_mode.id()
+                ));
+                capabilities.push(format!(
+                    "{}{}",
+                    harness_protocol::CAP_APPROVAL_DEFAULT_PREFIX,
+                    p.effective_mode(None).id()
+                ));
                 capabilities.push(harness_protocol::CAP_BACKGROUND.into());
                 // Off is silent: with `callback_turns = 0` the master asks
                 // nothing, and an end waits for the person as before.
@@ -1019,6 +1034,17 @@ impl NodeRuntime {
                 }
                 None => Err("unknown session".into()),
             },
+            // In the session's lane, which a running turn does not hold: a
+            // change made while a turn runs applies from its next call (T48).
+            MasterToNode::SetApprovalMode {
+                session_id, mode, ..
+            } => {
+                self.audit("session.set_approval_mode", session_id).await;
+                match self.session(session_id) {
+                    Some(s) => s.set_mode(mode).await.map(|_| ()),
+                    None => Err("unknown session".into()),
+                }
+            }
             MasterToNode::StopBackground {
                 session_id,
                 bg_id,
@@ -1123,10 +1149,9 @@ impl NodeRuntime {
             Profile::Agentic => policy.check_cwd(&cwd)?,
             Profile::Chat => std::path::PathBuf::new(),
         };
-        let mode = policy.effective_mode(approval_mode);
-        // A `host` session asks, whatever was asked and whatever node.toml
-        // allows (review N-e).
-        let mode = exec_mode.map_or(mode, |e| mode.min(e.max_approval()));
+        // Within node.toml's ceiling, and a `host` session never in `auto`,
+        // whatever was asked (review N-e, T48).
+        let mode = policy.session_mode(approval_mode, exec_mode);
         let model = agent
             .as_ref()
             .and_then(|a| a.model.clone())
@@ -1147,6 +1172,7 @@ impl NodeRuntime {
                 owned: None,
                 no_callbacks,
                 exec_mode,
+                above: Vec::new(),
             },
         )
         .await

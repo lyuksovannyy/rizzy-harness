@@ -95,7 +95,7 @@ pub(crate) struct Retry {
 pub fn approval_for(spec: &RoutineSpec, _untrusted: bool, _node: Option<&str>) -> ApprovalMode {
     match spec.approval_mode {
         ApprovalMode::AskAll => ApprovalMode::AskAll,
-        ApprovalMode::Ask | ApprovalMode::Auto => ApprovalMode::Ask,
+        ApprovalMode::Ask | ApprovalMode::AcceptEdits | ApprovalMode::Auto => ApprovalMode::Ask,
     }
 }
 

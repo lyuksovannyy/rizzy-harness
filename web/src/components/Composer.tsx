@@ -13,7 +13,7 @@ import { abilities, allEngines, type CustomEngine, engineByUrl, engineMention, e
 import { EngineIcon } from "./EngineIcon";
 import { Select } from "./Select";
 import { AgentMark, agentAlert } from "./AgentAvatar";
-import type { Agent, AvatarState, Effort, ExecMode, ModelInfo, NodeInfo, UploadedAttachment } from "../types";
+import type { Agent, ApprovalMode, AvatarState, Effort, ExecMode, ModelInfo, NodeInfo, UploadedAttachment } from "../types";
 import { type HostRight, mayPickHost } from "../lib/execModes";
 import { shownName } from "../md/hiddenChars";
 
@@ -22,6 +22,9 @@ import { shownName } from "../md/hiddenChars";
 const LinkedImg = lazy(() => import("./Linked"));
 // The host shell's choice: only those who may pick it load it (N.10a).
 const ExecChoice = lazy(() => import("./ExecChoice"));
+// The approval mode's picker (T48): only for agentic chats on a node that
+// announced its modes.
+const ApprovalModePick = lazy(() => import("./ApprovalModePick"));
 
 const FOLDERS_KEY = "harness.folders";
 const EFFORTS: Effort[] = ["low", "medium", "high", "max"];
@@ -62,6 +65,8 @@ export interface Submission {
   images?: string[];
   /** Agentic: how its commands run (N.10a); `host` only once its warning was confirmed. */
   execMode?: ExecMode;
+  /** Agentic: the approval mode the person picked (T48); absent: the node's default. */
+  approvalMode?: ApprovalMode;
 }
 
 const MAX_ATTACHMENTS = 5;
@@ -114,6 +119,9 @@ export function Composer(props: {
   images?: { workspace: string | null; pending?: boolean; left?: number } | null;
   /** Home: who may pick the host shell (N.10a); absent, nobody here. */
   hostRight?: HostRight;
+  /** Session: the chat's approval mode and how to change it (T48); absent:
+   * not changeable here (a chat, a sub-agent's, a routine's, an old node). */
+  approval?: { value: ApprovalMode; max: ApprovalMode; host: boolean; onChange: (m: ApprovalMode) => Promise<unknown> };
 }) {
   const home = props.where === "home";
   const [text, setText] = useState(() => (props.draft ? readDraft(props.draft) : ""));
@@ -162,6 +170,9 @@ export function Composer(props: {
   const [hostFor, setHostFor] = useState<string | null>(null);
   const worker = props.workers.find((w) => w.node_id === nodeId);
   const hostPickable = mayPickHost(worker, props.hostRight);
+  // The new chat's approval mode, as picked, for one node (like `hostFor`).
+  const [approvalFor, setApprovalFor] = useState<{ node: string; mode: ApprovalMode } | null>(null);
+  const approvalPick = approvalFor?.node === nodeId ? approvalFor.mode : undefined;
   const [caret, setCaret] = useState(0);
   const [pick, setPick] = useState(0);
   const [popupClosed, setPopupClosed] = useState(false);
@@ -372,6 +383,7 @@ export function Composer(props: {
         search: searching ? { url: engineUrl, query: typedEngine ? typedEngine.query.trim() || body : body } : undefined,
         ...(images.length ? { images } : {}),
         ...(home && mode === "agentic" ? { execMode: exec } : {}),
+        ...(home && mode === "agentic" && approvalPick ? { approvalMode: approvalPick } : {}),
       });
       if (mode === "agentic") rememberFolder(cwd.trim());
       if (home) props.onLearn?.(body, mode);
@@ -381,6 +393,7 @@ export function Composer(props: {
       setManual(false);
       // The host shell is chosen again, with its warning, for each chat.
       setHostFor(null);
+      setApprovalFor(null);
     } catch (x) {
       setErr(x instanceof Error ? x.message : String(x));
     } finally {
@@ -604,6 +617,20 @@ export function Composer(props: {
               />
             </span>
           )}
+          {!home && props.approval && !props.readOnly && (
+            <Suspense fallback={null}>
+              <ApprovalModePick
+                value={props.approval.value}
+                max={props.approval.max}
+                host={props.approval.host}
+                onChange={(m) => {
+                  setErr(null);
+                  props.approval!.onChange(m).catch((x) => setErr(x instanceof Error ? x.message : String(x)));
+                  ta.current?.focus();
+                }}
+              />
+            </Suspense>
+          )}
           {override && override !== props.agentId && (
             <span className="pill override">
               <CornerDownRight size={14} /> @{override} {t("composer.forMessage")}
@@ -819,6 +846,16 @@ export function Composer(props: {
                 value={hostFor === worker.node_id ? "host" : undefined}
                 onChange={(m) => setHostFor(m === "host" ? worker.node_id : null)}
               />
+              </Suspense>
+            )}
+            {worker?.max_approval && (
+              <Suspense fallback={null}>
+                <ApprovalModePick
+                  value={approvalPick ?? worker.default_approval ?? "ask"}
+                  max={worker.max_approval}
+                  host={hostPickable && hostFor === nodeId}
+                  onChange={(m) => setApprovalFor({ node: nodeId, mode: m })}
+                />
               </Suspense>
             )}
           </div>

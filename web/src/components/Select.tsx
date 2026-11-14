@@ -9,6 +9,8 @@ export interface SelectOption {
   hint?: string;
   /** Before the label, in the list and on the button (an engine's favicon). */
   icon?: ReactNode;
+  /** Shown, not pickable; `hint` says why. */
+  disabled?: boolean;
 }
 
 export function Select(props: {
@@ -17,6 +19,8 @@ export function Select(props: {
   options: SelectOption[];
   onChange: (v: string) => void;
   compact?: boolean;
+  /** Each option's hint on its own line under the label. */
+  stacked?: boolean;
 }) {
   const id = useId();
   const [open, setOpen] = useState(false);
@@ -33,11 +37,12 @@ export function Select(props: {
     return () => document.removeEventListener("mousedown", close);
   }, [open, props.options, props.value]);
   const pick = (o: SelectOption) => {
+    if (o.disabled) return;
     props.onChange(o.value);
     setOpen(false);
   };
   return (
-    <div className={`select ${props.compact ? "compact" : ""}`} ref={root}>
+    <div className={`select ${props.compact ? "compact" : ""} ${props.stacked ? "stacked" : ""}`} ref={root}>
       <button
         type="button"
         className="select-button"
@@ -77,7 +82,8 @@ export function Select(props: {
               key={o.value}
               role="option"
               aria-selected={o.value === props.value}
-              className={`${i === active ? "on" : ""} ${o.value === props.value ? "chosen" : ""}`}
+              aria-disabled={o.disabled || undefined}
+              className={`${i === active ? "on" : ""} ${o.value === props.value ? "chosen" : ""} ${o.disabled ? "off" : ""}`}
               onMouseEnter={() => setActive(i)}
               onMouseDown={(e) => e.preventDefault()}
               onClick={() => pick(o)}

@@ -488,6 +488,7 @@ export function Shell(props: {
       ...(workspaceId ? { workspace_id: workspaceId } : {}),
       ...(projectId ? { project_id: projectId } : {}),
       ...(agentic && s.execMode ? { exec_mode: s.execMode } : {}),
+      ...(agentic && s.approvalMode ? { approval_mode: s.approvalMode } : {}),
     });
     refreshSessions();
     go({ kind: "session", id: session_id });
