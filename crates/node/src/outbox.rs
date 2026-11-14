@@ -1,7 +1,7 @@
 //! What the node sends the master, in two lanes (ADOPTION_PLAN A.21).
 //!
 //! **In order:** events, snapshots, `deleted`, artifact chunks and the acks
-//! of every command that runs in a session's lane. They go in the order
+//! of every command that ran in a session's lane. They go in the order
 //! they were queued: a session's events in `seq` order (each is queued
 //! under the session's `head`), and a create's ack after its
 //! `session_created` (`Master::create_session` relies on it). At most
@@ -12,7 +12,8 @@
 //! asked for again).
 //!
 //! **Ahead:** the acks of the commands the node's command loop answers
-//! inline (cancel, approval answer, `stop_background`). No order between
+//! inline (cancel, approval answer, `stop_background`), and its refusals
+//! of commands no session lane takes (past `MAX_LANES` or a lane's depth). No order between
 //! them and the output is relied on (an approval request is an event the
 //! master has before anyone can answer it), so they pass whatever output is
 //! queued, and they never wait: at most `URGENT_QUEUE` are kept, and past

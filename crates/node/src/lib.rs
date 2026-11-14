@@ -199,7 +199,7 @@ impl Inner {
     }
 
     /// Send in order without waiting, for replies that are not part of the
-    /// log (artifact chunks, a full lane's refusal). When the queue is full
+    /// log (artifact chunks). When the queue is full
     /// the reply is dropped and the master's transfer times out and asks
     /// again; events never go this way.
     pub(crate) fn publish(&self, msg: NodeToMaster) {
@@ -223,8 +223,9 @@ impl Inner {
     }
 
     /// Send ahead of the queued output, never waiting: the acks of the
-    /// commands the command loop answers inline (`outbox`). Dropped when
-    /// the master has more than `outbox::URGENT_QUEUE` of them unread.
+    /// commands the command loop answers inline, and its refusals of
+    /// commands no lane takes (`outbox`). Dropped when the master has more
+    /// than `outbox::URGENT_QUEUE` of them unread.
     fn publish_urgent(&self, msg: NodeToMaster) {
         if let Some(o) = self.outbox()
             && !o.send_urgent(msg)
@@ -665,12 +666,15 @@ impl NodeRuntime {
         self.start_lane(lanes, &mut map, sid, cmd);
     }
 
-    /// A command no lane takes: a nack at once, never a silent drop.
+    /// A command no lane takes: a nack at once, never a silent drop. It
+    /// follows no event, so it goes ahead of the queued output like the
+    /// inline commands' acks (re-check D-1: in the ordered queue it was
+    /// dropped while the uplink was full).
     fn refuse(&self, cmd: LaneCmd, error: String) {
         if let LaneCmd::Msg(msg) = cmd
             && let Some(req_id) = msg.req_id()
         {
-            self.inner.publish(NodeToMaster::Ack {
+            self.inner.publish_urgent(NodeToMaster::Ack {
                 req_id: req_id.to_string(),
                 ok: false,
                 error: Some(error),
