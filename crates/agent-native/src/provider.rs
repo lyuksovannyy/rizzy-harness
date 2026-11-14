@@ -241,20 +241,44 @@ pub fn with_context(context: &str, text: &str) -> String {
     if context.is_empty() {
         return text.to_string();
     }
-    let mut quoted = String::with_capacity(context.len() + context.len() / 8);
-    let mut lines = 0usize;
-    for l in context.lines() {
-        quoted.push('\n');
-        quoted.push_str(OUTPUT_QUOTE);
-        quoted.push_str(&quoted_line(l));
-        lines += 1;
-    }
+    let (quoted, lines) = quote_lines(context);
     format!(
         "{CONTEXT_LEAD}, not part of the person's message: the {lines} line(s) below, each \
          starting with \"{OUTPUT_QUOTE}\", are what the harness adds to it, such as the person's \
          settings, memory recalled for it and, in a project chat, the project's instructions, \
          facts and board, which other people may have written. Their message follows the \
          empty line.{quoted}\n\n{text}"
+    )
+}
+
+/// Every line of `text` behind [`OUTPUT_QUOTE`] (`quoted_line`), each
+/// after a line break, and how many there are.
+fn quote_lines(text: &str) -> (String, usize) {
+    let mut quoted = String::with_capacity(text.len() + text.len() / 8);
+    let mut lines = 0usize;
+    for l in text.lines() {
+        quoted.push('\n');
+        quoted.push_str(OUTPUT_QUOTE);
+        quoted.push_str(&quoted_line(l));
+        lines += 1;
+    }
+    (quoted, lines)
+}
+
+/// A callback turn's opening with the repository's instruction files
+/// after it (review RI-1): an empty line, one line of the harness's, then
+/// every line of the files behind [`OUTPUT_QUOTE`]. The opening still
+/// starts with the harness's frame and its notes come first; nothing in
+/// the files starts a line. Empty files add nothing.
+pub fn with_instructions_after(opening: &str, instructions: &str) -> String {
+    if instructions.is_empty() {
+        return opening.to_string();
+    }
+    let (quoted, lines) = quote_lines(instructions);
+    format!(
+        "{opening}\n\n{INSTRUCTIONS_LEAD}, not the person's words and not program output: the \
+         {lines} line(s) below, each starting with \"{OUTPUT_QUOTE}\", are the repository's \
+         AGENTS.md / CLAUDE.md files as the harness read them for this turn.{quoted}"
     )
 }
 
