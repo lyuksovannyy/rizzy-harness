@@ -3722,6 +3722,87 @@ mod tests {
         out
     }
 
+    /// C43-1, through the loop: every turn carries a per-turn context at
+    /// the head of its user message, which the next turn rebuilds without.
+    /// Turn N+1 still marks a prefix that turn N marked, byte for byte,
+    /// past the system prompt, so the history is read from the cache and
+    /// not written again. Turn N has a tool call, so it sends two requests.
+    #[tokio::test]
+    async fn the_next_turn_marks_a_prefix_this_turn_marked() {
+        let sid = SessionId::new();
+        let mut seq = 1;
+        let mut history = vec![];
+        for n in 1..=2 {
+            history.extend(turn_events(sid, &mut seq, n));
+        }
+        let rec = Arc::new(Rec {
+            inner: mock::Mock {
+                delay: Duration::from_millis(0),
+            },
+            reqs: Mutex::new(vec![]),
+        });
+        let b = NativeBackend::new(rec.clone(), harness_tools::builtin(), Default::default());
+        let dir = tempfile::tempdir().unwrap();
+        let savings = harness_core::savings::Savings {
+            prompt_cache: true,
+            ..Default::default()
+        };
+        let mut turns = vec![];
+        for (n, text) in [(3, "run: echo hi"), (4, "thanks")] {
+            let host = RecHost::new(Decision::Allow);
+            let mut c = ctx(&host, text, dir.path());
+            c.turn_id = format!("t{n}");
+            c.history = history.clone();
+            c.extra.savings = savings.clone();
+            c.extra.context = Some(format!("Person: Ann\nTime: turn {n}"));
+            let out = b.run_turn(c).await;
+            assert_eq!(out.reason, TurnEndReason::Completed);
+            // What the node logs for this turn: the person's text without
+            // the context, then everything the loop emitted.
+            let mut push = |kind: EventKind| {
+                seq += 1;
+                let (kind, payload) = kind.into_parts();
+                history.push(RawEvent {
+                    session_id: sid,
+                    seq,
+                    ts_ms: 0,
+                    kind,
+                    payload,
+                });
+            };
+            push(EventKind::UserMessage(UserMessage {
+                turn_id: format!("t{n}"),
+                text: text.into(),
+                attachments: vec![],
+                reply: None,
+                images: vec![],
+            }));
+            for e in host.events.lock().unwrap().drain(..) {
+                push(e);
+            }
+            turns.push(std::mem::take(&mut *rec.reqs.lock().unwrap()));
+        }
+        assert_eq!(turns[0].len(), 2, "the tool call and the answer");
+        let sent = |reqs: &[ChatRequest]| -> Vec<String> {
+            reqs.iter()
+                .flat_map(|r| llm::marked_prefixes(&llm::to_genai(r)))
+                .collect()
+        };
+        let (this, next) = (sent(&turns[0]), sent(&turns[1]));
+        let system = &next[0];
+        let read: Vec<&String> = next
+            .iter()
+            .filter(|p| *p != system && this.contains(p))
+            .collect();
+        assert!(
+            !read.is_empty(),
+            "turn N+1 marks no prefix past the system prompt that turn N marked"
+        );
+        // And the longest of them reaches the end of turn N-1's history:
+        // it holds turn 2's answer.
+        assert!(read.iter().any(|p| p.contains("answer 2")), "{read:?}");
+    }
+
     #[tokio::test]
     async fn long_history_is_summarised_once_and_reused() {
         let sid = SessionId::new();
