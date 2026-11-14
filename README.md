@@ -1481,6 +1481,39 @@ Cancelling a turn stops any tool: one that does not return by itself
 within 2 seconds is abandoned. A slow undo or delete in one chat never
 delays Stop or an approval answer, in that chat or any other.
 
+**Editing files.** The agent changes only files it has seen in this chat:
+
+- `edit`, and `write` over an existing file, need the file to have been
+  read with `read` in this chat (any part of it). A new file needs
+  nothing. The agent's own edits and writes count as seen. Viewing a file
+  with `cat` in `bash` does not count.
+- If the file changed on disk since then (you edited it, a command or a
+  formatter did, another chat did), `write` is refused, and `edit` goes
+  ahead only when the text it replaces lies outside the lines that
+  changed; the result then shows those lines as they are now. Otherwise it
+  is refused and shows the changed lines, and the agent reads again. This
+  is decided against the text the agent was shown, kept in memory on the
+  node (files up to 512 KiB, 8 MiB in all; at most 4,096 files remembered
+  per node); after a node restart, or for a larger file, any change means
+  "read it again". What the agent has read is stored with each call in the
+  chat's log, so a restart does not make it read everything again. A
+  sub-agent has its own record; deleting a chat drops it.
+- `edit` takes one replacement (`old_string`, `new_string`, `replace_all`)
+  or several in `edits`, matched against the file as it was before the
+  call, all made or none. Text that does not match exactly is still found
+  when, on whole lines, it differs only in trailing whitespace or in
+  typographic quotes, dashes and spaces, and the result says so (the
+  file's own quotes and dashes are kept where the agent did not change
+  them); indentation must match. A line-number prefix copied from `read` output
+  is taken off. When nothing matches, the agent is shown the nearest lines
+  of the file, or told the change seems to be made already.
+- The result lists the changed lines, numbered as `read` numbers them,
+  with two lines around each. Line endings (CRLF), a byte-order mark and a
+  missing final newline are kept.
+- `read` returns up to 2,000 lines (400 with bounded reads) and about
+  29,000 characters; a longer window ends early at a whole line and names
+  the offset to go on from.
+
 ### Token savings
 
 Settings → Server → Token savings switches each method on or off; it is
