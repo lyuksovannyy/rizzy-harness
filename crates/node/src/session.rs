@@ -120,6 +120,9 @@ pub(crate) struct Session {
     /// the turn's next model request, or by the next turn (X.5). Rebuilt
     /// from the log at load.
     pending: Mutex<Vec<(u64, UserMessage)>>,
+    /// The environment line the last `turn_started` recorded, by turn id,
+    /// for that turn's run to send (`TurnExtra::environment`).
+    turn_env: Mutex<Option<(String, String)>>,
 }
 
 /// The most messages that wait at once for the running turn to read them
@@ -290,6 +293,7 @@ impl Session {
             bg_gate: tokio::sync::Mutex::new(()),
             queue: tokio::sync::Mutex::new(()),
             pending: Mutex::new(Vec::new()),
+            turn_env: Mutex::new(None),
             node: node.clone(),
             id,
             head: tokio::sync::Mutex::new(0),
@@ -385,6 +389,7 @@ impl Session {
             // Sent while a turn ran that a restart cut: the next turn reads
             // them (X.5).
             pending: Mutex::new(unread(&events)),
+            turn_env: Mutex::new(None),
             node,
             id,
             head: tokio::sync::Mutex::new(view.head_seq),
@@ -1309,11 +1314,13 @@ impl Session {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clear();
+        let environment = self.environment_line(&turn_id).await;
         if let Err(e) = self
             .emit(EventKind::TurnStarted(TurnStarted {
                 turn_id: turn_id.clone(),
                 agent: agent.as_ref().map(AgentSpec::agent_ref),
                 cause: Some(cause.clone()),
+                environment,
             }))
             .await
         {
@@ -1393,11 +1400,13 @@ impl Session {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clear();
+        let environment = self.environment_line(turn_id).await;
         let started = self
             .emit(EventKind::TurnStarted(TurnStarted {
                 cause: None,
                 agent: agent.map(AgentSpec::agent_ref),
                 turn_id: turn_id.into(),
+                environment,
             }))
             .await;
         drop(gate);
@@ -1498,6 +1507,40 @@ impl Session {
         }
     }
 
+    /// The environment line for turn `turn_id` (`crate::environment`),
+    /// composed now, before its `turn_started` records it, and kept for
+    /// the turn's run: the node's clock, OS, shell and the repository's
+    /// `HEAD`, read in the instruction files' bound. `None` for a chat or
+    /// a folder that fails its check.
+    async fn environment_line(&self, turn_id: &str) -> Option<String> {
+        use crate::instructions::{self as ins, Bounded};
+        if self.profile != Profile::Agentic {
+            return None;
+        }
+        let dir = self.checked_folder().ok()?;
+        let granted = match &self.owned {
+            Some(o) => o.top.clone(),
+            None => self.node.cfg.policy.root_of(&dir).ok()?,
+        };
+        let protected = self.node.cfg.policy.protected_dirs.clone();
+        let now = jiff::Zoned::now();
+        let read = ins::bounded(
+            move || crate::environment::repo(&dir, &granted, &protected),
+            &CancellationToken::new(),
+            ins::READ_TIMEOUT,
+        )
+        .await;
+        let repo = match read {
+            Bounded::Done(r) => crate::environment::Looked::Read(r),
+            Bounded::TimedOut => crate::environment::Looked::TimedOut,
+            Bounded::Cancelled | Bounded::Failed(_) => crate::environment::Looked::Failed,
+        };
+        let line = crate::environment::line(&now, &repo);
+        *self.turn_env.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some((turn_id.to_string(), line.clone()));
+        Some(line)
+    }
+
     /// `extra` with the repository's instruction files
     /// ([`crate::instructions`]) in `instructions`, read now from this
     /// session's checked folder, for every agentic turn: the person's, a
@@ -1567,30 +1610,15 @@ impl Session {
         let protected = policy.protected_dirs.clone();
         // The instruction files first, in a bound of their own: a slow
         // skill folder must not cost the turn its AGENTS.md (review S3).
-        // The repository's HEAD for the environment line, in the same
-        // bounded read (no process started).
-        let now = jiff::Zoned::now();
         let files_protected = protected.clone();
         let files = ins::bounded(
-            move || {
-                (
-                    ins::read(&dir, &granted, &files_protected, cap),
-                    crate::environment::repo(&dir, &granted, &files_protected),
-                )
-            },
+            move || ins::read(&dir, &granted, &files_protected, cap),
             cancel,
             ins::READ_TIMEOUT,
         )
         .await;
-        let repo = match &files {
-            Bounded::Done((_, repo)) => Some(repo.clone()),
-            _ => None,
-        };
-        if !matches!(files, Bounded::Cancelled) {
-            extra.environment = Some(crate::environment::line(&now, repo.as_ref()));
-        }
         let problems = match files {
-            Bounded::Done((r, _)) => {
+            Bounded::Done(r) => {
                 extra.instructions = r.text;
                 r.problems
             }
@@ -1658,7 +1686,7 @@ impl Session {
         }
 
         let extra_cause_none = extra.cause.is_none();
-        let extra = self
+        let mut extra = self
             .with_instructions(
                 extra,
                 agent.as_ref(),
@@ -1667,6 +1695,15 @@ impl Session {
                 &cancel,
             )
             .await;
+        // The environment line this turn's `turn_started` recorded: the
+        // message is sent with exactly what the log rebuilds it with.
+        extra.environment = self
+            .turn_env
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+            .filter(|(t, _)| *t == turn_id)
+            .map(|(_, l)| l);
         // Run the backend in its own task so a panic still ends the turn.
         let this = self.clone();
         let tid = turn_id.clone();

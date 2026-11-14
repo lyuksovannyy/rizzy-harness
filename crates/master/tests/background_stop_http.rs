@@ -579,6 +579,7 @@ async fn a_demotion_stops_the_host_chat_and_only_the_host_chat() {
                     turn_id: "t1".into(),
                     agent: None,
                     cause: None,
+                    environment: None,
                 }),
             );
             running(&t, sid).await;

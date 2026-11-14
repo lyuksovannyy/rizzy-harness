@@ -243,9 +243,11 @@ pub struct LimitsPolicy {
     /// The longest a `bash` call may run, in seconds, whatever the model
     /// asks for.
     pub bash_timeout_max_s: u64,
-    /// Seconds a model's stream may send nothing (no response headers, or
-    /// no byte of the body) before the call fails as a broken stream and
-    /// the retry and fallback rules take over.
+    /// Seconds a model call may wait for the provider's first answer
+    /// (headers, then the first event) before it fails and the retry (at
+    /// most once) and fallback rules take over.
+    pub model_first_byte_timeout_s: u64,
+    /// Seconds the stream may then go without an event.
     pub model_idle_timeout_s: u64,
     /// Sub-agents one turn may start (`delegate` calls run). The master's
     /// agent spec may ask for fewer, never more (Gate 3 review P-2).
@@ -288,6 +290,7 @@ impl Default for LimitsPolicy {
             tool_stream_bytes: harness_tools::stream::DEFAULT_STREAM_BYTES,
             max_steps: harness_core::policy::DEFAULT_MAX_STEPS,
             bash_timeout_max_s: harness_tools::DEFAULT_TIMEOUT_MAX_S,
+            model_first_byte_timeout_s: harness_core::policy::DEFAULT_MODEL_FIRST_BYTE_S,
             model_idle_timeout_s: harness_core::policy::DEFAULT_MODEL_IDLE_S,
             // Today's values: the default caps, and one level (the master
             // resolves a sub-agent's own delegates to none).
@@ -426,15 +429,22 @@ impl NodePolicy {
                 "[limits] bash_timeout_max_s = {n}: must be between {min} and {max}"
             ));
         }
-        let n = self.limits.model_idle_timeout_s;
-        let (min, max) = (
-            harness_core::policy::MIN_MODEL_IDLE_S,
-            harness_core::policy::MAX_MODEL_IDLE_S,
-        );
-        if !(min..=max).contains(&n) {
-            return Err(format!(
-                "[limits] model_idle_timeout_s = {n}: must be between {min} and {max}"
-            ));
+        for (key, n) in [
+            (
+                "model_first_byte_timeout_s",
+                self.limits.model_first_byte_timeout_s,
+            ),
+            ("model_idle_timeout_s", self.limits.model_idle_timeout_s),
+        ] {
+            let (min, max) = (
+                harness_core::policy::MIN_MODEL_IDLE_S,
+                harness_core::policy::MAX_MODEL_IDLE_S,
+            );
+            if !(min..=max).contains(&n) {
+                return Err(format!(
+                    "[limits] {key} = {n}: must be between {min} and {max}"
+                ));
+            }
         }
         let n = self.limits.max_subagents;
         if n > MAX_SUBAGENTS {
@@ -949,34 +959,38 @@ mod tests {
         assert!(e.contains("env_pass") && e.contains("CARGO_["), "{e}");
     }
 
-    /// The model stream's idle timeout: Codex's 300 s unless node.toml
-    /// says, and a value outside its range stops the node by name.
+    /// The model stream's timeouts: 600 s for the first answer and 300 s
+    /// between events unless node.toml says, and a value outside the range
+    /// stops the node by name.
     #[test]
-    fn the_model_idle_timeout_defaults_to_300_s_and_is_bounded() {
+    fn the_model_stream_timeouts_default_and_are_bounded() {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("node.toml");
+        let d = NodePolicy::load(&f).unwrap().limits;
         assert_eq!(
-            NodePolicy::load(&f).unwrap().limits.model_idle_timeout_s,
-            300
+            (d.model_first_byte_timeout_s, d.model_idle_timeout_s),
+            (600, 300)
         );
         std::fs::write(
             &f,
-            "[limits]
-model_idle_timeout_s = 900
-",
+            "[limits]\nmodel_idle_timeout_s = 900\nmodel_first_byte_timeout_s = 60\n",
         )
         .unwrap();
+        let p = NodePolicy::load(&f).unwrap().limits;
         assert_eq!(
-            NodePolicy::load(&f).unwrap().limits.model_idle_timeout_s,
-            900
+            (p.model_first_byte_timeout_s, p.model_idle_timeout_s),
+            (60, 900)
         );
-        for bad in ["model_idle_timeout_s = 9", "model_idle_timeout_s = 3601"] {
+        for bad in [
+            "model_idle_timeout_s = 9",
+            "model_idle_timeout_s = 3601",
+            "model_first_byte_timeout_s = 9",
+            "model_first_byte_timeout_s = 3601",
+        ] {
             std::fs::write(&f, format!("[limits]\n{bad}\n")).unwrap();
             let e = NodePolicy::load(&f).unwrap_err().to_string();
-            assert!(
-                e.contains("model_idle_timeout_s") && e.contains("10 and 3600"),
-                "{bad}: {e}"
-            );
+            let key = bad.split(' ').next().unwrap();
+            assert!(e.contains(key) && e.contains("10 and 3600"), "{bad}: {e}");
         }
     }
 

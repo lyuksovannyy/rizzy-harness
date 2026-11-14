@@ -916,8 +916,12 @@ impl Store {
                 )?;
             }
             "turn_ended" => {
-                let completed =
-                    e.payload.get("reason").and_then(|v| v.as_str()) == Some("completed");
+                // A turn that used its step budget ends with its account,
+                // which may ask the person (`limit`, as `completed`).
+                let completed = matches!(
+                    e.payload.get("reason").and_then(|v| v.as_str()),
+                    Some("completed" | "limit")
+                );
                 tx.execute(
                     "UPDATE sessions SET running = 0,
                         asks_user = CASE WHEN ?2 AND last_asks = 1 THEN 1 ELSE 0 END,

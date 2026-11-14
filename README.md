@@ -760,9 +760,10 @@ env_pass = []                        # extra variables the agent's shell gets (s
 
 [limits]
 tool_stream_bytes = 1048576          # live output one tool call may stream (4096 .. 1 GiB)
-max_steps = 50                       # model calls one turn may make (1 .. 1000)
+max_steps = 50                       # model calls that run tools in one turn; a person's turn then gets one to sum up (1 .. 1000)
 bash_timeout_max_s = 3600            # longest a bash call may run, whatever it asks for (1 .. 3600)
-model_idle_timeout_s = 300           # a model stream silent this long fails and is retried (10 .. 3600)
+model_first_byte_timeout_s = 600     # wait for a model's first answer (10 .. 3600)
+model_idle_timeout_s = 300           # then the longest gap between its events (10 .. 3600)
 max_subagents = 4                    # sub-agents one turn may start; the master may ask for fewer (0 .. 32)
 max_delegation_depth = 1             # 1: the turn's agent may delegate, its sub-agents not; 0: off (0 .. 4)
 background_per_session = 8           # background commands one chat may run at once; 0: off (0 .. 32)
@@ -1247,16 +1248,23 @@ rest of its output is read and dropped. The result the model gets has its
 own, smaller cap and says when the live stream was cut.
 
 **Step and time limits.** A turn may make `[limits] max_steps` model calls
-(default 50, 1 to 1000; a sub-agent's turn has the same cap). Halfway through,
-the agent is told how many it has used. Its last call runs no tool: the agent
-is asked to say what is done, what is left and what it would do next, a tool
-call it still makes is answered "not run", and the turn ends as "turn limit",
-not as an error. Reply to let it carry on. A sub-agent's last call may only
-`finish`; a callback turn (see "Background commands") still ends with
-"stopped after N steps". A model whose stream sends nothing for `[limits]
-model_idle_timeout_s` seconds (default 300, 10 to 3600: Codex's value; no
-response headers count too) fails as a broken stream and is retried like a
-dropped connection, never after part of its answer was shown. A `bash` call runs for
+that run tools (default 50, 1 to 1000; a sub-agent's turn has the same cap).
+Halfway through, the agent is told how many it has used. A person's turn then
+gets one more call that runs no tool: the tools stay listed (the provider's
+cache) but the provider is asked for no tool call (`tool_choice: none`), the
+agent is asked to say what is done, what is left and what it would do next, a
+tool call it makes anyway is answered "not run", and the turn ends as "step
+limit reached", not as an error. Reply to let it carry on. A message you send
+just before that last call is not read by it: it starts the next turn, with a
+full budget. A sub-agent's last call may only `finish`; a callback turn (see
+"Background commands") still ends with "stopped after N steps". A model that
+sends nothing is cut off: `[limits] model_first_byte_timeout_s` (default 600)
+bounds the wait for its first answer (a reasoning model may think for minutes,
+a local server may read the prompt before it answers), and
+`model_idle_timeout_s` (default 300, Codex's value) the gaps after it
+(keep-alive pings count); both 10 to 3600. Such a call is tried once more,
+never after part of its answer was shown, then another model of the agent's
+answers or the turn ends with an error naming both keys. A `bash` call runs for
 the `timeout_secs` it states, at least 5 s and at most `[limits]
 bash_timeout_max_s` seconds (default 3600, 1 to 3600, which wins over the
 5 s floor if set lower); **a call that states none stops after 60 s** (it was
@@ -1559,9 +1567,12 @@ The branch is read from the repository's `HEAD` file, the way instruction files
 are read (inside the folder `node.toml` grants, no link out, never waiting on a
 FIFO, within the same 5-second bound); no `git` process is started. The branch
 name is the repository's text: it is shown on one line, at most 120
-characters, with its quotation marks read as `'`. The line goes after the
-history, so the provider's cached prefix stays the same; it costs about 60
-tokens a message. Your own time zone, if you set one in your settings, is
+characters, with its quotation marks read as `'`. The line is recorded with
+the turn, so later messages resend it exactly and the provider's cache still
+covers that message; it costs about 60 tokens a message. (The instruction
+files, a project's context and recalled memory are not recorded: the message
+they come with is resent without them, so the cache stops there; see
+`prompt_cache` below.) Your own time zone, if you set one in your settings, is
 still sent separately with your messages.
 
 ## Repository instructions (AGENTS.md)

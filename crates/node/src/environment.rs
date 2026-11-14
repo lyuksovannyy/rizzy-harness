@@ -26,8 +26,29 @@ pub(crate) enum Repo {
     Branch(String),
     /// A detached `HEAD`: the commit's first 12 hex digits.
     Detached(String),
-    /// In a repository whose `HEAD` was not read, and why.
-    Unread(String),
+    /// In a repository whose `HEAD` was not read, and why; no reason when
+    /// its git folder lies outside the folders the session may read (a
+    /// sub-agent's worktree copy), which is not worth a line every turn.
+    Unread(Option<String>),
+}
+
+/// How the look at the repository went.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Looked {
+    Read(Repo),
+    TimedOut,
+    /// The read failed or was given up for another reason.
+    Failed,
+}
+
+/// The reason for an unread file, left out when it is only that the file
+/// lies outside the session's folders.
+fn why(what: &str, e: String) -> Repo {
+    if e == harness_tools::inside::OUTSIDE {
+        Repo::Unread(None)
+    } else {
+        Repo::Unread(Some(format!("{what} was not read: {e}")))
+    }
 }
 
 /// The repository the folder `cwd` (canonical) is in, inside `granted`,
@@ -53,15 +74,17 @@ pub(crate) fn repo(cwd: &Path, granted: &Path, protected: &[PathBuf]) -> Repo {
                 let text = String::from_utf8_lossy(&b);
                 match text.trim().strip_prefix("gitdir:") {
                     Some(dir) => top.join(dir.trim()).join("HEAD"),
-                    None => return Repo::Unread("its .git file names no git folder".into()),
+                    None => {
+                        return Repo::Unread(Some("its .git file names no git folder".into()));
+                    }
                 }
             }
-            Err(why) => return Repo::Unread(format!("its .git file was not read: {why}")),
+            Err(e) => return why("its .git file", e),
         },
     };
     match read(&head, 512) {
         Ok(b) => parse_head(&String::from_utf8_lossy(&b)),
-        Err(why) => Repo::Unread(format!("its HEAD was not read: {why}")),
+        Err(e) => why("its HEAD", e),
     }
 }
 
@@ -69,12 +92,19 @@ fn parse_head(text: &str) -> Repo {
     let t = text.trim();
     if let Some(r) = t.strip_prefix("ref:") {
         let r = r.trim();
+        // A reftable repository's `HEAD` points at this placeholder; the
+        // branch is in the reftable, which is not read here.
+        if r == "refs/heads/.invalid" {
+            return Repo::Unread(Some(
+                "a reftable repository, whose branch is not read".into(),
+            ));
+        }
         return Repo::Branch(r.strip_prefix("refs/heads/").unwrap_or(r).to_string());
     }
     if (t.len() == 40 || t.len() == 64) && t.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Repo::Detached(t[..12].to_string());
     }
-    Repo::Unread("its HEAD is not one git writes".into())
+    Repo::Unread(Some("its HEAD is not one git writes".into()))
 }
 
 /// The OS as `/etc/os-release` names it, read once.
@@ -97,9 +127,9 @@ fn os_name() -> &'static str {
     })
 }
 
-/// The line, for a turn starting at `now` in a folder whose repository is
-/// `repo` (`None`: not looked at).
-pub(crate) fn line(now: &jiff::Zoned, repo: Option<&Repo>) -> String {
+/// The line, for a turn starting at `now` in a folder whose repository
+/// was looked at as `repo`.
+pub(crate) fn line(now: &jiff::Zoned, repo: &Looked) -> String {
     let zone = now.time_zone().iana_name().unwrap_or("local time");
     let clock = format!(
         "{} ({zone}, UTC{})",
@@ -107,18 +137,28 @@ pub(crate) fn line(now: &jiff::Zoned, repo: Option<&Repo>) -> String {
         now.strftime("%:z")
     );
     let git = match repo {
-        Some(Repo::None) => "the working folder is not in a git repository".to_string(),
-        Some(Repo::Branch(b)) => format!(
+        // The search stops at the granted folder, which may itself sit in
+        // a repository.
+        Looked::Read(Repo::None) => {
+            "no git repository was found from the working folder up to the folder the node \
+             grants"
+                .to_string()
+        }
+        Looked::Read(Repo::Branch(b)) => format!(
             "the working folder is in a git repository, on branch \"{}\"",
             shown_name(b)
         ),
-        Some(Repo::Detached(c)) => {
+        Looked::Read(Repo::Detached(c)) => {
             format!("the working folder is in a git repository, at commit {c} (detached HEAD)")
         }
-        Some(Repo::Unread(why)) => {
+        Looked::Read(Repo::Unread(Some(why))) => {
             format!("the working folder is in a git repository ({why})")
         }
-        None => "whether the working folder is in a git repository was not read in time".into(),
+        Looked::Read(Repo::Unread(None)) => "the working folder is in a git repository".into(),
+        Looked::TimedOut => {
+            "whether the working folder is in a git repository was not read in time".into()
+        }
+        Looked::Failed => "whether the working folder is in a git repository is not known".into(),
     };
     format!(
         "{ENVIRONMENT_LEAD}: the node's clock reads {clock}; OS: {}; the `bash` tool runs \
@@ -177,8 +217,9 @@ mod tests {
         std::fs::create_dir_all(&wt).unwrap();
         std::fs::write(wt.join(".git"), format!("gitdir: {}\n", wt_git.display())).unwrap();
         assert_eq!(repo(&wt, &t.ws, &[]), Repo::Branch("side".into()));
-        // Granted only the worktree: its git folder is outside.
-        assert!(matches!(repo(&wt, &wt, &[]), Repo::Unread(_)));
+        // Granted only the worktree: its git folder is outside, and that
+        // is all the line says (review L3).
+        assert_eq!(repo(&wt, &wt, &[]), Repo::Unread(None));
     }
 
     /// The agent can write `.git/HEAD`: a FIFO there is not waited on, a
@@ -209,7 +250,7 @@ mod tests {
         let now = jiff::Timestamp::from_second(0)
             .unwrap()
             .to_zoned(jiff::tz::TimeZone::UTC);
-        let l = line(&now, Some(&r));
+        let l = line(&now, &Looked::Read(r));
         assert_eq!(l.lines().count(), 1, "{l}");
         assert!(l.starts_with(ENVIRONMENT_LEAD), "{l}");
         assert!(!l.contains("x\";"), "the quote closed: {l}");
@@ -222,7 +263,7 @@ mod tests {
             .at(10, 32, 0, 0)
             .in_tz("Europe/Riga")
             .unwrap();
-        let l = line(&now, Some(&Repo::Branch("main".into())));
+        let l = line(&now, &Looked::Read(Repo::Branch("main".into())));
         assert!(
             l.starts_with(
                 "[harness] Environment of this turn: the node's clock reads Saturday 2026-11-14 \
@@ -238,7 +279,22 @@ mod tests {
             ),
             "{l}"
         );
-        let l = line(&now, Some(&Repo::None));
-        assert!(l.ends_with("not in a git repository."), "{l}");
+        // The search stops at the granted folder (review L1).
+        let l = line(&now, &Looked::Read(Repo::None));
+        assert!(
+            l.ends_with(
+                "no git repository was found from the working folder up to the folder \
+                 the node grants."
+            ),
+            "{l}"
+        );
+        // A failed read is not reported as a slow one.
+        assert!(line(&now, &Looked::Failed).ends_with("is not known."));
+        assert!(line(&now, &Looked::TimedOut).ends_with("was not read in time."));
+        // Outside the session's folders: no reason every turn (L3).
+        assert!(
+            line(&now, &Looked::Read(Repo::Unread(None)))
+                .ends_with("the working folder is in a git repository.")
+        );
     }
 }

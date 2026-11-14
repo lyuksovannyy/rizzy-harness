@@ -42,8 +42,8 @@ use tokio::sync::mpsc;
 
 pub use provider::{
     ChatMsg, ChatRequest, Completion, Effort, ImagePart, NOTES_THEN_MESSAGE, Provider,
-    ProviderError, RetryHint, StopReason, ToolSpec, escape_leads, estimate_tokens, place_notes,
-    without_notes,
+    ProviderError, RetryHint, StopReason, StreamLimits, ToolSpec, escape_leads, estimate_tokens,
+    place_notes, without_notes,
 };
 pub use retry::RetryPolicy;
 
@@ -91,15 +91,35 @@ pub const NO_RESULT_RECORDED: &str = "No result was recorded for this call: its 
      be written). It may have run fully, partly or not at all. Check the current state (files, \
      processes, git status) before you repeat it; do not repeat it blindly.";
 
-/// The harness's note on a person's turn's last step (the step limit).
+/// A turn's own message with the node's environment line in front, as the
+/// loop sends it and the log rebuilds it (`turn_started.environment`).
+fn with_environment(line: Option<&str>, text: String) -> String {
+    match line.filter(|l| !l.is_empty()) {
+        Some(l) => format!("{l}\n\n{text}"),
+        None => text,
+    }
+}
+
+/// The harness's note before a person's turn's wrap-up request, after its
+/// `max_steps` steps.
 fn wrap_up_note(max_steps: usize) -> String {
     format!(
-        "[harness] This is the last step of this turn: it has used {} of its {max_steps} steps \
-         (`max_steps` in node.toml), and no tool runs now. Answer in text only: say what is \
-         done, what is left and what you would do next. The person can reply to let you carry \
-         on.",
-        max_steps - 1
+        "[harness] This turn has used its {max_steps} steps (`max_steps` in node.toml): this \
+         is its last request, and no tool runs now. Answer in text only: say what is done, what \
+         is left and what you would do next. The person can reply to let you carry on."
     )
+}
+
+/// The note the request after step `steps` gets: the wrap-up's for a
+/// person's turn that used its budget, the half-budget one at half.
+fn step_note(person: bool, steps: usize, max_steps: usize) -> Option<String> {
+    if person && steps >= max_steps {
+        Some(wrap_up_note(max_steps))
+    } else if max_steps >= HALF_NOTE_MIN_STEPS && steps == max_steps / 2 {
+        Some(half_note(steps, max_steps))
+    } else {
+        None
+    }
 }
 
 /// The harness's note at half a turn's step budget (goose's turn-budget
@@ -328,7 +348,7 @@ pub struct NativeConfig {
     pub retry: retry::RetryPolicy,
     /// How long a model's stream may send nothing before the call fails
     /// as a broken stream (node.toml `[limits] model_idle_timeout_s`).
-    pub model_idle_timeout: Duration,
+    pub stream_limits: provider::StreamLimits,
 }
 
 impl NativeConfig {
@@ -367,7 +387,7 @@ impl Default for NativeConfig {
             summarize_after_tokens: None,
             coding_summary: false,
             retry: Default::default(),
-            model_idle_timeout: Duration::from_secs(harness_core::policy::DEFAULT_MODEL_IDLE_S),
+            stream_limits: Default::default(),
         }
     }
 }
@@ -940,6 +960,9 @@ fn messages_of(history: &[RawEvent], unread_too: bool) -> Vec<ChatMsg> {
             });
         }
     };
+    // The environment line the turn's message opened with, as
+    // `turn_started` recorded it (the loop's `with_environment`).
+    let mut env: Option<(String, String)> = None;
     for e in history {
         let Ok(k) = e.typed() else { continue };
         match k {
@@ -948,7 +971,12 @@ fn messages_of(history: &[RawEvent], unread_too: bool) -> Vec<ChatMsg> {
             }
             EventKind::UserMessage(m) => {
                 close_open(&mut out, &mut open);
-                out.push(images::user_msg(m.model_text(), &m.images));
+                let line = env
+                    .take()
+                    .filter(|(turn, _)| *turn == m.turn_id)
+                    .map(|(_, l)| l);
+                let text = with_environment(line.as_deref(), m.model_text());
+                out.push(images::user_msg(text, &m.images));
             }
             // As the loop added them when it took them (`queued_msg`).
             EventKind::QueuedDelivered(d) => {
@@ -988,9 +1016,20 @@ fn messages_of(history: &[RawEvent], unread_too: bool) -> Vec<ChatMsg> {
             }
             // A callback turn has no `user_message`: its opening stands
             // where one would, built as the loop built it (T.8d step 3).
-            EventKind::TurnStarted(TurnStarted { cause: Some(c), .. }) => {
+            EventKind::TurnStarted(TurnStarted {
+                cause: Some(c),
+                environment,
+                ..
+            }) => {
                 close_open(&mut out, &mut open);
                 provider::open_callback(&mut out, c.callback_ids());
+                if let (Some(l), Some(ChatMsg::Opening(t))) = (environment, out.last_mut()) {
+                    t.push_str("\n\n");
+                    t.push_str(&l);
+                }
+            }
+            EventKind::TurnStarted(t) => {
+                env = t.environment.map(|l| (t.turn_id, l));
             }
             _ => {}
         }
@@ -1435,7 +1474,10 @@ impl NativeBackend {
         };
         let mut messages = history_msgs(summary.as_deref(), recent);
         // Per-turn context sits after the history: the system prompt and the
-        // history stay byte-identical from turn to turn (prompt cache).
+        // history before this turn stay byte-identical (prompt cache). The
+        // context itself is not logged, so the next turn rebuilds this
+        // turn's message without it and its cache stops there; the
+        // environment line is logged (`turn_started`) and rebuilt.
         // A callback turn (T.8d step 3) opens with the harness's frame and
         // the ended commands' notes, from the log alone: no person's text,
         // no per-turn context (it would not rebuild from the log), no
@@ -1480,10 +1522,7 @@ impl NativeBackend {
                     None => ctx.user_text.clone(),
                 };
                 // The node's line about where the turn runs opens it.
-                let user_text = match environment {
-                    Some(env) => format!("{env}\n\n{user_text}"),
-                    None => user_text,
-                };
+                let user_text = with_environment(environment, user_text);
                 // Recorded as read after `turn_started`, where the log has
                 // them on every later request.
                 messages.extend(ctx.extra.queued.iter().map(queued_msg));
@@ -1580,33 +1619,49 @@ impl NativeBackend {
         // guard cuts off can still report (review SB-1). Holds the end text
         // the turn has if it does not.
         let mut last: Option<String> = None;
-        // A person's turn's last request (the step limit): the same tools
-        // (the provider's cached prefix stays), the harness's note asking
-        // for an account of where the work stands, and no call run
-        // (OpenCode's max-steps step). The turn then ends at a limit, not
-        // as an error. A callback turn keeps its error (nobody started it).
+        // A person's turn, after its `max_steps` requests, gets one more
+        // (OpenCode's max-steps step): the same tools (the provider's
+        // cached prefix stays), `tool_choice: none`, the harness's note
+        // asking for an account of where the work stands, and no call run.
+        // The turn then ends at a limit, not as an error. A callback turn
+        // keeps its error (nobody started it); a sub-agent its `finish`.
+        let person = !child && callback.is_none();
         let mut wrap_up = false;
+        // The note for the next request, as the step's last tool result
+        // carried it into the log (`tool_call_finished.note`), so a later
+        // request rebuilds it byte for byte; set where that was possible.
+        let mut noted = false;
         let mut steps = 0usize;
         loop {
             if last.is_none() && !wrap_up {
-                if steps >= max_steps {
-                    break;
-                }
                 if child && steps + 1 == max_steps {
                     last = Some(cap_error.clone());
                     messages.push(ChatMsg::Note(harness_core::subagent::LAST_STEP_NOTE.into()));
-                } else if callback.is_none() && steps + 1 == max_steps {
+                } else if steps >= max_steps {
+                    if !person {
+                        break;
+                    }
                     wrap_up = true;
-                    messages.push(ChatMsg::Note(wrap_up_note(max_steps)));
-                } else if max_steps >= HALF_NOTE_MIN_STEPS && steps == max_steps / 2 {
-                    messages.push(ChatMsg::Note(half_note(steps, max_steps)));
+                    if !noted {
+                        messages.push(ChatMsg::Note(wrap_up_note(max_steps)));
+                    }
+                } else if !noted && let Some(n) = step_note(person, steps, max_steps) {
+                    messages.push(ChatMsg::Note(n));
                 }
             }
+            noted = false;
             steps += 1;
             // What the person wrote while the turn ran (X.5), before each
             // request: after the step's tool results and their notes, as
-            // the log has it, and only when a request follows.
-            match host.queued_messages().await {
+            // the log has it, and only when a request follows. Not before
+            // the wrap-up, which answers in text: a message sent then opens
+            // the next turn, with a full budget (review M2).
+            let queued = if wrap_up {
+                Ok(vec![])
+            } else {
+                host.queued_messages().await
+            };
+            match queued {
                 Ok(q) if !q.is_empty() => {
                     // A new request from the person is a change (T.1).
                     guard.restart();
@@ -1641,7 +1696,8 @@ impl NativeBackend {
                 // Only for models that take one (a fallback may not).
                 effort: effort.filter(|_| !agent.is_some_and(|a| a.no_effort.contains(&model))),
                 cache: sv.prompt_cache,
-                idle_timeout: Some(self.config.model_idle_timeout),
+                limits: Some(self.config.stream_limits),
+                no_tool_calls: wrap_up,
             };
             // A passing failure is retried (bounded, with backoff) before
             // the fallbacks, but only while this attempt has shown nothing:
@@ -2206,7 +2262,8 @@ impl NativeBackend {
                     };
                 }
             }
-            for call in calls {
+            let n_calls = calls.len();
+            for (i, call) in calls.into_iter().enumerate() {
                 if host
                     .emit(EventKind::ToolCallStarted(ToolCallStarted {
                         author: author.clone(),
@@ -2249,6 +2306,21 @@ impl NativeBackend {
                     });
                     guard.record(key, changes, outcome.ok, &output)
                 });
+                // The step's last result carries the next request's note
+                // (half the budget, or the wrap-up), so the log has it.
+                let note = match (i + 1 == n_calls)
+                    .then(|| step_note(person, steps, max_steps))
+                    .flatten()
+                {
+                    Some(n) => {
+                        noted = true;
+                        Some(match note {
+                            Some(g) => format!("{g}\n\n{n}"),
+                            None => n,
+                        })
+                    }
+                    None => note,
+                };
                 if let Some(b) = &outcome.background
                     && host
                         .emit(EventKind::BackgroundStarted(BackgroundStarted {
@@ -2440,7 +2512,8 @@ impl NativeBackend {
                     tools: vec![],
                     effort: None,
                     cache: ctx.extra.savings.prompt_cache,
-                    idle_timeout: Some(self.config.model_idle_timeout),
+                    limits: Some(self.config.stream_limits),
+                    no_tool_calls: false,
                 };
                 let mut retries = 0;
                 let step = loop {
@@ -2667,7 +2740,8 @@ impl NativeBackend {
                 tools: vec![],
                 effort: None,
                 cache: false,
-                idle_timeout: Some(self.config.model_idle_timeout),
+                limits: Some(self.config.stream_limits),
+                no_tool_calls: false,
             };
             let c = match self.complete_quietly(&req, &ctx.cancel).await {
                 Ok(c) => c,
@@ -4707,6 +4781,7 @@ mod tests {
                 cause: None,
                 agent: None,
                 turn_id: t.clone(),
+                environment: None,
             }),
             &mut out,
         );

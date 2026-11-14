@@ -180,8 +180,10 @@ pub struct TurnExtra {
     /// Token-saving methods in effect for this turn.
     pub savings: crate::savings::Savings,
     /// Context that changes every turn (memory recall, page context). It is
-    /// sent after the history, not in the system prompt, so the cached
-    /// prefix stays the same from turn to turn. Never stored.
+    /// sent after the history, not in the system prompt, so the system
+    /// prompt and the history before this turn stay cached. Never stored:
+    /// the next turn resends this turn's message without it, so the cache
+    /// stops at that message.
     pub context: Option<String>,
     /// The repository's instruction files (`AGENTS.md`, `CLAUDE.md`), and
     /// the catalogue of skills after them, read by the node at the start
@@ -193,8 +195,8 @@ pub struct TurnExtra {
     /// One line of the harness's about where the turn runs (the node's
     /// date and time zone, OS, shell, git branch), composed by the node at
     /// the start of this turn. Set only by the node, never from the
-    /// protocol. It opens the turn's own message (after the history, so
-    /// the cached prefix stays the same). Never stored.
+    /// protocol. It opens the turn's own message, and `turn_started`
+    /// records it, so later requests rebuild that message byte for byte.
     pub environment: Option<String>,
     /// The skills the node found for this turn (`crate::skills`), which
     /// the `skill` tool loads from; their catalogue is at the end of

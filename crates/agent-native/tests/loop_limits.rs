@@ -117,7 +117,7 @@ async fn max_steps_ends_the_turn_at_a_limit() {
         },
     );
     let out = b.run_turn(turn(&host, dir.path())).await;
-    assert_eq!(*p.calls.lock().unwrap(), 2, "exactly two steps");
+    assert_eq!(*p.calls.lock().unwrap(), 3, "two steps, then the wrap-up");
     assert_eq!(out.reason, TurnEndReason::Limit);
     assert_eq!(out.error, None);
     let outputs: Vec<String> = host
@@ -130,9 +130,9 @@ async fn max_steps_ends_the_turn_at_a_limit() {
             _ => None,
         })
         .collect();
-    assert_eq!(outputs.len(), 2);
+    assert_eq!(outputs.len(), 3);
     assert_eq!(
-        outputs[1],
+        outputs[2],
         harness_agent_native::NOT_RUN_AT_STEP_LIMIT,
         "the last step's call did not run"
     );
@@ -151,7 +151,7 @@ async fn the_defaults_are_todays_values() {
     let out = backend(p.clone(), NativeConfig::default())
         .run_turn(turn(&host, dir.path()))
         .await;
-    assert_eq!(*p.calls.lock().unwrap(), 50);
+    assert_eq!(*p.calls.lock().unwrap(), 51, "50 steps and the wrap-up");
     assert_eq!((out.reason, out.error), (TurnEndReason::Limit, None));
 }
 
@@ -193,7 +193,7 @@ async fn an_agent_definition_cannot_run_more_steps_than_the_node_allows() {
     let mut t = turn(&host, dir.path());
     t.agent = Some(agent);
     b.run_turn(t).await;
-    assert_eq!(*p.calls.lock().unwrap(), 3);
+    assert_eq!(*p.calls.lock().unwrap(), 4, "three steps and the wrap-up");
 }
 
 #[tokio::test]
@@ -208,8 +208,7 @@ async fn bash_timeout_ceiling_cuts_a_call_that_asked_for_more() {
     let b = backend(
         p,
         NativeConfig {
-            // The second (last) step runs no tool.
-            max_steps: 2,
+            max_steps: 1,
             bash_timeout_max: Duration::from_secs(1),
             ..Default::default()
         },
