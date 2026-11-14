@@ -114,6 +114,7 @@ fn fake_with(
             "exec:sandbox",
             harness_protocol::CAP_BACKGROUND,
             harness_protocol::CAP_CALLBACK,
+            harness_protocol::CAP_REMEMBER,
         ]
         .into_iter()
         .filter(|c| callback || *c != harness_protocol::CAP_CALLBACK)

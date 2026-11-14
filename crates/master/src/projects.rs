@@ -59,6 +59,11 @@ const CWD_MAX: usize = 1024;
 
 /// Project facts recalled per turn, and open cards shown to the model.
 const RECALL_FACTS: usize = 6;
+/// A project's active facts go into each turn whole, newest first, up to
+/// this many characters; past it, only the older ones the message recalls
+/// (at most `RECALL_FACTS`). A small memory is read whole, as Hermes and
+/// Codex do at session start: recall by "continue" finds nothing.
+const FACTS_CHARS: usize = 4000;
 const CONTEXT_CARDS: usize = 8;
 const CONTEXT_TITLE_CHARS: usize = 80;
 
@@ -482,7 +487,7 @@ fn board_line(
 
 /// What a turn in a chat of project `p` gets after the history (never in
 /// the system prompt; PLAN.md "Token savings"): the project's name and
-/// instructions, its facts recalled by `text` (when `allowed.project`), and
+/// instructions, its facts (`facts_block`, when `allowed.project`), and
 /// the open cards. `remember` says whether the turn may propose project
 /// facts (it has the tool); `allowed.personal` whether personal ones too.
 pub async fn turn_context(
@@ -505,24 +510,11 @@ pub async fn turn_context(
         s.push_str("\n\nProject instructions:\n");
         s.push_str(&p.instructions);
     }
-    if let Some(mem) = m
-        .memory()
-        .filter(|_| allowed.project && !text.trim().is_empty())
+    if let Some(mem) = m.memory().filter(|_| allowed.project)
+        && let Some(block) = facts_block(&*mem, &memory_owner(&p.project_id), text).await
     {
-        match mem
-            .recall(Some(&memory_owner(&p.project_id)), text, RECALL_FACTS)
-            .await
-        {
-            Ok(facts) if !facts.is_empty() => {
-                s.push_str("\n\nWhat this project has established (confirmed; may be outdated):");
-                for f in facts {
-                    s.push_str("\n- ");
-                    s.push_str(&f.text);
-                }
-            }
-            Ok(_) => {}
-            Err(e) => tracing::warn!(error = %e, "project memory recall failed"),
-        }
+        s.push_str("\n\n");
+        s.push_str(&block);
     }
     let pid = p.project_id.clone();
     if let Ok((cols, cards)) = m.inner.mirror.call(move |s| s.board(&pid)).await
@@ -537,12 +529,85 @@ pub async fn turn_context(
              scope \"project\".",
         );
         if !allowed.personal {
-            s.push_str(
-                " The user keeps their personal memory out of this workspace: use no other scope.",
-            );
+            s.push_str(" Personal memory is off in this chat: use no other scope.");
         }
     }
     s
+}
+
+/// The project facts of a turn: every active one, newest first, while they
+/// fit in `FACTS_CHARS`; then the older ones `text` recalls, and how many
+/// are left out. `None` when the project has none.
+async fn facts_block(
+    mem: &dyn harness_memory::MemoryStore,
+    owner: &str,
+    text: &str,
+) -> Option<String> {
+    let active: Vec<harness_memory::Fact> = match mem.list(Some(owner)).await {
+        Ok(all) => all
+            .into_iter()
+            .filter(|f| f.status == harness_memory::Status::Active)
+            .collect(),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not list project memory");
+            return None;
+        }
+    };
+    if active.is_empty() {
+        return None;
+    }
+    let mut used = 0;
+    let fit = active
+        .iter()
+        .position(|f| {
+            used += f.text.chars().count() + 3;
+            used > FACTS_CHARS
+        })
+        .unwrap_or(active.len());
+    let (newest, older) = active.split_at(fit);
+    let mut s = String::from(
+        "What this project has established (confirmed, newest first; may be outdated):",
+    );
+    for f in newest {
+        s.push_str("\n- ");
+        s.push_str(&f.text);
+    }
+    if older.is_empty() {
+        return Some(s);
+    }
+    let recalled: Vec<harness_memory::Fact> = if text.trim().is_empty() {
+        Vec::new()
+    } else {
+        match mem
+            .recall(Some(owner), text, newest.len() + RECALL_FACTS)
+            .await
+        {
+            Ok(hits) => hits
+                .into_iter()
+                .filter(|h| older.iter().any(|o| o.id == h.id))
+                .take(RECALL_FACTS)
+                .collect(),
+            Err(e) => {
+                tracing::warn!(error = %e, "project memory recall failed");
+                Vec::new()
+            }
+        }
+    };
+    if !recalled.is_empty() {
+        s.push_str("\nOlder ones that match this message:");
+        for f in &recalled {
+            s.push_str("\n- ");
+            s.push_str(&f.text);
+        }
+    }
+    match older.len().saturating_sub(recalled.len()) {
+        0 => {}
+        1 => s.push_str("\n(1 older fact not shown; ask the person if one may matter.)"),
+        n => s.push_str(&format!(
+            "\n({n} older facts not shown; ask the person if one may matter.)"
+        )),
+    }
+    Some(s)
 }
 
 #[cfg(test)]
