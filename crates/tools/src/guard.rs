@@ -6,7 +6,8 @@
 //! <key>] -- <bwrap> <args…>`: the node starts it (from `/proc/self/exe`,
 //! its own running image) with stdin set to one end of a Unix socket pair
 //! whose other end the node holds. The guard starts bubblewrap itself
-//! (stdin `/dev/null`, its own process group), gives it the command's
+//! (stdin `/dev/null`, or an MCP server's request FIFO:
+//! [`STDIN_FIFO_ENV`]; its own process group), gives it the command's
 //! stdout and stderr, keeps neither, and then waits on its children, the
 //! channel, and its parent.
 //!
@@ -94,6 +95,41 @@ pub const PARENT_LOOK: Duration = Duration::from_millis(500);
 /// The node's pid, in the guard's arguments: `getppid()` other than this
 /// is the kill order (review T8E-1).
 pub const NODE: &str = "--node";
+
+/// Set by the node on the guard of an MCP server (ADOPTION_PLAN X.3,
+/// [`crate::mcp`]): the path of a FIFO in a node-private folder, outside
+/// every file view, whose other end the node holds. The guard opens it
+/// without following a link, checks it is a FIFO of this user, removes the
+/// name and gives it to bubblewrap as the command's stdin, so the server
+/// reads the node's requests while the guard's own stdin stays its control
+/// channel. A `HARNESS_` name: no `env_pass` or server `env_vars` entry
+/// can pass one from the node's environment (`crate::env`), and server
+/// `env` values may not set one (`crate::mcp::validate`).
+pub const STDIN_FIFO_ENV: &str = "HARNESS_GUARD_STDIN_FIFO";
+
+/// Open [`STDIN_FIFO_ENV`]'s FIFO for reading (it never waits for a
+/// writer), check it, unlink it, and make it blocking again.
+fn open_stdin_fifo(path: &std::path::Path) -> Result<std::os::fd::OwnedFd, String> {
+    use nix::fcntl::{FcntlArg, OFlag, fcntl};
+    let fd = nix::fcntl::open(
+        path,
+        OFlag::O_RDONLY | OFlag::O_NONBLOCK | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        nix::sys::stat::Mode::empty(),
+    )
+    .map_err(|e| format!("the server's input {}: {e}", path.display()))?;
+    let st = nix::sys::stat::fstat(&fd).map_err(|e| format!("fstat: {e}"))?;
+    use nix::sys::stat::SFlag;
+    let fifo = (st.st_mode & SFlag::S_IFMT.bits()) == SFlag::S_IFIFO.bits();
+    if !fifo || st.st_uid != nix::unistd::getuid().as_raw() {
+        return Err(format!(
+            "the server's input {} is not a FIFO of this user",
+            path.display()
+        ));
+    }
+    let _ = std::fs::remove_file(path);
+    fcntl(&fd, FcntlArg::F_SETFL(OFlag::empty())).map_err(|e| format!("fcntl: {e}"))?;
+    Ok(fd)
+}
 
 /// Who gave the kill order, when it was not the node through the channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -232,9 +268,16 @@ fn run(program: &OsStr, args: &[OsString], node: Option<i32>) -> Result<i32, Str
     // bubblewrap alone (this process has one thread and starts nothing
     // else), closed here once it has started.
     let (args, view_fds) = open_view(args)?;
+    // The command's stdin: `/dev/null`, or the FIFO the node named for an
+    // MCP server's requests ([`STDIN_FIFO_ENV`]); the name is not passed on.
+    let stdin = match std::env::var_os(STDIN_FIFO_ENV) {
+        Some(p) => Stdio::from(open_stdin_fifo(std::path::Path::new(&p))?),
+        None => Stdio::null(),
+    };
     let child = std::process::Command::new(program)
         .args(&args)
-        .stdin(Stdio::null())
+        .env_remove(STDIN_FIFO_ENV)
+        .stdin(stdin)
         .process_group(0)
         .spawn()
         .map_err(|e| format!("cannot start {}: {e}", program.to_string_lossy()))?;

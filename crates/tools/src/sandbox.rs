@@ -1028,6 +1028,17 @@ impl Confinement {
         }
     }
 
+    /// The node's temp root (inside its data directory, which no file view
+    /// holds): only `<tmp_root>/<session>` folders are ever granted, so a
+    /// folder made beside them is out of every contained command's reach
+    /// (an MCP server's request FIFO, [`crate::mcp`]).
+    pub(crate) fn private_root(&self) -> Option<&Path> {
+        match self {
+            Self::Confined { sandbox, .. } => sandbox.tmp_root.as_deref(),
+            _ => None,
+        }
+    }
+
     /// This confinement for one session: its temp directory is
     /// `<tmp_root>/<key>`.
     pub fn for_session(&self, key: &str) -> Self {

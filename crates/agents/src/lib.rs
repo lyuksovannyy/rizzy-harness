@@ -233,6 +233,8 @@ impl Features {
             (self.read_files, READ_TOOLS),
             (self.edit_files, EDIT_TOOLS),
             (self.commands, COMMAND_TOOLS),
+            // MCP servers' tools run programs too (X.3): with commands.
+            (self.commands, &[harness_core::agent::MCP_ALL][..]),
             (
                 self.edit_files || self.commands,
                 &[PUBLISH_TOOL, TODO_TOOL][..],
