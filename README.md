@@ -1448,14 +1448,22 @@ admins manage projects; every member sees them and works in them with their
 own chats. Start chats from the project's page, or add a chat from its header's
 project picker. Every message in a project's chats gets, after the history:
 the project's **instructions** (Settings tab, up to 4,000 characters), the
-project **memory** recalled for that message, and the open cards of its
-**board**. That context is sent quoted under a line the harness writes, in
+project's confirmed **memory**, and the open cards of its **board**. Memory
+comes whole, newest first, up to about 4,000 characters, so "continue" in a
+new chat still knows the project's decisions; past that, the newest that fit,
+the older facts that match your message, and a line saying how many were left
+out. That context is sent quoted under a line the harness writes, in
 front of your message: a card title or an instruction another member wrote
 can say anything, but it cannot pose as your message (a model may still be
 swayed by what it reads), and a link that is only in it is not fetched on its
 say-so. The model proposes project facts with `remember` (scope
-`project`); a proposal shows only to the owner of the chat it came from until
-they keep it on the project's Memory tab. Keeping your personal memory out of
+`project`), in chats and in Agentic chats alike; a proposal shows only to the
+owner of the chat it came from until they keep it on the project's Memory tab.
+Every node offers `remember` (it runs nothing on the node: the server files
+the call as a proposal); `denied_tools = ["remember"]` in a node's
+`node.toml` turns it off there, and the server then files nothing from that
+node. The model is told about `remember` only where the chat's node offers
+it. Keeping your personal memory out of
 a team workspace leaves its projects' memory in. Agentic chats started in a project
 take its default node and folder. Temporary chats cannot join a project.
 Design and open questions: [docs/projects.md](docs/projects.md).
@@ -1843,8 +1851,8 @@ The built-in agents, grouped by category in the picker:
 | Scout (`@scout`) | IT | sub-agent | read and search files only |
 | Reviewer (`@reviewer`) | IT | agent, sub-agent | read and search files; project memory |
 
-**Researcher in Agentic sessions.** Web and memory tools exist only in chats,
-not on nodes yet. In an Agentic session, Researcher is therefore not offered
+**Researcher in Agentic sessions.** Web tools exist only in chats, not on
+nodes yet (nodes have `remember`, which alone does none of a task's work). In an Agentic session, Researcher is therefore not offered
 to the Senior Teamlead or Software Developer as a sub-agent, and a delegation
 to it by name is refused with the reason, so the lead never believes research
 was done that was not. The rule is general: any sub-agent that lists tools

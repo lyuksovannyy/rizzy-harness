@@ -72,8 +72,12 @@ User ids are UUIDs, so the prefixed keys can never collide with a user, and the 
 1. personal facts of the chat's owner (top 6, as today), unless the owner keeps their
    personal memory out of this team workspace (`workspaces::uses_memory`) or the agent's
    "Own memory" is off;
-2. project facts (top 6, recalled by the message), unless the agent's "Project memory" is
-   off;
+2. project facts, unless the agent's "Project memory" is off: **all active ones, newest
+   first** (by last change), up to `FACTS_CHARS` (4,000 characters); when they do not fit,
+   the older ones that match the message (top 6, recall) and a count of those left out.
+   A small project memory is read whole, like Hermes' and Codex's memory at session start
+   (`research/round2/synth/07-context-compaction-memory.md` §6.2 item 8): keyword recall
+   on "continue" found nothing;
 3. workspace facts (top 4) when the project's **Use workspace memory** switch is on and
    workspace memory exists **[ws]**.
 
@@ -85,7 +89,11 @@ personal recall is keyed by the chat's owner, and only the owner can read their 
 board belong to the project, not to the member, so a project chat keeps them when its owner
 keeps their personal memory out of the workspace. `remember` then stays available in that
 chat for project facts only: the project block says "use no other scope", and a personal
-proposal from it is dropped (`Master::file_proposal`). Outside projects the switch works as
+proposal from it is dropped, with or without `scope: "user"` (`Master::file_proposal`): the
+member chose to keep their facts out, so none heads for a shared project. Where personal
+memory is off because of the *agent* (the Software Developer's `memory: false`), a call with
+no scope is filed as a project proposal instead of being dropped while the chat says it was
+proposed (review MC-1); the owner still reads it before anyone else's agent does. Outside projects the switch works as
 on `main` (no personal recall, no `remember`).
 
 **"Share the current workspace's memory"** = the project's chats also recall the workspace's
@@ -145,18 +153,31 @@ people in its workspace.
 Project instructions:
 <instructions, up to 4,000 characters>
 
-What this project has established (confirmed; may be outdated):
-- <up to 6 facts recalled by this message>
+What this project has established (confirmed, newest first; may be outdated):
+- <every active fact, newest first, up to 4,000 characters>
+Older ones that match this message:
+- <up to 6, only when not all fit>
+(<n> older facts not shown; ask the person if one may matter.)
 
 Board: In progress: <title>; <title>. To do: <title>; <title> (+3 more).
 
 To keep a lasting decision or fact about this project, call `remember` with scope "project".
 ```
 
+The last line appears only when the turn can call `remember`: its agent has it, the turn may
+write project memory, and the chat's node offers the tool (its hello lists
+`harness_protocol::CAP_REMEMBER`: registered there and not in its `denied_tools`). Agentic
+nodes register it; it runs nothing on the node. The master files a `remember` call only
+from a node that lists the capability, so `denied_tools = ["remember"]` in `node.toml` stops
+proposals from that node, whatever its model sends.
+
 Budget: the block is rebuilt and sent on every turn, uncached, so it is capped: instructions
-≤ 4,000 characters (the editor shows the count and says it goes into every message), ≤ 6
-facts, ≤ 8 open cards (titles cut at 80 characters, done columns left out). Worst case ≈ 1,500
-tokens; a typical project a few hundred.
+≤ 4,000 characters (the editor shows the count and says it goes into every message), facts
+≤ 4,000 characters plus at most 6 recalled ones (each ≤ 500), so ≈ 7,000 characters of facts
+at worst, ≤ 8 open cards (titles cut at 80 characters, done columns left out). Worst case
+≈ 12,000 characters (≈ 3,000 tokens) a turn, more than half of it facts; a typical project a
+few hundred tokens. The repository's instruction files (pull request 87) go into the same
+per-turn message of an Agentic chat, with their own cap, on top of this.
 
 Not in phase 1, proposed:
 - **Project files**: documents uploaded once (extracted text, like attachments), with FTS5

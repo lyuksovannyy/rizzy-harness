@@ -651,8 +651,12 @@ impl NativeBackend {
         if declared.is_empty() {
             return None;
         }
+        // Proposing a memory does none of a task's work: `remember` alone
+        // leaves a delegate with nothing to work with (A.11, on nodes that
+        // register it).
         let usable = |name: &str| {
-            d.allows_tool(name)
+            name != "remember"
+                && d.allows_tool(name)
                 && !host.tool_denied(name)
                 && self
                     .tools
@@ -1137,6 +1141,9 @@ fn fallback_event(turn_id: &str, model: &str, from: &str, reason: String) -> Eve
 impl AgentBackend for NativeBackend {
     fn name(&self) -> &'static str {
         "native"
+    }
+    fn has_tool(&self, name: &str) -> bool {
+        self.tools.iter().any(|t| t.name() == name)
     }
 
     async fn run_turn(&self, ctx: TurnCtx<'_>) -> TurnOutcome {
