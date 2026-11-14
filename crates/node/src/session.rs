@@ -59,7 +59,19 @@ pub(crate) struct Session {
     head: tokio::sync::Mutex<u64>,
     cwd: PathBuf,
     model: String,
-    mode: ApprovalMode,
+    /// The chat's approval mode (T48): set at create, changed only by
+    /// [`Self::set_mode`] (the owner's command, recorded as
+    /// `approval_mode_changed`), rebuilt from the log at load. Read at
+    /// every approval, so a change applies from the next call.
+    mode: ModeCell,
+    /// The modes of the chats above a sub-agent's, nearest first: it never
+    /// runs above any of them, as they are now (a ceiling read at every
+    /// call, not a copy taken when it started; research 02 §8). Empty for
+    /// a chat of the person's own.
+    above: Vec<ModeCell>,
+    /// Held while a mode change is recorded and applied, so the mode in
+    /// force is always the log's latest.
+    mode_change: tokio::sync::Mutex<()>,
     profile: Profile,
     incognito: bool,
     /// Set on a delegated sub-task's session; limits what its turns may do.
@@ -244,6 +256,18 @@ struct Isolation {
     cwd: PathBuf,
 }
 
+/// One chat's approval mode, shared with the sub-agents it starts.
+pub(crate) type ModeCell = Arc<Mutex<ApprovalMode>>;
+
+fn read_mode(c: &ModeCell) -> ApprovalMode {
+    *c.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// Why a mode change is refused, or what it becomes (T48).
+pub(crate) const MODE_SUB_AGENT: &str = "a sub-agent runs in the approval mode of the chat that                                           started it; change that chat's mode";
+pub(crate) const MODE_ROUTINE: &str = "a routine's chat keeps the routine's approval setting;                                         change it in the routine";
+pub(crate) const MODE_CHAT: &str = "a chat without tools has no approval mode to change";
+
 /// Everything needed to start a session, already validated by the runtime.
 pub(crate) struct NewSession {
     pub title: String,
@@ -260,6 +284,8 @@ pub(crate) struct NewSession {
     pub no_callbacks: bool,
     /// Chosen by the runtime (or the parent's, for a sub-agent).
     pub exec_mode: Option<harness_core::policy::ExecMode>,
+    /// A sub-agent's: the modes of the chats above it (see `Session::above`).
+    pub above: Vec<ModeCell>,
 }
 
 impl Session {
@@ -280,6 +306,7 @@ impl Session {
             owned,
             no_callbacks,
             exec_mode,
+            above,
         } = new;
         let (bg, ends) = background_table(&node, profile, parent_session, exec_mode, 1);
         let s = Arc::new(Self {
@@ -295,7 +322,9 @@ impl Session {
             head: tokio::sync::Mutex::new(0),
             cwd: cwd.clone(),
             model: model.clone(),
-            mode,
+            mode: Arc::new(Mutex::new(mode)),
+            above,
+            mode_change: tokio::sync::Mutex::new(()),
             profile,
             incognito,
             parent_session,
@@ -341,10 +370,13 @@ impl Session {
             .meta
             .clone()
             .ok_or_else(|| StoreError::Corrupt(format!("session {id} has no session_created")))?;
-        // Re-clamp on load: the node policy may have been tightened since.
-        let mode = ApprovalMode::clamp(meta.approval_mode, node.cfg.policy.max_approval_mode);
-        // A `host` session asks, whatever its log says (review N-e).
-        let mode = meta.exec_mode.map_or(mode, |e| mode.min(e.max_approval()));
+        // The log's latest mode (the fold applies `approval_mode_changed`),
+        // clamped again: the node policy may have been tightened since, and
+        // a `host` session never runs above its limit (review N-e).
+        let mode = node
+            .cfg
+            .policy
+            .session_mode(Some(meta.approval_mode), meta.exec_mode);
         let last_state = events.iter().rev().find_map(|e| match e.typed() {
             Ok(EventKind::Checkpoint(c))
                 if !matches!(
@@ -390,7 +422,12 @@ impl Session {
             head: tokio::sync::Mutex::new(view.head_seq),
             cwd: PathBuf::from(meta.cwd),
             model: meta.model,
-            mode,
+            mode: Arc::new(Mutex::new(mode)),
+            // A sub-agent's chat is not resumed after a restart (its turn
+            // ended with the node); were it, it would run at most at its own
+            // recorded mode.
+            above: Vec::new(),
+            mode_change: tokio::sync::Mutex::new(()),
             profile: meta.profile,
             incognito: meta.incognito,
             parent_session: meta.parent_session,
@@ -832,6 +869,77 @@ impl Session {
             protected: policy.protected_dirs.clone(),
             sandbox: self.node.cfg.git_sandbox.clone(),
         }
+    }
+
+    /// The mode in force for the next call: this chat's own, never above
+    /// a chat above it, never above what this node allows it now.
+    pub(crate) fn current_mode(&self) -> ApprovalMode {
+        let own = self
+            .above
+            .iter()
+            .map(read_mode)
+            .fold(read_mode(&self.mode), ApprovalMode::min);
+        own.min(self.node.cfg.policy.allowed_mode(self.exec_mode))
+    }
+
+    /// The owner's change of the chat's approval mode (T48): clamped by
+    /// node.toml's `max_approval_mode` and the chat's execution mode,
+    /// recorded as `approval_mode_changed` by this session (one writer),
+    /// then applied: from the next call on. A card waiting now is not
+    /// answered by it. Refused for a sub-agent's chat, a routine's and a
+    /// chat without tools. Returns the mode in force.
+    pub(crate) async fn set_mode(&self, requested: ApprovalMode) -> Result<ApprovalMode, String> {
+        if self.profile != Profile::Agentic {
+            return Err(MODE_CHAT.into());
+        }
+        if self.parent_session.is_some() {
+            return Err(MODE_SUB_AGENT.into());
+        }
+        if self.no_callbacks {
+            return Err(MODE_ROUTINE.into());
+        }
+        let _change = self.mode_change.lock().await;
+        let mode = self
+            .node
+            .cfg
+            .policy
+            .session_mode(Some(requested), self.exec_mode);
+        if mode == read_mode(&self.mode) {
+            return Ok(mode);
+        }
+        // The log first: a change it does not hold is not made.
+        self.append(EventKind::ApprovalModeChanged(ApprovalModeChanged {
+            mode,
+            requested: (mode != requested).then_some(requested),
+        }))
+        .await
+        .map_err(|e| e.to_string())?;
+        *self.mode.lock().unwrap_or_else(|p| p.into_inner()) = mode;
+        Ok(mode)
+    }
+
+    /// Whether `write` or `edit` with `input` changes a file inside this
+    /// chat's own folder, judged as the tool itself resolves the path when
+    /// it may not leave the folder: links followed (one that leads out, or
+    /// dangles, is out), `..` normalized, `.git` and the node's data
+    /// directory out, the folder checked against its pin. Anything this
+    /// cannot settle is out, and is asked about.
+    fn edit_inside(&self, tool: &str, input: &Value) -> bool {
+        if !harness_core::policy::EDIT_TOOLS.contains(&tool) {
+            return false;
+        }
+        let Some(path) = input.get("path").and_then(Value::as_str) else {
+            return false;
+        };
+        let mut ctx = harness_tools::ToolCtx::new(self.cwd.clone());
+        ctx.pin = self.pin.clone();
+        ctx.owned = self.owned.clone();
+        ctx.protected = Arc::new(self.node.cfg.policy.protected_dirs.clone());
+        ctx.allow_outside_workspace = false;
+        let (Ok(real), Ok(ws)) = (ctx.resolve_for_write(path), ctx.workspace_dir()) else {
+            return false;
+        };
+        real.starts_with(&ws) && real != ws
     }
 
     /// Record a change of the session's active agent.
@@ -2335,7 +2443,12 @@ impl Session {
                 title: format!("@{}: {short}", agent.agent_id),
                 cwd,
                 model: agent.model.clone().unwrap_or_else(|| self.model.clone()),
-                mode: self.mode,
+                // Its parent's mode now, and the parent's (and theirs) as
+                // ceilings at every call after (T48).
+                mode: self.current_mode(),
+                above: std::iter::once(self.mode.clone())
+                    .chain(self.above.iter().cloned())
+                    .collect(),
                 profile: self.profile,
                 agent_id: Some(agent.agent_id.clone()),
                 incognito: self.incognito,
@@ -2891,7 +3004,14 @@ impl TurnHost for Session {
             }
             return Decision::Deny;
         }
-        if !self.mode.needs_approval(risk) {
+        let mode = self.current_mode();
+        if !mode.needs_approval(risk) {
+            return Decision::Allow;
+        }
+        // Accept edits (T48): a file change inside the folder runs unasked;
+        // it is checkpointed and undone with the turn. The path is judged
+        // here, by the node, from the call's own input.
+        if mode.accepts_edits() && risk == ToolRisk::Mutating && self.edit_inside(tool, input) {
             return Decision::Allow;
         }
         // "For this turn" is offered on every request a person answers: it

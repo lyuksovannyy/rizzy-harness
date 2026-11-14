@@ -134,7 +134,7 @@ impl RoutineSpec {
             if s.node_id.is_none() || s.cwd.is_none() {
                 return Err("spec: an agentic routine needs a node_id and a cwd".into());
             }
-            if s.approval_mode == ApprovalMode::Auto {
+            if s.approval_mode.accepts_edits() {
                 return Err(
                     "spec.approval_mode: routines never approve on their own; use ask or ask_all"
                         .into(),
@@ -317,6 +317,10 @@ mod tests {
         let s = RoutineSpec::parse(v.clone()).unwrap();
         assert_eq!(s.approval_mode, ApprovalMode::Ask);
         let mut all = v.clone();
+        // Accept edits approves on its own too (T48): refused like auto.
+        let mut edits = all.clone();
+        edits["approval_mode"] = json!("accept_edits");
+        assert!(RoutineSpec::parse(edits).is_err());
         all["approval_mode"] = json!("ask_all");
         assert_eq!(
             RoutineSpec::parse(all).unwrap().approval_mode,

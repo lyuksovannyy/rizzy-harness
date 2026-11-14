@@ -467,6 +467,16 @@ fn events() -> Vec<RawEvent> {
                 todo("Run the tests", TodoStatus::Pending),
             ],
         }),
+        // The owner's mode changes (T48): the latest is the chat's mode; a
+        // clamped one says what was asked.
+        EventKind::ApprovalModeChanged(ApprovalModeChanged {
+            mode: ApprovalMode::Auto,
+            requested: None,
+        }),
+        EventKind::ApprovalModeChanged(ApprovalModeChanged {
+            mode: ApprovalMode::AcceptEdits,
+            requested: Some(ApprovalMode::Auto),
+        }),
     ];
     let mut out: Vec<RawEvent> = kinds
         .into_iter()
@@ -550,6 +560,8 @@ fn a_streamed_message_gets_its_final_blocks() {
     assert_eq!(users[1]["images"][0]["width"], 1280);
     assert!(users[1]["images"][0].get("data").is_none());
     assert!(view["meta"]["parent_session"].is_string());
+    // The latest mode change is the chat's mode (T48).
+    assert_eq!(view["meta"]["approval_mode"], "accept_edits");
 }
 
 /// A callback turn stands where a message would, with the ids it was

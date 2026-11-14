@@ -715,6 +715,48 @@ same folder (or in a folder that contains it, or one inside it), and no
 chat can start working in that folder while an undo runs there; wait a
 moment, or cancel the other chat, and try again.
 
+**Approval modes.** Each agentic chat has an approval mode: how much runs
+without a click. The picker in the composer shows it and offers three, each
+with one line saying what runs unasked:
+
+- **Ask** (the default): every command, write, edit and publish waits on a
+  card. Reads, searches and the task list never ask.
+- **Accept edits**: `write` and `edit` of a file inside the chat's own folder
+  run without a card; they are checkpointed and the turn's Undo takes them
+  back. A path out of the folder (`../x`, an absolute path elsewhere, a link
+  that leads out or dangles), anything in `.git`, every command, every
+  publish and every other tool still ask. The node judges the path, from
+  the call itself, as the file tool resolves it.
+- **Auto**: nothing asks. Only in a sandbox chat: safety then rests on the
+  sandbox (its own processes, its own file view), as with Codex's default.
+  A host chat never runs in Auto (see "Execution modes"); it may use Accept
+  edits, since edits go through the node's own file tools in both modes and
+  every command still asks.
+
+Pick it for a new chat beside its folder, or change it in the open chat at
+any time; the chat shows each change. A lower mode applies from the agent's
+next call; a card already waiting stays waiting until you answer it. Only the
+chat's owner can change it (nobody else, admins included, can see the chat),
+with the execution level the chat needs. The node decides: it clamps every
+request to its own `max_approval_mode` and the chat's execution mode, records
+the result in the chat's log (so a restart and every open tab show it), and
+clamps it again after a restart if node.toml was tightened meanwhile. A choice
+the node does not allow is shown disabled with the reason. Nothing the agent
+writes, no tool output and no sub-agent can change it: a sub-agent never runs
+above the chat that started it, as that chat's mode is now, so lowering the
+chat also lowers a sub-agent that is working. A sub-agent's chat and a
+routine's chat cannot be switched (a routine keeps its own setting, which is
+Ask or ask every call).
+
+**What allows it today.** The shipped `node.toml` default is
+`max_approval_mode = "ask"`, so out of the box no chat runs an edit or a
+command unasked, and the picker shows Accept edits and Auto disabled. The
+node's admin allows them with one line in that node's `node.toml`:
+`max_approval_mode = "accept_edits"` (Accept edits) or
+`max_approval_mode = "auto"` (both; host chats still stop at Accept edits),
+then restarts the node. A new chat starts in Ask unless the person picks
+another mode.
+
 **Approving a call.** In `ask` mode a command, a write, an edit or a publish
 waits on a card that shows the whole call: every argument, the full path (and
 whether it is absolute or outside the chat's folder), long text with its size,
@@ -751,7 +793,7 @@ Every turn also checks the folder against `workspace_roots` again, so
 narrowing node.toml applies to existing chats.
 
 ```toml
-max_approval_mode = "ask"            # ask_all | ask | auto
+max_approval_mode = "ask"            # ask_all | ask | accept_edits | auto (see "Approval modes")
 workspace_roots = ["/home/me/code"]  # session cwd must be inside one of these
 denied_tools = []                    # e.g. ["bash"]; "delegate" turns sub-agents off
 allow_outside_workspace = false
@@ -807,8 +849,9 @@ names it):
   `systemd-run --user`) to run anything with every right of the user, its
   keys and other projects included. Treat it as a shell on this machine
   that a web page the agent reads can steer: the approval card is then the
-  only check, so a `host` chat always asks (it never runs in approval mode
-  `auto`, whatever is asked or `max_approval_mode` allows), and its card
+  only check, so a `host` chat always asks for commands (it never runs in
+  approval mode `auto`, whatever is asked or `max_approval_mode` allows;
+  `accept_edits` at most), and its card
   says the command runs in the host shell. Run such a node as a dedicated
   OS user that holds nothing else.
 

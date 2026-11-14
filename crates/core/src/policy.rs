@@ -10,9 +10,24 @@ pub enum ApprovalMode {
     /// Mutating tools (bash, edit, write) need approval; read-only tools run.
     #[default]
     Ask,
+    /// As `Ask`, except that `write` and `edit` of a file inside the chat's
+    /// own folder run without a card: they are checkpointed and undone with
+    /// the turn. The node decides what "inside" means
+    /// ([`ApprovalMode::accepts_edits`]); `bash`, `publish` and everything
+    /// else still ask.
+    AcceptEdits,
     /// Nothing needs approval.
     Auto,
 }
+
+/// The mode a new chat gets when its create names none, before the node
+/// clamps it to its ceiling and the chat's execution mode. The shipped
+/// default: one line to change (the owner's open question, README
+/// "Approval modes").
+pub const DEFAULT_CHAT_APPROVAL: ApprovalMode = ApprovalMode::Ask;
+
+/// The file tools `AcceptEdits` covers, by their registered names.
+pub const EDIT_TOOLS: [&str; 2] = ["write", "edit"];
 
 impl ApprovalMode {
     /// The effective mode is the stricter of what was requested and what the
@@ -21,12 +36,42 @@ impl ApprovalMode {
         requested.min(node_max)
     }
 
+    /// Whether a call of this risk asks, on its risk alone. `AcceptEdits`
+    /// asks as `Ask` does here: the node lets an edit inside the folder
+    /// through before it gets here (it alone can resolve the path).
     pub fn needs_approval(self, risk: ToolRisk) -> bool {
         match self {
             ApprovalMode::AskAll => risk != ToolRisk::ChatOnly,
-            ApprovalMode::Ask => risk == ToolRisk::Mutating,
+            ApprovalMode::Ask | ApprovalMode::AcceptEdits => risk == ToolRisk::Mutating,
             ApprovalMode::Auto => false,
         }
+    }
+
+    /// Whether `write` and `edit` inside the chat's folder run unasked.
+    pub fn accepts_edits(self) -> bool {
+        self >= ApprovalMode::AcceptEdits
+    }
+
+    /// Every mode, strictest first.
+    pub const ALL: [ApprovalMode; 4] = [
+        ApprovalMode::AskAll,
+        ApprovalMode::Ask,
+        ApprovalMode::AcceptEdits,
+        ApprovalMode::Auto,
+    ];
+
+    /// The wire name (`ask_all`, `ask`, `accept_edits`, `auto`).
+    pub fn id(self) -> &'static str {
+        match self {
+            ApprovalMode::AskAll => "ask_all",
+            ApprovalMode::Ask => "ask",
+            ApprovalMode::AcceptEdits => "accept_edits",
+            ApprovalMode::Auto => "auto",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<ApprovalMode> {
+        Self::ALL.into_iter().find(|m| m.id() == s)
     }
 }
 
@@ -64,11 +109,15 @@ impl ExecMode {
 
     /// The loosest approval mode a session of this mode may have (review
     /// N-e): a `host` session never runs in `auto`, because its approval
-    /// card is the only check between a steered agent and the node's user.
+    /// card is the only check between a steered agent and the node's user
+    /// for every command. `accept_edits` is allowed there (T48): it lets
+    /// only `write` and `edit` inside the folder through, which run in the
+    /// node's own file tools (the same confinement in both modes, never a
+    /// shell) and are undone with the turn; every command still asks.
     pub fn max_approval(self) -> ApprovalMode {
         match self {
             ExecMode::Sandbox => ApprovalMode::Auto,
-            ExecMode::Host => ApprovalMode::Ask,
+            ExecMode::Host => ApprovalMode::AcceptEdits,
         }
     }
 }
@@ -211,6 +260,30 @@ mod tests {
         assert_eq!(ApprovalMode::clamp(Ask, AskAll), AskAll);
     }
 
+    /// The order the clamp relies on, and the wire names.
+    #[test]
+    fn modes_are_ordered_and_named() {
+        use ApprovalMode::*;
+        assert!(AskAll < Ask && Ask < AcceptEdits && AcceptEdits < Auto);
+        assert_eq!(ApprovalMode::clamp(Auto, AcceptEdits), AcceptEdits);
+        assert_eq!(ApprovalMode::clamp(AcceptEdits, Ask), Ask);
+        for m in ApprovalMode::ALL {
+            assert_eq!(ApprovalMode::parse(m.id()), Some(m));
+            assert_eq!(serde_json::to_value(m).unwrap(), m.id());
+        }
+        assert_eq!(ApprovalMode::parse("yolo"), None);
+        assert!(serde_json::from_value::<ApprovalMode>(serde_json::json!("yolo")).is_err());
+        // Accept edits asks for every mutating call on its risk alone.
+        assert!(AcceptEdits.needs_approval(ToolRisk::Mutating));
+        assert!(!AcceptEdits.needs_approval(ToolRisk::ReadOnly));
+        assert!(AcceptEdits.accepts_edits() && Auto.accepts_edits());
+        assert!(!Ask.accepts_edits() && !AskAll.accepts_edits());
+        // A host chat: never auto, at most accept edits.
+        assert_eq!(ExecMode::Host.max_approval(), AcceptEdits);
+        assert_eq!(ExecMode::Sandbox.max_approval(), Auto);
+        assert_eq!(DEFAULT_CHAT_APPROVAL, Ask, "the shipped default");
+    }
+
     #[test]
     fn needs_approval_matrix() {
         assert!(ApprovalMode::Ask.needs_approval(ToolRisk::Mutating));
@@ -223,7 +296,7 @@ mod tests {
     /// about, `ask_all` included (TD-6).
     #[test]
     fn chat_only_is_never_asked() {
-        for mode in [ApprovalMode::AskAll, ApprovalMode::Ask, ApprovalMode::Auto] {
+        for mode in ApprovalMode::ALL {
             assert!(!mode.needs_approval(ToolRisk::ChatOnly), "{mode:?}");
         }
     }

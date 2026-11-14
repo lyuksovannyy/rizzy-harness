@@ -4,6 +4,7 @@
 // file keeps what the home screen, the sidebar and the composer call.
 import { call, type Scope, scoped } from "./api";
 import type {
+  ApprovalMode,
   ExecLevel,
   Agent,
   AgentAvatar,
@@ -72,6 +73,9 @@ export const pageApi = {
   deleteSession: (id: string, opts: { media?: boolean } = {}) =>
     call<{ ok: boolean }>("DELETE", `/api/sessions/${id}${opts.media ? "?media=1" : ""}`),
   setAgent: (id: string, agent_id: string) => call("POST", `/api/sessions/${id}/agent`, { agent_id }),
+  /** The node clamps it and records it; the chat shows the result (T48). */
+  setApprovalMode: (id: string, mode: ApprovalMode) =>
+    call<{ ok: boolean }>("POST", `/api/sessions/${id}/approval-mode`, { mode }),
   saveAgentAvatar: (id: string, avatar: AgentAvatar) =>
     call<Agent>("PUT", `/api/admin/agents/${encodeURIComponent(id)}/avatar`, avatar),
   /** One agent with its instructions; the model line follows `scope` like `agents`. */

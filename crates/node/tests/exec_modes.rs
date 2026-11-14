@@ -487,8 +487,9 @@ async fn host_is_never_the_default() {
 }
 
 /// Review N-e: a `host` session never runs in `auto`, whatever the master
-/// asks and whatever node.toml allows: recorded as `ask` at create, and a
-/// log that says `auto` loads as `ask` (its next command waits for a card).
+/// asks and whatever node.toml allows: recorded as `accept_edits` at most
+/// at create (T48: every command still asks), and a log that says `auto`
+/// loads clamped (its next command waits for a card).
 #[tokio::test]
 async fn a_host_session_is_never_in_auto() {
     let dir = tempfile::tempdir().unwrap();
@@ -509,7 +510,7 @@ async fn a_host_session_is_never_in_auto() {
         ack(&mut n).await.unwrap();
         assert_eq!(
             created(&n, made).unwrap().approval_mode,
-            harness_core::policy::ApprovalMode::Ask
+            harness_core::policy::ApprovalMode::AcceptEdits
         );
         // A sandbox session keeps `auto`.
         let sb = SessionId::new();

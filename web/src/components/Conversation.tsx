@@ -27,7 +27,7 @@ import { InputCtx, MessageCtx, ProgressCtx, type InputInfo, type Inputs, type Me
 import { CopyMessage } from "../md/CopyMessage";
 import { showHidden, shownName } from "../md/hidden";
 import type { History } from "../bg/topics";
-import type { Agent, Item, ModelInfo, NodeInfo, RoutineMark, SessionRow } from "../types";
+import type { Agent, ApprovalMode, Item, ModelInfo, NodeInfo, RoutineMark, SessionRow } from "../types";
 import { inputBlock, inputState, progressSignature, progressSlots, type ProgressSlots } from "../ui/blocks";
 import { Composer } from "./Composer";
 import { AgentMark, agentAlert } from "./AgentAvatar";
@@ -175,6 +175,8 @@ function useRunSeen(mark: RoutineMark | null | undefined) {
 
 /** A chat takes this many images in all (docs/media.md §6.6). */
 const CHAT_IMAGES = 50;
+/** An approval mode in the chat's own words (T48). */
+const MODE_NAMES: Record<ApprovalMode, string> = { ask_all: "ask every call", ask: "ask", accept_edits: "accept edits", auto: "auto" };
 
 function compact(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n);
@@ -558,6 +560,13 @@ export default function Conversation(props: {
                         {it.agent.name}
                       </div>
                     );
+                  case "approval_mode_changed":
+                    return (
+                      <div key={i} className="divider">
+                        Approval mode: {MODE_NAMES[it.mode]}
+                        {it.requested ? ` (asked for ${MODE_NAMES[it.requested]}; this node allows no more)` : ""}
+                      </div>
+                    );
                   case "summary":
                     // Only the latest summary is what the model sees now.
                     return view.items.findLastIndex((x) => x.type === "summary") !== i ? null : (
@@ -635,6 +644,18 @@ export default function Conversation(props: {
             workers={[]}
             agentId={activeAgent}
             onAgentChange={(id) => void pageApi.setAgent(sessionId, id)}
+            approval={
+              // The owner's own agentic chat on a node that can change it;
+              // a sub-agent's follows its parent, a routine's its routine.
+              meta?.profile === "agentic" && !meta.parent_session && !meta.no_callbacks && node?.max_approval
+                ? {
+                    value: meta.approval_mode,
+                    max: node.max_approval,
+                    host: meta.exec_mode === "host",
+                    onChange: (m) => pageApi.setApprovalMode(sessionId, m),
+                  }
+                : undefined
+            }
             agentState={running ? undefined : face}
             sessionModel={meta?.model}
             agenticBlocked={null}

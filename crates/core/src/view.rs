@@ -77,6 +77,12 @@ pub enum Item {
     AgentChanged {
         agent: AgentRef,
     },
+    /// The owner changed the chat's approval mode (`approval_mode_changed`).
+    ApprovalModeChanged {
+        mode: crate::policy::ApprovalMode,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        requested: Option<crate::policy::ApprovalMode>,
+    },
     /// A background command ended (`background_ended`). `tail` is program
     /// output: shown as plain text, never rendered.
     BackgroundEnded {
@@ -458,6 +464,15 @@ impl SessionView {
                 );
             }
             EventKind::TodoUpdated(t) => self.todo = t.items,
+            EventKind::ApprovalModeChanged(c) => {
+                if let Some(m) = &mut self.meta {
+                    m.approval_mode = c.mode;
+                }
+                self.items.push(Item::ApprovalModeChanged {
+                    mode: c.mode,
+                    requested: c.requested,
+                });
+            }
             EventKind::CallbackRefused(r) => self.items.push(Item::CallbackRefused {
                 bg_ids: r.bg_ids,
                 reason: r.reason,
@@ -514,6 +529,55 @@ mod tests {
             kind,
             payload,
         }
+    }
+
+    /// T48: the latest `approval_mode_changed` is the chat's mode, and the
+    /// chat shows where it changed.
+    #[test]
+    fn the_latest_mode_change_is_the_chats_mode() {
+        use crate::policy::ApprovalMode;
+        let sid = SessionId::new();
+        let created = SessionCreated {
+            title: "t".into(),
+            cwd: "/w".into(),
+            model: "m".into(),
+            backend: "native".into(),
+            node_id: "n".into(),
+            approval_mode: ApprovalMode::Ask,
+            profile: Profile::Agentic,
+            agent_id: None,
+            incognito: false,
+            parent_session: None,
+            no_callbacks: false,
+            exec_mode: None,
+        };
+        let change = |mode, requested| {
+            EventKind::ApprovalModeChanged(ApprovalModeChanged { mode, requested })
+        };
+        let evs = vec![
+            ev(sid, 1, EventKind::SessionCreated(created)),
+            ev(sid, 2, change(ApprovalMode::Auto, None)),
+            ev(
+                sid,
+                3,
+                change(ApprovalMode::AcceptEdits, Some(ApprovalMode::Auto)),
+            ),
+        ];
+        let v = SessionView::fold(&evs).unwrap();
+        assert_eq!(v.meta.unwrap().approval_mode, ApprovalMode::AcceptEdits);
+        assert_eq!(
+            v.items,
+            [
+                Item::ApprovalModeChanged {
+                    mode: ApprovalMode::Auto,
+                    requested: None
+                },
+                Item::ApprovalModeChanged {
+                    mode: ApprovalMode::AcceptEdits,
+                    requested: Some(ApprovalMode::Auto)
+                }
+            ]
+        );
     }
 
     #[test]

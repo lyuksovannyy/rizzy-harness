@@ -3601,6 +3601,12 @@ button.icon svg.lucide, .send svg.lucide { vertical-align: middle; }
   padding: 7px 10px; border-radius: var(--r-sm); cursor: pointer; color: var(--fg); font-size: var(--text-md);
 }
 .select-list li.chosen > span:first-child { font-weight: var(--w-semibold); }
+.select-list li.off { cursor: default; opacity: 0.55; }
+.select.stacked .select-list { min-width: 300px; max-width: min(360px, calc(100vw - 32px)); }
+.select.stacked .select-list .option-hint { white-space: normal; }
+/* The approval picker sits at the composer's right end: its menu opens leftward. */
+.approval-pick .select-list { left: auto; right: 0; }
+.select.stacked .select-list li { flex-direction: column; align-items: flex-start; gap: 2px; }
 .select-list { font-weight: var(--w-regular); }
 /* A segmented control looks like the mode switch: a track, a raised thumb. */
 /* One choice from a few: a capsule track, the chosen segment raised. */

@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct NodePolicy {
-    /// The loosest approval mode any session on this node may use.
+    /// The loosest approval mode any session on this node may use
+    /// (`ask_all`, `ask`, `accept_edits`, `auto`); [`DEFAULT_MAX_APPROVAL`]
+    /// when node.toml does not say.
     pub max_approval_mode: ApprovalMode,
     /// Session working directories must be inside one of these.
     pub workspace_roots: Vec<PathBuf>,
@@ -210,6 +212,11 @@ pub struct LimitsPolicy {
     pub callback_max_steps: usize,
 }
 
+/// `max_approval_mode` when node.toml does not say: the shipped ceiling,
+/// one line to change (README "Approval modes"). With `ask`, no chat on a
+/// node whose admin did not raise it runs an edit or a command unasked.
+pub const DEFAULT_MAX_APPROVAL: ApprovalMode = ApprovalMode::Ask;
+
 /// `[limits] callback_turns` by default, and the most it may say.
 pub const DEFAULT_CALLBACK_TURNS: usize = 3;
 pub const MAX_CALLBACK_TURNS: usize = 20;
@@ -282,7 +289,7 @@ impl LimitsPolicy {
 impl Default for NodePolicy {
     fn default() -> Self {
         Self {
-            max_approval_mode: ApprovalMode::Ask,
+            max_approval_mode: DEFAULT_MAX_APPROVAL,
             workspace_roots: dirs::home_dir().into_iter().collect(),
             denied_tools: Vec::new(),
             allow_outside_workspace: false,
@@ -532,11 +539,32 @@ impl NodePolicy {
         Ok(())
     }
 
+    /// The mode a session gets for `requested` (a create's, or a change's):
+    /// [`harness_core::policy::DEFAULT_CHAT_APPROVAL`] without one, never
+    /// above [`Self::max_approval_mode`] nor above what the chat's
+    /// execution mode allows ([`Self::allowed_mode`]).
     pub fn effective_mode(&self, requested: Option<ApprovalMode>) -> ApprovalMode {
         ApprovalMode::clamp(
-            requested.unwrap_or(ApprovalMode::Ask),
+            requested.unwrap_or(harness_core::policy::DEFAULT_CHAT_APPROVAL),
             self.max_approval_mode,
         )
+    }
+
+    /// The loosest mode a session of `exec` may have here: node.toml's
+    /// ceiling, and a `host` chat's own limit (review N-e).
+    pub fn allowed_mode(&self, exec: Option<harness_core::policy::ExecMode>) -> ApprovalMode {
+        exec.map_or(self.max_approval_mode, |e| {
+            self.max_approval_mode.min(e.max_approval())
+        })
+    }
+
+    /// [`Self::effective_mode`] within [`Self::allowed_mode`].
+    pub fn session_mode(
+        &self,
+        requested: Option<ApprovalMode>,
+        exec: Option<harness_core::policy::ExecMode>,
+    ) -> ApprovalMode {
+        self.effective_mode(requested).min(self.allowed_mode(exec))
     }
 }
 
