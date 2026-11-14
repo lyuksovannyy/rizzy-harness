@@ -29,6 +29,11 @@ pub fn threshold(configured: Option<usize>, window: Option<u64>) -> usize {
 /// prompt and a reply of at most 300 words.
 pub const SUMMARY_OVERHEAD: u64 = 2_048;
 
+/// The same for an agentic chat's summary: a longer prompt (about 700
+/// tokens) and a reply of up to about 1,000 words (1,400 tokens in
+/// English, more in other languages).
+pub const CODING_SUMMARY_OVERHEAD: u64 = 4_096;
+
 /// How large the history is, in tokens. The previous turn's last model
 /// call reported its input size (`context_tokens`): that number, plus an
 /// `estimate` of what that call did not read (its own reply and anything

@@ -507,7 +507,7 @@ extensibility.
 | A8 roster | A.4, A.11, T.7 | Rest done |
 | A9 guard, limits, ceiling | A.5, T.1 | Ceiling exists; proportional cap dropped |
 | A10 retry | A.14 | Mostly done; other tuning dropped |
-| A11 compaction | A.7, B.8, B.9 | Cache-preserving request and tiers dropped (O1) |
+| A11 compaction | A.7, B.8, B.9 | Cache-preserving request and tiers dropped (O1). Summary for coding work done (2026-11-14): agentic chats are summarised under Goal, Decisions, Files, Commands and results, Open and Next step (about 1,000 words; a later summary updates the sections; chat-profile chats keep the generic 300 words); the summary still sits in the system prompt, moving it out is later |
 | A12 seccomp, `.git` | C.10, T.6; C.8 | `.git` read-only impossible with Landlock: residual |
 | A13 edit guard | A.8, C.9, T.2 | |
 | A14 restore | A.9, A.15, B.2, B.3, B.6 | Rest done; timing fields only if B.3 asks |

@@ -528,6 +528,18 @@ away (nothing is logged, the history stays as it was). After two failed or
 useless summaries in one turn, the turn does not try again; if the context
 then does not fit, the error says summarising was tried and did not help.
 
+In agentic chats the summary is written for coding work, under six plain-text
+headings: **Goal** (what you asked for, in your words where possible),
+**Decisions** (and why), **Files** (each path changed or important, with what
+changed), **Commands and results** (builds and tests run, what passed or
+failed), **Open** (what is not done, errors not yet fixed) and **Next step**,
+up to about 1,000 words. The agent's task list is given back on its own, so the
+summary refers to it rather than copying it. A later summary updates these
+sections rather than nesting the earlier one, so the shape holds however often
+a long chat is summarised. Chat-profile chats keep a shorter general summary
+(at most 300 words). The two newest turns are kept as they are. The latest
+summary is shown, collapsed, where it was made in the chat.
+
 In agentic chats the agent keeps its own task list with the `todo` tool
 (Software Developer, Senior Teamlead, Writer, custom agents that edit files
 or run commands, and agents with `tools: all`; add `todo` to a file agent's

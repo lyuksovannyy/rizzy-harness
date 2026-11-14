@@ -356,6 +356,8 @@ async fn serve(
         NativeConfig {
             secrets: secrets.clone(),
             summarize_after_tokens: cfg.chat.summarize_after_tokens,
+            // The generic summary, not the coding one.
+            coding_summary: false,
             ..Default::default()
         },
     );
@@ -637,6 +639,9 @@ async fn agentic_node(
             // spec, for models that take one.
             effort: None,
             summarize_after_tokens: cfg.chat.summarize_after_tokens,
+            // Agentic chats: summarised for coding work (the chat runtime
+            // keeps the generic summary).
+            coding_summary: true,
             ..Default::default()
         },
     );
