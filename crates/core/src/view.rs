@@ -140,8 +140,21 @@ pub struct ApprovalState {
     /// Whether "allow for this turn" may be offered (see `ApprovalRequested`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub turn_allow: bool,
+    /// Whether "allow for this chat" may be offered.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub chat_allow: bool,
     pub decision: Option<Decision>,
     pub by: Option<ResolvedBy>,
+    /// The person's note with a denial.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// A call the person allowed for the rest of the chat (`chat_allow_added`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChatAllow {
+    pub tool: String,
+    pub input: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -181,6 +194,10 @@ pub struct SessionView {
     /// The agent's task list: the latest `todo_updated`'s (none: empty).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub todo: Vec<crate::todo::TodoItem>,
+    /// Calls allowed for the rest of the chat, by grant id; removed ones
+    /// are gone.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub chat_allows: BTreeMap<String, ChatAllow>,
 }
 
 /// One background command as the log shows it.
@@ -377,8 +394,10 @@ impl SessionView {
                         approval_id: a.approval_id,
                         reason: a.reason,
                         turn_allow: a.turn_allow,
+                        chat_allow: a.chat_allow,
                         decision: None,
                         by: None,
+                        note: None,
                     });
                 }
             }
@@ -392,6 +411,7 @@ impl SessionView {
                     {
                         a.decision = Some(r.decision);
                         a.by = Some(r.by);
+                        a.note = r.note.clone();
                         break;
                     }
                 }
@@ -464,6 +484,18 @@ impl SessionView {
                 );
             }
             EventKind::TodoUpdated(t) => self.todo = t.items,
+            EventKind::ChatAllowAdded(g) => {
+                self.chat_allows.insert(
+                    g.grant_id,
+                    ChatAllow {
+                        tool: g.tool,
+                        input: g.input,
+                    },
+                );
+            }
+            EventKind::ChatAllowRemoved(g) => {
+                self.chat_allows.remove(&g.grant_id);
+            }
             EventKind::ApprovalModeChanged(c) => {
                 if let Some(m) = &mut self.meta {
                     m.approval_mode = c.mode;
@@ -636,6 +668,7 @@ mod tests {
                     input: json!({}),
                     reason: "r".into(),
                     turn_allow: false,
+                    chat_allow: false,
                 }),
             ),
         ];

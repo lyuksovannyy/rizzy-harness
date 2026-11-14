@@ -185,6 +185,7 @@ impl N {
                         session_id: event.session_id,
                         approval_id: a.approval_id.clone(),
                         decision: answer(&a),
+                        note: None,
                     });
                     asked.push(a);
                 }
@@ -613,6 +614,7 @@ async fn a_sub_agent_never_runs_above_its_parent() {
                         session_id: event.session_id,
                         approval_id: a.approval_id.clone(),
                         decision: Decision::Deny,
+                        note: None,
                     });
                     asked.push((event.session_id, a));
                 }

@@ -1382,6 +1382,7 @@ async fn n2_one_click_is_one_start_even_when_the_answer_says_for_this_turn() {
             session_id: sid,
             approval_id: card.approval_id.clone(),
             decision: d,
+            note: None,
         });
         cards.push(card);
     }

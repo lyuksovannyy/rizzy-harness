@@ -216,6 +216,7 @@ async fn approval_roundtrip_and_auto_request_is_clamped() {
         session_id: sid,
         approval_id: a.approval_id,
         decision: Decision::Allow,
+        note: None,
     });
     h.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
     assert!(h.ws.join("out.txt").exists());
@@ -291,6 +292,7 @@ async fn cancel_while_waiting_for_approval_and_while_running() {
         session_id: sid,
         approval_id: a.approval_id,
         decision: Decision::Allow,
+        note: None,
     });
     let mut pid = None;
     for _ in 0..200 {
@@ -749,6 +751,7 @@ async fn recovers_interrupted_turn_on_start() {
                 input: serde_json::json!({}),
                 reason: "r".into(),
                 turn_allow: false,
+                chat_allow: false,
             }),
         ];
         for (i, k) in kinds.into_iter().enumerate() {
@@ -1334,6 +1337,7 @@ async fn an_approval_whose_answer_was_not_written_is_closed_with_the_turn() {
         session_id: sid,
         approval_id: a.approval_id,
         decision: Decision::Allow,
+        note: None,
     });
     h.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
     assert!(
@@ -2048,6 +2052,7 @@ impl Harness {
                             session_id: session,
                             approval_id: a.approval_id.clone(),
                             decision: answer(asked.len()),
+                            note: None,
                         });
                     }
                     asked.push((session, a));
@@ -3421,6 +3426,7 @@ async fn lead_turn(
                     session_id: last,
                     approval_id: a.approval_id,
                     decision: answer,
+                    note: None,
                 })
             }
             EventKind::TurnEnded(_) if last == sid => break,
@@ -3828,6 +3834,7 @@ async fn an_approval_allowed_after_the_stop_began_never_runs() {
             session_id: sid,
             approval_id: a.approval_id,
             decision: Decision::Allow,
+            note: None,
         });
         // The stop is polled first: its flag and cancel are set before the
         // answer is handed over.

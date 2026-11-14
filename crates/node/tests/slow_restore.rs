@@ -288,6 +288,7 @@ async fn scenario() {
         session_id: b,
         approval_id: "no-such-approval".into(),
         decision: Decision::Allow,
+        note: None,
     });
     l.pump_until(
         |l| {

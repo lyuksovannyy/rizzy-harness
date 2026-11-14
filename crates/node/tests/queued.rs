@@ -573,6 +573,7 @@ async fn a_message_while_an_approval_waits_is_queued() {
         session_id: sid,
         approval_id,
         decision: Decision::Allow,
+        note: None,
     });
     assert_eq!(n.ack("a").await, Ok(()));
     n.ended(1).await;

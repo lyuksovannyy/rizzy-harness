@@ -13,6 +13,7 @@ use crate::{CommandError, Master, auth};
 
 mod agent_edits;
 mod approval_mode;
+mod chat_allows;
 mod artifacts;
 mod background;
 mod hooks;
@@ -210,6 +211,7 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
         .merge(artifacts::routes())
         .merge(background::routes())
         .merge(approval_mode::routes())
+        .merge(chat_allows::routes())
         .merge(storage::routes())
         .merge(links::routes())
         // Matched routes only (the embedded UI files are not handlers); which
@@ -1384,6 +1386,9 @@ async fn set_agent(
 #[derive(Deserialize)]
 struct ApprovalBody {
     decision: Decision,
+    /// The person's note with a denial (ignored with an allow).
+    #[serde(default)]
+    note: Option<String>,
 }
 
 async fn approval(
@@ -1403,7 +1408,22 @@ async fn approval(
     if b.decision.allows() {
         agentic_gate(&m, &who, &row).await?;
     }
-    m.respond_approval(row.session_id, approval_id, b.decision)
+    if b
+        .note
+        .as_ref()
+        .is_some_and(|n| n.chars().count() > harness_core::policy::MAX_DENY_NOTE)
+    {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "the note is longer than {} characters",
+                harness_core::policy::MAX_DENY_NOTE
+            ),
+        ));
+    }
+    // With an allow a note means nothing: it is dropped, not refused.
+    let note = b.note.filter(|_| !b.decision.allows());
+    m.respond_approval(row.session_id, approval_id, b.decision, note)
         .await?;
     Ok(Json(json!({ "ok": true })))
 }

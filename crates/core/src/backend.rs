@@ -25,6 +25,14 @@ pub trait TurnHost: Send + Sync {
     /// and only asks the user if policy requires it. Emits the approval events.
     async fn approve(&self, call_id: &str, tool: &str, input: &Value, risk: ToolRisk) -> Decision;
 
+    /// The person's note with the denial of `call_id`, if they wrote one;
+    /// taken once, right after `approve` returned `Deny`. The loop gives it
+    /// to the model quoted after the fixed sentence
+    /// ([`crate::event::denied_text`]).
+    fn denial_note(&self, _call_id: &str) -> Option<String> {
+        None
+    }
+
     /// Run `task` as `agent` in a new child session on this node and wait for
     /// its turn to end. `started` is called with the child's id as soon as it
     /// exists (so the UI can link to it while it works). The child labels its

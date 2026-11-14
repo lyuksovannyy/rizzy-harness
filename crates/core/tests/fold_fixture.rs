@@ -125,11 +125,13 @@ fn events() -> Vec<RawEvent> {
             input: json!({"command": "cargo test"}),
             reason: "runs programs".into(),
             turn_allow: false,
+            chat_allow: false,
         }),
         EventKind::ApprovalResolved(ApprovalResolved {
             approval_id: "a1".into(),
             decision: Decision::AllowSession,
             by: ResolvedBy::User,
+            note: None,
         }),
         EventKind::ToolOutputDelta(ToolOutputDelta {
             call_id: "c1".into(),
@@ -207,6 +209,7 @@ fn events() -> Vec<RawEvent> {
             input: json!({}),
             reason: "changes files".into(),
             turn_allow: false,
+            chat_allow: false,
         }),
         EventKind::Checkpoint(Checkpoint {
             turn_id: t(),

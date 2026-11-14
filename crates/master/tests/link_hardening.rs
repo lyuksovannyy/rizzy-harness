@@ -661,14 +661,14 @@ async fn a_diverged_chat_refuses_an_allow_and_takes_a_deny() {
     assert_eq!(store.diverged_seq(sid).unwrap(), Some(3));
 
     let err = m
-        .respond_approval(sid, "a1".into(), Decision::Allow)
+        .respond_approval(sid, "a1".into(), Decision::Allow, None)
         .await
         .unwrap_err();
     assert!(err.to_string().contains("diverged"), "{err}");
 
     let m2 = m.clone();
     let deny =
-        tokio::spawn(async move { m2.respond_approval(sid, "a1".into(), Decision::Deny).await });
+        tokio::spawn(async move { m2.respond_approval(sid, "a1".into(), Decision::Deny, None).await });
     loop {
         let msg = tokio::time::timeout(Duration::from_secs(5), c2.recv())
             .await

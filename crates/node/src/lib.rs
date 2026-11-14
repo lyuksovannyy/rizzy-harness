@@ -106,6 +106,7 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::Callback { session_id, .. }
         | MasterToNode::SetAgent { session_id, .. }
         | MasterToNode::SetApprovalMode { session_id, .. }
+        | MasterToNode::RevokeAllow { session_id, .. }
         | MasterToNode::ArtifactStage { session_id, .. }
         | MasterToNode::ArtifactRelease { session_id, .. } => Some(*session_id),
         MasterToNode::Welcome { .. }
@@ -565,6 +566,7 @@ impl NodeRuntime {
                     harness_protocol::CAP_APPROVAL_DEFAULT_PREFIX,
                     p.effective_mode(None).id()
                 ));
+                capabilities.push(harness_protocol::CAP_ANSWERS.into());
                 capabilities.push(harness_protocol::CAP_BACKGROUND.into());
                 // Off is silent: with `callback_turns = 0` the master asks
                 // nothing, and an end waits for the person as before.
@@ -1058,11 +1060,23 @@ impl NodeRuntime {
                 session_id,
                 approval_id,
                 decision,
+                note,
                 ..
             } => match self.session(session_id) {
-                Some(s) => s.respond(&approval_id, decision),
+                Some(s) => s.respond(&approval_id, decision, note),
                 None => Err("unknown session".into()),
             },
+            MasterToNode::RevokeAllow {
+                session_id,
+                grant_id,
+                ..
+            } => {
+                self.audit("session.revoke_allow", session_id).await;
+                match self.session(session_id) {
+                    Some(s) => s.revoke_allow(&grant_id).await,
+                    None => Err("unknown session".into()),
+                }
+            }
             MasterToNode::ArtifactFetch {
                 req_id,
                 session_id,
