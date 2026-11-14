@@ -161,9 +161,10 @@ fn the_node_root_wins_a_name_and_the_nearest_folder_next() {
 }
 
 /// Abuse: a skill folder or `SKILL.md` that is a link out of the
-/// repository, a FIFO, bad front matter, a name with control or
-/// direction characters, and a protected folder are not read; each is
-/// named in the problems; nothing waits.
+/// repository, a FIFO, a skill with no description, and a protected folder
+/// are not read; each is named in the problems and in `refused`; nothing
+/// waits. Bad front matter is read line by line and a name with a
+/// direction override gives way to the folder's.
 #[test]
 fn links_out_of_the_root_and_bad_files_are_not_read() {
     let t = tree();
@@ -189,7 +190,7 @@ fn links_out_of_the_root_and_bad_files_are_not_read() {
         nix::sys::stat::Mode::S_IRWXU,
     )
     .unwrap();
-    // Front matter that does not parse, and names that are not names.
+    // Front matter that does not parse, a name that is not a name, none.
     put(
         &skills_dir.join("bad/SKILL.md"),
         "---\ndescription: [unclosed\n---\nx",
@@ -220,11 +221,21 @@ fn links_out_of_the_root_and_bad_files_are_not_read() {
         std::slice::from_ref(&data),
     );
     assert!(at.elapsed() < std::time::Duration::from_secs(2));
-    assert_eq!(names(&found.catalogue), ["ok"]);
+    // Front matter that is not YAML is read line by line (review S1), and
+    // a name that is not one gives way to the folder's (review S4): the
+    // direction override never reaches the list.
+    assert_eq!(names(&found.catalogue), ["bad", "evil", "ok"]);
+    assert!(found.catalogue.skills.iter().all(|s| s.name.is_ascii()));
     let p = found.problems.join("\n");
-    for which in ["stolen", "loose", "fifo", "bad", "evil", "nodesc", "keys"] {
+    for which in ["stolen", "loose", "fifo", "nodesc", "keys"] {
         assert!(p.contains(which), "{which} not named: {p}");
     }
+    assert_eq!(
+        found.catalogue.refused.len(),
+        5,
+        "{:?}",
+        found.catalogue.refused
+    );
     assert!(!p.contains("key\n") && !p.contains("secret\""), "{p}");
     // A root that is itself a link out of the repository is refused.
     let t2 = tree();
@@ -297,6 +308,10 @@ fn an_oversized_catalogue_is_cut_with_a_note() {
     assert_eq!(skills::cap_for(Some(32_000)), 2_560);
     let small = skills::render(&c, skills::cap_for(Some(32_000))).unwrap();
     assert!(small.len() <= 2_560, "{}", small.len());
+    assert!(
+        small.lines().filter(|l| l.starts_with("- s")).count() >= 10,
+        "{small}"
+    );
     // More than the count cap, each short: the count cap holds.
     let t = tree();
     for i in 0..200 {
@@ -337,6 +352,17 @@ fn a_slash_name_invokes_a_skill() {
         Some("review")
     );
     assert_eq!(skills::invoked("/reviewer x", &c), None);
+    // Review S7: punctuation after the name.
+    assert_eq!(
+        skills::invoked("/review: please", &c).as_deref(),
+        Some("review")
+    );
+    assert_eq!(
+        skills::invoked("/review, now", &c).as_deref(),
+        Some("review")
+    );
+    assert_eq!(skills::invoked("/review.", &c).as_deref(), Some("review"));
+    assert_eq!(skills::invoked("/Review x", &c), None);
     assert_eq!(skills::invoked("please /review", &c), None);
     assert_eq!(skills::invoked("/etc/review is broken", &c), None);
 }
@@ -477,4 +503,200 @@ async fn an_oversized_body_is_cut_with_a_note() {
         "{}",
         &out.output[out.output.len() - 200..]
     );
+}
+
+/// Review S1, from the README verbatim: an unquoted `": "` in a value is
+/// not YAML, and is what other harnesses' skills look like. The keys are
+/// read line by line then, a plain value's indented lines joined.
+#[test]
+fn front_matter_that_is_not_yaml_is_read_line_by_line() {
+    let t = tree();
+    put(
+        &t.home.join("release/SKILL.md"),
+        "---\nname: release\ndescription: Cut a release of this project: bump the version, tag, write the notes.\n---\n1. Run `scripts/bump.sh <version>` from this folder.\n2. ...\n",
+    );
+    put(
+        &t.home.join("triage/SKILL.md"),
+        "---\nname: triage\ndescription: Use when: a bug report\n  comes in: sort it.\nallowed-tools: Bash(gh:*)\ndisable-model-invocation: true\n---\nbody\n",
+    );
+    put(
+        &t.home.join("quoted/SKILL.md"),
+        "---\nname: 'quoted'\ndescription: \"Use when: quoted\" : odd\n---\nbody\n",
+    );
+    let found = skills::discover(&[node_root(&t.home)], &[]);
+    assert!(found.problems.is_empty(), "{:?}", found.problems);
+    let c = &found.catalogue;
+    assert_eq!(names(c), ["quoted", "release", "triage"]);
+    assert_eq!(
+        c.skills[1].description,
+        "Cut a release of this project: bump the version, tag, write the notes."
+    );
+    assert_eq!(
+        c.skills[2].description,
+        "Use when: a bug report comes in: sort it."
+    );
+    assert!(c.skills[2].manual);
+    assert!(c.refused.is_empty());
+}
+
+/// Review S1: a skill that is still refused is named with the catalogue
+/// (folder names only; the reasons stay in the node's log).
+#[test]
+fn a_refused_skill_is_named_with_the_catalogue() {
+    let t = tree();
+    put(&t.home.join("ok/SKILL.md"), skill_md("ok", "fine", ""));
+    put(&t.home.join("empty-desc/SKILL.md"), "---\nname: x\n---\n");
+    put(
+        &t.home.join("open/SKILL.md"),
+        "---\nname: open\ndescription: d\n",
+    );
+    let found = skills::discover(&[node_root(&t.home)], &[]);
+    assert_eq!(found.catalogue.refused, ["empty-desc", "open"]);
+    let got = skills::render(&found.catalogue, skills::CAP).unwrap();
+    assert!(
+        got.ends_with(
+            "\n[2 skill folder(s) could not be read: empty-desc, open; the node's log says why]"
+        ),
+        "{got}"
+    );
+    // Only refused ones: still said.
+    let only = Catalogue {
+        refused: vec!["x".into()],
+        ..Default::default()
+    };
+    assert!(
+        skills::render(&only, skills::CAP)
+            .unwrap()
+            .contains("could not be read: x;")
+    );
+}
+
+/// The front matter shapes seen in real skills (review probe): a BOM and
+/// CRLF, `license`, `allowed-tools` and nested `metadata` ignored, a name
+/// that differs from the folder's, a folded description, a number as a
+/// name; review S4: a given name that is not one (`My Skill`) gives way to
+/// the folder's name.
+#[test]
+fn real_front_matter_shapes_are_read() {
+    let t = tree();
+    let h = &t.home;
+    put(
+        &h.join("pdf-folder/SKILL.md"),
+        "\u{FEFF}---\r\nname: pdf\r\ndescription: \"Comprehensive PDF toolkit. Use when: filling forms\"\r\nlicense: Proprietary. LICENSE.txt has complete terms\r\nallowed-tools: Bash(python:*), Read\r\nmetadata:\r\n  version: 1.0\r\n---\r\n# PDF\r\n",
+    );
+    put(
+        &h.join("multi/SKILL.md"),
+        "---\nname: multi\ndescription: >\n  Line one\n  line two.\n---\nbody\n",
+    );
+    put(
+        &h.join("my-skill/SKILL.md"),
+        "---\nname: My Skill\ndescription: does things\n---\nbody\n",
+    );
+    put(
+        &h.join("2fa/SKILL.md"),
+        "---\nname: 2024\ndescription: year\n---\nbody\n",
+    );
+    let found = skills::discover(&[node_root(h)], &[]);
+    assert!(found.problems.is_empty(), "{:?}", found.problems);
+    let c = &found.catalogue;
+    assert_eq!(names(c), ["2024", "multi", "my-skill", "pdf"]);
+    let d = |n: &str| {
+        c.skills
+            .iter()
+            .find(|s| s.name == n)
+            .unwrap()
+            .description
+            .clone()
+    };
+    assert_eq!(
+        d("pdf"),
+        "Comprehensive PDF toolkit. Use when: filling forms"
+    );
+    assert_eq!(d("multi"), "Line one line two.");
+    assert_eq!(d("my-skill"), "does things");
+}
+
+/// Review probe: a CRLF body with a BOM loads clean, a file beside it by
+/// its path, and `./x/../SKILL.md` is refused.
+#[tokio::test]
+async fn a_crlf_body_loads_and_a_dotdot_file_is_refused() {
+    let t = tree();
+    put(
+        &t.home.join("pdf-folder/SKILL.md"),
+        "\u{FEFF}---\r\nname: pdf\r\ndescription: PDF toolkit\r\n---\r\n# PDF\r\nSee references/forms.md\r\n",
+    );
+    put(&t.home.join("pdf-folder/references/forms.md"), "forms text");
+    let c = skills::discover(&[node_root(&t.home)], &[]).catalogue;
+    let ctx = ctx_with(&t.ws, c);
+    let out = SkillTool.run(&ctx, json!({"name": "pdf"})).await;
+    assert!(out.ok, "{}", out.output);
+    assert!(
+        out.output.ends_with("\n\n# PDF\nSee references/forms.md"),
+        "{}",
+        out.output
+    );
+    assert!(!out.output.contains('\r'), "{}", out.output);
+    assert!(
+        out.output.contains("references/forms.md (read one"),
+        "{}",
+        out.output
+    );
+    let f = SkillTool
+        .run(&ctx, json!({"name": "pdf", "file": "references/forms.md"}))
+        .await;
+    assert!(f.ok && f.output.ends_with("forms text"), "{}", f.output);
+    let up = SkillTool
+        .run(
+            &ctx,
+            json!({"name": "pdf", "file": "./references/../SKILL.md"}),
+        )
+        .await;
+    assert!(!up.ok, "{}", up.output);
+}
+
+/// Review S6 (probe): with a small window the catalogue still lists about
+/// ten skills (the cap never goes below the lead, the note and about ten
+/// short lines), and the invoked line is inside the same bound; 1,000
+/// skills are found well within the turn's time limit.
+#[test]
+fn a_small_cap_still_lists_skills_and_counts_the_invoked_line() {
+    let t = tree();
+    let long = "x".repeat(1024);
+    for i in 0..1000 {
+        let n = format!("s{i:04}-{}", "n".repeat(50));
+        put(
+            &t.home.join(&n).join("SKILL.md"),
+            format!("---\nname: {n}\ndescription: {long}\n---\nb\n"),
+        );
+    }
+    let at = std::time::Instant::now();
+    let mut c = skills::discover(&[node_root(&t.home)], &[]).catalogue;
+    assert!(
+        at.elapsed() < std::time::Duration::from_secs(3),
+        "{:?}",
+        at.elapsed()
+    );
+    assert_eq!(c.skills.len(), 1000);
+    let floor = |r: &str| r.lines().filter(|l| l.starts_with("- s")).count();
+    for cap in [
+        skills::cap_for(Some(8192)),
+        skills::cap_for(Some(4096)),
+        100,
+    ] {
+        c.invoked = None;
+        let plain = skills::render(&c, cap).unwrap();
+        assert!(floor(&plain) >= 9, "{cap}: {plain}");
+        c.invoked = Some(c.skills[0].name.clone());
+        let with = skills::render(&c, cap).unwrap();
+        assert!(
+            with.ends_with("Load it with the `skill` tool first.]"),
+            "{with}"
+        );
+        // The floor's bound holds with the invoked line in it.
+        let bound = skills::LEAD.len() + 2_400 + 300;
+        assert!(with.len() <= bound, "{cap}: {} > {bound}", with.len());
+    }
+    // At the full cap the invoked line is inside it.
+    c.invoked = Some(c.skills[0].name.clone());
+    assert!(skills::render(&c, skills::CAP).unwrap().len() <= skills::CAP);
 }

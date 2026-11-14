@@ -151,7 +151,12 @@ pub fn discover(roots: &[Root], protected: &[PathBuf]) -> Found {
             continue;
         }
         let entries = match std::fs::read_dir(&real) {
-            Ok(rd) => rd,
+            Ok(rd) => {
+                if root.origin == SkillOrigin::Node && !found.catalogue.read.contains(&real) {
+                    found.catalogue.read.push(real.clone());
+                }
+                rd
+            }
             // A file where a folder was looked for is nobody's skill.
             Err(e) if e.raw_os_error() == Some(nix::libc::ENOTDIR) => continue,
             Err(e) => {
@@ -182,7 +187,12 @@ pub fn discover(roots: &[Root], protected: &[PathBuf]) -> Found {
             let label = entry.display().to_string();
             match one(&entry, &n.to_string_lossy(), bound, protected) {
                 Ok(None) => {}
-                Err(why) => found.problems.push(format!("{label}: {why}")),
+                Err(why) => {
+                    found.problems.push(format!("{label}: {why}"));
+                    let shown: String =
+                        clean(&n.to_string_lossy()).chars().take(NAME_MAX).collect();
+                    found.catalogue.refused.push(shown);
+                }
                 Ok(Some((name, description, manual, dir))) => {
                     if !seen.insert(name.clone()) {
                         let first = from
@@ -195,6 +205,12 @@ pub fn discover(roots: &[Root], protected: &[PathBuf]) -> Found {
                              {first}"
                         ));
                         continue;
+                    }
+                    if root.origin == SkillOrigin::Node
+                        && !dir.starts_with(&real)
+                        && !found.catalogue.read.contains(&dir)
+                    {
+                        found.catalogue.read.push(dir.clone());
                     }
                     from.push((name.clone(), dir.clone()));
                     found.catalogue.skills.push(Skill {
@@ -240,13 +256,18 @@ fn one(
     let text = normalized(&bytes);
     let (front, body) = split_front(&text, bytes.len() > HEAD)?;
     let fm: Front = match front {
-        Some(y) if !y.trim().is_empty() => serde_saphyr::from_str(y)
-            .map_err(|_| "SKILL.md: its front matter is not valid YAML".to_string())?,
+        // What other harnesses accept is not always YAML: an unquoted
+        // `description: Use when: ...` is not. Read the keys line by line
+        // then.
+        Some(y) if !y.trim().is_empty() => {
+            serde_saphyr::from_str(y).unwrap_or_else(|_| front_by_lines(y))
+        }
         _ => Front::default(),
     };
+    // A given name that is not one (`My Skill`): the folder's name.
     let name = match fm.name.as_deref().map(str::trim) {
-        Some(n) => n.to_string(),
-        None => folder.to_string(),
+        Some(n) if valid_name(n) => n.to_string(),
+        _ => folder.to_string(),
     };
     if !valid_name(&name) {
         return Err(format!(
@@ -273,6 +294,62 @@ struct Front {
     description: Option<String>,
     #[serde(rename = "disable-model-invocation")]
     manual: Option<bool>,
+}
+
+/// The keys of front matter that is not valid YAML, read line by line: a
+/// line `key: value` at the start of a line (split at the first `": "`),
+/// with the indented lines after it joined to its value; a value in
+/// matching quotes loses them; `>` or `|` starts a value on the next lines.
+fn front_by_lines(y: &str) -> Front {
+    fn set(f: &mut Front, key: &str, value: &str) {
+        let v = value.trim();
+        let v = ['"', '\'']
+            .iter()
+            .find_map(|q| v.strip_prefix(*q).and_then(|r| r.strip_suffix(*q)))
+            .unwrap_or(v)
+            .to_string();
+        match key {
+            "name" => f.name = Some(v),
+            "description" => f.description = Some(v),
+            "disable-model-invocation" => f.manual = Some(v == "true"),
+            _ => {}
+        }
+    }
+    let mut f = Front::default();
+    let mut cur: Option<(String, String)> = None;
+    for l in y.lines() {
+        if l.starts_with(char::is_whitespace) || l.trim().is_empty() {
+            if let Some((_, v)) = cur.as_mut()
+                && !l.trim().is_empty()
+            {
+                if !v.is_empty() {
+                    v.push(' ');
+                }
+                v.push_str(l.trim());
+            }
+            continue;
+        }
+        if let Some((k, v)) = cur.take() {
+            set(&mut f, &k, &v);
+        }
+        let (k, v) = match l.split_once(": ") {
+            Some((k, v)) => (k, v.trim()),
+            None => match l.strip_suffix(':') {
+                Some(k) => (k, ""),
+                None => continue,
+            },
+        };
+        let v = if v.starts_with(['>', '|']) && v.len() <= 2 {
+            ""
+        } else {
+            v
+        };
+        cur = Some((k.trim().to_string(), v.to_string()));
+    }
+    if let Some((k, v)) = cur {
+        set(&mut f, &k, &v);
+    }
+    f
 }
 
 /// UTF-8 (U+FFFD for other bytes), without a BOM, with `\n` line ends.
@@ -379,32 +456,65 @@ pub fn cap_for(window: Option<u64>) -> usize {
     }
 }
 
+/// About how many shortened lines the catalogue always has room for,
+/// whatever the cap.
+const FLOOR_LINES: usize = 10;
+
 /// The catalogue for the model: [`LEAD`], then `- name: description` per
-/// listed skill, sorted by name, at most [`MAX_LISTED`] and `cap` bytes.
-/// When the whole list does not fit, descriptions are shortened first,
-/// then skills are left out, with a note saying how many and how to reach
-/// them. A manual skill is not listed; the one the person invoked is named
-/// last. `None` when there is nothing to say.
+/// listed skill, sorted by name, at most [`MAX_LISTED`] and `cap` bytes,
+/// everything included; `cap` is never taken below the lead, the notes and
+/// about [`FLOOR_LINES`] shortened lines, so a small window still lists
+/// some. When the whole list does not fit, descriptions are shortened
+/// first, then skills are left out, with a note saying how many and how to
+/// reach them. A manual skill is not listed; skill folders that could not
+/// be read are named; the one the person invoked is named last. `None`
+/// when there is nothing to say.
 pub fn render(c: &Catalogue, cap: usize) -> Option<String> {
     let listed: Vec<&Skill> = c.skills.iter().filter(|s| !s.manual).collect();
-    let invoked = c.invoked.as_deref().map(|n| {
-        format!(
+    let mut after: Vec<String> = Vec::new();
+    if !c.refused.is_empty() {
+        let mut names: Vec<&str> = c
+            .refused
+            .iter()
+            .take(FLOOR_LINES)
+            .map(String::as_str)
+            .collect();
+        let more = c.refused.len() - names.len();
+        let and_more = format!("and {more} more");
+        if more > 0 {
+            names.push(&and_more);
+        }
+        after.push(format!(
+            "[{} skill folder(s) could not be read: {}; the node's log says why]",
+            c.refused.len(),
+            names.join(", ")
+        ));
+    }
+    if let Some(n) = c.invoked.as_deref() {
+        after.push(format!(
             "[The person's message starts with /{n}: they ask for the skill `{n}`. Load it with \
              the `skill` tool first.]"
-        )
-    });
-    if listed.is_empty() && invoked.is_none() {
+        ));
+    }
+    if listed.is_empty() && after.is_empty() {
         return None;
     }
     let total = listed.len();
     let take = total.min(MAX_LISTED);
-    let note = |left: usize| {
+    let tail: usize = after.iter().map(|a| a.len() + 1).sum();
+    let note_for = |left: usize, cap: usize| {
         format!(
             "[not listed: {left} more skills (the list holds at most {MAX_LISTED} skills and \
              {cap} characters); the `skill` tool with a name it does not know lists them all]"
         )
     };
-    let tail = invoked.as_ref().map_or(0, |i| i.len() + 1);
+    let floor = LEAD.len()
+        + 1
+        + note_for(total, usize::MAX).len()
+        + tail
+        + FLOOR_LINES * (NAME_MAX + SHORT + 8);
+    let cap = cap.max(floor);
+    let note = |left: usize| note_for(left, cap);
     let line = |s: &Skill, short: bool| {
         let d = if short && s.description.chars().count() > SHORT {
             let mut d: String = s.description.chars().take(SHORT).collect();
@@ -416,9 +526,9 @@ pub fn render(c: &Catalogue, cap: usize) -> Option<String> {
         format!("\n- {}: {d}", s.name)
     };
     let finish = |mut out: String| {
-        if let Some(i) = &invoked {
+        for a in &after {
             out.push('\n');
-            out.push_str(i);
+            out.push_str(a);
         }
         out
     };
@@ -435,7 +545,7 @@ pub fn render(c: &Catalogue, cap: usize) -> Option<String> {
             return Some(finish(out));
         }
     }
-    // Shortened, as many as fit with room for the note.
+    // Shortened, as many as fit with room for the note and the lines after.
     let room = cap.saturating_sub(note(total).len() + 1 + tail);
     let mut out = String::from(LEAD);
     let mut n = 0;
@@ -455,14 +565,40 @@ pub fn render(c: &Catalogue, cap: usize) -> Option<String> {
 }
 
 /// The skill the person's message names with `/name` at its start (the
-/// first word, nothing else), if there is one of that name.
+/// first word, without a trailing `:`, `,` or `.`), if there is one of
+/// that name.
 pub fn invoked(text: &str, c: &Catalogue) -> Option<String> {
     let rest = text.trim_start().strip_prefix('/')?;
-    let name = rest.split(char::is_whitespace).next()?;
+    let name = rest
+        .split(char::is_whitespace)
+        .next()?
+        .trim_end_matches([':', ',', '.']);
     c.skills
         .iter()
         .find(|s| s.name == name)
         .map(|s| s.name.clone())
+}
+
+/// The node owner's skill folders the agent's shell may read in this call
+/// (`Catalogue::read`; only a session whose agent has the `skill` tool
+/// has a catalogue): each one still at the real path discovery found (a
+/// folder replaced by a link since is left out), never one that holds or
+/// lies in a protected folder. Read-only, bound by their identity as
+/// `[sandbox] read` entries are (`Grants::read_identified`).
+pub fn shell_reads(ctx: &ToolCtx) -> Vec<(PathBuf, &'static str)> {
+    let Some(c) = &ctx.skills else {
+        return Vec::new();
+    };
+    c.read
+        .iter()
+        .filter(|p| p.canonicalize().ok().as_ref() == Some(*p))
+        .filter(|p| {
+            !ctx.protected
+                .iter()
+                .any(|x| x.starts_with(p) || p.starts_with(x))
+        })
+        .map(|p| (p.clone(), "a node.toml [skills] root"))
+        .collect()
 }
 
 /// `skill`: one skill's `SKILL.md`, or one file beside it, by name.

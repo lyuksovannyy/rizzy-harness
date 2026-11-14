@@ -1506,13 +1506,14 @@ impl Session {
     ///
     /// When the agent may use the `skill` tool here, the skills found in
     /// the same read (`harness_tools::skills`, node.toml `[skills]`) go to
-    /// `skills`, and their catalogue after the files; `user_text` starting
-    /// with `/name` invokes the skill of that name for this turn.
+    /// `skills`, and their catalogue after the files, read in a bound of
+    /// their own. `invoking`: the person's own message (never a delegated
+    /// task or a callback turn), which invokes a skill with `/name`.
     async fn with_instructions(
         &self,
         mut extra: TurnExtra,
         agent: Option<&AgentSpec>,
-        user_text: &str,
+        invoking: Option<&str>,
         cancel: &CancellationToken,
     ) -> TurnExtra {
         use crate::instructions::{self as ins, Bounded};
@@ -1560,48 +1561,41 @@ impl Session {
             }
         }
         let protected = policy.protected_dirs.clone();
-        let read = ins::bounded(
-            move || {
-                let files = ins::read(&dir, &granted, &protected, cap);
-                let found = (!roots.is_empty()).then(|| skills::discover(&roots, &protected));
-                (files, found)
-            },
+        // The instruction files first, in a bound of their own: a slow
+        // skill folder must not cost the turn its AGENTS.md (review S3).
+        let files_protected = protected.clone();
+        let files = ins::bounded(
+            move || ins::read(&dir, &granted, &files_protected, cap),
             cancel,
             ins::READ_TIMEOUT,
         )
         .await;
-        let (problems, skill_problems) = match read {
-            Bounded::Done((r, found)) => {
+        let problems = match files {
+            Bounded::Done(r) => {
                 extra.instructions = r.text;
-                let mut skill_problems = Vec::new();
-                if let Some(mut f) = found {
-                    f.catalogue.invoked = skills::invoked(user_text, &f.catalogue);
-                    if let Some(c) = skills::render(&f.catalogue, skills::cap_for(window)) {
-                        extra.instructions = Some(match extra.instructions.take() {
-                            Some(t) => format!("{t}\n\n{c}"),
-                            None => c,
-                        });
-                    }
-                    if !f.catalogue.skills.is_empty() {
-                        extra.skills = Some(Arc::new(f.catalogue));
-                    }
-                    skill_problems = f.problems;
-                }
-                (r.problems, skill_problems)
+                r.problems
             }
             Bounded::TimedOut => {
                 extra.instructions = Some(ins::timed_out());
-                (
-                    vec![format!("timed out after {} s", ins::READ_TIMEOUT.as_secs())],
-                    vec![],
-                )
+                vec![format!("timed out after {} s", ins::READ_TIMEOUT.as_secs())]
             }
             // The turn is stopping; the backend sees the cancel itself.
-            Bounded::Cancelled => (vec![], vec![]),
+            Bounded::Cancelled => return extra,
             Bounded::Failed(e) => {
                 tracing::warn!(session = %self.id, error = %e, "reading the instruction files failed");
-                (vec![], vec![])
+                vec![]
             }
+        };
+        let skill_problems = if roots.is_empty() {
+            vec![]
+        } else {
+            let found = ins::bounded(
+                move || skills::discover(&roots, &protected),
+                cancel,
+                ins::READ_TIMEOUT,
+            )
+            .await;
+            ins::with_skills(&mut extra, found, invoking, skills::cap_for(window))
         };
         if !problems.is_empty() {
             tracing::info!(
@@ -1644,8 +1638,15 @@ impl Session {
             return (TurnEndReason::Error, None);
         }
 
+        let extra_cause_none = extra.cause.is_none();
         let extra = self
-            .with_instructions(extra, agent.as_ref(), &user_text, &cancel)
+            .with_instructions(
+                extra,
+                agent.as_ref(),
+                // Only a person's own message invokes a skill (review S5).
+                (self.parent_session.is_none() && extra_cause_none).then_some(user_text.as_str()),
+                &cancel,
+            )
             .await;
         // Run the backend in its own task so a panic still ends the turn.
         let this = self.clone();

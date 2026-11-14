@@ -1562,8 +1562,11 @@ description: Cut a release of this project: bump the version, tag, write the not
 ```
 
 `name` (letters, digits, `.`, `_`, `-`, at most 64; the folder's name when
-left out) and `description` (what it is for and when to use it; the first
-paragraph of text when left out) are what the agent sees; the rest of the file
+left out, or when the given one is not such a name) and `description` (what
+it is for and when to use it; the first paragraph of text when left out) are
+what the agent sees. Front matter that is not strict YAML, such as an
+unquoted `description: Use when: ...`, is read line by line, as other harnesses
+accept it; the rest of the file
 is what it reads when it loads the skill. `disable-model-invocation: true`
 keeps a skill out of the agent's list: it is loaded only when you ask for it
 (below). Other keys (`allowed-tools`, `hooks`, `model`, `context`, ...) are
@@ -1587,7 +1590,11 @@ most 150 skills and 8,000 characters (or about 2% of the model's context
 window when that is smaller and known). When they do not fit, descriptions
 are shortened to 120 characters, then skills are left out, with a note saying
 how many; the `skill` tool lists every name when asked for one it does not
-know. Like the instruction files, the list is read again every message and
+know. The cap never goes below room for about ten skills. A skill folder whose
+`SKILL.md` could not be used (no description, a link out of its folder, ...) is
+named in a line under the list; the node's log says why. Looking for skills
+has its own 5-second limit, after the instruction files, so a slow skill
+folder costs only the list. Like the instruction files, the list is read again every message and
 survives compacting. The agent loads a skill with the `skill` tool: it gets the
 `SKILL.md` without its front matter (cut at 24 KiB with a note), the skill
 folder's path, and the names of the files beside it, which it reads with the
@@ -1598,17 +1605,21 @@ Writer, Reviewer and Scout have the tool, as do custom agents that read or edit
 files or run commands; the Assistant and the Researcher do not. A sub-agent
 with the tool gets the list too.
 
-**Asking for one.** A message that starts with `/name` (a skill's name, then
-your text) asks the agent to load that skill first, a manual one included.
+**Asking for one.** A message of yours that starts with `/name` (a skill's
+name, then your text; `/name:` works too) asks the agent to load that skill
+first, a manual one included. A task one agent hands another never does.
 There is no menu for it yet.
 
 **What a skill can do: nothing by itself.** Nothing in a skill runs when it is
 found or loaded (no `` !`command` `` expansion); a script it names runs only
 when the agent runs it with `bash`, under the chat's execution mode and its
-approval like any other command (to run scripts from this machine's skill
-folders inside the sandbox, add the folder to `[sandbox] read`). Its text is
-the repository's or this machine's, quoted to the model like `AGENTS.md`: it
-changes no setting, permission or tool, and a link only in it is not fetched.
+approval like any other command. The folders in `[skills] roots` (their real
+paths, a root that is a link resolved) are readable, never writable, in the
+shell of a chat whose agent has the `skill` tool, so a script beside a skill
+from this machine runs in the sandbox too; chats whose agent lacks the tool do
+not see them. The list is quoted to the model like `AGENTS.md`; a loaded body
+is a tool result, like a file the agent reads. Neither changes a setting,
+permission or tool, and a link only in them is not fetched.
 Only regular files are read: a repository's skill folder must lie inside the
 repository (the chat folder's own skills inside the chat folder), and a
 skill's files inside the skill's folder; links out of them, into the node's

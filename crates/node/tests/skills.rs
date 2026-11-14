@@ -398,3 +398,23 @@ async fn a_slash_name_invokes_a_manual_skill_for_the_turn() {
     assert!(loaded[0].1.ends_with("manual body"), "{loaded:?}");
     assert!(!loaded[1].0, "{loaded:?}");
 }
+
+/// Review S5: only a person's own message invokes a skill; a delegated
+/// task that starts with `/manual` does not (the sub-agent's context has no
+/// invoked line, so the manual skill stays closed to it).
+#[tokio::test]
+async fn a_delegated_task_does_not_invoke_a_skill() {
+    let mut n = start(both).await;
+    let sub = n.repo.join("sub");
+    let sid = n.create(&sub).await;
+    let scout = spec("scout", &["read", "skill"], vec![]);
+    let lead = spec("lead", &["read"], vec![scout]);
+    n.turn(sid, "delegate: scout=/manual now", Some(lead)).await;
+    let reqs = n.requests();
+    let child = reqs
+        .iter()
+        .find(|r| r.ends_with("\n\n/manual now"))
+        .unwrap_or_else(|| panic!("no request for the sub-agent: {reqs:?}"));
+    assert!(child.contains("| - release: Cut a release"), "{child}");
+    assert!(!child.contains("starts with /manual"), "{child}");
+}

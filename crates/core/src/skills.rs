@@ -39,6 +39,15 @@ pub struct Catalogue {
     pub skills: Vec<Skill>,
     /// The skill the person's message names with `/name` in this turn.
     pub invoked: Option<String>,
+    /// Skill folders that hold a `SKILL.md` that could not be used (refused
+    /// or unreadable), by folder name: named to the model, the reasons in
+    /// the node's log.
+    pub refused: Vec<String>,
+    /// Canonical folders of the node owner's skills (each `[skills] roots`
+    /// entry that exists, and a skill folder that is a link out of it): the
+    /// agent's shell may read them, never write (`bash` grants them
+    /// read-only to sessions whose agent has the `skill` tool).
+    pub read: Vec<PathBuf>,
 }
 
 impl Catalogue {

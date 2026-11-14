@@ -92,6 +92,48 @@ pub(crate) async fn bounded<T: Send + 'static>(
     }
 }
 
+/// Put what skill discovery found into `extra` (`harness_tools::skills`):
+/// the catalogue after the instruction files and the skills for the tool;
+/// `invoking` (the person's own message) may name one with `/name`. A
+/// discovery that timed out keeps the files, adds a note, and leaves no
+/// catalogue. What went wrong, for the log.
+pub(crate) fn with_skills(
+    extra: &mut harness_core::backend::TurnExtra,
+    found: Bounded<harness_tools::skills::Found>,
+    invoking: Option<&str>,
+    cap: usize,
+) -> Vec<String> {
+    use harness_tools::skills;
+    let push = |extra: &mut harness_core::backend::TurnExtra, c: String| {
+        extra.instructions = Some(match extra.instructions.take() {
+            Some(t) => format!("{t}\n\n{c}"),
+            None => c,
+        });
+    };
+    match found {
+        Bounded::Done(mut f) => {
+            f.catalogue.invoked = invoking.and_then(|t| skills::invoked(t, &f.catalogue));
+            if let Some(c) = skills::render(&f.catalogue, cap) {
+                push(extra, c);
+            }
+            extra.skills = Some(std::sync::Arc::new(f.catalogue));
+            f.problems
+        }
+        Bounded::TimedOut => {
+            push(
+                extra,
+                format!(
+                    "[skills not read: looking for them took longer than {} s]",
+                    READ_TIMEOUT.as_secs()
+                ),
+            );
+            vec![format!("timed out after {} s", READ_TIMEOUT.as_secs())]
+        }
+        Bounded::Cancelled => vec![],
+        Bounded::Failed(e) => vec![format!("discovery failed: {e}")],
+    }
+}
+
 /// [`read`] with the full cap, its text only.
 #[cfg(test)]
 pub(crate) fn block(cwd: &Path, granted: &Path, protected: &[PathBuf]) -> Option<String> {
@@ -508,6 +550,47 @@ mod tests {
                 format!("{LEAD}\n==> ../AGENTS.md <==\nchild rules\n==> AGENTS.md <==\nsub rules")
             );
         }
+    }
+
+    /// Review S3: a skill discovery that timed out keeps the instruction
+    /// files, says so, and sets no catalogue; a finished one adds the
+    /// catalogue after the files.
+    #[test]
+    fn a_skill_timeout_keeps_the_files_and_sets_no_catalogue() {
+        let mut extra = harness_core::backend::TurnExtra {
+            instructions: Some("FILES".into()),
+            ..Default::default()
+        };
+        let problems = with_skills(&mut extra, Bounded::TimedOut, None, 8000);
+        assert_eq!(
+            extra.instructions.as_deref(),
+            Some("FILES\n\n[skills not read: looking for them took longer than 5 s]")
+        );
+        assert!(extra.skills.is_none());
+        assert_eq!(problems.len(), 1);
+        let t = tree();
+        put(
+            &t.ws.join("s/a/SKILL.md"),
+            "---\nname: a\ndescription: A\n---\nbody",
+        );
+        let found = harness_tools::skills::discover(
+            &[harness_tools::skills::Root {
+                path: t.ws.join("s"),
+                origin: harness_core::skills::SkillOrigin::Node,
+                bound: None,
+            }],
+            &[],
+        );
+        let mut extra = harness_core::backend::TurnExtra {
+            instructions: Some("FILES".into()),
+            ..Default::default()
+        };
+        with_skills(&mut extra, Bounded::Done(found), Some("/a: now"), 8000);
+        let got = extra.instructions.unwrap();
+        assert!(got.starts_with("FILES\n\n"), "{got}");
+        assert!(got.contains("\n- a: A"), "{got}");
+        assert!(got.contains("starts with /a:"), "{got}");
+        assert_eq!(extra.skills.unwrap().skills.len(), 1);
     }
 
     /// The read is waited for at most its limit, and not past a cancel.
