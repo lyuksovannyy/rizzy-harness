@@ -107,6 +107,12 @@ impl ToolEnv {
         })
     }
 
+    /// The same deny-list with another pass list: an MCP server's own
+    /// `env_vars` (node.toml) in place of the node's `env_pass`.
+    pub fn with_pass(&self, pass: &[String]) -> Result<Self, String> {
+        Self::new(pass, self.inner.deny.iter().cloned())
+    }
+
     /// node.toml's `env_pass`, as given.
     pub fn pass(&self) -> &[String] {
         &self.inner.pass
