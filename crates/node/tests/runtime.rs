@@ -1590,9 +1590,63 @@ async fn a_read_only_sub_agent_runs_outside_a_repository() {
     )
     .await;
     let out = out.last().expect("a delegate call");
-    assert!(out.contains("@scout ended (completed)"), "{out}");
+    // It never called `finish`: its last text, `done` for a completed turn.
+    assert!(out.contains("\nSub-agent @scout finished: done. "), "{out}");
+    assert!(out.contains("\n| Tool said: "), "{out}");
     assert!(out.contains("hello from the folder"), "{out}");
     assert_eq!(h.node.store().sessions().unwrap().len(), 2);
+}
+
+/// A sub-agent that calls `finish` ends its turn at once (no further model
+/// request), and the parent's result carries its status and summary,
+/// quoted under the harness's line.
+#[tokio::test]
+async fn a_sub_agent_that_calls_finish_hands_back_its_status_and_summary() {
+    let mut h = Harness::new(auto_policy).await;
+    let sid = h.create().await;
+    let out = delegate_as_lead(
+        &mut h,
+        sid,
+        vec![agent_with("scout", &["read"], vec![])],
+        r#"delegate: scout=script: [{"tool": "finish", "input": {"status": "partial", "summary": "Read a.rs; b.rs is left.", "details": "b.rs needs a decision."}}]"#,
+    )
+    .await;
+    let out = out.last().expect("a delegate call");
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(lines[0].starts_with("session: "), "{out}");
+    assert!(
+        lines[1].starts_with("Sub-agent @scout finished: partial. Its own report follows"),
+        "{out}"
+    );
+    assert_eq!(
+        &lines[2..],
+        &[
+            "| Read a.rs; b.rs is left.",
+            "| ",
+            "| b.rs needs a decision."
+        ],
+        "{out}"
+    );
+    let child = h
+        .node
+        .store()
+        .sessions()
+        .unwrap()
+        .into_iter()
+        .map(|s| s.session_id)
+        .find(|c| *c != sid)
+        .expect("a child session");
+    let log = h.node.store().events_after(child, 0, 10_000).unwrap();
+    let messages = log.iter().filter(|e| e.kind == "assistant_message").count();
+    assert_eq!(messages, 1, "the child went on after `finish`");
+    let ended = log
+        .iter()
+        .find_map(|e| match e.typed() {
+            Ok(EventKind::TurnEnded(t)) => Some(t.reason),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(ended, harness_core::event::TurnEndReason::Completed);
 }
 
 /// In a repository a writing sub-agent works in its worktree and its

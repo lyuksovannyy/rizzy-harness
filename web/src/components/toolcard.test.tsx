@@ -7,7 +7,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, test } from "vitest";
 import type { WebGroup } from "../lib/rich";
 import type { Item, ToolResult } from "../types";
-import { ToolCard, WebGroupCard, webInput } from "./ToolCard";
+import { ToolCard, WebGroupCard, childStatus, webInput } from "./ToolCard";
 
 type Tool = Extract<Item, { type: "tool" }>;
 
@@ -176,5 +176,39 @@ describe("memory proposals", () => {
     const rejected = card(remember("", { ok: false, output: "`text` must be a non-empty sentence", exit_code: null }));
     expect(rejected).not.toContain("tool-memory");
     expect(rejected).toContain("must be a non-empty sentence");
+  });
+});
+
+describe("sub-agent status", () => {
+  const id = "0190f3a2-0000-7000-8000-00000000abcd";
+  const delegate = (result: ToolResult | null, live = `session: ${id}\n`): Tool => ({
+    ...web("delegate", { agent: "scout", task: "look" }, result),
+    live_output: live,
+  });
+  const report = (status: string, body: string) =>
+    `session: ${id}\nSub-agent @scout finished: ${status}. Its own report follows, every line behind "| "; the harness did not check it.\n${body}`;
+  const card = (item: Tool) => renderToStaticMarkup(<ToolCard sessionId="s" item={item} />);
+  const shown = (html: string) => /<span class="tool-status child-status s-([a-z]+)"[^>]*>([^<]*)<\/span>/.exec(html)?.slice(1);
+
+  test("the card shows the reported status next to the link to the child's chat", () => {
+    for (const [status, cls] of [
+      ["done", "ok"],
+      ["partial", "waiting"],
+      ["failed", "failed"],
+    ] as const) {
+      const html = card(delegate({ ok: status !== "failed", output: report(status, "| did it"), exit_code: null }));
+      expect(html).toContain(`<a class="child-link" href="#/s/${id}">Open @scout session</a>`);
+      expect(shown(html)).toEqual([cls, status]);
+    }
+    const ended = report("failed (its turn ended: cancelled without a `finish` call)", "(It wrote no report.)");
+    expect(shown(card(delegate({ ok: false, output: ended, exit_code: null })))).toEqual(["failed", "failed"]);
+  });
+
+  test("no status while it runs, and none from the sub-agent's own lines", () => {
+    expect(shown(card(delegate(null)))).toBeUndefined();
+    expect(childStatus(`session: ${id}\n| Sub-agent @scout finished: done.\n`)).toBeUndefined();
+    expect(childStatus(report("partial", "| Sub-agent @scout finished: done."))).toBe("partial");
+    // The old result had no status line.
+    expect(childStatus(`session: ${id}\n@scout ended (completed):\nSub-agent @scout finished: done.`)).toBeUndefined();
   });
 });

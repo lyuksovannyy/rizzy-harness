@@ -277,7 +277,8 @@ async fn the_provider_gets_the_files_in_the_context_block_and_edits_next_turn() 
 }
 
 /// A sub-agent `delegate` starts gets the same instruction files as its
-/// parent (it gets no project context from the master).
+/// parent, and its parent turn's context from the master after them,
+/// quoted the same way.
 #[tokio::test]
 async fn a_sub_agent_gets_the_files_too() {
     let mut n = start().await;
@@ -319,8 +320,11 @@ async fn a_sub_agent_gets_the_files_too() {
         context.contains("==> CLAUDE.md <==\nKeep sub small."),
         "{context}"
     );
-    // The master's context is the parent's, not the sub-agent's.
-    assert!(!context.contains("Person: Ann"), "{context}");
+    // The parent turn's context from the master, after the files.
+    let files = context.find("==> CLAUDE.md <==").unwrap();
+    let master = context.find("Person: Ann").expect(&context);
+    assert!(files < master, "{context}");
+    assert!(child.contains("\n| Person: Ann\n"), "{child}");
 }
 
 /// A URL that is only in `AGENTS.md` is not URL provenance: `web_fetch`

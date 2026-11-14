@@ -161,12 +161,13 @@ async fn teamlead_delegates_in_parallel_within_caps() {
     );
     let done: Vec<&String> = outs
         .iter()
-        .filter(|o| o.contains("ended (completed)"))
+        .filter(|o| o.contains(" finished: done. "))
         .collect();
     assert_eq!(done.len(), 4, "{outs:#?}");
     assert!(
         outs.iter()
-            .any(|o| o.contains("@writer ended (completed):\nYou said: draft notes"))
+            .any(|o| o.contains("\nSub-agent @writer finished: done. ")
+                && o.contains("\n| You said: draft notes"))
     );
     // Depth one: a sub-agent has no delegate tool.
     assert!(
@@ -256,8 +257,10 @@ async fn builtin_delegates_outside_a_repository_by_role() {
     assert_eq!(outs.len(), 5, "{outs:#?}");
     for (who, said) in [("scout", "look"), ("reviewer", "check")] {
         assert!(
-            outs.iter()
-                .any(|o| o.contains(&format!("@{who} ended (completed):\nYou said: {said}"))),
+            outs.iter().any(
+                |o| o.contains(&format!("\nSub-agent @{who} finished: done. "))
+                    && o.contains(&format!("\n| You said: {said}"))
+            ),
             "{who}: {outs:#?}"
         );
     }
