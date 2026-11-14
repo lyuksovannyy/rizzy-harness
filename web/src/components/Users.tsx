@@ -112,24 +112,35 @@ export function Users({ me }: { me: Me }) {
                     aria-label={`Server role of ${u.username}`}
                     value={u.role}
                     disabled={self}
-                    onChange={(e) => run(() => pageApi.updateUser(u.user_id, { role: e.target.value as Role }))}
+                    onChange={(e) => {
+                      const role = e.target.value as Role;
+                      // A server admin's level is host only while they are one.
+                      if (
+                        u.role === "admin" &&
+                        role === "member" &&
+                        !confirm(
+                          `Make ${u.username} a user? Their level will then be ${LEVEL_LABEL[u.exec_ceiling_stored]}; set it first if that is not what they should have.`,
+                        )
+                      )
+                        return;
+                      void run(() => pageApi.updateUser(u.user_id, { role }));
+                    }}
                   >
                     <option value="member">User</option>
                     <option value="admin">Server admin</option>
                   </select>
                 </td>
                 <td>
-                  {u.role === "admin" ? (
-                    <span title="A server admin's level is always host">{LEVEL_LABEL.host}</span>
-                  ) : (
-                    <LevelSelect
-                      label={`Level of ${u.username}`}
-                      value={u.exec_ceiling_stored}
-                      max="host"
-                      disabled={self}
-                      grant={{ who: u.username, where: "for every workspace they are in" }}
-                      onSave={(level) => void run(() => pageApi.setCeiling(u.user_id, level))}
-                    />
+                  <LevelSelect
+                    label={u.role === "admin" ? `Level of ${u.username} once no longer a server admin` : `Level of ${u.username}`}
+                    value={u.exec_ceiling_stored}
+                    max="host"
+                    disabled={self}
+                    grant={{ who: u.username, where: "for every workspace they are in" }}
+                    onSave={(level) => void run(() => pageApi.setCeiling(u.user_id, level))}
+                  />
+                  {u.role === "admin" && (
+                    <div className="muted small">Host while a server admin; this applies after.</div>
                   )}
                 </td>
                 <td>

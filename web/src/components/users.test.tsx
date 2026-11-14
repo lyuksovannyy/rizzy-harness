@@ -164,13 +164,32 @@ describe("the account's level (N.10a part 2)", () => {
     expect(api.setCeiling).toHaveBeenCalledWith("b", "host");
   });
 
-  test("a lower level is saved at once; a server admin's is host and not set here", async () => {
+  test("a lower level is saved at once; a server admin's is the one that applies after", async () => {
     api.setCeiling.mockResolvedValue({ ...bob, exec_ceiling: "sandbox", exec_ceiling_stored: "sandbox" });
     const host = await mount();
     choose(level(host, "bob")!, "sandbox");
     await act(async () => {});
     expect(document.querySelector("dialog.host-warning")).toBeNull();
     expect(api.setCeiling).toHaveBeenCalledWith("b", "sandbox");
+    // Review L2-8: a server admin's row has the select too, for what
+    // applies once they are no longer one (their own is not theirs to set).
     expect(level(host, "alex")).toBeNull();
+    const after = host.querySelector<HTMLSelectElement>('select[aria-label="Level of alex once no longer a server admin"]');
+    expect(after).not.toBeNull();
+    expect(after!.disabled).toBe(true);
+  });
+
+  test("demoting a server admin says the level they will have, and cancelling changes nothing", async () => {
+    api.users.mockResolvedValue({ users: [{ ...bob, user_id: "a", username: "alex", role: "admin" }, { ...bob, role: "admin", exec_ceiling: "host", exec_ceiling_stored: "sandbox" }] });
+    const asked: string[] = [];
+    vi.stubGlobal("confirm", vi.fn((q: string) => (asked.push(q), false)));
+    api.updateUser.mockClear();
+    const host = await mount();
+    const role = host.querySelector<HTMLSelectElement>('select[aria-label="Server role of bob"]')!;
+    choose(role, "member");
+    await act(async () => {});
+    expect(asked[0]).toContain("Their level will then be Sandbox");
+    expect(api.updateUser).not.toHaveBeenCalled();
+    expect(host.querySelector('select[aria-label="Level of bob once no longer a server admin"]')).not.toBeNull();
   });
 });

@@ -299,13 +299,34 @@ describe("Members", () => {
     await render(<WorkspaceMembers {...props("admin", { workspace: summary("admin", { exec_level: "container" }) })} />);
     expect(levelOf("Kim")!.value).toBe("none");
     expect(off(levelOf("Kim")!)).toEqual(["sandbox", "host"]);
-    expect(levelOf("alex")!.disabled).toBe(true);
+    // Her own row: shown, not a choice (nobody changes their own).
+    expect(levelOf("alex")).toBeNull();
+    expect(row("alex").textContent).toContain("None");
     expect(levelOf("sam")).toBeNull();
     expect(row("sam").textContent).toContain("Host");
     api.setWorkspaceMemberLevel.mockResolvedValue({ ...member("kim", "member", "Kim"), exec_level: "container" });
     await choose(levelOf("Kim")!, "container");
     expect(api.setWorkspaceMemberLevel).toHaveBeenCalledWith("w-acme", "u-kim", "container");
     expect(document.querySelector("dialog.host-warning")).toBeNull();
+  });
+
+  test("a member sees only their own level; a level above the admin's own is not theirs to change", async () => {
+    // As a guest: the server sends only her own row's level.
+    const own = { ...member("alex", "guest"), exec_level: "sandbox" as const, effective_level: "none" as const };
+    const others = [own, { ...member("sam", "owner"), exec_level: undefined }, { ...member("kim", "member", "Kim"), exec_level: undefined }];
+    api.workspaceMembers.mockResolvedValue({ members: others });
+    await render(<WorkspaceMembers {...props("guest")} />);
+    expect(levelOf("Kim")).toBeNull();
+    expect(host.querySelector('[aria-label="Level of Kim not shown"]')).not.toBeNull();
+    expect(row("alex").textContent).toContain("counts as None");
+    // As an admin at sandbox: a member the owner gave host is not hers to change.
+    act(() => root.unmount());
+    root = createRoot(host);
+    api.workspaceMembers.mockResolvedValue({ members: [member("alex", "admin"), { ...member("kim", "member", "Kim"), exec_level: "host" as const }] });
+    await render(<WorkspaceMembers {...props("admin", { workspace: summary("admin", { exec_level: "sandbox" }) })} />);
+    expect(levelOf("Kim")!.disabled).toBe(true);
+    // The role select says the role is not the level.
+    expect(roleOf("Kim").title).toContain("not what they may run");
   });
 
   test("an owner granting host sees the risks first; cancelling saves nothing", async () => {

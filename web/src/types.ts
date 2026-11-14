@@ -700,8 +700,11 @@ export interface WorkspaceMember {
   display_name: string | null;
   role: WorkspaceRole;
   joined_ms: number;
-  /** Their level here (an owner's is always `host`). */
-  exec_level: ExecLevel;
+  /** Their level here as set (an owner's is always `host`). Only to those
+   * who manage members here, and on one's own row. */
+  exec_level?: ExecLevel;
+  /** As it counts: the lower of that and their account's level. */
+  effective_level?: ExecLevel;
 }
 
 /** Settings → Server → Workspaces: one row per workspace. */
