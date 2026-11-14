@@ -285,6 +285,8 @@ pub struct Access {
     /// The member's own switch; always on in a Personal workspace (and for
     /// the API token, which is no member).
     pub use_memory: bool,
+    /// Whether they answered the join question (always in Personal).
+    pub memory_answered: bool,
     /// Their level here as it counts (`levels::workspace_level`): `host` in
     /// a Personal workspace, for an owner and for the API token, so there
     /// the account's ceiling decides.
@@ -354,13 +356,18 @@ pub async fn access(m: &Master, who: &Principal, ws: &str) -> Result<Access, WsE
     let w = w.ok_or(WsError::NotFound)?;
     let personal = w.personal();
     let none = harness_core::policy::ExecLevel::None;
-    let (role_id, use_memory, stored) = match (&who.user_id, member) {
-        (None, _) => (Role::Owner.id().to_string(), true, none),
-        (Some(_), Some(mr)) => (mr.role_id, mr.use_memory || personal, mr.exec_level),
+    let (role_id, use_memory, memory_answered, stored) = match (&who.user_id, member) {
+        (None, _) => (Role::Owner.id().to_string(), true, true, none),
+        (Some(_), Some(mr)) => (
+            mr.role_id,
+            mr.use_memory || personal,
+            mr.memory_answered || personal,
+            mr.exec_level,
+        ),
         // A Personal owner whose membership row went missing is still its
         // owner (the store restores the row at the next start).
         (Some(u), None) if w.personal_owner.as_deref() == Some(u.as_str()) => {
-            (Role::Owner.id().to_string(), true, none)
+            (Role::Owner.id().to_string(), true, true, none)
         }
         (Some(_), None) => return Err(WsError::NotFound),
     };
@@ -372,6 +379,7 @@ pub async fn access(m: &Master, who: &Principal, ws: &str) -> Result<Access, WsE
         workspace: w,
         personal,
         use_memory,
+        memory_answered,
     })
 }
 

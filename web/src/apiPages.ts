@@ -15,6 +15,7 @@ import type {
   Decision,
   FactKind,
   GraphifyStatus,
+  MemoryCallState,
   MemoryCfg,
   MemoryFact,
   MemorySource,
@@ -68,6 +69,8 @@ export const pageApi = {
     call<{ ok: boolean }>("POST", `/api/sessions/${id}/variants`, { group, message_id }),
   restoreTurn: (id: string, turn: string, force = false, rewind = false) =>
     call<{ ok: boolean }>("POST", `/api/sessions/${id}/turns/${turn}/restore`, { force, rewind }),
+  /** The owner's new title for a chat (cleaned and capped by the server). */
+  renameSession: (id: string, title: string) => call<{ ok: boolean; title: string }>("PUT", `/api/sessions/${id}/title`, { title }),
   /** `media` also deletes the caller's Media items that came from the chat. */
   deleteSession: (id: string, opts: { media?: boolean } = {}) =>
     call<{ ok: boolean }>("DELETE", `/api/sessions/${id}${opts.media ? "?media=1" : ""}`),
@@ -121,8 +124,18 @@ export const pageApi = {
   saveSettings: (p: Prefs) => call<Prefs>("PUT", "/api/me/settings", p),
   addMemory: (text: string, kind: FactKind = "fact") =>
     call<MemoryFact>("POST", "/api/memory", { text, kind }),
-  updateMemory: (id: string, b: { text?: string; status?: "active" }) =>
-    call<MemoryFact>("PATCH", `/api/memory/${id}`, b),
+  updateMemory: (
+    id: string,
+    b: { text?: string; status?: "active" | "retired"; place?: "user" | "workspace"; workspace_id?: string },
+  ) => call<MemoryFact>("PATCH", `/api/memory/${id}`, b),
+  memoryCall: (sessionId: string, callId: string) =>
+    call<MemoryCallState>("GET", `/api/sessions/${sessionId}/memory/${encodeURIComponent(callId)}`),
+  keepMemoryCall: (sessionId: string, callId: string) =>
+    call<MemoryCallState>("POST", `/api/sessions/${sessionId}/memory/${encodeURIComponent(callId)}/keep`),
+  dismissMemoryCall: (sessionId: string, callId: string) =>
+    call<MemoryCallState>("POST", `/api/sessions/${sessionId}/memory/${encodeURIComponent(callId)}/dismiss`),
+  undoMemoryCall: (sessionId: string, callId: string) =>
+    call<MemoryCallState>("POST", `/api/sessions/${sessionId}/memory/${encodeURIComponent(callId)}/undo`),
   deleteMemory: (id: string) => call<{ ok: boolean }>("DELETE", `/api/memory/${id}`),
   memoryCfg: () => call<MemoryCfg>("GET", "/api/admin/memory"),
   saveMemoryCfg: (b: {

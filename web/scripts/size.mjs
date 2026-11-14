@@ -129,8 +129,26 @@ const SUBAGENT_KB = 0.2;
 // cards and the face (+0.2, recorded +0.3: the total rounds up past 375.7).
 const X5_KB = 0.3;
 
+// Rename and export a chat (feat/chat-rename-export), measured 378.4
+// (initial 100.6) against 375.9 on main (+2.5, not split per chunk): the
+// header's title with its Rename field and the Pencil and Download icons in
+// the conversation chunk; the export dialog and the Markdown builder in
+// their own lazy chunk, loaded on the first click. After its review and the
+// merge of main with pull requests 94 and 95 (the skill tool's card, which
+// recorded no line of its own), measured 378.6 (initial 100.6): +0.2.
+const EXPORT_KB = 2.7;
+
+// Memory by default (T.3, owner 2026-11-14), measured 377.9 (initial 100.7)
+// against 375.9: the chat's memory line reads what was saved and has Undo,
+// the Memory page shows each fact's place, moves it and restores retired
+// ones, and the join question (a lazy chunk; Shell only decides whether to
+// load it, +0.2 initial). Review fixes and the owner's memory block,
+// measured 378.6: Keep and Dismiss, the replaced/forgotten/undone wording,
+// project facts' wording, the retry while the call is not filed (+0.7).
+const MEMDEF_KB = 2.7;
+
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
-const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB) * 100) / 10) / 10;
+const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB + EXPORT_KB + MEMDEF_KB) * 100) / 10) / 10;
 // Raised from 103 to 106 once the Phase A pages merged (103.7 measured: the
 // new sidebar, account button and routine-result rows are on the first
 // screen), then lowered to 104 at Phase B (102.3 measured) once the login

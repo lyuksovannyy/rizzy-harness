@@ -167,6 +167,7 @@ mod tests {
             role: Some(crate::workspaces::Role::Member),
             role_id: "member".into(),
             use_memory: false,
+            memory_answered: false,
             exec_level: level,
         }
     }
