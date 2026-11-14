@@ -519,9 +519,10 @@ async fn vars_for(m: &Master, a: &Admitted, prefs: &Prefs, now: i64) -> Vars {
             let number = s.run_count(&rid).unwrap_or(1);
             let last = s.runs_page(&rid, Some(&run_id), 1).unwrap_or_default();
             let trigger = trigger.and_then(|t| s.trigger(&t).ok().flatten());
-            (number, last.into_iter().next(), trigger)
+            Ok::<_, harness_store::StoreError>((number, last.into_iter().next(), trigger))
         })
-        .await;
+        .await
+        .unwrap_or((1, None, None));
     // `now.*` in the trigger's zone; Run now and intervals use the owner's.
     let tz = trigger
         .and_then(|t| ScheduleConfig::read(&t.config))

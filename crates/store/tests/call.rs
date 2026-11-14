@@ -3,7 +3,7 @@
 use std::future::Future;
 use std::task::Poll;
 
-use harness_store::Store;
+use harness_store::{Store, StoreError};
 
 /// A call made while its runtime shuts down (its blocking task is cancelled
 /// before it starts) returns an error. It panicked before (review A21-9:
@@ -22,16 +22,16 @@ fn a_call_cancelled_at_shutdown_is_an_error_not_a_panic() {
         .unwrap();
     let res = b.block_on(async {
         let mut call = Box::pin(store.call(|s| s.audit_count()));
-        {
-            // The blocking task goes to the runtime that is gone.
+        // The first poll spawns the blocking task, on the runtime that is
+        // gone.
+        let first = {
             let _in_a = dying.enter();
-            std::future::poll_fn(|cx| {
-                let _ = call.as_mut().poll(cx);
-                Poll::Ready(())
-            })
-            .await;
+            std::future::poll_fn(|cx| Poll::Ready(call.as_mut().poll(cx))).await
+        };
+        match first {
+            Poll::Ready(r) => r,
+            Poll::Pending => call.await,
         }
-        call.await
     });
-    assert!(res.is_err(), "{res:?}");
+    assert!(matches!(res, Err(StoreError::Stopped)), "{res:?}");
 }

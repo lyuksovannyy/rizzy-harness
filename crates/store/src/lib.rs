@@ -45,6 +45,22 @@ pub enum StoreError {
     /// left without an owner, ...). The message is written for users.
     #[error("{0}")]
     Refused(String),
+    /// The runtime is shutting down: the store's blocking task was
+    /// cancelled before it ran, so nothing was read or written.
+    #[error("the process is stopping; the store was not called")]
+    Stopped,
+}
+
+/// What [`Store::call`] returns when the runtime cancelled its blocking
+/// task (shutdown): an error, never a panic (review A21-9).
+pub trait CallResult {
+    fn stopped() -> Self;
+}
+
+impl<T, E: From<StoreError>> CallResult for std::result::Result<T, E> {
+    fn stopped() -> Self {
+        Err(StoreError::Stopped.into())
+    }
 }
 
 pub type Result<T> = std::result::Result<T, StoreError>;
@@ -665,15 +681,18 @@ impl Store {
     }
 
     /// Run a blocking store operation off the async runtime.
+    /// A panic in `f` is passed on; a task the runtime cancelled at
+    /// shutdown is [`StoreError::Stopped`].
     pub async fn call<R, F>(&self, f: F) -> R
     where
         F: FnOnce(&Store) -> R + Send + 'static,
-        R: Send + 'static,
+        R: CallResult + Send + 'static,
     {
         let this = self.clone();
         match tokio::task::spawn_blocking(move || f(&this)).await {
             Ok(r) => r,
-            Err(e) => std::panic::resume_unwind(e.into_panic()),
+            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+            Err(_) => R::stopped(),
         }
     }
 
