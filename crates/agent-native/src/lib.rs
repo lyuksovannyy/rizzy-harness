@@ -45,6 +45,12 @@ pub use retry::RetryPolicy;
 pub const FLUSH_INTERVAL: Duration = Duration::from_millis(75);
 /// ...or when this many bytes are buffered.
 pub const FLUSH_BYTES: usize = 2048;
+/// What is left in a stream's channel when it ends (a model's deltas that
+/// piled up behind a waiting append) goes out in batches of at most this
+/// many bytes: a few appends, each an fsync,
+/// and no frame larger than this ahead of the node's acks (review A21-3,
+/// re-check D-5).
+pub const DRAIN_BYTES: usize = 32 * 1024;
 
 /// After a cancel, how long a tool has to return on its own before the turn
 /// stops waiting for it. Longer than bash needs to end a group that ignores
@@ -927,7 +933,7 @@ where
     // streams waits for room in `rx` (bash watches its cancel and its
     // timeout while it does), so its output is held back; a model's deltas
     // pile up in its unbounded channel, bounded by the answer's size, and
-    // go out in batches of the usual size afterwards (review A21-3).
+    // go out in batches of `DRAIN_BYTES` afterwards (review A21-3).
     let mut sending: Option<Sending<'_>> = None;
     let mut finished: Option<T> = None;
     let out = loop {
@@ -967,11 +973,18 @@ where
     if let Some(s) = sending {
         s.await;
     }
-    // What is left in the channel, in batches as above: never one event
-    // the size of everything that piled up behind a waiting append.
+    // What is left in the channel, in batches of `DRAIN_BYTES`: never one
+    // event the size of everything that piled up behind a waiting append.
     while let Some(d) = rx.try_next() {
+        if !buf.is_empty()
+            && buf.len() + d.len() > DRAIN_BYTES
+            && let Some(s) = start(scrubber.push(&std::mem::take(&mut buf)), lead)
+        {
+            s.await;
+            emitted = true;
+        }
         buf.push_str(&d);
-        if buf.len() >= FLUSH_BYTES
+        if buf.len() >= DRAIN_BYTES
             && let Some(s) = start(scrubber.push(&std::mem::take(&mut buf)), lead)
         {
             s.await;

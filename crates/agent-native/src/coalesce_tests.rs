@@ -92,7 +92,7 @@ async fn what_piled_up_behind_a_waiting_append_goes_out_in_batches() {
     // The rest goes out in batches of at most 32 KiB (`DRAIN_BYTES`), so a
     // backlog after a Stop is a few appends, each an fsync on a node that
     // writes `Durability::Full`, not one per 2 KiB (re-check D-5).
-    let drain = 32 * 1024;
+    let drain = DRAIN_BYTES;
     assert!(
         biggest <= drain + 8,
         "{} batches, the largest {biggest} bytes",
