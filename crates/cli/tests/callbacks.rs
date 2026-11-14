@@ -83,9 +83,10 @@ struct Node {
     caps: Vec<String>,
 }
 
-/// The scripted mock, keeping every request it is sent.
+/// The scripted mock (or the one program output steers), keeping every
+/// request it is sent.
 struct Spy(
-    harness_agent_native::mock::Mock,
+    Box<dyn harness_agent_native::Provider>,
     Arc<std::sync::Mutex<Vec<harness_agent_native::ChatRequest>>>,
 );
 
@@ -112,7 +113,16 @@ async fn node() -> Option<Node> {
 /// `node` with its policy changed by `edit`; its hello's capabilities are
 /// in `caps`.
 async fn node_with(edit: impl FnOnce(&mut harness_node::NodePolicy)) -> Option<Node> {
-    use harness_agent_native::{NativeBackend, NativeConfig, mock::Mock};
+    node_built(edit, false).await
+}
+
+/// `node_with`, its model steered by program output when `obedient`
+/// (`mock::Obedient`: a callback turn acts on the command's first line).
+async fn node_built(
+    edit: impl FnOnce(&mut harness_node::NodePolicy),
+    obedient: bool,
+) -> Option<Node> {
+    use harness_agent_native::{NativeBackend, NativeConfig, mock::Mock, mock::Obedient};
     let dir = tempdir();
     let root = dir.path().canonicalize().unwrap();
     let (data, ws) = (root.join("data"), root.join("home/proj"));
@@ -130,8 +140,15 @@ async fn node_with(edit: impl FnOnce(&mut harness_node::NodePolicy)) -> Option<N
     let requests: Arc<std::sync::Mutex<Vec<harness_agent_native::ChatRequest>>> = Arc::default();
     let backend = NativeBackend::new(
         Arc::new(Spy(
-            Mock {
-                delay: Duration::from_millis(1),
+            {
+                let m = Mock {
+                    delay: Duration::from_millis(1),
+                };
+                if obedient {
+                    Box::new(Obedient(m))
+                } else {
+                    Box::new(m)
+                }
             },
             requests.clone(),
         )),
@@ -740,5 +757,108 @@ async fn an_end_racing_the_callback_lands_before_its_turn() {
     assert!(
         end_b < started || delivered,
         "bg-2 was appended after the callback turn started, undelivered"
+    );
+}
+
+/// Review ST-2: a message the person sends during a callback turn is not
+/// handed to it (a turn nobody watches, with its own small cap and no
+/// sub-agents). When it ends, the person's turn starts with the message,
+/// with the agent's sub-agents and the normal cap.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_during_a_callback_turn_starts_the_persons_turn_after_it() {
+    let Some(mut n) = node_built(|_| {}, true).await else {
+        return;
+    };
+    let sid = SessionId::new();
+    n.create(sid, json!({}));
+    // The callback turn, steered by the command's output, runs a command
+    // held on `go2`: it is running while the person writes.
+    let step = json!([{"tool": "bash", "input": {"command":
+        "while [ ! -e go2 ]; do sleep 0.05; done; echo held"}}]);
+    std::fs::write(n.ws.join("out.txt"), format!("script: {step}\n")).unwrap();
+    n.n += 1;
+    n.send(
+        json!({"type": "session.prompt", "req_id": format!("p{}", n.n), "session_id": sid,
+        "text": format!("script: {}", json!([bg(&held("out.txt"), 120)])),
+        "agent": delegating_agent()}),
+    );
+    n.started(sid, "bg-1").await;
+    n.turn_ended(sid).await;
+    std::fs::write(n.ws.join("go"), "").unwrap();
+    n.ended(sid, "bg-1").await;
+    n.n += 1;
+    n.send(
+        json!({"type": "session.callback", "req_id": format!("cb{}", n.n), "session_id": sid,
+        "bg_ids": ["bg-1"], "agent": delegating_agent()}),
+    );
+    n.until(move |e, k| {
+        e.session_id == sid
+            && matches!(k, EventKind::ToolCallStarted(t) if t.input["command"].as_str().is_some_and(|c| c.contains("go2")))
+    })
+    .await;
+    let before = n.requests.lock().unwrap().len();
+    n.n += 1;
+    let p = format!("p{}", n.n);
+    n.send(
+        json!({"type": "session.prompt", "req_id": p.clone(), "session_id": sid,
+        "text": "hello from the person", "agent": delegating_agent()}),
+    );
+    // Taken while the callback turn runs, before its command is let go.
+    loop {
+        if let harness_protocol::NodeToMaster::Ack { req_id, ok, error } = n.next().await
+            && req_id == p
+        {
+            assert!(ok, "{error:?}");
+            break;
+        }
+    }
+    std::fs::write(n.ws.join("go2"), "").unwrap();
+    // The callback turn ends, then the person's turn reads the message.
+    n.until(move |e, k| e.session_id == sid && matches!(k, EventKind::QueuedDelivered(_)))
+        .await;
+    n.turn_ended(sid).await;
+    n.turn_ended(sid).await;
+    let evs = n.of(sid);
+    let starts: Vec<&TurnStarted> = evs
+        .iter()
+        .filter_map(|k| match k {
+            EventKind::TurnStarted(t) => Some(t),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        starts.len(),
+        3,
+        "the person's, the callback, the person's: {evs:#?}"
+    );
+    assert!(starts[1].cause.is_some() && starts[2].cause.is_none());
+    // Read right after the third turn's start, never inside the callback.
+    let third = evs
+        .iter()
+        .rposition(|k| matches!(k, EventKind::TurnStarted(_)))
+        .unwrap();
+    assert!(
+        matches!(evs[third + 1], EventKind::QueuedDelivered(_)),
+        "{evs:#?}"
+    );
+    assert_eq!(
+        evs.iter()
+            .filter(|k| matches!(k, EventKind::QueuedDelivered(_)))
+            .count(),
+        1
+    );
+    let reqs = n.requests.lock().unwrap().clone();
+    let has = |r: &harness_agent_native::ChatRequest| {
+        r.messages.iter().any(|m| {
+            m.user_text()
+                .is_some_and(|t| t.contains("hello from the person"))
+        })
+    };
+    let first_with = reqs.iter().position(has).expect("the model read it");
+    assert!(first_with > before);
+    // That request is the person's turn's: it may delegate again.
+    assert!(
+        reqs[first_with].tools.iter().any(|t| t.name == "delegate"),
+        "the person's turn gets the agent's sub-agents"
     );
 }

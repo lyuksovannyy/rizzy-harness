@@ -29,17 +29,31 @@ struct Gated {
     entered: Notify,
     gate: Notify,
     seen: Mutex<Vec<ChatRequest>>,
+    /// The request that waits for the gate (0: the first).
+    hold: usize,
+    /// A request answered with a provider error instead.
+    fail: Option<usize>,
 }
 
 impl Gated {
     fn new(
         script: impl Fn(usize, &ChatRequest) -> Completion + Send + Sync + 'static,
     ) -> Arc<Self> {
+        Self::with(script, 0, None)
+    }
+
+    fn with(
+        script: impl Fn(usize, &ChatRequest) -> Completion + Send + Sync + 'static,
+        hold: usize,
+        fail: Option<usize>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             script: Box::new(script),
             entered: Notify::new(),
             gate: Notify::new(),
             seen: Mutex::new(vec![]),
+            hold,
+            fail,
         })
     }
 
@@ -63,9 +77,16 @@ impl Provider for Gated {
             s.push(req.clone());
             s.len() - 1
         };
-        if n == 0 {
+        if n == self.hold {
             self.entered.notify_one();
             self.gate.notified().await;
+        }
+        if self.fail == Some(n) {
+            return Err(ProviderError::Status {
+                status: 400,
+                body: "bad request".into(),
+                hint: Default::default(),
+            });
         }
         Ok((self.script)(n, req))
     }
@@ -116,7 +137,7 @@ struct Node {
     seen: Vec<RawEvent>,
 }
 
-fn config(dir: &std::path::Path, provider: Arc<dyn Provider>) -> NodeConfig {
+fn config_as(dir: &std::path::Path, provider: Arc<dyn Provider>, profile: Profile) -> NodeConfig {
     NodeConfig {
         node_id: "local".into(),
         hostname: "test".into(),
@@ -133,7 +154,7 @@ fn config(dir: &std::path::Path, provider: Arc<dyn Provider>) -> NodeConfig {
         )),
         default_model: "mock".into(),
         secrets: Default::default(),
-        profile: Profile::Agentic,
+        profile,
         incognito_ttl: None,
         checkpoints_dir: None,
         git_sandbox: None,
@@ -148,8 +169,19 @@ impl Node {
         Self::on(dir, provider).await
     }
 
+    /// A node of `profile` (a chat node takes parallel answers).
+    async fn start_as(provider: Arc<dyn Provider>, profile: Profile) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("ws")).unwrap();
+        Self::on_as(dir, provider, profile).await
+    }
+
     async fn on(dir: tempfile::TempDir, provider: Arc<dyn Provider>) -> Self {
-        let node = NodeRuntime::start(config(dir.path(), provider))
+        Self::on_as(dir, provider, Profile::Agentic).await
+    }
+
+    async fn on_as(dir: tempfile::TempDir, provider: Arc<dyn Provider>, profile: Profile) -> Self {
+        let node = NodeRuntime::start(config_as(dir.path(), provider, profile))
             .await
             .unwrap();
         let mut link = node.attach().await;
@@ -262,6 +294,11 @@ impl Node {
         sid
     }
 
+    /// A command written as JSON, as the master sends it.
+    fn send_json(&self, m: Value) {
+        self.send(serde_json::from_value(m).unwrap());
+    }
+
     fn prompt(&self, sid: SessionId, req_id: &str, text: &str) {
         self.send(MasterToNode::Prompt {
             req_id: req_id.into(),
@@ -274,6 +311,7 @@ impl Node {
             context: None,
             reply: None,
             images: vec![],
+            agent_named: false,
         });
     }
 
@@ -584,4 +622,181 @@ async fn a_restart_delivers_a_waiting_message_once() {
     let reqs = after.requests();
     assert_eq!(holding(reqs.last().unwrap(), "before the restart"), 1);
     assert_eq!(delivered(&n.log(sid)).len(), 1);
+}
+
+/// An agent the master resolved, as JSON.
+fn agent(id: &str) -> Value {
+    json!({"agent_id": id, "name": id, "system_prompt": "work", "tools": "all",
+           "prompt_hash": format!("h-{id}")})
+}
+
+/// Review ST-3: a turn that ends with an error (here the provider's)
+/// leaves the person's message for a turn the node starts at once; the
+/// message is often the fix.
+#[tokio::test]
+async fn a_message_after_an_error_starts_the_next_turn() {
+    let model = Gated::with(|_, _| answer("ok"), 0, Some(0));
+    let mut n = Node::start(model.clone()).await;
+    let sid = n.create(ApprovalMode::Auto).await;
+    n.prompt(sid, "p1", "do it");
+    assert_eq!(n.ack("p1").await, Ok(()));
+    model.entered.notified().await;
+    n.prompt(sid, "p2", "use the other endpoint");
+    assert_eq!(n.ack("p2").await, Ok(()));
+    model.gate.notify_one();
+    n.ended(2).await;
+    let reqs = model.requests();
+    assert_eq!(reqs.len(), 2, "the failed request, then the next turn's");
+    assert_eq!(holding(&reqs[1], "use the other endpoint"), 1);
+    let log = n.log(sid);
+    let ks = kinds(&log);
+    let second = ks.iter().rposition(|k| k == "turn_started").unwrap();
+    assert_eq!(ks[second + 1], "queued_delivered", "{ks:?}");
+    assert!(log.iter().any(|e| matches!(
+        e.typed(),
+        Ok(EventKind::TurnEnded(TurnEnded {
+            reason: TurnEndReason::Error,
+            ..
+        }))
+    )));
+}
+
+/// Review ST-8: a turn the node starts for waiting messages takes the
+/// savings, not the last turn's per-turn context (a routine's note, a
+/// recall for other words).
+#[tokio::test]
+async fn the_next_turn_does_not_take_the_last_turns_context() {
+    let model = Gated::new(|_, _| answer("ok"));
+    let mut n = Node::start(model.clone()).await;
+    let sid = n.create(ApprovalMode::Auto).await;
+    n.send_json(
+        json!({"type": "session.prompt", "req_id": "p1", "session_id": sid,
+        "text": "hello", "context": "CTX-ONLY-FOR-THE-FIRST-TURN"}),
+    );
+    assert_eq!(n.ack("p1").await, Ok(()));
+    model.entered.notified().await;
+    n.prompt(sid, "p2", "and then");
+    assert_eq!(n.ack("p2").await, Ok(()));
+    model.gate.notify_one();
+    n.ended(2).await;
+    let reqs = model.requests();
+    assert_eq!(holding(&reqs[0], "CTX-ONLY-FOR-THE-FIRST-TURN"), 1);
+    assert_eq!(holding(&reqs[1], "and then"), 1);
+    assert_eq!(holding(&reqs[1], "CTX-ONLY-FOR-THE-FIRST-TURN"), 0);
+}
+
+/// Review ST-5: a message that names another agent (the picker, or an
+/// @mention the master resolved) while a turn of this one runs is
+/// refused with the old reason and why; one that names none waits, as
+/// does one naming the running turn's own agent.
+#[tokio::test]
+async fn a_message_naming_another_agent_is_refused() {
+    let model = Gated::new(|_, _| answer("ok"));
+    let mut n = Node::start(model.clone()).await;
+    let sid = n.create(ApprovalMode::Auto).await;
+    n.send_json(
+        json!({"type": "session.prompt", "req_id": "p1", "session_id": sid,
+        "text": "work", "agent": agent("coder")}),
+    );
+    assert_eq!(n.ack("p1").await, Ok(()));
+    model.entered.notified().await;
+    n.send_json(
+        json!({"type": "session.prompt", "req_id": "p2", "session_id": sid,
+        "text": "@writer draft it", "agent": agent("writer"), "agent_named": true}),
+    );
+    let err = n.ack("p2").await.unwrap_err();
+    assert!(err.starts_with("a turn is already running"), "{err}");
+    assert!(
+        err.contains("pick the agent for your next message"),
+        "{err}"
+    );
+    n.send_json(
+        json!({"type": "session.prompt", "req_id": "p3", "session_id": sid,
+        "text": "@coder also this", "agent": agent("coder"), "agent_named": true}),
+    );
+    assert_eq!(n.ack("p3").await, Ok(()), "the running turn's own agent");
+    n.send_json(
+        json!({"type": "session.prompt", "req_id": "p4", "session_id": sid,
+        "text": "plain words", "agent": agent("general")}),
+    );
+    assert_eq!(n.ack("p4").await, Ok(()), "named nobody: it waits");
+    assert_eq!(queued(&n.log(sid)).len(), 2);
+    model.gate.notify_one();
+    n.ended(2).await;
+}
+
+/// Review ST-6: a sub-agent's chat takes no message while it works; its
+/// parent's turn reads its answer.
+#[tokio::test]
+async fn a_sub_agents_chat_takes_no_message_while_it_works() {
+    let model = Gated::with(
+        |n, _| match n {
+            0 => call("delegate", json!({"agent": "scout", "task": "look around"})),
+            _ => answer("done"),
+        },
+        1,
+        None,
+    );
+    let mut n = Node::start(model.clone()).await;
+    let sid = n.create(ApprovalMode::Auto).await;
+    let mut parent = agent("coder");
+    // A scout that only reads works in this folder (no copy of its own).
+    let mut scout = agent("scout");
+    scout["tools"] = json!(["read"]);
+    parent["delegates"] = json!([scout]);
+    n.send_json(
+        json!({"type": "session.prompt", "req_id": "p1", "session_id": sid,
+        "text": "delegate it", "agent": parent}),
+    );
+    assert_eq!(n.ack("p1").await, Ok(()));
+    model.entered.notified().await;
+    let child: SessionId = loop {
+        if let Some(c) = n.seen.iter().find_map(|e| match e.typed() {
+            Ok(EventKind::SessionCreated(c)) if c.parent_session.is_some() => Some(e.session_id),
+            _ => None,
+        }) {
+            break c;
+        }
+        n.next().await;
+    };
+    n.prompt(child, "q", "hello child");
+    let err = n.ack("q").await.unwrap_err();
+    assert!(err.starts_with("a turn is already running"), "{err}");
+    assert!(err.contains("sub-agent"), "{err}");
+    model.gate.notify_one();
+    n.ended(1).await;
+}
+
+/// Review ST-7: parallel answers take no message while they run.
+#[tokio::test]
+async fn parallel_answers_take_no_message_while_they_run() {
+    let model = Gated::new(|_, _| answer("ok"));
+    let mut n = Node::start_as(model.clone(), Profile::Chat).await;
+    let sid = SessionId::new();
+    n.send(MasterToNode::Create {
+        exec_mode: None,
+        no_callbacks: false,
+        profile: Some(Profile::Chat),
+        incognito: false,
+        agent: None,
+        req_id: "c".into(),
+        session_id: sid,
+        title: "t".into(),
+        cwd: String::new(),
+        model: None,
+        approval_mode: None,
+    });
+    assert_eq!(n.ack("c").await, Ok(()));
+    n.send_json(
+        json!({"type": "session.prompt", "req_id": "p1", "session_id": sid,
+        "text": "compare", "compare": ["mock-a", "mock-b"]}),
+    );
+    assert_eq!(n.ack("p1").await, Ok(()));
+    model.entered.notified().await;
+    n.prompt(sid, "p2", "and this");
+    let err = n.ack("p2").await.unwrap_err();
+    assert!(err.starts_with("a turn is already running"), "{err}");
+    assert!(err.contains("parallel answers"), "{err}");
+    model.gate.notify_one();
+    n.ended(1).await;
 }

@@ -705,13 +705,29 @@ async fn a_callback_turn_in_ask_mode_parks_on_its_card() {
         )
         .await;
     assert!(st.is_success());
+    // Not handed to the callback turn (review ST-2): the person's own turn
+    // starts after it and reads the message first.
     let evs = s
-        .wait_for(&sid, |e| real::count(e, "turn_ended") == 2)
+        .wait_for(&sid, |e| real::count(e, "turn_ended") == 3)
         .await;
-    assert_eq!(
-        real::count(&evs, "queued_delivered"),
-        1,
-        "read in that turn"
+    assert_eq!(real::count(&evs, "queued_delivered"), 1);
+    let kinds: Vec<&str> = evs.iter().map(|e| e["kind"].as_str().unwrap()).collect();
+    let third = kinds.iter().rposition(|k| *k == "turn_started").unwrap();
+    assert_eq!(kinds[third + 1], "queued_delivered", "{kinds:?}");
+    assert!(
+        evs[third]["payload"].get("cause").is_none(),
+        "the person's turn, not a callback"
+    );
+    let second_end = kinds
+        .iter()
+        .enumerate()
+        .filter(|(_, k)| **k == "turn_ended")
+        .nth(1)
+        .unwrap()
+        .0;
+    assert!(
+        second_end < kinds.iter().position(|k| *k == "queued_delivered").unwrap(),
+        "nothing read during the callback turn"
     );
     assert!(!ws.join("steered").exists());
 }

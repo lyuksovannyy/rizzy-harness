@@ -244,6 +244,8 @@ describe("writing while the agent works", () => {
     const textarea = host.querySelector("textarea")!;
     expect(textarea.disabled).toBe(false);
     expect(textarea.placeholder).toContain("write to add to the task");
+    // Said in words too, not only in the placeholder (review ST-10).
+    expect(host.querySelector(".composer-hint")!.textContent).toBe("Read after the current step. Stop interrupts.");
     // Nothing typed: Stop alone.
     expect(host.querySelector("button.stop")).not.toBeNull();
     expect(host.querySelector('button.send:not(.stop)')).toBeNull();

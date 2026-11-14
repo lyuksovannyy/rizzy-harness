@@ -385,3 +385,17 @@ describe("messages sent while the agent works (X.5)", () => {
     expect(host.querySelector(".queued-mark")).toBeNull();
   });
 });
+
+describe("an unread message when no turn runs (review ST-3)", () => {
+  test("says it goes with the next message", async () => {
+    await show(
+      [
+        { type: "user", turn_id: "t1", text: "fix it" },
+        { type: "user", turn_id: "t1", text: "also the docs", queued: { seq: 4, read: false } },
+        { type: "turn_end", turn_id: "t1", reason: "cancelled" },
+      ],
+      sessionRow(),
+    );
+    expect(host.querySelector(".queued-mark")!.textContent).toBe("not read yet: goes with your next message");
+  });
+});

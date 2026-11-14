@@ -67,6 +67,14 @@ describe("progressSlots", () => {
     expect(progressSlots(items, idle).get("b#0")?.ended).toBe(true);
   });
 
+  test("a turn the node started itself (X.5) is a turn of its own", () => {
+    // Its start has no item: the turn before it ended, and it runs.
+    const items = [user(), msg("a", [progress("p")]), end(), msg("b", [progress("p")])];
+    const slots = progressSlots(items, running);
+    expect(slots.get("a#0")).toEqual({ mode: "full", ended: true, reason: "completed" });
+    expect(slots.get("b#0")).toEqual({ mode: "full", ended: false });
+  });
+
   test("rejected blocks and other types get no slot", () => {
     const rejected: UiBlock = { ordinal: 0, hash: "0", type: "progress", id: "p", error: "steps: missing" };
     const chart: UiBlock = { ordinal: 1, hash: "0", type: "chart", id: "p", spec: { kind: "bar", x: { values: ["a"] }, series: [] } };
