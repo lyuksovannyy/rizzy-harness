@@ -2077,11 +2077,11 @@ impl Session {
     /// its own denials and by this node's policy, include `write`, `edit` or
     /// `bash` (no shell on a node is read-only).
     fn can_change_files(&self, agent: &AgentSpec) -> bool {
-        let denied = &self.node.cfg.policy.denied_tools;
+        let policy = &self.node.cfg.policy;
         self.profile == Profile::Agentic
             && ["write", "edit", "bash"]
                 .iter()
-                .any(|t| agent.allows_tool(t) && !denied.iter().any(|d| d == t))
+                .any(|t| agent.allows_tool(t) && !policy.denies(t))
     }
 
     /// Prepare a folder for a sub-agent that can change files, seeded with
@@ -2364,7 +2364,7 @@ impl TurnHost for Session {
     }
 
     fn tool_denied(&self, tool: &str) -> bool {
-        self.node.cfg.policy.denied_tools.iter().any(|t| t == tool)
+        self.node.cfg.policy.denies(tool)
     }
 
     fn background(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
@@ -2414,7 +2414,7 @@ impl TurnHost for Session {
 
     async fn approve(&self, call_id: &str, tool: &str, input: &Value, risk: ToolRisk) -> Decision {
         let policy = &self.node.cfg.policy;
-        if policy.denied_tools.iter().any(|t| t == tool) {
+        if policy.denies(tool) {
             let approval_id = new_id();
             // Record the refusal so the user sees why. Denied either way.
             let requested = self

@@ -541,13 +541,7 @@ impl NodeRuntime {
             // `remember` where this node offers it: registered, and not
             // refused by its own policy (the master files nothing otherwise).
             if self.inner.cfg.backend.has_tool("remember")
-                && !self
-                    .inner
-                    .cfg
-                    .policy
-                    .denied_tools
-                    .iter()
-                    .any(|t| t == "remember")
+                && !self.inner.cfg.policy.denies("remember")
             {
                 capabilities.push(harness_protocol::CAP_REMEMBER.into());
             }
