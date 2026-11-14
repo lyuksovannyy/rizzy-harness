@@ -1300,6 +1300,8 @@ impl NodeRuntime {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(&sid);
+        // What the backend keeps for it in memory (the file tools' record).
+        self.inner.cfg.backend.forget_session(sid);
         // The session's sandbox temp folder (TMPDIR) goes with it.
         if let Some(root) = &self.inner.cfg.policy.sandbox_tmp {
             let _ = std::fs::remove_dir_all(root.join(sid.to_string()));
