@@ -14,8 +14,10 @@
 //! * Only admins create further accounts (no self-signup). New accounts get a
 //!   temporary password and must change it at first login.
 //! * Everyone, admins included, sees only their own conversations.
-//! * Agentic sessions run shell commands on a worker node, so they need the
-//!   `can_agentic` grant (admins always have it).
+//! * Agentic sessions run shell commands on a worker node, so they need a
+//!   level (O13, N.10a part 2, `levels`): the account's ceiling, set by
+//!   server admins (theirs is `host`), and the member's level in the
+//!   workspace, set by its admins.
 //! * A 256-bit **API token** in `<data>/api-token` (0600) is accepted as
 //!   `Authorization: Bearer` for scripts and tests. It is the machine owner's
 //!   root key: admin rights and access to every session.
@@ -122,15 +124,16 @@ pub struct Principal {
     pub user_id: Option<String>,
     pub username: String,
     pub role: Role,
-    /// Effective: admins always may.
-    pub can_agentic: bool,
+    /// The account's effective ceiling (`levels::ceiling_of`): a server
+    /// admin's is `host`, a disabled account's `none`.
+    pub exec_ceiling: harness_core::policy::ExecLevel,
     pub must_change_password: bool,
 }
 
 impl Principal {
     pub fn from_user(u: UserRow) -> Self {
         Self {
-            can_agentic: u.role == Role::Admin || u.can_agentic,
+            exec_ceiling: crate::levels::ceiling_of(&u),
             must_change_password: u.must_change_password,
             user_id: Some(u.user_id),
             username: u.username,
@@ -138,12 +141,14 @@ impl Principal {
         }
     }
 
-    fn api_token() -> Self {
+    pub(crate) fn api_token() -> Self {
         Self {
             user_id: None,
             username: "api-token".into(),
             role: Role::Admin,
-            can_agentic: true,
+            // The machine owner's root key acts as an owner of every
+            // workspace and can set every level: it is `host` (`levels`).
+            exec_ceiling: harness_core::policy::ExecLevel::Host,
             must_change_password: false,
         }
     }
@@ -335,7 +340,7 @@ pub async fn create_account(
     username: String,
     password: String,
     role: Role,
-    can_agentic: bool,
+    exec_ceiling: harness_core::policy::ExecLevel,
     must_change_password: bool,
 ) -> Result<UserRow, AccountError> {
     validate_username(&username).map_err(AccountError::Invalid)?;
@@ -345,7 +350,7 @@ pub async fn create_account(
         username,
         password_hash: hash_password(hasher, password).await?,
         role,
-        can_agentic,
+        exec_ceiling,
         must_change_password,
     };
     let uid = user.user_id.clone();
@@ -652,7 +657,10 @@ impl Auth {
             username,
             password,
             Role::Admin,
-            true,
+            // A server admin's ceiling is `host` while they are one
+            // (`levels::ceiling_of`); this is what applies if they are ever
+            // demoted, and that is for the admin who demotes them to raise.
+            harness_core::policy::ExecLevel::None,
             false,
         )
         .await
@@ -1174,7 +1182,7 @@ mod tests {
             user_id: Some("a".into()),
             username: "a".into(),
             role: Role::Admin,
-            can_agentic: true,
+            exec_ceiling: harness_core::policy::ExecLevel::Host,
             must_change_password: false,
         };
         assert!(admin.can_see(Some("a")));

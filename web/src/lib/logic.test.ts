@@ -75,19 +75,20 @@ describe("modes", () => {
     expect(cycleMode("ask", noAgentic, 1)).toBe("search");
   });
   it("explains why agentic is unavailable", () => {
-    const member = { name: "Acme", personal: false, permissions: ["agentic" as const] };
-    const guest = { name: "Acme", personal: false, permissions: [] };
-    expect(agenticBlockReason(false, member, 1)).toMatch(/not enabled for your account/);
-    expect(agenticBlockReason(true, member, 0)).toMatch(/worker/);
-    expect(agenticBlockReason(true, member, 2)).toBeNull();
-    // The workspace role, after the account's grant and before the workers.
-    expect(agenticBlockReason(true, guest, 0)).toBe("Your role in Acme can't start agentic sessions.");
-    expect(agenticBlockReason(false, guest, 1)).toMatch(/not enabled for your account/);
-    expect(agenticBlockReason(true, { ...guest, name: "stored", personal: true }, 1)).toBe(
-      "Your role in Personal can't start agentic sessions.",
+    // N.10a part 2: the account's level first, then the level in the
+    // workspace (already the lower of the two), then the workers.
+    const sandbox = { name: "Acme", personal: false, exec_level: "sandbox" as const };
+    const none = { name: "Acme", personal: false, exec_level: "none" as const };
+    expect(agenticBlockReason("none", sandbox, 1)).toBe("Your account's level is none: no agent chats. Ask a server admin.");
+    expect(agenticBlockReason("host", sandbox, 0)).toMatch(/worker/);
+    expect(agenticBlockReason("sandbox", sandbox, 2)).toBeNull();
+    expect(agenticBlockReason("host", none, 0)).toBe("Your level in Acme is none: no agent chats. Ask one of its admins.");
+    expect(agenticBlockReason("container", none, 1)).toBe(
+      "Your account's level is container: no agent chats. Ask a server admin. No node offers containers yet.",
     );
+    expect(agenticBlockReason("host", { ...none, exec_level: "container" }, 1)).toContain("No node offers containers yet.");
     // No workspace (the API token): the account and the workers decide.
-    expect(agenticBlockReason(true, null, 1)).toBeNull();
+    expect(agenticBlockReason("host", null, 1)).toBeNull();
   });
 });
 

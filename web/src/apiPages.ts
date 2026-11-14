@@ -4,6 +4,7 @@
 // file keeps what the home screen, the sidebar and the composer call.
 import { call, type Scope, scoped } from "./api";
 import type {
+  ExecLevel,
   Agent,
   AgentAvatar,
   AgentChain,
@@ -44,11 +45,11 @@ export const pageApi = {
     call<{ ok: boolean }>("POST", "/api/me/password", { current, new: next }),
   users: () => call<{ users: User[] }>("GET", "/api/users"),
   /** The answer carries the server-made temporary password, this once. */
-  createUser: (b: { username: string; role: Role; can_agentic: boolean }) =>
-    call<User & { password: string }>("POST", "/api/users", b),
+  createUser: (b: { username: string; role: Role }) => call<User & { password: string }>("POST", "/api/users", b),
   resetPassword: (id: string) => call<User & { password: string }>("POST", `/api/users/${id}/password`),
-  updateUser: (id: string, b: { role?: Role; disabled?: boolean; can_agentic?: boolean }) =>
-    call<User>("PATCH", `/api/users/${id}`, b),
+  updateUser: (id: string, b: { role?: Role; disabled?: boolean }) => call<User>("PATCH", `/api/users/${id}`, b),
+  /** An account's ceiling (N.10a part 2): server admins, never their own. */
+  setCeiling: (id: string, level: ExecLevel) => call<User>("PUT", `/api/users/${id}/exec-ceiling`, { level }),
   deleteUser: (id: string) => call<{ ok: boolean }>("DELETE", `/api/users/${id}`),
   setupStatus: () => call<{ claimed: boolean }>("GET", "/api/setup"),
   setup: (claim_code: string, username: string, password: string) =>
@@ -147,6 +148,9 @@ export const pageApi = {
   setWorkspaceMemberRole: (id: string, userId: string, role: WorkspaceRole) =>
     call<WorkspaceMember>("PATCH", `${ws(id)}/members/${encodeURIComponent(userId)}`, { role }),
   /** Your own user id: leave the workspace. */
+  /** A member's level here: never one's own, never above one's own, `host` only by an owner. */
+  setWorkspaceMemberLevel: (id: string, userId: string, level: ExecLevel) =>
+    call<WorkspaceMember>("PUT", `${ws(id)}/members/${encodeURIComponent(userId)}/exec-level`, { level }),
   removeWorkspaceMember: (id: string, userId: string) =>
     call<{ ok: boolean }>("DELETE", `${ws(id)}/members/${encodeURIComponent(userId)}`),
   adminWorkspaces: () =>

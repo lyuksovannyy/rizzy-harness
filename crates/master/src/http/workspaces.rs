@@ -12,7 +12,8 @@ use serde_json::{Value, json};
 use super::{ApiError, ApiResult, require, require_admin, runtime};
 use crate::auth::Principal;
 use crate::workspaces::{self, Access, Perm, Role, WorkspaceSettings, access};
-use crate::{Live, Master};
+use crate::{Live, Master, levels};
+use harness_core::policy::ExecLevel;
 
 const ONLY_YOU: &str = "a Personal workspace has only you";
 const MAX_NAME: usize = 64;
@@ -36,7 +37,7 @@ fn no_member() -> ApiError {
 /// Tell every UI to refetch its workspaces, and its chats too when their
 /// rows changed: chats moved workspace (they fall back to their owners'
 /// Personal ones), or a role changed, which changes `blocked` on them.
-fn changed(m: &Master, chats_changed: bool) {
+pub(super) fn changed(m: &Master, chats_changed: bool) {
     let _ = m.inner.live.send(Live::WorkspacesChanged);
     if chats_changed {
         let _ = m.inner.live.send(Live::SessionsChanged);
@@ -70,7 +71,9 @@ fn parse_role(id: &str) -> ApiResult<Role> {
 }
 
 /// May `a` hand out `role`? Only owners make owners, and nobody grants a
-/// role above their own.
+/// role above their own. (Making someone an owner also makes their level
+/// here `host`, whatever the granter's own level: a role carries its level,
+/// decided by the owner, review L2-2.)
 fn guard_grant(a: &Access, role: Role) -> ApiResult<()> {
     if role == Role::Owner && !a.is_owner() {
         return Err(forbidden("only an owner can make someone an owner"));
@@ -83,7 +86,7 @@ fn guard_grant(a: &Access, role: Role) -> ApiResult<()> {
 
 /// May `a` change or remove a member who holds `target_role`? Owners only
 /// by owners, and nobody acts on a role above their own.
-fn guard_target(a: &Access, target_role: &str) -> ApiResult<()> {
+pub(super) fn guard_target(a: &Access, target_role: &str) -> ApiResult<()> {
     if target_role == Role::Owner.id() && !a.is_owner() {
         return Err(forbidden("only an owner can change or remove an owner"));
     }
@@ -95,8 +98,9 @@ fn guard_target(a: &Access, target_role: &str) -> ApiResult<()> {
     Ok(())
 }
 
-/// A `WorkspaceSummary` as the web types it.
-fn summary_json(w: &WorkspaceRow, role_id: &str, members: u64) -> Value {
+/// A `WorkspaceSummary` as the web types it. `exec_level` is the caller's
+/// effective level there (N.10a part 2): what the new-chat choice offers.
+fn summary_json(w: &WorkspaceRow, role_id: &str, members: u64, exec_level: ExecLevel) -> Value {
     json!({
         "workspace_id": w.workspace_id,
         "name": w.name,
@@ -104,34 +108,52 @@ fn summary_json(w: &WorkspaceRow, role_id: &str, members: u64) -> Value {
         "role": role_id,
         "permissions": workspaces::perms_of(role_id),
         "members": members,
+        "exec_level": exec_level,
     })
+}
+
+/// `who`'s effective level in the workspace of membership `ms`.
+fn level_in(who: &Principal, ms: &harness_store::Membership) -> ExecLevel {
+    let owner = ms.role_id == Role::Owner.id();
+    let here = levels::workspace_level(ms.workspace.personal(), owner, ms.exec_level);
+    who.exec_ceiling.min(here)
 }
 
 /// A `WorkspaceDetail`: the summary, the settings with stale references
 /// dropped (so saving what was read always validates), and the caller's
 /// own memory switch.
-async fn detail(m: &Master, a: &Access) -> ApiResult<Json<Value>> {
+async fn detail(m: &Master, who: &Principal, a: &Access) -> ApiResult<Json<Value>> {
     let id = a.id().to_string();
     let n = m.inner.mirror.call(move |s| s.member_count(&id)).await?;
-    let mut v = summary_json(&a.workspace, &a.role_id, n);
+    let mut v = summary_json(&a.workspace, &a.role_id, n, levels::effective(who, Some(a)));
     v["settings"] = json!(WorkspaceSettings::read(&a.workspace).normalized(m));
     v["use_memory"] = json!(a.use_memory);
     v["created_ms"] = json!(a.workspace.created_ms);
     Ok(Json(v))
 }
 
-async fn member_json(m: &Master, r: &MemberRow) -> Value {
+/// A member as the list shows them. With `with_levels` (the viewer manages
+/// members here, or it is their own row: review L2-7): their level here as
+/// set (an owner's is `host`) and as it counts, the lower of that and their
+/// account's ceiling, so an owner at a `none` ceiling shows `none`.
+pub(super) async fn member_json(m: &Master, r: &MemberRow, with_levels: bool) -> Value {
     let prefs = crate::prefs::Prefs::load(m, Some(&r.user_id)).await;
-    json!({
+    let owner = r.role_id == Role::Owner.id();
+    let mut v = json!({
         "user_id": r.user_id,
         "username": r.username,
         "display_name": prefs.display_name,
         "role": r.role_id,
         "joined_ms": r.joined_ms,
-    })
+    });
+    if with_levels {
+        v["exec_level"] = json!(levels::workspace_level(false, owner, r.exec_level));
+        v["effective_level"] = json!(levels::member_effective(r));
+    }
+    v
 }
 
-async fn load_member(m: &Master, ws: &str, user_id: &str) -> ApiResult<MemberRow> {
+pub(super) async fn load_member(m: &Master, ws: &str, user_id: &str) -> ApiResult<MemberRow> {
     let (ws, uid) = (ws.to_string(), user_id.to_string());
     m.inner
         .mirror
@@ -153,7 +175,7 @@ pub(super) async fn active_summary(m: &Master, who: &Principal) -> ApiResult<Val
     Ok(list
         .iter()
         .find(|ms| ms.workspace.workspace_id == active)
-        .map(|ms| summary_json(&ms.workspace, &ms.role_id, ms.members))
+        .map(|ms| summary_json(&ms.workspace, &ms.role_id, ms.members, level_in(who, ms)))
         .unwrap_or(Value::Null))
 }
 
@@ -170,7 +192,7 @@ pub(super) async fn list(State(m): State<Master>, headers: HeaderMap) -> ApiResu
     Ok(Json(json!({
         "workspaces": list
             .iter()
-            .map(|ms| summary_json(&ms.workspace, &ms.role_id, ms.members))
+            .map(|ms| summary_json(&ms.workspace, &ms.role_id, ms.members, level_in(&who, ms)))
             .collect::<Vec<_>>(),
         "active": active,
         "can_create": may_create(&m, &who),
@@ -203,7 +225,13 @@ pub(super) async fn create(
         .call(move |s| s.create_workspace(&name, &uid))
         .await?;
     changed(&m, false);
-    Ok(Json(summary_json(&w, Role::Owner.id(), 1)))
+    // Its owner's level there is `host`, so their ceiling decides.
+    Ok(Json(summary_json(
+        &w,
+        Role::Owner.id(),
+        1,
+        who.exec_ceiling,
+    )))
 }
 
 #[derive(Deserialize)]
@@ -231,7 +259,7 @@ pub(super) async fn get_one(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
     let who = require(&m, &headers).await?;
-    detail(&m, &access(&m, &who, &id).await?).await
+    detail(&m, &who, &access(&m, &who, &id).await?).await
 }
 
 #[derive(Deserialize)]
@@ -279,7 +307,7 @@ pub(super) async fn patch(
         })
         .await?;
     changed(&m, false);
-    detail(&m, &access(&m, &who, &id).await?).await
+    detail(&m, &who, &access(&m, &who, &id).await?).await
 }
 
 #[derive(Deserialize)]
@@ -310,7 +338,7 @@ pub(super) async fn set_memory(
         .call(move |s| s.set_use_memory(&ws, &uid, on))
         .await?;
     changed(&m, false);
-    detail(&m, &access(&m, &who, &id).await?).await
+    detail(&m, &who, &access(&m, &who, &id).await?).await
 }
 
 /// Owners only. Its chats return to their owners' Personal workspaces.
@@ -339,16 +367,32 @@ pub(super) async fn delete(
 /// their facts.
 async fn delete_workspace(m: &Master, ws: String) -> ApiResult<Option<Vec<String>>> {
     let projects = crate::projects::ids(m).await;
-    let members = m
+    let gone = m
         .inner
         .mirror
         .call(move |s| {
             let members: Vec<String> = s.members(&ws)?.into_iter().map(|r| r.user_id).collect();
-            Ok::<_, StoreError>(s.delete_workspace(&ws)?.then_some(members))
+            // The chats in it, read before it goes and they return to their
+            // owners' Personal workspaces (review L2-3).
+            let mut chats = Vec::new();
+            for u in &members {
+                chats.extend(
+                    s.sessions_of(Some(u))?
+                        .into_iter()
+                        .filter(|r| r.owner_id.as_deref() == Some(u.as_str()))
+                        .filter(|r| r.workspace_id.as_deref() == Some(ws.as_str()))
+                        .map(|r| r.session_id),
+                );
+            }
+            Ok::<_, StoreError>(s.delete_workspace(&ws)?.then_some((members, chats)))
         })
         .await?;
     crate::projects::forget_gone(m, projects).await;
-    Ok(members)
+    // What ran in its chats for the team stops, as at a member's removal.
+    Ok(gone.map(|(members, chats)| {
+        workspaces::stop_removed(m, chats);
+        members
+    }))
 }
 
 pub(super) async fn members(
@@ -357,11 +401,16 @@ pub(super) async fn members(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
     let who = require(&m, &headers).await?;
-    let ws = access(&m, &who, &id).await?.id().to_string();
+    let a = access(&m, &who, &id).await?;
+    // Every member's level to those who manage members here; to anyone
+    // else, only their own (review L2-7).
+    let all = a.can(Perm::Members);
+    let ws = a.id().to_string();
     let rows = m.inner.mirror.call(move |s| s.members(&ws)).await?;
     let mut out = Vec::with_capacity(rows.len());
     for r in &rows {
-        out.push(member_json(&m, r).await);
+        let own = who.user_id.as_deref() == Some(r.user_id.as_str());
+        out.push(member_json(&m, r, all || own).await);
     }
     Ok(Json(json!({ "members": out })))
 }
@@ -437,7 +486,7 @@ pub(super) async fn add_member(
     }
     let row = load_member(&m, a.id(), &user.user_id).await?;
     changed(&m, false);
-    Ok(Json(member_json(&m, &row).await))
+    Ok(Json(member_json(&m, &row, true).await))
 }
 
 #[derive(Deserialize)]
@@ -464,23 +513,25 @@ pub(super) async fn set_role(
     let target = load_member(&m, a.id(), &user_id).await?;
     guard_target(&a, &target.role_id)?;
     guard_grant(&a, role)?;
-    let (ws, uid) = (a.id().to_string(), user_id.clone());
+    let (ws, uid, was) = (a.id().to_string(), user_id.clone(), target.role_id.clone());
     // The store refuses to take the last enabled owner away, and a change
     // when their role is no longer the one guarded above (409).
     let found = m
         .inner
         .mirror
-        .call(move |s| s.set_member_role(&ws, &uid, Some(&target.role_id), role.id()))
+        .call(move |s| s.set_member_role(&ws, &uid, Some(&was), role.id()))
         .await?;
     if !found {
         return Err(no_member());
     }
     let row = load_member(&m, a.id(), &user_id).await?;
+    audit_owner_change(&m, &who, a.id(), &target, &row).await;
     // Their chats here may have become read-only, or writable again.
     changed(&m, true);
-    // A role without `agentic` stops their running agentic chats here.
+    // An owner made a member falls to their stored level: their running
+    // chats above it stop.
     workspaces::sweep_revoked(&m, vec![user_id]);
-    Ok(Json(member_json(&m, &row).await))
+    Ok(Json(member_json(&m, &row, true).await))
 }
 
 /// Remove a member, or leave when it is the caller. Their chats here
@@ -498,14 +549,27 @@ pub(super) async fn remove_member(
     }
     // Leaving needs no guard; removing someone else is guarded on their
     // role, which must still be the same when the store removes them.
+    let before = load_member(&m, a.id(), &user_id).await?;
     let guarded = if who.user_id.as_deref() == Some(user_id.as_str()) {
         None
     } else {
         a.require(Perm::Members)?;
-        let role = load_member(&m, a.id(), &user_id).await?.role_id;
-        guard_target(&a, &role)?;
-        Some(role)
+        guard_target(&a, &before.role_id)?;
+        Some(before.role_id.clone())
     };
+    // Their chats here, read before they move to Personal: what runs in
+    // them for this workspace stops (N.10a part 2).
+    let (ws, uid) = (a.id().to_string(), user_id.clone());
+    let theirs: Vec<_> = m
+        .inner
+        .mirror
+        .call(move |s| s.sessions_of(Some(&uid)))
+        .await?
+        .into_iter()
+        .filter(|r| r.owner_id.as_deref() == Some(user_id.as_str()))
+        .filter(|r| r.workspace_id.as_deref() == Some(ws.as_str()))
+        .map(|r| r.session_id)
+        .collect();
     let (ws, uid) = (a.id().to_string(), user_id.clone());
     // The store refuses to take the last enabled owner away, and a removal
     // when their role is no longer the one guarded above (409).
@@ -523,11 +587,37 @@ pub(super) async fn remove_member(
     if !removed {
         return Err(no_member());
     }
+    let owner = before.role_id == Role::Owner.id();
+    let from = levels::workspace_level(false, owner, before.exec_level);
+    let detail = json!({"by": levels::by(&who), "user": user_id, "workspace": a.id(),
+        "from": from, "to": null, "reason": "removed"});
+    levels::audit(&m, "level.workspace", detail).await;
     changed(&m, true);
-    // Their chats from here are back in Personal; running agentic ones
-    // stop if they may not run there.
+    // Their chats from here are back in Personal, where their account's
+    // ceiling applies from their next action; what was running for this
+    // workspace stops now.
+    workspaces::stop_removed(&m, theirs);
     workspaces::sweep_revoked(&m, vec![user_id]);
     Ok(Json(json!({ "ok": true })))
+}
+
+/// One `level.workspace` audit line when a role change made or unmade an
+/// owner, whose level there counts as `host` (N.10a part 2).
+async fn audit_owner_change(
+    m: &Master,
+    who: &Principal,
+    ws: &str,
+    before: &MemberRow,
+    after: &MemberRow,
+) {
+    let level =
+        |r: &MemberRow| levels::workspace_level(false, r.role_id == Role::Owner.id(), r.exec_level);
+    let (from, to) = (level(before), level(after));
+    if from != to {
+        let detail = json!({"by": levels::by(who), "user": after.user_id, "workspace": ws,
+            "from": from, "to": to, "reason": "role"});
+        levels::audit(m, "level.workspace", detail).await;
+    }
 }
 
 // ---- server admins -------------------------------------------------------
@@ -664,12 +754,14 @@ pub(super) async fn admin_patch(
     if target.disabled {
         return Err(conflict(format!("{} is disabled", target.username)));
     }
-    let (ws, uid) = (id.clone(), b.owner);
+    let (ws, uid) = (id.clone(), b.owner.clone());
     // Whatever their role is now, they become an owner.
     m.inner
         .mirror
         .call(move |s| s.set_member_role(&ws, &uid, None, Role::Owner.id()))
         .await?;
+    let row = load_member(&m, &id, &b.owner).await?;
+    audit_owner_change(&m, &who, &id, &target, &row).await;
     // Their chats here may have become writable.
     changed(&m, true);
     admin_one(&m, &id)

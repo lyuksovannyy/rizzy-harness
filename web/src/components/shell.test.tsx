@@ -63,13 +63,14 @@ const ws = (id: string, more: Partial<WorkspaceSummary> = {}): WorkspaceSummary 
   name: id,
   personal: false,
   role: "member",
-  permissions: ["agentic", "routines"],
+  permissions: ["routines"],
   members: 2,
+  exec_level: "host",
   ...more,
 });
 const personal = ws("p", { personal: true, role: "owner", members: 1 });
 const acme = ws("acme", { name: "Acme" });
-const me: Me = { user_id: "u", username: "alex", role: "member", can_agentic: true, must_change_password: false, workspace: acme };
+const me: Me = { user_id: "u", username: "alex", role: "member", exec_ceiling: "host" as const, must_change_password: false, workspace: acme };
 const list = (...workspaces: WorkspaceSummary[]): WorkspaceList => ({ workspaces, active: "p", can_create: true });
 // New functions on every call, as an App re-render could hand down.
 const props = () => ({
@@ -117,7 +118,7 @@ describe("Shell", () => {
     const p = props();
     await render(p);
     const before = stubs.sessions.mock.calls.length;
-    const promoted = ws("acme", { name: "Acme", role: "admin", permissions: ["agentic", "settings", "members", "routines"], members: 3 });
+    const promoted = ws("acme", { name: "Acme", role: "admin", permissions: ["settings", "members", "routines"], members: 3, exec_level: "host" as const });
     stubs.workspaces.mockResolvedValue(list(personal, promoted));
     await act(async () => lives[0]!.onWorkspacesChanged());
     expect(stubs.sessions.mock.calls.length).toBe(before + 1);

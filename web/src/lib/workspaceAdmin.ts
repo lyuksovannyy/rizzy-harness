@@ -8,13 +8,14 @@ import type { Plan } from "./modelPlan";
 
 export const ROLES: WorkspaceRole[] = ["owner", "admin", "member", "guest"];
 /** The members panel's columns, in the server's wire order. */
-export const PERMS: Perm[] = ["agentic", "settings", "members", "routines"];
+export const PERMS: Perm[] = ["settings", "members", "routines"];
 
-/** As fixed in the server (crates/master/src/workspaces.rs). */
+/** As fixed in the server (crates/master/src/workspaces.rs). Agent chats
+ * are no role's: each member's level says (N.10a part 2). */
 const ROLE_PERMS: Record<WorkspaceRole, Perm[]> = {
-  owner: ["agentic", "settings", "members", "routines"],
-  admin: ["agentic", "settings", "members", "routines"],
-  member: ["agentic", "routines"],
+  owner: ["settings", "members", "routines"],
+  admin: ["settings", "members", "routines"],
+  member: ["routines"],
   guest: [],
 };
 const RANK: Record<WorkspaceRole, number> = { owner: 3, admin: 2, member: 1, guest: 0 };
@@ -23,7 +24,6 @@ const RANK: Record<WorkspaceRole, number> = { owner: 3, admin: 2, member: 1, gue
 export const rolePerms = (r: WorkspaceRole): Perm[] => ROLE_PERMS[r] ?? [];
 
 export const PERM_LABEL: Record<Perm, string> = {
-  agentic: "Agentic sessions",
   settings: "Change settings",
   members: "Manage members",
   routines: "Run routines",
@@ -31,9 +31,9 @@ export const PERM_LABEL: Record<Perm, string> = {
 
 const SUMMARY: Record<WorkspaceRole, string> = {
   owner: "You can do everything here, including deleting the workspace and making others owners.",
-  admin: "You can start agentic sessions, run routines, change this workspace's settings and manage its members.",
-  member: "You can chat, start agentic sessions and run routines here.",
-  guest: "You can chat here, but not start agentic sessions or run routines.",
+  admin: "You can run routines, change this workspace's settings and manage its members and their levels.",
+  member: "You can chat and run routines here; your level says which agent chats you may start.",
+  guest: "You can chat here, but not run routines; your level says which agent chats you may start.",
 };
 
 /** One sentence on what the viewer's role lets them do. */

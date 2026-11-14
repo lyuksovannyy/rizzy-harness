@@ -14,6 +14,7 @@ pub mod config;
 pub mod env;
 mod favicon;
 mod http;
+pub mod levels;
 pub mod limits;
 pub mod media;
 pub mod model_cache;
@@ -234,6 +235,9 @@ pub struct MasterInner {
     outbound: Mutex<outbound::Outbound>,
     /// Callback turns: the watcher's per-chat state (T.8d step 3).
     callbacks: callbacks::Callbacks,
+    /// Tests: how long a level change waits between its guards and its
+    /// write, in ms (0 in use), so a test can make two changes overlap.
+    pub(crate) level_write_delay_ms: std::sync::atomic::AtomicU64,
 }
 
 /// What the UI asks for when starting a session.
@@ -260,9 +264,9 @@ pub struct CreateSpec {
     /// 3); the node records it and keeps to it.
     pub no_callbacks: bool,
     /// The execution mode asked of the node (N.10a): a request it refuses
-    /// when it does not offer that mode; `None`, the node's most confined.
-    /// Who may ask for which is checked by the caller
-    /// (`workspaces::exec_mode_for`).
+    /// when it does not offer that mode; `None`, the most confined one.
+    /// `create_session` checks it against the owner's level
+    /// (`workspaces::create_mode`).
     pub exec_mode: Option<harness_core::policy::ExecMode>,
 }
 
@@ -419,6 +423,10 @@ pub enum CommandError {
     NodeStopping,
     #[error("{0}")]
     Rejected(String),
+    /// The session's owner may not have it do work (their level, N.10a
+    /// part 2, or the node rule); the text says why (403).
+    #[error("{0}")]
+    Forbidden(String),
     #[error("store: {0}")]
     Store(#[from] harness_store::StoreError),
     #[error("unknown agent {0:?}: choose one of the agents listed")]
@@ -559,6 +567,7 @@ impl Master {
                 sockets: Default::default(),
                 outbound: Mutex::new(outbound::Outbound::from_env()),
                 callbacks: Default::default(),
+                level_write_delay_ms: Default::default(),
                 agents: Mutex::new(agent_edits::Agents::new(
                     harness_agents::AgentSet::from_agents(
                         harness_agents::builtins(),
@@ -622,6 +631,26 @@ impl Master {
 
     pub fn transcriber(&self) -> Option<Arc<voice::Transcriber>> {
         lock(&self.inner.transcriber).clone()
+    }
+
+    /// Tests: make every level change wait `d` between its guards and its
+    /// write (N.10a review L2-9), so two changes can be made to overlap.
+    #[doc(hidden)]
+    pub fn set_level_write_delay(&self, d: Duration) {
+        self.inner
+            .level_write_delay_ms
+            .store(d.as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The wait `set_level_write_delay` set; none in use.
+    pub(crate) async fn level_write_pause(&self) {
+        let ms = self
+            .inner
+            .level_write_delay_ms
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if ms > 0 {
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+        }
     }
 
     /// How often an open UI socket re-checks its login (default 60 s;
@@ -1482,18 +1511,29 @@ impl Master {
     ) -> Result<(), CommandError> {
         let req_id = new_id();
         let msg = build(req_id.clone());
+        let work = writes_to(&msg);
         // A diverged session takes no events, so nothing may make its node
         // write one (a turn would run with nobody seeing it). Cancel and
         // delete still go through.
-        if let Some(sid) = writes_to(&msg)
-            && self
+        if let Some(sid) = work {
+            let (diverged, row) = self
                 .inner
                 .mirror
-                .call(move |s| s.diverged_seq(sid))
-                .await?
-                .is_some()
-        {
-            return Err(CommandError::Rejected(DIVERGED.into()));
+                .call(move |s| {
+                    Ok::<_, harness_store::StoreError>((s.diverged_seq(sid)?, s.session(sid)?))
+                })
+                .await?;
+            if diverged.is_some() {
+                return Err(CommandError::Rejected(DIVERGED.into()));
+            }
+            // Whoever asks (a person, a routine, a callback, a future
+            // caller), a session does work only within its owner's level
+            // now (N.10a part 2): this is the one place every such command
+            // passes. A session the mirror does not know does none.
+            let row = row.ok_or(CommandError::UnknownSession)?;
+            if let Some(why) = workspaces::work_refusal(self, &row).await {
+                return Err(CommandError::Forbidden(why));
+            }
         }
         let (tx, rx) = oneshot::channel();
         lock(&self.inner.acks).insert(req_id.clone(), (node_id.to_string(), tx));
@@ -1527,13 +1567,38 @@ impl Master {
             Some(Err(false)) | None => return Err(CommandError::NodeOffline(node_id.into())),
         }
         match tokio::time::timeout(ACK_TIMEOUT, rx).await {
-            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Ok(()))) => {
+                // Checked again now the node took it (review L2-1): a level
+                // lowered between the check above and here was swept while
+                // this turn was not yet running, so the sweep missed it.
+                if let Some(sid) = work {
+                    self.recheck_after_ack(sid);
+                }
+                Ok(())
+            }
             Ok(Ok(Err(e))) if e == harness_protocol::NODE_STOPPING => {
                 Err(CommandError::NodeStopping)
             }
             Ok(Ok(Err(e))) => Err(CommandError::Rejected(e)),
             Ok(Err(_)) | Err(_) => Err(CommandError::Timeout),
         }
+    }
+
+    /// The level check again for `sid`, after its node acked a command that
+    /// makes it work; if it now refuses, its turn is cancelled and its
+    /// background commands stopped, in the background (review L2-1).
+    fn recheck_after_ack(&self, sid: SessionId) {
+        let this = self.clone();
+        tokio::spawn(async move {
+            let row = match this.inner.mirror.call(move |s| s.session(sid)).await {
+                Ok(Some(row)) => row,
+                _ => return,
+            };
+            if let Some(why) = workspaces::work_refusal(&this, &row).await {
+                tracing::info!(session = %sid, reason = %why, "a command acked after its owner's level was lowered: stopping its work");
+                workspaces::stop_removed(&this, vec![sid]);
+            }
+        });
     }
 
     async fn owner(&self, sid: SessionId) -> Result<String, CommandError> {
@@ -1586,9 +1651,20 @@ impl Master {
             Some(m) => r.agent_spec_with(Some(&agent_id), Some(m), None)?,
         };
         let model = chosen.clone().or(agent.model.clone());
-        // An agentic chat always carries a mode: `sandbox` unless asked.
+        // An agentic chat always carries a mode: the one asked for, else
+        // the most confined one, and only within the owner's level in the
+        // chat's workspace (N.10a part 2), whoever calls this.
         let exec_mode = match profile {
-            Profile::Agentic => Some(spec.exec_mode.unwrap_or(ExecMode::Sandbox)),
+            Profile::Agentic => Some(
+                workspaces::create_mode(
+                    self,
+                    owner.as_deref(),
+                    workspace.as_deref(),
+                    spec.exec_mode,
+                )
+                .await
+                .map_err(CommandError::Forbidden)?,
+            ),
             Profile::Chat => None,
         };
         // A connected node must have announced the mode it is sent (N.10a):

@@ -24,15 +24,16 @@ const personal: WorkspaceSummary = {
   name: "stored",
   personal: true,
   role: "owner",
-  permissions: ["agentic", "settings", "members", "routines"],
+  permissions: ["settings", "members", "routines"],
   members: 1,
+  exec_level: "host",
 };
-const acme: WorkspaceSummary = { workspace_id: "w2", name: "Acme", personal: false, role: "admin", permissions: ["agentic", "settings", "members", "routines"], members: 3 };
+const acme: WorkspaceSummary = { workspace_id: "w2", name: "Acme", personal: false, role: "admin", permissions: ["settings", "members", "routines"], members: 3, exec_level: "host" as const };
 const me = (workspace: WorkspaceSummary | null = personal, role: Me["role"] = "member"): Me => ({
   user_id: "u1",
   username: "alex",
   role,
-  can_agentic: true,
+  exec_ceiling: "host" as const,
   must_change_password: false,
   workspace,
 });

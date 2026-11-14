@@ -10,7 +10,7 @@ fn user(id: &str, name: &str, role: Role) -> NewUser {
         username: name.into(),
         password_hash: "$argon2id$x".into(),
         role,
-        can_agentic: false,
+        exec_ceiling: harness_core::policy::ExecLevel::None,
         must_change_password: false,
     }
 }
@@ -225,19 +225,18 @@ fn user_crud_flags_and_admin_count() {
     .unwrap();
     assert_eq!(s.active_admin_count().unwrap(), 1);
     let bob = s.user_by_id("m1").unwrap().unwrap();
-    assert!(bob.must_change_password && !bob.can_agentic && !bob.disabled);
+    assert!(bob.must_change_password && !bob.disabled);
+    assert_eq!(bob.exec_ceiling, harness_core::policy::ExecLevel::None);
 
     s.update_user(
         "m1",
         &UserPatch {
-            can_agentic: Some(true),
             role: Some(Role::Admin),
             ..Default::default()
         },
     )
     .unwrap();
     let bob = s.user_by_id("m1").unwrap().unwrap();
-    assert!(bob.can_agentic);
     assert_eq!(bob.role, Role::Admin);
     assert_eq!(s.active_admin_count().unwrap(), 2);
 

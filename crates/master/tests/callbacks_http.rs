@@ -322,7 +322,7 @@ async fn account(t: &T, name: &str, role: &str) -> (String, String) {
         &t.base,
         Method::POST,
         "/api/users",
-        Some(json!({"username": name, "role": role, "can_agentic": true})),
+        Some(json!({"username": name, "role": role, "exec_ceiling": "host"})),
         &t.alex,
     )
     .await;
@@ -673,6 +673,15 @@ async fn admission_is_what_the_owner_could_do_now() {
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, v) = req(
+        &t.base,
+        Method::PUT,
+        &format!("/api/workspaces/{team}/members/{bob_id}/exec-level"),
+        Some(json!({"level": "sandbox"})),
+        &t.alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
     let sid = chat(&t, &bob, Some(&team)).await;
     t.node.append(sid, started("bg-1"));
     mirrored(&t, sid, 2).await;
@@ -685,12 +694,36 @@ async fn admission_is_what_the_owner_could_do_now() {
     )
     .await;
     assert!(st.is_success(), "{st} {v}");
+    // The removal stops what ran for the team (N.10a part 2): a real node
+    // ends bg-1 then, so no callback could come of it (review L2-4).
+    let stopped = || {
+        t.node.seen.lock().unwrap().iter().any(|m| {
+            matches!(m, MasterToNode::StopBackground {
+                session_id, bg_id: None, by: harness_protocol::StopBackgroundBy::AccessRevoked, ..
+            } if *session_id == sid)
+        })
+    };
+    for _ in 0..500 {
+        if stopped() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        stopped(),
+        "the removal did not stop the chat's background commands"
+    );
     t.node
-        .append(sid, ended("bg-1", BackgroundReason::Exited, false));
+        .append(sid, ended("bg-1", BackgroundReason::AccessRevoked, false));
+    // A command started after the chat moved to Personal: its end resumes
+    // the agent, as the owner could go on there themselves.
+    t.node.append(sid, started("bg-2"));
+    t.node
+        .append(sid, ended("bg-2", BackgroundReason::Exited, false));
     let cbs = until_callbacks(&t.node, 1).await;
     assert_eq!(
         cbs,
-        vec![(sid, vec!["bg-1".to_string()])],
+        vec![(sid, vec!["bg-2".to_string()])],
         "the owner could go on in Personal"
     );
 
@@ -744,9 +777,9 @@ async fn admission_is_what_the_owner_could_do_now() {
     let e = chat(&t, &erin, None).await;
     let (st, _) = req(
         &t.base,
-        Method::PATCH,
-        &format!("/api/users/{erin_id}"),
-        Some(json!({"can_agentic": false})),
+        Method::PUT,
+        &format!("/api/users/{erin_id}/exec-ceiling"),
+        Some(json!({"level": "none"})),
         &t.alex,
     )
     .await;

@@ -18,7 +18,7 @@ const { StorageSettings } = await import("./StorageSettings");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-const admin: Me = { user_id: "u1", username: "root", role: "admin", can_agentic: true, must_change_password: false };
+const admin: Me = { user_id: "u1", username: "root", role: "admin", exec_ceiling: "host" as const, must_change_password: false };
 const SETTINGS: StorageLimits = { max_file_mb: 200, account_quota_mb: 4096, server_quota_mb: 20480, min_free_mb: 1024 };
 const GB = 1024 ** 3;
 

@@ -220,7 +220,7 @@ async fn user(s: &Server, name: &str, can_agentic: bool) -> (String, String) {
         s,
         Method::POST,
         "/api/users",
-        Some(json!({"username": name, "can_agentic": can_agentic})),
+        Some(json!({"username": name, "exec_ceiling": if can_agentic { "host" } else { "none" }})),
         &s.admin,
     )
     .await;
@@ -260,12 +260,40 @@ async fn team(s: &Server, owner: &str, name: &str) -> String {
     v["workspace_id"].as_str().unwrap().to_string()
 }
 
+/// Adds `username` with `role`, and gives them the `sandbox` level there
+/// (every new member starts at `none`, N.10a part 2).
 async fn add(s: &Server, by: &str, ws: &str, username: &str, role: &str) {
     let (st, v) = call(
         s,
         Method::POST,
         &format!("/api/workspaces/{ws}/members"),
         Some(json!({ "username": username, "role": role })),
+        by,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    level(s, by, ws, v["user_id"].as_str().unwrap(), "sandbox").await;
+}
+
+/// Adds `username` with `role`, at level `none`.
+async fn add_only(s: &Server, by: &str, ws: &str, username: &str, role: &str) {
+    let (st, v) = call(
+        s,
+        Method::POST,
+        &format!("/api/workspaces/{ws}/members"),
+        Some(json!({ "username": username, "role": role })),
+        by,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+}
+
+async fn level(s: &Server, by: &str, ws: &str, user_id: &str, level: &str) {
+    let (st, v) = call(
+        s,
+        Method::PUT,
+        &format!("/api/workspaces/{ws}/members/{user_id}/exec-level"),
+        Some(json!({ "level": level })),
         by,
     )
     .await;
@@ -648,21 +676,13 @@ async fn agentic_work_stops_when_access_goes() {
     let acme = team(&s, &bob, "Acme").await;
     add(&s, &bob, &acme, "carol", "member").await;
     let sid = new_chat(&s, &carol, &acme, json!({})).await;
-    let set_role = |role: &str| {
-        let (s, bob, path) = (
-            &s,
-            bob.clone(),
-            format!("/api/workspaces/{acme}/members/{carol_id}"),
-        );
-        let body = json!({ "role": role });
-        async move {
-            let (st, v) = call(s, Method::PATCH, &path, Some(body), &bob).await;
-            assert_eq!(st, StatusCode::OK, "{v}");
-        }
+    let set_level = |l: &'static str| {
+        let (s, bob, acme, id) = (&s, bob.clone(), acme.clone(), carol_id.clone());
+        async move { level(s, &bob, &acme, &id, l).await }
     };
 
-    // A turn waits for Carol to approve a command when she becomes a
-    // guest: it is cancelled, and her chat is read-only from then on.
+    // A turn waits for Carol to approve a command when her level there
+    // goes to none: it is cancelled, and her chat is read-only from then on.
     let (st, v) = prompt(&s, &carol, &sid, json!({"text": "run: echo hi"})).await;
     assert_eq!(st, StatusCode::OK, "{v}");
     let asked = nth_event(&s, &carol, &sid, "approval_requested", 1).await;
@@ -670,9 +690,9 @@ async fn agentic_work_stops_when_access_goes() {
         .as_str()
         .unwrap()
         .to_string();
-    set_role("guest").await;
+    set_level("none").await;
     wait_stopped(&s, &carol, &sid).await;
-    let why = "your role in Acme cannot run agentic sessions";
+    let why = "your level in Acme is none, so no agent chats; ask one of its admins";
     let r = get(&s, &format!("/api/sessions/{sid}"), &carol).await;
     assert_eq!(r["blocked"], why);
 
@@ -727,8 +747,8 @@ async fn agentic_work_stops_when_access_goes() {
         (StatusCode::FORBIDDEN, Some(why))
     );
 
-    // A member again: the refused prompt did not use up her upload.
-    set_role("member").await;
+    // Back at sandbox: the refused prompt did not use up her upload.
+    set_level("sandbox").await;
     let (st, v) = prompt(
         &s,
         &carol,
@@ -739,21 +759,21 @@ async fn agentic_work_stops_when_access_goes() {
     assert_eq!(st, StatusCode::OK, "{v}");
     nth_event(&s, &carol, &sid, "turn_ended", 2).await;
 
-    // Without the server grant: a running turn stops, and nothing more runs.
+    // Her account's level at none: a running turn stops, and nothing more runs.
     let (st, v) = prompt(&s, &carol, &sid, json!({"text": "run: echo again"})).await;
     assert_eq!(st, StatusCode::OK, "{v}");
     nth_event(&s, &carol, &sid, "approval_requested", 2).await;
     let (st, v) = call(
         &s,
-        Method::PATCH,
-        &format!("/api/users/{carol_id}"),
-        Some(json!({"can_agentic": false})),
+        Method::PUT,
+        &format!("/api/users/{carol_id}/exec-ceiling"),
+        Some(json!({"level": "none"})),
         &s.admin,
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
     wait_stopped(&s, &carol, &sid).await;
-    let grant = "agentic sessions are not enabled for this account; ask an admin";
+    let grant = "your account's level is none, so no agent chats; a server admin sets it";
     let (st, v) = prompt(&s, &carol, &sid, json!({"text": "hello"})).await;
     assert_eq!(
         (st, v["error"].as_str()),
@@ -940,8 +960,8 @@ async fn notices_follow_the_workspace() {
     let (carol, _) = user(&s, "carol", false).await;
     let (dave, _) = user(&s, "dave", false).await;
     let acme = team(&s, &bob, "Acme").await;
-    add(&s, &bob, &acme, "carol", "admin").await;
-    add(&s, &bob, &acme, "dave", "member").await;
+    add_only(&s, &bob, &acme, "carol", "admin").await;
+    add_only(&s, &bob, &acme, "dave", "member").await;
     let notices = |who: &str, q: String| {
         let (s, who) = (&s, who.to_string());
         async move {

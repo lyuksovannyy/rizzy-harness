@@ -156,7 +156,7 @@ async fn alex(t: &T) -> String {
 
 /// A member account made by `admin`, signed in with its own password.
 async fn account(t: &T, admin: &str, name: &str, agentic: bool) -> String {
-    let body = json!({"username": name, "can_agentic": agentic});
+    let body = json!({"username": name, "exec_ceiling": if agentic { "host" } else { "none" }});
     let (st, v) = send(t, Method::POST, "/api/users", Some(body), admin).await;
     assert_eq!(st, StatusCode::OK, "{v}");
     let pw = v["password"].as_str().unwrap();
