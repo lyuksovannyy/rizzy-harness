@@ -502,7 +502,7 @@ fn transcript(
         // Model text too: the last summary, read from the log.
         quoted_part(&mut out, PART_SUMMARY, p);
     }
-    for m in history_to_messages(events) {
+    for m in summary_messages(events) {
         match &m {
             // Images reach the summariser by name only. The text is the
             // person's with each attachment's content after it.
@@ -822,6 +822,21 @@ fn parse_effort(s: &str) -> Option<Effort> {
 /// got a result (interrupted turns) get a synthetic one so the transcript stays
 /// valid for providers that require every call to be answered.
 pub fn history_to_messages(history: &[RawEvent]) -> Vec<ChatMsg> {
+    messages_of(history, false)
+}
+
+/// [`history_to_messages`] for what a summary replaces (review ST-1): a
+/// queued message whose reading is not in `history` comes at its end. A
+/// compaction cut between a message sent after a turn's last step and its
+/// reading at the next turn's start would otherwise lose it: the
+/// summarised part holds the message without its reading, and the kept
+/// part, which [`history_to_messages`] rebuilds, the reading without the
+/// message (it adds nothing there). So the summary carries it, once.
+pub fn summary_messages(history: &[RawEvent]) -> Vec<ChatMsg> {
+    messages_of(history, true)
+}
+
+fn messages_of(history: &[RawEvent], unread_too: bool) -> Vec<ChatMsg> {
     // Parallel answers: only the chosen one (default: the first) is history.
     let mut chosen: std::collections::HashMap<String, String> = Default::default();
     for e in history {
@@ -905,6 +920,11 @@ pub fn history_to_messages(history: &[RawEvent]) -> Vec<ChatMsg> {
         }
     }
     close_open(&mut out, &mut open);
+    if unread_too {
+        let mut left: Vec<(u64, UserMessage)> = queued.into_iter().collect();
+        left.sort_by_key(|(seq, _)| *seq);
+        out.extend(left.iter().map(|(_, m)| queued_msg(m)));
+    }
     out
 }
 
@@ -2288,7 +2308,7 @@ impl NativeBackend {
         let old = &recent[..starts[starts.len() - KEEP_TURNS]];
         // If the kept turns alone are what is large, summarising the rest
         // saves little and would repeat on every turn: skip it.
-        let old_tokens = provider::estimate_tokens(&history_to_messages(old)) as usize;
+        let old_tokens = provider::estimate_tokens(&summary_messages(old)) as usize;
         if old.is_empty() || old_tokens < min_old {
             return Ok(None);
         }
@@ -2367,7 +2387,7 @@ impl NativeBackend {
             // each is its own event: the log never holds a summary that
             // grew the history, and a later piece's rejection leaves the
             // earlier ones in force.
-            let replaced = provider::estimate_tokens(&history_to_messages(&old[from..end]))
+            let replaced = provider::estimate_tokens(&summary_messages(&old[from..end]))
                 + prev.as_deref().map_or(0, |p| {
                     provider::estimate_tokens(&[ChatMsg::System(p.into())])
                 });
