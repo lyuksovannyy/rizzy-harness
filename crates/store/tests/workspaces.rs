@@ -569,11 +569,19 @@ fn members_and_workspace_fields_can_change() {
         ),
         ("bob", "member", false, false)
     );
+    // The join question: unanswered for a new member (and for the
+    // creator), answered once they choose, either way.
+    assert!(!bob.memory_answered);
+    assert!(!s.member(&team, "a1").unwrap().unwrap().memory_answered);
+    assert!(!s.memberships("b1").unwrap()[1].memory_answered);
+    assert!(s.memberships("b1").unwrap()[0].memory_answered, "Personal");
     assert!(s.set_use_memory(&team, "b1", true).unwrap());
     assert!(s.member(&team, "b1").unwrap().unwrap().use_memory);
     assert!(s.set_use_memory(&team, "b1", false).unwrap());
-    assert!(!s.member(&team, "b1").unwrap().unwrap().use_memory);
+    let bob = s.member(&team, "b1").unwrap().unwrap();
+    assert!(!bob.use_memory && bob.memory_answered);
     assert!(!s.memberships("b1").unwrap()[1].use_memory);
+    assert!(s.memberships("b1").unwrap()[1].memory_answered);
     assert!(!s.set_use_memory(&team, "c1", false).unwrap());
     assert!(s.member(&team, "c1").unwrap().is_none());
     assert_eq!(s.member_count(&team).unwrap(), 2);

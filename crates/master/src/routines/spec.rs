@@ -53,7 +53,7 @@ impl Default for RoutineSpec {
             effort: None,
             node_id: None,
             cwd: None,
-            approval_mode: harness_core::policy::DEFAULT_CHAT_APPROVAL,
+            approval_mode: crate::routines::runner::default_mode(),
             prompt: String::new(),
             project_id: None,
             catch_up: CatchUp::default(),
@@ -136,11 +136,18 @@ impl RoutineSpec {
             if s.node_id.is_none() || s.cwd.is_none() {
                 return Err("spec: an agentic routine needs a node_id and a cwd".into());
             }
+            let max = crate::routines::runner::save_max();
+            if s.approval_mode > max {
+                return Err(format!(
+                    "spec.approval_mode: a routine runs at most in {}",
+                    max.id()
+                ));
+            }
         } else if s.node_id.is_some() || s.cwd.is_some() {
             return Err("spec: node_id and cwd are for agentic routines only".into());
         } else {
             // Chats run on the chat runtime and approve nothing.
-            s.approval_mode = harness_core::policy::DEFAULT_CHAT_APPROVAL;
+            s.approval_mode = crate::routines::runner::default_mode();
         }
         if s.cwd.as_ref().is_some_and(|c| c.len() > 4096) {
             return Err("spec.cwd is too long".into());

@@ -204,11 +204,19 @@ export function ToolCard({
 
   // A proposal the tool accepted: the notice says where it waits. A
   // rejected one stays an ordinary card with the tool's error.
-  if (item.tool === "remember" && status === "ok")
+  // A memory block, not a tool card, from the moment the call is made:
+  // the server says what it did (saved, waiting, refused) and offers Undo.
+  if (item.tool === "remember" && (status === "ok" || status === "running"))
     return item.input?.scope === "project" ? (
       <ProjectMemoryNotice text={asText(item.input?.text)} project={projectId ?? null} />
     ) : (
-      <MemoryNotice text={asText(item.input?.text)} />
+      <MemoryNotice
+        text={asText(item.input?.text ?? "")}
+        sessionId={sessionId}
+        callId={item.call_id}
+        forget={!!item.input?.forget && item.input?.text == null}
+        done={status === "ok"}
+      />
     );
   // A file the agent published: its card says where the upload stands. A
   // refused or failed call stays an ordinary card with the tool's error.
@@ -244,6 +252,7 @@ export function ToolCard({
           <a className="child-link" href={`#/s/${child}`}>
             Open @{shownName(asText(item.input?.agent))} session{status === "running" ? " (approvals for its tools appear there)" : ""}
           </a>
+          {status === "running" && <span className="muted small">· its progress is in the panel on the right</span>}
           {reported && (
             <span
               className={`tool-status child-status s-${CHILD_STATUS_CLASS[reported]}`}

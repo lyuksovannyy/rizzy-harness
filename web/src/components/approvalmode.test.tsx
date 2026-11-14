@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-// A chat's approval mode (T48): one control in the composer showing the
+// A chat's approval mode (T50): one control in the composer showing the
 // mode, with the three choices and what each runs unasked; a choice the
 // node does not allow is disabled with the reason; a new chat sends the
 // person's pick only; an open chat asks the server, which the node clamps.

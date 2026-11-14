@@ -9,6 +9,8 @@ use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
+use harness_core::event::{EventKind, ModelRetry, RetryReason};
+
 use crate::provider::ProviderError;
 
 /// How often and how long to wait. The defaults are what other harnesses
@@ -43,6 +45,17 @@ impl RetryPolicy {
         }
     }
 
+    /// How many retries a failure like `e` gets: the policy's, except that
+    /// a provider that went silent has already cost a whole timeout, so it
+    /// gets one more try and then the fallbacks or the error (review M4).
+    /// The `model_retry` event's "of" is this number.
+    pub fn retries_for(&self, e: &ProviderError) -> u32 {
+        match e {
+            ProviderError::Silent(_) => self.retries.min(1),
+            _ => self.retries,
+        }
+    }
+
     /// The wait before retry number `n` (from 0) after `e`; `None` when `e`
     /// is not worth retrying or the retries are used up. The provider's
     /// `Retry-After` wins over the backoff. When it is longer than `max`
@@ -50,7 +63,7 @@ impl RetryPolicy {
     /// again and count against the provider's limit, so the caller falls
     /// back to another model or ends the turn (`explain`).
     pub fn delay(&self, e: &ProviderError, n: u32) -> Option<Duration> {
-        if n >= self.retries || !e.is_retryable() {
+        if n >= self.retries_for(e) || !e.is_retryable() {
             return None;
         }
         Some(match e.retry_after() {
@@ -115,6 +128,44 @@ fn jitter() -> f64 {
     (h.finish() >> 11) as f64 / (1u64 << 53) as f64
 }
 
+/// The class of a retried failure, for the person: never the body.
+pub fn reason(e: &ProviderError) -> RetryReason {
+    match e {
+        ProviderError::Status { status: 429, .. } => RetryReason::RateLimit,
+        ProviderError::Status {
+            status: 503 | 529, ..
+        } => RetryReason::Overloaded,
+        ProviderError::Status { .. } => RetryReason::ServerError,
+        // A provider that went silent (the idle timeout) reads as the
+        // network to a person: nothing arrived.
+        ProviderError::Http(_)
+        | ProviderError::Stream(_)
+        | ProviderError::Silent(_)
+        | ProviderError::UnknownModel(_) => RetryReason::Network,
+    }
+}
+
+/// The `model_retry` event for retry number `attempt` (from 1) of `model`
+/// after `e`, sent again `wait` from now.
+pub fn event(
+    turn_id: &str,
+    model: &str,
+    attempt: u32,
+    of: u32,
+    wait: Duration,
+    e: &ProviderError,
+) -> EventKind {
+    EventKind::ModelRetry(ModelRetry {
+        turn_id: turn_id.to_string(),
+        model: model.to_string(),
+        attempt,
+        of,
+        at_ms: harness_core::now_ms().saturating_add(wait.as_millis() as i64),
+        wait_ms: wait.as_millis() as u64,
+        reason: reason(e),
+    })
+}
+
 /// Wait `d` unless cancelled first; `false` when cancelled.
 pub async fn wait(d: Duration, cancel: &CancellationToken) -> bool {
     tokio::select! {
@@ -148,6 +199,10 @@ mod tests {
         }
         assert!(p.delay(&ProviderError::Http("refused".into()), 0).is_some());
         assert!(p.delay(&ProviderError::Stream("cut".into()), 0).is_some());
+        // Silence: once, not three times.
+        let silent = ProviderError::Silent("quiet".into());
+        assert!(p.delay(&silent, 0).is_some());
+        assert!(p.delay(&silent, 1).is_none());
         assert!(
             p.delay(&ProviderError::UnknownModel("x".into()), 0)
                 .is_none()
@@ -265,6 +320,28 @@ mod tests {
                 no_retry: true
             }
         );
+    }
+
+    #[test]
+    fn the_event_names_a_class_and_no_body() {
+        let r = |e: &ProviderError| reason(e);
+        assert_eq!(r(&status(429, "k")), RetryReason::RateLimit);
+        assert_eq!(r(&status(503, "k")), RetryReason::Overloaded);
+        assert_eq!(r(&status(529, "k")), RetryReason::Overloaded);
+        assert_eq!(r(&status(502, "k")), RetryReason::ServerError);
+        assert_eq!(r(&ProviderError::Http("x".into())), RetryReason::Network);
+        let before = harness_core::now_ms();
+        let e = status(429, "secret-ish body sk-live-123");
+        let ev = event("t", "p::m", 2, 3, Duration::from_secs(4), &e);
+        let (kind, payload) = ev.into_parts();
+        assert_eq!(kind, "model_retry");
+        assert!(!payload.to_string().contains("secret"), "{payload}");
+        assert_eq!(payload["attempt"], 2);
+        assert_eq!(payload["of"], 3);
+        assert_eq!(payload["reason"], "rate_limit");
+        assert_eq!(payload["wait_ms"], 4000);
+        let at = payload["at_ms"].as_i64().unwrap();
+        assert!(at >= before + 4000 && at <= harness_core::now_ms() + 4000);
     }
 
     #[test]

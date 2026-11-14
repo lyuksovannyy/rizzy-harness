@@ -8,12 +8,12 @@ export interface RawEvent {
   payload: any; // eslint-disable-line @typescript-eslint/no-explicit-any
 }
 
-/** Strictest first (T48): `accept_edits` lets `write`/`edit` inside the chat's
+/** Strictest first (T50): `accept_edits` lets `write`/`edit` inside the chat's
  * folder run without a card; `auto` runs everything unasked. */
 export type ApprovalMode = "ask_all" | "ask" | "accept_edits" | "auto";
 export type Decision = "allow" | "deny" | "allow_session";
 export type ResolvedBy = "user" | "policy" | "cancelled" | "interrupted";
-export type TurnEndReason = "completed" | "cancelled" | "error" | "interrupted" | "stopped";
+export type TurnEndReason = "completed" | "cancelled" | "error" | "interrupted" | "stopped" | "limit";
 
 export type Profile = "chat" | "agentic";
 
@@ -294,6 +294,30 @@ export interface SessionView {
   background?: Record<string, BackgroundState>;
   /** The agent's task list (the latest `todo_updated`); absent when empty. */
   todo?: TodoItem[];
+  /** A model call waits to be sent again (`model_retry`); absent otherwise. */
+  retry?: ModelRetry;
+  /** The latest turn's limits (`turn_ended.usage`): the window of the model it
+   * started on, and the history size at which the next summary is written
+   * (0: never). Absent when not known. */
+  context_window?: number;
+  summary_at?: number;
+  /** The model `context_window` is of (the one that answered last). */
+  context_model?: string;
+}
+
+export type RetryReason = "rate_limit" | "overloaded" | "server_error" | "network";
+
+export interface ModelRetry {
+  turn_id: string;
+  model: string;
+  /** This retry's number, from 1, of `of`. */
+  attempt: number;
+  of: number;
+  /** When it is sent again (ms since the epoch, on the node's clock)... */
+  at_ms: number;
+  /** ...this long after the event: the most a skewed browser clock shows. */
+  wait_ms: number;
+  reason: RetryReason;
 }
 
 /** One item of the agent's task list: the model's text, one line. */
@@ -325,6 +349,10 @@ export interface Usage {
   /** Of input_tokens, read from / written to the provider's prompt cache. */
   cache_read_tokens?: number;
   cache_write_tokens?: number;
+  /** A turn's own limits (`turn_ended` only, never in the totals). */
+  window?: number;
+  summary_at?: number;
+  model?: string;
 }
 
 export interface UploadedAttachment {
@@ -629,6 +657,8 @@ export interface SessionRow {
   routine?: RoutineMark | null;
   /** Background commands running in it, as far as the server knows. */
   background?: number;
+  /** Its last turn finished (or failed) after the viewer last looked at it. */
+  unread?: boolean;
 }
 
 /** The routine run behind a chat (`SessionRow.routine`). */
@@ -663,7 +693,7 @@ export interface NodeInfo {
   exec_modes?: ExecMode[];
   /** Their gaps (`gap:sandbox:netns`, `gap:host:netns`), for the chat to say. */
   exec_gaps?: string[];
-  /** The loosest approval mode its node.toml allows (T48); absent: the node
+  /** The loosest approval mode its node.toml allows (T50); absent: the node
    * cannot change a chat's mode. */
   max_approval?: ApprovalMode | null;
   /** What a new chat there gets when the person picks none. */
@@ -699,6 +729,9 @@ export interface WorkspaceSummary {
   /** The caller's effective level here: the lower of their ceiling and
    * their level in it (in a Personal workspace, the ceiling). */
   exec_level: ExecLevel;
+  /** Whether the caller answered the join question: may this workspace's
+   * agents use their own facts? Always true for Personal. */
+  memory_answered?: boolean;
 }
 
 export interface WorkspaceList {
@@ -719,6 +752,7 @@ export interface WorkspaceDetail extends WorkspaceSummary {
   settings: WorkspaceSettings;
   /** The caller's own "use my memory here" switch (always true for Personal). */
   use_memory: boolean;
+  memory_answered?: boolean;
   created_ms: number;
 }
 
@@ -773,10 +807,47 @@ export interface MemoryFact {
   owner_id: string | null;
   text: string;
   kind: FactKind;
-  status: "proposed" | "active";
+  /** `retired`: replaced or forgotten by the assistant; never used, restorable. */
+  status: "proposed" | "active" | "retired";
   source_session: string | null;
   created_ms: number;
   updated_ms: number;
+  /** `user`: your own facts, which follow you into a team workspace once you
+   * say yes there. `workspace`: kept in one workspace only. */
+  place?: "user" | "workspace";
+  workspace_id?: string;
+  workspace_name?: string | null;
+  workspace_personal?: boolean;
+}
+
+/** What one `remember` call of a chat did (`GET /api/sessions/{id}/memory/{call}`). */
+export interface MemoryCallState {
+  /** `pending`: waits for the person's Keep or Dismiss in the chat.
+   * `waiting`: the server has not filed the call yet; ask again. */
+  state:
+    | "saved"
+    | "pending"
+    | "kept"
+    | "dismissed"
+    | "refused"
+    | "forgot"
+    | "undone"
+    | "gone"
+    | "waiting"
+    | "project";
+  place?: "user" | "workspace" | "project";
+  /** False: the person may not change this project fact; it waits for a
+   * project manager (Dismiss only). */
+  keep?: boolean;
+  /** The text the call asked for (shown when nothing was filed). */
+  text?: string | null;
+  /** The fact the call added. */
+  fact?: MemoryFact | null;
+  /** The fact it replaces or forgets. */
+  target?: MemoryFact | null;
+  /** The call only drops `target`. */
+  forget?: boolean;
+  reason?: string | null;
 }
 
 export type Preset = "fast" | "balanced" | "best";

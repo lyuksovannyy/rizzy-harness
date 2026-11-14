@@ -1,5 +1,10 @@
-// Memory: what the assistant remembers about you. Proposals from chats wait
-// here for a confirm; only confirmed facts are used.
+// Memory: what the assistant remembers about you, and where each fact
+// lives. In your Personal workspace the assistant saves facts at once (each
+// save shows in the chat with Undo); in a team workspace it suggests them
+// and they wait here. Your own facts follow you into a team workspace only
+// once you say yes there; a fact kept in a workspace never leaves it. You can
+// move any fact between the two, restore one the assistant replaced or
+// forgot, or delete it.
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { pageApi } from "../apiPages";
@@ -11,8 +16,15 @@ import { Seg } from "./Seg";
 
 const KIND_LABEL: Record<FactKind, string> = { fact: "Fact", preference: "Preference", location: "Location" };
 
-function FactRow(props: { f: MemoryFact; onChange: () => void }) {
-  const { f } = props;
+/** Where a fact lives, in words. */
+export function placeLabel(f: MemoryFact): string {
+  if (f.place !== "workspace") return "Your facts";
+  if (f.workspace_personal) return "Personal only";
+  return f.workspace_name ? `${f.workspace_name} only` : "A workspace only";
+}
+
+function FactRow(props: { f: MemoryFact; onChange: () => void; home: string | null }) {
+  const { f, home } = props;
   const [edit, setEdit] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const run = async (p: Promise<unknown>) => {
@@ -25,6 +37,14 @@ function FactRow(props: { f: MemoryFact; onChange: () => void }) {
       setErr(x instanceof Error ? x.message : String(x));
     }
   };
+  // Moving: your own facts to the workspace the fact names (or Personal),
+  // a workspace's fact to your own facts.
+  const moveTo =
+    f.place === "workspace"
+      ? { place: "user" as const }
+      : home
+        ? { place: "workspace" as const, workspace_id: home }
+        : null;
   return (
     <li className={`fact ${f.status}`}>
       {edit === null ? (
@@ -34,6 +54,7 @@ function FactRow(props: { f: MemoryFact; onChange: () => void }) {
       )}
       <div className="row fact-meta">
         <span className="muted small">{KIND_LABEL[f.kind]}</span>
+        <span className={`small fact-place${f.place === "workspace" ? " here" : ""}`}>{placeLabel(f)}</span>
         {f.source_session && (
           <a className="small" href={`#/s/${f.source_session}`}>
             from a chat
@@ -55,8 +76,32 @@ function FactRow(props: { f: MemoryFact; onChange: () => void }) {
             <button type="button" className="link" onClick={() => setEdit(f.text)}>
               Edit
             </button>
+            {moveTo && (
+              <button
+                type="button"
+                className="link fact-move"
+                title={
+                  moveTo.place === "user"
+                    ? "Make it one of your facts: it can then follow you into team workspaces you say yes to"
+                    : "Keep it in your Personal workspace only: it never reaches a team workspace"
+                }
+                onClick={() => void run(pageApi.updateMemory(f.id, moveTo))}
+              >
+                {moveTo.place === "user" ? "Move to your facts" : "Keep private"}
+              </button>
+            )}
             <button type="button" className="link" onClick={() => void run(pageApi.deleteMemory(f.id))}>
               Forget
+            </button>
+          </>
+        )}
+        {f.status === "retired" && edit === null && (
+          <>
+            <button type="button" className="link" onClick={() => void run(pageApi.updateMemory(f.id, { status: "active" }))}>
+              Restore
+            </button>
+            <button type="button" className="link" onClick={() => void run(pageApi.deleteMemory(f.id))}>
+              Delete
             </button>
           </>
         )}
@@ -79,6 +124,7 @@ function FactRow(props: { f: MemoryFact; onChange: () => void }) {
 export function MemoryPage(props: { version: number }) {
   const [facts, setFacts] = useState<MemoryFact[] | null>(null);
   const [backend, setBackend] = useState("");
+  const [home, setHome] = useState<string | null>(null);
   const [text, setText] = useState("");
   const [err, setErr] = useState<string | null>(null);
   const load = useCallback(() => {
@@ -91,22 +137,33 @@ export function MemoryPage(props: { version: number }) {
       .catch((x) => setErr(x instanceof Error ? x.message : String(x)));
   }, []);
   useEffect(load, [load, props.version]);
+  // Your Personal workspace: where "Keep private" puts a fact.
+  useEffect(() => {
+    api
+      .workspaces()
+      .then((l) => setHome(l.workspaces.find((w) => w.personal)?.workspace_id ?? null))
+      .catch(() => setHome(null));
+  }, []);
   if (err && !facts) return <div className="card muted">{err}</div>;
   if (!facts) return <div className="muted">Loading…</div>;
   const proposed = facts.filter((f) => f.status === "proposed");
   const active = facts.filter((f) => f.status === "active");
+  const retired = facts.filter((f) => f.status === "retired");
   return (
     <div className="stack">
       <p className="muted">
-        Short facts the assistant may use in future chats. It suggests them during chats; nothing is used until
-        you choose Remember. Incognito chats never read or write memory.
+        Short facts the assistant uses in future chats. In your Personal workspace it saves them as you talk (each
+        save shows in the chat, with Undo); in a team workspace it suggests them and they wait here. Private details
+        (health, money, family…) stay in the workspace where they came up. Your own facts reach a team workspace
+        only if you said yes there. Temporary chats never read or write memory. Nobody else, admins included, can see
+        any of this.
       </p>
       {proposed.length > 0 && (
         <div className="card stack">
           <h3>To review ({proposed.length})</h3>
           <ul className="facts">
             {proposed.map((f) => (
-              <FactRow key={f.id} f={f} onChange={load} />
+              <FactRow key={f.id} f={f} onChange={load} home={home} />
             ))}
           </ul>
         </div>
@@ -138,12 +195,23 @@ export function MemoryPage(props: { version: number }) {
         ) : (
           <ul className="facts">
             {active.map((f) => (
-              <FactRow key={f.id} f={f} onChange={load} />
+              <FactRow key={f.id} f={f} onChange={load} home={home} />
             ))}
           </ul>
         )}
         <div className="muted small">Stored in: {backend === "builtin" ? "this server" : backend === "qdrant" ? "this server (vectors in Qdrant)" : backend}</div>
       </div>
+      {retired.length > 0 && (
+        <div className="card stack">
+          <h3>Replaced or forgotten ({retired.length})</h3>
+          <span className="field-hint">The assistant replaced or dropped these. They are not used; restore or delete them.</span>
+          <ul className="facts">
+            {retired.map((f) => (
+              <FactRow key={f.id} f={f} onChange={load} home={home} />
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }

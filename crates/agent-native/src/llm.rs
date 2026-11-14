@@ -302,6 +302,30 @@ fn provider_error(e: genai::Error) -> ProviderError {
     }
 }
 
+/// What a call that went silent reads as (both keys named, so the person
+/// knows which one to raise).
+fn silent(what: &str, after: std::time::Duration) -> ProviderError {
+    ProviderError::Silent(format!(
+        "the provider {what} for {} s (`[limits] model_first_byte_timeout_s` and \
+         `model_idle_timeout_s` in node.toml)",
+        after.as_secs()
+    ))
+}
+
+/// genai's own header timeout, when it fired.
+fn header_timeout(e: &genai::Error, limits: Option<StreamLimits>) -> Option<ProviderError> {
+    let genai::Error::WebStream { error, .. } = e else {
+        return None;
+    };
+    match error.downcast_ref::<genai::webc::StreamTimeout>()? {
+        genai::webc::StreamTimeout::Headers => Some(silent(
+            "did not answer",
+            limits.map_or_else(Default::default, |l| l.first_byte),
+        )),
+        genai::webc::StreamTimeout::Read => None,
+    }
+}
+
 /// Why the model stopped, from the provider's own value (the raw string;
 /// genai's own normalisation is not used, so this table is the whole
 /// rule). A value not listed, or none, is `Other`: never `End`.
@@ -349,16 +373,52 @@ impl Provider for LlmProvider {
         if let Some(e) = req.effort {
             opts = opts.with_reasoning_effort(effort(e));
         }
+        // No answer without tool calls is asked of a model the loop would
+        // refuse one from (the tools stay listed: Anthropic needs them once
+        // the history holds tool use).
+        if req.no_tool_calls && !req.tools.is_empty() {
+            opts = opts.with_tool_choice(genai::chat::ToolChoice::None);
+        }
+        // Neither genai nor reqwest has a timeout here by default. genai
+        // times the wait for the response headers; the wait for the first
+        // event after them, and between events (keep-alive pings count),
+        // is timed below.
+        if let Some(l) = req.limits {
+            opts = opts.with_stream_header_timeout(l.first_byte);
+        }
+        let limits = req.limits;
+        let fail =
+            |e: genai::Error| header_timeout(&e, limits).unwrap_or_else(|| provider_error(e));
         let mut stream = self
             .client
             .exec_chat_stream(&req.model, to_genai(req), Some(&opts))
             .await
-            .map_err(provider_error)?
+            .map_err(fail)?
             .stream;
         let mut text = String::new();
         let mut out = Completion::default();
-        while let Some(ev) = stream.next().await {
-            match ev.map_err(provider_error)? {
+        // `Start` comes with the headers: the first answer is the event
+        // after it.
+        let mut answered = false;
+        loop {
+            let next = match limits {
+                None => stream.next().await,
+                Some(l) => {
+                    let (wait, what) = if answered {
+                        (l.idle, "sent nothing more")
+                    } else {
+                        (l.first_byte, "sent nothing")
+                    };
+                    match tokio::time::timeout(wait, stream.next()).await {
+                        Ok(n) => n,
+                        Err(_) => return Err(silent(what, wait)),
+                    }
+                }
+            };
+            let Some(ev) = next else { break };
+            let ev = ev.map_err(fail)?;
+            answered |= !matches!(ev, ChatStreamEvent::Start);
+            match ev {
                 ChatStreamEvent::Chunk(c) => {
                     if !c.content.is_empty() {
                         text.push_str(&c.content);
@@ -379,6 +439,7 @@ impl Provider for LlmProvider {
                             context_tokens: 0,
                             cache_read_tokens: n(d.and_then(|d| d.cached_tokens)),
                             cache_write_tokens: n(d.and_then(|d| d.cache_creation_tokens)),
+                            ..Default::default()
                         });
                     }
                     if let Some(content) = end.captured_content {
@@ -572,6 +633,8 @@ mod tests {
             tools: vec![],
             effort: None,
             cache: false,
+            limits: None,
+            no_tool_calls: false,
         });
         assert_eq!(r.messages.len(), 2, "the note was sent as a message");
     }
@@ -603,6 +666,8 @@ mod tests {
             }],
             effort: None,
             cache: false,
+            limits: None,
+            no_tool_calls: false,
         });
         assert_eq!(r.messages.len(), 4);
         assert_eq!(r.tools.as_ref().map(|t| t.len()), Some(1));
@@ -632,6 +697,8 @@ mod tests {
             tools: vec![],
             effort: None,
             cache: false,
+            limits: None,
+            no_tool_calls: false,
         });
         let parts = r.messages[0].content.parts();
         assert_eq!(parts.len(), 2);
@@ -678,6 +745,8 @@ mod tests {
             tools: vec![],
             effort: None,
             cache: true,
+            limits: None,
+            no_tool_calls: false,
         }))
     }
 
@@ -728,6 +797,8 @@ mod tests {
             tools: vec![],
             effort: None,
             cache: false,
+            limits: None,
+            no_tool_calls: false,
         });
         assert!(marked(&off).is_empty());
     }
@@ -757,6 +828,8 @@ mod tests {
                 tools: vec![],
                 effort: None,
                 cache: true,
+                limits: None,
+                no_tool_calls: false,
             });
             let at = marked(&r);
             assert!(at.len() <= 4, "{n}: {at:?}");
@@ -799,6 +872,8 @@ mod tests {
                 tools: vec![],
                 effort: None,
                 cache: false,
+                limits: None,
+                no_tool_calls: false,
             };
             let r = &r;
             async move {

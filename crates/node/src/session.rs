@@ -59,19 +59,17 @@ pub(crate) struct Session {
     head: tokio::sync::Mutex<u64>,
     cwd: PathBuf,
     model: String,
-    /// The chat's approval mode (T48): set at create, changed only by
+    /// The chat's approval mode (T50): set at create, changed only by
     /// [`Self::set_mode`] (the owner's command, recorded as
     /// `approval_mode_changed`), rebuilt from the log at load. Read at
     /// every approval, so a change applies from the next call.
     mode: ModeCell,
-    /// The modes of the chats above a sub-agent's, nearest first: it never
-    /// runs above any of them, as they are now (a ceiling read at every
-    /// call, not a copy taken when it started; research 02 §8). Empty for
-    /// a chat of the person's own.
-    above: Vec<ModeCell>,
     /// Held while a mode change is recorded and applied, so the mode in
     /// force is always the log's latest.
     mode_change: tokio::sync::Mutex<()>,
+    /// Calls the Accept edits rule let through, by call id, until the loop
+    /// asks ([`TurnHost::confined`]).
+    confined: Mutex<std::collections::HashSet<String>>,
     profile: Profile,
     incognito: bool,
     /// Set on a delegated sub-task's session; limits what its turns may do.
@@ -118,6 +116,10 @@ pub(crate) struct Session {
     /// This session's background commands (T.8d): an agentic session that
     /// is not a sub-agent's. Dropping it stops every one.
     bg: Option<Arc<harness_tools::background::SessionBg>>,
+    /// This session's MCP servers (X.3), from node.toml alone: an agentic
+    /// session that is not a sub-agent's, on a node that has some. Started
+    /// by the first turn that offers their tools; dropping it stops them.
+    mcp: Option<Arc<harness_tools::mcp::SessionMcp>>,
     /// Ends that came while a turn ran: recorded at its next step boundary
     /// (`delivered`), or after its end.
     bg_queue: Mutex<Vec<harness_tools::background::Ended>>,
@@ -140,6 +142,9 @@ pub(crate) struct Session {
     /// the turn's next model request, or by the next turn (X.5). Rebuilt
     /// from the log at load.
     pending: Mutex<Vec<(u64, UserMessage)>>,
+    /// The environment line the last `turn_started` recorded, by turn id,
+    /// for that turn's run to send (`TurnExtra::environment`).
+    turn_env: Mutex<Option<(String, String)>>,
 }
 
 /// The most messages that wait at once for the running turn to read them
@@ -231,6 +236,19 @@ fn callback_check(history: &[RawEvent], bg_ids: &[String]) -> Result<usize, Stri
     Ok(in_a_row)
 }
 
+/// A session's MCP servers (see [`Session::mcp`]): node.toml's, for an
+/// agentic session that is not a sub-agent's.
+fn mcp_servers(
+    node: &Inner,
+    profile: Profile,
+    parent: Option<SessionId>,
+) -> Option<Arc<harness_tools::mcp::SessionMcp>> {
+    if profile != Profile::Agentic || parent.is_some() {
+        return None;
+    }
+    harness_tools::mcp::SessionMcp::new(&node.cfg.policy.mcp_servers)
+}
+
 /// Pin an agentic session's folder (see [`Session::pin`]).
 fn pin_of(profile: Profile, cwd: &std::path::Path) -> Option<harness_core::folder::FolderPin> {
     if profile != Profile::Agentic {
@@ -264,16 +282,19 @@ struct Isolation {
     cwd: PathBuf,
 }
 
-/// One chat's approval mode, shared with the sub-agents it starts.
+/// One chat's approval mode (read by its sub-agents through the node's
+/// session table, `Session::current_mode`).
 pub(crate) type ModeCell = Arc<Mutex<ApprovalMode>>;
 
 fn read_mode(c: &ModeCell) -> ApprovalMode {
     *c.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// Why a mode change is refused, or what it becomes (T48).
-pub(crate) const MODE_SUB_AGENT: &str = "a sub-agent runs in the approval mode of the chat that                                           started it; change that chat's mode";
-pub(crate) const MODE_ROUTINE: &str = "a routine's chat keeps the routine's approval setting;                                         change it in the routine";
+/// Why a mode change is refused, or what it becomes (T50).
+pub(crate) const MODE_SUB_AGENT: &str =
+    "a sub-agent runs in the approval mode of the chat that started it; change that chat's mode";
+pub(crate) const MODE_ROUTINE: &str =
+    "a routine's chat keeps the routine's approval setting; change it in the routine";
 pub(crate) const MODE_CHAT: &str = "a chat without tools has no approval mode to change";
 
 /// Everything needed to start a session, already validated by the runtime.
@@ -292,8 +313,6 @@ pub(crate) struct NewSession {
     pub no_callbacks: bool,
     /// Chosen by the runtime (or the parent's, for a sub-agent).
     pub exec_mode: Option<harness_core::policy::ExecMode>,
-    /// A sub-agent's: the modes of the chats above it (see `Session::above`).
-    pub above: Vec<ModeCell>,
 }
 
 impl Session {
@@ -314,25 +333,26 @@ impl Session {
             owned,
             no_callbacks,
             exec_mode,
-            above,
         } = new;
         let (bg, ends) = background_table(&node, profile, parent_session, exec_mode, 1);
         let s = Arc::new(Self {
             bg,
+            mcp: mcp_servers(&node, profile, parent_session),
             bg_queue: Mutex::new(Vec::new()),
             bg_flush: Arc::default(),
             bg_failed: AtomicBool::new(false),
             bg_gate: tokio::sync::Mutex::new(()),
             queue: tokio::sync::Mutex::new(()),
             pending: Mutex::new(Vec::new()),
+            turn_env: Mutex::new(None),
             node: node.clone(),
             id,
             head: tokio::sync::Mutex::new(0),
             cwd: cwd.clone(),
             model: model.clone(),
             mode: Arc::new(Mutex::new(mode)),
-            above,
             mode_change: tokio::sync::Mutex::new(()),
+            confined: Mutex::new(std::collections::HashSet::new()),
             profile,
             incognito,
             parent_session,
@@ -426,6 +446,7 @@ impl Session {
         );
         let s = Arc::new(Self {
             bg,
+            mcp: mcp_servers(&node, meta.profile, meta.parent_session),
             bg_queue: Mutex::new(Vec::new()),
             bg_flush: Arc::default(),
             bg_failed: AtomicBool::new(false),
@@ -434,17 +455,15 @@ impl Session {
             // Sent while a turn ran that a restart cut: the next turn reads
             // them (X.5).
             pending: Mutex::new(unread(&events)),
+            turn_env: Mutex::new(None),
             node,
             id,
             head: tokio::sync::Mutex::new(view.head_seq),
             cwd: PathBuf::from(meta.cwd),
             model: meta.model,
             mode: Arc::new(Mutex::new(mode)),
-            // A sub-agent's chat is not resumed after a restart (its turn
-            // ended with the node); were it, it would run at most at its own
-            // recorded mode.
-            above: Vec::new(),
             mode_change: tokio::sync::Mutex::new(()),
+            confined: Mutex::new(std::collections::HashSet::new()),
             profile: meta.profile,
             incognito: meta.incognito,
             parent_session: meta.parent_session,
@@ -622,6 +641,38 @@ impl Session {
                 bg.stop_all(reason);
                 Ok(())
             }
+        }
+    }
+
+    /// Stop this session's MCP servers for good (it is being deleted, or
+    /// the node is stopping) and wait for their processes, at most
+    /// `bound`. True when they are gone.
+    pub(crate) async fn close_mcp(&self, bound: std::time::Duration) -> bool {
+        match &self.mcp {
+            Some(m) => {
+                m.close();
+                m.wait_gone(bound).await
+            }
+            None => true,
+        }
+    }
+
+    /// Order this session's MCP servers to stop for good; not waited for.
+    pub(crate) fn close_mcp_now(&self) {
+        if let Some(m) = &self.mcp {
+            m.close();
+        }
+    }
+
+    /// MCP server processes of this session still alive.
+    pub(crate) fn mcp_running(&self) -> usize {
+        self.mcp.as_ref().map_or(0, |m| m.running())
+    }
+
+    /// Stop the MCP servers no call used for `idle`.
+    pub(crate) fn mcp_idle(&self, idle: std::time::Duration) {
+        if let Some(m) = &self.mcp {
+            m.stop_idle(idle);
         }
     }
 
@@ -892,18 +943,25 @@ impl Session {
     }
 
     /// The mode in force for the next call: this chat's own, never above
-    /// a chat above it, never above what this node allows it now.
+    /// what this node allows now, and for a sub-agent never above the chat
+    /// that started it as that chat is now (and its own parents, read at
+    /// every call: research 02 §8, a ceiling, not a copy). This holds after
+    /// a restart and for a child loaded again later, since it is read from
+    /// the parent each time; a sub-agent whose parent this node does not
+    /// hold (deleted, not loaded) asks.
     pub(crate) fn current_mode(&self) -> ApprovalMode {
-        let own = self
-            .above
-            .iter()
-            .map(read_mode)
-            .fold(read_mode(&self.mode), ApprovalMode::min);
-        own.min(self.node.cfg.policy.max_approval_mode)
+        let own = read_mode(&self.mode).min(self.node.cfg.policy.max_approval_mode);
+        match self.parent_session {
+            None => own,
+            Some(pid) => match self.node.session(pid) {
+                Some(parent) if parent.id != self.id => own.min(parent.current_mode()),
+                _ => own.min(ApprovalMode::Ask),
+            },
+        }
     }
 
-    /// The owner's change of the chat's approval mode (T48): clamped by
-    /// node.toml's `max_approval_mode` and the chat's execution mode,
+    /// The owner's change of the chat's approval mode (T50): clamped by
+    /// node.toml's `max_approval_mode` (nothing else limits it),
     /// recorded as `approval_mode_changed` by this session (one writer),
     /// then applied: from the next call on. A card waiting now is not
     /// answered by it. Refused for a sub-agent's chat, a routine's and a
@@ -1183,7 +1241,8 @@ impl Session {
         Ok(())
     }
 
-    /// After a turn that ended `completed` or with an error, with messages
+    /// After a turn that ended `completed`, at its step limit or with an
+    /// error, with messages
     /// it never read (they came after its last step, or it failed: the
     /// message is often the fix, review ST-3; or it was a callback turn,
     /// which reads none, ST-2): a turn of the person's starts with them,
@@ -1197,7 +1256,10 @@ impl Session {
         agent: Option<AgentSpec>,
         after: TurnExtra,
     ) {
-        while matches!(reason, TurnEndReason::Completed | TurnEndReason::Error) {
+        while matches!(
+            reason,
+            TurnEndReason::Completed | TurnEndReason::Error | TurnEndReason::Limit
+        ) {
             let Some((turn_id, user_text, history, extra, cancel, by_stop)) =
                 self.start_queued(agent.as_ref(), after.clone()).await
             else {
@@ -1429,11 +1491,13 @@ impl Session {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clear();
+        let environment = self.environment_line(&turn_id).await;
         if let Err(e) = self
             .emit(EventKind::TurnStarted(TurnStarted {
                 turn_id: turn_id.clone(),
                 agent: agent.as_ref().map(AgentSpec::agent_ref),
                 cause: Some(cause.clone()),
+                environment,
             }))
             .await
         {
@@ -1513,11 +1577,13 @@ impl Session {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clear();
+        let environment = self.environment_line(turn_id).await;
         let started = self
             .emit(EventKind::TurnStarted(TurnStarted {
                 cause: None,
                 agent: agent.map(AgentSpec::agent_ref),
                 turn_id: turn_id.into(),
+                environment,
             }))
             .await;
         drop(gate);
@@ -1616,6 +1682,40 @@ impl Session {
             // Ends queued while it ran are recorded after it.
             self.bg_flush.notify_one();
         }
+    }
+
+    /// The environment line for turn `turn_id` (`crate::environment`),
+    /// composed now, before its `turn_started` records it, and kept for
+    /// the turn's run: the node's clock, OS, shell and the repository's
+    /// `HEAD`, read in the instruction files' bound. `None` for a chat or
+    /// a folder that fails its check.
+    async fn environment_line(&self, turn_id: &str) -> Option<String> {
+        use crate::instructions::{self as ins, Bounded};
+        if self.profile != Profile::Agentic {
+            return None;
+        }
+        let dir = self.checked_folder().ok()?;
+        let granted = match &self.owned {
+            Some(o) => o.top.clone(),
+            None => self.node.cfg.policy.root_of(&dir).ok()?,
+        };
+        let protected = self.node.cfg.policy.protected_dirs.clone();
+        let now = jiff::Zoned::now();
+        let read = ins::bounded(
+            move || crate::environment::repo(&dir, &granted, &protected),
+            &CancellationToken::new(),
+            ins::READ_TIMEOUT,
+        )
+        .await;
+        let repo = match read {
+            Bounded::Done(r) => crate::environment::Looked::Read(r),
+            Bounded::TimedOut => crate::environment::Looked::TimedOut,
+            Bounded::Cancelled | Bounded::Failed(_) => crate::environment::Looked::Failed,
+        };
+        let line = crate::environment::line(&now, &repo);
+        *self.turn_env.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some((turn_id.to_string(), line.clone()));
+        Some(line)
     }
 
     /// `extra` with the repository's instruction files
@@ -1763,7 +1863,7 @@ impl Session {
         }
 
         let extra_cause_none = extra.cause.is_none();
-        let extra = self
+        let mut extra = self
             .with_instructions(
                 extra,
                 agent.as_ref(),
@@ -1772,6 +1872,15 @@ impl Session {
                 &cancel,
             )
             .await;
+        // The environment line this turn's `turn_started` recorded: the
+        // message is sent with exactly what the log rebuilds it with.
+        extra.environment = self
+            .turn_env
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+            .filter(|(t, _)| *t == turn_id)
+            .map(|(_, l)| l);
         // Run the backend in its own task so a panic still ends the turn.
         let this = self.clone();
         let tid = turn_id.clone();
@@ -2524,12 +2633,9 @@ impl Session {
                 title: format!("@{}: {short}", agent.agent_id),
                 cwd,
                 model: agent.model.clone().unwrap_or_else(|| self.model.clone()),
-                // Its parent's mode now, and the parent's (and theirs) as
-                // ceilings at every call after (T48).
+                // Its parent's mode now; the parent's, as it is then, is its
+                // ceiling at every call after (`current_mode`, T50).
                 mode: self.current_mode(),
-                above: std::iter::once(self.mode.clone())
-                    .chain(self.above.iter().cloned())
-                    .collect(),
                 profile: self.profile,
                 agent_id: Some(agent.agent_id.clone()),
                 incognito: self.incognito,
@@ -3031,6 +3137,13 @@ impl TurnHost for Session {
             .remove(call_id)
     }
 
+    fn confined(&self, call_id: &str) -> bool {
+        self.confined
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(call_id)
+    }
+
     fn tool_denied(&self, tool: &str) -> bool {
         self.node.cfg.policy.denies(tool)
     }
@@ -3039,6 +3152,12 @@ impl TurnHost for Session {
         self.bg
             .clone()
             .map(|b| b as Arc<dyn std::any::Any + Send + Sync>)
+    }
+
+    fn mcp(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+        self.mcp
+            .clone()
+            .map(|m| m as Arc<dyn std::any::Any + Send + Sync>)
     }
 
     async fn background_notes(
@@ -3139,10 +3258,14 @@ impl TurnHost for Session {
         if !mode.needs_approval(risk) {
             return Decision::Allow;
         }
-        // Accept edits (T48): a file change inside the folder runs unasked;
+        // Accept edits (T50): a file change inside the folder runs unasked;
         // it is checkpointed and undone with the turn. The path is judged
         // here, by the node, from the call's own input.
         if mode.accepts_edits() && risk == ToolRisk::Mutating && self.edit_inside(tool, input) {
+            self.confined
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(call_id.to_string());
             return Decision::Allow;
         }
         // "For this turn" is offered on every request a person answers: it
@@ -3166,6 +3289,20 @@ impl TurnHost for Session {
         }
         let chat_allow = !background_start && self.parent_session.is_none();
         let approval_id = new_id();
+        let mut reason = approval_reason(tool, risk, input, &self.node.cfg.policy, self.exec_mode);
+        // An MCP tool's card names the server and its own name of the tool
+        // (review N2): a cleaned or hashed public name says little.
+        if let Some(m) = self
+            .mcp
+            .as_ref()
+            .filter(|_| tool.starts_with(harness_tools::mcp::PREFIX))
+            && let Some((server, raw)) = m.origin(tool).await
+        {
+            reason = format!(
+                "{reason} (server `{server}`, its tool `{}`)",
+                harness_core::event::shown_name(&raw)
+            );
+        }
         let (tx, rx) = oneshot::channel();
         self.approvals
             .lock()
@@ -3177,7 +3314,7 @@ impl TurnHost for Session {
                 call_id: call_id.into(),
                 tool: tool.into(),
                 input: input.clone(),
-                reason: approval_reason(tool, risk, input, &self.node.cfg.policy, self.exec_mode),
+                reason,
                 // "For this turn" would cover every identical start of the
                 // turn (N-2): a background start is asked for each time.
                 turn_allow: !background_start,
@@ -3393,6 +3530,12 @@ fn tool_reason(tool: &str, risk: ToolRisk, input: &Value, policy: &crate::NodePo
             s.push_str("; the network is on, so it can accept connections");
         }
         return s;
+    }
+    if tool.starts_with(harness_tools::mcp::PREFIX) {
+        return format!(
+            "`{tool}` is a tool of an MCP server this node runs (node.toml): a program the \
+             harness did not write, in this chat's folder; what it does is up to that server"
+        );
     }
     match (tool, risk) {
         ("publish", _) => "`publish` uploads a copy of a file from this folder to Artifacts".into(),

@@ -1,7 +1,7 @@
 //! SQLite event log. The same schema serves the node's authoritative log and
 //! the master's mirror; only durability differs. See PLAN.md §2–3.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -251,6 +251,9 @@ pub struct MemberRow {
     pub joined_ms: i64,
     /// The member's own choice to use their personal memory here.
     pub use_memory: bool,
+    /// Whether they answered that question (a new team member has not:
+    /// the join question; until then `use_memory` is false).
+    pub memory_answered: bool,
     /// Their level here as stored (the master reads an owner's as `host`).
     pub exec_level: ExecLevel,
     /// Their account's ceiling as stored, and whether they are a server
@@ -282,6 +285,8 @@ pub struct Membership {
     pub workspace: WorkspaceRow,
     pub role_id: String,
     pub use_memory: bool,
+    /// Whether they answered the join question (`MemberRow::memory_answered`).
+    pub memory_answered: bool,
     /// Their level there as stored (an owner's counts as `host`).
     pub exec_level: ExecLevel,
     /// How many members the workspace has.
@@ -327,6 +332,13 @@ CREATE TABLE IF NOT EXISTS sessions (
     last_asks  INTEGER NOT NULL DEFAULT 0,
     asks_user  INTEGER NOT NULL DEFAULT 0,
     attention_seq INTEGER NOT NULL DEFAULT 0,
+    -- The running turn was started by the harness (a callback, T.8d): its
+    -- end is signalled by the callback's own attention row instead.
+    turn_callback INTEGER NOT NULL DEFAULT 0,
+    -- The seq of the last turn end worth telling the owner about (a
+    -- top-level chat's turn that completed or failed, did not end with a
+    -- question and was not a callback): "finished, unread" until seen.
+    finished_seq INTEGER NOT NULL DEFAULT 0,
     -- Set when a second writer sent other content under this seq (PLAN.md
     -- §3): every later append is refused until the session is deleted.
     diverged_seq INTEGER
@@ -445,10 +457,10 @@ CREATE TABLE IF NOT EXISTS workspace_members (
     role_id      TEXT NOT NULL,          -- owner | admin | member | guest
     joined_ms    INTEGER NOT NULL,
     -- The member's own choice to share their facts (personal memory) with this
-    -- workspace's chats: recall and proposals. Every insert says it (1 in
-    -- Personal, 0 elsewhere); the default only covers an insert that forgets,
-    -- and then it shares nothing.
-    use_memory   INTEGER NOT NULL DEFAULT 0,
+    -- workspace's chats: recall and proposals. 1 in Personal; NULL for a new
+    -- team member until they answer the join question (shares nothing, like
+    -- 0), then 0 or 1.
+    use_memory   INTEGER CHECK (use_memory IN (0, 1)),
     -- The member's level here, set by the workspace's admins; every new
     -- member starts at none. An owner's counts as host (the master).
     exec_level   TEXT NOT NULL DEFAULT 'none'
@@ -910,20 +922,29 @@ impl Store {
                 )?;
             }
             "turn_started" => {
+                let callback = e.payload.get("cause").is_some_and(|c| !c.is_null());
                 tx.execute(
-                    "UPDATE sessions SET running = 1, asks_user = 0, last_asks = 0 WHERE session_id = ?1",
-                    params![sid],
+                    "UPDATE sessions SET running = 1, asks_user = 0, last_asks = 0, turn_callback = ?2 WHERE session_id = ?1",
+                    params![sid, callback],
                 )?;
             }
             "turn_ended" => {
-                let completed =
-                    e.payload.get("reason").and_then(|v| v.as_str()) == Some("completed");
+                let reason = e.payload.get("reason").and_then(|v| v.as_str());
+                // A turn that used its step budget ends with its account,
+                // which may ask the person (`limit`, as `completed`).
+                let completed = matches!(reason, Some("completed" | "limit"));
+                // A cancel is the person's own doing; a stop or an
+                // interruption is the node's, recorded at its next start.
+                let tells = completed || reason == Some("error");
                 tx.execute(
                     "UPDATE sessions SET running = 0,
+                        finished_seq = CASE WHEN ?4 AND parent_id IS NULL AND turn_callback = 0
+                                             AND NOT (?2 AND last_asks = 1)
+                                       THEN ?3 ELSE finished_seq END,
                         asks_user = CASE WHEN ?2 AND last_asks = 1 THEN 1 ELSE 0 END,
                         attention_seq = CASE WHEN ?2 AND last_asks = 1 THEN ?3 ELSE attention_seq END
                      WHERE session_id = ?1",
-                    params![sid, completed, e.seq as i64],
+                    params![sid, completed, e.seq as i64, tells],
                 )?;
             }
             "assistant_message" => {
@@ -1619,6 +1640,39 @@ impl Store {
         Ok(out)
     }
 
+    /// The latest `session_created` or `approval_mode_changed` of `sid`: the
+    /// chat's approval mode as its log says (T50), so a lowering is never
+    /// gated like a raise. One read on the primary key.
+    pub fn last_mode_event(&self, sid: SessionId) -> Result<Option<RawEvent>> {
+        let conn = self.lock();
+        Ok(conn
+            .query_row(
+                "SELECT seq, ts_ms, kind, payload FROM events WHERE session_id = ?1
+                 AND kind IN ('session_created', 'approval_mode_changed')
+                 ORDER BY seq DESC LIMIT 1",
+                params![sid.to_string()],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?
+            .map(|(seq, ts_ms, kind, payload)| {
+                Ok::<_, serde_json::Error>(RawEvent {
+                    session_id: sid,
+                    seq: seq as u64,
+                    ts_ms,
+                    kind,
+                    payload: serde_json::from_str(&payload)?,
+                })
+            })
+            .transpose()?)
+    }
+
     /// `background_started` and `background_ended` of `sid` recorded at or
     /// after `since_ms` (node clock), oldest first: which commands the
     /// mirror shows running, rebuilt at the master's start.
@@ -1666,6 +1720,50 @@ impl Store {
             }
         }
         Ok(None)
+    }
+
+    /// `owner`'s chats (`None`: every chat) whose last turn finished after
+    /// `viewer` last looked at them ("finished, unread" in the list).
+    pub fn unread(&self, owner: Option<&str>, viewer: &str) -> Result<HashSet<SessionId>> {
+        let conn = self.lock();
+        let mut st = conn.prepare_cached(
+            "SELECT s.session_id FROM sessions s
+             LEFT JOIN seen v ON v.session_id = s.session_id AND v.user_id = ?2
+             WHERE (?1 IS NULL OR s.owner_id = ?1)
+               AND s.finished_seq > COALESCE(v.seq, 0)",
+        )?;
+        let rows = st.query_map(params![owner, viewer], |r| r.get::<_, String>(0))?;
+        let mut out = HashSet::new();
+        for r in rows {
+            let id = r?;
+            out.insert(
+                id.parse()
+                    .map_err(|_| StoreError::Corrupt(format!("session id {id}")))?,
+            );
+        }
+        Ok(out)
+    }
+
+    /// The input of tool call `call_id` of `sid` and its tool's name, from
+    /// its `tool_call_started`; `None` when the mirror has no such call.
+    pub fn tool_call(
+        &self,
+        sid: SessionId,
+        call_id: &str,
+    ) -> Result<Option<(String, serde_json::Value)>> {
+        let conn = self.lock();
+        let payload: Option<String> = conn
+            .prepare_cached(
+                "SELECT payload FROM events WHERE session_id = ?1 AND kind = 'tool_call_started'
+                   AND json_extract(payload, '$.call_id') = ?2
+                 ORDER BY seq DESC LIMIT 1",
+            )?
+            .query_row(params![sid.to_string(), call_id], |r| r.get(0))
+            .optional()?;
+        let Some(p) = payload else { return Ok(None) };
+        let v: serde_json::Value = serde_json::from_str(&p)?;
+        let tool = v["tool"].as_str().unwrap_or_default().to_string();
+        Ok(Some((tool, v["input"].clone())))
     }
 
     /// The seq up to which `user` has seen chat `sid` (0 when never).
@@ -2379,15 +2477,16 @@ impl Store {
     // ---- workspaces (master only) ----
 
     /// A membership row. `use_memory` is whether the member shares their
-    /// facts with the workspace: on in Personal, off in a team workspace
-    /// (the creator's own membership included) until they turn it on.
+    /// facts with the workspace: on in Personal; in a team workspace `None`
+    /// (the creator's own membership included), the join question nobody
+    /// answered yet, which shares nothing.
     fn insert_member(
         conn: &Connection,
         ws: &str,
         user_id: &str,
         role_id: &str,
         now: i64,
-        use_memory: bool,
+        use_memory: Option<bool>,
     ) -> rusqlite::Result<usize> {
         conn.execute(
             "INSERT INTO workspace_members (workspace_id, user_id, role_id, joined_ms, use_memory) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -2402,7 +2501,7 @@ impl Store {
             "INSERT INTO workspaces (workspace_id, name, personal_owner, created_ms) VALUES (?1, ?2, ?3, ?4)",
             params![ws, PERSONAL_NAME, user_id, now],
         )?;
-        Self::insert_member(conn, &ws, user_id, OWNER, now, true)?;
+        Self::insert_member(conn, &ws, user_id, OWNER, now, Some(true))?;
         Ok(ws)
     }
 
@@ -2541,7 +2640,8 @@ impl Store {
                 Ok(Membership {
                     workspace: Self::workspace_from_row(r)?,
                     role_id: r.get(5)?,
-                    use_memory: r.get::<_, i64>(6)? != 0,
+                    use_memory: r.get::<_, Option<i64>>(6)? == Some(1),
+                    memory_answered: r.get::<_, Option<i64>>(6)?.is_some(),
                     exec_level: level_col(r, 7)?,
                     members: r.get::<_, i64>(8)? as u64,
                 })
@@ -2569,7 +2669,8 @@ impl Store {
             disabled: r.get::<_, i64>(2)? != 0,
             role_id: r.get(3)?,
             joined_ms: r.get(4)?,
-            use_memory: r.get::<_, i64>(5)? != 0,
+            use_memory: r.get::<_, Option<i64>>(5)? == Some(1),
+            memory_answered: r.get::<_, Option<i64>>(5)?.is_some(),
             exec_level: level_col(r, 6)?,
             exec_ceiling: level_col(r, 7)?,
             server_admin: r.get::<_, String>(8)? == "admin",
@@ -2678,7 +2779,7 @@ impl Store {
             "INSERT INTO workspaces (workspace_id, name, created_ms, settings) VALUES (?1, ?2, ?3, ?4)",
             params![w.workspace_id, w.name, w.created_ms, w.settings],
         )?;
-        Self::insert_member(&tx, &w.workspace_id, owner, OWNER, w.created_ms, false)?;
+        Self::insert_member(&tx, &w.workspace_id, owner, OWNER, w.created_ms, None)?;
         tx.commit()?;
         Ok(w)
     }
@@ -2735,7 +2836,7 @@ impl Store {
         let Some(username) = username else {
             return Ok(false);
         };
-        match Self::insert_member(&tx, ws, user_id, role_id, harness_core::now_ms(), false) {
+        match Self::insert_member(&tx, ws, user_id, role_id, harness_core::now_ms(), None) {
             Ok(_) => {}
             Err(e)
                 if e.sqlite_error().map(|e| e.extended_code)

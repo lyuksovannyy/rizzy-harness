@@ -428,8 +428,9 @@ then (`crates/node/src/session.rs:65-68`), and the parent is blocked in `delegat
 time. A callback would go to a session that no longer exists. The refusal says: "return, and the
 parent can start it". Cheap to lift later if a need appears.
 
-**Routine chats: allowed.** A routine runs in `ask` or `ask_all`, so a background start parks for
-the owner's click. The run is the chat's first turn (`docs/routines.md`, "Watcher"), so callback
+**Routine chats: allowed.** In `ask` or `ask_all` a background start parks for the owner's click;
+in `auto` (a routine's default since the owner's decision of 2026-11-14) it starts unasked with
+nobody present, within the node's `max_approval_mode`; a run with webhook data asks. The run is the chat's first turn (`docs/routines.md`, "Watcher"), so callback
 turns are later turns and do not change the run's status. They do use the session's
 `callback_turns` like any chat.
 
@@ -811,7 +812,11 @@ step 1), the callback turn's mark and the attention items (step 3).
   `node_restarted` for each, and one whose link only dropped still has them running, with the
   strip's Stop working again. **A node without `CAP_BACKGROUND`**: 409, sent nothing. A node that
   is stopping: 503 (it stops them itself, `node_stopping`). No ack in time: 504.
-- **The strip** (`web/src/components/BackgroundStrip.tsx`, rows from `web/src/lib/background.ts`):
+- **The strip** (replaced on 2026-11-14 by the side panel: `web/src/components/SidePanel.tsx`,
+  rows from `sideItems.ts` and `web/src/lib/background.ts`; one list beside the conversation with
+  the turn's sub-agents, a separator, then the commands; ended rows of the latest turn stay; the
+  rest below holds for its command rows, except that an end no longer shows "ended" for 6 s: the
+  row keeps its state for the turn). As it was built:
   above the reply box while a command of the open chat runs, one row per command in start order:
   the id, the first non-empty line of the command cut at 80 characters (the start call's input,
   the model's text: React text, hidden characters marked by `showHidden`, never HTML; `title` is
@@ -834,7 +839,7 @@ step 1), the callback turn's mark and the attention items (step 3).
 - **A node that is away** (the node list says `connected: false`; a node the list does not name
   is not taken as away, and the server's 503 says it if it is): the strip says so in words, each
   row shows "node away" instead of the time left, and no Stop is offered.
-- **The chunk.** The strip is its own lazy chunk (`BackgroundStrip-*.js`), imported by the
+- **The chunk.** The side panel is its own lazy chunk (`SidePanel-*.js`; it was `BackgroundStrip-*.js`), imported by the
   conversation on the first running command of the open chat and then kept mounted for that
   chat (it hides itself) so an end the tab asked for can show; a chat with none never loads it.
   `size.mjs` checks it stays out of the first load. Measured: 1.9 KB gzipped (its stylesheet

@@ -58,6 +58,15 @@ pub trait TurnHost: Send + Sync {
         false
     }
 
+    /// Whether `approve` let `call_id` through on the chat's Accept edits
+    /// rule rather than a person's answer; taken once. Such a call runs with
+    /// `allow_outside_workspace` off, so the tool walks the path the same
+    /// way the rule did and a link planted between the two is refused
+    /// (T50).
+    fn confined(&self, _call_id: &str) -> bool {
+        false
+    }
+
     /// Where this session's turns publish files (`publish`); `None` when
     /// publishing is off here (chat sessions, nodes without staging).
     fn artifacts(&self) -> Option<std::sync::Arc<dyn crate::artifacts::ArtifactSink>> {
@@ -100,6 +109,15 @@ pub trait TurnHost: Send + Sync {
     /// commands do not exist (the chat runtime, tests). The loop refuses
     /// them for a sub-agent whatever this returns.
     fn background(&self) -> Option<std::sync::Arc<dyn std::any::Any + Send + Sync>> {
+        None
+    }
+
+    /// This session's MCP servers (`harness_tools::mcp::SessionMcp`,
+    /// ADOPTION_PLAN X.3), made by the node from its own node.toml alone.
+    /// Type-erased like [`Self::background`]; `None` where there are none
+    /// (chat sessions, sub-agents, nodes without servers, tests). The loop
+    /// offers none to a sub-agent whatever this returns.
+    fn mcp(&self) -> Option<std::sync::Arc<dyn std::any::Any + Send + Sync>> {
         None
     }
 
@@ -188,8 +206,10 @@ pub struct TurnExtra {
     /// Token-saving methods in effect for this turn.
     pub savings: crate::savings::Savings,
     /// Context that changes every turn (memory recall, page context). It is
-    /// sent after the history, not in the system prompt, so the cached
-    /// prefix stays the same from turn to turn. Never stored.
+    /// sent after the history, not in the system prompt, so the system
+    /// prompt and the history before this turn stay cached. Never stored:
+    /// the next turn resends this turn's message without it, so the cache
+    /// stops at that message.
     pub context: Option<String>,
     /// The repository's instruction files (`AGENTS.md`, `CLAUDE.md`), and
     /// the catalogue of skills after them, read by the node at the start
@@ -198,6 +218,12 @@ pub struct TurnExtra {
     /// of it; a callback turn, which takes no `context`, gets them after
     /// its opening. Never stored.
     pub instructions: Option<String>,
+    /// One line of the harness's about where the turn runs (the node's
+    /// date and time zone, OS, shell, git branch), composed by the node at
+    /// the start of this turn. Set only by the node, never from the
+    /// protocol. It opens the turn's own message, and `turn_started`
+    /// records it, so later requests rebuild that message byte for byte.
+    pub environment: Option<String>,
     /// The skills the node found for this turn (`crate::skills`), which
     /// the `skill` tool loads from; their catalogue is at the end of
     /// `instructions`. Set only by the node, never from the protocol.
@@ -225,6 +251,9 @@ pub struct TurnExtra {
     /// order, before this turn's own message. Set only by the node.
     pub queued: Vec<crate::event::UserMessage>,
 }
+
+/// How the node's environment line ([`TurnExtra::environment`]) begins.
+pub const ENVIRONMENT_LEAD: &str = "[harness] Environment of this turn";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TurnOutcome {

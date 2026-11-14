@@ -69,6 +69,8 @@ enum Reply {
     /// More text than the request held.
     Pad,
     Fail,
+    /// The provider is overloaded (503): retried.
+    Busy,
     /// A short summary under the coding headings.
     Sections,
 }
@@ -211,6 +213,11 @@ impl Provider for Windowed {
                     body: "bad request".into(),
                     hint: RetryHint::default(),
                 }),
+                Reply::Busy => Err(ProviderError::Status {
+                    status: 503,
+                    body: "busy".into(),
+                    hint: RetryHint::default(),
+                }),
             };
         }
         Ok(Completion {
@@ -243,6 +250,7 @@ fn history(turns: usize, tokens: usize) -> Vec<RawEvent> {
             cause: None,
             agent: None,
             turn_id: t.clone(),
+            environment: None,
         }));
         push(EventKind::UserMessage(UserMessage {
             turn_id: t.clone(),
@@ -945,6 +953,7 @@ async fn a_background_note_and_a_callback_opening_reach_the_summariser_quoted() 
             turn_id: t.into(),
             agent: None,
             cause,
+            environment: None,
         })
     };
     let said = |t: &str, text: String| {
@@ -1143,6 +1152,7 @@ fn history_with_todo(kept: usize) -> Vec<RawEvent> {
         cause: None,
         agent: None,
         turn_id: "t1".into(),
+        environment: None,
     }));
     push(EventKind::UserMessage(UserMessage {
         turn_id: "t1".into(),
@@ -1311,6 +1321,7 @@ fn history_with_a_newer_list() -> Vec<RawEvent> {
             cause: None,
             agent: None,
             turn_id: "t9".into(),
+            environment: None,
         }),
         EventKind::UserMessage(UserMessage {
             turn_id: "t9".into(),
@@ -1589,6 +1600,101 @@ fn the_coding_summary_keeps_a_sub_agents_report_as_its_own_account() {
         !harness_agent_native::SUMMARY_PROMPT.contains("sub-agent's report"),
         "the chat prompt stays as it was"
     );
+}
+
+/// A summary call that waits to be retried says so, like a turn's call.
+#[tokio::test]
+async fn a_retried_summary_call_is_recorded() {
+    let p = Windowed::replying(BIG, vec![Reply::Busy, Reply::Short]);
+    let b = NativeBackend::new(
+        p.clone(),
+        Vec::new(),
+        NativeConfig {
+            summarize_after_tokens: Some(100),
+            retry: harness_agent_native::RetryPolicy {
+                retries: 3,
+                base: Duration::from_millis(1),
+                max: Duration::from_millis(5),
+            },
+            ..Default::default()
+        },
+    );
+    let host = Host::default();
+    let out = run(
+        &b,
+        &host,
+        history(4, 3_000),
+        agent(None),
+        Default::default(),
+    )
+    .await;
+    assert_eq!(out.reason, TurnEndReason::Completed, "{:?}", out.error);
+    let evs = host.0.lock().unwrap();
+    let retry = evs
+        .iter()
+        .position(|k| matches!(k, EventKind::ModelRetry(r) if r.reason == RetryReason::Overloaded && r.attempt == 1))
+        .expect("a model_retry event");
+    let summary = evs
+        .iter()
+        .position(|k| matches!(k, EventKind::HistorySummarized(_)))
+        .unwrap();
+    assert!(retry < summary);
+}
+
+/// A summary call that uses up its retries says the wait is over: the turn
+/// goes on without the summary, and the countdown must not stay up until
+/// the main call's first output (review 98-2).
+#[tokio::test]
+async fn a_summary_call_that_gives_up_ends_the_countdown() {
+    let p = Windowed::replying(BIG, vec![Reply::Busy; 8]);
+    let b = NativeBackend::new(
+        p.clone(),
+        Vec::new(),
+        NativeConfig {
+            summarize_after_tokens: Some(100),
+            retry: harness_agent_native::RetryPolicy {
+                retries: 2,
+                base: Duration::from_millis(1),
+                max: Duration::from_millis(5),
+            },
+            ..Default::default()
+        },
+    );
+    let host = Host::default();
+    run(
+        &b,
+        &host,
+        history(4, 3_000),
+        agent(None),
+        Default::default(),
+    )
+    .await;
+    let evs = host.0.lock().unwrap();
+    let names: Vec<&str> = evs.iter().map(|k| k.name()).collect();
+    let last_retry = names
+        .iter()
+        .rposition(|n| *n == "model_retry")
+        .expect("retried");
+    let given_up = names
+        .iter()
+        .position(|n| *n == "retry_given_up")
+        .expect("given up");
+    assert!(last_retry < given_up, "{names:?}");
+    // In the view the countdown is gone at that point.
+    let sid = SessionId::new();
+    let mut v = harness_core::view::SessionView::default();
+    for (i, k) in evs[..=given_up].iter().enumerate() {
+        let (kind, payload) = k.clone().into_parts();
+        v.apply(&RawEvent {
+            session_id: sid,
+            seq: i as u64 + 1,
+            ts_ms: 0,
+            kind,
+            payload,
+        })
+        .unwrap();
+    }
+    assert_eq!(v.retry, None);
 }
 
 /// A skill's body is a tool result, which a summary replaces: the coding

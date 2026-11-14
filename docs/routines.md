@@ -137,10 +137,16 @@ All routine time comes from one clock in the scheduler's handle (`Clock::wall()`
 
 ## Approvals in agentic routines
 
-Agentic routines run in `ask` or `ask_all` only (the node clamps further, T5); the API refuses
-`auto` even where node.toml allows it. **Nothing is approved without a click.** Read-only tools run
-unattended, so review-and-report routines finish on their own; `bash`, `edit`, `write` and
-`publish` park the run. A parked run is an ordinary chat with a pending approval: it shows in
+A routine's mode is picked when it is created or edited (all four modes), `auto` when none is
+set: the owner's decision of 2026-11-14, in their words: "about routines default mode - auto, still when creating/editing an route - allows to select the mode". This replaces O6 ("never auto-approve"). A run's mode is
+`runner::run_mode(spec, untrusted, by hand)`: the routine's mode, at most `ask` when the prompt
+holds webhook data (whoever calls the webhook writes into it), and at most
+`runner::UNATTENDED_MAX` (`auto`) for a run nobody started by hand; the save rule and the
+default follow it, and the node clamps further (T5). **A scheduled routine in `auto` runs
+commands with nobody present**, bounded by the node's `max_approval_mode`, the routine's own
+mode and, in a sandbox chat, the sandbox. In `ask`, read-only tools run unattended, so
+review-and-report routines finish on their own; `bash`, `edit`, `write` and `publish` park the
+run. A parked run is an ordinary chat with a pending approval: it shows in
 "Waiting for you" with the usual notification, the owner approves it through the normal
 endpoint, and after 24 hours it is cancelled. `allow_session` ("Allow this exact call for this
 turn") covers only that call, until the run's turn ends (each run is a new chat).
@@ -151,7 +157,7 @@ turn") covers only that call, until the run's turn ends (each run is a new chat)
 node)`. It returns the spec's mode: `auto` unless the routine sets its own (the owner's decision of
 2026-11-14: "default accept mode is Auto for every chat type"), except that an `untrusted` run
 (webhook data in its prompt) gets at most `ask`: whoever can send the webhook writes into its
-prompt, and in `auto` they would steer its commands with no card (PLAN.md T48; the owner is asked
+prompt, and in `auto` they would steer its commands with no card (PLAN.md T50; the owner is asked
 to confirm this exception). `node` is there for a trusted tool list (Later). It is
 called once per run, when the run's chat is created; the owner's later turns in that chat never go
 through it.

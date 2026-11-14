@@ -49,6 +49,7 @@ fn script(sid: SessionId, n: u64) -> Vec<RawEvent> {
             cause: None,
             agent: None,
             turn_id: "t1".into(),
+            environment: None,
         }),
     ));
     for seq in 3..=n {
@@ -324,6 +325,7 @@ fn expired_incognito_only_selects_idle_incognito() {
                 cause: None,
                 agent: None,
                 turn_id: "t".into(),
+                environment: None,
             }),
         ),
     )
@@ -345,6 +347,7 @@ fn a_shown_input_block_needs_attention() {
                 cause: None,
                 agent: None,
                 turn_id: "t1".into(),
+                environment: None,
             }),
             EventKind::AssistantMessage(AssistantMessage {
                 turn_id: "t1".into(),
@@ -881,6 +884,7 @@ fn the_watchers_read_of_a_long_last_turn_is_its_ends_only() {
             turn_id: "t".into(),
             agent: None,
             cause: None,
+            environment: None,
         }),
     );
     assert_eq!(s.append("n", &started).unwrap(), AppendOutcome::Applied);
@@ -947,4 +951,74 @@ fn the_recorded_execution_mode_is_on_the_row() {
         Some("host")
     );
     assert_eq!(s.session(none).unwrap().unwrap().exec_mode, None);
+}
+
+/// A top-level chat's turn that completed or failed is "finished, unread"
+/// for its owner until they have seen it; a cancel, a sub-agent's chat, a
+/// callback turn (its own attention row) and a question (attention) are not.
+#[test]
+fn a_finished_turn_is_unread_until_seen() {
+    let s = Store::open_in_memory().unwrap();
+    let turn = |sid: SessionId, from: u64, cause: Option<TurnCause>, text: &str, reason| {
+        let kinds = [
+            EventKind::TurnStarted(TurnStarted {
+                cause,
+                agent: None,
+                turn_id: format!("t{from}"),
+                environment: None,
+            }),
+            EventKind::AssistantMessage(AssistantMessage {
+                turn_id: format!("t{from}"),
+                message_id: format!("m{from}"),
+                text: text.into(),
+                tool_calls: vec![],
+                author: None,
+                variant: None,
+                blocks: vec![],
+            }),
+            EventKind::TurnEnded(TurnEnded {
+                turn_id: format!("t{from}"),
+                reason,
+                usage: None,
+            }),
+        ];
+        for (i, k) in kinds.into_iter().enumerate() {
+            s.append("local", &ev(sid, from + i as u64, k)).unwrap();
+        }
+    };
+    let unread = |sid| s.unread(None, "u1").unwrap().contains(&sid);
+
+    let done = SessionId::new();
+    s.append("local", &created(done)).unwrap();
+    turn(done, 2, None, "Done.", TurnEndReason::Completed);
+    assert!(unread(done));
+    s.mark_seen("u1", done, 4).unwrap();
+    assert!(!unread(done), "seen");
+    assert!(s.unread(None, "u2").unwrap().contains(&done), "per viewer");
+    // An error is news too; a cancel is the person's own doing.
+    turn(done, 5, None, "", TurnEndReason::Error);
+    assert!(unread(done));
+    s.mark_seen("u1", done, 7).unwrap();
+    turn(done, 8, None, "Half", TurnEndReason::Cancelled);
+    assert!(!unread(done), "cancelled");
+    // A question is attention, not "finished".
+    turn(done, 11, None, "Shall I go on?", TurnEndReason::Completed);
+    assert!(!unread(done), "a question");
+    // A callback turn has its own attention row.
+    turn(
+        done,
+        14,
+        Some(TurnCause::Callback(vec!["bg-1".into()])),
+        "The build failed.",
+        TurnEndReason::Completed,
+    );
+    assert!(!unread(done), "a callback turn");
+
+    // A sub-agent's chat never.
+    let child = SessionId::new();
+    let mut c = created(child);
+    c.payload["parent_session"] = json!(done.to_string());
+    s.append("local", &c).unwrap();
+    turn(child, 2, None, "Report.", TurnEndReason::Completed);
+    assert!(!unread(child), "a sub-agent's chat");
 }

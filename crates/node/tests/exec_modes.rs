@@ -488,7 +488,7 @@ async fn host_is_never_the_default() {
 
 /// The owner's decision of 2026-11-14 replaces review N-e's clamp: a
 /// `host` session runs in the mode asked for, `auto` included, within
-/// node.toml's ceiling, at create and after a restart (PLAN.md T48). Its
+/// node.toml's ceiling, at create and after a restart (PLAN.md T50). Its
 /// card, when it has one, still says the host shell.
 #[tokio::test]
 async fn a_host_session_takes_auto_within_the_nodes_ceiling() {

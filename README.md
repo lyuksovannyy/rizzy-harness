@@ -126,6 +126,23 @@ turn's agent and settings: one sent to another agent (the agent picker, or an
 `@mention` of another agent) is refused with the reason, so pick the agent for
 your next message instead.
 
+When a turn completes or fails in a chat you are not looking at (another chat
+is open, or the tab is hidden), the chat gets a dot in **Recent** until you
+open it, and with **Desktop notifications** on (Settings → Account →
+Preferences) the browser says "A chat finished: number N in your recent
+chats", never the chat's title. A sub-agent's chat, a turn the harness
+started after a background command ended (it has its own "resumed" row on
+Home) and an answer that asks you something (it waits for you on Home) do
+not get one; neither does a turn you stopped. The chat header shows the
+context of the last request as a share of the model's window and where older
+turns will be summarised ("62% of 128k · summary at 80%"). Without a known
+window it says **window unknown**: hover it for how to set `context` on the
+model. A sub-agent's card in the conversation marks where it was started
+and links to its chat; its row in the side panel shows what it is doing (its
+latest tool call and how many it made, or that it waits for an approval) and
+its tokens once it ended. Only chats in the open workspace notify, and a
+second tab may notify while another tab shows the chat.
+
 A chat is titled from its first message. The pencil next to the title in the
 chat's header renames it (Enter saves, Escape cancels; at most 200
 characters, control and hidden characters dropped); only you can rename your
@@ -196,9 +213,10 @@ Settings has four sections:
 - **Account**: your profile, appearance, search engines, default agents (one
   for chats, one for Agentic chats) and model, your memories, your password.
 - **Workspace** (everyone in it): its name, your role, who is in it, the
-  defaults it gives, and whether your facts (your memories) are shared with
-  its chats: always in Personal; in a team workspace off until you turn it
-  on, for the workspace's creator too.
+  defaults it gives, and whether your facts (your memories) are used in its
+  chats: always in Personal; in a team workspace you are asked when you join
+  it (its creator too). Until you answer, the answer is no; you can change it
+  here at any time (see **Memory.** further down).
 - **Workspace admin** (admins and owners; not for Personal): its name, default
   agents (chats and Agentic), the model each agent uses there (the Assistant's, `general`, is the
   workspace's default model), members and roles, deleting it.
@@ -259,9 +277,14 @@ status, duration, tokens and the first sentence of its answer.
   `{{last_run.status}}`, and `{{event.body.<path>}}` / `{{event.text}}` for a
   webhook); the editor's preview renders the prompt and the next runs on the
   server.
-- **Agentic routines** run in `ask` or `ask_all` only: a command, an edit or a
-  publish waits for your click in "Waiting for you" and is cancelled after
-  24 hours. Read-only work finishes on its own.
+- **Agentic routines** run in the approval mode you pick when you create or
+  edit them, Auto by default (the owner's decision of 2026-11-14). A scheduled
+  routine in Auto runs commands with nobody present, bounded by the node's
+  `max_approval_mode` and, in a sandbox chat, by the sandbox. A run that uses a
+  webhook's data always asks, whatever the routine's mode: whoever calls the
+  webhook writes into its prompt. When a run asks, a command, an edit or a
+  publish waits for your click in "Waiting for you" and is cancelled after 24
+  hours; read-only work finishes on its own.
 - **Webhooks**: `POST /api/hooks/<trigger id>` with
   `Authorization: Bearer <secret>` and a JSON or plain-text body of at most
   64 KiB (`Idempotency-Key` is honoured for 24 hours). The secret is shown once
@@ -494,7 +517,9 @@ is not retried: the agent's next fallback model answers at once, or without
 one the turn ends with a message naming the wait. A refused key, a missing
 permission, an exhausted quota or a bad request is not retried, and nothing
 is retried once part of the answer is on screen. The chat shows the turn as
-still running while it waits. When a turn's
+still running while it waits, with a line under it naming the model, why
+(rate limit, provider overloaded, provider error, connection failed) and a
+countdown to the next attempt ("attempt 2 of 3"). When a turn's
 model is unavailable, or its request still fails before any output with a model
 problem (not found, rate limit, server error, no connection), the agent's
 fallbacks are tried in order, skipping unavailable ones, and the chat notes
@@ -592,8 +617,65 @@ sub-agent keeps its own list in its own session. A new Agentic chat starts
 with the Agentic default agent (your `default_agentic_agent`, else the
 workspace's, else the Software Developer), not the chat default.
 
-Memories are proposed by the assistant during chats and used only after you
-confirm them under Settings → Account → Memory.
+**Memory.** The assistant keeps short facts about you for later chats (Settings → Account
+→ Memory lists every one of them).
+
+- **In your Personal workspace it saves them as you talk**, without asking,
+  in every chat (also one that read web pages or files: the owner's decision
+  of 2026-11-14 was "No, always save"). Each change shows as its own
+  **memory block** in the chat, where the assistant made it: "Saved to your
+  facts: …", "Saved, in this workspace only: …", "Replaced: old → new" or
+  "Forgot: …", each with **Undo**. Undo removes a save, brings back the fact
+  a replacement or forgetting retired, and the block then says it was undone
+  (after a reload too). The next chat already knows a saved fact. Replaced
+  and forgotten facts are kept under "Replaced or forgotten", restorable.
+- **Correcting and dropping facts works for every kind** the chat is given:
+  your facts, facts kept in the workspace, and the project's facts (the
+  owner, 2026-11-14: "replaces / forget - must work in all memory types with
+  ability to revert the change via the block"). A correction stays where the
+  fact was (your facts, the same workspace, the same project). It applies at
+  once where you could make that change yourself, with Undo on the block: in
+  your own chats for your facts, and for a project's facts if you manage the
+  project (or its members may confirm facts). Otherwise the block says it
+  waits for a project manager, and nothing changes. A retired project fact
+  shows on the project's Memory tab under "Replaced or forgotten", with
+  Restore for managers.
+- **Elsewhere it asks, in the chat.** In a team workspace, from a
+  sub-agent, from a message not sent by you signed in (the API token, a
+  routine's run), and for any fact you wrote yourself, the block says what
+  the assistant wants to remember, replace or forget, with **Keep** and
+  **Dismiss**: nothing changes until you click Keep.
+- **Two places.** Ordinary things about you (your preferences, people, how you
+  work) go to **your facts**, which can follow you into team workspaces.
+  Private details (health, money, identity documents, family, anything you
+  would not want a colleague's workspace to see) are **kept in the workspace
+  where they came up**: in your Personal workspace they stay there and are
+  never used anywhere else. The assistant decides which is which when it
+  saves; it can be wrong, so every fact shows its place on the Memory page
+  and **Keep private** / **Move to your facts** moves it.
+- **Team workspaces ask first.** When you join one (or create it), a question
+  at the top of the page asks whether its agents may use your facts. Until
+  you answer yes, nothing of your facts is read or added there. With yes,
+  your chats there read your facts and the assistant *suggests* new ones,
+  which wait under To review until you keep them. Your answer can be changed
+  later in Settings → Workspace. Leaving a workspace deletes what was kept in
+  it about you.
+- **Nobody else sees your memory**: not the workspace's members, not its
+  admins, not the server's admins. Deleting an account deletes its memory.
+- What the assistant reads: your facts, newest first, up to 3,000 characters
+  each turn (older ones only when your message matches them). The facts it
+  saved itself may take up to 3,000 characters; past that, a save is
+  refused and the next turn asks it to merge or drop facts first. Facts you
+  add yourself do not count. A save that waits for you, or was refused, is
+  named to the assistant in the next turn. Only you see these blocks and
+  can use their buttons.
+- Temporary chats, turns started by an external event and turns that
+  report a finished background command read and write no memory. Anything
+  that looks like a password, key or token is refused ("my passwords are in
+  1Password" is fine; the password itself is not).
+
+Project memory works as before: facts proposed for a project wait on the
+project's Memory tab (docs/projects.md).
 
 Who may create workspaces (also a switch under Settings → Server → Workspaces):
 
@@ -748,8 +830,10 @@ with one line saying what runs unasked:
 These defaults are the owner's decision of 2026-11-14, in their words: "default accept mode is Auto for every chat type, no limits for apart chat types or agentic host access modes, so each can use auto, always accept, manual, etc...". Pick another mode for a new chat beside its
 folder, or change it in the open chat at any time; the chat shows each change.
 A lower mode applies from the agent's next call; a card already waiting stays
-waiting until you answer it. Only the chat's owner can change it (nobody else,
-admins included, can see the chat), with the execution level the chat needs.
+waiting until you answer it. Only the chat's owner can change it, and the
+server's API token (which can already prompt and approve any chat); nobody
+else, admins included, can see the chat. Raising it needs the execution level
+the chat needs; lowering it is never refused.
 Nothing the agent writes, no tool output and no sub-agent can change it: a
 sub-agent never runs above the chat that started it, as that chat's mode is
 now, so lowering the chat also lowers a sub-agent that is working. A
@@ -812,8 +896,10 @@ env_pass = []                        # extra variables the agent's shell gets (s
 
 [limits]
 tool_stream_bytes = 1048576          # live output one tool call may stream (4096 .. 1 GiB)
-max_steps = 50                       # model calls one turn may make (1 .. 1000)
+max_steps = 50                       # model calls that run tools in one turn; a person's turn then gets one to sum up (1 .. 1000)
 bash_timeout_max_s = 3600            # longest a bash call may run, whatever it asks for (1 .. 3600)
+model_first_byte_timeout_s = 600     # wait for a model's first answer (10 .. 3600)
+model_idle_timeout_s = 300           # then the longest gap between its events (10 .. 3600)
 max_subagents = 4                    # sub-agents one turn may start; the master may ask for fewer (0 .. 32)
 max_delegation_depth = 1             # 1: the turn's agent may delegate, its sub-agents not; 0: off (0 .. 4)
 background_per_session = 8           # background commands one chat may run at once; 0: off (0 .. 32)
@@ -1294,6 +1380,71 @@ Passing `SSH_AUTH_SOCK` lets the agent use every key in your SSH agent. An
 invalid entry stops the node at start; `rizzy-harness doctor` prints the
 effective list.
 
+**MCP servers.** A node can give its agentic chats the tools of Model
+Context Protocol servers (stdio servers only, for now). Only the node's
+own `node.toml` adds one: nothing the server, a prompt, an agent or a
+repository's `.mcp.json` or `.codex/config.toml` says starts anything. The
+fields are Codex's, so a definition can be copied over:
+
+```toml
+[mcp_servers.github]
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+env = { GITHUB_PERSONAL_ACCESS_TOKEN = "ghp_..." }  # secrets only: given to this server, scrubbed everywhere
+env_vars = ["SSL_CERT_FILE"]          # more names passed from the node's environment
+# enabled_tools = ["create_issue", "list_issues"]   # only these (default: all it lists)
+disabled_tools = ["delete_repository"]
+startup_timeout_sec = 30              # start, initialize and list its tools (1 .. 300)
+tool_timeout_sec = 300                # one call (1 .. 3600)
+# enabled = false                     # keep the table, start nothing
+```
+
+- **Where it runs.** Each chat starts its own copy, at its first turn
+  that offers MCP tools, exactly where that chat's `bash` runs: in a
+  `sandbox` chat inside bubblewrap (its file view, its network rule, its
+  folder read-write), in a `host` chat as the node's user. So a server
+  needs what a command needs there: `npx` needs `[sandbox] write =
+  ["~/.npm"]` and the network on; a server that reads a config file needs
+  its folder in `[sandbox] read`. Sub-agents get no MCP tools.
+- **Its environment** is the agent's core list above (not `env_pass`),
+  plus its own `env_vars` and `env`. Provider keys, `.env` names and
+  `HARNESS_*` are never passed; `env` values are scrubbed from every
+  output like the provider keys. So put only secrets in `env`: a value
+  such as `/home/me` there would be blanked in every chat's text. Pass
+  ordinary variables with `env_vars`.
+- **Its tools** are offered as `mcp__<server>__<tool>`. An agent gets them
+  when its `tools` list holds `mcp` (Software Developer and Senior
+  Teamlead do; agents made on the Agents page with "commands" do), or names
+  one exactly; `deny_tools: [mcp]` removes them all, and `denied_tools` in
+  node.toml refuses one by name, `mcp__<server>` all of one server's, and
+  `mcp` every MCP tool on the node. A chat carries at most 40 MCP tools and
+  64,000 bytes of their descriptions and schemas, and leaves out a tool
+  whose schema is over 8,000 bytes; what is left out, and a server that
+  did not start, is shown in the chat once (choose with `enabled_tools`).
+- **Every call is asked about** in the `ask` mode, like `bash`: the
+  harness did not write the server, and what a server says about its own
+  tools (`readOnlyHint`) is never believed. A result is tool output like
+  any other: text only (an image or a binary resource is named, not
+  shown), cut at 30,000 characters. A message from the server over 8 MiB,
+  a call past `tool_timeout_sec` or a server that exits fails that call
+  with the reason (and the end of its error output); the server is
+  started again at its next use, at most 3 times in a row (a successful
+  call starts the count again).
+- **It never outlives its chat.** A server is stopped when its chat is
+  deleted, when the node stops, and after 10 minutes without a call (it
+  starts again when needed). A `sandbox` chat's server also dies with the
+  node; a `host` chat's can outlive a `kill -9` of the node, like its
+  commands.
+
+`rizzy-harness doctor` starts each server once and prints how many tools
+it offers, or why it did not start.
+
+Only stdio servers exist: the client library (`rmcp`, pinned at 3.8.0) has
+an advisory against its Streamable HTTP client before 3.9.0
+(RUSTSEC-2026-0462, a response body read without a limit), code this build
+does not enable. An HTTP transport must not be turned on before the pin
+moves to 3.9.0 or newer.
+
 **Streamed output.** What a command prints is shown live and stored, up to
 `[limits] tool_stream_bytes` per call (default 1 MiB). Past it the stream
 ends with `[output truncated: further output is not shown or stored]`; the
@@ -1301,9 +1452,24 @@ command keeps running until it exits, times out or is cancelled, and the
 rest of its output is read and dropped. The result the model gets has its
 own, smaller cap and says when the live stream was cut.
 
-**Step and time limits.** A turn ends after `[limits] max_steps` model calls
-(default 50, 1 to 1000; a sub-agent's turn has the same cap) with the message
-"stopped after N steps (`max_steps` in node.toml)". A `bash` call runs for
+**Step and time limits.** A turn may make `[limits] max_steps` model calls
+that run tools (default 50, 1 to 1000; a sub-agent's turn has the same cap).
+Halfway through, the agent is told how many it has used. A person's turn then
+gets one more call that runs no tool: the tools stay listed (the provider's
+cache) but the provider is asked for no tool call (`tool_choice: none`), the
+agent is asked to say what is done, what is left and what it would do next, a
+tool call it makes anyway is answered "not run", and the turn ends as "step
+limit reached", not as an error. Reply to let it carry on. A message you send
+just before that last call is not read by it: it starts the next turn, with a
+full budget. A sub-agent's last call may only `finish`; a callback turn (see
+"Background commands") still ends with "stopped after N steps". A model that
+sends nothing is cut off: `[limits] model_first_byte_timeout_s` (default 600)
+bounds the wait for its first answer (a reasoning model may think for minutes,
+a local server may read the prompt before it answers), and
+`model_idle_timeout_s` (default 300, Codex's value) the gaps after it
+(keep-alive pings count); both 10 to 3600. Such a call is tried once more,
+never after part of its answer was shown, then another model of the agent's
+answers or the turn ends with an error naming both keys. A `bash` call runs for
 the `timeout_secs` it states, at least 5 s and at most `[limits]
 bash_timeout_max_s` seconds (default 3600, 1 to 3600, which wins over the
 5 s floor if set lower); **a call that states none stops after 60 s** (it was
@@ -1343,18 +1509,27 @@ are off the agent is not offered `bash_output` or `bash_stop` and `bash` does
 not describe `background` (a call that asks for it anyway is refused with the
 reason).
 
-**What you see and how you stop one.** While a background command of the open
-chat runs, a strip above the reply box lists each one: its id (`bg-1`), the
-first line of its command (as plain text), the time left before its timeout
-stops it, and **Stop**; with two or more, **Stop all**. A click shows
-"stopping…" until the node has ended the command; the strip then shows
-"ended: stopped" for a moment, the chat keeps the line "bg-1 ended (stopped by
-user)", and the strip goes when nothing runs. A refused stop shows the reason
-on its row (Stop can be pressed again). The strip is drawn from the chat's
-log, so a reload or a second tab shows the same commands; only "stopping…" is
-the tab's own. **The chat's Stop does not stop them**: it ends the turn, and
-the strip stays, saying they keep running. When the chat's node is away, the
-strip says so and offers no Stop: a stop cannot reach it, and the commands
+**What you see and how you stop one.** Work that runs beside the
+conversation is listed in the **side panel** on the right of the chat, as
+Claude Desktop does it: the turn's sub-agents on top, then a separator, then
+the chat's background commands. The panel opens by itself when the first
+one starts; close it with its button, and it shows as a small button with
+the count of what is active (on a narrow screen it is always that button,
+and the panel opens over the chat). A command's row shows its id (`bg-1`),
+the first line of its command (as plain text), its state, the time left
+before its timeout stops it, and **Stop**; with two or more running, **Stop
+all**. A click shows "stopping…" until the node has ended the command; the
+row then says it was stopped, and the chat keeps the line "bg-1 ended
+(stopped by user)". Rows of the latest turn stay listed once finished, so you
+see what ran; a command from an earlier turn is listed while it runs. A
+refused stop shows the reason on its row (Stop can be pressed again). The
+panel is drawn from the chat's log, so a reload or a second tab shows the
+same rows; only "stopping…" is the tab's own. A command the agent waits for
+(not a background one) is not in the panel: it is a block in the
+conversation, open, with its output as it comes. **The chat's Stop does not
+stop background commands**: it ends the turn, and the panel keeps them,
+saying they keep running. When the chat's node is away, the panel says so
+and offers no Stop: a stop cannot reach it, and the commands
 end with that node or at their timeout (the chat shows the end when the node
 is back). The time left is the node's deadline counted on your computer's
 clock; if the two clocks differ it is off by that much, but it never shows
@@ -1404,7 +1579,7 @@ be reached** by a later command: each command has a network namespace of its
 own; the start's result says so. A command stops at its timeout, with
 `bash_stop`, when the chat is deleted, when its owner loses access to it
 (the chat then starts none until its owner writes to it again), with the
-strip's Stop, and when the node stops or dies; a turn's Stop leaves it
+side panel's Stop, and when the node stops or dies; a turn's Stop leaves it
 running. An undo in a chat is
 refused while that chat's own background commands run; a background command
 of another chat in the same folder is not checked and can write over what an
@@ -1594,6 +1769,25 @@ memory off. Keeping your personal memory out of
 a team workspace leaves its projects' memory in. Agentic chats started in a project
 take its default node and folder. Temporary chats cannot join a project.
 Design and open questions: [docs/projects.md](docs/projects.md).
+
+## The environment line
+
+Every message in an agentic chat (a sub-agent's task and a callback turn
+included) opens with one line from the node: its clock (weekday, date, time,
+time zone and UTC offset), its OS, that the `bash` tool runs bash, and whether
+the chat's folder is in a git repository and on which branch (or at which
+commit). The model no longer guesses the date or spends calls finding these.
+The branch is read from the repository's `HEAD` file, the way instruction files
+are read (inside the folder `node.toml` grants, no link out, never waiting on a
+FIFO, within the same 5-second bound); no `git` process is started. The branch
+name is the repository's text: it is shown on one line, at most 120
+characters, with its quotation marks read as `'`. The line is recorded with
+the turn, so later messages resend it exactly and the provider's cache still
+covers that message; it costs about 60 tokens a message. (The instruction
+files, a project's context and recalled memory are not recorded: the message
+they come with is resent without them, so the cache stops there; see
+`prompt_cache` below.) Your own time zone, if you set one in your settings, is
+still sent separately with your messages.
 
 ## Repository instructions (AGENTS.md)
 
@@ -2281,8 +2475,10 @@ Rich messages (Markdown, citations, `ui:` blocks; sections in `web/e2e/rich/`):
 node web/e2e/rich.cjs target/debug/rizzy-harness
 ```
 
-A chat's background command in the strip, the turn's Stop leaving it, the
-strip's Stop ending it (needs bubblewrap; port 7786):
+A chat's background command in the side panel (not above the composer), a
+foreground command as a block in the chat, the turn's Stop leaving the
+background one, the panel's Stop ending it (needs bubblewrap; port 7786, or
+the fourth argument):
 
 ```bash
 node web/e2e/background.cjs target/debug/rizzy-harness

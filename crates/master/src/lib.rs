@@ -17,6 +17,7 @@ mod http;
 pub mod levels;
 pub mod limits;
 pub mod media;
+pub mod memory;
 pub mod model_cache;
 pub mod nodes;
 pub mod notices;
@@ -132,15 +133,15 @@ pub struct NodeInfo {
     /// the chat to say. Only the known ones.
     pub exec_gaps: Vec<String>,
     /// The loosest approval mode its node.toml allows (`approval-max:*`,
-    /// T48); `None`: a node that cannot change a chat's mode. What the UI
+    /// T50); `None`: a node that cannot change a chat's mode. What the UI
     /// offers; the node clamps whatever it is sent.
     pub max_approval: Option<harness_core::policy::ApprovalMode>,
     /// What a new chat there gets when the person picks none
-    /// (`approval-default:*`), before a `host` chat's limit.
+    /// (`approval-default:*`).
     pub default_approval: Option<harness_core::policy::ApprovalMode>,
 }
 
-/// The approval modes in a hello's capabilities (T48): its ceiling and its
+/// The approval modes in a hello's capabilities (T50): its ceiling and its
 /// default, known names only.
 fn approval_of(
     caps: &[String],
@@ -246,6 +247,9 @@ pub struct MasterInner {
     /// What each chat's latest turn may write to memory, for its `remember`
     /// calls (`projects::TurnMemory`).
     turn_memory: Mutex<HashMap<SessionId, projects::TurnMemory>>,
+    /// Lines for a chat's next turn about its `remember` calls (refused,
+    /// waiting for the person: `memory::Notes`).
+    notes: memory::Notes,
     /// The routine scheduler, once `start_routines` ran.
     routines: OnceLock<routines::RoutinesHandle>,
     /// The blob store, once `storage::open` ran (before any node links, so
@@ -325,6 +329,10 @@ pub struct PromptOpts {
     /// every other field must be empty, and the turn gets no context and no
     /// memory (no recall, no project facts, no `remember`).
     pub callback: Vec<String>,
+    /// The chat's owner sent this message, signed in as themselves (the
+    /// HTTP prompt route decides it): only then may the turn's `remember`
+    /// apply without a click (PLAN.md T49).
+    pub by_owner: bool,
 }
 
 /// The model a turn runs on: the agent's (resolved), else the one chosen
@@ -496,9 +504,6 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::Callback { session_id, .. }
         | MasterToNode::SelectVariant { session_id, .. }
         | MasterToNode::SetAgent { session_id, .. }
-        // Raising it lets the chat do more without a click: the owner's
-        // level is checked as for every command that makes a chat work.
-        | MasterToNode::SetApprovalMode { session_id, .. }
         | MasterToNode::Restore { session_id, .. }
         | MasterToNode::ApprovalRespond { session_id, .. }
         | MasterToNode::ArtifactStage { session_id, .. } => Some(*session_id),
@@ -508,6 +513,9 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::StopBackground { .. }
         // Removing a grant takes power away, like a denial.
         | MasterToNode::RevokeAllow { .. }
+        // `Master::set_approval_mode` checks a raise itself: a lowering,
+        // like a denial, is never refused for the owner's level.
+        | MasterToNode::SetApprovalMode { .. }
         | MasterToNode::Delete { .. }
         | MasterToNode::Resume { .. }
         | MasterToNode::ArtifactFetch { .. }
@@ -591,6 +599,7 @@ impl Master {
                 voice_usage: Default::default(),
                 pdf: OnceLock::new(),
                 turn_memory: Mutex::new(HashMap::new()),
+                notes: Default::default(),
                 routines: OnceLock::new(),
                 storage: OnceLock::new(),
                 pulls: Default::default(),
@@ -738,96 +747,6 @@ impl Master {
 
     pub fn memory(&self) -> Option<Arc<dyn harness_memory::MemoryStore>> {
         lock(&self.inner.memory).clone()
-    }
-
-    /// A mirrored `remember` call becomes a proposal for the chat's owner
-    /// (never for incognito chats, nor where the owner keeps their memory
-    /// out of a team workspace), and only from a node that offers the tool
-    /// (`CAP_REMEMBER`): one whose `node.toml` denies it files nothing,
-    /// whatever its model sends. The call id makes replays harmless.
-    async fn file_proposal(&self, node_id: &str, e: &RawEvent) {
-        let Some(mem) = self.memory() else { return };
-        if !self.node_has(node_id, harness_protocol::CAP_REMEMBER) {
-            return;
-        }
-        let (Some(text), Some(call_id)) = (
-            e.payload.pointer("/input/text").and_then(|v| v.as_str()),
-            e.payload.get("call_id").and_then(|v| v.as_str()),
-        ) else {
-            return;
-        };
-        let sid = e.session_id;
-        // A call of a turn nobody wrote (a callback turn, T.8d step 3) is
-        // never filed, whatever the chat's recorded memory says: decided
-        // from the log, so a restart or a refused message in the meantime
-        // changes nothing (review S3-1). Fails closed.
-        let turn = e
-            .payload
-            .get("turn_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        match self
-            .inner
-            .mirror
-            .call(move |s| s.turn_cause(sid, &turn))
-            .await
-        {
-            Ok(Some(false)) => {}
-            _ => return,
-        }
-        let Ok(Some(row)) = self.inner.mirror.call(move |s| s.session(sid)).await else {
-            return;
-        };
-        if row.incognito {
-            return;
-        }
-        // What the turn that made the call may write (`Master::prompt`
-        // decided it). A project fact goes to the chat's project, if it has
-        // one and project memory is on; otherwise it is the owner's to
-        // review, if personal memory is. A call that names no scope where
-        // the agent's own memory is off (the Software Developer) and only
-        // project memory is on is filed as a project proposal, not dropped
-        // while the chat says it was proposed (review MC-1); the owner reads
-        // it before any other member's agent does. Not where the member
-        // keeps their memory out of the workspace: a personal fact must not
-        // head for a shared project because they did.
-        let allowed = projects::turn_memory(self, &row).await;
-        let project = match e.payload.pointer("/input/scope").and_then(|v| v.as_str()) {
-            Some("project") if allowed.project => projects::proposal_owner(self, &row).await,
-            None if allowed.project
-                && !allowed.personal
-                && workspaces::uses_memory(self, &row).await =>
-            {
-                projects::proposal_owner(self, &row).await
-            }
-            _ => None,
-        };
-        if project.is_none() && !allowed.personal {
-            return;
-        }
-        let kind = match e.payload.pointer("/input/kind").and_then(|v| v.as_str()) {
-            Some("preference") => harness_memory::FactKind::Preference,
-            Some("location") => harness_memory::FactKind::Location,
-            _ => harness_memory::FactKind::Fact,
-        };
-        let res = mem
-            .add(harness_memory::NewFact {
-                owner_id: project.or(row.owner_id),
-                text: text.to_string(),
-                kind,
-                status: harness_memory::Status::Proposed,
-                source_session: Some(sid),
-                dedupe_key: Some(format!("{sid}:{call_id}")),
-            })
-            .await;
-        match res {
-            Ok(Some(_)) => {
-                let _ = self.inner.live.send(Live::MemoryChanged);
-            }
-            Ok(None) => {}
-            Err(err) => tracing::warn!(error = %err, "could not file a memory proposal"),
-        }
     }
 
     pub fn set_models(&self, models: Vec<ModelInfo>) {
@@ -1432,7 +1351,7 @@ impl Master {
                 if e.kind == "tool_call_started"
                     && e.payload.get("tool").and_then(|v| v.as_str()) == Some("remember")
                 {
-                    self.file_proposal(node_id, &e).await;
+                    memory::file(self, node_id, &e).await;
                 }
                 if matches!(e.kind.as_str(), "artifact_staged" | "artifact_stage_failed") {
                     artifacts::on_applied(self, node_id, &e).await;
@@ -1849,6 +1768,7 @@ impl Master {
             untrusted,
             images,
             callback,
+            by_owner,
         } = opts;
         let resume = !callback.is_empty();
         if resume
@@ -1961,6 +1881,7 @@ impl Master {
         // Nor does a callback turn: nobody wrote anything to recall by, and
         // program output must not steer what is remembered.
         let allowed = projects::TurnMemory {
+            by_owner: by_owner && !untrusted && !resume,
             personal: personal && !untrusted && !resume,
             project: project.is_some()
                 && features.is_none_or(|f| f.project_memory)
@@ -1971,16 +1892,13 @@ impl Master {
         if untrusted {
             deny_untrusted(&mut agent);
         }
-        if let Some(mem) = self
-            .memory()
-            .filter(|_| allowed.personal && !text.trim().is_empty())
-        {
-            // An answer with no note has nothing to recall by: the answer
-            // itself is ids and values, written on the node.
-            match mem.recall(row.owner_id.as_deref(), &text, 6).await {
-                Ok(facts) => turn_context.extend(harness_memory::context_block(&facts)),
-                Err(err) => tracing::warn!(error = %err, "memory recall failed"),
-            }
+        // The owner's facts, whole while they fit, each with its id
+        // (`memory::turn_block`).
+        let mut noted = Vec::new();
+        if allowed.personal {
+            let (block, calls) = memory::turn_block(self, &row, &text, allowed).await;
+            turn_context.extend(block);
+            noted = calls;
         }
         // A callback turn's opening is rebuilt from the log alone on every
         // later request: no per-turn context joins it.
@@ -2051,7 +1969,7 @@ impl Master {
         // recorded only now that nothing but the node can refuse the
         // prompt, and put back as it was when the node does: the turn that
         // runs keeps its own (an untrusted turn's none, say). A callback
-        // turn records nothing at all (it returned above): `file_proposal`
+        // turn records nothing at all (it returned above): `memory::file`
         // files nothing from a turn whose `turn_started` has a cause, which
         // the log decides, also after a restart (review S3-1).
         let before = lock(&self.inner.turn_memory).insert(sid, allowed);
@@ -2075,6 +1993,8 @@ impl Master {
             };
         }
         sent?;
+        // The notes rode on this turn: do not repeat them (review M5).
+        self.inner.notes.mark_told(sid, &noted);
         media::prompted(self, &row, &sent_images).await;
         Ok(())
     }
@@ -2140,15 +2060,58 @@ impl Master {
         .await
     }
 
-    /// Change a chat's approval mode on its node (T48), which clamps it
+    /// Change a chat's approval mode on its node (T50), which clamps it
     /// and records it. Refused here for a node that announced no
     /// approval modes (it would drop the link on an unknown message).
+    /// The chat's approval mode as its log says (`session_created`, then
+    /// the latest `approval_mode_changed`).
+    pub async fn approval_mode_of(
+        &self,
+        sid: SessionId,
+    ) -> Result<Option<harness_core::policy::ApprovalMode>, CommandError> {
+        let ev = self
+            .inner
+            .mirror
+            .call(move |s| s.last_mode_event(sid))
+            .await?;
+        Ok(ev.and_then(|e| {
+            let v = match e.kind.as_str() {
+                "session_created" => e.payload.get("approval_mode"),
+                _ => e.payload.get("mode"),
+            };
+            v.and_then(|v| serde_json::from_value(v.clone()).ok())
+        }))
+    }
+
+    /// Change a chat's approval mode on its node, which clamps it and
+    /// records it. `raise`: the request is looser than the chat's mode now,
+    /// so it makes the chat do more without a click, and passes the checks
+    /// of every command that makes a chat work (a diverged log, the owner's
+    /// level now). A lowering passes neither: like a denial or a cancel it
+    /// is never refused for the owner's level (review F6).
     pub async fn set_approval_mode(
         &self,
         sid: SessionId,
         mode: harness_core::policy::ApprovalMode,
+        raise: bool,
     ) -> Result<(), CommandError> {
         let node = self.owner(sid).await?;
+        if raise {
+            let (diverged, row) = self
+                .inner
+                .mirror
+                .call(move |s| {
+                    Ok::<_, harness_store::StoreError>((s.diverged_seq(sid)?, s.session(sid)?))
+                })
+                .await?;
+            if diverged.is_some() {
+                return Err(CommandError::Rejected(DIVERGED.into()));
+            }
+            let row = row.ok_or(CommandError::UnknownSession)?;
+            if let Some(why) = workspaces::work_refusal(self, &row).await {
+                return Err(CommandError::Forbidden(why));
+            }
+        }
         let known = lock(&self.inner.nodes)
             .get(&node)
             .is_some_and(|n| n.info.max_approval.is_some());

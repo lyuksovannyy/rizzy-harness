@@ -74,6 +74,8 @@ pub enum EventKind {
     VariantSelected(VariantSelected),
     HistorySummarized(HistorySummarized),
     ModelFallback(ModelFallback),
+    ModelRetry(ModelRetry),
+    RetryGivenUp(RetryGivenUp),
     // Boxed: its metadata makes it many times larger than the rest.
     ArtifactStaged(Box<ArtifactStaged>),
     ArtifactStageFailed(ArtifactStageFailed),
@@ -125,6 +127,8 @@ impl EventKind {
             EventKind::VariantSelected(_) => "variant_selected",
             EventKind::HistorySummarized(_) => "history_summarized",
             EventKind::ModelFallback(_) => "model_fallback",
+            EventKind::ModelRetry(_) => "model_retry",
+            EventKind::RetryGivenUp(_) => "retry_given_up",
             EventKind::ArtifactStaged(_) => "artifact_staged",
             EventKind::ArtifactStageFailed(_) => "artifact_stage_failed",
             EventKind::BackgroundStarted(_) => "background_started",
@@ -440,6 +444,12 @@ pub struct TurnStarted {
     /// for a person's turn, which has a `user_message` right after.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cause: Option<TurnCause>,
+    /// The node's line about where the turn ran (its clock, OS, shell, git
+    /// branch; `TurnExtra::environment`), which opened the turn's message:
+    /// recorded so every later request rebuilds that message byte for byte
+    /// (the provider's prompt cache). Written by the node only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
 }
 
 /// What started a turn that no person's message started.
@@ -730,6 +740,52 @@ pub struct ModelFallback {
     /// Why `from` was not used: "unavailable", or the provider's error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+/// A model call failed for a passing reason and the harness waits before
+/// sending the same request again (`agent_native::retry`). Written by the
+/// session's own loop just before the wait, so the person sees why nothing
+/// moves and for how long. Only the reason's class: never the provider's
+/// response, which may echo the request or a key.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelRetry {
+    pub turn_id: String,
+    /// The model called again (prefixed).
+    pub model: String,
+    /// This retry's number, from 1.
+    pub attempt: u32,
+    /// How many retries it gets in all.
+    pub of: u32,
+    /// When it is sent again (ms since the epoch, on the node's clock)...
+    pub at_ms: i64,
+    /// ...which is this long after the event: what a browser whose clock
+    /// is off shows at most.
+    pub wait_ms: u64,
+    pub reason: RetryReason,
+}
+
+/// A call that was retried (`model_retry`) is not tried again: the summary
+/// call gave up and the turn goes on without that summary. The wait the
+/// person saw is over. (A turn's own call that gives up is followed by a
+/// fallback or the turn's end, which say so themselves.)
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RetryGivenUp {
+    pub turn_id: String,
+    pub model: String,
+}
+
+/// Why a model call is retried, in classes a person can act on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryReason {
+    /// 429 without an exhausted quota.
+    RateLimit,
+    /// 503 or 529: the provider says it is busy.
+    Overloaded,
+    /// 500, 502, 504.
+    ServerError,
+    /// The connection failed or the stream broke.
+    Network,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1039,6 +1095,10 @@ pub enum TurnEndReason {
     /// The node was stopped (SIGTERM or SIGINT, A.19): the turn was
     /// cancelled through the normal cancel path and closed before exit.
     Stopped,
+    /// The turn used its step budget (`[limits] max_steps`): its last
+    /// request asked the model to say what is done and what is left, and
+    /// the person's next message carries on. Not a failure.
+    Limit,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -1054,6 +1114,19 @@ pub struct Usage {
     pub cache_read_tokens: u64,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub cache_write_tokens: u64,
+    /// The turn's limits, set once by the loop on the turn's usage (never
+    /// summed, never on a single call's): the context window of the model
+    /// that answered (see `model`), when the master knows it...
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<u64>,
+    /// ...and the history size (tokens) above which the next turn writes a
+    /// summary first (`0`: never). `None`: the backend did not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary_at: Option<u64>,
+    /// The model `window` is of: the one that answered last (a fallback's
+    /// when one answered), so it matches `context_tokens`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -1061,7 +1134,8 @@ fn is_zero(n: &u64) -> bool {
 }
 
 impl Usage {
-    /// Add another call's usage (context size is the latest call's).
+    /// Add another call's usage (context size is the latest call's; the
+    /// limits stay this turn's own).
     pub fn add(&mut self, u: &Usage) {
         self.input_tokens += u.input_tokens;
         self.output_tokens += u.output_tokens;
@@ -1078,7 +1152,7 @@ pub struct TurnEnded {
     pub usage: Option<Usage>,
 }
 
-/// The chat's approval mode changed (T48): the owner's change, as the node
+/// The chat's approval mode changed (T50): the owner's change, as the node
 /// clamped it. Appended by the session actor only, on a command from the
 /// master; nothing the model writes, no tool and no sub-agent records one.
 /// The fold takes `mode` as the chat's mode from here on, so a restart and
@@ -1088,7 +1162,7 @@ pub struct ApprovalModeChanged {
     /// The mode the chat runs in now.
     pub mode: crate::policy::ApprovalMode,
     /// What was asked for, when the node gave less: above its
-    /// `max_approval_mode`, or above what a `host` chat may have.
+    /// `max_approval_mode`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested: Option<crate::policy::ApprovalMode>,
 }
@@ -1269,6 +1343,7 @@ mod tests {
                 cause: None,
                 turn_id: "t".into(),
                 agent: Some(agent.clone()),
+                environment: None,
             }),
             EventKind::AssistantMessage(AssistantMessage {
                 turn_id: "t".into(),
@@ -1455,7 +1530,8 @@ mod tests {
             EventKind::TurnStarted(TurnStarted {
                 cause: None,
                 agent: None,
-                turn_id: "t1".into()
+                turn_id: "t1".into(),
+                environment: None,
             })
         );
     }
@@ -1568,6 +1644,7 @@ mod background_note_tests {
             turn_id: "t".into(),
             agent: None,
             cause: Some(TurnCause::Callback(vec!["bg-1".into(), "bg-3".into()])),
+            environment: None,
         });
         let (kind, payload) = k.clone().into_parts();
         assert_eq!(

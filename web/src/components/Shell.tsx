@@ -13,6 +13,7 @@ import { buildSearchUrl } from "../lib/searchUrl";
 import { titleFrom } from "../lib/title";
 import { applyAppearance, writeBackdropMirror } from "../lib/appearance";
 import { newlyWaiting, notifyEnabled, waitingWords } from "../lib/notify";
+import { useFinishedSignal } from "../lib/finished";
 import { projectsApi, type ProjectSummary } from "../lib/projects";
 import { useRoutineResults } from "../lib/routineResults";
 import type {
@@ -44,6 +45,7 @@ const Project = lazy(() => import("./Project"));
 const Routines = lazy(() => import("./Routines"));
 const Media = lazy(() => import("./Media"));
 const Artifacts = lazy(() => import("./Artifacts"));
+const MemoryShareAsk = lazy(() => import("./MemoryShareAsk"));
 // Imported on the first sign of intent (pointer or focus on Search, or a
 // shortcut), so the panel opens without waiting.
 const loadSearch = () => import("./SearchPanel");
@@ -406,6 +408,7 @@ export function Shell(props: {
   };
 
   const listed = useMemo(() => sessions.filter((x) => !x.incognito && !x.parent_id), [sessions]);
+  useFinishedSignal(loadedSessions ? listed : null, viewing);
   // The Ask wall infers topics from the titles the sidebar lists (untitled
   // chats say nothing), and keeps every chat's title off the wall, the
   // incognito and sub-agent ones the sidebar hides included.
@@ -623,6 +626,14 @@ export function Shell(props: {
             </button>
           </div>
         )}
+        {/* The join question of the active team workspace, while unanswered. */}
+        {workspaces?.workspaces
+          .filter((w) => w.workspace_id === workspaceId && !w.personal && w.memory_answered === false)
+          .map((w) => (
+            <Suspense key={w.workspace_id} fallback={null}>
+              <MemoryShareAsk workspace={w} onAnswered={workspacesChanged} />
+            </Suspense>
+          ))}
         <Suspense fallback={<div className="muted pad">Loading…</div>}>
           {route.kind === "session" ? (
             <Conversation

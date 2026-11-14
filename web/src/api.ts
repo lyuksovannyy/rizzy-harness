@@ -143,7 +143,7 @@ export const api = {
     workspace_id?: string;
     project_id?: string;
     exec_mode?: ExecMode;
-    /** A request: the node clamps it (T48). Absent: the node's default. */
+    /** A request: the node clamps it (T50). Absent: the node's default. */
     approval_mode?: ApprovalMode;
   }) => call<{ session_id: string }>("POST", "/api/sessions", b),
   attention: () => call<AttentionResponse>("GET", "/api/attention"),

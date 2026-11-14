@@ -231,6 +231,7 @@ impl Provider for Mock {
             input_tokens: estimate_tokens(&req.messages),
             output_tokens: 1,
             context_tokens: 0,
+            ..Default::default()
         });
         if let Some(ChatMsg::System(p)) = req.messages.first()
             && (p == crate::SUMMARY_PROMPT || p == crate::CODING_SUMMARY_PROMPT)
@@ -263,8 +264,10 @@ impl Provider for Mock {
             .iter()
             .rev()
             .find_map(|m| {
-                m.user_text()
-                    .map(|t| crate::provider::without_notes(t).to_string())
+                m.user_text().map(|t| {
+                    crate::provider::without_environment(crate::provider::without_notes(t))
+                        .to_string()
+                })
             })
             .unwrap_or_default();
         // Just shown images: say how many arrived with their bytes.

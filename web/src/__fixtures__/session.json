@@ -340,6 +340,7 @@
           "name": "Writer",
           "prompt_hash": "h2"
         },
+        "environment": "[harness] Environment of this turn: the node's clock reads Saturday 2026-11-14 10:32 (Europe/Riga, UTC+02:00).",
         "turn_id": "t2"
       },
       "seq": 23,
@@ -518,6 +519,16 @@
       "ts_ms": 1700000000034
     },
     {
+      "kind": "turn_ended",
+      "payload": {
+        "reason": "limit",
+        "turn_id": "t2"
+      },
+      "seq": 36,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000035
+    },
+    {
       "kind": "user_message",
       "payload": {
         "reply": {
@@ -532,9 +543,9 @@
         "text": "Choice answer · next: o1",
         "turn_id": "t3"
       },
-      "seq": 36,
+      "seq": 37,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000035
+      "ts_ms": 1700000000036
     },
     {
       "kind": "tool_call_started",
@@ -546,9 +557,9 @@
         "tool": "publish",
         "turn_id": "t3"
       },
-      "seq": 37,
+      "seq": 38,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000036
+      "ts_ms": 1700000000037
     },
     {
       "kind": "artifact_staged",
@@ -572,9 +583,9 @@
         "source_path": "/w/target/release/app",
         "stage_id": "01a19bf2000070008000000000000a01"
       },
-      "seq": 38,
+      "seq": 39,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000037
+      "ts_ms": 1700000000038
     },
     {
       "kind": "artifact_staged",
@@ -596,9 +607,9 @@
         "source_path": "/w/target/release/app",
         "stage_id": "01a19bf2000070008000000000000a01"
       },
-      "seq": 39,
+      "seq": 40,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000038
+      "ts_ms": 1700000000039
     },
     {
       "kind": "artifact_stage_failed",
@@ -606,9 +617,9 @@
         "error": "out/missing.bin: no such file or folder",
         "path": "out/missing.bin"
       },
-      "seq": 40,
+      "seq": 41,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000039
+      "ts_ms": 1700000000040
     },
     {
       "kind": "background_started",
@@ -619,9 +630,9 @@
         "timeout_s": 600,
         "turn_id": "t1"
       },
-      "seq": 41,
+      "seq": 42,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000040
+      "ts_ms": 1700000000041
     },
     {
       "kind": "background_started",
@@ -632,9 +643,9 @@
         "timeout_s": 60,
         "turn_id": "t1"
       },
-      "seq": 42,
+      "seq": 43,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000041
+      "ts_ms": 1700000000042
     },
     {
       "kind": "background_ended",
@@ -649,9 +660,9 @@
         "tail": "<b>not html</b>",
         "tail_cut": false
       },
-      "seq": 43,
+      "seq": 44,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000042
+      "ts_ms": 1700000000043
     },
     {
       "kind": "background_ended",
@@ -666,9 +677,9 @@
         "tail": "fail\n",
         "tail_cut": false
       },
-      "seq": 44,
+      "seq": 45,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000043
+      "ts_ms": 1700000000044
     },
     {
       "kind": "turn_started",
@@ -680,9 +691,9 @@
         },
         "turn_id": "t4"
       },
-      "seq": 45,
+      "seq": 46,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000044
+      "ts_ms": 1700000000045
     },
     {
       "kind": "assistant_message",
@@ -692,9 +703,9 @@
         "tool_calls": [],
         "turn_id": "t4"
       },
-      "seq": 46,
+      "seq": 47,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000045
+      "ts_ms": 1700000000046
     },
     {
       "kind": "turn_ended",
@@ -702,9 +713,9 @@
         "reason": "completed",
         "turn_id": "t4"
       },
-      "seq": 47,
+      "seq": 48,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000046
+      "ts_ms": 1700000000047
     },
     {
       "kind": "callback_refused",
@@ -714,9 +725,9 @@
         ],
         "reason": "3 turns in a row without you (node limit)"
       },
-      "seq": 48,
+      "seq": 49,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000047
+      "ts_ms": 1700000000048
     },
     {
       "kind": "todo_updated",
@@ -734,9 +745,9 @@
         ],
         "turn_id": "t4"
       },
-      "seq": 49,
+      "seq": 50,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000048
+      "ts_ms": 1700000000049
     },
     {
       "kind": "todo_updated",
@@ -758,15 +769,6 @@
         ],
         "turn_id": "t4"
       },
-      "seq": 50,
-      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000049
-    },
-    {
-      "kind": "approval_mode_changed",
-      "payload": {
-        "mode": "auto"
-      },
       "seq": 51,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
       "ts_ms": 1700000000050
@@ -774,19 +776,106 @@
     {
       "kind": "approval_mode_changed",
       "payload": {
-        "mode": "accept_edits",
-        "requested": "auto"
+        "mode": "auto"
       },
       "seq": 52,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
       "ts_ms": 1700000000051
     },
     {
+      "kind": "approval_mode_changed",
+      "payload": {
+        "mode": "accept_edits",
+        "requested": "auto"
+      },
+      "seq": 53,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000052
+    },
+    {
+      "kind": "turn_started",
+      "payload": {
+        "turn_id": "t5"
+      },
+      "seq": 54,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000053
+    },
+    {
+      "kind": "model_retry",
+      "payload": {
+        "at_ms": 1700000002000,
+        "attempt": 1,
+        "model": "openai::gpt-4o",
+        "of": 3,
+        "reason": "overloaded",
+        "turn_id": "t5",
+        "wait_ms": 2000
+      },
+      "seq": 55,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000054
+    },
+    {
+      "kind": "assistant_message",
+      "payload": {
+        "message_id": "m6",
+        "text": "Back.",
+        "tool_calls": [],
+        "turn_id": "t5"
+      },
+      "seq": 56,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000055
+    },
+    {
+      "kind": "turn_ended",
+      "payload": {
+        "reason": "completed",
+        "turn_id": "t5",
+        "usage": {
+          "context_tokens": 800,
+          "input_tokens": 900,
+          "model": "openai::gpt-4o",
+          "output_tokens": 10,
+          "summary_at": 102400,
+          "window": 128000
+        }
+      },
+      "seq": 57,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000056
+    },
+    {
+      "kind": "turn_started",
+      "payload": {
+        "turn_id": "t6"
+      },
+      "seq": 58,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000057
+    },
+    {
+      "kind": "model_retry",
+      "payload": {
+        "at_ms": 1700000004000,
+        "attempt": 2,
+        "model": "openai::gpt-4o",
+        "of": 3,
+        "reason": "network",
+        "turn_id": "t6",
+        "wait_ms": 4000
+      },
+      "seq": 59,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000058
+    },
+    {
       "kind": "from_a_newer_node",
       "payload": {
         "anything": true
       },
-      "seq": 53,
+      "seq": 60,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
       "ts_ms": 0
     }
@@ -815,8 +904,10 @@
         "restored": false
       }
     },
-    "context_tokens": 1,
-    "head_seq": 53,
+    "context_model": "openai::gpt-4o",
+    "context_tokens": 800,
+    "context_window": 128000,
+    "head_seq": 60,
     "items": [
       {
         "text": "fix the bug",
@@ -1066,6 +1157,11 @@
         "type": "user"
       },
       {
+        "reason": "limit",
+        "turn_id": "t2",
+        "type": "turn_end"
+      },
+      {
         "reply": {
           "block_id": "next",
           "message_id": "m2",
@@ -1189,6 +1285,19 @@
         "mode": "accept_edits",
         "requested": "auto",
         "type": "approval_mode_changed"
+      },
+      {
+        "author": null,
+        "done": true,
+        "message_id": "m6",
+        "text": "Back.",
+        "type": "assistant",
+        "variant": null
+      },
+      {
+        "reason": "completed",
+        "turn_id": "t5",
+        "type": "turn_end"
       }
     ],
     "meta": {
@@ -1205,9 +1314,19 @@
     "pending_approvals": [
       "a2"
     ],
+    "retry": {
+      "at_ms": 1700000004000,
+      "attempt": 2,
+      "model": "openai::gpt-4o",
+      "of": 3,
+      "reason": "network",
+      "turn_id": "t6",
+      "wait_ms": 4000
+    },
     "running_agent": null,
-    "running_turn": null,
+    "running_turn": "t6",
     "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+    "summary_at": 102400,
     "todo": [
       {
         "content": "Read the code",
@@ -1225,8 +1344,8 @@
     "unknown_events": 1,
     "usage": {
       "context_tokens": 0,
-      "input_tokens": 1,
-      "output_tokens": 2
+      "input_tokens": 901,
+      "output_tokens": 12
     },
     "variant_selection": {
       "g1": "m4"

@@ -628,6 +628,12 @@ async fn agentic_node(
             tool_stream_bytes: policy.limits.tool_stream_bytes,
             max_steps: policy.limits.max_steps,
             bash_timeout_max: std::time::Duration::from_secs(policy.limits.bash_timeout_max_s),
+            stream_limits: harness_agent_native::StreamLimits {
+                first_byte: std::time::Duration::from_secs(
+                    policy.limits.model_first_byte_timeout_s,
+                ),
+                idle: std::time::Duration::from_secs(policy.limits.model_idle_timeout_s),
+            },
             secrets: secrets.clone(),
             allow_outside_workspace: policy.allow_outside_workspace,
             protected_dirs: Arc::new(policy.protected_dirs.clone()),
@@ -924,7 +930,7 @@ fn api_token_path(dir: &Path) -> PathBuf {
     dir.join("api-token")
 }
 
-fn doctor(dir: &Path) -> anyhow::Result<()> {
+async fn doctor(dir: &Path) -> anyhow::Result<()> {
     use harness_tools::sandbox::ContainLevel;
     let mut ok = true;
     let mut check = |name: &str, res: Result<String, String>| match res {
@@ -1061,6 +1067,46 @@ fn doctor(dir: &Path) -> anyhow::Result<()> {
                 c => Err(checkpoint_confinement(c).to_string()),
             }),
     );
+    // MCP servers (X.3): each started once where a chat would start it
+    // (the sandbox mode where the node offers it, else the host mode), in
+    // a scratch folder, listed and stopped.
+    if let Ok(mut p) = NodePolicy::load(&dir.join("node.toml"))
+        && !p.mcp_servers.is_empty()
+    {
+        use harness_core::policy::ExecMode;
+        use harness_tools::sandbox::Confinement;
+        p.protect(dir);
+        let confinement = match &started {
+            Ok((s, o)) if o.offers(ExecMode::Sandbox) => s.confinement.clone(),
+            Ok((s, o)) if o.offers(ExecMode::Host) => s.uncontained.clone(),
+            Ok(_) => Confinement::Refused("this node offers no execution mode".into()),
+            Err(e) => Confinement::Refused(e.as_str().into()),
+        };
+        let scratch =
+            std::env::temp_dir().join(format!("{BRAND}-doctor-mcp-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&scratch);
+        let ctx = harness_tools::ToolCtx {
+            sandbox: confinement.for_session("doctor-mcp"),
+            protected: Arc::new(p.protected_dirs.clone()),
+            ..harness_tools::ToolCtx::new(&scratch)
+        };
+        for (name, server) in &p.mcp_servers {
+            if !server.enabled {
+                println!("ok    mcp {name}: disabled (enabled = false)");
+                continue;
+            }
+            check(
+                &format!("mcp {name}"),
+                harness_tools::mcp::probe(name, server, &ctx).await,
+            );
+        }
+        let _ = std::fs::remove_dir_all(&scratch);
+        if let Ok((s, _)) = &started
+            && let Some(t) = &s.tmp_root
+        {
+            let _ = std::fs::remove_dir_all(t.join("doctor-mcp"));
+        }
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1306,7 +1352,7 @@ async fn async_main(cli: Cli, dir: PathBuf, dotenv_names: Vec<String>) -> anyhow
                 "no pending claim code: this install is already claimed (or `serve` has not run yet)"
             ),
         },
-        Cmd::Doctor => doctor(&dir),
+        Cmd::Doctor => doctor(&dir).await,
         Cmd::SandboxExec { .. } => bail!(
             "{} must be the first argument",
             harness_tools::sandbox::SUBCOMMAND
@@ -1337,7 +1383,8 @@ mod tests {
     #[test]
     fn agentic_nodes_register_remember() {
         let graphify = harness_tools::graphify::GraphifyState::new(false, PathBuf::from("unused"));
-        let names: Vec<&str> = agentic_tools(&graphify).iter().map(|t| t.name()).collect();
+        let tools = agentic_tools(&graphify);
+        let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(names.contains(&"remember"), "{names:?}");
         assert!(names.contains(&"graph_query"), "{names:?}");
     }

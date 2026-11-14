@@ -75,6 +75,7 @@ fn events() -> Vec<RawEvent> {
             cause: None,
             agent: None,
             turn_id: t(),
+            environment: None,
         }),
         EventKind::UserMessage(UserMessage {
             turn_id: t(),
@@ -252,6 +253,7 @@ fn events() -> Vec<RawEvent> {
                 name: "Writer".into(),
                 prompt_hash: "h2".into(),
             }),
+            environment: Some("[harness] Environment of this turn: the node's clock reads Saturday 2026-11-14 10:32 (Europe/Riga, UTC+02:00).".into()),
         }),
         // The turn's model failed before any output; a fallback answers.
         EventKind::ModelFallback(ModelFallback {
@@ -362,6 +364,12 @@ fn events() -> Vec<RawEvent> {
             group: "g1".into(),
             message_id: "m4".into(),
         }),
+        // A turn that used its step budget ends at a limit, not an error.
+        EventKind::TurnEnded(TurnEnded {
+            turn_id: "t2".into(),
+            reason: TurnEndReason::Limit,
+            usage: None,
+        }),
         // An answer to a question: the canonical text plus the reply.
         EventKind::UserMessage(UserMessage {
             turn_id: "t3".into(),
@@ -436,6 +444,7 @@ fn events() -> Vec<RawEvent> {
             turn_id: "t4".into(),
             agent: None,
             cause: Some(TurnCause::Callback(vec!["bg-2".into()])),
+            environment: None,
         }),
         EventKind::AssistantMessage(AssistantMessage {
             author: None,
@@ -473,7 +482,7 @@ fn events() -> Vec<RawEvent> {
                 todo("Run the tests", TodoStatus::Pending),
             ],
         }),
-        // The owner's mode changes (T48): the latest is the chat's mode; a
+        // The owner's mode changes (T50): the latest is the chat's mode; a
         // clamped one says what was asked.
         EventKind::ApprovalModeChanged(ApprovalModeChanged {
             mode: ApprovalMode::Auto,
@@ -482,6 +491,61 @@ fn events() -> Vec<RawEvent> {
         EventKind::ApprovalModeChanged(ApprovalModeChanged {
             mode: ApprovalMode::AcceptEdits,
             requested: Some(ApprovalMode::Auto),
+        }),
+        // A retry shows while the call waits, and goes once output resumes;
+        // a second one is still waiting at the fixture's end.
+        EventKind::TurnStarted(TurnStarted {
+            turn_id: "t5".into(),
+            agent: None,
+            cause: None,
+            environment: None,
+        }),
+        EventKind::ModelRetry(ModelRetry {
+            turn_id: "t5".into(),
+            model: "openai::gpt-4o".into(),
+            attempt: 1,
+            of: 3,
+            at_ms: 1_700_000_002_000,
+            wait_ms: 2000,
+            reason: RetryReason::Overloaded,
+        }),
+        EventKind::AssistantMessage(AssistantMessage {
+            author: None,
+            variant: None,
+            turn_id: "t5".into(),
+            message_id: "m6".into(),
+            text: "Back.".into(),
+            tool_calls: vec![],
+            blocks: vec![],
+        }),
+        // The turn's limits reach the view; the totals never carry them.
+        EventKind::TurnEnded(TurnEnded {
+            turn_id: "t5".into(),
+            reason: TurnEndReason::Completed,
+            usage: Some(Usage {
+                input_tokens: 900,
+                output_tokens: 10,
+                context_tokens: 800,
+                window: Some(128_000),
+                summary_at: Some(102_400),
+                model: Some("openai::gpt-4o".into()),
+                ..Default::default()
+            }),
+        }),
+        EventKind::TurnStarted(TurnStarted {
+            turn_id: "t6".into(),
+            agent: None,
+            cause: None,
+            environment: None,
+        }),
+        EventKind::ModelRetry(ModelRetry {
+            turn_id: "t6".into(),
+            model: "openai::gpt-4o".into(),
+            attempt: 2,
+            of: 3,
+            at_ms: 1_700_000_004_000,
+            wait_ms: 4000,
+            reason: RetryReason::Network,
         }),
     ];
     let mut out: Vec<RawEvent> = kinds
@@ -566,7 +630,7 @@ fn a_streamed_message_gets_its_final_blocks() {
     assert_eq!(users[1]["images"][0]["width"], 1280);
     assert!(users[1]["images"][0].get("data").is_none());
     assert!(view["meta"]["parent_session"].is_string());
-    // The latest mode change is the chat's mode (T48).
+    // The latest mode change is the chat's mode (T50).
     assert_eq!(view["meta"]["approval_mode"], "accept_edits");
 }
 
@@ -629,4 +693,19 @@ fn the_latest_task_list_is_the_list() {
     // No list: nothing serialized, as the web fold leaves it out.
     let empty = serde_json::to_value(SessionView::default()).unwrap();
     assert!(empty.get("todo").is_none(), "{empty}");
+}
+
+/// The second retry still waits at the end; the first was cleared by the
+/// answer. The finished turn's limits are the view's, not the totals'.
+#[test]
+fn a_waiting_retry_and_the_turns_limits_are_in_the_view() {
+    let view = serde_json::to_value(SessionView::fold(&events()).unwrap()).unwrap();
+    assert_eq!(view["retry"]["attempt"], 2);
+    assert_eq!(view["retry"]["reason"], "network");
+    assert_eq!(view["retry"]["at_ms"], 1_700_000_004_000_i64);
+    assert_eq!(view["context_window"], 128_000);
+    assert_eq!(view["summary_at"], 102_400);
+    assert_eq!(view["context_tokens"], 800);
+    assert_eq!(view["context_model"], "openai::gpt-4o");
+    assert!(view["usage"].get("window").is_none());
 }

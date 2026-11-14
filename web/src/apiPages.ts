@@ -16,6 +16,7 @@ import type {
   Decision,
   FactKind,
   GraphifyStatus,
+  MemoryCallState,
   MemoryCfg,
   MemoryFact,
   MemorySource,
@@ -75,7 +76,7 @@ export const pageApi = {
   deleteSession: (id: string, opts: { media?: boolean } = {}) =>
     call<{ ok: boolean }>("DELETE", `/api/sessions/${id}${opts.media ? "?media=1" : ""}`),
   setAgent: (id: string, agent_id: string) => call("POST", `/api/sessions/${id}/agent`, { agent_id }),
-  /** The node clamps it and records it; the chat shows the result (T48). */
+  /** The node clamps it and records it; the chat shows the result (T50). */
   setApprovalMode: (id: string, mode: ApprovalMode) =>
     call<{ ok: boolean }>("POST", `/api/sessions/${id}/approval-mode`, { mode }),
   saveAgentAvatar: (id: string, avatar: AgentAvatar) =>
@@ -127,8 +128,18 @@ export const pageApi = {
   saveSettings: (p: Prefs) => call<Prefs>("PUT", "/api/me/settings", p),
   addMemory: (text: string, kind: FactKind = "fact") =>
     call<MemoryFact>("POST", "/api/memory", { text, kind }),
-  updateMemory: (id: string, b: { text?: string; status?: "active" }) =>
-    call<MemoryFact>("PATCH", `/api/memory/${id}`, b),
+  updateMemory: (
+    id: string,
+    b: { text?: string; status?: "active" | "retired"; place?: "user" | "workspace"; workspace_id?: string },
+  ) => call<MemoryFact>("PATCH", `/api/memory/${id}`, b),
+  memoryCall: (sessionId: string, callId: string) =>
+    call<MemoryCallState>("GET", `/api/sessions/${sessionId}/memory/${encodeURIComponent(callId)}`),
+  keepMemoryCall: (sessionId: string, callId: string) =>
+    call<MemoryCallState>("POST", `/api/sessions/${sessionId}/memory/${encodeURIComponent(callId)}/keep`),
+  dismissMemoryCall: (sessionId: string, callId: string) =>
+    call<MemoryCallState>("POST", `/api/sessions/${sessionId}/memory/${encodeURIComponent(callId)}/dismiss`),
+  undoMemoryCall: (sessionId: string, callId: string) =>
+    call<MemoryCallState>("POST", `/api/sessions/${sessionId}/memory/${encodeURIComponent(callId)}/undo`),
   deleteMemory: (id: string) => call<{ ok: boolean }>("DELETE", `/api/memory/${id}`),
   memoryCfg: () => call<MemoryCfg>("GET", "/api/admin/memory"),
   saveMemoryCfg: (b: {

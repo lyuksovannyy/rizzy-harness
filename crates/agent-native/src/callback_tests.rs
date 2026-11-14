@@ -147,6 +147,7 @@ fn history(sid: SessionId) -> Vec<RawEvent> {
                 turn_id: "t1".into(),
                 agent: None,
                 cause: None,
+                environment: None,
             }),
         ),
         ev(
@@ -287,6 +288,7 @@ async fn the_opening_has_one_harness_header_quoted_output_and_rebuilds_the_same(
             turn_id: "t2".into(),
             agent: None,
             cause: Some(TurnCause::Callback(vec!["bg-1".into()])),
+            environment: None,
         }),
     ));
     let again = place_notes(history_to_messages(&log));
@@ -376,6 +378,8 @@ async fn the_default_mock_does_not_obey_program_output() {
         tools: vec![],
         effort: None,
         cache: false,
+        limits: None,
+        no_tool_calls: false,
     };
     let mock = || mock::Mock {
         delay: std::time::Duration::from_millis(1),
@@ -436,6 +440,7 @@ async fn a_callback_turn_gets_the_instruction_files_after_its_opening() {
             turn_id: "t2".into(),
             agent: None,
             cause: Some(TurnCause::Callback(vec!["bg-1".into()])),
+            environment: None,
         }),
     ));
     let again = place_notes(history_to_messages(&log));
@@ -445,4 +450,41 @@ async fn a_callback_turn_gets_the_instruction_files_after_its_opening() {
             opening[..opening.len() - tail.len()].to_string()
         ))
     );
+}
+
+/// The node's environment line reaches a callback turn too, after the
+/// opening (which still starts with the harness's frame); `turn_started`
+/// records it, and a later request rebuilds the opening byte for byte.
+#[tokio::test]
+async fn a_callback_turn_gets_the_environment_line() {
+    let sid = SessionId::new();
+    let host = Host(Mutex::new(vec![]));
+    let rec = Arc::new(Rec {
+        calls: vec![],
+        seen: Mutex::new(vec![]),
+    });
+    let b = NativeBackend::new(rec.clone(), vec![], NativeConfig::default());
+    let mut c = callback_ctx(&host, sid, history(sid));
+    let env = "[harness] Environment of this turn: test line.";
+    c.extra.environment = Some(env.into());
+    b.run_turn(c).await;
+    let reqs = rec.seen.lock().unwrap().clone();
+    let Some(ChatMsg::User(opening)) = reqs[0].messages.last() else {
+        panic!("{:?}", reqs[0].messages);
+    };
+    assert!(opening.starts_with(CALLBACK_LEAD), "{opening}");
+    assert!(opening.ends_with(&format!("\n\n{env}")), "{opening}");
+    let mut log = history(sid);
+    log.push(ev(
+        sid,
+        6,
+        EventKind::TurnStarted(TurnStarted {
+            turn_id: "t2".into(),
+            agent: None,
+            cause: Some(TurnCause::Callback(vec!["bg-1".into()])),
+            environment: Some(env.into()),
+        }),
+    ));
+    let again = place_notes(history_to_messages(&log));
+    assert_eq!(again.last(), Some(&ChatMsg::User(opening.clone())));
 }
