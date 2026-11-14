@@ -5,6 +5,8 @@
 mod attachment_tests;
 #[cfg(test)]
 mod callback_tests;
+#[cfg(test)]
+mod coalesce_tests;
 pub mod compact;
 #[cfg(test)]
 mod delegate_availability_tests;
