@@ -1275,9 +1275,9 @@ fn todo_agent() -> AgentSpec {
 fn history_with_a_newer_list() -> Vec<RawEvent> {
     let mut h = history_with_todo(1);
     let sid = h[0].session_id;
-    let mut seq = h.last().unwrap().seq;
+    let last = h.last().unwrap().seq;
     let items = serde_json::json!([{"content": "Ship the newer plan", "status": "in_progress"}]);
-    for k in [
+    let kinds = [
         EventKind::TurnStarted(TurnStarted {
             cause: None,
             agent: None,
@@ -1322,8 +1322,8 @@ fn history_with_a_newer_list() -> Vec<RawEvent> {
             reason: TurnEndReason::Completed,
             usage: None,
         }),
-    ] {
-        seq += 1;
+    ];
+    for (k, seq) in kinds.into_iter().zip(last + 1..) {
         let (kind, payload) = k.into_parts();
         h.push(RawEvent {
             session_id: sid,

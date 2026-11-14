@@ -102,8 +102,11 @@ const N10A_KB = 2.4;
 // chat's first list (0.7, its stylesheet 0.5 beside it) and the lucide
 // circle icon it shares (0.2); the conversation's lazy import and the tool
 // card's line (+0.2); the fold's case in the first load (+0.1 before
-// rounding).
-const TODO_KB = 1.1;
+// rounding). Its review's fixes, measured 374.3 (initial 100.2): a new
+// chat's agent per mode for the home screen, projects and routines (TD-1,
+// first load, +0.1) and the panel folding when no turn works on it (TD-2,
+// +0.1).
+const TODO_KB = 1.3;
 
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
 const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + TODO_KB) * 100) / 10) / 10;
