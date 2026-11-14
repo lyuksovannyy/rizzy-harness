@@ -207,4 +207,10 @@ pub struct TurnOutcome {
 pub trait AgentBackend: Send + Sync {
     fn name(&self) -> &'static str;
     async fn run_turn(&self, ctx: TurnCtx<'_>) -> TurnOutcome;
+    /// Whether this backend has a tool of that name registered (for what a
+    /// node announces; the agent and the node's policy still decide each
+    /// turn's tools).
+    fn has_tool(&self, _name: &str) -> bool {
+        false
+    }
 }

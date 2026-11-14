@@ -19,6 +19,7 @@ mod publish;
 pub mod sandbox;
 mod search;
 pub mod stream;
+pub mod todo;
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -488,6 +489,9 @@ pub struct ToolOutcome {
     /// A `bash` call that left a background command running: the loop
     /// records `background_started` before this call's result.
     pub background: Option<background::Started>,
+    /// A `todo` call's accepted list: the loop records `todo_updated`
+    /// before this call's result.
+    pub todo: Option<Vec<harness_core::todo::TodoItem>>,
 }
 
 impl ToolOutcome {
@@ -563,6 +567,7 @@ pub fn builtin() -> ToolSet {
         Arc::new(ToolOutput),
         Arc::new(Outline),
         Arc::new(Publish),
+        Arc::new(todo::Todo),
     ]
 }
 

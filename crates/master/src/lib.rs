@@ -711,9 +711,14 @@ impl Master {
 
     /// A mirrored `remember` call becomes a proposal for the chat's owner
     /// (never for incognito chats, nor where the owner keeps their memory
-    /// out of a team workspace). The call id makes replays harmless.
-    async fn file_proposal(&self, e: &RawEvent) {
+    /// out of a team workspace), and only from a node that offers the tool
+    /// (`CAP_REMEMBER`): one whose `node.toml` denies it files nothing,
+    /// whatever its model sends. The call id makes replays harmless.
+    async fn file_proposal(&self, node_id: &str, e: &RawEvent) {
         let Some(mem) = self.memory() else { return };
+        if !self.node_has(node_id, harness_protocol::CAP_REMEMBER) {
+            return;
+        }
         let (Some(text), Some(call_id)) = (
             e.payload.pointer("/input/text").and_then(|v| v.as_str()),
             e.payload.get("call_id").and_then(|v| v.as_str()),
@@ -749,10 +754,22 @@ impl Master {
         // What the turn that made the call may write (`Master::prompt`
         // decided it). A project fact goes to the chat's project, if it has
         // one and project memory is on; otherwise it is the owner's to
-        // review, if personal memory is.
+        // review, if personal memory is. A call that names no scope where
+        // the agent's own memory is off (the Software Developer) and only
+        // project memory is on is filed as a project proposal, not dropped
+        // while the chat says it was proposed (review MC-1); the owner reads
+        // it before any other member's agent does. Not where the member
+        // keeps their memory out of the workspace: a personal fact must not
+        // head for a shared project because they did.
         let allowed = projects::turn_memory(self, &row).await;
         let project = match e.payload.pointer("/input/scope").and_then(|v| v.as_str()) {
             Some("project") if allowed.project => projects::proposal_owner(self, &row).await,
+            None if allowed.project
+                && !allowed.personal
+                && workspaces::uses_memory(self, &row).await =>
+            {
+                projects::proposal_owner(self, &row).await
+            }
             _ => None,
         };
         if project.is_none() && !allowed.personal {
@@ -1381,7 +1398,7 @@ impl Master {
                 if e.kind == "tool_call_started"
                     && e.payload.get("tool").and_then(|v| v.as_str()) == Some("remember")
                 {
-                    self.file_proposal(&e).await;
+                    self.file_proposal(node_id, &e).await;
                 }
                 if matches!(e.kind.as_str(), "artifact_staged" | "artifact_stage_failed") {
                     artifacts::on_applied(self, node_id, &e).await;
@@ -1929,7 +1946,9 @@ impl Master {
         // A callback turn's opening is rebuilt from the log alone on every
         // later request: no per-turn context joins it.
         if let Some(p) = project.as_ref().filter(|_| !resume) {
-            let remember = allowed.project && agent.allows_tool("remember");
+            let remember = allowed.project
+                && agent.allows_tool("remember")
+                && self.node_has(&row.node_id, harness_protocol::CAP_REMEMBER);
             turn_context.push(projects::turn_context(self, p, &text, allowed, remember).await);
         }
         // Last, so it is what the model reads right before answering.

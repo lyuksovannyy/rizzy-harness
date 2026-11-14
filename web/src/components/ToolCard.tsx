@@ -138,6 +138,13 @@ function summaryRaw(tool: string, input: Tool["input"]): string {
       return `/${asText(i.pattern ?? "")}/ ${asText(i.path ?? "")}${i.glob ? ` (${asText(i.glob)})` : ""}`;
     case "glob":
       return `${asText(i.pattern ?? "")} ${asText(i.path ?? "")}`;
+    case "todo": {
+      // The list is pinned above the composer; the card names the change.
+      const items: { content?: unknown; status?: unknown }[] = Array.isArray(i.items) ? i.items : [];
+      const now = items.find((x) => x?.status === "in_progress");
+      const done = items.filter((x) => x?.status === "done").length;
+      return `task list: ${done}/${items.length} done${now ? ` · ${asText(now.content ?? "")}` : ""}`;
+    }
     default:
       return JSON.stringify(i);
   }

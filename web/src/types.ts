@@ -279,6 +279,14 @@ export interface SessionView {
   checkpoints: Record<string, CheckpointState>;
   /** Background commands by id; absent when there are none (as serde writes it). */
   background?: Record<string, BackgroundState>;
+  /** The agent's task list (the latest `todo_updated`); absent when empty. */
+  todo?: TodoItem[];
+}
+
+/** One item of the agent's task list: the model's text, one line. */
+export interface TodoItem {
+  content: string;
+  status: "pending" | "in_progress" | "done";
 }
 
 export interface BackgroundState {
@@ -443,6 +451,8 @@ export interface Prefs {
   image_search_url?: string;
   custom_engines?: { name: string; text_url?: string | null; image_url?: string | null }[];
   default_agent: string | null;
+  /** The person's default agent for Agentic chats. */
+  default_agentic_agent?: string | null;
   default_model: string | null;
   display_name?: string | null;
   timezone?: string | null;

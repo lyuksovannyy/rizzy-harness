@@ -12,6 +12,7 @@ pub mod savings;
 pub mod secret;
 pub mod subagent;
 pub mod text;
+pub mod todo;
 pub mod ui;
 pub mod view;
 

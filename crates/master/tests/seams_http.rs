@@ -108,7 +108,7 @@ async fn start() -> T {
         }),
     );
     master.set_memory(Arc::new(SqliteMemory::open_in_memory().unwrap()));
-    let (link, chat_node) = fake_node("master", &["profile:chat"]);
+    let (link, chat_node) = fake_node("master", &["profile:chat", harness_protocol::CAP_REMEMBER]);
     master.add_link(link, true).await.unwrap();
     let (bare, _) = fake_node("bare", &[]);
     master.add_link(bare, false).await.unwrap();
@@ -258,6 +258,8 @@ async fn untrusted_turns_get_no_memory_no_web_tools_and_a_note() {
     let (spec, ctx) = last_prompt(&t);
     assert!(ctx.contains("the beds are watered at dawn"), "{ctx}");
     assert!(ctx.contains("with rain water"), "{ctx}");
+    // ...and is told about `remember`, which the untrusted one is not.
+    assert!(ctx.contains("call `remember`"), "{ctx}");
     assert!(!spec.deny_tools.iter().any(|d| d == "web_fetch"));
     assert!(!spec.delegates.is_empty());
 

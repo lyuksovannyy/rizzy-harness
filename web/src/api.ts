@@ -184,7 +184,8 @@ export const api = {
     if (!res.ok) throw new HttpError(res.status, data?.error ?? `${res.status} ${res.statusText}`);
     return data;
   },
-  agents: (scope?: Scope | null) => call<{ agents: Agent[]; default: string }>("GET", scoped("/api/agents", scope)),
+  agents: (scope?: Scope | null) =>
+    call<{ agents: Agent[]; default: string; defaults?: { chat: string | null; agentic: string | null } }>("GET", scoped("/api/agents", scope)),
   notices: (scope?: Scope | null) => call<{ notices: Notice[] }>("GET", scoped("/api/notices", scope)),
   models: (scope?: Scope | null) => call<{ models: ModelInfo[] }>("GET", scoped("/api/models", scope)),
   /** One page of the search panel (`in`: a tab, or "all"), in `workspace`;

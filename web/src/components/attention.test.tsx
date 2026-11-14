@@ -133,7 +133,7 @@ describe("Home", () => {
     <Home
       username="alex"
       agents={[]}
-      defaultAgent="general"
+      agentDefaults={{ chat: "general", agentic: null }}
       models={[]}
       workers={[]}
       prefs={null}

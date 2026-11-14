@@ -188,6 +188,9 @@ const COMMAND_TOOLS: &[&str] = &["bash", "bash_output", "bash_stop", "tool_outpu
 const MEMORY_TOOL: &str = "remember";
 /// Offered with either switch that builds things; no switch of its own.
 const PUBLISH_TOOL: &str = "publish";
+/// The agent's own task list: with the same switches, for the same reason
+/// (work that takes many steps).
+const TODO_TOOL: &str = "todo";
 
 /// What an agent can do, as the Agents page shows it. A custom agent is
 /// made from these; for the others they are read off the definition.
@@ -227,7 +230,10 @@ impl Features {
             (self.read_files, READ_TOOLS),
             (self.edit_files, EDIT_TOOLS),
             (self.commands, COMMAND_TOOLS),
-            (self.edit_files || self.commands, &[PUBLISH_TOOL][..]),
+            (
+                self.edit_files || self.commands,
+                &[PUBLISH_TOOL, TODO_TOOL][..],
+            ),
         ];
         groups
             .iter()
