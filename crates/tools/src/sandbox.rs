@@ -1009,6 +1009,9 @@ pub struct Grants {
     /// A sub-agent's node-owned folder (see `harness_core::folder::
     /// OwnedFolder`), when the session is one.
     pub owned: Option<harness_core::folder::OwnedFolder>,
+    /// Where the command starts (`bash`'s `workdir`): a folder inside the
+    /// session folder, checked again here; the session folder when `None`.
+    pub cwd: Option<PathBuf>,
 }
 
 impl Confinement {
@@ -1123,6 +1126,19 @@ impl Confinement {
             None => workspace
                 .canonicalize()
                 .map_err(|e| format!("workspace {}: {e}", workspace.display()))?,
+        };
+        // Where the command starts: the session folder, or a folder inside
+        // it (`workdir`, resolved by the tool, checked again here).
+        let start = match &grants.cwd {
+            Some(d) if d.starts_with(&ws) => d.clone(),
+            Some(d) => {
+                return Err(format!(
+                    "{} is outside the session folder {}",
+                    d.display(),
+                    ws.display()
+                ));
+            }
+            None => ws.clone(),
         };
         let mut contained = false;
         let std_cmd = match self {
@@ -1244,7 +1260,7 @@ impl Confinement {
                     &rw,
                     &ro,
                     false,
-                    contain.map(|b| (b, ws.as_path())),
+                    contain.map(|b| (b, start.as_path())),
                     session,
                     None,
                 );
@@ -1261,7 +1277,7 @@ impl Confinement {
         // folder (`--chdir`), so a folder that hangs (a stalled network
         // mount) stalls the guard, never the node's spawn (review N-2).
         c.args(args)
-            .current_dir(if contained { Path::new("/") } else { &ws });
+            .current_dir(if contained { Path::new("/") } else { &start });
         Ok((c, contained))
     }
 }

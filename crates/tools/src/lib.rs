@@ -4,11 +4,14 @@
 //! confined to the workspace unless the node policy says otherwise.
 
 pub mod approval;
+pub mod args;
 pub mod background;
 mod bash;
 pub mod contain;
 pub mod guard;
-pub use bash::{DEFAULT_TIMEOUT_MAX_S, MAX_TIMEOUT_MAX_S, MIN_TIMEOUT_MAX_S};
+pub use bash::{
+    DEFAULT_TIMEOUT_MAX_S, MAX_TIMEOUT_MAX_S, MIN_TIMEOUT_MAX_S, workdir as bash_workdir,
+};
 mod edit;
 #[cfg(test)]
 mod edit_tests;

@@ -2396,7 +2396,53 @@ impl NativeBackend {
                 }
             }
             let n_calls = calls.len();
-            for (i, call) in calls.into_iter().enumerate() {
+            for (i, mut call) in calls.into_iter().enumerate() {
+                // The arguments against the schema the model was offered,
+                // before the tool card, the approval and the run (Pi's
+                // repair-then-validate): a repaired value is what all three
+                // see; a wrong one is the call's result and nothing runs.
+                let bad_args = match tools.iter().find(|t| t.name == call.tool) {
+                    None => Some(unknown_tool(&call.tool, &tools)),
+                    Some(spec) if call.input.is_object() => {
+                        // One of our own tools: its whole schema (an
+                        // argument this turn's schema leaves out, `bash`'s
+                        // `background` where they are off, reaches the tool,
+                        // which says why it is refused), closed. Another
+                        // tool's (MCP): the offered schema, read as JSON
+                        // Schema reads it.
+                        let own = self.tools.iter().find(|t| t.name() == call.tool);
+                        let (schema, closed) = match own {
+                            Some(t) => (
+                                t.schema_for(self.config.bash_timeout_max),
+                                harness_tools::args::Closed::Builtin,
+                            ),
+                            None => (spec.schema.clone(), harness_tools::args::Closed::Schema),
+                        };
+                        match harness_tools::args::check(&schema, &call.input, closed) {
+                            Ok(v) => {
+                                call.input = v;
+                                // A `workdir` the tool would refuse is
+                                // refused now, before anyone is asked.
+                                match call
+                                    .input
+                                    .get("workdir")
+                                    .and_then(serde_json::Value::as_str)
+                                {
+                                    Some(w) if own.is_some() && call.tool == "bash" => {
+                                        harness_tools::bash_workdir(&self.start_ctx(&ctx, host), w)
+                                            .err()
+                                    }
+                                    _ => None,
+                                }
+                            }
+                            Err(e) => Some(format!(
+                                "This tool call was not run: {e}. Call it again with that fixed."
+                            )),
+                        }
+                    }
+                    // Not an object: `run_tool` says so.
+                    Some(_) => None,
+                };
                 if host
                     .emit(EventKind::ToolCallStarted(ToolCallStarted {
                         author: author.clone(),
@@ -2411,32 +2457,41 @@ impl NativeBackend {
                     return stopped(usage);
                 }
                 // Before approval and dispatch: a refused call never starts.
+                // The repeated-call guard first: the same bad call again
+                // and again is refused, and ends the turn, as any other.
                 let key = harness_tools::call_key(&ctx.cwd, &call.tool, &call.input);
-                let (outcome, refused) = match guard.admit(key) {
-                    repeat::Admission::Refuse { note, stop } => {
-                        repeat_stop |= stop;
-                        (ToolOutcome::err(repeat::REFUSED_OUTPUT), Some(note))
-                    }
-                    repeat::Admission::Ended => (ToolOutcome::err(repeat::ENDED_OUTPUT), None),
-                    repeat::Admission::Run => {
-                        let mut observed =
-                            observed_text(&messages, &trusted, Some((user_idx, &own_words)));
-                        if let Some(inh) = &ctx.extra.observed {
-                            observed.splice(0..0, inh.iter().cloned());
+                let admission = match (guard.admit(key), bad_args) {
+                    (repeat::Admission::Run, Some(e)) => Err(e),
+                    (a, _) => Ok(a),
+                };
+                let (outcome, refused) = match admission {
+                    Err(e) => (ToolOutcome::err(e), None),
+                    Ok(admission) => match admission {
+                        repeat::Admission::Refuse { note, stop } => {
+                            repeat_stop |= stop;
+                            (ToolOutcome::err(repeat::REFUSED_OUTPUT), Some(note))
                         }
-                        let o = self
-                            .run_tool(
-                                &ctx,
-                                host,
-                                &call,
-                                &mut allowed_this_turn,
-                                &observed,
-                                &refs,
-                                &mcp_tools,
-                            )
-                            .await;
-                        (o, None)
-                    }
+                        repeat::Admission::Ended => (ToolOutcome::err(repeat::ENDED_OUTPUT), None),
+                        repeat::Admission::Run => {
+                            let mut observed =
+                                observed_text(&messages, &trusted, Some((user_idx, &own_words)));
+                            if let Some(inh) = &ctx.extra.observed {
+                                observed.splice(0..0, inh.iter().cloned());
+                            }
+                            let o = self
+                                .run_tool(
+                                    &ctx,
+                                    host,
+                                    &call,
+                                    &mut allowed_this_turn,
+                                    &observed,
+                                    &refs,
+                                    &mcp_tools,
+                                )
+                                .await;
+                            (o, None)
+                        }
+                    },
                 };
                 let cancelled = ctx.cancel.is_cancelled();
                 let output = self.config.secrets.scrub(&outcome.output);
@@ -3095,6 +3150,33 @@ impl NativeBackend {
             Step::Cancelled => ToolOutcome::err(abandoned_note()),
         }
     }
+}
+
+/// The result of a call to a tool this turn does not offer: the tools it
+/// does, so the model can pick one instead of guessing again.
+fn unknown_tool(name: &str, offered: &[ToolSpec]) -> String {
+    /// More names are counted, not listed (a node with many MCP tools).
+    const SHOWN: usize = 50;
+    let mut names: Vec<&str> = offered.iter().map(|t| t.name.as_str()).collect();
+    names.sort_unstable();
+    let mut list = names
+        .iter()
+        .take(SHOWN)
+        .map(|n| format!("`{n}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if names.len() > SHOWN {
+        list.push_str(&format!(" and {} more", names.len() - SHOWN));
+    }
+    format!(
+        "unknown tool `{}`: this turn offers {}",
+        harness_core::event::shown_name(name),
+        if list.is_empty() {
+            "no tools".into()
+        } else {
+            list
+        }
+    )
 }
 
 impl NativeBackend {

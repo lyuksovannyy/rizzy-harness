@@ -1289,6 +1289,33 @@ async fn a_foreground_call_without_a_timeout_ends_at_60_s() {
 
 // ---- the review's findings (docs/security-review/2026-11-T8d-...) ----
 
+/// A background command honours `workdir`, in the contained sandbox too:
+/// bubblewrap enters that folder, not the session's.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_background_command_runs_in_its_workdir() {
+    let f = fixture();
+    let Some(sb) = f.sandbox() else { return };
+    let mut n = node_with(f, sb, vec![]).await;
+    std::fs::create_dir_all(n.ws.join("sub/dir")).unwrap();
+    n.turn(json!([
+        {"tool": "bash", "input": {"command": "pwd", "background": true, "timeout_secs": 30, "workdir": "sub/dir"}},
+    ]))
+    .await;
+    let out: Vec<String> = n
+        .seen
+        .iter()
+        .filter_map(|e| match e.typed() {
+            Ok(EventKind::ToolCallFinished(f)) => Some(f.output),
+            _ => None,
+        })
+        .collect();
+    let want = n.ws.canonicalize().unwrap().join("sub/dir");
+    assert!(
+        out.iter().any(|o| o.contains(&want.display().to_string())),
+        "{out:?}"
+    );
+}
+
 fn bg(cmd: &str, t: u64) -> Value {
     json!({"tool": "bash", "input": {"command": cmd, "background": true, "timeout_secs": t}})
 }
