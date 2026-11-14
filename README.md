@@ -1379,17 +1379,26 @@ Design and open questions: [docs/projects.md](docs/projects.md).
 ## Repository instructions (AGENTS.md)
 
 In an agentic chat the node reads the repository's own instruction files and
-sends them to the model with every message, the way Codex and Claude Code do:
-the `AGENTS.md` in each folder from the top of the git repository holding the
+sends them to the model with every message, the way Codex does: the
+`AGENTS.md` in each folder from the top of the git repository holding the
 chat's folder down to the chat's folder itself (only that folder when it is in
-no repository), and `CLAUDE.md` in a folder that has no `AGENTS.md`. Files in
-folders below the chat's folder are not read. The top folder's file comes
-first, the deepest last, each under its path in the repository; together they
-are cut at 32 KiB, with a note saying where the text stops and which files were
-left out. They are read again at the start of every message, so an edit (yours
-or the agent's) counts from the next message on, and they are sent after the
-history like a project's instructions, so compacting a long chat does not lose
-them. A sub-agent gets them too.
+no repository), and `CLAUDE.md` in a folder that has no `AGENTS.md` (an empty
+or whitespace-only `AGENTS.md` counts as none). The top folder's file comes
+first, the deepest last, each named by its path from the chat's folder
+(`../../AGENTS.md`), so the agent's own `read` of that path opens the same
+file. Together they are cut at 32 KiB, or at about a tenth of the model's
+context window when that is smaller and known, with a note saying where the
+text stops, which files were left out and why. They are read again at the
+start of every message, so an edit (yours or the agent's) counts from the next
+message on, and they are sent after the history like a project's
+instructions, so compacting a long chat does not lose them. A sub-agent gets
+them too, and so does the turn that resumes a chat after a background command
+ends (a callback turn), the one nobody watches.
+
+Not read: files in folders below the chat's folder, files above the
+repository's top (or above the folder `node.toml` grants), `.claude/CLAUDE.md`,
+`CLAUDE.local.md`, other names, and `@path` imports inside a file (the line is
+sent as written; the file it names is not read).
 
 They are text for the model and nothing more: they change no setting in
 `node.toml`, no approval mode, tool or limit, and a link that is only in them is
@@ -1397,7 +1406,15 @@ not fetched on their say-so. Only regular files inside the folder the node
 grants are read: a link is followed only to a file inside the repository (the
 chat folder's own file only to one inside the chat folder), never out of it or
 into the node's data directory, and a file that cannot be read is named with
-the reason while the message goes on.
+the reason while the message goes on. A read that takes more than 5 seconds
+(a hung network disk) is given up with a note; the node logs each refused,
+cut or timed-out read (paths and reasons, never the text).
+
+**Cost:** the files are sent fresh with every message, after the part of the
+request the provider caches: about 1k tokens a message for a typical
+`AGENTS.md`, up to the cap (about 8k tokens), not reused from one message to
+the next (the steps within one message do reuse it). Moving them to a cached
+place is for later (with X.1).
 
 ## Rich messages
 
