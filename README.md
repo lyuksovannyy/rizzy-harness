@@ -126,6 +126,15 @@ turn's agent and settings: one sent to another agent (the agent picker, or an
 `@mention` of another agent) is refused with the reason, so pick the agent for
 your next message instead.
 
+A chat is titled from its first message. The pencil next to the title in the
+chat's header renames it (Enter saves, Escape cancels; at most 200
+characters, control and hidden characters dropped); only you can rename your
+chats, and the new title is what the list and search show. The download
+button next to it saves the chat as a Markdown file: your messages, the
+answers, and each tool call as one line (tick **Include tool outputs** for
+their full output). The file is made in your browser from what the chat
+shows; nothing is fetched for it.
+
 Settings → Account → Preferences → **Appearance** picks the theme (System follows the
 operating system; Light and Dark stay put) and the accent colour, one of eight:
 Blue (the default), Purple, Pink, Red, Orange, Yellow, Green and Graphite
