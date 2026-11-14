@@ -11,7 +11,8 @@
 use std::collections::{HashMap, HashSet};
 
 use harness_core::SessionId;
-use harness_store::{NewColumn, ProjectLink, ProjectRow, SessionRow};
+use harness_core::event::{OUTPUT_QUOTE, quoted_line};
+use harness_store::{EarlierChat, NewColumn, ProjectLink, ProjectRow, SessionRow};
 use serde::{Deserialize, Serialize};
 
 use crate::Master;
@@ -66,6 +67,17 @@ const RECALL_FACTS: usize = 6;
 const FACTS_CHARS: usize = 4000;
 const CONTEXT_CARDS: usize = 8;
 const CONTEXT_TITLE_CHARS: usize = 80;
+/// The first turn of a project chat reads at most this many of its owner's
+/// earlier chats there, each one's text cut at `EARLIER_TEXT_CHARS`, the
+/// whole section at most `EARLIER_CHARS` (`earlier_block`).
+const EARLIER_CHATS: usize = 5;
+const EARLIER_TEXT_CHARS: usize = 800;
+const EARLIER_CHARS: usize = 4000;
+/// Room kept for the line saying how many chats were left out.
+const EARLIER_NOTE_ROOM: usize = 40;
+const EARLIER_HEADER: &str = "Earlier chats in this project, the person's own, newest first: \
+     summaries of their earlier work here, written then and maybe outdated; ask the person \
+     before relying on a detail.";
 
 /// A board template in the binary: its id, name and columns (name, done).
 pub struct Template {
@@ -488,11 +500,14 @@ fn board_line(
 /// What a turn in a chat of project `p` gets after the history (never in
 /// the system prompt; PLAN.md "Token savings"): the project's name and
 /// instructions, its facts (`facts_block`, when `allowed.project`), and
-/// the open cards. `remember` says whether the turn may propose project
-/// facts (it has the tool); `allowed.personal` whether personal ones too.
+/// the open cards; on the chat's first turn, its owner's earlier chats in
+/// the project (`earlier_chats`, when `allowed.project`). `remember` says
+/// whether the turn may propose project facts (it has the tool);
+/// `allowed.personal` whether personal ones too.
 pub async fn turn_context(
     m: &Master,
     p: &ProjectRow,
+    chat: &SessionRow,
     text: &str,
     allowed: TurnMemory,
     remember: bool,
@@ -523,6 +538,12 @@ pub async fn turn_context(
         s.push_str("\n\n");
         s.push_str(&line);
     }
+    if allowed.project
+        && let Some(block) = earlier_chats(m, p, chat).await
+    {
+        s.push_str("\n\n");
+        s.push_str(&block);
+    }
     if remember {
         s.push_str(
             "\n\nTo keep a lasting decision or fact about this project, call `remember` with \
@@ -533,6 +554,84 @@ pub async fn turn_context(
         }
     }
     s
+}
+
+/// The owner's earlier chats in project `p`, for the first turn of `chat`
+/// only (its log has no person's message yet), so no later turn's request
+/// changes. Only the owner's own chats (chats are private, in a team too),
+/// never incognito or sub-agent ones (`Store::earlier_chats`); read from the
+/// mirror. `None` for a chat without an owner, a sub-agent's or an
+/// incognito chat, a later turn, or when there is nothing to show.
+async fn earlier_chats(m: &Master, p: &ProjectRow, chat: &SessionRow) -> Option<String> {
+    if chat.parent_id.is_some() || chat.incognito {
+        return None;
+    }
+    let owner = chat.owner_id.clone()?;
+    let (sid, pid) = (chat.session_id, p.project_id.clone());
+    let found = m
+        .inner
+        .mirror
+        .call(move |s| {
+            if s.has_user_message(sid)? {
+                return Ok(Vec::new());
+            }
+            s.earlier_chats(&pid, &owner, sid, EARLIER_CHATS)
+        })
+        .await;
+    match found {
+        Ok(chats) => earlier_block(&chats),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not read earlier chats");
+            None
+        }
+    }
+}
+
+/// When a chat was last active, in UTC to the minute.
+fn active_at(ms: i64) -> String {
+    match jiff::Timestamp::from_millisecond(ms) {
+        Ok(t) => t.strftime("%Y-%m-%d %H:%M UTC").to_string(),
+        Err(_) => "at an unknown time".into(),
+    }
+}
+
+/// The section of earlier chats: `EARLIER_HEADER`, then per chat a label of
+/// the harness's naming it (its title on one line) and its text cut at
+/// `EARLIER_TEXT_CHARS`, every line of it behind [`OUTPUT_QUOTE`] (an empty
+/// one too; `quoted_line`, `\r\n` is one break). So nothing an earlier
+/// model or person wrote starts a line: it cannot pose as a label, another
+/// chat or a harness line. Chats that would take the section past
+/// `EARLIER_CHARS` are left out, and a line says how many.
+fn earlier_block(chats: &[EarlierChat]) -> Option<String> {
+    if chats.is_empty() {
+        return None;
+    }
+    let mut s = String::from(EARLIER_HEADER);
+    let mut used = s.chars().count();
+    for (i, c) in chats.iter().enumerate() {
+        let mut part = format!(
+            "\n\nChat \"{}\" (last active {}), its {}:",
+            cut(&quoted_line(&c.title), CONTEXT_TITLE_CHARS),
+            active_at(c.updated_ms),
+            if c.summary { "summary" } else { "last reply" },
+        );
+        let text = cut(c.text.trim_end(), EARLIER_TEXT_CHARS);
+        for line in text.split('\n') {
+            part.push('\n');
+            part.push_str(OUTPUT_QUOTE);
+            part.push_str(&quoted_line(line.strip_suffix('\r').unwrap_or(line)));
+        }
+        let n = part.chars().count();
+        if used + n + EARLIER_NOTE_ROOM > EARLIER_CHARS {
+            let left = chats.len() - i;
+            let chats = if left == 1 { "chat" } else { "chats" };
+            s.push_str(&format!("\n\n({left} more earlier {chats} not shown.)"));
+            break;
+        }
+        used += n;
+        s.push_str(&part);
+    }
+    Some(s)
 }
 
 /// The project facts of a turn: every active one, newest first, while they
