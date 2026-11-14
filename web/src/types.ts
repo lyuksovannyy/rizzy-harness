@@ -342,6 +342,46 @@ export interface CheckpointState {
   restored: boolean;
 }
 
+/** What one turn changed, read by the node from its checkpoints (X.12;
+ * `harness_protocol::TurnDiff`). A view: nothing of it is in the log. */
+export interface TurnDiff {
+  files: DiffFile[];
+  /** Changed files past the listed ones. */
+  more_files?: number;
+  /** Something was left out to keep the answer small. */
+  cut?: boolean;
+  /** Nested git repositories, whose files are not compared. */
+  nested?: string[];
+}
+
+export type DiffStatus = "added" | "deleted" | "modified" | "renamed" | "type_changed";
+export type DiffContent = "text" | "binary" | "too_large" | "omitted";
+
+export interface DiffFile {
+  path: string;
+  old_path?: string;
+  status: DiffStatus;
+  content: DiffContent;
+  old_mode?: string;
+  new_mode?: string;
+  old_size?: number;
+  new_size?: number;
+  added: number;
+  removed: number;
+  hunks?: DiffHunk[];
+  cut?: boolean;
+}
+
+export interface DiffHunk {
+  old_start: number;
+  old_lines: number;
+  new_start: number;
+  new_lines: number;
+  section?: string;
+  /** Each line with its mark first: " ", "+", "-", or "\\" (no newline at end). */
+  lines: string[];
+}
+
 export interface Usage {
   input_tokens: number;
   output_tokens: number;

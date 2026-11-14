@@ -743,7 +743,16 @@ place of the image.
 To have such a link read, paste it into your message.
 
 Every agentic turn is checkpointed and its file changes can be undone
-from the chat. Checkpoints live in a private repository in the node's data
+from the chat. "Show changes" on a turn's "N files changed" row opens what
+the turn changed beside the chat: each file with its added and removed lines
+(three lines of context, line numbers, `+` and `−`), renames as renames,
+binary files and files over 512 KiB named with their sizes, hidden characters
+shown as `<U+…>` codes. "Include later turns" shows what "Rewind" would undo.
+Changes made by shell commands show like any other. The node reads them from
+the turn's checkpoints when you ask; nothing is stored on the server. A very
+large turn is shown in part, marked "Cut" (at most 1,000 files are listed and
+about 1 MiB of lines is sent); a checkpoint that is no longer kept, or a node
+that is away, is said in words. Only the chat's owner can open them. Checkpoints live in a private repository in the node's data
 directory (`checkpoints/<hash>.git`), for git repositories too: nothing is
 written into your folder, no objects, refs, index or config are ever written
 into your `.git` (git may update the timestamps of existing object files
