@@ -629,9 +629,10 @@ async fn the_step_cap_holds_and_callback_turns_0_starts_none() {
     );
 }
 
-/// §4.6 in `ask`: a callback turn's call parks on its card with no timeout,
-/// and the person's new message is refused "a turn is already running"
-/// until they answer.
+/// §4.6 in `ask`: a callback turn's call parks on its card with no timeout.
+/// The person's new message meanwhile is taken (X.5) and waits like any
+/// other: the card still needs its answer, and the turn reads the message
+/// after the call's result.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_callback_turn_in_ask_mode_parks_on_its_card() {
     let (_dir, data, ws) = real::setup("");
@@ -679,13 +680,14 @@ async fn a_callback_turn_in_ask_mode_parks_on_its_card() {
     assert_eq!(real::count(&evs, "turn_ended"), 1, "it waits on the card");
     assert!(!ws.join("steered").exists());
     let (st, v) = s.say(&sid, "hello").await;
-    assert!(!st.is_success(), "{st} {v}");
-    assert!(
-        v["error"]
-            .as_str()
-            .unwrap_or("")
-            .contains("a turn is already running"),
-        "{v}"
+    assert!(st.is_success(), "{st} {v}");
+    let evs = s
+        .wait_for(&sid, |e| real::count(e, "user_message") == 2)
+        .await;
+    assert_eq!(
+        real::count(&evs, "approval_resolved"),
+        1,
+        "the card still waits"
     );
     let aid = evs
         .iter()
@@ -703,7 +705,13 @@ async fn a_callback_turn_in_ask_mode_parks_on_its_card() {
         )
         .await;
     assert!(st.is_success());
-    s.wait_for(&sid, |e| real::count(e, "turn_ended") == 2)
+    let evs = s
+        .wait_for(&sid, |e| real::count(e, "turn_ended") == 2)
         .await;
+    assert_eq!(
+        real::count(&evs, "queued_delivered"),
+        1,
+        "read in that turn"
+    );
     assert!(!ws.join("steered").exists());
 }

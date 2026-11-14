@@ -474,14 +474,48 @@
       "ts_ms": 1700000000030
     },
     {
+      "kind": "user_message",
+      "payload": {
+        "queued": true,
+        "text": "also bump the version",
+        "turn_id": "t2"
+      },
+      "seq": 32,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000031
+    },
+    {
+      "kind": "user_message",
+      "payload": {
+        "queued": true,
+        "text": "and tag it",
+        "turn_id": "t2"
+      },
+      "seq": 33,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000032
+    },
+    {
+      "kind": "queued_delivered",
+      "payload": {
+        "seqs": [
+          32
+        ],
+        "turn_id": "t2"
+      },
+      "seq": 34,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000033
+    },
+    {
       "kind": "variant_selected",
       "payload": {
         "group": "g1",
         "message_id": "m4"
       },
-      "seq": 32,
+      "seq": 35,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000031
+      "ts_ms": 1700000000034
     },
     {
       "kind": "user_message",
@@ -498,9 +532,9 @@
         "text": "Choice answer · next: o1",
         "turn_id": "t3"
       },
-      "seq": 33,
+      "seq": 36,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000032
+      "ts_ms": 1700000000035
     },
     {
       "kind": "tool_call_started",
@@ -512,9 +546,9 @@
         "tool": "publish",
         "turn_id": "t3"
       },
-      "seq": 34,
+      "seq": 37,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000033
+      "ts_ms": 1700000000036
     },
     {
       "kind": "artifact_staged",
@@ -538,9 +572,9 @@
         "source_path": "/w/target/release/app",
         "stage_id": "01a19bf2000070008000000000000a01"
       },
-      "seq": 35,
+      "seq": 38,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000034
+      "ts_ms": 1700000000037
     },
     {
       "kind": "artifact_staged",
@@ -562,9 +596,9 @@
         "source_path": "/w/target/release/app",
         "stage_id": "01a19bf2000070008000000000000a01"
       },
-      "seq": 36,
+      "seq": 39,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000035
+      "ts_ms": 1700000000038
     },
     {
       "kind": "artifact_stage_failed",
@@ -572,9 +606,9 @@
         "error": "out/missing.bin: no such file or folder",
         "path": "out/missing.bin"
       },
-      "seq": 37,
+      "seq": 40,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000036
+      "ts_ms": 1700000000039
     },
     {
       "kind": "background_started",
@@ -585,9 +619,9 @@
         "timeout_s": 600,
         "turn_id": "t1"
       },
-      "seq": 38,
+      "seq": 41,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000037
+      "ts_ms": 1700000000040
     },
     {
       "kind": "background_started",
@@ -598,9 +632,9 @@
         "timeout_s": 60,
         "turn_id": "t1"
       },
-      "seq": 39,
+      "seq": 42,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000038
+      "ts_ms": 1700000000041
     },
     {
       "kind": "background_ended",
@@ -615,9 +649,9 @@
         "tail": "<b>not html</b>",
         "tail_cut": false
       },
-      "seq": 40,
+      "seq": 43,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000039
+      "ts_ms": 1700000000042
     },
     {
       "kind": "background_ended",
@@ -632,9 +666,9 @@
         "tail": "fail\n",
         "tail_cut": false
       },
-      "seq": 41,
+      "seq": 44,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000040
+      "ts_ms": 1700000000043
     },
     {
       "kind": "turn_started",
@@ -646,9 +680,9 @@
         },
         "turn_id": "t4"
       },
-      "seq": 42,
+      "seq": 45,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000041
+      "ts_ms": 1700000000044
     },
     {
       "kind": "assistant_message",
@@ -658,9 +692,9 @@
         "tool_calls": [],
         "turn_id": "t4"
       },
-      "seq": 43,
+      "seq": 46,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000042
+      "ts_ms": 1700000000045
     },
     {
       "kind": "turn_ended",
@@ -668,9 +702,9 @@
         "reason": "completed",
         "turn_id": "t4"
       },
-      "seq": 44,
+      "seq": 47,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000043
+      "ts_ms": 1700000000046
     },
     {
       "kind": "callback_refused",
@@ -680,16 +714,16 @@
         ],
         "reason": "3 turns in a row without you (node limit)"
       },
-      "seq": 45,
+      "seq": 48,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000044
+      "ts_ms": 1700000000047
     },
     {
       "kind": "from_a_newer_node",
       "payload": {
         "anything": true
       },
-      "seq": 46,
+      "seq": 49,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
       "ts_ms": 0
     }
@@ -719,7 +753,7 @@
       }
     },
     "context_tokens": 1,
-    "head_seq": 46,
+    "head_seq": 49,
     "items": [
       {
         "text": "fix the bug",
@@ -949,6 +983,24 @@
         "result": null,
         "tool": "read",
         "type": "tool"
+      },
+      {
+        "queued": {
+          "read": true,
+          "seq": 32
+        },
+        "text": "also bump the version",
+        "turn_id": "t2",
+        "type": "user"
+      },
+      {
+        "queued": {
+          "read": false,
+          "seq": 33
+        },
+        "text": "and tag it",
+        "turn_id": "t2",
+        "type": "user"
       },
       {
         "reply": {

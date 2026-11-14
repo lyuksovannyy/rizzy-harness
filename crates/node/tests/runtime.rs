@@ -1211,10 +1211,27 @@ async fn a_tool_does_not_run_when_its_event_cannot_be_written() {
         .await;
     // The turn is over once the session takes a prompt again; while the log
     // is broken that prompt is refused for the log, not for a running turn.
+    // The probe is an answer to a question: while a turn runs it is refused
+    // (a plain message would wait for the turn, X.5).
     let mut refused = Ok(());
     for i in 0..100 {
         let id = format!("q{i}");
-        prompt(&h, &id, "hello".into());
+        h.send(MasterToNode::Prompt {
+            savings: None,
+            context: None,
+            reply: Some(FormReply {
+                message_id: "none".into(),
+                block_id: "none".into(),
+                values: Default::default(),
+            }),
+            agent: None,
+            attachments: vec![],
+            compare: vec![],
+            req_id: id.clone(),
+            session_id: sid,
+            text: String::new(),
+            images: vec![],
+        });
         match ack(&mut h, &id).await {
             Err(e) if e.contains("already running") => {
                 tokio::time::sleep(Duration::from_millis(50)).await

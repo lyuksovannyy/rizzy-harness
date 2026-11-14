@@ -11,6 +11,24 @@ describe("fold", () => {
     expect(fold(events)).toStrictEqual(fixture.expected);
   });
 
+  it("shows a message sent while a turn ran where it was sent, read once the agent took it", () => {
+    const ev = (seq: number, kind: string, payload: object): RawEvent => ({ session_id: "s", seq, ts_ms: 0, kind, payload }) as RawEvent;
+    const v = fold([
+      ev(1, "turn_started", { turn_id: "t" }),
+      ev(2, "user_message", { turn_id: "t", text: "fix it" }),
+      ev(3, "tool_call_started", { turn_id: "t", call_id: "c", tool: "read", input: {} }),
+      ev(4, "user_message", { turn_id: "t", text: "also the docs", queued: true }),
+    ]);
+    expect(v.items.map((i) => i.type)).toEqual(["user", "tool", "user"]);
+    expect(v.items[0]).not.toHaveProperty("queued");
+    expect(v.items[2]).toMatchObject({ text: "also the docs", queued: { seq: 4, read: false } });
+    apply(v, ev(5, "tool_call_finished", { call_id: "c", ok: true, output: "x", truncated: false }));
+    apply(v, ev(6, "queued_delivered", { turn_id: "t", seqs: [4] }));
+    expect(v.items[2]).toMatchObject({ queued: { seq: 4, read: true } });
+    expect(v.running_turn).toBe("t");
+    expect(v.unknown_events).toBe(0);
+  });
+
   it("rejects duplicates and gaps", () => {
     const events = fixture.events as RawEvent[];
     const v = emptyView();
