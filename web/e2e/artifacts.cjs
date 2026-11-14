@@ -18,7 +18,7 @@ const R = `${S}/ws`;
 fs.mkdirSync(`${S}/data`, { recursive: true });
 fs.mkdirSync(`${R}/target/release`, { recursive: true });
 fs.writeFileSync(`${S}/data/config.toml`, '[[providers]]\nid = "demo"\nname = "Demo"\npreset = "demo"\nkind = "mock"\nmock_delay_ms = 5\nmodels = [{ id = "mock" }]\n');
-fs.writeFileSync(`${S}/data/node.toml`, `workspace_roots = ["${R}"]\n`);
+fs.writeFileSync(`${S}/data/node.toml`, `workspace_roots = ["${R}"]\nmax_approval_mode = "ask"\n`);
 // A "build output" of a few MB, so the upload takes more than one chunk.
 const built = crypto.randomBytes(3 * 1024 * 1024 + 17);
 fs.writeFileSync(`${R}/target/release/myapp`, built);

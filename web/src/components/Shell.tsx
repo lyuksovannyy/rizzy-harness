@@ -12,7 +12,7 @@ import { afterChange, followRoute, keepsRoute, switchRoute, workspaceName } from
 import { buildSearchUrl } from "../lib/searchUrl";
 import { titleFrom } from "../lib/title";
 import { applyAppearance, writeBackdropMirror } from "../lib/appearance";
-import { newlyWaiting, notifyEnabled } from "../lib/notify";
+import { newlyWaiting, notifyEnabled, waitingWords } from "../lib/notify";
 import { useFinishedSignal } from "../lib/finished";
 import { projectsApi, type ProjectSummary } from "../lib/projects";
 import { useRoutineResults } from "../lib/routineResults";
@@ -34,7 +34,6 @@ import type { Submission } from "./Composer";
 import { Home } from "./Home";
 import type { FeaturePageProps } from "./pages";
 import { Sidebar } from "./Sidebar";
-import { shownName } from "../md/hiddenChars";
 import { agentDefaults, type AgentDefaults } from "../lib/agentDefaults";
 
 // Everything but the home screen loads on demand (new-tab speed budget).
@@ -206,10 +205,8 @@ export function Shell(props: {
             const a = r.items.find((x) => x.session_id === id)!;
             const viewing = location.hash === `#/s/${id}` && document.visibilityState === "visible";
             if (viewing) continue;
-            const n = new Notification(shownName(a.title) || APP_TITLE, {
-              body: a.reason === "approval" ? "Needs your approval" : "Asked you a question",
-              tag: id,
-            });
+            // Fixed words and its place in the list, never the chat's title.
+            const n = new Notification(APP_TITLE, { body: waitingWords(a.reason, ids.indexOf(id) + 1, ids.length), tag: id });
             n.onclick = () => {
               window.focus();
               location.hash = `#/s/${id}`;
@@ -491,6 +488,7 @@ export function Shell(props: {
       ...(workspaceId ? { workspace_id: workspaceId } : {}),
       ...(projectId ? { project_id: projectId } : {}),
       ...(agentic && s.execMode ? { exec_mode: s.execMode } : {}),
+      ...(agentic && s.approvalMode ? { approval_mode: s.approvalMode } : {}),
     });
     refreshSessions();
     go({ kind: "session", id: session_id });

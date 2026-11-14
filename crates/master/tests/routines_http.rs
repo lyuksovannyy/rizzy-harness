@@ -43,6 +43,7 @@ async fn rt(root: &Path, id: &str, profile: Profile) -> NodeRuntime {
         node_id: id.into(),
         hostname: "h".into(),
         policy: NodePolicy {
+            max_approval_mode: harness_core::policy::ApprovalMode::Ask,
             workspace_roots: vec![root.into()],
             ..Default::default()
         },
@@ -701,12 +702,23 @@ async fn saving_checks_triggers_specs_and_prompts() {
         StatusCode::BAD_REQUEST,
         create(&t, &alex, None, "x", extra, every(60)).await,
     );
+    // Any approval mode may be saved (the owner, 2026-11-14); the node
+    // clamps it, and a webhook run asks (`runner::approval_for`).
     let auto = json!({"profile": "agentic", "agent_id": "coder", "prompt": "x",
                       "node_id": "local", "cwd": t.root, "approval_mode": "auto"});
-    refused(
-        StatusCode::BAD_REQUEST,
-        create(&t, &alex, None, "x", auto, every(60)).await,
-    );
+    let (st, v) = create(&t, &alex, None, "x", auto, every(60)).await;
+    assert_eq!(st, StatusCode::CREATED, "{v}");
+    let made = v["routine"]["routine_id"].as_str().unwrap();
+    assert_eq!(v["routine"]["spec"]["approval_mode"], "auto");
+    let (st, _) = req(
+        &t,
+        Method::DELETE,
+        &format!("/api/routines/{made}"),
+        None,
+        &alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
     let e = refused(
         StatusCode::BAD_REQUEST,
         create(
@@ -720,13 +732,13 @@ async fn saving_checks_triggers_specs_and_prompts() {
         .await,
     );
     assert!(e.contains("nobody"), "{e}");
-    let nowhere = json!({"profile": "agentic", "agent_id": "coder", "prompt": "x",
+    let nowhere = json!({"profile": "agentic", "approval_mode": "ask", "agent_id": "coder", "prompt": "x",
                          "node_id": "elsewhere", "cwd": t.root});
     refused(
         StatusCode::BAD_REQUEST,
         create(&t, &alex, None, "x", nowhere, every(60)).await,
     );
-    let chat_node = json!({"profile": "agentic", "agent_id": "coder", "prompt": "x",
+    let chat_node = json!({"profile": "agentic", "approval_mode": "ask", "agent_id": "coder", "prompt": "x",
                            "node_id": "master", "cwd": t.root});
     refused(
         StatusCode::BAD_REQUEST,
@@ -855,7 +867,7 @@ async fn routines_are_their_owners_alone() {
         f["routines"],
         json!({"enabled": true, "show": true, "webhooks": true, "why": null})
     );
-    let agentic = json!({"profile": "agentic", "agent_id": "coder", "prompt": "x",
+    let agentic = json!({"profile": "agentic", "approval_mode": "ask", "agent_id": "coder", "prompt": "x",
                          "node_id": "local", "cwd": t.root});
     let (st, v) = create(&t, &bob, None, "a", agentic, every(60)).await;
     assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
@@ -1117,7 +1129,7 @@ async fn agentic_runs_wait_for_approval_and_time_out() {
     let t = start(dir.path()).await;
     let (alex, _) = alex(&t).await;
     let spec = |agent: &str, prompt: &str| {
-        json!({"profile": "agentic", "agent_id": agent, "prompt": prompt,
+        json!({"profile": "agentic", "approval_mode": "ask", "agent_id": agent, "prompt": prompt,
                "node_id": "local", "cwd": t.root})
     };
     let id = routine(
@@ -1564,6 +1576,7 @@ async fn a_routines_chat_is_always_in_the_sandbox() {
             node_id: id.into(),
             hostname: id.into(),
             policy: NodePolicy {
+                max_approval_mode: harness_core::policy::ApprovalMode::Ask,
                 workspace_roots: vec![t.root.clone().into()],
                 exec: offers,
                 ..Default::default()
@@ -1589,7 +1602,7 @@ async fn a_routines_chat_is_always_in_the_sandbox() {
         t.master.add_link(node.attach().await, false).await.unwrap();
     }
     let spec = |node: &str| {
-        json!({"profile": "agentic", "agent_id": "coder", "prompt": "hello",
+        json!({"profile": "agentic", "approval_mode": "ask", "agent_id": "coder", "prompt": "hello",
                "node_id": node, "cwd": t.root})
     };
     let id = routine(
@@ -1629,7 +1642,7 @@ async fn an_offline_node_is_retried_then_fails_and_failures_pause() {
     let t = start(dir.path()).await;
     let (alex, _) = alex(&t).await;
     offline_node(&t).await;
-    let spec = json!({"profile": "agentic", "agent_id": "coder", "prompt": "run: true",
+    let spec = json!({"profile": "agentic", "approval_mode": "ask", "agent_id": "coder", "prompt": "run: true",
                       "node_id": "gone", "cwd": t.root});
 
     // Run now: retried after 1, 5 and 15 minutes, then failed.
@@ -1717,7 +1730,7 @@ async fn agentic_routines_on_the_local_node_are_for_admins() {
     let t = start(dir.path()).await;
     let (alex, _) = alex(&t).await;
     let (bob, _) = account(&t, &alex, "bob", true).await;
-    let agentic = json!({"profile": "agentic", "agent_id": "coder", "prompt": "x",
+    let agentic = json!({"profile": "agentic", "approval_mode": "ask", "agent_id": "coder", "prompt": "x",
                          "node_id": "local", "cwd": t.root});
     let (st, v) = create(&t, &bob, None, "a", agentic.clone(), every(60)).await;
     assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
@@ -1883,6 +1896,7 @@ async fn a_routine_fires_at_its_owners_level_on_the_day_it_fires() {
         node_id: "node-both1".into(),
         hostname: "node-both1".into(),
         policy: NodePolicy {
+            max_approval_mode: harness_core::policy::ApprovalMode::Ask,
             workspace_roots: vec![t.root.clone().into()],
             exec: ExecOffers::new(Ok(()), Ok(()), vec![]),
             ..Default::default()
@@ -1926,7 +1940,7 @@ async fn a_routine_fires_at_its_owners_level_on_the_day_it_fires() {
         }
     };
     ceiling("sandbox").await;
-    let spec = json!({"profile": "agentic", "agent_id": "coder", "prompt": "hello",
+    let spec = json!({"profile": "agentic", "approval_mode": "ask", "agent_id": "coder", "prompt": "hello",
                       "node_id": "node-both1", "cwd": t.root});
     let id = routine(&t, &bob, None, "Nightly", spec, every(60)).await;
     ceiling("none").await;
@@ -1959,4 +1973,74 @@ async fn a_routine_fires_at_its_owners_level_on_the_day_it_fires() {
     assert_eq!(st, StatusCode::OK, "{v}");
     let run = started(&t, &bob, &id).await;
     wait_status(&t, &bob, &id, &run, "completed").await;
+}
+
+/// The owner, 2026-11-14: "about routines default mode - auto, still when
+/// creating/editing an route - allows to select the mode". A routine made
+/// without a mode is Auto; every mode is saved on create and on edit; a
+/// node whose ceiling is `ask` (this test server's) still clamps a run
+/// of an Auto routine, which then waits for the owner.
+#[tokio::test]
+async fn a_routine_defaults_to_auto_and_saves_every_mode_and_the_node_clamps_its_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = start(dir.path()).await;
+    let (alex, _) = alex(&t).await;
+    let spec = json!({"profile": "agentic", "agent_id": "coder", "prompt": "run: echo hi",
+                      "node_id": "local", "cwd": t.root});
+    let id = routine(&t, &alex, None, "Auto", spec.clone(), every(60)).await;
+    let path = format!("/api/routines/{id}");
+    let (_, v) = req(&t, Method::GET, "/api/routines", None, &alex).await;
+    let saved = v["routines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["routine_id"] == id.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(saved["spec"]["approval_mode"], "auto");
+    for mode in ["ask_all", "ask", "accept_edits", "auto"] {
+        let mut s = spec.clone();
+        s["approval_mode"] = json!(mode);
+        let (st, v) = create(&t, &alex, None, &format!("m-{mode}"), s.clone(), every(60)).await;
+        assert_eq!(st, StatusCode::CREATED, "{mode}: {v}");
+        assert_eq!(v["routine"]["spec"]["approval_mode"], mode);
+        let made = v["routine"]["routine_id"].as_str().unwrap().to_string();
+        let (st, _) = req(
+            &t,
+            Method::DELETE,
+            &format!("/api/routines/{made}"),
+            None,
+            &alex,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, v) = req(&t, Method::PATCH, &path, Some(json!({"spec": s})), &alex).await;
+        assert_eq!(st, StatusCode::OK, "{mode}: {v}");
+        assert_eq!(v["routine"]["spec"]["approval_mode"], mode);
+    }
+    // Back to Auto; this node's node.toml allows at most `ask`.
+    let (st, v) = req(&t, Method::PATCH, &path, Some(json!({"spec": spec})), &alex).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let run = started(&t, &alex, &id).await;
+    let waiting = wait_status(&t, &alex, &id, &run, "waiting").await;
+    let sid = waiting["session_id"].as_str().unwrap().to_string();
+    let (_, ev) = req(
+        &t,
+        Method::GET,
+        &format!("/api/sessions/{sid}/events"),
+        None,
+        &alex,
+    )
+    .await;
+    let created = ev["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "session_created")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        created["payload"]["approval_mode"], "ask",
+        "clamped by the node"
+    );
 }

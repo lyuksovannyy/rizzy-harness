@@ -15,9 +15,9 @@ const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2e8
 const A = `${S}/master`, B = `${S}/remote`, W = `${S}/remote-ws`;
 for (const d of [A, B, `${W}`]) fs.mkdirSync(d, { recursive: true });
 fs.writeFileSync(`${A}/config.toml`, '[[providers]]\nid = "demo"\nname = "Demo"\npreset = "demo"\nkind = "mock"\nmock_delay_ms = 10\nmodels = [{ id = "mock" }]\n');
-fs.writeFileSync(`${A}/node.toml`, `workspace_roots = ["${A}"]\n`);
+fs.writeFileSync(`${A}/node.toml`, `workspace_roots = ["${A}"]\nmax_approval_mode = "ask"\n`);
 fs.writeFileSync(`${B}/config.toml`, '[[providers]]\nid = "demo"\nname = "Demo"\npreset = "demo"\nkind = "mock"\nmock_delay_ms = 10\nmodels = [{ id = "mock" }]\n');
-fs.writeFileSync(`${B}/node.toml`, `workspace_roots = ["${W}"]\n`);
+fs.writeFileSync(`${B}/node.toml`, `workspace_roots = ["${W}"]\nmax_approval_mode = "ask"\n`);
 const URL_ = 'http://127.0.0.1:7794/';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (...a) => console.log('•', ...a);

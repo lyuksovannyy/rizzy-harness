@@ -371,6 +371,38 @@ describe("editor", () => {
     expect(host.textContent).toContain("s3cret");
   });
 
+  // The owner, 2026-11-14: a routine's default mode is Auto, and creating
+  // or editing one lets the person pick any mode; a webhook run asks.
+  test("the approval picker: Auto for a new routine, the saved mode when editing, all four saved", async () => {
+    const agentic = routine({
+      spec: { ...routine().spec, profile: "agentic", node_id: "n1", cwd: "/src", approval_mode: "accept_edits" },
+    });
+    routinesApi.list.mockResolvedValue(LIST({ routines: [agentic] }));
+    routinesApi.update.mockResolvedValue({ routine: agentic, secrets: {} });
+    await show("r1");
+    expect(radio("Approvals", "Accept edits").getAttribute("aria-checked")).toBe("true");
+    act(() => radio("Approvals", "Ask before changes").click());
+    await act(async () => button("Save")!.click());
+    expect(routinesApi.update.mock.calls[0]![1].spec).toMatchObject({ approval_mode: "ask" });
+    act(() => root.unmount());
+    root = createRoot(host);
+    routinesApi.create.mockResolvedValue({ routine: routine(), secrets: {} });
+    await show("new");
+    act(() => radio("Runs as", "Agentic").click());
+    expect(radio("Approvals", "Auto").getAttribute("aria-checked")).toBe("true");
+    expect(["Auto", "Accept edits", "Ask before changes", "Ask before every tool"].every((l) => radio("Approvals", l))).toBe(true);
+  });
+
+  test("a webhook routine says its runs ask whatever the mode", async () => {
+    const hooked = routine({
+      spec: { ...routine().spec, profile: "agentic", node_id: "n1", cwd: "/src", approval_mode: "auto" },
+      triggers: [{ trigger_id: "h1", kind: "webhook", config: {}, next_run_ms: null, last_fired_ms: null, url_path: "/api/hooks/h1", secret_set: true }],
+    });
+    routinesApi.list.mockResolvedValue(LIST({ routines: [hooked] }));
+    await show("r1", { webhooks: true });
+    expect(host.querySelector(".webhook-asks")!.textContent).toContain("whatever the approval mode above");
+  });
+
   test("the webhook card: a curl line, Rotate shows a new secret once, a warning on localhost", async () => {
     const hooked = routine({
       triggers: [{ trigger_id: "h1", kind: "webhook", config: {}, next_run_ms: null, last_fired_ms: null, url_path: "/api/hooks/h1", secret_set: true }],

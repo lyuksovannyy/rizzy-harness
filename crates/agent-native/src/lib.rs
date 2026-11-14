@@ -199,6 +199,10 @@ impl harness_core::backend::TurnHost for Logged<'_> {
         self.host.approve(call_id, tool, input, risk).await
     }
 
+    fn confined(&self, call_id: &str) -> bool {
+        self.host.confined(call_id)
+    }
+
     fn tool_denied(&self, tool: &str) -> bool {
         self.host.tool_denied(tool)
     }
@@ -2945,7 +2949,10 @@ impl NativeBackend {
             workspace: ctx.cwd.clone(),
             cancel: ctx.cancel.child_token(),
             output: Some(sink),
-            allow_outside_workspace: self.config.allow_outside_workspace,
+            // A call the Accept edits rule allowed walks its path as the
+            // rule did (T50).
+            allow_outside_workspace: self.config.allow_outside_workspace
+                && !host.confined(&call.call_id),
             protected: self.config.protected_dirs.clone(),
             timeout: self.config.tool_timeout,
             bash_timeout_max: self.config.bash_timeout_max,

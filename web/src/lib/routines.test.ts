@@ -110,13 +110,13 @@ describe("runs", () => {
 });
 
 describe("drafts", () => {
-  test("a chat routine saves no node, folder or approval mode; an agentic one asks by default", () => {
+  test("a chat routine saves no node, folder or approval mode; an agentic one runs in auto by default (the owner, 2026-11-14)", () => {
     const d = newDraft("general", TZ, 5);
     d.spec = { ...d.spec, node_id: "n1", cwd: "/x", approval_mode: "ask_all" };
     expect(draftSpec(d)).not.toHaveProperty("node_id");
     expect(draftSpec(d)).not.toHaveProperty("approval_mode");
     const a = { ...d, spec: { ...d.spec, profile: "agentic" as const, approval_mode: null } };
-    expect(draftSpec(a)).toMatchObject({ profile: "agentic", node_id: "n1", cwd: "/x", approval_mode: "ask" });
+    expect(draftSpec(a)).toMatchObject({ profile: "agentic", node_id: "n1", cwd: "/x", approval_mode: "auto" });
   });
 
   test("saved triggers keep their ids, so a webhook's URL survives an edit", () => {

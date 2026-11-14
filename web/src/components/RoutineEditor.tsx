@@ -285,15 +285,18 @@ export function RoutineEditor(props: {
                 Approvals
                 <Seg
                   label="Approvals"
-                  value={spec.approval_mode ?? "ask"}
+                  value={spec.approval_mode ?? "auto"}
                   options={[
+                    { value: "auto", label: "Auto" },
+                    { value: "accept_edits", label: "Accept edits" },
                     { value: "ask", label: "Ask before changes" },
                     { value: "ask_all", label: "Ask before every tool" },
                   ]}
                   onChange={(v) => setSpec({ approval_mode: v })}
                 />
                 <span className="field-hint">
-                  Asks before changing files or running commands. A run waiting for you is cancelled after 24 hours.
+                  Auto runs edits and commands in the sandbox without asking; a run started by a webhook always asks. A run
+                  waiting for you is cancelled after 24 hours.
                 </span>
               </div>
             </>
@@ -330,6 +333,12 @@ export function RoutineEditor(props: {
               sample={sample}
               onSample={setSample}
             />
+          )}
+          {draft.when === "webhook" && spec.profile === "agentic" && (
+            <span className="field-hint webhook-asks">
+              A run that uses the webhook&apos;s data asks before every change or command, whatever the approval mode above
+              says: whoever calls the webhook writes into its prompt.
+            </span>
           )}
         </fieldset>
 
@@ -370,7 +379,10 @@ export function RoutineEditor(props: {
             </details>
           )}
           {preview?.untrusted && (
-            <span className="field-hint">With webhook data, the run is untrusted: memory and web tools stay off in its chat.</span>
+            <span className="field-hint">
+              With webhook data, the run is untrusted: memory and web tools stay off in its chat, and it asks before every
+              change or command.
+            </span>
           )}
         </div>
 

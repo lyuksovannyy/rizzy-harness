@@ -774,13 +774,32 @@
       "ts_ms": 1700000000050
     },
     {
-      "kind": "turn_started",
+      "kind": "approval_mode_changed",
       "payload": {
-        "turn_id": "t5"
+        "mode": "auto"
       },
       "seq": 52,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
       "ts_ms": 1700000000051
+    },
+    {
+      "kind": "approval_mode_changed",
+      "payload": {
+        "mode": "accept_edits",
+        "requested": "auto"
+      },
+      "seq": 53,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000052
+    },
+    {
+      "kind": "turn_started",
+      "payload": {
+        "turn_id": "t5"
+      },
+      "seq": 54,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000053
     },
     {
       "kind": "model_retry",
@@ -793,9 +812,9 @@
         "turn_id": "t5",
         "wait_ms": 2000
       },
-      "seq": 53,
+      "seq": 55,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000052
+      "ts_ms": 1700000000054
     },
     {
       "kind": "assistant_message",
@@ -805,9 +824,9 @@
         "tool_calls": [],
         "turn_id": "t5"
       },
-      "seq": 54,
+      "seq": 56,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000053
+      "ts_ms": 1700000000055
     },
     {
       "kind": "turn_ended",
@@ -823,18 +842,18 @@
           "window": 128000
         }
       },
-      "seq": 55,
+      "seq": 57,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000054
+      "ts_ms": 1700000000056
     },
     {
       "kind": "turn_started",
       "payload": {
         "turn_id": "t6"
       },
-      "seq": 56,
+      "seq": 58,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000055
+      "ts_ms": 1700000000057
     },
     {
       "kind": "model_retry",
@@ -847,16 +866,16 @@
         "turn_id": "t6",
         "wait_ms": 4000
       },
-      "seq": 57,
+      "seq": 59,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000056
+      "ts_ms": 1700000000058
     },
     {
       "kind": "from_a_newer_node",
       "payload": {
         "anything": true
       },
-      "seq": 58,
+      "seq": 60,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
       "ts_ms": 0
     }
@@ -888,7 +907,7 @@
     "context_model": "openai::gpt-4o",
     "context_tokens": 800,
     "context_window": 128000,
-    "head_seq": 58,
+    "head_seq": 60,
     "items": [
       {
         "text": "fix the bug",
@@ -1259,6 +1278,15 @@
         "type": "callback_refused"
       },
       {
+        "mode": "auto",
+        "type": "approval_mode_changed"
+      },
+      {
+        "mode": "accept_edits",
+        "requested": "auto",
+        "type": "approval_mode_changed"
+      },
+      {
         "author": null,
         "done": true,
         "message_id": "m6",
@@ -1273,7 +1301,7 @@
       }
     ],
     "meta": {
-      "approval_mode": "ask",
+      "approval_mode": "accept_edits",
       "backend": "native",
       "cwd": "/w",
       "exec_mode": "sandbox",

@@ -132,6 +132,32 @@ pub struct NodeInfo {
     /// The gaps of those modes it announced (`gap:*`, review T8B-3), for
     /// the chat to say. Only the known ones.
     pub exec_gaps: Vec<String>,
+    /// The loosest approval mode its node.toml allows (`approval-max:*`,
+    /// T50); `None`: a node that cannot change a chat's mode. What the UI
+    /// offers; the node clamps whatever it is sent.
+    pub max_approval: Option<harness_core::policy::ApprovalMode>,
+    /// What a new chat there gets when the person picks none
+    /// (`approval-default:*`).
+    pub default_approval: Option<harness_core::policy::ApprovalMode>,
+}
+
+/// The approval modes in a hello's capabilities (T50): its ceiling and its
+/// default, known names only.
+fn approval_of(
+    caps: &[String],
+) -> (
+    Option<harness_core::policy::ApprovalMode>,
+    Option<harness_core::policy::ApprovalMode>,
+) {
+    let find = |prefix: &str| {
+        caps.iter()
+            .find_map(|c| c.strip_prefix(prefix))
+            .and_then(harness_core::policy::ApprovalMode::parse)
+    };
+    (
+        find(harness_protocol::CAP_APPROVAL_MAX_PREFIX),
+        find(harness_protocol::CAP_APPROVAL_DEFAULT_PREFIX),
+    )
 }
 
 /// The execution modes and gaps in a hello's capabilities (N.10a), the
@@ -485,6 +511,9 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::Create { .. }
         | MasterToNode::Cancel { .. }
         | MasterToNode::StopBackground { .. }
+        // `Master::set_approval_mode` checks a raise itself: a lowering,
+        // like a denial, is never refused for the owner's level.
+        | MasterToNode::SetApprovalMode { .. }
         | MasterToNode::Delete { .. }
         | MasterToNode::Resume { .. }
         | MasterToNode::ArtifactFetch { .. }
@@ -1044,6 +1073,8 @@ impl Master {
                     profile,
                     exec_modes: Vec::new(),
                     exec_gaps: Vec::new(),
+                    max_approval: None,
+                    default_approval: None,
                 },
                 tx: None,
                 resuming: HashSet::new(),
@@ -1055,6 +1086,7 @@ impl Master {
             entry.info.connected = true;
             entry.info.profile = profile;
             (entry.info.exec_modes, entry.info.exec_gaps) = exec_of(&capabilities);
+            (entry.info.max_approval, entry.info.default_approval) = approval_of(&capabilities);
             entry.capabilities = capabilities;
             entry.tx = Some(link.to_node.clone());
             entry.resuming.clear();
@@ -2022,6 +2054,76 @@ impl Master {
             req_id,
             session_id: sid,
             agent,
+        })
+        .await
+    }
+
+    /// Change a chat's approval mode on its node (T50), which clamps it
+    /// and records it. Refused here for a node that announced no
+    /// approval modes (it would drop the link on an unknown message).
+    /// The chat's approval mode as its log says (`session_created`, then
+    /// the latest `approval_mode_changed`).
+    pub async fn approval_mode_of(
+        &self,
+        sid: SessionId,
+    ) -> Result<Option<harness_core::policy::ApprovalMode>, CommandError> {
+        let ev = self
+            .inner
+            .mirror
+            .call(move |s| s.last_mode_event(sid))
+            .await?;
+        Ok(ev.and_then(|e| {
+            let v = match e.kind.as_str() {
+                "session_created" => e.payload.get("approval_mode"),
+                _ => e.payload.get("mode"),
+            };
+            v.and_then(|v| serde_json::from_value(v.clone()).ok())
+        }))
+    }
+
+    /// Change a chat's approval mode on its node, which clamps it and
+    /// records it. `raise`: the request is looser than the chat's mode now,
+    /// so it makes the chat do more without a click, and passes the checks
+    /// of every command that makes a chat work (a diverged log, the owner's
+    /// level now). A lowering passes neither: like a denial or a cancel it
+    /// is never refused for the owner's level (review F6).
+    pub async fn set_approval_mode(
+        &self,
+        sid: SessionId,
+        mode: harness_core::policy::ApprovalMode,
+        raise: bool,
+    ) -> Result<(), CommandError> {
+        let node = self.owner(sid).await?;
+        if raise {
+            let (diverged, row) = self
+                .inner
+                .mirror
+                .call(move |s| {
+                    Ok::<_, harness_store::StoreError>((s.diverged_seq(sid)?, s.session(sid)?))
+                })
+                .await?;
+            if diverged.is_some() {
+                return Err(CommandError::Rejected(DIVERGED.into()));
+            }
+            let row = row.ok_or(CommandError::UnknownSession)?;
+            if let Some(why) = workspaces::work_refusal(self, &row).await {
+                return Err(CommandError::Forbidden(why));
+            }
+        }
+        let known = lock(&self.inner.nodes)
+            .get(&node)
+            .is_some_and(|n| n.info.max_approval.is_some());
+        if !known {
+            return Err(CommandError::Rejected(
+                "this chat's node cannot change its approval mode (a node older than this \
+                 server, or one that is away)"
+                    .into(),
+            ));
+        }
+        self.send_command(&node, |req_id| MasterToNode::SetApprovalMode {
+            req_id,
+            session_id: sid,
+            mode,
         })
         .await
     }

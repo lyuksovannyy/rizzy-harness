@@ -36,3 +36,11 @@ export function newlyWaiting(before: string[], now: string[]): string[] {
   const b = new Set(before);
   return now.filter((id) => !b.has(id));
 }
+
+/** A notification's words for a chat that waits (row W.6): fixed words and
+ * the chat's place in the list of waiting chats (1-based), never its title,
+ * a command or a path: the lock screen and the notification log keep them. */
+export function waitingWords(reason: string, place: number, of: number): string {
+  const what = reason === "approval" ? "A chat needs your approval" : "A chat asked you a question";
+  return of > 1 ? `${what} (${place} of ${of} waiting)` : what;
+}
