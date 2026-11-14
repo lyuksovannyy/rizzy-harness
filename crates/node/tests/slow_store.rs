@@ -374,3 +374,56 @@ async fn the_number_of_session_lanes_is_capped() {
     );
     assert!(refused >= N - MAX_LANES - 100, "only {refused} refused");
 }
+
+/// Re-check D-2: a clean stop does not leave audit lines behind. `flush`
+/// waits, within its bound, until every queued line is written and every
+/// counted one recorded as a count, and says false while that is not done.
+///
+/// Fails on c9be431: `flush` waited for the link only and returned true
+/// with the store still held and 1,500 lines queued or counted in memory.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_clean_stop_writes_or_counts_every_audit_line() {
+    let node = Node::new().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let db = node.wedge();
+    const N: usize = 1_500;
+    for i in 0..N {
+        node.send(approval_answer(&format!("a{i}"))).await;
+    }
+    let left = node.node.stop(Duration::from_secs(1)).await;
+    let held = node.node.flush(Duration::from_secs(1)).await;
+    db.execute_batch("ROLLBACK").unwrap();
+    drop(db);
+    let done = node.node.flush(Duration::from_secs(30)).await;
+    // What is in node.db now, read beside the store (as after the process
+    // ended).
+    let (kept, counted): (i64, i64) = {
+        let db = rusqlite::Connection::open(node.dir.path().join("node.db")).unwrap();
+        let kept = db
+            .query_row(
+                "SELECT COUNT(*) FROM audit WHERE kind = 'approval.respond'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let counted = db
+            .query_row(
+                "SELECT COALESCE(SUM(json_extract(detail, '$.count')), 0) FROM audit \
+                 WHERE kind = 'audit.not_recorded'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        (kept, counted)
+    };
+    eprintln!(
+        "D-2, {N} audit lines at a stop with the store held: flush said {held} while held, \
+         {done} after; {kept} written, {counted} counted (left: {left:?})"
+    );
+    assert!(
+        !held,
+        "flush said all was out while the store held the audit lines"
+    );
+    assert!(done, "flush gave up with the store free");
+    assert_eq!(kept + counted, N as i64, "audit lines lost at a clean stop");
+}
