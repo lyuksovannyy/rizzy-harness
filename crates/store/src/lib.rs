@@ -1624,6 +1624,39 @@ impl Store {
         Ok(out)
     }
 
+    /// The latest `session_created` or `approval_mode_changed` of `sid`: the
+    /// chat's approval mode as its log says (T48), so a lowering is never
+    /// gated like a raise. One read on the primary key.
+    pub fn last_mode_event(&self, sid: SessionId) -> Result<Option<RawEvent>> {
+        let conn = self.lock();
+        Ok(conn
+            .query_row(
+                "SELECT seq, ts_ms, kind, payload FROM events WHERE session_id = ?1
+                 AND kind IN ('session_created', 'approval_mode_changed')
+                 ORDER BY seq DESC LIMIT 1",
+                params![sid.to_string()],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?
+            .map(|(seq, ts_ms, kind, payload)| {
+                Ok::<_, serde_json::Error>(RawEvent {
+                    session_id: sid,
+                    seq: seq as u64,
+                    ts_ms,
+                    kind,
+                    payload: serde_json::from_str(&payload)?,
+                })
+            })
+            .transpose()?)
+    }
+
     /// `background_started` and `background_ended` of `sid` recorded at or
     /// after `since_ms` (node clock), oldest first: which commands the
     /// mirror shows running, rebuilt at the master's start.

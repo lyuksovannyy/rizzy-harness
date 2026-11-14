@@ -260,9 +260,14 @@ status, duration, tokens and the first sentence of its answer.
   `{{last_run.status}}`, and `{{event.body.<path>}}` / `{{event.text}}` for a
   webhook); the editor's preview renders the prompt and the next runs on the
   server.
-- **Agentic routines** run in `ask` or `ask_all` only: a command, an edit or a
-  publish waits for your click in "Waiting for you" and is cancelled after
-  24 hours. Read-only work finishes on its own.
+- **Agentic routines** run in the approval mode you pick when you create or
+  edit them, Auto by default (the owner's decision of 2026-11-14). A scheduled
+  routine in Auto runs commands with nobody present, bounded by the node's
+  `max_approval_mode` and, in a sandbox chat, by the sandbox. A run that uses a
+  webhook's data always asks, whatever the routine's mode: whoever calls the
+  webhook writes into its prompt. When a run asks, a command, an edit or a
+  publish waits for your click in "Waiting for you" and is cancelled after 24
+  hours; read-only work finishes on its own.
 - **Webhooks**: `POST /api/hooks/<trigger id>` with
   `Authorization: Bearer <secret>` and a JSON or plain-text body of at most
   64 KiB (`Idempotency-Key` is honoured for 24 hours). The secret is shown once
@@ -806,8 +811,10 @@ with one line saying what runs unasked:
 These defaults are the owner's decision of 2026-11-14, in their words: "default accept mode is Auto for every chat type, no limits for apart chat types or agentic host access modes, so each can use auto, always accept, manual, etc...". Pick another mode for a new chat beside its
 folder, or change it in the open chat at any time; the chat shows each change.
 A lower mode applies from the agent's next call; a card already waiting stays
-waiting until you answer it. Only the chat's owner can change it (nobody else,
-admins included, can see the chat), with the execution level the chat needs.
+waiting until you answer it. Only the chat's owner can change it, and the
+server's API token (which can already prompt and approve any chat); nobody
+else, admins included, can see the chat. Raising it needs the execution level
+the chat needs; lowering it is never refused.
 Nothing the agent writes, no tool output and no sub-agent can change it: a
 sub-agent never runs above the chat that started it, as that chat's mode is
 now, so lowering the chat also lowers a sub-agent that is working. A

@@ -1,6 +1,6 @@
 //! A chat's approval mode (T48, README "Approval modes"): chosen at create,
 //! changed by the owner's command, clamped by the node's own `node.toml`
-//! and the chat's execution mode whatever the master sends, recorded as
+//! (and by nothing else) whatever the master sends, recorded as
 //! `approval_mode_changed` by the session (one writer), rebuilt from the
 //! log after a restart. `accept_edits` lets `write` and `edit` inside the
 //! chat's folder run without a card, and nothing else; a sub-agent never
@@ -679,4 +679,244 @@ async fn a_sub_agent_never_runs_above_its_parent() {
         .unwrap_err();
     assert!(e.contains("routine"), "{e}");
     assert!(n.changes(routine).is_empty());
+}
+
+/// Review F2: a sub-agent's chat never runs above its parent as the parent
+/// is now, also when the owner types into it later: after the parent was
+/// lowered, without and with a node restart in between.
+#[tokio::test]
+async fn a_sub_agent_prompted_later_follows_its_parent_also_after_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    std::fs::write(ws.join("notes.txt"), "x\n").unwrap();
+    let db = dir.path().join("node.db");
+    let agent = |id: &str, tools: &[&str], delegates| harness_core::agent::AgentSpec {
+        agent_id: id.into(),
+        name: id.into(),
+        system_prompt: "work".into(),
+        tools: harness_core::agent::ToolSelection::List(
+            tools.iter().map(|t| t.to_string()).collect(),
+        ),
+        model: None,
+        fallbacks: vec![],
+        unavailable: vec![],
+        no_effort: vec![],
+        context_windows: Default::default(),
+        effort: None,
+        budget: Default::default(),
+        ui: Default::default(),
+        prompt_hash: "h".into(),
+        deny_tools: vec![],
+        delegates,
+        caps: None,
+    };
+    let (sid, child) = {
+        let mut n = start(&db, policy(dir.path(), ApprovalMode::Auto)).await;
+        let sid = n.create(&ws, Some(ApprovalMode::Auto), None, false).await;
+        // A read-only sub-agent works in its parent's folder (no worktree).
+        n.turn(
+            sid,
+            "delegate: scout=read: notes.txt",
+            Some(agent(
+                "lead",
+                &["bash"],
+                vec![agent("scout", &["read"], vec![])],
+            )),
+            deny,
+        )
+        .await;
+        let child = n
+            .node
+            .store()
+            .events_after(sid, 0, 10_000)
+            .unwrap()
+            .iter()
+            .find_map(|e| {
+                let f = e.payload.get("output")?.as_str()?;
+                f.strip_prefix("session: ")?.get(..36)?.parse().ok()
+            })
+            .expect("the sub-agent's session");
+        n.set_mode(sid, ApprovalMode::Ask).await.unwrap();
+        // Without a restart: the owner types into the sub-agent's chat.
+        let asked = n
+            .turn(
+                child,
+                &script(&[("bash", json!({"command": "touch one.txt"}))]),
+                Some(agent("scout", &["bash"], vec![])),
+                deny,
+            )
+            .await;
+        assert_eq!(about(&asked), ["bash touch one.txt"]);
+        (sid, child)
+    };
+    // After a restart: still the parent's mode now.
+    let mut n = start(&db, policy(dir.path(), ApprovalMode::Auto)).await;
+    let asked = n
+        .turn(
+            child,
+            &script(&[("bash", json!({"command": "touch two.txt"}))]),
+            Some(agent("scout", &["bash"], vec![])),
+            deny,
+        )
+        .await;
+    assert_eq!(about(&asked), ["bash touch two.txt"]);
+    assert!(!ws.join("one.txt").exists() && !ws.join("two.txt").exists());
+    // Raised again, the sub-agent may run unasked.
+    n.set_mode(sid, ApprovalMode::Auto).await.unwrap();
+    let asked = n
+        .turn(
+            child,
+            &script(&[("bash", json!({"command": "touch three.txt"}))]),
+            Some(agent("scout", &["bash"], vec![])),
+            deny,
+        )
+        .await;
+    assert!(asked.is_empty(), "{:?}", about(&asked));
+}
+
+/// Review F8: a raise while a card waits leaves that card waiting; the
+/// person's answer still decides it.
+#[tokio::test]
+async fn a_raise_does_not_answer_a_waiting_card() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    let mut n = start(
+        &dir.path().join("node.db"),
+        policy(dir.path(), ApprovalMode::Auto),
+    )
+    .await;
+    let sid = n.create(&ws, Some(ApprovalMode::Ask), None, false).await;
+    n.send(prompt(
+        sid,
+        &script(&[("bash", json!({"command": "touch r.txt"}))]),
+        None,
+    ));
+    let card = loop {
+        if let NodeToMaster::Event { event } = n.next().await
+            && let Ok(EventKind::ApprovalRequested(a)) = event.typed()
+        {
+            break a;
+        }
+    };
+    n.set_mode(sid, ApprovalMode::Auto).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let log = n.node.store().events_after(sid, 0, 10_000).unwrap();
+    assert!(
+        !log.iter().any(|e| e.kind == "approval_resolved"),
+        "answered by the raise"
+    );
+    assert!(!ws.join("r.txt").exists());
+    n.send(MasterToNode::ApprovalRespond {
+        req_id: "a".into(),
+        session_id: sid,
+        approval_id: card.approval_id,
+        decision: Decision::Deny,
+    });
+    loop {
+        if let NodeToMaster::Event { event } = n.next().await
+            && event.kind == "turn_ended"
+        {
+            break;
+        }
+    }
+    assert!(!ws.join("r.txt").exists());
+}
+
+/// Review F8: a lowering applies to the chat's own next call in the same
+/// turn, not only to the next turn.
+#[tokio::test]
+async fn a_lowering_applies_to_the_next_call_of_the_running_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    let mut n = start(
+        &dir.path().join("node.db"),
+        policy(dir.path(), ApprovalMode::Auto),
+    )
+    .await;
+    let sid = n.create(&ws, Some(ApprovalMode::Auto), None, false).await;
+    n.send(prompt(
+        sid,
+        &script(&[
+            ("bash", json!({"command": "sleep 2"})),
+            ("bash", json!({"command": "touch late.txt"})),
+        ]),
+        None,
+    ));
+    loop {
+        if let NodeToMaster::Event { event } = n.next().await
+            && let Ok(EventKind::ToolCallStarted(c)) = event.typed()
+            && c.input["command"] == "sleep 2"
+        {
+            break;
+        }
+    }
+    n.send(MasterToNode::SetApprovalMode {
+        req_id: "lower".into(),
+        session_id: sid,
+        mode: ApprovalMode::Ask,
+    });
+    let mut asked = vec![];
+    loop {
+        match n.next().await {
+            NodeToMaster::Ack { req_id, ok, error } if req_id == "lower" => {
+                assert!(ok, "{error:?}")
+            }
+            NodeToMaster::Event { event } => match event.typed().unwrap() {
+                EventKind::ApprovalRequested(a) => {
+                    n.send(MasterToNode::ApprovalRespond {
+                        req_id: "a".into(),
+                        session_id: sid,
+                        approval_id: a.approval_id.clone(),
+                        decision: Decision::Deny,
+                    });
+                    asked.push(a);
+                }
+                EventKind::TurnEnded(_) => break,
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    assert_eq!(about(&asked), ["bash touch late.txt"]);
+    assert!(!ws.join("late.txt").exists());
+}
+
+/// Review F8: Accept edits covers a new file in a new folder inside the
+/// chat's folder, and not `.git` in another letter case.
+#[tokio::test]
+async fn accept_edits_covers_a_new_folder_and_not_git_in_any_case() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(ws.join(".git")).unwrap();
+    let mut n = start(
+        &dir.path().join("node.db"),
+        policy(dir.path(), ApprovalMode::Auto),
+    )
+    .await;
+    let sid = n
+        .create(&ws, Some(ApprovalMode::AcceptEdits), None, false)
+        .await;
+    let asked = n
+        .turn(
+            sid,
+            &script(&[
+                ("write", json!({"path": "src/new/mod.rs", "content": "x"})),
+                ("write", json!({"path": ".GIT/config", "content": "x"})),
+                (
+                    "write",
+                    json!({"path": ".Git/hooks/pre-commit", "content": "x"}),
+                ),
+            ]),
+            None,
+            deny,
+        )
+        .await;
+    assert_eq!(
+        about(&asked),
+        ["write .GIT/config", "write .Git/hooks/pre-commit"]
+    );
+    assert!(ws.join("src/new/mod.rs").exists());
 }

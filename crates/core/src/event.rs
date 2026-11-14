@@ -1033,7 +1033,7 @@ pub struct ApprovalModeChanged {
     /// The mode the chat runs in now.
     pub mode: crate::policy::ApprovalMode,
     /// What was asked for, when the node gave less: above its
-    /// `max_approval_mode`, or above what a `host` chat may have.
+    /// `max_approval_mode`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested: Option<crate::policy::ApprovalMode>,
 }

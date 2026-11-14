@@ -1974,3 +1974,73 @@ async fn a_routine_fires_at_its_owners_level_on_the_day_it_fires() {
     let run = started(&t, &bob, &id).await;
     wait_status(&t, &bob, &id, &run, "completed").await;
 }
+
+/// The owner, 2026-11-14: "about routines default mode - auto, still when
+/// creating/editing an route - allows to select the mode". A routine made
+/// without a mode is Auto; every mode is saved on create and on edit; a
+/// node whose ceiling is `ask` (this test server's) still clamps a run
+/// of an Auto routine, which then waits for the owner.
+#[tokio::test]
+async fn a_routine_defaults_to_auto_and_saves_every_mode_and_the_node_clamps_its_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = start(dir.path()).await;
+    let (alex, _) = alex(&t).await;
+    let spec = json!({"profile": "agentic", "agent_id": "coder", "prompt": "run: echo hi",
+                      "node_id": "local", "cwd": t.root});
+    let id = routine(&t, &alex, None, "Auto", spec.clone(), every(60)).await;
+    let path = format!("/api/routines/{id}");
+    let (_, v) = req(&t, Method::GET, "/api/routines", None, &alex).await;
+    let saved = v["routines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["routine_id"] == id.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(saved["spec"]["approval_mode"], "auto");
+    for mode in ["ask_all", "ask", "accept_edits", "auto"] {
+        let mut s = spec.clone();
+        s["approval_mode"] = json!(mode);
+        let (st, v) = create(&t, &alex, None, mode, s.clone(), every(60)).await;
+        assert_eq!(st, StatusCode::CREATED, "{mode}: {v}");
+        assert_eq!(v["routine"]["spec"]["approval_mode"], mode);
+        let made = v["routine"]["routine_id"].as_str().unwrap().to_string();
+        let (st, _) = req(
+            &t,
+            Method::DELETE,
+            &format!("/api/routines/{made}"),
+            None,
+            &alex,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, v) = req(&t, Method::PATCH, &path, Some(json!({"spec": s})), &alex).await;
+        assert_eq!(st, StatusCode::OK, "{mode}: {v}");
+        assert_eq!(v["routine"]["spec"]["approval_mode"], mode);
+    }
+    // Back to Auto; this node's node.toml allows at most `ask`.
+    let (st, v) = req(&t, Method::PATCH, &path, Some(json!({"spec": spec})), &alex).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let run = started(&t, &alex, &id).await;
+    let waiting = wait_status(&t, &alex, &id, &run, "waiting").await;
+    let sid = waiting["session_id"].as_str().unwrap().to_string();
+    let (_, ev) = req(
+        &t,
+        Method::GET,
+        &format!("/api/sessions/{sid}/events"),
+        None,
+        &alex,
+    )
+    .await;
+    let created = ev["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "session_created")
+        .unwrap()
+        .clone();
+    assert_eq!(
+        created["payload"]["approval_mode"], "ask",
+        "clamped by the node"
+    );
+}

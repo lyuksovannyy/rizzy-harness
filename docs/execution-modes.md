@@ -322,7 +322,8 @@ earlier build is refused at start as a schema mismatch (fix plan 4.3).
   `the_modes_are_not_shown_to_an_account_without_the_grant`;
   `master/tests/routines_http.rs` `a_routines_chat_is_always_in_the_sandbox`;
   `node/tests/exec_modes.rs` `host_is_never_the_default`,
-  `a_host_session_is_never_in_auto`, `a_host_session_is_not_offered_background_commands`,
+  `a_host_session_takes_auto_within_the_nodes_ceiling` (it replaced `a_host_session_is_never_in_auto`
+  with the owner's decision of 2026-11-14), `a_host_session_is_not_offered_background_commands`,
   `an_agentic_session_without_a_recorded_mode_runs_nothing`; `node/src/exec.rs`
   `a_mode_not_offered_gets_a_confinement_that_runs_nothing`; `node/src/session.rs`
   `a_host_chats_card_says_the_host_shell`; `cli/tests/network_off.rs`

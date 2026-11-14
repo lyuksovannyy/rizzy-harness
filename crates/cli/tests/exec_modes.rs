@@ -135,7 +135,13 @@ impl Node {
                 title: "t".into(),
                 cwd: self.ws.display().to_string(),
                 model: None,
-                approval_mode: Some(harness_core::policy::ApprovalMode::Auto),
+                // A `host` chat in Ask, so its cards (which name the host
+                // shell) are checked; a sandbox chat runs unasked.
+                approval_mode: Some(if mode == ExecMode::Host {
+                    harness_core::policy::ApprovalMode::Ask
+                } else {
+                    harness_core::policy::ApprovalMode::Auto
+                }),
                 profile: None,
                 agent: None,
                 incognito: false,
@@ -170,7 +176,7 @@ impl Node {
         let mut answered = std::collections::HashSet::new();
         loop {
             let log = self.rt.store().events_after(sid, 0, 10_000).unwrap();
-            // A `host` session always asks (review N-e): allow each card.
+            // A `host` session made in Ask asks: allow each card.
             for e in &log {
                 if let Ok(EventKind::ApprovalRequested(a)) = e.typed()
                     && answered.insert(a.approval_id.clone())

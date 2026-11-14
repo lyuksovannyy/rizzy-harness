@@ -552,8 +552,7 @@ impl NodeRuntime {
                 // start.
                 capabilities.extend(self.inner.cfg.policy.exec.capabilities());
                 // Its approval modes (T48): the ceiling, and what a new chat
-                // gets; each chat's own limit (a `host` chat's) the UI knows
-                // from the chat.
+                // gets.
                 let p = &self.inner.cfg.policy;
                 capabilities.push(format!(
                     "{}{}",
@@ -1171,7 +1170,6 @@ impl NodeRuntime {
                 owned: None,
                 no_callbacks,
                 exec_mode,
-                above: Vec::new(),
             },
         )
         .await

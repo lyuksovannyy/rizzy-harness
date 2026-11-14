@@ -82,26 +82,55 @@ pub(crate) struct Retry {
     event: Option<Arc<Event>>,
 }
 
-/// The one place a run's approval mode is chosen: the spec's (`auto` by
-/// default, the owner's decision of 2026-11-14), except that a run holding
-/// webhook data (`untrusted`) asks: whoever can send the webhook writes
-/// into its prompt, and in `auto` they would steer its commands with no
-/// card (PLAN.md T48; the owner is asked to confirm this exception). A
-/// node clamps it further (T5).
-///
-/// This is the seam for trusted routines (docs/routines.md, "The approval
-/// seam"), which is why it takes what v1 ignores. A trusted mode would
-/// return the mode plus the spec's tool allowlist, and only when the run is
-/// not `untrusted` (no `event.*` in its prompt, so a webhook run never
-/// qualifies) and `node` announces `preapproved_tools`. Nothing else on the
-/// master chooses, and an untrusted chat's later turns never come through
-/// here (they run in the chat's own mode, which its owner may change).
-pub fn approval_for(spec: &RoutineSpec, untrusted: bool, _node: Option<&str>) -> ApprovalMode {
-    if untrusted {
-        spec.approval_mode.min(ApprovalMode::Ask)
+/// The loosest mode a run nobody started by hand (a schedule, a webhook)
+/// may have: `Auto`, the owner's decision of 2026-11-14, in their words:
+/// "about routines default mode - auto, still when creating/editing an
+/// route - allows to select the mode". It replaces the recorded decision
+/// O6 ("never auto-approve", ADOPTION_PLAN); `Ask` would restore O6, and
+/// the save rule and a routine's default follow it ([`run_mode`]). A
+/// scheduled routine in `auto` runs commands with nobody present, bounded
+/// by the node's `max_approval_mode`, the routine's own mode, the sandbox
+/// of a sandbox chat, and the `ask` cap for webhook data (PLAN.md T48).
+pub const UNATTENDED_MAX: ApprovalMode = ApprovalMode::Auto;
+
+/// The one rule for a routine run's approval mode: the spec's, at most
+/// `ask` when the prompt holds webhook data (whoever can send the webhook
+/// writes into it, and in `auto` would steer its commands with no card,
+/// PLAN.md T48), and at most [`UNATTENDED_MAX`] unless the owner started it
+/// by hand. A node clamps it further (T5).
+pub fn run_mode(spec: ApprovalMode, untrusted: bool, by_hand: bool) -> ApprovalMode {
+    let m = if untrusted {
+        spec.min(ApprovalMode::Ask)
     } else {
-        spec.approval_mode
-    }
+        spec
+    };
+    if by_hand { m } else { m.min(UNATTENDED_MAX) }
+}
+
+/// The mode a new routine gets when its spec names none.
+pub fn default_mode() -> ApprovalMode {
+    run_mode(harness_core::policy::DEFAULT_CHAT_APPROVAL, false, false)
+}
+
+/// The loosest mode a spec may be saved with: what any run of it could get.
+pub fn save_max() -> ApprovalMode {
+    run_mode(ApprovalMode::Auto, false, true)
+}
+
+/// A run's approval mode, chosen once when its chat is created
+/// ([`run_mode`]). The seam for trusted routines (docs/routines.md, "The
+/// approval seam"): a trusted mode would return the mode plus the spec's
+/// tool allowlist, only for a run that is not `untrusted` and on a `node`
+/// that announces `preapproved_tools`. A routine chat's later turns never
+/// come through here; they run in the chat's recorded mode, which the node
+/// does not let anyone change (a routine's chat keeps its routine's).
+pub fn approval_for(
+    spec: &RoutineSpec,
+    untrusted: bool,
+    by_hand: bool,
+    _node: Option<&str>,
+) -> ApprovalMode {
+    run_mode(spec.approval_mode, untrusted, by_hand)
 }
 
 fn ts(ms: i64) -> Timestamp {
@@ -617,6 +646,7 @@ async fn launch(m: Master, a: Admitted) {
                 approval_mode: Some(approval_for(
                     &a.spec,
                     rendered.untrusted,
+                    a.run.trigger_kind == "manual",
                     a.spec.node_id.as_deref(),
                 )),
                 agent_id: Some(a.spec.agent_id.clone()),
@@ -1482,10 +1512,26 @@ mod approval_tests {
             approval_mode: m,
             ..RoutineSpec::default()
         };
-        assert_eq!(RoutineSpec::default().approval_mode, ApprovalMode::Auto);
+        // The one line F1 flips; the default and the save rule follow it.
+        assert_eq!(UNATTENDED_MAX, ApprovalMode::Auto);
+        assert_eq!(RoutineSpec::default().approval_mode, default_mode());
+        assert_eq!(default_mode(), ApprovalMode::Auto);
+        assert_eq!(save_max(), ApprovalMode::Auto);
         for m in ApprovalMode::ALL {
-            assert_eq!(approval_for(&spec(m), false, None), m);
-            assert_eq!(approval_for(&spec(m), true, None), m.min(ApprovalMode::Ask));
+            assert_eq!(approval_for(&spec(m), false, true, None), m);
+            assert_eq!(
+                approval_for(&spec(m), false, false, None),
+                m.min(UNATTENDED_MAX)
+            );
+            for by_hand in [true, false] {
+                assert!(approval_for(&spec(m), true, by_hand, None) <= ApprovalMode::Ask);
+            }
         }
+        // With `UNATTENDED_MAX = Ask` (O6) a scheduled run asks whatever
+        // the spec says; `run_mode` is the whole rule.
+        assert_eq!(
+            run_mode(ApprovalMode::Auto, false, false).min(ApprovalMode::Ask),
+            ApprovalMode::Ask
+        );
     }
 }

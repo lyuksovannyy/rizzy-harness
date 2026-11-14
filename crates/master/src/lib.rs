@@ -137,7 +137,7 @@ pub struct NodeInfo {
     /// offers; the node clamps whatever it is sent.
     pub max_approval: Option<harness_core::policy::ApprovalMode>,
     /// What a new chat there gets when the person picks none
-    /// (`approval-default:*`), before a `host` chat's limit.
+    /// (`approval-default:*`).
     pub default_approval: Option<harness_core::policy::ApprovalMode>,
 }
 
@@ -504,9 +504,6 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::Callback { session_id, .. }
         | MasterToNode::SelectVariant { session_id, .. }
         | MasterToNode::SetAgent { session_id, .. }
-        // Raising it lets the chat do more without a click: the owner's
-        // level is checked as for every command that makes a chat work.
-        | MasterToNode::SetApprovalMode { session_id, .. }
         | MasterToNode::Restore { session_id, .. }
         | MasterToNode::ApprovalRespond { session_id, .. }
         | MasterToNode::ArtifactStage { session_id, .. } => Some(*session_id),
@@ -514,6 +511,9 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::Create { .. }
         | MasterToNode::Cancel { .. }
         | MasterToNode::StopBackground { .. }
+        // `Master::set_approval_mode` checks a raise itself: a lowering,
+        // like a denial, is never refused for the owner's level.
+        | MasterToNode::SetApprovalMode { .. }
         | MasterToNode::Delete { .. }
         | MasterToNode::Resume { .. }
         | MasterToNode::ArtifactFetch { .. }
@@ -2061,12 +2061,55 @@ impl Master {
     /// Change a chat's approval mode on its node (T48), which clamps it
     /// and records it. Refused here for a node that announced no
     /// approval modes (it would drop the link on an unknown message).
+    /// The chat's approval mode as its log says (`session_created`, then
+    /// the latest `approval_mode_changed`).
+    pub async fn approval_mode_of(
+        &self,
+        sid: SessionId,
+    ) -> Result<Option<harness_core::policy::ApprovalMode>, CommandError> {
+        let ev = self
+            .inner
+            .mirror
+            .call(move |s| s.last_mode_event(sid))
+            .await?;
+        Ok(ev.and_then(|e| {
+            let v = match e.kind.as_str() {
+                "session_created" => e.payload.get("approval_mode"),
+                _ => e.payload.get("mode"),
+            };
+            v.and_then(|v| serde_json::from_value(v.clone()).ok())
+        }))
+    }
+
+    /// Change a chat's approval mode on its node, which clamps it and
+    /// records it. `raise`: the request is looser than the chat's mode now,
+    /// so it makes the chat do more without a click, and passes the checks
+    /// of every command that makes a chat work (a diverged log, the owner's
+    /// level now). A lowering passes neither: like a denial or a cancel it
+    /// is never refused for the owner's level (review F6).
     pub async fn set_approval_mode(
         &self,
         sid: SessionId,
         mode: harness_core::policy::ApprovalMode,
+        raise: bool,
     ) -> Result<(), CommandError> {
         let node = self.owner(sid).await?;
+        if raise {
+            let (diverged, row) = self
+                .inner
+                .mirror
+                .call(move |s| {
+                    Ok::<_, harness_store::StoreError>((s.diverged_seq(sid)?, s.session(sid)?))
+                })
+                .await?;
+            if diverged.is_some() {
+                return Err(CommandError::Rejected(DIVERGED.into()));
+            }
+            let row = row.ok_or(CommandError::UnknownSession)?;
+            if let Some(why) = workspaces::work_refusal(self, &row).await {
+                return Err(CommandError::Forbidden(why));
+            }
+        }
         let known = lock(&self.inner.nodes)
             .get(&node)
             .is_some_and(|n| n.info.max_approval.is_some());

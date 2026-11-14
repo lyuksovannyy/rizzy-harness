@@ -114,6 +114,7 @@ fn changes(seen: &Seen) -> Vec<(SessionId, ApprovalMode)> {
 
 struct T {
     base: String,
+    master: harness_master::Master,
     alex: String,
     local: Seen,
     remote: Seen,
@@ -147,7 +148,8 @@ async fn start() -> T {
     master.add_link(l, false).await.unwrap();
     let (l, old) = fake("old", &[]);
     master.add_link(l, false).await.unwrap();
-    tokio::spawn(async move { axum::serve(listener, router(master)).await.unwrap() });
+    let m2 = master.clone();
+    tokio::spawn(async move { axum::serve(listener, router(m2)).await.unwrap() });
     let base = format!("http://{addr}");
     let r = reqwest::Client::new()
         .post(format!("{base}/api/setup"))
@@ -159,6 +161,7 @@ async fn start() -> T {
     let alex = common::signed_in(r).await;
     T {
         base,
+        master,
         alex,
         local,
         remote,
@@ -255,6 +258,22 @@ async fn the_owner_changes_the_mode_and_the_node_is_asked() {
             (sid, ApprovalMode::Auto),
             (sid, ApprovalMode::Ask)
         ]
+    );
+    // A raise to auto leaves one audit line: ids and the two modes only
+    // (review F10).
+    let lines = t
+        .master
+        .inner_mirror()
+        .audit_lines("approval_mode.")
+        .unwrap();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    let (kind, detail) = &lines[0];
+    assert_eq!(kind, "approval_mode.auto");
+    let d: Value = serde_json::from_str(detail).unwrap();
+    assert_eq!(d["session_id"], sid.to_string());
+    assert_eq!(
+        (d["from"].as_str(), d["to"].as_str()),
+        (Some("ask"), Some("auto"))
     );
     // A mode that does not exist is no request at all.
     let (st, _) = req(
@@ -363,6 +382,17 @@ async fn an_owner_without_the_level_is_refused() {
     .await;
     assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
     assert!(changes(&t.remote).is_empty());
+    // A lowering is never refused (review F6): like a denial or a cancel.
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        &path(sid),
+        Some(json!({"mode": "ask_all"})),
+        &bob,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(changes(&t.remote), [(sid, ApprovalMode::AskAll)]);
 }
 
 /// A node from before approval modes is never sent the command (it would
