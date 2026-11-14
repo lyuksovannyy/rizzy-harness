@@ -138,6 +138,8 @@ function summaryRaw(tool: string, input: Tool["input"]): string {
       return `/${asText(i.pattern ?? "")}/ ${asText(i.path ?? "")}${i.glob ? ` (${asText(i.glob)})` : ""}`;
     case "glob":
       return `${asText(i.pattern ?? "")} ${asText(i.path ?? "")}`;
+    case "skill":
+      return `${asText(i.name ?? "")}${i.file ? ` · ${asText(i.file)}` : ""}`;
     case "todo": {
       // The list is pinned above the composer; the card names the change.
       const items: { content?: unknown; status?: unknown }[] = Array.isArray(i.items) ? i.items : [];
