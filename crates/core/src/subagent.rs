@@ -548,6 +548,7 @@ mod tests {
         };
         let finished = |id: &str, ok: bool| {
             EventKind::ToolCallFinished(ToolCallFinished {
+                seen: None,
                 call_id: id.into(),
                 ok,
                 output: String::new(),

@@ -137,6 +137,7 @@ fn events() -> Vec<RawEvent> {
             text: "running 3 tests\n".into(),
         }),
         EventKind::ToolCallFinished(ToolCallFinished {
+            seen: None,
             call_id: "c1".into(),
             ok: false,
             output: "1 failed".into(),
@@ -153,6 +154,7 @@ fn events() -> Vec<RawEvent> {
             input: json!({"path": "src/lib.rs"}),
         }),
         EventKind::ToolCallFinished(ToolCallFinished {
+            seen: None,
             call_id: "c2".into(),
             ok: true,
             output: "     1\tfn main() {}".into(),
@@ -170,6 +172,7 @@ fn events() -> Vec<RawEvent> {
             input: json!({"query": "tokio"}),
         }),
         EventKind::ToolCallFinished(ToolCallFinished {
+            seen: None,
             call_id: "c5".into(),
             ok: true,
             output: "[S1] Tokio\n    https://tokio.rs/\n    An async runtime".into(),
