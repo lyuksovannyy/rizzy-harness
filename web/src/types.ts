@@ -398,6 +398,8 @@ export interface AgentFeatures {
   read_files: boolean;
   edit_files: boolean;
   commands: boolean;
+  /** The tools of the MCP servers the node runs for the chat; its own switch, not implied by commands. */
+  mcp: boolean;
   /** Hands sub-tasks to the agents available as sub-agents. */
   delegate: boolean;
   /** In the agent picker and @mentions. */

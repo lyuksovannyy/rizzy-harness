@@ -350,6 +350,7 @@ fn features() -> harness_agents::Features {
         read_files: true,
         edit_files: false,
         commands: false,
+        mcp: false,
         delegate: false,
         as_agent: true,
         as_subagent: true,
@@ -763,4 +764,71 @@ fn agents_that_work_on_files_get_skills() {
         assert!(with(r, e, c).iter().any(|t| t == "skill"), "{r} {e} {c}");
     }
     assert!(!with(false, false, false).iter().any(|t| t == "skill"));
+}
+
+/// MCP servers are their own switch (the owner, 2026-11-14): commands no
+/// longer bring them, and the switch alone does. Built-ins keep them where
+/// their tool list has `mcp` (Software Developer, Senior Teamlead).
+#[test]
+fn mcp_servers_are_their_own_switch() {
+    let make = |commands: bool, mcp: bool| {
+        harness_agents::custom(
+            "m",
+            "M",
+            "",
+            "m",
+            harness_agents::Features {
+                commands,
+                mcp,
+                ..features()
+            },
+            vec![],
+        )
+        .unwrap()
+    };
+    let commands_only = make(true, false);
+    assert!(!commands_only.spec.allows_mcp());
+    assert!(!commands_only.spec.allows_tool("mcp__github__create_issue"));
+    assert!(commands_only.spec.allows_tool("bash"));
+    assert!(!commands_only.features.mcp);
+    for commands in [true, false] {
+        let on = make(commands, true);
+        assert!(on.spec.allows_mcp(), "commands {commands}");
+        assert!(on.spec.allows_tool("mcp__github__create_issue"));
+        assert!(on.features.mcp);
+        assert_eq!(on.spec.allows_tool("bash"), commands);
+    }
+    assert_ne!(
+        make(true, false).spec.prompt_hash,
+        make(true, true).spec.prompt_hash
+    );
+
+    let all = builtins();
+    for a in &all {
+        let want = matches!(a.id.as_str(), "coder" | "teamlead");
+        assert_eq!(a.features.mcp, want, "{}", a.id);
+        assert_eq!(a.spec.allows_mcp(), want, "{}", a.id);
+    }
+    // A file agent: `all` or `mcp` in its tools turns the switch on.
+    let file = |tools: &str| {
+        parse(
+            "f",
+            &format!("---\nname: F\ntools: {tools}\n---\nhi\n"),
+            false,
+        )
+        .unwrap()
+        .features
+        .mcp
+    };
+    assert!(file("all") && file("[read, mcp]") && file("[mcp__github__list]"));
+    assert!(!file("[bash, read]"));
+
+    // A page agent saved before the switch reads with it off.
+    let old: harness_agents::edits::Custom = serde_json::from_str(
+        r#"{"name":"Old","summary":"","prompt":"p","features":{"memory":true,"web":false,
+        "read_files":true,"edit_files":false,"commands":true,"delegate":false,
+        "as_agent":true,"as_subagent":true}}"#,
+    )
+    .unwrap();
+    assert!(!old.features.mcp);
 }

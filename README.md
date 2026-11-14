@@ -1414,7 +1414,8 @@ tool_timeout_sec = 300                # one call (1 .. 3600)
   ordinary variables with `env_vars`.
 - **Its tools** are offered as `mcp__<server>__<tool>`. An agent gets them
   when its `tools` list holds `mcp` (Software Developer and Senior
-  Teamlead do; agents made on the Agents page with "commands" do), or names
+  Teamlead do; agents made on the Agents page with the "MCP servers"
+  switch do: "Run commands" alone does not bring them), or names
   one exactly; `deny_tools: [mcp]` removes them all, and `denied_tools` in
   node.toml refuses one by name, `mcp__<server>` all of one server's, and
   `mcp` every MCP tool on the node. A chat carries at most 40 MCP tools and
@@ -2274,7 +2275,7 @@ The built-in agents, grouped by category in the picker:
 | Assistant (`@general`, `@ai`), the chats' default | General | agent | web search and fetch; your facts; project memory |
 | Smol (`@smol`) | General | agent, sub-agent | nothing but answer: no tools, no memory |
 | Researcher (`@researcher`, `@research`) | General | agent, sub-agent | web search and fetch; project memory |
-| Software Developer (`@coder`, `@dev`), the Agentic default | IT | agent, sub-agent | read, change and search files, run commands, publish, web; delegates to Scout, Researcher and Reviewer; project memory |
+| Software Developer (`@coder`, `@dev`), the Agentic default | IT | agent, sub-agent | read, change and search files, run commands, the node's MCP servers, publish, web; delegates to Scout, Researcher and Reviewer; project memory |
 | Senior Teamlead (`@teamlead`) | IT | agent | everything the Software Developer has, plus your facts; delegates to Software Developer, Researcher, Writer, Scout and Reviewer |
 | Writer (`@writer`) | General | agent, sub-agent | read, change and search files, publish, web; project memory |
 | Scout (`@scout`) | IT | sub-agent | read and search files only |
@@ -2352,7 +2353,7 @@ between), then what became of its changes and the pages it cited. The `delegate`
 
 **Agents** in the sidebar lists every agent. Server admins can make agents there
 (name, handle, summary, instructions and feature switches: memory, project
-memory, web search, files, commands, sub-agents, and whether it is offered as an agent,
+memory, web search, files, commands, MCP servers, sub-agents, and whether it is offered as an agent,
 a sub-agent or both), change them, delete them, and change any agent's look.
 Built-in agents and agent files keep their name, handle, instructions and
 features: only their summary and **additional instructions** (added after
