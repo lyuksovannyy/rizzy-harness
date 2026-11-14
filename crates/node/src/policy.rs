@@ -36,6 +36,8 @@ pub struct NodePolicy {
     /// ceiling. What it offers is decided at start, from this and its own
     /// self-test ([`Self::exec`]).
     pub execution: ExecutionPolicy,
+    /// Skills (`[skills]`, ADOPTION_PLAN X.2).
+    pub skills: SkillsPolicy,
     /// Folders no session may include and no file tool may touch, in every
     /// mode: the runtime's own data directory (keys, the API token,
     /// databases). Set by the runtime with [`NodePolicy::protect`], never
@@ -73,6 +75,62 @@ pub struct SandboxPolicy {
     /// Where bubblewrap is, absolute; taken as given. Without it, the first
     /// `bwrap` on `PATH` that this user cannot replace (owned by root).
     pub bwrap: Option<PathBuf>,
+}
+
+/// `[skills]` in node.toml (ADOPTION_PLAN X.2, PLAN.md T46): where the
+/// node looks for skill folders. `denied_tools = ["skill"]` turns skills
+/// off altogether. Nothing the master sends can change it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SkillsPolicy {
+    /// Read the skills of the session's repository (`.agents/skills` and
+    /// `.claude/skills` from its top down to the session folder).
+    pub repository: bool,
+    /// The node owner's skill folders, absolute or under `~/` (the node
+    /// user's home). By default `~/.agents/skills` and `~/.claude/skills`,
+    /// where other harnesses keep personal skills. Every session on this
+    /// node can read the skills in them.
+    pub roots: Vec<PathBuf>,
+}
+
+impl Default for SkillsPolicy {
+    fn default() -> Self {
+        Self {
+            repository: true,
+            roots: vec!["~/.agents/skills".into(), "~/.claude/skills".into()],
+        }
+    }
+}
+
+impl SkillsPolicy {
+    /// [`Self::roots`] with `~/` expanded; an entry that is neither
+    /// absolute nor under `~/` (or `~/` without a home) is an error.
+    pub fn roots(&self) -> Result<Vec<PathBuf>, String> {
+        let home = dirs::home_dir();
+        self.roots
+            .iter()
+            .map(|p| {
+                let p = match (p.strip_prefix("~"), &home) {
+                    (Ok(rest), Some(h)) => h.join(rest),
+                    (Ok(_), None) => {
+                        return Err(format!(
+                            "[skills] roots: {} uses ~ but there is no home directory",
+                            p.display()
+                        ));
+                    }
+                    (Err(_), _) => p.clone(),
+                };
+                if p.is_absolute() {
+                    Ok(p)
+                } else {
+                    Err(format!(
+                        "[skills] roots: {} must be absolute (or start with ~/)",
+                        p.display()
+                    ))
+                }
+            })
+            .collect()
+    }
 }
 
 /// `[execution]` in node.toml (N.10a; README "Execution modes"): which
@@ -298,6 +356,7 @@ impl Default for NodePolicy {
             limits: LimitsPolicy::default(),
             sandbox: SandboxPolicy::default(),
             execution: ExecutionPolicy::default(),
+            skills: SkillsPolicy::default(),
             protected_dirs: Vec::new(),
             exec: Default::default(),
             sandbox_tmp: None,
@@ -336,6 +395,7 @@ impl NodePolicy {
     /// Values serde cannot check: `env_pass` globs, `[limits]` ranges.
     pub fn validate(&self) -> Result<(), String> {
         harness_tools::env::compile_pass(&self.env_pass)?;
+        self.skills.roots()?;
         let n = self.limits.tool_stream_bytes;
         let (min, max) = (
             harness_tools::stream::MIN_STREAM_BYTES,

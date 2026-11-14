@@ -10,6 +10,8 @@ mod coalesce_tests;
 pub mod compact;
 #[cfg(test)]
 mod delegate_availability_tests;
+#[cfg(test)]
+mod edit_guard_tests;
 pub mod images;
 pub mod llm;
 pub mod mask;
@@ -450,7 +452,9 @@ text under \"Task list:\" is the assistant's own task list as it stood at the en
 tool); the harness gives it back after the summary, so do not copy it: refer to it. A \
 sub-agent's report (a \"Tool result:\" of a delegate call) is that agent's own account, not \
 checked by the harness: write what it reported as its report (\"the scout reported …\"), not \
-as an established fact. ",
+as an established fact. A skill loaded with the skill tool (a \"Tool result:\" that starts \
+with \"Skill `\") whose instructions the work still follows: name it under Decisions (\"follows \
+the skill `name`\"), so you can load it again; do not copy its text. ",
     transcript_data!()
 );
 
@@ -619,6 +623,9 @@ pub struct NativeBackend {
     config: NativeConfig,
     /// Full outputs of filtered commands (`tool_output`).
     outputs: Arc<harness_tools::OutputStore>,
+    /// What each session's agent has seen of each file (T.2), rebuilt
+    /// from the log at every turn's start; the snapshots live only here.
+    seen: Arc<harness_tools::seen::SeenStore>,
     repo_maps: std::sync::Mutex<RepoMaps>,
 }
 
@@ -634,6 +641,7 @@ impl NativeBackend {
             tools,
             config,
             outputs: Arc::default(),
+            seen: Arc::default(),
             repo_maps: Default::default(),
         }
     }
@@ -1271,6 +1279,9 @@ impl AgentBackend for NativeBackend {
     fn has_tool(&self, name: &str) -> bool {
         self.tools.iter().any(|t| t.name() == name)
     }
+    fn forget_session(&self, session: harness_core::SessionId) {
+        self.seen.forget(session);
+    }
 
     async fn run_turn(&self, ctx: TurnCtx<'_>) -> TurnOutcome {
         let cancel = ctx.cancel.child_token();
@@ -1336,6 +1347,9 @@ impl NativeBackend {
         }
         let mut usage = Usage::default();
         let (mut summary, mut recent) = split_summary(&ctx.history);
+        // The file tools' guard as the log leaves it (after a restart or a
+        // failed append, the log decides).
+        self.seen.sync(ctx.session_id, &ctx.history);
         // The model answering this turn. Until the turn has any output, a
         // model-level failure moves on to the next of the agent's fallbacks;
         // the note saying so goes out just before the answer.
@@ -1872,6 +1886,7 @@ impl NativeBackend {
                         .is_err()
                         || host
                             .emit(EventKind::ToolCallFinished(ToolCallFinished {
+                                seen: None,
                                 call_id: call.call_id.clone(),
                                 ok: false,
                                 output: CUT_BY_OUTPUT_LIMIT.into(),
@@ -1966,6 +1981,7 @@ impl NativeBackend {
                     .is_err()
                     || host
                         .emit(EventKind::ToolCallFinished(ToolCallFinished {
+                            seen: None,
                             call_id: call.call_id.clone(),
                             ok: verdict.is_ok(),
                             output: output.clone(),
@@ -2014,6 +2030,7 @@ impl NativeBackend {
                         .is_err()
                         || host
                             .emit(EventKind::ToolCallFinished(ToolCallFinished {
+                                seen: None,
                                 call_id: call.call_id,
                                 ok: false,
                                 output: not_run.into(),
@@ -2114,6 +2131,7 @@ impl NativeBackend {
                         Some(r) => {
                             if host
                                 .emit(EventKind::ToolCallFinished(ToolCallFinished {
+                                    seen: None,
                                     call_id: call.call_id.clone(),
                                     ok: false,
                                     output: r.clone(),
@@ -2161,6 +2179,7 @@ impl NativeBackend {
                     let output = self.config.secrets.scrub(&outcome.output);
                     if host
                         .emit(EventKind::ToolCallFinished(ToolCallFinished {
+                            seen: None,
                             call_id: call.call_id.clone(),
                             ok: outcome.ok,
                             output: output.clone(),
@@ -2263,8 +2282,17 @@ impl NativeBackend {
                 {
                     return stopped(usage);
                 }
+                // What the file tools' guard rebuilds from (T.2).
+                // A path the scrubber would change is not logged at all: a
+                // changed path would stand for another file in every later
+                // rebuild (the next turn then asks for a read).
+                let seen = outcome
+                    .seen
+                    .clone()
+                    .filter(|f| outcome.ok && self.config.secrets.scrub(&f.path) == f.path);
                 if host
                     .emit(EventKind::ToolCallFinished(ToolCallFinished {
+                        seen,
                         call_id: call.call_id.clone(),
                         ok: outcome.ok,
                         output: output.clone(),
@@ -2759,6 +2787,8 @@ impl NativeBackend {
             pin: host.folder_pin(),
             owned: host.owned_folder(),
             background: background_access(ctx, host),
+            skills: ctx.extra.skills.clone(),
+            seen: self.seen.session(ctx.session_id),
         };
         // stdout and stderr are interleaved into one coalesced stream (as a
         // terminal shows them); the final result carries both. `coalesce`
@@ -3444,6 +3474,7 @@ mod tests {
         let sid = SessionId::new();
         let earlier = |seq: u64, id: &str, url: &str| {
             let (kind, payload) = EventKind::ToolCallFinished(ToolCallFinished {
+                seen: None,
                 call_id: format!("old{seq}"),
                 ok: true,
                 output: String::new(),
@@ -4195,6 +4226,7 @@ mod tests {
             ..scout()
         };
         let (kind, payload) = EventKind::ToolCallFinished(ToolCallFinished {
+            seen: None,
             call_id: "old".into(),
             ok: true,
             output: String::new(),
@@ -5370,6 +5402,7 @@ mod tests {
                     blocks: vec![],
                 }),
                 EventKind::ToolCallFinished(ToolCallFinished {
+                    seen: None,
                     call_id: id.into(),
                     ok,
                     output: format!("{id} https://laundered.example/path"),

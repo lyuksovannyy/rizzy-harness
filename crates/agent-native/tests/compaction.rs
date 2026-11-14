@@ -765,6 +765,7 @@ fn forging_history() -> (Vec<RawEvent>, String) {
     }));
     for (call_id, output) in [("c1", file.as_str()), ("c2", "ok\n")] {
         events.push(EventKind::ToolCallFinished(ToolCallFinished {
+            seen: None,
             call_id: call_id.into(),
             ok: true,
             output: output.into(),
@@ -1030,6 +1031,7 @@ async fn a_background_note_and_a_callback_opening_reach_the_summariser_quoted() 
             blocks: vec![],
         }));
         push(EventKind::ToolCallFinished(ToolCallFinished {
+            seen: None,
             call_id,
             ok: true,
             output: TAIL.into(),
@@ -1169,6 +1171,7 @@ fn history_with_todo(kept: usize) -> Vec<RawEvent> {
         items: serde_json::from_value(items).unwrap(),
     }));
     push(EventKind::ToolCallFinished(ToolCallFinished {
+        seen: None,
         call_id: "plan".into(),
         ok: true,
         output: "Task list saved: 3 items.".into(),
@@ -1336,6 +1339,7 @@ fn history_with_a_newer_list() -> Vec<RawEvent> {
             items: serde_json::from_value(items).unwrap(),
         }),
         EventKind::ToolCallFinished(ToolCallFinished {
+            seen: None,
             call_id: "plan2".into(),
             ok: true,
             output: "Task list saved: 1 item.".into(),
@@ -1585,4 +1589,14 @@ fn the_coding_summary_keeps_a_sub_agents_report_as_its_own_account() {
         !harness_agent_native::SUMMARY_PROMPT.contains("sub-agent's report"),
         "the chat prompt stays as it was"
     );
+}
+
+/// A skill's body is a tool result, which a summary replaces: the coding
+/// summary names each skill the work still follows, so the agent loads it
+/// again, without copying its text (X.2; Hermes keeps reload pointers).
+#[test]
+fn the_coding_summary_names_loaded_skills_to_load_again() {
+    let p = harness_agent_native::CODING_SUMMARY_PROMPT;
+    assert!(p.contains("loaded with the skill tool"), "{p}");
+    assert!(p.contains("so you can load it again"), "{p}");
 }

@@ -781,6 +781,10 @@ write = []                           # more read-write folders, e.g. "~/.cache"
 [execution]
 sandbox = "auto"                     # auto | strict | off: offer the sandbox mode (bubblewrap), see "Execution modes"
 host = false                         # offer the host shell: commands as this OS user, no sandbox. Read "Execution modes" first
+
+[skills]
+repository = true                    # read the chat repository's .agents/skills and .claude/skills (see "Skills")
+roots = ["~/.agents/skills", "~/.claude/skills"]  # this machine's skill folders; every chat on the node can read them
 ```
 
 **Execution modes.** Each agentic chat runs its commands in one mode,
@@ -1435,6 +1439,39 @@ Cancelling a turn stops any tool: one that does not return by itself
 within 2 seconds is abandoned. A slow undo or delete in one chat never
 delays Stop or an approval answer, in that chat or any other.
 
+**Editing files.** The agent changes only files it has seen in this chat:
+
+- `edit`, and `write` over an existing file, need the file to have been
+  read with `read` in this chat (any part of it). A new file needs
+  nothing. The agent's own edits and writes count as seen. Viewing a file
+  with `cat` in `bash` does not count.
+- If the file changed on disk since then (you edited it, a command or a
+  formatter did, another chat did), `write` is refused, and `edit` goes
+  ahead only when the text it replaces lies outside the lines that
+  changed; the result then shows those lines as they are now. Otherwise it
+  is refused and shows the changed lines, and the agent reads again. This
+  is decided against the text the agent was shown, kept in memory on the
+  node (files up to 512 KiB, 8 MiB in all; at most 4,096 files remembered
+  per node); after a node restart, or for a larger file, any change means
+  "read it again". What the agent has read is stored with each call in the
+  chat's log, so a restart does not make it read everything again. A
+  sub-agent has its own record; deleting a chat drops it.
+- `edit` takes one replacement (`old_string`, `new_string`, `replace_all`)
+  or several in `edits`, matched against the file as it was before the
+  call, all made or none. Text that does not match exactly is still found
+  when, on whole lines, it differs only in trailing whitespace or in
+  typographic quotes, dashes and spaces, and the result says so (the
+  file's own quotes and dashes are kept where the agent did not change
+  them); indentation must match. A line-number prefix copied from `read` output
+  is taken off. When nothing matches, the agent is shown the nearest lines
+  of the file, or told the change seems to be made already.
+- The result lists the changed lines, numbered as `read` numbers them,
+  with two lines around each. Line endings (CRLF), a byte-order mark and a
+  missing final newline are kept.
+- `read` returns up to 2,000 lines (400 with bounded reads) and about
+  29,000 characters; a longer window ends early at a whole line and names
+  the offset to go on from.
+
 ### Token savings
 
 Settings → Server → Token savings switches each method on or off; it is
@@ -1566,6 +1603,92 @@ request the provider caches: about 1k tokens a message for a typical
 `AGENTS.md`, up to the cap (about 8k tokens), not reused from one message to
 the next (the steps within one message do reuse it). Moving them to a cached
 place is for later (with X.1).
+
+## Skills
+
+A skill is a folder with a `SKILL.md` that the agent loads only when a task
+calls for it: the format Claude Code, Codex, OpenCode, Pi, Cursor and others
+read (the Agent Skills format), so folders you already have work as they are.
+
+```markdown
+---
+name: release
+description: Cut a release of this project: bump the version, tag, write the notes.
+---
+1. Run `scripts/bump.sh <version>` from this folder.
+2. ...
+```
+
+`name` (letters, digits, `.`, `_`, `-`, at most 64; the folder's name when
+left out, or when the given one is not such a name) and `description` (what
+it is for and when to use it; the first paragraph of text when left out) are
+what the agent sees. Front matter that is not strict YAML, such as an
+unquoted `description: Use when: ...`, is read line by line, as other harnesses
+accept it; the rest of the file
+is what it reads when it loads the skill. `disable-model-invocation: true`
+keeps a skill out of the agent's list: it is loaded only when you ask for it
+(below). Other keys (`allowed-tools`, `hooks`, `model`, `context`, ...) are
+ignored: a skill never widens what the agent may do. Files beside `SKILL.md`
+(scripts, references, templates) are read when the skill says so.
+
+**Where the node looks**, at the start of every message of an agentic chat:
+`.agents/skills/<name>/SKILL.md` and `.claude/skills/<name>/SKILL.md` in each
+folder from the top of the chat folder's git repository down to the chat's
+folder (as for `AGENTS.md`), and in the folders `[skills] roots` names in
+`node.toml` (by default `~/.agents/skills` and `~/.claude/skills`). When two
+skills have one name, this machine's folders win over the repository (a
+repository cannot stand in for your own `deploy`), and within the repository
+the folder nearest the chat's folder wins; the node logs what it left out.
+`[skills] repository = false` reads only this machine's folders;
+`denied_tools = ["skill"]` turns skills off.
+
+**What the agent gets.** After the instruction files, in the same block, a
+list of the skills: one line each, `- name: description`, sorted by name, at
+most 150 skills and 8,000 characters (or about 2% of the model's context
+window when that is smaller and known). When they do not fit, descriptions
+are shortened to 120 characters, then skills are left out, with a note saying
+how many; the `skill` tool lists every name when asked for one it does not
+know. The cap never goes below room for about ten skills. A skill folder whose
+`SKILL.md` could not be used (no description, a link out of its folder, ...) is
+named in a line under the list; the node's log says why. Looking for skills
+has its own 5-second limit, after the instruction files, so a slow skill
+folder costs only the list. Like the instruction files, the list is read again every message and
+survives compacting. The agent loads a skill with the `skill` tool: it gets the
+`SKILL.md` without its front matter (cut at 24 KiB with a note), the skill
+folder's path, and the names of the files beside it, which it reads with the
+same tool (`file`) or, inside the chat's folder, with its usual tools. When a
+long chat is summarised, the summary names the skills the work still follows
+so the agent can load them again. The Software Developer, Senior Teamlead,
+Writer, Reviewer and Scout have the tool, as do custom agents that read or edit
+files or run commands; the Assistant and the Researcher do not. A sub-agent
+with the tool gets the list too.
+
+**Asking for one.** A message of yours that starts with `/name` (a skill's
+name, then your text; `/name:` works too) asks the agent to load that skill
+first, a manual one included. A task one agent hands another never does.
+There is no menu for it yet.
+
+**What a skill can do: nothing by itself.** Nothing in a skill runs when it is
+found or loaded (no `` !`command` `` expansion); a script it names runs only
+when the agent runs it with `bash`, under the chat's execution mode and its
+approval like any other command. The folders in `[skills] roots` (their real
+paths, a root that is a link resolved) are readable, never writable, in the
+shell of a chat whose agent has the `skill` tool, so a script beside a skill
+from this machine runs in the sandbox too; chats whose agent lacks the tool do
+not see them. The list is quoted to the model like `AGENTS.md`; a loaded body
+is a tool result, like a file the agent reads. Neither changes a setting,
+permission or tool, and a link only in them is not fetched.
+Only regular files are read: a repository's skill folder must lie inside the
+repository (the chat folder's own skills inside the chat folder), and a
+skill's files inside the skill's folder; links out of them, into the node's
+data directory, FIFOs and devices are refused and logged. This machine's skill
+folders may be links anywhere outside the data directory. On a node other
+people's chats use, they can read the skills in `[skills] roots`: keep secrets
+out of them, or set `roots = []`.
+
+**Cost:** about 25 tokens per listed skill with every message, up to the cap
+(about 2k tokens), sent fresh like the instruction files; a body costs only
+when it is loaded.
 
 ## Rich messages
 

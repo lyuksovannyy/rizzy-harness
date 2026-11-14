@@ -183,8 +183,9 @@ pub struct TurnExtra {
     /// sent after the history, not in the system prompt, so the cached
     /// prefix stays the same from turn to turn. Never stored.
     pub context: Option<String>,
-    /// The repository's instruction files (`AGENTS.md`, `CLAUDE.md`), read
-    /// by the node at the start of this turn. Set only by the node, never
+    /// The repository's instruction files (`AGENTS.md`, `CLAUDE.md`), and
+    /// the catalogue of skills after them, read by the node at the start
+    /// of this turn. Set only by the node, never
     /// from the protocol. Sent after the history like `context`, in front
     /// of it; a callback turn, which takes no `context`, gets them after
     /// its opening. Never stored.
@@ -195,6 +196,10 @@ pub struct TurnExtra {
     /// protocol. It opens the turn's own message (after the history, so
     /// the cached prefix stays the same). Never stored.
     pub environment: Option<String>,
+    /// The skills the node found for this turn (`crate::skills`), which
+    /// the `skill` tool loads from; their catalogue is at the end of
+    /// `instructions`. Set only by the node, never from the protocol.
+    pub skills: Option<std::sync::Arc<crate::skills::Catalogue>>,
     /// A delegated sub-task's parent book: its labels continue the parent's
     /// numbering, so `[S3]` in the answer it returns names the parent's S3.
     /// `None` means the book comes from this session's own log.
@@ -239,4 +244,6 @@ pub trait AgentBackend: Send + Sync {
     fn has_tool(&self, _name: &str) -> bool {
         false
     }
+    /// The session was deleted: drop whatever is kept in memory for it.
+    fn forget_session(&self, _session: crate::SessionId) {}
 }

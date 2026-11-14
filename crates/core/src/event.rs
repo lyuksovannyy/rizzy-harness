@@ -863,6 +863,22 @@ pub struct ToolCallFinished {
     /// the node's loop writes it, never from the tool or the model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// The file this call read or wrote, as the file tools' staleness guard
+    /// must know it (ADOPTION_PLAN T.2): the node rebuilds what the agent
+    /// has seen from these, so the guard survives a restart. Only the
+    /// node's loop writes it, from what `read`, `write` or `edit` did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seen: Option<FileSeen>,
+}
+
+/// A file as a file tool left the agent knowing it: `read` showed it (all
+/// of it, or a part), or `write`/`edit` wrote it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileSeen {
+    /// The real path (links resolved), as the file tools key it.
+    pub path: String,
+    /// SHA-256 of the file's bytes, lowercase hex.
+    pub sha256: String,
 }
 
 /// A web page behind a citation label. Only the harness's web tools write
@@ -1201,6 +1217,7 @@ mod tests {
     #[test]
     fn sources_roundtrip() {
         let k = EventKind::ToolCallFinished(ToolCallFinished {
+            seen: None,
             call_id: "c".into(),
             ok: true,
             output: "[S4] Tokio\n    https://tokio.rs/".into(),
