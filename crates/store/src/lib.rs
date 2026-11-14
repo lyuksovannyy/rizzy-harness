@@ -981,14 +981,52 @@ impl Store {
         Ok(())
     }
 
+    /// Rename chat `sid`: its row's title (every list, search hit and page
+    /// reads the row), cut to `MAX_TITLE_CHARS`, and the search index's
+    /// title. The log keeps the title it was created with; nothing the
+    /// agent reads changes. `false` when there is no such chat.
+    pub fn rename_session(&self, sid: SessionId, title: &str) -> Result<bool> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let id = sid.to_string();
+        let incognito: Option<bool> = tx
+            .query_row(
+                "SELECT incognito FROM sessions WHERE session_id = ?1",
+                params![id],
+                |r| r.get::<_, i64>(0).map(|v| v != 0),
+            )
+            .optional()?;
+        let Some(incognito) = incognito else {
+            return Ok(false);
+        };
+        let title = row_title(title);
+        tx.execute(
+            "UPDATE sessions SET title = ?2 WHERE session_id = ?1",
+            params![id, title],
+        )?;
+        if !incognito {
+            tx.execute(
+                "DELETE FROM chat_fts WHERE session_id = ?1 AND title != ''",
+                params![id],
+            )?;
+            Self::index_row(&tx, &id, "title", &title)?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// Drop and rebuild the search index from the event log.
     pub fn rebuild_search_index(&self) -> Result<()> {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         tx.execute("DELETE FROM chat_fts", [])?;
+        // A chat's title is its row's (a rename changes only that).
         let rows: Vec<(String, String, String)> = {
             let mut stmt = tx.prepare(
-                "SELECT e.session_id, e.kind, e.payload FROM events e
+                "SELECT e.session_id, e.kind,
+                        CASE WHEN e.kind = 'session_created'
+                             THEN json_object('title', s.title) ELSE e.payload END
+                 FROM events e
                  JOIN sessions s ON s.session_id = e.session_id
                  WHERE s.incognito = 0
                    AND e.kind IN ('session_created', 'user_message', 'assistant_message')
