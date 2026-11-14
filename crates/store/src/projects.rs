@@ -128,6 +128,20 @@ pub struct ProjectLink {
     pub workspace_id: String,
 }
 
+/// One of a person's earlier chats in a project, for the first turn of
+/// their next chat there (the master's `projects::earlier_chats`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EarlierChat {
+    pub session_id: SessionId,
+    pub title: String,
+    /// Its newest event's time (node clock).
+    pub updated_ms: i64,
+    /// Its latest `history_summarized` text when `summary`, else its last
+    /// assistant message with text.
+    pub text: String,
+    pub summary: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColumnRow {
     pub column_id: String,
@@ -441,6 +455,105 @@ impl Store {
             });
         }
         Ok(out)
+    }
+
+    /// `owner`'s chats in `project` other than `except`, newest first, at
+    /// most `limit` of those with text (see [`EarlierChat`]; one with
+    /// neither a summary nor a reply is skipped). Never an incognito chat
+    /// nor a sub-agent's, and only where the link still applies (the
+    /// chat's effective workspace is the project's). Filtered by owner in
+    /// SQL: no other account's chat is read.
+    pub fn earlier_chats(
+        &self,
+        project: &str,
+        owner: &str,
+        except: SessionId,
+        limit: usize,
+    ) -> Result<Vec<EarlierChat>> {
+        let conn = self.lock();
+        // A few more than `limit`: chats opened and left empty are common.
+        let sql = format!(
+            "SELECT s.session_id, s.title, s.updated_ms FROM session_projects sp
+             JOIN sessions s ON s.session_id = sp.session_id {WS_JOINS}
+             JOIN projects p ON p.project_id = sp.project_id
+             WHERE sp.project_id = ?1 AND s.owner_id = ?2 AND s.session_id <> ?3
+               AND s.incognito = 0 AND s.parent_id IS NULL
+               AND p.workspace_id = {EFFECTIVE_WS}
+             ORDER BY s.updated_ms DESC LIMIT ?4"
+        );
+        let candidates: Vec<(String, String, i64)> = conn
+            .prepare(&sql)?
+            .query_map(
+                params![project, owner, except.to_string(), (limit * 4) as i64],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut summary = conn.prepare_cached(
+            "SELECT payload FROM events WHERE session_id = ?1 AND kind = 'history_summarized'
+             ORDER BY seq DESC LIMIT 1",
+        )?;
+        let mut replies = conn.prepare_cached(
+            "SELECT payload FROM events WHERE session_id = ?1 AND kind = 'assistant_message'
+             ORDER BY seq DESC",
+        )?;
+        let text_of = |payload: &str| -> Result<Option<String>> {
+            let v: serde_json::Value = serde_json::from_str(payload)?;
+            Ok(v.get("text")
+                .and_then(|t| t.as_str())
+                .filter(|t| !t.trim().is_empty())
+                .map(str::to_string))
+        };
+        let mut out = Vec::new();
+        for (sid, title, updated_ms) in candidates {
+            if out.len() >= limit {
+                break;
+            }
+            let found = match summary
+                .query_row(params![sid], |r| r.get::<_, String>(0))
+                .optional()?
+            {
+                Some(p) => text_of(&p)?.map(|t| (t, true)),
+                None => None,
+            };
+            let found = match found {
+                Some(f) => Some(f),
+                None => {
+                    let mut rows = replies.query(params![sid])?;
+                    let mut last = None;
+                    while let Some(row) = rows.next()? {
+                        if let Some(t) = text_of(&row.get::<_, String>(0)?)? {
+                            last = Some((t, false));
+                            break;
+                        }
+                    }
+                    last
+                }
+            };
+            let Some((text, is_summary)) = found else {
+                continue;
+            };
+            out.push(EarlierChat {
+                session_id: sid
+                    .parse()
+                    .map_err(|_| StoreError::Corrupt(format!("session id {sid}")))?,
+                title,
+                updated_ms,
+                text,
+                summary: is_summary,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Whether chat `sid` has a person's message yet: none before its
+    /// first turn.
+    pub fn has_user_message(&self, sid: SessionId) -> Result<bool> {
+        let conn = self.lock();
+        Ok(conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM events WHERE session_id = ?1 AND kind = 'user_message')",
+            params![sid.to_string()],
+            |r| r.get(0),
+        )?)
     }
 
     // ---- board ----

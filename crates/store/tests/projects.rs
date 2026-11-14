@@ -449,3 +449,200 @@ fn a_new_chat_joins_only_a_project_of_its_workspace() {
     assert!(!s.link_new_session(b, "gone").unwrap());
     assert_eq!(s.project_links(None).unwrap().len(), 2);
 }
+
+/// A chat of `owner` in team workspace `w`, created at `ts`, its later
+/// events one millisecond apart; in project `p` when given. `created` adds
+/// to the `session_created` payload.
+fn chat_with(
+    s: &Store,
+    owner: &str,
+    w: &str,
+    p: Option<&str>,
+    ts: i64,
+    created: serde_json::Value,
+    events: &[(&str, serde_json::Value)],
+) -> SessionId {
+    let sid = SessionId::new();
+    let mut payload = json!({"title": format!("chat {ts}"), "cwd": "", "model": "m"});
+    for (k, v) in created.as_object().unwrap() {
+        payload[k] = v.clone();
+    }
+    s.append(
+        "n1",
+        &RawEvent {
+            session_id: sid,
+            seq: 1,
+            ts_ms: ts,
+            kind: "session_created".into(),
+            payload,
+        },
+    )
+    .unwrap();
+    s.claim_session(sid, Some(owner), Some(w)).unwrap();
+    if let Some(p) = p {
+        s.set_session_project(sid, Some(p)).unwrap();
+    }
+    for (i, (kind, payload)) in events.iter().enumerate() {
+        s.append(
+            "n1",
+            &RawEvent {
+                session_id: sid,
+                seq: i as u64 + 2,
+                ts_ms: ts + i as i64 + 1,
+                kind: kind.to_string(),
+                payload: payload.clone(),
+            },
+        )
+        .unwrap();
+    }
+    sid
+}
+
+fn said(text: &str) -> (&'static str, serde_json::Value) {
+    (
+        "assistant_message",
+        json!({"turn_id": "t", "message_id": harness_core::new_id(), "text": text}),
+    )
+}
+
+/// What a new project chat's first turn reads of earlier chats: only its
+/// owner's own chats in that project, newest first, never incognito or
+/// sub-agent chats nor the chat itself; each with its latest summary, else
+/// its last assistant message with text; a chat with neither is left out.
+#[test]
+fn earlier_chats_are_the_owners_own_in_the_project_newest_first() {
+    let (s, w) = store();
+    s.create_user(&NewUser {
+        user_id: "u2".into(),
+        username: "u2".into(),
+        password_hash: "$argon2id$x".into(),
+        role: Role::Member,
+        exec_ceiling: harness_core::policy::ExecLevel::None,
+        must_change_password: false,
+    })
+    .unwrap();
+    assert!(s.add_member(&w, "u2", "member").unwrap());
+    project(&s, "p", &w);
+    project(&s, "q", &w);
+    let none = json!({});
+    let summary = (
+        "history_summarized",
+        json!({"turn_id": "t", "through_seq": 2, "text": "Goal: alpha"}),
+    );
+    // Summarised, then talked on: the summary is what it gives.
+    let a = chat_with(
+        &s,
+        "u1",
+        &w,
+        Some("p"),
+        100,
+        none.clone(),
+        &[said("alpha reply"), summary, said("alpha later")],
+    );
+    // No summary: the last assistant message with text (a tool-call step
+    // with none comes after it).
+    let b = chat_with(
+        &s,
+        "u1",
+        &w,
+        Some("p"),
+        200,
+        none.clone(),
+        &[said("bravo reply"), said("")],
+    );
+    // Another member's chat in the same project.
+    chat_with(
+        &s,
+        "u2",
+        &w,
+        Some("p"),
+        300,
+        none.clone(),
+        &[said("charlie secret")],
+    );
+    // Incognito, a sub-agent of `a`, no reply yet, another project.
+    chat_with(
+        &s,
+        "u1",
+        &w,
+        Some("p"),
+        400,
+        json!({"incognito": true}),
+        &[said("delta hidden")],
+    );
+    let sub = chat_with(
+        &s,
+        "u1",
+        &w,
+        Some("p"),
+        500,
+        json!({"parent_session": a.to_string()}),
+        &[said("echo delegate")],
+    );
+    assert_eq!(
+        s.session(sub).unwrap().unwrap().parent_id,
+        Some(a.to_string())
+    );
+    chat_with(&s, "u1", &w, Some("p"), 600, none.clone(), &[]);
+    chat_with(
+        &s,
+        "u1",
+        &w,
+        Some("q"),
+        700,
+        none.clone(),
+        &[said("foxtrot elsewhere")],
+    );
+    let me = chat_with(
+        &s,
+        "u1",
+        &w,
+        Some("p"),
+        800,
+        none.clone(),
+        &[said("golf myself")],
+    );
+
+    let got = s.earlier_chats("p", "u1", me, 5).unwrap();
+    let ids: Vec<SessionId> = got.iter().map(|c| c.session_id).collect();
+    assert_eq!(ids, vec![b, a], "{got:?}");
+    assert_eq!(got[0].text, "bravo reply");
+    assert!(!got[0].summary);
+    assert_eq!(got[0].title, "chat 200");
+    assert_eq!(got[0].updated_ms, 202);
+    assert_eq!(got[1].text, "Goal: alpha");
+    assert!(got[1].summary);
+    // The limit counts chats with text.
+    let got = s.earlier_chats("p", "u1", me, 1).unwrap();
+    assert_eq!(got.len(), 1);
+    assert_eq!(got[0].session_id, b);
+    // The other member reads only their own.
+    let theirs = s.earlier_chats("p", "u2", me, 5).unwrap();
+    assert_eq!(theirs.len(), 1);
+    assert_eq!(theirs[0].text, "charlie secret");
+}
+
+/// A chat whose owner left the project's workspace is back in Personal:
+/// its link no longer applies, so it is not one of the project's chats.
+#[test]
+fn earlier_chats_follow_the_chats_workspace() {
+    let (s, w) = store();
+    project(&s, "p", &w);
+    let home = s.personal_workspace("u1").unwrap();
+    project(&s, "mine", &home);
+    let a = chat_with(
+        &s,
+        "u1",
+        &w,
+        Some("p"),
+        100,
+        json!({}),
+        &[said("alpha reply")],
+    );
+    // A stale link to a project of another workspace.
+    s.set_session_project(a, Some("mine")).unwrap();
+    let me = SessionId::new();
+    assert!(s.earlier_chats("mine", "u1", me, 5).unwrap().is_empty());
+    s.set_session_project(a, Some("p")).unwrap();
+    assert_eq!(s.earlier_chats("p", "u1", me, 5).unwrap().len(), 1);
+}

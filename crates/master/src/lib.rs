@@ -1954,7 +1954,8 @@ impl Master {
             let remember = allowed.project
                 && agent.allows_tool("remember")
                 && self.node_has(&row.node_id, harness_protocol::CAP_REMEMBER);
-            turn_context.push(projects::turn_context(self, p, &text, allowed, remember).await);
+            turn_context
+                .push(projects::turn_context(self, p, &row, &text, allowed, remember).await);
         }
         // Last, so it is what the model reads right before answering.
         if untrusted {
