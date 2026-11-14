@@ -126,6 +126,23 @@ turn's agent and settings: one sent to another agent (the agent picker, or an
 `@mention` of another agent) is refused with the reason, so pick the agent for
 your next message instead.
 
+When a turn completes or fails in a chat you are not looking at (another chat
+is open, or the tab is hidden), the chat gets a dot in **Recent** until you
+open it, and with **Desktop notifications** on (Settings → Account →
+Preferences) the browser says "A chat finished: number N in your recent
+chats", never the chat's title. A sub-agent's chat, a turn the harness
+started after a background command ended (it has its own "resumed" row on
+Home) and an answer that asks you something (it waits for you on Home) do
+not get one; neither does a turn you stopped. The chat header shows the
+context of the last request as a share of the model's window and where older
+turns will be summarised ("62% of 128k · summary at 80%"). Without a known
+window it says **window unknown**: hover it for how to set `context` on the
+model. A sub-agent's card in the conversation marks where it was started
+and links to its chat; its row in the side panel shows what it is doing (its
+latest tool call and how many it made, or that it waits for an approval) and
+its tokens once it ended. Only chats in the open workspace notify, and a
+second tab may notify while another tab shows the chat.
+
 A chat is titled from its first message. The pencil next to the title in the
 chat's header renames it (Enter saves, Escape cancels; at most 200
 characters, control and hidden characters dropped); only you can rename your
@@ -495,7 +512,9 @@ is not retried: the agent's next fallback model answers at once, or without
 one the turn ends with a message naming the wait. A refused key, a missing
 permission, an exhausted quota or a bad request is not retried, and nothing
 is retried once part of the answer is on screen. The chat shows the turn as
-still running while it waits. When a turn's
+still running while it waits, with a line under it naming the model, why
+(rate limit, provider overloaded, provider error, connection failed) and a
+countdown to the next attempt ("attempt 2 of 3"). When a turn's
 model is unavailable, or its request still fails before any output with a model
 problem (not found, rate limit, server error, no connection), the agent's
 fallbacks are tried in order, skipping unavailable ones, and the chat notes
@@ -1421,18 +1440,27 @@ are off the agent is not offered `bash_output` or `bash_stop` and `bash` does
 not describe `background` (a call that asks for it anyway is refused with the
 reason).
 
-**What you see and how you stop one.** While a background command of the open
-chat runs, a strip above the reply box lists each one: its id (`bg-1`), the
-first line of its command (as plain text), the time left before its timeout
-stops it, and **Stop**; with two or more, **Stop all**. A click shows
-"stopping…" until the node has ended the command; the strip then shows
-"ended: stopped" for a moment, the chat keeps the line "bg-1 ended (stopped by
-user)", and the strip goes when nothing runs. A refused stop shows the reason
-on its row (Stop can be pressed again). The strip is drawn from the chat's
-log, so a reload or a second tab shows the same commands; only "stopping…" is
-the tab's own. **The chat's Stop does not stop them**: it ends the turn, and
-the strip stays, saying they keep running. When the chat's node is away, the
-strip says so and offers no Stop: a stop cannot reach it, and the commands
+**What you see and how you stop one.** Work that runs beside the
+conversation is listed in the **side panel** on the right of the chat, as
+Claude Desktop does it: the turn's sub-agents on top, then a separator, then
+the chat's background commands. The panel opens by itself when the first
+one starts; close it with its button, and it shows as a small button with
+the count of what is active (on a narrow screen it is always that button,
+and the panel opens over the chat). A command's row shows its id (`bg-1`),
+the first line of its command (as plain text), its state, the time left
+before its timeout stops it, and **Stop**; with two or more running, **Stop
+all**. A click shows "stopping…" until the node has ended the command; the
+row then says it was stopped, and the chat keeps the line "bg-1 ended
+(stopped by user)". Rows of the latest turn stay listed once finished, so you
+see what ran; a command from an earlier turn is listed while it runs. A
+refused stop shows the reason on its row (Stop can be pressed again). The
+panel is drawn from the chat's log, so a reload or a second tab shows the
+same rows; only "stopping…" is the tab's own. A command the agent waits for
+(not a background one) is not in the panel: it is a block in the
+conversation, open, with its output as it comes. **The chat's Stop does not
+stop background commands**: it ends the turn, and the panel keeps them,
+saying they keep running. When the chat's node is away, the panel says so
+and offers no Stop: a stop cannot reach it, and the commands
 end with that node or at their timeout (the chat shows the end when the node
 is back). The time left is the node's deadline counted on your computer's
 clock; if the two clocks differ it is off by that much, but it never shows
@@ -1482,7 +1510,7 @@ be reached** by a later command: each command has a network namespace of its
 own; the start's result says so. A command stops at its timeout, with
 `bash_stop`, when the chat is deleted, when its owner loses access to it
 (the chat then starts none until its owner writes to it again), with the
-strip's Stop, and when the node stops or dies; a turn's Stop leaves it
+side panel's Stop, and when the node stops or dies; a turn's Stop leaves it
 running. An undo in a chat is
 refused while that chat's own background commands run; a background command
 of another chat in the same folder is not checked and can write over what an
@@ -2359,8 +2387,10 @@ Rich messages (Markdown, citations, `ui:` blocks; sections in `web/e2e/rich/`):
 node web/e2e/rich.cjs target/debug/rizzy-harness
 ```
 
-A chat's background command in the strip, the turn's Stop leaving it, the
-strip's Stop ending it (needs bubblewrap; port 7786):
+A chat's background command in the side panel (not above the composer), a
+foreground command as a block in the chat, the turn's Stop leaving the
+background one, the panel's Stop ending it (needs bubblewrap; port 7786, or
+the fourth argument):
 
 ```bash
 node web/e2e/background.cjs target/debug/rizzy-harness
