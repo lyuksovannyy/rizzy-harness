@@ -192,6 +192,12 @@ pub async fn connect_with(
         .await
         .map_err(|_| crate::timed_out("connecting to the master"))??;
     tcp.set_nodelay(true)?;
+    // Only Linux and Android have it (socket2); elsewhere the kernel's
+    // buffer is ahead of a Stop's ack.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    if let Err(e) = socket2::SockRef::from(&tcp).set_tcp_notsent_lowat(crate::UNSENT_LIMIT) {
+        tracing::warn!(error = %e, "could not limit the bytes the socket holds unsent");
+    }
     tokio::time::timeout(timing.handshake, async {
         let tls = connector.connect(name, tcp).await?;
         let (ws, _) =

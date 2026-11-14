@@ -22,6 +22,9 @@ rustls = { version = "0.23.46", default-features = false, features = ["aws_lc_rs
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+# TCP_NOTSENT_LOWAT on the node's socket (A.21): no safe setter in tokio,
+# nix or rustix. Already in the tree with these features through tokio.
+socket2 = { version = "=0.6.5", features = ["all"] }
 thiserror.workspace = true
 tokio.workspace = true
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["aws_lc_rs", "tls12"] }

@@ -5,6 +5,8 @@
 mod attachment_tests;
 #[cfg(test)]
 mod callback_tests;
+#[cfg(test)]
+mod coalesce_tests;
 pub mod compact;
 #[cfg(test)]
 mod delegate_availability_tests;
@@ -43,6 +45,12 @@ pub use retry::RetryPolicy;
 pub const FLUSH_INTERVAL: Duration = Duration::from_millis(75);
 /// ...or when this many bytes are buffered.
 pub const FLUSH_BYTES: usize = 2048;
+/// What is left in a stream's channel when it ends (a model's deltas that
+/// piled up behind a waiting append) goes out in batches of at most this
+/// many bytes: a few appends, each an fsync,
+/// and no frame larger than this ahead of the node's acks (review A21-3,
+/// re-check D-5).
+pub const DRAIN_BYTES: usize = 32 * 1024;
 
 /// After a cancel, how long a tool has to return on its own before the turn
 /// stops waiting for it. Longer than bash needs to end a group that ignores
@@ -893,26 +901,54 @@ async fn coalesce_led<T, F>(
 where
     F: std::future::Future<Output = T>,
 {
+    type Sending<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
     tokio::pin!(fut);
     let mut buf = String::new();
     let mut scrubber = StreamScrubber::new(secrets.clone());
     let mut emitted = false;
     let mut tick = tokio::time::interval(FLUSH_INTERVAL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // `clean` is already scrubbed; an empty one (all held back) is not sent.
-    let flush = async |clean: String, lead: &mut Option<EventKind>| -> bool {
+    // The appends of one batch (`lead` before the first). `clean` is
+    // already scrubbed; an empty one (all held back) is not sent. A failed
+    // append cancels the turn's token, which ends this loop (or the tool,
+    // which then returns); later appends fail at once.
+    let start = |clean: String, lead: &mut Option<EventKind>| {
         if clean.is_empty() {
-            return false;
+            return None;
         }
-        // A failed append cancels the turn's token, which ends this loop
-        // (or the tool, which then returns); later appends fail at once.
-        if let Some(l) = lead.take() {
-            let _ = host.emit(l).await;
-        }
-        let _ = host.emit(make(clean)).await;
-        true
+        let first = lead.take();
+        let batch = make(clean);
+        let s: Sending<'_> = Box::pin(async move {
+            if let Some(l) = first {
+                let _ = host.emit(l).await;
+            }
+            let _ = host.emit(batch).await;
+        });
+        Some(s)
     };
+    // A batch being appended. While it waits (for room on a full link to
+    // the master, B.7), the tool and the cancel are still polled, so a Stop,
+    // the tool's own timeout and the node's stop end the command whatever
+    // the link holds (A.21). Chunks are not read meanwhile: a tool that
+    // streams waits for room in `rx` (bash watches its cancel and its
+    // timeout while it does), so its output is held back; a model's deltas
+    // pile up in its unbounded channel, bounded by the answer's size, and
+    // go out in batches of `DRAIN_BYTES` afterwards (review A21-3).
+    let mut sending: Option<Sending<'_>> = None;
+    let mut finished: Option<T> = None;
     let out = loop {
+        if let Some(s) = sending.as_mut() {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => break finished.take().map_or(Step::Cancelled, Step::Done),
+                () = s => sending = None,
+                r = &mut fut, if finished.is_none() => finished = Some(r),
+            }
+            continue;
+        }
+        if let Some(r) = finished.take() {
+            break Step::Done(r);
+        }
         tokio::select! {
             biased;
             _ = cancel.cancelled() => break Step::Cancelled,
@@ -920,24 +956,47 @@ where
             Some(d) = rx.next() => {
                 buf.push_str(&d);
                 if buf.len() >= FLUSH_BYTES {
-                    let clean = scrubber.push(&std::mem::take(&mut buf));
-                    emitted |= flush(clean, lead).await;
+                    sending = start(scrubber.push(&std::mem::take(&mut buf)), lead);
+                    emitted |= sending.is_some();
                 }
             }
             _ = tick.tick() => {
                 if !buf.is_empty() {
-                    let clean = scrubber.push(&std::mem::take(&mut buf));
-                    emitted |= flush(clean, lead).await;
+                    sending = start(scrubber.push(&std::mem::take(&mut buf)), lead);
+                    emitted |= sending.is_some();
                 }
             }
         }
     };
+    // A batch whose append has begun is finished, never dropped: its seq
+    // is taken.
+    if let Some(s) = sending {
+        s.await;
+    }
+    // What is left in the channel, in batches of `DRAIN_BYTES`: never one
+    // event the size of everything that piled up behind a waiting append.
     while let Some(d) = rx.try_next() {
+        if !buf.is_empty()
+            && buf.len() + d.len() > DRAIN_BYTES
+            && let Some(s) = start(scrubber.push(&std::mem::take(&mut buf)), lead)
+        {
+            s.await;
+            emitted = true;
+        }
         buf.push_str(&d);
+        if buf.len() >= DRAIN_BYTES
+            && let Some(s) = start(scrubber.push(&std::mem::take(&mut buf)), lead)
+        {
+            s.await;
+            emitted = true;
+        }
     }
     let mut clean = scrubber.push(&buf);
     clean.push_str(&scrubber.finish());
-    emitted |= flush(clean, lead).await;
+    if let Some(s) = start(clean, lead) {
+        s.await;
+        emitted = true;
+    }
     (out, emitted)
 }
 

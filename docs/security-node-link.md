@@ -63,20 +63,30 @@ two ends that both have a lot to say cannot deadlock on each other.
 | Master, from one node (parsed, not yet stored) | 8 messages | the master stops reading that node's socket; TCP pushes back on the node. Worst case per node: (8 + 2) × 8 MiB with maximal frames, a few KiB in practice. Other nodes and the UI are not involved. |
 | Master, to one node (not yet written) | 64 commands | a new command fails at once (`Timeout`); a `resume` that does not fit is asked again on the next gap or hello |
 | Node, commands from the master | 64 | the node stops reading the master's socket |
-| Node, to the master | 256 messages | session actors (appending an event) and the command loop (acks, snapshots) wait. Nothing is dropped. If the link dies while they wait, the wait ends, the event is already in the node's log, and the next hello plus `resume` replays it. Artifact chunks alone are sent without waiting and dropped when full; the master's transfer times out and asks again. |
+| Node, to the master, in order (`crates/node/src/outbox.rs`) | 256 messages and 1 MiB (a larger message goes alone) | session actors (appending an event) and session lanes (their acks, snapshots) wait. Nothing is dropped. If the link dies while they wait, the wait ends, the event is already in the node's log, and the next hello plus `resume` replays it. Artifact chunks are sent without waiting and dropped when full; the master's transfer times out and asks again. |
+| Node, to the master, ahead (A.21) | 64 acks | the acks of cancel, approval answer and `stop_background`, which the command loop answers inline, and its refusals of commands no session lane takes (past 256 lanes or a lane's 64), go ahead of the queue above and never wait; past 64 unread one is dropped (its command was acted on; the master's request times out). While the queue above waits, at most 8 of them go in a row. |
+| Node's socket, unsent bytes (A.21) | 128 KiB (`TCP_NOTSENT_LOWAT`, Linux and Android) | the kernel reports the socket full; without the cap its send buffer autotunes to `tcp_wmem`'s maximum (4 MiB), all of it ahead of an ack. |
 
 Idle detection counts only time spent waiting on the peer: an end that is
 not reading because its own consumer is behind does not call the peer dead.
 A peer that sends nothing for 60 s while we read, or takes no byte of a frame
 for 60 s while we write, is dropped. `session.snapshot` batches stop at 500
-events or 2 MiB (a quarter of the frame limit), whichever comes first; one
-event over 2 MiB goes alone.
+events or 512 KiB (a sixteenth of the frame limit; 2 MiB before A.21, which
+held an ack back by 8 s at 256 KiB/s), whichever comes first; one event
+over 512 KiB goes alone.
 
 `allow_remote_sessions`: T5 claimed the node decides "whether
 remote-created sessions are allowed at all". No such setting existed, and
 on a worker node every session is created by the master, so the setting
 would mean "run no sessions", which not running `node run` already does.
 The sentence was removed instead of adding the setting.
+
+A Stop and an approval answer on a full, slow uplink: `crates/node/tests/control_under_load.rs`
+(in process) and `control_over_link.rs` (over the real link at 256 KiB/s,
+acks under 3 s), ADOPTION_PLAN A.21; the socket's cap read back from the
+node's socket: `crates/link/tests/unsent_limit.rs`. The command loop on a
+slow store (audit lines, unknown sessions, the lane cap):
+`crates/node/tests/slow_store.rs`.
 
 Tests: `crates/link/tests/backpressure.rs` (a flooding node, a flooding
 master, a busy link that is not dead, a silent node, an oversized frame,
