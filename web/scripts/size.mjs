@@ -117,6 +117,10 @@ const N10A2_KB = 1.1;
 // +0.1).
 const TODO_KB = 1.3;
 
+// Sub-agent briefing (pull request 91), measured 375.9 with X.5 against
+// 375.7 before it: the delegate card's status (+0.2 as the total rounds).
+const SUBAGENT_KB = 0.2;
+
 // X.5, writing while a turn runs, measured 375.7 (initial 100.5) against
 // the recorded 375.5 on main: in the first load the composer sends while a
 // turn runs (Send beside Stop, the line under the box), the fold reads
@@ -126,7 +130,7 @@ const TODO_KB = 1.3;
 const X5_KB = 0.3;
 
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
-const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB) * 100) / 10) / 10;
+const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB) * 100) / 10) / 10;
 // Raised from 103 to 106 once the Phase A pages merged (103.7 measured: the
 // new sidebar, account button and routine-result rows are on the first
 // screen), then lowered to 104 at Phase B (102.3 measured) once the login
