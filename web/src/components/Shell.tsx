@@ -34,6 +34,7 @@ import { Home } from "./Home";
 import type { FeaturePageProps } from "./pages";
 import { Sidebar } from "./Sidebar";
 import { shownName } from "../md/hiddenChars";
+import { agentDefaults, type AgentDefaults } from "../lib/agentDefaults";
 
 // Everything but the home screen loads on demand (new-tab speed budget).
 const Conversation = lazy(() => import("./Conversation"));
@@ -150,7 +151,8 @@ export function Shell(props: {
   const [nodes, setNodes] = useState<NodeInfo[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   // The default agent where this Shell lists: the workspace's, else the server's.
-  const [scopeDefaultAgent, setScopeDefaultAgent] = useState("general");
+  // The server's default agent per mode here (the workspace's folded in).
+  const [scopeDefaults, setScopeDefaults] = useState<AgentDefaults>({ chat: "general", agentic: null });
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [prefs, setPrefs] = useState<Prefs | null>(null);
   const [memoryVersion, setMemoryVersion] = useState(0);
@@ -249,7 +251,7 @@ export function Shell(props: {
       .agents(scope)
       .then((r) => {
         setAgents(r.agents);
-        setScopeDefaultAgent(r.default);
+        setScopeDefaults({ chat: r.default, agentic: r.defaults?.agentic ?? null });
       })
       .catch(unauthorized);
   }, [scope, unauthorized, refreshNotices]);
@@ -420,7 +422,7 @@ export function Shell(props: {
   const gutter = prefs?.backdrop_chats && prefs.backdrop !== "off" ? history : null;
   const workers = nodes.filter((n) => n.connected && n.profile === "agentic");
   const agenticBlocked = agenticBlockReason(me.can_agentic, me.workspace, workers.length);
-  const defaultAgent = prefs?.default_agent ?? scopeDefaultAgent;
+  const newChatAgents = agentDefaults(prefs, scopeDefaults);
   const selected = route.kind === "session" ? route.id : null;
 
   // Makes another workspace the active one; App then remounts Shell there.
@@ -646,7 +648,7 @@ export function Shell(props: {
               memoryVersion={memoryVersion}
               chats={listed}
               agents={agents}
-              defaultAgent={defaultAgent}
+              agentDefaults={newChatAgents}
               models={models}
               workers={workers}
               nodes={nodes}
@@ -670,7 +672,15 @@ export function Shell(props: {
               scope={scope}
             />
           ) : route.kind === "routines" ? (
-            <Routines {...page} id={route.id} tab={route.tab} agents={agents} nodes={nodes} projects={projects} />
+            <Routines
+              {...page}
+              id={route.id}
+              tab={route.tab}
+              agents={agents}
+              nodes={nodes}
+              projects={projects}
+              agentDefaults={newChatAgents}
+            />
           ) : route.kind === "media" ? (
             <Media {...page} filter={route.filter} id={route.id} />
           ) : route.kind === "artifacts" ? (
@@ -680,7 +690,7 @@ export function Shell(props: {
               me={me}
               agents={agents}
               models={models}
-              defaultAgent={scopeDefaultAgent}
+              defaultAgent={scopeDefaults.chat}
               prefs={prefs}
               onPrefs={(p) => {
                 setPrefs(p);
@@ -699,7 +709,7 @@ export function Shell(props: {
               username={prefs?.display_name || me.username}
               timeZone={prefs?.timezone}
               agents={agents}
-              defaultAgent={defaultAgent}
+              agentDefaults={newChatAgents}
               models={models}
               workers={workers}
               prefs={prefs}

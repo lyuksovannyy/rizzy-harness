@@ -30,7 +30,7 @@ vi.mock("../live", () => ({
   },
 }));
 // What the tests look at; every other call stays pending.
-const stubs = { sessions: vi.fn(), workspaces: vi.fn(), attention: vi.fn() };
+const stubs = { sessions: vi.fn(), workspaces: vi.fn(), attention: vi.fn(), agents: vi.fn(), settings: vi.fn() };
 vi.mock("../api", () => ({
   api: new Proxy(stubs, {
     get: (o, k: string) => (o as Record<string, unknown>)[k] ?? (() => new Promise(() => {})),
@@ -39,7 +39,14 @@ vi.mock("../api", () => ({
   // lib/projects.ts calls the API through `call`.
   call: () => new Promise(() => {}),
 }));
-vi.mock("./Home", () => ({ Home: () => null }));
+// What Shell hands the home screen (the new chat's agent defaults).
+let homeProps: Record<string, unknown> | null = null;
+vi.mock("./Home", () => ({
+  Home: (p: Record<string, unknown>) => {
+    homeProps = p;
+    return null;
+  },
+}));
 let sidebar: SidebarProps | null = null;
 vi.mock("./Sidebar", () => ({
   Sidebar: (p: SidebarProps) => {
@@ -88,6 +95,9 @@ beforeEach(() => {
   stubs.sessions.mockReset().mockResolvedValue({ sessions: [] });
   stubs.workspaces.mockReset().mockResolvedValue(list(personal, acme));
   stubs.attention.mockReset().mockReturnValue(new Promise(() => {}));
+  stubs.agents.mockReset().mockReturnValue(new Promise(() => {}));
+  stubs.settings.mockReset().mockReturnValue(new Promise(() => {}));
+  homeProps = null;
   sidebar = null;
   localStorage.clear();
   history.replaceState(null, "", "#/");
@@ -103,6 +113,24 @@ afterEach(() => {
 const render = (p: ReturnType<typeof props>) => act(async () => root.render(<Shell {...p} />));
 
 describe("Shell", () => {
+  // TD-1: a new Agentic chat gets the Agentic default, not the chat one.
+  const agentsReply = { agents: [], default: "general", defaults: { chat: "general", agentic: "coder" } };
+  const prefsReply = (more: Record<string, unknown> = {}) => ({ search_url: "", default_agent: null, default_model: null, onboarded: true, ...more });
+
+  test("the home screen gets the server's Agentic default beside the chat default", async () => {
+    stubs.agents.mockResolvedValue(agentsReply);
+    stubs.settings.mockResolvedValue(prefsReply());
+    await render(props());
+    expect(homeProps?.agentDefaults).toEqual({ chat: "general", agentic: "coder" });
+  });
+
+  test("the person's own defaults win, per mode", async () => {
+    stubs.agents.mockResolvedValue(agentsReply);
+    stubs.settings.mockResolvedValue(prefsReply({ default_agent: "writer", default_agentic_agent: "teamlead" }));
+    await render(props());
+    expect(homeProps?.agentDefaults).toEqual({ chat: "writer", agentic: "teamlead" });
+  });
+
   test("new callbacks from App keep the live connection; only unmounting closes it", async () => {
     await render(props());
     await render(props());

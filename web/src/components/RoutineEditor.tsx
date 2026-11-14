@@ -29,6 +29,7 @@ import { Select } from "./Select";
 import { pickerGroups, VariablePicker } from "./VariablePicker";
 import { WebhookCard } from "./WebhookCard";
 import { shownName } from "../md/hiddenChars";
+import { defaultFor, type AgentDefaults } from "../lib/agentDefaults";
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 /** Typing settles before the server previews the prompt and schedules. */
@@ -49,6 +50,8 @@ export function RoutineEditor(props: {
   /** A template to start a new one from. */
   seed: Draft | null;
   agents: Agent[];
+  /** A new routine's agent per mode until one is picked. */
+  agentDefaults: AgentDefaults;
   nodes: NodeInfo[];
   /** The workspace's projects: a run's chat can land in one. */
   projects: ProjectSummary[];
@@ -63,10 +66,12 @@ export function RoutineEditor(props: {
   onDeleted: () => void;
 }) {
   const { list, routine } = props;
-  const firstAgent = props.agents[0]?.id ?? "general";
   const [draft, setDraft] = useState<Draft>(
-    () => (routine ? draftOf(routine, Date.now()) : (props.seed ?? newDraft(firstAgent, props.zone, Date.now()))),
+    () => (routine ? draftOf(routine, Date.now()) : (props.seed ?? newDraft(props.agentDefaults.chat, props.zone, Date.now()))),
   );
+  // A new routine's agent follows its mode's default until one is picked
+  // (a template's is the default too).
+  const [agentPicked, setAgentPicked] = useState(!!routine);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -202,7 +207,10 @@ export function RoutineEditor(props: {
               label="Agent"
               value={spec.agent_id}
               options={props.agents.map((a) => ({ value: a.id, label: a.name, icon: <AgentMark agent={a} size={18} /> }))}
-              onChange={(v) => setSpec({ agent_id: v })}
+              onChange={(v) => {
+                setAgentPicked(true);
+                setSpec({ agent_id: v });
+              }}
             />
           </div>
           <label>
@@ -227,7 +235,11 @@ export function RoutineEditor(props: {
                 { value: "agentic", label: "Agentic", disabled: !!agenticWhy && spec.profile !== "agentic" },
               ]}
               onChange={(v) =>
-                setSpec(v === "agentic" ? { profile: v, node_id: spec.node_id ?? workers.find((n) => n.connected)?.node_id ?? null } : { profile: v })
+                setSpec({
+                  profile: v,
+                  ...(v === "agentic" ? { node_id: spec.node_id ?? workers.find((n) => n.connected)?.node_id ?? null } : {}),
+                  ...(agentPicked ? {} : { agent_id: defaultFor(props.agentDefaults, v) }),
+                })
               }
             />
             {agenticWhy && <span className="field-hint">{agenticWhy}</span>}
