@@ -1463,7 +1463,14 @@ Every node offers `remember` (it runs nothing on the node: the server files
 the call as a proposal); `denied_tools = ["remember"]` in a node's
 `node.toml` turns it off there, and the server then files nothing from that
 node. The model is told about `remember` only where the chat's node offers
-it. Keeping your personal memory out of
+it. The **first message of a new chat** in a project also gets your own
+**earlier chats** there: up to five, newest first, each with its title, when
+it was last active, and its compaction summary (or, without one, its last
+reply), cut to about 800 characters each and 4,000 in all, quoted, with a
+note to ask you before relying on a detail. Only your own chats count, never
+another member's, a temporary chat or a sub-agent's; later messages of the
+chat do not get it again, and neither does a chat whose agent has project
+memory off. Keeping your personal memory out of
 a team workspace leaves its projects' memory in. Agentic chats started in a project
 take its default node and folder. Temporary chats cannot join a project.
 Design and open questions: [docs/projects.md](docs/projects.md).

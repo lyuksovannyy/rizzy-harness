@@ -19,8 +19,8 @@ mod projects;
 pub mod routines;
 pub mod session_images;
 pub use projects::{
-    CardPatch, CardRow, ColumnRow, NewCard, NewColumn, NewProject, ProjectLink, ProjectPatch,
-    ProjectRow, TemplateRow,
+    CardPatch, CardRow, ColumnRow, EarlierChat, NewCard, NewColumn, NewProject, ProjectLink,
+    ProjectPatch, ProjectRow, TemplateRow,
 };
 
 #[derive(Debug, thiserror::Error)]

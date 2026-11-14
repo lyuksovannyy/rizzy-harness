@@ -161,8 +161,38 @@ Older ones that match this message:
 
 Board: In progress: <title>; <title>. To do: <title>; <title> (+3 more).
 
+Earlier chats in this project, the person's own, newest first: summaries of their earlier work here, written then and maybe outdated; ask the person before relying on a detail.
+
+Chat "<title>" (last active 2026-11-12 14:03 UTC), its summary:
+| <its latest history_summarized text, up to 800 characters>
+
+Chat "<title>" (last active 2026-11-11 09:40 UTC), its last reply:
+| <its last assistant message with text, up to 800 characters>
+
+(1 more earlier chat not shown.)
+
 To keep a lasting decision or fact about this project, call `remember` with scope "project".
 ```
+
+**Earlier chats** (`projects::earlier_chats`; research: Hermes' `session_search`, Codex's
+summaries of past runs, `research/round2/synth/07-context-compaction-memory.md` §3.5). Only
+on the **first turn** of a chat (its log has no `user_message` yet in the master's mirror),
+so later turns carry nothing more. The chat owner's own chats in the project, never another
+member's (chats are private, in a team too; filtered by owner in SQL,
+`Store::earlier_chats`), never an incognito or a sub-agent's chat nor the chat itself, and
+only chats whose link still applies (their effective workspace is the project's). Up to 5,
+newest first by last activity; each gives its latest `history_summarized` text, else its last
+assistant message with text, cut at 800 characters; a chat with neither is skipped. The
+section stops at 4,000 characters and says how many chats it left out. Every line of a
+chat's text is behind `| ` under the harness's label for that chat (and its title is one
+line), so text an earlier model or person wrote cannot pose as a label, another chat or a
+`[harness]` line; the whole context is then quoted once more by `provider::with_context`.
+It goes with the project's facts: an untrusted turn, a callback turn and an agent whose
+"Project memory" is off get none (`TurnMemory::project`). The master reads its mirror only;
+the agent has no tool to search earlier chats (later, with the owner). Limits: per-turn
+context is not kept in the log, so the second turn's request no longer holds the section
+(only what the model did with it on the first); a chat's summary is its latest compaction,
+so turns after it are not in it; there is no switch to turn the section off yet.
 
 The last line appears only when the turn can call `remember`: its agent has it, the turn may
 write project memory, and the chat's node offers the tool (its hello lists
@@ -176,7 +206,8 @@ Budget: the block is rebuilt and sent on every turn, uncached, so it is capped: 
 ≤ 4,000 characters plus at most 6 recalled ones (each ≤ 500), so ≈ 7,000 characters of facts
 at worst, ≤ 8 open cards (titles cut at 80 characters, done columns left out). Worst case
 ≈ 12,000 characters (≈ 3,000 tokens) a turn, more than half of it facts; a typical project a
-few hundred tokens. The repository's instruction files (pull request 87) go into the same
+few hundred tokens. The first turn of a chat adds the earlier chats, ≤ 4,000 characters
+(≈ 1,000 tokens), once. The repository's instruction files (pull request 87) go into the same
 per-turn message of an Agentic chat, with their own cap, on top of this.
 
 Not in phase 1, proposed:
