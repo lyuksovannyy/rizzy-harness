@@ -20,7 +20,7 @@ fs.mkdirSync(`${S}/data`, { recursive: true });
 fs.mkdirSync(`${S}/ws`, { recursive: true });
 fs.writeFileSync(`${S}/ws/main.rs`, 'fn main() {}\n');
 fs.writeFileSync(`${S}/data/config.toml`, '[[providers]]\nid = "demo"\nname = "Demo"\npreset = "demo"\nkind = "mock"\nmock_delay_ms = 5\nmodels = [{ id = "mock" }]\n');
-fs.writeFileSync(`${S}/data/node.toml`, `workspace_roots = ["${S}/ws"]\n`);
+fs.writeFileSync(`${S}/data/node.toml`, `workspace_roots = ["${S}/ws"]\nmax_approval_mode = "ask"\n`);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (...a) => console.log('•', ...a);
 const check = (cond, msg) => { if (!cond) throw new Error(msg); };

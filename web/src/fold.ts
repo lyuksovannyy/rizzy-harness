@@ -48,6 +48,7 @@ const KNOWN = new Set([
   "callback_refused",
   "queued_delivered",
   "todo_updated",
+  "approval_mode_changed",
 ]);
 
 const CLEARS_RETRY = new Set([
@@ -280,6 +281,13 @@ export function apply(v: SessionView, e: RawEvent): void {
       v.active_agent = p.agent.agent_id;
       v.items.push({ type: "agent_changed", agent: p.agent });
       break;
+    case "approval_mode_changed": {
+      if (v.meta) v.meta.approval_mode = p.mode;
+      const it: Extract<Item, { type: "approval_mode_changed" }> = { type: "approval_mode_changed", mode: p.mode };
+      if (p.requested != null) it.requested = p.requested;
+      v.items.push(it);
+      break;
+    }
     case "variant_selected":
       v.variant_selection[p.group] = p.message_id;
       break;

@@ -35,6 +35,7 @@ async fn start() -> Server {
         node_id: "local".into(),
         hostname: "h".into(),
         policy: NodePolicy {
+            max_approval_mode: harness_core::policy::ApprovalMode::Ask,
             workspace_roots: vec![dir.path().into()],
             ..Default::default()
         },

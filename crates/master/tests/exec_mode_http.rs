@@ -109,6 +109,7 @@ async fn node(root: &std::path::Path, id: &str, profile: Profile, exec: ExecOffe
         node_id: id.into(),
         hostname: "h".into(),
         policy: NodePolicy {
+            max_approval_mode: harness_core::policy::ApprovalMode::Ask,
             workspace_roots: vec![root.into()],
             exec,
             ..Default::default()

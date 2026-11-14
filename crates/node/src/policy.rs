@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct NodePolicy {
-    /// The loosest approval mode any session on this node may use.
+    /// The loosest approval mode any session on this node may use
+    /// (`ask_all`, `ask`, `accept_edits`, `auto`); [`DEFAULT_MAX_APPROVAL`]
+    /// when node.toml does not say.
     pub max_approval_mode: ApprovalMode,
     /// Session working directories must be inside one of these.
     pub workspace_roots: Vec<PathBuf>,
@@ -278,6 +280,12 @@ pub struct LimitsPolicy {
     pub callback_max_steps: usize,
 }
 
+/// `max_approval_mode` when node.toml does not say: `auto`, so the owner's
+/// default for new chats (`DEFAULT_CHAT_APPROVAL`, 2026-11-14) holds on a
+/// fresh node. The node's owner lowers it in node.toml (README "Approval
+/// modes"); the node enforces it whatever the master sends.
+pub const DEFAULT_MAX_APPROVAL: ApprovalMode = ApprovalMode::Auto;
+
 /// `[limits] callback_turns` by default, and the most it may say.
 pub const DEFAULT_CALLBACK_TURNS: usize = 3;
 pub const MAX_CALLBACK_TURNS: usize = 20;
@@ -352,7 +360,7 @@ impl LimitsPolicy {
 impl Default for NodePolicy {
     fn default() -> Self {
         Self {
-            max_approval_mode: ApprovalMode::Ask,
+            max_approval_mode: DEFAULT_MAX_APPROVAL,
             workspace_roots: dirs::home_dir().into_iter().collect(),
             denied_tools: Vec::new(),
             allow_outside_workspace: false,
@@ -635,9 +643,13 @@ impl NodePolicy {
         Ok(())
     }
 
+    /// The mode a session gets for `requested` (a create's, a change's, a
+    /// load's): [`harness_core::policy::DEFAULT_CHAT_APPROVAL`] without
+    /// one, never above [`Self::max_approval_mode`]. Nothing else limits it:
+    /// not the chat's kind, not its execution mode (the owner, 2026-11-14).
     pub fn effective_mode(&self, requested: Option<ApprovalMode>) -> ApprovalMode {
         ApprovalMode::clamp(
-            requested.unwrap_or(ApprovalMode::Ask),
+            requested.unwrap_or(harness_core::policy::DEFAULT_CHAT_APPROVAL),
             self.max_approval_mode,
         )
     }
@@ -831,23 +843,26 @@ tool_timeout_sec = 120
         }
     }
 
+    /// The node's ceiling is enforced whatever the master asks; a fresh
+    /// node allows `auto` and a new chat starts in it (the owner,
+    /// 2026-11-14).
     #[test]
     fn master_cannot_loosen() {
         let p = NodePolicy::default();
-        assert_eq!(
-            p.effective_mode(Some(ApprovalMode::Auto)),
-            ApprovalMode::Ask
-        );
-        assert_eq!(p.effective_mode(None), ApprovalMode::Ask);
-        let loose = NodePolicy {
-            max_approval_mode: ApprovalMode::Auto,
+        assert_eq!(p.max_approval_mode, ApprovalMode::Auto);
+        assert_eq!(p.effective_mode(None), ApprovalMode::Auto);
+        let strict = NodePolicy {
+            max_approval_mode: ApprovalMode::Ask,
             ..Default::default()
         };
-        // Even a permissive node defaults to asking.
-        assert_eq!(loose.effective_mode(None), ApprovalMode::Ask);
         assert_eq!(
-            loose.effective_mode(Some(ApprovalMode::Auto)),
-            ApprovalMode::Auto
+            strict.effective_mode(Some(ApprovalMode::Auto)),
+            ApprovalMode::Ask
+        );
+        assert_eq!(strict.effective_mode(None), ApprovalMode::Ask);
+        assert_eq!(
+            strict.effective_mode(Some(ApprovalMode::AskAll)),
+            ApprovalMode::AskAll
         );
     }
 

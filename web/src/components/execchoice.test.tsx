@@ -94,7 +94,7 @@ describe("the host shell for a new chat", () => {
       "can keep running after the chat ends",
       "one web page or file the agent reads can turn all of that against you",
       "The approval card is then the only check",
-      "never runs in auto",
+      "in Auto (the default for new chats) every command",
       "what a sandbox chat wrote in this folder",
     ]) {
       expect(text).toContain(risk);

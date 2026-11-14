@@ -27,6 +27,7 @@ impl Chat {
             node_id: "master".into(),
             hostname: "test".into(),
             policy: NodePolicy {
+                max_approval_mode: harness_core::policy::ApprovalMode::Ask,
                 workspace_roots: vec![dir.path().into()],
                 ..Default::default()
             },

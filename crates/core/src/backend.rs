@@ -50,6 +50,15 @@ pub trait TurnHost: Send + Sync {
         false
     }
 
+    /// Whether `approve` let `call_id` through on the chat's Accept edits
+    /// rule rather than a person's answer; taken once. Such a call runs with
+    /// `allow_outside_workspace` off, so the tool walks the path the same
+    /// way the rule did and a link planted between the two is refused
+    /// (T50).
+    fn confined(&self, _call_id: &str) -> bool {
+        false
+    }
+
     /// Where this session's turns publish files (`publish`); `None` when
     /// publishing is off here (chat sessions, nodes without staging).
     fn artifacts(&self) -> Option<std::sync::Arc<dyn crate::artifacts::ArtifactSink>> {

@@ -84,6 +84,7 @@ pub enum EventKind {
     CallbackRefused(CallbackRefused),
     QueuedDelivered(QueuedDelivered),
     TodoUpdated(TodoUpdated),
+    ApprovalModeChanged(ApprovalModeChanged),
 }
 
 impl EventKind {
@@ -133,6 +134,7 @@ impl EventKind {
             EventKind::CallbackRefused(_) => "callback_refused",
             EventKind::QueuedDelivered(_) => "queued_delivered",
             EventKind::TodoUpdated(_) => "todo_updated",
+            EventKind::ApprovalModeChanged(_) => "approval_mode_changed",
         }
     }
 }
@@ -1095,6 +1097,21 @@ pub struct TurnEnded {
     pub usage: Option<Usage>,
 }
 
+/// The chat's approval mode changed (T50): the owner's change, as the node
+/// clamped it. Appended by the session actor only, on a command from the
+/// master; nothing the model writes, no tool and no sub-agent records one.
+/// The fold takes `mode` as the chat's mode from here on, so a restart and
+/// the UI rebuild it from the log (the node clamps it again on load).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApprovalModeChanged {
+    /// The mode the chat runs in now.
+    pub mode: crate::policy::ApprovalMode,
+    /// What was asked for, when the node gave less: above its
+    /// `max_approval_mode`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested: Option<crate::policy::ApprovalMode>,
+}
+
 /// The session's active agent changed (selector, not an @mention: a mention
 /// only affects one turn and is recorded in that turn's `TurnStarted`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1267,6 +1284,10 @@ mod tests {
                 blocks: vec![],
             }),
             EventKind::AgentChanged(AgentChanged { agent }),
+            EventKind::ApprovalModeChanged(ApprovalModeChanged {
+                mode: crate::policy::ApprovalMode::AcceptEdits,
+                requested: Some(crate::policy::ApprovalMode::Auto),
+            }),
             EventKind::VariantSelected(VariantSelected {
                 group: "g".into(),
                 message_id: "m".into(),

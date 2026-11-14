@@ -30,7 +30,9 @@ pub struct RoutineSpec {
     /// Agentic only.
     pub node_id: Option<String>,
     pub cwd: Option<String>,
-    /// `ask` or `ask_all`; nothing runs without a click (agentic).
+    /// The run chat's approval mode (agentic): `auto` unless the routine
+    /// sets its own (the owner, 2026-11-14); the node clamps it to its
+    /// ceiling, and a run holding webhook data asks (`runner::approval_for`).
     pub approval_mode: ApprovalMode,
     /// The template (`template.rs`).
     pub prompt: String,
@@ -51,7 +53,7 @@ impl Default for RoutineSpec {
             effort: None,
             node_id: None,
             cwd: None,
-            approval_mode: ApprovalMode::Ask,
+            approval_mode: crate::routines::runner::default_mode(),
             prompt: String::new(),
             project_id: None,
             catch_up: CatchUp::default(),
@@ -134,17 +136,18 @@ impl RoutineSpec {
             if s.node_id.is_none() || s.cwd.is_none() {
                 return Err("spec: an agentic routine needs a node_id and a cwd".into());
             }
-            if s.approval_mode == ApprovalMode::Auto {
-                return Err(
-                    "spec.approval_mode: routines never approve on their own; use ask or ask_all"
-                        .into(),
-                );
+            let max = crate::routines::runner::save_max();
+            if s.approval_mode > max {
+                return Err(format!(
+                    "spec.approval_mode: a routine runs at most in {}",
+                    max.id()
+                ));
             }
         } else if s.node_id.is_some() || s.cwd.is_some() {
             return Err("spec: node_id and cwd are for agentic routines only".into());
         } else {
             // Chats run on the chat runtime and approve nothing.
-            s.approval_mode = ApprovalMode::Ask;
+            s.approval_mode = crate::routines::runner::default_mode();
         }
         if s.cwd.as_ref().is_some_and(|c| c.len() > 4096) {
             return Err("spec.cwd is too long".into());
@@ -311,20 +314,22 @@ mod tests {
     }
 
     #[test]
-    fn agentic_needs_a_place_and_never_auto() {
+    fn agentic_needs_a_place_and_starts_in_auto() {
         let v = json!({"profile": "agentic", "agent_id": "coder", "prompt": "review",
                        "node_id": "local", "cwd": "/srv/app"});
         let s = RoutineSpec::parse(v.clone()).unwrap();
-        assert_eq!(s.approval_mode, ApprovalMode::Ask);
-        let mut all = v.clone();
-        all["approval_mode"] = json!("ask_all");
-        assert_eq!(
-            RoutineSpec::parse(all).unwrap().approval_mode,
-            ApprovalMode::AskAll
-        );
-        let mut auto = v.clone();
-        auto["approval_mode"] = json!("auto");
-        assert!(RoutineSpec::parse(auto).unwrap_err().contains("ask"));
+        // The owner's default (2026-11-14), unless the routine sets its own.
+        assert_eq!(s.approval_mode, ApprovalMode::Auto);
+        for (name, mode) in [
+            ("ask_all", ApprovalMode::AskAll),
+            ("ask", ApprovalMode::Ask),
+            ("accept_edits", ApprovalMode::AcceptEdits),
+            ("auto", ApprovalMode::Auto),
+        ] {
+            let mut x = v.clone();
+            x["approval_mode"] = json!(name);
+            assert_eq!(RoutineSpec::parse(x).unwrap().approval_mode, mode);
+        }
         let mut nowhere = v;
         nowhere["cwd"] = Value::Null;
         assert!(RoutineSpec::parse(nowhere).is_err());

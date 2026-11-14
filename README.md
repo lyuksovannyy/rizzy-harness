@@ -277,9 +277,14 @@ status, duration, tokens and the first sentence of its answer.
   `{{last_run.status}}`, and `{{event.body.<path>}}` / `{{event.text}}` for a
   webhook); the editor's preview renders the prompt and the next runs on the
   server.
-- **Agentic routines** run in `ask` or `ask_all` only: a command, an edit or a
-  publish waits for your click in "Waiting for you" and is cancelled after
-  24 hours. Read-only work finishes on its own.
+- **Agentic routines** run in the approval mode you pick when you create or
+  edit them, Auto by default (the owner's decision of 2026-11-14). A scheduled
+  routine in Auto runs commands with nobody present, bounded by the node's
+  `max_approval_mode` and, in a sandbox chat, by the sandbox. A run that uses a
+  webhook's data always asks, whatever the routine's mode: whoever calls the
+  webhook writes into its prompt. When a run asks, a command, an edit or a
+  publish waits for your click in "Waiting for you" and is cancelled after 24
+  hours; read-only work finishes on its own.
 - **Webhooks**: `POST /api/hooks/<trigger id>` with
   `Authorization: Bearer <secret>` and a JSON or plain-text body of at most
   64 KiB (`Idempotency-Key` is honoured for 24 hours). The secret is shown once
@@ -803,6 +808,49 @@ same folder (or in a folder that contains it, or one inside it), and no
 chat can start working in that folder while an undo runs there; wait a
 moment, or cancel the other chat, and try again.
 
+**Approval modes.** Each agentic chat has an approval mode: how much runs
+without a click. The picker in the composer shows it and offers three, each
+with one line saying what runs unasked:
+
+- **Auto** (the default for every new chat, sandbox and host alike, and for
+  routines that set none): nothing asks. In a sandbox chat the sandbox is
+  the boundary (its own processes, its own file view). **In a host chat on
+  Auto every command runs as the node's own user, with no sandbox and no
+  question asked**: nothing stands between an agent that a web page or a
+  file has steered and the machine. The picker says so on that line.
+- **Accept edits**: `write` and `edit` of a file inside the chat's own folder
+  run without a card; they are checkpointed and the turn's Undo takes them
+  back. A path out of the folder (`../x`, an absolute path elsewhere, a link
+  that leads out or dangles), anything in `.git`, every command, every
+  publish and every other tool still ask. The node judges the path, from
+  the call itself, as the file tool resolves it.
+- **Ask**: every command, write, edit and publish waits on a card. Reads,
+  searches and the task list never ask.
+
+These defaults are the owner's decision of 2026-11-14, in their words: "default accept mode is Auto for every chat type, no limits for apart chat types or agentic host access modes, so each can use auto, always accept, manual, etc...". Pick another mode for a new chat beside its
+folder, or change it in the open chat at any time; the chat shows each change.
+A lower mode applies from the agent's next call; a card already waiting stays
+waiting until you answer it. Only the chat's owner can change it, and the
+server's API token (which can already prompt and approve any chat); nobody
+else, admins included, can see the chat. Raising it needs the execution level
+the chat needs; lowering it is never refused.
+Nothing the agent writes, no tool output and no sub-agent can change it: a
+sub-agent never runs above the chat that started it, as that chat's mode is
+now, so lowering the chat also lowers a sub-agent that is working. A
+sub-agent's chat and a routine's chat cannot be switched (a routine sets its
+own mode in its editor). A routine run that holds a webhook's data always
+asks, whatever the routine's mode: whoever can send the webhook writes into
+its prompt.
+
+**The node decides.** Each node clamps every mode it is sent to its own
+`max_approval_mode` in `node.toml`, records the result in the chat's log (so a
+restart and every open tab show it), and clamps it again after a restart if
+node.toml was tightened meanwhile. A fresh `node.toml` allows `auto`. A node's
+owner lowers it with one line, `max_approval_mode = "ask"` (or
+`"accept_edits"`), then restarts the node: from then on every chat there,
+sandbox and host, runs at most at that mode whatever anyone picks, and the
+picker shows the higher modes disabled with the reason.
+
 **Approving a call.** In `ask` mode a command, a write, an edit or a publish
 waits on a card that shows the whole call: every argument, the full path (and
 whether it is absolute or outside the chat's folder), long text with its size,
@@ -839,7 +887,7 @@ Every turn also checks the folder against `workspace_roots` again, so
 narrowing node.toml applies to existing chats.
 
 ```toml
-max_approval_mode = "ask"            # ask_all | ask | auto
+max_approval_mode = "auto"           # ask_all | ask | accept_edits | auto: the most any chat here may use (see "Approval modes")
 workspace_roots = ["/home/me/code"]  # session cwd must be inside one of these
 denied_tools = []                    # e.g. ["bash"]; "delegate" turns sub-agents off
 allow_outside_workspace = false
@@ -901,9 +949,13 @@ names it):
   `systemd-run --user`) to run anything with every right of the user, its
   keys and other projects included. Treat it as a shell on this machine
   that a web page the agent reads can steer: the approval card is then the
-  only check, so a `host` chat always asks (it never runs in approval mode
-  `auto`, whatever is asked or `max_approval_mode` allows), and its card
-  says the command runs in the host shell. Run such a node as a dedicated
+  only check, and only in Ask. **A host chat may run in Auto, and new chats
+  start in Auto** (the owner's decision of 2026-11-14, in their words: "default accept mode is Auto for every chat type, no limits for apart chat types or agentic host access modes, so each can use auto, always accept, manual, etc..."): then every command runs as this node's
+  user with no question asked, and nothing stands between a steered agent
+  and the machine. The warning shown when you choose the host shell says
+  so. A node's owner who does not want that sets `max_approval_mode = "ask"`
+  in its `node.toml`. A card in a host chat says the command runs in the
+  host shell. Run such a node as a dedicated
   OS user that holds nothing else.
 
 A new chat is in the sandbox mode unless `host` is asked for by name: a
@@ -2160,7 +2212,7 @@ install -m 0755 rizzy-harness /usr/local/bin/rizzy-harness    # the same binary 
 
 ```toml
 # This node decides what the master may do here.
-max_approval_mode = "ask"
+max_approval_mode = "auto"   # the default; "ask" makes every chat here ask
 workspace_roots = ["/home/rizzy-harness/work"]
 ```
 

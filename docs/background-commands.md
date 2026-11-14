@@ -428,8 +428,9 @@ then (`crates/node/src/session.rs:65-68`), and the parent is blocked in `delegat
 time. A callback would go to a session that no longer exists. The refusal says: "return, and the
 parent can start it". Cheap to lift later if a need appears.
 
-**Routine chats: allowed.** A routine runs in `ask` or `ask_all`, so a background start parks for
-the owner's click. The run is the chat's first turn (`docs/routines.md`, "Watcher"), so callback
+**Routine chats: allowed.** In `ask` or `ask_all` a background start parks for the owner's click;
+in `auto` (a routine's default since the owner's decision of 2026-11-14) it starts unasked with
+nobody present, within the node's `max_approval_mode`; a run with webhook data asks. The run is the chat's first turn (`docs/routines.md`, "Watcher"), so callback
 turns are later turns and do not change the run's status. They do use the session's
 `callback_turns` like any chat.
 

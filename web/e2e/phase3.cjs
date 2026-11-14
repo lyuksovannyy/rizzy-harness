@@ -13,7 +13,7 @@ fs.mkdirSync(`${S}/p3/data`, { recursive: true });
 fs.mkdirSync(`${S}/p3/proj`, { recursive: true });
 fs.writeFileSync(`${S}/p3/proj/main.rs`, 'fn main() {}\n');
 fs.writeFileSync(`${S}/p3/data/config.toml`, '[[providers]]\nid = "demo"\nname = "Demo"\npreset = "demo"\nkind = "mock"\nmock_delay_ms = 25\nmodels = [{ id = "mock" }]\n');
-fs.writeFileSync(`${S}/p3/data/node.toml`, `workspace_roots = ["${S}/p3"]\n`);
+fs.writeFileSync(`${S}/p3/data/node.toml`, `workspace_roots = ["${S}/p3"]\nmax_approval_mode = "ask"\n`);
 const URL = 'http://127.0.0.1:7798/';
 
 /** Finish first-run onboarding with defaults (demo provider for admins). */
