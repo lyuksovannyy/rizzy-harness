@@ -8,25 +8,48 @@
 //! What is checked: `type` (`object`, `array`, `string`, `integer`,
 //! `number`, `boolean`, `null`, or a list of them), `properties`,
 //! `required`, `items`, `enum`, and keys the schema does not name. A key
-//! not named is refused only where the schema lists `properties` and does
-//! not open the object (`additionalProperties` absent or `false`; a
-//! `patternProperties` opens it too). Every other keyword (`minimum`,
-//! `pattern`, `oneOf`, `$ref`, ...) is not checked and never refuses a call:
-//! the tool, or an MCP server, still checks its own input.
+//! not named is refused where the schema says `additionalProperties:
+//! false`, or, for one of our own tools ([`Closed::Builtin`]), where it
+//! lists `properties` and does not open the object; another tool's schema
+//! (an MCP server's) is open unless it says so, as JSON Schema reads it.
+//! Every other keyword (`minimum`, `pattern`, `oneOf`, `$ref`, ...) is not
+//! checked and never refuses a call: the tool, or an MCP server, still
+//! checks its own input.
 //!
-//! What is repaired (Pi's coercion), so the approval card and the tool see
-//! the repaired value, never the raw one: a string holding an integer or a
-//! number where one is expected, and `"true"` / `"false"` where a boolean
-//! is. Nothing else is changed.
+//! What is repaired (Pi's coercion), so the tool card, the approval card,
+//! the approval key and the tool see the repaired value, never the raw one:
+//! - `null` for an argument that is not required: removed (the tools read
+//!   it as absent; models send it for optionals all the time);
+//! - where exactly one type (besides `null`) is allowed: a string holding
+//!   an integer (`"10"`, `"10.0"`) or a number, `"true"` / `"false"` for a
+//!   boolean, a string holding JSON of exactly the array or object
+//!   expected (the `edit` tool's `edits` sent as a string); a string is
+//!   never changed where a string is allowed;
+//! - an integral float where an integer is expected (`15.0` becomes `15`,
+//!   which the tool's `as_u64()` reads).
+//!
+//! `delegate` and `finish` never reach this check: the loop takes them out
+//! of the step's calls first, and each checks its own input.
 
 use serde_json::{Map, Value};
+
+/// Whose schema it is: how an object that does not say whether it takes
+/// other keys is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Closed {
+    /// One of our own tools: its `properties` are all it takes.
+    Builtin,
+    /// Another tool's (an MCP server's): open unless it says
+    /// `additionalProperties: false`.
+    Schema,
+}
 
 /// `input` checked against `schema`, repaired; or the first problem, naming
 /// the field and what it should be, to return to the model as the call's
 /// result.
-pub fn check(schema: &Value, input: &Value) -> Result<Value, String> {
+pub fn check(schema: &Value, input: &Value, closed: Closed) -> Result<Value, String> {
     let mut v = input.clone();
-    walk(schema, &mut v, "")?;
+    walk(schema, &mut v, "", closed)?;
     Ok(v)
 }
 
@@ -70,6 +93,12 @@ fn fits(t: &str, v: &Value) -> bool {
     }
 }
 
+/// `f` as an integer, if it is a whole number within the i64 range.
+fn whole(f: f64) -> Option<Value> {
+    (f.is_finite() && f.fract() == 0.0 && f >= i64::MIN as f64 && f < i64::MAX as f64)
+        .then(|| Value::from(f as i64))
+}
+
 /// `s` as the value of type `t`, if it reads as one exactly.
 fn coerce(t: &str, s: &str) -> Option<Value> {
     let s = s.trim();
@@ -78,7 +107,11 @@ fn coerce(t: &str, s: &str) -> Option<Value> {
             .parse::<i64>()
             .ok()
             .map(Value::from)
-            .or_else(|| s.parse::<u64>().ok().map(Value::from)),
+            .or_else(|| s.parse::<u64>().ok().map(Value::from))
+            .or_else(|| s.parse::<f64>().ok().and_then(whole)),
+        "array" | "object" => serde_json::from_str::<Value>(s)
+            .ok()
+            .filter(|v| v.is_array() == (t == "array") && (v.is_array() || v.is_object())),
         "number" => s.parse::<i64>().ok().map(Value::from).or_else(|| {
             s.parse::<f64>()
                 .ok()
@@ -102,13 +135,33 @@ fn name(path: &str) -> String {
     }
 }
 
-fn walk(schema: &Value, v: &mut Value, path: &str) -> Result<(), String> {
+/// The one type `ts` allows besides `null`, if there is exactly one.
+fn single<'a>(ts: &[&'a str]) -> Option<&'a str> {
+    let mut real = ts.iter().filter(|t| **t != "null");
+    match (real.next(), real.next()) {
+        (Some(t), None) => Some(t),
+        _ => None,
+    }
+}
+
+fn walk(schema: &Value, v: &mut Value, path: &str, closed: Closed) -> Result<(), String> {
+    // An integral float where an integer is expected is that integer: the
+    // tools read integers with `as_u64()`, which a float is not.
+    if let Some(ts) = types(schema)
+        && ts.contains(&"integer")
+        && let Value::Number(n) = v
+        && !(n.is_i64() || n.is_u64())
+        && let Some(i) = n.as_f64().and_then(whole)
+    {
+        *v = i;
+    }
     if let Some(ts) = types(schema)
         && !ts.is_empty()
         && !ts.iter().any(|t| fits(t, v))
     {
-        let repaired = match v {
-            Value::String(s) => ts.iter().find_map(|t| coerce(t, s)),
+        // Only where one type is meant: a union is not guessed at.
+        let repaired = match (&*v, single(&ts)) {
+            (Value::String(s), Some(t)) => coerce(t, s),
             _ => None,
         };
         match repaired {
@@ -135,6 +188,16 @@ fn walk(schema: &Value, v: &mut Value, path: &str) -> Result<(), String> {
             }
         }
     }
+    if let Some(allowed) = schema.get("enum").and_then(Value::as_array) {
+        // `2.0` for an enum of integers is `2`.
+        if let Value::Number(n) = v
+            && !(n.is_i64() || n.is_u64())
+            && let Some(i) = n.as_f64().and_then(whole)
+            && allowed.contains(&i)
+        {
+            *v = i;
+        }
+    }
     if let Some(allowed) = schema.get("enum").and_then(Value::as_array)
         && !allowed.contains(v)
     {
@@ -142,11 +205,11 @@ fn walk(schema: &Value, v: &mut Value, path: &str) -> Result<(), String> {
         return Err(format!("{} must be one of {}", name(path), list.join(", ")));
     }
     match v {
-        Value::Object(map) => object(schema, map, path),
+        Value::Object(map) => object(schema, map, path, closed),
         Value::Array(items) => match schema.get("items") {
             Some(item) if item.is_object() => {
                 for (i, x) in items.iter_mut().enumerate() {
-                    walk(item, x, &format!("{path}[{i}]"))?;
+                    walk(item, x, &format!("{path}[{i}]"), closed)?;
                 }
                 Ok(())
             }
@@ -156,7 +219,12 @@ fn walk(schema: &Value, v: &mut Value, path: &str) -> Result<(), String> {
     }
 }
 
-fn object(schema: &Value, map: &mut Map<String, Value>, path: &str) -> Result<(), String> {
+fn object(
+    schema: &Value,
+    map: &mut Map<String, Value>,
+    path: &str,
+    whose: Closed,
+) -> Result<(), String> {
     let at = |k: &str| {
         if path.is_empty() {
             k.to_string()
@@ -165,23 +233,29 @@ fn object(schema: &Value, map: &mut Map<String, Value>, path: &str) -> Result<()
         }
     };
     let props = schema.get("properties").and_then(Value::as_object);
-    if let Some(req) = schema.get("required").and_then(Value::as_array) {
-        for k in req.iter().filter_map(Value::as_str) {
-            if !map.contains_key(k) {
-                return Err(format!("`{}` is required and missing", at(k)));
-            }
+    let required: Vec<&str> = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|r| r.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    // `null` for an optional argument is its absence.
+    map.retain(|k, v| !v.is_null() || required.contains(&k.as_str()));
+    for k in &required {
+        if !map.contains_key(*k) {
+            return Err(format!("`{}` is required and missing", at(k)));
         }
     }
     let Some(props) = props else {
         return Ok(());
     };
-    let closed = matches!(
-        schema.get("additionalProperties"),
-        None | Some(Value::Bool(false))
-    ) && schema.get("patternProperties").is_none();
+    let closed = match schema.get("additionalProperties") {
+        Some(Value::Bool(false)) => true,
+        None => whose == Closed::Builtin && schema.get("patternProperties").is_none(),
+        Some(_) => false,
+    };
     for (k, v) in map.iter_mut() {
         match props.get(k) {
-            Some(p) => walk(p, v, &at(k))?,
+            Some(p) => walk(p, v, &at(k), whose)?,
             None if closed => {
                 let mut known: Vec<&str> = props.keys().map(String::as_str).collect();
                 known.sort_unstable();
@@ -205,6 +279,10 @@ fn object(schema: &Value, map: &mut Map<String, Value>, path: &str) -> Result<()
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn check(schema: &Value, input: &Value) -> Result<Value, String> {
+        super::check(schema, input, Closed::Builtin)
+    }
 
     fn bash() -> Value {
         json!({
@@ -238,8 +316,18 @@ mod tests {
             .unwrap(),
             json!({"x": 1.5})
         );
-        // A float with no fraction is an integer.
-        assert!(check(&bash(), &json!({"command": "ls", "timeout_secs": 30.0})).is_ok());
+        // A float with no fraction is that integer (review M1), as is the
+        // string "10.0".
+        assert_eq!(
+            check(&bash(), &json!({"command": "ls", "timeout_secs": 30.0})).unwrap(),
+            json!({"command": "ls", "timeout_secs": 30})
+        );
+        assert_eq!(
+            check(&bash(), &json!({"command": "ls", "timeout_secs": "10.0"})).unwrap()["timeout_secs"],
+            json!(10)
+        );
+        let e = json!({"type": "object", "properties": {"n": {"enum": [1, 2, 3]}}});
+        assert_eq!(check(&e, &json!({"n": 2.0})).unwrap(), json!({"n": 2}));
     }
 
     #[test]
@@ -317,5 +405,64 @@ mod tests {
         // An empty or odd schema.
         assert!(check(&json!({}), &json!({"a": 1})).is_ok());
         assert!(check(&json!(true), &json!({"a": 1})).is_ok());
+    }
+
+    /// Review H1: `null` for an optional argument is its absence; for a
+    /// required one it is still refused.
+    #[test]
+    fn null_for_an_optional_argument_is_removed() {
+        assert_eq!(
+            check(
+                &bash(),
+                &json!({"command": "ls", "workdir": null, "timeout_secs": null})
+            )
+            .unwrap(),
+            json!({"command": "ls"})
+        );
+        assert!(check(&bash(), &json!({"command": null})).is_err());
+    }
+
+    /// Review H2: a string holding JSON of exactly the array or object
+    /// expected is that value; a string field is never parsed.
+    #[test]
+    fn a_json_string_for_an_array_or_object_is_parsed() {
+        let s = json!({"type": "object", "properties": {
+            "edits": {"type": "array", "items": {"type": "object"}},
+            "opts": {"type": "object"},
+            "text": {"type": "string"}
+        }});
+        assert_eq!(
+            check(
+                &s,
+                &json!({"edits": "[{\"a\": 1}]", "opts": "{\"b\": 2}", "text": "[1]"})
+            )
+            .unwrap(),
+            json!({"edits": [{"a": 1}], "opts": {"b": 2}, "text": "[1]"})
+        );
+        // JSON of another type is not repaired.
+        assert!(check(&s, &json!({"edits": "{\"a\": 1}"})).is_err());
+        assert!(check(&s, &json!({"opts": "[1]"})).is_err());
+        // The parsed value is checked as usual.
+        assert!(check(&s, &json!({"edits": "[1]"})).is_err());
+    }
+
+    /// Review L2: a union is not guessed at.
+    #[test]
+    fn a_union_type_is_not_coerced() {
+        let s = json!({"type": "object", "properties": {"x": {"type": ["integer", "boolean"]}, "y": {"type": ["integer", "null"]}}});
+        assert!(check(&s, &json!({"x": "true"})).is_err());
+        assert_eq!(check(&s, &json!({"y": "4"})).unwrap(), json!({"y": 4}));
+    }
+
+    /// Review M2: another tool's schema (an MCP server's) is open unless it
+    /// says `additionalProperties: false`; one of ours is closed.
+    #[test]
+    fn only_our_own_schemas_are_closed_by_default() {
+        let s = json!({"type": "object", "properties": {"q": {"type": "string"}}});
+        let x = json!({"q": "x", "extra": 1});
+        assert_eq!(super::check(&s, &x, Closed::Schema).unwrap(), x);
+        assert!(super::check(&s, &x, Closed::Builtin).is_err());
+        let shut = json!({"type": "object", "properties": {"q": {"type": "string"}}, "additionalProperties": false});
+        assert!(super::check(&shut, &x, Closed::Schema).is_err());
     }
 }

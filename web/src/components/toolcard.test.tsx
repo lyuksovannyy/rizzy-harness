@@ -352,3 +352,15 @@ describe("skill card", () => {
     expect(summaryOf({ name: "release", file: "scripts/tag.sh" })).toBe("release · scripts/tag.sh");
   });
 });
+
+describe("bash's workdir", () => {
+  test("is shown as where the command runs, a path with hidden characters marked", () => {
+    const html = renderToStaticMarkup(
+      <ToolCard sessionId="s" item={web("bash", { command: "ls", workdir: "crates/​x" })} />,
+    );
+    expect(html).toContain("Runs in");
+    const row = html.slice(html.indexOf("Runs in"));
+    expect(row).toContain("call-path");
+    expect(row).toContain("hidden-mark");
+  });
+});

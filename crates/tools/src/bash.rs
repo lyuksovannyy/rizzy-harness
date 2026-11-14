@@ -201,7 +201,7 @@ fn workdir_schema() -> Value {
 /// Where a call with `workdir` starts: the folder `w` names, resolved as
 /// the file tools resolve a path, and inside the session's folder whatever
 /// the node allows the file tools (the shell's grants are that folder's).
-fn workdir(ctx: &ToolCtx, w: &str) -> Result<std::path::PathBuf, String> {
+pub fn workdir(ctx: &ToolCtx, w: &str) -> Result<std::path::PathBuf, String> {
     let refused = |why: &str| format!("not run: workdir `{w}` {why}");
     let ws = ctx.workspace_dir()?;
     let dir = ctx

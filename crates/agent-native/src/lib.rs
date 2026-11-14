@@ -2320,20 +2320,36 @@ impl NativeBackend {
                 let bad_args = match tools.iter().find(|t| t.name == call.tool) {
                     None => Some(unknown_tool(&call.tool, &tools)),
                     Some(spec) if call.input.is_object() => {
-                        // The tool's whole schema where it has one: an
-                        // argument this turn's schema leaves out (`bash`'s
-                        // `background` where they are off) reaches the
-                        // tool, which says why it is refused.
-                        let schema = self
-                            .tools
-                            .iter()
-                            .find(|t| t.name() == call.tool)
-                            .map(|t| t.schema_for(self.config.bash_timeout_max))
-                            .unwrap_or_else(|| spec.schema.clone());
-                        match harness_tools::args::check(&schema, &call.input) {
+                        // One of our own tools: its whole schema (an
+                        // argument this turn's schema leaves out, `bash`'s
+                        // `background` where they are off, reaches the tool,
+                        // which says why it is refused), closed. Another
+                        // tool's (MCP): the offered schema, read as JSON
+                        // Schema reads it.
+                        let own = self.tools.iter().find(|t| t.name() == call.tool);
+                        let (schema, closed) = match own {
+                            Some(t) => (
+                                t.schema_for(self.config.bash_timeout_max),
+                                harness_tools::args::Closed::Builtin,
+                            ),
+                            None => (spec.schema.clone(), harness_tools::args::Closed::Schema),
+                        };
+                        match harness_tools::args::check(&schema, &call.input, closed) {
                             Ok(v) => {
                                 call.input = v;
-                                None
+                                // A `workdir` the tool would refuse is
+                                // refused now, before anyone is asked.
+                                match call
+                                    .input
+                                    .get("workdir")
+                                    .and_then(serde_json::Value::as_str)
+                                {
+                                    Some(w) if own.is_some() && call.tool == "bash" => {
+                                        harness_tools::bash_workdir(&self.start_ctx(&ctx, host), w)
+                                            .err()
+                                    }
+                                    _ => None,
+                                }
                             }
                             Err(e) => Some(format!(
                                 "This tool call was not run: {e}. Call it again with that fixed."
@@ -2357,10 +2373,12 @@ impl NativeBackend {
                     return stopped(usage);
                 }
                 // Before approval and dispatch: a refused call never starts.
+                // The repeated-call guard first: the same bad call again
+                // and again is refused, and ends the turn, as any other.
                 let key = harness_tools::call_key(&ctx.cwd, &call.tool, &call.input);
-                let admission = match bad_args {
-                    Some(e) => Err(e),
-                    None => Ok(guard.admit(key)),
+                let admission = match (guard.admit(key), bad_args) {
+                    (repeat::Admission::Run, Some(e)) => Err(e),
+                    (a, _) => Ok(a),
                 };
                 let (outcome, refused) = match admission {
                     Err(e) => (ToolOutcome::err(e), None),
@@ -3020,13 +3038,19 @@ impl NativeBackend {
 /// The result of a call to a tool this turn does not offer: the tools it
 /// does, so the model can pick one instead of guessing again.
 fn unknown_tool(name: &str, offered: &[ToolSpec]) -> String {
+    /// More names are counted, not listed (a node with many MCP tools).
+    const SHOWN: usize = 50;
     let mut names: Vec<&str> = offered.iter().map(|t| t.name.as_str()).collect();
     names.sort_unstable();
-    let list = names
+    let mut list = names
         .iter()
+        .take(SHOWN)
         .map(|n| format!("`{n}`"))
         .collect::<Vec<_>>()
         .join(", ");
+    if names.len() > SHOWN {
+        list.push_str(&format!(" and {} more", names.len() - SHOWN));
+    }
     format!(
         "unknown tool `{}`: this turn offers {}",
         harness_core::event::shown_name(name),

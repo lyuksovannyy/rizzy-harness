@@ -249,10 +249,91 @@ async fn a_workdir_outside_the_session_folder_is_refused() {
         assert!(!f.ok, "{w}: {}", f.output);
         assert!(f.output.contains("workdir"), "{w}: {}", f.output);
         assert!(!outside.join("made").exists(), "{w}: it ran outside");
+        // Refused before the approval card (review L3).
+        assert!(host.asked.lock().unwrap().is_empty(), "{w}: it was asked");
         assert!(!ws.join("made").exists(), "{w}: it ran in the folder");
     }
     // Not a folder.
     std::fs::write(ws.join("file"), "x").unwrap();
     let (host, _) = run(&ws, "bash", json!({"command": "true", "workdir": "file"})).await;
     assert!(host.finished()[0].output.contains("not a folder"));
+}
+
+/// Calls the same tool with the same input on every request, forever.
+struct Again {
+    input: Value,
+    calls: Mutex<usize>,
+}
+
+#[async_trait::async_trait]
+impl Provider for Again {
+    fn name(&self) -> &'static str {
+        "again"
+    }
+    async fn complete(
+        &self,
+        _: &ChatRequest,
+        _: mpsc::UnboundedSender<String>,
+    ) -> Result<Completion, ProviderError> {
+        let n = {
+            let mut c = self.calls.lock().unwrap();
+            *c += 1;
+            *c
+        };
+        Ok(Completion {
+            text: String::new(),
+            tool_calls: vec![ToolCallRef {
+                call_id: format!("c{n}"),
+                tool: "bash".into(),
+                input: self.input.clone(),
+            }],
+            usage: None,
+            stop: Default::default(),
+        })
+    }
+}
+
+/// Review L1: the same bad call again and again meets the repeated-call
+/// guard like any other, and the turn ends with the guard's refusal.
+#[tokio::test]
+async fn the_same_bad_call_again_and_again_ends_at_the_guard() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = Host::default();
+    let p = Arc::new(Again {
+        input: json!({"command": "true", "timeout": 300}),
+        calls: Mutex::new(0),
+    });
+    let b = NativeBackend::new(p.clone(), harness_tools::builtin(), NativeConfig::default());
+    let out = b
+        .run_turn(TurnCtx {
+            session_id: SessionId::new(),
+            turn_id: "t".into(),
+            history: vec![],
+            user_text: "go".into(),
+            cwd: dir.path().to_path_buf(),
+            model: "x".into(),
+            agent: None,
+            compare: vec![],
+            parent_session: None,
+            extra: Default::default(),
+            cancel: Default::default(),
+            host: &host,
+        })
+        .await;
+    assert_eq!(out.reason, TurnEndReason::Error);
+    assert_eq!(
+        out.error.as_deref(),
+        Some(harness_agent_native::repeat::STOP_ERROR)
+    );
+    assert!(
+        *p.calls.lock().unwrap() < 10,
+        "{}",
+        *p.calls.lock().unwrap()
+    );
+    let refused = host
+        .finished()
+        .iter()
+        .filter(|f| f.output == harness_agent_native::repeat::REFUSED_OUTPUT)
+        .count();
+    assert!(refused >= 1);
 }

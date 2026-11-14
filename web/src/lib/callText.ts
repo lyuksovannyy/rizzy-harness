@@ -261,7 +261,10 @@ type Special = { key: string; label: string; as: Mode | "path"; tone?: "del" | "
 
 // Tools whose main arguments get a name; every other key still follows.
 const SPECIAL: Record<string, Special[]> = {
-  bash: [{ key: "command", label: "Command", as: "cmd" }],
+  bash: [
+    { key: "command", label: "Command", as: "cmd" },
+    { key: "workdir", label: "Runs in", as: "path" },
+  ],
   write: [
     { key: "path", label: "Path", as: "path" },
     { key: "content", label: "Content", as: "text" },
