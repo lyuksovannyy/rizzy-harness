@@ -58,6 +58,8 @@ struct Call {
     tokens: u64,
     text: String,
     system: String,
+    /// The assistant's tool calls in the request, `tool input` a line.
+    calls: String,
 }
 
 /// What the `n`th summary request gets back (default: a short summary).
@@ -146,6 +148,21 @@ impl Provider for Windowed {
             })
             .collect::<Vec<_>>()
             .join("\n");
+        let assistant_calls = req
+            .messages
+            .iter()
+            .filter_map(|m| match m {
+                ChatMsg::Assistant { tool_calls, .. } => Some(
+                    tool_calls
+                        .iter()
+                        .map(|c| format!("{} {}", c.tool, c.input))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         let n = {
             let mut calls = self.calls.lock().unwrap();
             calls.push(Call {
@@ -153,6 +170,7 @@ impl Provider for Windowed {
                 tokens,
                 text,
                 system,
+                calls: assistant_calls,
             });
             calls.iter().filter(|c| c.summary).count()
         };
@@ -1157,9 +1175,9 @@ const TODO_SENT: &str = "| [done] Read the code\n\
 async fn the_task_list_survives_compaction() {
     let h = history_with_todo(2);
     let p = Windowed::new(BIG, BIG);
-    let b = backend(p.clone(), Some(100));
+    let b = todo_backend(p.clone(), Some(100));
     let host = Host::default();
-    let out = run(&b, &host, h.clone(), agent(None), Default::default()).await;
+    let out = run(&b, &host, h.clone(), todo_agent(), Default::default()).await;
     assert_eq!(out.reason, TurnEndReason::Completed, "{:?}", out.error);
     assert_eq!(p.kinds(), ["summary", "main"]);
     let main = p.calls().pop().unwrap();
@@ -1188,12 +1206,12 @@ async fn the_task_list_survives_compaction() {
         payload,
     });
     let p2 = Windowed::new(BIG, BIG);
-    let b2 = backend(p2.clone(), Some(0));
+    let b2 = todo_backend(p2.clone(), Some(0));
     let out = run(
         &b2,
         &Host::default(),
         later,
-        agent(None),
+        todo_agent(),
         Default::default(),
     )
     .await;
@@ -1231,4 +1249,160 @@ async fn the_summariser_reads_the_task_list_quoted() {
         call.text
     );
     assert!(call.system.contains("\"Task list:\""), "{}", call.system);
+}
+
+/// A backend whose one tool is `todo`, and an agent offered it.
+fn todo_backend(p: Arc<dyn Provider>, configured: Option<usize>) -> NativeBackend {
+    NativeBackend::new(
+        p,
+        vec![Arc::new(harness_tools::todo::Todo)],
+        NativeConfig {
+            summarize_after_tokens: configured,
+            ..Default::default()
+        },
+    )
+}
+
+fn todo_agent() -> AgentSpec {
+    AgentSpec {
+        tools: ToolSelection::List(vec!["todo".into()]),
+        ..agent(None)
+    }
+}
+
+/// `history_with_todo(1)`, then a kept turn whose `todo` call replaced the
+/// list after the summary's end.
+fn history_with_a_newer_list() -> Vec<RawEvent> {
+    let mut h = history_with_todo(1);
+    let sid = h[0].session_id;
+    let mut seq = h.last().unwrap().seq;
+    let items = serde_json::json!([{"content": "Ship the newer plan", "status": "in_progress"}]);
+    for k in [
+        EventKind::TurnStarted(TurnStarted {
+            cause: None,
+            agent: None,
+            turn_id: "t9".into(),
+        }),
+        EventKind::UserMessage(UserMessage {
+            turn_id: "t9".into(),
+            text: "go on".into(),
+            attachments: vec![],
+            reply: None,
+            images: vec![],
+        }),
+        EventKind::AssistantMessage(AssistantMessage {
+            author: None,
+            variant: None,
+            turn_id: "t9".into(),
+            message_id: "m9".into(),
+            text: String::new(),
+            tool_calls: vec![ToolCallRef {
+                call_id: "plan2".into(),
+                tool: "todo".into(),
+                input: serde_json::json!({ "items": items }),
+            }],
+            blocks: vec![],
+        }),
+        EventKind::TodoUpdated(TodoUpdated {
+            turn_id: "t9".into(),
+            call_id: "plan2".into(),
+            items: serde_json::from_value(items).unwrap(),
+        }),
+        EventKind::ToolCallFinished(ToolCallFinished {
+            call_id: "plan2".into(),
+            ok: true,
+            output: "Task list saved: 1 item.".into(),
+            exit_code: None,
+            truncated: false,
+            sources: vec![],
+            note: None,
+        }),
+        EventKind::TurnEnded(TurnEnded {
+            turn_id: "t9".into(),
+            reason: TurnEndReason::Completed,
+            usage: None,
+        }),
+    ] {
+        seq += 1;
+        let (kind, payload) = k.into_parts();
+        h.push(RawEvent {
+            session_id: sid,
+            seq,
+            ts_ms: 0,
+            kind,
+            payload,
+        });
+    }
+    h
+}
+
+/// A list changed in a turn kept after the summary does not touch the
+/// system prompt (prompt cache): it still holds the list as of the
+/// summary, the newer `todo` call is in the messages, and the next turn
+/// sends the same system prompt (TD-3).
+#[tokio::test]
+async fn a_newer_list_leaves_the_system_prompt_as_it_was() {
+    let h = history_with_a_newer_list();
+    let p = Windowed::new(BIG, BIG);
+    let b = todo_backend(p.clone(), Some(100));
+    let host = Host::default();
+    let out = run(&b, &host, h.clone(), todo_agent(), Default::default()).await;
+    assert_eq!(out.reason, TurnEndReason::Completed, "{:?}", out.error);
+    assert_eq!(p.kinds(), ["summary", "main"]);
+    let main = p.calls().pop().unwrap();
+    assert!(main.system.contains(TODO_SENT), "{}", main.system);
+    assert!(
+        !main.system.contains("Ship the newer plan"),
+        "{}",
+        main.system
+    );
+    assert!(main.calls.contains("Ship the newer plan"), "{}", main.calls);
+
+    let summary = host.summaries().pop().unwrap();
+    let mut later = h;
+    let next = later.last().unwrap().seq + 1;
+    let (kind, payload) = EventKind::HistorySummarized(summary).into_parts();
+    later.push(RawEvent {
+        session_id: later[0].session_id,
+        seq: next,
+        ts_ms: 0,
+        kind,
+        payload,
+    });
+    let p2 = Windowed::new(BIG, BIG);
+    let b2 = todo_backend(p2.clone(), Some(0));
+    let out = run(
+        &b2,
+        &Host::default(),
+        later,
+        todo_agent(),
+        Default::default(),
+    )
+    .await;
+    assert_eq!(out.reason, TurnEndReason::Completed, "{:?}", out.error);
+    assert_eq!(p2.calls().pop().unwrap().system, main.system);
+}
+
+/// The list goes back only to a turn that has `todo` among its tools: an
+/// agent without it is not told of a tool it cannot call (TD-4).
+#[tokio::test]
+async fn no_list_note_without_the_todo_tool() {
+    let p = Windowed::new(BIG, BIG);
+    let b = todo_backend(p.clone(), Some(100));
+    let out = run(
+        &b,
+        &Host::default(),
+        history_with_todo(2),
+        agent(None),
+        Default::default(),
+    )
+    .await;
+    assert_eq!(out.reason, TurnEndReason::Completed, "{:?}", out.error);
+    let main = p.calls().pop().unwrap();
+    assert!(main.system.contains("SUMMARY1"), "{}", main.system);
+    assert!(
+        !main.system.contains("[harness] Your task list"),
+        "{}",
+        main.system
+    );
 }

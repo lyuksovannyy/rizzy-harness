@@ -316,6 +316,9 @@ const PART_CALLS: &str = "Assistant called tools:";
 const PART_RESULT: &str = "Tool result:";
 const PART_TODO: &str = "Task list:";
 
+/// The task list tool's name (`harness_tools::todo::Todo`).
+const TODO_TOOL: &str = "todo";
+
 /// How the harness's line over the task list it gives back after a summary
 /// begins.
 pub const TODO_LEAD: &str = "[harness] Your task list";
@@ -1184,13 +1187,22 @@ impl NativeBackend {
         // agent keeps its plan, and the bytes stay the same until the next
         // summary (prompt cache); later changes are in `recent`'s calls.
         let full = &ctx.history;
+        // Only for a turn that can call `todo` (its tools as `tool_specs`
+        // offers them): no note about a tool the agent does not have.
+        let offers_todo = agent.is_none_or(|a| a.allows_tool(TODO_TOOL))
+            && self
+                .tools
+                .iter()
+                .any(|t| t.name() == TODO_TOOL && t.enabled(sv));
         let history_msgs = |summary: Option<&str>, recent: &[RawEvent]| {
             let system = match summary {
                 Some(t) => {
                     let mut s =
                         format!("{base_system}\n\nSummary of the earlier conversation:\n{t}");
                     let through = recent.first().map_or(u64::MAX, |e| e.seq.saturating_sub(1));
-                    if let Some(items) = harness_core::todo::as_of(full, through) {
+                    if let Some(items) =
+                        harness_core::todo::as_of(full, through).filter(|_| offers_todo)
+                    {
                         s.push_str("\n\n");
                         s.push_str(&todo_note(&items));
                     }
