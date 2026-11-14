@@ -72,8 +72,8 @@ fn parse_role(id: &str) -> ApiResult<Role> {
 
 /// May `a` hand out `role`? Only owners make owners, and nobody grants a
 /// role above their own. (Making someone an owner also makes their level
-/// here `host`; that is not bounded by the granter's own level: see
-/// docs/execution-modes.md, "Open".)
+/// here `host`, whatever the granter's own level: a role carries its level,
+/// decided by the owner, review L2-2.)
 fn guard_grant(a: &Access, role: Role) -> ApiResult<()> {
     if role == Role::Owner && !a.is_owner() {
         return Err(forbidden("only an owner can make someone an owner"));

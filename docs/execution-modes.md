@@ -160,17 +160,13 @@ still shown until the node's next hello.
   every new member starts at `none`; nobody changes their own; nobody
   grants above their own effective level there; only an owner grants
   `host`; an owner's level counts as `host` and cannot be set (so a team
-  owner's effective level is their ceiling). **Open:** making someone an
-  owner gives them that `host`, and the role rule (only owners make owners)
-  does not look at the granting owner's level, so a self-made owner at a
-  `sandbox` ceiling can give a friend whose ceiling is `host` the `host`
-  level in their team by making them co-owner. Requiring the granter to be
-  at `host` was tried and dropped: an owner below `host` could then never
-  name a co-owner, and the last-owner rule would keep them in their team
-  for good. The two ways out (owners' level stored, the creator's set to
-  `host`; or the guard plus a way to hand over ownership) are the owner's
-  decision. Until nodes belong to workspaces (N.1) it gives nothing the
-  friend's own ceiling did not already allow on any node. Members, not only admins, are
+  owner's effective level is their ceiling). **Decided (the owner, 2026-11-14, review L2-2):** a role carries its
+  level, so making someone an owner gives them `host` there whatever the
+  granting owner's own level; their account's ceiling still caps it. (A
+  self-made owner at a `sandbox` ceiling can thus give a friend whose ceiling
+  is `host` that level in their team by making them co-owner; until nodes
+  belong to workspaces, N.1, it gives nothing the friend's ceiling did not
+  already allow on any node.) Members, not only admins, are
   "in" the workspace at `none`: they read and chat there, nothing more.
 * **A Personal workspace** has no level of its own: the ceiling applies
   (`levels::workspace_level` counts it as `host`). This is what closes the

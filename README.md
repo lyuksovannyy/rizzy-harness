@@ -807,8 +807,8 @@ with every right of the node's user. See
   their own. A role says what someone may administer, the level what they
   may run: changing one never changes the other. An owner's level there is always `host`, so their account's level
   decides. Making someone an owner therefore gives them `host` there,
-  whatever the granting owner's own level (an open question, see
-  docs/execution-modes.md). A Personal workspace has no level of its own: your account's
+  whatever the granting owner's own level (decided: a role carries its
+  level). A Personal workspace has no level of its own: your account's
   level applies.
 - **Your level** in a workspace is the lower of the two, and a chat's mode
   must be at most it: at create and on every later action that makes it
