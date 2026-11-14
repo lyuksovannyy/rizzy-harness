@@ -97,8 +97,14 @@ const GLASS_KB = 0.1;
 // gaps' words, the choice bound to its node).
 const N10A_KB = 2.4;
 
+// N.10a part 2, measured 373.9 (initial 100.1, unchanged): the level
+// select and its host warning's grant variant, in the lazy Settings chunk
+// (Users, Workspace admin → Members) and the warning's own lazy chunk; the
+// composer's rule now reads the level instead of the admin role (+0.9).
+const N10A2_KB = 0.9;
+
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
-const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB) * 100) / 10) / 10;
+const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB) * 100) / 10) / 10;
 // Raised from 103 to 106 once the Phase A pages merged (103.7 measured: the
 // new sidebar, account button and routine-result rows are on the first
 // screen), then lowered to 104 at Phase B (102.3 measured) once the login

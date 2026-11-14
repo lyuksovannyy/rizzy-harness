@@ -7,7 +7,7 @@ import { canGive, canManage, chainsOf, dropped, ROLES, rolePerms, workspacePlan 
 
 describe("roles", () => {
   test("permissions are fixed, and an unknown role has none", () => {
-    expect(ROLES.map(rolePerms)).toEqual([["agentic", "settings", "members", "routines"], ["agentic", "settings", "members", "routines"], ["agentic", "routines"], []]);
+    expect(ROLES.map(rolePerms)).toEqual([["settings", "members", "routines"], ["settings", "members", "routines"], ["routines"], []]);
     expect(rolePerms("boss" as WorkspaceRole)).toEqual([]);
   });
 

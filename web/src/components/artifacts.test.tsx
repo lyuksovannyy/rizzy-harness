@@ -83,9 +83,9 @@ const artifact = (n: number, over: Partial<Artifact> = {}): Artifact => ({
 const listing = (artifacts: Artifact[], next_cursor: string | null = null): ArtifactPage => ({ artifacts, next_cursor, usage: { used: 1024 ** 3, quota: 4 * 1024 ** 3 } });
 const detail = (a: Artifact, versions: ArtifactVersion[]): ArtifactWithVersions => ({ ...a, versions });
 
-const PERSONAL: WorkspaceSummary = { workspace_id: "w1", name: "alex", personal: true, role: "owner", permissions: ["agentic", "settings", "members", "routines"], members: 1 };
-const TEAM: WorkspaceSummary = { workspace_id: "w2", name: "Acme", personal: false, role: "member", permissions: ["agentic", "routines"], members: 3 };
-const meIn = (workspace: WorkspaceSummary): Me => ({ user_id: "u1", username: "alex", role: "member", can_agentic: true, must_change_password: false, workspace });
+const PERSONAL: WorkspaceSummary = { workspace_id: "w1", name: "alex", personal: true, role: "owner", permissions: ["settings", "members", "routines"], members: 1, exec_level: "host" as const };
+const TEAM: WorkspaceSummary = { workspace_id: "w2", name: "Acme", personal: false, role: "member", permissions: ["routines"], members: 3, exec_level: "host" as const };
+const meIn = (workspace: WorkspaceSummary): Me => ({ user_id: "u1", username: "alex", role: "member", exec_ceiling: "host" as const, must_change_password: false, workspace });
 const features = (over: Partial<Features> = {}): Features => ({
   voice: false,
   memory: false,
@@ -291,7 +291,7 @@ describe("menu", () => {
     artifactsApi.list.mockResolvedValue(listing([artifact(1), artifact(2, { mine: false, visibility: "workspace", owner: { username: "bob" } })]));
     artifactsApi.update.mockResolvedValue({});
     artifactsApi.remove.mockResolvedValue({ ok: true });
-    const admin = meIn({ ...TEAM, role: "admin", permissions: ["agentic", "settings", "members", "routines"] });
+    const admin = meIn({ ...TEAM, role: "admin", permissions: ["settings", "members", "routines"] });
     await show({ me: admin });
     const [mine, theirs] = rows();
     expect(buttons(mine!.querySelector(".artifact-menu-items")!).map((b) => b.textContent)).toEqual(["Share with workspace", "Rename", "Delete"]);

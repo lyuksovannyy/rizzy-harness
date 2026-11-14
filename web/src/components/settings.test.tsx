@@ -55,7 +55,7 @@ const agent = (id: string, name: string, more: Partial<Agent> = {}): Agent => ({
   ...more,
 });
 
-const member: Me = { user_id: "u", username: "alex", role: "member", can_agentic: false, must_change_password: false };
+const member: Me = { user_id: "u", username: "alex", role: "member", exec_ceiling: "none" as const, must_change_password: false };
 
 function render(prefs: Partial<Prefs>, route: { section?: string; tab?: string } = { section: "account", tab: "preferences" }, me = member) {
   act(() =>
@@ -154,8 +154,9 @@ describe("the route", () => {
       name: "Personal",
       personal: true,
       role: "owner" as const,
-      permissions: ["agentic" as const, "settings" as const, "members" as const],
+      permissions: ["settings" as const, "members" as const],
       members: 1,
+      exec_level: "host" as const,
     };
     render({}, { section: "account" }, { ...member, workspace: personal });
     // Personal has no Workspace admin section, whatever the role holds.

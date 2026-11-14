@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { pageApi } from "../apiPages";
 import type { Me, Role, User } from "../types";
+import { LEVEL_LABEL, LevelSelect } from "./LevelSelect";
 
 /** A temporary password the server just made (AUDIT L14). It lives only in
  * this component's state, which closing the dialog clears: never in a
@@ -47,7 +48,6 @@ export function Users({ me }: { me: Me }) {
   const [err, setErr] = useState<string | null>(null);
   const [username, setUsername] = useState("");
   const [role, setRole] = useState<Role>("member");
-  const [agentic, setAgentic] = useState(false);
   const [shown, setShown] = useState<Shown | null>(null);
 
   const load = useCallback(() => {
@@ -71,10 +71,9 @@ export function Users({ me }: { me: Me }) {
   const create = (e: React.FormEvent) => {
     e.preventDefault();
     void run(async () => {
-      const u = await pageApi.createUser({ username: username.trim(), role, can_agentic: agentic });
+      const u = await pageApi.createUser({ username: username.trim(), role });
       setShown({ username: u.username, password: u.password });
       setUsername("");
-      setAgentic(false);
       setRole("member");
     });
   };
@@ -83,8 +82,9 @@ export function Users({ me }: { me: Me }) {
     <section className="stack">
       <p className="muted">
         Only admins create accounts. The server makes each new user a temporary password, shown to you
-        once, which they must change at first login. Agentic access runs shell commands on worker
-        nodes: grant it only to people you would give a shell.
+        once, which they must change at first login. An account's level is the most it may run in any
+        workspace (and what it runs in its Personal one): none, container, sandbox, or host, a shell on
+        a node with no sandbox. Every new account starts at none; a server admin's is always host.
       </p>
       {err && <div className="error-text">{err}</div>}
       {shown && <TempPassword shown={shown} onClose={() => setShown(null)} />}
@@ -93,7 +93,7 @@ export function Users({ me }: { me: Me }) {
           <tr>
             <th>User</th>
             <th>Role</th>
-            <th>Agentic</th>
+            <th>Level</th>
             <th>Status</th>
             <th />
           </tr>
@@ -119,13 +119,18 @@ export function Users({ me }: { me: Me }) {
                   </select>
                 </td>
                 <td>
-                  <input
-                    type="checkbox"
-                    aria-label={`agentic access for ${u.username}`}
-                    checked={u.can_agentic}
-                    disabled={self || u.role === "admin"}
-                    onChange={(e) => run(() => pageApi.updateUser(u.user_id, { can_agentic: e.target.checked }))}
-                  />
+                  {u.role === "admin" ? (
+                    <span title="A server admin's level is always host">{LEVEL_LABEL.host}</span>
+                  ) : (
+                    <LevelSelect
+                      label={`Level of ${u.username}`}
+                      value={u.exec_ceiling_stored}
+                      max="host"
+                      disabled={self}
+                      grant={{ who: u.username, where: "for every workspace they are in" }}
+                      onSave={(level) => void run(() => pageApi.setCeiling(u.user_id, level))}
+                    />
+                  )}
                 </td>
                 <td>
                   {u.disabled ? "disabled" : u.must_change_password ? "temporary password" : "active"}
@@ -173,19 +178,11 @@ export function Users({ me }: { me: Me }) {
             <option value="member">User</option>
             <option value="admin">Server admin</option>
           </select>
-          <label className="check">
-            <input
-              type="checkbox"
-              checked={agentic || role === "admin"}
-              disabled={role === "admin"}
-              onChange={(e) => setAgentic(e.target.checked)}
-            />
-            agentic access
-          </label>
           <button className="primary" disabled={!username.trim()}>
             Create
           </button>
         </div>
+        <span className="field-hint">New accounts start at level none: set it in the list, where host asks first.</span>
       </form>
     </section>
   );

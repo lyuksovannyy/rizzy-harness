@@ -13,7 +13,8 @@ const bob: User = {
   username: "bob",
   role: "member",
   disabled: false,
-  can_agentic: false,
+  exec_ceiling: "none" as const,
+  exec_ceiling_stored: "none" as const,
   must_change_password: false,
   created_ms: 0,
 };
@@ -23,6 +24,7 @@ const api = vi.hoisted(() => ({
   resetPassword: vi.fn(),
   updateUser: vi.fn(),
   deleteUser: vi.fn(),
+  setCeiling: vi.fn(),
 }));
 vi.mock("../api", () => ({ api }));
 vi.mock("../apiPages", () => ({ pageApi: api }));
@@ -30,7 +32,7 @@ const { Users } = await import("./Users");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-const me: Me = { user_id: "a", username: "alex", role: "admin", can_agentic: true, must_change_password: false };
+const me: Me = { user_id: "a", username: "alex", role: "admin", exec_ceiling: "host" as const, must_change_password: false };
 const writeText = vi.fn().mockResolvedValue(undefined);
 
 beforeEach(() => {
@@ -91,7 +93,8 @@ describe("temporary passwords", () => {
     expect(host.querySelector('input[placeholder^="temporary password"]')).toBeNull();
     typeInto(host.querySelector<HTMLInputElement>('input[placeholder="username"]')!, "carol");
     await act(async () => button(host, "Create").click());
-    expect(api.createUser).toHaveBeenCalledWith({ username: "carol", role: "member", can_agentic: false });
+    // No level: every new account starts at none, set in the list.
+    expect(api.createUser).toHaveBeenCalledWith({ username: "carol", role: "member" });
     expect(host.querySelector("dialog")!.textContent).toContain("carol");
     await shownThenForgotten(host);
     expect(prompt).not.toHaveBeenCalled();
@@ -112,5 +115,62 @@ describe("temporary passwords", () => {
     await act(async () => button(host, "Reset password").click());
     expect(api.resetPassword).not.toHaveBeenCalled();
     expect(host.querySelector("dialog")).toBeNull();
+  });
+});
+
+describe("the account's level (N.10a part 2)", () => {
+  const level = (host: HTMLElement, who: string) =>
+    host.querySelector<HTMLSelectElement>(`select[aria-label="Level of ${who}"]`);
+  const choose = (el: HTMLSelectElement, value: string) =>
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(el, value);
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+  const warning = async () => {
+    for (let i = 0; i < 50 && !document.querySelector("dialog.host-warning"); i++) {
+      await act(async () => new Promise((r) => setTimeout(r, 10)));
+    }
+    return document.querySelector<HTMLDialogElement>("dialog.host-warning");
+  };
+
+  test("granting host shows the risks before anything is saved; cancelling saves nothing", async () => {
+    api.setCeiling.mockClear();
+    api.setCeiling.mockResolvedValue({ ...bob, exec_ceiling: "host", exec_ceiling_stored: "host" });
+    const host = await mount();
+    const sel = level(host, "bob")!;
+    expect(sel.value).toBe("none");
+    choose(sel, "host");
+    const d = (await warning())!;
+    expect(d).not.toBeNull();
+    expect(d.textContent).toContain("Let bob run commands without the sandbox?");
+    for (const risk of [
+      "with nothing between them and the machine",
+      "its keys and other projects included",
+      "can keep running after the chat ends",
+      "one web page or file the agent reads can turn all of that against you",
+      "The approval card is then the only check",
+      "what a sandbox chat wrote in a folder",
+    ]) {
+      expect(d.textContent).toContain(risk);
+    }
+    expect(api.setCeiling).not.toHaveBeenCalled();
+    await act(async () => button(d as unknown as HTMLElement, "Cancel").click());
+    expect(document.querySelector("dialog.host-warning")).toBeNull();
+    expect(api.setCeiling).not.toHaveBeenCalled();
+    expect(level(host, "bob")!.value).toBe("none");
+    // Confirmed, it is saved.
+    choose(level(host, "bob")!, "host");
+    await act(async () => button((await warning()) as unknown as HTMLElement, "Grant host").click());
+    expect(api.setCeiling).toHaveBeenCalledWith("b", "host");
+  });
+
+  test("a lower level is saved at once; a server admin's is host and not set here", async () => {
+    api.setCeiling.mockResolvedValue({ ...bob, exec_ceiling: "sandbox", exec_ceiling_stored: "sandbox" });
+    const host = await mount();
+    choose(level(host, "bob")!, "sandbox");
+    await act(async () => {});
+    expect(document.querySelector("dialog.host-warning")).toBeNull();
+    expect(api.setCeiling).toHaveBeenCalledWith("b", "sandbox");
+    expect(level(host, "alex")).toBeNull();
   });
 });

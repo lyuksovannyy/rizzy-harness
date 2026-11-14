@@ -95,7 +95,7 @@ beforeEach(async () => {
   document.body.append(host);
   root = createRoot(host);
   await act(async () =>
-    root.render(<Onboarding me={{ user_id: "u", username: "admin", role: "admin", can_agentic: true, must_change_password: false }} prefs={{ search_url: "", default_agent: null, default_model: null }} onDone={() => {}} />),
+    root.render(<Onboarding me={{ user_id: "u", username: "admin", role: "admin", exec_ceiling: "host" as const, must_change_password: false }} prefs={{ search_url: "", default_agent: null, default_model: null }} onDone={() => {}} />),
   );
 });
 afterEach(() => {

@@ -67,7 +67,7 @@ const detail = (a: Agent, more: Partial<AgentDetail> = {}): AgentDetail => ({
   description_default: a.description,
   ...more,
 });
-const admin: Me = { user_id: "u", username: "alex", role: "admin", can_agentic: true, must_change_password: false };
+const admin: Me = { user_id: "u", username: "alex", role: "admin", exec_ceiling: "host" as const, must_change_password: false };
 const member: Me = { ...admin, role: "member" };
 const coder = agent("coder");
 const reviewer = agent("reviewer", { builtin: false, origin: "custom", features: NEW_FEATURES });
