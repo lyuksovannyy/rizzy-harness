@@ -2123,6 +2123,7 @@ impl Master {
             ));
         }
         self.send_command(&node, |req_id| MasterToNode::SetApprovalMode {
+            lowering: !raise,
             req_id,
             session_id: sid,
             mode,

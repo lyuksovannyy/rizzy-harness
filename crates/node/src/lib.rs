@@ -1066,11 +1066,14 @@ impl NodeRuntime {
             // In the session's lane, which a running turn does not hold: a
             // change made while a turn runs applies from its next call (T50).
             MasterToNode::SetApprovalMode {
-                session_id, mode, ..
+                session_id,
+                mode,
+                lowering,
+                ..
             } => {
                 self.audit("session.set_approval_mode", session_id).await;
                 match self.session(session_id) {
-                    Some(s) => s.set_mode(mode).await.map(|_| ()),
+                    Some(s) => s.set_mode(mode, lowering).await.map(|_| ()),
                     None => Err("unknown session".into()),
                 }
             }

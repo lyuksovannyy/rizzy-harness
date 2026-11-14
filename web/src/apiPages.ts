@@ -179,6 +179,9 @@ export const pageApi = {
   setWorkspaceOwner: (id: string, owner: string) => call<AdminWorkspace>("PATCH", adminWs(id), { owner }),
   adminDeleteWorkspace: (id: string) => call<{ ok: boolean }>("DELETE", adminWs(id)),
   cancel: (id: string) => call("POST", `/api/sessions/${id}/cancel`),
-  approve: (id: string, approvalId: string, decision: Decision) =>
-    call("POST", `/api/sessions/${id}/approvals/${approvalId}`, { decision }),
+  /** `note` goes with a denial only (the server drops it with an allow). */
+  approve: (id: string, approvalId: string, decision: Decision, note?: string) =>
+    call("POST", `/api/sessions/${id}/approvals/${approvalId}`, note ? { decision, note } : { decision }),
+  /** Remove a call allowed for the rest of the chat (T51). */
+  revokeAllow: (id: string, grantId: string) => call("DELETE", `/api/sessions/${id}/allows/${grantId}`),
 };

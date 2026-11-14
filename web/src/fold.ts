@@ -49,6 +49,8 @@ const KNOWN = new Set([
   "queued_delivered",
   "todo_updated",
   "approval_mode_changed",
+  "chat_allow_added",
+  "chat_allow_removed",
 ]);
 
 const CLEARS_RETRY = new Set([
@@ -232,6 +234,7 @@ export function apply(v: SessionView, e: RawEvent): void {
         t.approval = { approval_id: p.approval_id, reason: p.reason, decision: null, by: null };
         // As the Rust view: the key only when true.
         if (p.turn_allow === true) t.approval.turn_allow = true;
+        if (p.chat_allow === true) t.approval.chat_allow = true;
       }
       break;
     }
@@ -242,6 +245,7 @@ export function apply(v: SessionView, e: RawEvent): void {
         if (it.type === "tool" && it.approval && it.approval.approval_id === p.approval_id) {
           it.approval.decision = p.decision;
           it.approval.by = p.by;
+          if (p.note != null) it.approval.note = p.note;
           break;
         }
       }
@@ -323,6 +327,15 @@ export function apply(v: SessionView, e: RawEvent): void {
       });
       break;
     }
+    case "chat_allow_added":
+      (v.chat_allows ??= {})[p.grant_id] = { tool: p.tool, input: p.input };
+      break;
+    case "chat_allow_removed":
+      if (v.chat_allows) {
+        delete v.chat_allows[p.grant_id];
+        if (Object.keys(v.chat_allows).length === 0) delete v.chat_allows;
+      }
+      break;
     case "todo_updated": {
       // The whole list each time; an empty one is no list (serde omits it).
       const items = Array.isArray(p.items) ? p.items : [];

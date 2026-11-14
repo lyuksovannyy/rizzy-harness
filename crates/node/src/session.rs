@@ -966,7 +966,14 @@ impl Session {
     /// then applied: from the next call on. A card waiting now is not
     /// answered by it. Refused for a sub-agent's chat, a routine's and a
     /// chat without tools. Returns the mode in force.
-    pub(crate) async fn set_mode(&self, requested: ApprovalMode) -> Result<ApprovalMode, String> {
+    /// `lowering`: the master skipped the owner's level check because its
+    /// copy of the log said this lowers the mode; refused, with nothing
+    /// recorded, when it would raise it (the copy was behind).
+    pub(crate) async fn set_mode(
+        &self,
+        requested: ApprovalMode,
+        lowering: bool,
+    ) -> Result<ApprovalMode, String> {
         if self.profile != Profile::Agentic {
             return Err(MODE_CHAT.into());
         }
@@ -978,8 +985,16 @@ impl Session {
         }
         let _change = self.mode_change.lock().await;
         let mode = self.node.cfg.policy.effective_mode(Some(requested));
-        if mode == read_mode(&self.mode) {
+        let now = read_mode(&self.mode);
+        if mode == now {
             return Ok(mode);
+        }
+        if lowering && mode > now {
+            return Err(format!(
+                "{}: it is in {} now; send it again",
+                harness_protocol::MODE_NOT_A_LOWERING,
+                now.id()
+            ));
         }
         // The log first: a change it does not hold is not made.
         self.append(EventKind::ApprovalModeChanged(ApprovalModeChanged {
@@ -3019,7 +3034,11 @@ impl Session {
     ) -> Result<(), String> {
         let note = note
             .filter(|_| !decision.allows())
-            .map(|n| n.chars().take(harness_core::policy::MAX_DENY_NOTE).collect::<String>())
+            .map(|n| {
+                n.chars()
+                    .take(harness_core::policy::MAX_DENY_NOTE)
+                    .collect::<String>()
+            })
             .filter(|n| !n.trim().is_empty());
         let tx = self
             .approvals
@@ -3275,9 +3294,13 @@ impl TurnHost for Session {
         // request, and the loop records the key of the call it is running.
         let background_start = is_background_start(tool, input);
         // "For this chat": the same exact call, allowed before in this chat
-        // (never a background start: one click is one command).
+        // (never a background start: one click is one command). Only in
+        // `ask` and `accept_edits`: `ask_all` means every call (T51), and
+        // `auto` never gets here.
+        let grants_apply = mode != ApprovalMode::AskAll;
         let key = harness_tools::call_key(&self.cwd, tool, input);
-        if !background_start
+        if grants_apply
+            && !background_start
             && self
                 .grants
                 .lock()
@@ -3287,7 +3310,7 @@ impl TurnHost for Session {
         {
             return Decision::Allow;
         }
-        let chat_allow = !background_start && self.parent_session.is_none();
+        let chat_allow = grants_apply && !background_start && self.parent_session.is_none();
         let approval_id = new_id();
         let mut reason = approval_reason(tool, risk, input, &self.node.cfg.policy, self.exec_mode);
         // An MCP tool's card names the server and its own name of the tool

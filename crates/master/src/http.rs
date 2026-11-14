@@ -14,9 +14,9 @@ use memory::{memory_err, memory_store};
 
 mod agent_edits;
 mod approval_mode;
-mod chat_allows;
 mod artifacts;
 mod background;
+mod chat_allows;
 mod hooks;
 mod levels;
 mod links;
@@ -1422,8 +1422,7 @@ async fn approval(
     if b.decision.allows() {
         agentic_gate(&m, &who, &row).await?;
     }
-    if b
-        .note
+    if b.note
         .as_ref()
         .is_some_and(|n| n.chars().count() > harness_core::policy::MAX_DENY_NOTE)
     {

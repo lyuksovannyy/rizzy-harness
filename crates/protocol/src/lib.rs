@@ -74,6 +74,13 @@ pub fn exec_capability(mode: harness_core::policy::ExecMode) -> String {
 pub const CAP_APPROVAL_MAX_PREFIX: &str = "approval-max:";
 pub const CAP_APPROVAL_DEFAULT_PREFIX: &str = "approval-default:";
 
+/// How a node's refusal of a `session.set_approval_mode` sent as a lowering
+/// that would raise the mode begins. The master answers it as a refusal to
+/// send again (its copy of the log was behind; on the next try it sees the
+/// mode the node has).
+pub const MODE_NOT_A_LOWERING: &str =
+    "this change was sent as a lowering but would raise the chat's approval mode";
+
 /// The node capability that announces the person's answers beyond allow
 /// and deny: a note with a denial, `allow_chat` and `session.revoke_allow`.
 /// The master sends `allow_chat` and `session.revoke_allow` only to a node
@@ -350,6 +357,12 @@ pub enum MasterToNode {
         req_id: String,
         session_id: SessionId,
         mode: ApprovalMode,
+        /// The master judged it a lowering from its copy of the log and so
+        /// skipped the owner's level check: the node refuses it if it would
+        /// in fact raise the chat's mode (`MODE_NOT_A_LOWERING`; the copy
+        /// was behind), and records nothing.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        lowering: bool,
     },
     #[serde(rename = "session.cancel")]
     Cancel {
@@ -505,6 +518,7 @@ mod tests {
         assert_eq!(v["decision"], "allow_session");
         assert_eq!(serde_json::from_value::<MasterToNode>(v).unwrap(), d);
         let m = MasterToNode::SetApprovalMode {
+            lowering: false,
             req_id: "r".into(),
             session_id: sid,
             mode: ApprovalMode::AcceptEdits,

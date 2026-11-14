@@ -857,9 +857,20 @@ whether it is absolute or outside the chat's folder), long text with its size,
 beginning and end and a "show all" for the middle, runs of blanks as counted
 markers, and hidden or look-alike characters as codes. "Allow once" runs this
 call; "Allow this exact call for this turn" also lets the identical call run
-again without asking until the turn ends (any other call still asks); "Deny"
-refuses it. If you allow while part of the input is collapsed, the card says how
-many characters you have not expanded.
+again without asking until the turn ends (any other call still asks); "Allow
+this exact call for this chat" lets the identical call (the same command and
+every other argument, its working folder included; for a file, the same change
+to the same file) run without asking for the rest of the chat, also after a
+restart, until you remove it: the chat's side panel lists each one under
+"Allowed in this chat" with Remove. It applies in Ask and Accept edits only
+(Ask every call means every call), never in another chat or in a sub-agent's
+chat, never to a background start, and never past the node's `denied_tools`.
+"Deny" refuses the call; the field beside it takes an optional note (up to
+2,000 characters) that reaches the agent with the denial, quoted as your own
+words, so you can say what to do instead. The field is never focused by
+itself and Enter in it answers nothing: only the Deny button sends it. If you
+allow while part of the input is collapsed, the card says how many characters
+you have not expanded.
 
 `node.toml`: the node's own policy. It is authoritative: the master can only
 ask for stricter settings.

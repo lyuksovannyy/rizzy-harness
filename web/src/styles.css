@@ -3669,6 +3669,8 @@ button.icon svg.lucide, .send svg.lucide { vertical-align: middle; }
 }
 .select-list li.chosen > span:first-child { font-weight: var(--w-semibold); }
 .select-list li.off { cursor: default; opacity: 0.55; }
+.approval .deny-note { flex: 1 1 14em; min-width: 10em; min-height: 0; padding: 4px 10px; }
+.deny-said { white-space: pre-wrap; }
 .select.stacked .select-list { min-width: 300px; max-width: min(360px, calc(100vw - 32px)); }
 .select.stacked .select-list .option-hint { white-space: normal; }
 /* The approval picker sits at the composer's right end: its menu opens leftward. */

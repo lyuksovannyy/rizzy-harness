@@ -11,7 +11,7 @@ export interface RawEvent {
 /** Strictest first (T50): `accept_edits` lets `write`/`edit` inside the chat's
  * folder run without a card; `auto` runs everything unasked. */
 export type ApprovalMode = "ask_all" | "ask" | "accept_edits" | "auto";
-export type Decision = "allow" | "deny" | "allow_session";
+export type Decision = "allow" | "deny" | "allow_session" | "allow_chat";
 export type ResolvedBy = "user" | "policy" | "cancelled" | "interrupted";
 export type TurnEndReason = "completed" | "cancelled" | "error" | "interrupted" | "stopped" | "limit";
 
@@ -170,8 +170,18 @@ export interface ApprovalState {
   /** "This exact call for this turn" may be offered; present only when
    * true, as the Rust view serialises it. */
   turn_allow?: true;
+  /** "This exact call for this chat" may be offered (T51); present only when true. */
+  chat_allow?: true;
   decision: Decision | null;
   by: ResolvedBy | null;
+  /** The person's note with a denial; absent otherwise. */
+  note?: string;
+}
+
+/** A call the person allowed for the rest of the chat (`chat_allow_added`). */
+export interface ChatAllow {
+  tool: string;
+  input: Record<string, unknown>;
 }
 
 /** An image a user message carries (`user_message.images`); its bytes stay in Media. */
@@ -303,6 +313,8 @@ export interface SessionView {
   summary_at?: number;
   /** The model `context_window` is of (the one that answered last). */
   context_model?: string;
+  /** Calls allowed for the rest of the chat, by grant id; absent when none. */
+  chat_allows?: Record<string, ChatAllow>;
 }
 
 export type RetryReason = "rate_limit" | "overloaded" | "server_error" | "network";

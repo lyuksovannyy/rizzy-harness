@@ -7,7 +7,11 @@
 // background command), can be closed, and shows a count when closed; on a
 // narrow screen it is a drawer behind that button. Every row is a fold of
 // this chat's own log (the server sent it only to its owner), and a child's
-// activity comes through the same check as opening that chat.
+// activity comes through the same check as opening that chat. Below them,
+// the calls the person allowed for the rest of this chat (T51), each with
+// Remove: they are this chat's live state, so they sit beside it rather
+// than in Settings (Claude Desktop keeps "always allow" in its settings, far
+// from the chat it applies to; ours is per chat, so it is listed with it).
 import { PanelRightClose, PanelRightOpen } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { call } from "../api";
@@ -100,7 +104,8 @@ export default function SidePanel(props: {
     setClicks((cs) => Object.fromEntries(Object.entries(cs).filter(([id]) => !endedKey.split(",").includes(id))));
   }, [endedKey]);
 
-  const total = agents.length + commands.length;
+  const grants = Object.entries(view?.chat_allows ?? {});
+  const total = agents.length + commands.length + grants.length;
   if (total === 0) return null;
   const active = agents.filter((a) => a.state === "running" || a.state === "waiting").length + runningCmds.length;
   const label = `Running beside the chat: ${active} active, ${total} in all`;
@@ -120,6 +125,14 @@ export default function SidePanel(props: {
       await call("POST", all ? `/api/sessions/${sessionId}/background/stop` : `/api/sessions/${sessionId}/background/${ids[0]}/stop`);
     } catch (x) {
       set(ids, { state: "failed", error: x instanceof Error ? x.message : String(x) });
+    }
+  };
+  const removeGrant = async (id: string) => {
+    set([`grant:${id}`], { state: "stopping", at: Date.now() });
+    try {
+      await call("DELETE", `/api/sessions/${sessionId}/allows/${id}`);
+    } catch (x) {
+      set([`grant:${id}`], { state: "failed", error: x instanceof Error ? x.message : String(x) });
     }
   };
   const busy = (id: string) => {
@@ -207,6 +220,43 @@ export default function SidePanel(props: {
           </li>
         )}
         {commands.map(command)}
+        {grants.length > 0 && (agents.length > 0 || commands.length > 0) && <li role="separator" className="side-sep" />}
+        {grants.length > 0 && (
+          <li className="side-group small" data-kind="grants-head">
+            <span>
+              Allowed in this chat <span className="muted">· run without asking (Ask and Accept edits)</span>
+            </span>
+          </li>
+        )}
+        {grants.map(([id, g]) => {
+          const what = String(g.input?.command ?? g.input?.path ?? JSON.stringify(g.input));
+          const c = clicks[`grant:${id}`];
+          return (
+            <li key={id} className="side-row" data-kind="grant" data-grant={id}>
+              <div className="side-row-head">
+                <span className="mono side-name">{showHidden(g.tool)}</span>
+              </div>
+              {/* The model's text: shown as text, hidden characters marked. */}
+              <code className="side-what ellipsis" title={showHidden(what)}>
+                {showHidden(what)}
+              </code>
+              <div className="side-row-foot">
+                <span className="muted small" role="status">
+                  {c?.state === "failed" ? <span className="error-text">{showHidden(c.error)}</span> : ""}
+                </span>
+                <button
+                  type="button"
+                  className="small"
+                  aria-label={`Remove the allowance for ${g.tool}`}
+                  disabled={c?.state === "stopping"}
+                  onClick={() => void removeGrant(id)}
+                >
+                  Remove
+                </button>
+              </div>
+            </li>
+          );
+        })}
       </ul>
     </aside>
   );

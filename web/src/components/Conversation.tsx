@@ -63,6 +63,8 @@ const TodoPanel = lazy(() => import("./TodoPanel"));
 function mayHaveSideItems(view: SessionView | undefined): boolean {
   if (!view) return false;
   if (view.background && Object.keys(view.background).length > 0) return true;
+  // Calls allowed for the rest of the chat are listed there too (T51).
+  if (view.chat_allows && Object.keys(view.chat_allows).length > 0) return true;
   return view.items.some((it) => it.type === "tool" && it.tool === "delegate");
 }
 
