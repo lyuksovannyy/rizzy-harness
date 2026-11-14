@@ -332,6 +332,18 @@ impl ToolCtx {
         Ok(path)
     }
 
+    /// The path the file tools' record and lock are keyed on: the real
+    /// path. In the workspace [`Self::resolve`] already gives it; in
+    /// outside mode it does not follow links, so it is walked here, and two
+    /// spellings of one file share one record and one lock.
+    pub(crate) fn seen_key(&self, path: &Path) -> PathBuf {
+        if self.allow_outside_workspace {
+            walk(path, None, "").unwrap_or_else(|_| path.to_path_buf())
+        } else {
+            path.to_path_buf()
+        }
+    }
+
     /// Refuse `real` (a real or normalized path) inside a protected folder.
     fn refuse_protected(&self, real: &Path, shown: &str) -> Result<(), String> {
         // A sub-agent's own folder lies in a protected folder by design;

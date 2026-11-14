@@ -1235,6 +1235,9 @@ impl AgentBackend for NativeBackend {
     fn has_tool(&self, name: &str) -> bool {
         self.tools.iter().any(|t| t.name() == name)
     }
+    fn forget_session(&self, session: harness_core::SessionId) {
+        self.seen.forget(session);
+    }
 
     async fn run_turn(&self, ctx: TurnCtx<'_>) -> TurnOutcome {
         let cancel = ctx.cancel.child_token();
@@ -1300,8 +1303,8 @@ impl NativeBackend {
         }
         let mut usage = Usage::default();
         let (mut summary, mut recent) = split_summary(&ctx.history);
-        // The file tools' guard as the log leaves it (a restart, a failed
-        // append, a summary: the log decides).
+        // The file tools' guard as the log leaves it (after a restart or a
+        // failed append, the log decides).
         self.seen.sync(ctx.session_id, &ctx.history);
         // The model answering this turn. Until the turn has any output, a
         // model-level failure moves on to the next of the agent's fallbacks;
@@ -1341,7 +1344,6 @@ impl NativeBackend {
                 return stopped(usage);
             };
             if let Some((text, through_seq)) = compacted {
-                self.seen.demote(ctx.session_id, through_seq);
                 let start = recent.partition_point(|e| e.seq <= through_seq);
                 recent = &recent[start..];
                 summary = Some(text);
@@ -1690,7 +1692,6 @@ impl NativeBackend {
                         c
                     };
                     if let Some((text, through_seq)) = compacted {
-                        self.seen.demote(ctx.session_id, through_seq);
                         let start = recent.partition_point(|ev| ev.seq <= through_seq);
                         recent = &recent[start..];
                         summary = Some(text);
@@ -2192,10 +2193,13 @@ impl NativeBackend {
                     return stopped(usage);
                 }
                 // What the file tools' guard rebuilds from (T.2).
-                let seen = outcome.seen.clone().filter(|_| outcome.ok).map(|mut f| {
-                    f.path = self.config.secrets.scrub(&f.path);
-                    f
-                });
+                // A path the scrubber would change is not logged at all: a
+                // changed path would stand for another file in every later
+                // rebuild (the next turn then asks for a read).
+                let seen = outcome
+                    .seen
+                    .clone()
+                    .filter(|f| outcome.ok && self.config.secrets.scrub(&f.path) == f.path);
                 if host
                     .emit(EventKind::ToolCallFinished(ToolCallFinished {
                         seen,

@@ -1,9 +1,8 @@
 //! What the agent has seen of each file, per session: the table behind the
 //! staleness guard of `edit` and `write` (ADOPTION_PLAN T.2, PLAN.md T45).
 //!
-//! `read` records the file's SHA-256 (and whether it showed every line);
-//! `edit` and `write` check it before they change a file and record what
-//! they wrote. The event log is the authority: each such call's
+//! `read` records the file's SHA-256; `edit` and `write` refuse a file the
+//! agent has not read, or that changed since, and record what they wrote. The event log is the authority: each such call's
 //! `tool_call_finished` carries a [`FileSeen`], and at the start of every
 //! turn the session's table is rebuilt from the log ([`SeenStore::sync`]),
 //! so a node restart loses nothing but the snapshots below.
@@ -29,13 +28,17 @@ pub const SNAPSHOT_MAX_FILE: usize = 512 << 10;
 pub const SNAPSHOT_MAX_TOTAL: usize = 8 << 20;
 /// Files remembered per session; past it the least recently used is
 /// forgotten (the agent then has to read it again).
-pub const MAX_FILES: usize = 4096;
+pub const MAX_FILES: usize = 1024;
+/// Files remembered over all sessions of the node, least recently used
+/// forgotten first. Worst case per entry: a path of `PATH_MAX` (4,096
+/// bytes) plus about 200 bytes of entry and map overhead, so 4,096 entries
+/// are at most about 17.6 MB, and with [`SNAPSHOT_MAX_TOTAL`] about 26 MB:
+/// under the 50 MB idle rule even if every path were as long as allowed
+/// (a typical path of 100 bytes makes it about 1.2 MB).
+pub const MAX_ENTRIES: usize = 4096;
 /// Session tables kept; the least recently used goes (it is rebuilt from
 /// the log on that session's next turn, without snapshots).
 pub const MAX_SESSIONS: usize = 256;
-
-/// Seq of an entry recorded in this turn, not yet in the log.
-const UNLOGGED: u64 = u64::MAX;
 
 pub type Sha = [u8; 32];
 
@@ -62,8 +65,6 @@ fn unhex(s: &str) -> Option<Sha> {
 #[derive(Debug, Clone)]
 pub struct Seen {
     pub sha: Sha,
-    /// Every line was shown (or written) since the last summary.
-    pub full: bool,
     /// The text it was shown, if still kept.
     pub snapshot: Option<Arc<String>>,
 }
@@ -71,8 +72,6 @@ pub struct Seen {
 #[derive(Debug, Clone)]
 struct Entry {
     seen: Seen,
-    /// Seq of the event that recorded it, or [`UNLOGGED`].
-    seq: u64,
     used: u64,
 }
 
@@ -86,10 +85,19 @@ struct Table {
 struct Inner {
     sessions: HashMap<SessionId, Table>,
     snap_bytes: usize,
+    /// Entries over all tables.
+    entries: usize,
     tick: u64,
 }
 
 impl Inner {
+    fn drop_table(&mut self, sid: SessionId) {
+        if let Some(t) = self.sessions.remove(&sid) {
+            self.snap_bytes -= t.files.values().map(Self::snap_len).sum::<usize>();
+            self.entries -= t.files.len();
+        }
+    }
+
     fn tick(&mut self) -> u64 {
         self.tick += 1;
         self.tick
@@ -109,8 +117,21 @@ impl Inner {
             else {
                 break;
             };
-            if let Some(t) = self.sessions.remove(&oldest) {
-                self.snap_bytes -= t.files.values().map(Self::snap_len).sum::<usize>();
+            self.drop_table(oldest);
+        }
+        while self.entries > MAX_ENTRIES {
+            let oldest = self
+                .sessions
+                .iter()
+                .flat_map(|(s, t)| t.files.iter().map(move |(p, e)| (e.used, *s, p)))
+                .min_by_key(|(used, _, _)| *used)
+                .map(|(_, s, p)| (s, p.clone()));
+            let Some((sid, path)) = oldest else { break };
+            if let Some(t) = self.sessions.get_mut(&sid)
+                && let Some(e) = t.files.remove(&path)
+            {
+                self.snap_bytes -= Self::snap_len(&e);
+                self.entries -= 1;
             }
         }
         while self.snap_bytes > SNAPSHOT_MAX_TOTAL {
@@ -152,89 +173,64 @@ impl SeenStore {
     }
 
     /// Rebuild `session`'s table from its log: per path the latest
-    /// [`FileSeen`] wins; one recorded before the latest summary no longer
-    /// counts as a whole read (the model has only the summary of it).
-    /// Snapshots are kept where the hash is the one the log names.
+    /// [`FileSeen`] wins. Snapshots are kept where the hash is the one the
+    /// log names.
     pub fn sync(&self, session: SessionId, history: &[RawEvent]) {
-        let mut through = None;
-        let mut latest: HashMap<PathBuf, (FileSeen, u64)> = HashMap::new();
+        let mut latest: HashMap<PathBuf, (Sha, u64)> = HashMap::new();
         for e in history {
-            match e.kind.as_str() {
-                "history_summarized" => {
-                    through = e
-                        .payload
-                        .get("through_seq")
-                        .and_then(|v| v.as_u64())
-                        .or(through)
-                }
-                "tool_call_finished" => {
-                    if let Some(s) = e.payload.get("seen")
-                        && let Ok(f) = serde_json::from_value::<FileSeen>(s.clone())
-                    {
-                        latest.insert(PathBuf::from(&f.path), (f, e.seq));
-                    }
-                }
-                _ => {}
+            if e.kind == "tool_call_finished"
+                && let Some(s) = e.payload.get("seen")
+                && let Ok(f) = serde_json::from_value::<FileSeen>(s.clone())
+                && let Some(sha) = unhex(&f.sha256)
+            {
+                latest.insert(PathBuf::from(&f.path), (sha, e.seq));
+            }
+        }
+        // Keep the most recent files only.
+        if latest.len() > MAX_FILES {
+            let mut by_seq: Vec<(PathBuf, u64)> =
+                latest.iter().map(|(p, (_, s))| (p.clone(), *s)).collect();
+            by_seq.sort_by_key(|(_, s)| *s);
+            for (p, _) in &by_seq[..by_seq.len() - MAX_FILES] {
+                latest.remove(p);
             }
         }
         let mut inner = self.lock();
         let now = inner.tick();
-        let old = inner.sessions.remove(&session).unwrap_or_default();
+        let old = inner.sessions.get(&session).map(|t| {
+            t.files
+                .iter()
+                .filter_map(|(p, e)| Some((p.clone(), (e.seen.sha, e.seen.snapshot.clone()?))))
+                .collect::<HashMap<_, _>>()
+        });
+        inner.drop_table(session);
         let mut table = Table {
             files: HashMap::new(),
             used: now,
         };
-        for (path, (f, seq)) in latest {
-            let Some(sha) = unhex(&f.sha256) else {
-                continue;
-            };
+        for (path, (sha, _)) in latest {
             let snapshot = old
-                .files
-                .get(&path)
-                .filter(|e| e.seen.sha == sha)
-                .and_then(|e| e.seen.snapshot.clone());
-            let full = f.full && through.is_none_or(|t| seq > t);
+                .as_ref()
+                .and_then(|o| o.get(&path))
+                .filter(|(s, _)| *s == sha)
+                .map(|(_, t)| t.clone());
             table.files.insert(
                 path,
                 Entry {
-                    seen: Seen {
-                        sha,
-                        full,
-                        snapshot,
-                    },
-                    seq,
+                    seen: Seen { sha, snapshot },
                     used: now,
                 },
             );
         }
-        // Keep the most recent files only.
-        if table.files.len() > MAX_FILES {
-            let mut by_seq: Vec<(PathBuf, u64)> = table
-                .files
-                .iter()
-                .map(|(p, e)| (p.clone(), e.seq))
-                .collect();
-            by_seq.sort_by_key(|(_, s)| *s);
-            for (p, _) in &by_seq[..by_seq.len() - MAX_FILES] {
-                table.files.remove(p);
-            }
-        }
-        inner.snap_bytes -= old.files.values().map(Inner::snap_len).sum::<usize>();
         inner.snap_bytes += table.files.values().map(Inner::snap_len).sum::<usize>();
+        inner.entries += table.files.len();
         inner.sessions.insert(session, table);
         inner.evict();
     }
 
-    /// A summary now stands for the log up to `through`: what was read
-    /// there no longer counts as a whole read.
-    pub fn demote(&self, session: SessionId, through: u64) {
-        if let Some(t) = self.lock().sessions.get_mut(&session) {
-            for e in t.files.values_mut() {
-                if e.seq <= through {
-                    e.seen.full = false;
-                }
-            }
-        }
+    /// Drop everything kept for `session` (it was deleted).
+    pub fn forget(&self, session: SessionId) {
+        self.lock().drop_table(session);
     }
 }
 
@@ -265,21 +261,21 @@ impl SessionSeen {
 
     /// Record that the agent now knows `path` as `bytes` (a snapshot is
     /// kept when it is small text). Returns the event's record of it.
-    pub fn record(&self, path: &Path, bytes: &[u8], full: bool) -> FileSeen {
+    pub fn record(&self, path: &Path, bytes: &[u8]) -> FileSeen {
         let sha = sha256(bytes);
         let snapshot = (bytes.len() <= SNAPSHOT_MAX_FILE)
             .then(|| std::str::from_utf8(bytes).ok())
             .flatten()
             .map(|s| Arc::new(s.to_string()));
-        self.put(path, sha, full, snapshot)
+        self.put(path, sha, snapshot)
     }
 
     /// [`Self::record`] for a file too large to hold: its hash only.
-    pub fn record_hash(&self, path: &Path, sha: Sha, full: bool) -> FileSeen {
-        self.put(path, sha, full, None)
+    pub fn record_hash(&self, path: &Path, sha: Sha) -> FileSeen {
+        self.put(path, sha, None)
     }
 
-    fn put(&self, path: &Path, sha: Sha, full: bool, snapshot: Option<Arc<String>>) -> FileSeen {
+    fn put(&self, path: &Path, sha: Sha, snapshot: Option<Arc<String>>) -> FileSeen {
         let mut inner = self.store.lock();
         let now = inner.tick();
         let added = snapshot.as_ref().map_or(0, |s| s.len());
@@ -288,12 +284,7 @@ impl SessionSeen {
         let old = t.files.insert(
             path.to_path_buf(),
             Entry {
-                seen: Seen {
-                    sha,
-                    full,
-                    snapshot,
-                },
-                seq: UNLOGGED,
+                seen: Seen { sha, snapshot },
                 used: now,
             },
         );
@@ -306,14 +297,17 @@ impl SessionSeen {
             && let Some(e) = t.files.remove(&p)
         {
             inner.snap_bytes -= Inner::snap_len(&e);
+            inner.entries -= 1;
         }
-        inner.snap_bytes -= old.as_ref().map_or(0, Inner::snap_len);
+        match &old {
+            Some(o) => inner.snap_bytes -= Inner::snap_len(o),
+            None => inner.entries += 1,
+        }
         inner.snap_bytes += added;
         inner.evict();
         FileSeen {
             path: path.display().to_string(),
             sha256: hex(&sha),
-            full,
         }
     }
 }
@@ -361,7 +355,7 @@ impl Drop for PathLock {
 mod tests {
     use super::*;
     use harness_core::EventKind;
-    use harness_core::event::{HistorySummarized, ToolCallFinished};
+    use harness_core::event::ToolCallFinished;
 
     fn raw(sid: SessionId, seq: u64, kind: EventKind) -> RawEvent {
         let (kind, payload) = kind.into_parts();
@@ -391,7 +385,7 @@ mod tests {
     fn a_restart_rebuilds_the_hashes_from_the_log_without_snapshots() {
         let sid = SessionId::new();
         let first = Arc::new(SeenStore::default());
-        let rec = first.session(sid).record(Path::new("/w/a"), b"x\n", true);
+        let rec = first.session(sid).record(Path::new("/w/a"), b"x\n");
         assert!(
             first
                 .session(sid)
@@ -404,42 +398,40 @@ mod tests {
         // Same process: the snapshot is kept.
         first.sync(sid, &log);
         let s = first.session(sid).get(Path::new("/w/a")).unwrap();
-        assert!(s.full && s.snapshot.is_some() && s.sha == sha256(b"x\n"));
+        assert!(s.snapshot.is_some() && s.sha == sha256(b"x\n"));
         // A new process: the hash, not the text.
         let second = Arc::new(SeenStore::default());
         second.sync(sid, &log);
         let s = second.session(sid).get(Path::new("/w/a")).unwrap();
-        assert!(s.full && s.snapshot.is_none() && s.sha == sha256(b"x\n"));
+        assert!(s.snapshot.is_none() && s.sha == sha256(b"x\n"));
         // What the log does not hold (an append that failed) is gone.
-        first.session(sid).record(Path::new("/w/b"), b"y", true);
+        first.session(sid).record(Path::new("/w/b"), b"y");
         first.sync(sid, &log);
         assert!(first.session(sid).get(Path::new("/w/b")).is_none());
     }
 
     #[test]
-    fn a_summary_turns_whole_reads_before_it_into_partial_ones() {
-        let sid = SessionId::new();
+    fn entries_are_bounded_over_all_sessions_and_a_deleted_session_is_forgotten() {
         let s = Arc::new(SeenStore::default());
-        let a = s.session(sid).record(Path::new("/w/a"), b"a", true);
-        let b = s.session(sid).record(Path::new("/w/b"), b"b", true);
-        let log = vec![
-            raw(sid, 2, finished(a)),
-            raw(
-                sid,
-                5,
-                EventKind::HistorySummarized(HistorySummarized {
-                    turn_id: "t".into(),
-                    through_seq: 2,
-                    text: "s".into(),
-                }),
-            ),
-            raw(sid, 7, finished(b)),
-        ];
-        s.sync(sid, &log);
-        assert!(!s.session(sid).get(Path::new("/w/a")).unwrap().full);
-        assert!(s.session(sid).get(Path::new("/w/b")).unwrap().full);
-        s.demote(sid, 7);
-        assert!(!s.session(sid).get(Path::new("/w/b")).unwrap().full);
+        let sid = SessionId::new();
+        s.session(sid).record(Path::new("/w/kept"), b"k");
+        for i in 0..MAX_ENTRIES + 10 {
+            // Spread over sessions, so the per-session bound is not what acts.
+            let other = SessionId::new();
+            s.session(other)
+                .record(&PathBuf::from(format!("/w/{i}")), b"x");
+            assert!(s.lock().entries <= MAX_ENTRIES);
+        }
+        let counted: usize = s.lock().sessions.values().map(|t| t.files.len()).sum();
+        assert_eq!(counted, s.lock().entries);
+        // The least recently used went first.
+        assert!(s.session(sid).get(Path::new("/w/kept")).is_none());
+        let sid = SessionId::new();
+        s.session(sid).record(Path::new("/w/mine"), b"m");
+        let before = s.lock().entries;
+        s.forget(sid);
+        assert!(s.session(sid).get(Path::new("/w/mine")).is_none());
+        assert_eq!(s.lock().entries, before - 1);
     }
 
     #[test]
@@ -450,13 +442,13 @@ mod tests {
         for i in 0..n {
             let sid = SessionId::new();
             s.session(sid)
-                .record(&PathBuf::from(format!("/w/{i}")), &big, true);
+                .record(&PathBuf::from(format!("/w/{i}")), &big);
         }
         assert!(s.lock().snap_bytes <= SNAPSHOT_MAX_TOTAL);
         // Too large to keep at all: the hash only.
         let sid = SessionId::new();
         let huge = vec![b'a'; SNAPSHOT_MAX_FILE + 1];
-        s.session(sid).record(Path::new("/w/huge"), &huge, true);
+        s.session(sid).record(Path::new("/w/huge"), &huge);
         let e = s.session(sid).get(Path::new("/w/huge")).unwrap();
         assert!(e.snapshot.is_none() && e.sha == sha256(&huge));
     }

@@ -879,9 +879,6 @@ pub struct FileSeen {
     pub path: String,
     /// SHA-256 of the file's bytes, lowercase hex.
     pub sha256: String,
-    /// Every line was shown in full (or the agent wrote all of it): what
-    /// `write` needs to replace an existing file.
-    pub full: bool,
 }
 
 /// A web page behind a citation label. Only the harness's web tools write

@@ -52,8 +52,8 @@ impl Tool for Read {
     fn description(&self) -> &'static str {
         "Read a text file. Output lines are prefixed with their 1-based line number and a tab \
          (not part of the file). Use offset/limit for large files; a long read stops early and \
-         says where to go on. Reading a file is what lets `edit` change it, and reading all of \
-         it is what lets `write` replace it."
+         says where to go on. Reading a file (any part of it) is what lets `edit` and `write` \
+         change it."
     }
     fn schema(&self) -> Value {
         json!({
@@ -107,7 +107,6 @@ impl Tool for Read {
             total,
             capped,
             last,
-            cut,
             sha,
             bytes,
         } = match res {
@@ -138,10 +137,10 @@ impl Tool for Read {
         // What the agent now knows of the file, for `edit` and `write`. A
         // file cut at the byte cap has no hash of all of it: not recorded.
         if !capped {
-            let full = offset == 1 && last >= total && !cut;
+            let key = ctx.seen_key(&path);
             o.seen = Some(match bytes {
-                Some(b) => ctx.seen.record(&path, &b, full),
-                None => ctx.seen.record_hash(&path, sha, full),
+                Some(b) => ctx.seen.record(&key, &b),
+                None => ctx.seen.record_hash(&key, sha),
             });
         }
         o
@@ -155,8 +154,8 @@ impl Tool for Write {
     }
     fn description(&self) -> &'static str {
         "Create a file, or replace an existing one with the given content. An existing file must \
-         have been read in full in this session and not changed since; to change part of a \
-         file, use `edit`. Parent directories are created."
+         have been read in this session (any part of it) and not changed since; to change part \
+         of a file, `edit` is usually better. Parent directories are created."
     }
     fn schema(&self) -> Value {
         json!({
@@ -186,8 +185,9 @@ impl Tool for Write {
         {
             return ToolOutcome::err(format!("{}: {e}", parent.display()));
         }
-        let _lock = crate::seen::lock_path(&path).await;
-        if let Err(e) = check_overwrite(ctx, &path, &shown).await {
+        let key = ctx.seen_key(&path);
+        let _lock = crate::seen::lock_path(&key).await;
+        if let Err(e) = check_overwrite(ctx, &path, &key, &shown).await {
             return ToolOutcome::err(e);
         }
         match write_nofollow(&path, content.as_bytes()).await {
@@ -197,7 +197,7 @@ impl Tool for Write {
                     path.display(),
                     content.lines().count()
                 ));
-                o.seen = Some(ctx.seen.record(&path, content.as_bytes(), true));
+                o.seen = Some(ctx.seen.record(&key, content.as_bytes()));
                 o
             }
             Err(e) => ToolOutcome::err(e),
@@ -205,9 +205,14 @@ impl Tool for Write {
     }
 }
 
-/// `write` over an existing file: only one the agent read in full in this
-/// session and that has not changed since. A new file needs nothing.
-async fn check_overwrite(ctx: &ToolCtx, path: &std::path::Path, shown: &str) -> Result<(), String> {
+/// `write` over an existing file: only one the agent read in this session
+/// and that has not changed since (`edit`'s rule). A new file needs nothing.
+async fn check_overwrite(
+    ctx: &ToolCtx,
+    path: &std::path::Path,
+    key: &std::path::Path,
+    shown: &str,
+) -> Result<(), String> {
     match tokio::fs::symlink_metadata(path).await {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(format!("{}: {e}", path.display())),
@@ -215,11 +220,11 @@ async fn check_overwrite(ctx: &ToolCtx, path: &std::path::Path, shown: &str) -> 
         Ok(md) if !md.file_type().is_file() => return Ok(()),
         Ok(_) => {}
     }
-    let Some(seen) = ctx.seen.get(path) else {
+    let Some(seen) = ctx.seen.get(key) else {
         return Err(format!(
             "{shown} already exists and has not been read in this session, so writing it would \
-             replace content you have not seen. Read it first (all of it, with `read`), then \
-             write it; or change only part of it with `edit`."
+             replace content you have not seen; nothing was written. Read it with `read` first, \
+             then write it (or change only part of it with `edit`)."
         ));
     };
     let live = hash_file(path).await?;
@@ -233,20 +238,12 @@ async fn check_overwrite(ctx: &ToolCtx, path: &std::path::Path, shown: &str) -> 
             "nothing was written",
         ));
     }
-    if !seen.full {
-        return Err(format!(
-            "{shown}: you have read only part of it in this session (or read it before the \
-             conversation was summarised), so writing it would replace lines you have not seen. \
-             Read all of it first (`read` with a `limit` covering every line), or change only \
-             part of it with `edit`; nothing was written."
-        ));
-    }
     Ok(())
 }
 
 /// The SHA-256 of a regular file as it is now and, when it is small text,
-/// the text; `None` for one larger than `read` would hash (it cannot be the
-/// one the agent read in full).
+/// the text; `None` for one larger than `read` would hash (so it cannot be
+/// one the agent read).
 async fn hash_file(
     path: &std::path::Path,
 ) -> Result<Option<(crate::seen::Sha, Option<String>)>, String> {
@@ -517,8 +514,6 @@ struct Lines {
     capped: bool,
     /// The last line shown (`first - 1` when none was).
     last: usize,
-    /// A shown line was cut at `max_chars`.
-    cut: bool,
     /// SHA-256 of every byte read (all of the file unless `capped`).
     sha: crate::seen::Sha,
     /// The bytes themselves, when the file is small enough to snapshot.
@@ -555,7 +550,6 @@ fn read_window(
         chars: 0,
         last: w.first.saturating_sub(1).saturating_add(w.limit),
         shown: w.first.saturating_sub(1),
-        cut: false,
     };
     let mut line: Vec<u8> = Vec::new();
     let mut long = false;
@@ -615,7 +609,6 @@ fn read_window(
         total,
         capped,
         last: s.shown,
-        cut: s.cut,
         sha: hasher.finalize().into(),
         bytes: bytes.filter(|_| !capped),
     })
@@ -630,7 +623,6 @@ struct Shown {
     last: usize,
     /// The last line shown.
     shown: usize,
-    cut: bool,
 }
 
 impl Shown {
@@ -648,7 +640,6 @@ impl Shown {
                 } else {
                     one
                 };
-                self.cut |= long || text.chars().count() > w.max_chars;
                 self.chars += chars;
                 self.out.push_str(&one);
                 self.shown = n;

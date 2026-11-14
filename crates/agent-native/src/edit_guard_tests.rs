@@ -116,7 +116,7 @@ async fn the_guard_is_rebuilt_from_the_log_after_a_restart() {
     assert!(r[0].ok, "{}", r[0].output);
     let seen = r[0].seen.as_ref().expect("the read is recorded");
     assert!(
-        seen.full && seen.path.ends_with("f.txt") && seen.sha256.len() == 64,
+        seen.path.ends_with("f.txt") && seen.sha256.len() == 64,
         "{seen:?}"
     );
     append(&mut log, sid, ev);
@@ -180,8 +180,10 @@ async fn the_guard_is_rebuilt_from_the_log_after_a_restart() {
     assert_eq!(std::fs::read_to_string(&f).unwrap(), "1\n2\nthree\n");
 }
 
+/// A summary does not end what the agent read: the hash still says the
+/// file is as it was read, so `write` and `edit` go on (review F1, F7).
 #[tokio::test]
-async fn a_summary_ends_whole_reads_before_it() {
+async fn a_summary_keeps_what_was_read() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("f.txt"), "one\n").unwrap();
     let sid = harness_core::SessionId::new();
@@ -212,17 +214,38 @@ async fn a_summary_ends_whole_reads_before_it() {
         &log,
         dir.path(),
         json!([
-            call("write", json!({"path": "f.txt", "content": "replaced\n"})),
             call(
                 "edit",
                 json!({"path": "f.txt", "old_string": "one", "new_string": "1"})
             ),
+            call("write", json!({"path": "f.txt", "content": "replaced\n"})),
         ]),
     )
     .await;
     let r = results(&ev);
-    // The model has only a summary of the file: no whole overwrite.
-    assert!(!r[0].ok && r[0].output.contains("part"), "{}", r[0].output);
-    // An edit still goes: its match proves the text it replaces.
+    assert!(r[0].ok, "{}", r[0].output);
     assert!(r[1].ok, "{}", r[1].output);
+}
+
+/// Review F6: a deleted session's record is dropped.
+#[tokio::test]
+async fn a_deleted_session_is_forgotten() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("f.txt"), "one\n").unwrap();
+    let sid = harness_core::SessionId::new();
+    let b = backend();
+    // In-turn records (the log is not given back): only memory holds them.
+    let ev = turn(
+        &b,
+        sid,
+        &[],
+        dir.path(),
+        json!([call("read", json!({"path": "f.txt"}))]),
+    )
+    .await;
+    assert!(results(&ev)[0].ok);
+    let f = dir.path().canonicalize().unwrap().join("f.txt");
+    assert!(b.seen.session(sid).get(&f).is_some());
+    b.forget_session(sid);
+    assert!(b.seen.session(sid).get(&f).is_none());
 }

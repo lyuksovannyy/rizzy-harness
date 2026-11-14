@@ -89,7 +89,7 @@ async fn own_edits_and_writes_never_make_the_file_stale() {
 }
 
 #[tokio::test]
-async fn a_new_file_needs_no_read_but_an_existing_one_needs_a_whole_read() {
+async fn a_new_file_needs_no_read_and_an_existing_one_needs_a_read() {
     let (dir, ctx) = ws();
     let w = run(&Write, &ctx, json!({"path": "new.txt", "content": "n\n"})).await;
     assert!(w.ok, "{}", w.output);
@@ -103,8 +103,15 @@ async fn a_new_file_needs_no_read_but_an_existing_one_needs_a_whole_read() {
     )
     .await;
     assert!(!w.ok, "an unread file was overwritten: {}", w.output);
-    assert!(w.output.contains("read"), "{}", w.output);
-    // Part of it is not enough to replace all of it.
+    // The refusal names a call the model can make.
+    assert!(
+        w.output.contains("Read it with `read` first"),
+        "{}",
+        w.output
+    );
+    assert_eq!(get(&dir, "old.txt"), body);
+    // Any read is enough, as for `edit` (review F1, F2: a "whole read"
+    // could be impossible to make).
     let r = run(&Read, &ctx, json!({"path": "old.txt", "limit": 5})).await;
     assert!(r.ok);
     let w = run(
@@ -113,18 +120,78 @@ async fn a_new_file_needs_no_read_but_an_existing_one_needs_a_whole_read() {
         json!({"path": "old.txt", "content": "gone\n"}),
     )
     .await;
-    assert!(!w.ok, "{}", w.output);
-    assert!(w.output.contains("part"), "{}", w.output);
-    assert_eq!(get(&dir, "old.txt"), body);
-    read(&ctx, "old.txt").await;
+    assert!(w.ok, "{}", w.output);
+    assert_eq!(get(&dir, "old.txt"), "gone\n");
+}
+
+/// Review F1: a file whose `read` passes the character budget is read in
+/// pieces; `write` over it must then be possible.
+#[tokio::test]
+async fn write_works_after_reading_a_long_file_in_pieces() {
+    let (dir, ctx) = ws();
+    let body: String = (1..=900)
+        .map(|i| format!("let v{i:04} = compute_something(1, 2);\n"))
+        .collect();
+    put(&dir, "a.rs", &body);
+    let mut offset = 1usize;
+    let mut reads = 0;
+    loop {
+        let r = run(
+            &Read,
+            &ctx,
+            json!({"path": "a.rs", "offset": offset, "limit": 5000}),
+        )
+        .await;
+        assert!(r.ok, "{}", r.output);
+        reads += 1;
+        let next = r
+            .output
+            .lines()
+            .last()
+            .unwrap()
+            .split("use offset ")
+            .nth(1)
+            .and_then(|s| s.split(' ').next())
+            .and_then(|s| s.parse::<usize>().ok());
+        match next {
+            Some(n) => offset = n,
+            None => break,
+        }
+        assert!(reads < 10);
+    }
+    assert!(
+        reads > 1,
+        "the file fit one read; the test needs a longer one"
+    );
     let w = run(
         &Write,
         &ctx,
-        json!({"path": "old.txt", "content": "gone\n"}),
+        json!({"path": "a.rs", "content": "fn main() {}\n"}),
     )
     .await;
     assert!(w.ok, "{}", w.output);
-    assert_eq!(get(&dir, "old.txt"), "gone\n");
+}
+
+/// Review F2: a line over the bounded-read cap is shown cut; that must not
+/// make `write` impossible.
+#[tokio::test]
+async fn write_works_on_a_file_with_a_line_over_the_line_cap() {
+    let (dir, mut ctx) = ws();
+    ctx.savings.bounded_reads = true;
+    put(
+        &dir,
+        "README.md",
+        &format!("# Title\n\n{}\n", "word ".repeat(150)),
+    );
+    assert!(run(&Read, &ctx, json!({"path": "README.md"})).await.ok);
+    let w = run(
+        &Write,
+        &ctx,
+        json!({"path": "README.md", "content": "new\n"}),
+    )
+    .await;
+    assert!(w.ok, "{}", w.output);
+    assert_eq!(get(&dir, "README.md"), "new\n");
 }
 
 #[tokio::test]
@@ -433,9 +500,9 @@ async fn a_long_window_stops_at_a_character_budget_and_never_loses_its_middle() 
         "{}",
         r.output.lines().last().unwrap()
     );
-    // Such a read is a partial one: it does not let `write` replace the file.
+    // It counts as a read: `write` may replace the file (review F1).
     let w = run(&Write, &ctx, json!({"path": "big.txt", "content": "x\n"})).await;
-    assert!(!w.ok, "{}", w.output);
+    assert!(w.ok, "{}", w.output);
 }
 #[tokio::test]
 async fn sessions_do_not_share_what_they_read() {
@@ -455,4 +522,110 @@ async fn sessions_do_not_share_what_they_read() {
     assert!(!e.ok, "{}", e.output);
     let e = edit(&a, "a.txt", "x", "y").await;
     assert!(e.ok, "{}", e.output);
+}
+
+/// Review F3: a `\r\n` in `old_string` that matches an LF file only on the
+/// LF view is not a raw match: `new_string` goes in with the file's LF.
+#[tokio::test]
+async fn crlf_typed_into_an_lf_file_is_written_as_lf() {
+    let (dir, ctx) = ws();
+    put(&dir, "a.txt", "a\nb\nc\n");
+    read(&ctx, "a.txt").await;
+    let e = edit(&ctx, "a.txt", "a\r\nb", "x\r\ny").await;
+    assert!(e.ok, "{}", e.output);
+    assert_eq!(get(&dir, "a.txt"), "x\ny\nc\n");
+    // And in a CRLF file, a typed CRLF that is there goes in as typed.
+    put(&dir, "b.txt", "a\r\nb\r\n");
+    read(&ctx, "b.txt").await;
+    let e = edit(&ctx, "b.txt", "a\r\nb", "x\r\ny").await;
+    assert!(e.ok, "{}", e.output);
+    assert_eq!(get(&dir, "b.txt"), "x\r\ny\r\n");
+}
+
+/// Review F4: once `old_string` lost a pasted gutter, every line of
+/// `new_string` that has one loses it, and a newly typed line stays.
+#[tokio::test]
+async fn a_gutter_is_taken_off_the_lines_of_new_string_that_have_one() {
+    let (dir, ctx) = ws();
+    put(&dir, "a.rs", "fn a() {\n    one();\n}\n");
+    read(&ctx, "a.rs").await;
+    let e = edit(
+        &ctx,
+        "a.rs",
+        "     2\t    one();",
+        "     2\t    one();\n    two();",
+    )
+    .await;
+    assert!(e.ok, "{}", e.output);
+    assert_eq!(get(&dir, "a.rs"), "fn a() {\n    one();\n    two();\n}\n");
+}
+
+/// Review F5: the typographic tier changes only what the model changed;
+/// the file's curly quotes elsewhere on the line stay.
+#[tokio::test]
+async fn the_typographic_tier_keeps_the_files_own_characters() {
+    let (dir, ctx) = ws();
+    put(
+        &dir,
+        "doc.md",
+        "It\u{2019}s \u{201c}fine\u{201d} here\nnext\n",
+    );
+    read(&ctx, "doc.md").await;
+    let e = edit(&ctx, "doc.md", "It's \"fine\" here", "It's \"fine\" there").await;
+    assert!(e.ok, "{}", e.output);
+    assert!(e.output.contains("quotes"), "{}", e.output);
+    assert_eq!(
+        get(&dir, "doc.md"),
+        "It\u{2019}s \u{201c}fine\u{201d} there\nnext\n"
+    );
+}
+
+/// Review probe: the trailing-whitespace tier in a CRLF file with a BOM
+/// splices on the right bytes.
+#[tokio::test]
+async fn the_trailing_whitespace_tier_in_a_crlf_file_splices_right() {
+    let (dir, ctx) = ws();
+    put(&dir, "a.txt", "\u{feff}a  \r\nb\t\r\nc\r\n");
+    read(&ctx, "a.txt").await;
+    let e = edit(&ctx, "a.txt", "a\nb\n", "x\ny\n").await;
+    assert!(e.ok, "{}", e.output);
+    assert_eq!(get(&dir, "a.txt"), "\u{feff}x\r\ny\r\nc\r\n");
+}
+
+/// Review probe: lines added above by someone else; an edit below lands on
+/// the right line and the result numbers the new lines.
+#[tokio::test]
+async fn a_stale_file_with_lines_added_above_is_edited_below() {
+    let (dir, ctx) = ws();
+    put(&dir, "a.txt", "one\ntwo\nthree\nfour\n");
+    read(&ctx, "a.txt").await;
+    put(&dir, "a.txt", "zero\nzero2\none\ntwo\nthree\nfour\n");
+    let e = edit(&ctx, "a.txt", "four", "FOUR").await;
+    assert!(e.ok, "{}", e.output);
+    assert_eq!(get(&dir, "a.txt"), "zero\nzero2\none\ntwo\nthree\nFOUR\n");
+    assert!(
+        e.output.contains("1\tzero") && e.output.contains("2\tzero2"),
+        "{}",
+        e.output
+    );
+}
+
+/// Review probe: a fuzzy `replace_all` and a second edit that take in the
+/// same line are refused as overlapping, and nothing is written.
+#[tokio::test]
+async fn a_fuzzy_replace_all_overlapping_another_edit_is_refused() {
+    let (dir, ctx) = ws();
+    put(&dir, "a.txt", "a \nb\na \nb\n");
+    read(&ctx, "a.txt").await;
+    let e = run(
+        &Edit,
+        &ctx,
+        json!({"path": "a.txt", "edits": [
+            {"old_string": "a\n", "new_string": "A\n", "replace_all": true},
+            {"old_string": "b\na", "new_string": "B\nA"},
+        ]}),
+    )
+    .await;
+    assert!(!e.ok && e.output.contains("overlap"), "{}", e.output);
+    assert_eq!(get(&dir, "a.txt"), "a \nb\na \nb\n");
 }

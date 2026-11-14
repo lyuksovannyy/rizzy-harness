@@ -96,16 +96,17 @@ impl Tool for Edit {
             Ok(s) => s,
             Err(e) => return ToolOutcome::err(e),
         };
-        let _lock = crate::seen::lock_path(&path).await;
+        let key = ctx.seen_key(&path);
+        let _lock = crate::seen::lock_path(&key).await;
         let text = match read_nofollow(&path).await {
             Ok(t) => t,
             Err(e) => return ToolOutcome::err(e),
         };
-        match edit(ctx, &path, &shown, &text, &specs) {
-            Ok((updated, report, full)) => match write_nofollow(&path, updated.as_bytes()).await {
+        match edit(ctx, &path, &key, &shown, &text, &specs) {
+            Ok((updated, report)) => match write_nofollow(&path, updated.as_bytes()).await {
                 Ok(()) => {
                     let mut o = ToolOutcome::ok(report);
-                    o.seen = Some(ctx.seen.record(&path, updated.as_bytes(), full));
+                    o.seen = Some(ctx.seen.record(&key, updated.as_bytes()));
                     o
                 }
                 Err(e) => ToolOutcome::err(e),
@@ -341,23 +342,39 @@ fn find(v: &View, starts: &mut Option<Vec<usize>>, needle: &str, tier: Tier) -> 
     out
 }
 
-/// `s` without a line-number gutter copied from `read` (`   12\t…` or
-/// `12\t…` on every non-blank line), if it has one.
+/// The line-number gutter `read` puts in front of a line (`   12\t` or
+/// `12\t`): the rest of the line, if it has one.
+fn gutterless(line: &str) -> Option<&str> {
+    let t = line.trim_start_matches(' ');
+    let digits = t.len() - t.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    t[digits..].strip_prefix('\t').filter(|_| digits > 0)
+}
+
+/// `s` without a line-number gutter copied from `read`, if every non-blank
+/// line has one (so `old_string` is read output, not text that happens to
+/// start with a number and a tab).
 fn strip_gutter(s: &str) -> Option<String> {
     let mut any = false;
     let mut out = Vec::new();
     for line in s.split('\n') {
         if line.trim().is_empty() {
-            out.push(String::new());
+            out.push("");
             continue;
         }
-        let t = line.trim_start_matches(' ');
-        let digits = t.len() - t.trim_start_matches(|c: char| c.is_ascii_digit()).len();
-        let rest = t[digits..].strip_prefix('\t').filter(|_| digits > 0)?;
+        out.push(gutterless(line)?);
         any = true;
-        out.push(rest.to_string());
     }
     any.then(|| out.join("\n"))
+}
+
+/// `new_string` once `old_string` was found to be pasted `read` output:
+/// the gutter off every line that has one, the lines typed without one
+/// kept as they are.
+fn strip_gutter_where_present(s: &str) -> String {
+    s.split('\n')
+        .map(|l| gutterless(l).unwrap_or(l))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// 1-based line of byte `off` in `text`.
@@ -373,13 +390,23 @@ struct Found {
     spans: Vec<Span>,
     tier: Tier,
     gutter: bool,
+    /// Matched on the original bytes, because `old_string` held a `\r\n`
+    /// that is in the file as it is: `new_string` goes in as it is too.
+    raw: bool,
     /// The replacement text (the gutter taken off when it had one too).
     new: String,
 }
 
 /// Match `spec` against the file: the first tier with a match wins.
 fn locate(v: &View, starts: &mut Option<Vec<usize>>, spec: &Spec) -> Result<Found, String> {
-    // A CRLF the model typed: the original bytes, as they are.
+    let found = |spans, tier, gutter, raw, new| Found {
+        spans,
+        tier,
+        gutter,
+        raw,
+        new,
+    };
+    // A CRLF the model typed that the file has: the original bytes.
     if spec.old.contains('\r') {
         let spans: Vec<Span> = v
             .orig
@@ -391,7 +418,11 @@ fn locate(v: &View, starts: &mut Option<Vec<usize>>, spec: &Spec) -> Result<Foun
             })
             .collect();
         if !spans.is_empty() {
-            return unique(v, spec, spans, Tier::Exact, false, spec.new.clone());
+            return unique(
+                v,
+                spec,
+                found(spans, Tier::Exact, false, true, spec.new.clone()),
+            );
         }
     }
     let old = spec.old.replace("\r\n", "\n");
@@ -399,29 +430,23 @@ fn locate(v: &View, starts: &mut Option<Vec<usize>>, spec: &Spec) -> Result<Foun
     for tier in tiers {
         let spans = find(v, starts, &old, tier);
         if !spans.is_empty() {
-            return unique(v, spec, spans, tier, false, spec.new.clone());
+            return unique(v, spec, found(spans, tier, false, false, spec.new.clone()));
         }
     }
     if let Some(stripped) = strip_gutter(&old) {
-        let new = strip_gutter(&spec.new).unwrap_or_else(|| spec.new.clone());
+        let new = strip_gutter_where_present(&spec.new);
         for tier in tiers {
             let spans = find(v, starts, &stripped, tier);
             if !spans.is_empty() {
-                return unique(v, spec, spans, tier, true, new);
+                return unique(v, spec, found(spans, tier, true, false, new));
             }
         }
     }
     Err(miss(v, spec, &old))
 }
 
-fn unique(
-    v: &View,
-    spec: &Spec,
-    spans: Vec<Span>,
-    tier: Tier,
-    gutter: bool,
-    new: String,
-) -> Result<Found, String> {
+fn unique(v: &View, spec: &Spec, f: Found) -> Result<Found, String> {
+    let spans = &f.spans;
     if spans.len() > 1 && !spec.all {
         let mut lines: Vec<String> = spans
             .iter()
@@ -439,12 +464,35 @@ fn unique(
             lines.join(", ")
         ));
     }
-    Ok(Found {
-        spans,
-        tier,
-        gutter,
-        new,
-    })
+    Ok(f)
+}
+
+/// For a match made through the typographic fold: `new` with the file's
+/// own characters kept wherever it agrees with the matched text once both
+/// are folded (the common prefix and suffix, in characters), so quotes,
+/// dashes and spaces the model did not change stay as the file has them.
+/// Both are in LF form.
+fn keep_file_chars(matched: &str, new: &str) -> String {
+    let m: Vec<char> = matched.chars().collect();
+    let n: Vec<char> = new.chars().collect();
+    let p = m
+        .iter()
+        .zip(&n)
+        .take_while(|(a, b)| fold(**a) == fold(**b))
+        .count();
+    let room = m.len().min(n.len()) - p;
+    let q = m
+        .iter()
+        .rev()
+        .zip(n.iter().rev())
+        .take(room)
+        .take_while(|(a, b)| fold(**a) == fold(**b))
+        .count();
+    m[..p]
+        .iter()
+        .chain(&n[p..n.len() - q])
+        .chain(&m[m.len() - q..])
+        .collect()
 }
 
 /// Why nothing matched, with what helps most: the edit may already be
@@ -602,15 +650,16 @@ pub(crate) fn stale_refusal(
 }
 
 /// The edit itself: the guard, every spec matched against `text`, the new
-/// text, the report, and whether the agent now knows all of the file.
+/// text and the report.
 fn edit(
     ctx: &ToolCtx,
     path: &Path,
+    key: &Path,
     shown: &str,
     text: &str,
     specs: &[Spec],
-) -> Result<(String, String, bool), String> {
-    let Some(seen) = ctx.seen.get(path) else {
+) -> Result<(String, String), String> {
+    let Some(seen) = ctx.seen.get(key) else {
         return Err(format!(
             "{shown} has not been read in this session; nothing was changed. Read it first with \
              `read` (the part that holds the text you are replacing is enough), then edit it."
@@ -664,7 +713,7 @@ fn edit(
             notes.push(format!("{}matched {h}", spec.label));
         }
         for s in &found.spans {
-            let mut rep = if spec.old.contains('\r') && found.tier == Tier::Exact && !found.gutter {
+            let mut rep = if found.raw {
                 found.new.clone()
             } else {
                 let span = &text[s.a..s.b];
@@ -675,7 +724,10 @@ fn edit(
                 } else {
                     first_crlf
                 };
-                let lf = found.new.replace("\r\n", "\n");
+                let mut lf = found.new.replace("\r\n", "\n");
+                if found.tier == Tier::Typographic {
+                    lf = keep_file_chars(&span.replace("\r\n", "\n"), &lf);
+                }
                 if crlf { lf.replace('\n', "\r\n") } else { lf }
             };
             if s.trim_nl {
@@ -750,7 +802,7 @@ fn edit(
         );
         report.push_str(&show(ctx, &updated, a, b));
     }
-    Ok((updated, report, seen.full && !stale))
+    Ok((updated, report))
 }
 
 /// The lines around each replacement in `text` (the new file), numbered as
