@@ -14,6 +14,17 @@ ignore = [
     # environment (FIX_PLAN 3.4, AUDIT S7, PLAN.md T20). Revisit when
     # pdf-extract or lopdf drop it.
     { id = "RUSTSEC-2026-0192", reason = "FIX_PLAN 3.4: only in the confined pdf-text helper" },
+    # rmcp before 3.9.0 buffers a Streamable HTTP response body without a
+    # limit. That code is behind the features
+    # `transport-streamable-http-client*`, which this workspace does not
+    # enable: rmcp is built with `default-features = false` and only
+    # `client` and `transport-async-rw` (stdio servers; see Cargo.toml), and
+    # our own reader caps a stdio line at 8 MiB. 3.9.0 was under two weeks
+    # old when the MCP client was added (CLAUDE.md's dependency rule), so
+    # the pin stays at 3.8.0 for now. Remove this entry by moving the pin
+    # to 3.9.0 or newer once it is two weeks old, and in any case BEFORE an
+    # HTTP transport feature is turned on (ADOPTION_PLAN X.3 follow-up).
+    { id = "RUSTSEC-2026-0462", reason = "X.3: the affected HTTP client features are not compiled in" },
 ]
 
 [licenses]
