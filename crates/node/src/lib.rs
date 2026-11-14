@@ -964,6 +964,7 @@ impl NodeRuntime {
                 session_id,
                 text,
                 agent,
+                agent_named,
                 attachments,
                 compare,
                 savings,
@@ -985,7 +986,7 @@ impl NodeRuntime {
                     images,
                 };
                 match self.session(session_id) {
-                    Some(s) => s.prompt(input, agent, compare, extra).await,
+                    Some(s) => s.prompt(input, agent, agent_named, compare, extra).await,
                     None => Err("unknown session".into()),
                 }
             }

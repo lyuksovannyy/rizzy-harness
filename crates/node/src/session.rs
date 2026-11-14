@@ -31,6 +31,22 @@ struct RunningTurn {
     /// Set when the node's stop cancelled this turn (and nothing had
     /// before it): its end is then `stopped` (review N-7).
     by_stop: Arc<AtomicBool>,
+    /// The agent running it, as the master resolved it (X.5: a message
+    /// naming another agent does not wait for this turn).
+    agent_id: Option<String>,
+    /// A callback turn: it is handed no message the person sends meanwhile
+    /// (review ST-2); the person's own turn after it reads them.
+    callback: bool,
+    /// Parallel answers: they take no message while they run (ST-7).
+    compare: bool,
+}
+
+/// The running turn as a message sent meanwhile sees it.
+struct Running {
+    turn_id: String,
+    cancelled: bool,
+    agent_id: Option<String>,
+    compare: bool,
 }
 
 pub(crate) struct Session {
@@ -825,10 +841,13 @@ impl Session {
         .map_err(|e| e.to_string())
     }
 
+    /// `agent_named`: the person chose the agent for this message (the
+    /// picker or an @mention), as the master resolved it.
     pub(crate) async fn prompt(
         self: &Arc<Self>,
         input: Input,
         agent: Option<AgentSpec>,
+        agent_named: bool,
         compare: Vec<String>,
         extra: TurnExtra,
     ) -> Result<(), String> {
@@ -868,6 +887,9 @@ impl Session {
                 savings: extra.savings.clone(),
                 publishes: Arc::default(),
                 by_stop: by_stop.clone(),
+                agent_id: agent.as_ref().map(|a| a.agent_id.clone()),
+                callback: false,
+                compare: !compare.is_empty(),
             })
         };
         if let Err(e) = claim() {
@@ -877,9 +899,13 @@ impl Session {
             // A turn runs: the message waits for it (X.5). One that ended
             // since left the slot to this message's own turn.
             match self.running_turn() {
-                Some((running, false)) => return self.enqueue(running, input, &compare).await,
+                Some(r) if !r.cancelled => {
+                    return self
+                        .enqueue(r, input, &compare, agent.as_ref(), agent_named)
+                        .await;
+                }
                 // Stopped by the person, still ending: refused as before.
-                Some((_, true)) => {
+                Some(_) => {
                     return Err(format!(
                         "{TURN_RUNNING}: it is stopping; send this when it has stopped"
                     ));
@@ -909,10 +935,10 @@ impl Session {
             }
         };
         // What a turn that reads messages this one leaves unread starts
-        // from: this turn's savings and context.
+        // from: this turn's savings only. Its context was for this message
+        // (a recall by its words, a routine's note), not for those (ST-8).
         let after = TurnExtra {
             savings: extra.savings.clone(),
-            context: extra.context.clone(),
             ..Default::default()
         };
         // Recorded before the prompt is answered, so a log that cannot be
@@ -951,13 +977,18 @@ impl Session {
         Ok(())
     }
 
-    /// The running turn's id, and whether it was cancelled already.
-    fn running_turn(&self) -> Option<(String, bool)> {
+    /// The running turn, if any.
+    fn running_turn(&self) -> Option<Running> {
         self.turn
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .as_ref()
-            .map(|t| (t.turn_id.clone(), t.cancel.is_cancelled()))
+            .map(|t| Running {
+                turn_id: t.turn_id.clone(),
+                cancelled: t.cancel.is_cancelled(),
+                agent_id: t.agent_id.clone(),
+                compare: t.compare,
+            })
     }
 
     /// Record a message sent while turn `turn_id` runs (X.5): stored before
@@ -965,13 +996,35 @@ impl Session {
     /// (`user_message.queued`); the model reads it before the turn's next
     /// request, or the next turn does. An answer to a question and
     /// parallel answers wait for the turn's end, as before; so does a
-    /// message past [`MAX_QUEUED`]. The caller holds `queue`.
+    /// message past [`MAX_QUEUED`], one naming another agent than the
+    /// running turn's (ST-5), one to a sub-agent's chat (ST-6) and any
+    /// while parallel answers run (ST-7). The caller holds `queue`.
     async fn enqueue(
         &self,
-        turn_id: String,
+        running: Running,
         input: Input,
         compare: &[String],
+        agent: Option<&AgentSpec>,
+        agent_named: bool,
     ) -> Result<(), String> {
+        if self.parent_session.is_some() {
+            return Err(format!(
+                "{TURN_RUNNING}: a sub-agent's chat takes no message while it works; \
+                 its parent reads its answer"
+            ));
+        }
+        if running.compare {
+            return Err(format!(
+                "{TURN_RUNNING}: parallel answers take no message while they run"
+            ));
+        }
+        if agent_named && agent.map(|a| &a.agent_id) != running.agent_id.as_ref() {
+            return Err(format!(
+                "{TURN_RUNNING}: the running turn's agent reads it; pick the agent for your \
+                 next message"
+            ));
+        }
+        let turn_id = running.turn_id;
         if input.reply.is_some() {
             return Err(format!("{TURN_RUNNING}: an answer waits until it ends"));
         }
@@ -1002,19 +1055,21 @@ impl Session {
         Ok(())
     }
 
-    /// After a turn that ended `completed` with messages it never read
-    /// (they came after its last step, X.5): a turn starts with them, the
-    /// last as its own message, and so on while such a turn leaves more.
-    /// Nothing starts after any other end (Stop, an error, a node stop):
-    /// the messages then wait for the person's next one. Nor when another
-    /// turn took the slot first; that turn reads them.
+    /// After a turn that ended `completed` or with an error, with messages
+    /// it never read (they came after its last step, or it failed: the
+    /// message is often the fix, review ST-3; or it was a callback turn,
+    /// which reads none, ST-2): a turn of the person's starts with them,
+    /// the last as its own message, and so on while such a turn leaves
+    /// more. Nothing starts after Stop, a node stop or a restart: the
+    /// messages then wait for the person's next one. Nor when another turn
+    /// took the slot first; that turn reads them.
     async fn read_queued(
         self: Arc<Self>,
         mut reason: TurnEndReason,
         agent: Option<AgentSpec>,
         after: TurnExtra,
     ) {
-        while reason == TurnEndReason::Completed {
+        while matches!(reason, TurnEndReason::Completed | TurnEndReason::Error) {
             let Some((turn_id, user_text, history, extra, cancel, by_stop)) =
                 self.start_queued(agent.as_ref(), after.clone()).await
             else {
@@ -1073,6 +1128,9 @@ impl Session {
             savings: extra.savings.clone(),
             publishes: Arc::default(),
             by_stop: by_stop.clone(),
+            agent_id: agent.map(|a| a.agent_id.clone()),
+            callback: false,
+            compare: false,
         })
         .ok()?;
         let (history, mut queued) = match self.begin(None, &turn_id, agent).await {
@@ -1143,6 +1201,9 @@ impl Session {
             savings: savings.clone(),
             publishes: Arc::default(),
             by_stop: by_stop.clone(),
+            agent_id: agent.as_ref().map(|a| a.agent_id.clone()),
+            callback: true,
+            compare: false,
         })
         .map_err(|e| {
             if e == TURN_RUNNING {
@@ -1222,6 +1283,9 @@ impl Session {
         }
         // No sub-agents in a turn nobody watches: the unattended spend is
         // `callback_turns × callback_max_steps` model calls, nothing more.
+        // The person's turn that reads their messages after it gets the
+        // agent as it is, sub-agents and all (review ST-2).
+        let person = agent.clone().map(|a| limits.bound_delegation(a));
         let agent = agent.map(|a| {
             let mut a = limits.bound_delegation(a);
             a.delegates.clear();
@@ -1267,14 +1331,14 @@ impl Session {
                     turn_id,
                     String::new(),
                     history,
-                    agent.clone(),
+                    agent,
                     vec![],
                     extra,
                     cancel,
                     by_stop,
                 )
                 .await;
-            this.read_queued(reason, agent, after).await;
+            this.read_queued(reason, person, after).await;
         });
         Ok(())
     }
@@ -2310,6 +2374,9 @@ impl Session {
             savings: savings.clone(),
             publishes: Arc::default(),
             by_stop: by_stop.clone(),
+            agent_id: Some(agent.agent_id.clone()),
+            callback: false,
+            compare: false,
         }) {
             if let Some(i) = iso {
                 crate::git::remove_folder(&i.child).await;
@@ -2736,8 +2803,12 @@ impl TurnHost for Session {
 
     async fn queued_messages(&self) -> Result<Vec<UserMessage>, LogError> {
         let _queue = self.queue.lock().await;
+        // A callback turn reads none (ST-2): the person's turn after it does.
+        let turn_id = match self.turn.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
+            Some(t) if !t.callback => Some(t.turn_id.clone()),
+            _ => None,
+        };
         let taken = std::mem::take(&mut *self.pending.lock().unwrap_or_else(|p| p.into_inner()));
-        let turn_id = self.running_turn().map(|(t, _)| t);
         let (false, Some(turn_id)) = (taken.is_empty(), turn_id) else {
             *self.pending.lock().unwrap_or_else(|p| p.into_inner()) = taken;
             return Ok(Vec::new());

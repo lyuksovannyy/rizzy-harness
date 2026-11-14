@@ -101,20 +101,30 @@ Without configuration the built-in **mock** provider is used, so you can try
 the UI with no API key. Try `run: ls -la`, `read: README.md` or `slow: 50`.
 
 **Writing while the agent works.** The reply box stays open while a turn
-runs: Enter (or Send, next to Stop) sends the message at once. The node stores
-it before it says yes, so a message that was taken is never lost, and the chat
-shows it where you sent it, marked "sent while working" until the agent has
-read it. The agent reads it before its next model request, right after the
-results of the tools it was running, as your message, marked for it as written
-while it worked; a running command is never interrupted for it. If the agent
-had already given its last answer, your message starts the next turn instead.
-Stop works as before and never restarts anything by itself: a message the
-stopped turn did not read (or one a node restart cut off) goes to the agent
-with your next message, ahead of it. At most 8 messages wait at once; the
-ninth is refused ("a turn is already running…") until the agent reads them.
-An answer to a question card and parallel answers still wait for the turn to
-end, and a message sent during the turn keeps that turn's agent and settings
-(an `@mention` in it does not switch agents).
+runs: Enter (or Send, next to Stop) sends the message at once, and a line under
+the box says what happens to it ("Read after the current step. Stop
+interrupts."). The node stores the message before it says yes, so a message
+that was taken is never lost, and the chat shows it where you sent it, marked
+"sent while working" until the agent has read it. The agent reads it before
+its next model request, right after the results of the tools it was running,
+as your message, marked for it as written while it worked; a running command
+is never interrupted for it. If the agent had already given its last answer,
+or the turn ended with an error (a step limit, the repeated-call guard, a
+provider error: your message is often the fix), your message starts the next
+turn instead. A turn the server started by itself when a background command
+ended reads none of your messages; your own turn starts with them when it
+ends. Stop works as before and never restarts anything by itself: a message
+the stopped turn did not read (or one a node restart cut off) is marked "not
+read yet: goes with your next message" and goes to the agent with your next
+message, ahead of it. A message the agent was given just before a Stop or a
+crash counts as read: it is in the next turn's history like any other. At
+most 8 messages wait at once; the ninth is refused ("a turn is already
+running…") until the agent reads them. An answer to a question card still
+waits for the turn to end; so does any message while parallel answers run,
+and a sub-agent's chat takes none while it works. A message keeps the running
+turn's agent and settings: one sent to another agent (the agent picker, or an
+`@mention` of another agent) is refused with the reason, so pick the agent for
+your next message instead.
 
 Settings → Account → Preferences → **Appearance** picks the theme (System follows the
 operating system; Light and Dark stay put) and the accent colour, one of eight:

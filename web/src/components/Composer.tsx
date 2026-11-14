@@ -826,6 +826,7 @@ export function Composer(props: {
       </div>
       {home && props.agenticBlocked && <div className="hint muted">{props.agenticBlocked}</div>}
       {props.readOnly && <div className="hint muted">{t("conv.readOnly", { reason: props.readOnly })}</div>}
+      {props.running && props.onStop && !props.readOnly && <div className="hint muted composer-hint">{t("composer.runningHint")}</div>}
       {err && <div className="error-text">{err}</div>}
     </div>
   );
