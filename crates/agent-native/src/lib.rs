@@ -925,7 +925,9 @@ where
     // the tool's own timeout and the node's stop end the command whatever
     // the link holds (A.21). Chunks are not read meanwhile: a tool that
     // streams waits for room in `rx` (bash watches its cancel and its
-    // timeout while it does), so nothing piles up here.
+    // timeout while it does), so its output is held back; a model's deltas
+    // pile up in its unbounded channel, bounded by the answer's size, and
+    // go out in batches of the usual size afterwards (review A21-3).
     let mut sending: Option<Sending<'_>> = None;
     let mut finished: Option<T> = None;
     let out = loop {
@@ -965,8 +967,16 @@ where
     if let Some(s) = sending {
         s.await;
     }
+    // What is left in the channel, in batches as above: never one event
+    // the size of everything that piled up behind a waiting append.
     while let Some(d) = rx.try_next() {
         buf.push_str(&d);
+        if buf.len() >= FLUSH_BYTES
+            && let Some(s) = start(scrubber.push(&std::mem::take(&mut buf)), lead)
+        {
+            s.await;
+            emitted = true;
+        }
     }
     let mut clean = scrubber.push(&buf);
     clean.push_str(&scrubber.finish());

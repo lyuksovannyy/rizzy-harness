@@ -1567,7 +1567,9 @@ Upgrade the server first, then its nodes.
 When they produce output faster than the link carries (several chats
 streaming command output over a slow uplink), the node holds their output
 back until the link has room: a chat's output then reaches you late, and
-the agent waits with it, so it cannot run far ahead of what you see. Stop
+a command the agent runs waits with it, so the agent cannot run far ahead
+of what you see (a model's answer is not held back while it is written,
+only its delivery; it is at most one answer long). Stop
 and approvals are not held back: a Stop ends the command at once, a
 command's timeout still applies, and the node answers Stop and an approval
 ahead of the waiting output (about a second on a full 256 KiB/s uplink).
