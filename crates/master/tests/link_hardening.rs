@@ -313,7 +313,7 @@ fn revoke_grant(store: &Store, user: &str) {
     use harness_core::policy::ExecLevel;
     assert!(
         store
-            .set_exec_ceiling(user, ExecLevel::Host, ExecLevel::None, "{}")
+            .set_exec_ceiling(user, ExecLevel::Host, ExecLevel::None, None, "{}")
             .unwrap()
     );
 }
@@ -1284,4 +1284,77 @@ async fn a_node_without_background_commands_is_not_sent_their_stop() {
     });
     assert!(cancel_within(&mut c1, sid, 5).await);
     assert_eq!(stop_background_within(&mut c1, sid, 2).await, None);
+}
+
+/// Review L2-1: a prompt checked just before a lowering, whose turn the
+/// node had not started when the sweep looked (`running` still false in the
+/// mirror), runs on unless something looks again. The master checks again
+/// once the node acked the command, and cancels the turn the level no
+/// longer allows.
+#[tokio::test]
+async fn a_prompt_checked_before_a_lowering_is_cancelled_once_acked() {
+    use harness_core::event::TurnStarted;
+    use harness_core::policy::ExecLevel;
+    let store = Store::open_in_memory().unwrap();
+    people(&store);
+    let m = master_on(&store);
+    m.set_agents(harness_agents::AgentSet::load(std::path::Path::new("/nonexistent")).0);
+    let (l, mut c, tx) = open_link("n1", vec![]);
+    m.add_link(l, false).await.unwrap();
+    let sid = SessionId::new();
+    send(&tx, event(sid, 1, "")).await;
+    barrier(&store, &tx).await;
+    store.claim_session(sid, Some("bob"), None).unwrap();
+
+    // The prompt passes its check and goes out; the node holds its ack.
+    let m2 = m.clone();
+    let prompt = tokio::spawn(async move {
+        m2.prompt(sid, "hi".into(), harness_master::PromptOpts::default())
+            .await
+    });
+    let req = loop {
+        match tokio::time::timeout(Duration::from_secs(30), c.recv()).await {
+            Ok(Some(MasterToNode::Prompt { req_id, .. })) => break req_id,
+            Ok(Some(_)) => {}
+            other => panic!("no prompt: {other:?}"),
+        }
+    };
+    // Now bob's ceiling goes to none and the sweep runs: it sees no
+    // running turn.
+    assert!(
+        store
+            .set_exec_ceiling("bob", ExecLevel::Sandbox, ExecLevel::None, None, "{}")
+            .unwrap()
+    );
+    harness_master::workspaces::cancel_revoked(&m, &["bob".to_string()]).await;
+    // The node starts the turn and acks the prompt.
+    let (kind, payload) = EventKind::TurnStarted(TurnStarted {
+        cause: None,
+        turn_id: "t1".into(),
+        agent: None,
+    })
+    .into_parts();
+    send(
+        &tx,
+        RawEvent {
+            session_id: sid,
+            seq: 2,
+            ts_ms: 2,
+            kind,
+            payload,
+        },
+    )
+    .await;
+    tx.send(NodeToMaster::Ack {
+        req_id: req,
+        ok: true,
+        error: None,
+    })
+    .await
+    .unwrap();
+    assert!(prompt.await.unwrap().is_ok());
+    assert!(
+        cancel_within(&mut c, sid, 5).await,
+        "the turn the sweep missed runs on at the old level"
+    );
 }

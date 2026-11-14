@@ -253,7 +253,28 @@ pub struct MemberRow {
     pub use_memory: bool,
     /// Their level here as stored (the master reads an owner's as `host`).
     pub exec_level: ExecLevel,
+    /// Their account's ceiling as stored, and whether they are a server
+    /// admin (whose ceiling counts as `host`): their effective level here.
+    pub exec_ceiling: ExecLevel,
+    pub server_admin: bool,
 }
+
+/// Who changes a level, as their guards read them (N.10a review L2-9): the
+/// change is written only while all of it still holds, so a grant decided
+/// by someone who is lowered or demoted meanwhile is refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Setter {
+    pub user_id: String,
+    /// Their workspace role and stored level there; `None` for a server
+    /// admin setting an account's ceiling (no workspace).
+    pub member: Option<(String, ExecLevel)>,
+    pub exec_ceiling: ExecLevel,
+    pub server_admin: bool,
+}
+
+/// Why a level change was refused because its setter's own standing
+/// changed after their guards read it.
+pub const SETTER_CHANGED: &str = "your own role or level just changed; reload and try again";
 
 /// A workspace a user belongs to, with their role there.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2499,7 +2520,8 @@ impl Store {
     }
 
     const MEMBER_SELECT: &str =
-        "SELECT m.user_id, u.username, u.disabled, m.role_id, m.joined_ms, m.use_memory, m.exec_level
+        "SELECT m.user_id, u.username, u.disabled, m.role_id, m.joined_ms, m.use_memory, m.exec_level,
+                u.exec_ceiling, u.role
          FROM workspace_members m JOIN users u ON u.user_id = m.user_id";
 
     fn member_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<MemberRow> {
@@ -2511,7 +2533,45 @@ impl Store {
             joined_ms: r.get(4)?,
             use_memory: r.get::<_, i64>(5)? != 0,
             exec_level: level_col(r, 6)?,
+            exec_ceiling: level_col(r, 7)?,
+            server_admin: r.get::<_, String>(8)? == "admin",
         })
+    }
+
+    /// Whether `setter` still stands as their guards read them (in `ws`
+    /// for a member level), inside the transaction that writes the change.
+    fn setter_holds(conn: &Connection, ws: Option<&str>, setter: &Setter) -> Result<bool> {
+        let account: Option<(String, i64, String)> = conn
+            .query_row(
+                "SELECT exec_ceiling, disabled, role FROM users WHERE user_id = ?1",
+                params![setter.user_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let Some((ceiling, disabled, role)) = account else {
+            return Ok(false);
+        };
+        if disabled != 0
+            || ceiling != setter.exec_ceiling.id()
+            || (role == "admin") != setter.server_admin
+        {
+            return Ok(false);
+        }
+        match (&setter.member, ws) {
+            (Some((role_id, level)), Some(ws)) => {
+                let now: Option<(String, String)> = conn
+                    .query_row(
+                        "SELECT role_id, exec_level FROM workspace_members
+                         WHERE workspace_id = ?1 AND user_id = ?2",
+                        params![ws, setter.user_id],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()?;
+                Ok(now.is_some_and(|(r, l)| &r == role_id && l == level.id()))
+            }
+            (None, None) => Ok(true),
+            _ => Ok(false),
+        }
     }
 
     pub fn member(&self, ws: &str, user_id: &str) -> Result<Option<MemberRow>> {
@@ -2741,7 +2801,8 @@ impl Store {
 
     /// Change an account's stored ceiling from `from` to `to`, only while it
     /// is still `from` (what the caller's guards read; a concurrent change is
-    /// refused with [`LEVEL_CHANGED`]), and write `audit` as one
+    /// refused with [`LEVEL_CHANGED`]) and `setter` (`None`: the API token)
+    /// still stands as read ([`SETTER_CHANGED`]), and write `audit` as one
     /// `level.account` line in the same transaction. Returns whether the
     /// account exists.
     pub fn set_exec_ceiling(
@@ -2749,10 +2810,16 @@ impl Store {
         user_id: &str,
         from: ExecLevel,
         to: ExecLevel,
+        setter: Option<&Setter>,
         audit: &str,
     ) -> Result<bool> {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
+        if let Some(st) = setter
+            && !Self::setter_holds(&tx, None, st)?
+        {
+            return Err(StoreError::Refused(SETTER_CHANGED.into()));
+        }
         let n = tx.execute(
             "UPDATE users SET exec_ceiling = ?3 WHERE user_id = ?1 AND exec_ceiling = ?2",
             params![user_id, from.id(), to.id()],
@@ -2779,7 +2846,8 @@ impl Store {
     /// Change a member's stored level in team workspace `ws` from `from` to
     /// `to`, only while they still hold `role` and `from` (what the caller's
     /// guards checked; otherwise refused with [`ROLE_CHANGED`] or
-    /// [`LEVEL_CHANGED`]), and write `audit` as one `level.workspace` line
+    /// [`LEVEL_CHANGED`]) and `setter` (`None`: the API token) still stands
+    /// as read ([`SETTER_CHANGED`]), and write `audit` as one `level.workspace` line
     /// in the same transaction. Returns whether they are a member.
     pub fn set_member_level(
         &self,
@@ -2788,12 +2856,18 @@ impl Store {
         role: &str,
         from: ExecLevel,
         to: ExecLevel,
+        setter: Option<&Setter>,
         audit: &str,
     ) -> Result<bool> {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         if Self::team_workspace(&tx, ws)?.is_none() {
             return Ok(false);
+        }
+        if let Some(st) = setter
+            && !Self::setter_holds(&tx, Some(ws), st)?
+        {
+            return Err(StoreError::Refused(SETTER_CHANGED.into()));
         }
         let n = tx.execute(
             "UPDATE workspace_members SET exec_level = ?5

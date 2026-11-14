@@ -235,6 +235,9 @@ pub struct MasterInner {
     outbound: Mutex<outbound::Outbound>,
     /// Callback turns: the watcher's per-chat state (T.8d step 3).
     callbacks: callbacks::Callbacks,
+    /// Tests: how long a level change waits between its guards and its
+    /// write, in ms (0 in use), so a test can make two changes overlap.
+    pub(crate) level_write_delay_ms: std::sync::atomic::AtomicU64,
 }
 
 /// What the UI asks for when starting a session.
@@ -564,6 +567,7 @@ impl Master {
                 sockets: Default::default(),
                 outbound: Mutex::new(outbound::Outbound::from_env()),
                 callbacks: Default::default(),
+                level_write_delay_ms: Default::default(),
                 agents: Mutex::new(agent_edits::Agents::new(
                     harness_agents::AgentSet::from_agents(
                         harness_agents::builtins(),
@@ -627,6 +631,26 @@ impl Master {
 
     pub fn transcriber(&self) -> Option<Arc<voice::Transcriber>> {
         lock(&self.inner.transcriber).clone()
+    }
+
+    /// Tests: make every level change wait `d` between its guards and its
+    /// write (N.10a review L2-9), so two changes can be made to overlap.
+    #[doc(hidden)]
+    pub fn set_level_write_delay(&self, d: Duration) {
+        self.inner
+            .level_write_delay_ms
+            .store(d.as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The wait `set_level_write_delay` set; none in use.
+    pub(crate) async fn level_write_pause(&self) {
+        let ms = self
+            .inner
+            .level_write_delay_ms
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if ms > 0 {
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+        }
     }
 
     /// How often an open UI socket re-checks its login (default 60 s;
@@ -1487,10 +1511,11 @@ impl Master {
     ) -> Result<(), CommandError> {
         let req_id = new_id();
         let msg = build(req_id.clone());
+        let work = writes_to(&msg);
         // A diverged session takes no events, so nothing may make its node
         // write one (a turn would run with nobody seeing it). Cancel and
         // delete still go through.
-        if let Some(sid) = writes_to(&msg) {
+        if let Some(sid) = work {
             let (diverged, row) = self
                 .inner
                 .mirror
@@ -1542,13 +1567,38 @@ impl Master {
             Some(Err(false)) | None => return Err(CommandError::NodeOffline(node_id.into())),
         }
         match tokio::time::timeout(ACK_TIMEOUT, rx).await {
-            Ok(Ok(Ok(()))) => Ok(()),
+            Ok(Ok(Ok(()))) => {
+                // Checked again now the node took it (review L2-1): a level
+                // lowered between the check above and here was swept while
+                // this turn was not yet running, so the sweep missed it.
+                if let Some(sid) = work {
+                    self.recheck_after_ack(sid);
+                }
+                Ok(())
+            }
             Ok(Ok(Err(e))) if e == harness_protocol::NODE_STOPPING => {
                 Err(CommandError::NodeStopping)
             }
             Ok(Ok(Err(e))) => Err(CommandError::Rejected(e)),
             Ok(Err(_)) | Err(_) => Err(CommandError::Timeout),
         }
+    }
+
+    /// The level check again for `sid`, after its node acked a command that
+    /// makes it work; if it now refuses, its turn is cancelled and its
+    /// background commands stopped, in the background (review L2-1).
+    fn recheck_after_ack(&self, sid: SessionId) {
+        let this = self.clone();
+        tokio::spawn(async move {
+            let row = match this.inner.mirror.call(move |s| s.session(sid)).await {
+                Ok(Some(row)) => row,
+                _ => return,
+            };
+            if let Some(why) = workspaces::work_refusal(&this, &row).await {
+                tracing::info!(session = %sid, reason = %why, "a command acked after its owner's level was lowered: stopping its work");
+                workspaces::stop_removed(&this, vec![sid]);
+            }
+        });
     }
 
     async fn owner(&self, sid: SessionId) -> Result<String, CommandError> {

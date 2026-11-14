@@ -664,6 +664,7 @@ fn levels_start_at_none_and_change_only_from_what_was_read() {
             "member",
             ExecLevel::None,
             ExecLevel::Sandbox,
+            None,
             "{\"n\":1}"
         )
         .unwrap()
@@ -674,6 +675,7 @@ fn levels_start_at_none_and_change_only_from_what_was_read() {
         "member",
         ExecLevel::None,
         ExecLevel::Container,
+        None,
         "{\"n\":2}",
     );
     assert!(matches!(second, Err(StoreError::Refused(m)) if m == harness_store::LEVEL_CHANGED));
@@ -691,14 +693,23 @@ fn levels_start_at_none_and_change_only_from_what_was_read() {
             "member",
             ExecLevel::Sandbox,
             ExecLevel::None,
+            None,
             "{}"
         ),
         Err(StoreError::Refused(_))
     ));
     // Not a member, and a Personal workspace.
     assert!(
-        !s.set_member_level(&ws, "c1", "member", ExecLevel::None, ExecLevel::Host, "{}")
-            .unwrap()
+        !s.set_member_level(
+            &ws,
+            "c1",
+            "member",
+            ExecLevel::None,
+            ExecLevel::Host,
+            None,
+            "{}"
+        )
+        .unwrap()
     );
     let personal = s.personal_workspace("b1").unwrap();
     assert!(
@@ -708,6 +719,7 @@ fn levels_start_at_none_and_change_only_from_what_was_read() {
             "owner",
             ExecLevel::None,
             ExecLevel::Host,
+            None,
             "{}"
         )
         .is_err()
@@ -716,15 +728,15 @@ fn levels_start_at_none_and_change_only_from_what_was_read() {
 
     // The account ceiling, the same way.
     assert!(
-        s.set_exec_ceiling("b1", ExecLevel::None, ExecLevel::Host, "{}")
+        s.set_exec_ceiling("b1", ExecLevel::None, ExecLevel::Host, None, "{}")
             .unwrap()
     );
     assert!(matches!(
-        s.set_exec_ceiling("b1", ExecLevel::None, ExecLevel::Sandbox, "{}"),
+        s.set_exec_ceiling("b1", ExecLevel::None, ExecLevel::Sandbox, None, "{}"),
         Err(StoreError::Refused(_))
     ));
     assert!(
-        !s.set_exec_ceiling("nobody", ExecLevel::None, ExecLevel::Host, "{}")
+        !s.set_exec_ceiling("nobody", ExecLevel::None, ExecLevel::Host, None, "{}")
             .unwrap()
     );
     assert_eq!(
@@ -732,4 +744,120 @@ fn levels_start_at_none_and_change_only_from_what_was_read() {
         ExecLevel::Host
     );
     assert_eq!(lines(&s, "level.account"), 1);
+}
+
+/// Review L2-9: a level change is written only while its setter still
+/// stands as their guards read them: an admin lowered, demoted or disabled
+/// between their read and their write is refused, and nothing is written.
+#[test]
+fn a_level_change_holds_only_while_its_setter_stands_as_read() {
+    use harness_core::policy::ExecLevel;
+    use harness_store::{SETTER_CHANGED, Setter};
+    let s = store();
+    let ws = s.create_workspace("Acme", "a1").unwrap().workspace_id;
+    assert!(s.add_member(&ws, "b1", "admin").unwrap());
+    assert!(s.add_member(&ws, "c1", "member").unwrap());
+    s.set_exec_ceiling("b1", ExecLevel::None, ExecLevel::Sandbox, None, "{}")
+        .unwrap();
+    s.set_member_level(
+        &ws,
+        "b1",
+        "admin",
+        ExecLevel::None,
+        ExecLevel::Sandbox,
+        None,
+        "{}",
+    )
+    .unwrap();
+    // What bob's guards read.
+    let read = |s: &Store| {
+        let m = s.member(&ws, "b1").unwrap().unwrap();
+        Setter {
+            user_id: "b1".into(),
+            member: Some((m.role_id, m.exec_level)),
+            exec_ceiling: m.exec_ceiling,
+            server_admin: m.server_admin,
+        }
+    };
+    let refused = |r: harness_store::Result<bool>| matches!(r, Err(StoreError::Refused(m)) if m == SETTER_CHANGED);
+    let bob = read(&s);
+    // Lowered here meanwhile.
+    s.set_member_level(
+        &ws,
+        "b1",
+        "admin",
+        ExecLevel::Sandbox,
+        ExecLevel::None,
+        None,
+        "{}",
+    )
+    .unwrap();
+    assert!(refused(s.set_member_level(
+        &ws,
+        "c1",
+        "member",
+        ExecLevel::None,
+        ExecLevel::Sandbox,
+        Some(&bob),
+        "{}"
+    )));
+    // Demoted meanwhile.
+    let bob = read(&s);
+    assert!(s.set_member_role(&ws, "b1", None, "member").unwrap());
+    assert!(refused(s.set_member_level(
+        &ws,
+        "c1",
+        "member",
+        ExecLevel::None,
+        ExecLevel::Container,
+        Some(&bob),
+        "{}"
+    )));
+    // His ceiling lowered meanwhile.
+    let bob = read(&s);
+    s.set_exec_ceiling("b1", ExecLevel::Sandbox, ExecLevel::Container, None, "{}")
+        .unwrap();
+    assert!(refused(s.set_member_level(
+        &ws,
+        "c1",
+        "member",
+        ExecLevel::None,
+        ExecLevel::Container,
+        Some(&bob),
+        "{}"
+    )));
+    assert_eq!(
+        s.member(&ws, "c1").unwrap().unwrap().exec_level,
+        ExecLevel::None
+    );
+    // As read, it lands.
+    let bob = read(&s);
+    assert!(
+        s.set_member_level(
+            &ws,
+            "c1",
+            "member",
+            ExecLevel::None,
+            ExecLevel::Container,
+            Some(&bob),
+            "{}"
+        )
+        .unwrap()
+    );
+    // An account's ceiling: the setter must still be an enabled server admin.
+    let admin = Setter {
+        user_id: "a1".into(),
+        member: None,
+        exec_ceiling: ExecLevel::None,
+        server_admin: true,
+    };
+    assert!(refused(s.set_exec_ceiling(
+        "c1",
+        ExecLevel::None,
+        ExecLevel::Host,
+        Some(&admin),
+        "{}"
+    )));
+    let lines = s.audit_lines("level.").unwrap().len();
+    assert_eq!(lines, 5, "only the writes that landed are audited");
 }

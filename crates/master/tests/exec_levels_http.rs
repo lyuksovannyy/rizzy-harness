@@ -18,7 +18,7 @@ use harness_core::event::Profile;
 use harness_master::auth::{Auth, Claim};
 use harness_master::config::{Config, LocalNodeUsers};
 use harness_master::providers::ProviderRuntime;
-use harness_master::{Master, router};
+use harness_master::{CommandError, CreateSpec, Master, PromptOpts, router};
 use harness_node::exec::ExecOffers;
 use harness_node::{NodeConfig, NodePolicy, NodeRuntime};
 use harness_store::Store;
@@ -35,6 +35,7 @@ struct Server {
     admin: String,
     admin_id: String,
     mirror: Store,
+    master: Master,
     _dir: tempfile::TempDir,
 }
 
@@ -108,6 +109,7 @@ async fn start() -> Server {
         admin: String::new(),
         admin_id: String::new(),
         mirror,
+        master: master.clone(),
         _dir: dir,
     };
     let (st, cookie, v) = send(
@@ -616,9 +618,29 @@ async fn an_admin_grants_only_up_to_their_own_level_and_host_only_by_an_owner() 
     set_level(&s, &s.admin, &acme, &dave_id, "none").await;
     let (st, v) = set_level(&s, &carol, &acme, &dave_id, "sandbox").await;
     forbidden_with(st, &v, "above your own (yours in Acme is container)");
-    // The owner's level cannot be set; a member cannot set levels at all.
-    let (st, v) = set_level(&s, &carol, &acme, &s.admin_id, "none").await;
-    assert_ne!(st, StatusCode::OK, "{v}");
+    // An owner's level cannot be set, even by another owner (the owner
+    // rule itself, not the rule on acting above one's role).
+    let (_erin, erin_id) = account(&s, "erin", "host").await;
+    add(&s, &s.admin, &acme, "erin", "member").await;
+    let (st, v) = call(
+        &s,
+        Method::PATCH,
+        &format!("/api/workspaces/{acme}/members/{erin_id}"),
+        Some(json!({"role": "owner"})),
+        &s.admin,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, v) = set_level(&s, &s.admin, &acme, &erin_id, "none").await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert!(
+        v["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("an owner's level here is always host"),
+        "{v}"
+    );
+    // A member cannot set levels at all.
     let (st, v) = set_level(&s, &dave, &acme, &carol_id, "none").await;
     assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
     // The owner grants host; an unknown level is refused.
@@ -689,8 +711,16 @@ async fn the_personal_workspace_level_is_the_ceiling() {
     forbidden_with(st, &v, "your account's level is sandbox");
     set_ceiling(&s, &s.admin, &bob_id, "host").await;
     created(&s, &bob, &mine, Some("host")).await;
-    let (st, v) = set_level(&s, &s.admin, &mine, &bob_id, "none").await;
-    assert_ne!(st, StatusCode::OK, "{v}");
+    // Not even the API token, owner of every workspace, sets a level there.
+    let (st, v) = set_level(&s, TOKEN, &mine, &bob_id, "none").await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert!(
+        v["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("a Personal workspace has no levels"),
+        "{v}"
+    );
     // The server admin, host in their own Personal workspace...
     let theirs = personal(&s, &s.admin).await;
     created(&s, &s.admin, &theirs, Some("host")).await;
@@ -737,6 +767,12 @@ async fn every_level_change_is_one_audit_line() {
     let account_lines = s.mirror.audit_lines("level.account").unwrap();
     assert_eq!(account_lines.len(), 1, "{account_lines:?}");
     let l: Value = serde_json::from_str(&account_lines[0].1).unwrap();
+    let keys = |l: &Value| {
+        let mut k: Vec<String> = l.as_object().unwrap().keys().cloned().collect();
+        k.sort();
+        k
+    };
+    assert_eq!(keys(&l), ["by", "from", "to", "user"], "no content: {l}");
     assert_eq!(
         (&l["by"], &l["user"], &l["from"], &l["to"]),
         (
@@ -750,6 +786,11 @@ async fn every_level_change_is_one_audit_line() {
     let ws_lines = s.mirror.audit_lines("level.workspace").unwrap();
     assert_eq!(ws_lines.len(), 1, "{ws_lines:?}");
     let l: Value = serde_json::from_str(&ws_lines[0].1).unwrap();
+    assert_eq!(
+        keys(&l),
+        ["by", "from", "to", "user", "workspace"],
+        "no content: {l}"
+    );
     assert_eq!(
         (&l["workspace"], &l["user"], &l["from"], &l["to"]),
         (
@@ -795,4 +836,285 @@ async fn the_api_token_is_host_but_a_members_chat_keeps_the_members_level() {
     )
     .await;
     forbidden_with(st, &v, "your level in Acme is none");
+}
+
+/// Review L2-3: deleting a team stops what ran in its chats, as removing a
+/// member does (the chats return to Personal either way), whether its owner
+/// deletes it or a server admin does.
+#[tokio::test]
+async fn deleting_a_workspace_stops_what_ran_there() {
+    let s = start().await;
+    let (bob, bob_id) = account(&s, "bob", "sandbox").await;
+    for by_admin in [false, true] {
+        let acme = team(&s, &s.admin, "Acme").await;
+        add(&s, &s.admin, &acme, "bob", "member").await;
+        set_level(&s, &s.admin, &acme, &bob_id, "sandbox").await;
+        let sid = created(&s, &bob, &acme, None).await;
+        waiting_turn(&s, &bob, &sid, 1).await;
+        let path = match by_admin {
+            false => format!("/api/workspaces/{acme}"),
+            true => format!("/api/admin/workspaces/{acme}"),
+        };
+        let (st, v) = call(&s, Method::DELETE, &path, None, &s.admin).await;
+        assert_eq!(st, StatusCode::OK, "{path}: {v}");
+        wait_stopped(&s, &bob, &sid).await;
+    }
+}
+
+/// Review L2-10 (decided): nobody changes a level above their own. A
+/// workspace admin at sandbox can neither lower nor otherwise change a
+/// member the owner gave host; one at their own level or below, yes.
+#[tokio::test]
+async fn an_admin_cannot_change_a_member_whose_level_is_above_their_own() {
+    let s = start().await;
+    let (carol, carol_id) = account(&s, "carol", "host").await;
+    let (_dave, dave_id) = account(&s, "dave", "host").await;
+    let (_eve, eve_id) = account(&s, "eve", "host").await;
+    let acme = team(&s, &s.admin, "Acme").await;
+    add(&s, &s.admin, &acme, "carol", "admin").await;
+    add(&s, &s.admin, &acme, "dave", "member").await;
+    add(&s, &s.admin, &acme, "eve", "member").await;
+    set_level(&s, &s.admin, &acme, &carol_id, "sandbox").await;
+    set_level(&s, &s.admin, &acme, &dave_id, "host").await;
+    for to in ["none", "sandbox"] {
+        let (st, v) = set_level(&s, &carol, &acme, &dave_id, to).await;
+        forbidden_with(st, &v, "whose level is above your own");
+    }
+    let (_, v) = call(
+        &s,
+        Method::GET,
+        &format!("/api/workspaces/{acme}/members"),
+        None,
+        &s.admin,
+    )
+    .await;
+    assert!(v.to_string().contains("host"), "{v}");
+    set_level(&s, &s.admin, &acme, &eve_id, "sandbox").await;
+    let (st, v) = set_level(&s, &carol, &acme, &eve_id, "none").await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+}
+
+/// Review L2-9 and the 409 at the HTTP layer: a level change is written
+/// only while what its guards read still holds, the setter's own standing
+/// included. A grant by an admin who is lowered meanwhile, and the second
+/// of two changes decided on the same reading, each get 409.
+#[tokio::test]
+async fn a_change_decided_on_a_stale_reading_gets_409() {
+    let s = start().await;
+    let (carol, carol_id) = account(&s, "carol", "host").await;
+    let (_dave, dave_id) = account(&s, "dave", "host").await;
+    let acme = team(&s, &s.admin, "Acme").await;
+    add(&s, &s.admin, &acme, "carol", "admin").await;
+    add(&s, &s.admin, &acme, "dave", "member").await;
+    set_level(&s, &s.admin, &acme, &carol_id, "sandbox").await;
+    // Every level write waits this long between its guards and its write.
+    s.master.set_level_write_delay(Duration::from_millis(400));
+    // The owner lowers carol; carol, a moment later, grants dave sandbox on
+    // her old reading. The owner's write lands first.
+    let lower = set_level(&s, &s.admin, &acme, &carol_id, "none");
+    let grant = async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        set_level(&s, &carol, &acme, &dave_id, "sandbox").await
+    };
+    let ((st1, v1), (st2, v2)) = tokio::join!(lower, grant);
+    assert_eq!(st1, StatusCode::OK, "{v1}");
+    assert_eq!(st2, StatusCode::CONFLICT, "{v2}");
+    // Two changes of one member on the same reading: the second is refused.
+    let first = set_level(&s, &s.admin, &acme, &dave_id, "container");
+    let second = async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        set_level(&s, TOKEN, &acme, &dave_id, "sandbox").await
+    };
+    let ((st1, v1), (st2, v2)) = tokio::join!(first, second);
+    assert_eq!(st1, StatusCode::OK, "{v1}");
+    assert_eq!(st2, StatusCode::CONFLICT, "{v2}");
+    s.master.set_level_write_delay(Duration::ZERO);
+    let (_, v) = call(
+        &s,
+        Method::GET,
+        &format!("/api/workspaces/{acme}/members"),
+        None,
+        &s.admin,
+    )
+    .await;
+    let dave = v["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["user_id"] == dave_id.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(dave["exec_level"], "container", "{v}");
+}
+
+/// Review L2-7 (decided): a member who is not an admin of the workspace sees
+/// only their own level; admins see every member's, as set and as it
+/// counts (an owner at a none ceiling counts as none, not host).
+#[tokio::test]
+async fn the_member_list_shows_levels_to_admins_and_each_member_their_own() {
+    let s = start().await;
+    let (gus, gus_id) = account(&s, "gus", "sandbox").await;
+    let (_dan, dan_id) = account(&s, "dan", "host").await;
+    let (_olga, olga_id) = account(&s, "olga", "none").await;
+    let acme = team(&s, &s.admin, "Acme").await;
+    add(&s, &s.admin, &acme, "gus", "guest").await;
+    add(&s, &s.admin, &acme, "dan", "member").await;
+    add(&s, &s.admin, &acme, "olga", "member").await;
+    set_level(&s, &s.admin, &acme, &gus_id, "host").await;
+    set_level(&s, &s.admin, &acme, &dan_id, "host").await;
+    call(
+        &s,
+        Method::PATCH,
+        &format!("/api/workspaces/{acme}/members/{olga_id}"),
+        Some(json!({"role": "owner"})),
+        &s.admin,
+    )
+    .await;
+    let row = |v: &Value, id: &str| {
+        v["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["user_id"] == id)
+            .unwrap()
+            .clone()
+    };
+    let (_, v) = call(
+        &s,
+        Method::GET,
+        &format!("/api/workspaces/{acme}/members"),
+        None,
+        &gus,
+    )
+    .await;
+    assert_eq!(row(&v, &dan_id).get("exec_level"), None, "{v}");
+    assert_eq!(row(&v, &dan_id).get("effective_level"), None, "{v}");
+    // His own: set host here, sandbox as it counts (his ceiling).
+    assert_eq!(row(&v, &gus_id)["effective_level"], "sandbox", "{v}");
+    let (_, v) = call(
+        &s,
+        Method::GET,
+        &format!("/api/workspaces/{acme}/members"),
+        None,
+        &s.admin,
+    )
+    .await;
+    assert_eq!(row(&v, &dan_id)["exec_level"], "host", "{v}");
+    assert_eq!(row(&v, &dan_id)["effective_level"], "host", "{v}");
+    assert_eq!(row(&v, &olga_id)["exec_level"], "host", "{v}");
+    assert_eq!(row(&v, &olga_id)["effective_level"], "none", "{v}");
+}
+
+/// Review L2's model: the send_command check and create_session's second
+/// check hold for a caller that skips HTTP. Bob's host chat, once his level
+/// there is sandbox: Master::prompt, an allowing respond_approval and a
+/// direct create_session of a host chat are refused with Forbidden.
+#[tokio::test]
+async fn the_master_refuses_direct_callers_too() {
+    let s = start().await;
+    let (bob, bob_id) = account(&s, "bob", "host").await;
+    let acme = team(&s, &s.admin, "Acme").await;
+    add(&s, &s.admin, &acme, "bob", "member").await;
+    set_level(&s, &s.admin, &acme, &bob_id, "host").await;
+    let sid = created(&s, &bob, &acme, Some("host")).await;
+    let approval = waiting_turn(&s, &bob, &sid, 1).await;
+    set_level(&s, &s.admin, &acme, &bob_id, "sandbox").await;
+    wait_stopped(&s, &bob, &sid).await;
+    let id = sid.parse().unwrap();
+    let r = s
+        .master
+        .prompt(id, "hi".into(), PromptOpts::default())
+        .await;
+    assert!(matches!(r, Err(CommandError::Forbidden(_))), "{r:?}");
+    let r = s
+        .master
+        .respond_approval(id, approval, harness_core::policy::Decision::Allow)
+        .await;
+    assert!(matches!(r, Err(CommandError::Forbidden(_))), "{r:?}");
+    let r = s.master.set_agent(id, "coder").await;
+    assert!(matches!(r, Err(CommandError::Forbidden(_))), "{r:?}");
+    let r = s
+        .master
+        .create_session(CreateSpec {
+            node_id: Some(BOTH.into()),
+            title: "x".into(),
+            cwd: s.ws.display().to_string(),
+            owner_id: Some(bob_id.clone()),
+            workspace_id: Some(acme.clone()),
+            exec_mode: Some(harness_core::policy::ExecMode::Host),
+            ..Default::default()
+        })
+        .await;
+    assert!(matches!(r, Err(CommandError::Forbidden(_))), "{r:?}");
+}
+
+/// RN-1 across workspaces: lowering bob's level in Acme to none stops his
+/// Acme turn and leaves his Personal and his Beta sandbox turns running.
+#[tokio::test]
+async fn lowering_in_one_team_leaves_personal_and_other_teams_running() {
+    let s = start().await;
+    let (bob, bob_id) = account(&s, "bob", "sandbox").await;
+    let acme = team(&s, &s.admin, "Acme").await;
+    let beta = team(&s, &s.admin, "Beta").await;
+    for w in [&acme, &beta] {
+        add(&s, &s.admin, w, "bob", "member").await;
+        set_level(&s, &s.admin, w, &bob_id, "sandbox").await;
+    }
+    let mine = personal(&s, &bob).await;
+    let a = created(&s, &bob, &acme, None).await;
+    let b = created(&s, &bob, &beta, None).await;
+    let p = created(&s, &bob, &mine, None).await;
+    for sid in [&a, &b, &p] {
+        waiting_turn(&s, &bob, sid, 1).await;
+    }
+    let (st, v) = set_level(&s, &s.admin, &acme, &bob_id, "none").await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    wait_stopped(&s, &bob, &a).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    for (sid, what) in [(&b, "Beta"), (&p, "Personal")] {
+        assert_eq!(
+            session(&s, &bob, sid).await["running"],
+            true,
+            "{what} stopped"
+        );
+    }
+}
+
+/// An owner demoted to member falls to their stored level here (none) and
+/// their running host turn in the team stops; their Personal host turn,
+/// at their ceiling, goes on.
+#[tokio::test]
+async fn a_demoted_owners_team_host_turn_stops_and_personal_goes_on() {
+    let s = start().await;
+    let (bob, bob_id) = account(&s, "bob", "host").await;
+    let acme = team(&s, &s.admin, "Acme").await;
+    add(&s, &s.admin, &acme, "bob", "member").await;
+    let role = |r: &'static str| {
+        let (s, acme, id) = (&s, acme.clone(), bob_id.clone());
+        async move {
+            let (st, v) = call(
+                s,
+                Method::PATCH,
+                &format!("/api/workspaces/{acme}/members/{id}"),
+                Some(json!({ "role": r })),
+                &s.admin,
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{v}");
+        }
+    };
+    role("owner").await;
+    let t = created(&s, &bob, &acme, Some("host")).await;
+    let mine = personal(&s, &bob).await;
+    let p = created(&s, &bob, &mine, Some("host")).await;
+    waiting_turn(&s, &bob, &t, 1).await;
+    waiting_turn(&s, &bob, &p, 1).await;
+    role("member").await;
+    wait_stopped(&s, &bob, &t).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        session(&s, &bob, &p).await["running"],
+        true,
+        "Personal stopped"
+    );
 }

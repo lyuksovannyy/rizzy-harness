@@ -46,6 +46,19 @@ pub fn workspace_level(personal: bool, owner: bool, stored: ExecLevel) -> ExecLe
     }
 }
 
+/// A member's effective level in their workspace, from their membership
+/// row alone (a team workspace: an owner's level there counts as `host`).
+pub fn member_effective(r: &harness_store::MemberRow) -> ExecLevel {
+    let ceiling = if r.disabled {
+        ExecLevel::None
+    } else if r.server_admin {
+        ExecLevel::Host
+    } else {
+        r.exec_ceiling
+    };
+    ceiling.min(workspace_level(false, r.role_id == "owner", r.exec_level))
+}
+
 /// `who`'s effective level in `ws`: the lower of their ceiling and their
 /// level there. `ws` is `None` only for a chat without a workspace, which
 /// only the API token makes.

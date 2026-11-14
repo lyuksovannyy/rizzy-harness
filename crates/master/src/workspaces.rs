@@ -786,7 +786,9 @@ async fn stop_background_revoked(m: &Master, sid: harness_core::SessionId) {
 /// background: the chats a member had in a team workspace they were just
 /// removed from (N.10a part 2). They return to the member's Personal
 /// workspace, where their account's ceiling applies from their next action;
-/// what was running for the team stops now, whatever that ceiling is.
+/// what was running for the team stops now, whatever that ceiling is. Also
+/// a workspace's deletion (review L2-3), and a command its node acked after
+/// its owner's level was lowered (`Master::recheck_after_ack`, L2-1).
 pub fn stop_removed(m: &Master, sids: Vec<harness_core::SessionId>) {
     if sids.is_empty() {
         return;
@@ -794,8 +796,10 @@ pub fn stop_removed(m: &Master, sids: Vec<harness_core::SessionId>) {
     let m = m.clone();
     tokio::spawn(async move {
         for sid in sids {
-            let row = m.inner.mirror.call(move |s| s.session(sid)).await;
-            if matches!(&row, Ok(Some(r)) if r.running) {
+            // Whether or not the mirror shows a turn yet: one the node
+            // started just now may not have reached it (review L2-1), and a
+            // cancel with nothing running changes nothing.
+            {
                 for attempt in 1..=CANCEL_TRIES {
                     match m.cancel(sid).await {
                         Err(crate::CommandError::Timeout) if attempt < CANCEL_TRIES => {

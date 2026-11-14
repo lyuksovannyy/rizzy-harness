@@ -132,19 +132,25 @@ async fn detail(m: &Master, who: &Principal, a: &Access) -> ApiResult<Json<Value
     Ok(Json(v))
 }
 
-/// A member as the list shows them: their level here as it counts (an
-/// owner's is `host`), never their account's ceiling, which is theirs.
-pub(super) async fn member_json(m: &Master, r: &MemberRow) -> Value {
+/// A member as the list shows them. With `with_levels` (the viewer manages
+/// members here, or it is their own row: review L2-7): their level here as
+/// set (an owner's is `host`) and as it counts, the lower of that and their
+/// account's ceiling, so an owner at a `none` ceiling shows `none`.
+pub(super) async fn member_json(m: &Master, r: &MemberRow, with_levels: bool) -> Value {
     let prefs = crate::prefs::Prefs::load(m, Some(&r.user_id)).await;
     let owner = r.role_id == Role::Owner.id();
-    json!({
+    let mut v = json!({
         "user_id": r.user_id,
         "username": r.username,
         "display_name": prefs.display_name,
         "role": r.role_id,
         "joined_ms": r.joined_ms,
-        "exec_level": levels::workspace_level(false, owner, r.exec_level),
-    })
+    });
+    if with_levels {
+        v["exec_level"] = json!(levels::workspace_level(false, owner, r.exec_level));
+        v["effective_level"] = json!(levels::member_effective(r));
+    }
+    v
 }
 
 pub(super) async fn load_member(m: &Master, ws: &str, user_id: &str) -> ApiResult<MemberRow> {
@@ -361,16 +367,32 @@ pub(super) async fn delete(
 /// their facts.
 async fn delete_workspace(m: &Master, ws: String) -> ApiResult<Option<Vec<String>>> {
     let projects = crate::projects::ids(m).await;
-    let members = m
+    let gone = m
         .inner
         .mirror
         .call(move |s| {
             let members: Vec<String> = s.members(&ws)?.into_iter().map(|r| r.user_id).collect();
-            Ok::<_, StoreError>(s.delete_workspace(&ws)?.then_some(members))
+            // The chats in it, read before it goes and they return to their
+            // owners' Personal workspaces (review L2-3).
+            let mut chats = Vec::new();
+            for u in &members {
+                chats.extend(
+                    s.sessions_of(Some(u))?
+                        .into_iter()
+                        .filter(|r| r.owner_id.as_deref() == Some(u.as_str()))
+                        .filter(|r| r.workspace_id.as_deref() == Some(ws.as_str()))
+                        .map(|r| r.session_id),
+                );
+            }
+            Ok::<_, StoreError>(s.delete_workspace(&ws)?.then_some((members, chats)))
         })
         .await?;
     crate::projects::forget_gone(m, projects).await;
-    Ok(members)
+    // What ran in its chats for the team stops, as at a member's removal.
+    Ok(gone.map(|(members, chats)| {
+        workspaces::stop_removed(m, chats);
+        members
+    }))
 }
 
 pub(super) async fn members(
@@ -379,11 +401,16 @@ pub(super) async fn members(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
     let who = require(&m, &headers).await?;
-    let ws = access(&m, &who, &id).await?.id().to_string();
+    let a = access(&m, &who, &id).await?;
+    // Every member's level to those who manage members here; to anyone
+    // else, only their own (review L2-7).
+    let all = a.can(Perm::Members);
+    let ws = a.id().to_string();
     let rows = m.inner.mirror.call(move |s| s.members(&ws)).await?;
     let mut out = Vec::with_capacity(rows.len());
     for r in &rows {
-        out.push(member_json(&m, r).await);
+        let own = who.user_id.as_deref() == Some(r.user_id.as_str());
+        out.push(member_json(&m, r, all || own).await);
     }
     Ok(Json(json!({ "members": out })))
 }
@@ -459,7 +486,7 @@ pub(super) async fn add_member(
     }
     let row = load_member(&m, a.id(), &user.user_id).await?;
     changed(&m, false);
-    Ok(Json(member_json(&m, &row).await))
+    Ok(Json(member_json(&m, &row, true).await))
 }
 
 #[derive(Deserialize)]
@@ -504,7 +531,7 @@ pub(super) async fn set_role(
     // An owner made a member falls to their stored level: their running
     // chats above it stop.
     workspaces::sweep_revoked(&m, vec![user_id]);
-    Ok(Json(member_json(&m, &row).await))
+    Ok(Json(member_json(&m, &row, true).await))
 }
 
 /// Remove a member, or leave when it is the caller. Their chats here
