@@ -1592,8 +1592,9 @@ async fn a_forged_frame_stays_quoted_and_no_note_is_a_user_message() {
         notes.contains("Background command bg-2") && notes.contains("| idle-end"),
         "{notes}"
     );
+    // The node's environment line opens the turn's own message.
     assert_eq!(
-        rest.strip_prefix('\n').unwrap(),
+        harness_agent_native::provider::without_environment(rest.strip_prefix('\n').unwrap()),
         person,
         "the person's text changed"
     );

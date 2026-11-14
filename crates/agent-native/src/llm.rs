@@ -302,6 +302,27 @@ fn provider_error(e: genai::Error) -> ProviderError {
     }
 }
 
+/// A call that hit the idle timeout ([`ChatRequest::idle_timeout`]): no
+/// response headers in time is a provider that cannot be reached (`Http`:
+/// retried, then another model may answer); a body that went quiet is a
+/// broken stream (`Stream`: retried only while nothing was shown).
+fn idle_error(e: &genai::Error, idle: Option<std::time::Duration>) -> Option<ProviderError> {
+    use genai::webc::StreamTimeout;
+    let genai::Error::WebStream { error, .. } = e else {
+        return None;
+    };
+    let secs = idle.map_or(0, |d| d.as_secs());
+    let key = "`[limits] model_idle_timeout_s` in node.toml";
+    Some(match error.downcast_ref::<StreamTimeout>()? {
+        StreamTimeout::Headers => ProviderError::Http(format!(
+            "the provider did not answer within {secs} s ({key})"
+        )),
+        StreamTimeout::Read => {
+            ProviderError::Stream(format!("the provider sent nothing for {secs} s ({key})"))
+        }
+    })
+}
+
 /// Why the model stopped, from the provider's own value (the raw string;
 /// genai's own normalisation is not used, so this table is the whole
 /// rule). A value not listed, or none, is `Other`: never `End`.
@@ -349,16 +370,26 @@ impl Provider for LlmProvider {
         if let Some(e) = req.effort {
             opts = opts.with_reasoning_effort(effort(e));
         }
+        // genai times both itself (reqwest has no timeout here): the wait
+        // for the response headers, and each wait for the next bytes of
+        // the body, which a provider's keep-alive pings reset.
+        if let Some(t) = req.idle_timeout {
+            opts = opts
+                .with_stream_header_timeout(t)
+                .with_stream_read_timeout(t);
+        }
+        let fail =
+            |e: genai::Error| idle_error(&e, req.idle_timeout).unwrap_or_else(|| provider_error(e));
         let mut stream = self
             .client
             .exec_chat_stream(&req.model, to_genai(req), Some(&opts))
             .await
-            .map_err(provider_error)?
+            .map_err(fail)?
             .stream;
         let mut text = String::new();
         let mut out = Completion::default();
         while let Some(ev) = stream.next().await {
-            match ev.map_err(provider_error)? {
+            match ev.map_err(fail)? {
                 ChatStreamEvent::Chunk(c) => {
                     if !c.content.is_empty() {
                         text.push_str(&c.content);
@@ -572,6 +603,7 @@ mod tests {
             tools: vec![],
             effort: None,
             cache: false,
+            idle_timeout: None,
         });
         assert_eq!(r.messages.len(), 2, "the note was sent as a message");
     }
@@ -603,6 +635,7 @@ mod tests {
             }],
             effort: None,
             cache: false,
+            idle_timeout: None,
         });
         assert_eq!(r.messages.len(), 4);
         assert_eq!(r.tools.as_ref().map(|t| t.len()), Some(1));
@@ -632,6 +665,7 @@ mod tests {
             tools: vec![],
             effort: None,
             cache: false,
+            idle_timeout: None,
         });
         let parts = r.messages[0].content.parts();
         assert_eq!(parts.len(), 2);
@@ -678,6 +712,7 @@ mod tests {
             tools: vec![],
             effort: None,
             cache: true,
+            idle_timeout: None,
         }))
     }
 
@@ -728,6 +763,7 @@ mod tests {
             tools: vec![],
             effort: None,
             cache: false,
+            idle_timeout: None,
         });
         assert!(marked(&off).is_empty());
     }
@@ -757,6 +793,7 @@ mod tests {
                 tools: vec![],
                 effort: None,
                 cache: true,
+                idle_timeout: None,
             });
             let at = marked(&r);
             assert!(at.len() <= 4, "{n}: {at:?}");
@@ -799,6 +836,7 @@ mod tests {
                 tools: vec![],
                 effort: None,
                 cache: false,
+                idle_timeout: None,
             };
             let r = &r;
             async move {

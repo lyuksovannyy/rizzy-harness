@@ -199,6 +199,16 @@ pub const DEFAULT_MAX_STEPS: usize = 50;
 pub const MIN_MAX_STEPS: usize = 1;
 pub const MAX_MAX_STEPS: usize = 1000;
 
+/// Seconds a model's stream may send nothing (no headers yet, or no byte
+/// of the body) before the call fails as a broken stream, when node.toml
+/// does not say, and the range it may set (`[limits]
+/// model_idle_timeout_s`). Codex's value; OpenClaw's for self-hosted
+/// models (its cloud default is 120 s, which a reasoning model that sends
+/// nothing while it thinks can pass).
+pub const DEFAULT_MODEL_IDLE_S: u64 = 300;
+pub const MIN_MODEL_IDLE_S: u64 = 10;
+pub const MAX_MODEL_IDLE_S: u64 = 3600;
+
 #[cfg(test)]
 mod tests {
     use super::*;

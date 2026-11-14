@@ -254,7 +254,7 @@ fn pick(
 /// At most `cap + 1` bytes of the regular file `path` leads to, when its
 /// real path is inside `bound` and in no `protected` folder
 /// ([`harness_tools::inside::read_inside`], which skills read through too).
-fn read_one(
+pub(crate) fn read_one(
     path: &Path,
     bound: &Path,
     protected: &[PathBuf],

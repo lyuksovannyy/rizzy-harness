@@ -205,6 +205,16 @@ pub fn without_notes(text: &str) -> &str {
     }
 }
 
+/// A user message's text without the node's environment line in front of
+/// it (`TurnExtra::environment`, one line and an empty one). Only the demo
+/// provider reads a message this way.
+pub fn without_environment(text: &str) -> &str {
+    match text.strip_prefix(harness_core::backend::ENVIRONMENT_LEAD) {
+        Some(rest) => rest.split_once("\n\n").map_or("", |(_, t)| t),
+        None => text,
+    }
+}
+
 /// How the harness's line for an image the model does not get begins.
 pub const IMAGE_LEAD: &str = "[harness] Image \"";
 
@@ -307,6 +317,7 @@ pub fn with_instructions_after(opening: &str, instructions: &str) -> String {
 /// the text after it ([`with_context`]); `None` without the frame. Only
 /// the demo provider reads a message this way.
 pub fn split_context(text: &str) -> Option<(String, &str)> {
+    let text = without_environment(text);
     if !text.starts_with(CONTEXT_LEAD) {
         return None;
     }
@@ -346,6 +357,11 @@ pub struct ChatRequest {
     /// Mark the stable prefix (system prompt + tools) and the newest message
     /// as cache breakpoints, where the provider needs explicit markers.
     pub cache: bool,
+    /// The longest the provider may send nothing (before its response
+    /// headers, or between two reads of its body) before the call fails
+    /// as a broken stream (node.toml `[limits] model_idle_timeout_s`).
+    /// `None`: no limit.
+    pub idle_timeout: Option<std::time::Duration>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]

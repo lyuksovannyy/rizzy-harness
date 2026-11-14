@@ -263,8 +263,10 @@ impl Provider for Mock {
             .iter()
             .rev()
             .find_map(|m| {
-                m.user_text()
-                    .map(|t| crate::provider::without_notes(t).to_string())
+                m.user_text().map(|t| {
+                    crate::provider::without_environment(crate::provider::without_notes(t))
+                        .to_string()
+                })
             })
             .unwrap_or_default();
         // Just shown images: say how many arrived with their bytes.

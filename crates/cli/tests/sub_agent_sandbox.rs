@@ -531,7 +531,10 @@ impl harness_agent_native::Provider for Script {
             .iter()
             .rposition(|m| m.user_text().is_some())
             .unwrap_or(0);
-        let user = req.messages[since].user_text().unwrap_or("");
+        // After the node's environment line, which opens every turn.
+        let user = harness_agent_native::provider::without_environment(
+            req.messages[since].user_text().unwrap_or(""),
+        );
         let calls: Vec<(String, serde_json::Value)> = user
             .find('[')
             .zip(user.rfind(']'))

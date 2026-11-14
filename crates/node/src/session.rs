@@ -1059,7 +1059,8 @@ impl Session {
         Ok(())
     }
 
-    /// After a turn that ended `completed` or with an error, with messages
+    /// After a turn that ended `completed`, at its step limit or with an
+    /// error, with messages
     /// it never read (they came after its last step, or it failed: the
     /// message is often the fix, review ST-3; or it was a callback turn,
     /// which reads none, ST-2): a turn of the person's starts with them,
@@ -1073,7 +1074,10 @@ impl Session {
         agent: Option<AgentSpec>,
         after: TurnExtra,
     ) {
-        while matches!(reason, TurnEndReason::Completed | TurnEndReason::Error) {
+        while matches!(
+            reason,
+            TurnEndReason::Completed | TurnEndReason::Error | TurnEndReason::Limit
+        ) {
             let Some((turn_id, user_text, history, extra, cancel, by_stop)) =
                 self.start_queued(agent.as_ref(), after.clone()).await
             else {
@@ -1563,15 +1567,30 @@ impl Session {
         let protected = policy.protected_dirs.clone();
         // The instruction files first, in a bound of their own: a slow
         // skill folder must not cost the turn its AGENTS.md (review S3).
+        // The repository's HEAD for the environment line, in the same
+        // bounded read (no process started).
+        let now = jiff::Zoned::now();
         let files_protected = protected.clone();
         let files = ins::bounded(
-            move || ins::read(&dir, &granted, &files_protected, cap),
+            move || {
+                (
+                    ins::read(&dir, &granted, &files_protected, cap),
+                    crate::environment::repo(&dir, &granted, &files_protected),
+                )
+            },
             cancel,
             ins::READ_TIMEOUT,
         )
         .await;
+        let repo = match &files {
+            Bounded::Done((_, repo)) => Some(repo.clone()),
+            _ => None,
+        };
+        if !matches!(files, Bounded::Cancelled) {
+            extra.environment = Some(crate::environment::line(&now, repo.as_ref()));
+        }
         let problems = match files {
-            Bounded::Done(r) => {
+            Bounded::Done((r, _)) => {
                 extra.instructions = r.text;
                 r.problems
             }
