@@ -3971,6 +3971,56 @@ mod tests {
         assert_eq!(recent.first().map(|e| e.seq), Some(10));
     }
 
+    /// The demo provider answers an agentic chat's summarising request
+    /// under its headings, so the UI and the e2e show a realistic summary.
+    #[tokio::test]
+    async fn the_demo_summary_of_an_agentic_chat_follows_the_headings() {
+        let sid = SessionId::new();
+        let mut seq = 1;
+        let mut history = vec![];
+        for n in 1..=4 {
+            history.extend(turn_events(sid, &mut seq, n));
+        }
+        let b = NativeBackend::new(
+            Arc::new(mock::Mock {
+                delay: Duration::from_millis(0),
+            }),
+            vec![],
+            NativeConfig {
+                summarize_after_tokens: Some(300),
+                coding_summary: true,
+                ..Default::default()
+            },
+        );
+        let host = RecHost::new(Decision::Allow);
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = ctx(&host, "next", dir.path());
+        c.history = history;
+        let out = b.run_turn(c).await;
+        assert_eq!(out.reason, TurnEndReason::Completed);
+        let events = host.events.lock().unwrap().clone();
+        let EventKind::HistorySummarized(h) = &events[0] else {
+            panic!("{events:?}")
+        };
+        let lines: Vec<&str> = h.text.lines().collect();
+        let mut at = 0;
+        for heading in [
+            "Goal:",
+            "Decisions:",
+            "Files:",
+            "Commands and results:",
+            "Open:",
+            "Next step:",
+        ] {
+            let i = lines[at..]
+                .iter()
+                .position(|l| *l == heading)
+                .unwrap_or_else(|| panic!("{heading:?} missing or out of order:\n{}", h.text));
+            at += i + 1;
+        }
+        assert!(h.text.contains("2 earlier messages"), "{}", h.text);
+    }
+
     /// With the breaker open, `compact` makes no request at all.
     #[tokio::test]
     async fn an_open_breaker_makes_no_summary_request() {
