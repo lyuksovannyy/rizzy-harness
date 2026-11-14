@@ -387,6 +387,17 @@ relies on. Such a node offers agent chats only with the unconfined shell turned 
 `node.toml`. The node setting that would count Landlock as `sandbox` from ABI 9 is not built:
 it would give `sandbox` two strengths; it can be added if someone needs it.
 
+**Answered by the owner, 2026-11-14 (part 2):** the account-wide yes or no
+(`users.can_agentic`) is replaced by an **account ceiling**, one of the same
+levels, set by server admins. A member's effective level in a workspace is
+the lower of their account ceiling and their level in that workspace; in a
+Personal workspace the level is the account ceiling itself. So a team owner,
+self-made or not, can never raise anyone, themselves included, past what a
+server admin allowed for that account, and the Personal workspace needs no
+rule of its own (the hole the interim rule of part 1 closed with "server
+admins only"). A server admin's ceiling is `host`; like anyone else they
+have a level in a workspace only as its member.
+
 **Built in two parts (2026-11-13).** N.10a touches auth, the node link and the UI, so it is two
 changes with a review each: first the node's side (the `[execution]` ceiling, the modes a node
 can enforce announced at hello, the session's mode recorded at creation), then the level per
