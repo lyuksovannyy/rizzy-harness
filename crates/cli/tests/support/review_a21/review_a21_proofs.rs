@@ -188,6 +188,7 @@ impl Node {
             session_id: sid,
             text: text.into(),
             images: vec![],
+            agent_named: false,
         })
         .await;
         (sid, cwd)
@@ -453,6 +454,7 @@ async fn a_refusal_past_max_lanes_reaches_the_master_while_the_uplink_is_full() 
             session_id: SessionId::new(),
             text: "hi".into(),
             images: vec![],
+            agent_named: false,
         })
         .await;
     }

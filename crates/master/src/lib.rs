@@ -1863,6 +1863,10 @@ impl Master {
         // Only read when nothing ahead of it chose: a routine's or the
         // popup's explicit agent wins, and an event's text cannot fail the
         // turn by starting with such a mention.
+        // The person picked the agent for this message (not an answer's
+        // asker, not the chat's own): the node refuses it while another
+        // agent's turn runs (X.5, review ST-5).
+        let picked = agent_id.is_some();
         let named = asker.or(agent_id);
         let mention = match leading_mention(&text).filter(|_| reply.is_none() && named.is_none()) {
             Some(handle) => match r.top_level(handle) {
@@ -1874,6 +1878,7 @@ impl Master {
         };
         // The chat's own agent; one that is gone or became sub-agent-only
         // refuses the prompt (an explicit agent or a mention still works).
+        let picked = picked || mention.is_some();
         let chosen = match named.or(mention) {
             Some(id) => Some(id),
             None => r.session_agent(row.agent_id.as_deref())?,
@@ -1998,6 +2003,7 @@ impl Master {
             context: (!turn_context.is_empty()).then(|| turn_context.join("\n\n")),
             reply,
             images,
+            agent_named: picked,
         };
         // The link drops a frame over 8 MiB; the margin covers the request
         // id and the framing.

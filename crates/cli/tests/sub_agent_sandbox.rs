@@ -687,6 +687,7 @@ async fn a_delegated_sub_agent_gets_its_folder_through_the_node() {
             session_id: sid,
             text: task.to_string(),
             images: vec![],
+            agent_named: false,
         })
         .unwrap();
     loop {

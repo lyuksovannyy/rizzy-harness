@@ -162,6 +162,7 @@ impl Node {
                 savings: None,
                 context: None,
                 images: vec![],
+                agent_named: false,
             })
             .unwrap();
         self.ack().await.unwrap();

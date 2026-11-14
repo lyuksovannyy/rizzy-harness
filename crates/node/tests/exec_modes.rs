@@ -155,6 +155,7 @@ fn prompt(sid: SessionId, text: &str) -> MasterToNode {
         savings: None,
         context: None,
         images: vec![],
+        agent_named: false,
     }
 }
 
@@ -714,6 +715,7 @@ async fn a_sub_agents_mode_is_its_parents() {
             savings,
             context,
             images,
+            agent_named: false,
         })
         .unwrap();
     ack(&mut n).await.unwrap();

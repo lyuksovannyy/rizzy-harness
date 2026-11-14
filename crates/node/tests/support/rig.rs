@@ -198,6 +198,7 @@ impl Rig {
             session_id: self.sid,
             text: format!("run: {cmd}"),
             images: vec![],
+            agent_named: false,
         });
     }
 

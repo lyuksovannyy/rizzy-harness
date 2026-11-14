@@ -202,6 +202,7 @@ async fn approval_roundtrip_and_auto_request_is_clamped() {
         session_id: sid,
         text: "run: echo sk-node-secret-1 > out.txt; echo written".into(),
         images: vec![],
+        agent_named: false,
     });
     let EventKind::ApprovalRequested(a) = h
         .until(|k| matches!(k, EventKind::ApprovalRequested(_)))
@@ -244,6 +245,7 @@ async fn cancel_while_waiting_for_approval_and_while_running() {
         session_id: sid,
         text: "run: sleep 100".into(),
         images: vec![],
+        agent_named: false,
     });
     h.until(|k| matches!(k, EventKind::ApprovalRequested(_)))
         .await;
@@ -276,6 +278,7 @@ async fn cancel_while_waiting_for_approval_and_while_running() {
         session_id: sid,
         text: format!("run: (sleep 1000) & echo $! > {}; wait", pidfile.display()),
         images: vec![],
+        agent_named: false,
     });
     let EventKind::ApprovalRequested(a) = h
         .until(|k| matches!(k, EventKind::ApprovalRequested(_)))
@@ -339,6 +342,7 @@ async fn cancel_right_after_prompt_stops_that_turn() {
             session_id: sid,
             text: "slow: 400".into(),
             images: vec![],
+            agent_named: false,
         });
         h.send(MasterToNode::Cancel {
             req_id: format!("x{round}"),
@@ -372,6 +376,7 @@ async fn policy_denied_tool_never_runs() {
         session_id: sid,
         text: "run: touch nope".into(),
         images: vec![],
+        agent_named: false,
     });
     let EventKind::ApprovalResolved(r) = h
         .until(|k| matches!(k, EventKind::ApprovalResolved(_)))
@@ -585,6 +590,7 @@ async fn a_loaded_session_over_the_data_dir_gets_no_turn() {
             session_id: sid,
             text: "run: echo hi > out.txt".into(),
             images: vec![],
+            agent_named: false,
         })
         .unwrap();
     loop {
@@ -618,6 +624,7 @@ async fn resume_replays_in_batches() {
         session_id: sid,
         text: "hello world".into(),
         images: vec![],
+        agent_named: false,
     });
     h.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
     h.send(MasterToNode::Resume {
@@ -665,6 +672,7 @@ async fn resume_batches_are_limited_by_bytes() {
             session_id: sid,
             text: "x".repeat(*n),
             images: vec![],
+            agent_named: false,
         });
         h.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
     }
@@ -794,6 +802,7 @@ async fn recovers_interrupted_turn_on_start() {
             session_id: sid,
             text: "continue".into(),
             images: vec![],
+            agent_named: false,
         })
         .unwrap();
     loop {
@@ -856,6 +865,7 @@ async fn sub_task_sessions_ask_no_questions() {
             session_id: sid,
             text: "ui: choices".into(),
             images: vec![],
+            agent_named: false,
         })
         .unwrap();
     let blocks = loop {
@@ -913,6 +923,7 @@ async fn git_checkpoints_and_undo() {
         session_id: sid,
         text: "run: echo v2 > keep.txt; echo new > made.txt".into(),
         images: vec![],
+        agent_named: false,
     });
     let EventKind::Checkpoint(after) = h
         .until(|k| matches!(k, EventKind::Checkpoint(c) if c.phase == CheckpointPhase::After))
@@ -1021,6 +1032,7 @@ async fn hostile_repo_config_does_not_run_on_checkpoint_or_undo() {
         session_id: sid,
         text: "run: echo v2 > keep.txt".into(),
         images: vec![],
+        agent_named: false,
     });
     let EventKind::Checkpoint(after) = h
         .until(|k| matches!(k, EventKind::Checkpoint(c) if c.phase == CheckpointPhase::After))
@@ -1076,6 +1088,7 @@ async fn shadow_checkpoints_keep_latest_and_rewind() {
             session_id: sid,
             text: format!("run: echo v{v} > notes.txt; echo {v} > f{v}.txt"),
             images: vec![],
+            agent_named: false,
         });
         let EventKind::Checkpoint(after) = h
             .until(|k| matches!(k, EventKind::Checkpoint(c) if c.phase == CheckpointPhase::After))
@@ -1179,6 +1192,7 @@ async fn a_tool_does_not_run_when_its_event_cannot_be_written() {
             session_id: sid,
             text,
             images: vec![],
+            agent_named: false,
         })
     };
     // The ack for `id`, collecting events on the way.
@@ -1231,6 +1245,7 @@ async fn a_tool_does_not_run_when_its_event_cannot_be_written() {
             session_id: sid,
             text: String::new(),
             images: vec![],
+            agent_named: false,
         });
         match ack(&mut h, &id).await {
             Err(e) if e.contains("already running") => {
@@ -1306,6 +1321,7 @@ async fn an_approval_whose_answer_was_not_written_is_closed_with_the_turn() {
         session_id: sid,
         text: "run: touch out.txt".into(),
         images: vec![],
+        agent_named: false,
     });
     let EventKind::ApprovalRequested(a) = h
         .until(|k| matches!(k, EventKind::ApprovalRequested(_)))
@@ -1426,6 +1442,7 @@ async fn a_sub_agent_whose_log_failed_changes_nothing_in_the_folder() {
         session_id: sid,
         text: "delegate: dev=run: echo v2 > keep.txt; echo new > made.txt".into(),
         images: vec![],
+        agent_named: false,
     });
     let EventKind::ToolCallFinished(result) = h
         .until(|k| matches!(k, EventKind::ToolCallFinished(f) if f.output.contains("@dev")))
@@ -1502,6 +1519,7 @@ async fn delegate_as_lead(
         session_id: sid,
         text: text.into(),
         images: vec![],
+        agent_named: false,
     });
     loop {
         h.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
@@ -1709,6 +1727,7 @@ async fn a_failed_append_kills_the_running_command() {
             pidfile.display()
         ),
         images: vec![],
+        agent_named: false,
     });
     let EventKind::TurnEnded(t) = h.until(|k| matches!(k, EventKind::TurnEnded(_))).await else {
         unreachable!()
@@ -1757,6 +1776,7 @@ async fn an_unclosed_turn_is_closed_once_by_a_restart() {
         session_id: sid,
         text: "run: true".into(),
         images: vec![],
+        agent_named: false,
     });
     h.until(|k| matches!(k, EventKind::AssistantMessage(_)))
         .await;
@@ -1853,6 +1873,7 @@ async fn ack_time_on_a_long_session() {
                 session_id: sid,
                 text: "hello".into(),
                 images: vec![],
+                agent_named: false,
             })
             .unwrap();
         loop {
@@ -1939,6 +1960,7 @@ impl Harness {
             session_id: sid,
             text,
             images: vec![],
+            agent_named: false,
         });
         let mut asked = vec![];
         loop {
@@ -2070,6 +2092,7 @@ async fn prompt_turn(h: &mut Harness, sid: SessionId, text: &str) -> String {
         session_id: sid,
         text: text.into(),
         images: vec![],
+        agent_named: false,
     });
     let EventKind::Checkpoint(after) = h
         .until(|k| matches!(k, EventKind::Checkpoint(c) if c.phase == CheckpointPhase::After))
@@ -2691,6 +2714,7 @@ async fn start_long_turn(h: &mut Harness, sid: SessionId) {
         session_id: sid,
         text: "run: sleep 30".into(),
         images: vec![],
+        agent_named: false,
     });
     until_in(h, sid, |k| matches!(k, EventKind::ToolCallStarted(_))).await;
 }
@@ -2784,6 +2808,7 @@ async fn a_restore_is_refused_when_the_busy_chat_reaches_the_folder_through_a_sy
         session_id: b,
         text: "run: sleep 30".into(),
         images: vec![],
+        agent_named: false,
     });
     let err = ack_for(&mut h, &format!("p-{b}")).await.unwrap_err();
     assert!(err.contains("folder was replaced"), "{err}");
@@ -2986,6 +3011,7 @@ async fn a_session_whose_folder_was_replaced_refuses_to_work() {
             session_id: sid,
             text: "read: id_ed25519".into(),
             images: vec![],
+            agent_named: false,
         });
         let e = ack_for(&mut h, &format!("p{i}")).await.unwrap_err();
         assert!(e.contains("folder was replaced"), "{target:?}: {e}");
@@ -3038,6 +3064,7 @@ async fn turn_of(
         session_id: sid,
         text,
         images: vec![],
+        agent_named: false,
     });
     loop {
         h.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
@@ -3310,6 +3337,7 @@ async fn lead_turn(
         session_id: sid,
         text: text.into(),
         images: vec![],
+        agent_named: false,
     });
     loop {
         let k = h
@@ -3572,6 +3600,7 @@ fn prompt_msg(req_id: &str, sid: SessionId, text: &str) -> MasterToNode {
         session_id: sid,
         text: text.into(),
         images: vec![],
+        agent_named: false,
     }
 }
 
@@ -3817,6 +3846,7 @@ async fn a_sub_agent_started_across_the_stop_never_runs_a_turn_after_it() {
             session_id: sid,
             text: "delegate: dev=slow: 400".into(),
             images: vec![],
+            agent_named: false,
         });
         h.until(|k| matches!(k, EventKind::ToolCallStarted(c) if c.tool == "delegate"))
             .await;

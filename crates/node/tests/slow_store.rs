@@ -146,6 +146,7 @@ fn prompt(req: &str, sid: SessionId, text: &str) -> MasterToNode {
         session_id: sid,
         text: text.into(),
         images: vec![],
+        agent_named: false,
     }
 }
 

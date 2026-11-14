@@ -322,6 +322,7 @@ no_callbacks: false,
             session_id: sid,
             text,
             images: vec![],
+            agent_named: false,
         });
     }
 

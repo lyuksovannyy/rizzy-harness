@@ -926,6 +926,7 @@ impl Node {
             session_id: self.sid,
             text: text.into(),
             images: vec![],
+            agent_named: false,
         });
     }
 

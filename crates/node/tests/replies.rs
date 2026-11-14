@@ -89,6 +89,7 @@ impl Chat {
             context: None,
             reply,
             images: vec![],
+            agent_named: false,
         });
     }
 

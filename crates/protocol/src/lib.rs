@@ -266,6 +266,11 @@ pub enum MasterToNode {
         /// store agent definitions.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent: Option<AgentSpec>,
+        /// The person chose `agent` for this message (an explicit agent or
+        /// an @mention), not the chat's own. A message that would wait for
+        /// a running turn of another agent is refused (X.5, review ST-5).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        agent_named: bool,
         /// Documents with their extracted text (extracted on the master).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<harness_core::event::Attachment>,
@@ -543,6 +548,7 @@ mod tests {
             context: None,
             reply: None,
             images: vec![img.clone()],
+            agent_named: false,
         };
         let v = serde_json::to_value(&p).unwrap();
         assert_eq!(
@@ -569,6 +575,7 @@ mod tests {
             context: None,
             reply,
             images: vec![],
+            agent_named: false,
         };
         let v = serde_json::to_value(prompt(None)).unwrap();
         assert!(v.get("reply").is_none(), "{v}");
