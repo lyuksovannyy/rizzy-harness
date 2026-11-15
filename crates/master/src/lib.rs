@@ -562,6 +562,7 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         MasterToNode::Prompt { session_id, .. }
         | MasterToNode::Callback { session_id, .. }
         | MasterToNode::Handoff { session_id, .. }
+        | MasterToNode::Compact { session_id, .. }
         | MasterToNode::SelectVariant { session_id, .. }
         | MasterToNode::SetAgent { session_id, .. }
         | MasterToNode::Restore { session_id, .. }

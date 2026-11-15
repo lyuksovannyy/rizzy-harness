@@ -29,6 +29,9 @@ struct LogHost {
     log: Mutex<Vec<RawEvent>>,
     queued: Mutex<Vec<(usize, String)>>,
     asked: Mutex<usize>,
+    /// Read-only calls run with no card, so `read`s of one step run
+    /// together (X.19).
+    unasked: bool,
 }
 
 impl LogHost {
@@ -38,6 +41,7 @@ impl LogHost {
             log: Mutex::new(history),
             queued: Mutex::default(),
             asked: Mutex::new(0),
+            unasked: false,
         }
     }
     fn push(&self, k: EventKind) -> u64 {
@@ -69,6 +73,9 @@ impl LogHost {
 
 #[async_trait::async_trait]
 impl TurnHost for LogHost {
+    fn runs_unasked(&self, _: &str, risk: ToolRisk) -> bool {
+        self.unasked && risk == ToolRisk::ReadOnly
+    }
     async fn emit(&self, kind: EventKind) -> Result<(), harness_core::backend::LogError> {
         self.push(kind);
         Ok(())
@@ -230,7 +237,13 @@ impl harness_tools::Tool for Read {
     fn risk(&self) -> ToolRisk {
         ToolRisk::ReadOnly
     }
+    fn parallel_safe(&self) -> bool {
+        true
+    }
     async fn run(&self, _: &ToolCtx, input: Value) -> ToolOutcome {
+        if let Some(ms) = input["delay"].as_u64() {
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+        }
         let path = input["path"].as_str().unwrap_or("?").to_string();
         let chars = input["n"].as_u64().unwrap_or(6_000) as usize;
         let mut out = String::new();
@@ -547,11 +560,33 @@ fn random_script(seed: u64, steps: usize) -> (Vec<Completion>, Vec<(usize, Strin
 /// every step and compared byte for byte with what was sent.
 #[tokio::test]
 async fn rebuild_matches_live_at_every_step() {
+    rebuild_matches_live(false, 1..=8).await;
+}
+
+/// The same with the reads of a step running together (X.19), each later
+/// call of a step made to finish before the earlier ones: the log, and so
+/// every request, keep call order whichever finishes first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rebuild_matches_live_with_parallel_reads_finishing_out_of_order() {
+    rebuild_matches_live(true, 1..=4).await;
+}
+
+async fn rebuild_matches_live(parallel: bool, seeds: std::ops::RangeInclusive<u64>) {
     let mut report = vec![];
     let mut failures = 0;
-    for seed in 1..=8u64 {
+    for seed in seeds {
         for keep in [None, Some(8usize)] {
-            let (steps, queued) = random_script(seed, 120);
+            let (mut steps, queued) = random_script(seed, 120);
+            if parallel {
+                for s in &mut steps {
+                    let n = s.tool_calls.len() as u64;
+                    for (k, c) in s.tool_calls.iter_mut().enumerate() {
+                        if c.tool == "read" && n > 1 {
+                            c.input["delay"] = json!((n - k as u64) * 3);
+                        }
+                    }
+                }
+            }
             let n = steps.len();
             let steps = Arc::new(steps);
             let s2 = steps.clone();
@@ -578,7 +613,8 @@ async fn rebuild_matches_live_at_every_step() {
             } else {
                 (vec![], vec![], vec![])
             };
-            let host = LogHost::new(sid, history.clone());
+            let mut host = LogHost::new(sid, history.clone());
+            host.unasked = parallel;
             *host.queued.lock().unwrap() = queued;
             let start = history.len();
             open_turn(&host, qseqs);
@@ -587,6 +623,14 @@ async fn rebuild_matches_live_at_every_step() {
             extra.queued = read_first;
             let out = run(&b, &host, history, extra).await;
             let log = host.log();
+            if parallel {
+                // Two starts in a row: a batch ran.
+                assert!(
+                    log.windows(2)
+                        .any(|w| w.iter().all(|e| e.kind == "tool_call_started")),
+                    "seed {seed}: no step ran in parallel"
+                );
+            }
             let sh = host.shortened();
             let folds = sh.iter().filter(|c| c.folded.is_some()).count();
             // With a known window the count mask does not act (review M1),

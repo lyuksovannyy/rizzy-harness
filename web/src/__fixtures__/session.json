@@ -786,6 +786,45 @@
       "ts_ms": 1700000000051
     },
     {
+      "kind": "compact_failed",
+      "payload": {
+        "reason": "The chat was not summarised: the summary was not smaller than what it would replace. Nothing was lost.",
+        "usage": {
+          "context_tokens": 0,
+          "input_tokens": 500,
+          "output_tokens": 400
+        }
+      },
+      "seq": 53,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000052
+    },
+    {
+      "kind": "history_summarized",
+      "payload": {
+        "focus": "keep the database migration details",
+        "manual": true,
+        "text": "Goal\nMigrate the users table.",
+        "through_seq": 42,
+        "tokens_after": 1234,
+        "turn_id": "",
+        "usage": {
+          "by_model": {
+            "demo::mock": {
+              "input_tokens": 2000,
+              "output_tokens": 300
+            }
+          },
+          "context_tokens": 0,
+          "input_tokens": 2000,
+          "output_tokens": 300
+        }
+      },
+      "seq": 54,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000053
+    },
+    {
       "kind": "todo_updated",
       "payload": {
         "call_id": "c-plan-1",
@@ -801,9 +840,9 @@
         ],
         "turn_id": "t4"
       },
-      "seq": 53,
+      "seq": 55,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000052
+      "ts_ms": 1700000000054
     },
     {
       "kind": "todo_updated",
@@ -825,9 +864,9 @@
         ],
         "turn_id": "t4"
       },
-      "seq": 54,
+      "seq": 56,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000053
+      "ts_ms": 1700000000055
     },
     {
       "kind": "tool_call_started",
@@ -839,9 +878,9 @@
         "tool": "bash",
         "turn_id": "t4"
       },
-      "seq": 55,
+      "seq": 57,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000054
+      "ts_ms": 1700000000056
     },
     {
       "kind": "approval_requested",
@@ -856,9 +895,9 @@
         "tool": "bash",
         "turn_allow": true
       },
-      "seq": 56,
+      "seq": 58,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000055
+      "ts_ms": 1700000000057
     },
     {
       "kind": "approval_resolved",
@@ -868,9 +907,9 @@
         "decision": "deny",
         "note": "keep the build folder"
       },
-      "seq": 57,
+      "seq": 59,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000056
+      "ts_ms": 1700000000058
     },
     {
       "kind": "chat_allow_added",
@@ -883,9 +922,9 @@
         "key": "abababababababababababababababababababababababababababababababab",
         "tool": "bash"
       },
-      "seq": 58,
+      "seq": 60,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000057
+      "ts_ms": 1700000000059
     },
     {
       "kind": "chat_allow_added",
@@ -898,27 +937,27 @@
         "key": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
         "tool": "bash"
       },
-      "seq": 59,
+      "seq": 61,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000058
+      "ts_ms": 1700000000060
     },
     {
       "kind": "chat_allow_removed",
       "payload": {
         "grant_id": "g2"
       },
-      "seq": 60,
+      "seq": 62,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000059
+      "ts_ms": 1700000000061
     },
     {
       "kind": "approval_mode_changed",
       "payload": {
         "mode": "auto"
       },
-      "seq": 61,
+      "seq": 63,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000060
+      "ts_ms": 1700000000062
     },
     {
       "kind": "approval_mode_changed",
@@ -926,18 +965,18 @@
         "mode": "accept_edits",
         "requested": "auto"
       },
-      "seq": 62,
+      "seq": 64,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000061
+      "ts_ms": 1700000000063
     },
     {
       "kind": "turn_started",
       "payload": {
         "turn_id": "t5"
       },
-      "seq": 63,
+      "seq": 65,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000062
+      "ts_ms": 1700000000064
     },
     {
       "kind": "model_retry",
@@ -950,9 +989,9 @@
         "turn_id": "t5",
         "wait_ms": 2000
       },
-      "seq": 64,
+      "seq": 66,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000063
+      "ts_ms": 1700000000065
     },
     {
       "kind": "assistant_message",
@@ -962,9 +1001,9 @@
         "tool_calls": [],
         "turn_id": "t5"
       },
-      "seq": 65,
+      "seq": 67,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000064
+      "ts_ms": 1700000000066
     },
     {
       "kind": "turn_ended",
@@ -1031,9 +1070,9 @@
           "output_tokens": 0
         }
       },
-      "seq": 66,
+      "seq": 68,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000065
+      "ts_ms": 1700000000067
     },
     {
       "kind": "turn_ended",
@@ -1060,9 +1099,9 @@
           "output_tokens": 0
         }
       },
-      "seq": 67,
+      "seq": 69,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000066
+      "ts_ms": 1700000000068
     },
     {
       "kind": "turn_ended",
@@ -1092,18 +1131,18 @@
           "window": 128000
         }
       },
-      "seq": 68,
+      "seq": 70,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000067
+      "ts_ms": 1700000000069
     },
     {
       "kind": "turn_started",
       "payload": {
         "turn_id": "t6"
       },
-      "seq": 69,
+      "seq": 71,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000068
+      "ts_ms": 1700000000070
     },
     {
       "kind": "context_shortened",
@@ -1120,9 +1159,9 @@
         "tokens_before": 31000,
         "turn_id": "t6"
       },
-      "seq": 70,
+      "seq": 72,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000069
+      "ts_ms": 1700000000071
     },
     {
       "kind": "model_retry",
@@ -1135,9 +1174,9 @@
         "turn_id": "t6",
         "wait_ms": 4000
       },
-      "seq": 71,
+      "seq": 73,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000070
+      "ts_ms": 1700000000072
     },
     {
       "kind": "context_sent",
@@ -1152,16 +1191,16 @@
         ],
         "turn_id": "t6"
       },
-      "seq": 72,
+      "seq": 74,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000071
+      "ts_ms": 1700000000073
     },
     {
       "kind": "from_a_newer_node",
       "payload": {
         "anything": true
       },
-      "seq": 73,
+      "seq": 75,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
       "ts_ms": 0
     }
@@ -1201,7 +1240,7 @@
     "context_model": "openai::gpt-4o",
     "context_tokens": 800,
     "context_window": 128000,
-    "head_seq": 73,
+    "head_seq": 75,
     "items": [
       {
         "text": "fix the bug",
@@ -1596,6 +1635,17 @@
         "type": "handoff"
       },
       {
+        "message": "The chat was not summarised: the summary was not smaller than what it would replace. Nothing was lost.",
+        "type": "error"
+      },
+      {
+        "focus": "keep the database migration details",
+        "manual": true,
+        "text": "Goal\nMigrate the users table.",
+        "through_seq": 42,
+        "type": "summary"
+      },
+      {
         "approval": {
           "approval_id": "a-deny",
           "by": "user",
@@ -1728,13 +1778,13 @@
           "input_tokens": 3,
           "output_tokens": 0
         },
-        "11": {
-          "input_tokens": 3,
-          "output_tokens": 0
-        },
         "__proto__": {
           "input_tokens": 7,
           "output_tokens": 0
+        },
+        "demo::mock": {
+          "input_tokens": 2000,
+          "output_tokens": 300
         },
         "demo::small": {
           "input_tokens": 1100,
@@ -1794,8 +1844,8 @@
       "cache_read_tokens": 300,
       "cache_write_tokens": 100,
       "context_tokens": 0,
-      "input_tokens": 1901,
-      "output_tokens": 72
+      "input_tokens": 4401,
+      "output_tokens": 772
     },
     "variant_selection": {
       "g1": "m4"

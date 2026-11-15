@@ -50,6 +50,10 @@ pub const CAP_CALLBACK: &str = "callback";
 /// master asks for hand-off notes only on nodes whose hello listed it.
 pub const CAP_HANDOFF: &str = "handoff";
 
+/// The node capability that announces `session.compact` (X.20): a person's
+/// `/compact`, summarising the chat's history now.
+pub const CAP_COMPACT: &str = "compact";
+
 /// The node capability that announces `session.diff` (X.12, PLAN.md T53).
 /// The master asks for a turn's changes only on nodes whose hello listed it.
 pub const CAP_DIFF: &str = "diff";
@@ -299,6 +303,21 @@ pub const HANDOFF_NOTHING: &str = "no hand-off note due";
 /// A `session.handoff` refused because a turn or another note runs: the
 /// master asks again at its next look.
 pub const HANDOFF_BUSY: &str = "no hand-off note now: the chat is busy";
+
+/// A `session.compact` refused because a turn runs: `/compact` works between
+/// turns (a running turn shortens its own context when it must, X.15).
+pub const COMPACT_TURN_RUNNING: &str = "A turn is running: /compact works between turns. Stop \
+     it or wait for it to end, then try again (a running turn shortens its own context when it \
+     must).";
+/// A `session.compact` refused because a message of the person's waits to
+/// be read (sent during the last turn): it is read first.
+pub const COMPACT_PENDING: &str = "A message of yours is waiting to be read: send /compact \
+     again after its answer (or send a message to have it read).";
+/// A `session.compact` refused because another one runs in the chat.
+pub const COMPACT_BUSY: &str = "This chat is already being summarised.";
+/// A prompt or callback refused while the chat is being summarised.
+pub const COMPACTING: &str = "This chat is being summarised: send your message when that is \
+     done.";
 
 /// The most background ids one `session.callback` may name.
 pub const MAX_CALLBACK_IDS: usize = 64;
@@ -572,6 +591,24 @@ pub enum MasterToNode {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         low_effort: Vec<String>,
     },
+    /// Summarise the chat's history now (a person's `/compact`, X.20, PLAN.md
+    /// T64; only to nodes with [`CAP_COMPACT`]). Sent only for the chat's
+    /// owner. The node refuses it while a turn runs ([`COMPACT_TURN_RUNNING`])
+    /// or for a chat too short to summarise (no event), else acks once it
+    /// started and records `history_summarized` (`manual`) or
+    /// `compact_failed` in the chat's log.
+    #[serde(rename = "session.compact")]
+    Compact {
+        req_id: String,
+        session_id: SessionId,
+        /// The person's words on what to keep in focus; the node scrubs
+        /// them and cuts them to `COMPACT_FOCUS_MAX_CHARS`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        focus: Option<String>,
+        /// Context windows the master knows (tokens), by model.
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        windows: std::collections::BTreeMap<String, u64>,
+    },
     /// The user picked one of several parallel answers.
     #[serde(rename = "session.select_variant")]
     SelectVariant {
@@ -751,6 +788,7 @@ impl MasterToNode {
             | MasterToNode::Prompt { req_id, .. }
             | MasterToNode::Callback { req_id, .. }
             | MasterToNode::Handoff { req_id, .. }
+            | MasterToNode::Compact { req_id, .. }
             | MasterToNode::SetAgent { req_id, .. }
             | MasterToNode::SetApprovalMode { req_id, .. }
             | MasterToNode::SetStepLimit { req_id, .. }

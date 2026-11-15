@@ -654,6 +654,7 @@ async fn after_a_summary_every_standing_section_is_sent_again() {
         turn_id: "t1".into(),
         through_seq: through,
         text: "## Goal\nfix it".into(),
+        ..Default::default()
     })
     .into_parts();
     log.push(RawEvent {

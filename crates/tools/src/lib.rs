@@ -602,6 +602,16 @@ pub trait Tool: Send + Sync {
         self.schema()
     }
     fn risk(&self) -> ToolRisk;
+    /// Whether calls of this tool may run at the same time as other such
+    /// calls of the same step (the loop's parallel batch, PLAN.md "Event
+    /// order of a parallel step"). Only a [`ToolRisk::ReadOnly`] tool's
+    /// answer counts, and only a tool that starts no process, writes
+    /// nothing, streams no live output and shares no numbering with other
+    /// calls (web citation labels) may say yes. `false`, the default, keeps
+    /// a tool added later in order until it says so (an allow-list).
+    fn parallel_safe(&self) -> bool {
+        false
+    }
     /// Offered to the model only when this returns true (tools that exist
     /// for a token-saving method are off with it).
     fn enabled(&self, _savings: &harness_core::savings::Savings) -> bool {

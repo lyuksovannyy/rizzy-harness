@@ -130,6 +130,7 @@ const KNOWN = new Set([
   "chat_allow_removed",
   "step_limit_changed",
   "handoff_written",
+  "compact_failed",
 ]);
 
 const CLEARS_RETRY = new Set([
@@ -395,8 +396,20 @@ export function apply(v: SessionView, e: RawEvent): void {
     case "variant_selected":
       v.variant_selection[p.group] = p.message_id;
       break;
-    case "history_summarized":
-      v.items.push({ type: "summary", through_seq: p.through_seq, text: p.text });
+    case "history_summarized": {
+      // A person's /compact (X.20): its cost is the chat's, and the meter
+      // shows the shorter context until the next turn reports its own.
+      if (p.usage) addUsage(v.usage, p.usage);
+      if (p.tokens_after != null) v.context_tokens = p.tokens_after;
+      const it: Extract<Item, { type: "summary" }> = { type: "summary", through_seq: p.through_seq, text: p.text };
+      if (p.manual === true) it.manual = true;
+      if (p.focus != null) it.focus = p.focus;
+      v.items.push(it);
+      break;
+    }
+    case "compact_failed":
+      if (p.usage) addUsage(v.usage, p.usage);
+      v.items.push({ type: "error", message: p.reason });
       break;
     case "context_shortened": {
       const it: Extract<Item, { type: "shortened" }> = {
