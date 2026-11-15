@@ -949,6 +949,13 @@ pub struct FileSeen {
     pub path: String,
     /// SHA-256 of the file's bytes, lowercase hex.
     pub sha256: String,
+    /// For `edit` and `write`: the SHA-256 of the bytes the call replaced
+    /// (read under the file's lock just before writing), or `""` when the
+    /// file did not exist; absent for `read`, or when not known. An undo
+    /// uses it to tell a file the turn's own calls changed, one after the
+    /// other, from one something else also changed (PLAN.md T57).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
 }
 
 /// A web page behind a citation label. Only the harness's web tools write

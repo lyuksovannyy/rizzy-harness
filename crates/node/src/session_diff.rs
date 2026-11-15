@@ -101,7 +101,22 @@ impl Session {
             }
         }
         match crate::git::turn_diff(&repo, &before, &target, scrub).await {
-            Ok(d) => Ok(d),
+            Ok(mut d) => {
+                // What an undo would refuse over (T57), said before the
+                // person clicks: the same check, on the files shown.
+                let shown: std::collections::BTreeSet<String> = d
+                    .files
+                    .iter()
+                    .flat_map(|f| std::iter::once(f.path.clone()).chain(f.old_path.clone()))
+                    .collect();
+                let span = self
+                    .diff_span(&events, turn_id, rewind, &before, &target)
+                    .await;
+                let foreign = self.foreign_work(&repo, &span, &shown).await;
+                d.others_wrote = foreign.wrote.iter().cloned().collect();
+                d.others_may = foreign.maybe().into_iter().collect();
+                Ok(d)
+            }
             // Pruned between the check and the read (review D12): the
             // sentence, not git's "bad object".
             Err(_)
@@ -111,6 +126,66 @@ impl Session {
                 Err(pruned())
             }
             Err(e) => Err(e),
+        }
+    }
+}
+
+impl Session {
+    /// The undone span an undo of `turn_id` (or a rewind from it) would
+    /// check, as `Session::restore` builds it: from the turn's
+    /// `turn_started` to the checkpoint of the state compared with, with
+    /// this chat's own `edit`/`write` calls in it. Reads only this chat's
+    /// `turn_started` events and its tool calls from that turn on.
+    async fn diff_span(
+        &self,
+        checkpoints: &[harness_core::RawEvent],
+        turn_id: &str,
+        rewind: bool,
+        before: &str,
+        target: &str,
+    ) -> crate::others::Span {
+        let id = self.id;
+        let starts = self
+            .node
+            .cfg
+            .store
+            .call(move |s| s.events_of_kind(id, "turn_started"))
+            .await
+            .unwrap_or_default();
+        let mut marks = starts;
+        marks.extend(checkpoints.iter().cloned());
+        marks.sort_by_key(|e| e.seq);
+        let since = crate::others::span_start(&marks, turn_id);
+        let mut end = i64::MAX;
+        for e in checkpoints {
+            if let Ok(EventKind::Checkpoint(c)) = e.typed() {
+                let state = !matches!(
+                    c.phase,
+                    CheckpointPhase::Before | CheckpointPhase::BeforeRestore
+                );
+                if rewind && state {
+                    end = e.ts_ms;
+                } else if !rewind && c.turn_id == turn_id && c.phase == CheckpointPhase::After {
+                    end = e.ts_ms;
+                    break;
+                }
+            }
+        }
+        let calls = self
+            .node
+            .cfg
+            .store
+            .call(move |s| {
+                s.events_since_turn_at(id, since, &["tool_call_started", "tool_call_finished"])
+            })
+            .await
+            .unwrap_or_default();
+        crate::others::Span {
+            since,
+            end,
+            before: Some(before.to_string()),
+            after: Some(target.to_string()),
+            own: crate::others::own_writes(&calls, since, end),
         }
     }
 }

@@ -106,7 +106,10 @@ impl Tool for Edit {
             Ok((updated, report)) => match write_nofollow(&path, updated.as_bytes()).await {
                 Ok(()) => {
                     let mut o = ToolOutcome::ok(report);
-                    o.seen = Some(ctx.seen.record(&key, updated.as_bytes()));
+                    let mut seen = ctx.seen.record(&key, updated.as_bytes());
+                    // What this edit replaced (T57).
+                    seen.base = Some(crate::seen::hex(&crate::seen::sha256(text.as_bytes())));
+                    o.seen = Some(seen);
                     o
                 }
                 Err(e) => ToolOutcome::err(e),

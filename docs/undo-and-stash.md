@@ -73,6 +73,7 @@ Short paths: `git.rs` and `session.rs` are in `crates/node/src/`, `event.rs` and
 | All or nothing (A.16) | `git.rs`, `restore_diff`, `secure_blobs`, `worktree_tree` | The blobs a restore writes are checked and copied first; a missing one refuses the restore; a broken shadow index is rebuilt. |
 | Nested repositories (A.15) | `git.rs`, `stage_without_nested`, `restore_plan` | Never snapshotted, never touched. |
 | Busy folders | `session.rs`, `claim_folder`, `claim_turn` | No undo while another chat's turn runs in the folder, and no turn while an undo runs. |
+| Another chat's work (T57, 2026-11-15) | `others.rs`, `foreign_work`; `session.rs`, `restore` | An undo or rewind is refused when a file it writes was changed, since the undone span began, by another chat in an overlapping folder: certainly (its `edit`/`write` records, its own undos) or maybe (a call of any other tool, by the files its turn's own checkpoints changed; a background command, every file). The refusal names files only; "Undo anyway" goes ahead and tells that chat which of its files were put back. The turn's diff view names the same files before the click, certain and possible apart (`TurnDiff.others_wrote`, `others_may`). See §4.4. |
 | Periodic node tasks | `crates/node/src/lib.rs`, the loops started at node start (`artifacts::EXPIRE_EVERY`, `purge_incognito`) | Staged artifacts and idle incognito chats expire there. |
 
 Not built: a chat button to undo an undo (`web/src/fold.ts` ignores `before_restore`), and any
@@ -592,8 +593,33 @@ without gc cost about 30 ms at 1,000 files, 70 ms at 10,000 and 600 ms at 100,00
 - **A restore is not atomic across files** (a T33 residual), and unstash shares this. Both name
   the pre-write checkpoint on failure.
 - **Uncommitted work inside a nested repository** is in no checkpoint and in no stash.
-- **Two chats in one folder.** Chat B's agent edits look like the person's edits to chat A's undo.
-  They are stashed under A, unseen by B's agent. Turns are still not serialised.
+- **Two chats in one folder (T57, fixed in part).** A turn's checkpoints are snapshots of the whole
+  folder, so chat B's work during chat A's turn is in `after(A)`, and A's undo used to put it back
+  silently (the first live test, 2026-11-15). Now the undo reads B's log over the undone span
+  (from A's `turn_started`, written before the `before` scan, to the checkpoint of the state the
+  undo expects; after that the changed-since check compares content) and refuses, naming the
+  files, when B wrote one of them (its `edit` and `write` records, its own undos) or may have (any
+  other tool call, judged by the files B's turn changed between its own checkpoints; a background
+  command, or B deleted since and leaving a write tombstone: every file). A file A's own
+  `edit`/`write` calls explain end to end (each records the hash it replaced, `base`; the chain
+  runs from `before(A)` to `after(A)`) is never counted as B's. The rule is "never silently", not
+  "never": "Undo anyway" stays, so an injected agent in B cannot block A's undo, and B then gets a
+  line naming its files that were put back (in its own folder only), with nothing about A. What
+  it does not do:
+  - B cannot restore its lost content itself (it sits in A's `before_restore`); its line says to
+    make the change again, and its agent's `edit` guard (T45) refuses to build on the old picture.
+    A "put back this chat's version" action for B, limited to the named files and served from that
+    snapshot, is the follow-up.
+  - A shell command of B is attributed by B's whole turn: files A changed during it by other means
+    than an unbroken chain of its own edits are named too. Undoing only the files A's own records
+    name was rejected: A's shell commands have no record, so that would leave A's turn half undone
+    without saying so.
+  - One writer per folder was rejected: two chats in one repository is ordinary use, and queued
+    or background work would wait on it.
+  - The window is by the node's clock (`ts_ms`); writers outside overlapping folders (a host chat
+    elsewhere writing here by absolute path) and chats of another node sharing the folder over a
+    network file system are not seen.
+  Turns are still not serialised.
 - **The person's edits made during a turn** are part of `after(T)`, so undo overwrites them
   without asking. They survive only in the pre-restore snapshot, under `checkpoints_keep`.
   Fixing that needs per-write attribution, which the shell does not give.

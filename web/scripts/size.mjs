@@ -217,7 +217,17 @@ const T51_KB = 1.0;
 const AGENT_SWITCHES_KB = 0.1;
 
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
-const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB + EXPORT_KB + MEMDEF_KB + VISIBILITY_KB + T50_KB + LOOP_KB + DIFF_KB + T51_KB + WSMEM_KB + STEPS_KB + AGENT_SWITCHES_KB) * 100) / 10) / 10;
+// Another chat's work before an undo (PLAN.md T57, fix/undo-other-chats),
+// measured 390.3 against 390.2: the diff panel's note naming the files
+// another chat changed, in its lazy chunk, and the conversation row's
+// "Undo anyway" for every refusal that offers it (+0.1). After its review
+// (certain and possible files apart in the panel), measured 390.4 against
+// a recorded 390.4: no change to the line; 394.1 after the merge of the
+// step limit, workspace memory and approval answers (no change).
+const T57_KB = 0.1;
+
+// Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
+const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB + EXPORT_KB + MEMDEF_KB + VISIBILITY_KB + T50_KB + LOOP_KB + DIFF_KB + T51_KB + WSMEM_KB + STEPS_KB + AGENT_SWITCHES_KB + T57_KB) * 100) / 10) / 10;
 // Raised from 103 to 106 once the Phase A pages merged (103.7 measured: the
 // new sidebar, account button and routine-result rows are on the first
 // screen), then lowered to 104 at Phase B (102.3 measured) once the login
