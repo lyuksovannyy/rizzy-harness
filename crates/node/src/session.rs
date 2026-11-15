@@ -3137,9 +3137,12 @@ impl Session {
         // did) reaches the parent's folder, since no event would record it.
         let log_failed =
             child.log_failed.load(Ordering::SeqCst) || self.log_failed.load(Ordering::SeqCst);
-        let merge_note = match iso {
-            Some(i) => Some(self.merge_back(i, child_id, !log_failed).await),
-            None => None,
+        let (merge_note, unapplied) = match iso {
+            Some(i) => {
+                let (n, d) = self.merge_back(i, child_id, !log_failed).await;
+                (Some(n), d)
+            }
+            None => (None, None),
         };
         let log = self
             .node
@@ -3184,6 +3187,7 @@ impl Session {
             finish,
             error,
             note,
+            unapplied,
         })
     }
 
@@ -3307,33 +3311,81 @@ impl Session {
     /// `git apply` under the user's config). `apply: false` keeps the
     /// result in the node's checkpoint store and changes nothing in the
     /// folder.
-    async fn merge_back(&self, iso: Isolation, child: SessionId, apply: bool) -> String {
+    async fn merge_back(
+        &self,
+        iso: Isolation,
+        child: SessionId,
+        apply: bool,
+    ) -> (String, Option<String>) {
         let id = child.to_string();
         let kept = "it is kept in this node's checkpoint store (sub-agent snapshots)";
-        let note = match iso.sub.result(&iso.child, &id).await {
-            Err(e) => format!("its changes could not be collected: {e}"),
-            Ok(result) if !apply => format!(
-                "its changes were not applied, because a session log could not be written; \
-                 {kept} as {result}"
-            ),
+        let (note, unapplied) = match iso.sub.result(&iso.child, &id).await {
+            Err(e) => (format!("its changes could not be collected: {e}"), None),
             Ok(result) => {
-                let applied = match self.checked_folder() {
-                    Ok(_) => iso.sub.apply(&iso.base, &result, &id).await,
-                    Err(e) => Err(e),
+                let applied = match (apply, self.checked_folder()) {
+                    (false, _) => Err(crate::git::NotApplied::Failed(
+                        "a session log could not be written".into(),
+                    )),
+                    (true, Ok(_)) => iso.sub.apply(&iso.base, &result, &id).await,
+                    (true, Err(e)) => Err(crate::git::NotApplied::Failed(e)),
                 };
                 match applied {
-                    Ok(0) => "no file changes".to_string(),
-                    Ok(n) => format!("{n} changed file(s) applied to the folder"),
-                    Err(e) => format!(
-                        "its changes conflict with the folder and were NOT applied ({e}); \
-                         {kept} as {result}"
-                    ),
+                    Ok(a) => (applied_note(&a), None),
+                    Err(e) => {
+                        let (diff, cut) = self.unapplied(&iso, &result).await;
+                        let follows = match (&diff, cut) {
+                            (Some(_), Some(c)) => format!(
+                                " Its changes against the folder it started from follow, every \
+                                 line behind \"| \" ({c})."
+                            ),
+                            (Some(_), None) => " Its changes against the folder it started from \
+                                                follow, every line behind \"| \"."
+                                .to_string(),
+                            (None, Some(c)) => format!(" Its changes cannot be shown: {c}."),
+                            (None, None) => String::new(),
+                        };
+                        // A failed log keeps its words (nothing would record a
+                        // merge); anything else says why it did not apply.
+                        let why = if apply {
+                            format!("its changes were NOT applied: {}", e.text())
+                        } else {
+                            "its changes were not applied, because a session log could not be \
+                             written"
+                                .to_string()
+                        };
+                        (
+                            format!(
+                                "{}. Nothing of this sub-agent's work was written; redo the \
+                                 changes with your own tools if they are still wanted; {kept} \
+                                 as {result}.{follows}",
+                                why.trim_end_matches('.')
+                            ),
+                            diff,
+                        )
+                    }
                 }
             }
         };
         crate::git::remove_folder(&iso.child).await;
         iso.sub.prune(self.node.cfg.policy.checkpoints_keep).await;
-        note
+        (note, unapplied)
+    }
+
+    /// A child's changes from its base, as lines for the parent, and what
+    /// was left out of them (or why they cannot be read).
+    async fn unapplied(&self, iso: &Isolation, result: &str) -> (Option<String>, Option<String>) {
+        let secrets = &self.node.cfg.secrets;
+        match iso
+            .sub
+            .changes(&iso.base, result, &|s: &str| secrets.scrub(s))
+            .await
+        {
+            Ok(d) => {
+                let (text, cut) = crate::git::unapplied_text(&d);
+                ((!text.is_empty()).then_some(text), cut)
+            }
+            Err(e) => (None, Some(e)),
+        }
     }
 
     /// Record an approval's answer; `false` if the log refused it (the
@@ -3976,6 +4028,21 @@ fn tool_reason(tool: &str, risk: ToolRisk, input: &Value, policy: &crate::NodePo
         (_, ToolRisk::ReadOnly | ToolRisk::ChatOnly) => {
             format!("approval mode requires asking for `{tool}`")
         }
+    }
+}
+
+/// The merge note for a child's result that was applied.
+fn applied_note(a: &crate::git::Applied) -> String {
+    match (a.written, a.same) {
+        (0, 0) => "no file changes".to_string(),
+        (0, _) => "its changes were already in the folder".to_string(),
+        (n, _) if a.merged.is_empty() => format!("{n} changed file(s) applied to the folder"),
+        (n, _) => format!(
+            "{n} changed file(s) applied to the folder, {} of them merged with changes the \
+             folder had since the sub-agent started: {}",
+            a.merged.shown.len() + a.merged.more,
+            a.merged.listed()
+        ),
     }
 }
 

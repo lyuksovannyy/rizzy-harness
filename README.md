@@ -898,9 +898,16 @@ work as changes against `HEAD`), as bytes: your repository's filters are
 not applied (an LFS repository's files arrive as the real files, line
 endings are not converted). No other chat can reach it, and it is
 deleted when the sub-agent ends. When the sub-agent ends, the files it changed are written into
-the folder; if you or another sub-agent changed one of them meanwhile,
-nothing is written and the agent is told. None of this runs your
-repository's config, hooks, filters or attributes. Sub-agents that only
+the folder. If you or another sub-agent changed one of them meanwhile,
+the two versions are merged file by file the way `git merge` does
+(changes to different parts of a file both land; the delegate card says
+how many files were merged). When the changes overlap, or a file was
+deleted on one side and changed on the other, added on both, a link, a
+binary file or over 1 MiB on both sides, nothing of that sub-agent is
+written, and the agent that delegated gets the list of those files and
+the sub-agent's whole diff (up to 16,000 characters) so it can make the
+changes itself. None of this runs your repository's config, hooks, filters, merge drivers or
+attributes. Sub-agents that only
 read work in the folder itself. Only the latest 10 checkpoints per folder are kept (`checkpoints_keep`
 in `node.toml`). "Rewind" undoes a turn and everything after it. Before an
 undo or rewind changes a file it saves the folder as it is, your own edits

@@ -190,6 +190,9 @@ pub struct DelegateOutcome {
     /// The harness's own note after the report: what became of the child's
     /// changes, or why it stopped.
     pub note: Option<String>,
+    /// The child's changes against its base when they were not applied to
+    /// the folder (plain lines; quoted when rendered for the parent).
+    pub unapplied: Option<String>,
 }
 
 pub struct TurnCtx<'a> {

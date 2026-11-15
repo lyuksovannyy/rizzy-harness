@@ -129,6 +129,7 @@ impl TurnHost for Host {
             finish: None,
             error: None,
             note: None,
+            unapplied: None,
         })
     }
     async fn background_notes(

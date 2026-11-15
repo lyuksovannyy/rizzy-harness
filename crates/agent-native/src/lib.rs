@@ -986,6 +986,7 @@ impl NativeBackend {
                     text: &o.text,
                     error: o.error.as_deref(),
                     note: o.note.as_deref(),
+                    unapplied: o.unapplied.as_deref(),
                 });
                 (
                     ToolOutcome {
@@ -4673,6 +4674,7 @@ mod tests {
                 finish,
                 error: out.error.clone(),
                 note: None,
+                unapplied: None,
             })
         }
     }
