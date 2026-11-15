@@ -6,9 +6,10 @@
 import { Select } from "./Select";
 import type { ApprovalMode } from "../types";
 
-const RANK: Record<ApprovalMode, number> = { ask_all: 0, ask: 1, accept_edits: 2, auto: 3 };
+const RANK: Record<ApprovalMode, number> = { plan: -1, ask_all: 0, ask: 1, accept_edits: 2, auto: 3 };
 
 export const MODE_WORDS: Record<ApprovalMode, { label: string; hint: string }> = {
+  plan: { label: "Plan", hint: "Looks and plans; changes nothing (the shell is read-only). Only you leave it" },
   ask_all: { label: "Ask every call", hint: "Asks before every tool call, reads included" },
   ask: { label: "Ask", hint: "Asks before every edit and every command" },
   accept_edits: { label: "Accept edits", hint: "Edits files in this folder without asking (undo per turn); commands still ask" },
@@ -38,7 +39,7 @@ export function ApprovalModePick(props: {
 }) {
   const value = clampMode(props.value, props.max);
   const hint = (m: ApprovalMode) => (props.host && m === "auto" ? HOST_AUTO : MODE_WORDS[m].hint);
-  const shown: ApprovalMode[] = ["ask", "accept_edits", "auto"];
+  const shown: ApprovalMode[] = ["plan", "ask", "accept_edits", "auto"];
   if (value === "ask_all") shown.unshift("ask_all");
   return (
     <span className="approval-pick" title={hint(value)}>

@@ -286,7 +286,8 @@ status, duration, tokens and the first sentence of its answer.
   webhook's data always asks, whatever the routine's mode: whoever calls the
   webhook writes into its prompt. When a run asks, a command, an edit or a
   publish waits for your click in "Waiting for you" and is cancelled after 24
-  hours; read-only work finishes on its own.
+  hours; read-only work finishes on its own. A routine in **Plan** changes
+  nothing (a report or a review), webhook data or not.
 - **Webhooks**: `POST /api/hooks/<trigger id>` with
   `Authorization: Bearer <secret>` and a JSON or plain-text body of at most
   64 KiB (`Idempotency-Key` is honoured for 24 hours). The secret is shown once
@@ -1091,7 +1092,7 @@ turn's, and a chat in an unrelated folder that writes here through a path
 outside its folder is not seen.
 
 **Approval modes.** Each agentic chat has an approval mode: how much runs
-without a click. The picker in the composer shows it and offers three, each
+without a click. The picker in the composer shows it and offers four, each
 with one line saying what runs unasked:
 
 - **Auto** (the default for every new chat, sandbox and host alike, and for
@@ -1110,6 +1111,43 @@ with one line saying what runs unasked:
   the path, from the call itself, as the file tool resolves it.
 - **Ask**: every command, write, edit and publish waits on a card. Reads,
   searches and the task list never ask.
+- **Plan**: the agent looks and writes a plan; nothing changes. It is not
+  "ask": a call that would change something is refused by the node before
+  any card, with a sentence telling the agent to describe the change in its
+  plan, and no answer can lift it: a card still waiting when you switch to
+  Plan is denied by the node at once, and so is a late Allow on it. Plan
+  shows no cards at all (what it allows runs unasked), so it is not "Ask
+  every call minus the writes". Reads, searches, the task list, web
+  search and fetch, earlier-chat search, skills and the repository map run.
+  `write`, `edit`, `publish`, `remember` (and memory proposals), and every
+  MCP tool are refused and not offered (MCP servers are not started in plan
+  mode: their effects are only the server's word). `bash` runs in the
+  **read-only shell** (docs/read-only-shell.md): contained in bubblewrap with
+  the chat's folder and everything else bound read-only and only its own
+  `/tmp` (256 MiB, gone when the command ends) writable, in a sandbox chat
+  and in a host chat alike; `git log`, `git diff`, `git status`, `grep` work,
+  and any write fails with "Read-only file system". Toolchains that need a
+  writable home or build folder cannot build or test there (`cargo` fails
+  on a read-only `~/.rustup` even with `CARGO_TARGET_DIR=$TMPDIR`; `npm
+  install` fails): a planner reads, greps, runs `git`, and runs scripts and
+  tests that write nothing or only to `$TMPDIR`. On a node without that
+  containment (no bubblewrap, `[sandbox] mode = "off"`, a bubblewrap that
+  cannot size a tmpfs) plan mode has **no shell** and the agent is told why.
+  `delegate` starts only agents that cannot change files (no `write`, `edit`,
+  `publish`, MCP or "all tools"); a sub-agent started in plan mode is in plan
+  mode for its whole life. A background command started before you switched
+  to Plan keeps running as it was started (stop it from the chat or with
+  `bash_stop`, which plan mode allows); a sub-agent that changed files before
+  the switch has its changes kept in the node's store and shown, not written
+  into the folder. The agent is told plan mode is on, that only you can end
+  it, and to end its turn with a plan. Plan mode stops changes, not
+  reading: where the chat has network access, the agent can still send out
+  what it reads (`web_fetch`, the shell), as in every mode. **Only you leave
+  it**: pick another mode in the composer, or one of the choices in the plan
+  bar above it while no turn runs ("Auto", "Accept edits", "Ask": each
+  switches and sends "Carry out the plan."); nothing the agent, a skill,
+  an MCP server, a routine or a webhook does switches it. The plan is the
+  agent's last answer, ordinary chat history the next turn reads.
 
 No mode shows a card for a call that cannot happen: a path the file tool
 would refuse whatever you answer (outside the folder on a node with
@@ -1203,7 +1241,7 @@ Every turn also checks the folder against `workspace_roots` again, so
 narrowing node.toml applies to existing chats.
 
 ```toml
-max_approval_mode = "auto"           # ask_all | ask | accept_edits | auto: the most any chat here may use (see "Approval modes")
+max_approval_mode = "auto"           # plan | ask_all | ask | accept_edits | auto: the most any chat here may use (see "Approval modes")
 chat_grants = true                   # offer and honour "Allow this exact call for this chat"; false: never
 workspace_roots = ["/home/me/code"]  # session cwd must be inside one of these
 denied_tools = []                    # e.g. ["bash"]; "delegate" turns sub-agents off
@@ -2950,7 +2988,8 @@ the turn's sub-agent and token limits like a new one; a sub-agent has at most
 chat's, a sub-agent's own sub-agent's, an unknown or a deleted id is refused
 with a sentence); one that is still working takes no second message; and it
 runs with what a new sub-agent of the same agent would get now, at most your
-chat's approval mode as it is now. Its chat marks each follow-up, and the side
+chat's approval mode as it is now (in plan mode a sub-agent that changes files
+is not given one, and one started in plan mode stays in it). Its chat marks each follow-up, and the side
 panel lists the sub-agent once with its number of runs.
 
 **Agents** in the sidebar lists every agent. Server admins can make agents there

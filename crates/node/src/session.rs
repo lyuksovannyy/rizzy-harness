@@ -112,6 +112,14 @@ pub(crate) struct Session {
     no_callbacks: bool,
     turn: Mutex<Option<RunningTurn>>,
     approvals: Mutex<HashMap<String, Answer>>,
+    /// The mode the log says now (`session_created`, the latest
+    /// `approval_mode_changed`): a turn that starts with another in force
+    /// (node.toml's ceiling lowered since) records the change first
+    /// (`record_clamp`), so the log, the master and the UI tell the truth.
+    recorded: Mutex<ApprovalMode>,
+    /// Waiting approvals denied because the chat entered plan mode (X.7):
+    /// recorded as resolved by policy, never as the person's answer.
+    plan_denied: Mutex<std::collections::HashSet<String>>,
     /// The person's notes with denials, by call id, until the loop takes
     /// the one of the call it is closing ([`TurnHost::denial_note`]).
     deny_notes: Mutex<HashMap<String, String>>,
@@ -346,6 +354,16 @@ struct Isolation {
 
 /// One chat's approval mode (read by its sub-agents through the node's
 /// session table, `Session::current_mode`).
+/// The reason recorded with a card denied because the chat entered plan
+/// mode while it waited (X.7).
+const PLAN_CARD_DENIED: &str = "Plan mode started while this call waited: in plan mode nothing \
+     is changed, so it was not run.";
+
+/// Why a sub-agent's changes were kept out of a folder whose chat is in
+/// plan mode (X.7) when the child ended.
+const PLAN_NOT_APPLIED: &str = "the chat is in plan mode, in which nothing is changed in its \
+     folder; carry them out after the person leaves plan mode";
+
 pub(crate) type ModeCell = Arc<Mutex<ApprovalMode>>;
 
 fn read_mode(c: &ModeCell) -> ApprovalMode {
@@ -433,6 +451,8 @@ impl Session {
             no_callbacks,
             turn: Mutex::new(None),
             approvals: Mutex::new(HashMap::new()),
+            recorded: Mutex::new(mode),
+            plan_denied: Mutex::new(std::collections::HashSet::new()),
             deny_notes: Mutex::new(HashMap::new()),
             grants: Mutex::new(HashMap::new()),
             log_failed: AtomicBool::new(false),
@@ -560,6 +580,8 @@ impl Session {
             no_callbacks: meta.no_callbacks,
             turn: Mutex::new(None),
             approvals: Mutex::new(HashMap::new()),
+            recorded: Mutex::new(meta.approval_mode),
+            plan_denied: Mutex::new(std::collections::HashSet::new()),
             deny_notes: Mutex::new(HashMap::new()),
             grants: Mutex::new(grants),
             log_failed: AtomicBool::new(false),
@@ -1131,7 +1153,86 @@ impl Session {
         .await
         .map_err(|e| e.to_string())?;
         *self.mode.lock().unwrap_or_else(|p| p.into_inner()) = mode;
+        *self.recorded.lock().unwrap_or_else(|p| p.into_inner()) = mode;
+        // Entering plan mode (X.7): no card of this chat or of a sub-agent
+        // under it can still be allowed; each is denied now, so none stays
+        // on screen as if it could.
+        if mode == ApprovalMode::Plan {
+            let all: Vec<Arc<Session>> = self
+                .node
+                .sessions
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .values()
+                .cloned()
+                .collect();
+            for s in all
+                .iter()
+                .filter(|s| s.id == self.id || s.descends_from(self.id))
+            {
+                s.deny_waiting_for_plan();
+            }
+        }
         Ok(mode)
+    }
+
+    /// Review M1 of PR 125: before a turn starts, a mode the node now
+    /// enforces that the log does not say (node.toml's `max_approval_mode`
+    /// lowered since it was recorded: `load` clamps the mode in force, not
+    /// the log) is recorded as `approval_mode_changed`, `requested` naming
+    /// what the log said, as a clamp at `set_mode` is. The master's checks
+    /// (memory in plan mode) and the UI read the log.
+    async fn record_clamp(&self) {
+        if self.profile != Profile::Agentic {
+            return;
+        }
+        let _change = self.mode_change.lock().await;
+        let now = read_mode(&self.mode).min(self.node.cfg.policy.max_approval_mode);
+        let said = *self.recorded.lock().unwrap_or_else(|p| p.into_inner());
+        if now == said {
+            return;
+        }
+        if self
+            .append(EventKind::ApprovalModeChanged(ApprovalModeChanged {
+                mode: now,
+                requested: Some(said),
+            }))
+            .await
+            .is_ok()
+        {
+            *self.mode.lock().unwrap_or_else(|p| p.into_inner()) = now;
+            *self.recorded.lock().unwrap_or_else(|p| p.into_inner()) = now;
+        }
+    }
+
+    /// Whether `ancestor` started this session, or one above it, as the
+    /// node holds them now (a few levels at most).
+    fn descends_from(&self, ancestor: SessionId) -> bool {
+        let mut up = self.parent_session;
+        for _ in 0..8 {
+            match up {
+                Some(p) if p == ancestor => return true,
+                Some(p) => up = self.node.session(p).and_then(|s| s.parent_session),
+                None => return false,
+            }
+        }
+        false
+    }
+
+    /// Deny every card waiting in this session because plan mode began
+    /// (`approve` records each as the node's policy).
+    fn deny_waiting_for_plan(&self) {
+        let waiting: Vec<(String, Answer)> = self
+            .approvals
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .drain()
+            .collect();
+        let mut denied = self.plan_denied.lock().unwrap_or_else(|p| p.into_inner());
+        for (id, tx) in waiting {
+            denied.insert(id);
+            let _ = tx.send((Decision::Deny, None));
+        }
     }
 
     /// The owner's change of the chat's step limit (X.14): sent as a
@@ -1682,7 +1783,9 @@ impl Session {
         }
         // Held from the read to `turn_started`: an end whose check passed
         // before the slot was taken is in the log before the read, and
-        // every later one is queued for the turn (S3-4).
+        // every later one is queued for the turn (S3-4). The mode in force
+        // recorded first, if the log says another.
+        self.record_clamp().await;
         let gate = self.bg_gate.lock().await;
         let id = self.id;
         let history = match self
@@ -2202,6 +2305,8 @@ impl Session {
         agent: Option<&AgentSpec>,
         follow_up: Option<(&str, &str)>,
     ) -> Result<(Vec<RawEvent>, Vec<UserMessage>), String> {
+        // The mode in force recorded first, if the log says another.
+        self.record_clamp().await;
         // As for a callback turn (S3-4): no end lands between the read and
         // `turn_started`.
         let gate = self.bg_gate.lock().await;
@@ -3971,7 +4076,16 @@ impl Session {
             .sessions_dir()
             .map(|d| real_path(&d).join(child_id.to_string()));
         let wrote = own_dir.as_ref().is_some_and(|d| child.cwd.starts_with(d));
-        let writes = self.can_change_files(&agent);
+        // A child made in plan mode stays in it for life (its own recorded
+        // mode is its floor, X.7): it changes nothing, whatever its agent
+        // could, and works in this folder as it did.
+        let made_in_plan = read_mode(&child.mode) == ApprovalMode::Plan;
+        let writes = !made_in_plan && self.can_change_files(&agent);
+        if wrote && self.current_mode() == ApprovalMode::Plan {
+            return Err(format!(
+                "[harness] plan mode: @{started_as} `{child_id}` was not continued: it changes                  files, and nothing may change in plan mode. Describe the work in your plan."
+            ));
+        }
         if wrote != writes {
             return Err(format!(
                 "@{started_as} `{child_id}` cannot be given a follow-up: its agent {} files now \
@@ -4135,8 +4249,17 @@ impl Session {
     /// `bash` (no shell on a node is read-only).
     fn can_change_files(&self, agent: &AgentSpec) -> bool {
         let policy = &self.node.cfg.policy;
+        // In plan mode (X.7) the child is made in plan mode and stays in it
+        // (its own recorded mode is its floor for life): its `bash` is the
+        // read-only shell and its `write` and `edit` are refused, so it
+        // works in this folder, as a reader does.
+        let tools: &[&str] = if self.current_mode() == ApprovalMode::Plan {
+            &[]
+        } else {
+            &["write", "edit", "bash"]
+        };
         self.profile == Profile::Agentic
-            && ["write", "edit", "bash"]
+            && tools
                 .iter()
                 .any(|t| agent.allows_tool(t) && !policy.denies(t))
     }
@@ -4269,6 +4392,12 @@ impl Session {
                     (false, _) => Err(crate::git::NotApplied::Failed(
                         "a session log could not be written".into(),
                     )),
+                    // Plan mode (X.7) switched on while the child worked:
+                    // the node writes nothing into the folder either; the
+                    // changes stay in the store and are shown.
+                    (true, Ok(_)) if self.current_mode() == ApprovalMode::Plan => {
+                        Err(crate::git::NotApplied::Failed(PLAN_NOT_APPLIED.into()))
+                    }
                     (true, Ok(_)) => iso.sub.apply(&iso.base, &result, &id).await,
                     (true, Err(e)) => Err(crate::git::NotApplied::Failed(e)),
                 };
@@ -4598,7 +4727,14 @@ impl TurnHost for Session {
     }
 
     fn runs_unasked(&self, tool: &str, risk: ToolRisk) -> bool {
-        !self.node.cfg.policy.denies(tool) && !self.current_mode().needs_approval(risk)
+        let mode = self.current_mode();
+        !self.node.cfg.policy.denies(tool)
+            && !mode.needs_approval(risk)
+            && !mode.refuses(tool, risk)
+    }
+
+    fn approval_mode(&self) -> Option<ApprovalMode> {
+        (self.profile == Profile::Agentic).then(|| self.current_mode())
     }
 
     fn background(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
@@ -4713,6 +4849,13 @@ impl TurnHost for Session {
             return Decision::Deny;
         }
         let mode = self.current_mode();
+        // Plan mode (X.7): refused, never asked, and no card can lift it.
+        // The loop refuses these before they get here, with the plain
+        // sentence (`plan_refusal`); this is the node's own floor for a
+        // call that reached it anyway (the mode changed in between).
+        if mode.refuses(tool, risk) {
+            return Decision::Deny;
+        }
         if !mode.needs_approval(risk) {
             return Decision::Allow;
         }
@@ -4820,6 +4963,26 @@ impl TurnHost for Session {
         } else {
             decision
         };
+        // Plan mode (X.7) began while the card waited: the node's floor is
+        // read again after the answer. A call it refuses is denied whatever
+        // was answered, and so is every card plan mode's start denied
+        // (`deny_waiting_for_plan`): recorded as the node's policy, with
+        // the reason, never as the person's answer.
+        let plan_denied = self
+            .plan_denied
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&approval_id);
+        let (decision, by, note) =
+            if plan_denied || (decision.allows() && self.current_mode().refuses(tool, risk)) {
+                (
+                    Decision::Deny,
+                    ResolvedBy::Policy,
+                    Some(PLAN_CARD_DENIED.to_string()),
+                )
+            } else {
+                (decision, by, note)
+            };
         self.approvals
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -4831,7 +4994,7 @@ impl TurnHost for Session {
         {
             return Decision::Deny;
         }
-        if let Some(n) = note {
+        if let Some(n) = note.filter(|_| by == ResolvedBy::User) {
             self.deny_notes
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())

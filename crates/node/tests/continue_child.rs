@@ -973,3 +973,160 @@ async fn a_follow_up_rebuilds_after_a_summary_inside_the_child() {
         "the request does not rebuild"
     );
 }
+
+// ---- Plan mode (pull request 125, X.7, T67) and follow-ups ----
+
+/// Sets the rig's chat to `mode` and waits for the log to say so.
+async fn set_mode(r: &mut Rig, mode: harness_core::policy::ApprovalMode) {
+    r.n += 1;
+    r.send(MasterToNode::SetApprovalMode {
+        req_id: format!("m{}", r.n),
+        session_id: r.session_id(),
+        mode,
+        lowering: false,
+    });
+    r.until(|k| matches!(k, EventKind::ApprovalModeChanged(m) if m.mode == mode))
+        .await;
+}
+
+/// Whether the last request of agent `id` was sent in plan mode.
+fn last_request_in_plan(r: &Rig, id: &str) -> bool {
+    requests_of(r, id).last().is_some_and(|m| {
+        m.iter()
+            .any(|x| text_of(x).contains("[harness] Plan mode is on"))
+    })
+}
+
+/// (a) With the chat in plan mode, a follow-up to a child that changes
+/// files is refused by the node, and the child does not run.
+#[tokio::test]
+async fn in_plan_mode_a_writing_child_is_not_continued() {
+    use harness_core::policy::ApprovalMode;
+    let mut r = rig().await;
+    let (_, outs) = r
+        .lead_turn(&delegate(&[
+            json!({"agent": "dev", "task": "run: echo one > b.txt"}),
+        ]))
+        .await;
+    let child = child_of(&outs[0]);
+    set_mode(&mut r, ApprovalMode::Plan).await;
+    let (_, outs) = r
+        .lead_turn(&delegate(&[json!({
+            "agent": "dev", "session": child.to_string(), "task": "run: echo two > b.txt"
+        })]))
+        .await;
+    assert!(
+        outs[0].contains("plan mode: @dev") && outs[0].contains("was not continued"),
+        "{outs:#?}"
+    );
+    assert_eq!(turns(&events_of(&r, child)).len(), 1);
+    assert_eq!(r.read("b.txt").as_deref(), Some("one\n"));
+}
+
+/// (b) A child made in plan mode stays in it for life: continued after the
+/// chat left plan mode, its turn is still in plan mode (the note is in its
+/// request) and its command changes nothing.
+#[tokio::test]
+async fn a_child_made_in_plan_mode_stays_in_it() {
+    use harness_core::policy::ApprovalMode;
+    let mut r = rig().await;
+    set_mode(&mut r, ApprovalMode::Plan).await;
+    let (_, outs) = r
+        .lead_turn(&delegate(&[
+            json!({"agent": "dev", "task": "run: cat a.txt"}),
+        ]))
+        .await;
+    let child = child_of(&outs[0]);
+    assert!(last_request_in_plan(&r, "dev"));
+    set_mode(&mut r, ApprovalMode::Auto).await;
+    let (_, outs) = r
+        .lead_turn(&delegate(&[json!({
+            "agent": "dev", "session": child.to_string(), "task": "run: echo two > b.txt"
+        })]))
+        .await;
+    assert_eq!(child_of(&outs[0]), child, "{outs:#?}");
+    assert!(
+        last_request_in_plan(&r, "dev"),
+        "the follow-up of a child made in plan mode left plan mode"
+    );
+    assert!(r.read("b.txt").is_none(), "a child made in plan mode wrote");
+}
+
+/// (c) A reader made outside plan mode and continued while the chat is in
+/// plan mode runs its turn in plan mode.
+#[tokio::test]
+async fn a_reader_continued_in_plan_mode_runs_in_plan_mode() {
+    use harness_core::policy::ApprovalMode;
+    let mut r = rig().await;
+    let (_, outs) = r
+        .lead_turn(&delegate(&[
+            json!({"agent": "look", "task": "read: a.txt"}),
+        ]))
+        .await;
+    let child = child_of(&outs[0]);
+    assert!(!last_request_in_plan(&r, "look"));
+    set_mode(&mut r, ApprovalMode::Plan).await;
+    let (_, outs) = r
+        .lead_turn(&delegate(&[json!({
+            "agent": "look", "session": child.to_string(), "task": "read: a.txt"
+        })]))
+        .await;
+    assert_eq!(child_of(&outs[0]), child, "{outs:#?}");
+    assert!(last_request_in_plan(&r, "look"));
+}
+
+/// Entering plan mode denies every waiting card of the chat and of every
+/// loaded sub-agent under it: a continued child waiting on a card in its
+/// follow-up is denied, writes nothing, and its result says why.
+#[tokio::test]
+async fn entering_plan_mode_denies_a_continued_childs_waiting_card() {
+    use harness_core::policy::ApprovalMode;
+    let mut r = rig().await;
+    let (_, outs) = r
+        .lead_turn(&delegate(&[
+            json!({"agent": "dev", "task": "run: echo one > b.txt"}),
+        ]))
+        .await;
+    let child = child_of(&outs[0]);
+    set_mode(&mut r, ApprovalMode::Ask).await;
+    r.n += 1;
+    r.send(MasterToNode::Prompt {
+        savings: None,
+        context: None,
+        reply: None,
+        agent: Some(r.lead()),
+        attachments: vec![],
+        compare: vec![],
+        req_id: format!("p{}", r.n),
+        session_id: r.session_id(),
+        text: delegate(&[json!({
+            "agent": "dev", "session": child.to_string(), "task": "run: echo two > b.txt"
+        })]),
+        images: vec![],
+        agent_named: false,
+        files: vec![],
+    });
+    r.until(|k| matches!(k, EventKind::ApprovalRequested(a) if a.tool == "bash"))
+        .await;
+    assert_eq!(r.seen.last().unwrap().session_id, child);
+    set_mode(&mut r, ApprovalMode::Plan).await;
+    let sid = r.session_id();
+    loop {
+        r.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
+        if r.seen.last().is_some_and(|e| e.session_id == sid) {
+            break;
+        }
+    }
+    let evs = events_of(&r, child);
+    assert!(
+        evs.iter().any(|k| matches!(k,
+            EventKind::ApprovalResolved(a) if a.decision == harness_core::policy::Decision::Deny)),
+        "{evs:#?}"
+    );
+    assert!(
+        evs.iter().any(|k| matches!(k,
+            EventKind::ToolCallFinished(f) if f.output.contains("switched this chat to plan mode"))),
+        "{evs:#?}"
+    );
+    assert_eq!(r.read("b.txt").as_deref(), Some("one\n"));
+}

@@ -5,6 +5,15 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalMode {
+    /// Plan mode (ADOPTION_PLAN X.7, PLAN.md T67): the agent investigates
+    /// and writes a plan; nothing changes. Not "ask": a call that would
+    /// change something is refused by the node before any card
+    /// ([`ApprovalMode::refuses`]), `bash` runs in the read-only shell, and
+    /// no answer can lift it. The strictest mode, so the clamp, a
+    /// sub-agent's ceiling and a webhook run's cap keep it. Set and left
+    /// only by the chat's owner, through the same route and event as the
+    /// other modes.
+    Plan,
     /// Every tool call needs approval.
     AskAll,
     /// Mutating tools (bash, edit, write) need approval; read-only tools run.
@@ -29,6 +38,26 @@ pub const DEFAULT_CHAT_APPROVAL: ApprovalMode = ApprovalMode::Auto;
 /// The file tools `AcceptEdits` covers, by their registered names.
 pub const EDIT_TOOLS: [&str; 2] = ["write", "edit"];
 
+/// The one mutating tool plan mode runs: `bash`, in the read-only shell
+/// (ADOPTION_PLAN T.7); where the node has none it is refused too.
+pub const PLAN_SHELL: &str = "bash";
+
+/// Tools whose risk is read-only (they ask nothing in `ask`) that plan mode
+/// refuses all the same: `remember` files a memory through the master,
+/// which changes what later chats are told.
+pub const PLAN_REFUSED: &[&str] = &["remember"];
+
+/// The result of a call plan mode refuses (a plain sentence the model can
+/// act on; no card is shown and nothing runs).
+pub fn plan_refusal(tool: &str) -> String {
+    format!(
+        "[harness] plan mode: `{}` was not run and nothing was changed. In plan mode you may \
+         read, search and look; describe this change in your plan instead. Only the person can \
+         end plan mode.",
+        crate::event::shown_name(tool)
+    )
+}
+
 impl ApprovalMode {
     /// The effective mode is the stricter of what was requested and what the
     /// node allows. A master can tighten, never loosen.
@@ -36,11 +65,16 @@ impl ApprovalMode {
         requested.min(node_max)
     }
 
-    /// Whether a call of this risk asks, on its risk alone. `AcceptEdits`
+    /// Whether a call of this risk asks, on its risk alone (after
+    /// [`Self::refuses`], which plan mode needs). `AcceptEdits`
     /// asks as `Ask` does here: the node lets an edit inside the folder
     /// through before it gets here (it alone can resolve the path).
     pub fn needs_approval(self, risk: ToolRisk) -> bool {
         match self {
+            // What plan mode lets run, runs unasked (`bash` in the
+            // read-only shell); what it does not is refused, never asked
+            // ([`Self::refuses`], which every caller checks first).
+            ApprovalMode::Plan => false,
             ApprovalMode::AskAll => risk != ToolRisk::ChatOnly,
             ApprovalMode::Ask | ApprovalMode::AcceptEdits => risk == ToolRisk::Mutating,
             ApprovalMode::Auto => false,
@@ -52,17 +86,34 @@ impl ApprovalMode {
         self >= ApprovalMode::AcceptEdits
     }
 
+    /// Whether plan mode refuses a call of `tool` at `risk` outright: every
+    /// mutating tool but `bash` (which runs in the read-only shell there),
+    /// and the read-only-risk tools that change something outside the
+    /// chat ([`PLAN_REFUSED`]). `delegate` is the loop's (a writer agent is
+    /// refused there, and every child inherits the mode). Always `false`
+    /// in every other mode.
+    pub fn refuses(self, tool: &str, risk: ToolRisk) -> bool {
+        self == ApprovalMode::Plan
+            && match risk {
+                ToolRisk::Mutating => tool != PLAN_SHELL,
+                ToolRisk::ReadOnly => PLAN_REFUSED.contains(&tool),
+                ToolRisk::ChatOnly => false,
+            }
+    }
+
     /// Every mode, strictest first.
-    pub const ALL: [ApprovalMode; 4] = [
+    pub const ALL: [ApprovalMode; 5] = [
+        ApprovalMode::Plan,
         ApprovalMode::AskAll,
         ApprovalMode::Ask,
         ApprovalMode::AcceptEdits,
         ApprovalMode::Auto,
     ];
 
-    /// The wire name (`ask_all`, `ask`, `accept_edits`, `auto`).
+    /// The wire name (`plan`, `ask_all`, `ask`, `accept_edits`, `auto`).
     pub fn id(self) -> &'static str {
         match self {
+            ApprovalMode::Plan => "plan",
             ApprovalMode::AskAll => "ask_all",
             ApprovalMode::Ask => "ask",
             ApprovalMode::AcceptEdits => "accept_edits",
@@ -276,7 +327,14 @@ mod tests {
     #[test]
     fn modes_are_ordered_and_named() {
         use ApprovalMode::*;
-        assert!(AskAll < Ask && Ask < AcceptEdits && AcceptEdits < Auto);
+        assert!(Plan < AskAll && AskAll < Ask && Ask < AcceptEdits && AcceptEdits < Auto);
+        // Plan is the strictest: a node's ceiling, a parent's mode and a
+        // webhook run's cap of `ask` all keep it.
+        for m in ApprovalMode::ALL {
+            assert_eq!(ApprovalMode::clamp(Plan, m), Plan);
+            assert_eq!(ApprovalMode::clamp(m, Plan), Plan);
+        }
+        assert!(!Plan.accepts_edits());
         assert_eq!(ApprovalMode::clamp(Auto, AcceptEdits), AcceptEdits);
         assert_eq!(ApprovalMode::clamp(AcceptEdits, Ask), Ask);
         for m in ApprovalMode::ALL {
@@ -302,6 +360,33 @@ mod tests {
         assert!(!ApprovalMode::Ask.needs_approval(ToolRisk::ReadOnly));
         assert!(ApprovalMode::AskAll.needs_approval(ToolRisk::ReadOnly));
         assert!(!ApprovalMode::Auto.needs_approval(ToolRisk::Mutating));
+    }
+
+    /// Plan mode refuses what mutates (but `bash`, which it runs read-only)
+    /// and `remember`; it never refuses in another mode.
+    #[test]
+    fn plan_mode_refuses_what_changes_something() {
+        use ApprovalMode::*;
+        for (tool, risk, refused) in [
+            ("write", ToolRisk::Mutating, true),
+            ("edit", ToolRisk::Mutating, true),
+            ("publish", ToolRisk::Mutating, true),
+            ("mcp__srv__tool", ToolRisk::Mutating, true),
+            ("bash", ToolRisk::Mutating, false),
+            ("remember", ToolRisk::ReadOnly, true),
+            ("read", ToolRisk::ReadOnly, false),
+            ("recall", ToolRisk::ReadOnly, false),
+            ("todo", ToolRisk::ChatOnly, false),
+        ] {
+            assert_eq!(Plan.refuses(tool, risk), refused, "{tool}");
+            for m in [AskAll, Ask, AcceptEdits, Auto] {
+                assert!(!m.refuses(tool, risk), "{m:?} {tool}");
+            }
+        }
+        // Nothing asks in plan mode: it runs, or it is refused.
+        assert!(!Plan.needs_approval(ToolRisk::Mutating));
+        assert!(!Plan.needs_approval(ToolRisk::ReadOnly));
+        assert!(plan_refusal("write").contains("plan mode: `write` was not run"));
     }
 
     /// A tool that writes only the chat's own log (`todo`) is never asked

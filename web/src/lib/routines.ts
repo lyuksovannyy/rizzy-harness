@@ -17,7 +17,7 @@ export interface RoutineSpec {
   effort: Effort | null;
   node_id?: string | null;
   cwd?: string | null;
-  approval_mode?: "ask" | "ask_all" | "accept_edits" | "auto" | null;
+  approval_mode?: "plan" | "ask" | "ask_all" | "accept_edits" | "auto" | null;
   prompt: string;
   project_id: string | null;
   catch_up: "skip" | "once";

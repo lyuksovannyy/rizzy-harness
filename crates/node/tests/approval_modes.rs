@@ -1990,3 +1990,846 @@ async fn no_false_refusal_for_a_file_made_earlier_or_read_under_another_spelling
         "R\n"
     );
 }
+
+// ---- plan mode (ADOPTION_PLAN X.7, PLAN.md T67) ----
+
+impl N {
+    /// The results of `sid`'s tool calls, by tool, in log order.
+    fn results(&self, sid: SessionId) -> Vec<(String, bool, String)> {
+        let events = self.node.store().events_after(sid, 0, 100_000).unwrap();
+        let mut tools = std::collections::HashMap::new();
+        let mut out = vec![];
+        for e in &events {
+            match e.typed() {
+                Ok(EventKind::ToolCallStarted(s)) => {
+                    tools.insert(s.call_id, s.tool);
+                }
+                Ok(EventKind::ToolCallFinished(f)) => out.push((
+                    tools.get(&f.call_id).cloned().unwrap_or_default(),
+                    f.ok,
+                    f.output,
+                )),
+                _ => {}
+            }
+        }
+        out
+    }
+}
+
+/// In plan mode every call that would change something is refused by the
+/// node before any card, with the sentence, and changes nothing: `write`,
+/// `edit`, an MCP tool, and `bash` on a node without a read-only shell
+/// (this one: no bubblewrap), which says why. Reads run.
+#[tokio::test]
+async fn plan_mode_refuses_every_change_with_no_card_and_no_effect() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    std::fs::write(ws.join("kept.txt"), "original\n").unwrap();
+    let mut n = start(
+        &dir.path().join("node.db"),
+        policy(dir.path(), ApprovalMode::Auto),
+    )
+    .await;
+    let sid = n.create(&ws, Some(ApprovalMode::Plan), None, false).await;
+    assert_eq!(n.mode(sid), ApprovalMode::Plan);
+    let asked = n
+        .turn(
+            sid,
+            &script(&[
+                ("read", json!({"path": "kept.txt"})),
+                ("write", json!({"path": "new.txt", "content": "x"})),
+                (
+                    "edit",
+                    json!({"path": "kept.txt", "old_string": "original", "new_string": "gone"}),
+                ),
+                ("mcp__files__write", json!({"path": "kept.txt"})),
+                ("bash", json!({"command": "touch from-bash.txt"})),
+            ]),
+            None,
+            |_| Decision::Allow,
+        )
+        .await;
+    assert!(asked.is_empty(), "a card: {:?}", about(&asked));
+    assert!(!ws.join("new.txt").exists());
+    assert!(!ws.join("from-bash.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(ws.join("kept.txt")).unwrap(),
+        "original\n"
+    );
+    let results = n.results(sid);
+    let read = results.iter().find(|(t, ..)| t == "read").unwrap();
+    assert!(read.1, "{read:?}");
+    for tool in ["write", "edit", "mcp__files__write", "bash"] {
+        let (_, ok, out) = results.iter().find(|(t, ..)| t == tool).expect(tool);
+        assert!(!ok, "{tool}: {out}");
+        assert!(out.starts_with("[harness] plan mode: `"), "{tool}: {out}");
+    }
+    let (_, _, bash) = results.iter().find(|(t, ..)| t == "bash").unwrap();
+    assert!(bash.contains("no read-only shell"), "{bash}");
+    assert!(bash.contains("sandbox"), "says why: {bash}");
+    // Nothing the turn did left plan mode.
+    assert!(n.changes(sid).is_empty());
+    assert_eq!(n.mode(sid), ApprovalMode::Plan);
+}
+
+/// Plan mode is entered and left only by the owner's command (the same
+/// route and event as every mode), survives a restart, and nothing the
+/// model writes leaves it; after the person switches to auto, the next
+/// turn carries out the change.
+#[tokio::test]
+async fn only_the_person_leaves_plan_mode_and_it_survives_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    let db = dir.path().join("node.db");
+    let wire = json!({"type": "session.set_approval_mode", "req_id": "r",
+                      "mode": "auto"})
+    .to_string();
+    let sid = {
+        let mut n = start(&db, policy(dir.path(), ApprovalMode::Auto)).await;
+        let sid = n.create(&ws, None, None, false).await;
+        n.set_mode(sid, ApprovalMode::Plan).await.unwrap();
+        assert_eq!(
+            n.changes(sid).iter().map(|c| c.mode).collect::<Vec<_>>(),
+            [ApprovalMode::Plan]
+        );
+        sid
+    };
+    let mut n = start(&db, policy(dir.path(), ApprovalMode::Auto)).await;
+    let asked = n
+        .turn(
+            sid,
+            &script(&[
+                ("write", json!({"path": "mode.json", "content": wire})),
+                ("write", json!({"path": "a.txt", "content": "x"})),
+            ]),
+            None,
+            |_| Decision::Allow,
+        )
+        .await;
+    assert!(asked.is_empty(), "{:?}", about(&asked));
+    assert!(!ws.join("a.txt").exists() && !ws.join("mode.json").exists());
+    assert_eq!(n.mode(sid), ApprovalMode::Plan, "after the restart");
+    // The person leaves it.
+    n.set_mode(sid, ApprovalMode::Auto).await.unwrap();
+    let asked = n
+        .turn(
+            sid,
+            &script(&[("write", json!({"path": "a.txt", "content": "x"}))]),
+            None,
+            |_| Decision::Deny,
+        )
+        .await;
+    assert!(asked.is_empty());
+    assert!(ws.join("a.txt").exists());
+}
+
+/// A sub-agent of a chat in plan mode is in plan mode: recorded so at its
+/// creation and held by the parent's ceiling; a delegate that can write is
+/// not started at all.
+#[tokio::test]
+async fn a_sub_agent_of_a_plan_chat_cannot_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    let mut n = start(
+        &dir.path().join("node.db"),
+        policy(dir.path(), ApprovalMode::Auto),
+    )
+    .await;
+    let sid = n.create(&ws, Some(ApprovalMode::Plan), None, false).await;
+    let agent = |id: &str, tools: &[&str], delegates| harness_core::agent::AgentSpec {
+        agent_id: id.into(),
+        name: id.into(),
+        system_prompt: "work".into(),
+        tools: harness_core::agent::ToolSelection::List(
+            tools.iter().map(|t| t.to_string()).collect(),
+        ),
+        model: None,
+        fallbacks: vec![],
+        unavailable: vec![],
+        no_effort: vec![],
+        context_windows: Default::default(),
+        effort: None,
+        ui: Default::default(),
+        prompt_hash: "h".into(),
+        deny_tools: vec![],
+        delegates,
+        caps: None,
+    };
+    let task = script(&[
+        ("bash", json!({"command": "touch child.txt"})),
+        ("write", json!({"path": "child2.txt", "content": "x"})),
+    ]);
+    let asked = n
+        .turn(
+            sid,
+            &format!("delegate: dev={task} | scout={task}"),
+            Some(agent(
+                "lead",
+                &["read"],
+                vec![
+                    agent("dev", &["read", "write", "bash"], vec![]),
+                    agent("scout", &["read", "bash"], vec![]),
+                ],
+            )),
+            |_| Decision::Allow,
+        )
+        .await;
+    assert!(asked.is_empty(), "{:?}", about(&asked));
+    assert!(!ws.join("child.txt").exists() && !ws.join("child2.txt").exists());
+    let results = n.results(sid);
+    let outs: Vec<&str> = results.iter().map(|(_, _, o)| o.as_str()).collect();
+    assert!(
+        outs.iter().any(|o| o.contains("@dev was not started")),
+        "{outs:?}"
+    );
+    // Scout ran, in plan mode: recorded at its creation, and its calls
+    // refused.
+    let children: Vec<SessionId> = n
+        .node
+        .store()
+        .sessions()
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.parent_id.as_deref() == Some(&sid.to_string()))
+        .map(|r| r.session_id)
+        .collect();
+    assert_eq!(children.len(), 1, "only the scout started: {outs:?}");
+    assert_eq!(n.mode(children[0]), ApprovalMode::Plan);
+    for (tool, ok, out) in n.results(children[0]) {
+        assert!(!ok, "{tool}: {out}");
+        assert!(out.contains("plan mode"), "{tool}: {out}");
+    }
+}
+
+/// The person switches a running turn to plan mode: its next change is
+/// refused, without a card.
+#[tokio::test]
+async fn switching_to_plan_mode_applies_to_the_next_call_of_the_running_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    let mut n = start(
+        &dir.path().join("node.db"),
+        policy(dir.path(), ApprovalMode::Auto),
+    )
+    .await;
+    let sid = n.create(&ws, Some(ApprovalMode::Auto), None, false).await;
+    n.send(prompt(
+        sid,
+        &script(&[
+            ("bash", json!({"command": "sleep 2"})),
+            ("write", json!({"path": "late.txt", "content": "x"})),
+        ]),
+        None,
+    ));
+    loop {
+        if let NodeToMaster::Event { event } = n.next().await
+            && let Ok(EventKind::ToolCallStarted(c)) = event.typed()
+            && c.input["command"] == "sleep 2"
+        {
+            break;
+        }
+    }
+    n.send(MasterToNode::SetApprovalMode {
+        lowering: true,
+        req_id: "plan".into(),
+        session_id: sid,
+        mode: ApprovalMode::Plan,
+    });
+    let mut cards = 0;
+    loop {
+        match n.next().await {
+            NodeToMaster::Ack { req_id, ok, error } if req_id == "plan" => {
+                assert!(ok, "{error:?}")
+            }
+            NodeToMaster::Event { event } => match event.typed().unwrap() {
+                EventKind::ApprovalRequested(_) => cards += 1,
+                EventKind::TurnEnded(_) => break,
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    assert_eq!(cards, 0);
+    assert!(!ws.join("late.txt").exists());
+    let (_, ok, out) = n
+        .results(sid)
+        .into_iter()
+        .find(|(t, ..)| t == "write")
+        .unwrap();
+    assert!(!ok && out.contains("plan mode"), "{out}");
+}
+
+/// A routine's chat may run in plan mode and keeps it; a node's ceiling of
+/// plan makes every chat plan.
+#[tokio::test]
+async fn a_routine_may_run_in_plan_mode_and_a_node_may_cap_at_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    let mut n = start(
+        &dir.path().join("node.db"),
+        policy(dir.path(), ApprovalMode::Auto),
+    )
+    .await;
+    let routine = n.create(&ws, Some(ApprovalMode::Plan), None, true).await;
+    assert_eq!(n.mode(routine), ApprovalMode::Plan);
+    assert!(n.set_mode(routine, ApprovalMode::Auto).await.is_err());
+    assert_eq!(n.mode(routine), ApprovalMode::Plan);
+    drop(n);
+    let mut n = start(
+        &dir.path().join("node2.db"),
+        policy(dir.path(), ApprovalMode::Plan),
+    )
+    .await;
+    let sid = n.create(&ws, Some(ApprovalMode::Auto), None, false).await;
+    assert_eq!(n.mode(sid), ApprovalMode::Plan);
+    let asked = n
+        .turn(
+            sid,
+            &script(&[("write", json!({"path": "a.txt", "content": "x"}))]),
+            None,
+            |_| Decision::Allow,
+        )
+        .await;
+    assert!(asked.is_empty());
+    assert!(!ws.join("a.txt").exists());
+}
+
+// ---- the independent review of PR 125 ----
+
+/// Review H1: a card shown in `ask`, the person switches to plan mode
+/// while it waits, then answers Allow on the old card. The card was
+/// denied by the node when plan mode began (recorded as its policy, with
+/// the reason), and the late Allow runs nothing. Failed before: the write
+/// ran.
+#[tokio::test]
+async fn a_card_waiting_when_plan_mode_starts_is_denied() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    let mut n = start(
+        &dir.path().join("node.db"),
+        policy(dir.path(), ApprovalMode::Auto),
+    )
+    .await;
+    let sid = n.create(&ws, Some(ApprovalMode::Ask), None, false).await;
+    for (tool, input, file) in [
+        ("write", json!({"path": "a.txt", "content": "x"}), "a.txt"),
+        ("bash", json!({"command": "touch b.txt"}), "b.txt"),
+    ] {
+        if n.mode(sid) != ApprovalMode::Ask {
+            n.set_mode(sid, ApprovalMode::Ask).await.unwrap();
+        }
+        n.send(prompt(sid, &script(&[(tool, input)]), None));
+        let approval_id = loop {
+            if let NodeToMaster::Event { event } = n.next().await
+                && let Ok(EventKind::ApprovalRequested(a)) = event.typed()
+            {
+                break a.approval_id;
+            }
+        };
+        n.send(MasterToNode::SetApprovalMode {
+            lowering: true,
+            req_id: "plan".into(),
+            session_id: sid,
+            mode: ApprovalMode::Plan,
+        });
+        loop {
+            if let NodeToMaster::Ack { req_id, ok, error } = n.next().await
+                && req_id == "plan"
+            {
+                assert!(ok, "{error:?}");
+                break;
+            }
+        }
+        assert_eq!(n.mode(sid), ApprovalMode::Plan);
+        n.send(MasterToNode::ApprovalRespond {
+            req_id: "ans".into(),
+            session_id: sid,
+            approval_id: approval_id.clone(),
+            decision: Decision::Allow,
+            note: None,
+        });
+        loop {
+            if let NodeToMaster::Event { event } = n.next().await
+                && let Ok(EventKind::TurnEnded(_)) = event.typed()
+            {
+                break;
+            }
+        }
+        let r = n.results(sid);
+        let (_, ok, out) = r.iter().rev().find(|(t, ..)| t == tool).unwrap();
+        assert!(!ok, "{tool}: {out}");
+        assert!(out.contains("plan mode"), "{tool}: {out}");
+        assert!(!ws.join(file).exists(), "{tool}");
+        // The card's answer in the log is the node's, with the reason.
+        let events = n.node.store().events_after(sid, 0, 100_000).unwrap();
+        let resolved = events
+            .iter()
+            .filter_map(|e| match e.typed() {
+                Ok(EventKind::ApprovalResolved(r)) if r.approval_id == approval_id => Some(r),
+                _ => None,
+            })
+            .next_back()
+            .expect("resolved");
+        assert_eq!(resolved.decision, Decision::Deny);
+        assert_eq!(resolved.by, harness_core::event::ResolvedBy::Policy);
+        assert!(resolved.note.unwrap().contains("Plan mode started"));
+    }
+    assert!(
+        !ws.join("a.txt").exists(),
+        "write ran in plan mode after the old card's Allow"
+    );
+    assert!(
+        !ws.join("b.txt").exists(),
+        "bash wrote in plan mode after the old card's Allow"
+    );
+}
+
+/// Review: "for this chat" given in ask, plan mode entered: the same call
+/// again is refused, with no card.
+#[tokio::test]
+async fn a_chat_grant_does_not_survive_into_plan_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    let mut n = start(
+        &dir.path().join("node.db"),
+        policy(dir.path(), ApprovalMode::Auto),
+    )
+    .await;
+    let sid = n.create(&ws, Some(ApprovalMode::Ask), None, false).await;
+    let s = script(&[("write", json!({"path": "g.txt", "content": "x"}))]);
+    let asked = n.turn(sid, &s, None, |_| Decision::AllowChat).await;
+    assert_eq!(asked.len(), 1);
+    std::fs::remove_file(ws.join("g.txt")).unwrap();
+    n.set_mode(sid, ApprovalMode::Plan).await.unwrap();
+    let asked = n.turn(sid, &s, None, |_| Decision::Allow).await;
+    assert!(asked.is_empty());
+    assert!(!ws.join("g.txt").exists());
+}
+
+/// Review H1, the states that outlive a mode change: a "for this turn"
+/// grant given in `ask` before the switch covers nothing in plan mode (the
+/// grant skips the card, never the mode).
+#[tokio::test]
+async fn a_turn_grant_given_before_plan_mode_covers_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    let mut n = start(
+        &dir.path().join("node.db"),
+        policy(dir.path(), ApprovalMode::Auto),
+    )
+    .await;
+    let sid = n.create(&ws, Some(ApprovalMode::Ask), None, false).await;
+    let write = ("write", json!({"path": "a.txt", "content": "x"}));
+    n.send(prompt(
+        sid,
+        &script(&[
+            write.clone(),
+            ("read", json!({"path": "a.txt"})),
+            ("bash", json!({"command": "sleep 2"})),
+            write.clone(),
+        ]),
+        None,
+    ));
+    let mut switched = false;
+    loop {
+        if let NodeToMaster::Event { event } = n.next().await {
+            match event.typed().unwrap() {
+                EventKind::ApprovalRequested(a) => {
+                    // The write: for this turn; the sleep: once.
+                    let d = if a.tool == "write" {
+                        Decision::AllowSession
+                    } else {
+                        Decision::Allow
+                    };
+                    n.send(MasterToNode::ApprovalRespond {
+                        req_id: format!("a-{}", a.approval_id),
+                        session_id: sid,
+                        approval_id: a.approval_id.clone(),
+                        decision: d,
+                        note: None,
+                    });
+                }
+                EventKind::ToolCallStarted(c) if c.input["command"] == "sleep 2" && !switched => {
+                    switched = true;
+                    std::fs::remove_file(ws.join("a.txt")).unwrap();
+                    n.send(MasterToNode::SetApprovalMode {
+                        lowering: true,
+                        req_id: "plan".into(),
+                        session_id: sid,
+                        mode: ApprovalMode::Plan,
+                    });
+                }
+                EventKind::TurnEnded(_) => break,
+                _ => {}
+            }
+        }
+    }
+    assert!(switched);
+    assert!(
+        !ws.join("a.txt").exists(),
+        "the turn grant ran the write in plan mode"
+    );
+    let writes: Vec<_> = n
+        .results(sid)
+        .into_iter()
+        .filter(|(t, ..)| t == "write")
+        .collect();
+    assert_eq!(writes.len(), 2, "{writes:?}");
+    assert!(writes[0].1);
+    assert!(
+        !writes[1].1 && writes[1].2.contains("plan mode"),
+        "{writes:?}"
+    );
+}
+
+/// Review H1: a writer sub-agent mid-turn when its parent chat enters plan
+/// mode: its waiting card is denied at once by the node, and its next write
+/// is refused (the parent's mode is its ceiling at every call).
+#[tokio::test]
+async fn a_writer_sub_agent_mid_turn_follows_its_parent_into_plan_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    for args in [
+        &["init", "-q"][..],
+        &["commit", "-q", "--allow-empty", "-m", "init"],
+    ] {
+        let ok = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&ws)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+    }
+    let mut n = start(
+        &dir.path().join("node.db"),
+        policy(dir.path(), ApprovalMode::Auto),
+    )
+    .await;
+    let sid = n.create(&ws, Some(ApprovalMode::Ask), None, false).await;
+    let agent = |id: &str, tools: &[&str], delegates| harness_core::agent::AgentSpec {
+        agent_id: id.into(),
+        name: id.into(),
+        system_prompt: "work".into(),
+        tools: harness_core::agent::ToolSelection::List(
+            tools.iter().map(|t| t.to_string()).collect(),
+        ),
+        model: None,
+        fallbacks: vec![],
+        unavailable: vec![],
+        no_effort: vec![],
+        context_windows: Default::default(),
+        effort: None,
+        ui: Default::default(),
+        prompt_hash: "h".into(),
+        deny_tools: vec![],
+        delegates,
+        caps: None,
+    };
+    let task = script(&[
+        ("write", json!({"path": "first.txt", "content": "x"})),
+        ("write", json!({"path": "second.txt", "content": "x"})),
+    ]);
+    n.send(prompt(
+        sid,
+        &format!("delegate: dev={task}"),
+        Some(agent(
+            "lead",
+            &["read"],
+            vec![agent("dev", &["write"], vec![])],
+        )),
+    ));
+    let mut child = None;
+    let mut cards = 0;
+    loop {
+        if let NodeToMaster::Event { event } = n.next().await {
+            match event.typed().unwrap() {
+                // The child's first write waits on its card: plan mode now.
+                EventKind::ApprovalRequested(_) if event.session_id != sid => {
+                    cards += 1;
+                    child = Some(event.session_id);
+                    n.send(MasterToNode::SetApprovalMode {
+                        lowering: true,
+                        req_id: "plan".into(),
+                        session_id: sid,
+                        mode: ApprovalMode::Plan,
+                    });
+                }
+                EventKind::ApprovalRequested(a) => {
+                    n.send(MasterToNode::ApprovalRespond {
+                        req_id: "x".into(),
+                        session_id: sid,
+                        approval_id: a.approval_id.clone(),
+                        decision: Decision::Allow,
+                        note: None,
+                    });
+                }
+                EventKind::TurnEnded(_) if event.session_id == sid => break,
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(cards, 1, "the child asked again in plan mode");
+    let child = child.expect("the child asked");
+    let results = n.results(child);
+    assert_eq!(results.len(), 2, "{results:?}");
+    for (tool, ok, out) in &results {
+        assert!(!ok && out.contains("plan mode"), "{tool}: {out}");
+    }
+    let events = n.node.store().events_after(child, 0, 100_000).unwrap();
+    assert!(events.iter().any(|e| matches!(
+        e.typed(),
+        Ok(EventKind::ApprovalResolved(r)) if r.by == harness_core::event::ResolvedBy::Policy
+    )));
+    for f in ["first.txt", "second.txt"] {
+        assert!(!ws.join(f).exists(), "{f}");
+    }
+}
+
+/// A writer sub-agent changed files in its own copy, then its parent chat
+/// entered plan mode before it ended: its changes are not written into the
+/// folder, the parent is told so, and the work is kept (PLAN.md T32).
+#[tokio::test]
+async fn a_writer_childs_changes_are_kept_out_of_a_folder_now_in_plan_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    for args in [
+        &["init", "-q"][..],
+        &["commit", "-q", "--allow-empty", "-m", "init"],
+    ] {
+        let ok = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&ws)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok);
+    }
+    let mut n = start(
+        &dir.path().join("node.db"),
+        policy(dir.path(), ApprovalMode::Auto),
+    )
+    .await;
+    let sid = n.create(&ws, Some(ApprovalMode::Auto), None, false).await;
+    let agent = |id: &str, tools: &[&str], delegates| harness_core::agent::AgentSpec {
+        agent_id: id.into(),
+        name: id.into(),
+        system_prompt: "work".into(),
+        tools: harness_core::agent::ToolSelection::List(
+            tools.iter().map(|t| t.to_string()).collect(),
+        ),
+        model: None,
+        fallbacks: vec![],
+        unavailable: vec![],
+        no_effort: vec![],
+        context_windows: Default::default(),
+        effort: None,
+        ui: Default::default(),
+        prompt_hash: "h".into(),
+        deny_tools: vec![],
+        delegates,
+        caps: None,
+    };
+    let task = script(&[
+        ("write", json!({"path": "first.txt", "content": "x"})),
+        ("bash", json!({"command": "sleep 2"})),
+    ]);
+    n.send(prompt(
+        sid,
+        &format!("delegate: dev={task}"),
+        Some(agent(
+            "lead",
+            &["read"],
+            vec![agent("dev", &["write", "bash"], vec![])],
+        )),
+    ));
+    let mut switched = false;
+    loop {
+        if let NodeToMaster::Event { event } = n.next().await {
+            match event.typed().unwrap() {
+                EventKind::ToolCallStarted(c)
+                    if event.session_id != sid && c.input["command"] == "sleep 2" =>
+                {
+                    switched = true;
+                    n.send(MasterToNode::SetApprovalMode {
+                        lowering: true,
+                        req_id: "plan".into(),
+                        session_id: sid,
+                        mode: ApprovalMode::Plan,
+                    });
+                }
+                EventKind::TurnEnded(_) if event.session_id == sid => break,
+                _ => {}
+            }
+        }
+    }
+    assert!(switched);
+    assert!(
+        !ws.join("first.txt").exists(),
+        "written into a folder in plan mode"
+    );
+    let results = n.results(sid);
+    let (_, ok, out) = results.iter().find(|(t, ..)| t == "delegate").unwrap();
+    assert!(!ok, "{out}");
+    assert!(
+        out.contains("NOT applied") && out.contains("plan mode"),
+        "{out}"
+    );
+    assert!(out.contains("checkpoint store"), "kept: {out}");
+}
+
+/// Review: a sub-agent recorded in plan mode whose parent the node no
+/// longer holds (`current_mode` falls back to `own.min(ask)`) stays in plan
+/// mode: its own recorded mode is its floor.
+#[tokio::test]
+async fn a_plan_child_without_its_parent_stays_in_plan_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    let db = dir.path().join("node.db");
+    let agent = |id: &str, tools: &[&str], delegates| harness_core::agent::AgentSpec {
+        agent_id: id.into(),
+        name: id.into(),
+        system_prompt: "work".into(),
+        tools: harness_core::agent::ToolSelection::List(
+            tools.iter().map(|t| t.to_string()).collect(),
+        ),
+        model: None,
+        fallbacks: vec![],
+        unavailable: vec![],
+        no_effort: vec![],
+        context_windows: Default::default(),
+        effort: None,
+        ui: Default::default(),
+        prompt_hash: "h".into(),
+        deny_tools: vec![],
+        delegates,
+        caps: None,
+    };
+    let (sid, child) = {
+        let mut n = start(&db, policy(dir.path(), ApprovalMode::Auto)).await;
+        let sid = n.create(&ws, Some(ApprovalMode::Plan), None, false).await;
+        let task = script(&[("read", json!({"path": "."}))]);
+        n.turn(
+            sid,
+            &format!("delegate: scout={task}"),
+            Some(agent(
+                "lead",
+                &["read"],
+                vec![agent("scout", &["read", "write"], vec![])],
+            )),
+            |_| Decision::Allow,
+        )
+        .await;
+        let child = n
+            .node
+            .store()
+            .sessions()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.parent_id.as_deref() == Some(&sid.to_string()))
+            .map(|r| r.session_id);
+        (sid, child)
+    };
+    // `scout` declares `write`: a writer, not started in plan mode. Make
+    // the child by hand instead: a reader, as the node records one.
+    assert!(child.is_none(), "a writer was started in plan mode");
+    let child = {
+        let mut n = start(&db, policy(dir.path(), ApprovalMode::Auto)).await;
+        let task = script(&[("read", json!({"path": "."}))]);
+        n.turn(
+            sid,
+            &format!("delegate: scout={task}"),
+            Some(agent(
+                "lead",
+                &["read"],
+                vec![agent("scout", &["read"], vec![])],
+            )),
+            |_| Decision::Allow,
+        )
+        .await;
+        n.node
+            .store()
+            .sessions()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.parent_id.as_deref() == Some(&sid.to_string()))
+            .map(|r| r.session_id)
+            .expect("the scout ran")
+    };
+    // The parent is gone from the node; the child stays.
+    Store::open(&db, Durability::Full)
+        .unwrap()
+        .delete_session(sid, false)
+        .unwrap();
+    let mut n = start(&db, policy(dir.path(), ApprovalMode::Auto)).await;
+    assert!(n.node.store().events_after(sid, 0, 10).unwrap().is_empty());
+    assert_eq!(n.mode(child), ApprovalMode::Plan);
+    let asked = n
+        .turn(
+            child,
+            &script(&[("write", json!({"path": "c.txt", "content": "x"}))]),
+            None,
+            |_| Decision::Allow,
+        )
+        .await;
+    assert!(asked.is_empty(), "{:?}", about(&asked));
+    assert!(!ws.join("c.txt").exists());
+}
+
+/// Review M1 of PR 125: node.toml's ceiling lowered to plan for a chat whose
+/// log says auto. The node enforces plan mode, and its next turn records
+/// the change first (`approval_mode_changed`, requested = what the log
+/// said), so the log, the master and the UI say plan. Failed before: the
+/// log kept saying auto.
+#[tokio::test]
+async fn a_lowered_ceiling_is_recorded_at_the_next_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    let db = dir.path().join("node.db");
+    let sid = {
+        let mut n = start(&db, policy(dir.path(), ApprovalMode::Auto)).await;
+        n.create(&ws, Some(ApprovalMode::Auto), None, false).await
+    };
+    let mut n = start(&db, policy(dir.path(), ApprovalMode::Plan)).await;
+    assert_eq!(n.mode(sid), ApprovalMode::Auto, "nothing recorded yet");
+    let asked = n
+        .turn(
+            sid,
+            &script(&[("write", json!({"path": "a.txt", "content": "x"}))]),
+            None,
+            |_| Decision::Allow,
+        )
+        .await;
+    assert!(asked.is_empty());
+    assert!(!ws.join("a.txt").exists());
+    assert_eq!(n.mode(sid), ApprovalMode::Plan);
+    let changes = n.changes(sid);
+    assert_eq!(changes.len(), 1, "{changes:?}");
+    assert_eq!(changes[0].mode, ApprovalMode::Plan);
+    assert_eq!(changes[0].requested, Some(ApprovalMode::Auto));
+    // Recorded once: the next turn adds nothing.
+    n.turn(sid, "hello", None, |_| Decision::Allow).await;
+    assert_eq!(n.changes(sid).len(), 1);
+}
