@@ -42,6 +42,8 @@ export const pages = {
   "retry.overloaded": "provider overloaded",
   "retry.server_error": "provider error",
   "retry.network": "connection failed",
+  // The first-byte (or idle) timeout: the provider took the request and sent nothing yet.
+  "retry.no_answer": "no answer yet",
   "conv.childTools1": "1 tool call",
   "conv.childTools": "{n} tool calls",
   "conv.childTokens": "{n} tokens",

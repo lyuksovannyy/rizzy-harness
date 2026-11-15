@@ -160,7 +160,7 @@ impl Transcriber {
             .client
             .post(format!("{}/audio/transcriptions", self.url))
             .multipart(form);
-        if let Some(k) = &self.key {
+        if let Some(k) = self.key.as_ref().filter(|k| !k.is_blank()) {
             rb = rb.bearer_auth(k.expose());
         }
         let r = rb

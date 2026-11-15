@@ -56,6 +56,75 @@ async fn an_edit_of_a_file_never_read_is_refused_and_says_to_read_it() {
     assert_eq!(get(&dir, "a.txt"), "1\ntwo\n");
 }
 
+/// Live test 2026-11-15: a model that had read a file with `cat` in `bash`
+/// had both its edits refused. The guard does not parse commands; the
+/// refusal shows the lines around the first match instead, numbered as
+/// `read` shows them, and counts as reading the file at that moment: the
+/// same edit sent again goes through, unless the file changes first.
+#[tokio::test]
+async fn a_refused_unread_edit_shows_the_lines_and_the_same_edit_then_applies() {
+    let (dir, ctx) = ws();
+    let body: String = (1..=20).map(|i| format!("line {i}\n")).collect();
+    put(&dir, "a.txt", &body);
+    let e = edit(&ctx, "a.txt", "line 10\n", "ten\n").await;
+    assert!(!e.ok, "{}", e.output);
+    assert_eq!(get(&dir, "a.txt"), body, "nothing changed");
+    for n in 7..=13 {
+        assert!(
+            e.output.contains(&format!("\tline {n}\n")),
+            "line {n}: {}",
+            e.output
+        );
+    }
+    assert!(
+        !e.output.contains("\tline 3\n"),
+        "only around the match: {}",
+        e.output
+    );
+    assert!(
+        e.output.contains("send the same edit again"),
+        "{}",
+        e.output
+    );
+    let again = edit(&ctx, "a.txt", "line 10\n", "ten\n").await;
+    assert!(again.ok, "{}", again.output);
+    assert!(get(&dir, "a.txt").contains("line 9\nten\nline 11\n"));
+}
+
+/// Shown lines are what the file held then: a change on disk before the
+/// next edit is judged as after a `read` (refused where it changed, with
+/// the lines as they are now).
+#[tokio::test]
+async fn lines_shown_by_a_refusal_go_stale_like_a_read() {
+    let (dir, ctx) = ws();
+    put(&dir, "a.txt", "alpha\nbeta\n");
+    let e = edit(&ctx, "a.txt", "beta", "BETA").await;
+    assert!(!e.ok && e.output.contains("\tbeta"), "{}", e.output);
+    put(&dir, "a.txt", "alpha\nzeta\n");
+    let again = edit(&ctx, "a.txt", "beta", "BETA").await;
+    assert!(!again.ok, "{}", again.output);
+    assert!(again.output.contains("changed on disk"), "{}", again.output);
+    assert_eq!(get(&dir, "a.txt"), "alpha\nzeta\n");
+}
+
+/// Text that is not in the file shows nothing and counts as nothing: the
+/// refusal names the one call to make.
+#[tokio::test]
+async fn an_unread_edit_whose_text_is_missing_says_to_read() {
+    let (dir, ctx) = ws();
+    put(&dir, "a.txt", "one\ntwo\n");
+    let e = edit(&ctx, "a.txt", "three", "3").await;
+    assert!(!e.ok, "{}", e.output);
+    assert!(
+        e.output.contains("`read` with path `a.txt`"),
+        "{}",
+        e.output
+    );
+    assert!(!e.output.contains("\tone"), "{}", e.output);
+    let again = edit(&ctx, "a.txt", "one", "1").await;
+    assert!(!again.ok, "not seen yet: {}", again.output);
+}
+
 #[tokio::test]
 async fn a_partial_read_is_enough_for_edit() {
     let (dir, ctx) = ws();

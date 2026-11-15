@@ -500,6 +500,7 @@ impl ProviderError {
             ProviderError::UnknownModel(_) => false,
             ProviderError::Status { status, body, hint } => {
                 !hint.no_retry
+                    && !model_not_found(body)
                     && match status {
                         429 => !quota_exhausted(body),
                         500 | 502 | 503 | 504 | 529 => true,
@@ -550,6 +551,30 @@ impl ProviderError {
                     || msg.contains("input token count")))
     }
 
+    /// The provider answered that it cannot serve the model: a 404, a
+    /// server error (500 to 599, which a router also sends for a model it
+    /// has no connection for), or an error coded `model_not_found` at any
+    /// status. Not a rate limit, an exhausted quota or a too-long request.
+    /// Only the status and the error's code decide, never its free text.
+    pub fn cannot_serve(&self) -> bool {
+        let ProviderError::Status { status, body, .. } = self else {
+            return false;
+        };
+        !self.is_context_overflow() && (matches!(status, 404 | 500..=599) || model_not_found(body))
+    }
+
+    /// The provider's own words for a failed request: the error body's
+    /// message (or the body when it is not JSON). Shown quoted under the
+    /// harness's message, never on its own.
+    pub fn provider_text(&self) -> Option<String> {
+        match self {
+            ProviderError::Status { body, .. } if !body.trim().is_empty() => {
+                Some(error_message(body))
+            }
+            _ => None,
+        }
+    }
+
     /// How long the provider asked to wait before trying again.
     pub fn retry_after(&self) -> Option<std::time::Duration> {
         match self {
@@ -570,6 +595,13 @@ impl ProviderError {
             ProviderError::UnknownModel(_) => "unknown model".into(),
         }
     }
+}
+
+/// The error is coded `model_not_found` (OpenAI's code for a model that
+/// does not exist or is not open to the key; compatible servers and
+/// gateways such as LiteLLM reuse it): no wait brings the model back.
+fn model_not_found(body: &str) -> bool {
+    error_codes(body).iter().any(|c| c == "model_not_found")
 }
 
 /// The `error.code` / `error.type` of a JSON error body, lowercased

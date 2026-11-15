@@ -41,7 +41,8 @@ impl Tool for Remember {
          or accounts, family, relationships, beliefs, legal matters; a sensitive fact stays in this \
          workspace only. Never keep a password, key or token. To correct a fact you were shown, \
          pass its id as `replaces` with the new text; to drop one, pass its id as `forget` alone. \
-         The person sees every call in the chat: some save at once (with undo), others wait for \
+         The ids in brackets before the facts you were shown are only for `replaces` and \
+         `forget`: never show or cite one in a reply. The person sees every call in the chat: some save at once (with undo), others wait for \
          their Keep."
     }
     fn schema(&self) -> Value {
@@ -87,5 +88,22 @@ impl Tool for Remember {
                 crate::MAX_FACT_CHARS
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Live test 2026-11-15: a model cited a fact's id in its answer
+    /// ("... prefers tea over coffee [01a1dc9e...]"). The ids are arguments.
+    #[test]
+    fn the_description_says_fact_ids_are_never_shown() {
+        let d = Remember.description();
+        assert!(
+            d.contains("only for `replaces` and `forget`")
+                && d.contains("never show or cite one in a reply"),
+            "{d}"
+        );
     }
 }

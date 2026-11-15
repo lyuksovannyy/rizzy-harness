@@ -24,6 +24,22 @@
 //!   that change nothing do not break a count: it is not "in a row".
 //! - **The window** is one turn: a new guard for every turn, every callback
 //!   turn and every sub-agent's turn. A restart ends the turn.
+//! - **The second rule: one tool failing the same way** whatever its input
+//!   (live test 2026-11-15: 28 `bash` calls, each adding one flag to the
+//!   same command, each failing with the same error; the first rule never
+//!   fired, the turn burned 139k tokens). Per tool, a streak of failures
+//!   whose results are identical (after [`stable`]); the third is warned
+//!   ([`TOOL_WARN_AT`]), and after seven the next call to that tool is not
+//!   run ([`TOOL_REFUSE_AT`]); asking again in a later message ends the turn,
+//!   as above. Any other result of the tool (a success, a failure in other
+//!   words) ends the streak, and so does a change ([`RepeatGuard::restart`]);
+//!   calls of other tools in between do not. Only failures count: a poll
+//!   that succeeds with the same answer is the first rule's (same call) or
+//!   no loop at all. The thresholds are Hermes's same-tool failure counts
+//!   (warn at 3, halt at 8; `agent/tool_guardrails.py`, research round 2
+//!   synth 01 §2), which also need no identical result; with one required
+//!   here the rule is stricter, and it never refuses on argument churn
+//!   alone, which is why OpenClaw keeps its rolling detector off.
 //!
 //! It is fed only what the loop logged and asked before approval and
 //! dispatch, so a refused call is never offered to the person and never
@@ -43,10 +59,21 @@ use harness_tools::CallKey;
 pub const WARN_AT: u32 = 2;
 /// The call that would be the this-many-th is not run.
 pub const REFUSE_AT: u32 = 5;
+/// The second rule: from this many identical failures of one tool in a row
+/// (any input) the result carries a warning.
+pub const TOOL_WARN_AT: u32 = 3;
+/// The second rule: the call of that tool that would be the this-many-th
+/// such failure is not run.
+pub const TOOL_REFUSE_AT: u32 = 8;
 
 /// What the person sees as the result of a refused call.
 pub const REFUSED_OUTPUT: &str = "Not run: this exact call gave the same result several \
      times in this turn, with nothing changing in between (the harness's repeated-call guard).";
+
+/// What the person sees as the result of a call the second rule refused.
+pub const TOOL_REFUSED_OUTPUT: &str = "Not run: the calls to this tool before it failed with exactly \
+     the same output several times in a row in this turn, whatever their input, with nothing \
+     changing in between (the harness's repeated-call guard).";
 
 /// The result of a call after the refusal that ended the turn, in the same
 /// message: not run, and the person is not asked about it.
@@ -55,7 +82,8 @@ pub const ENDED_OUTPUT: &str = "Not run: the turn was ended by the harness's rep
 
 /// Why the turn ended, for the person.
 pub const STOP_ERROR: &str = "stopped: the model asked again for a call the repeated-call guard \
-     had refused (the same call with the same result, again and again, in one turn)";
+     had refused (the same call with the same result, or one tool failing the same way, again \
+     and again, in one turn)";
 
 struct Streak {
     outcome: u64,
@@ -70,6 +98,9 @@ struct Streak {
 #[derive(Default)]
 pub struct RepeatGuard {
     calls: HashMap<CallKey, Streak>,
+    /// The second rule: per tool (a digest of its name), its identical
+    /// failures in a row.
+    tools: HashMap<u64, Streak>,
     /// The model's message whose calls are being admitted.
     step: u32,
     /// A refusal ended the turn: nothing more runs in it.
@@ -83,10 +114,12 @@ pub enum Admission {
     /// Not run: a refusal earlier in this step ended the turn;
     /// [`ENDED_OUTPUT`] is its result.
     Ended,
-    /// Not run: [`REFUSED_OUTPUT`] is its result, `note` the model's line;
-    /// `stop` when the model was sent its refusal and asked for it again,
-    /// and the turn ends after this step.
+    /// Not run: `output` is its result ([`REFUSED_OUTPUT`] or
+    /// [`TOOL_REFUSED_OUTPUT`]), `note` the model's line; `stop` when the
+    /// model was sent its refusal and asked for it again, and the turn ends
+    /// after this step.
     Refuse {
+        output: &'static str,
         note: String,
         stop: bool,
     },
@@ -99,45 +132,74 @@ impl RepeatGuard {
         self.step += 1;
     }
 
-    /// Before approval and dispatch.
-    pub fn admit(&mut self, key: CallKey) -> Admission {
+    /// Before approval and dispatch: `key` is the call, `tool` its tool.
+    pub fn admit(&mut self, key: CallKey, tool: &str) -> Admission {
         if self.ended {
             return Admission::Ended;
         }
-        let Some(s) = self.calls.get_mut(&key) else {
-            return Admission::Run;
-        };
-        if s.runs + 1 < REFUSE_AT {
-            return Admission::Run;
-        }
+        let step = self.step;
         // Only a refusal the model has been sent ends the turn: the same
         // call again in the message that was refused is refused again,
         // as the first time (review T1-D2).
-        let stop = s.refused.is_some_and(|at| at < self.step);
-        s.refused.get_or_insert(self.step);
-        self.ended = stop;
-        let note = if stop {
-            format!(
-                "{NOTE_LEAD} This call and the calls after it in this message were not run, \
-                 and the turn ends here: it was refused before and you asked for it again."
-            )
-        } else {
-            format!(
-                "{NOTE_LEAD} This call was not run: the same call gave the same result {} \
-                 times in this turn, with nothing changing in between that the harness can \
-                 see, so it would again. Try a different approach, or end your turn and tell the person what \
-                 blocks you. Asking for it again ends the turn.",
-                REFUSE_AT - 1
-            )
+        let refuse = |s: &mut Streak| {
+            let stop = s.refused.is_some_and(|at| at < step);
+            s.refused.get_or_insert(step);
+            stop
         };
-        Admission::Refuse { note, stop }
+        if let Some(s) = self.calls.get_mut(&key)
+            && s.runs + 1 >= REFUSE_AT
+        {
+            let stop = refuse(s);
+            self.ended = stop;
+            let note = if stop {
+                stop_note()
+            } else {
+                format!(
+                    "{NOTE_LEAD} This call was not run: the same call gave the same result {} \
+                     times in this turn, with nothing changing in between that the harness can \
+                     see, so it would again. Try a different approach, or end your turn and tell the person what \
+                     blocks you. Asking for it again ends the turn.",
+                    REFUSE_AT - 1
+                )
+            };
+            return Admission::Refuse {
+                output: REFUSED_OUTPUT,
+                note,
+                stop,
+            };
+        }
+        if let Some(s) = self.tools.get_mut(&tool_digest(tool))
+            && s.runs + 1 >= TOOL_REFUSE_AT
+        {
+            let stop = refuse(s);
+            self.ended = stop;
+            let note = if stop {
+                stop_note()
+            } else {
+                format!(
+                    "{NOTE_LEAD} This call was not run: the last {} calls to this tool failed \
+                     with exactly the same output, whatever their input, with nothing changing \
+                     in between that the harness can see. Changing the input this way does not \
+                     change the result: read what the error says and try a different approach, \
+                     or end your turn and tell the person what blocks you. Calling this tool \
+                     again in your next message ends the turn.",
+                    TOOL_REFUSE_AT - 1
+                )
+            };
+            return Admission::Refuse {
+                output: TOOL_REFUSED_OUTPUT,
+                note,
+                stop,
+            };
+        }
+        Admission::Run
     }
 
     /// Something changed: every call's count starts again. Each keeps its
     /// last result, so a call that then only repeats it is judged against
     /// it (and is no progress itself).
     pub fn restart(&mut self) {
-        for s in self.calls.values_mut() {
+        for s in self.calls.values_mut().chain(self.tools.values_mut()) {
             s.runs = 0;
             s.refused = None;
         }
@@ -148,6 +210,7 @@ impl RepeatGuard {
     pub fn record(
         &mut self,
         key: CallKey,
+        tool: &str,
         changes: bool,
         ok: bool,
         output: &str,
@@ -179,16 +242,63 @@ impl RepeatGuard {
                 refused: None,
             },
         );
-        (runs >= WARN_AT).then(|| {
-            format!(
+        // The second rule: this tool's identical failures in a row; any
+        // other result of it ends the streak.
+        let t = tool_digest(tool);
+        let failed = if ok {
+            self.tools.remove(&t);
+            0
+        } else {
+            let n = match self.tools.get(&t) {
+                Some(s) if s.outcome == outcome => s.runs + 1,
+                _ => 1,
+            };
+            self.tools.insert(
+                t,
+                Streak {
+                    outcome,
+                    runs: n,
+                    refused: None,
+                },
+            );
+            n
+        };
+        if runs >= WARN_AT {
+            return Some(format!(
                 "{NOTE_LEAD} This exact call has now given the same result {runs} times in \
                  this turn, with nothing changing in between that the harness can see; asking \
                  again will not change it. If you are waiting for something outside to \
                  change, wait inside one command (a loop with a sleep and a deadline) or run \
                  it in the background. Call number {REFUSE_AT} of it will not be run."
+            ));
+        }
+        (failed >= TOOL_WARN_AT).then(|| {
+            format!(
+                "{NOTE_LEAD} This call and the {} calls to the same tool before it in this turn \
+                 all failed with exactly the same output, though their input differed; changing \
+                 the input this way does not change the result. Read what the error says and \
+                 try a different approach, or end your turn and tell the person what blocks \
+                 you. After {} such failures in a row the next call to this tool is not run.",
+                failed - 1,
+                TOOL_REFUSE_AT - 1
             )
         })
     }
+}
+
+/// The note of a refusal that ends the turn.
+fn stop_note() -> String {
+    format!(
+        "{NOTE_LEAD} This call and the calls after it in this message were not run, and the \
+         turn ends here: it was refused before and you asked for it again."
+    )
+}
+
+/// A tool's name as the second rule keys it: a digest, like every key here.
+fn tool_digest(tool: &str) -> u64 {
+    let mut h = std::hash::DefaultHasher::new();
+    tool.hash(&mut h);
+    h.finish()
 }
 
 /// Tokens the harness itself writes into a result that differ on every
@@ -264,17 +374,23 @@ mod tests {
         let mut g = RepeatGuard::default();
         let k = key(json!({"path": "a"}));
         for n in 1..REFUSE_AT {
-            assert_eq!(g.admit(k), Admission::Run, "call {n}");
-            let note = g.record(k, false, true, "same");
+            assert_eq!(g.admit(k, "read"), Admission::Run, "call {n}");
+            let note = g.record(k, "read", false, true, "same");
             assert_eq!(note.is_some(), n >= WARN_AT, "call {n}");
         }
-        assert!(matches!(g.admit(k), Admission::Refuse { stop: false, .. }));
+        assert!(matches!(
+            g.admit(k, "read"),
+            Admission::Refuse { stop: false, .. }
+        ));
         assert!(
-            matches!(g.admit(k), Admission::Refuse { stop: false, .. }),
+            matches!(g.admit(k, "read"), Admission::Refuse { stop: false, .. }),
             "the model was not sent the refusal yet"
         );
         g.next_step();
-        assert!(matches!(g.admit(k), Admission::Refuse { stop: true, .. }));
+        assert!(matches!(
+            g.admit(k, "read"),
+            Admission::Refuse { stop: true, .. }
+        ));
     }
 
     #[test]
@@ -282,13 +398,16 @@ mod tests {
         let mut g = RepeatGuard::default();
         let (a, c) = (key(json!({"path": "a"})), key(json!({"path": "c"})));
         for _ in 1..REFUSE_AT {
-            g.record(a, false, true, "same");
+            g.record(a, "read", false, true, "same");
         }
-        g.record(c, true, false, "no such file");
-        assert!(matches!(g.admit(a), Admission::Refuse { .. }));
+        g.record(c, "read", true, false, "no such file");
+        assert!(matches!(g.admit(a, "read"), Admission::Refuse { .. }));
         let b = key(json!({"path": "b"}));
-        g.record(b, false, true, "x");
-        assert!(g.record(b, false, false, "x").is_none(), "ok differs");
+        g.record(b, "read", false, true, "x");
+        assert!(
+            g.record(b, "read", false, false, "x").is_none(),
+            "ok differs"
+        );
     }
 
     /// Review T1-R1: what the harness itself makes different on every run
@@ -331,14 +450,17 @@ mod tests {
             let mut g = RepeatGuard::default();
             let k = key(json!({ "path": i }));
             assert_ne!(a, b);
-            assert!(g.record(k, true, false, &a).is_none());
-            assert!(g.record(k, true, false, &b).is_some(), "pair {i}: {b}");
+            assert!(g.record(k, "read", true, false, &a).is_none());
+            assert!(
+                g.record(k, "read", true, false, &b).is_some(),
+                "pair {i}: {b}"
+            );
         }
         let mut g = RepeatGuard::default();
         let k = key(json!({"path": "poll"}));
-        g.record(k, false, true, "bg-1 (running for 30 s)");
+        g.record(k, "read", false, true, "bg-1 (running for 30 s)");
         assert!(
-            g.record(k, false, true, "bg-1 (running for 60 s)")
+            g.record(k, "read", false, true, "bg-1 (running for 60 s)")
                 .is_none()
         );
     }
@@ -354,11 +476,11 @@ mod tests {
             key(json!({"path": "x"})),
         );
         for _ in 1..REFUSE_AT {
-            g.record(a, true, true, "a");
-            g.record(b, true, true, "b");
-            g.record(x, false, false, "error");
+            g.record(a, "read", true, true, "a");
+            g.record(b, "read", true, true, "b");
+            g.record(x, "read", false, false, "error");
         }
-        assert!(matches!(g.admit(x), Admission::Refuse { .. }));
+        assert!(matches!(g.admit(x, "read"), Admission::Refuse { .. }));
     }
 
     #[test]
@@ -367,10 +489,10 @@ mod tests {
         let k = key(json!({"path": "SECRET-ARG"}));
         let mut notes = vec![];
         for _ in 1..REFUSE_AT {
-            notes.extend(g.record(k, false, true, "SECRET-OUT"));
+            notes.extend(g.record(k, "read", false, true, "SECRET-OUT"));
         }
         for _ in 0..2 {
-            if let Admission::Refuse { note, .. } = g.admit(k) {
+            if let Admission::Refuse { note, .. } = g.admit(k, "read") {
                 notes.push(note);
             }
             g.next_step();
@@ -379,6 +501,56 @@ mod tests {
         for n in notes {
             assert!(n.starts_with(NOTE_LEAD) && !n.contains('\n'), "{n}");
             assert!(!n.contains("SECRET"), "{n}");
+        }
+    }
+
+    /// The second rule alone: one tool, a new input every time, the same
+    /// failure. Warned from the third, refused at the eighth; any other
+    /// result of that tool, or a change, starts it again; a success is
+    /// never counted.
+    #[test]
+    fn one_tool_failing_the_same_way_is_warned_then_refused() {
+        let mut g = RepeatGuard::default();
+        let k =
+            |i: u32| harness_tools::call_key(std::path::Path::new("/w"), "bash", &json!({"c": i}));
+        for i in 1..TOOL_REFUSE_AT {
+            assert_eq!(g.admit(k(i), "bash"), Admission::Run, "call {i}");
+            let note = g.record(k(i), "bash", false, false, "error: read-only");
+            assert_eq!(note.is_some(), i >= TOOL_WARN_AT, "call {i}");
+        }
+        match g.admit(k(99), "bash") {
+            Admission::Refuse { output, stop, .. } => {
+                assert_eq!(output, TOOL_REFUSED_OUTPUT);
+                assert!(!stop);
+            }
+            a => panic!("{a:?}"),
+        }
+        assert_eq!(g.admit(k(1), "read"), Admission::Run, "another tool runs");
+        g.next_step();
+        assert!(matches!(
+            g.admit(k(100), "bash"),
+            Admission::Refuse { stop: true, .. }
+        ));
+
+        // A success in between, or a change, starts the streak again.
+        let mut g = RepeatGuard::default();
+        for i in 1..TOOL_REFUSE_AT {
+            g.record(k(i), "bash", false, false, "error");
+        }
+        g.record(k(50), "bash", false, true, "fine");
+        assert_eq!(g.admit(k(51), "bash"), Admission::Run);
+        let mut g = RepeatGuard::default();
+        for i in 1..TOOL_REFUSE_AT {
+            g.record(k(i), "bash", false, false, "error");
+        }
+        g.restart();
+        assert_eq!(g.admit(k(51), "bash"), Admission::Run);
+
+        // Identical successes through new inputs never count.
+        let mut g = RepeatGuard::default();
+        for i in 1..3 * TOOL_REFUSE_AT {
+            assert!(g.record(k(i), "bash", false, true, "pending").is_none());
+            assert_eq!(g.admit(k(i + 1), "bash"), Admission::Run);
         }
     }
 }

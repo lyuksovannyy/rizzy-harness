@@ -305,7 +305,7 @@ export interface SessionView {
   context_model?: string;
 }
 
-export type RetryReason = "rate_limit" | "overloaded" | "server_error" | "network";
+export type RetryReason = "rate_limit" | "overloaded" | "server_error" | "network" | "no_answer";
 
 export interface ModelRetry {
   turn_id: string;

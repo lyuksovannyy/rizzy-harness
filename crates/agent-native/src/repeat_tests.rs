@@ -1093,3 +1093,149 @@ async fn a_second_ask_in_the_refusing_message_does_not_end_the_turn() {
     assert!(fin[7].1.contains("Not run") && r.changes == 0, "{fin:?}");
     assert_eq!(r.out.reason, TurnEndReason::Error, "{:?}", r.out);
 }
+
+fn builtin() -> Opts {
+    Opts {
+        builtin: true,
+        ..Default::default()
+    }
+}
+
+/// Live test 2026-11-15 (scenario 1b, codestral): 28 `bash` calls, each
+/// adding one flag to the same failing command, each answered with the same
+/// error. Each call is another call, so the exact-call rule never fired.
+/// The second rule warns at the third identical failure of the same tool
+/// and refuses the eighth call; asking for it in the next message ends the
+/// turn, as the first rule does.
+#[tokio::test]
+async fn a_loop_of_near_identical_calls_with_the_same_failure_ends_at_the_guard() {
+    let host = Host::new(Decision::Allow);
+    let dir = tempfile::tempdir().unwrap();
+    let mut flags = String::new();
+    let calls: Vec<_> = (0..28)
+        .map(|i| {
+            flags.push_str(&format!(" --flag{i}"));
+            bash(&format!(
+                "echo run >> runs; echo \"error: could not create home directory: \
+                 Read-only file system (os error 30)\"; exit 1 #{flags}"
+            ))
+        })
+        .collect();
+    let r = run_in(&host, calls, builtin(), dir.path()).await;
+    let fin = host.noted();
+    assert_eq!(
+        lines_of(dir.path(), "runs"),
+        repeat::TOOL_REFUSE_AT as usize - 1,
+        "{fin:?}"
+    );
+    assert_eq!(r.out.reason, TurnEndReason::Error, "{:?}", r.out);
+    assert!(
+        r.out
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("repeated-call guard"),
+        "{:?}",
+        r.out
+    );
+    let warned: Vec<usize> = (0..fin.len()).filter(|i| fin[*i].2.is_some()).collect();
+    let first = repeat::TOOL_WARN_AT as usize - 1;
+    assert_eq!(warned.first(), Some(&first), "{fin:?}");
+    let warn = fin[first].2.clone().unwrap();
+    assert!(
+        warn.contains("same tool") && warn.contains("exactly the same output"),
+        "the model is told what repeats: {warn}"
+    );
+    assert!(
+        !warn.contains("flag") && !warn.contains("Read-only"),
+        "{warn}"
+    );
+    let refused = repeat::TOOL_REFUSE_AT as usize - 1;
+    assert!(fin[refused].1.contains("Not run"), "{fin:?}");
+    assert_eq!(
+        fin.len(),
+        refused + 2,
+        "the next message's call ends it: {fin:?}"
+    );
+}
+
+/// Reading the same file in different ranges gives a different result
+/// each time: never a repeat, however many reads.
+#[tokio::test]
+async fn reading_one_file_in_different_ranges_never_trips_it() {
+    let host = Host::new(Decision::Allow);
+    let dir = tempfile::tempdir().unwrap();
+    let body: String = (0..40).map(|i| format!("line {i}\n")).collect();
+    std::fs::write(dir.path().join("f.txt"), body).unwrap();
+    let calls = (0..12)
+        .map(|i| {
+            (
+                "read",
+                json!({"path": "f.txt", "offset": 1 + 3 * i, "limit": 3}),
+            )
+        })
+        .collect();
+    let r = run_in(&host, calls, builtin(), dir.path()).await;
+    let fin = host.noted();
+    assert_eq!(r.out.reason, TurnEndReason::Completed, "{:?}", r.out);
+    assert!(fin.iter().all(|f| f.0 && f.2.is_none()), "{fin:?}");
+}
+
+/// Tests that keep failing, each time with a different message (another
+/// test, another line), are work in progress: never warned or refused.
+#[tokio::test]
+async fn failures_in_new_words_never_trip_it() {
+    let host = Host::new(Decision::Allow);
+    let dir = tempfile::tempdir().unwrap();
+    let calls = (0..12)
+        .map(|i| {
+            bash(&format!(
+                "echo run >> runs; echo 'test t{i} failed'; exit 1"
+            ))
+        })
+        .collect();
+    let r = run_in(&host, calls, builtin(), dir.path()).await;
+    let fin = host.noted();
+    assert_eq!(lines_of(dir.path(), "runs"), 12, "{fin:?}");
+    assert_eq!(r.out.reason, TurnEndReason::Completed, "{:?}", r.out);
+    assert!(fin.iter().all(|f| f.2.is_none()), "{fin:?}");
+}
+
+/// A poll that succeeds with the same answer through calls that differ
+/// (a status check written a little differently each time) is not a
+/// failure loop: the second rule counts failures only.
+#[tokio::test]
+async fn a_successful_poll_loop_never_trips_the_failure_rule() {
+    let host = Host::new(Decision::Allow);
+    let dir = tempfile::tempdir().unwrap();
+    let calls = (0..12)
+        .map(|i| bash(&format!("echo run >> runs; echo pending #{i}")))
+        .collect();
+    let r = run_in(&host, calls, builtin(), dir.path()).await;
+    let fin = host.noted();
+    assert_eq!(lines_of(dir.path(), "runs"), 12, "{fin:?}");
+    assert_eq!(r.out.reason, TurnEndReason::Completed, "{:?}", r.out);
+    assert!(fin.iter().all(|f| f.0 && f.2.is_none()), "{fin:?}");
+}
+
+/// A different result of the same tool between the failures (here a
+/// success) starts the streak again.
+#[tokio::test]
+async fn another_result_of_the_tool_starts_the_failure_streak_again() {
+    let host = Host::new(Decision::Allow);
+    let dir = tempfile::tempdir().unwrap();
+    let fail = |i: usize| {
+        bash(&format!(
+            "echo run >> runs; echo 'error: nope'; exit 1 #{i}"
+        ))
+    };
+    let n = repeat::TOOL_REFUSE_AT as usize - 2;
+    let mut calls: Vec<_> = (0..n).map(fail).collect();
+    calls.push(bash("echo run >> runs; echo fine"));
+    calls.extend((n..2 * n).map(fail));
+    let r = run_in(&host, calls, builtin(), dir.path()).await;
+    let fin = host.noted();
+    assert_eq!(lines_of(dir.path(), "runs"), 2 * n + 1, "{fin:?}");
+    assert_eq!(r.out.reason, TurnEndReason::Completed, "{:?}", r.out);
+    assert!(!fin.iter().any(|f| f.1.contains("Not run")), "{fin:?}");
+}

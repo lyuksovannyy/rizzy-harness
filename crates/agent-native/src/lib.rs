@@ -471,7 +471,12 @@ Next step:\n\
 What to do next.\n\n\
 Keep exact paths, names, commands, numbers and error messages. Write \"none\" under a heading \
 with nothing to say. Write up to about 1,000 words in all, far fewer when the session is \
-short. Do not continue the work, and write nothing before \"Goal:\".\n\n",
+short. Do not continue the work, and write nothing before \"Goal:\".\n\n\
+Record what was said, done and found, with its outcome as it was stated then: never check it \
+again, correct it, work it out again or add a result that is not in the transcript, even where \
+you think it is wrong. Where the transcript itself shows that something was wrong or \
+uncertain, say that it was called so and by whom (\"the person said the total was wrong\", \
+\"the test run contradicted it\").\n\n",
     transcript_labels!(),
     "The text under \"Earlier summary:\" is your own summary of what came before, under the \
 same headings: update it, do not nest it. Write the six headings once: keep what still holds, \
@@ -623,6 +628,17 @@ fn transcript(
             ChatMsg::Tool { content, .. } => {
                 let short: String = content.chars().take(TRANSCRIPT_RESULT_CHARS).collect();
                 quoted_part(&mut out, PART_RESULT, &short);
+                // Said where it is cut: without it a summariser read the
+                // cut text as all the assistant saw and "corrected" an
+                // answer taken from the rest (live test 2026-11-15).
+                let total = content.chars().count();
+                if total > TRANSCRIPT_RESULT_CHARS {
+                    out.push_str(&format!(
+                        "{NOTE_LEAD} The tool result above is cut here for this summary: \
+                         {TRANSCRIPT_RESULT_CHARS} of its {total} characters are shown, and the \
+                         assistant saw all of it.\n\n"
+                    ));
+                }
             }
             // The harness's own words, not the user's: as they are.
             ChatMsg::Note(t) | ChatMsg::CallNote(t) | ChatMsg::Opening(t) => {
@@ -2392,16 +2408,16 @@ impl NativeBackend {
                 // The repeated-call guard first: the same bad call again
                 // and again is refused, and ends the turn, as any other.
                 let key = harness_tools::call_key(&ctx.cwd, &call.tool, &call.input);
-                let admission = match (guard.admit(key), bad_args) {
+                let admission = match (guard.admit(key, &call.tool), bad_args) {
                     (repeat::Admission::Run, Some(e)) => Err(e),
                     (a, _) => Ok(a),
                 };
                 let (outcome, refused) = match admission {
                     Err(e) => (ToolOutcome::err(e), None),
                     Ok(admission) => match admission {
-                        repeat::Admission::Refuse { note, stop } => {
+                        repeat::Admission::Refuse { output, note, stop } => {
                             repeat_stop |= stop;
-                            (ToolOutcome::err(repeat::REFUSED_OUTPUT), Some(note))
+                            (ToolOutcome::err(output), Some(note))
                         }
                         repeat::Admission::Ended => (ToolOutcome::err(repeat::ENDED_OUTPUT), None),
                         repeat::Admission::Run => {
@@ -2432,7 +2448,7 @@ impl NativeBackend {
                         t.name() == call.tool
                             && t.risk() == harness_core::policy::ToolRisk::Mutating
                     });
-                    guard.record(key, changes, outcome.ok, &output)
+                    guard.record(key, &call.tool, changes, outcome.ok, &output)
                 });
                 // The step's last result carries the next request's note
                 // (half the budget, or the wrap-up), so the log has it.
