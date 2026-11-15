@@ -251,6 +251,7 @@ export type Item =
   | { type: "agent_changed"; agent: AgentRef }
   /** The owner changed the approval mode; `requested` when the node gave less. */
   | { type: "approval_mode_changed"; mode: ApprovalMode; requested?: ApprovalMode }
+  | { type: "step_limit_changed"; max_steps: number; requested?: number }
   | { type: "summary"; through_seq: number; text: string }
   /** The turn's main model failed or is unavailable: `model` (prefixed) answered instead of `from`. */
   | { type: "fallback"; turn_id: string; model: string; from: string; reason?: string | null }
@@ -294,6 +295,9 @@ export interface SessionView {
   background?: Record<string, BackgroundState>;
   /** The agent's task list (the latest `todo_updated`); absent when empty. */
   todo?: TodoItem[];
+  /** The chat's own step limit (the latest `step_limit_changed`); absent:
+   * the node's. */
+  max_steps?: number;
   /** A model call waits to be sent again (`model_retry`); absent otherwise. */
   retry?: ModelRetry;
   /** The latest turn's limits (`turn_ended.usage`): the window of the model it
@@ -740,6 +744,9 @@ export interface NodeInfo {
   max_approval?: ApprovalMode | null;
   /** What a new chat there gets when the person picks none. */
   default_approval?: ApprovalMode | null;
+  /** Its `[limits] max_steps` (X.14), the most a chat's own limit may be;
+   * absent: the node cannot change a chat's limit. */
+  max_steps?: number | null;
 }
 
 /** A server-wide account role (Settings → Users), not a workspace role. */

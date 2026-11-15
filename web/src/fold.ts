@@ -49,6 +49,7 @@ const KNOWN = new Set([
   "queued_delivered",
   "todo_updated",
   "approval_mode_changed",
+  "step_limit_changed",
 ]);
 
 const CLEARS_RETRY = new Set([
@@ -284,6 +285,13 @@ export function apply(v: SessionView, e: RawEvent): void {
     case "approval_mode_changed": {
       if (v.meta) v.meta.approval_mode = p.mode;
       const it: Extract<Item, { type: "approval_mode_changed" }> = { type: "approval_mode_changed", mode: p.mode };
+      if (p.requested != null) it.requested = p.requested;
+      v.items.push(it);
+      break;
+    }
+    case "step_limit_changed": {
+      v.max_steps = p.max_steps;
+      const it: Extract<Item, { type: "step_limit_changed" }> = { type: "step_limit_changed", max_steps: p.max_steps };
       if (p.requested != null) it.requested = p.requested;
       v.items.push(it);
       break;

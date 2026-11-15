@@ -83,6 +83,12 @@ pub enum Item {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         requested: Option<crate::policy::ApprovalMode>,
     },
+    /// The owner changed the chat's step limit (`step_limit_changed`).
+    StepLimitChanged {
+        max_steps: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        requested: Option<i64>,
+    },
     /// A background command ended (`background_ended`). `tail` is program
     /// output: shown as plain text, never rendered.
     BackgroundEnded {
@@ -181,6 +187,10 @@ pub struct SessionView {
     /// The agent's task list: the latest `todo_updated`'s (none: empty).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub todo: Vec<crate::todo::TodoItem>,
+    /// The chat's own step limit (the latest `step_limit_changed`); none:
+    /// the node's `[limits] max_steps`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_steps: Option<u64>,
     /// A model call waits to be sent again (`model_retry`); gone once
     /// output resumes, another model answers or the turn ends.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -502,6 +512,13 @@ impl SessionView {
                 }
                 self.items.push(Item::ApprovalModeChanged {
                     mode: c.mode,
+                    requested: c.requested,
+                });
+            }
+            EventKind::StepLimitChanged(c) => {
+                self.max_steps = Some(c.max_steps);
+                self.items.push(Item::StepLimitChanged {
+                    max_steps: c.max_steps,
                     requested: c.requested,
                 });
             }

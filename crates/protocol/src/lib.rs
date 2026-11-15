@@ -179,6 +179,18 @@ pub fn exec_capability(mode: harness_core::policy::ExecMode) -> String {
 /// `session.set_approval_mode` only to a node whose hello listed
 /// `approval-max:*`.
 pub const CAP_APPROVAL_MAX_PREFIX: &str = "approval-max:";
+/// The node capability that announces `session.set_step_limit` and says
+/// its step limit (X.14): `steps-max:<n>`, node.toml's `[limits]
+/// max_steps`, the most a chat there may be set to. What the UI offers;
+/// the node clamps every request. The master sends `session.set_step_limit`
+/// only to a node whose hello listed it.
+pub const CAP_STEPS_MAX_PREFIX: &str = "steps-max:";
+
+/// How a node's refusal of a `session.set_step_limit` sent as a lowering
+/// that would raise the chat's limit begins. The master answers it as a
+/// refusal to send again (its copy of the log was behind).
+pub const STEPS_NOT_A_LOWERING: &str =
+    "this change was sent as a lowering but would raise the chat's step limit";
 pub const CAP_APPROVAL_DEFAULT_PREFIX: &str = "approval-default:";
 
 /// The gaps of the modes a node offers, for the UI to say in the chat
@@ -463,6 +475,22 @@ pub enum MasterToNode {
         session_id: SessionId,
         mode: ApprovalMode,
     },
+    /// Change the chat's step limit (X.14). A request only: the node
+    /// clamps it to `1..=` its own `[limits] max_steps`, refuses it for a
+    /// sub-agent's or a routine's chat, and records the result as
+    /// `step_limit_changed`. Only to nodes whose hello listed `steps-max:*`.
+    #[serde(rename = "session.set_step_limit")]
+    SetStepLimit {
+        req_id: String,
+        session_id: SessionId,
+        max_steps: i64,
+        /// The master judged it a lowering from its copy of the log and so
+        /// skipped the owner's level check: the node refuses it if it would
+        /// in fact raise the chat's limit (`STEPS_NOT_A_LOWERING`; the copy
+        /// was behind), and records nothing.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        lowering: bool,
+    },
     #[serde(rename = "session.cancel")]
     Cancel {
         req_id: String,
@@ -563,6 +591,7 @@ impl MasterToNode {
             | MasterToNode::Callback { req_id, .. }
             | MasterToNode::SetAgent { req_id, .. }
             | MasterToNode::SetApprovalMode { req_id, .. }
+            | MasterToNode::SetStepLimit { req_id, .. }
             | MasterToNode::Cancel { req_id, .. }
             | MasterToNode::StopBackground { req_id, .. }
             | MasterToNode::Delete { req_id, .. }
@@ -627,6 +656,16 @@ mod tests {
                    "session_id": "0193f2a0-0000-7000-8000-000000000001", "mode": "accept_edits"})
         );
         assert_eq!(m.req_id(), Some("r"));
+        assert_eq!(serde_json::from_value::<MasterToNode>(v).unwrap(), m);
+        let m = MasterToNode::SetStepLimit {
+            req_id: "r".into(),
+            session_id: sid,
+            max_steps: 30,
+            lowering: false,
+        };
+        let v = serde_json::to_value(&m).unwrap();
+        assert_eq!(v["type"], "session.set_step_limit");
+        assert_eq!(v["max_steps"], 30);
         assert_eq!(serde_json::from_value::<MasterToNode>(v).unwrap(), m);
     }
 
