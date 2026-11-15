@@ -2306,7 +2306,7 @@ The built-in agents, grouped by category in the picker:
 | Reviewer (`@reviewer`) | IT | agent, sub-agent | read and search files; project memory; earlier chats and memory search |
 
 **Researcher in Agentic sessions.** Web tools exist only in chats, not on
-nodes yet (nodes have `remember`, which alone does none of a task's work). In an Agentic session, Researcher is therefore not offered
+nodes yet (nodes have `remember` and `recall`, which alone do none of a task's work). In an Agentic session, Researcher is therefore not offered
 to the Senior Teamlead or Software Developer as a sub-agent, and a delegation
 to it by name is refused with the reason, so the lead never believes research
 was done that was not. The rule is general: any sub-agent that lists tools

@@ -1391,5 +1391,7 @@ mod tests {
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(names.contains(&"remember"), "{names:?}");
         assert!(names.contains(&"graph_query"), "{names:?}");
+        // And `recall`, which the master answers (PLAN.md T55).
+        assert!(names.contains(&"recall"), "{names:?}");
     }
 }

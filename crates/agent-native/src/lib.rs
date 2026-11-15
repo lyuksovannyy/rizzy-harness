@@ -797,6 +797,7 @@ impl NativeBackend {
             .iter()
             .map(|n| match n.as_str() {
                 "remember" => "memory".to_string(),
+                "recall" => "earlier chats search".to_string(),
                 n => n.replace('_', " "),
             })
             .collect();
