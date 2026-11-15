@@ -223,6 +223,32 @@ impl Rig {
         }
     }
 
+    /// What `turn` of `sid` changed, as the diff view asks for it.
+    async fn diff(&mut self, sid: SessionId, turn: &str) -> harness_protocol::TurnDiff {
+        self.n += 1;
+        let req = format!("d{}", self.n);
+        self.send(MasterToNode::Diff {
+            req_id: req.clone(),
+            session_id: sid,
+            turn_id: turn.into(),
+            rewind: false,
+        });
+        loop {
+            match self.recv().await {
+                NodeToMaster::Event { event } => self.seen.push(event),
+                NodeToMaster::DiffResult {
+                    req_id,
+                    diff,
+                    error,
+                    ..
+                } if req_id == req => {
+                    return *diff.unwrap_or_else(|| panic!("no diff: {error:?}"));
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// The chat notes of `sid` seen since `mark`.
     fn notes(&self, sid: SessionId, mark: usize) -> Vec<String> {
         self.seen[mark..]
@@ -313,6 +339,8 @@ async fn another_chats_edit_during_the_turn_is_not_undone_silently() {
     r.turn(b, b_edits_first_line()).await;
     let turn = r.finish_waiting_turn(a, mark).await;
     assert_eq!(r.read("f.txt"), "ONE-B\ntwo\nTHREE-A\n");
+    // The diff view says so before the person clicks.
+    assert_eq!(r.diff(a, &turn).await.others, vec!["f.txt".to_string()]);
 
     let before = r.seen.len();
     let err = r.restore(a, &turn, false, false).await.unwrap_err();
@@ -399,6 +427,7 @@ async fn no_refusal_when_the_other_chat_only_read_or_worked_outside_the_turn() {
         ]),
     )
     .await;
+    assert!(r.diff(a, &turn).await.others.is_empty());
     let before = r.seen.len();
     r.restore(a, &turn, false, false).await.unwrap();
     assert_eq!(r.read("f.txt"), "ONE-B\ntwo\nthree\n");

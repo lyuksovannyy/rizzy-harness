@@ -101,7 +101,28 @@ impl Session {
             }
         }
         match crate::git::turn_diff(&repo, &before, &target, scrub).await {
-            Ok(d) => Ok(d),
+            Ok(mut d) => {
+                // What an undo would refuse over (T57), said before the
+                // person clicks: the same check, on the files shown.
+                let since_ms = events
+                    .iter()
+                    .find(|e| {
+                        matches!(e.typed(), Ok(EventKind::Checkpoint(c)) if c.turn_id == turn_id)
+                    })
+                    .map_or(0, |e| e.ts_ms);
+                let shown: std::collections::BTreeSet<String> = d
+                    .files
+                    .iter()
+                    .flat_map(|f| std::iter::once(f.path.clone()).chain(f.old_path.clone()))
+                    .collect();
+                d.others = self
+                    .foreign_work(&repo, since_ms, &shown)
+                    .await
+                    .all()
+                    .into_iter()
+                    .collect();
+                Ok(d)
+            }
             // Pruned between the check and the read (review D12): the
             // sentence, not git's "bad object".
             Err(_)

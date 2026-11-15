@@ -330,6 +330,12 @@ export default function DiffPanel(props: {
             {diff.more_files ? `; ${diff.more_files} more changed file${diff.more_files === 1 ? " is" : "s are"} not listed` : ""}.⟩
           </p>
         )}
+        {!!diff?.others?.length && (
+          <p className="diff-cut small" role="note">
+            Another chat working in this folder changed, or may have changed, {diff.others.map((n) => showHidden(n)).join(", ")}{" "}
+            since this turn began. Undoing this turn would put that back too, so it asks first.
+          </p>
+        )}
         {!!diff?.nested?.length && (
           <p className="muted small">
             Git repositories inside the folder are not compared: {diff.nested.map((n) => showHidden(n)).join(", ")}.

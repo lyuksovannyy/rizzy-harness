@@ -582,6 +582,7 @@ async fn turn_diff_inner(
         more_files,
         cut: cut || more_files > 0,
         nested: Names::of(&nested).shown.iter().map(|n| scrub(n)).collect(),
+        others: vec![],
     })
 }
 

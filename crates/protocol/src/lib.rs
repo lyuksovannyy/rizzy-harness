@@ -74,6 +74,12 @@ pub struct TurnDiff {
     /// their files are not compared (docs/undo-and-stash.md §2.6).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub nested: Vec<String>,
+    /// Files of this diff that another chat working in the folder changed,
+    /// or may have changed with its commands, since the turn began: an undo
+    /// of the turn would put them back too, so it asks first (PLAN.md T57).
+    /// Nothing about that chat.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub others: Vec<String>,
 }
 
 fn is_zero(n: &u64) -> bool {

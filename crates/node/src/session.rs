@@ -2594,12 +2594,23 @@ impl Session {
             false
         };
         let root = real_path(&repo.root);
-        let others: Vec<SessionId> = all
+        let ids: Vec<SessionId> = all
             .iter()
             .filter(|(id, _, _)| !mine(*id))
             .filter(|(_, _, cwd)| overlaps(&real_path(cwd), &root))
             .map(|(id, _, _)| *id)
             .collect();
+        let sessions: Vec<Arc<Session>> = {
+            let map = self.node.sessions.lock().unwrap_or_else(|p| p.into_inner());
+            ids.iter().filter_map(|id| map.get(id).cloned()).collect()
+        };
+        let mut others = Vec::with_capacity(sessions.len());
+        for s in sessions {
+            // Its own checkpoints, where its turns' changes are read
+            // (none: every file the undo writes counts for it).
+            let theirs = s.checkpoint_repo().await.ok().flatten();
+            others.push((s.id, theirs));
+        }
         crate::others::foreign_work(&self.node.cfg.store, repo, others, since_ms, touched).await
     }
 

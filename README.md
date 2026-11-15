@@ -752,7 +752,9 @@ Changes made by shell commands show like any other. The node reads them from
 the turn's checkpoints when you ask; nothing is stored on the server. A very
 large turn is shown in part, marked "Cut" (at most 1,000 files are listed and
 about 1 MiB of lines is sent); a checkpoint that is no longer kept, or a node
-that is away, is said in words. Only the chat's owner can open them. Checkpoints live in a private repository in the node's data
+that is away, is said in words. If another chat changed (or may have changed)
+some of these files since the turn began, the view names them before you
+press Undo (see "Two chats in one folder" below). Only the chat's owner can open them. Checkpoints live in a private repository in the node's data
 directory (`checkpoints/<hash>.git`), for git repositories too: nothing is
 written into your folder, no objects, refs, index or config are ever written
 into your `.git` (git may update the timestamps of existing object files

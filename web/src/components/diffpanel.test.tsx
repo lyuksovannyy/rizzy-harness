@@ -209,3 +209,17 @@ test("code is marked only where it hides something: indentation stays, CRLF said
   expect(indent.textContent).not.toContain("spaces⟩");
   expect([...indent.querySelectorAll(".hidden-mark")].map((m) => m.textContent)).toEqual(["<U+202E>"]);
 });
+
+test("another chat's files are named before Undo, hidden characters as codes (T57)", async () => {
+  turnDiff.mockImplementationOnce(() => Promise.resolve({ ...sample(), others: ["shop/format.py", "x‮y"] }));
+  await render();
+  const text = host.textContent!;
+  expect(text).toContain("Another chat working in this folder changed, or may have changed, shop/format.py");
+  expect(text).toContain("so it asks first");
+  expect(text).toContain("x<U+202E>y");
+});
+
+test("no note when no other chat worked here", async () => {
+  await render();
+  expect(host.textContent).not.toContain("Another chat");
+});

@@ -139,11 +139,14 @@ pub(crate) fn reverted_note(files: &BTreeSet<String>) -> String {
 
 /// The other chats' work on `touched` (paths relative to the checkpoint's
 /// folder `repo.root`) from `since_ms` on. `others` are the chats whose
-/// folder overlaps it, without the undoing chat and its sub-agents.
+/// folder overlaps it, without the undoing chat and its sub-agents, each
+/// with its own checkpoint repository when it has one (a chat in a folder
+/// containing this one, or inside it, may have its own; its paths are
+/// relative to its own folder).
 pub(crate) async fn foreign_work(
     store: &harness_store::Store,
     repo: &Repo,
-    others: Vec<SessionId>,
+    others: Vec<(SessionId, Option<Repo>)>,
     since_ms: i64,
     touched: &BTreeSet<String>,
 ) -> Foreign {
@@ -153,7 +156,11 @@ pub(crate) async fn foreign_work(
     }
     let root = real(&repo.root);
     let all = || touched.clone();
-    for sid in others {
+    for (sid, theirs) in others {
+        let theirs = theirs.as_ref().unwrap_or(repo);
+        let their_root = real(&theirs.root);
+        // A path of theirs as ours, if it is in this folder.
+        let ours = |p: &str| relative(&root, &their_root.join(p));
         let events = store
             .call(move |s| s.events_since_turn_at(sid, since_ms - LOOK_BACK_MS, KINDS))
             .await;
@@ -169,27 +176,32 @@ pub(crate) async fn foreign_work(
                         mine.insert(rel);
                     }
                 }
-                for rel in w.restored.into_iter().filter(|p| touched.contains(p)) {
+                for rel in w
+                    .restored
+                    .iter()
+                    .filter_map(|p| ours(p))
+                    .filter(|p| touched.contains(p))
+                {
                     out.wrote.insert(rel.clone());
                     mine.insert(rel);
                 }
                 for (before, after) in w.turns {
                     let changed = match (before, after) {
                         (Some(b), Some(a))
-                            if crate::git::exists(repo, &b).await
-                                && crate::git::exists(repo, &a).await =>
+                            if crate::git::exists(theirs, &b).await
+                                && crate::git::exists(theirs, &a).await =>
                         {
-                            crate::git::changed(repo, &b, &a).await.ok().map(|c| {
+                            crate::git::changed(theirs, &b, &a).await.ok().map(|c| {
                                 c.into_iter()
-                                    .map(|(_, p)| p)
+                                    .filter_map(|(_, p)| ours(&p))
                                     .filter(|p| touched.contains(p))
                                     .collect::<BTreeSet<_>>()
                             })
                         }
                         _ => None,
                     };
-                    // No checkpoints of that turn here (another folder's,
-                    // pruned, or a chat that takes none): any file.
+                    // No checkpoints of that turn (pruned, or a chat that
+                    // takes none): any file.
                     let changed = changed.unwrap_or_else(all);
                     mine.extend(changed.iter().cloned());
                     out.may.extend(changed);

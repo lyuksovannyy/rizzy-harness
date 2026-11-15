@@ -352,6 +352,9 @@ export interface TurnDiff {
   cut?: boolean;
   /** Nested git repositories, whose files are not compared. */
   nested?: string[];
+  /** Files another chat in the folder changed (or may have) since the turn
+   * began: an undo asks first (PLAN.md T57). Nothing about that chat. */
+  others?: string[];
 }
 
 export type DiffStatus = "added" | "deleted" | "modified" | "renamed" | "type_changed";
