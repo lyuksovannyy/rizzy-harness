@@ -625,7 +625,7 @@ async fn the_nodes_refusals() {
     // Nothing to resume: quiet.
     let other = chat(&t, &t.alex, None).await;
     *t.node.refuse.lock().unwrap() = Some(format!(
-        "{}: a turn is already running",
+        "{}: bg-1 has no end in this chat that waits for a turn",
         harness_protocol::CALLBACK_NOTHING
     ));
     t.node.append(other, started("bg-1"));
@@ -836,12 +836,7 @@ async fn a_restarted_master_asks_once_and_loses_nothing() {
     )
     .unwrap();
     let t = start(store, dir.path()).await;
-    let busy = || {
-        Some(format!(
-            "{}: a turn is already running",
-            harness_protocol::CALLBACK_NOTHING
-        ))
-    };
+    let busy = || Some(harness_protocol::CALLBACK_BUSY.to_string());
     let (a, b) = (chat(&t, &t.alex, None).await, chat(&t, &t.alex, None).await);
     *t.node.refuse.lock().unwrap() = busy();
     for sid in [a, b] {
@@ -1049,10 +1044,7 @@ async fn a_callback_turns_remember_is_never_filed_and_the_persons_turn_keeps_its
     .await;
     assert!(st.is_success(), "{st} {v}");
     mirrored(&t, p, 3).await;
-    *t.node.refuse.lock().unwrap() = Some(format!(
-        "{}: a turn is already running",
-        harness_protocol::CALLBACK_NOTHING
-    ));
+    *t.node.refuse.lock().unwrap() = Some(harness_protocol::CALLBACK_BUSY.to_string());
     t.node.append(p, started("bg-1"));
     t.node
         .append(p, ended("bg-1", BackgroundReason::Exited, false));

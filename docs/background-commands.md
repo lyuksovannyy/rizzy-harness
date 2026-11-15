@@ -280,14 +280,17 @@ The master does, as its routine runner does:
    are the only callers of `Master::prompt`; the callback is a third and must go through it too.
 4. It sends `session.prompt` with no text and `cause: { callback: [bg ids] }`, the session's
    agent and the usual context.
-5. The node accepts only if every named end is in its log, no turn started after it, the
+5. The node accepts only if every named end is in its log and still waits (no person's turn,
+   no refusal and no callback turn naming it came after it; the turn then names every end of
+   the chat that still waits, not only those the master listed), the
    session has fewer than `callback_turns` callback turns since its last `user_message`, and no
    drain runs. Otherwise it refuses with the reason (an ack error) and the end waits for the
    person's next message.
 
 Several ends before the turn starts become one turn. An end recorded more than 60 minutes
 before the master sees it (the master was down) starts no turn: the agent learns of it at the
-next message. These two rules and step 5 make a duplicate impossible: the second prompt finds
+next message, or in the opening of a later callback turn that a fresh end starts (the node names
+every end that still waits and does not know which ones the master declined). These two rules and step 5 make a duplicate impossible: the second prompt finds
 nothing undelivered.
 
 **What the model reads.** A fixed frame from the harness, never presented as the person's words:
