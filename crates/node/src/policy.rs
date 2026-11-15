@@ -88,8 +88,14 @@ pub struct SandboxPolicy {
     /// `bwrap` on `PATH` that this user cannot replace (owned by root).
     pub bwrap: Option<PathBuf>,
     /// The read-only shell's `/tmp` per command, in MiB (memory: a tmpfs of
-    /// the command's own; 64 to 65536). Absent: 1024 (PLAN.md T70).
+    /// the command's own, host memory per running read-only command;
+    /// 64 to 65536). Absent: 256 (PLAN.md T70).
     pub read_only_tmp_mib: Option<u64>,
+    /// Whether the read-only shell (plan mode, read-only agents) reaches
+    /// the network. Off by default (PLAN.md T70): their commands run
+    /// unasked and may run the repository's own code. On, it follows
+    /// `network` (it never widens it).
+    pub read_only_network: bool,
 }
 
 /// `[skills]` in node.toml (ADOPTION_PLAN X.2, PLAN.md T46): where the
@@ -402,6 +408,7 @@ impl SandboxPolicy {
         };
         Ok(harness_tools::sandbox::Settings {
             read_only_tmp,
+            read_only_network: self.read_only_network,
             mode: self.mode,
             network: self.network,
             read: expand("read", &self.read)?,

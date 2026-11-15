@@ -587,3 +587,58 @@ async fn a_readers_background_command_and_the_repeated_call_guard() {
     let last = reads.last().unwrap();
     assert!(last.starts_with("Not run: this exact call"), "{}", t.all());
 }
+
+/// A follow-up to Scout (PR 127's `session`) is still Scout in the
+/// read-only shell: same child, the parent's folder, `git log` works,
+/// writes fail, nothing is merged back.
+#[tokio::test]
+async fn a_continued_scout_is_still_read_only() {
+    let Some(mut n) = node(|_| {}).await else {
+        return;
+    };
+    let sid = n.create(ExecMode::Sandbox, ApprovalMode::Auto).await;
+    let t = n
+        .run(
+            sid,
+            lead(vec![scout()]),
+            &delegate("scout", "run: git log --oneline | wc -l"),
+        )
+        .await;
+    let first = t.of("delegate")[0].to_string();
+    let child = first
+        .strip_prefix("session: ")
+        .and_then(|r| r.lines().next())
+        .unwrap()
+        .to_string();
+    let before = tree(&n.ws);
+    let call = json!([{"tool": "delegate", "input": {
+        "agent": "scout", "session": child,
+        "task": "run: touch again.txt; git log -1 --format=%s"
+    }}]);
+    let t = n
+        .run(sid, lead(vec![scout()]), &format!("script: {call}"))
+        .await;
+    let out = t.of("delegate")[0];
+    assert!(out.starts_with(&format!("session: {child}")), "{out}");
+    assert!(!out.contains("applied"), "a merge-back: {out}");
+    // The child existed before this turn: its follow-up's results are read
+    // from its own log.
+    let cid: SessionId = child.parse().unwrap();
+    let last =
+        n.rt.store()
+            .events_after(cid, 0, 10_000)
+            .unwrap()
+            .into_iter()
+            .filter_map(|e| match e.typed() {
+                Ok(EventKind::ToolCallFinished(f)) => Some(f.output),
+                _ => None,
+            })
+            .next_back()
+            .unwrap();
+    assert!(last.contains("Read-only file system"), "{last}");
+    assert!(last.contains("add two"), "{last}");
+    assert_eq!(tree(&n.ws), before);
+    for f in n.child_folders(sid) {
+        assert_eq!(f.canonicalize().unwrap(), n.ws.canonicalize().unwrap());
+    }
+}

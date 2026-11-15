@@ -291,7 +291,9 @@ async fn reading_still_works() {
         (
             "tmp",
             "echo scratch > \"$TMPDIR/n\" && cat \"$TMPDIR/n\" && echo $TMPDIR",
-            "scratch\n/tmp",
+            // This folder is under the host's `/tmp`: the tmpfs is
+            // elsewhere (`read_only_tmp_dir`).
+            "scratch\n/.harness-tmp",
         ),
     ] {
         let out = bash(&ro, cmd).await;
@@ -299,7 +301,11 @@ async fn reading_still_works() {
         assert!(out.output.contains(want), "{what}: {}", out.output);
     }
     // Another command's `/tmp` is its own: nothing of the last one.
-    let out = bash(&ro, "test -e /tmp/n && echo LEFT-BEHIND; ls -A /tmp").await;
+    let out = bash(
+        &ro,
+        "test -e \"$TMPDIR/n\" && echo LEFT-BEHIND; ls -A \"$TMPDIR\"",
+    )
+    .await;
     assert!(out.ok, "{}", out.output);
     assert!(!out.output.contains("LEFT-BEHIND"), "{}", out.output);
     assert!(!f.ws.join(".git/index.lock").exists());
@@ -432,7 +438,7 @@ async fn the_binds_hold_without_landlock() {
     let Some(sb) = ready(&f).await else { return };
     let script = format!(
         "touch new-file; echo x >> marker; chmod 600 marker; echo x > '{}/kept'; \
-         echo t > /tmp/t && cat /tmp/t",
+         echo t > \"$TMPDIR/t\" && cat \"$TMPDIR/t\"",
         f.extra.display()
     );
     let (cmd, contained) = confined(sb)
@@ -667,4 +673,154 @@ fn walkdir(p: &Path) -> Vec<PathBuf> {
     }
     out.sort();
     out
+}
+
+/// A folder under the host's `/tmp` (review of PR 131, M1): Landlock is
+/// still the second layer for it. A Unix socket a host process listens on
+/// inside the read-only folder cannot be connected to (Landlock's
+/// `RESOLVE_UNIX`, ABI 9; before the fix the tmpfs's write rule on `/tmp`
+/// covered the folder and the host received the data), the temp folder is
+/// `/.harness-tmp`, writable, and `/tmp` itself is read-only.
+#[tokio::test]
+async fn a_folder_under_tmp_keeps_landlock_as_the_second_layer() {
+    let f = fixture();
+    assert!(
+        f.ws.starts_with("/tmp"),
+        "this test needs its folder under /tmp"
+    );
+    let Some(sb) = ready(&f).await else { return };
+    let ro = f.ctx(confined(sb), true);
+    let listener = std::os::unix::net::UnixListener::bind(f.ws.join("svc.sock")).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let out = bash(
+        &ro,
+        "python3 -c \"import socket;s=socket.socket(socket.AF_UNIX);s.connect('svc.sock');\
+         s.sendall(b'WRITE-VIA-SOCKET');print('connected')\"",
+    )
+    .await;
+    assert!(!out.output.contains("connected\n"), "{}", out.output);
+    assert!(out.output.contains("PermissionError"), "{}", out.output);
+    assert!(listener.accept().is_err(), "the host received a connection");
+    let out = bash(
+        &ro,
+        "echo $TMPDIR $CARGO_TARGET_DIR; echo t > \"$TMPDIR/t\" && cat \"$TMPDIR/t\"; \
+         touch /tmp/hard-coded 2>&1",
+    )
+    .await;
+    assert!(
+        out.output
+            .starts_with("/.harness-tmp /.harness-tmp/cargo-target\nt\n"),
+        "{}",
+        out.output
+    );
+    assert!(
+        out.output.contains("Read-only file system"),
+        "{}",
+        out.output
+    );
+}
+
+/// The read-only shell has no network by default (PLAN.md T70): TCP to a
+/// listener of this test on the host's loopback fails, while the shell's
+/// own loopback works (a test suite's local server) and so does a test
+/// run; with `[sandbox] read_only_network = true` the host's listener is
+/// reached.
+#[tokio::test]
+async fn the_read_only_shell_has_no_network_unless_node_toml_says_so() {
+    let f = fixture();
+    let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    tcp.set_nonblocking(true).unwrap();
+    let port = tcp.local_addr().unwrap().port();
+    let reach = format!(
+        "python3 -c \"import socket;s=socket.create_connection(('127.0.0.1',{port}),3);\
+         s.sendall(b'x');print('reached')\" 2>&1 | tail -n 1"
+    );
+    let own = "python3 -c \"import socket,threading;srv=socket.socket();srv.bind(('127.0.0.1',0));\
+         srv.listen(1);p=srv.getsockname()[1];threading.Thread(target=lambda:srv.accept()[0].sendall(b'hi'),\
+         daemon=True).start();c=socket.create_connection(('127.0.0.1',p),3);print('own',c.recv(2).decode())\"";
+    std::fs::write(
+        f.ws.join("test_t.py"),
+        "import unittest\nclass T(unittest.TestCase):\n    def test_one(self):\n        self.assertEqual(1, 1)\n",
+    )
+    .unwrap();
+    // Off (the default).
+    let Some(sb) = ready(&f).await else { return };
+    let ro = f.ctx(confined(sb), true);
+    let out = bash(&ro, &reach).await;
+    assert!(!out.output.contains("reached"), "{}", out.output);
+    assert!(tcp.accept().is_err(), "the host's listener was reached");
+    let out = bash(&ro, own).await;
+    assert!(
+        out.output.contains("own hi"),
+        "own loopback: {}",
+        out.output
+    );
+    let out = bash(&ro, "python3 -B -m unittest -q test_t 2>&1 | tail -n 1").await;
+    assert!(out.output.contains("OK"), "{}", out.output);
+    // On.
+    let Some(sb) = f.sandbox_with(Settings {
+        read_only_network: true,
+        ..f.settings()
+    }) else {
+        return;
+    };
+    let Some(sb) = ready_with(&f, sb).await else {
+        return;
+    };
+    let ro = f.ctx(confined(sb), true);
+    let out = bash(&ro, &reach).await;
+    assert!(out.output.contains("reached"), "{}", out.output);
+}
+
+fn shmem_kib() -> i64 {
+    std::fs::read_to_string("/proc/meminfo")
+        .unwrap()
+        .lines()
+        .find(|l| l.starts_with("Shmem:"))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+/// The temp folder is host memory while the command runs (Shmem, in no
+/// process's RSS) and is returned when it ends; filling it ends in a clean
+/// "No space left" (the reviewer's measurement of PR 131, kept). Other
+/// processes move Shmem too: three tries.
+#[tokio::test]
+async fn the_temp_folder_is_host_memory_until_the_command_ends() {
+    let f = fixture();
+    let Some(sb) = f.sandbox_with(Settings {
+        read_only_tmp: 128 * 1024 * 1024,
+        ..f.settings()
+    }) else {
+        return;
+    };
+    let Some(sb) = ready_with(&f, sb).await else {
+        return;
+    };
+    let ro = Arc::new(f.ctx(confined(sb), true));
+    let mut seen = vec![];
+    for _ in 0..3 {
+        let before = shmem_kib();
+        let r = ro.clone();
+        let run = tokio::spawn(async move {
+            bash(
+                &r,
+                "head -c 200M /dev/zero > \"$TMPDIR/fill\"; echo rc=$?; sleep 3",
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+        let during = shmem_kib() - before;
+        let out = run.await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let after = shmem_kib() - before;
+        assert!(out.output.contains("No space left"), "{}", out.output);
+        seen.push((during, after));
+        if during > 96 * 1024 && after < 32 * 1024 {
+            return;
+        }
+    }
+    panic!("Shmem deltas (KiB, during, after): {seen:?}");
 }

@@ -182,17 +182,25 @@ macro_rules! lead {
 /// every write fails with "Read-only file system", git's optional index
 /// refresh is off so `git status` and `git diff` work, and cargo builds
 /// into `/tmp`.
-pub fn read_only_note(tmp_bytes: u64) -> String {
+pub fn read_only_note(tmp_bytes: u64, network: bool, web_fetch: bool) -> String {
+    let net = match (network, web_fetch) {
+        (true, _) => "",
+        (false, true) => {
+            " It has NO network: downloads, package installs and requests fail; read a web page \
+             with web_fetch instead."
+        }
+        (false, false) => " It has NO network: downloads, package installs and requests fail.",
+    };
     format!(
         "This shell is READ-ONLY: the folder and everything else it sees are mounted \
-         read-only, and only $TMPDIR (/tmp, at most {} MiB, private to the command and emptied \
-         when it ends) can be written. Use it to look and check: ls, cat, grep and pipelines, \
-         find, git log, git diff, git show, git status, git blame, and tests that write only to \
-         /tmp (cargo build and cargo test do: CARGO_TARGET_DIR is set there). Anything that \
-         writes elsewhere fails with \"Read-only file system\": editing or creating files, git \
-         add, commit, checkout, stash or fetch, installing or downloading packages, builds or \
-         tests that write into the folder (send their output to $TMPDIR where the tool allows \
-         it). Do not retry a write: it cannot succeed here.",
+         read-only, and only $TMPDIR (at most {} MiB, private to the command and emptied when it \
+         ends) can be written.{net} Use it to look and check: ls, cat, grep and pipelines, find, \
+         git log, git diff, git show, git status, git blame, and tests that write only to \
+         $TMPDIR (cargo build and cargo test do: CARGO_TARGET_DIR is set there; every command \
+         builds from nothing, so only small builds fit). Anything that writes elsewhere fails \
+         with \"Read-only file system\": editing or creating files, git add, commit, checkout, \
+         stash or fetch, builds or tests that write into the folder (send their output to \
+         $TMPDIR where the tool allows it). Do not retry a write: it cannot succeed here.",
         tmp_bytes / (1024 * 1024)
     )
 }
