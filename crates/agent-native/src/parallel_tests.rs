@@ -1,4 +1,4 @@
-//! Read-only calls of one step run at the same time (X.17): which calls
+//! Read-only calls of one step run at the same time (X.19): which calls
 //! join a batch, that the log and the next request keep call order
 //! whichever call finishes first, and that every guard of a call still
 //! sees it once, in call order.

@@ -5,13 +5,16 @@
 import { useEffect, useState } from "react";
 import { pageApi } from "../apiPages";
 import type { SessionView } from "../types";
+import { COMPACT_FAILED_LEAD } from "./compactCommand";
 
 /** How long the working state waits for the outcome before it gives up showing. */
 const WAIT_MS = 10 * 60 * 1000;
 
 /** Whether `items` from `from` on hold a /compact's outcome. */
 export function compactEnded(view: SessionView | null | undefined, from: number): boolean {
-  return !!view?.items.slice(from).some((it) => (it.type === "summary" && it.manual) || it.type === "error");
+  return !!view?.items
+    .slice(from)
+    .some((it) => (it.type === "summary" && it.manual) || (it.type === "error" && it.message.startsWith(COMPACT_FAILED_LEAD)));
 }
 
 export function useCompact(sessionId: string, view: SessionView | null | undefined) {

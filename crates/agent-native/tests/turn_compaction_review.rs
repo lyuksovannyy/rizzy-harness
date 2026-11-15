@@ -30,7 +30,7 @@ struct LogHost {
     queued: Mutex<Vec<(usize, String)>>,
     asked: Mutex<usize>,
     /// Read-only calls run with no card, so `read`s of one step run
-    /// together (X.17).
+    /// together (X.19).
     unasked: bool,
 }
 
@@ -561,7 +561,7 @@ async fn rebuild_matches_live_at_every_step() {
     rebuild_matches_live(false, 1..=8).await;
 }
 
-/// The same with the reads of a step running together (X.17), each later
+/// The same with the reads of a step running together (X.19), each later
 /// call of a step made to finish before the earlier ones: the log, and so
 /// every request, keep call order whichever finishes first.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

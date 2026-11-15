@@ -718,14 +718,19 @@ collapsed, where it was made in the chat.
 in focus, and the chat's history is summarised now instead of when it fills
 up: everything before your last message and its answer, which stay word for
 word (an automatic summary keeps the last two turns), with the task list and
-standing context given back as after any summary. Your focus words go to the
-summarising model as yours, quoted, for emphasis only (at most 2,000
-characters; a longer text is cut and says so). The chat shows "Summarising
+standing context given back as after any summary. Your focus words, on the
+same line as `/compact`, go to the summarising model as yours, quoted, for
+emphasis only (at most 2,000 characters; a longer text is cut and says so;
+more lines after the command are refused with a hint). `/compact` is the
+built-in command: a skill named `compact` is still offered to the agent,
+but `/compact` never loads it. The chat shows "Summarising
 the chat for the model…" until the summary appears ("summarised for the
 model at your request", with your focus and the summary under it), and the
 context meter drops to the new size. It works between turns only (a running
 turn shortens its own context when it must; Stop it first if you want to
-summarise now), one at a time, and no message is sent while it runs. A chat
+summarise now), one at a time, and no message is sent while it runs; Stop
+shows while it runs and cancels it. A message you sent during the last turn
+that no turn has read yet is read first: `/compact` waits until then. A chat
 too short to summarise, a model error, a summary that would not be smaller
 or Stop is said in plain words, and nothing is lost: the chat keeps showing
 every message, only what the model is sent gets shorter. After two failed
@@ -2304,7 +2309,9 @@ with the tool gets the list too.
 **Asking for one.** A message of yours that starts with `/name` (a skill's
 name, then your text; `/name:` works too) asks the agent to load that skill
 first, a manual one included. A task one agent hands another never does.
-There is no menu for it yet.
+There is no menu for it yet. `/compact` is taken by the built-in command
+(see "Summarise now"): a skill named `compact` is still offered to the
+agent, but cannot be asked for this way (a manual one not at all).
 
 **What a skill can do: nothing by itself.** Nothing in a skill runs when it is
 found or loaded (no `` !`command` `` expansion); a script it names runs only

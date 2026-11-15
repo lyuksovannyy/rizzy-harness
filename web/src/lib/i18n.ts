@@ -34,6 +34,7 @@ const en = {
   "composer.placeholder.session": "Reply… (@ to pick an agent)",
   "composer.running": "Working… write to add to the task, or press Stop",
   "composer.runningHint": "Read after the current step. Stop interrupts.",
+  "composer.compacting": "Summarising the chat… press Stop to cancel",
   "composer.send": "Send",
   "composer.stop": "Stop",
   "composer.node": "Node",

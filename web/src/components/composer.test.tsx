@@ -304,6 +304,40 @@ describe("/compact", () => {
     expect(compacted).toEqual(["keep the database migration details", ""]);
     expect(sent).toEqual(["/compactness is a word"]);
     expect(textarea.value).toBe("");
+    // More lines after it: neither a summary nor a message, a hint.
+    await send("/compact keep x\nthen do y");
+    expect(compacted.length).toBe(2);
+    expect(sent.length).toBe(1);
+    expect(host.textContent).toContain("same line");
+    act(() => root.unmount());
+  });
+
+  test("while a /compact runs, Stop shows and cancels it", () => {
+    let stopped = 0;
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    act(() =>
+      root.render(
+        <Composer
+          where="session"
+          agents={[]}
+          models={[]}
+          workers={[]}
+          agentId=""
+          onAgentChange={() => {}}
+          agenticBlocked={null}
+          onSubmit={async () => {}}
+          compact={async () => {}}
+          compacting
+          onStop={() => void stopped++}
+        />,
+      ),
+    );
+    const stop = host.querySelector<HTMLButtonElement>("button.send.stop");
+    expect(stop).not.toBeNull();
+    act(() => stop!.click());
+    expect(stopped).toBe(1);
     act(() => root.unmount());
   });
 });

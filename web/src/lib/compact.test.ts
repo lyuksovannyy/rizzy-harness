@@ -7,11 +7,15 @@ import { compactEnded } from "./compact";
 import { parseCompact } from "./compactCommand";
 
 describe("parseCompact", () => {
-  test("the command, with or without focus", () => {
-    expect(parseCompact("/compact")).toBe("");
-    expect(parseCompact("  /compact  ")).toBe("");
-    expect(parseCompact("/compact keep the database migration details")).toBe("keep the database migration details");
-    expect(parseCompact("/compact\nline one\nline two")).toBe("line one\nline two");
+  test("the command, with or without focus on its line", () => {
+    expect(parseCompact("/compact")).toEqual({ focus: "" });
+    expect(parseCompact("  /compact  ")).toEqual({ focus: "" });
+    expect(parseCompact("/compact keep the database migration details")).toEqual({ focus: "keep the database migration details" });
+  });
+  test("more lines after it: refused with a hint, not a summary of the whole message", () => {
+    const r = parseCompact("/compact keep x\nand then do y");
+    expect(r && "error" in r).toBe(true);
+    expect(parseCompact("/compact\nline one")).toHaveProperty("error");
   });
   test("anything else is a message", () => {
     expect(parseCompact("/compactness")).toBeNull();
@@ -28,6 +32,8 @@ describe("compactEnded", () => {
     expect(compactEnded(view(before), 1)).toBe(false);
     expect(compactEnded(view([...before, { type: "summary", through_seq: 9, text: "new", manual: true }]), 1)).toBe(true);
     expect(compactEnded(view([...before, { type: "error", message: "The chat was not summarised: x. Nothing was lost." }]), 1)).toBe(true);
+    // Another error (an MCP server that did not start) is not its outcome.
+    expect(compactEnded(view([...before, { type: "error", message: "mcp server x did not start" }]), 1)).toBe(false);
     // An automatic summary is not the person's.
     expect(compactEnded(view([...before, { type: "summary", through_seq: 9, text: "auto" }]), 1)).toBe(false);
   });

@@ -296,6 +296,10 @@ pub const HANDOFF_BUSY: &str = "no hand-off note now: the chat is busy";
 pub const COMPACT_TURN_RUNNING: &str = "A turn is running: /compact works between turns. Stop \
      it or wait for it to end, then try again (a running turn shortens its own context when it \
      must).";
+/// A `session.compact` refused because a message of the person's waits to
+/// be read (sent during the last turn): it is read first.
+pub const COMPACT_PENDING: &str = "A message of yours is waiting to be read: send /compact \
+     again after its answer (or send a message to have it read).";
 /// A `session.compact` refused because another one runs in the chat.
 pub const COMPACT_BUSY: &str = "This chat is already being summarised.";
 /// A prompt or callback refused while the chat is being summarised.

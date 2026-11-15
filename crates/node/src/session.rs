@@ -192,6 +192,11 @@ pub(crate) struct Session {
     /// (`claim_turn` refuses with `COMPACTING`), and Stop or a delete
     /// cancels it. Set and read under `turn`'s lock.
     compacting: Mutex<Option<CancellationToken>>,
+    /// The agent and settings the last person's turn would read its
+    /// queued messages with (`read_queued`): a `/compact` that ends with
+    /// messages pending starts that turn (X.20 review M1). None after a
+    /// restart: those messages wait for the person's next one.
+    reader: Mutex<Option<(Option<AgentSpec>, TurnExtra)>>,
 }
 
 /// The most messages that wait at once for the running turn to read them
@@ -404,6 +409,7 @@ impl Session {
             note: Mutex::new(None),
             note_tries: Mutex::default(),
             compacting: Mutex::new(None),
+            reader: Mutex::new(None),
             node: node.clone(),
             id,
             head: tokio::sync::Mutex::new(0),
@@ -527,6 +533,7 @@ impl Session {
             note: Mutex::new(None),
             note_tries: Mutex::default(),
             compacting: Mutex::new(None),
+            reader: Mutex::new(None),
             node,
             id,
             head: tokio::sync::Mutex::new(view.head_seq),
@@ -1356,6 +1363,7 @@ impl Session {
                     by_stop,
                 )
                 .await;
+            this.keep_reader(agent.clone(), after.clone());
             this.read_queued(reason, agent, after, turn_id).await;
         });
         Ok(())
@@ -1459,6 +1467,8 @@ impl Session {
             reason,
             TurnEndReason::Completed | TurnEndReason::Error | TurnEndReason::Limit
         ) {
+            #[cfg(feature = "testing")]
+            crate::testing::queued_hold(self.id).await;
             let Some((turn_id, user_text, history, extra, cancel, by_stop)) = self
                 .start_queued(agent.as_ref(), after.clone(), &ended)
                 .await
@@ -1765,6 +1775,7 @@ impl Session {
                     by_stop,
                 )
                 .await;
+            this.keep_reader(person.clone(), after.clone());
             this.read_queued(reason, person, after, turn_id).await;
         });
         Ok(())
@@ -1973,6 +1984,17 @@ impl Session {
             if t.is_some() {
                 return Err(COMPACT_TURN_RUNNING.into());
             }
+            // A message sent during the last turn that no turn read yet:
+            // the turn that reads it may be about to claim the slot (it
+            // waits for `queue`), and must not find it taken (review M1).
+            if !self
+                .pending
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .is_empty()
+            {
+                return Err(harness_protocol::COMPACT_PENDING.into());
+            }
             let mut c = self.compacting.lock().unwrap_or_else(|p| p.into_inner());
             if c.is_some() {
                 return Err(COMPACT_BUSY.into());
@@ -2087,13 +2109,40 @@ impl Session {
         Ok(())
     }
 
-    /// The `/compact` is over: turns may start again.
-    fn end_compact(&self) {
-        let _t = self.turn.lock().unwrap_or_else(|p| p.into_inner());
-        self.compacting
+    /// The `/compact` is over, whatever its outcome: turns may start
+    /// again, and messages that wait to be read (none can arrive while it
+    /// runs, and it is refused while any wait; this is the second guard of
+    /// review M1) start the turn that reads them, as after a turn.
+    fn end_compact(self: &Arc<Self>) {
+        {
+            let _t = self.turn.lock().unwrap_or_else(|p| p.into_inner());
+            self.compacting
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .take();
+        }
+        let waiting = !self
+            .pending
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .take();
+            .is_empty();
+        let reader = self
+            .reader
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        if let (true, Some((agent, after))) = (waiting, reader) {
+            let this = self.clone();
+            tokio::spawn(async move {
+                this.read_queued(TurnEndReason::Completed, agent, after, String::new())
+                    .await;
+            });
+        }
+    }
+
+    /// What the last person's turn reads its queued messages with.
+    fn keep_reader(&self, agent: Option<AgentSpec>, after: TurnExtra) {
+        *self.reader.lock().unwrap_or_else(|p| p.into_inner()) = Some((agent, after));
     }
 
     /// Start a turn in the log: read the history before it, then record

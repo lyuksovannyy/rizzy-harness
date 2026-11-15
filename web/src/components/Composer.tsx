@@ -130,6 +130,8 @@ export function Composer(props: {
   steps?: { value: number; max: number; onChange: (n: number) => Promise<unknown> };
   /** Session: `/compact [focus]` summarises the chat now instead of sending a message (X.20). */
   compact?: (focus: string) => Promise<unknown>;
+  /** Session: a /compact runs; Stop cancels it. */
+  compacting?: boolean;
 }) {
   const home = props.where === "home";
   const [text, setText] = useState(() => (props.draft ? readDraft(props.draft) : ""));
@@ -359,12 +361,16 @@ export function Composer(props: {
     // next step (X.5).
     if (!body || busy || uploading || sendingImages || props.readOnly) return;
     // `/compact [focus]`: a command to the chat's node, never a message.
-    const focus = !home && props.compact ? parseCompact(body) : null;
-    if (focus !== null && props.compact) {
+    const asked = !home && props.compact ? parseCompact(body) : null;
+    if (asked && "error" in asked) {
+      setErr(asked.error);
+      return;
+    }
+    if (asked && props.compact) {
       setBusy(true);
       setErr(null);
       try {
-        await props.compact(focus);
+        await props.compact(asked.focus);
         setText("");
       } catch (x) {
         setErr(x instanceof Error ? x.message : String(x));
@@ -502,7 +508,9 @@ export function Composer(props: {
     }
   };
 
-  const placeholder = props.running
+  const placeholder = props.compacting
+    ? t("composer.compacting")
+    : props.running
     ? t("composer.running")
     : props.readOnly
       ? t("composer.readOnly")
@@ -819,13 +827,13 @@ export function Composer(props: {
               })}
             </div>
           )}
-          {props.running && props.onStop && (
+          {(props.running || props.compacting) && props.onStop && (
             <button type="button" className="send stop" onClick={props.onStop} aria-label={t("composer.stop")}>
               <Square size={16} fill="currentColor" />
             </button>
           )}
           {/* While a turn runs, Send joins Stop once there is something to send. */}
-          {(!(props.running && props.onStop) || !!text.trim()) && (
+          {(!((props.running || props.compacting) && props.onStop) || !!text.trim()) && (
             <button
               type="button"
               className="send"

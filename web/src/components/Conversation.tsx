@@ -793,6 +793,8 @@ export default function Conversation(props: {
             agenticBlocked={null}
             readOnly={blocked}
             running={running}
+            // While a /compact runs, Stop cancels it (the same route).
+            compacting={summarise.compacting && !running}
             draft={keepsDraft ? sessionId : undefined}
             voice={props.voice}
             onStop={() => void pageApi.cancel(sessionId)}

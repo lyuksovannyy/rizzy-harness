@@ -613,3 +613,29 @@ async fn a_sub_agent_that_fails_still_counts_what_it_spent() {
         "the failed child's one call"
     );
 }
+
+/// A person's `/compact` (X.20) summarises with the chat's model; its
+/// calls land under that model, as every other call does.
+#[tokio::test]
+async fn a_manual_compact_lands_under_the_chats_model() {
+    let p = Arc::new(Script::default());
+    let b = backend(p.clone(), None);
+    let sid = SessionId::new();
+    let out = b
+        .compact_now(harness_core::backend::CompactCtx {
+            session_id: sid,
+            history: history(sid, 4, 4_000),
+            model: "p::chat".into(),
+            window: None,
+            focus: Some("keep the numbers".into()),
+            cancel: CancellationToken::new(),
+        })
+        .await
+        .unwrap();
+    let harness_core::backend::CompactOutcome::Done { usage, .. } = out else {
+        panic!("no summary: {out:?}")
+    };
+    assert!(*p.summaries.lock().unwrap() > 0, "a summary was written");
+    assert_eq!(usage.by_model, p.ledger());
+    assert_eq!(usage.by_model.keys().collect::<Vec<_>>(), ["p::chat"]);
+}

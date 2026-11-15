@@ -302,9 +302,33 @@ pub mod testing {
         h
     }
 
+    static QUEUED_HOLD: Holds = std::sync::Mutex::new(Vec::new());
+
+    /// Arm a hold for session `sid`'s next start of a turn for the messages
+    /// sent while the last one ran: after the ended turn freed the slot and
+    /// before the next one claims it (X.20 review M1, a `/compact` in that
+    /// window).
+    pub fn hold_next_queued_start(sid: harness_core::SessionId) -> Arc<EndHold> {
+        let h = Arc::new(EndHold {
+            held: tokio::sync::Notify::new(),
+            go: tokio::sync::Semaphore::new(0),
+            is_held: Default::default(),
+        });
+        QUEUED_HOLD.lock().unwrap().push((sid, h.clone()));
+        h
+    }
+
+    pub(crate) async fn queued_hold(sid: harness_core::SessionId) {
+        wait_on(&QUEUED_HOLD, sid).await;
+    }
+
     pub(crate) async fn end_hold(sid: harness_core::SessionId) {
+        wait_on(&END_HOLD, sid).await;
+    }
+
+    async fn wait_on(holds: &Holds, sid: harness_core::SessionId) {
         let h = {
-            let mut all = END_HOLD.lock().unwrap();
+            let mut all = holds.lock().unwrap();
             all.iter()
                 .position(|(s, _)| *s == sid)
                 .map(|i| all.remove(i).1)
