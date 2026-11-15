@@ -929,10 +929,81 @@ fn the_watchers_read_of_a_long_last_turn_is_its_ends_only() {
     drop(raw);
     let s = Store::open(&path, Durability::Full).unwrap();
     let got = s
-        .events_since_last_turn(sid, &["background_ended"])
+        .events_since_last_person_turn(sid, &["background_ended"])
         .unwrap();
     assert_eq!(got.len(), 1);
     assert_eq!(got[0].seq, 503);
+}
+
+/// T.8d step 3: a callback turn is no floor of the watcher's read (it
+/// covers only the ends it names, which the reader folds); a person's turn
+/// and a refusal are.
+#[test]
+fn the_watchers_read_starts_after_the_persons_turn_not_a_callback_turn() {
+    let s = Store::open_in_memory().unwrap();
+    let sid = SessionId::new();
+    s.append("n", &created(sid)).unwrap();
+    let turn = |seq, cause: Option<TurnCause>| {
+        ev(
+            sid,
+            seq,
+            EventKind::TurnStarted(TurnStarted {
+                turn_id: "t".into(),
+                agent: None,
+                cause,
+                environment: None,
+            }),
+        )
+    };
+    let end = |seq, id: &str| {
+        ev(
+            sid,
+            seq,
+            EventKind::BackgroundEnded(BackgroundEnded {
+                bg_id: id.into(),
+                reason: BackgroundReason::Exited,
+                exit_code: Some(0),
+                signal: None,
+                confirmed: BackgroundConfirmed::Ended,
+                ran_ms: 1,
+                output_bytes: 0,
+                tail: String::new(),
+                tail_cut: false,
+                delivered: false,
+            }),
+        )
+    };
+    s.append("n", &end(2, "bg-1")).unwrap();
+    s.append("n", &turn(3, None)).unwrap();
+    s.append("n", &end(4, "bg-2")).unwrap();
+    s.append("n", &end(5, "bg-3")).unwrap();
+    s.append(
+        "n",
+        &turn(6, Some(TurnCause::Callback(vec!["bg-2".into()]))),
+    )
+    .unwrap();
+    let seqs = |s: &Store| -> Vec<u64> {
+        s.events_since_last_person_turn(sid, &["background_ended", "turn_started"])
+            .unwrap()
+            .iter()
+            .map(|e| e.seq)
+            .collect()
+    };
+    assert_eq!(seqs(&s), [4, 5, 6]);
+    s.append(
+        "n",
+        &ev(
+            sid,
+            7,
+            EventKind::CallbackRefused(CallbackRefused {
+                bg_ids: vec!["bg-3".into()],
+                reason: "r".into(),
+            }),
+        ),
+    )
+    .unwrap();
+    s.append("n", &end(8, "bg-4")).unwrap();
+    assert_eq!(seqs(&s), [8]);
 }
 
 /// N.10a: the mode `session_created` recorded is on the session's row, so
