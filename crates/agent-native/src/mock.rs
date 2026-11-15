@@ -415,6 +415,7 @@ impl Provider for Mock {
                     | ChatMsg::CallNote(_)
                     | ChatMsg::Summary(_)
                     | ChatMsg::StepContext(_)
+                    | ChatMsg::ToolImage { .. }
             )
         });
         if let Some(ChatMsg::Tool { content, .. }) = last_real {

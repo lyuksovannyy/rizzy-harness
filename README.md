@@ -2144,6 +2144,26 @@ delays Stop or an approval answer, in that chat or any other.
 - `read` returns up to 2,000 lines (400 with bounded reads) and about
   29,000 characters; a longer window ends early at a whole line and names
   the offset to go on from.
+- **Images.** `read` of a PNG, JPEG, WebP or GIF file shows the agent the
+  image itself (a screenshot, a diagram, a design export in the repository),
+  when the turn's model is listed with `vision = true`; the format is told
+  by the file's first bytes, never its name, and an SVG is read as text.
+  A model without vision gets a line saying the file is an image it cannot
+  see, never the bytes as text. Limits: 5 MiB a file (as for an image you
+  attach) and 8,000 pixels a side, with no resizing (the harness decodes no
+  image; a larger file is refused with a note, so export a smaller one or a
+  crop); 4 images (5 MiB together) per step and 20 per turn; a request shows
+  only the newest 4 images (5 MiB together), older ones and cleared results
+  are left out, and the agent is told to read the file again to see it. The
+  bytes read are kept with the chat on its worker (at most 100 MiB of images
+  a chat, yours included) and go when the chat is deleted, so later requests
+  show the same image even after the file changed. The tool card shows the
+  path, format, size and pixels, not the picture. Each image costs tokens on
+  every request that shows it (the context meter counts about 1,000 tokens an
+  image; providers bill by pixels, often more for a large screenshot).
+  Text inside an image is treated as file content, not instructions, but
+  the secret scrubber cannot read pixels: a screenshot of a key goes to the
+  provider as it is.
 
 ### Token savings
 

@@ -144,12 +144,35 @@ fn user_parts(text: &str, images: &[ImagePart]) -> Vec<ContentPart> {
     parts
 }
 
+/// An image a `read` returned, as the provider is sent it: the harness's
+/// line naming the file and the call (each made one line, quotation marks
+/// read as `'`), then the image. Shown only to a model that takes images
+/// (`images::tool_window`); one without bytes is left out.
+fn tool_image_parts(m: &ChatMsg) -> Vec<ContentPart> {
+    let ChatMsg::ToolImage { call_id, image, .. } = m else {
+        return vec![];
+    };
+    let Some(data) = image.data.clone() else {
+        return vec![];
+    };
+    vec![
+        ContentPart::Text(crate::images::tool_image_line(&image.name, call_id)),
+        ContentPart::Binary(Binary::from_base64(
+            image.mime.clone(),
+            data,
+            Some(image.name.clone()),
+        )),
+    ]
+}
+
 pub(crate) fn to_genai(req: &ChatRequest) -> GChatRequest {
     let mut msgs = Vec::new();
     let mut system_seen = false;
     // Where each user message (the person's, or a callback turn's
     // opening) went in `msgs`.
     let mut users = Vec::new();
+    // The message before was a step's image: the next one joins it.
+    let mut images_open = false;
     for m in &req.messages {
         if matches!(
             m,
@@ -212,7 +235,24 @@ pub(crate) fn to_genai(req: &ChatRequest) -> GChatRequest {
                 call_id.clone(),
                 content.clone(),
             ))),
+            // A step's images (`place_notes` put them after its results):
+            // one user-role message, each under the harness's line.
+            ChatMsg::ToolImage { .. } => {
+                let parts = tool_image_parts(m);
+                if parts.is_empty() {
+                    continue;
+                }
+                let joined = images_open && msgs.last().is_some();
+                if joined && let Some(last) = msgs.last_mut() {
+                    let mut all = last.content.parts().to_vec();
+                    all.extend(parts);
+                    last.content = MessageContent::from_parts(all);
+                } else {
+                    msgs.push(ChatMessage::user(MessageContent::from_parts(parts)));
+                }
+            }
         }
+        images_open = matches!(m, ChatMsg::ToolImage { .. });
     }
     if req.cache && msgs.len() > 1 {
         // Every message rebuilds byte for byte from the log, this turn's

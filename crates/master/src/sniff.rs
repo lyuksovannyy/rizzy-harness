@@ -544,13 +544,12 @@ pub fn target(b: &[u8]) -> Option<String> {
 
 // ---- image dimensions -----------------------------------------------------
 
-/// Width and height from an image header (never decoded).
+/// Width and height from an image header (never decoded). PNG, JPEG, GIF
+/// and WebP are read by `harness_core::image`, which the `read` tool
+/// shares.
 pub fn dimensions(b: &[u8], format: &str) -> Option<(u32, u32)> {
     let (w, h) = match format {
-        "png" => png(b)?,
-        "jpeg" => jpeg(b)?,
-        "gif" => (u32::from(le16(b, 6)?), u32::from(le16(b, 8)?)),
-        "webp" => webp(b)?,
+        "png" | "jpeg" | "gif" | "webp" => harness_core::image::dimensions(b, format)?,
         "bmp" => bmp(b)?,
         "avif" | "heic" | "heif" => ispe(b)?,
         "ico" => {
@@ -560,76 +559,6 @@ pub fn dimensions(b: &[u8], format: &str) -> Option<(u32, u32)> {
         _ => return None,
     };
     (w > 0 && h > 0).then_some((w, h))
-}
-
-fn png(b: &[u8]) -> Option<(u32, u32)> {
-    if !b.starts_with(b"\x89PNG\r\n\x1a\n") || b.get(12..16)? != b"IHDR" {
-        return None;
-    }
-    Some((be32(b, 16)?, be32(b, 20)?))
-}
-
-/// The first SOF segment's size; markers are walked by their lengths.
-fn jpeg(b: &[u8]) -> Option<(u32, u32)> {
-    if !b.starts_with(&[0xFF, 0xD8]) {
-        return None;
-    }
-    let mut i = 2;
-    loop {
-        while *b.get(i)? != 0xFF {
-            i += 1;
-        }
-        while *b.get(i)? == 0xFF {
-            i += 1;
-        }
-        let marker = *b.get(i)?;
-        i += 1;
-        match marker {
-            0x01 | 0xD0..=0xD8 => continue,
-            0xD9 | 0xDA => return None,
-            _ => {}
-        }
-        let len = usize::from(be16(b, i)?);
-        let sof = matches!(marker, 0xC0..=0xCF) && !matches!(marker, 0xC4 | 0xC8 | 0xCC);
-        if sof {
-            let h = be16(b, i + 3)?;
-            let w = be16(b, i + 5)?;
-            return Some((u32::from(w), u32::from(h)));
-        }
-        if len < 2 {
-            return None;
-        }
-        i = i.checked_add(len)?;
-    }
-}
-
-fn webp(b: &[u8]) -> Option<(u32, u32)> {
-    if !b.starts_with(b"RIFF") || b.get(8..12)? != b"WEBP" {
-        return None;
-    }
-    match b.get(12..16)? {
-        b"VP8 " => {
-            if b.get(23..26)? != [0x9D, 0x01, 0x2A] {
-                return None;
-            }
-            let w = u32::from(le16(b, 26)? & 0x3FFF);
-            let h = u32::from(le16(b, 28)? & 0x3FFF);
-            Some((w, h))
-        }
-        b"VP8L" => {
-            if *b.get(20)? != 0x2F {
-                return None;
-            }
-            let bits = le32(b, 21)?;
-            Some(((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1))
-        }
-        b"VP8X" => {
-            let w = le24(b, 24)? + 1;
-            let h = le24(b, 27)? + 1;
-            Some((w, h))
-        }
-        _ => None,
-    }
 }
 
 /// A bitmap's size; `None` unless its DIB header has a known length.
@@ -678,11 +607,6 @@ fn le16(b: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_le_bytes(
         b.get(at..at.checked_add(2)?)?.try_into().ok()?,
     ))
-}
-
-fn le24(b: &[u8], at: usize) -> Option<u32> {
-    let s = b.get(at..at.checked_add(3)?)?;
-    Some(u32::from(s[0]) | u32::from(s[1]) << 8 | u32::from(s[2]) << 16)
 }
 
 fn be32(b: &[u8], at: usize) -> Option<u32> {

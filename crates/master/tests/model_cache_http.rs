@@ -903,7 +903,7 @@ async fn inherited_fallbacks_and_effort() {
     f.list(&["a", "b", "c"]);
     let url = fake(f.clone()).await;
     let t = start().await;
-    let ms = json!([{"id": "a", "effort": true, "context": 200000}, {"id": "b", "context": 8192}, {"id": "c"}]);
+    let ms = json!([{"id": "a", "effort": true, "context": 200000}, {"id": "b", "context": 8192, "vision": true}, {"id": "c"}]);
     let (st, v) = put_local(&t, &url, ms).await;
     assert_eq!(st, StatusCode::OK, "{v}");
     let assign = |general: Value| {
@@ -931,6 +931,8 @@ async fn inherited_fallbacks_and_effort() {
         .map(|(k, v)| (k.as_str(), *v))
         .collect();
     assert_eq!(windows, [("loc::a", 200_000), ("loc::b", 8192)]);
+    // And which of them take images (X.23): only those listed with vision.
+    assert_eq!(spec.vision, ["loc::b"]);
     // Only a fallback takes one: kept for it.
     assign(json!({"model": "loc::c", "fallbacks": ["loc::a"]})).await;
     let spec = t

@@ -310,6 +310,7 @@ mod tests {
                 blocks: vec![],
             }),
             EventKind::ToolCallFinished(ToolCallFinished {
+                image: None,
                 call_id: "c1".into(),
                 ok: true,
                 output: result.into(),

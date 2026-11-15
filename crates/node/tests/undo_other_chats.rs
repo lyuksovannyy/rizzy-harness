@@ -806,6 +806,7 @@ fn seed_other_chat(store: &Store, ws: &Path, turns: u64, age_ms: i64) {
                 author: None,
             }));
             put(EventKind::ToolCallFinished(ToolCallFinished {
+                image: None,
                 call_id,
                 ok: true,
                 output: "z".repeat(2000),

@@ -846,6 +846,7 @@ mod tests {
                 sid,
                 2,
                 EventKind::ToolCallFinished(ToolCallFinished {
+                    image: None,
                     seen: None,
                     call_id: "c".into(),
                     ok: true,

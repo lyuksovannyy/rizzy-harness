@@ -1283,6 +1283,28 @@ pub struct ToolCallFinished {
     /// node's loop writes it, from what `read`, `write` or `edit` did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seen: Option<FileSeen>,
+    /// The image a `read` of an image file returned to the model (X.23,
+    /// PLAN.md T71): a reference only. The bytes the call read are kept
+    /// with the chat on the node (`session_images`, keyed by this hash), so
+    /// every later request shows the same bytes whatever happens to the
+    /// file. Only the node's loop writes it, and only for a model that
+    /// takes images.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<ToolImage>,
+}
+
+/// An image a tool call returned (`tool_call_finished.image`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolImage {
+    /// Hex SHA-256 of the bytes; the node keys its copy by it.
+    pub sha256: String,
+    /// `image/png`, `image/jpeg`, `image/webp` or `image/gif`.
+    pub mime: String,
+    /// From the file's header.
+    pub width: u32,
+    pub height: u32,
+    /// The file's size: what the per-request bound counts.
+    pub bytes: u64,
 }
 
 /// A file as a file tool left the agent knowing it: `read` showed it (all
@@ -2001,6 +2023,7 @@ mod tests {
     #[test]
     fn sources_roundtrip() {
         let k = EventKind::ToolCallFinished(ToolCallFinished {
+            image: None,
             seen: None,
             call_id: "c".into(),
             ok: true,

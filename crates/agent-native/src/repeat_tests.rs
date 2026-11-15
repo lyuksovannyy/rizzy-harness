@@ -630,6 +630,7 @@ async fn a_new_turn_starts_a_new_count() {
             sid,
             3 + 2 * i,
             EventKind::ToolCallFinished(ToolCallFinished {
+                image: None,
                 seen: None,
                 call_id: id,
                 ok: true,
@@ -766,6 +767,7 @@ async fn a_test_run_after_each_delegation_runs() {
         fallbacks: vec![],
         unavailable: vec![],
         no_effort: vec![],
+        vision: vec![],
         context_windows: Default::default(),
         effort: None,
         ui: Default::default(),
@@ -813,6 +815,7 @@ async fn a_failed_delegation_is_no_change() {
         fallbacks: vec![],
         unavailable: vec![],
         no_effort: vec![],
+        vision: vec![],
         context_windows: Default::default(),
         effort: None,
         ui: Default::default(),

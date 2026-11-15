@@ -120,6 +120,7 @@ impl Seen {
                         .join("\n")
                 ),
                 ChatMsg::Tool { content, .. } => content.clone(),
+                ChatMsg::ToolImage { image, .. } => image.name.clone(),
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -338,6 +339,7 @@ fn agent(window: Option<u64>) -> AgentSpec {
         fallbacks: vec![],
         unavailable: vec![],
         no_effort: vec![],
+        vision: vec![],
         context_windows: window.map(|w| ("m".to_string(), w)).into_iter().collect(),
         effort: None,
         ui: Default::default(),
@@ -865,6 +867,7 @@ fn huge_turn(sid: SessionId, from: u64, turn: &str, steps: usize, chars: usize) 
             blocks: vec![],
         }));
         emitted.push(EventKind::ToolCallFinished(ToolCallFinished {
+            image: None,
             seen: None,
             call_id: id,
             ok: true,

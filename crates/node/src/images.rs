@@ -9,6 +9,11 @@ use harness_protocol::{ChatImage, MAX_IMAGE_BYTES, MAX_IMAGES};
 use harness_store::session_images::SessionImage;
 use sha2::{Digest, Sha256};
 
+/// The most bytes of images one chat keeps (the person's and those `read`
+/// returned, X.23): an image `read` returns past it is not shown. The
+/// person's are bounded by the master (50 per chat, 5 MiB a message).
+pub(crate) const CHAT_IMAGE_BYTES: u64 = 100 << 20;
+
 /// The image types every vision provider takes.
 const MIMES: &[&str] = &["image/png", "image/jpeg", "image/webp", "image/gif"];
 

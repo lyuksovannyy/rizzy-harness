@@ -669,6 +669,7 @@ mod tests {
             seq,
             ts,
             EventKind::ToolCallFinished(ToolCallFinished {
+                image: None,
                 call_id: call.into(),
                 ok,
                 output: String::new(),

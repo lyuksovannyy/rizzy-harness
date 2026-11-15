@@ -342,6 +342,45 @@ source is that chat (sent there, or published there by an agent; the artifacts s
 `features.media.vision_images` is true while Media is on and some listed model sees images;
 the composer still checks the chat's model.
 
+## Images `read` returns (X.23, PLAN.md T71)
+
+The agent's `read` of an image file of the chat's folder returns the image to
+the model. It uses the person's path where it can, and differs where the
+source does.
+
+- **What is an image:** the file's first bytes are PNG, JPEG, WebP or GIF
+  (`harness_core::image::raster`, the four formats every vision provider
+  reads); the name does not count, and an SVG stays a text read. The header
+  gives the size (`image::dimensions`, shared with `sniff.rs`); nothing is
+  decoded. Refused with a note: over 5 MiB (`image::MAX_BYTES`, the upload
+  path's cap, checked before the file is loaded), over 8,000 px a side, or a
+  header that cannot be read. There is no resizing: the upload path resizes
+  in the browser, and the node has no image decoder.
+- **Who gets it:** only a model of the turn's chain listed with vision
+  (`AgentSpec.vision`, filled by the master's resolver from the model list).
+  Any other model gets the harness's line that the file is an image it
+  cannot see. Decided per request, so a fallback without vision gets none.
+- **Where the bytes live:** the loop calls `TurnHost::keep_image` before it
+  records the result; the node puts them into `session_images` (the table
+  above), keyed by (chat, sha256), at most 100 MiB of images a chat
+  (`CHAT_IMAGE_BYTES`, the person's images included), never in an incognito
+  chat. `tool_call_finished.image` is `{sha256, mime, width, height, bytes}`.
+  They go with the chat. Nothing reaches the master but the reference: no
+  Media item, no route; the UI shows the result's text (path, format, size).
+- **To the model** (`crates/agent-native/src/images.rs`): the result's text
+  is one line of description, and the harness's line after it says the image
+  follows the step's results and is a file from the folder, its text data.
+  Tool results carry text only (genai's `ToolResponse`, OpenAI's tool role),
+  so `place_notes` moves a step's images after all of its results and the
+  provider gets them as one user-role message, each under the harness's line
+  naming the file and the call. A request shows the newest 4 images, 5 MiB
+  together (`tool_window`, from the conversation alone); their bytes come
+  from the store when the loop no longer holds them, so a rebuild sends the
+  same bytes. Per step at most 4 (5 MiB), per turn 20; the rest get a line.
+  A cleared result loses its image; a summary's transcript says an image was
+  shown, never shows it; parallel answers carry none. Each image counts
+  `IMAGE_CHARS` (4,000 characters, about 1,000 tokens) in the estimate.
+
 ## Deleting, honestly
 
 - Deleting an item deletes its blob when nothing else references it (another workspace's item

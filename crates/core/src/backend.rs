@@ -136,6 +136,16 @@ pub trait TurnHost: Send + Sync {
         Vec::new()
     }
 
+    /// Keep the bytes of an image a `read` returned with this session
+    /// (X.23), keyed by their hash, before the result that names it is
+    /// recorded; [`Self::images`] gives them back. The same bytes kept
+    /// again cost nothing. `Err` with a sentence for the model when they
+    /// cannot be kept (the chat's bound, a full disk, no store): the loop
+    /// then sends the result without the image.
+    async fn keep_image(&self, _image: KeptImage) -> Result<(), String> {
+        Err("this session keeps no images".into())
+    }
+
     /// This session's table of background commands
     /// (`harness_tools::background::SessionBg`, docs/background-commands.md
     /// §4.3), owned by the node and bounded by its `[limits]`. Type-erased
@@ -186,6 +196,17 @@ pub struct ImageData {
     pub mime: String,
     /// Base64, shared: a turn copies its messages on every step.
     pub data: std::sync::Arc<str>,
+}
+
+/// An image's bytes to keep with a session (`TurnHost::keep_image`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeptImage {
+    /// Hex SHA-256 of `bytes`.
+    pub sha256: String,
+    pub mime: String,
+    /// The path as the call named it (the store's `name` column).
+    pub name: String,
+    pub bytes: Vec<u8>,
 }
 
 /// How a delegated sub-task ended.

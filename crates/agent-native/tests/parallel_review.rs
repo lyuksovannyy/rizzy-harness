@@ -325,6 +325,7 @@ fn agent_w(w: u64) -> AgentSpec {
         fallbacks: vec![],
         unavailable: vec![],
         no_effort: vec![],
+        vision: vec![],
         context_windows: vec![("m".to_string(), w)].into_iter().collect(),
         effort: None,
         ui: Default::default(),
@@ -439,6 +440,7 @@ fn kind_of(m: &ChatMsg) -> String {
         ChatMsg::StepContext(_) => "SC".into(),
         ChatMsg::Note(t) => format!("N({})", t.chars().take(30).collect::<String>()),
         ChatMsg::CallNote(_) => "CN".into(),
+        ChatMsg::ToolImage { call_id, .. } => format!("IMG({call_id})"),
         ChatMsg::Assistant { tool_calls, .. } => format!(
             "A[{}]",
             tool_calls
@@ -734,6 +736,7 @@ fn previous_turn(sid: SessionId) -> (Vec<RawEvent>, u64, UserMessage) {
             blocks: vec![],
         }));
         push(EventKind::ToolCallFinished(ToolCallFinished {
+            image: None,
             seen: None,
             call_id: format!("t1c{i}"),
             ok: true,

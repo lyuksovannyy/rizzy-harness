@@ -299,6 +299,7 @@ fn agent(window: u64) -> AgentSpec {
         fallbacks: vec![],
         unavailable: vec![],
         no_effort: vec![],
+        vision: vec![],
         context_windows: vec![("m".to_string(), window)].into_iter().collect(),
         effort: None,
         ui: Default::default(),
@@ -434,6 +435,7 @@ fn all_text(req: &[ChatMsg]) -> String {
             ChatMsg::UserImages { text, .. } => text.clone(),
             ChatMsg::Assistant { text, .. } => text.clone(),
             ChatMsg::Tool { content, .. } => content.clone(),
+            ChatMsg::ToolImage { image, .. } => image.name.clone(),
         })
         .collect::<Vec<_>>()
         .join("\n")

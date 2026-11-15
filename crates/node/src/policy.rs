@@ -1105,6 +1105,7 @@ tool_timeout_sec = 120
             fallbacks: vec![],
             unavailable: vec![],
             no_effort: vec![],
+            vision: vec![],
             context_windows: Default::default(),
             effort: None,
             ui: Default::default(),

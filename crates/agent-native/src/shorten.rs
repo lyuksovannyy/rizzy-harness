@@ -215,14 +215,43 @@ fn calls(msgs: &[ChatMsg]) -> Vec<Option<(String, Value)>> {
         .collect()
 }
 
-/// Tool results that may be cleared: long enough, not a kept tool's, not a
-/// skill's instructions.
+/// Whether the tool result at `i` returned an image (X.23): its
+/// [`ChatMsg::ToolImage`] follows it, after any notes. An image counts as
+/// [`crate::provider::IMAGE_CHARS`] wherever results are weighed, and goes
+/// with its result when that is cleared.
+fn has_image(msgs: &[ChatMsg], i: usize) -> bool {
+    let ChatMsg::Tool { call_id, .. } = &msgs[i] else {
+        return false;
+    };
+    msgs[i + 1..]
+        .iter()
+        .find(|m| !matches!(m, ChatMsg::CallNote(_)))
+        .is_some_and(|m| matches!(m, ChatMsg::ToolImage { call_id: c, .. } if c == call_id))
+}
+
+/// A tool result's weight in characters: its text, and its image.
+fn weight(msgs: &[ChatMsg], i: usize) -> usize {
+    match &msgs[i] {
+        ChatMsg::Tool { content, .. } => {
+            content.len()
+                + if has_image(msgs, i) {
+                    crate::provider::IMAGE_CHARS
+                } else {
+                    0
+                }
+        }
+        _ => 0,
+    }
+}
+
+/// Tool results that may be cleared: long enough (an image always is),
+/// not a kept tool's, not a skill's instructions.
 fn eligible(msgs: &[ChatMsg], calls: &[Option<(String, Value)>]) -> Vec<bool> {
     msgs.iter()
         .enumerate()
         .map(|(i, m)| match m {
-            ChatMsg::Tool { content, .. } => {
-                content.len() >= MIN_CHARS
+            ChatMsg::Tool { .. } => {
+                weight(msgs, i) >= MIN_CHARS
                     && calls[i].as_ref().is_none_or(|(t, input)| {
                         !KEPT_TOOLS.contains(&t.as_str())
                             && !(t == SKILL_TOOL && input.get("file").is_none())
@@ -336,8 +365,18 @@ pub fn apply(msgs: &[ChatMsg], spans: &[Span], st: &State, how: How) -> Vec<Chat
     }
     let l = layout(msgs, spans, st);
     let mut out = Vec::with_capacity(msgs.len());
+    // The step's results sent as stubs: their images go with them.
+    let mut gone: Vec<String> = Vec::new();
     for (i, m) in msgs.iter().enumerate() {
+        if matches!(m, ChatMsg::Assistant { .. }) {
+            gone.clear();
+        }
         if l.skip[i] {
+            continue;
+        }
+        if let ChatMsg::ToolImage { call_id, .. } = m
+            && gone.contains(call_id)
+        {
             continue;
         }
         if how.stubs
@@ -345,6 +384,7 @@ pub fn apply(msgs: &[ChatMsg], spans: &[Span], st: &State, how: How) -> Vec<Chat
             && let ChatMsg::Tool { call_id, content } = m
         {
             let (tool, input) = l.calls[i].clone().unwrap_or_default();
+            gone.push(call_id.clone());
             // The stub is the harness's line, not the result's text: sent
             // the way a guard's note is, after an empty result.
             out.push(ChatMsg::Tool {
@@ -454,8 +494,8 @@ pub fn tail_start(msgs: &[ChatMsg], tail: u64) -> Option<usize> {
     let mut any = false;
     for (i, m) in msgs.iter().enumerate().rev() {
         match m {
-            ChatMsg::Tool { content, .. } => {
-                results += tokens(content.len());
+            ChatMsg::Tool { .. } => {
+                results += tokens(weight(msgs, i));
                 any = true;
             }
             ChatMsg::Assistant { text, tool_calls } if !tool_calls.is_empty() && any => {
@@ -509,7 +549,7 @@ pub fn plan_clear(
             continue;
         };
         let (tool, input) = l.calls[i].clone().unwrap_or_default();
-        saved += tokens(content.len()).saturating_sub(tokens(stub(&tool, &input, content).len()));
+        saved += tokens(weight(msgs, i)).saturating_sub(tokens(stub(&tool, &input, content).len()));
         last = Some(i);
         if saved >= need {
             break;
