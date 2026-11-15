@@ -73,6 +73,7 @@ pub enum EventKind {
     AgentChanged(AgentChanged),
     VariantSelected(VariantSelected),
     HistorySummarized(HistorySummarized),
+    ContextShortened(ContextShortened),
     ModelFallback(ModelFallback),
     ModelRetry(ModelRetry),
     RetryGivenUp(RetryGivenUp),
@@ -128,6 +129,7 @@ impl EventKind {
             EventKind::AgentChanged(_) => "agent_changed",
             EventKind::VariantSelected(_) => "variant_selected",
             EventKind::HistorySummarized(_) => "history_summarized",
+            EventKind::ContextShortened(_) => "context_shortened",
             EventKind::ModelFallback(_) => "model_fallback",
             EventKind::ModelRetry(_) => "model_retry",
             EventKind::RetryGivenUp(_) => "retry_given_up",
@@ -793,6 +795,54 @@ pub struct HistorySummarized {
     /// Every event with `seq <= through_seq` is covered by `text`.
     pub through_seq: u64,
     pub text: String,
+}
+
+/// What the model is sent was shortened during a turn (ADOPTION_PLAN X.15,
+/// PLAN.md T59): old tool results sent as a one-line stub, the turn's
+/// earlier steps sent as a summary, or both. The log keeps every event and
+/// the UI shows every result as it was: only the requests shrink. Appended
+/// by the session's one writer (the loop, through its host) before the
+/// request it shortens; every later request of the turn, and of later
+/// turns, applies the latest one, so the log alone rebuilds the same bytes.
+/// Nothing in it comes from a tool result: the counts and the summary are
+/// the harness's and the summarising model's.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContextShortened {
+    pub turn_id: String,
+    /// Tool results sent as a stub from here on: see [`Cleared`].
+    /// Cumulative: the latest event's is in force.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleared: Option<Cleared>,
+    /// This turn's first steps sent as a summary from here on: see
+    /// [`Folded`]. The latest of a turn is in force for that turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folded: Option<Folded>,
+    /// The request's estimated size before and after (tokens), for the UI.
+    pub tokens_before: u64,
+    pub tokens_after: u64,
+}
+
+/// Where clearing reaches: every tool result of the conversation's turns
+/// before `turn_id` (those the requests still carry after the latest
+/// summary), and the first `results` tool results of `turn_id`. A result
+/// of a tool that is never cleared, or one too short to be worth it, stays
+/// as it is. When `turn_id` is no longer carried (a summary covers it),
+/// nothing is cleared: every turn still carried is later than it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Cleared {
+    pub turn_id: String,
+    pub results: u32,
+}
+
+/// The first `steps` steps (model messages and what followed each) of the
+/// event's turn, summarised as `text`; messages the person sent during
+/// them stay as they were. `todo`: the task list as it stood then.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Folded {
+    pub steps: u32,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub todo: Option<Vec<crate::todo::TodoItem>>,
 }
 
 /// The turn's model was unavailable or failed before any output, and one
@@ -1505,6 +1555,20 @@ mod tests {
             EventKind::StepLimitChanged(StepLimitChanged {
                 max_steps: 1000,
                 requested: Some(5000),
+            }),
+            EventKind::ContextShortened(ContextShortened {
+                turn_id: "t".into(),
+                cleared: Some(Cleared {
+                    turn_id: "t0".into(),
+                    results: 3,
+                }),
+                folded: Some(Folded {
+                    steps: 4,
+                    text: "s".into(),
+                    todo: None,
+                }),
+                tokens_before: 9,
+                tokens_after: 4,
             }),
             EventKind::VariantSelected(VariantSelected {
                 group: "g".into(),

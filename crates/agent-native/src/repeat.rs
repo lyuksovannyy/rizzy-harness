@@ -65,7 +65,7 @@
 //! (std's SipHash): two different results that collide only count as one,
 //! which can at worst refuse a call after four runs, never run one.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
 use harness_core::event::NOTE_LEAD;
@@ -133,6 +133,9 @@ pub struct RepeatGuard {
     step: u32,
     /// A refusal ended the turn: nothing more runs in it.
     ended: bool,
+    /// Calls whose count was set back once because their result left
+    /// what the model is sent ([`RepeatGuard::forgive`]).
+    forgiven: HashSet<CallKey>,
 }
 
 /// The guard's answer before a call runs.
@@ -237,6 +240,20 @@ impl RepeatGuard {
             s.runs = 0;
             s.refused = None;
             s.trial = false;
+        }
+    }
+
+    /// The call's result is no longer in what the model is sent (cleared
+    /// or summarised, X.15): its next identical result is not counted as a
+    /// repeat, since a model reads again what it can no longer see. Once
+    /// per call per turn: shortening (which only size triggers) cannot set
+    /// a loop's count back again and again, so a stuck model is refused
+    /// after at most `REFUSE_AT - 1` more runs.
+    pub fn forgive(&mut self, key: CallKey) {
+        if self.forgiven.insert(key)
+            && let Some(s) = self.calls.get_mut(&key)
+        {
+            s.runs = 0;
         }
     }
 

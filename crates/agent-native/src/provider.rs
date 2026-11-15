@@ -110,13 +110,17 @@ pub fn place_notes(msgs: Vec<ChatMsg>) -> Vec<ChatMsg> {
                 })
             }
             // Right after its result, so on the last one sent.
+            // A cleared result's stub (`shorten`) is a call note after an
+            // empty result: then the note is all the result says.
             ChatMsg::CallNote(t) => {
                 if let Some(ChatMsg::Tool { content, .. }) = out
                     .iter_mut()
                     .rev()
                     .find(|m| matches!(m, ChatMsg::Tool { .. }))
                 {
-                    content.push_str("\n\n");
+                    if !content.is_empty() {
+                        content.push_str("\n\n");
+                    }
                     content.push_str(&t);
                 }
             }

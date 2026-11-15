@@ -587,6 +587,20 @@ fn events() -> Vec<RawEvent> {
             cause: None,
             environment: None,
         }),
+        EventKind::ContextShortened(ContextShortened {
+            turn_id: "t6".into(),
+            cleared: Some(Cleared {
+                turn_id: "t6".into(),
+                results: 1,
+            }),
+            folded: Some(Folded {
+                steps: 2,
+                text: "Read <b>main.rs</b>; the bug is in parse.".into(),
+                todo: None,
+            }),
+            tokens_before: 31_000,
+            tokens_after: 9_000,
+        }),
         EventKind::ModelRetry(ModelRetry {
             turn_id: "t6".into(),
             model: "openai::gpt-4o".into(),
@@ -711,6 +725,24 @@ fn a_callback_turn_and_a_refusal_are_items() {
         .unwrap();
     assert_eq!(r["bg_ids"], json!(["bg-5"]));
     assert!(r["reason"].as_str().unwrap().contains("node limit"));
+}
+
+/// A shortened context is a quiet item in its turn: whether results were
+/// cleared, how many steps were summarised, the summary as plain text (the
+/// UI renders it as text, never as markup), and the sizes.
+#[test]
+fn a_shortened_context_is_an_item() {
+    let view = serde_json::to_value(SessionView::fold(&events()).unwrap()).unwrap();
+    let items = view["items"].as_array().unwrap();
+    let s = items.iter().find(|i| i["type"] == "shortened").unwrap();
+    assert_eq!(s["turn_id"], "t6");
+    assert_eq!(s["cleared"], true);
+    assert_eq!(s["steps"], 2);
+    assert_eq!(s["text"], "Read <b>main.rs</b>; the bug is in parse.");
+    assert_eq!(
+        (s["tokens_before"].as_u64(), s["tokens_after"].as_u64()),
+        (Some(31_000), Some(9_000))
+    );
 }
 
 /// Staged files: the agent's joins its `publish` card, the user's and the

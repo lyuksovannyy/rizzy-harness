@@ -149,6 +149,26 @@ describe("routine chats", () => {
   });
 });
 
+describe("shortened context", () => {
+  test("a quiet line says what was shortened; the summary is the model's text, shown as text", async () => {
+    await show(
+      [
+        { type: "shortened", turn_id: "t1", cleared: true, tokens_before: 31_000, tokens_after: 9_000 },
+        { type: "shortened", turn_id: "t1", cleared: false, steps: 12, text: "Read <b>main.rs</b>", tokens_before: 15_200, tokens_after: 4_100 },
+      ],
+      sessionRow(),
+    );
+    const lines = [...host.querySelectorAll(".divider")].map((d) => d.textContent ?? "");
+    expect(lines).toContain("Context shortened for the model (older tool results cleared): about 31k to 9.0k tokens. Everything stays shown here.");
+    const folded = host.querySelector("details.summary")!;
+    expect(folded.querySelector("summary")!.textContent).toBe(
+      "Context shortened for the model (12 steps summarised): about 15k to 4.1k tokens. Everything stays shown here.",
+    );
+    expect(folded.querySelector("p")!.textContent).toBe("Read <b>main.rs</b>");
+    expect(folded.querySelector("b")).toBeNull();
+  });
+});
+
 describe("artifacts", () => {
   test("a saved file is an item; a failed save says why", async () => {
     await show(

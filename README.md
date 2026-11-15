@@ -598,16 +598,41 @@ preset = "balanced"                  # fast | balanced | best (Ollama model name
 # mem0_url = "http://localhost:8888" # for backend = "mem0" (run with MEM0_TELEMETRY=false)
 ```
 
-Older turns are summarised when the history nears the model's context window
-(the window from the provider's model listing or your `context` on a model,
-less a fifth of it, at least 16k, for the reply and tool results), measured
-with the token count the provider reported for the previous turn. Set
-`summarize_after_tokens` to use a fixed number instead. If a provider still
-refuses a request as too long, the turn summarises older turns, hides all but
-the newest large tool output, and tries once more; a second refusal ends the
-turn with a message saying so. A summary is only made by a model whose window
-holds what it reads: a long history is summarised in pieces, and a single turn
-larger than the window is left unsummarised rather than skipped. A summary
+At the start of each turn, older turns are summarised when the history is over
+the model's context window less a fifth of it (at least 16k, for the reply and
+tool results; the window from the provider's model listing or your `context` on
+a model), measured with the token count the provider reported for the previous
+turn; the two newest turns are kept as they are. Set `summarize_after_tokens` to
+use a fixed number instead.
+
+Inside a turn, every request is checked against the same line before it is
+sent (when the model's window is known), so a long coding turn goes on instead
+of being cut off. Past the line, the oldest tool results are first replaced, in
+what the model is sent, by a one-line note saying what was there (the tool, its
+file or command, how many lines) and that it can be called again; the newest
+steps are never touched (except when one step alone is over the line: then all
+but its newest result), nor the task list or a loaded skill; the agent is told
+up front to write down what it will need and to read a cleared result again
+before relying on it. Each such cut
+frees about half the line, so it happens rarely: about every 36 steps of a long
+turn on a 128k model, every 5 or 6 on a 32k one. When that is not enough (the
+calls themselves are what is large), earlier turns are summarised and then the
+turn's own earlier steps, at a step boundary; your message, the context sent with
+it, anything you wrote during the turn and the task list stay as they were. The
+chat shows a quiet line where this happened ("Context shortened for the model"),
+with the summary collapsed under it; every message and tool result stays shown in
+full, and the agent can read any cleared file again. The same applies to the two
+newest turns at the start of a turn when they alone are over the line. With an
+unknown window none of this happens inside a turn. If a provider still refuses a
+request as too long, the turn summarises older turns, hides all but the newest
+large tool output, and tries once more; a second refusal ends the turn with its
+account of where the work stands (or an error, for a turn nobody started). See
+`docs/turn-compaction.md` for the numbers and what the other harnesses do.
+
+A summary is only made by a model whose window holds what it reads: a long
+history is summarised in pieces, and a single turn larger than the window is read
+with its tool results cut shorter (down to 250 characters each), and left
+unsummarised only if it does not fit even so. A summary
 that is not at least a tenth smaller than the history it replaces is thrown
 away (nothing is logged, the history stays as it was). After two failed or
 useless summaries in one turn, the turn does not try again; if the context
@@ -628,8 +653,8 @@ and the agent then report the invented value), and where the conversation
 itself called something wrong it says who did. A tool result longer than
 2,000 characters reaches the summarising model shortened, with a line saying
 it was cut and that the agent saw all of it. Chat-profile chats keep a
-shorter general summary (at most 300 words). The two newest turns are kept as they are. The latest
-summary is shown, collapsed, where it was made in the chat.
+shorter general summary (at most 300 words). The latest summary is shown,
+collapsed, where it was made in the chat.
 
 In agentic chats the agent keeps its own task list with the `todo` tool
 (Software Developer, Senior Teamlead, Writer, custom agents that edit files
@@ -1824,8 +1849,9 @@ one of your messages is `callback_turns × callback_max_steps` steps, 60 with
 the defaults. A step is one answer of the model, which may carry several tool
 calls, so 60 steps is not 60 commands; and on top of the steps come a call
 retried after a passing provider error, the agent's fallback models when its
-own fails (more calls in that step), and up to two summarising passes a turn
-in a long chat (one model call per piece summarised). When
+own fails (more calls in that step), and summarising calls in a long chat: one
+per piece of older turns summarised, and inside a long turn at most 12 summaries
+of its own steps (two failed ones stop them for the turn). When
 the budget is spent the chat says "the agent was not resumed: 3 turns in a
 row without you (node limit)" and the end waits for your next message.
 **`callback_turns = 0` turns callback turns off** on that node, silently: the
