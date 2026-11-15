@@ -150,8 +150,9 @@ const MEMDEF_KB = 2.7;
 // Workspace memory (T54, owner 2026-11-14), measured 387.8 against the
 // recorded 386.5: the workspace's Memory tab (its own chunk with Settings),
 // the waiting count on the Overview, the block's wording for the shared and
-// Personal places (+1.3).
-const WSMEM_KB = 1.3;
+// Personal places (+1.3). Its review (F2, F4, F5: the two-step proposal,
+// who wrote each fact, retire before delete), measured 392.0 (+0.4).
+const WSMEM_KB = 1.7;
 
 // What the agent is doing (feat/turn-finished-signal), measured 377.9
 // (initial 101.0) against 375.9 on main (+2.0, not split per chunk): in the
