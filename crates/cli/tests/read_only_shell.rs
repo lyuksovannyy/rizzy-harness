@@ -135,6 +135,12 @@ async fn ready(f: &Fixture) -> Option<Arc<Sandbox>> {
         let out = bash(&f.ctx(confined(sb), true), "touch refused-here").await;
         assert!(!out.ok, "{}", out.output);
         assert!(!f.ws.join("refused-here").exists());
+        // A runner that must contain (CI) must have it: never green by
+        // skipping (review of PR 125).
+        assert!(
+            !bwrap::required(),
+            "HARNESS_REQUIRE_BWRAP=1 but there is no read-only shell here: {why}"
+        );
         eprintln!("SKIPPED (no read-only shell with this bubblewrap): {why}");
         return None;
     }
@@ -469,4 +475,86 @@ async fn the_binds_hold_without_landlock() {
         std::fs::read_to_string(f.extra.join("kept")).unwrap(),
         "original\n"
     );
+}
+
+/// Review of PR 125: a sandboxed command gets no core dumps (the host's
+/// core pattern may pipe them to a handler outside the sandbox), and
+/// cannot raise the limit; the same for the writable shell.
+#[tokio::test]
+async fn sandboxed_commands_dump_no_core() {
+    let f = fixture();
+    let Some(sb) = f.sandbox() else { return };
+    for read_only in [false, true] {
+        if read_only && confined(sb.clone()).read_only_shell().is_err() {
+            continue;
+        }
+        let ctx = f.ctx(confined(sb.clone()), read_only);
+        let out = bash(
+            &ctx,
+            "echo soft=$(ulimit -Sc) hard=$(ulimit -Hc); ulimit -c 1000",
+        )
+        .await;
+        assert!(
+            out.output.contains("soft=0 hard=0"),
+            "{read_only}: {}",
+            out.output
+        );
+        assert!(!out.ok, "{read_only}: raised it: {}", out.output);
+    }
+}
+
+/// Review of PR 125: under the containment form that shares this machine's
+/// `/proc` (a rootless container), `/proc/<pid>/root` and `cwd` of the
+/// node's own processes lead past the binds; Landlock (required on this
+/// node) keeps the read-only shell from them. A best-effort node offers no
+/// read-only shell in that form.
+#[tokio::test]
+async fn the_shared_proc_form_holds_through_landlock() {
+    use harness_tools::contain::{Contain, Form};
+    let f = fixture();
+    if f.sandbox().is_none() {
+        return;
+    }
+    let sb = f.plain();
+    let bwrap = harness_tools::contain::find_bwrap().unwrap();
+    let c = Contain::new(bwrap.clone(), Form::SharedProc);
+    if let Err(e) = sb.probe_containment(&c, &f.data.join("sandbox-tmp/probe-shared")) {
+        eprintln!("SKIPPED (shared /proc form): {e}");
+        return;
+    }
+    let sb = Arc::new(sb.with_containment(c));
+    if let Err(why) = confined(sb.clone()).read_only_shell() {
+        assert!(!bwrap::required(), "{why}");
+        eprintln!("SKIPPED (shared /proc form): {why}");
+        return;
+    }
+    eprintln!("RAN (shared /proc form)");
+    let ro = f.ctx(confined(sb), true);
+    let me = std::process::id();
+    for cmd in [
+        format!("echo x >> /proc/{me}/root$PWD/marker"),
+        format!("echo x > /proc/{me}/cwd/via-node-cwd"),
+        "for p in /proc/[0-9]*; do echo x >> $p/root$PWD/marker 2>/dev/null && echo WROTE $p \
+         && exit 0; done; exit 1"
+            .to_string(),
+    ] {
+        let out = bash(&ro, &cmd).await;
+        assert!(!out.output.contains("WROTE"), "{cmd}: {}", out.output);
+        assert!(!out.ok, "{cmd}: {}", out.output);
+    }
+    assert_eq!(f.marker(), "original\nchanged\n");
+    // Best effort: no read-only shell in this form.
+    let best = Sandbox::new(
+        PathBuf::from(EXE),
+        &Settings {
+            mode: harness_tools::sandbox::Mode::BestEffort,
+            ..f.settings()
+        },
+        Some(f.data.join("sandbox-tmp")),
+        std::slice::from_ref(&f.data),
+    )
+    .unwrap()
+    .with_containment(Contain::new(bwrap, Form::SharedProc));
+    let why = confined(Arc::new(best)).read_only_shell().unwrap_err();
+    assert!(why.contains("/proc"), "{why}");
 }

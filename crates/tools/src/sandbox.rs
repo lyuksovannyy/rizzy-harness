@@ -999,6 +999,12 @@ pub const NO_CONTAINMENT: &str = "this chat runs in the sandbox mode and the nod
 pub const READ_ONLY_NO_CONTAIN: &str = "this node has no working bubblewrap containment, and its \
      Landlock rules alone cannot keep a command from changing files' modes, owners or times";
 
+/// Why there is no read-only shell where the containment shares this
+/// machine's `/proc` and the Landlock rules are only best effort.
+pub const READ_ONLY_SHARED_PROC: &str = "this node's containment shares this machine's /proc \
+     (another process's /proc/<pid>/root leads past the read-only folders) and its Landlock rules \
+     are only best effort ([sandbox] mode = \"best-effort\")";
+
 /// How a read-only command refused for want of its confinement begins.
 pub const READ_ONLY_REFUSED: &str = "not run: no read-only shell here";
 
@@ -1107,6 +1113,12 @@ impl Confinement {
             ),
             Self::Confined { sandbox, .. } => match sandbox.contain.get() {
                 None => Err(READ_ONLY_NO_CONTAIN.into()),
+                // The outer `/proc` is in the view: `/proc/<pid>/root` of a
+                // process outside leads past the binds, and only Landlock
+                // (required, not best effort) keeps a command from it.
+                Some(c) if c.form() == crate::contain::Form::SharedProc && sandbox.best_effort => {
+                    Err(READ_ONLY_SHARED_PROC.into())
+                }
                 Some(c) if !c.sizes_tmpfs() => Err(READ_ONLY_NO_SIZE.into()),
                 Some(_) => Ok(()),
             },
@@ -2693,6 +2705,14 @@ pub fn exec(req: ExecRequest) -> i32 {
     let Some((program, args)) = command else {
         return req.probe.run();
     };
+    // No core dumps from a sandboxed command (review of PR 125): the host's
+    // core pattern often pipes to a handler outside the sandbox
+    // (systemd-coredump) that writes the dump on the host. Soft and hard
+    // limit 0, so the command cannot raise it again.
+    if let Err(e) = nix::sys::resource::setrlimit(nix::sys::resource::Resource::RLIMIT_CORE, 0, 0) {
+        eprintln!("{SUBCOMMAND}: cannot turn core dumps off, not running the command: {e}");
+        return EXIT_UNCONFINED;
+    }
     let err = std::process::Command::new(program).args(args).exec();
     eprintln!("{SUBCOMMAND}: {}: {err}", Path::new(program).display());
     if err.kind() == std::io::ErrorKind::NotFound {

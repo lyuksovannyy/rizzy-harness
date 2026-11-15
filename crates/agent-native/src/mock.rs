@@ -490,7 +490,7 @@ impl Provider for Mock {
         if let Some(t) = user.strip_prefix("remember project:") {
             return Ok(call(
                 "remember",
-                json!({"text": t.trim(), "kind": "fact", "scope": "project"}),
+                json!({"text": t.trim(), "kind": "fact", "about": "project"}),
             ));
         }
         if let Some(t) = user.strip_prefix("remember:") {

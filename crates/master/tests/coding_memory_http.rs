@@ -545,3 +545,56 @@ async fn a_remember_in_plan_mode_files_nothing() {
     assert_eq!(facts.len(), 1, "{facts:?}");
     assert_eq!(facts[0]["text"], "a fact kept");
 }
+
+/// Review M1 of PR 125: a `remember` is filed from the node's successful
+/// result, never from the call's start. A call the person denies (in
+/// `ask_all` the card asks for it) is in the log but files nothing.
+/// Failed before: the master filed it from `tool_call_started`.
+#[tokio::test]
+async fn a_denied_remember_files_nothing() {
+    let s = start(Offer::Yes).await;
+    let pid = project(&s).await;
+    let sid = coding_chat(&s, Some(&pid)).await;
+    let (st, v) = call(
+        &s,
+        Method::POST,
+        &format!("/api/sessions/{sid}/approval-mode"),
+        Some(json!({"mode": "ask_all"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, v) = call(
+        &s,
+        Method::POST,
+        &format!("/api/sessions/{sid}/prompt"),
+        Some(json!({ "text": "remember project: a fact the person refuses" })),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    // Deny the card when it shows, then wait for the turn's end.
+    let path = format!("/api/sessions/{sid}/events");
+    let mut denied = false;
+    for _ in 0..500 {
+        let (_, v) = call(&s, Method::GET, &path, None).await;
+        let evs = v["events"].as_array().unwrap().clone();
+        if !denied && let Some(a) = evs.iter().find(|e| e["kind"] == "approval_requested") {
+            let id = a["payload"]["approval_id"].as_str().unwrap();
+            let (st, v) = call(
+                &s,
+                Method::POST,
+                &format!("/api/sessions/{sid}/approvals/{id}"),
+                Some(json!({"decision": "deny"})),
+            )
+            .await;
+            assert_eq!(st, StatusCode::OK, "{v}");
+            denied = true;
+        }
+        if evs.iter().any(|e| e["kind"] == "turn_ended") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(denied, "no card for remember in ask_all");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(project_facts(&s, &pid).await.is_empty());
+}

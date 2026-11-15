@@ -802,27 +802,104 @@ async fn in_plan_mode(m: &Master, row: &SessionRow) -> bool {
     true
 }
 
-/// A mirrored `remember` call, filed for the chat (never for an incognito
-/// chat, nor a turn that may write no memory: an untrusted or callback
-/// turn, an agent whose memory is off), and only from a node that offers
-/// the tool (`CAP_REMEMBER`): one whose `node.toml` denies it files
-/// nothing, whatever its model sends. The call id makes replays harmless.
-pub async fn file(m: &Master, node_id: &str, e: &RawEvent) {
-    let Some(mem) = m.memory() else { return };
-    if !m.node_has(node_id, harness_protocol::CAP_REMEMBER) {
+/// `remember` calls the node started and has not finished: their
+/// `tool_call_started` payloads, by chat and call id. Kept only until the
+/// call's result arrives; at most [`PENDING_MAX`] (a call whose result
+/// never comes, a node that died mid-call, is dropped first, and so is
+/// never filed: fails closed).
+type Pending = Mutex<HashMap<(SessionId, String), Value>>;
+const PENDING_MAX: usize = 4096;
+
+fn pending() -> &'static Pending {
+    static P: std::sync::OnceLock<Pending> = std::sync::OnceLock::new();
+    P.get_or_init(Default::default)
+}
+
+/// A mirrored `tool_call_started`: a `remember` call is held until its
+/// result (review M1 of PR 125: a call is filed only once the node ran it).
+pub fn started(e: &RawEvent) {
+    if e.payload.get("tool").and_then(|v| v.as_str()) != Some("remember") {
         return;
     }
     let Some(call_id) = e.payload.get("call_id").and_then(|v| v.as_str()) else {
         return;
     };
-    let input = e.payload.get("input").cloned().unwrap_or(Value::Null);
-    let sid = e.session_id;
+    let mut p = pending().lock().unwrap_or_else(|p| p.into_inner());
+    if p.len() >= PENDING_MAX
+        && let Some(k) = p.keys().next().cloned()
+    {
+        p.remove(&k);
+    }
+    p.insert((e.session_id, call_id.to_string()), e.payload.clone());
+}
+
+/// A mirrored `tool_call_finished`: the `remember` call it ends is filed
+/// when, and only when, the node ran it and it succeeded. A call the node
+/// refused (plan mode, its `denied_tools`, a person's denial, arguments
+/// it does not take, the repeated-call guard) is never filed.
+pub async fn finished(m: &Master, node_id: &str, e: &RawEvent) {
+    let Some(call_id) = e.payload.get("call_id").and_then(|v| v.as_str()) else {
+        return;
+    };
+    let Some(started) = pending()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(&(e.session_id, call_id.to_string()))
+    else {
+        return;
+    };
+    if e.payload.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        // The chat's memory block says why (the node's own words, first
+        // line), so it does not wait for a filing that never comes. The
+        // model has the same words as its result: no note is added.
+        let why: String = e
+            .payload
+            .get("output")
+            .and_then(|v| v.as_str())
+            .and_then(|o| o.lines().find(|l| !l.trim().is_empty()))
+            .unwrap_or("the node did not run it")
+            .chars()
+            .take(300)
+            .collect();
+        set_record(
+            m,
+            e.session_id,
+            call_id,
+            &CallRecord {
+                state: CallState::Refused,
+                added: None,
+                target: None,
+                retired: false,
+                why: Some(why),
+                decides: you(),
+            },
+        )
+        .await;
+        return;
+    }
+    file(m, node_id, e.session_id, &started).await;
+}
+
+/// A `remember` call the node ran (its `tool_call_started` payload),
+/// filed for the chat (never for an incognito
+/// chat, nor a turn that may write no memory: an untrusted or callback
+/// turn, an agent whose memory is off), and only from a node that offers
+/// the tool (`CAP_REMEMBER`): one whose `node.toml` denies it files
+/// nothing, whatever its model sends. The call id makes replays harmless.
+async fn file(m: &Master, node_id: &str, sid: SessionId, started: &Value) {
+    let Some(mem) = m.memory() else { return };
+    if !m.node_has(node_id, harness_protocol::CAP_REMEMBER) {
+        return;
+    }
+    let Some(call_id) = started.get("call_id").and_then(|v| v.as_str()) else {
+        return;
+    };
+    let input = started.get("input").cloned().unwrap_or(Value::Null);
     // A call of a turn nobody wrote (a callback turn, T.8d step 3) is
     // never filed, whatever the chat's recorded memory says: decided from
     // the log, so a restart or a refused message in the meantime changes
     // nothing (review S3-1). Fails closed.
-    let turn = e
-        .payload
+    let turn = started
         .get("turn_id")
         .and_then(|v| v.as_str())
         .unwrap_or("")
@@ -837,10 +914,9 @@ pub async fn file(m: &Master, node_id: &str, e: &RawEvent) {
     if row.incognito {
         return;
     }
-    // Plan mode (X.7): the node refuses `remember` there, but its call is
-    // in the log all the same (`tool_call_started` comes first); nothing is
-    // filed for a chat in plan mode, or a sub-agent of one, as the log
-    // says now. Fails closed on a read error.
+    // Plan mode (X.7): the node refuses `remember` there, so no call of it
+    // succeeds; a second check, as the log says now (the node records a
+    // ceiling it lowered at the next turn). Fails closed on a read error.
     if in_plan_mode(m, &row).await {
         return;
     }

@@ -401,6 +401,11 @@ fn plan_note_without_shell(why: &str) -> String {
     )
 }
 
+/// The result of a call whose card waited while plan mode began (X.7).
+pub const PLAN_STARTED_WHILE_WAITING: &str = "[harness] plan mode: the person switched this chat \
+     to plan mode while this call waited for an answer, so it was not run and nothing was \
+     changed. Describe the change in your plan instead.";
+
 /// The result of `bash` in plan mode where the node has no read-only
 /// shell.
 fn plan_no_shell(why: &str) -> String {
@@ -4175,6 +4180,18 @@ impl NativeBackend {
                 call.input
             ))));
         }
+        // Plan mode (X.7), read again here: a call planned before the mode
+        // changed, or covered by a "for this turn" grant given before it,
+        // is refused all the same (the grant skips the card, never the
+        // mode).
+        if is_plan(host)
+            && let Some(r) = self.plan_refusal(tool.name(), mcp)
+        {
+            return Err(Box::new(ToolOutcome {
+                denied: true,
+                ..ToolOutcome::err(r)
+            }));
+        }
         let key = harness_tools::call_key(&ctx.cwd, tool.name(), &call.input);
         if !allowed_this_turn.contains(&key) {
             let decision = host
@@ -4191,6 +4208,10 @@ impl NativeBackend {
                         denied: true,
                         ..ToolOutcome::err(if ctx.cancel.is_cancelled() {
                             "[cancelled before approval]".to_string()
+                        } else if is_plan(host) {
+                            // The person did not deny it: plan mode began
+                            // while it waited (the node denied the card).
+                            PLAN_STARTED_WHILE_WAITING.to_string()
                         } else {
                             // The person's note, quoted after the fixed sentence.
                             harness_core::event::denied_text(note.as_deref())
@@ -4227,6 +4248,16 @@ impl NativeBackend {
         use futures::FutureExt as _;
         if !stream && ctx.cancel.is_cancelled() {
             return ToolOutcome::err(NOT_RUN_STOPPED);
+        }
+        // Plan mode (X.7) at the moment it would run: a call authorised
+        // before the mode changed (one waiting in a batch) runs nothing.
+        if is_plan(host)
+            && let Some(r) = self.plan_refusal(tool.name(), std::slice::from_ref(&tool))
+        {
+            return ToolOutcome {
+                denied: true,
+                ..ToolOutcome::err(r)
+            };
         }
         // Bounded, with a byte budget for the whole call (PLAN.md T9): a
         // flood is cut with one marker, then read and dropped by the tool.

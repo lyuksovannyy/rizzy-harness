@@ -1114,7 +1114,10 @@ with one line saying what runs unasked:
 - **Plan**: the agent looks and writes a plan; nothing changes. It is not
   "ask": a call that would change something is refused by the node before
   any card, with a sentence telling the agent to describe the change in its
-  plan, and no answer can lift it. Reads, searches, the task list, web
+  plan, and no answer can lift it: a card still waiting when you switch to
+  Plan is denied by the node at once, and so is a late Allow on it. Plan
+  shows no cards at all (what it allows runs unasked), so it is not "Ask
+  every call minus the writes". Reads, searches, the task list, web
   search and fetch, earlier-chat search, skills and the repository map run.
   `write`, `edit`, `publish`, `remember` (and memory proposals), and every
   MCP tool are refused and not offered (MCP servers are not started in plan
@@ -1123,7 +1126,11 @@ with one line saying what runs unasked:
   the chat's folder and everything else bound read-only and only its own
   `/tmp` (256 MiB, gone when the command ends) writable, in a sandbox chat
   and in a host chat alike; `git log`, `git diff`, `git status`, `grep` work,
-  and any write fails with "Read-only file system". On a node without that
+  and any write fails with "Read-only file system". Toolchains that need a
+  writable home or build folder cannot build or test there (`cargo` fails
+  on a read-only `~/.rustup` even with `CARGO_TARGET_DIR=$TMPDIR`; `npm
+  install` fails): a planner reads, greps, runs `git`, and runs scripts and
+  tests that write nothing or only to `$TMPDIR`. On a node without that
   containment (no bubblewrap, `[sandbox] mode = "off"`, a bubblewrap that
   cannot size a tmpfs) plan mode has **no shell** and the agent is told why.
   `delegate` starts only agents that cannot change files (no `write`, `edit`,
@@ -1133,9 +1140,12 @@ with one line saying what runs unasked:
   `bash_stop`, which plan mode allows); a sub-agent that changed files before
   the switch has its changes kept in the node's store and shown, not written
   into the folder. The agent is told plan mode is on, that only you can end
-  it, and to end its turn with a plan. **Only you leave it**: pick another
-  mode in the composer, or one of the choices under the agent's answer
-  ("Carry out in Auto", "Accept edits", "Ask"); nothing the agent, a skill,
+  it, and to end its turn with a plan. Plan mode stops changes, not
+  reading: where the chat has network access, the agent can still send out
+  what it reads (`web_fetch`, the shell), as in every mode. **Only you leave
+  it**: pick another mode in the composer, or one of the choices in the plan
+  bar above it while no turn runs ("Auto", "Accept edits", "Ask": each
+  switches and sends "Carry out the plan."); nothing the agent, a skill,
   an MCP server, a routine or a webhook does switches it. The plan is the
   agent's last answer, ordinary chat history the next turn reads.
 

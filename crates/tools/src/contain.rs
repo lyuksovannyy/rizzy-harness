@@ -160,8 +160,9 @@ pub fn binds_of(bwrap: &Path) -> (Binds, Option<String>) {
 }
 
 /// The size of a read-only shell's `/tmp` (T.7): a tmpfs in the command's
-/// own mount namespace, so a command that fills it fills memory of its own
-/// cgroup up to this, never the node's disk, and it is gone when the
+/// own mount namespace, so a command that fills it takes up to this much
+/// memory (charged where the node's own processes are: commands have no
+/// cgroup of their own), never the node's disk, and it is gone when the
 /// command ends.
 pub const READ_ONLY_TMP_BYTES: u64 = 256 * 1024 * 1024;
 

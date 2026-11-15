@@ -386,6 +386,10 @@ async fn plan_mode_runs_bash_read_only_in_both_execution_modes() {
             "{mode:?}: {out}"
         );
         if !shell {
+            assert!(
+                !bwrap::required(),
+                "HARNESS_REQUIRE_BWRAP=1 but there is no read-only shell here: {out}"
+            );
             eprintln!("SKIPPED (no read-only shell with this bubblewrap): {out}");
             assert!(out.contains("no read-only shell"), "{mode:?}: {out}");
             continue;

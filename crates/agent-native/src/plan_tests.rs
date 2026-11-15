@@ -286,6 +286,15 @@ async fn run(
     steps: Vec<Vec<(&'static str, Value)>>,
     switch: Option<(usize, ApprovalMode)>,
 ) -> Run {
+    run_with(host, steps, switch, Default::default()).await
+}
+
+async fn run_with(
+    host: Arc<Host>,
+    steps: Vec<Vec<(&'static str, Value)>>,
+    switch: Option<(usize, ApprovalMode)>,
+    extra: harness_core::backend::TurnExtra,
+) -> Run {
     let rec = Arc::new(Rec {
         steps,
         seen: Mutex::default(),
@@ -321,7 +330,7 @@ async fn run(
             agent: Some(lead()),
             compare: vec![],
             parent_session: None,
-            extra: Default::default(),
+            extra,
             cancel: Default::default(),
             host: &*host,
         })
@@ -532,4 +541,44 @@ async fn a_model_that_keeps_writing_is_stopped() {
     assert_eq!(r.out.reason, TurnEndReason::Error, "{:?}", r.out);
     assert_eq!(r.runs.load(Ordering::SeqCst), 0);
     assert!(host.results().len() < 20, "{}", host.results().len());
+}
+
+/// Review H1, the turns that start after the switch: a callback turn (a
+/// background command ended) and a turn that reads a message the person
+/// queued while plan mode began are plan-mode turns like any: the write is
+/// refused, the line is sent.
+#[tokio::test]
+async fn a_callback_turn_and_a_queued_message_run_in_plan_mode() {
+    let queued = UserMessage {
+        turn_id: "earlier".into(),
+        text: "also write the file".into(),
+        attachments: vec![],
+        reply: None,
+        images: vec![],
+        queued: true,
+        files: vec![],
+    };
+    for extra in [
+        harness_core::backend::TurnExtra {
+            cause: Some(TurnCause::Callback(vec!["bg-1".into()])),
+            ..Default::default()
+        },
+        harness_core::backend::TurnExtra {
+            queued: vec![queued.clone()],
+            ..Default::default()
+        },
+    ] {
+        let callback = extra.cause.is_some();
+        let host = Arc::new(Host::new(ApprovalMode::Plan));
+        let r = run_with(host.clone(), vec![vec![call("write", "w")]], None, extra).await;
+        assert_eq!(r.runs.load(Ordering::SeqCst), 0, "callback {callback}");
+        let (ok, out) = host.result("w");
+        assert!(
+            !ok && out.contains("plan mode"),
+            "callback {callback}: {out}"
+        );
+        let sent = r.rec.seen.lock().unwrap()[0].clone();
+        let text = format!("{:?}", sent.messages);
+        assert!(text.contains("Plan mode is on"), "callback {callback}");
+    }
 }

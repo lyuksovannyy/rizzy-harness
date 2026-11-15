@@ -35,6 +35,10 @@ struct LogHost {
     /// The chat is in plan mode (X.7): its line goes into the context
     /// block, and the mutating `note` is refused.
     plan: bool,
+    /// The person switches the mode (in or out of plan) after this many
+    /// tool results of the turn.
+    flip_after: Option<usize>,
+    finished: std::sync::atomic::AtomicUsize,
 }
 
 impl LogHost {
@@ -46,6 +50,8 @@ impl LogHost {
             asked: Mutex::new(0),
             unasked: false,
             plan: false,
+            flip_after: None,
+            finished: Default::default(),
         }
     }
     fn push(&self, k: EventKind) -> u64 {
@@ -85,6 +91,10 @@ impl TurnHost for LogHost {
             .then_some(harness_core::policy::ApprovalMode::Plan)
     }
     async fn emit(&self, kind: EventKind) -> Result<(), harness_core::backend::LogError> {
+        if matches!(kind, EventKind::ToolCallFinished(_)) {
+            self.finished
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
         self.push(kind);
         Ok(())
     }
@@ -579,6 +589,16 @@ async fn rebuild_matches_live_in_plan_mode() {
     rebuild_matches_live(false, 1..=3, true).await;
 }
 
+/// The person switches into plan mode, and out of it, during the turn
+/// (after a few results): every request still rebuilds byte for byte (the
+/// line is the turn's, sent once at its start; the refusals are results).
+#[tokio::test]
+async fn rebuild_matches_live_when_plan_mode_changes_mid_turn() {
+    for (plan, after) in [(false, 3), (true, 3), (true, 10)] {
+        rebuild_matches_live_flip(false, 4..=5, plan, Some(after)).await;
+    }
+}
+
 /// The same with the reads of a step running together (X.19), each later
 /// call of a step made to finish before the earlier ones: the log, and so
 /// every request, keep call order whichever finishes first.
@@ -588,6 +608,15 @@ async fn rebuild_matches_live_with_parallel_reads_finishing_out_of_order() {
 }
 
 async fn rebuild_matches_live(parallel: bool, seeds: std::ops::RangeInclusive<u64>, plan: bool) {
+    rebuild_matches_live_flip(parallel, seeds, plan, None).await;
+}
+
+async fn rebuild_matches_live_flip(
+    parallel: bool,
+    seeds: std::ops::RangeInclusive<u64>,
+    plan: bool,
+    flip_after: Option<usize>,
+) {
     let mut report = vec![];
     let mut failures = 0;
     for seed in seeds {
@@ -632,6 +661,7 @@ async fn rebuild_matches_live(parallel: bool, seeds: std::ops::RangeInclusive<u6
             let mut host = LogHost::new(sid, history.clone());
             host.unasked = parallel;
             host.plan = plan;
+            host.flip_after = flip_after;
             *host.queued.lock().unwrap() = queued;
             let start = history.len();
             open_turn(&host, qseqs);
@@ -648,7 +678,7 @@ async fn rebuild_matches_live(parallel: bool, seeds: std::ops::RangeInclusive<u6
                     "seed {seed}: no step ran in parallel"
                 );
             }
-            if plan {
+            if plan && flip_after.is_none() {
                 let sent = log.iter().any(|e| {
                     e.kind == "context_sent" && e.payload.to_string().contains("Plan mode is on")
                 });
@@ -1495,4 +1525,98 @@ async fn a_mentioned_file_survives_an_in_turn_summary() {
     let (compared, bad) = check_every_step(&log, &main, None, 0);
     assert!(compared > 0);
     assert!(bad.is_none(), "{}", bad.unwrap());
+}
+
+/// Leaving plan mode between turns: a turn in plan mode (its line in its
+/// block, its writes refused), then a turn out of it on the same log. Every
+/// request of the second turn rebuilds byte for byte from the log, the
+/// first turn's plan line included as it was sent.
+#[tokio::test]
+async fn rebuild_matches_live_after_leaving_plan_mode() {
+    let (steps, _) = random_script(7, 12);
+    let n = steps.len();
+    let steps = Arc::new(steps);
+    let s2 = steps.clone();
+    // The same script twice: once per turn.
+    let p = Model::new(
+        W,
+        Box::new(move |i| {
+            let i = i % (n + 1);
+            if i < n {
+                s2[i].clone()
+            } else {
+                Completion {
+                    text: "done".into(),
+                    ..Default::default()
+                }
+            }
+        }),
+    );
+    let b = backend(p.clone());
+    let sid = SessionId::new();
+    let mut history = vec![];
+    let mut first_of_second = 0;
+    for (turn, plan) in [("t1", true), ("t2", false)] {
+        let mut host = LogHost::new(sid, history.clone());
+        host.plan = plan;
+        let start = history.len();
+        host.push(EventKind::TurnStarted(TurnStarted {
+            cause: None,
+            agent: None,
+            turn_id: turn.into(),
+            environment: None,
+        }));
+        host.push(EventKind::UserMessage(UserMessage {
+            turn_id: turn.into(),
+            text: "USER-ASKS read and fix.".into(),
+            attachments: vec![],
+            reply: None,
+            images: vec![],
+            queued: false,
+            files: vec![],
+        }));
+        if !plan {
+            first_of_second = p.main().len();
+        }
+        let out = b
+            .run_turn(TurnCtx {
+                session_id: sid,
+                turn_id: turn.into(),
+                history: history.clone(),
+                user_text: "USER-ASKS read and fix.".into(),
+                cwd: Default::default(),
+                model: "m".into(),
+                agent: Some(agent()),
+                compare: vec![],
+                parent_session: None,
+                extra: TurnExtra::default(),
+                cancel: Default::default(),
+                host: &host,
+            })
+            .await;
+        assert!(
+            matches!(out.reason, TurnEndReason::Completed | TurnEndReason::Error),
+            "{turn}: {out:?}"
+        );
+        host.push(EventKind::TurnEnded(TurnEnded {
+            turn_id: turn.into(),
+            reason: out.reason,
+            usage: out.usage.clone(),
+        }));
+        history = host.log();
+        if !plan {
+            let main = p.main();
+            let (compared, bad) = check_every_step(&history, &main[first_of_second..], None, start);
+            assert!(compared > 0);
+            assert!(bad.is_none(), "{}", bad.unwrap());
+            // The first turn's plan line is in the second turn's requests,
+            // as it was sent; the second turn adds none.
+            let first = &main[first_of_second].msgs;
+            let plan_lines = first
+                .iter()
+                .filter(|m| format!("{m:?}").contains("Plan mode is on"))
+                .count();
+            assert_eq!(plan_lines, 1, "{first:?}");
+        }
+    }
 }

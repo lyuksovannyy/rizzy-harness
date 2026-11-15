@@ -61,12 +61,26 @@ them as not covered), so "read-only" would be a best effort. That differs
 from ADOPTION_PLAN T.7's first wording ("a Landlock profile"); the plan row
 says so.
 
+Where the containment shares this machine's `/proc` (the `SharedProc`
+form, inside a rootless container), `/proc/<pid>/root` of a process
+outside leads past the binds; only Landlock stops that, so in that form
+the read-only shell exists only with `[sandbox] mode = "required"` (tested
+in `the_shared_proc_form_holds_through_landlock`).
+
+Every sandboxed command, read-only or not, runs with core dumps off
+(`RLIMIT_CORE` 0, soft and hard, set by `sandbox-exec` before the command):
+the host's core pattern may pipe a dump to a handler outside the sandbox.
+
 ## Residuals
 
 - A command can still read what any command of the chat reads, and send it
   out where the network is on: read-only is about changes, not secrecy.
-- `/tmp` is memory of the command's own: 256 MiB per running command, so a
-  node with many background commands in plan mode can hold that much each.
+- `/tmp` is memory: 256 MiB per running command, charged where the node's
+  own processes are (no cgroup per command), so a node with many background
+  commands in plan mode can hold that much each.
+- Toolchains that need a writable home or build folder cannot build or test
+  (`cargo` fails on a read-only `~/.rustup` even with
+  `CARGO_TARGET_DIR=$TMPDIR`).
 - Writes outside the file system (a request to a local service listening on
   TCP where the network is on, a background command started before plan
   mode) are not file writes and are not stopped by this shell.
