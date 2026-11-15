@@ -211,7 +211,11 @@ impl Node {
         let before = self.ended(sid);
         self.send(MasterToNode::Prompt {
             savings: None,
-            context: Some("Person: Ann".into()),
+            context: Some(Box::new(harness_core::backend::MasterContext {
+                turn: Some("Person: Ann".into()),
+                standing: vec![],
+                unattended: false,
+            })),
             reply: None,
             agent,
             attachments: vec![],
@@ -409,4 +413,42 @@ async fn every_turn_opens_with_the_node_s_environment_line() {
     assert!(env.contains("the node's clock reads "), "{env}");
     assert!(env.contains("on branch \"feat/x\""), "{env}");
     assert!(rest.starts_with(CONTEXT_LEAD), "{rest}");
+}
+
+/// An instruction file changed during a turn (here by the turn's own
+/// `write`) does not change the turn's message: every request of the turn
+/// carries the files as read at its start, and the node's log rebuilds
+/// that message byte for byte (X.1). The next turn sends the new files in
+/// full with the harness's line saying they replace the earlier ones.
+#[tokio::test]
+async fn a_file_changed_during_a_turn_waits_for_the_next_turn() {
+    let mut n = start().await;
+    let sub = n.repo.join("sub");
+    let sid = n.create(&sub).await;
+    let script = json!([
+        {"tool": "read", "input": {"path": "CLAUDE.md"}},
+        {"tool": "write", "input": {"path": "CLAUDE.md", "content": "Now split sub up.\n"}},
+        {"tool": "read", "input": {"path": "keep.txt"}},
+    ]);
+    n.turn(sid, &format!("script: {script}"), None).await;
+    assert_eq!(
+        std::fs::read_to_string(sub.join("CLAUDE.md")).unwrap(),
+        "Now split sub up.\n",
+        "the write ran"
+    );
+    let sent = n.raw_requests();
+    assert!(sent.len() >= 4, "{sent:?}");
+    assert!(sent.iter().all(|r| *r == sent[0]), "{sent:?}");
+    assert!(sent[0].contains("| Keep sub small."), "{}", sent[0]);
+    let log = n.node.store().events_after(sid, 0, 10_000).unwrap();
+    let rebuilt = harness_agent_native::history_to_messages(&log);
+    let first = rebuilt.iter().find_map(|m| m.user_text()).unwrap();
+    assert_eq!(first, sent[0]);
+    n.turn(sid, "again", None).await;
+    let next = n.raw_requests().pop().unwrap();
+    assert!(next.contains("| Now split sub up."), "{next}");
+    assert!(
+        next.contains("The repository's instruction files below replace the ones sent earlier"),
+        "{next}"
+    );
 }

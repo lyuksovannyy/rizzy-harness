@@ -526,6 +526,9 @@ impl SessionView {
                 );
             }
             EventKind::TodoUpdated(t) => self.todo = t.items,
+            // What the model was sent with the turn's message; the chat
+            // never showed it (X.1).
+            EventKind::ContextSent(_) => {}
             EventKind::ChatAllowAdded(g) => {
                 self.chat_allows.insert(
                     g.grant_id,

@@ -85,6 +85,7 @@ pub enum EventKind {
     QueuedDelivered(QueuedDelivered),
     TodoUpdated(TodoUpdated),
     ApprovalModeChanged(ApprovalModeChanged),
+    ContextSent(ContextSent),
     ChatAllowAdded(ChatAllowAdded),
     ChatAllowRemoved(ChatAllowRemoved),
     StepLimitChanged(StepLimitChanged),
@@ -138,6 +139,7 @@ impl EventKind {
             EventKind::QueuedDelivered(_) => "queued_delivered",
             EventKind::TodoUpdated(_) => "todo_updated",
             EventKind::ApprovalModeChanged(_) => "approval_mode_changed",
+            EventKind::ContextSent(_) => "context_sent",
             EventKind::ChatAllowAdded(_) => "chat_allow_added",
             EventKind::ChatAllowRemoved(_) => "chat_allow_removed",
             EventKind::StepLimitChanged(_) => "step_limit_changed",
@@ -551,6 +553,63 @@ pub struct UserMessage {
 pub struct QueuedDelivered {
     pub turn_id: String,
     pub seqs: Vec<u64>,
+}
+
+/// The harness's context block a turn's opening message carried (X.1),
+/// section by section: the repository's instruction files, the list of
+/// skills, the master's standing parts (memory, project) where they
+/// changed or went, and this turn's own context. Recorded by the loop
+/// through the session's one writer, after the turn's message and before
+/// its first answer, so every later request rebuilds that message from the
+/// log and a section that has not changed is not sent again. A later
+/// record that sends a standing key again or withdraws it takes that key
+/// out of every earlier opening when the history is rebuilt: the model
+/// reads at most the current version of each (T52). Never shown: the UI's
+/// fold ignores it. Its texts passed the node's scrubber before they were
+/// sent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextSent {
+    pub turn_id: String,
+    /// Whose text the block stands in front of (or after, for a callback
+    /// turn's opening); the lead line says so.
+    pub frame: ContextFrame,
+    /// In the order sent. Empty: the turn's opening carries no block (a
+    /// summary mid-turn made the one it had unnecessary). A later record
+    /// for the same turn replaces it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sections: Vec<SentSection>,
+}
+
+/// Where a [`ContextSent`] block stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextFrame {
+    /// In front of the person's message.
+    Person,
+    /// In front of a sub-agent's task.
+    Task,
+    /// After a callback turn's opening.
+    Callback,
+}
+
+/// One section of a [`ContextSent`] block.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SentSection {
+    /// `instructions`, `skills`, `memory`, `project` (standing), or
+    /// `turn` (this turn's own, never taken out).
+    pub key: String,
+    /// A standing section's SHA-256 of `text` (hex); empty when the block
+    /// said the section no longer applies, and for `turn`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub digest: String,
+    /// The section as sent (scrubbed, capped, unquoted); empty for a
+    /// withdrawal.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub text: String,
+    /// The harness's sentence in the block's first line: this replaces the
+    /// earlier one, or the earlier one no longer applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// How the harness's line after a queued message begins.

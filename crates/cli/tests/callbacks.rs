@@ -568,11 +568,12 @@ async fn the_opening_at_the_provider_quotes_every_line_and_rebuilds_the_same() {
 /// The node reads the repository's instruction files for a callback turn
 /// too (the unattended turn, where they matter most): the opening at the
 /// provider still starts with the harness's frame and ends with the files,
-/// quoted under the harness's line.
+/// quoted under the harness's line. Written after the person's turn, so
+/// the callback turn is the first to send them (a file the model already
+/// has is not sent again: X.1).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_callback_turn_gets_the_repositorys_instruction_files() {
     let Some(mut n) = node().await else { return };
-    std::fs::write(n.ws.join("AGENTS.md"), "Run cargo fmt before you stop.\n").unwrap();
     let sid = SessionId::new();
     n.create(sid, json!({}));
     std::fs::write(n.ws.join("out.txt"), "built\n").unwrap();
@@ -582,6 +583,7 @@ async fn a_callback_turn_gets_the_repositorys_instruction_files() {
     );
     n.started(sid, "bg-1").await;
     n.turn_ended(sid).await;
+    std::fs::write(n.ws.join("AGENTS.md"), "Run cargo fmt before you stop.\n").unwrap();
     std::fs::write(n.ws.join("go"), "").unwrap();
     n.ended(sid, "bg-1").await;
     let before = n.requests.lock().unwrap().len();

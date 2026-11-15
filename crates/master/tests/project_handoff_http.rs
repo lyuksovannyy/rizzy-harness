@@ -279,10 +279,11 @@ async fn a_new_project_chat_starts_with_the_owners_earlier_chats() {
     assert!(!ctx.contains("Xray"), "{ctx}");
     assert!(!ctx.contains("\"Charlie\""), "{ctx}");
 
-    // The second turn of the chat does not carry it again.
+    // The second turn of the chat does not carry it again (nor the
+    // project's brief, unchanged: X.1).
     say(&t, &alex, &c, "and then").await;
     let ctx = last_context(&t);
-    assert!(ctx.contains("Project \"Harness\""), "{ctx}");
+    assert!(!ctx.contains("Project \"Harness\""), "{ctx}");
     assert!(!ctx.contains(SECTION), "{ctx}");
 }
 

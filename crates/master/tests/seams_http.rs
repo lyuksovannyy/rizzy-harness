@@ -205,9 +205,10 @@ fn last_prompt(t: &T) -> (harness_core::agent::AgentSpec, String) {
     seen.iter()
         .rev()
         .find_map(|m| match m {
-            MasterToNode::Prompt { agent, context, .. } => {
-                Some((agent.clone().unwrap(), context.clone().unwrap_or_default()))
-            }
+            MasterToNode::Prompt { agent, context, .. } => Some((
+                agent.clone().unwrap(),
+                context.as_ref().map(|c| c.joined()).unwrap_or_default(),
+            )),
             _ => None,
         })
         .expect("no prompt reached the node")

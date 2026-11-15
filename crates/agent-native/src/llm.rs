@@ -213,18 +213,19 @@ pub(crate) fn to_genai(req: &ChatRequest) -> GChatRequest {
         }
     }
     if req.cache && msgs.len() > 1 {
-        // This turn's user message starts with the per-turn context, which
-        // the next turn rebuilds it without (review C43-1), so no entry
-        // that ends at it or after it is read in a later turn.
-        // Breakpoint 2: the end of the history before it, which the next
-        // turn rebuilds byte-identical from the log.
+        // Every message rebuilds byte for byte from the log, this turn's
+        // own included (its context block is recorded, `context_sent`,
+        // X.1), so breakpoint 4 of a turn's last request is read by the
+        // next turn's first, two blocks later.
+        // Breakpoint 2: the end of the history before this turn's message.
         // Breakpoint 3: the end of the history before the previous user
-        // message: where the previous turn put breakpoint 2, so this
-        // request reads that entry where it ends, however long the
-        // previous turn was (a breakpoint looks back only 20 blocks for
-        // an entry to read).
-        // Breakpoint 4: the newest message, so the next step of this turn
-        // reads everything up to here.
+        // message: where the previous turn put breakpoint 2. Both are read
+        // where they end however long the turn was, for a step whose many
+        // parallel results put the last entry beyond the 20 blocks a
+        // breakpoint looks back (before X.1 they were the only entries a
+        // later turn could read: review C43-1).
+        // Breakpoint 4: the newest message, so the next step of this turn,
+        // and the next turn, read everything up to here.
         // A user message first in the request has no history before it.
         // Places that coincide (the history end is the system prompt in a
         // second turn) are marked once, so with breakpoint 1 there are
@@ -789,11 +790,10 @@ mod tests {
         }))
     }
 
-    /// C43-1: the per-turn context is at the head of this turn's user
-    /// message, so a marker on it or after it is never read by the next
-    /// turn. The message before it ends the history (byte-identical when
-    /// the next turn rebuilds it from the log), and the message before the
-    /// previous user message is where the previous turn put that marker.
+    /// The message before this turn's ends the history, and the message
+    /// before the previous user message is where the previous turn put
+    /// that marker (C43-1; since X.1 the newest marker is read by the next
+    /// turn too, and these two are for a step past the 20-block lookback).
     #[test]
     fn the_history_before_this_turn_and_the_last_are_marked() {
         let mut m = vec![ChatMsg::System("s".into()), user("u1"), said("a1")];

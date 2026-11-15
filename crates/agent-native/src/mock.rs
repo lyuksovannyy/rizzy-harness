@@ -439,7 +439,22 @@ impl Provider for Mock {
                 Some(ChatMsg::System(s)) => s.clone(),
                 _ => String::new(),
             };
-            let block = format!("{context}\n{sys}")
+            // Memory that did not change since an earlier message is not
+            // sent again (X.1): the latest block the conversation holds.
+            let earlier = req
+                .messages
+                .iter()
+                .rev()
+                .filter_map(|m| m.user_text())
+                .filter_map(crate::provider::split_context)
+                .map(|(c, _)| c)
+                .find(|c| c.contains("What you remember about the user"))
+                .unwrap_or_default();
+            let mut all = format!("{context}\n{sys}");
+            if !all.contains("What you remember about the user") {
+                all = earlier;
+            }
+            let block = all
                 .split("What you remember about the user")
                 .nth(1)
                 .map(|b| format!("Memory:{b}"))

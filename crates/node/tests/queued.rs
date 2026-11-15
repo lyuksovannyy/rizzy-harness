@@ -742,7 +742,9 @@ async fn a_message_after_an_error_starts_the_next_turn() {
 
 /// Review ST-8: a turn the node starts for waiting messages takes the
 /// savings, not the last turn's per-turn context (a routine's note, a
-/// recall for other words).
+/// recall for other words). The first turn's message keeps its own
+/// context in the history (X.1: it is rebuilt as it was sent); the new
+/// turn's message does not carry it again.
 #[tokio::test]
 async fn the_next_turn_does_not_take_the_last_turns_context() {
     let model = Gated::new(|_, _| answer("ok"));
@@ -750,7 +752,7 @@ async fn the_next_turn_does_not_take_the_last_turns_context() {
     let sid = n.create(ApprovalMode::Auto).await;
     n.send_json(
         json!({"type": "session.prompt", "req_id": "p1", "session_id": sid,
-        "text": "hello", "context": "CTX-ONLY-FOR-THE-FIRST-TURN"}),
+        "text": "hello", "context": {"turn": "CTX-ONLY-FOR-THE-FIRST-TURN"}}),
     );
     assert_eq!(n.ack("p1").await, Ok(()));
     model.entered.notified().await;
@@ -761,7 +763,53 @@ async fn the_next_turn_does_not_take_the_last_turns_context() {
     let reqs = model.requests();
     assert_eq!(holding(&reqs[0], "CTX-ONLY-FOR-THE-FIRST-TURN"), 1);
     assert_eq!(holding(&reqs[1], "and then"), 1);
-    assert_eq!(holding(&reqs[1], "CTX-ONLY-FOR-THE-FIRST-TURN"), 0);
+    assert_eq!(holding(&reqs[1], "CTX-ONLY-FOR-THE-FIRST-TURN"), 1);
+    let own = reqs[1]
+        .messages
+        .iter()
+        .rev()
+        .find_map(|m| m.user_text())
+        .unwrap();
+    assert!(own.contains("and then"), "{own}");
+    assert!(!own.contains("CTX-ONLY-FOR-THE-FIRST-TURN"), "{own}");
+}
+
+/// Review F2 of PR 108: a turn that only reads queued messages is sent the
+/// master's context of the newest one (computed for that message), its
+/// standing parts included; never the last turn's.
+#[tokio::test]
+async fn a_queued_only_turn_takes_the_queued_messages_context() {
+    let model = Gated::new(|_, _| answer("ok"));
+    let mut n = Node::start(model.clone()).await;
+    let sid = n.create(ApprovalMode::Auto).await;
+    n.send_json(
+        json!({"type": "session.prompt", "req_id": "p1", "session_id": sid,
+        "text": "hello", "context": {"turn": "CTX-FIRST",
+            "standing": [{"part": "workspace", "text": "SHARED-OLD"}]}}),
+    );
+    assert_eq!(n.ack("p1").await, Ok(()));
+    model.entered.notified().await;
+    n.send_json(
+        json!({"type": "session.prompt", "req_id": "p2", "session_id": sid,
+        "text": "and then", "context": {"turn": "CTX-QUEUED",
+            "standing": [{"part": "workspace", "text": "SHARED-NEW"}]}}),
+    );
+    assert_eq!(n.ack("p2").await, Ok(()));
+    model.gate.notify_one();
+    n.ended(2).await;
+    let reqs = model.requests();
+    let own = reqs[1]
+        .messages
+        .iter()
+        .rev()
+        .find_map(|m| m.user_text())
+        .unwrap();
+    assert!(
+        own.contains("CTX-QUEUED") && own.contains("SHARED-NEW"),
+        "{own}"
+    );
+    assert!(!own.contains("CTX-FIRST"), "{own}");
+    assert_eq!(holding(&reqs[1], "SHARED-OLD"), 0, "the old version left");
 }
 
 /// Review ST-5: a message that names another agent (the picker, or an
@@ -878,4 +926,48 @@ async fn parallel_answers_take_no_message_while_they_run() {
     assert!(err.contains("parallel answers"), "{err}");
     model.gate.notify_one();
     n.ended(1).await;
+}
+
+// ---- Round-3 re-check of PR 108 (H1): kept as a regression test ----
+
+/// F2/queued: the running turn is an @mention of agent "coder" (memory
+/// off: its context has no memory part). A plain message sent meanwhile
+/// is resolved by the master for the chat's own agent "general" (memory
+/// on): its context holds the owner's facts. The turn the node starts for
+/// that message runs as "coder", and is sent general's memory.
+#[tokio::test]
+async fn rv3_queued_context_of_another_agent() {
+    let model = Gated::new(|_, _| answer("ok"));
+    let mut n = Node::start(model.clone()).await;
+    let sid = n.create(ApprovalMode::Auto).await;
+    let spec = |id: &str, p: &str| {
+        json!({"agent_id": id, "name": id, "system_prompt": p, "tools": "all",
+               "prompt_hash": format!("h-{id}")})
+    };
+    n.send_json(
+        json!({"type": "session.prompt", "req_id": "p1", "session_id": sid,
+        "text": "@coder look", "agent": spec("coder", "CODER-PROMPT"), "agent_named": true,
+        "context": {"turn": "CTX-1", "standing": []}}),
+    );
+    assert_eq!(n.ack("p1").await, Ok(()));
+    model.entered.notified().await;
+    n.send_json(
+        json!({"type": "session.prompt", "req_id": "p2", "session_id": sid,
+        "text": "and also", "agent": spec("general", "GENERAL-PROMPT"),
+        "context": {"turn": "CTX-2",
+            "standing": [{"part": "memory", "text": "OWN-FACT-ZZ lives at Elm"}]}}),
+    );
+    assert_eq!(n.ack("p2").await, Ok(()));
+    model.gate.notify_one();
+    n.ended(2).await;
+    let reqs = model.requests();
+    assert_eq!(reqs.len(), 2);
+    let sys = match &reqs[1].messages[0] {
+        ChatMsg::System(s) => s.clone(),
+        o => panic!("{o:?}"),
+    };
+    assert!(
+        !(sys.contains("CODER-PROMPT") && holding(&reqs[1], "OWN-FACT-ZZ") > 0),
+        "the memory-off agent's turn is sent the other agent's memory"
+    );
 }

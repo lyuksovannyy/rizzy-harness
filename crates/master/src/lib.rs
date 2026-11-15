@@ -1848,6 +1848,38 @@ impl Master {
         Ok(sid)
     }
 
+    /// The standing parts of a callback turn's context (review M1): the
+    /// fact lists and the project's brief, facts and board, computed as for
+    /// a person's turn that `reads` them. No recall lines, notes or earlier
+    /// chats (there is no message); the node keeps what the model has of
+    /// those unless their place changed.
+    async fn callback_standing(
+        &self,
+        row: &harness_store::SessionRow,
+        reads: projects::TurnMemory,
+        project: Option<&harness_store::ProjectRow>,
+    ) -> Vec<harness_core::backend::StandingPart> {
+        use harness_core::backend::{StandingKey as K, StandingPart};
+        let mut out = Vec::new();
+        if reads.personal || reads.workspace {
+            let block = memory::turn_block(self, row, "", reads, false).await;
+            for (part, text) in [(K::Memory, block.own), (K::Workspace, block.workspace)] {
+                out.extend(text.map(|text| StandingPart { part, text }));
+            }
+        }
+        if let Some(p) = project {
+            let ctx = projects::turn_context(self, p, row, "", reads, false).await;
+            for (part, text) in [
+                (K::Project, Some(ctx.brief)),
+                (K::ProjectMemory, ctx.facts),
+                (K::Board, ctx.board),
+            ] {
+                out.extend(text.map(|text| StandingPart { part, text }));
+            }
+        }
+        out
+    }
+
     /// Run a turn. The agent is, in order: `agent_id` (explicit, e.g. from the
     /// mention popup), a leading `@agent` in the text, the session's agent.
     /// An answer (`reply`) goes to the agent that asked, ahead of all three.
@@ -1958,7 +1990,11 @@ impl Master {
         // Per-turn context goes after the history, not into the system
         // prompt: a system prompt that changes every turn would make the
         // provider re-read (and bill) the whole conversation each time.
+        // This message's own part (the person's settings and clock, the
+        // untrusted note) apart from the standing parts (memory, project),
+        // which the loop sends again only when they change (X.1).
         let mut turn_context: Vec<String> = context.into_iter().collect();
+        let mut standing: Vec<harness_core::backend::StandingPart> = Vec::new();
         // The agent's memory switches (on the Agents page).
         let features = r.agents().get(&agent.agent_id).map(|a| a.features);
         // A project chat always gets the project's brief and board; its
@@ -1976,6 +2012,16 @@ impl Master {
         let attended = !untrusted && !resume;
         let mut allowed =
             memory::turn_allowed(self, &row, features, project.is_some(), by_owner).await;
+        // What a callback turn READS (review M1): the standing sections as
+        // for a person's turn of the same agent and owner, so its request
+        // extends the last one when nothing changed; it is the same chat
+        // and agent, triggered by a command the agent started. What it may
+        // DO stays gated below (`remember`, `recall`). An untrusted turn
+        // reads nothing.
+        let mut reads = allowed;
+        reads.workspace &= !untrusted;
+        reads.personal &= !untrusted;
+        reads.project &= !untrusted;
         allowed.workspace &= attended;
         allowed.by_owner &= attended;
         allowed.personal &= attended;
@@ -2005,11 +2051,26 @@ impl Master {
         // The owner's facts, whole while they fit, each with its id
         // (`memory::turn_block`).
         let mut noted = Vec::new();
+        // What `remember` does here: the memory places' line, then the
+        // project's, one section.
+        let mut remember_lines: Vec<String> = Vec::new();
         if allowed.personal || allowed.workspace {
             let offers = agent.allows_tool("remember")
                 && self.node_has(&row.node_id, harness_protocol::CAP_REMEMBER);
-            let (block, calls) = memory::turn_block(self, &row, &text, allowed, offers).await;
-            turn_context.extend(block);
+            let block = memory::turn_block(self, &row, &text, allowed, offers).await;
+            use harness_core::backend::StandingKey as K;
+            for (part, text) in [
+                (K::Memory, block.own),
+                (K::MemoryRecall, block.own_recall),
+                (K::Workspace, block.workspace),
+                (K::WorkspaceRecall, block.workspace_recall),
+                (K::MemoryNotes, block.notes),
+            ] {
+                standing
+                    .extend(text.map(|text| harness_core::backend::StandingPart { part, text }));
+            }
+            remember_lines.extend(block.about);
+            let calls = block.calls;
             noted = calls;
         }
         // A callback turn's opening is rebuilt from the log alone on every
@@ -2018,8 +2079,25 @@ impl Master {
             let remember = allowed.project
                 && agent.allows_tool("remember")
                 && self.node_has(&row.node_id, harness_protocol::CAP_REMEMBER);
-            turn_context
-                .push(projects::turn_context(self, p, &row, &text, allowed, remember).await);
+            let ctx = projects::turn_context(self, p, &row, &text, allowed, remember).await;
+            use harness_core::backend::StandingKey as K;
+            for (part, text) in [
+                (K::Project, Some(ctx.brief)),
+                (K::ProjectMemory, ctx.facts),
+                (K::ProjectRecall, ctx.facts_recall),
+                (K::EarlierChats, ctx.earlier),
+                (K::Board, ctx.board),
+            ] {
+                standing
+                    .extend(text.map(|text| harness_core::backend::StandingPart { part, text }));
+            }
+            remember_lines.extend(ctx.remember);
+        }
+        if !remember_lines.is_empty() {
+            standing.push(harness_core::backend::StandingPart {
+                part: harness_core::backend::StandingKey::Remember,
+                text: remember_lines.join("\n\n"),
+            });
         }
         if recalls {
             turn_context.push(recall::CONTEXT_LINE.into());
@@ -2043,12 +2121,20 @@ impl Master {
         let chat = row.profile.as_deref() == Some("chat");
         let savings = r.token_savings().map(|t| t.for_turn(chat));
         if resume {
+            // The standing sections only: no message to recall by, no
+            // `remember` to describe (`unattended`).
+            let standing = self.callback_standing(&row, reads, project.as_ref()).await;
             let mut msg = MasterToNode::Callback {
                 req_id: String::new(),
                 session_id: sid,
                 bg_ids: callback,
                 agent: Some(agent),
                 savings,
+                context: Some(Box::new(harness_core::backend::MasterContext {
+                    turn: None,
+                    standing,
+                    unattended: true,
+                })),
             };
             return self
                 .send_command(&row.node_id, move |req_id| {
@@ -2068,7 +2154,11 @@ impl Master {
             attachments,
             compare,
             savings,
-            context: (!turn_context.is_empty()).then(|| turn_context.join("\n\n")),
+            context: Some(Box::new(harness_core::backend::MasterContext {
+                turn: (!turn_context.is_empty()).then(|| turn_context.join("\n\n")),
+                standing,
+                unattended: false,
+            })),
             reply,
             images,
             agent_named: picked,
