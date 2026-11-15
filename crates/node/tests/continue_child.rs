@@ -1035,6 +1035,9 @@ async fn in_plan_mode_a_writing_child_is_not_continued() {
 async fn a_child_made_in_plan_mode_stays_in_it() {
     use harness_core::policy::ApprovalMode;
     let mut r = rig().await;
+    // A `bash`-only `dev`: a reader by the shared rule (PLAN.md T70), so
+    // plan mode starts it (the rig's own `dev` also has `write`).
+    r.delegates = vec![support::Rig::spec("dev", &["bash"], vec![])];
     set_mode(&mut r, ApprovalMode::Plan).await;
     let (_, outs) = r
         .lead_turn(&delegate(&[
@@ -1134,4 +1137,82 @@ async fn entering_plan_mode_denies_a_continued_childs_waiting_card() {
         "{evs:#?}"
     );
     assert_eq!(r.read("b.txt").as_deref(), Some("one\n"));
+}
+
+/// A child whose agent no longer needs what it needed when it started
+/// (review of PR 131): a reader with a shell (the read-only shell, the
+/// parent's folder) whose agent gained `write` is refused, and so is a
+/// `publish` agent (the parent's folder) that gained a writable `bash`;
+/// the other way round, a writer that lost its writing tools is refused
+/// too. Nothing runs in any of them.
+#[tokio::test]
+async fn a_child_whose_agent_now_needs_another_folder_is_not_continued() {
+    let mut r = rig().await;
+    for (id, first, then) in [
+        (
+            "scout",
+            &["read", "bash"][..],
+            &["read", "bash", "write"][..],
+        ),
+        ("poster", &["read", "publish"], &["read", "publish", "bash"]),
+        ("maker", &["read", "write"], &["read", "bash"]),
+    ] {
+        r.delegates = vec![Rig::spec(id, first, vec![])];
+        let (_, outs) = r
+            .lead_turn(&delegate(&[json!({"agent": id, "task": "read: a.txt"})]))
+            .await;
+        let child = child_of(&outs[0]);
+        r.delegates = vec![Rig::spec(id, then, vec![])];
+        let (_, outs) = r
+            .lead_turn(&delegate(&[json!({
+                "agent": id, "session": child.to_string(), "task": "run: echo x > b.txt"
+            })]))
+            .await;
+        assert!(
+            outs[0].contains("cannot be given a follow-up"),
+            "{id}: {outs:#?}"
+        );
+        assert_eq!(turns(&events_of(&r, child)).len(), 1, "{id}");
+        assert!(r.read("b.txt").is_none(), "{id}");
+    }
+}
+
+/// A reader with a shell is continued as it ran: in the parent's folder,
+/// still a reader (on this node, which has no read-only shell, its `bash`
+/// is refused with the reason, never run writable), and nothing is merged
+/// back.
+#[tokio::test]
+async fn a_reader_with_a_shell_is_continued_as_a_reader() {
+    let mut r = rig().await;
+    r.delegates = vec![Rig::spec(
+        "scout",
+        &["read", "grep", "bash", "bash_output"],
+        vec![],
+    )];
+    let (_, outs) = r
+        .lead_turn(&delegate(&[
+            json!({"agent": "scout", "task": "read: a.txt"}),
+        ]))
+        .await;
+    let child = child_of(&outs[0]);
+    let (_, outs) = r
+        .lead_turn(&delegate(&[json!({
+            "agent": "scout", "session": child.to_string(), "task": "run: echo x > b.txt"
+        })]))
+        .await;
+    assert_eq!(child_of(&outs[0]), child, "{outs:#?}");
+    assert!(outs[0].contains("finished: done"), "{outs:#?}");
+    assert!(!outs[0].contains("applied"), "a merge-back: {outs:#?}");
+    assert!(r.read("b.txt").is_none());
+    assert_eq!(turns(&events_of(&r, child)).len(), 2);
+    let ran = events_of(&r, child).into_iter().any(|k| {
+        matches!(k, EventKind::ToolCallFinished(f) if f.output.contains("read-only shell, and this node has none"))
+    });
+    assert!(ran, "the follow-up's bash was not judged a reader's");
+    let created = raw_of(&r, child)
+        .into_iter()
+        .find(|e| e.kind == "session_created")
+        .unwrap();
+    let cwd = std::path::PathBuf::from(created.payload["cwd"].as_str().unwrap());
+    assert_eq!(cwd.canonicalize().unwrap(), r.ws.canonicalize().unwrap());
 }

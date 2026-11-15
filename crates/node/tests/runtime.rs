@@ -1412,7 +1412,7 @@ fn agent(
         agent_id: id.into(),
         name: id.into(),
         system_prompt: "work".into(),
-        tools: harness_core::agent::ToolSelection::List(vec!["bash".into()]),
+        tools: harness_core::agent::ToolSelection::List(vec!["bash".into(), "write".into()]),
         model: None,
         fallbacks: vec![],
         unavailable: vec![],
@@ -1598,13 +1598,24 @@ async fn delegate_as_lead(
 /// A sub-agent that can change files gets its own worktree or is not
 /// started: in a folder that is not a repository the delegation is refused
 /// with the reason, no child session exists and nothing in the folder moved.
+/// "Needs its own folder" (PLAN.md T70): `write`, `edit`, a writable
+/// `bash` (an agent with MCP or `publish` beside it) and a tool nobody
+/// listed; not `bash` alone (the read-only shell: `a_reader_with_a_shell_*`)
+/// nor `publish` or MCP alone (`publish_and_mcp_sub_agents_*`).
 #[tokio::test]
 async fn a_writing_sub_agent_is_refused_outside_a_repository() {
     let mut h = Harness::new(auto_policy).await;
     std::fs::write(h.ws.join("keep.txt"), "v1\n").unwrap();
     let sid = h.create().await;
     let before = tree(&h.ws);
-    for tools in [&["bash"][..], &["write"], &["edit"]] {
+    for tools in [
+        &["bash", "write"][..],
+        &["write"],
+        &["edit"],
+        &["read", "mcp", "bash"],
+        &["read", "publish", "bash"],
+        &["read", "notebook_edit"],
+    ] {
         let out = delegate_as_lead(
             &mut h,
             sid,
@@ -1681,6 +1692,109 @@ async fn a_read_only_sub_agent_runs_outside_a_repository() {
     assert!(out.contains("\n| Tool said: "), "{out}");
     assert!(out.contains("hello from the folder"), "{out}");
     assert_eq!(h.node.store().sessions().unwrap().len(), 2);
+}
+
+/// `publish`-only and MCP-only sub-agents change things but write no file
+/// directly: they share the parent's folder and start outside a git
+/// repository, as on main (review of PR 131, item 4). They have no shell.
+#[tokio::test]
+async fn publish_and_mcp_sub_agents_share_the_folder_outside_a_repository() {
+    let mut h = Harness::new(auto_policy).await;
+    std::fs::write(h.ws.join("keep.txt"), "hello from the folder\n").unwrap();
+    let sid = h.create().await;
+    for tools in [&["read", "publish"][..], &["read", "mcp"]] {
+        let out = delegate_as_lead(
+            &mut h,
+            sid,
+            vec![agent_with("helper", tools, vec![])],
+            "delegate: helper=read: keep.txt",
+        )
+        .await;
+        let out = out.last().expect("a delegate call");
+        assert!(
+            out.contains("Sub-agent @helper finished: done."),
+            "{tools:?}: {out}"
+        );
+        assert!(out.contains("hello from the folder"), "{tools:?}: {out}");
+    }
+    let sessions = h.node.store().sessions().unwrap();
+    for s in sessions.iter().filter(|s| s.session_id != sid) {
+        assert_eq!(
+            std::path::Path::new(&s.cwd).canonicalize().unwrap(),
+            h.ws.canonicalize().unwrap(),
+            "a publish or MCP sub-agent got a folder of its own"
+        );
+    }
+}
+
+/// A sub-agent whose only tool that could change things is `bash` is a
+/// reader (PLAN.md T70): it is started outside a repository, works in the
+/// parent's folder (no copy, nothing merged back), and on a node with no
+/// read-only shell (this one: no bubblewrap) its `bash` is not run, with
+/// the reason; the folder does not move.
+#[tokio::test]
+async fn a_reader_with_a_shell_shares_the_folder_and_writes_nothing() {
+    let mut h = Harness::new(auto_policy).await;
+    std::fs::write(h.ws.join("keep.txt"), "v1\n").unwrap();
+    let sid = h.create().await;
+    let before = tree(&h.ws);
+    let scout = agent_with(
+        "scout",
+        &[
+            "read",
+            "grep",
+            "glob",
+            "bash",
+            "bash_output",
+            "bash_stop",
+            "tool_output",
+        ],
+        vec![],
+    );
+    let out = delegate_as_lead(
+        &mut h,
+        sid,
+        vec![scout],
+        "delegate: scout=run: echo v2 > keep.txt; echo new > made.txt",
+    )
+    .await;
+    let out = out.last().expect("a delegate call");
+    assert!(out.contains("\nSub-agent @scout finished: done. "), "{out}");
+    assert!(
+        out.contains("read-only shell, and this node has none"),
+        "{out}"
+    );
+    assert!(!out.contains("applied"), "a merge-back was reported: {out}");
+    assert_eq!(tree(&h.ws), before, "the folder changed");
+    let sessions = h.node.store().sessions().unwrap();
+    assert_eq!(sessions.len(), 2);
+    let child = sessions.iter().find(|s| s.session_id != sid).unwrap();
+    assert_eq!(
+        std::path::Path::new(&child.cwd).canonicalize().unwrap(),
+        h.ws.canonicalize().unwrap(),
+        "the reader got a folder of its own"
+    );
+    // The node denying `write` makes a writer a reader the same way.
+    let mut h = Harness::new(|root| NodePolicy {
+        denied_tools: vec!["write".into()],
+        ..auto_policy(root)
+    })
+    .await;
+    let sid = h.create().await;
+    let out = delegate_as_lead(
+        &mut h,
+        sid,
+        vec![agent_with("dev", &["read", "write", "bash"], vec![])],
+        "delegate: dev=run: echo new > made.txt",
+    )
+    .await;
+    let out = out.last().expect("a delegate call");
+    assert!(out.contains("finished: done"), "{out}");
+    assert!(
+        out.contains("read-only shell, and this node has none"),
+        "{out}"
+    );
+    assert!(!h.ws.join("made.txt").exists());
 }
 
 /// A sub-agent that calls `finish` ends its turn at once (no further model

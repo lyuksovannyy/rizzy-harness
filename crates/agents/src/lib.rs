@@ -182,6 +182,9 @@ const WEB_TOOLS: &[&str] = &["web_search", "web_fetch"];
 const READ_TOOLS: &[&str] = &["read", "grep", "glob", "outline", "graph_query"];
 const EDIT_TOOLS: &[&str] = &["write", "edit"];
 const COMMAND_TOOLS: &[&str] = &["bash", "bash_output", "bash_stop", "tool_output"];
+/// "Read-only commands" (ADOPTION_PLAN T.7, PLAN.md T70): the same tools,
+/// for an agent that changes nothing else, whose shell the node then runs
+/// read-only.
 const MEMORY_TOOL: &str = "remember";
 /// Searching earlier chats and memory: its own switch.
 const RECALL_TOOL: &str = "recall";
@@ -226,6 +229,14 @@ pub struct Features {
     pub edit_files: bool,
     /// Run shell commands.
     pub commands: bool,
+    /// Run shell commands that can only read (T.7, PLAN.md T70): `bash` in
+    /// the read-only shell, for an agent that changes nothing else by the
+    /// shared rule. Its own switch, off when absent (a custom agent gets it
+    /// when someone turns it on); with a switch on that changes things
+    /// (files, commands, MCP) it adds nothing. Built-in Scout and Reviewer
+    /// have it.
+    #[serde(default)]
+    pub read_only_commands: bool,
     /// The tools of the MCP servers the node runs for the chat (X.3). Its
     /// own switch: commands do not bring it. Off when absent, so a page
     /// agent saved before the switch has no MCP tools until it is turned on.
@@ -260,12 +271,26 @@ impl Features {
                 &[SKILL_TOOL][..],
             ),
         ];
-        groups
+        let mut tools: Vec<String> = groups
             .iter()
             .filter(|(on, _)| *on)
             .flat_map(|(_, tools)| tools.iter().map(|t| t.to_string()))
-            .collect()
+            .collect();
+        // The shell only where the node will run it read-only: the rest
+        // changes nothing (the shared rule, as the node reads it).
+        if self.read_only_commands && !changes_things(&tools) {
+            tools.extend(COMMAND_TOOLS.iter().map(|t| t.to_string()));
+        }
+        tools
     }
+}
+
+/// Whether an agent with exactly `tools` changes things by the shared rule
+/// (`harness_core::agent::AgentSpec::changes_things`, its shell aside).
+fn changes_things(tools: &[String]) -> bool {
+    tools
+        .iter()
+        .any(|t| t == harness_core::agent::MCP_ALL || harness_core::agent::tool_changes(t, true))
 }
 
 /// An agent as listed in the UI.
@@ -373,6 +398,9 @@ pub fn custom(
     // Kept as chosen: with no sub-agent to call it has no `delegate` tool,
     // but the switch stays on.
     agent.features.delegate = features.delegate;
+    // Kept as chosen too: with a switch on that changes things it adds no
+    // shell, but turning that one off again brings it back.
+    agent.features.read_only_commands = features.read_only_commands;
     Ok(agent)
 }
 
@@ -428,6 +456,13 @@ fn build(id: &str, fm: Frontmatter, body: &str, origin: Origin) -> Result<Agent,
         }
     });
     let any = |tools: &[&str]| tools.iter().any(|t| fm.tools.allows(t));
+    // A shell the node runs read-only (PLAN.md T70): shown as its own
+    // switch, not as "Run commands".
+    let read_only_shell = fm.tools.allows(harness_core::agent::SHELL)
+        && match &fm.tools {
+            ToolSelection::List(l) => !changes_things(l),
+            ToolSelection::All(_) => false,
+        };
     let features = Features {
         memory: fm.memory,
         project_memory: fm.project_memory,
@@ -435,7 +470,8 @@ fn build(id: &str, fm: Frontmatter, body: &str, origin: Origin) -> Result<Agent,
         web: any(WEB_TOOLS),
         read_files: any(READ_TOOLS),
         edit_files: any(EDIT_TOOLS),
-        commands: any(COMMAND_TOOLS),
+        commands: any(COMMAND_TOOLS) && !read_only_shell,
+        read_only_commands: read_only_shell,
         mcp: mcp_listed(&fm.tools),
         delegate: !fm.delegates.is_empty(),
         as_agent: fm.available_as.contains(&Use::Agent),

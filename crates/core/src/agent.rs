@@ -12,6 +12,64 @@ pub const MCP_PREFIX: &str = "mcp__";
 /// The `tools` entry that stands for every MCP tool.
 pub const MCP_ALL: &str = "mcp";
 
+/// **The tools that cannot change anything** (ADOPTION_PLAN T.7, PLAN.md
+/// T70): not a file, not a process outside their own call, not a setting,
+/// nothing on another machine through the node. The one allow-list every
+/// "is this agent read-only" question reads ([`AgentSpec::changes_things`],
+/// [`tool_changes`]): the master's small-model setting, the node's
+/// sub-agent folders, plan mode, the parallel batch and the repeated-call
+/// guard. A tool added later changes things until someone puts it here;
+/// an MCP tool is never here (its effects are its server's word).
+///
+/// - `read`, `grep`, `glob`, `outline`, `graph_query`: read files and the
+///   repository's map.
+/// - `tool_output`: reads a command's kept output; `bash_output` reads, and
+///   `bash_stop` stops, a background command of the session's own.
+/// - `todo`: writes only the chat's own task list (its own log).
+/// - `skill`: loads a skill's instructions.
+/// - `recall`: searches the person's earlier chats and memory.
+/// - `web_search`, `web_fetch`: a search and a page read through the
+///   node's web tools (they send a query or a URL out: read-only is not
+///   secrecy, as with the read-only shell's network).
+/// - `remember`: changes nothing itself; the master files the proposal, and
+///   a sub-agent's call always waits for a person's Keep
+///   (`master/src/memory.rs`, `saves_without_a_click`). Plan mode refuses
+///   it all the same ([`crate::policy::PLAN_REFUSED`]): it promises that
+///   nothing changes, memory included.
+///
+/// `bash` is not here: it changes things in a writable shell. An agent
+/// whose other tools are all here gets the read-only shell instead
+/// ([`AgentSpec::changes_things`]).
+pub const READ_ONLY_TOOLS: &[&str] = &[
+    "read",
+    "grep",
+    "glob",
+    "outline",
+    "graph_query",
+    "tool_output",
+    "bash_output",
+    "bash_stop",
+    "todo",
+    "skill",
+    "recall",
+    "web_search",
+    "web_fetch",
+    "remember",
+];
+
+/// The shell: the one tool that changes things or not by where it runs.
+pub const SHELL: &str = "bash";
+
+/// Whether a call of `tool` can change anything: every tool not on
+/// [`READ_ONLY_TOOLS`] (MCP tools always), and [`SHELL`] unless this call
+/// runs in the read-only shell (`read_only_shell`, the node's choice).
+pub fn tool_changes(tool: &str, read_only_shell: bool) -> bool {
+    if tool == SHELL {
+        return !read_only_shell;
+    }
+    tool.starts_with(MCP_PREFIX) || !READ_ONLY_TOOLS.contains(&tool)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ToolSelection {
@@ -164,6 +222,58 @@ impl AgentSpec {
         listed && !self.deny_tools.iter().any(|t| t == MCP_ALL)
     }
 
+    /// **Whether this agent can change things here** (PLAN.md T70): it may
+    /// use every tool (`all`), an MCP tool, or any tool that is not on
+    /// [`READ_ONLY_TOOLS`], counting only the tools it may call (its own
+    /// list, less its denials) that `offered` keeps (the node's
+    /// `denied_tools`; the master passes `|_| true`). Its shell does not
+    /// count: an agent that changes nothing else runs `bash` in the
+    /// read-only shell, which the node picks from this same answer, so a
+    /// spec cannot ask for a writable shell for it. Read-only agents work
+    /// in their parent's folder (no copy to merge back), may run on the
+    /// small model and may be started in plan mode.
+    pub fn changes_things(&self, offered: impl Fn(&str) -> bool) -> bool {
+        self.changes_with(&offered)
+    }
+
+    fn changes_with(&self, offered: &dyn Fn(&str) -> bool) -> bool {
+        let ToolSelection::List(tools) = &self.tools else {
+            return true;
+        };
+        tools
+            .iter()
+            .filter(|t| self.allows_tool(t) && offered(t))
+            .any(|t| t == MCP_ALL || tool_changes(t, true))
+    }
+
+    /// **Whether this agent needs a folder of its own** as a sub-agent
+    /// (PLAN.md T70), from the same inputs as [`Self::changes_things`]: it
+    /// changes things, and at least one of the tools it may call (offered
+    /// by the node) can change files directly: `write`, `edit`, a writable
+    /// `bash` (which every agent that changes things has, if it has
+    /// `bash`), `all`, or a tool nobody listed. `publish` (an artifact
+    /// through the master) and MCP tools (their own server's calls, with
+    /// their own approval) do not: an agent with only those shares its
+    /// parent's folder, as on main, so a chat in a plain folder can still
+    /// delegate to a calendar or notes agent. So an agent that shares the
+    /// folder never has the writable shell, `write`, `edit` or an unlisted
+    /// tool (tested over every subset).
+    pub fn needs_own_folder(&self, offered: impl Fn(&str) -> bool) -> bool {
+        if !self.changes_with(&offered) {
+            return false;
+        }
+        let ToolSelection::List(tools) = &self.tools else {
+            return true;
+        };
+        tools
+            .iter()
+            .filter(|t| self.allows_tool(t) && offered(t))
+            .any(|t| {
+                let mcp = t == MCP_ALL || t.starts_with(MCP_PREFIX);
+                !mcp && t != "publish" && (t == SHELL || tool_changes(t, true))
+            })
+    }
+
     pub fn agent_ref(&self) -> AgentRef {
         AgentRef {
             agent_id: self.agent_id.clone(),
@@ -213,6 +323,155 @@ mod tests {
         assert!(!d.allows_tool("mcp__x__y") && !d.allows_mcp() && d.allows_tool("bash"));
         // `mcp` is not a tool of its own name only.
         assert!(!spec(list(&["mcp"]), &[]).allows_tool("mcpx"));
+    }
+
+    fn listed(tools: &[&str], deny: &[&str]) -> AgentSpec {
+        AgentSpec {
+            tools: ToolSelection::List(tools.iter().map(|t| t.to_string()).collect()),
+            deny_tools: deny.iter().map(|d| d.to_string()).collect(),
+            ..serde_json::from_value(serde_json::json!({
+                "agent_id": "a", "name": "A", "system_prompt": "", "tools": "all", "prompt_hash": "h"
+            }))
+            .unwrap()
+        }
+    }
+
+    /// The shared rule's truth table (PLAN.md T70): odd agents a person can
+    /// write, judged on the master (everything offered) and on a node.
+    #[test]
+    fn an_agent_is_read_only_only_when_every_tool_it_may_call_is_listed() {
+        let all = |_: &str| true;
+        for (tools, changes) in [
+            (&[][..], false),
+            (&["read"][..], false),
+            (
+                &["read", "grep", "glob", "outline", "graph_query", "skill"],
+                false,
+            ),
+            (&["read", "remember"], false),
+            (&["read", "recall", "todo", "tool_output"], false),
+            (&["web_search", "web_fetch", "remember"], false),
+            // The shell: read-only for such an agent, so no writer.
+            (&["read", "bash"], false),
+            (&["read", "bash", "bash_output", "bash_stop"], false),
+            (&["bash"], false),
+            (&["read", "publish"], true),
+            (&["read", "write"], true),
+            (&["read", "edit", "bash"], true),
+            (&["read", "mcp"], true),
+            (&["read", "mcp__github__list_issues"], true),
+            (&["read", "bash", "mcp__x__y"], true),
+            // Not listed yet, so it changes things.
+            (&["read", "notebook_edit"], true),
+            (&["read", "delegate"], true),
+        ] {
+            assert_eq!(listed(tools, &[]).changes_things(all), changes, "{tools:?}");
+        }
+        let every = AgentSpec {
+            tools: ToolSelection::All(AllTools::All),
+            ..listed(&[], &[])
+        };
+        assert!(every.changes_things(all), "all tools");
+        assert!(
+            every.changes_things(|t| t == "read"),
+            "all tools, whatever is offered"
+        );
+        // The agent's own denials and the node's narrow it, never widen it.
+        assert!(!listed(&["read", "write"], &["write"]).changes_things(all));
+        assert!(!listed(&["read", "mcp"], &["mcp"]).changes_things(all));
+        assert!(!listed(&["read", "write", "bash"], &[]).changes_things(|t| t != "write"));
+        assert!(listed(&["read", "write"], &[]).changes_things(|t| t != "bash"));
+    }
+
+    /// "Needs its own folder" (review of PR 131): over every subset of a
+    /// tool set, an agent that shares its parent's folder never has the
+    /// writable shell, `write`, `edit` or an unlisted tool; a reader never
+    /// needs a folder; `publish`- and MCP-only agents share it.
+    #[test]
+    fn an_agent_sharing_the_folder_never_writes_files_directly() {
+        let pool = [
+            "read",
+            "grep",
+            "write",
+            "edit",
+            "bash",
+            "bash_output",
+            "publish",
+            "mcp",
+            "mcp__notes__add",
+            "remember",
+            "web_fetch",
+            "notebook_edit",
+        ];
+        for mask in 0u32..(1 << pool.len()) {
+            let tools: Vec<&str> = (0..pool.len())
+                .filter(|i| mask & (1 << i) != 0)
+                .map(|i| pool[i])
+                .collect();
+            let a = listed(&tools, &[]);
+            let changes = a.changes_things(|_| true);
+            let own = a.needs_own_folder(|_| true);
+            if !changes {
+                assert!(!own, "{tools:?}");
+            }
+            if !own {
+                let writable_shell = changes && tools.contains(&"bash");
+                let direct = ["write", "edit", "notebook_edit"]
+                    .iter()
+                    .any(|t| tools.contains(t));
+                assert!(!writable_shell && !direct, "{tools:?} shares the folder");
+            }
+        }
+        let own = |t: &[&str]| listed(t, &[]).needs_own_folder(|_| true);
+        let changes = |t: &[&str]| listed(t, &[]).changes_things(|_| true);
+        for t in [
+            &["read", "mcp"][..],
+            &["read", "publish"],
+            &["read", "mcp__notes__add", "publish"],
+        ] {
+            assert!(changes(t) && !own(t), "{t:?}");
+        }
+        for t in [
+            &["read", "mcp", "bash"][..],
+            &["read", "publish", "bash"],
+            &["read", "write"],
+            &["notebook_edit"],
+        ] {
+            assert!(own(t), "{t:?}");
+        }
+        assert!(
+            !own(&["read", "bash"]),
+            "a reader: the read-only shell, shared folder"
+        );
+        let every = AgentSpec {
+            tools: ToolSelection::All(AllTools::All),
+            ..listed(&[], &[])
+        };
+        assert!(every.needs_own_folder(|_| true));
+        // The node's denial counts as for the other question.
+        assert!(!listed(&["read", "mcp", "bash"], &[]).needs_own_folder(|t| t != "bash"));
+    }
+
+    #[test]
+    fn a_call_changes_things_unless_listed_or_in_the_read_only_shell() {
+        for t in READ_ONLY_TOOLS {
+            assert!(!tool_changes(t, false), "{t}");
+        }
+        for t in [
+            "write",
+            "edit",
+            "publish",
+            "delegate",
+            "mcp",
+            "mcp__s__read",
+            "anything",
+        ] {
+            assert!(tool_changes(t, false) && tool_changes(t, true), "{t}");
+        }
+        assert!(tool_changes(SHELL, false));
+        assert!(!tool_changes(SHELL, true));
+        // An MCP tool named like a listed one is still an MCP tool.
+        assert!(tool_changes("mcp__fs__read", true));
     }
 
     #[test]

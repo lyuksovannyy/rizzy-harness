@@ -177,16 +177,33 @@ macro_rules! lead {
 }
 
 /// Added to `bash`'s description where it runs in the read-only shell
-/// (plan mode, an agent with no tool that writes: T.7). What a model will
-/// hit there: every write fails with "Read-only file system", and git's
-/// optional index refresh is off so `git status` and `git diff` work.
-pub const READ_ONLY_NOTE: &str = "This shell is READ-ONLY: the folder and everything else it \
-     sees are mounted read-only, and only $TMPDIR (/tmp, at most 256 MiB, emptied when the \
-     command ends) can be written. Use it to look: ls, cat, grep, find, git log, git diff, git \
-     show, git status, git blame, listing tests or packages. Anything that writes fails with \
-     \"Read-only file system\": editing or creating files, git add, commit, checkout, stash or \
-     fetch, installing packages, builds or tests that write into the folder (send their output \
-     to $TMPDIR where the tool allows it). Do not retry a write: it cannot succeed here.";
+/// (plan mode, an agent that changes nothing else: T.7, PLAN.md T70),
+/// with the node's `/tmp` size in bytes. What a model will hit there:
+/// every write fails with "Read-only file system", git's optional index
+/// refresh is off so `git status` and `git diff` work, and cargo builds
+/// into `/tmp`.
+pub fn read_only_note(tmp_bytes: u64, network: bool, web_fetch: bool) -> String {
+    let net = match (network, web_fetch) {
+        (true, _) => "",
+        (false, true) => {
+            " It has NO network: downloads, package installs and requests fail; read a web page \
+             with web_fetch instead."
+        }
+        (false, false) => " It has NO network: downloads, package installs and requests fail.",
+    };
+    format!(
+        "This shell is READ-ONLY: the folder and everything else it sees are mounted \
+         read-only, and only $TMPDIR (at most {} MiB, private to the command and emptied when it \
+         ends) can be written.{net} Use it to look and check: ls, cat, grep and pipelines, find, \
+         git log, git diff, git show, git status, git blame, and tests that write only to \
+         $TMPDIR (cargo build and cargo test do: CARGO_TARGET_DIR is set there; every command \
+         builds from nothing, so only small builds fit). Anything that writes elsewhere fails \
+         with \"Read-only file system\": editing or creating files, git add, commit, checkout, \
+         stash or fetch, builds or tests that write into the folder (send their output to \
+         $TMPDIR where the tool allows it). Do not retry a write: it cannot succeed here.",
+        tmp_bytes / (1024 * 1024)
+    )
+}
 
 /// `bash`'s description where background commands are off (the node's
 /// `background_per_session = 0`, a sub-agent): nothing about them.

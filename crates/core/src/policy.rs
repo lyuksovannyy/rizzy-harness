@@ -38,12 +38,18 @@ pub const DEFAULT_CHAT_APPROVAL: ApprovalMode = ApprovalMode::Auto;
 /// The file tools `AcceptEdits` covers, by their registered names.
 pub const EDIT_TOOLS: [&str; 2] = ["write", "edit"];
 
-/// The one mutating tool plan mode runs: `bash`, in the read-only shell
-/// (ADOPTION_PLAN T.7); where the node has none it is refused too.
-pub const PLAN_SHELL: &str = "bash";
+/// The one tool that changes things plan mode runs: `bash`, in the
+/// read-only shell (ADOPTION_PLAN T.7); where the node has none it is
+/// refused too.
+pub const PLAN_SHELL: &str = crate::agent::SHELL;
 
-/// Tools whose risk is read-only (they ask nothing in `ask`) that plan mode
-/// refuses all the same: `remember` files a memory through the master,
+/// The orchestration tool: whether plan mode starts a child is decided per
+/// agent by the loop (a writer is refused, a reader inherits the mode), so
+/// [`ApprovalMode::refuses`] leaves it alone.
+pub const DELEGATE: &str = "delegate";
+
+/// Tools on the read-only list ([`crate::agent::READ_ONLY_TOOLS`]) that
+/// plan mode refuses all the same: `remember` files a memory through the master,
 /// which changes what later chats are told.
 pub const PLAN_REFUSED: &[&str] = &["remember"];
 
@@ -86,19 +92,17 @@ impl ApprovalMode {
         self >= ApprovalMode::AcceptEdits
     }
 
-    /// Whether plan mode refuses a call of `tool` at `risk` outright: every
-    /// mutating tool but `bash` (which runs in the read-only shell there),
-    /// and the read-only-risk tools that change something outside the
-    /// chat ([`PLAN_REFUSED`]). `delegate` is the loop's (a writer agent is
-    /// refused there, and every child inherits the mode). Always `false`
-    /// in every other mode.
-    pub fn refuses(self, tool: &str, risk: ToolRisk) -> bool {
+    /// Whether plan mode refuses a call of `tool` outright: every tool
+    /// that changes things by the shared rule ([`crate::agent::tool_changes`],
+    /// an allow-list: a tool not on it, and every MCP tool, is refused) but
+    /// `bash` (which runs in the read-only shell there), and the listed
+    /// tools that change something outside the chat ([`PLAN_REFUSED`]).
+    /// `delegate` is the loop's (a writer agent is refused there, and every
+    /// child inherits the mode). Always `false` in every other mode.
+    pub fn refuses(self, tool: &str) -> bool {
         self == ApprovalMode::Plan
-            && match risk {
-                ToolRisk::Mutating => tool != PLAN_SHELL,
-                ToolRisk::ReadOnly => PLAN_REFUSED.contains(&tool),
-                ToolRisk::ChatOnly => false,
-            }
+            && tool != DELEGATE
+            && (crate::agent::tool_changes(tool, true) || PLAN_REFUSED.contains(&tool))
     }
 
     /// Every mode, strictest first.
@@ -362,25 +366,33 @@ mod tests {
         assert!(!ApprovalMode::Auto.needs_approval(ToolRisk::Mutating));
     }
 
-    /// Plan mode refuses what mutates (but `bash`, which it runs read-only)
-    /// and `remember`; it never refuses in another mode.
+    /// Plan mode refuses what changes things by the shared list (but
+    /// `bash`, which it runs read-only) and `remember`; it never refuses in
+    /// another mode. A tool not on the list is refused, whatever risk it
+    /// declares (PLAN.md T70).
     #[test]
     fn plan_mode_refuses_what_changes_something() {
         use ApprovalMode::*;
-        for (tool, risk, refused) in [
-            ("write", ToolRisk::Mutating, true),
-            ("edit", ToolRisk::Mutating, true),
-            ("publish", ToolRisk::Mutating, true),
-            ("mcp__srv__tool", ToolRisk::Mutating, true),
-            ("bash", ToolRisk::Mutating, false),
-            ("remember", ToolRisk::ReadOnly, true),
-            ("read", ToolRisk::ReadOnly, false),
-            ("recall", ToolRisk::ReadOnly, false),
-            ("todo", ToolRisk::ChatOnly, false),
+        for (tool, refused) in [
+            ("write", true),
+            ("edit", true),
+            ("publish", true),
+            ("mcp__srv__tool", true),
+            ("mcp__srv__read", true),
+            ("a_tool_added_later", true),
+            ("bash", false),
+            ("bash_output", false),
+            ("remember", true),
+            ("read", false),
+            ("recall", false),
+            ("web_fetch", false),
+            ("todo", false),
+            // The loop's, per agent.
+            ("delegate", false),
         ] {
-            assert_eq!(Plan.refuses(tool, risk), refused, "{tool}");
+            assert_eq!(Plan.refuses(tool), refused, "{tool}");
             for m in [AskAll, Ask, AcceptEdits, Auto] {
-                assert!(!m.refuses(tool, risk), "{m:?} {tool}");
+                assert!(!m.refuses(tool), "{m:?} {tool}");
             }
         }
         // Nothing asks in plan mode: it runs, or it is refused.

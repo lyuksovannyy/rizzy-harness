@@ -87,6 +87,15 @@ pub struct SandboxPolicy {
     /// Where bubblewrap is, absolute; taken as given. Without it, the first
     /// `bwrap` on `PATH` that this user cannot replace (owned by root).
     pub bwrap: Option<PathBuf>,
+    /// The read-only shell's `/tmp` per command, in MiB (memory: a tmpfs of
+    /// the command's own, host memory per running read-only command;
+    /// 64 to 65536). Absent: 256 (PLAN.md T70).
+    pub read_only_tmp_mib: Option<u64>,
+    /// Whether the read-only shell (plan mode, read-only agents) reaches
+    /// the network. Off by default (PLAN.md T70): their commands run
+    /// unasked and may run the repository's own code. On, it follows
+    /// `network` (it never widens it).
+    pub read_only_network: bool,
 }
 
 /// `[skills]` in node.toml (ADOPTION_PLAN X.2, PLAN.md T46): where the
@@ -388,7 +397,18 @@ impl SandboxPolicy {
                 })
                 .collect()
         };
+        let read_only_tmp = match self.read_only_tmp_mib {
+            None => 0,
+            Some(m @ 64..=65536) => m * 1024 * 1024,
+            Some(m) => {
+                return Err(format!(
+                    "[sandbox] read_only_tmp_mib = {m}: must be 64 to 65536 (MiB)"
+                ));
+            }
+        };
         Ok(harness_tools::sandbox::Settings {
+            read_only_tmp,
+            read_only_network: self.read_only_network,
             mode: self.mode,
             network: self.network,
             read: expand("read", &self.read)?,
@@ -881,6 +901,27 @@ impl NodePolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `[sandbox] read_only_tmp_mib` (PLAN.md T70): absent is the default,
+    /// a value in range is taken in MiB, one outside is refused at load.
+    #[test]
+    fn the_read_only_shells_tmp_size_is_the_nodes() {
+        let size = |toml_text: &str| {
+            toml::from_str::<NodePolicy>(toml_text)
+                .unwrap()
+                .sandbox_settings()
+                .map(|s| s.read_only_tmp)
+        };
+        assert_eq!(size(""), Ok(0), "0: the default");
+        assert_eq!(
+            size("[sandbox]\nread_only_tmp_mib = 2048\n"),
+            Ok(2048 * 1024 * 1024)
+        );
+        for bad in [0, 63, 65537] {
+            let e = size(&format!("[sandbox]\nread_only_tmp_mib = {bad}\n")).unwrap_err();
+            assert!(e.contains("read_only_tmp_mib"), "{e}");
+        }
+    }
 
     /// X.2, T62: the operator's file is `AGENTS.md` in the data directory
     /// unless node.toml names one (absolute or under `~/`); a relative

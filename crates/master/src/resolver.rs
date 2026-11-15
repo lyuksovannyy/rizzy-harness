@@ -156,21 +156,6 @@ impl Master {
     }
 }
 
-/// The tools that only read (files, the repository's map, a command's
-/// stored output, the chat's own task list, earlier chats, skills): a
-/// sub-agent limited to these may run on the small model (X.16).
-pub const READ_ONLY_TOOLS: &[&str] = &[
-    "read",
-    "grep",
-    "glob",
-    "outline",
-    "graph_query",
-    "tool_output",
-    "todo",
-    "recall",
-    "skill",
-];
-
 impl Resolver {
     /// The server's config with this scope's chains, when the master
     /// manages its providers.
@@ -354,24 +339,17 @@ impl Resolver {
 
     /// The small model for sub-agent `c` (X.16): when the admin turned on
     /// "read-only sub-agents use the small model", set a small model this
-    /// server still lists, and every tool `c` may use is one that only
-    /// reads ([`READ_ONLY_TOOLS`]). An allow-list, from the agent's own
-    /// switches, never its name: a tool added later (or `publish`,
-    /// `remember`, web tools, MCP, "all tools") is not read-only until
-    /// someone puts it on the list. The node may still narrow it.
+    /// server still lists, and `c` changes nothing by the shared rule
+    /// (`AgentSpec::changes_things`, PLAN.md T70): an allow-list, from the
+    /// agent's own tools, never its name, so a tool added later (or
+    /// `publish`, MCP, "all tools") is not read-only until someone puts it
+    /// on the list. Its `bash` runs in the read-only shell and does not
+    /// count. The node may still narrow it.
     fn small_for(&self, c: &AgentSpec) -> Option<String> {
         let cfg = self.cfg.as_ref()?;
         let s = &cfg.savings;
         let small = s.small_model.as_ref().filter(|m| cfg.knows_model(m))?;
-        let read_only = s.small_subagents
-            && match &c.tools {
-                harness_core::agent::ToolSelection::List(l) => l
-                    .iter()
-                    .filter(|t| c.allows_tool(t))
-                    .all(|t| READ_ONLY_TOOLS.contains(&t.as_str())),
-                harness_core::agent::ToolSelection::All(_) => false,
-            };
-        read_only.then(|| small.clone())
+        (s.small_subagents && !c.changes_things(|_| true)).then(|| small.clone())
     }
 
     /// Resolve an agent id (or this scope's default agent) to the spec a
@@ -760,18 +738,37 @@ mod tests {
         };
         for tools in [
             "read, publish",
-            "read, remember",
             "read, todo, publish, bash_output",
-            "read, web_fetch",
             "read, write",
             "read, mcp",
+            "read, bash, edit",
+            "read, mcp__github__list",
+            "read, a_tool_added_later",
         ] {
             assert_eq!(r.small_for(&spec(tools)), None, "{tools}");
         }
-        assert_eq!(
-            r.small_for(&spec("read, grep, glob, outline, graph_query, skill"))
-                .as_deref(),
-            Some("demo::small")
-        );
+        // The shared rule (PLAN.md T70): `remember` (a sub-agent's call
+        // waits for a person), the web tools and the read-only shell
+        // change nothing.
+        for tools in [
+            "read, grep, glob, outline, graph_query, skill",
+            "read, remember",
+            "read, web_fetch",
+            "read, grep, bash, bash_output, bash_stop",
+        ] {
+            assert_eq!(
+                r.small_for(&spec(tools)).as_deref(),
+                Some("demo::small"),
+                "{tools}"
+            );
+        }
+        // The built-ins as shipped: Scout and Reviewer with their shell.
+        for a in harness_agents::builtins() {
+            let small = matches!(
+                a.id.as_str(),
+                "scout" | "reviewer" | "researcher" | "general" | "smol"
+            );
+            assert_eq!(r.small_for(&a.spec).is_some(), small, "{}", a.id);
+        }
     }
 }

@@ -243,10 +243,10 @@ async fn run_opts(host: &Host, steps: Vec<Vec<(&'static str, Value)>>, o: Opts) 
         })
     };
     let tools = vec![
-        tool("look", true, ToolRisk::ReadOnly),
-        tool("find", true, ToolRisk::ReadOnly),
-        tool("peek", false, ToolRisk::ReadOnly),
-        tool("change", true, ToolRisk::Mutating),
+        tool("read", true, ToolRisk::ReadOnly),
+        tool("grep", true, ToolRisk::ReadOnly),
+        tool("glob", false, ToolRisk::ReadOnly),
+        tool("write", true, ToolRisk::Mutating),
     ];
     let b = NativeBackend::new(rec.clone(), tools, NativeConfig::default());
     let dir = tempfile::tempdir().unwrap();
@@ -283,7 +283,7 @@ async fn run(host: &Host, steps: Vec<Vec<(&'static str, Value)>>) -> Run {
 }
 
 fn look(id: &str, ms: u64) -> (&'static str, Value) {
-    ("look", json!({"id": id, "ms": ms}))
+    ("read", json!({"id": id, "ms": ms}))
 }
 
 /// The tool results of the request after the first step, as sent.
@@ -361,7 +361,7 @@ async fn a_change_between_reads_runs_alone_in_its_place() {
         vec![vec![
             look("a", 100),
             look("b", 100),
-            ("change", json!({"id": "w", "ms": 10})),
+            ("write", json!({"id": "w", "ms": 10})),
             look("c", 100),
             look("d", 100),
         ]],
@@ -387,8 +387,8 @@ async fn an_undeclared_read_only_tool_stays_in_order() {
     let r = run(
         &host,
         vec![vec![
-            ("peek", json!({"id": "p1", "ms": 50})),
-            ("peek", json!({"id": "p2", "ms": 50})),
+            ("glob", json!({"id": "p1", "ms": 50})),
+            ("glob", json!({"id": "p2", "ms": 50})),
         ]],
     )
     .await;
@@ -405,7 +405,7 @@ async fn a_call_that_needs_a_card_keeps_the_step_in_order() {
     let r = run(&host, vec![vec![look("a", 50), look("b", 50)]]).await;
     assert_eq!(host.order(), ["S:a", "F:a", "S:b", "F:b"]);
     assert_eq!(r.probe.most.load(Ordering::SeqCst), 1);
-    assert_eq!(*host.asked.lock().unwrap(), ["look", "look"]);
+    assert_eq!(*host.asked.lock().unwrap(), ["read", "read"]);
 }
 
 /// A tool in the node's `denied_tools` is never part of a batch: it is
@@ -413,7 +413,7 @@ async fn a_call_that_needs_a_card_keeps_the_step_in_order() {
 #[tokio::test]
 async fn a_denied_tool_is_refused_in_order() {
     let mut host = Host::new();
-    host.denied = Some("look");
+    host.denied = Some("read");
     let r = run(&host, vec![vec![look("a", 10), look("b", 10)]]).await;
     assert_eq!(host.order(), ["S:a", "F:a", "S:b", "F:b"]);
     assert_eq!(r.probe.runs.load(Ordering::SeqCst), 0);
@@ -426,7 +426,7 @@ async fn a_denied_tool_is_refused_in_order() {
 #[tokio::test]
 async fn identical_reads_in_one_step_are_counted_as_in_order() {
     let host = Host::new();
-    let same = ("look", json!({"id": "same", "ms": 5}));
+    let same = ("read", json!({"id": "same", "ms": 5}));
     let r = run(&host, vec![vec![same; 6]]).await;
     assert_eq!(r.probe.runs.load(Ordering::SeqCst), 4);
     assert_eq!(r.probe.most.load(Ordering::SeqCst), 1, "never together");
@@ -446,7 +446,7 @@ async fn identical_reads_in_one_step_are_counted_as_in_order() {
 async fn a_batch_runs_no_more_failing_calls_than_in_order() {
     let host = Host::new();
     let calls: Vec<_> = (0..10)
-        .map(|i| ("look", json!({"id": format!("f{i}"), "fail": "same error"})))
+        .map(|i| ("read", json!({"id": format!("f{i}"), "fail": "same error"})))
         .collect();
     let r = run(&host, vec![calls]).await;
     assert_eq!(
@@ -466,7 +466,7 @@ async fn a_panicking_call_fails_alone() {
         &host,
         vec![vec![
             look("a", 50),
-            ("look", json!({"id": "b", "panic": true})),
+            ("read", json!({"id": "b", "panic": true})),
             look("c", 50),
         ]],
     )
@@ -486,7 +486,7 @@ async fn a_failing_call_fails_alone() {
         &host,
         vec![vec![
             look("a", 30),
-            ("look", json!({"id": "b", "fail": "no such file"})),
+            ("read", json!({"id": "b", "fail": "no such file"})),
             look("c", 10),
         ]],
     )
@@ -514,7 +514,7 @@ async fn stop_cancels_every_call_of_a_batch() {
     let calls: Vec<_> = (0..MAX_PARALLEL_CALLS + 2)
         .map(|i| {
             (
-                if i % 2 == 0 { "look" } else { "find" },
+                if i % 2 == 0 { "read" } else { "grep" },
                 json!({"id": format!("w{i}"), "wait": true}),
             )
         })
@@ -560,7 +560,7 @@ async fn a_batch_runs_at_most_the_cap_at_once() {
         vec![
             (0..n)
                 .map(|i| {
-                    let tool = if i % 2 == 0 { "look" } else { "find" };
+                    let tool = if i % 2 == 0 { "read" } else { "grep" };
                     (tool, json!({"id": format!("r{i}"), "ms": 50}))
                 })
                 .collect(),

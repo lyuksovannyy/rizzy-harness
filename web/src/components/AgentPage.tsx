@@ -65,6 +65,11 @@ export const FEATURE_GROUPS: { title: string; items: Feature[] }[] = [
       { key: "read_files", label: "Read files", hint: "Reads and searches files on a node" },
       { key: "edit_files", label: "Change files", hint: "Writes and edits files" },
       { key: "commands", label: "Run commands", hint: "Runs shell commands on a node" },
+      {
+        key: "read_only_commands",
+        label: "Read-only commands",
+        hint: "Runs commands that can only look (git log, grep, tests) in a read-only shell without network; only for an agent that changes nothing else",
+      },
       { key: "mcp", label: "MCP servers", hint: "Uses the tools of the MCP servers the node runs for the chat" },
       { key: "delegate", label: "Launch sub-agents", hint: "Hands sub-tasks to the agents available as sub-agents" },
       { key: null, label: "Manage workspace", hint: "Changes workspace settings and members" },
@@ -81,6 +86,7 @@ export const NEW_FEATURES: AgentFeatures = {
   read_files: false,
   edit_files: false,
   commands: false,
+  read_only_commands: false,
   mcp: false,
   delegate: false,
   as_agent: true,
@@ -107,6 +113,11 @@ export function handleProblem(id: string, agents: Pick<Agent, "id">[]): string |
   return null;
 }
 
+/** A switch that does nothing with the others as they are: read-only commands next to a switch that changes things. */
+export function moot(f: AgentFeatures, key: keyof AgentFeatures): boolean {
+  return key === "read_only_commands" && (f.edit_files || f.commands || f.mcp);
+}
+
 /** Turning a feature off would leave the agent nowhere to be used. */
 export function lastPlace(f: AgentFeatures, key: keyof AgentFeatures): boolean {
   return (key === "as_agent" && f[key] && !f.as_subagent) || (key === "as_subagent" && f[key] && !f.as_agent);
@@ -120,7 +131,7 @@ function FeatureGrid(props: { features: AgentFeatures; disabled: boolean; onChan
           <legend>{g.title}</legend>
           {g.items.map((it) => {
             const on = it.key ? props.features[it.key] : false;
-            const off = !it.key || props.disabled || lastPlace(props.features, it.key);
+            const off = !it.key || props.disabled || lastPlace(props.features, it.key) || moot(props.features, it.key);
             return (
               <label key={it.label} className={`feature ${it.key ? "" : "planned"}`}>
                 <input
@@ -527,6 +538,9 @@ export function AgentPage(props: {
           <div className="field">
             <span className="field-label">Features{locked && " (fixed for this agent)"}</span>
             <FeatureGrid features={draft.features} disabled={!canEdit || locked} onChange={(features) => set({ features })} />
+            {locked && draft.features.read_only_commands && (
+              <p className="field-hint">No tool of this agent changes files, so its commands run in a read-only shell, without network.</p>
+            )}
           </div>
           {listed && !creating && (
             <div className="field">

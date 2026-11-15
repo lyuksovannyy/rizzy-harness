@@ -1,7 +1,11 @@
 //! Plan mode in the loop (ADOPTION_PLAN X.7, PLAN.md T67): what it offers,
 //! what it refuses (before any card, with the plain sentence, nothing run),
 //! the delegates it starts, the harness's line it sends, a change of mode
-//! during a turn, and that the parallel batches of X.19 still form.
+//! during a turn, and that the parallel batches of X.19 still form. Then
+//! read-only agents outside plan mode (T.7, PLAN.md T70): an agent that
+//! changes nothing else gets its shell only as the read-only shell, so on
+//! a node without one (these tests: no bubblewrap) it gets none and is
+//! told why.
 //!
 //! The host stands in for the node: it answers the chat's mode as a
 //! session does (`approval_mode`, `runs_unasked`), and records every
@@ -33,6 +37,8 @@ struct Host {
     asked: Mutex<Vec<String>>,
     /// The agents started as children.
     children: Mutex<Vec<String>>,
+    /// The node's `denied_tools`.
+    denied: Mutex<Vec<String>>,
 }
 
 impl Host {
@@ -42,6 +48,7 @@ impl Host {
             mode: Mutex::new(mode),
             asked: Mutex::default(),
             children: Mutex::default(),
+            denied: Mutex::default(),
         }
     }
 
@@ -79,10 +86,10 @@ impl TurnHost for Host {
         self.events.lock().unwrap().push(kind);
         Ok(())
     }
-    async fn approve(&self, _c: &str, tool: &str, _i: &Value, risk: ToolRisk) -> Decision {
+    async fn approve(&self, _c: &str, tool: &str, _i: &Value, _risk: ToolRisk) -> Decision {
         self.asked.lock().unwrap().push(tool.into());
         // As the node: refused in plan mode, never asked.
-        if self.mode.lock().unwrap().refuses(tool, risk) {
+        if self.mode.lock().unwrap().refuses(tool) {
             Decision::Deny
         } else {
             Decision::Allow
@@ -90,10 +97,13 @@ impl TurnHost for Host {
     }
     fn runs_unasked(&self, tool: &str, risk: ToolRisk) -> bool {
         let m = *self.mode.lock().unwrap();
-        !m.needs_approval(risk) && !m.refuses(tool, risk)
+        !m.needs_approval(risk) && !m.refuses(tool)
     }
     fn approval_mode(&self) -> Option<ApprovalMode> {
         Some(*self.mode.lock().unwrap())
+    }
+    fn tool_denied(&self, tool: &str) -> bool {
+        self.denied.lock().unwrap().iter().any(|t| t == tool)
     }
     async fn delegate(
         &self,
@@ -296,6 +306,16 @@ async fn run_with(
     switch: Option<(usize, ApprovalMode)>,
     extra: harness_core::backend::TurnExtra,
 ) -> Run {
+    run_as(host, lead(), steps, switch, extra).await
+}
+
+async fn run_as(
+    host: Arc<Host>,
+    agent: AgentSpec,
+    steps: Vec<Vec<(&'static str, Value)>>,
+    switch: Option<(usize, ApprovalMode)>,
+    extra: harness_core::backend::TurnExtra,
+) -> Run {
     let rec = Arc::new(Rec {
         steps,
         seen: Mutex::default(),
@@ -328,7 +348,7 @@ async fn run_with(
             user_text: "plan the change".into(),
             cwd: dir.path().to_path_buf(),
             model: "rec".into(),
-            agent: Some(lead()),
+            agent: Some(agent),
             compare: vec![],
             parent_session: None,
             extra,
@@ -581,5 +601,184 @@ async fn a_callback_turn_and_a_queued_message_run_in_plan_mode() {
         let sent = r.rec.seen.lock().unwrap()[0].clone();
         let text = format!("{:?}", sent.messages);
         assert!(text.contains("Plan mode is on"), "callback {callback}");
+    }
+}
+
+/// The names a request offered and the text of its messages.
+fn offered(r: &Run) -> (Vec<String>, String) {
+    let reqs = r.rec.seen.lock().unwrap().clone();
+    let names = reqs[0].tools.iter().map(|t| t.name.clone()).collect();
+    let text = reqs[0]
+        .messages
+        .iter()
+        .filter_map(|m| m.user_text())
+        .collect::<Vec<_>>()
+        .join("\n");
+    (names, text)
+}
+
+/// A read-only agent (Scout as shipped: reading tools and the shell) on a
+/// node with no read-only shell, in every mode but plan: no `bash`,
+/// `bash_output` or `bash_stop`, the context block says why, and a call
+/// by name runs nothing, asks nothing and says why (T.7, PLAN.md T70).
+#[tokio::test]
+async fn a_read_only_agent_gets_no_shell_where_the_node_has_none() {
+    let scout = spec(
+        "scout",
+        &[
+            "read",
+            "grep",
+            "glob",
+            "outline",
+            "skill",
+            "bash",
+            "bash_output",
+            "bash_stop",
+            "tool_output",
+        ],
+        vec![],
+    );
+    for mode in [
+        ApprovalMode::AskAll,
+        ApprovalMode::Ask,
+        ApprovalMode::AcceptEdits,
+        ApprovalMode::Auto,
+    ] {
+        let host = Arc::new(Host::new(mode));
+        let r = run_as(
+            host.clone(),
+            scout.clone(),
+            vec![vec![call("bash", "b"), call("bash_output", "o")]],
+            None,
+            Default::default(),
+        )
+        .await;
+        let (names, text) = offered(&r);
+        for gone in ["bash", "bash_output", "bash_stop"] {
+            assert!(
+                !names.contains(&gone.to_string()),
+                "{mode:?}: {gone} offered: {names:?}"
+            );
+        }
+        assert!(names.contains(&"read".to_string()), "{names:?}");
+        assert!(text.contains("there is no `bash` here"), "{mode:?}: {text}");
+        assert_eq!(
+            r.runs.load(Ordering::SeqCst),
+            0,
+            "{mode:?}: a shell tool ran"
+        );
+        assert!(host.asked.lock().unwrap().is_empty(), "{mode:?}: asked");
+        for id in ["b", "o"] {
+            let (ok, out) = host.result(id);
+            assert!(!ok, "{mode:?}");
+            assert!(
+                out.contains("read-only shell, and this node has none"),
+                "{mode:?}: {out}"
+            );
+        }
+    }
+}
+
+/// An agent that changes things keeps its ordinary shell, described as
+/// such; the node's `denied_tools` narrowing it to a reader gives it the
+/// read-only shell's rule (none here), never the other way round; a spec
+/// that says anything about its shell is not read (there is no such
+/// field: a hostile master's extra keys are dropped).
+#[tokio::test]
+async fn what_the_node_offers_decides_the_shell() {
+    let coder = spec("coder", &["read", "write", "bash"], vec![]);
+    let host = Arc::new(Host::new(ApprovalMode::Auto));
+    let r = run_as(host, coder.clone(), vec![], None, Default::default()).await;
+    let reqs = r.rec.seen.lock().unwrap().clone();
+    let bash = reqs[0]
+        .tools
+        .iter()
+        .find(|t| t.name == "bash")
+        .expect("bash");
+    assert!(
+        !bash.description.contains("READ-ONLY"),
+        "{}",
+        bash.description
+    );
+
+    // The node denies `write`: what is left only reads, so its shell
+    // must be the read-only one, and there is none here.
+    let host = Arc::new(Host::new(ApprovalMode::Auto));
+    host.denied.lock().unwrap().push("write".into());
+    let r = run_as(host, coder, vec![], None, Default::default()).await;
+    let (names, text) = offered(&r);
+    assert!(!names.contains(&"bash".to_string()), "{names:?}");
+    assert!(text.contains("there is no `bash` here"), "{text}");
+
+    // A spec from a hostile master asking for a writable shell for a
+    // reader: the keys mean nothing; the tool list decides.
+    let hostile: AgentSpec = serde_json::from_value(json!({
+        "agent_id": "scout", "name": "Scout", "system_prompt": "p", "prompt_hash": "h",
+        "tools": ["read", "bash"],
+        "read_only_shell": false, "writable_shell": true, "shell": "writable",
+        "features": {"commands": true, "read_only_commands": false}
+    }))
+    .unwrap();
+    assert!(!hostile.changes_things(|_| true));
+    let host = Arc::new(Host::new(ApprovalMode::Auto));
+    let r = run_as(
+        host.clone(),
+        hostile,
+        vec![vec![call("bash", "b")]],
+        None,
+        Default::default(),
+    )
+    .await;
+    let (names, _) = offered(&r);
+    assert!(!names.contains(&"bash".to_string()), "{names:?}");
+    assert_eq!(r.runs.load(Ordering::SeqCst), 0);
+    assert!(host.result("b").1.contains("read-only shell"));
+}
+
+/// Plan mode starts a reader with a shell, and refuses a delegate whose
+/// list holds a tool the shared list does not know (it changes things
+/// until someone lists it), whatever the node registered.
+#[tokio::test]
+async fn plan_mode_judges_delegates_by_the_shared_list() {
+    let lead = spec(
+        "lead",
+        &["read"],
+        vec![
+            spec(
+                "scout",
+                &["read", "bash", "bash_output", "bash_stop", "tool_output"],
+                vec![],
+            ),
+            spec("odd", &["read", "notebook_edit"], vec![]),
+            spec("poster", &["read", "publish"], vec![]),
+        ],
+    );
+    let host = Arc::new(Host::new(ApprovalMode::Plan));
+    let r = run_as(
+        host.clone(),
+        lead,
+        vec![vec![
+            (
+                DELEGATE,
+                json!({"id": "d1", "agent": "scout", "task": "look"}),
+            ),
+            (
+                DELEGATE,
+                json!({"id": "d2", "agent": "odd", "task": "look"}),
+            ),
+            (
+                DELEGATE,
+                json!({"id": "d3", "agent": "poster", "task": "look"}),
+            ),
+        ]],
+        None,
+        Default::default(),
+    )
+    .await;
+    assert_eq!(r.out.reason, TurnEndReason::Completed, "{:?}", r.out);
+    assert_eq!(*host.children.lock().unwrap(), ["scout"]);
+    for id in ["d2", "d3"] {
+        let (ok, out) = host.result(id);
+        assert!(!ok && out.contains("it can change files"), "{id}: {out}");
     }
 }

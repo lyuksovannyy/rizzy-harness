@@ -142,6 +142,12 @@ pub struct Settings {
     /// `None`: the first `bwrap` on `PATH` the node's user cannot replace,
     /// looked up at start.
     pub bwrap: Option<PathBuf>,
+    /// The read-only shell's `/tmp` in bytes (`[sandbox] read_only_tmp_mib`);
+    /// `0`: [`crate::contain::READ_ONLY_TMP_BYTES`].
+    pub read_only_tmp: u64,
+    /// `[sandbox] read_only_network`: the read-only shell reaches the
+    /// network as `network` says; `false` (the default): it has none.
+    pub read_only_network: bool,
 }
 
 /// A working sandbox: the wrapper binary and the node-wide rules.
@@ -155,6 +161,10 @@ pub struct Sandbox {
     extra_write: Vec<Extra>,
     network: Network,
     best_effort: bool,
+    /// The read-only shell's `/tmp`, in bytes (node.toml).
+    read_only_tmp: u64,
+    /// The read-only shell reaches the network (node.toml; off by default).
+    read_only_network: bool,
     /// Per-session temp directories live under it (inside the data dir).
     tmp_root: Option<PathBuf>,
     protected: Vec<PathBuf>,
@@ -496,6 +506,11 @@ impl Sandbox {
                 .collect(),
             network: settings.network,
             best_effort: settings.mode == Mode::BestEffort,
+            read_only_tmp: match settings.read_only_tmp {
+                0 => crate::contain::READ_ONLY_TMP_BYTES,
+                n => n,
+            },
+            read_only_network: settings.read_only_network,
             tmp_root,
             protected: protected.to_vec(),
             contain: std::sync::OnceLock::new(),
@@ -516,6 +531,8 @@ impl Sandbox {
             extra_write: self.extra_write.clone(),
             network: self.network,
             best_effort: self.best_effort,
+            read_only_tmp: self.read_only_tmp,
+            read_only_network: self.read_only_network,
             tmp_root: self.tmp_root.clone(),
             protected: self.protected.clone(),
             contain: std::sync::OnceLock::new(),
@@ -694,7 +711,7 @@ impl Sandbox {
         contain: Option<(&crate::contain::Contain, &Path)>,
         session: &OsStr,
         probe: Option<&Probe>,
-        read_only: bool,
+        read_only: Option<&Path>,
     ) -> std::process::Command {
         let mark = self.tmp_root.as_ref().map(|root| crate::contain::Mark {
             root: root.clone(),
@@ -712,9 +729,16 @@ impl Sandbox {
             .collect();
         // A read-only shell (T.7): node.toml's `write` entries too are only
         // read.
-        if read_only {
+        if read_only.is_some() {
             extra_ro.append(&mut extra_rw);
         }
+        // The read-only shell has no network unless node.toml says so
+        // (`[sandbox] read_only_network`, never wider than `network`):
+        // a network namespace of its own where bubblewrap can make one
+        // (its own loopback works, nothing outside it does); Landlock's
+        // TCP rules where it cannot (PLAN.md T70).
+        let ro_net_off = read_only.is_some() && !self.read_only_network;
+        let net_off = self.network == Network::Off || ro_net_off;
         let all_rw: Vec<Grant> = rw.iter().chain(&extra_rw).cloned().collect();
         let all_ro: Vec<Grant> = extra_ro.iter().chain(ro).cloned().collect();
         let mut c = match contain {
@@ -724,9 +748,9 @@ impl Sandbox {
                 self.image,
                 cwd,
                 mark.as_ref(),
-                self.network == Network::Off && self.network_namespace(b),
+                net_off && self.network_namespace(b),
                 &view(&all_rw, &all_ro),
-                read_only.then_some(crate::contain::READ_ONLY_TMP_BYTES),
+                read_only.map(|p| (self.read_only_tmp, p)),
             ),
             None => self.own_program(),
         };
@@ -739,7 +763,10 @@ impl Sandbox {
         if self.best_effort {
             c.arg("--best-effort");
         }
-        if self.network == Network::Off {
+        // Landlock's TCP rules: as node.toml says, and for the read-only
+        // shell where no network namespace stands in for them.
+        let in_ns = contain.is_some_and(|(b, _)| self.network_namespace(b));
+        if self.network == Network::Off || (ro_net_off && !in_ns) {
             c.arg("--no-network");
         }
         if status {
@@ -751,17 +778,44 @@ impl Sandbox {
         for g in all_rw.iter().chain(&devices()) {
             g.push_args(&mut c, "--rw");
         }
-        // The read-only shell's `/tmp` is the tmpfs of its own mount
+        // The read-only shell's temp folder is the tmpfs of its own mount
         // namespace (never the host's: it is not in the view), so Landlock
-        // grants it by path inside.
-        if read_only && contain.is_some() {
-            Grant::system(Path::new(READ_ONLY_TMP)).push_args(&mut c, "--rw");
+        // grants it by path inside; no grant lies beneath it
+        // ([`read_only_tmp_dir`]), so the rule widens nothing else.
+        if let (Some(t), Some(_)) = (read_only, contain) {
+            Grant::system(t).push_args(&mut c, "--rw");
         }
         for g in &all_ro {
             g.push_args(&mut c, "--ro");
         }
         c.arg("--");
         c
+    }
+
+    /// Where the read-only shell's tmpfs goes for these grants:
+    /// [`READ_ONLY_TMP`], unless a grant (or node.toml's entries, or a
+    /// system folder) lies at or beneath it or above it, then
+    /// [`READ_ONLY_TMP_ELSEWHERE`]; neither: refused. Landlock's rule on
+    /// the tmpfs must cover nothing granted, or it would lift the
+    /// read-only rules beneath it.
+    fn read_only_tmp_dir(&self, rw: &[Grant], ro: &[Grant]) -> Result<PathBuf, String> {
+        let granted: Vec<&Path> = rw
+            .iter()
+            .chain(ro)
+            .map(|g| g.path.as_path())
+            .chain(self.read.iter().map(PathBuf::as_path))
+            .chain(self.extra_read.iter().map(|e| e.real.as_path()))
+            .chain(self.extra_write.iter().map(|e| e.real.as_path()))
+            .collect();
+        [READ_ONLY_TMP, READ_ONLY_TMP_ELSEWHERE]
+            .into_iter()
+            .map(PathBuf::from)
+            .find(|t| !granted.iter().any(|g| g.starts_with(t) || t.starts_with(g)))
+            .ok_or_else(|| {
+                "the read-only shell has no place for its temp folder: something granted lies \
+                 beneath /tmp and beneath /.harness-tmp"
+                    .to_string()
+            })
     }
 
     /// The harness binary to run `sandbox-exec` from outside a containment
@@ -844,7 +898,7 @@ impl Sandbox {
             None,
             OsStr::new("probe"),
             Some(&probe),
-            false,
+            None,
         );
         c.env_clear()
             .current_dir(scratch)
@@ -940,7 +994,7 @@ impl Sandbox {
             Some((contain, scratch)),
             OsStr::new("probe"),
             Some(&probe),
-            false,
+            None,
         );
         // Through the guard, as every command: its channel stays open (no
         // kill order) until the probe has ended.
@@ -1052,7 +1106,8 @@ pub struct Grants {
     /// The read-only shell (ADOPTION_PLAN T.7, X.7; docs/read-only-shell.md):
     /// every grant read-only, the session's folder and node.toml's `write`
     /// entries included, and nothing writable but a `/tmp` of the command's
-    /// own ([`crate::contain::READ_ONLY_TMP_BYTES`], gone when it ends).
+    /// own (node.toml's size, [`crate::contain::READ_ONLY_TMP_BYTES`] by
+    /// default; gone when it ends).
     /// Only ever contained (bubblewrap's read-only binds, Landlock inside
     /// as a second layer): where this confinement cannot contain it the
     /// command is refused ([`Confinement::read_only_shell`]), never run
@@ -1063,12 +1118,22 @@ pub struct Grants {
 }
 
 /// The read-only shell's only writable folder: a tmpfs at this path in the
-/// command's own mount namespace.
+/// command's own mount namespace, where nothing granted lies beneath it.
 pub const READ_ONLY_TMP: &str = "/tmp";
+
+/// ...and where something granted does (a folder under the host's `/tmp`):
+/// a Landlock rule on a folder covers everything beneath it, so the tmpfs
+/// cannot be `/tmp` then, or the folder would be writable to Landlock and
+/// its pathname sockets reachable (review of PR 131, M1).
+pub const READ_ONLY_TMP_ELSEWHERE: &str = "/.harness-tmp";
 
 /// The environment a read-only shell adds: git reads without taking the
 /// index lock or refreshing the index (`git status` would otherwise try to
-/// write `.git/index` and fail on the read-only folder).
+/// write `.git/index` and fail on the read-only folder). `TMPDIR` and
+/// `CARGO_TARGET_DIR` (`$TMPDIR/cargo-target`: with it, `cargo test` runs
+/// on read-only `~/.cargo` and `~/.rustup`, docs/read-only-shell.md
+/// "Toolchains") are set beside it. Set after the node's `env_pass`, so
+/// they win.
 pub const READ_ONLY_ENV: &[(&str, &str)] = &[("GIT_OPTIONAL_LOCKS", "0")];
 
 impl Confinement {
@@ -1103,6 +1168,26 @@ impl Confinement {
     /// ([`Grants::read_only`]): `Err` says why not, in words for the model
     /// and the person. Only a contained shell with a bubblewrap that sizes
     /// a tmpfs can; Landlock alone is never offered as read-only.
+    /// The read-only shell's `/tmp` size here, in bytes (node.toml's, or
+    /// the default where this confinement has no sandbox).
+    pub fn read_only_tmp(&self) -> u64 {
+        match self {
+            Self::Confined { sandbox, .. } => sandbox.read_only_tmp,
+            _ => crate::contain::READ_ONLY_TMP_BYTES,
+        }
+    }
+
+    /// Whether the read-only shell reaches the network here
+    /// (`[sandbox] read_only_network`, never wider than `network`).
+    pub fn read_only_network(&self) -> bool {
+        match self {
+            Self::Confined { sandbox, .. } => {
+                sandbox.read_only_network && sandbox.network == Network::On
+            }
+            _ => false,
+        }
+    }
+
     pub fn read_only_shell(&self) -> Result<(), String> {
         match self {
             Self::Refused(why) => Err(format!("this node has no contained shell for it ({why})")),
@@ -1352,6 +1437,13 @@ impl Confinement {
                     .as_ref()
                     .and_then(|t| t.file_name())
                     .unwrap_or(OsStr::new("-"));
+                // The read-only shell's temp folder: `/tmp`, unless a grant
+                // lies beneath it (a folder cloned under `/tmp`).
+                let ro_tmp = if grants.read_only {
+                    Some(sandbox.read_only_tmp_dir(&rw, &ro)?)
+                } else {
+                    None
+                };
                 let mut c = sandbox.wrapper(
                     &rw,
                     &ro,
@@ -1359,12 +1451,13 @@ impl Confinement {
                     contain.map(|b| (b, start.as_path())),
                     session,
                     None,
-                    grants.read_only,
+                    ro_tmp.as_deref(),
                 );
                 c.arg(program);
                 env.apply_std(&mut c);
-                if grants.read_only {
-                    c.env("TMPDIR", READ_ONLY_TMP);
+                if let Some(t) = &ro_tmp {
+                    c.env("TMPDIR", t);
+                    c.env("CARGO_TARGET_DIR", t.join("cargo-target"));
                     for (k, v) in READ_ONLY_ENV {
                         c.env(k, v);
                     }
@@ -2996,10 +3089,46 @@ mod tests {
 
     /// The wrapper's arguments for a command with no grants of its own.
     fn wrapper_args(sb: &Sandbox) -> Vec<String> {
-        sb.wrapper(&[], &[], false, None, OsStr::new("-"), None, false)
+        sb.wrapper(&[], &[], false, None, OsStr::new("-"), None, None)
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect()
+    }
+
+    /// Review of PR 131, M1, on any kernel (the socket test in
+    /// `cli/tests/read_only_shell.rs` needs Landlock ABI 9 to see it): the
+    /// read-only shell's tmpfs, and so Landlock's one write rule, never
+    /// lies above, at or beneath anything granted.
+    #[test]
+    fn the_read_only_temp_folder_is_never_above_or_beneath_a_grant() {
+        let sb = Sandbox::new("/bin/true".into(), &Settings::default(), None, &[]).unwrap();
+        let at = |rw: &[&str], ro: &[&str]| {
+            let g = |l: &[&str]| -> Vec<Grant> {
+                l.iter().map(|p| Grant::system(Path::new(p))).collect()
+            };
+            sb.read_only_tmp_dir(&g(rw), &g(ro))
+        };
+        assert_eq!(at(&[], &["/home/u/proj"]).unwrap(), Path::new("/tmp"));
+        // `/tmpfoo` is a sibling of `/tmp`, not beneath it.
+        assert_eq!(at(&[], &["/tmpfoo/proj"]).unwrap(), Path::new("/tmp"));
+        for under in ["/tmp/clone/proj", "/tmp"] {
+            assert_eq!(at(&[], &[under]).unwrap(), Path::new("/.harness-tmp"));
+            assert_eq!(at(&[under], &[]).unwrap(), Path::new("/.harness-tmp"));
+        }
+        // Something granted above both (the root) or beneath both: refused.
+        assert!(at(&[], &["/"]).is_err());
+        assert!(at(&[], &["/tmp/a", "/.harness-tmp/b"]).is_err());
+        // node.toml's own entries count as grants.
+        let s = Settings {
+            read: vec!["/tmp".into()],
+            ..Default::default()
+        };
+        if let Ok(sb) = Sandbox::new("/bin/true".into(), &s, None, &[]) {
+            assert_eq!(
+                sb.read_only_tmp_dir(&[], &[]).unwrap(),
+                Path::new("/.harness-tmp")
+            );
+        }
     }
 
     /// The `<expect>` the wrapper is given for `path`, if it is granted.

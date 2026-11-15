@@ -96,7 +96,11 @@ fn agent(ui: UiLevel) -> AgentSpec {
         agent_id: "general".into(),
         name: "General".into(),
         system_prompt: "Be helpful.".into(),
-        tools: ToolSelection::List(vec!["bash".into(), "web_search".into()]),
+        // `write` (not registered here) makes it an agent that changes
+        // things, so its `bash` is the ordinary shell: with only `bash`
+        // and `web_search` it would get the read-only shell, which this
+        // test's node does not have (PLAN.md T70).
+        tools: ToolSelection::List(vec!["bash".into(), "web_search".into(), "write".into()]),
         model: None,
         fallbacks: vec![],
         unavailable: vec![],
