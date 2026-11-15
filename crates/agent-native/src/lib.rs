@@ -18,6 +18,8 @@ pub mod llm;
 pub mod mask;
 pub mod mock;
 pub mod models;
+#[cfg(test)]
+mod parallel_tests;
 pub mod provider;
 #[cfg(test)]
 mod queued_tests;
@@ -66,6 +68,40 @@ pub const DRAIN_BYTES: usize = 32 * 1024;
 /// cancel still reports its output; a dropped bash call kills its group
 /// anyway.
 pub const TOOL_CANCEL_GRACE: Duration = Duration::from_secs(5);
+
+/// At most this many calls of one parallel batch run at once (Hermes's 8
+/// workers; DeepSeek allows 10): parallel-safe tools are file reads and
+/// searches, each on a blocking thread of its own.
+pub const MAX_PARALLEL_CALLS: usize = 8;
+
+/// The result of a call of a parallel batch that had not started when the
+/// person pressed Stop.
+pub const NOT_RUN_STOPPED: &str = "[cancelled before it ran]";
+
+/// The result of a call whose tool panicked: the others of its step go on.
+pub const TOOL_PANICKED: &str = "This tool call failed: the tool stopped with an internal \
+     error (a bug in the harness, not in your call). Its other effects, if any, are unknown.";
+
+/// A tool call as the loop judged it before anything was logged.
+struct Planned {
+    call: ToolCallRef,
+    /// The call's result when its arguments are wrong or its tool unknown.
+    bad_args: Option<String>,
+    /// Our own tool, asked for its early refusal once the guard admits it.
+    precheck: Option<Arc<dyn harness_tools::Tool>>,
+    key: harness_tools::CallKey,
+    /// May run at the same time as its parallel-safe neighbours.
+    parallel: bool,
+}
+
+/// A call of a group after its start was logged.
+enum Pre {
+    /// Not run: its result (and the guard's note).
+    Done(Box<ToolOutcome>, Option<String>),
+    /// To run: authorised, in a batch (`Some`), or alone, through
+    /// `run_tool` with its approval (`None`).
+    Run(Option<Arc<dyn harness_tools::Tool>>),
+}
 
 /// The result of every tool call in a message that stopped on the output
 /// limit. It names the cause and the way out, never the cut arguments.
@@ -3002,6 +3038,11 @@ impl NativeBackend {
                 }
             }
             let n_calls = calls.len();
+            // Every call validated and judged first, in call order: pure
+            // (the schema, the tool's declared risk, the node's policy
+            // answers), nothing logged, nothing asked.
+            let mut planned: std::collections::VecDeque<(usize, Planned)> =
+                std::collections::VecDeque::with_capacity(n_calls);
             for (i, mut call) in calls.into_iter().enumerate() {
                 // The arguments against the schema the model was offered,
                 // before the tool card, the approval and the run (Pi's
@@ -3042,174 +3083,279 @@ impl NativeBackend {
                     // Not an object: `run_tool` says so.
                     Some(_) => None,
                 };
-                if host
-                    .emit(EventKind::ToolCallStarted(ToolCallStarted {
-                        author: author.clone(),
-                        turn_id: ctx.turn_id.clone(),
-                        call_id: call.call_id.clone(),
-                        tool: call.tool.clone(),
-                        input: call.input.clone(),
-                    }))
-                    .await
-                    .is_err()
-                {
-                    return stopped(usage);
-                }
-                // Before approval and dispatch: a refused call never starts.
-                // The repeated-call guard first: the same bad call again
-                // and again is refused, and ends the turn, as any other.
-                let key = harness_tools::call_key(&ctx.cwd, &call.tool, &call.input);
-                // A call its tool would refuse whatever anyone answers (a
-                // path or `workdir` the node puts out of reach, an unread
-                // file for `edit`/`write`) is refused now, with the tool's
-                // words, before anyone is asked (T51), and only once the
-                // guard admits it: a refusal can count a file as read
-                // (`edit`'s), which must not happen for a call never made.
-                // The tool checks again when it runs.
-                let admission = match (guard.admit(key, &call.tool), bad_args) {
-                    (repeat::Admission::Run, Some(e)) => Err(e),
-                    (repeat::Admission::Run, None) => match precheck
-                        .and_then(|t| t.refusal(&self.refusal_ctx(&ctx, host), &call.input))
-                    {
-                        Some(e) => Err(e),
-                        None => Ok(repeat::Admission::Run),
-                    },
-                    (a, _) => Ok(a),
-                };
-                let (outcome, refused) = match admission {
-                    Err(e) => (ToolOutcome::err(e), None),
-                    Ok(admission) => match admission {
-                        repeat::Admission::Refuse { output, note, stop } => {
-                            repeat_stop |= stop;
-                            (ToolOutcome::err(output), Some(note))
-                        }
-                        repeat::Admission::Ended => (ToolOutcome::err(repeat::ENDED_OUTPUT), None),
-                        repeat::Admission::Run => {
-                            let mut observed = observed_text(
-                                &messages,
-                                &trusted,
-                                Some((user_idx, &own_words)),
-                                child,
-                            );
-                            if let Some(inh) = &ctx.extra.observed {
-                                observed.splice(0..0, inh.iter().cloned());
-                            }
-                            let o = self
-                                .run_tool(
-                                    &ctx,
-                                    host,
-                                    &call,
-                                    &mut allowed_this_turn,
-                                    &observed,
-                                    &refs,
-                                    &mcp_tools,
-                                )
-                                .await;
-                            (o, None)
-                        }
-                    },
-                };
-                let cancelled = ctx.cancel.is_cancelled();
-                let output = self.config.secrets.scrub(&outcome.output);
-                let note = refused.or_else(|| {
-                    let changes = self.tools.iter().chain(&mcp_tools).any(|t| {
-                        t.name() == call.tool
-                            && t.risk() == harness_core::policy::ToolRisk::Mutating
+                // May run at the same time as its neighbours: one of our
+                // own tools that declares itself read-only and parallel
+                // safe (an allow-list: MCP tools never, their effects are
+                // the server's word), with valid arguments, that would run
+                // with no card here (the node's mode and `denied_tools`).
+                let parallel = bad_args.is_none()
+                    && precheck.as_ref().is_some_and(|t| {
+                        t.risk() == harness_core::policy::ToolRisk::ReadOnly
+                            && t.parallel_safe()
+                            && t.enabled(&ctx.extra.savings)
+                            && host.runs_unasked(t.name(), t.risk())
                     });
-                    if outcome.denied {
-                        guard.record_denied(key, &output)
-                    } else {
-                        guard.record(key, &call.tool, changes, outcome.ok, &output)
+                let key = harness_tools::call_key(&ctx.cwd, &call.tool, &call.input);
+                planned.push_back((
+                    i,
+                    Planned {
+                        call,
+                        bad_args,
+                        precheck,
+                        key,
+                        parallel,
+                    },
+                ));
+            }
+            // In groups, in call order: a run of neighbouring parallel-safe
+            // calls is one group (each call key once, within the repeated-
+            // call guard's margin: `RepeatGuard::batchable`), every other
+            // call a group of its own, run exactly as before.
+            let mut cancelled = false;
+            while let Some(first) = planned.pop_front() {
+                let mut group = vec![first];
+                if group[0].1.parallel && guard.batchable(&group[0].1.call.tool, 0) {
+                    while let Some((_, next)) = planned.front() {
+                        let already = group
+                            .iter()
+                            .filter(|(_, p)| p.call.tool == next.call.tool)
+                            .count();
+                        if !next.parallel
+                            || group.iter().any(|(_, p)| p.key == next.key)
+                            || !guard.batchable(&next.call.tool, already as u32)
+                        {
+                            break;
+                        }
+                        group.extend(planned.pop_front());
                     }
-                });
-                // A trial after the second rule's refusal that failed the
-                // same way ends the turn after this step.
-                repeat_stop |= guard.ended();
-                // The step's last result carries the next request's note
-                // (half the budget, or the wrap-up), so the log has it; the
-                // limit read again now (review F5).
-                let note = match (i + 1 == n_calls)
-                    .then(|| step_note(person, steps, cap_now()))
-                    .flatten()
-                {
-                    Some((kind, n)) => {
-                        noted = Some(kind);
-                        Some(match note {
-                            Some(g) => format!("{g}\n\n{n}"),
-                            None => n,
-                        })
-                    }
-                    None => note,
-                };
-                if let Some(b) = &outcome.background
-                    && host
-                        .emit(EventKind::BackgroundStarted(BackgroundStarted {
-                            bg_id: b.bg_id.clone(),
-                            call_id: call.call_id.clone(),
+                }
+                let parallel = group.len() > 1;
+                // Started, admitted and (in a batch) authorised, one call
+                // after another in call order: a card, if one is ever
+                // shown, is shown alone.
+                let mut pre: Vec<Pre> = Vec::with_capacity(group.len());
+                for (_, p) in &mut group {
+                    if host
+                        .emit(EventKind::ToolCallStarted(ToolCallStarted {
+                            author: author.clone(),
                             turn_id: ctx.turn_id.clone(),
-                            timeout_s: b.timeout_s,
-                            ends_by_ms: b.ends_by_ms,
+                            call_id: p.call.call_id.clone(),
+                            tool: p.call.tool.clone(),
+                            input: p.call.input.clone(),
                         }))
                         .await
                         .is_err()
-                {
-                    // Nothing in the log names it: it is stopped, and its end
-                    // is not recorded either.
-                    if let harness_tools::background::Access::On(bg) = background_access(&ctx, host)
                     {
-                        bg.discard(&b.bg_id);
+                        return stopped(usage);
                     }
-                    return stopped(usage);
+                    // Before approval and dispatch: a refused call never
+                    // starts. The repeated-call guard first: the same bad
+                    // call again and again is refused, and ends the turn,
+                    // as any other. A call its tool would refuse whatever
+                    // anyone answers (a path or `workdir` the node puts out
+                    // of reach, an unread file for `edit`/`write`) is
+                    // refused now, with the tool's words, before anyone is
+                    // asked (T51), and only once the guard admits it: a
+                    // refusal can count a file as read (`edit`'s), which
+                    // must not happen for a call never made. The tool
+                    // checks again when it runs.
+                    let admission = match (guard.admit(p.key, &p.call.tool), p.bad_args.take()) {
+                        (repeat::Admission::Run, Some(e)) => Err(e),
+                        (repeat::Admission::Run, None) => {
+                            match p.precheck.take().and_then(|t| {
+                                t.refusal(&self.refusal_ctx(&ctx, host), &p.call.input)
+                            }) {
+                                Some(e) => Err(e),
+                                None => Ok(repeat::Admission::Run),
+                            }
+                        }
+                        (a, _) => Ok(a),
+                    };
+                    pre.push(match admission {
+                        Err(e) => Pre::Done(Box::new(ToolOutcome::err(e)), None),
+                        Ok(repeat::Admission::Refuse { output, note, stop }) => {
+                            repeat_stop |= stop;
+                            Pre::Done(Box::new(ToolOutcome::err(output)), Some(note))
+                        }
+                        Ok(repeat::Admission::Ended) => {
+                            Pre::Done(Box::new(ToolOutcome::err(repeat::ENDED_OUTPUT)), None)
+                        }
+                        Ok(repeat::Admission::Run) if parallel => {
+                            match self
+                                .authorize(&ctx, host, &p.call, &mut allowed_this_turn, &mcp_tools)
+                                .await
+                            {
+                                Ok(tool) => Pre::Run(Some(tool)),
+                                Err(o) => Pre::Done(o, None),
+                            }
+                        }
+                        Ok(repeat::Admission::Run) => Pre::Run(None),
+                    });
                 }
-                // The task list the tool accepted, before its result.
-                if outcome.ok && offers_todo && outcome.todo.is_some() {
-                    todo_now = outcome.todo.clone();
+                // What a running call may follow: the user's words and
+                // trusted results logged before this group (a batch's calls
+                // read no URL: no web tool is parallel safe).
+                let mut observed = Vec::new();
+                if pre.iter().any(|p| matches!(p, Pre::Run(_))) {
+                    observed =
+                        observed_text(&messages, &trusted, Some((user_idx, &own_words)), child);
+                    if let Some(inh) = &ctx.extra.observed {
+                        observed.splice(0..0, inh.iter().cloned());
+                    }
                 }
-                if let Some(items) = outcome.todo.clone().filter(|_| outcome.ok)
-                    && host
-                        .emit(EventKind::TodoUpdated(TodoUpdated {
-                            turn_id: ctx.turn_id.clone(),
+                // A batch's calls run together, at most
+                // `MAX_PARALLEL_CALLS` at once, and come back in call
+                // order whichever finishes first (`buffered`): their
+                // results are logged and sent in call order.
+                let runs: Vec<_> = group
+                    .iter()
+                    .zip(&pre)
+                    .filter_map(|((_, p), pr)| match pr {
+                        Pre::Run(Some(tool)) => Some(self.execute(
+                            &ctx,
+                            host,
+                            &p.call,
+                            tool.clone(),
+                            &observed,
+                            &refs,
+                            false,
+                        )),
+                        _ => None,
+                    })
+                    .collect();
+                let mut runs =
+                    futures::StreamExt::buffered(futures::stream::iter(runs), MAX_PARALLEL_CALLS);
+                for ((i, p), pr) in group.iter().zip(pre) {
+                    let (i, call, key) = (*i, &p.call, p.key);
+                    let (outcome, refused) = match pr {
+                        Pre::Done(o, r) => (*o, r),
+                        Pre::Run(Some(_)) => (
+                            futures::StreamExt::next(&mut runs)
+                                .await
+                                .unwrap_or_else(|| {
+                                    ToolOutcome::err("[internal error: no result for this call]")
+                                }),
+                            None,
+                        ),
+                        Pre::Run(None) => (
+                            self.run_tool(
+                                &ctx,
+                                host,
+                                call,
+                                &mut allowed_this_turn,
+                                &observed,
+                                &refs,
+                                &mcp_tools,
+                            )
+                            .await,
+                            None,
+                        ),
+                    };
+                    cancelled |= ctx.cancel.is_cancelled();
+                    let output = self.config.secrets.scrub(&outcome.output);
+                    let note = refused.or_else(|| {
+                        let changes = self.tools.iter().chain(&mcp_tools).any(|t| {
+                            t.name() == call.tool
+                                && t.risk() == harness_core::policy::ToolRisk::Mutating
+                        });
+                        if outcome.denied {
+                            guard.record_denied(key, &output)
+                        } else {
+                            guard.record(key, &call.tool, changes, outcome.ok, &output)
+                        }
+                    });
+                    // A trial after the second rule's refusal that failed the
+                    // same way ends the turn after this step.
+                    repeat_stop |= guard.ended();
+                    // The step's last result carries the next request's note
+                    // (half the budget, or the wrap-up), so the log has it; the
+                    // limit read again now (review F5).
+                    let note = match (i + 1 == n_calls)
+                        .then(|| step_note(person, steps, cap_now()))
+                        .flatten()
+                    {
+                        Some((kind, n)) => {
+                            noted = Some(kind);
+                            Some(match note {
+                                Some(g) => format!("{g}\n\n{n}"),
+                                None => n,
+                            })
+                        }
+                        None => note,
+                    };
+                    if let Some(b) = &outcome.background
+                        && host
+                            .emit(EventKind::BackgroundStarted(BackgroundStarted {
+                                bg_id: b.bg_id.clone(),
+                                call_id: call.call_id.clone(),
+                                turn_id: ctx.turn_id.clone(),
+                                timeout_s: b.timeout_s,
+                                ends_by_ms: b.ends_by_ms,
+                            }))
+                            .await
+                            .is_err()
+                    {
+                        // Nothing in the log names it: it is stopped, and its end
+                        // is not recorded either.
+                        if let harness_tools::background::Access::On(bg) =
+                            background_access(&ctx, host)
+                        {
+                            bg.discard(&b.bg_id);
+                        }
+                        return stopped(usage);
+                    }
+                    // The task list the tool accepted, before its result.
+                    if outcome.ok && offers_todo && outcome.todo.is_some() {
+                        todo_now = outcome.todo.clone();
+                    }
+                    if let Some(items) = outcome.todo.clone().filter(|_| outcome.ok)
+                        && host
+                            .emit(EventKind::TodoUpdated(TodoUpdated {
+                                turn_id: ctx.turn_id.clone(),
+                                call_id: call.call_id.clone(),
+                                items,
+                            }))
+                            .await
+                            .is_err()
+                    {
+                        return stopped(usage);
+                    }
+                    // What the file tools' guard rebuilds from (T.2).
+                    // A path the scrubber would change is not logged at all: a
+                    // changed path would stand for another file in every later
+                    // rebuild (the next turn then asks for a read).
+                    let seen = outcome
+                        .seen
+                        .clone()
+                        .filter(|f| outcome.ok && self.config.secrets.scrub(&f.path) == f.path);
+                    if host
+                        .emit(EventKind::ToolCallFinished(ToolCallFinished {
+                            seen,
                             call_id: call.call_id.clone(),
-                            items,
+                            ok: outcome.ok,
+                            output: output.clone(),
+                            exit_code: outcome.exit_code,
+                            truncated: outcome.truncated,
+                            sources: self.scrub_sources(outcome.sources),
+                            note: note.clone(),
                         }))
                         .await
                         .is_err()
-                {
-                    return stopped(usage);
-                }
-                // What the file tools' guard rebuilds from (T.2).
-                // A path the scrubber would change is not logged at all: a
-                // changed path would stand for another file in every later
-                // rebuild (the next turn then asks for a read).
-                let seen = outcome
-                    .seen
-                    .clone()
-                    .filter(|f| outcome.ok && self.config.secrets.scrub(&f.path) == f.path);
-                if host
-                    .emit(EventKind::ToolCallFinished(ToolCallFinished {
-                        seen,
+                    {
+                        return stopped(usage);
+                    }
+                    if outcome.ok && URL_SOURCES.contains(&call.tool.as_str()) {
+                        trusted.insert(call.call_id.clone());
+                    }
+                    messages.push(ChatMsg::Tool {
                         call_id: call.call_id.clone(),
-                        ok: outcome.ok,
-                        output: output.clone(),
-                        exit_code: outcome.exit_code,
-                        truncated: outcome.truncated,
-                        sources: self.scrub_sources(outcome.sources),
-                        note: note.clone(),
-                    }))
-                    .await
-                    .is_err()
-                {
-                    return stopped(usage);
+                        content: output,
+                    });
+                    // After the result's escaped text, as the log rebuilds it.
+                    messages.extend(note.map(ChatMsg::CallNote));
                 }
-                if outcome.ok && URL_SOURCES.contains(&call.tool.as_str()) {
-                    trusted.insert(call.call_id.clone());
-                }
-                messages.push(ChatMsg::Tool {
-                    call_id: call.call_id,
-                    content: output,
-                });
-                // After the result's escaped text, as the log rebuilds it.
-                messages.extend(note.map(ChatMsg::CallNote));
+                // A Stop ends the turn after the group: every call of a
+                // batch has its result, the ones that never started too.
                 if cancelled {
                     return TurnOutcome {
                         reason: TurnEndReason::Cancelled,
@@ -3773,6 +3919,29 @@ impl NativeBackend {
         refs: &SharedRefs,
         mcp: &[Arc<dyn harness_tools::Tool>],
     ) -> ToolOutcome {
+        match self
+            .authorize(ctx, host, call, allowed_this_turn, mcp)
+            .await
+        {
+            Ok(tool) => {
+                self.execute(ctx, host, call, tool, observed, refs, true)
+                    .await
+            }
+            Err(o) => *o,
+        }
+    }
+
+    /// The call's tool, offered and enabled, with an object for input, and
+    /// let through by the host (its card, if the chat's mode asks): or the
+    /// call's result.
+    async fn authorize(
+        &self,
+        ctx: &TurnCtx<'_>,
+        host: &dyn harness_core::backend::TurnHost,
+        call: &ToolCallRef,
+        allowed_this_turn: &mut HashSet<harness_tools::CallKey>,
+        mcp: &[Arc<dyn harness_tools::Tool>],
+    ) -> Result<Arc<dyn harness_tools::Tool>, Box<ToolOutcome>> {
         let offered = ctx.agent.as_ref().is_none_or(|a| a.allows_tool(&call.tool));
         let Some(tool) = self
             .tools
@@ -3781,13 +3950,16 @@ impl NativeBackend {
             .find(|t| t.name() == call.tool)
             .filter(|t| offered && t.enabled(&ctx.extra.savings))
         else {
-            return ToolOutcome::err(format!("unknown tool `{}`", call.tool));
+            return Err(Box::new(ToolOutcome::err(format!(
+                "unknown tool `{}`",
+                call.tool
+            ))));
         };
         if !call.input.is_object() {
-            return ToolOutcome::err(format!(
+            return Err(Box::new(ToolOutcome::err(format!(
                 "tool arguments must be a JSON object, got: {}",
                 call.input
-            ));
+            ))));
         }
         let key = harness_tools::call_key(&ctx.cwd, tool.name(), &call.input);
         if !allowed_this_turn.contains(&key) {
@@ -3801,7 +3973,7 @@ impl NativeBackend {
                     let note = host.denial_note(&call.call_id);
                     // Marked as a denial here, never read from the text:
                     // the repeated-call guard's second rule skips it.
-                    return ToolOutcome {
+                    return Err(Box::new(ToolOutcome {
                         denied: true,
                         ..ToolOutcome::err(if ctx.cancel.is_cancelled() {
                             "[cancelled before approval]".to_string()
@@ -3809,7 +3981,7 @@ impl NativeBackend {
                             // The person's note, quoted after the fixed sentence.
                             harness_core::event::denied_text(note.as_deref())
                         })
-                    };
+                    }));
                 }
                 harness_core::policy::Decision::AllowSession => {
                     allowed_this_turn.insert(key);
@@ -3819,13 +3991,36 @@ impl NativeBackend {
                 | harness_core::policy::Decision::AllowChat => {}
             }
         }
+        Ok(tool.clone())
+    }
+
+    /// Run an authorised call. `stream`: its live output goes to the log as
+    /// `tool_output_delta` events (a call that runs alone); a call of a
+    /// parallel batch gets no output sink, so concurrent calls never
+    /// interleave events in the log (parallel-safe tools stream nothing
+    /// anyway), and does not start once the person pressed Stop.
+    #[allow(clippy::too_many_arguments)]
+    async fn execute(
+        &self,
+        ctx: &TurnCtx<'_>,
+        host: &dyn harness_core::backend::TurnHost,
+        call: &ToolCallRef,
+        tool: Arc<dyn harness_tools::Tool>,
+        observed: &[String],
+        refs: &SharedRefs,
+        stream: bool,
+    ) -> ToolOutcome {
+        use futures::FutureExt as _;
+        if !stream && ctx.cancel.is_cancelled() {
+            return ToolOutcome::err(NOT_RUN_STOPPED);
+        }
         // Bounded, with a byte budget for the whole call (PLAN.md T9): a
         // flood is cut with one marker, then read and dropped by the tool.
         let (sink, rx) = harness_tools::OutputSink::channel(self.config.tool_stream_bytes);
         let tctx = ToolCtx {
             workspace: ctx.cwd.clone(),
             cancel: ctx.cancel.child_token(),
-            output: Some(sink),
+            output: stream.then_some(sink),
             // A call the Accept edits rule allowed walks its path as the
             // rule did (T50).
             allow_outside_workspace: self.config.allow_outside_workspace
@@ -3875,21 +4070,33 @@ impl NativeBackend {
             })
         };
         let _stop_watch = AbortOnDrop(watch);
-        let step = coalesce(
-            tool.run(&tctx, call.input.clone()),
-            rx,
-            &abandon,
-            host,
-            secrets,
-            |text| {
+        // A tool that panics is this call's failure, not the turn's: the
+        // other calls of its step complete and are logged.
+        let run = std::panic::AssertUnwindSafe(tool.run(&tctx, call.input.clone()))
+            .catch_unwind()
+            .map(|r| {
+                r.unwrap_or_else(|_| {
+                    tracing::error!(tool = %call.tool, "tool panicked");
+                    ToolOutcome::err(TOOL_PANICKED)
+                })
+            });
+        let step = if stream {
+            coalesce(run, rx, &abandon, host, secrets, |text| {
                 EventKind::ToolOutputDelta(ToolOutputDelta {
                     call_id: call_id.clone(),
                     stream: OutputStream::Stdout,
                     text,
                 })
-            },
-        )
-        .await;
+            })
+            .await
+        } else {
+            drop(rx);
+            tokio::select! {
+                biased;
+                _ = abandon.cancelled() => Step::Cancelled,
+                o = run => Step::Done(o),
+            }
+        };
         match step {
             Step::Done(mut o) => {
                 if tctx.output.as_ref().is_some_and(|s| s.truncated()) {

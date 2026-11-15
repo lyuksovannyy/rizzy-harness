@@ -1076,7 +1076,10 @@ directory, be inside it, or contain it: with the default data directory
 `grep`, `glob`, `outline`) never reach into the data directory, even with
 `allow_outside_workspace = true` or through a symlink. The shell runs in a
 sandbox that cannot open it either (see "The shell sandbox" below); its
-output is still scrubbed of the API token and known keys.
+output is still scrubbed of the API token and known keys. When the model asks for several `read`, `grep`, `glob` or `outline`
+calls in one step and none needs a card, they run at the same time (at most
+8 at once); their results still appear, and reach the model, in the order it
+asked. Every other call, `bash` included, runs alone in its place.
 `allow_outside_workspace = true` lets `write` and `edit` change any file
 of the node's user outside the data directory, `~/.bashrc` and
 `~/.gitconfig` included, which is the same as running a command outside

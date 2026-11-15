@@ -58,7 +58,8 @@ impl Tool for Read {
          (not part of the file). Use offset/limit for large files; a long read stops early and \
          says where to go on. Reading a file with `read` (this tool; any part of it) is what \
          lets `edit` and `write` change it: read it here before you change it, since `cat`, \
-         `head` or `sed` in `bash` do not count."
+         `head` or `sed` in `bash` do not count. Several files you need: ask for them in one \
+         step; reads (and `grep`, `glob`) of one step run at the same time."
     }
     fn schema(&self) -> Value {
         json!({
@@ -73,6 +74,9 @@ impl Tool for Read {
     }
     fn risk(&self) -> ToolRisk {
         ToolRisk::ReadOnly
+    }
+    fn parallel_safe(&self) -> bool {
+        true
     }
     fn refusal(&self, ctx: &ToolCtx, input: &Value) -> Option<String> {
         crate::path_refusal(ctx, input, false)
