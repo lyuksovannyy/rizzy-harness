@@ -191,7 +191,9 @@ const DIFF_KB = 3.8;
 // Another chat's work before an undo (PLAN.md T57, fix/undo-other-chats),
 // measured 390.3 against 390.2: the diff panel's note naming the files
 // another chat changed, in its lazy chunk, and the conversation row's
-// "Undo anyway" for every refusal that offers it (+0.1).
+// "Undo anyway" for every refusal that offers it (+0.1). After its review
+// (certain and possible files apart in the panel), measured 390.4 against
+// a recorded 390.4: no change to the line.
 const T57_KB = 0.1;
 
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
