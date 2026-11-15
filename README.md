@@ -896,7 +896,7 @@ env_pass = []                        # extra variables the agent's shell gets (s
 
 [limits]
 tool_stream_bytes = 1048576          # live output one tool call may stream (4096 .. 1 GiB)
-max_steps = 50                       # model calls that run tools in one turn; a person's turn then gets one to sum up (1 .. 1000)
+max_steps = 1000                     # model calls that run tools in one turn, and the most a chat may be set to; a person's turn then gets one to sum up (1 .. 10000)
 bash_timeout_max_s = 3600            # longest a bash call may run, whatever it asks for (1 .. 3600)
 model_first_byte_timeout_s = 600     # wait for a model's first answer (10 .. 3600)
 model_idle_timeout_s = 300           # then the longest gap between its events (10 .. 3600)
@@ -1453,7 +1453,23 @@ rest of its output is read and dropped. The result the model gets has its
 own, smaller cap and says when the live stream was cut.
 
 **Step and time limits.** A turn may make `[limits] max_steps` model calls
-that run tools (default 50, 1 to 1000; a sub-agent's turn has the same cap).
+that run tools (default 1,000, 1 to 10,000 in the node's `node.toml`). The
+default is the owner's decision (2026-11-15: "Raise max to 1000 by default +
+add ability for session owners to override max steps (min: 1 - {max
+setted})"). **What it costs:** with Auto as the default approval mode, one
+message can run up to a thousand model requests and a thousand tool calls,
+with nobody clicking anything. What bounds it: the chat's own step limit,
+the node's `max_steps`, the repeated-call guard (the same call with the same
+result is refused and then ends the turn), the model stream timeouts, Stop,
+and the provider's own rate and spending limits. A chat's owner can set the
+chat's own limit, from 1 up to the node's, in the composer next to the
+approval mode ("N steps"): the node clamps whatever it is sent, records it in
+the chat (shown as "Step limit: N"), keeps it across a restart, and applies
+it from the running turn's next request (a limit below what the turn has
+used gives it its wrap-up next). Only the owner (or the API token) can change
+it; nothing the model, a tool, a skill or an MCP server writes can. A
+sub-agent's cap is at most its parent chat's limit; a callback turn keeps
+`callback_max_steps`; a routine's chat uses the node's limit.
 Halfway through, the agent is told how many it has used. A person's turn then
 gets one more call that runs no tool: the tools stay listed (the provider's
 cache) but the provider is asked for no tool call (`tool_choice: none`), the

@@ -67,6 +67,11 @@ pub(crate) struct Session {
     /// Held while a mode change is recorded and applied, so the mode in
     /// force is always the log's latest.
     mode_change: tokio::sync::Mutex<()>,
+    /// The chat's own step limit (X.14): `None` until the owner sets one
+    /// ([`Self::set_step_limit`], recorded as `step_limit_changed`),
+    /// rebuilt from the log at load. Read before every model request of a
+    /// person's turn, so a change reaches the running turn.
+    steps: Mutex<Option<usize>>,
     /// Calls the Accept edits rule let through, by call id, until the loop
     /// asks ([`TurnHost::confined`]).
     confined: Mutex<std::collections::HashSet<String>>,
@@ -289,6 +294,12 @@ pub(crate) const MODE_ROUTINE: &str =
     "a routine's chat keeps the routine's approval setting; change it in the routine";
 pub(crate) const MODE_CHAT: &str = "a chat without tools has no approval mode to change";
 
+/// Why a step-limit change is refused (X.14).
+pub(crate) const STEPS_SUB_AGENT: &str =
+    "a sub-agent's steps follow the chat that started it; change that chat's step limit";
+pub(crate) const STEPS_ROUTINE: &str = "a routine's chat keeps the node's step limit";
+pub(crate) const STEPS_CHAT: &str = "a chat without tools has no step limit to change";
+
 /// Everything needed to start a session, already validated by the runtime.
 pub(crate) struct NewSession {
     pub title: String,
@@ -344,6 +355,7 @@ impl Session {
             model: model.clone(),
             mode: Arc::new(Mutex::new(mode)),
             mode_change: tokio::sync::Mutex::new(()),
+            steps: Mutex::new(None),
             confined: Mutex::new(std::collections::HashSet::new()),
             profile,
             incognito,
@@ -393,6 +405,7 @@ impl Session {
         // The log's latest mode (the fold applies `approval_mode_changed`),
         // clamped again: node.toml may have been tightened since.
         let mode = node.cfg.policy.effective_mode(Some(meta.approval_mode));
+        let node_max_steps = node.cfg.policy.limits.max_steps;
         let last_state = events.iter().rev().find_map(|e| match e.typed() {
             Ok(EventKind::Checkpoint(c))
                 if !matches!(
@@ -442,6 +455,11 @@ impl Session {
             model: meta.model,
             mode: Arc::new(Mutex::new(mode)),
             mode_change: tokio::sync::Mutex::new(()),
+            // The log's latest, clamped again: node.toml may be lower now.
+            steps: Mutex::new(
+                view.max_steps
+                    .map(|n| (n as usize).clamp(1, node_max_steps)),
+            ),
             confined: Mutex::new(std::collections::HashSet::new()),
             profile: meta.profile,
             incognito: meta.incognito,
@@ -966,6 +984,59 @@ impl Session {
         .map_err(|e| e.to_string())?;
         *self.mode.lock().unwrap_or_else(|p| p.into_inner()) = mode;
         Ok(mode)
+    }
+
+    /// The owner's change of the chat's step limit (X.14): clamped to
+    /// `1..=` node.toml's `[limits] max_steps` whatever was sent, recorded
+    /// as `step_limit_changed` by this session (one writer), then applied:
+    /// from the running turn's next request on (a limit below the steps it
+    /// has used gives it its wrap-up request next). Refused for a
+    /// sub-agent's chat, a routine's and a chat without tools. Returns the
+    /// limit in force.
+    pub(crate) async fn set_step_limit(&self, requested: i64) -> Result<usize, String> {
+        if self.profile != Profile::Agentic {
+            return Err(STEPS_CHAT.into());
+        }
+        if self.parent_session.is_some() {
+            return Err(STEPS_SUB_AGENT.into());
+        }
+        if self.no_callbacks {
+            return Err(STEPS_ROUTINE.into());
+        }
+        let _change = self.mode_change.lock().await;
+        let max = self.node.cfg.policy.limits.max_steps;
+        let limit = requested.clamp(1, max as i64) as usize;
+        if Some(limit) == *self.steps.lock().unwrap_or_else(|p| p.into_inner()) {
+            return Ok(limit);
+        }
+        // The log first: a change it does not hold is not made.
+        self.append(EventKind::StepLimitChanged(StepLimitChanged {
+            max_steps: limit as u64,
+            requested: (limit as i64 != requested).then_some(requested),
+        }))
+        .await
+        .map_err(|e| e.to_string())?;
+        *self.steps.lock().unwrap_or_else(|p| p.into_inner()) = Some(limit);
+        Ok(limit)
+    }
+
+    /// The step limit of this chat's person's turns now: its own, or the
+    /// node's. A sub-agent's: at most its parent chat's (X.14).
+    pub(crate) fn current_steps(&self) -> usize {
+        let max = self.node.cfg.policy.limits.max_steps;
+        let own = self
+            .steps
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or(max)
+            .min(max);
+        match self.parent_session {
+            None => own,
+            Some(pid) => match self.node.session(pid) {
+                Some(parent) if parent.id != self.id => own.min(parent.current_steps()),
+                _ => own,
+            },
+        }
     }
 
     /// Whether `write` or `edit` with `input` changes a file inside this
@@ -3000,6 +3071,10 @@ impl Session {
 impl TurnHost for Session {
     async fn emit(&self, kind: EventKind) -> Result<(), harness_core::backend::LogError> {
         Session::emit(self, kind).await
+    }
+
+    fn step_limit(&self) -> Option<usize> {
+        Some(self.current_steps())
     }
 
     async fn delegate(

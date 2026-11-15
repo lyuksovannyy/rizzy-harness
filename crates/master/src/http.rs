@@ -25,6 +25,7 @@ mod projects;
 mod providers;
 mod routines;
 mod sessions;
+mod step_limit;
 mod storage;
 mod users;
 mod workspaces;
@@ -209,6 +210,7 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
         .merge(artifacts::routes())
         .merge(background::routes())
         .merge(approval_mode::routes())
+        .merge(step_limit::routes())
         .merge(storage::routes())
         .merge(links::routes())
         .merge(sessions::routes())

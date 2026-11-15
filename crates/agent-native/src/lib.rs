@@ -207,6 +207,12 @@ impl harness_core::backend::TurnHost for Logged<'_> {
         self.host.tool_denied(tool)
     }
 
+    // Not forwarding it would run every chat at the node's limit, whatever
+    // its owner set (tests/host_forwarding.rs).
+    fn step_limit(&self) -> Option<usize> {
+        self.host.step_limit()
+    }
+
     async fn delegate(
         &self,
         agent: harness_core::agent::AgentSpec,
@@ -1632,7 +1638,9 @@ impl NativeBackend {
         };
         // A callback turn's own cap (`callback_max_steps`), never above the
         // backend's.
-        let max_steps = ctx
+        // A person's turn and a sub-agent's follow the chat's own limit
+        // (`TurnHost::step_limit`, X.14), read again before every request.
+        let mut max_steps = ctx
             .extra
             .max_steps
             .map_or(self.config.max_steps, |n| n.min(self.config.max_steps));
@@ -1663,13 +1671,15 @@ impl NativeBackend {
         // Same call, same result (T.1): this turn's only, never the model's.
         let mut guard = repeat::RepeatGuard::default();
         let mut repeat_stop = false;
-        let cap_error = if max_steps < self.config.max_steps || callback.is_some() {
-            format!(
-                "stopped after {max_steps} steps: a turn nobody started may take no more \
-                 (`callback_max_steps` in node.toml)"
-            )
-        } else {
-            format!("stopped after {max_steps} steps (`max_steps` in node.toml)")
+        let cap_error = |max_steps: usize| {
+            if callback.is_some() {
+                format!(
+                    "stopped after {max_steps} steps: a turn nobody started may take no more \
+                     (`callback_max_steps` in node.toml)"
+                )
+            } else {
+                format!("stopped after {max_steps} steps (`max_steps` in node.toml)")
+            }
         };
         // A sub-agent's last request offers `finish` alone, after the
         // harness's note, so a child the step cap or the repeated-call
@@ -1690,9 +1700,16 @@ impl NativeBackend {
         let mut noted = false;
         let mut steps = 0usize;
         loop {
+            if callback.is_none()
+                && let Some(n) = host.step_limit()
+            {
+                max_steps = n.clamp(1, self.config.max_steps);
+            }
             if last.is_none() && !wrap_up {
-                if child && steps + 1 == max_steps {
-                    last = Some(cap_error.clone());
+                // `>=`: a limit lowered below the steps used gives the last
+                // request next.
+                if child && steps + 1 >= max_steps {
+                    last = Some(cap_error(max_steps));
                     messages.push(ChatMsg::Note(harness_core::subagent::LAST_STEP_NOTE.into()));
                 } else if steps >= max_steps {
                     if !person {
@@ -2560,7 +2577,7 @@ impl NativeBackend {
         TurnOutcome {
             reason: TurnEndReason::Error,
             usage: Some(usage),
-            error: Some(cap_error),
+            error: Some(cap_error(max_steps)),
         }
     }
 }
@@ -4153,10 +4170,11 @@ mod tests {
         let (delegated, child, p) = briefed(forever).await;
         // The step cap's own text names why (review SB-1).
         assert!(
-            delegated.output.contains(
+            delegated.output.contains(&format!(
                 "\nSub-agent @researcher finished: failed (its turn ended without a `finish` \
-                 call: error: stopped after 50 steps (`max_steps` in node.toml)). "
-            ),
+                 call: error: stopped after {} steps (`max_steps` in node.toml)). ",
+                harness_core::policy::DEFAULT_MAX_STEPS
+            )),
             "{}",
             delegated.output
         );

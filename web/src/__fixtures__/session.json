@@ -519,14 +519,24 @@
       "ts_ms": 1700000000034
     },
     {
+      "kind": "step_limit_changed",
+      "payload": {
+        "max_steps": 1000,
+        "requested": 5000
+      },
+      "seq": 36,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000035
+    },
+    {
       "kind": "turn_ended",
       "payload": {
         "reason": "limit",
         "turn_id": "t2"
       },
-      "seq": 36,
+      "seq": 37,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000035
+      "ts_ms": 1700000000036
     },
     {
       "kind": "user_message",
@@ -543,9 +553,9 @@
         "text": "Choice answer · next: o1",
         "turn_id": "t3"
       },
-      "seq": 37,
+      "seq": 38,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000036
+      "ts_ms": 1700000000037
     },
     {
       "kind": "tool_call_started",
@@ -557,9 +567,9 @@
         "tool": "publish",
         "turn_id": "t3"
       },
-      "seq": 38,
+      "seq": 39,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000037
+      "ts_ms": 1700000000038
     },
     {
       "kind": "artifact_staged",
@@ -583,9 +593,9 @@
         "source_path": "/w/target/release/app",
         "stage_id": "01a19bf2000070008000000000000a01"
       },
-      "seq": 39,
+      "seq": 40,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000038
+      "ts_ms": 1700000000039
     },
     {
       "kind": "artifact_staged",
@@ -607,9 +617,9 @@
         "source_path": "/w/target/release/app",
         "stage_id": "01a19bf2000070008000000000000a01"
       },
-      "seq": 40,
+      "seq": 41,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000039
+      "ts_ms": 1700000000040
     },
     {
       "kind": "artifact_stage_failed",
@@ -617,9 +627,9 @@
         "error": "out/missing.bin: no such file or folder",
         "path": "out/missing.bin"
       },
-      "seq": 41,
+      "seq": 42,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000040
+      "ts_ms": 1700000000041
     },
     {
       "kind": "background_started",
@@ -630,9 +640,9 @@
         "timeout_s": 600,
         "turn_id": "t1"
       },
-      "seq": 42,
+      "seq": 43,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000041
+      "ts_ms": 1700000000042
     },
     {
       "kind": "background_started",
@@ -643,9 +653,9 @@
         "timeout_s": 60,
         "turn_id": "t1"
       },
-      "seq": 43,
+      "seq": 44,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000042
+      "ts_ms": 1700000000043
     },
     {
       "kind": "background_ended",
@@ -660,9 +670,9 @@
         "tail": "<b>not html</b>",
         "tail_cut": false
       },
-      "seq": 44,
+      "seq": 45,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000043
+      "ts_ms": 1700000000044
     },
     {
       "kind": "background_ended",
@@ -677,9 +687,9 @@
         "tail": "fail\n",
         "tail_cut": false
       },
-      "seq": 45,
+      "seq": 46,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000044
+      "ts_ms": 1700000000045
     },
     {
       "kind": "turn_started",
@@ -691,9 +701,9 @@
         },
         "turn_id": "t4"
       },
-      "seq": 46,
+      "seq": 47,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000045
+      "ts_ms": 1700000000046
     },
     {
       "kind": "assistant_message",
@@ -703,9 +713,9 @@
         "tool_calls": [],
         "turn_id": "t4"
       },
-      "seq": 47,
+      "seq": 48,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000046
+      "ts_ms": 1700000000047
     },
     {
       "kind": "turn_ended",
@@ -713,9 +723,9 @@
         "reason": "completed",
         "turn_id": "t4"
       },
-      "seq": 48,
+      "seq": 49,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000047
+      "ts_ms": 1700000000048
     },
     {
       "kind": "callback_refused",
@@ -725,9 +735,9 @@
         ],
         "reason": "3 turns in a row without you (node limit)"
       },
-      "seq": 49,
+      "seq": 50,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000048
+      "ts_ms": 1700000000049
     },
     {
       "kind": "todo_updated",
@@ -745,9 +755,9 @@
         ],
         "turn_id": "t4"
       },
-      "seq": 50,
+      "seq": 51,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000049
+      "ts_ms": 1700000000050
     },
     {
       "kind": "todo_updated",
@@ -769,15 +779,6 @@
         ],
         "turn_id": "t4"
       },
-      "seq": 51,
-      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000050
-    },
-    {
-      "kind": "approval_mode_changed",
-      "payload": {
-        "mode": "auto"
-      },
       "seq": 52,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
       "ts_ms": 1700000000051
@@ -785,21 +786,30 @@
     {
       "kind": "approval_mode_changed",
       "payload": {
-        "mode": "accept_edits",
-        "requested": "auto"
+        "mode": "auto"
       },
       "seq": 53,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
       "ts_ms": 1700000000052
     },
     {
-      "kind": "turn_started",
+      "kind": "approval_mode_changed",
       "payload": {
-        "turn_id": "t5"
+        "mode": "accept_edits",
+        "requested": "auto"
       },
       "seq": 54,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
       "ts_ms": 1700000000053
+    },
+    {
+      "kind": "turn_started",
+      "payload": {
+        "turn_id": "t5"
+      },
+      "seq": 55,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000054
     },
     {
       "kind": "model_retry",
@@ -812,9 +822,9 @@
         "turn_id": "t5",
         "wait_ms": 2000
       },
-      "seq": 55,
+      "seq": 56,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000054
+      "ts_ms": 1700000000055
     },
     {
       "kind": "assistant_message",
@@ -824,9 +834,9 @@
         "tool_calls": [],
         "turn_id": "t5"
       },
-      "seq": 56,
+      "seq": 57,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000055
+      "ts_ms": 1700000000056
     },
     {
       "kind": "turn_ended",
@@ -842,18 +852,18 @@
           "window": 128000
         }
       },
-      "seq": 57,
+      "seq": 58,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000056
+      "ts_ms": 1700000000057
     },
     {
       "kind": "turn_started",
       "payload": {
         "turn_id": "t6"
       },
-      "seq": 58,
+      "seq": 59,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000057
+      "ts_ms": 1700000000058
     },
     {
       "kind": "model_retry",
@@ -866,16 +876,16 @@
         "turn_id": "t6",
         "wait_ms": 4000
       },
-      "seq": 59,
+      "seq": 60,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000058
+      "ts_ms": 1700000000059
     },
     {
       "kind": "from_a_newer_node",
       "payload": {
         "anything": true
       },
-      "seq": 60,
+      "seq": 61,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
       "ts_ms": 0
     }
@@ -907,7 +917,7 @@
     "context_model": "openai::gpt-4o",
     "context_tokens": 800,
     "context_window": 128000,
-    "head_seq": 60,
+    "head_seq": 61,
     "items": [
       {
         "text": "fix the bug",
@@ -1157,6 +1167,11 @@
         "type": "user"
       },
       {
+        "max_steps": 1000,
+        "requested": 5000,
+        "type": "step_limit_changed"
+      },
+      {
         "reason": "limit",
         "turn_id": "t2",
         "type": "turn_end"
@@ -1300,6 +1315,7 @@
         "type": "turn_end"
       }
     ],
+    "max_steps": 1000,
     "meta": {
       "approval_mode": "accept_edits",
       "backend": "native",

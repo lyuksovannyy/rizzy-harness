@@ -79,6 +79,9 @@ export const pageApi = {
   /** The node clamps it and records it; the chat shows the result (T50). */
   setApprovalMode: (id: string, mode: ApprovalMode) =>
     call<{ ok: boolean }>("POST", `/api/sessions/${id}/approval-mode`, { mode }),
+  /** The node clamps it to 1..its limit and records it; the chat shows the result (X.14). */
+  setStepLimit: (id: string, max_steps: number) =>
+    call<{ ok: boolean }>("POST", `/api/sessions/${id}/step-limit`, { max_steps }),
   saveAgentAvatar: (id: string, avatar: AgentAvatar) =>
     call<Agent>("PUT", `/api/admin/agents/${encodeURIComponent(id)}/avatar`, avatar),
   /** One agent with its instructions; the model line follows `scope` like `agents`. */

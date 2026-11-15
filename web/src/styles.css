@@ -3673,6 +3673,27 @@ button.icon svg.lucide, .send svg.lucide { vertical-align: middle; }
 .select.stacked .select-list .option-hint { white-space: normal; }
 /* The approval picker sits at the composer's right end: its menu opens leftward. */
 .approval-pick .select-list { left: auto; right: 0; }
+/* The chat's step limit (X.14): a pill and a small form under it. */
+.step-pick { position: relative; }
+.step-pop {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  right: 0;
+  z-index: 20;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  width: 240px;
+  padding: 8px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: var(--text-xs);
+}
+.step-pop label { display: flex; flex-direction: column; gap: 4px; flex: 1; }
+.step-pop input { width: 100%; }
+.step-err { color: var(--bad); width: 100%; }
 .select.stacked .select-list li { flex-direction: column; align-items: flex-start; gap: 2px; }
 .select-list { font-weight: var(--w-regular); }
 /* A segmented control looks like the mode switch: a track, a raised thumb. */
