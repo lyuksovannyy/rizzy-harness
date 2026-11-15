@@ -21,9 +21,16 @@ With the answering model's window `W` known (`usage.window`):
 | tail | `W / 40` within 10k..25k, at most `W / 5` and `at / 4` | Hermes' lean tail; the newest step is always in it, whatever its size |
 
 The request's size is our estimate (4 characters a token) corrected by the
-provider's count of the previous request (Pi's measure). With an unknown window
-nothing changes inside a turn: the summary between turns at 24k, the count-based
-mask (`keep_tool_outputs`) and the reactive path on a provider's refusal, as before.
+provider's count of the previous request (Pi's measure), the correction bounded to
+between three quarters and twice the estimate: real tokenizers stay within about 0.6
+to 1.6 times four characters a token, and a router that reports nonsense must not make
+every step look full (review M2: at ten times, 12 summaries in 60 steps before the cap,
+one after). With a known window the count-based mask (`keep_tool_outputs`, "Hide old
+tool outputs", on by default) does not act: it hid outputs by count every 8 steps,
+rewrote the cache that often, and kept clearing from ever acting on a large window
+(review M1: 36 rewrites and no cut in a 300-step turn on 128k). With an unknown window
+nothing changes inside a turn: the summary between turns at 24k, the count-based mask
+and the reactive path on a provider's refusal, as before.
 
 ## Tier 1: clearing (no model call)
 
@@ -42,9 +49,10 @@ the request is at the target:
   the result.
 - The call and its arguments stay (Hermes never rewrites them; a summary of a cleared
   pair would lose what was asked).
-- Never cleared: results under 1,000 characters, the `todo` tool's, and the newest
-  load of each skill's instructions (Hermes keeps a just-loaded skill body; Oh My Pi
-  protects plan and skill reads).
+- Never cleared: results under 1,000 characters, the `todo` tool's, and every load
+  of a skill's instructions (Hermes keeps a just-loaded skill body; Oh My Pi protects
+  plan and skill reads). Keeping only the newest load would clear an earlier one when
+  the skill is loaded again, a change no event records.
 - Advice by tool: read-only tools are called again; `read` also says the file
   still counts as read (and to read a few files per step); any other tool (`bash`,
   `edit`, `write`, `delegate`, MCP) "ran once: do not run it again only to see this
@@ -62,11 +70,21 @@ When clearing leaves less than `min_cut` below the line, earlier turns go into t
 summary first (as between turns, all of them), then the running turn's steps before
 the tail are summarised with the existing summariser (`CODING_SUMMARY_PROMPT` or
 `SUMMARY_PROMPT`), in one request whose tool results are cut to fit the window (2,000
-characters each, then 1,000, 500, 250). The summary goes into the turn's opening
-message under the harness's line, each of its lines quoted, with the task list as it
-stood then; the opening itself (the person's words, attachments, the context block
-with its standing sections) stays as it was, so do the person's messages sent during
-the summarised steps, placed right after it, and the steps after the summary. A later
+characters each, then 1,000, 500, 250). The summary is sent as a user-role message
+of its own right after the message before the turn's first step (the opening), under
+the harness's line, each of its lines quoted, with the task list as it stood then;
+model-written text never goes inside the person's message. The opening itself (the
+person's words, attachments, the context block with its standing sections) stays as
+it was, so do the person's messages sent during the summarised steps, placed after
+the summary, and the steps after it. A summary is asked for only when dropping those
+steps would make room: a system prompt and tools that fill the window alone are left
+to the last resort.
+
+A summary of earlier turns made inside a turn never takes what the running turn's
+opening reads from the log: it stops before the turn in which a queued message the
+running turn read at its start was sent, and before a background end logged after the
+last turn (what a callback turn's opening takes). Otherwise the next request rebuilt
+from the log would lose the person's message (review H1). A later
 summary of the same turn reads the earlier one and covers the turn from its start.
 The shrink check (at most nine tenths of what it replaces) and the breaker (two
 failures end summarising for the turn) are A.7's. At most 12 per turn.
@@ -100,11 +118,13 @@ the UI), and an in-turn cut is neither.
 ## Cost to the provider's cache
 
 Each cut changes bytes from the first newly cleared result on. Measured with 300
-steps of 6,000-character results (about 1,550 tokens a step): 7 rewrites on a 128k
-window (each frees about 51k tokens, one every 36 steps), 52 on a 32k window (about
-8k each, one every 5 to 6 steps, a summary about every 100 steps). Never on two
-steps in a row. The count-based mask (`keep_tool_outputs`, on by default) still
-rewrites the newest outputs every `keep` steps, as before.
+steps of 6,000-character results (about 1,550 tokens a step) and the default token-
+saving settings (`TokenSavings::default()`, the count mask on with keep 8, which with
+a known window does not act): 7 rewrites on a 128k window (each frees about 51k
+tokens, one every 36 steps), 52 on a 32k window (about 8k each, one every 5 to 6
+steps, a summary about every 100 steps). Never on two steps in a row. Both bounds are
+tests (`shortening_is_rare_and_never_on_consecutive_steps`,
+`mask_and_clearing_at_128k`).
 
 ## Live check (2026-11-15, the owner's router, synthetic repository)
 
@@ -137,7 +157,9 @@ helps but does not guarantee it.
   arguments (`research/round2/synth/07-context-compaction-memory.md`, Hermes).
 - OpenClaw: hard-clears whole results to a placeholder at 50% of the window, never in
   the last three assistant turns; frozen projections recorded so a restart rebuilds
-  the same prefix (same file, OpenClaw "Pruning of old tool output").
+  the same prefix (same file, OpenClaw "Pruning of old tool output"). It is off by
+  default, except that the Anthropic provider turns it on (`cache-ttl`, 1 h) when
+  Anthropic auth is found and the mode was left unset.
 - Pi: compacts after each tool batch at window less 16,384; keeps about 20,000 tokens;
   cuts never on a tool result; an oversized turn is split and its early part summarised
   separately (same file, Pi "Compaction" items 3-4, 6).

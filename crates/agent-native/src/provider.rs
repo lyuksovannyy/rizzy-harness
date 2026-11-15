@@ -39,6 +39,12 @@ pub enum ChatMsg {
     /// (not URL provenance, not what a mock or a summary reads as the
     /// person's). Sent as a user message by [`place_notes`].
     Opening(String),
+    /// The harness's note with a summary of a turn's earlier steps (X.15):
+    /// its line, then the model-written summary quoted line by line, then
+    /// the task list. Sent as a user-role message of its own right after
+    /// the turn's opening (`place_notes`), never inside the person's
+    /// message, and never the person's words (`user_text` is `None`).
+    Summary(String),
 }
 
 /// One image of a user message.
@@ -130,6 +136,7 @@ pub fn place_notes(msgs: Vec<ChatMsg>) -> Vec<ChatMsg> {
             }),
             // It took the notes before it when it was made (`open_callback`).
             ChatMsg::Opening(t) => out.push(ChatMsg::User(t)),
+            ChatMsg::Summary(t) => out.push(ChatMsg::User(t)),
             other => out.push(other),
         }
     }
@@ -728,7 +735,8 @@ pub fn estimate_tokens(messages: &[ChatMsg]) -> u64 {
             | ChatMsg::User(t)
             | ChatMsg::Note(t)
             | ChatMsg::CallNote(t)
-            | ChatMsg::Opening(t) => t.len(),
+            | ChatMsg::Opening(t)
+            | ChatMsg::Summary(t) => t.len(),
             ChatMsg::UserImages { text, images } => text.len() + images.len() * IMAGE_CHARS,
             ChatMsg::Assistant { text, tool_calls } => {
                 text.len()

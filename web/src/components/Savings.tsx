@@ -19,7 +19,7 @@ const METHODS: { key: BoolKey; title: string; detail: string; mode: string }[] =
     key: "mask_old_outputs",
     title: "Hide old tool outputs",
     detail:
-      "Replaces tool outputs older than the newest few with a one-line note (the model can run the tool again). Hidden in batches so the cache stays valid.",
+      "For models whose context window is not known: replaces tool outputs older than the newest few with a one-line note (the model can run the tool again), hidden in batches so the cache stays valid. With a known window, old outputs are cleared only when the context nears the window, whatever this says.",
     mode: "agentic",
   },
   {

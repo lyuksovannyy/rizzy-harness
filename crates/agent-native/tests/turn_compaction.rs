@@ -106,7 +106,8 @@ impl Seen {
                 | ChatMsg::User(t)
                 | ChatMsg::Note(t)
                 | ChatMsg::CallNote(t)
-                | ChatMsg::Opening(t) => t.clone(),
+                | ChatMsg::Opening(t)
+                | ChatMsg::Summary(t) => t.clone(),
                 ChatMsg::UserImages { text, .. } => text.clone(),
                 ChatMsg::Assistant { text, tool_calls } => format!(
                     "{text}\n{}",
@@ -369,6 +370,8 @@ struct Run<'a> {
     user: &'a str,
     extra: TurnExtra,
     parent: Option<SessionId>,
+    cwd: std::path::PathBuf,
+    spec: Option<AgentSpec>,
 }
 
 impl<'a> Run<'a> {
@@ -381,6 +384,8 @@ impl<'a> Run<'a> {
             user: "Read the files and find the bug.",
             extra: Default::default(),
             parent: None,
+            cwd: Default::default(),
+            spec: None,
         }
     }
     async fn go(self) -> TurnOutcome {
@@ -390,9 +395,9 @@ impl<'a> Run<'a> {
                 turn_id: "now".into(),
                 history: self.history,
                 user_text: self.user.into(),
-                cwd: Default::default(),
+                cwd: self.cwd,
                 model: "m".into(),
-                agent: Some(agent(self.window)),
+                agent: Some(self.spec.unwrap_or_else(|| agent(self.window))),
                 compare: vec![],
                 parent_session: self.parent,
                 extra: self.extra,
@@ -662,6 +667,24 @@ async fn an_in_turn_summary_keeps_the_opening_sections_queued_and_tasks() {
     ] {
         assert!(last.contains(kept), "{kept} is lost");
     }
+    // The summary is a message of its own; the person's message is as they
+    // wrote it (review P1).
+    let users: Vec<String> = p
+        .main()
+        .last()
+        .unwrap()
+        .msgs
+        .iter()
+        .filter_map(|m| m.user_text().map(str::to_string))
+        .collect();
+    let opening = users.iter().find(|t| t.contains("PERSON-ASKS")).unwrap();
+    assert!(!opening.contains("[harness] The first"), "{opening}");
+    assert!(!opening.contains("SUMMARY"), "{opening}");
+    assert!(
+        users
+            .iter()
+            .any(|t| t.starts_with("[harness] The first") && t.contains("SUMMARY"))
+    );
     // The summarised steps' calls are gone from the request.
     assert!(!last.contains(&format!("\"1 {}", "n".repeat(20))));
 }
@@ -680,12 +703,17 @@ fn rewrites(main: &[Seen]) -> Vec<usize> {
 
 /// (e) A 300-step turn changes earlier bytes only a few times, never on two
 /// steps in a row: each cut frees enough that the next is far away.
+/// Measured with the production token-saving defaults (the count mask on,
+/// keep 8), which with a known window leave old outputs to clearing.
 #[tokio::test]
 async fn shortening_is_rare_and_never_on_consecutive_steps() {
+    let defaults = harness_core::savings::TokenSavings::default().for_turn(false);
     let p = Model::new(W, reads(300));
     let b = backend(p.clone(), 6_000, false);
     let host = Host::default();
-    let out = Run::new(&b, &host).go().await;
+    let mut run = Run::new(&b, &host);
+    run.extra.savings = defaults.clone();
+    let out = run.go().await;
     assert_eq!(out.reason, TurnEndReason::Completed, "{:?}", out.error);
     assert_eq!(p.overflows(), 0);
     let r = rewrites(&p.main());
@@ -708,6 +736,7 @@ async fn shortening_is_rare_and_never_on_consecutive_steps() {
     let host = Host::default();
     let mut run = Run::new(&b, &host);
     run.window = Some(w);
+    run.extra.savings = defaults;
     let out = run.go().await;
     assert_eq!(out.reason, TurnEndReason::Completed, "{:?}", out.error);
     assert_eq!(p.overflows(), 0);
@@ -935,4 +964,91 @@ async fn an_unknown_window_shortens_nothing_inside_a_turn() {
     let out = run.go().await;
     assert_eq!(out.reason, TurnEndReason::Completed, "{:?}", out.error);
     assert!(host.shortened().is_empty());
+}
+
+/// A file whose read was cleared still counts as read: the real `edit`
+/// takes an exact old text from it (the match proves the model has it),
+/// and the stub said the file can be read again (review, low: traced
+/// only, now run).
+#[tokio::test]
+async fn an_edit_after_a_cleared_read_goes_through() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+    let mut a = String::from("fn target() { let MARKER_LINE = 1; }\n");
+    while a.len() < 6_000 {
+        a.push_str("// filler line of the file a.rs for this test\n");
+    }
+    std::fs::write(src.join("a.rs"), &a).unwrap();
+    for k in 0..20 {
+        std::fs::write(src.join(format!("f{k}.rs")), "// other file\n".repeat(450)).unwrap();
+    }
+    let p = Model::new(
+        W,
+        Box::new(|i| match i {
+            0 => call(i, "read", json!({"path": "src/a.rs"})),
+            1..=20 => call(i, "read", json!({ "path": format!("src/f{}.rs", i - 1) })),
+            21 => call(
+                i,
+                "edit",
+                json!({"path": "src/a.rs", "old_string": "MARKER_LINE = 1", "new_string": "MARKER_LINE = 2"}),
+            ),
+            _ => answer("done"),
+        }),
+    );
+    let b = NativeBackend::new(p.clone(), harness_tools::builtin(), NativeConfig::default());
+    let host = Host::default();
+    let mut run = Run::new(&b, &host);
+    run.cwd = dir.path().to_path_buf();
+    let mut spec = agent(Some(W));
+    spec.tools = ToolSelection::List(vec!["read".into(), "edit".into()]);
+    run.spec = Some(spec);
+    let out = run.go().await;
+    assert_eq!(out.reason, TurnEndReason::Completed, "{:?}", out.error);
+    // The read was cleared before the edit was asked for.
+    let at_edit = p.main()[21].clone();
+    assert!(
+        at_edit.tool_results()[0].starts_with(STUB),
+        "{}",
+        at_edit.tool_results()[0]
+    );
+    let (output, _) = host.notes()[21].clone();
+    let edited = std::fs::read_to_string(src.join("a.rs")).unwrap();
+    assert!(
+        edited.contains("MARKER_LINE = 2"),
+        "the edit did not apply: {output}"
+    );
+}
+
+/// A system prompt that alone nearly fills the window: no cut can reach
+/// half the line, nothing is summarised for nothing, and the turn ends
+/// through the last resort (the provider's refusal, the wrap-up) instead
+/// of looping (review, low).
+#[tokio::test]
+async fn a_window_the_fixed_part_fills_ends_through_the_last_resort() {
+    let p = Model::new(W, reads(200));
+    let b = backend(p.clone(), 6_000, false);
+    let host = Host::default();
+    let mut run = Run::new(&b, &host);
+    let mut spec = agent(Some(W));
+    spec.system_prompt = "Follow the house rules. ".repeat(4_700);
+    run.spec = Some(spec);
+    let out = run.go().await;
+    assert!(
+        matches!(out.reason, TurnEndReason::Limit | TurnEndReason::Error),
+        "{:?} {:?}",
+        out.reason,
+        out.error
+    );
+    eprintln!(
+        "{:?} after {} requests, {} refused, {} summary calls, {} cuts",
+        out.reason,
+        p.main().len(),
+        p.overflows(),
+        p.summaries(),
+        host.shortened().len()
+    );
+    // No summary that could not make room was asked for.
+    assert_eq!(p.summaries(), 0, "{} summary calls", p.summaries());
+    assert!(p.main().len() < 120, "{} requests", p.main().len());
 }

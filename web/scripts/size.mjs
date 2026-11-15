@@ -229,8 +229,10 @@ const T57_KB = 0.1;
 // Shortened context inside a turn (ADOPTION_PLAN X.15, feat/turn-compaction),
 // measured 394.5 against 394.2: the fold's `context_shortened` item and the
 // chat's quiet line for it (with the summary collapsed, as for a history
-// summary), in the conversation's chunk and the fold (+0.3).
-const X15_KB = 0.3;
+// summary), in the conversation's chunk and the fold (+0.3). After its
+// review, measured 394.6: the "Hide old tool outputs" setting's description
+// says it acts only for a model whose window is unknown (+0.1).
+const X15_KB = 0.4;
 
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
 const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB + EXPORT_KB + MEMDEF_KB + VISIBILITY_KB + T50_KB + LOOP_KB + DIFF_KB + T51_KB + WSMEM_KB + STEPS_KB + AGENT_SWITCHES_KB + T57_KB + X15_KB) * 100) / 10) / 10;

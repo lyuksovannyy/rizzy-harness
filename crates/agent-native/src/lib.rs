@@ -570,6 +570,36 @@ fn note_compact_failure(failures: &mut u32, model: &str) {
     }
 }
 
+/// Where a summary of `recent` must stop so that the next turn's opening
+/// still finds in the log what it reads there: before anything after the
+/// last `turn_ended` (a background end a callback turn's opening takes),
+/// and before the turn in which a queued message no `queued_delivered`
+/// names was sent (the next turn reads it at its start; the node's
+/// `unread`).
+fn opening_cut(recent: &[RawEvent]) -> usize {
+    let mut end = recent
+        .iter()
+        .rposition(|e| e.kind == "turn_ended")
+        .map_or(0, |i| i + 1);
+    let mut unread: Vec<(u64, usize)> = Vec::new();
+    for (i, e) in recent.iter().enumerate() {
+        match e.typed() {
+            Ok(EventKind::UserMessage(m)) if m.queued => unread.push((e.seq, i)),
+            Ok(EventKind::QueuedDelivered(d)) => unread.retain(|(s, _)| !d.seqs.contains(s)),
+            _ => {}
+        }
+    }
+    if let Some(&(_, first)) = unread.first()
+        && first < end
+    {
+        end = recent[..=first]
+            .iter()
+            .rposition(|e| e.kind == "turn_started")
+            .unwrap_or(0);
+    }
+    end
+}
+
 /// The latest summary in a history, and the events after it.
 pub fn split_summary(history: &[RawEvent]) -> (Option<String>, &[RawEvent]) {
     let mut found: Option<(String, u64)> = None;
@@ -681,7 +711,7 @@ fn transcript_of(
                 }
             }
             // The harness's own words, not the user's: as they are.
-            ChatMsg::Note(t) | ChatMsg::CallNote(t) | ChatMsg::Opening(t) => {
+            ChatMsg::Note(t) | ChatMsg::CallNote(t) | ChatMsg::Opening(t) | ChatMsg::Summary(t) => {
                 out.push_str(&format!("{t}\n\n"))
             }
             ChatMsg::System(_) => {}
@@ -1680,8 +1710,14 @@ impl NativeBackend {
         usage.model = Some(model.clone());
         // X.15: where results may be cleared inside a turn, the model is told
         // once, in the system prompt (the same bytes every turn, so cached).
+        // With a known window, clearing (X.15) replaces the count-based mask
+        // (`keep_tool_outputs`): the mask hid outputs by count every `keep`
+        // steps, rewrote the cache that often and kept clearing from ever
+        // acting on a large window (review M1). It stays for an unknown
+        // window, and as the last resort after a provider's refusal.
         if window_of(&model).is_some() {
             system = format!("{system}\n\n{}", shorten::SYSTEM_NOTE);
+            keep = None;
         }
         // Failed or useless summaries this turn; two stop further attempts.
         let mut compact_failures = 0u32;
@@ -2158,8 +2194,15 @@ impl NativeBackend {
                     if let Some(k) = keep {
                         mask::mask_old_outputs(&mut m, k);
                     }
+                    // The provider's correction, bounded both ways: real
+                    // tokenizers stay within about 0.6 to 1.6 times our
+                    // four characters a token (code, other languages), so
+                    // a quarter down and the estimate again up (twice it)
+                    // keep every honest correction, while a router that
+                    // reports nonsense cannot make every step look full
+                    // and summarise again and again (review M2).
                     let est = provider::estimate_tokens(&m) as i64;
-                    (est + calib.max(-est / 4)).max(0) as u64
+                    (est + calib.clamp(-est / 4, est)).max(0) as u64
                 };
                 let mut all = with_turn(&spans, turn_idx);
                 let before = size(&shortening, &messages, &all);
@@ -2236,6 +2279,13 @@ impl NativeBackend {
                             && let Some(tail) = shorten::tail_start(&messages, lim.tail)
                             && let Some((steps_n, range)) =
                                 shorten::plan_fold(&messages, &span, &new, tail)
+                            // Only when it can make room: with the steps gone
+                            // altogether the request must be under the room
+                            // (a system prompt and tools that fill the window
+                            // are left to the last resort, not summarised
+                            // again and again; review, low).
+                            && now.saturating_sub(provider::estimate_tokens(&messages[range.clone()]))
+                                <= room
                         {
                             let prev = new.folds.get(&ctx.turn_id).map(|f| f.text.clone());
                             let text = self
@@ -3448,11 +3498,15 @@ impl NativeBackend {
         if starts.len() <= keep {
             return Ok(None);
         }
-        let old = if keep == 0 {
-            recent
+        let kept = if keep == 0 {
+            recent.len()
         } else {
-            &recent[..starts[starts.len() - keep]]
+            starts[starts.len() - keep]
         };
+        // Never what the running turn's opening reads from the log (review
+        // H1 of X.15): an unread queued message it takes at its start, or a
+        // background end a callback turn's opening takes.
+        let old = &recent[..kept.min(opening_cut(recent))];
         // If the kept turns alone are what is large, summarising the rest
         // saves little and would repeat on every turn: skip it.
         // Sized as the requests carry it, context blocks included (review

@@ -615,10 +615,13 @@ but its newest result), nor the task list or a loaded skill; the agent is told
 up front to write down what it will need and to read a cleared result again
 before relying on it. Each such cut
 frees about half the line, so it happens rarely: about every 36 steps of a long
-turn on a 128k model, every 5 or 6 on a 32k one. When that is not enough (the
+turn of file reads on a 128k model, every 5 or 6 on a 32k one (measured with the
+default token-saving settings; with a known window the "hide old tool outputs"
+setting does not act, clearing replaces it). When that is not enough (the
 calls themselves are what is large), earlier turns are summarised and then the
-turn's own earlier steps, at a step boundary; your message, the context sent with
-it, anything you wrote during the turn and the task list stay as they were. The
+turn's own earlier steps, at a step boundary, into a summary sent as a message of
+its own after your message; your message, the context sent with it, anything you
+wrote during the turn and the task list stay as they were. The
 chat shows a quiet line where this happened ("Context shortened for the model"),
 with the summary collapsed under it; every message and tool result stays shown in
 full, and the agent can read any cleared file again. The same applies to the two
@@ -1965,7 +1968,7 @@ stored as `[savings]` in `config.toml` and applies from the next message.
 | Method | Default | Applies to | What it does |
 |---|---|---|---|
 | `prompt_cache` | on | chat + agentic | Marks cacheable the instructions and tools, the end of the history before this turn's message, the end of the history before the previous turn's message, and the newest message (at most 4, Anthropic's limit); Anthropic bills re-reads at 10% or less. Within a turn each step reads the one before. Across turns the next turn reads everything up to this turn's last tool result, byte for byte: what was sent with this turn's message (instruction files, skills, memory, the project's brief, your settings line) is recorded with the turn and sent again exactly, and what has not changed is not sent again at all (PLAN.md T52). Usage shows cache reads and writes per turn (the token meter's tooltip). A summary, an image no longer shown, or a change in which tool outputs are hidden makes one request write the history again. |
-| `mask_old_outputs` | on, keep 8 | agentic | Tool outputs older than the newest 8–15 become a one-line note; hidden in batches so the cache stays valid. |
+| `mask_old_outputs` | on, keep 8 | agentic | For a model whose context window is not known: tool outputs older than the newest 8–15 become a one-line note, hidden in batches so the cache stays valid. With a known window it does not act: old outputs are cleared only when the context nears the window (`docs/turn-compaction.md`). |
 | `filter_shell_output` | on | agentic | Colours, progress bars, build noise and passing-test lines removed, repeats folded; the full output stays on the node (`tool_output`). |
 | `bounded_reads` | on | agentic | 400-line read windows, 60 grep matches grouped by file. |
 | `outline_tool` | on | agentic | `outline`: a file's definitions with line numbers (Rust, Python, JS, TS, Go). |

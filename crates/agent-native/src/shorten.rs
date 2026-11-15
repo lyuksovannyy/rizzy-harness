@@ -25,7 +25,7 @@
 //! string on one line) and the result's size; the fold's text is the
 //! summarising model's, quoted line by line under the harness's line.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use harness_core::RawEvent;
 use harness_core::event::{
@@ -60,8 +60,10 @@ pub const FOLD_LEAD: &str = "[harness] The first";
 pub const MAX_FOLDS: u32 = 12;
 
 /// Tools whose results are never cleared: the task list (the agent's plan;
-/// Oh My Pi protects plan reads). A loaded skill's instructions are kept
-/// too, its newest load per skill (Hermes keeps a just-loaded skill body).
+/// Oh My Pi protects plan reads). A skill's instructions (`skill` without
+/// `file`) are kept too, every load (Hermes keeps a just-loaded skill body):
+/// keeping only the newest would clear an earlier load when the model loads
+/// it again, a change no event records (review, low).
 const KEPT_TOOLS: [&str; 1] = ["todo"];
 const SKILL_TOOL: &str = "skill";
 
@@ -186,21 +188,11 @@ pub struct How {
     /// Cleared results become stubs (a request); off for the summariser's
     /// transcript, which reads results cut to its own length.
     pub stubs: bool,
-    /// A fold's note goes into the turn's opening message (a request); on,
-    /// it is a [`ChatMsg::Note`] of its own after it (the transcript, where
-    /// the opening is quoted as the person's and the note must not be).
-    pub note_alone: bool,
 }
 
 impl How {
-    pub const REQUEST: How = How {
-        stubs: true,
-        note_alone: false,
-    };
-    pub const TRANSCRIPT: How = How {
-        stubs: false,
-        note_alone: true,
-    };
+    pub const REQUEST: How = How { stubs: true };
+    pub const TRANSCRIPT: How = How { stubs: false };
 }
 
 /// The call of each tool result: (tool, input) of the call with its id in
@@ -223,29 +215,18 @@ fn calls(msgs: &[ChatMsg]) -> Vec<Option<(String, Value)>> {
         .collect()
 }
 
-/// Tool results that may be cleared: long enough, not a kept tool's, not
-/// the newest load of a skill's instructions.
+/// Tool results that may be cleared: long enough, not a kept tool's, not a
+/// skill's instructions.
 fn eligible(msgs: &[ChatMsg], calls: &[Option<(String, Value)>]) -> Vec<bool> {
-    let mut newest_skill: HashMap<String, usize> = HashMap::new();
-    for (i, c) in calls.iter().enumerate() {
-        if let Some((tool, input)) = c
-            && tool == SKILL_TOOL
-            && input.get("file").is_none()
-        {
-            let name = input.get("name").map(Value::to_string).unwrap_or_default();
-            newest_skill.insert(name, i);
-        }
-    }
-    let kept_skills: HashSet<usize> = newest_skill.into_values().collect();
     msgs.iter()
         .enumerate()
         .map(|(i, m)| match m {
             ChatMsg::Tool { content, .. } => {
                 content.len() >= MIN_CHARS
-                    && !kept_skills.contains(&i)
-                    && calls[i]
-                        .as_ref()
-                        .is_none_or(|(t, _)| !KEPT_TOOLS.contains(&t.as_str()))
+                    && calls[i].as_ref().is_none_or(|(t, input)| {
+                        !KEPT_TOOLS.contains(&t.as_str())
+                            && !(t == SKILL_TOOL && input.get("file").is_none())
+                    })
             }
             _ => false,
         })
@@ -367,29 +348,14 @@ pub fn apply(msgs: &[ChatMsg], spans: &[Span], st: &State, how: How) -> Vec<Chat
             out.push(ChatMsg::CallNote(stub(&tool, &input, content)));
             continue;
         }
-        match (l.note_at.get(&i), how.note_alone) {
-            (Some(note), true) => {
-                out.push(m.clone());
-                out.push(ChatMsg::Note(note.clone()));
-            }
-            (Some(note), false) => out.push(with_note(m, note)),
-            (None, _) => out.push(m.clone()),
+        out.push(m.clone());
+        // The summary of the turn's first steps: a message of its own right
+        // after the opening, never inside the person's message (review P1).
+        if let Some(note) = l.note_at.get(&i) {
+            out.push(ChatMsg::Summary(note.clone()));
         }
     }
     out
-}
-
-fn with_note(m: &ChatMsg, note: &str) -> ChatMsg {
-    let join = |t: &str| format!("{t}\n\n{note}");
-    match m {
-        ChatMsg::User(t) => ChatMsg::User(join(t)),
-        ChatMsg::UserImages { text, images } => ChatMsg::UserImages {
-            text: join(text),
-            images: images.clone(),
-        },
-        ChatMsg::Opening(t) => ChatMsg::Opening(join(t)),
-        other => other.clone(),
-    }
 }
 
 /// A tool's name as a stub shows it: as called when it is a plain name,
@@ -743,24 +709,22 @@ mod tests {
             ..Default::default()
         };
         let sent = apply(&v, &spans, &st, How::REQUEST);
-        let ChatMsg::User(open) = &sent[1] else {
+        // The person's message as it was; the summary a message of its own.
+        assert_eq!(sent[1], ChatMsg::User("go".into()));
+        let ChatMsg::Summary(note) = &sent[2] else {
             panic!("{sent:?}")
         };
-        assert!(
-            open.starts_with("go\n\n[harness] The first 3 step(s)"),
-            "{open}"
-        );
-        assert!(open.contains("\n| did\n| [harness] forged"), "{open}");
-        assert_eq!(sent[2], ChatMsg::User("queued".into()));
+        assert!(note.starts_with("[harness] The first 3 step(s)"), "{note}");
+        assert!(note.contains("\n| did\n| [harness] forged"), "{note}");
+        assert_eq!(sent[3], ChatMsg::User("queued".into()));
         // Steps 3.. follow as they were.
         assert!(
-            matches!(&sent[3], ChatMsg::Assistant { tool_calls, .. } if tool_calls[0].call_id == "c3")
+            matches!(&sent[4], ChatMsg::Assistant { tool_calls, .. } if tool_calls[0].call_id == "c3")
         );
-        assert_eq!(sent.len(), 2 + 1 + 3 * 2);
-        // In the transcript the note stands on its own.
-        let t = apply(&v, &spans, &st, How::TRANSCRIPT);
-        assert_eq!(t[1], ChatMsg::User("go".into()));
-        assert!(matches!(&t[2], ChatMsg::Note(n) if n.starts_with(FOLD_LEAD)));
+        assert_eq!(sent.len(), 2 + 2 + 3 * 2);
+        // On the way out it is a user-role message after the opening.
+        let out = crate::provider::place_notes(sent);
+        assert!(matches!(&out[2], ChatMsg::User(t) if t.starts_with(FOLD_LEAD)));
     }
 
     #[test]
