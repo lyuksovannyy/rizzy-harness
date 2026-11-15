@@ -1667,3 +1667,35 @@ async fn a_denied_tool_is_refused_by_policy_as_before() {
     assert!(!ws.join("in.txt").exists());
     assert!(!dir.path().join("out.txt").exists());
 }
+
+/// From the review of the refusal pre-check: a model looping on the same refused call
+/// is still cut by the repeated-call guard, and every refused call is in
+/// the log as tool_call_started + tool_call_finished(ok false).
+#[tokio::test]
+async fn review_a_loop_on_a_refused_path_is_still_cut() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    let mut n = start(
+        &dir.path().join("node.db"),
+        policy(dir.path(), ApprovalMode::Auto),
+    )
+    .await;
+    let sid = n.create(&ws, Some(ApprovalMode::Ask), None, false).await;
+    let calls: Vec<(&str, Value)> = (0..12)
+        .map(|_| ("write", json!({"path": "../out.txt", "content": "e"})))
+        .collect();
+    let asked = n.turn(sid, &script(&calls), None, deny).await;
+    assert!(asked.is_empty());
+    let evs = n.node.store().events_after(sid, 0, 100_000).unwrap();
+    let kinds: Vec<String> = evs.iter().map(|e| e.kind.clone()).collect();
+    let started = kinds.iter().filter(|k| *k == "tool_call_started").count();
+    let finished = kinds.iter().filter(|k| *k == "tool_call_finished").count();
+    let outs = outputs(&n, sid);
+    eprintln!("started {started} finished {finished}");
+    for (i, o) in outs.iter().enumerate() {
+        eprintln!("{i}: {}", o.lines().next().unwrap_or(""));
+    }
+    assert_eq!(started, finished);
+    assert!(started < 12, "the guard cut the loop: {started} calls");
+}
