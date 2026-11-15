@@ -262,7 +262,8 @@ export type Item =
   /** The owner changed the approval mode; `requested` when the node gave less. */
   | { type: "approval_mode_changed"; mode: ApprovalMode; requested?: ApprovalMode }
   | { type: "step_limit_changed"; max_steps: number; requested?: number }
-  | { type: "summary"; through_seq: number; text: string }
+  /** `manual`: made at the person's /compact (X.20), with their `focus`. */
+  | { type: "summary"; through_seq: number; text: string; manual?: boolean; focus?: string }
   /** What the model is sent was shortened in this turn (`context_shortened`, X.15): older tool results cleared, the first `steps` steps summarised (`text` is the model's). The chat keeps showing everything. */
   | {
       type: "shortened";

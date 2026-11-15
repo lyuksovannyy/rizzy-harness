@@ -659,6 +659,26 @@ it was cut and that the agent saw all of it. Chat-profile chats keep a
 shorter general summary (at most 300 words). The latest summary is shown,
 collapsed, where it was made in the chat.
 
+**Summarise now: `/compact`.** Type `/compact` in a chat's message box, or
+`/compact keep the database migration details` with words on what to keep
+in focus, and the chat's history is summarised now instead of when it fills
+up: everything before your last message and its answer, which stay word for
+word (an automatic summary keeps the last two turns), with the task list and
+standing context given back as after any summary. Your focus words go to the
+summarising model as yours, quoted, for emphasis only (at most 2,000
+characters; a longer text is cut and says so). The chat shows "Summarising
+the chat for the model…" until the summary appears ("summarised for the
+model at your request", with your focus and the summary under it), and the
+context meter drops to the new size. It works between turns only (a running
+turn shortens its own context when it must; Stop it first if you want to
+summarise now), one at a time, and no message is sent while it runs. A chat
+too short to summarise, a model error, a summary that would not be smaller
+or Stop is said in plain words, and nothing is lost: the chat keeps showing
+every message, only what the model is sent gets shorter. After two failed
+summaries in a row, send a message before trying again. The summary's cost
+counts in the chat's usage. Only the chat's owner can do it; no agent,
+routine or tool can.
+
 In agentic chats the agent keeps its own task list with the `todo` tool
 (Software Developer, Senior Teamlead, Writer, custom agents that edit files
 or run commands, and agents with `tools: all`; add `todo` to a file agent's

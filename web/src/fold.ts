@@ -55,6 +55,7 @@ const KNOWN = new Set([
   "chat_allow_removed",
   "step_limit_changed",
   "handoff_written",
+  "compact_failed",
 ]);
 
 const CLEARS_RETRY = new Set([
@@ -68,6 +69,14 @@ const CLEARS_RETRY = new Set([
   "model_fallback",
   "retry_given_up",
 ]);
+
+/** A /compact's cost, added to the chat's (X.20). */
+function addUsage(v: SessionView, u: { input_tokens: number; output_tokens: number; cache_read_tokens?: number; cache_write_tokens?: number }) {
+  v.usage.input_tokens += u.input_tokens;
+  v.usage.output_tokens += u.output_tokens;
+  if (u.cache_read_tokens) v.usage.cache_read_tokens = (v.usage.cache_read_tokens ?? 0) + u.cache_read_tokens;
+  if (u.cache_write_tokens) v.usage.cache_write_tokens = (v.usage.cache_write_tokens ?? 0) + u.cache_write_tokens;
+}
 
 function lastTool(v: SessionView, callId: string): Extract<Item, { type: "tool" }> | undefined {
   for (let i = v.items.length - 1; i >= 0; i--) {
@@ -322,8 +331,20 @@ export function apply(v: SessionView, e: RawEvent): void {
     case "variant_selected":
       v.variant_selection[p.group] = p.message_id;
       break;
-    case "history_summarized":
-      v.items.push({ type: "summary", through_seq: p.through_seq, text: p.text });
+    case "history_summarized": {
+      // A person's /compact (X.20): its cost is the chat's, and the meter
+      // shows the shorter context until the next turn reports its own.
+      if (p.usage) addUsage(v, p.usage);
+      if (p.tokens_after != null) v.context_tokens = p.tokens_after;
+      const it: Extract<Item, { type: "summary" }> = { type: "summary", through_seq: p.through_seq, text: p.text };
+      if (p.manual === true) it.manual = true;
+      if (p.focus != null) it.focus = p.focus;
+      v.items.push(it);
+      break;
+    }
+    case "compact_failed":
+      if (p.usage) addUsage(v, p.usage);
+      v.items.push({ type: "error", message: p.reason });
       break;
     case "context_shortened": {
       const it: Extract<Item, { type: "shortened" }> = {

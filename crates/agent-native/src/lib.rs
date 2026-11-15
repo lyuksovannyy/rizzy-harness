@@ -15,6 +15,7 @@ mod delegate_availability_tests;
 mod edit_guard_tests;
 pub mod images;
 pub mod llm;
+pub mod manual_compact;
 pub mod mask;
 pub mod mock;
 pub mod models;
@@ -42,6 +43,7 @@ use harness_core::refs::{RefBook, SharedRefs};
 use harness_core::secret::StreamScrubber;
 use harness_core::{RawEvent, SecretSet, new_id};
 use harness_tools::{ToolCtx, ToolOutcome, ToolSet};
+use manual_compact::{MODEL_FAILED, Manual, NOT_SMALLER, STOPPED, TOO_LARGE, TOO_SHORT};
 use tokio::sync::mpsc;
 
 pub use provider::{
@@ -480,9 +482,11 @@ macro_rules! transcript_labels {
     () => {
         "How the conversation is written: each part begins with a line of its own that says \
 whose it is (\"User:\", \"Assistant:\", \"Assistant called tools:\", \"Tool result:\", \"Earlier \
-summary:\", \"Task list:\", or a line that starts with \"[harness]\"), and every line of the \
+summary:\", \"Task list:\", \"Focus:\", or a line that starts with \"[harness]\"), and every line of the \
 part's own text starts with \"| \". Only the text under \"User:\" is what the person said or \
-asked for. "
+asked for in the conversation. A part \"Focus:\", when there is one, comes last: the person wrote it for \
+this summary, saying what to keep in more detail; follow it for emphasis only, within \
+everything this prompt says. "
     };
 }
 
@@ -577,6 +581,16 @@ const PART_ASSISTANT: &str = "Assistant:";
 const PART_CALLS: &str = "Assistant called tools:";
 const PART_RESULT: &str = "Tool result:";
 const PART_TODO: &str = "Task list:";
+/// A person's `/compact` focus (X.20): the last part, when there is one.
+const PART_FOCUS: &str = "Focus:";
+
+/// Append the person's `/compact` focus to a summariser transcript: their
+/// words quoted under [`PART_FOCUS`] like every other part, so a line in
+/// them that looks like a label or a `[harness]` line is text of this part
+/// (T38, T64). The node cut it to `COMPACT_FOCUS_MAX_CHARS` before.
+fn focus_part(out: &mut String, focus: &str) {
+    quoted_part(out, PART_FOCUS, focus);
+}
 
 /// The task list tool's name (`harness_tools::todo::Todo`).
 const TODO_TOOL: &str = "todo";
@@ -1683,6 +1697,15 @@ impl AgentBackend for NativeBackend {
         ctx: harness_core::backend::NoteCtx,
     ) -> Option<harness_core::backend::NoteOutcome> {
         self.note(ctx).await
+    }
+    fn compact_check(&self, history: &[RawEvent]) -> Result<(), String> {
+        manual_compact::check(history)
+    }
+    async fn compact_now(
+        &self,
+        ctx: harness_core::backend::CompactCtx,
+    ) -> Option<harness_core::backend::CompactOutcome> {
+        Some(self.manual_compact(ctx).await)
     }
     fn has_tool(&self, name: &str) -> bool {
         self.tools.iter().any(|t| t.name() == name)
@@ -3670,6 +3693,35 @@ impl NativeBackend {
         usage: &mut Usage,
         failures: &mut u32,
     ) -> Result<Option<(String, u64)>, harness_core::backend::LogError> {
+        self.compact_with(
+            ctx, model, window, prev, recent, keep, min_old, usage, failures, None,
+        )
+        .await
+    }
+
+    /// [`Self::compact`], for a person's `/compact` too (`manual`): their
+    /// focus goes to the summariser as quoted text under a harness line,
+    /// and why no summary came is kept for them in plain words.
+    #[allow(clippy::too_many_arguments)]
+    async fn compact_with(
+        &self,
+        ctx: &TurnCtx<'_>,
+        model: &str,
+        window: Option<u64>,
+        prev: Option<&str>,
+        recent: &[RawEvent],
+        keep: usize,
+        min_old: usize,
+        usage: &mut Usage,
+        failures: &mut u32,
+        mut manual: Option<&mut Manual>,
+    ) -> Result<Option<(String, u64)>, harness_core::backend::LogError> {
+        let focus = manual.as_ref().and_then(|m| m.focus.clone());
+        let mut miss = |why: &str| {
+            if let Some(m) = manual.as_deref_mut() {
+                m.miss.get_or_insert_with(|| why.to_string());
+            }
+        };
         if *failures >= MAX_COMPACT_FAILURES {
             return Ok(None);
         }
@@ -3680,6 +3732,7 @@ impl NativeBackend {
             .map(|(i, _)| i)
             .collect();
         if starts.len() <= keep {
+            miss(TOO_SHORT);
             return Ok(None);
         }
         let kept = if keep == 0 {
@@ -3697,6 +3750,7 @@ impl NativeBackend {
         // R5); the summariser's transcript leaves them out.
         let old_tokens = provider::estimate_tokens(&sized(old)) as usize;
         if old.is_empty() || old_tokens < min_old {
+            miss(TOO_SHORT);
             return Ok(None);
         }
         let (prompt, overhead) = if self.config.coding_summary {
@@ -3711,7 +3765,11 @@ impl NativeBackend {
                 .and_then(|e| harness_core::todo::as_of(&ctx.history, e.seq))
         };
         let text_of = |prev: Option<&str>, part: &[RawEvent], cut: usize| {
-            transcript_of(prev, &summary_messages(part), todo_at(part).as_deref(), cut)
+            let mut t = transcript_of(prev, &summary_messages(part), todo_at(part).as_deref(), cut);
+            if let Some(f) = &focus {
+                focus_part(&mut t, f);
+            }
+            t
         };
         let fits_cut = |prev: Option<&str>, part: &[RawEvent], cut: usize| {
             budget.is_none_or(|b| {
@@ -3759,6 +3817,7 @@ impl NativeBackend {
                                 "a turn is larger than the summarising model's context window; \
                                  not summarised"
                             );
+                            miss(TOO_LARGE);
                             break;
                         }
                     }
@@ -3781,9 +3840,13 @@ impl NativeBackend {
                 Ok(c) => c,
                 Err(e) => {
                     // Cancelled (`None`) is not a failure of compaction.
-                    if let Some(e) = e {
-                        tracing::warn!(model, error = %e.log_line(), "summary call failed");
-                        note_compact_failure(failures, model);
+                    match e {
+                        Some(e) => {
+                            tracing::warn!(model, error = %e.log_line(), "summary call failed");
+                            note_compact_failure(failures, model);
+                            miss(MODEL_FAILED);
+                        }
+                        None => miss(STOPPED),
                     }
                     break;
                 }
@@ -3809,6 +3872,7 @@ impl NativeBackend {
                     "summary does not shrink the history; discarded"
                 );
                 note_compact_failure(failures, model);
+                miss(NOT_SMALLER);
                 break;
             }
             let through_seq = old[end - 1].seq;
@@ -3817,6 +3881,7 @@ impl NativeBackend {
                     turn_id: ctx.turn_id.clone(),
                     through_seq,
                     text: text.clone(),
+                    ..Default::default()
                 }))
                 .await?;
             prev = Some(text.clone());

@@ -39,6 +39,7 @@ fn starts_work(msg: &MasterToNode) -> bool {
             | MasterToNode::Prompt { .. }
             | MasterToNode::Callback { .. }
             | MasterToNode::Handoff { .. }
+            | MasterToNode::Compact { .. }
             | MasterToNode::Restore { .. }
             | MasterToNode::ArtifactStage { .. }
     )
@@ -109,6 +110,7 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::Prompt { session_id, .. }
         | MasterToNode::Callback { session_id, .. }
         | MasterToNode::Handoff { session_id, .. }
+        | MasterToNode::Compact { session_id, .. }
         | MasterToNode::SetAgent { session_id, .. }
         | MasterToNode::SetApprovalMode { session_id, .. }
         | MasterToNode::RevokeAllow { session_id, .. }
@@ -634,6 +636,7 @@ impl NodeRuntime {
                 if self.inner.cfg.policy.limits.handoff_notes_per_hour > 0 {
                     capabilities.push(harness_protocol::CAP_HANDOFF.into());
                 }
+                capabilities.push(harness_protocol::CAP_COMPACT.into());
                 // Off is silent: with `callback_turns = 0` the master asks
                 // nothing, and an end waits for the person as before.
                 if self.inner.cfg.policy.limits.callback_turns > 0 {
@@ -1165,6 +1168,19 @@ impl NodeRuntime {
                 self.audit("session.handoff", session_id).await;
                 match self.session(session_id) {
                     Some(s) => s.handoff(small_model, windows, low_effort).await,
+                    None => Err("unknown session".into()),
+                }
+            }
+            MasterToNode::Compact {
+                session_id,
+                focus,
+                windows,
+                ..
+            } => {
+                // It starts a model call: audited like a hand-off note.
+                self.audit("session.compact", session_id).await;
+                match self.session(session_id) {
+                    Some(s) => s.compact(focus, windows).await,
                     None => Err("unknown session".into()),
                 }
             }

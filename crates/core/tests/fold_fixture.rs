@@ -295,6 +295,7 @@ fn events() -> Vec<RawEvent> {
             turn_id: "t2".into(),
             through_seq: 3,
             text: "User asked to fix a bug.".into(),
+            ..Default::default()
         }),
         EventKind::AssistantDelta(AssistantDelta {
             turn_id: "t2".into(),
@@ -493,6 +494,32 @@ fn events() -> Vec<RawEvent> {
                 reason: "unknown to this node".into(),
             }],
             usage: None,
+        }),
+        // A person's `/compact` (X.20): one that failed (its cost counted),
+        // then one written between turns with its focus, its cost and the
+        // context size the meter shows until the next turn reports.
+        EventKind::CompactFailed(CompactFailed {
+            reason: "The chat was not summarised: the summary was not smaller than what it \
+                     would replace. Nothing was lost."
+                .into(),
+            usage: Some(Usage {
+                input_tokens: 500,
+                output_tokens: 400,
+                ..Default::default()
+            }),
+        }),
+        EventKind::HistorySummarized(HistorySummarized {
+            turn_id: String::new(),
+            through_seq: 42,
+            text: "Goal\nMigrate the users table.".into(),
+            manual: true,
+            focus: Some("keep the database migration details".into()),
+            usage: Some(Usage {
+                input_tokens: 2_000,
+                output_tokens: 300,
+                ..Default::default()
+            }),
+            tokens_after: Some(1_234),
         }),
         // The agent's task list: each event replaces the whole list.
         EventKind::TodoUpdated(TodoUpdated {

@@ -438,10 +438,54 @@ pub struct NoteOutcome {
     pub usage: Option<Usage>,
 }
 
+/// A person's `/compact` (ADOPTION_PLAN X.20): summarise the chat's
+/// history now, between turns, as the automatic summary would, with their
+/// focus text.
+pub struct CompactCtx {
+    pub session_id: crate::SessionId,
+    /// Every event of the chat, in seq order.
+    pub history: Vec<RawEvent>,
+    /// The model that summarises (the chat's, as its last turn ended on)
+    /// and its context window when the master knows it.
+    pub model: String,
+    pub window: Option<u64>,
+    /// The person's words on what to keep in focus: scrubbed and cut to
+    /// `COMPACT_FOCUS_MAX_CHARS` by the node.
+    pub focus: Option<String>,
+    /// Stop, a delete or the node's stop: nothing is then recorded.
+    pub cancel: CancellationToken,
+}
+
+/// What came of a [`CompactCtx`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum CompactOutcome {
+    /// The newest summary, covering every event up to `through_seq`; the
+    /// estimated size of the next request (tokens).
+    Done {
+        through_seq: u64,
+        text: String,
+        usage: Usage,
+        tokens_after: u64,
+    },
+    /// No summary; `reason` is the person's, in plain words.
+    Failed { reason: String, usage: Usage },
+}
+
 #[async_trait::async_trait]
 pub trait AgentBackend: Send + Sync {
     fn name(&self) -> &'static str;
     async fn run_turn(&self, ctx: TurnCtx<'_>) -> TurnOutcome;
+    /// Whether a `/compact` of this history could make a summary: `Err`
+    /// with the plain answer when it could not (too short, two failed in a
+    /// row since the last turn). Pure: read before anything starts.
+    fn compact_check(&self, _history: &[RawEvent]) -> Result<(), String> {
+        Err("this chat's agent cannot summarise its history".into())
+    }
+    /// Summarise now ([`CompactCtx`]). `None`: this backend makes no
+    /// summaries.
+    async fn compact_now(&self, _ctx: CompactCtx) -> Option<CompactOutcome> {
+        None
+    }
     /// Write a hand-off note's model part. `None`: this backend writes no
     /// notes, or the request was cancelled; nothing is recorded.
     async fn write_note(&self, _ctx: NoteCtx) -> Option<NoteOutcome> {
