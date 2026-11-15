@@ -60,6 +60,28 @@ pub trait TurnHost: Send + Sync {
         Err("delegation is not available here".into())
     }
 
+    /// Send `task` as the next message to `child`, a sub-agent this session
+    /// started earlier as `agent`, and wait for that turn to end (PLAN.md
+    /// T68). The host decides whether `child` may be continued (its own
+    /// log, never the id as the model wrote it) and refuses with a sentence
+    /// for the model otherwise. `call_id` is the parent's `delegate` call,
+    /// recorded in the child's `turn_started`. The rest as for
+    /// [`Self::delegate`]; `started` is called with `child` once it runs.
+    #[allow(clippy::too_many_arguments)]
+    async fn continue_child(
+        &self,
+        _child: crate::SessionId,
+        _agent: crate::agent::AgentSpec,
+        _task: String,
+        _call_id: String,
+        _refs: SharedRefs,
+        _observed: std::sync::Arc<Vec<String>>,
+        _cancel: CancellationToken,
+        _started: Box<dyn FnOnce(crate::SessionId) + Send>,
+    ) -> Result<DelegateOutcome, String> {
+        Err("following up a sub-agent is not available here".into())
+    }
+
     /// Whether a call of `tool` at `risk` would run right now with no
     /// card and no policy refusal (the node's denials and the chat's
     /// approval mode, nothing else): `edit`'s early answer shows a file's

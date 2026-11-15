@@ -273,6 +273,11 @@ pub struct SessionView {
     /// turn cost; `usage` above is the whole chat's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_usage: Option<Usage>,
+    /// In a sub-agent's chat: the turns that were follow-ups from the chat
+    /// that started it (`turn_started.continued_by`, T68), in order. Its
+    /// first run is not one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub follow_ups: Vec<String>,
 }
 
 /// One background command as the log shows it.
@@ -368,6 +373,9 @@ impl SessionView {
                 self.meta = Some(m);
             }
             EventKind::TurnStarted(t) => {
+                if t.continued_by.is_some() {
+                    self.follow_ups.push(t.turn_id.clone());
+                }
                 if let Some(c) = &t.cause {
                     self.items.push(Item::Callback {
                         turn_id: t.turn_id.clone(),
@@ -794,6 +802,7 @@ mod tests {
                     agent: None,
                     turn_id: "t".into(),
                     environment: None,
+                    continued_by: None,
                     retry: None,
                 }),
             ),
@@ -1004,6 +1013,7 @@ mod tests {
                 agent: None,
                 turn_id: "t".into(),
                 environment: None,
+                continued_by: None,
                 retry: None,
             }),
             EventKind::ModelRetry(retry.clone()),
@@ -1066,6 +1076,7 @@ mod tests {
                 agent: None,
                 turn_id: "t".into(),
                 environment: None,
+                continued_by: None,
                 retry: None,
             }),
         );

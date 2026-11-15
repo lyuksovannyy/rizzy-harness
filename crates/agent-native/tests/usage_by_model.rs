@@ -425,6 +425,7 @@ fn history(sid: SessionId, turns: usize, chars: usize) -> Vec<RawEvent> {
             agent: None,
             cause: None,
             environment: None,
+            continued_by: None,
             retry: None,
         }));
         kinds.push(EventKind::UserMessage(UserMessage {

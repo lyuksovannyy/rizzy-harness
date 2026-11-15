@@ -116,7 +116,7 @@ fn earlier(sid: SessionId, m: UserMessage) -> Vec<RawEvent> {
                 turn_id: m.turn_id.clone(),
                 agent: None,
                 cause: None,
-                environment: None,
+                environment: None, continued_by: None,
                 retry: None,
             }),
         ),

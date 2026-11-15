@@ -364,3 +364,73 @@ async fn bash_says_it_already_runs_in_the_chats_folder() {
         Some(true)
     );
 }
+
+/// The model is told it can give a finished sub-agent a follow-up (T68):
+/// the `delegate` description says when and how, the schema offers
+/// `session`, and a malformed id is refused before anything starts (the
+/// host's default, as for a backend without follow-ups, refuses the rest).
+#[tokio::test]
+async fn delegate_offers_follow_ups() {
+    let all = vec![spec("scout", list(&["read"]))];
+    let (seen, _, _, _) = run_seen(&[], vec![], all.clone(), "hello").await;
+    let (_, desc) = seen
+        .iter()
+        .find(|(n, _)| n == DELEGATE)
+        .expect("delegate offered");
+    assert!(desc.contains(DELEGATE_FOLLOW_UP), "{desc}");
+    assert!(desc.contains("`session`"), "{desc}");
+    let schema = {
+        let rec = Arc::new(Rec {
+            reqs: Mutex::default(),
+        });
+        let backend = NativeBackend::new(
+            rec.clone(),
+            harness_tools::builtin(),
+            NativeConfig::default(),
+        );
+        let host = Host {
+            events: Mutex::default(),
+            started: AtomicUsize::new(0),
+            denied: vec![],
+        };
+        let dir = tempfile::tempdir().unwrap();
+        backend
+            .run_turn(TurnCtx {
+                session_id: SessionId::new(),
+                turn_id: "t".into(),
+                history: vec![],
+                user_text: "hello".into(),
+                cwd: dir.path().to_path_buf(),
+                model: "mock".into(),
+                agent: Some(AgentSpec {
+                    delegates: all.clone(),
+                    ..spec("lead", ToolSelection::All(AllTools::All))
+                }),
+                compare: vec![],
+                parent_session: None,
+                extra: Default::default(),
+                cancel: Default::default(),
+                host: &host,
+            })
+            .await;
+        let reqs = rec.reqs.lock().unwrap();
+        reqs[0]
+            .tools
+            .iter()
+            .find(|t| t.name == DELEGATE)
+            .unwrap()
+            .schema
+            .clone()
+    };
+    assert_eq!(schema["properties"]["session"]["type"], "string");
+    assert_eq!(schema["required"], json!(["agent", "task"]));
+    let (_, started, outs) = run(&[], vec![], all.clone(), "delegate: scout@not-an-id=more").await;
+    assert_eq!(started, 0);
+    assert!(outs[0].contains("`session` must be the id"), "{outs:?}");
+    // A host without follow-ups (this test's) refuses a well-formed one;
+    // no new child is started in its place.
+    let id = SessionId::new();
+    let (_, started, outs) = run(&[], vec![], all, &format!("delegate: scout@{id}=more")).await;
+    assert_eq!(started, 0);
+    assert!(outs[0].contains("not available here"), "{outs:?}");
+}

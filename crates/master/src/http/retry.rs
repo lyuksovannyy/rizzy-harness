@@ -179,6 +179,7 @@ mod tests {
             cause: None,
             environment: None,
             retry: None,
+            continued_by: None,
         })
         .into_parts();
         let e = harness_core::RawEvent {

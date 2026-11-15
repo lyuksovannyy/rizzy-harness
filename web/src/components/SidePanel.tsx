@@ -68,6 +68,7 @@ function AgentItem({ row, models }: { row: AgentRow; models?: ModelInfo[] }) {
     <li className="side-row" data-kind="agent" data-call={row.call_id}>
       <div className="side-row-head">
         <span className="side-name">@{shownName(row.agent)}</span>
+        {row.runs > 1 && <span className="small muted">{row.runs} runs</span>}
         <State state={row.state} />
       </div>
       {/* The model's text: shown as text, hidden characters marked. */}

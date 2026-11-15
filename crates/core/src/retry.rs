@@ -209,6 +209,7 @@ mod tests {
                 cause,
                 environment: None,
                 retry,
+                continued_by: None,
             }))
         }
         fn message(&mut self, t: &str, text: &str, queued: bool) -> &mut Self {

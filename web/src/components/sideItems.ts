@@ -19,6 +19,9 @@ export interface AgentRow {
   task: string;
   cut: boolean;
   state: RowState;
+  /** Its runs listed here: a follow-up (`delegate` with `session`, T68)
+   * is the same sub-agent again, one row with its latest call. */
+  runs: number;
 }
 
 export interface CommandRow extends BgRow {
@@ -59,22 +62,34 @@ export function sideItems(view: SessionView | null | undefined, keep: ReadonlySe
   const turnRunning = view.running_turn !== null;
   const agents: AgentRow[] = [];
   const callIndex = new Map<string, number>();
+  const runsOf = new Map<string, number>();
   items.forEach((it, i) => {
     if (it.type !== "tool") return;
     callIndex.set(it.call_id, i);
     if (it.tool !== "delegate") return;
+    const output = it.result ? it.result.output : it.live_output;
+    // Only the node's first line: a uuid the model wrote into an echoed
+    // refusal is never taken for the child.
+    const child = /^session: ([0-9a-f-]{36})(?:\n|$)/.exec(output)?.[1] ?? null;
+    // Runs over the whole chat: a follow-up in a later turn counts the
+    // earlier ones too.
+    if (child) runsOf.set(child, (runsOf.get(child) ?? 0) + 1);
     const state = agentState(it, turnRunning);
     if (i < from && state !== "running") return;
-    const output = it.result ? it.result.output : it.live_output;
     const { head, cut } = commandHead(typeof it.input?.task === "string" ? it.input.task : "");
-    agents.push({
+    const row: AgentRow = {
       call_id: it.call_id,
-      child: /session: ([0-9a-f-]{36})/.exec(output)?.[1] ?? null,
+      child,
       agent: typeof it.input?.agent === "string" ? it.input.agent : "?",
       task: head,
       cut,
       state,
-    });
+      runs: child ? runsOf.get(child)! : 1,
+    };
+    // A follow-up to a child already listed takes its row's place.
+    const at = child ? agents.findIndex((a) => a.child === child) : -1;
+    if (at >= 0) agents[at] = row;
+    else agents.push(row);
   });
   const commands: CommandRow[] = [];
   for (const [bg_id, b] of Object.entries(view.background ?? {})) {

@@ -619,6 +619,7 @@ async fn the_next_turn_rebuilds_this_turns_requests_byte_for_byte() {
             agent: None,
             cause: None,
             environment: Some("[harness] Environment of this turn: one.".into()),
+            continued_by: None,
             retry: None,
         }),
         EventKind::UserMessage(UserMessage {

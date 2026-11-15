@@ -280,6 +280,7 @@ mod tests {
             agent: None,
             cause: None,
             environment: None,
+            continued_by: None,
             retry: None,
         })
     }
@@ -415,6 +416,7 @@ mod tests {
                     failed_model: None,
                     model: None,
                 }),
+                continued_by: None,
             }),
             after("t2", &["b.sql"]),
             ended("t2", TurnEndReason::Completed),

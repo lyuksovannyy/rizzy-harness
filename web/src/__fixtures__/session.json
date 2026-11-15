@@ -1215,6 +1215,7 @@
     {
       "kind": "turn_started",
       "payload": {
+        "continued_by": "call-follow-up",
         "turn_id": "t6"
       },
       "seq": 78,
@@ -1332,6 +1333,9 @@
     "context_model": "openai::gpt-4o",
     "context_tokens": 800,
     "context_window": 128000,
+    "follow_ups": [
+      "t6"
+    ],
     "head_seq": 83,
     "items": [
       {

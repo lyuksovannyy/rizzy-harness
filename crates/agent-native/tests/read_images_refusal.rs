@@ -285,6 +285,7 @@ impl Turn<'_> {
     async fn run(&self, turn_id: &str, text: &str, retry: Option<RetryOf>) -> TurnOutcome {
         let history = self.host.log();
         self.host.push(EventKind::TurnStarted(TurnStarted {
+            continued_by: None,
             retry: retry.clone(),
             cause: None,
             agent: None,

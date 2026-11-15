@@ -12,7 +12,8 @@
 //! * `remember project: <t>` -> the same with `scope: "project"`
 //! * `memory?`       -> repeats the recalled-memory block (per-turn context)
 //! * `delegate: a=task | b=task` -> one `delegate` call per pair (parallel),
-//!   then passes on the first line of the (last) sub-agent's answer
+//!   then passes on the first line of the (last) sub-agent's answer;
+//!   `a@<id>=task` is a follow-up to the sub-agent `<id>` (`session`)
 //! * `slow: <n>`     -> streams `n` chunks, `delay_ms` apart (default 50)
 //! * `rich: demo`    -> streams Markdown that exercises the rich renderer
 //! * `ui: <name>`    -> streams a canned `ui:` block: choices, form, progress,
@@ -484,7 +485,12 @@ impl Provider for Mock {
                 .map(|(a, t)| ToolCallRef {
                     call_id: harness_core::new_id(),
                     tool: "delegate".into(),
-                    input: json!({"agent": a.trim(), "task": t.trim()}),
+                    input: match a.split_once('@') {
+                        Some((a, sid)) => {
+                            json!({"agent": a.trim(), "session": sid.trim(), "task": t.trim()})
+                        }
+                        None => json!({"agent": a.trim(), "task": t.trim()}),
+                    },
                 })
                 .collect();
             return Ok(Completion {

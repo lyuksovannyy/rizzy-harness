@@ -221,6 +221,7 @@ fn backend(p: Arc<dyn Provider>) -> NativeBackend {
 
 fn open(host: &Host, turn: &str) {
     host.push(EventKind::TurnStarted(TurnStarted {
+        continued_by: None,
         retry: None,
         cause: None,
         agent: None,
