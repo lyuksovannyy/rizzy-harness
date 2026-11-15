@@ -1084,11 +1084,12 @@ impl NodeRuntime {
             MasterToNode::SetStepLimit {
                 session_id,
                 max_steps,
+                lowering,
                 ..
             } => {
                 self.audit("session.set_step_limit", session_id).await;
                 match self.session(session_id) {
-                    Some(s) => s.set_step_limit(max_steps).await.map(|_| ()),
+                    Some(s) => s.set_step_limit(max_steps, lowering).await.map(|_| ()),
                     None => Err("unknown session".into()),
                 }
             }

@@ -2201,6 +2201,7 @@ impl Master {
             req_id,
             session_id: sid,
             max_steps,
+            lowering: !raise,
         })
         .await
     }

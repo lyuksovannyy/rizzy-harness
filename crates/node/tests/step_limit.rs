@@ -109,10 +109,20 @@ impl N {
     }
 
     async fn set(&mut self, sid: SessionId, max_steps: i64) -> Result<(), String> {
+        self.set_as(sid, max_steps, false).await
+    }
+
+    async fn set_as(
+        &mut self,
+        sid: SessionId,
+        max_steps: i64,
+        lowering: bool,
+    ) -> Result<(), String> {
         self.send(MasterToNode::SetStepLimit {
-            req_id: format!("s-{sid}-{max_steps}"),
+            req_id: format!("s-{sid}-{max_steps}-{lowering}"),
             session_id: sid,
             max_steps,
+            lowering,
         });
         self.ack().await
     }
@@ -265,6 +275,7 @@ async fn lowering_mid_turn_ends_it_with_the_wrap_up() {
         req_id: "low".into(),
         session_id: sid,
         max_steps: 1,
+        lowering: true,
     });
     let (ran, reason) = n.until_end(sid).await;
     assert_eq!(reason, TurnEndReason::Limit);
@@ -292,5 +303,52 @@ async fn the_model_cannot_raise_its_own_steps() {
     assert_eq!(
         n.turn(sid, &many(8, "true")).await,
         (2, TurnEndReason::Limit)
+    );
+}
+
+/// Review F1: a change the master sent as a lowering (it skipped the
+/// owner's level check) that would raise the limit in force is refused,
+/// and nothing is recorded; a real lowering is taken.
+#[tokio::test]
+async fn a_raise_sent_as_a_lowering_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut n = start(&dir.path().join("node.db"), dir.path(), 40).await;
+    let sid = n.create(dir.path()).await;
+    n.set(sid, 5).await.unwrap();
+    let e = n.set_as(sid, 15, true).await.unwrap_err();
+    assert!(
+        e.contains(harness_protocol::STEPS_NOT_A_LOWERING) && e.contains("send it again"),
+        "{e}"
+    );
+    assert_eq!(n.changes(sid).len(), 1, "nothing recorded");
+    n.set_as(sid, 3, true).await.unwrap();
+    assert_eq!(n.changes(sid).last().unwrap().max_steps, 3);
+}
+
+/// Review F7: an explicit choice equal to what the node gives now is still
+/// recorded when it differs from the log, so a node limit raised again
+/// later does not bring an older, higher choice back.
+#[tokio::test]
+async fn an_explicit_choice_is_kept_across_a_node_limit_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("node.db");
+    let sid = {
+        let mut n = start(&db, dir.path(), 40).await;
+        let sid = n.create(dir.path()).await;
+        n.set(sid, 30).await.unwrap();
+        sid
+    };
+    {
+        // The node is lowered to 20: 30 is in force as 20; the owner
+        // chooses 20 explicitly.
+        let mut n = start(&db, dir.path(), 20).await;
+        n.set(sid, 20).await.unwrap();
+        assert_eq!(n.changes(sid).last().unwrap().max_steps, 20);
+    }
+    // Raised to 40 again: the chat keeps its owner's 20.
+    let mut n = start(&db, dir.path(), 40).await;
+    assert_eq!(
+        n.turn(sid, &many(30, "true")).await,
+        (20, TurnEndReason::Limit)
     );
 }

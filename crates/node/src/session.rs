@@ -405,7 +405,6 @@ impl Session {
         // The log's latest mode (the fold applies `approval_mode_changed`),
         // clamped again: node.toml may have been tightened since.
         let mode = node.cfg.policy.effective_mode(Some(meta.approval_mode));
-        let node_max_steps = node.cfg.policy.limits.max_steps;
         let last_state = events.iter().rev().find_map(|e| match e.typed() {
             Ok(EventKind::Checkpoint(c))
                 if !matches!(
@@ -455,11 +454,10 @@ impl Session {
             model: meta.model,
             mode: Arc::new(Mutex::new(mode)),
             mode_change: tokio::sync::Mutex::new(()),
-            // The log's latest, clamped again: node.toml may be lower now.
-            steps: Mutex::new(
-                view.max_steps
-                    .map(|n| (n as usize).clamp(1, node_max_steps)),
-            ),
+            // The log's latest as it is: `current_steps` clamps it by
+            // node.toml as it is now, so a node limit raised again later
+            // brings back exactly what the owner chose (review F7).
+            steps: Mutex::new(view.max_steps.map(|n| (n as usize).max(1))),
             confined: Mutex::new(std::collections::HashSet::new()),
             profile: meta.profile,
             incognito: meta.incognito,
@@ -986,14 +984,20 @@ impl Session {
         Ok(mode)
     }
 
-    /// The owner's change of the chat's step limit (X.14): clamped to
+    /// The owner's change of the chat's step limit (X.14): sent as a
+    /// lowering that would raise the limit in force, refused (recording
+    /// nothing; the master's copy was behind). Otherwise clamped to
     /// `1..=` node.toml's `[limits] max_steps` whatever was sent, recorded
     /// as `step_limit_changed` by this session (one writer), then applied:
     /// from the running turn's next request on (a limit below the steps it
     /// has used gives it its wrap-up request next). Refused for a
     /// sub-agent's chat, a routine's and a chat without tools. Returns the
     /// limit in force.
-    pub(crate) async fn set_step_limit(&self, requested: i64) -> Result<usize, String> {
+    pub(crate) async fn set_step_limit(
+        &self,
+        requested: i64,
+        lowering: bool,
+    ) -> Result<usize, String> {
         if self.profile != Profile::Agentic {
             return Err(STEPS_CHAT.into());
         }
@@ -1006,6 +1010,18 @@ impl Session {
         let _change = self.mode_change.lock().await;
         let max = self.node.cfg.policy.limits.max_steps;
         let limit = requested.clamp(1, max as i64) as usize;
+        // Sent as a lowering (the master skipped the level check) but a
+        // raise of the limit in force: its copy of the log was behind.
+        let now = self.current_steps();
+        if lowering && limit > now {
+            return Err(format!(
+                "{}: it is {now} now; send it again",
+                harness_protocol::STEPS_NOT_A_LOWERING
+            ));
+        }
+        // An explicit choice is recorded whenever it differs from the
+        // log's own value, even if it equals what is in force (review F7):
+        // a node limit raised later must not bring an old value back.
         if Some(limit) == *self.steps.lock().unwrap_or_else(|p| p.into_inner()) {
             return Ok(limit);
         }
@@ -1034,7 +1050,9 @@ impl Session {
             None => own,
             Some(pid) => match self.node.session(pid) {
                 Some(parent) if parent.id != self.id => own.min(parent.current_steps()),
-                _ => own,
+                // Its parent is gone (deleted): the smallest limit, as the
+                // mode falls back to Ask (review N1).
+                _ => 1,
             },
         }
     }

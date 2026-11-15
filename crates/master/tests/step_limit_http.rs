@@ -14,7 +14,7 @@ use common::{Login as _, SameOrigin as _};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use harness_core::event::{EventKind, Profile, SessionCreated};
+use harness_core::event::{EventKind, Profile, SessionCreated, StepLimitChanged};
 use harness_core::policy::ApprovalMode;
 use harness_core::{RawEvent, Secret, SessionId};
 use harness_master::auth::{Auth, Claim};
@@ -29,7 +29,10 @@ use tokio::sync::mpsc;
 type Seen = Arc<Mutex<Vec<MasterToNode>>>;
 
 /// An agentic node `id` announcing `caps` on top of the usual ones.
-fn fake(id: &str, caps: &[&str]) -> (NodeLink, Seen) {
+/// `records`: it sends the `step_limit_changed` of a change it takes, as
+/// a node does; without, the master's copy stays behind (the window after a
+/// change, before its event arrives).
+fn fake(id: &str, caps: &[&str], records: bool) -> (NodeLink, Seen) {
     let (to_node, mut commands) = mpsc::channel::<MasterToNode>(1024);
     let (tx, from_node) = mpsc::channel::<NodeToMaster>(1024);
     let mut capabilities = vec![
@@ -49,10 +52,58 @@ fn fake(id: &str, caps: &[&str]) -> (NodeLink, Seen) {
     .unwrap();
     let seen: Seen = Arc::default();
     let (node, keep) = (id.to_string(), seen.clone());
+    // Like a real node: the limit in force per chat (the node's at first),
+    // and a change sent as a lowering that would raise it refused. It
+    // records no event, so the master's copy stays behind.
+    let node_max: i64 = caps
+        .iter()
+        .find_map(|c| c.strip_prefix("steps-max:")?.parse().ok())
+        .unwrap_or(0);
     tokio::spawn(async move {
         let mut seqs: HashMap<SessionId, u64> = HashMap::new();
+        let mut limits: HashMap<SessionId, i64> = HashMap::new();
         while let Some(msg) = commands.recv().await {
             keep.lock().unwrap().push(msg.clone());
+            if let MasterToNode::SetStepLimit {
+                req_id,
+                session_id,
+                max_steps,
+                lowering,
+            } = &msg
+            {
+                let now = *limits.get(session_id).unwrap_or(&node_max);
+                let limit = (*max_steps).clamp(1, node_max);
+                if *lowering && limit > now {
+                    let _ = tx.try_send(NodeToMaster::Ack {
+                        req_id: req_id.clone(),
+                        ok: false,
+                        error: Some(format!(
+                            "{}: it is {now} now; send it again",
+                            harness_protocol::STEPS_NOT_A_LOWERING
+                        )),
+                    });
+                    continue;
+                }
+                limits.insert(*session_id, limit);
+                if records {
+                    let seq = seqs.entry(*session_id).or_insert(0);
+                    *seq += 1;
+                    let (kind, payload) = EventKind::StepLimitChanged(StepLimitChanged {
+                        max_steps: limit as u64,
+                        requested: (limit != *max_steps).then_some(*max_steps),
+                    })
+                    .into_parts();
+                    let _ = tx.try_send(NodeToMaster::Event {
+                        event: RawEvent {
+                            session_id: *session_id,
+                            seq: *seq,
+                            ts_ms: harness_core::now_ms(),
+                            kind,
+                            payload,
+                        },
+                    });
+                }
+            }
             if let MasterToNode::Create {
                 session_id,
                 exec_mode,
@@ -142,6 +193,7 @@ async fn start() -> T {
     let (l, local) = fake(
         "local",
         &["approval-max:auto", "approval-default:ask", "steps-max:50"],
+        true,
     );
     master.add_link(l, true).await.unwrap();
     let (l, remote) = fake(
@@ -151,9 +203,10 @@ async fn start() -> T {
             "approval-default:ask",
             "steps-max:20",
         ],
+        false,
     );
     master.add_link(l, false).await.unwrap();
-    let (l, old) = fake("old", &[]);
+    let (l, old) = fake("old", &[], true);
     master.add_link(l, false).await.unwrap();
     let m2 = master.clone();
     tokio::spawn(async move { axum::serve(listener, router(m2)).await.unwrap() });
@@ -238,6 +291,32 @@ async fn chat(t: &T, who: &str, node: &str, workspace: Option<&str>) -> SessionI
     v["session_id"].as_str().unwrap().parse().unwrap()
 }
 
+/// Until the master's copy of `sid` holds a `step_limit_changed` for every
+/// change the fake node `local` was sent (it records each one it takes).
+async fn settled(t: &T, sid: SessionId) {
+    let sent = changes(&t.local).iter().filter(|(s, _)| *s == sid).count();
+    for _ in 0..300 {
+        let (_, v) = req(
+            t,
+            Method::GET,
+            &format!("/api/sessions/{sid}/events"),
+            None,
+            &t.alex,
+        )
+        .await;
+        let got = v["events"].as_array().map_or(0, |e| {
+            e.iter()
+                .filter(|e| e["kind"] == "step_limit_changed")
+                .count()
+        });
+        if got >= sent {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("the change never reached the master's copy");
+}
+
 fn path(sid: SessionId) -> String {
     format!("/api/sessions/{sid}/step-limit")
 }
@@ -259,6 +338,9 @@ async fn the_owner_changes_the_limit_and_the_node_clamps_it() {
         )
         .await;
         assert_eq!(st, StatusCode::OK, "{n}: {v}");
+        // As a person does: the next change once this one is in the chat
+        // (in the window before, a raise sent as a lowering is refused).
+        settled(&t, sid).await;
     }
     assert_eq!(
         changes(&t.local),
@@ -392,4 +474,59 @@ async fn a_raise_needs_the_level_a_lowering_does_not() {
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(changes(&t.remote), [(sid, 5)]);
+}
+
+/// Review F1: the window after a lowering. The master's copy of the log
+/// still holds the old limit, so a raise from 5 back to 15 by an owner
+/// whose level forbids raises is judged a lowering (15 < 20) and sent as
+/// one: the node refuses it as a raise of the limit in force, and the
+/// master answers 409, "send it again", instead of relaying a raise that
+/// skipped the level check.
+#[tokio::test]
+async fn a_raise_in_the_window_after_a_lowering_is_refused() {
+    let t = start().await;
+    let (bob, bob_id) = account(&t, "bob", "member").await;
+    let sid = chat(&t, &bob, "remote", None).await;
+    let (st, v) = req(
+        &t,
+        Method::PUT,
+        &format!("/api/users/{bob_id}/exec-ceiling"),
+        Some(json!({"level": "none"})),
+        &t.alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, _) = req(
+        &t,
+        Method::POST,
+        &path(sid),
+        Some(json!({"max_steps": 5})),
+        &bob,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        &path(sid),
+        Some(json!({"max_steps": 15})),
+        &bob,
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "relayed: {v}");
+    assert!(
+        v["error"].as_str().unwrap().contains("send it again"),
+        "{v}"
+    );
+    let flags: Vec<bool> = t
+        .remote
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|m| match m {
+            MasterToNode::SetStepLimit { lowering, .. } => Some(*lowering),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(flags, [true, true], "both were sent as lowerings");
 }

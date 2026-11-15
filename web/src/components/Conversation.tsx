@@ -703,7 +703,8 @@ export default function Conversation(props: {
               // node that can change it (X.14).
               meta?.profile === "agentic" && !meta.parent_session && !meta.no_callbacks && node?.max_steps
                 ? {
-                    value: view?.max_steps ?? node.max_steps,
+                    // The limit in force: the chat's, within the node's now.
+                    value: Math.min(view?.max_steps ?? node.max_steps, node.max_steps),
                     max: node.max_steps,
                     onChange: (n) => pageApi.setStepLimit(sessionId, n),
                   }

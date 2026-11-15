@@ -78,6 +78,12 @@ pub const CAP_APPROVAL_MAX_PREFIX: &str = "approval-max:";
 /// the node clamps every request. The master sends `session.set_step_limit`
 /// only to a node whose hello listed it.
 pub const CAP_STEPS_MAX_PREFIX: &str = "steps-max:";
+
+/// How a node's refusal of a `session.set_step_limit` sent as a lowering
+/// that would raise the chat's limit begins. The master answers it as a
+/// refusal to send again (its copy of the log was behind).
+pub const STEPS_NOT_A_LOWERING: &str =
+    "this change was sent as a lowering but would raise the chat's step limit";
 pub const CAP_APPROVAL_DEFAULT_PREFIX: &str = "approval-default:";
 
 /// The gaps of the modes a node offers, for the UI to say in the chat
@@ -360,6 +366,12 @@ pub enum MasterToNode {
         req_id: String,
         session_id: SessionId,
         max_steps: i64,
+        /// The master judged it a lowering from its copy of the log and so
+        /// skipped the owner's level check: the node refuses it if it would
+        /// in fact raise the chat's limit (`STEPS_NOT_A_LOWERING`; the copy
+        /// was behind), and records nothing.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        lowering: bool,
     },
     #[serde(rename = "session.cancel")]
     Cancel {
@@ -517,6 +529,7 @@ mod tests {
             req_id: "r".into(),
             session_id: sid,
             max_steps: 30,
+            lowering: false,
         };
         let v = serde_json::to_value(&m).unwrap();
         assert_eq!(v["type"], "session.set_step_limit");
