@@ -1,10 +1,11 @@
 // Settings → Token savings (admin): every method can be switched off.
 import { useEffect, useState } from "react";
 import { pageApi } from "../apiPages";
-import type { GraphifyStatus, Style, TokenSavings } from "../types";
+import { modelLabel, offeredModels } from "../lib/models";
+import type { GraphifyStatus, ModelInfo, NoteWriter, Style, TokenSavings } from "../types";
 
 type BoolKey = {
-  [K in keyof TokenSavings]: TokenSavings[K] extends boolean ? K : never;
+  [K in keyof TokenSavings]-?: TokenSavings[K] extends boolean ? K : never;
 }[keyof TokenSavings];
 
 const METHODS: { key: BoolKey; title: string; detail: string; mode: string }[] = [
@@ -107,7 +108,76 @@ function GraphifyCard({ enabled, onToggle }: { enabled: boolean; onToggle: (v: b
   );
 }
 
-export function SavingsSettings() {
+const WRITERS: { v: NoteWriter; label: string }[] = [
+  { v: "small_model", label: "The small model (this chat's model when none is set)" },
+  { v: "chat_model", label: "This chat's model" },
+  { v: "off", label: "Off" },
+];
+
+/** One small (fast) model and what uses it (X.16): hand-off notes and
+ * read-only sub-agents. A node that does not know the model falls back to
+ * the chat's own. */
+function SmallModelCard(props: { s: TokenSavings; models: ModelInfo[]; save: (n: TokenSavings) => void }) {
+  const { s, models, save } = props;
+  const current = s.small_model ?? "";
+  return (
+    <div className="card stack" data-testid="small-model">
+      <h3>Small model and hand-off notes</h3>
+      <p className="muted small">
+        A cheap, fast model for background writing, as other harnesses call their small or fast model. When a coding
+        chat in a project that changed files or its task list has been idle for 10 minutes, one request writes a short
+        hand-off note (where the work stands, decisions, what is next); the next chat in the same project reads it with
+        the facts from the log (what was asked, files changed, the task list). Costs one request per stretch of work (up
+        to about 16,600 input tokens and 800 output), counted in that chat&apos;s usage.
+      </p>
+      <p className="muted small" data-testid="small-model-where">
+        With a small model set, a chat&apos;s recent turns, tool output included, are sent to the small model&apos;s
+        provider, which may not be the provider the chat uses.
+      </p>
+      <label>
+        Small model
+        <select
+          aria-label="Small model"
+          value={current}
+          onChange={(e) => save({ ...s, small_model: e.target.value || null })}
+        >
+          <option value="">None</option>
+          {offeredModels(models, current).map((m) => (
+            <option key={m.id} value={m.id} disabled={m.unavailable}>
+              {modelLabel(m, models)}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label>
+        Hand-off notes written by
+        <select
+          aria-label="Hand-off notes"
+          value={s.handoff_notes}
+          onChange={(e) => save({ ...s, handoff_notes: e.target.value as NoteWriter })}
+        >
+          {WRITERS.map((w) => (
+            <option key={w.v} value={w.v}>
+              {w.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="check">
+        <input
+          type="checkbox"
+          aria-label="Read-only sub-agents use the small model"
+          checked={s.small_subagents}
+          onChange={(e) => save({ ...s, small_subagents: e.target.checked })}
+        />
+        Read-only sub-agents use the small model (those whose every tool only reads: read, search, outline, task list,
+        earlier chats, skills; and that have no model of their own)
+      </label>
+    </div>
+  );
+}
+
+export function SavingsSettings(props: { models?: ModelInfo[] }) {
   const [s, setS] = useState<TokenSavings | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -213,6 +283,7 @@ export function SavingsSettings() {
         {err && <div className="error-text">{err}</div>}
         {msg && <div className="muted small">{msg}</div>}
       </div>
+      <SmallModelCard s={s} models={props.models ?? []} save={(n) => void save(n)} />
       <GraphifyCard enabled={s.graphify} onToggle={(v) => void save({ ...s, graphify: v })} />
     </div>
   );

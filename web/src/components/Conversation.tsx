@@ -650,6 +650,21 @@ export default function Conversation(props: {
                         <p>{it.text}</p>
                       </details>
                     );
+                  case "handoff":
+                    // Only the latest note is what the next chat reads. The
+                    // note is the model's text: shown as text.
+                    return view.items.findLastIndex((x) => x.type === "handoff") !== i ? null : it.text ? (
+                      <details key={i} className="divider summary" data-testid="handoff">
+                        <summary>{t("conv.handoff", { model: it.model ?? "?" })}</summary>
+                        <p>{it.text}</p>
+                      </details>
+                    ) : (
+                      <div key={i} className="divider" data-testid="handoff">
+                        {t("conv.handoffFixed", {
+                          why: (it.failed ?? []).map((f) => `${f.model}: ${f.reason}`).join("; ") || "no model wrote one",
+                        })}
+                      </div>
+                    );
                   case "shortened": {
                     const what = [
                       it.cleared ? t("conv.shortCleared") : "",

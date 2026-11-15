@@ -233,6 +233,25 @@ impl Provider for Mock {
             context_tokens: 0,
             ..Default::default()
         });
+        // A hand-off note under its headings (X.16), naming how many of
+        // the person's messages it read.
+        if let Some(ChatMsg::System(p)) = req.messages.first()
+            && p == crate::HANDOFF_PROMPT
+        {
+            let n = match req.messages.get(1) {
+                Some(ChatMsg::User(t)) => t.lines().filter(|l| *l == crate::PART_USER).count(),
+                _ => 0,
+            };
+            return Ok(Completion {
+                text: format!(
+                    "Status:\nDemo work after {n} messages.\nDecisions:\nnone\nNext:\n\
+                     Answer the next message.\nRemember:\nnone"
+                ),
+                tool_calls: vec![],
+                usage,
+                stop: Default::default(),
+            });
+        }
         if let Some(ChatMsg::System(p)) = req.messages.first()
             && (p == crate::SUMMARY_PROMPT || p == crate::CODING_SUMMARY_PROMPT)
         {

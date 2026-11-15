@@ -181,6 +181,13 @@ pub(crate) struct Session {
     /// The environment line the last `turn_started` recorded, by turn id,
     /// for that turn's run to send (`TurnExtra::environment`).
     turn_env: Mutex<Option<(String, String)>>,
+    /// The hand-off note being written (X.16), if one is: a turn that
+    /// claims the slot, a Stop and a delete cancel it, so it never holds
+    /// the chat against the person.
+    note: Mutex<Option<CancellationToken>>,
+    /// When this chat's last notes were started, for `[limits]
+    /// handoff_notes_per_hour` (in memory: a restart gives one more hour).
+    note_tries: Mutex<std::collections::VecDeque<std::time::Instant>>,
 }
 
 /// The most messages that wait at once for the running turn to read them
@@ -390,6 +397,8 @@ impl Session {
             pending: Mutex::new(Vec::new()),
             queued_context: Mutex::new(None),
             turn_env: Mutex::new(None),
+            note: Mutex::new(None),
+            note_tries: Mutex::default(),
             node: node.clone(),
             id,
             head: tokio::sync::Mutex::new(0),
@@ -510,6 +519,8 @@ impl Session {
             pending: Mutex::new(unread(&events)),
             queued_context: Mutex::new(None),
             turn_env: Mutex::new(None),
+            note: Mutex::new(None),
+            note_tries: Mutex::default(),
             node,
             id,
             head: tokio::sync::Mutex::new(view.head_seq),
@@ -834,6 +845,27 @@ impl Session {
     /// Assign the next seq, scrub, persist (fsync), then publish.
     async fn append(&self, kind: EventKind) -> Result<RawEvent, StoreError> {
         let mut head = self.head.lock().await;
+        self.append_at(&mut head, kind).await
+    }
+
+    /// Append `kind` only if the log's head is still `expected` and `go`
+    /// says yes under the lock (a hand-off note: nothing may have joined
+    /// the log since what it covers, and no turn claimed the slot).
+    /// `Ok(None)`: not appended.
+    async fn append_if_head(
+        &self,
+        expected: u64,
+        go: impl FnOnce() -> bool,
+        kind: EventKind,
+    ) -> Result<Option<RawEvent>, StoreError> {
+        let mut head = self.head.lock().await;
+        if *head != expected || !go() {
+            return Ok(None);
+        }
+        self.append_at(&mut head, kind).await.map(Some)
+    }
+
+    async fn append_at(&self, head: &mut u64, kind: EventKind) -> Result<RawEvent, StoreError> {
         let (kind, mut payload) = kind.into_parts();
         if !self.node.cfg.secrets.is_empty() {
             // The string fields, not the serialized text: a secret holding a
@@ -1728,6 +1760,170 @@ impl Session {
                 )
                 .await;
             this.read_queued(reason, person, after, turn_id).await;
+        });
+        Ok(())
+    }
+
+    /// Write the chat's hand-off note if one is due (X.16,
+    /// docs/handoff-notes.md): asked by the master once the chat has been
+    /// idle. Only for a chat of the person's own that changes files
+    /// (agentic, not a sub-agent's, not incognito, not a routine's), when
+    /// its log says a note is due and no turn runs. Acked once started; the
+    /// writing goes on beside the chat without the turn slot: a turn that
+    /// claims the slot, a Stop or a delete cancels it, and a note is
+    /// recorded only when nothing joined the log since what it read (so
+    /// no event lands inside a turn or between a turn's read and its
+    /// start that a callback or a summary would read). Models: the small
+    /// model the master named, then the chat's own (the model the last
+    /// turn ended on), each tried once; this node's providers decide which
+    /// it knows (an unknown one fails as `unknown to this node`, as a
+    /// prompt's model would).
+    pub(crate) async fn handoff(
+        self: &Arc<Self>,
+        small_model: Option<String>,
+        windows: std::collections::BTreeMap<String, u64>,
+        low_effort: Vec<String>,
+    ) -> Result<(), String> {
+        use harness_protocol::{HANDOFF_BUSY, HANDOFF_NOTHING};
+        let per_hour = self.node.cfg.policy.limits.handoff_notes_per_hour;
+        if per_hour == 0 {
+            return Err(format!(
+                "{HANDOFF_NOTHING}: hand-off notes are off on this node (handoff_notes_per_hour = 0)"
+            ));
+        }
+        if self.profile != Profile::Agentic
+            || self.parent_session.is_some()
+            || self.incognito
+            || self.no_callbacks
+        {
+            return Err(format!(
+                "{HANDOFF_NOTHING}: this chat takes no hand-off notes"
+            ));
+        }
+        if self.node.is_stopping() {
+            return Err(harness_protocol::NODE_STOPPING.into());
+        }
+        // Under `queue`, which a person's turn holds from its claim of the
+        // slot to its start: no turn starts between this check and the
+        // note's claim (and one that claims after cancels the note).
+        let queue = self.queue.lock().await;
+        if self
+            .turn
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_some()
+        {
+            return Err(HANDOFF_BUSY.into());
+        }
+        let cancel = CancellationToken::new();
+        {
+            let mut n = self.note.lock().unwrap_or_else(|p| p.into_inner());
+            if n.is_some() {
+                return Err(HANDOFF_BUSY.into());
+            }
+            *n = Some(cancel.clone());
+        }
+        drop(queue);
+        let id = self.id;
+        let history = match self
+            .node
+            .cfg
+            .store
+            .call(move |s| s.events_after(id, 0, usize::MAX >> 1))
+            .await
+        {
+            Ok(h) => h,
+            Err(e) => {
+                self.end_note(&cancel);
+                return Err(e.to_string());
+            }
+        };
+        if !harness_core::handoff::due(&history) {
+            self.end_note(&cancel);
+            return Err(HANDOFF_NOTHING.into());
+        }
+        // The node's bound on unattended note calls per chat (a master that
+        // asks and cancels in a loop meets it too: a cancelled note leaves
+        // no event, so the chat stays due).
+        {
+            let mut tries = self.note_tries.lock().unwrap_or_else(|p| p.into_inner());
+            let hour = std::time::Duration::from_secs(3600);
+            while tries.front().is_some_and(|t| t.elapsed() >= hour) {
+                tries.pop_front();
+            }
+            if tries.len() >= per_hour {
+                drop(tries);
+                self.end_note(&cancel);
+                return Err(format!(
+                    "{HANDOFF_NOTHING}: {per_hour} notes started for this chat in the last hour \
+                     (handoff_notes_per_hour)"
+                ));
+            }
+            tries.push_back(std::time::Instant::now());
+        }
+        let through = history.last().map_or(0, |e| e.seq);
+        let chat_model = history
+            .iter()
+            .rev()
+            .find_map(|e| match e.typed() {
+                Ok(EventKind::TurnEnded(t)) => t.usage.and_then(|u| u.model),
+                _ => None,
+            })
+            .unwrap_or_else(|| self.model.clone());
+        let mut models: Vec<String> = small_model.into_iter().collect();
+        if !models.contains(&chat_model) {
+            models.push(chat_model);
+        }
+        let models = models
+            .into_iter()
+            .map(|m| {
+                let w = windows.get(&m).copied();
+                (m, w)
+            })
+            .collect();
+        let this = self.clone();
+        tokio::spawn(async move {
+            let out = this
+                .node
+                .cfg
+                .backend
+                .write_note(harness_core::backend::NoteCtx {
+                    session_id: id,
+                    history,
+                    models,
+                    low_effort,
+                    cancel: cancel.clone(),
+                })
+                .await;
+            let Some(out) = out else {
+                this.end_note(&cancel);
+                return;
+            };
+            let ev = EventKind::HandoffWritten(harness_core::event::HandoffWritten {
+                through_seq: through,
+                text: out.text,
+                model: out.model,
+                failed: out.failed,
+                usage: out.usage,
+            });
+            let go = || {
+                !cancel.is_cancelled()
+                    && this
+                        .turn
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner())
+                        .is_none()
+            };
+            match this.append_if_head(through, go, ev).await {
+                Ok(Some(_)) => tracing::debug!(session = %id, "hand-off note recorded"),
+                Ok(None) => {
+                    tracing::debug!(session = %id, "hand-off note dropped: the chat went on")
+                }
+                Err(e) => {
+                    tracing::warn!(session = %id, error = %e, "could not record a hand-off note")
+                }
+            }
+            this.end_note(&cancel);
         });
         Ok(())
     }
@@ -2986,7 +3182,27 @@ impl Session {
             return Err(TURN_RUNNING.into());
         }
         *t = Some(turn);
+        drop(t);
+        // The person (or a callback) goes first: a note being written is
+        // dropped, and the next idle stretch writes it (X.16).
+        self.cancel_note();
         Ok(())
+    }
+
+    /// The note of `cancel` is over: free its slot. A cancelled one's was
+    /// taken by [`Self::cancel_note`] already (another may hold it now).
+    fn end_note(&self, cancel: &CancellationToken) {
+        let mut n = self.note.lock().unwrap_or_else(|p| p.into_inner());
+        if !cancel.is_cancelled() {
+            *n = None;
+        }
+    }
+
+    /// Cancel the hand-off note being written, if one is.
+    fn cancel_note(&self) {
+        if let Some(c) = self.note.lock().unwrap_or_else(|p| p.into_inner()).take() {
+            c.cancel();
+        }
     }
 
     /// Run a delegated sub-task in a new child session and wait for it.
@@ -3383,6 +3599,7 @@ impl Session {
         if let Some(t) = self.turn.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
             t.cancel.cancel();
         }
+        self.cancel_note();
     }
 
     /// Mark the running turn as the stop's to end, unless it was cancelled

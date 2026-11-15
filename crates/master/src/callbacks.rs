@@ -338,7 +338,7 @@ async fn check(m: &Master, sid: SessionId) -> Next {
 /// Why the master will not resume `row` now (`Err`), as a routine fire
 /// checks its owner (docs/routines.md, "Admission") without the `routines`
 /// permission, and as the owner's own prompt passes `agentic_gate`.
-async fn admission(m: &Master, row: &SessionRow) -> Result<(), String> {
+pub(crate) async fn admission(m: &Master, row: &SessionRow) -> Result<(), String> {
     if row.parent_id.is_some() {
         return Err("a sub-agent's chat gets no callback turn".into());
     }

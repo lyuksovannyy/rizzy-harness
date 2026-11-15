@@ -14,6 +14,7 @@ pub mod config;
 pub mod diff;
 pub mod env;
 mod favicon;
+mod handoff;
 mod http;
 pub mod levels;
 pub mod limits;
@@ -310,6 +311,8 @@ pub struct MasterInner {
     outbound: Mutex<outbound::Outbound>,
     /// Callback turns: the watcher's per-chat state (T.8d step 3).
     callbacks: callbacks::Callbacks,
+    /// Hand-off notes asked for (X.16).
+    handoffs: handoff::Handoffs,
     /// Tests: how long a level change waits between its guards and its
     /// write, in ms (0 in use), so a test can make two changes overlap.
     pub(crate) level_write_delay_ms: std::sync::atomic::AtomicU64,
@@ -547,6 +550,7 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         MasterToNode::ApprovalRespond { decision, .. } if !decision.allows() => None,
         MasterToNode::Prompt { session_id, .. }
         | MasterToNode::Callback { session_id, .. }
+        | MasterToNode::Handoff { session_id, .. }
         | MasterToNode::SelectVariant { session_id, .. }
         | MasterToNode::SetAgent { session_id, .. }
         | MasterToNode::Restore { session_id, .. }
@@ -660,6 +664,7 @@ impl Master {
                 sockets: Default::default(),
                 outbound: Mutex::new(outbound::Outbound::from_env()),
                 callbacks: Default::default(),
+                handoffs: Default::default(),
                 level_write_delay_ms: Default::default(),
                 agents: Mutex::new(agent_edits::Agents::new(
                     harness_agents::AgentSet::from_agents(
@@ -917,6 +922,18 @@ impl Master {
         callbacks::start(self);
     }
 
+    /// Ask for hand-off notes of idle coding chats (X.16): a sweep every
+    /// minute, from the log alone, so a restart loses nothing.
+    pub fn start_handoffs(&self) {
+        handoff::start(self);
+    }
+
+    /// One sweep of [`Self::start_handoffs`] now (tests); how many chats
+    /// were asked for a note.
+    pub async fn sweep_handoffs(&self) -> usize {
+        handoff::sweep(self).await
+    }
+
     /// The attention rows of callback turns and refusals (`GET
     /// /api/attention` puts them with `items`).
     pub(crate) async fn callback_attention(
@@ -1112,6 +1129,8 @@ impl Master {
         {
             return Err(format!("node {node_id} is revoked"));
         }
+        // Notes this node acked before may have died with its last link.
+        handoff::node_back(self, &node_id);
         let _ = link.to_node.try_send(MasterToNode::Welcome {
             protocol_version: PROTOCOL_VERSION,
         });
@@ -2509,6 +2528,7 @@ impl Master {
             }
         };
         callbacks::forget(self, sid).await;
+        handoff::forget(self, sid);
         self.nudge(Live::SessionsChanged(Audience::owner(owner.as_deref())));
     }
 

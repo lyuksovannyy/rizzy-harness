@@ -49,6 +49,7 @@ fn request() -> ChatRequest {
         cache: false,
         limits: None,
         no_tool_calls: false,
+        max_tokens: None,
     }
 }
 

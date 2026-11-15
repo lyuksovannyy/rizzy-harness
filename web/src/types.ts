@@ -291,7 +291,14 @@ export type Item =
   /** A turn the harness started because these background commands ended while the chat was idle. */
   | { type: "callback"; turn_id: string; bg_ids: string[] }
   /** The node did not resume the agent for these ends (`callback_refused`). */
-  | { type: "callback_refused"; bg_ids: string[]; reason: string };
+  | { type: "callback_refused"; bg_ids: string[]; reason: string }
+  /** A hand-off note for the next chat (`handoff_written`, X.16): `text` is the model's, shown as text. */
+  | { type: "handoff"; through_seq: number; text?: string; model?: string; failed?: NoteFailure[] };
+
+export interface NoteFailure {
+  model: string;
+  reason: string;
+}
 
 export type UserItem = Extract<Item, { type: "user" }>;
 export type ToolItem = Extract<Item, { type: "tool" }>;
@@ -1047,7 +1054,15 @@ export interface TokenSavings {
   repo_map_tokens: number;
   outline_tool: boolean;
   graphify: boolean;
+  /** The small (fast) model for background writing; absent: none set. */
+  small_model?: string | null;
+  /** Who writes hand-off notes (X.16). */
+  handoff_notes: NoteWriter;
+  /** Sub-agents that change no files run on the small model. */
+  small_subagents: boolean;
 }
+
+export type NoteWriter = "off" | "chat_model" | "small_model";
 
 /** `GET /api/admin/graphify`: read-only. node.toml decides; no HTTP call
  * installs graphify or edits node.toml. */

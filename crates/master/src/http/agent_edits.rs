@@ -280,6 +280,7 @@ pub(super) async fn generate_summary(
         cache: false,
         limits: Some(Default::default()),
         no_tool_calls: false,
+        max_tokens: None,
     };
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let done = tokio::time::timeout(Duration::from_secs(60), rt.provider.complete(&req, tx))

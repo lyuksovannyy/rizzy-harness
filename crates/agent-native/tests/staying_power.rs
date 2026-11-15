@@ -441,6 +441,7 @@ fn limited(first_byte: u64, idle: u64) -> ChatRequest {
             idle: Duration::from_secs(idle),
         }),
         no_tool_calls: false,
+        max_tokens: None,
     }
 }
 
