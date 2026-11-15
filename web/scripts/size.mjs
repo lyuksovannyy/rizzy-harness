@@ -147,6 +147,15 @@ const EXPORT_KB = 2.7;
 // project facts' wording, the retry while the call is not filed (+0.7).
 const MEMDEF_KB = 2.7;
 
+// Workspace memory (T54, owner 2026-11-14), measured 387.8 against the
+// recorded 386.5: the workspace's Memory tab (its own chunk with Settings),
+// the waiting count on the Overview, the block's wording for the shared and
+// Personal places (+1.3). Its review (F2, F4, F5: the two-step proposal,
+// who wrote each fact, retire before delete), measured 392.0 (+0.4).
+// Merged with the step limit (pull request 106): measured 393.0, a tenth over the
+// sum of the two lines (rounding), recorded here (+0.1).
+const WSMEM_KB = 1.8;
+
 // What the agent is doing (feat/turn-finished-signal), measured 377.9
 // (initial 101.0) against 375.9 on main (+2.0, not split per chunk): in the
 // conversation chunk the retry countdown, the context meter against the
@@ -175,6 +184,10 @@ const T50_KB = 1.3;
 // Measured with approval modes merged on top: the total passes 386.4 by
 // less than a tenth (+0.1).
 const LOOP_KB = 0.1;
+// X.14 (2026-11-15, the chat's step limit): the lazy "N steps" control and
+// its form (StepLimitPick), the fold of `step_limit_changed`, its divider and
+// the route call; measured 387.3 (rounded) after it against 386.5 before.
+const STEPS_KB = 0.9;
 
 // A turn's changes (X.12, feat/turn-diff), measured 389.6 (initial 101.5,
 // unchanged) against 386.4 on main: the diff panel in its own lazy chunk,
@@ -188,16 +201,26 @@ const LOOP_KB = 0.1;
 // yielding the right side (+0.6).
 const DIFF_KB = 3.8;
 
+// T51, a denial's note and "allow for this chat", measured 387.2 (initial
+// 101.6) against 386.5 on main: the card's note field, its button and the
+// note on a denied card in the conversation chunk, the side panel's
+// "Allowed in this chat" rows with Remove in its own chunk, the fold's two
+// events and the types in the first load (+0.1 initial). After its review,
+// measured 387.4: the card's line on what a chat grant allows and the side
+// panel's every-argument text (+0.2); 391.2 after the merge of the diff view (+0.1, rounding).
+const T51_KB = 1.0;
+
 // Another chat's work before an undo (PLAN.md T57, fix/undo-other-chats),
 // measured 390.3 against 390.2: the diff panel's note naming the files
 // another chat changed, in its lazy chunk, and the conversation row's
 // "Undo anyway" for every refusal that offers it (+0.1). After its review
 // (certain and possible files apart in the panel), measured 390.4 against
-// a recorded 390.4: no change to the line.
+// a recorded 390.4: no change to the line; 394.1 after the merge of the
+// step limit, workspace memory and approval answers (no change).
 const T57_KB = 0.1;
 
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
-const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB + EXPORT_KB + MEMDEF_KB + VISIBILITY_KB + T50_KB + LOOP_KB + DIFF_KB + T57_KB) * 100) / 10) / 10;
+const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB + EXPORT_KB + MEMDEF_KB + VISIBILITY_KB + T50_KB + LOOP_KB + DIFF_KB + T51_KB + WSMEM_KB + STEPS_KB + T57_KB) * 100) / 10) / 10;
 // Raised from 103 to 106 once the Phase A pages merged (103.7 measured: the
 // new sidebar, account button and routine-result rows are on the first
 // screen), then lowered to 104 at Phase B (102.3 measured) once the login

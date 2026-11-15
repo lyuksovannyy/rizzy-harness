@@ -190,7 +190,32 @@ pub fn exec_capability(mode: harness_core::policy::ExecMode) -> String {
 /// `session.set_approval_mode` only to a node whose hello listed
 /// `approval-max:*`.
 pub const CAP_APPROVAL_MAX_PREFIX: &str = "approval-max:";
+/// The node capability that announces `session.set_step_limit` and says
+/// its step limit (X.14): `steps-max:<n>`, node.toml's `[limits]
+/// max_steps`, the most a chat there may be set to. What the UI offers;
+/// the node clamps every request. The master sends `session.set_step_limit`
+/// only to a node whose hello listed it.
+pub const CAP_STEPS_MAX_PREFIX: &str = "steps-max:";
+
+/// How a node's refusal of a `session.set_step_limit` sent as a lowering
+/// that would raise the chat's limit begins. The master answers it as a
+/// refusal to send again (its copy of the log was behind).
+pub const STEPS_NOT_A_LOWERING: &str =
+    "this change was sent as a lowering but would raise the chat's step limit";
 pub const CAP_APPROVAL_DEFAULT_PREFIX: &str = "approval-default:";
+
+/// How a node's refusal of a `session.set_approval_mode` sent as a lowering
+/// that would raise the mode begins. The master answers it as a refusal to
+/// send again (its copy of the log was behind; on the next try it sees the
+/// mode the node has).
+pub const MODE_NOT_A_LOWERING: &str =
+    "this change was sent as a lowering but would raise the chat's approval mode";
+
+/// The node capability that announces the person's answers beyond allow
+/// and deny: a note with a denial, `allow_chat` and `session.revoke_allow`.
+/// The master sends `allow_chat` and `session.revoke_allow` only to a node
+/// whose hello listed it (an unknown decision or message drops the link).
+pub const CAP_ANSWERS: &str = "answers";
 
 /// The gaps of the modes a node offers, for the UI to say in the chat
 /// (reviews T8B-3, N.10a L-d, L-e). The node's state at its hello: one the
@@ -473,6 +498,28 @@ pub enum MasterToNode {
         req_id: String,
         session_id: SessionId,
         mode: ApprovalMode,
+        /// The master judged it a lowering from its copy of the log and so
+        /// skipped the owner's level check: the node refuses it if it would
+        /// in fact raise the chat's mode (`MODE_NOT_A_LOWERING`; the copy
+        /// was behind), and records nothing.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        lowering: bool,
+    },
+    /// Change the chat's step limit (X.14). A request only: the node
+    /// clamps it to `1..=` its own `[limits] max_steps`, refuses it for a
+    /// sub-agent's or a routine's chat, and records the result as
+    /// `step_limit_changed`. Only to nodes whose hello listed `steps-max:*`.
+    #[serde(rename = "session.set_step_limit")]
+    SetStepLimit {
+        req_id: String,
+        session_id: SessionId,
+        max_steps: i64,
+        /// The master judged it a lowering from its copy of the log and so
+        /// skipped the owner's level check: the node refuses it if it would
+        /// in fact raise the chat's limit (`STEPS_NOT_A_LOWERING`; the copy
+        /// was behind), and records nothing.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        lowering: bool,
     },
     #[serde(rename = "session.cancel")]
     Cancel {
@@ -515,6 +562,19 @@ pub enum MasterToNode {
         session_id: SessionId,
         approval_id: String,
         decision: Decision,
+        /// The person's note with a denial; the node drops it with an
+        /// allow and cuts it to `MAX_DENY_NOTE`. Only to nodes with
+        /// `CAP_ANSWERS` (an older one ignores the field).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    /// Remove a call the person allowed for the rest of a chat
+    /// (`chat_allow_removed`). Only to nodes with `CAP_ANSWERS`.
+    #[serde(rename = "session.revoke_allow")]
+    RevokeAllow {
+        req_id: String,
+        session_id: SessionId,
+        grant_id: String,
     },
     #[serde(rename = "resume")]
     Resume {
@@ -574,12 +634,14 @@ impl MasterToNode {
             | MasterToNode::Callback { req_id, .. }
             | MasterToNode::SetAgent { req_id, .. }
             | MasterToNode::SetApprovalMode { req_id, .. }
+            | MasterToNode::SetStepLimit { req_id, .. }
             | MasterToNode::Cancel { req_id, .. }
             | MasterToNode::StopBackground { req_id, .. }
             | MasterToNode::Delete { req_id, .. }
             | MasterToNode::Restore { req_id, .. }
             | MasterToNode::SelectVariant { req_id, .. }
             | MasterToNode::ApprovalRespond { req_id, .. }
+            | MasterToNode::RevokeAllow { req_id, .. }
             | MasterToNode::ArtifactRelease { req_id, .. }
             | MasterToNode::ArtifactStage { req_id, .. } => Some(req_id),
             // A fetch is answered by its chunk, never acked.
@@ -621,12 +683,14 @@ mod tests {
             session_id: sid,
             approval_id: "a".into(),
             decision: Decision::AllowSession,
+            note: None,
         };
         let v = serde_json::to_value(&d).unwrap();
         assert_eq!(v["type"], "approval.respond");
         assert_eq!(v["decision"], "allow_session");
         assert_eq!(serde_json::from_value::<MasterToNode>(v).unwrap(), d);
         let m = MasterToNode::SetApprovalMode {
+            lowering: false,
             req_id: "r".into(),
             session_id: sid,
             mode: ApprovalMode::AcceptEdits,
@@ -638,6 +702,16 @@ mod tests {
                    "session_id": "0193f2a0-0000-7000-8000-000000000001", "mode": "accept_edits"})
         );
         assert_eq!(m.req_id(), Some("r"));
+        assert_eq!(serde_json::from_value::<MasterToNode>(v).unwrap(), m);
+        let m = MasterToNode::SetStepLimit {
+            req_id: "r".into(),
+            session_id: sid,
+            max_steps: 30,
+            lowering: false,
+        };
+        let v = serde_json::to_value(&m).unwrap();
+        assert_eq!(v["type"], "session.set_step_limit");
+        assert_eq!(v["max_steps"], 30);
         assert_eq!(serde_json::from_value::<MasterToNode>(v).unwrap(), m);
     }
 

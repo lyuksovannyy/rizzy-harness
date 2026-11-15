@@ -421,10 +421,9 @@ async fn delete_workspace(m: &Master, ws: String) -> ApiResult<Option<Vec<String
         })
         .await?;
     crate::projects::forget_gone(m, projects).await;
-    if let Some((members, _)) = &gone {
-        for u in members {
-            crate::memory::forget_member(m, &ws_id, u).await;
-        }
+    // Its memory is the workspace's, and goes with it.
+    if gone.is_some() {
+        crate::memory::forget_workspace(m, &ws_id).await;
     }
     // What ran in its chats for the team stops, as at a member's removal.
     Ok(gone.map(|(members, chats)| {
@@ -625,8 +624,16 @@ pub(super) async fn remove_member(
     if !removed {
         return Err(no_member());
     }
-    // What was kept about them in this workspace goes with their place in it.
-    crate::memory::forget_member(&m, a.id(), &before.user_id).await;
+    // The workspace's memory stays the workspace's (their access ends with
+    // their membership); it goes only with the workspace, as when the last
+    // member left.
+    let w = a.id().to_string();
+    if matches!(
+        m.inner.mirror.call(move |s| s.workspace(&w)).await,
+        Ok(None)
+    ) {
+        crate::memory::forget_workspace(&m, a.id()).await;
+    }
     let owner = before.role_id == Role::Owner.id();
     let from = levels::workspace_level(false, owner, before.exec_level);
     let detail = json!({"by": levels::by(&who), "user": user_id, "workspace": a.id(),

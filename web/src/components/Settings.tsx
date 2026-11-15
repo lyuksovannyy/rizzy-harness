@@ -27,6 +27,7 @@ import { WorkspaceDelete } from "./workspace/WorkspaceDelete";
 import { WorkspaceGeneral } from "./workspace/WorkspaceGeneral";
 import { WorkspaceMembers } from "./workspace/WorkspaceMembers";
 import { WorkspaceModels } from "./workspace/WorkspaceModels";
+import { WorkspaceMemory } from "./workspace/WorkspaceMemory";
 import { WorkspaceOverview } from "./workspace/WorkspaceOverview";
 
 function NotifyToggle() {
@@ -230,6 +231,7 @@ export default function Settings(props: {
         {tab === "memory" && <MemoryPage version={props.memoryVersion} />}
         {tab === "password" && <ChangePassword forced={false} onDone={() => choose("account", "profile")} />}
         {wsProps && tab === "overview" && <WorkspaceOverview {...wsProps} />}
+        {wsProps && tab === "facts" && <WorkspaceMemory {...wsProps} version={props.memoryVersion} />}
         {wsProps && tab === "general" && <WorkspaceGeneral {...wsProps} />}
         {wsProps && tab === "models" && <WorkspaceModels {...wsProps} />}
         {wsProps && tab === "members" && <WorkspaceMembers {...wsProps} />}

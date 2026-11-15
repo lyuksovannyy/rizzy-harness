@@ -19,6 +19,23 @@ const MIN_CHARS: usize = 400;
 /// many were masked.
 pub fn mask_old_outputs(msgs: &mut [ChatMsg], keep: usize) -> usize {
     let keep = keep.max(1);
+    mask(msgs, |big| {
+        if big <= keep {
+            0
+        } else {
+            (big - keep) / keep * keep
+        }
+    })
+}
+
+/// Mask every large tool output, the newest too: a turn's last request
+/// when nothing else makes it fit (review F3).
+pub fn mask_all_outputs(msgs: &mut [ChatMsg]) -> usize {
+    mask(msgs, |big| big)
+}
+
+/// Hide the oldest `hide(n)` of the `n` large tool outputs.
+fn mask(msgs: &mut [ChatMsg], hide: impl Fn(usize) -> usize) -> usize {
     let mut calls: HashMap<String, (String, String)> = HashMap::new();
     for m in msgs.iter() {
         if let ChatMsg::Assistant { tool_calls, .. } = m {
@@ -35,10 +52,7 @@ pub fn mask_old_outputs(msgs: &mut [ChatMsg], keep: usize) -> usize {
         .filter(|(_, m)| matches!(m, ChatMsg::Tool { content, .. } if content.len() >= MIN_CHARS))
         .map(|(i, _)| i)
         .collect();
-    if big.len() <= keep {
-        return 0;
-    }
-    let hide = (big.len() - keep) / keep * keep;
+    let hide = hide(big.len()).min(big.len());
     for &i in &big[..hide] {
         if let ChatMsg::Tool { call_id, content } = &mut msgs[i] {
             let lines = content.lines().count();

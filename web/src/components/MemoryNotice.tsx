@@ -100,8 +100,18 @@ export function MemoryNotice({
   );
 
   const fact = st?.fact?.text ?? st?.text ?? text;
-  const where = (user: RichKey, here: RichKey, project: RichKey) =>
-    rt(st?.place === "project" ? project : st?.place === "workspace" ? here : user);
+  // Where it lives: your facts, your Personal workspace (private details),
+  // this (team) workspace's shared memory, the project's.
+  const where = (user: RichKey, here: RichKey, shared: RichKey, project: RichKey) =>
+    rt(
+      st?.place === "project"
+        ? project
+        : st?.place === "workspace"
+          ? st.workspace_personal
+            ? here
+            : shared
+          : user,
+    );
   const old = st?.target?.text;
   const isForget = st ? !!st.forget : !!forget;
   let head: React.ReactNode;
@@ -110,11 +120,12 @@ export function MemoryNotice({
     case "saved":
       head = old ? (
         <>
-          {where("memory.replaced", "memory.replacedHere", "memory.replacedProject")} {quote(old)} → {quote(fact)}
+          {where("memory.replaced", "memory.replacedHere", "memory.replacedShared", "memory.replacedProject")} {quote(old)} →{" "}
+          {quote(fact)}
         </>
       ) : (
         <>
-          {where("memory.saved", "memory.savedHere", "memory.savedProject")} {quote(fact)}
+          {where("memory.saved", "memory.savedHere", "memory.savedShared", "memory.savedProject")} {quote(fact)}
         </>
       );
       foot = (
@@ -126,7 +137,7 @@ export function MemoryNotice({
     case "forgot":
       head = (
         <>
-          {where("memory.forgot", "memory.forgot", "memory.forgotProject")} {quote(old ?? "")}
+          {where("memory.forgot", "memory.forgot", "memory.forgotShared", "memory.forgotProject")} {quote(old ?? "")}
         </>
       );
       foot = button("undo");
@@ -142,19 +153,35 @@ export function MemoryNotice({
         </>
       ) : (
         <>
-          {rt(st.place === "workspace" ? "memory.wantsHere" : "memory.wants")} {quote(fact)}
+          {where("memory.wants", "memory.wantsHere", "memory.wantsShared", "memory.wantsProject")} {quote(fact)}
         </>
       );
       foot =
-        st.keep === false ? (
+        st.keep !== false && st.decides && st.decides !== "you" ? (
           <>
-            {rt("memory.forManager")} {button("dismiss")}
+            {rt("memory.sendHint")} {button("keep", true)} · {button("dismiss")}
+          </>
+        ) : st.keep === false ? (
+          <>
+            {rt(st.decides === "admin" ? "memory.forAdmin" : "memory.forManager")} {button("dismiss")}
           </>
         ) : (
           <>
             {rt("memory.waitingHint")} {button("keep", true)} · {button("dismiss")}
           </>
         );
+      break;
+    case "sent":
+      head = (
+        <>
+          {rt("memory.sentOn")} {quote(isForget ? (old ?? "") : fact)}
+        </>
+      );
+      foot = (
+        <>
+          {rt(st.decides === "admin" ? "memory.forAdmin" : "memory.forManager")} {button("dismiss")}
+        </>
+      );
       break;
     case "kept":
       head = (

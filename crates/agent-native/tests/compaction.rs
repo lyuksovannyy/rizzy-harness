@@ -442,23 +442,30 @@ async fn context_overflow_compacts_once_and_retries() {
 #[tokio::test]
 async fn a_second_overflow_fails_cleanly() {
     let h = history(4, 3_000);
-    // Even the compacted request is too long.
+    // Even the compacted request is too long, and so is the wrap-up
+    // request the person's turn then gets (review F3): one error, without
+    // "start a new chat".
     let p = Windowed::new(1_000, BIG);
     let b = backend(p.clone(), None);
     let host = Host::default();
     let t = Instant::now();
     let out = run(&b, &host, h, agent(None), Default::default()).await;
     assert_eq!(out.reason, TurnEndReason::Error);
-    assert_eq!(p.kinds(), ["main", "summary", "main"], "one retry, no loop");
+    assert_eq!(
+        p.kinds(),
+        ["main", "summary", "main", "main"],
+        "one retry, the wrap-up, no loop"
+    );
     let err = out.error.unwrap();
     assert!(err.contains("context window"), "{err}");
+    assert!(!err.contains("new chat"), "{err}");
     assert!(
         !err.contains("maximum context length is"),
         "no provider body: {err}"
     );
     assert!(t.elapsed() < Duration::from_secs(5));
 
-    // Nothing to compact: fails at once, without a pointless retry.
+    // Nothing to compact: the wrap-up at once, then the error.
     let p = Windowed::new(1_000, BIG);
     let b = backend(p.clone(), None);
     let out = run(
@@ -470,7 +477,7 @@ async fn a_second_overflow_fails_cleanly() {
     )
     .await;
     assert_eq!(out.reason, TurnEndReason::Error);
-    assert_eq!(p.kinds(), ["main"]);
+    assert_eq!(p.kinds(), ["main", "main"]);
 }
 
 #[tokio::test]
@@ -1705,4 +1712,200 @@ fn the_coding_summary_names_loaded_skills_to_load_again() {
     let p = harness_agent_native::CODING_SUMMARY_PROMPT;
     assert!(p.contains("loaded with the skill tool"), "{p}");
     assert!(p.contains("so you can load it again"), "{p}");
+}
+
+/// A tool whose output is `size` characters: a turn that grows.
+struct Big(usize);
+
+#[async_trait::async_trait]
+impl harness_tools::Tool for Big {
+    fn name(&self) -> &str {
+        "big"
+    }
+    fn description(&self) -> &str {
+        "big output"
+    }
+    fn schema(&self) -> Value {
+        serde_json::json!({"type": "object", "properties": {"n": {"type": "integer"}}})
+    }
+    fn risk(&self) -> ToolRisk {
+        ToolRisk::ReadOnly
+    }
+    async fn run(&self, _: &harness_tools::ToolCtx, input: Value) -> harness_tools::ToolOutcome {
+        harness_tools::ToolOutcome::ok(format!("{input} {}", "word ".repeat(self.0 / 5)))
+    }
+}
+
+/// Calls `big` until `steps` main requests went through, then answers;
+/// a main request above `window` is refused as too long; summaries are
+/// short. Records each request: (summary, tokens, no_tool_calls, ok).
+struct Grow {
+    window: u64,
+    steps: usize,
+    /// Characters of text with each call (never masked).
+    text: usize,
+    /// The first summary call fails (the provider is out for a moment).
+    first_summary_fails: bool,
+    calls: Mutex<Vec<(bool, u64, bool, bool)>>,
+}
+
+#[async_trait::async_trait]
+impl Provider for Grow {
+    fn name(&self) -> &'static str {
+        "grow"
+    }
+    async fn complete(
+        &self,
+        req: &ChatRequest,
+        _: mpsc::UnboundedSender<String>,
+    ) -> Result<Completion, ProviderError> {
+        let prompts = [SUMMARY_PROMPT, CODING_SUMMARY_PROMPT];
+        let summary = matches!(req.messages.first(), Some(ChatMsg::System(s)) if prompts.contains(&s.as_str()));
+        let tokens = estimate_tokens(&req.messages);
+        let ok = summary || tokens <= self.window;
+        let done = {
+            let mut c = self.calls.lock().unwrap();
+            c.push((summary, tokens, req.no_tool_calls, ok));
+            c.iter().filter(|c| !c.0 && c.3).count()
+        };
+        if summary {
+            let first = self.calls.lock().unwrap().iter().filter(|c| c.0).count() == 1;
+            if first && self.first_summary_fails {
+                return Err(ProviderError::Status {
+                    status: 400,
+                    body: "bad request".into(),
+                    hint: RetryHint::default(),
+                });
+            }
+            return Ok(Completion {
+                text: "SUMMARY".into(),
+                ..Default::default()
+            });
+        }
+        if !ok {
+            return Err(overflow());
+        }
+        if done > self.steps || req.no_tool_calls {
+            return Ok(Completion {
+                text: "Done: all of it.".into(),
+                ..Default::default()
+            });
+        }
+        Ok(Completion {
+            text: "w ".repeat(self.text / 2),
+            tool_calls: vec![ToolCallRef {
+                call_id: format!("c{done}"),
+                tool: "big".into(),
+                input: serde_json::json!({ "n": done }),
+            }],
+            usage: None,
+            stop: Default::default(),
+        })
+    }
+}
+
+fn big_agent() -> AgentSpec {
+    AgentSpec {
+        tools: ToolSelection::List(vec!["big".into()]),
+        ..agent(None)
+    }
+}
+
+/// Allows every call (the file's `Host` denies them).
+#[derive(Default)]
+struct Allow(Mutex<Vec<EventKind>>);
+
+#[async_trait::async_trait]
+impl TurnHost for Allow {
+    async fn emit(&self, kind: EventKind) -> Result<(), harness_core::backend::LogError> {
+        self.0.lock().unwrap().push(kind);
+        Ok(())
+    }
+    async fn approve(&self, _: &str, _: &str, _: &Value, _: ToolRisk) -> Decision {
+        Decision::Allow
+    }
+}
+
+async fn grow_turn(
+    history_turns: (usize, usize),
+    window: u64,
+    steps: usize,
+    size: usize,
+    first_summary_fails: bool,
+) -> (TurnOutcome, Vec<(bool, u64, bool, bool)>) {
+    let p = Arc::new(Grow {
+        window,
+        steps,
+        text: 0,
+        first_summary_fails,
+        calls: Mutex::default(),
+    });
+    let b = NativeBackend::new(
+        p.clone(),
+        vec![Arc::new(Big(size))],
+        NativeConfig::default(),
+    );
+    let host = Allow::default();
+    let out = b
+        .run_turn(TurnCtx {
+            session_id: harness_core::SessionId::new(),
+            turn_id: "now".into(),
+            history: history(history_turns.0, history_turns.1),
+            user_text: "next".into(),
+            cwd: Default::default(),
+            model: "m".into(),
+            agent: Some(big_agent()),
+            compare: vec![],
+            parent_session: None,
+            extra: Default::default(),
+            cancel: Default::default(),
+            host: &host,
+        })
+        .await;
+    let calls = p.calls.lock().unwrap().clone();
+    (out, calls)
+}
+
+/// Review F3 (a): a turn that ran on for a while after its first overflow
+/// may compact again when it overflows again: it goes on to its answer.
+#[tokio::test]
+async fn a_later_overflow_in_the_same_turn_is_recovered_again() {
+    // The turn's own outputs overflow first; the summary call fails then,
+    // and hiding old outputs makes room. Much later, the hidden outputs'
+    // notes fill it again: the summary now works and the turn goes on.
+    let (out, calls) = grow_turn((4, 1_500), 10_000, 120, 8_000, true).await;
+    let refused: Vec<usize> = calls
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| !c.0 && !c.3)
+        .map(|(i, _)| i)
+        .collect();
+    assert!(refused.len() >= 2, "two overflows: {calls:?}");
+    assert_eq!(
+        out.reason,
+        TurnEndReason::Completed,
+        "{:?} {calls:?}",
+        out.error
+    );
+}
+
+/// Review F3 (b): an overflow that cannot be recovered in a person's turn
+/// (a second one soon after the first) gives the turn its wrap-up request,
+/// old outputs hidden and no tools, and it ends at its limit with its
+/// account, not with an error.
+#[tokio::test]
+async fn an_overflow_that_cannot_be_recovered_ends_with_the_wrap_up() {
+    // Each step's output alone is most of the room left.
+    let (out, calls) = grow_turn((4, 3_000), 10_000, 30, 16_000, false).await;
+    assert_eq!(
+        out.reason,
+        TurnEndReason::Limit,
+        "{:?} {calls:?}",
+        out.error
+    );
+    let last = calls.last().unwrap();
+    assert!(
+        !last.0 && last.2 && last.3,
+        "the wrap-up went through: {calls:?}"
+    );
 }
