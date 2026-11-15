@@ -274,7 +274,9 @@ describe("@ file mentions (T63)", () => {
     const asked: string[] = [];
     vi.spyOn(pageApi, "files").mockImplementation(async (_id: string, q: string) => {
       asked.push(q);
-      return { paths: paths.filter((p) => p.includes(q.replace(/^\.\//, ""))) };
+      // As the node answers: `./` when asked from the folder itself.
+      const pre = q.startsWith("./") ? "./" : "";
+      return { paths: paths.filter((p) => p.includes(q.replace(/^\.\//, ""))).map((p) => pre + p) };
     });
     const sent: Submission[] = [];
     const host = document.createElement("div");
@@ -357,6 +359,39 @@ describe("@ file mentions (T63)", () => {
     expect(c.sent[0]!.files).toEqual(["src/main.rs"]);
     c.unmount();
     vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  test("a path typed right before sending is checked and goes", async () => {
+    vi.useFakeTimers();
+    const c = await mountSession("s1", ["notes.md"]);
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(c.textarea, "see @notes.md now");
+      c.textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      c.key("Enter");
+      await vi.dynamicImportSettled();
+      for (let i = 0; i < 10; i++) await Promise.resolve();
+    });
+    expect(c.sent[0]!.files).toEqual(["notes.md"]);
+    // Asked for that very path, not by a walk.
+    expect(c.asked).toEqual(["./notes.md"]);
+    c.unmount();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  test("an answer about a path expires, so a file made later becomes a chip", async () => {
+    const { pageApi } = await import("../apiPages");
+    const { existing, KNOWN_MS } = await import("../lib/fileMentions");
+    let there: string[] = [];
+    vi.spyOn(pageApi, "files").mockImplementation(async () => ({ paths: there }));
+    const known = new Map();
+    expect(await existing("s1", ["a.rs"], known, 1000)).toEqual([]);
+    there = ["./a.rs"];
+    expect(await existing("s1", ["a.rs"], known, 1000 + KNOWN_MS - 1)).toEqual([]);
+    expect(await existing("s1", ["a.rs"], known, 1000 + KNOWN_MS)).toEqual(["a.rs"]);
     vi.restoreAllMocks();
   });
 

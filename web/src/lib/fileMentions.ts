@@ -28,25 +28,38 @@ export async function listFiles(id: string, q: string): Promise<string[]> {
   return (await pageApi.files(id, q)).paths;
 }
 
-/** The query whose answer lists `token` itself when it exists: a folder
- * (`src/`) is found among its parent's names, a file among its folder's. */
-function probe(token: string): string {
-  return token.endsWith("/") ? token.slice(0, -1) : token;
+/** How long an answer about a path is trusted (a file may appear later). */
+export const KNOWN_MS = 10_000;
+
+/** What the folder said about a token, and when. */
+export type Known = Map<string, { ok: boolean; at: number }>;
+
+/** The question that asks for `token` itself: its folder's entries that
+ * start with its name (`./` for the chat's folder), never a walk; the
+ * node lists an exact name first. */
+function probe(token: string): { q: string; want: string } {
+  const t = token.endsWith("/") ? token.slice(0, -1) : token;
+  return t.includes("/") ? { q: t, want: token } : { q: `./${t}`, want: `./${token}` };
 }
 
 /** Which of `tokens` name a file or folder of chat `id`'s folder, asked
  * one at a time (the server lets one person wait for a few lists at once),
- * the answers kept in `known` across calls. A token the folder does not
- * hold is the person's text, not a mention (`@types/node`). */
-export async function existing(id: string, tokens: string[], known: Map<string, boolean>): Promise<string[]> {
+ * answers kept in `known` for `KNOWN_MS`. A token the folder does not hold
+ * is the person's text, not a mention (`@types/node`). */
+export async function existing(id: string, tokens: string[], known: Known, now = Date.now()): Promise<string[]> {
+  const fresh = (tok: string) => {
+    const k = known.get(tok);
+    return k && now - k.at < KNOWN_MS ? k : undefined;
+  };
   for (const tok of tokens) {
-    if (known.has(tok)) continue;
+    if (fresh(tok)) continue;
+    const { q, want } = probe(tok);
     try {
-      known.set(tok, (await listFiles(id, probe(tok))).includes(tok));
+      known.set(tok, { ok: (await listFiles(id, q)).includes(want), at: now });
     } catch {
       // Not known now: asked again with the next change.
-      return tokens.filter((x) => known.get(x));
+      break;
     }
   }
-  return tokens.filter((x) => known.get(x));
+  return tokens.filter((x) => fresh(x)?.ok);
 }

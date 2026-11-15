@@ -3439,9 +3439,12 @@ impl Session {
         }
         // A sub-agent gets its task as text, never the images, and its
         // parent turn's context, quoted like the parent's.
+        // Scrubbed as the log stores it (the parent model wrote it, maybe
+        // from tool output): the child's model gets what the log holds and
+        // its next request rebuilds byte for byte (review of PR 120).
         let msg = UserMessage {
             turn_id,
-            text: task,
+            text: self.node.cfg.secrets.scrub(&task),
             attachments: vec![],
             reply: None,
             images: vec![],

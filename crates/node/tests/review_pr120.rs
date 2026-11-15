@@ -37,7 +37,18 @@ impl harness_agent_native::Provider for Spy {
         // Everything the request carries, as one string.
         self.1.lock().unwrap().push(format!("{:?}", req.messages));
         self.2.lock().unwrap().push(req.messages.clone());
-        self.0.complete(req, deltas).await
+        // A parent model that writes a node secret into a sub-agent's task
+        // (it read it somewhere): `@@S@@` in a delegate call becomes it.
+        let mut c = self.0.complete(req, deltas).await?;
+        for t in &mut c.tool_calls {
+            if t.tool == "delegate"
+                && let Some(task) = t.input.get("task").and_then(|v| v.as_str())
+            {
+                let task = task.replace("@@S@@", SECRET);
+                t.input["task"] = serde_json::Value::String(task);
+            }
+        }
+        Ok(c)
     }
 }
 
@@ -400,4 +411,65 @@ async fn r2b_typed_text_and_attachments_reach_the_model_as_the_log_holds_them() 
         next[at], first[at],
         "the rebuilt message differs from what was sent"
     );
+}
+
+/// Review of PR 120: a sub-agent's task, which the parent model writes,
+/// reaches the child's model scrubbed as the log stores it.
+#[tokio::test]
+async fn r6_a_sub_agents_task_is_scrubbed_like_a_message() {
+    let mut n = start(false, None).await;
+    let a = n.create("ws1").await;
+    let spec = |id: &str, tools: Vec<String>, delegates| harness_core::agent::AgentSpec {
+        agent_id: id.into(),
+        name: id.into(),
+        system_prompt: "work".into(),
+        tools: harness_core::agent::ToolSelection::List(tools),
+        model: None,
+        fallbacks: vec![],
+        unavailable: vec![],
+        no_effort: vec![],
+        context_windows: Default::default(),
+        effort: None,
+        ui: Default::default(),
+        prompt_hash: "h".into(),
+        deny_tools: vec![],
+        delegates,
+        caps: None,
+    };
+    let scout = spec("scout", vec!["read".into()], vec![]);
+    let lead = spec("lead", vec!["read".into()], vec![scout]);
+    let before = n.ended(a);
+    n.send(MasterToNode::Prompt {
+        savings: None,
+        context: None,
+        reply: None,
+        agent: Some(lead),
+        attachments: vec![],
+        compare: vec![],
+        req_id: "p".into(),
+        session_id: a,
+        text: "delegate: scout=check the key @@S@@ please".into(),
+        images: vec![],
+        agent_named: false,
+        files: vec![],
+    })
+    .await
+    .unwrap();
+    let by = std::time::Instant::now() + Duration::from_secs(20);
+    while n.ended(a) == before {
+        assert!(std::time::Instant::now() < by, "the turn did not end");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let reqs = n.msgs.lock().unwrap().clone();
+    let child = reqs
+        .iter()
+        .map(|m| format!("{m:?}"))
+        .find(|m| m.contains("check the key") && !m.contains("delegate:"))
+        .expect("the child's request");
+    let s = child;
+    assert!(
+        !s.contains(SECRET),
+        "the secret reached the sub-agent's model: {s}"
+    );
+    assert!(s.contains("check the key [REDACTED] please"), "{s}");
 }

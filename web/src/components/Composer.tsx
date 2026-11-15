@@ -349,7 +349,7 @@ export function Composer(props: {
   // message, so nothing reaches the model the person did not see listed.
   const [found, setFound] = useState<string[]>([]);
   const [dropped, setDropped] = useState<string[]>([]);
-  const known = useRef(new Map<string, boolean>());
+  const known = useRef(new Map<string, { ok: boolean; at: number }>());
   const hasPathToken = !!filesOf && /(^|[\s([{'"])@[^\s@]*[/.]/.test(text);
   useEffect(() => {
     if (!filesOf || !hasPathToken) {
@@ -368,6 +368,17 @@ export function Composer(props: {
     };
   }, [text, filesOf, hasPathToken]);
   const attached = found.filter((p) => !dropped.includes(p));
+  // On send, the check of the text as sent (a token typed within the
+  // debounce, a file made since): waited for at most 2 s, else the chips
+  // shown. Never a path the person took off.
+  const sendable = async (id: string, body: string): Promise<string[]> => {
+    const m = await import("../lib/fileMentions");
+    const checked = await Promise.race([
+      m.existing(id, m.fileMentions(body), known.current),
+      new Promise<null>((r) => setTimeout(() => r(null), 2000)),
+    ]);
+    return (checked ?? attached).filter((p) => !dropped.includes(p));
+  };
   const suggestions: { id: string; title: string; hint: string; origin?: string | null; agent?: Agent; file?: boolean }[] = !mention
     ? []
     : fileQuery != null
@@ -441,9 +452,7 @@ export function Composer(props: {
         ...(images.length ? { images } : {}),
         ...(home && mode === "agentic" ? { execMode: exec } : {}),
         ...(home && mode === "agentic" && approvalPick ? { approvalMode: approvalPick } : {}),
-        ...(filesOf && attached.length
-          ? { files: (await import("../lib/fileMentions")).fileMentions(body).filter((p) => attached.includes(p)) }
-          : {}),
+        ...(filesOf && hasPathToken ? { files: await sendable(filesOf, body) } : {}),
       });
       if (mode === "agentic") rememberFolder(cwd.trim());
       if (home) props.onLearn?.(body, mode);

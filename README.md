@@ -2266,7 +2266,13 @@ lies inside a `workspace_roots` entry (by default your home folder, so
 `~/.codex/AGENTS.md` is refused), inside a `[sandbox]` read or write folder,
 or inside `/etc`, `/usr`, `/opt` and the other folders the sandbox lets every
 command read; put it in a folder of its own such as `/srv/rizzy-harness/`.
-Wherever it lies, the file joins the node's protected paths: `read`, `write`,
+The path may hold no `.` or `..`; the node resolves it once at start (links
+in its folders followed, even where the file or a folder does not exist
+yet) and checks and protects where it really leads. At every message it
+resolves the path again: if it now leads elsewhere (a folder on the way
+became a link, or appeared as one), the file is not read and the agent is
+told why; restart the node to accept the new place. Wherever it lies, the
+file joins the node's protected paths: `read`, `write`,
 `edit`, `@` mentions and the folder listing refuse it in every mode, and the
 shell gets no grant on it. In the sandbox mode the shell does not see it at
 all (bubblewrap's file view holds only its grants); in the host mode this
@@ -2274,12 +2280,14 @@ rests on Landlock alone (the same rules, no bubblewrap), so it holds where
 Landlock is enforced and has that mode's gaps (see "Execution modes": a
 command can ask another service of this user, over a socket, to change it
 below Linux 7.1). The node reads it only when it belongs to the node's own
-user or root (another account's file would set every chat's instructions,
-so it is named, not read), and warns in its log and in `doctor` when
-another user can write the file or its folder. No file, or an empty one:
+user or root and neither its group nor other users can write it (else
+another account would set every chat's instructions: it is named, not read;
+`chmod go-w` it), and warns in its log and in `doctor` when another user can
+write its folder or the file has more than one name (a hard link). No file, or an empty one:
 nothing is sent. It is read at the start of every message like the
-repository's files, in a 5-second bound of its own, cut at 16 KiB (or half
-the repository files' cap on a small context window) with a note, sent again
+repository's files, in a 5-second bound of its own, cut at 16 KiB as sent
+(indentation included; or half the repository files' cap on a small context
+window) with a note, sent again
 only when it changed, withdrawn when you delete it, and kept through
 compaction. Only the regular file at that very path is read: a link there is
 not followed (name the file itself in node.toml; a link in a folder above it

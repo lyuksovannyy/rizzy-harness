@@ -232,13 +232,24 @@ pub(crate) struct UserFile {
 pub(crate) fn read_user(path: &Path, cap: usize) -> UserFile {
     use nix::fcntl::OFlag;
     use std::io::Read as _;
-    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let mut out = UserFile::default();
     let lead = USER_LEAD;
     let mut refused = |why: String| {
         out.text = Some(format!("{lead}\n(not read: {why})"));
         out.problem = Some(why);
     };
+    // `path` is where the file led at start (`resolve_existing`), and is
+    // what is protected. A folder on the way that became a link since, or
+    // appeared through one, leads elsewhere now: not read (review of PR
+    // 120). Checked again on the opened descriptor below.
+    const MOVED: &str = "the path leads elsewhere than when the node started (a folder on its way \
+         became a link, or appeared through one); restart the node to check it again";
+    if crate::policy::resolve_file(path) != path {
+        refused(MOVED.into());
+        return out;
+    }
     let meta = match std::fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return out,
@@ -270,6 +281,15 @@ pub(crate) fn read_user(path: &Path, cap: usize) -> UserFile {
             return out;
         }
     };
+    // What was opened is the file the node protects: a folder on the way
+    // swapped for a link between the check above and the open is refused.
+    match std::fs::read_link(format!("/proc/self/fd/{}", f.as_raw_fd())) {
+        Ok(real) if real == path => {}
+        _ => {
+            refused(MOVED.into());
+            return out;
+        }
+    }
     // Swapped for something else between the look and the open.
     let Ok(meta) = f
         .metadata()
@@ -279,14 +299,12 @@ pub(crate) fn read_user(path: &Path, cap: usize) -> UserFile {
         refused("it is not a regular file".into());
         return out;
     };
-    // Only the node's own user or root sets every chat's instructions.
+    // Only the node's own user or root owns it, and nobody else writes it.
+    if let Some(why) =
+        crate::policy::file_refusal(meta.uid(), meta.mode(), nix::unistd::geteuid().as_raw())
     {
-        use std::os::unix::fs::MetadataExt;
-        if let Some(why) = crate::policy::owner_refusal(meta.uid(), nix::unistd::geteuid().as_raw())
-        {
-            refused(why);
-            return out;
-        }
+        refused(why);
+        return out;
     }
     let mut bytes = Vec::new();
     if let Err(e) = f.take(cap as u64 + 1).read_to_end(&mut bytes) {
@@ -296,24 +314,33 @@ pub(crate) fn read_user(path: &Path, cap: usize) -> UserFile {
     if bytes.iter().all(u8::is_ascii_whitespace) {
         return out;
     }
-    let cut = bytes.len() > cap;
-    let mut text = String::from_utf8_lossy(&bytes).into_owned();
-    if cut {
-        let mut n = cap.min(text.len());
+    // The cap counts the indentation too: a file of short lines cannot
+    // grow past it (review of PR 120).
+    let lossy = String::from_utf8_lossy(&bytes);
+    let mut text = indent(lossy.trim_end_matches(['\n', '\r']));
+    let cut = bytes.len() > cap || text.len() > cap;
+    if text.len() > cap {
+        let mut n = cap;
         while !text.is_char_boundary(n) {
             n -= 1;
         }
         text.truncate(n);
     }
-    let mut block = format!("{lead}\n{}", indent(text.trim_end_matches(['\n', '\r'])));
+    let mut block = format!("{lead}\n{text}");
     if cut {
         let note = format!(
-            "[cut: the node operator's instruction file is longer than {cap} bytes; the text \
-             above is its start]"
+            "[cut: the node operator's instruction file is longer than {cap} bytes as sent; the \
+             text above is its start]"
         );
         block.push('\n');
         block.push_str(&note);
         out.problem = Some(note);
+    } else if meta.nlink() > 1 {
+        out.problem = Some(format!(
+            "it has {} names (hard links); a change through another name changes every chat's \
+             instructions",
+            meta.nlink()
+        ));
     }
     out.text = Some(block);
     out
@@ -394,7 +421,10 @@ pub(crate) fn read(cwd: &Path, granted: &Path, protected: &[PathBuf], cap: usize
                 found.problems.push(format!("{label}: {why}"));
             }
             Ok(bytes) => {
-                let mut text = String::from_utf8_lossy(&bytes).into_owned();
+                // The cap counts the text as sent, indentation included
+                // (review of PR 120).
+                let lossy = String::from_utf8_lossy(&bytes);
+                let mut text = indent(lossy.trim_end_matches(['\n', '\r']));
                 if text.len() > left {
                     let mut n = left;
                     while !text.is_char_boundary(n) {
@@ -405,7 +435,7 @@ pub(crate) fn read(cwd: &Path, granted: &Path, protected: &[PathBuf], cap: usize
                 }
                 left -= text.len();
                 out.push_str(&format!("\n==> {label} <==\n"));
-                out.push_str(&indent(text.trim_end_matches(['\n', '\r'])));
+                out.push_str(&text);
             }
         }
     }
@@ -634,7 +664,8 @@ mod tests {
         put(&t.ws.join("a/b/AGENTS.md"), "never reached");
         let r = read(&t.ws.join("a/b"), &t.ws, &[], CAP);
         let got = r.text.unwrap();
-        let into = CAP - 20_000;
+        // 200 lines, each sent with two spaces in front; no last line break.
+        let into = CAP - (20_000 + 400 - 1);
         assert!(
             got.ends_with(&format!(
                 "\n[cut: the instruction files are longer than 32 KiB together; the text above \
@@ -646,12 +677,12 @@ mod tests {
         assert!(!got.contains("never reached"));
         let text: usize = got
             .lines()
-            .filter_map(|l| l.strip_prefix("  x"))
+            .filter(|l| l.starts_with("  x"))
             .map(|l| l.len() + 1)
             .sum();
-        assert!(text <= CAP, "{text}");
-        // Two spaces of indentation a line on top.
-        assert!(got.len() < CAP + 2048, "{}", got.len());
+        // Each file's last line has no line break of its own: +1 a file.
+        assert!(text <= CAP + 2, "{text}");
+        assert!(got.len() < CAP + 1024, "{}", got.len());
         assert_eq!(r.problems.len(), 1, "{:?}", r.problems);
         assert!(r.problems[0].contains("cut"), "{:?}", r.problems);
     }
@@ -897,10 +928,10 @@ mod tests {
         put(&f, "é".repeat(5 * 1024 * 1024 / 2));
         let r = read_user(&f, USER_CAP);
         let text = r.text.unwrap();
-        assert!(text.len() < USER_CAP + 2048, "{}", text.len());
+        assert!(text.len() < USER_CAP + 1024, "{}", text.len());
         assert!(
             text.ends_with(&format!(
-                "\n[cut: the node operator's instruction file is longer than {USER_CAP} bytes; the \
+                "\n[cut: the node operator's instruction file is longer than {USER_CAP} bytes as sent; the \
                  text above is its start]"
             )),
             "{}",
@@ -909,6 +940,62 @@ mod tests {
         assert!(r.problem.unwrap().contains("cut"));
         assert_eq!(user_cap_for(None), USER_CAP);
         assert_eq!(user_cap_for(Some(8192)), 1638);
+    }
+
+    /// Review of PR 120: the cap counts the indentation, so a file of
+    /// short lines does not grow past it; the repository's files too.
+    #[test]
+    fn short_lines_stay_within_the_cap_as_sent() {
+        let t = tree();
+        let f = t.ws.join("AGENTS.md");
+        put(&f, "a\n".repeat(20_000));
+        let text = read_user(&f, USER_CAP).text.unwrap();
+        let body = &text[USER_LEAD.len() + 1..text.rfind("\n[cut:").unwrap()];
+        assert!(body.len() <= USER_CAP, "{}", body.len());
+        let got = read(&t.ws, &t.ws, &[], CAP).text.unwrap();
+        let sent: usize = got
+            .lines()
+            .filter(|l| l.starts_with("  "))
+            .map(|l| l.len() + 1)
+            .sum();
+        assert!(sent <= CAP + 1, "{sent}");
+    }
+
+    /// Review of PR 120 (H1, x1-x3 and one step further): the file is read
+    /// only where it led at start. A folder on its way that did not exist
+    /// then and appears later as a link (into a chat's folder, where an
+    /// agent wrote the text) leads elsewhere: not read, with the reason. A
+    /// file others can write is not read either, root's included.
+    #[test]
+    fn the_operators_file_is_read_only_where_it_led_at_start() {
+        let t = tree();
+        let at_start = crate::policy::resolve_file(&t.ws.join("ops/sub/AGENTS.md"));
+        assert_eq!(at_start, t.ws.join("ops/sub/AGENTS.md"));
+        put(&t.ws.join("chat/sub/AGENTS.md"), "PLANTED by a chat");
+        std::os::unix::fs::symlink(t.ws.join("chat"), t.ws.join("ops")).unwrap();
+        let r = read_user(&at_start, USER_CAP);
+        let text = r.text.unwrap();
+        assert!(!text.contains("PLANTED"), "{text}");
+        assert!(
+            text.contains("(not read: the path leads elsewhere than when the node started"),
+            "{text}"
+        );
+        // Group-writable: not read.
+        use std::os::unix::fs::PermissionsExt;
+        let f = t.ws.join("g/AGENTS.md");
+        put(&f, "rule");
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o664)).unwrap();
+        let text = read_user(&f, USER_CAP).text.unwrap();
+        assert!(
+            text.contains("(not read: its group or other users can write it"),
+            "{text}"
+        );
+        // Two names: read, and the log is told.
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::hard_link(&f, t.ws.join("g/other")).unwrap();
+        let r = read_user(&f, USER_CAP);
+        assert!(r.text.unwrap().ends_with("\n  rule"));
+        assert!(r.problem.unwrap().contains("2 names"));
     }
 
     /// Review of PR 120: a repository file that imitates the operator's

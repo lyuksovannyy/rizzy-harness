@@ -296,7 +296,10 @@ pub fn complete(ctx: &ToolCtx, query: &str) -> Result<Vec<Candidate>, String> {
             return Ok(vec![]);
         }
         let lower = prefix.to_lowercase();
-        let mut out: Vec<(bool, String)> = Vec::new();
+        // (not the exact name, a file, path): the exact name first, so the
+        // composer's check of a typed path finds it however many names
+        // share its start.
+        let mut out: Vec<(bool, bool, String)> = Vec::new();
         let Ok(rd) = std::fs::read_dir(&real) else {
             return Ok(vec![]);
         };
@@ -313,10 +316,14 @@ pub fn complete(ctx: &ToolCtx, query: &str) -> Result<Vec<Candidate>, String> {
             if is_dir {
                 p.push('/');
             }
-            out.push((!is_dir, p));
+            out.push((name.to_lowercase() != lower, !is_dir, p));
         }
         out.sort();
-        return Ok(out.into_iter().map(|(_, p)| p).take(MAX_RESULTS).collect());
+        return Ok(out
+            .into_iter()
+            .map(|(_, _, p)| p)
+            .take(MAX_RESULTS)
+            .collect());
     }
     let lower = query.to_lowercase();
     let started = Instant::now();
@@ -601,6 +608,12 @@ mod tests {
         assert_eq!(got, ["main.md", "src/main.rs"]);
         assert_eq!(complete(&c, "src/").unwrap(), ["src/lib.rs", "src/main.rs"]);
         assert_eq!(complete(&c, "src/m").unwrap(), ["src/main.rs"]);
+        // An exact name comes first, past any number sharing its start.
+        for i in 0..60 {
+            std::fs::create_dir_all(t.ws.join(format!("src/lib.rs{i:02}"))).unwrap();
+        }
+        assert_eq!(complete(&c, "src/lib.rs").unwrap()[0], "src/lib.rs");
+        assert_eq!(complete(&c, "./main.md").unwrap(), ["./main.md"]);
         assert!(complete(&c, "../").unwrap().is_empty());
         assert!(complete(&c, "data-link/").unwrap().is_empty());
         // A link out of the folder is not listed through, outside mode on.
