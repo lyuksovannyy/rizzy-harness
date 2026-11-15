@@ -550,9 +550,9 @@ async fn parallel_coders_get_worktrees_and_merge_back() {
 }
 
 /// "Read-only sub-agents use the small model" (X.16): with it on and a
-/// small model set, a sub-agent that may not write, edit, run commands or
-/// use MCP (Scout, Reviewer by their tool lists) and has no model of its
-/// own runs on the small model, its parent's model as its fallback; the
+/// small model set, a sub-agent whose every tool only reads (Scout, by its
+/// tool list; not Reviewer, which may `remember`) and that has no model of
+/// its own runs on the small model, its parent's model as its fallback; the
 /// child's own log says which model it ran on.
 #[tokio::test]
 async fn read_only_sub_agents_run_on_the_small_model_when_switched_on() {
@@ -593,7 +593,11 @@ async fn read_only_sub_agents_run_on_the_small_model_when_switched_on() {
             .events_after(k.session_id, 0, 1_000)
             .unwrap();
         let created = evs.iter().find(|e| e.kind == "session_created").unwrap();
-        assert_eq!(created.payload["model"], "demo::small", "{evs:?}");
+        // Scout's tools all only read; Reviewer may also `remember`, which
+        // is not on the allow-list, so it keeps its parent's model.
+        let small = created.payload["model"] == "demo::small";
+        let scout = created.payload["agent_id"] == "scout";
+        assert_eq!(small, scout, "{evs:?}");
     }
     // The parent itself stays on its own model.
     let evs = m.inner_mirror().events_after(sid, 0, 1_000).unwrap();
