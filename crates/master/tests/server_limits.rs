@@ -359,6 +359,10 @@ async fn call(
     Some((st, r.text().await.unwrap()))
 }
 
+/// The handler sleeps 5 s; the short limit is 300 ms. What separates "cut"
+/// from "ran to the end" is the answer (504 with the timeout's body, not
+/// the handler's `late`) and that it came before the handler's 5 s were up;
+/// the client's own wait only fails a hung test.
 #[tokio::test]
 async fn a_sleeping_handler_is_cut_and_dropped() {
     let dropped = Arc::new(AtomicBool::new(false));
@@ -368,11 +372,15 @@ async fn a_sleeping_handler_is_cut_and_dropped() {
         srv.addr,
         reqwest::Method::GET,
         "/api/me",
-        Duration::from_secs(3),
+        Duration::from_secs(30),
     )
     .await
-    .expect("cut before the handler finished");
-    assert!(t.elapsed() < Duration::from_secs(2));
+    .expect("no answer in 30 s");
+    assert!(
+        t.elapsed() < Duration::from_secs(5),
+        "answered only after the handler's own 5 s: {:?}",
+        t.elapsed()
+    );
     assert_eq!(st, 504);
     assert_eq!(body, r#"{"error":"request timed out"}"#);
     assert!(

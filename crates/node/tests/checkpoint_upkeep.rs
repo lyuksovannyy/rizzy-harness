@@ -498,6 +498,16 @@ fn logged(p: &Path, what: &str) -> Vec<f64> {
         .collect()
 }
 
+/// The checkpoint groups dropped since the last collection, from the
+/// shadow's state file (`harness-gc`, written by `git::upkeep`).
+fn dropped(shadow: &Path) -> u64 {
+    std::fs::read_to_string(shadow.join("harness-gc"))
+        .unwrap_or_default()
+        .lines()
+        .find_map(|l| l.strip_prefix("dropped ")?.trim().parse().ok())
+        .unwrap_or(0)
+}
+
 fn epoch() -> f64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -528,11 +538,26 @@ const SLOW_CHILD: &str = "HARNESS_TEST_A18_SLOW_GC_LOG";
 async fn slow_gc_scenario(log: PathBuf) {
     let mut rig = Rig::with_keep(1).await;
     rig.write("f.txt", "0\n");
+    // Turns until one makes the collection due (`GC_EVERY` dropped groups,
+    // counted before its `turn_ended`, in the shadow's `harness-gc`); then
+    // wait for that collection to start before anything else happens. (It
+    // was a fixed 300 ms after each turn: on a loaded runner the collection
+    // started later, during the next turn, and was then measured against
+    // the wrong turn's end.)
     let mut ended = 0.0;
     for i in 1..=40 {
         rig.turn(&format!("echo {i} > f.txt")).await;
         ended = epoch();
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        if dropped(&rig.shadow()) >= GC_EVERY {
+            let by = std::time::Instant::now() + Duration::from_secs(60);
+            while logged(&log, "start").is_empty() {
+                assert!(
+                    std::time::Instant::now() < by,
+                    "the due collection never started"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
         if !logged(&log, "start").is_empty() {
             break;
         }
