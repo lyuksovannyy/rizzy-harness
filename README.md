@@ -906,7 +906,9 @@ deleted on one side and changed on the other, added on both, a link, a
 binary file or over 1 MiB on both sides, nothing of that sub-agent is
 written, and the agent that delegated gets the list of those files and
 the sub-agent's whole diff (up to 16,000 characters) so it can make the
-changes itself. None of this runs your repository's config, hooks, filters, merge drivers or
+changes itself. Several sub-agents started in one step work at the same
+time on separate copies and do not see each other's changes; the agents
+are told to start together only work that is independent. None of this runs your repository's config, hooks, filters, merge drivers or
 attributes. Sub-agents that only
 read work in the folder itself. Only the latest 10 checkpoints per folder are kept (`checkpoints_keep`
 in `node.toml`). "Rewind" undoes a turn and everything after it. Before an

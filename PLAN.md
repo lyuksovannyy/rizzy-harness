@@ -1365,7 +1365,10 @@ unversioned, pin the image.
   `max_subagent_tokens`). Such an agent gets a `delegate` tool; each call runs the
   specialist **in its own child session on the same node** (own log, own approvals,
   `parent_session` on `session_created`, owner inherited only from a parent on the same
-  node). All delegations of one step run **in parallel**; caps are enforced per turn
+  node). All delegations of one step run **in parallel**, each writer on its own copy
+  from the same base, blind to the others; the `delegate` description and the Senior
+  Teamlead's prompt tell the model to start only independent work in one step and work
+  that builds on another child's result in a later one; caps are enforced per turn
   (default 4 sub-agents, 200k tokens) and shown in the tool description. Depth is one
   (sub-agents get no delegates). Cancelling the parent cancels its children. The child's
   turn gets the task, the repository's instruction files and its parent turn's

@@ -325,6 +325,15 @@ fn stopped(usage: Usage) -> TurnOutcome {
 /// The orchestration tool (handled by the loop itself, not a `Tool`).
 pub const DELEGATE: &str = "delegate";
 
+/// What the `delegate` description says about calls in one step (the live
+/// test of 2026-11-15: "write the function" and "write its tests" started
+/// together, each blind to the other).
+pub const DELEGATE_PARALLEL: &str = "Several calls in one step run at the same time, each \
+     sub-agent on its own copy of the folder, and they do not see each other's changes: in \
+     one step delegate only independent work (different files, or reading only); delegate \
+     work that builds on another sub-agent's result in a later step, after that result is \
+     back.";
+
 /// `finish`, offered in a sub-agent's turn only (handled by the loop).
 fn finish_spec() -> ToolSpec {
     ToolSpec {
@@ -819,8 +828,8 @@ impl NativeBackend {
                     "Hand a self-contained sub-task to a specialist, who works in its own session \
                      on the same machine with this turn's project context (not this conversation) \
                      and returns a status (done, partial or failed) with its own report, which \
-                     nobody has checked. Available: {}. Several calls in one step run in \
-                     parallel. Limits per turn: {} sub-agents, {} tokens.",
+                     nobody has checked. Available: {}. {DELEGATE_PARALLEL} Limits per turn: {} \
+                     sub-agents, {} tokens.",
                     roster.join(", "),
                     caps.max_subagents,
                     caps.max_tokens
