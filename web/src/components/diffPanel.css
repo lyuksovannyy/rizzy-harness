@@ -1,0 +1,176 @@
+/* A turn's changes (DiffPanel.tsx): beside the conversation on a wide
+   screen, over it on a narrow one. Rizzy Glass tokens only. An added or
+   removed line is marked by its sign as well as its colour. */
+.diff-panel {
+  flex: none;
+  width: min(640px, 48%);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  border-left: 1px solid var(--line);
+  background: var(--bg-2);
+  font-size: var(--text-sm);
+}
+.diff-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--hairline);
+}
+.diff-title {
+  margin: 0;
+  font-weight: var(--w-semibold);
+}
+.diff-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-3);
+  padding: 6px 12px;
+  color: var(--fg-2);
+}
+.diff-tools:empty {
+  display: none;
+}
+.diff-body {
+  overflow: auto;
+  flex: 1;
+  padding: 8px 12px 16px;
+  min-width: 0;
+}
+.diff-list {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+}
+.diff-jump {
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.diff-file {
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  margin: 0 0 10px;
+  min-width: 0;
+}
+.diff-file-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: 6px 8px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--hairline);
+}
+.diff-path {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.diff-counts {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+.diff-plus {
+  color: var(--ok);
+}
+.diff-minus {
+  color: var(--bad);
+}
+.diff-badge {
+  flex: none;
+  display: inline-block;
+  min-width: 1.4em;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  font-weight: var(--w-semibold);
+  border: 1px solid currentColor;
+  border-radius: 4px;
+}
+.diff-st-added {
+  color: var(--ok);
+}
+.diff-st-deleted {
+  color: var(--bad);
+}
+.diff-st-modified,
+.diff-st-type_changed {
+  color: var(--warn);
+}
+.diff-st-renamed {
+  color: var(--accent-fg);
+}
+.diff-why,
+.diff-cut {
+  margin: 6px 8px;
+}
+.diff-cut {
+  color: var(--warn);
+}
+.diff-hunk {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+.diff-hunk-head {
+  padding: 2px 8px;
+  color: var(--fg-3);
+  background: var(--fill);
+  overflow-wrap: anywhere;
+}
+.diff-line {
+  display: grid;
+  grid-template-columns: 3.5em 3.5em 1.5em minmax(0, 1fr);
+}
+.diff-n {
+  padding-right: 6px;
+  text-align: right;
+  color: var(--fg-3);
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+}
+.diff-sign {
+  text-align: center;
+  user-select: none;
+  font-weight: var(--w-bold);
+}
+/* Long lines wrap: nothing is cut off at the panel's edge. */
+.diff-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  min-width: 0;
+  padding-right: 8px;
+}
+.diff-add {
+  background: var(--add-bg);
+}
+.diff-add .diff-sign {
+  color: var(--ok);
+}
+.diff-del {
+  background: var(--del-bg);
+}
+.diff-del .diff-sign {
+  color: var(--bad);
+}
+.diff-note .diff-text {
+  color: var(--fg-3);
+  font-style: italic;
+}
+@media (max-width: 900px) {
+  .diff-panel {
+    position: absolute;
+    inset: 0;
+    z-index: 4;
+    width: auto;
+    /* Opaque: the chat must not show through the lines. */
+    background: var(--surface);
+    box-shadow: var(--shadow-1);
+  }
+  .diff-line {
+    grid-template-columns: 2.8em 2.8em 1.2em minmax(0, 1fr);
+  }
+}
