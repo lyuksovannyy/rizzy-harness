@@ -26,6 +26,7 @@ vi.mock("../apiPages", () => ({
     approve: vi.fn(),
     turnDiff: vi.fn(() => Promise.resolve({ files: [] })),
     restoreTurn: vi.fn(() => Promise.resolve({ ok: true })),
+    retryTurn: vi.fn(() => Promise.resolve({ ok: true })),
   },
 }));
 const artifactsApi = { forSession: vi.fn(() => Promise.resolve([])), save: vi.fn(() => Promise.resolve({ requested: true })) };
@@ -411,6 +412,48 @@ describe("callback turns (T.8d step 3)", () => {
   });
 });
 
+
+describe("Retry on a failed turn (X.21)", () => {
+  const failed: Item[] = [
+    { type: "user", turn_id: "t1", text: "migrate it" },
+    { type: "error", message: "The model is not available." },
+    { type: "turn_end", turn_id: "t1", reason: "error" },
+  ];
+  const buttons = () => [...host.querySelectorAll(".divider button")].filter((b) => b.textContent === "Retry");
+  test("on the failed last turn's end line; a click retries that turn", async () => {
+    await show(failed, sessionRow());
+    expect(buttons()).toHaveLength(1);
+    await act(async () => (buttons()[0] as HTMLButtonElement).click());
+    expect(api.retryTurn).toHaveBeenCalledWith(SID, "t1");
+  });
+  test("not after a turn that followed, a Stop, a completed turn, in a sub-agent's chat or a routine's run", async () => {
+    await show([...failed, { type: "user", turn_id: "t2", text: "never mind" }, { type: "turn_end", turn_id: "t2", reason: "completed" }], sessionRow());
+    expect(buttons()).toHaveLength(0);
+    await show([{ type: "user", turn_id: "t1", text: "x" }, { type: "turn_end", turn_id: "t1", reason: "cancelled" }], sessionRow());
+    expect(buttons()).toHaveLength(0);
+    await show(failed, sessionRow({ parent_id: "p1" }));
+    expect(buttons()).toHaveLength(0);
+    await show(failed, sessionRow({ routine: mark({ status: "failed" }) }));
+    expect(buttons()).toHaveLength(0);
+    await show(failed, sessionRow({ blocked: "your level" }));
+    expect(buttons()).toHaveLength(0);
+  });
+  test("the retry stands after the failed attempt, which stays, and the message shows once", async () => {
+    await show(
+      [
+        ...failed,
+        { type: "retry", turn_id: "t2", of: "t1", reason: "error", failed_model: "demo::small", model: "openai::gpt-4o" },
+        { type: "assistant", message_id: "m2", text: "Migrated.", done: true, author: null, variant: null },
+        { type: "turn_end", turn_id: "t2", reason: "completed" },
+      ],
+      sessionRow(),
+    );
+    expect([...host.querySelectorAll(".msg.user")].map((m) => m.textContent)).toEqual(["migrate it"]);
+    expect(host.textContent).toContain("turn error");
+    expect(host.textContent).toContain("Retried with openai::gpt-4o (the attempt above used demo::small)");
+    expect(buttons()).toHaveLength(0);
+  });
+});
 
 describe("messages sent while the agent works (X.5)", () => {
   test("shown where they were sent, marked until the agent reads them; the streaming reply before one is not cut", async () => {

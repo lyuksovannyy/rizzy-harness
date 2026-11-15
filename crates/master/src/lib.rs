@@ -392,6 +392,15 @@ pub struct PromptOpts {
     /// Paths the person mentioned with `@path` (PLAN.md T63): names only,
     /// which the node reads under its own `read` rules.
     pub files: Vec<String>,
+    /// The person's Retry of this failed turn (X.21, `http/retry.rs`): the
+    /// node runs it again with the message its log holds. The text is that
+    /// message's, for what is looked up by it (recall, project facts, a
+    /// leading `@agent`); it is not sent. Attachments, images, files, an
+    /// answer and parallel answers must be empty.
+    pub retry: Option<String>,
+    /// The message a retry runs again carries images: the model it now
+    /// runs on must see them, as for a prompt with images.
+    pub retry_images: bool,
 }
 
 /// The model a turn runs on: the agent's (resolved), else the one chosen
@@ -561,6 +570,7 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         MasterToNode::ApprovalRespond { decision, .. } if !decision.allows() => None,
         MasterToNode::Prompt { session_id, .. }
         | MasterToNode::Callback { session_id, .. }
+        | MasterToNode::Retry { session_id, .. }
         | MasterToNode::Handoff { session_id, .. }
         | MasterToNode::Compact { session_id, .. }
         | MasterToNode::SelectVariant { session_id, .. }
@@ -1952,8 +1962,22 @@ impl Master {
             callback,
             by_owner,
             files,
+            retry,
+            retry_images,
         } = opts;
         let resume = !callback.is_empty();
+        if retry.is_some()
+            && (resume
+                || !attachments.is_empty()
+                || !compare.is_empty()
+                || reply.is_some()
+                || !images.is_empty()
+                || !files.is_empty())
+        {
+            return Err(CommandError::Rejected(
+                "a retry carries no attachment, image, file, answer or parallel answers".into(),
+            ));
+        }
         if resume
             && (!text.is_empty()
                 || context.is_some()
@@ -2034,7 +2058,7 @@ impl Master {
         )?;
         // `media::prompt_images` checked the chat's own model; an @mention or
         // parallel answers may bring others.
-        if !images.is_empty() {
+        if !images.is_empty() || retry_images {
             let main = turn_model(&agent, session_model.as_deref(), &row);
             if let Some(blind) = blind(&r, &main, &compare) {
                 return Err(CommandError::Rejected(media::blind_message(&blind)));
@@ -2199,23 +2223,34 @@ impl Master {
                 .await;
         }
         let sent_images: Vec<String> = images.iter().map(|i| i.media_id.clone()).collect();
-        let mut msg = MasterToNode::Prompt {
-            req_id: String::new(),
-            session_id: sid,
-            text,
-            agent: Some(agent),
-            attachments,
-            compare,
-            savings,
-            context: Some(Box::new(harness_core::backend::MasterContext {
-                turn: (!turn_context.is_empty()).then(|| turn_context.join("\n\n")),
-                standing,
-                unattended: false,
-            })),
-            reply,
-            images,
-            agent_named: picked,
-            files,
+        let context = Some(Box::new(harness_core::backend::MasterContext {
+            turn: (!turn_context.is_empty()).then(|| turn_context.join("\n\n")),
+            standing,
+            unattended: false,
+        }));
+        let mut msg = match retry {
+            Some(turn_id) => MasterToNode::Retry {
+                req_id: String::new(),
+                session_id: sid,
+                turn_id,
+                agent: Some(agent),
+                savings,
+                context,
+            },
+            None => MasterToNode::Prompt {
+                req_id: String::new(),
+                session_id: sid,
+                text,
+                agent: Some(agent),
+                attachments,
+                compare,
+                savings,
+                context,
+                reply,
+                images,
+                agent_named: picked,
+                files,
+            },
         };
         // The link drops a frame over 8 MiB; the margin covers the request
         // id and the framing.
@@ -2234,7 +2269,9 @@ impl Master {
         let before = lock(&self.inner.turn_memory).insert(sid, allowed);
         let sent = self
             .send_command(&row.node_id, move |req_id| {
-                if let MasterToNode::Prompt { req_id: r, .. } = &mut msg {
+                if let MasterToNode::Prompt { req_id: r, .. }
+                | MasterToNode::Retry { req_id: r, .. } = &mut msg
+                {
                     *r = req_id;
                 }
                 msg

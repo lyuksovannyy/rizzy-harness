@@ -60,6 +60,19 @@ describe("export as Markdown", () => {
     expect(md).not.toContain("test result");
   });
 
+  test("a retry says so between the failed attempt and its answer (X.21)", () => {
+    const r = view([
+      { type: "user", turn_id: "t1", text: "Migrate it" },
+      { type: "turn_end", turn_id: "t1", reason: "error" },
+      { type: "retry", turn_id: "t2", of: "t1", reason: "error", failed_model: "demo::small", model: "demo::big" },
+      { type: "assistant", message_id: "m2", text: "Migrated.", done: true, author: null, variant: null },
+      { type: "turn_end", turn_id: "t2", reason: "completed" },
+    ]);
+    const md = chatMarkdown(r, "x", { outputs: false, agentName: () => "Agent", now: NOW });
+    expect(md).toContain("_Turn error._\n\n_Retried with demo::big (the attempt above used demo::small)._\n\n");
+    expect(md.match(/Migrate it/g)).toHaveLength(1);
+  });
+
   test("outputs when asked, in a fence the output cannot end", () => {
     const md = chatMarkdown(v, "Build fix", { outputs: true, now: NOW });
     expect(md).toContain("````text\ntest result: FAILED\n```\nsk-not-shown?\n````");
