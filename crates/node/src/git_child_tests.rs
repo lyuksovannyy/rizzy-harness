@@ -735,6 +735,33 @@ async fn a_child_replacing_a_folder_with_an_ignored_file_in_it_is_a_conflict() {
     );
 }
 
+/// The look into a replaced folder is bounded (it runs under the node-wide
+/// apply lock): many ignored files in it are a conflict that names a few
+/// of them, and all of them stay.
+#[tokio::test]
+async fn a_replaced_folder_full_of_ignored_files_names_a_bounded_few() {
+    let l = layout();
+    commit_file(&l, b".gitignore", b"*.log\n");
+    std::fs::create_dir(l.proj.join("d")).unwrap();
+    commit_file(&l, b"d/x", b"x\n");
+    for i in 0..120 {
+        std::fs::write(l.proj.join(format!("d/{i}.log")), "person\n").unwrap();
+    }
+    let (sub, base, c) = child_of(&l, "rc2c").await;
+    std::fs::remove_file(c.path.join("d/x")).unwrap();
+    std::fs::remove_dir(c.path.join("d")).unwrap();
+    std::fs::write(c.path.join("d"), "file\n").unwrap();
+    let result = sub.result(&c, "rc2c").await.unwrap();
+    let r = sub.apply(&base, &result, "rc2c").await;
+    let Err(NotApplied::Conflict(named)) = r else {
+        panic!("{r:?}");
+    };
+    assert_eq!(named.len(), 50, "{named:?}");
+    assert!(named.iter().all(|(p, _)| p.ends_with(".log")), "{named:?}");
+    assert_eq!(std::fs::read_to_string(l.proj.join("d/x")).unwrap(), "x\n");
+    assert_eq!(std::fs::read_dir(l.proj.join("d")).unwrap().count(), 121);
+}
+
 /// A dangling, ignored link in the way is a conflict and stays.
 #[tokio::test]
 async fn a_dangling_ignored_link_in_the_way_is_a_conflict() {

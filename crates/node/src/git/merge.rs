@@ -192,6 +192,10 @@ const CLASH: &str = "a file and a folder of the same name";
 const NO_MERGE: &str = "git could not merge it";
 const DURING: &str = "changed in the folder while the merge ran";
 const IGNORED: &str = "a file of yours that git ignores is in the way";
+/// Under a folder the child replaced by a file: how many entries are looked
+/// at, and how many files in the way are named, before the walk stops.
+const IN_THE_WAY_LOOKED: usize = 20_000;
+const IN_THE_WAY_NAMED: usize = 50;
 const TOO_MANY: &str = "one of more than 500 files changed on both sides, too many to merge";
 
 /// Apply what changed from `base` to `result` to the folder (see the
@@ -559,18 +563,37 @@ async fn ignored_in_the_way(repo: &Repo, rows: &[DiffRow]) -> Vec<Vec<u8>> {
             let at = root.join(rel_path(&p));
             match std::fs::symlink_metadata(&at) {
                 Ok(m) if m.is_dir() => {
-                    out.extend(
-                        walkdir::WalkDir::new(&at)
-                            .follow_links(false)
-                            .into_iter()
-                            .filter_map(|e| e.ok())
-                            .filter(|e| !e.file_type().is_dir())
-                            .filter_map(|e| {
-                                let rel = e.path().strip_prefix(&root).ok()?;
-                                Some(super::path_bytes(rel))
-                            })
-                            .filter(|f| !deleted.contains(f)),
-                    );
+                    // Bounded: this runs under the node-wide apply lock, and
+                    // a replaced folder may hold a build tree of the
+                    // person's. A few names are enough to refuse; a folder
+                    // too large to look through is itself in the way.
+                    let mut looked = 0usize;
+                    let mut found = 0usize;
+                    for e in walkdir::WalkDir::new(&at)
+                        .follow_links(false)
+                        .into_iter()
+                        .filter_map(|e| e.ok())
+                    {
+                        looked += 1;
+                        if looked > IN_THE_WAY_LOOKED {
+                            out.push(p.clone());
+                            break;
+                        }
+                        if e.file_type().is_dir() {
+                            continue;
+                        }
+                        let Ok(rel) = e.path().strip_prefix(&root) else {
+                            continue;
+                        };
+                        let f = super::path_bytes(rel);
+                        if !deleted.contains(&f) {
+                            out.push(f);
+                            found += 1;
+                            if found >= IN_THE_WAY_NAMED {
+                                break;
+                            }
+                        }
+                    }
                     continue;
                 }
                 Ok(_) => {
