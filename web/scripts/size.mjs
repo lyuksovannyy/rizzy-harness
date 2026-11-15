@@ -190,7 +190,8 @@ const DIFF_KB = 3.8;
 
 // Two agent switches of their own (the owner, 2026-11-14): "MCP servers"
 // and "Earlier chats and memory search", their labels and hints in the
-// Agents page chunk. Measured 386.54 with both (+0.1).
+// Agents page chunk. Measured 386.54 with both (+0.1); after merging the
+// turn diff, 390.3.
 const AGENT_SWITCHES_KB = 0.1;
 
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.

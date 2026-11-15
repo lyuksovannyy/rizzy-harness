@@ -3,7 +3,7 @@ name: Researcher
 description: Researches a question on the web and reports what the sources say, with citations and a confidence level.
 aliases: [research]
 category: General
-tools: [web_search, web_fetch, remember, recall]
+tools: [web_search, web_fetch, remember]
 budget: lean
 ui: rich
 memory: false

@@ -46,8 +46,6 @@ fn builtin_roster_is_exactly_the_table() {
         "web_search",
         "web_fetch",
         "remember",
-        // Earlier chats and memory search (PLAN.md T55).
-        "recall",
         // Every MCP tool of the node's servers (X.3).
         "mcp",
     ];
@@ -137,7 +135,6 @@ fn builtin_roster_is_exactly_the_table() {
                 "todo",
                 "skill",
                 "remember",
-                "recall",
             ],
             user_facts: false,
             project_memory: true,
@@ -840,13 +837,19 @@ fn mcp_servers_are_their_own_switch() {
 }
 
 /// "Earlier chats and memory search" is its own switch (the owner,
-/// 2026-11-14): on for the built-ins that have memory, off for Smol and
-/// Scout; a page agent asks for `recall` only with it; a page agent saved
+/// 2026-11-14): on for Assistant, Researcher and Reviewer, off for the
+/// built-ins that run commands, use MCP servers or publish (and Smol,
+/// Scout); a file agent that takes a built-in's id gets it only from its
+/// own list; a page agent asks for `recall` only with it; a page agent saved
 /// before the switch reads with it off.
 #[test]
 fn recall_is_its_own_switch() {
     for a in builtins() {
-        let want = !matches!(a.id.as_str(), "smol" | "scout");
+        let want = matches!(a.id.as_str(), "general" | "researcher" | "reviewer");
+        assert_eq!(
+            harness_agents::RECALL_BUILTINS.contains(&a.id.as_str()),
+            want
+        );
         assert_eq!(a.features.recall, want, "{}", a.id);
         assert_eq!(a.spec.allows_tool("recall"), want, "{}", a.id);
     }
@@ -864,6 +867,13 @@ fn recall_is_its_own_switch() {
         )
         .unwrap()
     };
+    let file = parse(
+        "general",
+        "---\nname: G\ntools: [web_search, remember]\n---\nhi\n",
+        false,
+    )
+    .unwrap();
+    assert!(!file.features.recall, "a file agent's list decides");
     assert!(!make(false).spec.allows_tool("recall"));
     assert!(make(true).spec.allows_tool("recall") && make(true).features.recall);
     // Memory on does not bring it.

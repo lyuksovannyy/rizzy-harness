@@ -174,6 +174,7 @@ impl AgentSpec {
             agent_id: self.agent_id.clone(),
             name: self.name.clone(),
             prompt_hash: self.prompt_hash.clone(),
+            withheld: self.deny_tools.clone(),
         }
     }
 }

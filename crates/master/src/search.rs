@@ -15,7 +15,7 @@ use unicode_segmentation::UnicodeSegmentation;
 /// Shared with the web app so client and server agree on what is time-sensitive.
 const TIME_SENSITIVE_JSON: &str = include_str!("../../../web/src/lib/time-sensitive.json");
 
-const STOPWORDS: &[&str] = &[
+pub(crate) const STOPWORDS: &[&str] = &[
     "a", "an", "and", "are", "as", "at", "be", "but", "by", "can", "could", "do", "does", "for",
     "from", "get", "has", "have", "how", "i", "if", "in", "into", "is", "it", "its", "me", "my",
     "of", "on", "or", "please", "should", "so", "that", "the", "their", "then", "there", "this",

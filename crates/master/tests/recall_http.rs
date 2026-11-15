@@ -323,8 +323,33 @@ async fn running_turn(t: &T, sid: SessionId, turn: &str) {
         )
         .await
         .unwrap();
+    start_turn(t, sid, turn).await;
+}
+
+/// The node starts a turn of the newest prompt `sid` got, recording its
+/// agent as an honest node does (`AgentSpec::agent_ref`, with what the
+/// master withheld).
+async fn start_turn(t: &T, sid: SessionId, turn: &str) {
+    let agent = t
+        .chat
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find_map(|m| match m {
+            MasterToNode::Prompt {
+                session_id, agent, ..
+            } if *session_id == sid => agent.as_ref().map(|a| a.agent_ref()),
+            _ => None,
+        })
+        .expect("no prompt for the session");
     t.chat
-        .emit(sid, "turn_started", json!({"turn_id": turn}))
+        .emit(
+            sid,
+            "turn_started",
+            json!({"turn_id": turn, "agent": agent}),
+        )
         .await;
     landed(t, sid).await;
 }
@@ -482,8 +507,17 @@ async fn untrusted_turns_temporary_chats_and_agents_without_the_switch() {
     assert!(!spec.allows_tool("recall"));
     assert!(spec.delegates.iter().all(|d| !d.allows_tool("recall")));
     assert!(!ctx.contains("`recall`"), "{ctx}");
+    // Its turn, once it runs, is refused: the log records `recall` withheld.
+    t.chat
+        .emit(
+            b,
+            "turn_ended",
+            json!({"turn_id": "t2", "reason": "completed"}),
+        )
+        .await;
+    start_turn(&t, b, "w").await;
     let e = t.chat.recall(b, "heron server").await.unwrap_err();
-    assert!(e.contains("not available"), "{e}");
+    assert!(e.contains("not available in this turn"), "{e}");
 
     // Smol has no switch: not offered.
     t.master
@@ -501,6 +535,16 @@ async fn untrusted_turns_temporary_chats_and_agents_without_the_switch() {
     let (spec, ctx) = last_spec(&t);
     assert!(!spec.allows_tool("recall"));
     assert!(!ctx.contains("`recall`"), "{ctx}");
+    t.chat
+        .emit(
+            b,
+            "turn_ended",
+            json!({"turn_id": "w", "reason": "completed"}),
+        )
+        .await;
+    start_turn(&t, b, "s").await;
+    let e = t.chat.recall(b, "heron server").await.unwrap_err();
+    assert!(e.contains("not available to this agent"), "{e}");
 
     // A temporary chat: withheld, refused.
     let temp = chat(&t, &alex, json!({"incognito": true})).await;
@@ -569,5 +613,168 @@ async fn memory_hits_are_the_owners() {
     assert!(
         !hits.iter().any(|h| h.excerpt.contains("Mondays")),
         "{hits:?}"
+    );
+}
+
+/// Review R1 (P1): an untrusted (webhook) turn runs and the owner queues a
+/// prompt behind it: the running untrusted turn still may not search.
+#[tokio::test]
+async fn a_queued_prompt_does_not_open_a_running_untrusted_turn() {
+    let t = start().await;
+    let [alex, _bob] = users(&t).await;
+    let a = chat(&t, &alex, json!({})).await;
+    t.chat
+        .exchange(a, "t1", "The heron server lives in Oslo.")
+        .await;
+    landed(&t, a).await;
+    let b = chat(&t, &alex, json!({})).await;
+    let untrusted = PromptOpts {
+        untrusted: true,
+        ..Default::default()
+    };
+    t.master
+        .prompt(b, "event text".into(), untrusted)
+        .await
+        .unwrap();
+    start_turn(&t, b, "w").await;
+    assert!(t.chat.recall(b, "heron server").await.is_err());
+    let owner = PromptOpts {
+        by_owner: true,
+        ..Default::default()
+    };
+    t.master.prompt(b, "later".into(), owner).await.unwrap();
+    let e = t.chat.recall(b, "heron server").await.unwrap_err();
+    assert!(e.contains("not available in this turn"), "{e}");
+}
+
+/// Review R6 (P2): a queued untrusted prompt does not take the tool from
+/// the granted turn that is running.
+#[tokio::test]
+async fn a_queued_untrusted_prompt_leaves_the_running_turn_its_grant() {
+    let t = start().await;
+    let [alex, _bob] = users(&t).await;
+    let a = chat(&t, &alex, json!({})).await;
+    t.chat
+        .exchange(a, "t1", "The heron server lives in Oslo.")
+        .await;
+    landed(&t, a).await;
+    let b = chat(&t, &alex, json!({})).await;
+    running_turn(&t, b, "t2").await;
+    assert!(t.chat.recall(b, "heron server").await.is_ok());
+    let untrusted = PromptOpts {
+        untrusted: true,
+        ..Default::default()
+    };
+    t.master.prompt(b, "event".into(), untrusted).await.unwrap();
+    assert_eq!(
+        chat_ids(&t.chat.recall(b, "heron server").await.unwrap()),
+        [a.to_string()]
+    );
+}
+
+/// Review R1 (P3): a grant does not outlive its turn: a turn the master
+/// never prompted (no agent recorded) is refused, as is the time between
+/// turns.
+#[tokio::test]
+async fn a_grant_does_not_outlive_its_turn() {
+    let t = start().await;
+    let [alex, _bob] = users(&t).await;
+    let a = chat(&t, &alex, json!({})).await;
+    t.chat
+        .exchange(a, "t1", "The heron server lives in Oslo.")
+        .await;
+    landed(&t, a).await;
+    let b = chat(&t, &alex, json!({})).await;
+    running_turn(&t, b, "t2").await;
+    t.chat
+        .emit(
+            b,
+            "turn_ended",
+            json!({"turn_id": "t2", "reason": "completed"}),
+        )
+        .await;
+    landed(&t, b).await;
+    assert!(t.chat.recall(b, "heron server").await.is_err());
+    t.chat
+        .emit(b, "turn_started", json!({"turn_id": "t3"}))
+        .await;
+    landed(&t, b).await;
+    let e = t.chat.recall(b, "heron server").await.unwrap_err();
+    assert!(e.contains("not available to this agent"), "{e}");
+}
+
+/// Review R5 (P4): natural questions and other languages find the chat;
+/// query syntax has no effect; a query with no words is refused and not
+/// counted.
+#[tokio::test]
+async fn natural_queries_find_the_chat() {
+    let t = start().await;
+    let [alex, _bob] = users(&t).await;
+    let a = chat(&t, &alex, json!({})).await;
+    t.chat
+        .exchange(a, "t1", "We made the decision: deploy the Größe service to staging; деплой в пятницу. 東京サーバー. Cost was $1,200 (approx).")
+        .await;
+    landed(&t, a).await;
+    let b = chat(&t, &alex, json!({})).await;
+    running_turn(&t, b, "t2").await;
+    let mut n = 0;
+    for q in [
+        "what decisions did we make about deploying?",
+        "decision deploy",
+        "decisions",
+        "deploying staging",
+        "\"deploy the\" AND NOT staging",
+        "staging OR (x) NEAR(a b) ^col: * -y",
+        "Größe",
+        "деплой",
+        "пятница",
+        "東京",
+        "1,200 cost",
+    ] {
+        if n == harness_master::recall::PER_TURN {
+            n = 0;
+            running_turn(&t, b, &format!("t{q}")).await;
+        }
+        n += 1;
+        let hits = t.chat.recall(b, q).await.unwrap();
+        assert_eq!(chat_ids(&hits), [a.to_string()], "{q:?}");
+    }
+    // No words: refused, and not counted.
+    running_turn(&t, b, "t-empty").await;
+    for _ in 0..harness_master::recall::PER_TURN + 2 {
+        let e = t.chat.recall(b, "a* ?").await.unwrap_err();
+        assert!(e.contains("distinctive words"), "{e}");
+    }
+    // Only common words: searched by them rather than refused.
+    t.chat.recall(b, "what is it?").await.unwrap();
+    for _ in 1..harness_master::recall::PER_TURN {
+        t.chat.recall(b, "heron").await.unwrap();
+    }
+    let e = t.chat.recall(b, "heron").await.unwrap_err();
+    assert!(e.contains("already searched"), "{e}");
+}
+
+/// Review R7: a long asking chat does not crowd the others out.
+#[tokio::test]
+async fn a_long_asking_chat_does_not_crowd_out_the_others() {
+    let t = start().await;
+    let [alex, _bob] = users(&t).await;
+    let a = chat(&t, &alex, json!({})).await;
+    t.chat.exchange(a, "t1", "pelican budget").await;
+    landed(&t, a).await;
+    let b = chat(&t, &alex, json!({})).await;
+    for i in 0..harness_store::SEARCH_WINDOW + 20 {
+        t.chat
+            .emit(
+                b,
+                "user_message",
+                json!({"turn_id": "x", "text": format!("pelican pelican note {i}")}),
+            )
+            .await;
+    }
+    running_turn(&t, b, "t2").await;
+    assert_eq!(
+        chat_ids(&t.chat.recall(b, "pelican").await.unwrap()),
+        [a.to_string()]
     );
 }

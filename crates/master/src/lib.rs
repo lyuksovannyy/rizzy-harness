@@ -252,7 +252,7 @@ pub struct MasterInner {
     /// Lines for a chat's next turn about its `remember` calls (refused,
     /// waiting for the person: `memory::Notes`).
     notes: memory::Notes,
-    /// Which chats' running turns may use `recall`, and their counts.
+    /// `recall`'s counts per turn and hour, and its searches per node.
     recall: recall::Grants,
     /// The routine scheduler, once `start_routines` ran.
     routines: OnceLock<routines::RoutinesHandle>,
@@ -1218,14 +1218,17 @@ impl Master {
 
     /// Send `msg` to `node_id` without waiting for an ack (an answer to the
     /// node's own request). Dropped when the node is gone or not keeping
-    /// up: its request then times out there.
-    pub(crate) fn send_unacked(&self, node_id: &str, msg: MasterToNode) {
+    /// up: its request then times out there. Whether it was queued.
+    pub(crate) fn send_unacked(&self, node_id: &str, msg: MasterToNode) -> bool {
         let nodes = lock(&self.inner.nodes);
-        if let Some(tx) = nodes.get(node_id).and_then(|n| n.tx.as_ref())
-            && tx.try_send(msg).is_err()
-        {
+        let sent = nodes
+            .get(node_id)
+            .and_then(|n| n.tx.as_ref())
+            .is_some_and(|tx| tx.try_send(msg).is_ok());
+        if !sent {
             tracing::warn!(node = %node_id, "could not send an answer to the node");
         }
+        sent
     }
 
     fn resume_done(&self, node_id: &str, sid: SessionId) {
@@ -1947,9 +1950,10 @@ impl Master {
         if !may_recall {
             recall::deny(&mut agent);
         }
-        let recalls = may_recall
-            && (agent.allows_tool("recall")
-                || agent.delegates.iter().any(|d| d.allows_tool("recall")));
+        // What the master decided here reaches the log with the turn
+        // (`AgentRef::withheld` in `turn_started`), which is what a later
+        // search is checked against: no flag is kept here.
+        let recalls = may_recall && agent.allows_tool("recall");
         // The owner's facts, whole while they fit, each with its id
         // (`memory::turn_block`).
         let mut noted = Vec::new();
@@ -1967,7 +1971,7 @@ impl Master {
             turn_context
                 .push(projects::turn_context(self, p, &row, &text, allowed, remember).await);
         }
-        if recalls && agent.allows_tool("recall") {
+        if recalls {
             turn_context.push(recall::CONTEXT_LINE.into());
         }
         // Last, so it is what the model reads right before answering.
@@ -1989,9 +1993,6 @@ impl Master {
         let chat = row.profile.as_deref() == Some("chat");
         let savings = r.token_savings().map(|t| t.for_turn(chat));
         if resume {
-            // A callback turn searches nothing, also not with a grant an
-            // earlier turn of the chat left.
-            self.inner.recall.set(sid, false);
             let mut msg = MasterToNode::Callback {
                 req_id: String::new(),
                 session_id: sid,
@@ -2037,7 +2038,6 @@ impl Master {
         // files nothing from a turn whose `turn_started` has a cause, which
         // the log decides, also after a restart (review S3-1).
         let before = lock(&self.inner.turn_memory).insert(sid, allowed);
-        let recall_before = self.inner.recall.set(sid, recalls);
         let sent = self
             .send_command(&row.node_id, move |req_id| {
                 if let MasterToNode::Prompt { req_id: r, .. } = &mut msg {
@@ -2056,8 +2056,6 @@ impl Master {
                 Some(b) => tm.insert(sid, b),
                 None => tm.remove(&sid),
             };
-            drop(tm);
-            self.inner.recall.restore(sid, recall_before);
         }
         sent?;
         // The notes rode on this turn: do not repeat them (review M5).

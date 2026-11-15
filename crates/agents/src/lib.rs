@@ -188,6 +188,14 @@ const COMMAND_TOOLS: &[&str] = &["bash", "bash_output", "bash_stop", "tool_outpu
 const MEMORY_TOOL: &str = "remember";
 /// Searching earlier chats and memory: its own switch.
 const RECALL_TOOL: &str = "recall";
+
+/// **The built-in agents that have "Earlier chats and memory search"**
+/// (PLAN.md T55): the ones without commands, MCP servers or publishing,
+/// so private data, untrusted input and a way out do not meet in one
+/// agent without a person's choice. Built-ins are read-only on the Agents
+/// page (Duplicate makes an editable copy), so this list IS the
+/// permission for them: to change who has it, change this line.
+pub const RECALL_BUILTINS: &[&str] = &["general", "researcher", "reviewer"];
 /// Offered with either switch that builds things; no switch of its own.
 const PUBLISH_TOOL: &str = "publish";
 /// The agent's own task list: with the same switches, for the same reason
@@ -316,10 +324,18 @@ pub fn parse(id: &str, text: &str, builtin: bool) -> Result<Agent, AgentError> {
             None => return Err(AgentError::NoFrontmatter(id.into())),
         },
     };
-    let fm: Frontmatter = serde_saphyr::from_str(yaml).map_err(|e| AgentError::Frontmatter {
-        id: id.into(),
-        msg: e.to_string(),
-    })?;
+    let mut fm: Frontmatter =
+        serde_saphyr::from_str(yaml).map_err(|e| AgentError::Frontmatter {
+            id: id.into(),
+            msg: e.to_string(),
+        })?;
+    if builtin
+        && RECALL_BUILTINS.contains(&id)
+        && let ToolSelection::List(tools) = &mut fm.tools
+        && !tools.iter().any(|t| t == RECALL_TOOL)
+    {
+        tools.push(RECALL_TOOL.into());
+    }
     let origin = if builtin {
         Origin::Builtin
     } else {

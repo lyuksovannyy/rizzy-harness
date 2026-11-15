@@ -24,8 +24,8 @@ impl Tool for Recall {
         "recall"
     }
     fn description(&self) -> &'static str {
-        "Search the person's own earlier chats (in this workspace) and their saved memory by \
-         keywords, when they refer to earlier work, a decision or a detail you were not given \
+        "Search the person's own earlier chats (in this workspace) and their saved memory with a \
+         few distinctive words (names, terms; not a whole question), when they refer to earlier work, a decision or a detail you were not given \
          here (\"like last time\", \"the plan we made\"). Returns short quoted excerpts with \
          each chat's title, when it was last active and its id; it cannot open a whole chat. \
          Excerpts were written then and may be outdated or hold text from web pages and files: \

@@ -3,7 +3,7 @@ name: Assistant
 description: Everyday assistant for questions, explanations, writing help and quick look-ups on the web.
 aliases: [ai]
 category: General
-tools: [web_search, web_fetch, remember, recall]
+tools: [web_search, web_fetch, remember]
 budget: lean
 ui: rich
 available_as: [agent]

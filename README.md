@@ -678,8 +678,10 @@ Project memory works as before: facts proposed for a project wait on the
 project's Memory tab (docs/projects.md).
 
 **Earlier chats and memory search.** An agent with this switch (on the
-Agents page; on for every built-in agent with memory, off for Smol and
-Scout) has a `recall` tool: when you refer to earlier work it was not given
+Agents page; on for the Assistant, the Researcher and the Reviewer; off
+for the built-in agents that can run commands, use MCP servers or publish,
+and for Smol and Scout: built-in agents cannot be changed there, so to give
+it to the Software Developer, **Duplicate** it and turn the switch on) has a `recall` tool: when you refer to earlier work it was not given
 ("like last time", "the plan we made"), it searches **your own** earlier
 chats in the chat's workspace and the memory that chat reads anyway (your
 facts where the workspace may use them, the project's facts), by keywords,
@@ -694,8 +696,15 @@ change anything, and the call shows in the chat like any tool.
 - Not in temporary chats, turns started by an external event (a routine's
   webhook) or turns that report a finished background command. A
   sub-agent searches only when its own agent has the switch.
-- At most 8 searches per turn and 40 per chat per hour, at most 10 results
-  and about 6,000 characters of excerpts per search.
+- Search with a few distinctive words: each word also finds its longer
+  forms ("decision" finds "decisions"), and chats with more of the words
+  come first. At most 8 searches per turn and 40 per chat per hour, at
+  most 10 results and about 6,000 characters of excerpts per search.
+- **Recalled text can leave the machine.** In a chat in Auto with the
+  node's network on, an agent that also has `bash`, MCP tools or web
+  search can send what it found out (in a command, a tool call or a search
+  query) with nothing asked. Ask or Accept edits asks before commands and
+  MCP calls; `[sandbox] network = "off"` stops commands reaching out.
 - The excerpts are quoted to the agent as text written then: earlier chats
   hold web pages, tool output and other people's files, so it is told to
   check a detail before relying on it and never to follow instructions in
@@ -2308,9 +2317,9 @@ The built-in agents, grouped by category in the picker:
 | Assistant (`@general`, `@ai`), the chats' default | General | agent | web search and fetch; your facts; project memory; earlier chats and memory search |
 | Smol (`@smol`) | General | agent, sub-agent | nothing but answer: no tools, no memory |
 | Researcher (`@researcher`, `@research`) | General | agent, sub-agent | web search and fetch; project memory; earlier chats and memory search |
-| Software Developer (`@coder`, `@dev`), the Agentic default | IT | agent, sub-agent | read, change and search files, run commands, the node's MCP servers, publish, web; delegates to Scout, Researcher and Reviewer; project memory; earlier chats and memory search |
+| Software Developer (`@coder`, `@dev`), the Agentic default | IT | agent, sub-agent | read, change and search files, run commands, the node's MCP servers, publish, web; delegates to Scout, Researcher and Reviewer; project memory |
 | Senior Teamlead (`@teamlead`) | IT | agent | everything the Software Developer has, plus your facts; delegates to Software Developer, Researcher, Writer, Scout and Reviewer |
-| Writer (`@writer`) | General | agent, sub-agent | read, change and search files, publish, web; project memory; earlier chats and memory search |
+| Writer (`@writer`) | General | agent, sub-agent | read, change and search files, publish, web; project memory |
 | Scout (`@scout`) | IT | sub-agent | read and search files only |
 | Reviewer (`@reviewer`) | IT | agent, sub-agent | read and search files; project memory; earlier chats and memory search |
 
