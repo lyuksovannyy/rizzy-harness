@@ -58,6 +58,8 @@ enum Reply {
     FailAfter(u16, u64),
     /// Streams some text first, then fails with a 503.
     FailAfterText,
+    /// Fails with a status and this body.
+    Body(u16, &'static str),
     Ok,
 }
 
@@ -113,6 +115,11 @@ impl Provider for Scripted {
             .and_then(|q| q.pop_front());
         match next.unwrap_or(Reply::Ok) {
             Reply::Fail(s) => Err(status(s)),
+            Reply::Body(s, b) => Err(ProviderError::Status {
+                status: s,
+                body: b.into(),
+                hint: RetryHint::default(),
+            }),
             Reply::FailAfter(s, secs) => Err(ProviderError::Status {
                 status: s,
                 body: "{\"error\":{\"message\":\"secret-ish body\"}}".into(),
@@ -522,4 +529,69 @@ async fn a_fallback_answer_reports_its_own_window() {
     assert_eq!(p.calls(), ["m", "fb"]);
     let u = out.usage.unwrap();
     assert_eq!((u.window, u.model.as_deref()), (Some(32_000), Some("fb")));
+}
+
+/// The router's answer to a model it has no connection for (live test
+/// 2026-11-15), verbatim.
+const ROUTER_503: &str = "{\"error\":{\"message\":\"no enabled connection can serve mistral/does-not-exist-9 \u{2014} add one under Providers\",\"type\":\"api_error\",\"code\":\"api_error\"}}";
+
+/// The router's 503 for a model it has no connection for: after the
+/// retries the turn's error says in the harness's words that the provider
+/// failed, with the provider's own text quoted below it, never the raw
+/// JSON body (a 503 is no setting to point at: review F5).
+#[tokio::test]
+async fn a_provider_that_fails_is_named_in_the_harness_words() {
+    let m = "router::mistral/does-not-exist-9";
+    let p = Scripted::new(vec![(
+        m,
+        (0..4).map(|_| Reply::Body(503, ROUTER_503)).collect(),
+    )]);
+    let b = backend(p.clone(), fast());
+    let out = run(&b, &Host::default(), m, agent(&[])).await;
+    assert_eq!(out.reason, TurnEndReason::Error);
+    let e = out.error.unwrap_or_default();
+    assert!(
+        e.starts_with(&format!(
+            "The provider failed to answer for the model {m}: it answered 503 to all 4 tries."
+        )),
+        "{e}"
+    );
+    assert!(
+        e.contains("\n| no enabled connection can serve mistral/does-not-exist-9"),
+        "{e}"
+    );
+    assert!(!e.contains("{\"error\""), "no raw body: {e}");
+    // `api_error` tells nothing apart: a 503 is still retried.
+    assert_eq!(p.calls().len(), 4);
+}
+
+/// A provider that names the error `model_not_found` (OpenAI's code,
+/// whatever the status) is not retried: no wait brings the model back.
+#[tokio::test]
+async fn model_not_found_is_not_retried() {
+    let body = "{\"error\":{\"message\":\"The model `x` does not exist\",\"type\":\"invalid_request_error\",\"code\":\"model_not_found\"}}";
+    let p = Scripted::new(vec![("m", vec![Reply::Body(503, body)])]);
+    let b = backend(p.clone(), fast());
+    let out = run(&b, &Host::default(), "m", agent(&[])).await;
+    assert_eq!(out.reason, TurnEndReason::Error);
+    assert_eq!(p.calls().len(), 1, "{:?}", p.calls());
+    let e = out.error.unwrap_or_default();
+    assert!(
+        e.starts_with("The provider could not serve the model m"),
+        "{e}"
+    );
+}
+
+/// Review F8: `model_not_found` from a gateway's 401 reaches the agent's
+/// fallback chain.
+#[tokio::test]
+async fn model_not_found_at_401_falls_back() {
+    let body = "{\"error\":{\"message\":\"no access\",\"code\":\"model_not_found\"}}";
+    let p = Scripted::new(vec![("m", vec![Reply::Body(401, body)])]);
+    let b = backend(p.clone(), fast());
+    let host = Host::default();
+    let out = run(&b, &host, "m", agent(&["n"])).await;
+    assert_eq!(out.reason, TurnEndReason::Completed, "{:?}", out.error);
+    assert_eq!(p.calls(), ["m", "n"]);
+    assert_eq!(host.answer().as_deref(), Some("answer from n"));
 }

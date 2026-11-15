@@ -119,7 +119,7 @@ impl Embedder {
             .client
             .post(format!("{}/embeddings", self.base_url))
             .json(&json!({ "model": self.model, "input": inputs }));
-        if let Some(k) = &self.key {
+        if let Some(k) = self.key.as_ref().filter(|k| !k.is_blank()) {
             rb = match self.style {
                 ApiStyle::Openai => rb.bearer_auth(k.expose()),
                 ApiStyle::Anthropic => rb

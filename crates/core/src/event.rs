@@ -788,6 +788,9 @@ pub enum RetryReason {
     ServerError,
     /// The connection failed or the stream broke.
     Network,
+    /// The provider took the request and sent nothing within the first-byte
+    /// (or idle) timeout: not the network, and not a refusal.
+    NoAnswer,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

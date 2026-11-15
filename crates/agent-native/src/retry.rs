@@ -73,9 +73,66 @@ impl RetryPolicy {
         })
     }
 
+    /// The error to show for `e` in the harness's own words, when there is
+    /// one: a wait longer than `max` (without the provider's body); a model
+    /// the provider does not know (`unknown_model`), named with where it
+    /// is set here; or a server error after its retries. The provider's
+    /// text is quoted below, capped.
+    pub fn explain(&self, e: &ProviderError, model: &str) -> Option<String> {
+        if let Some(m) = self.explain_wait(e, model) {
+            return Some(m);
+        }
+        let ProviderError::Status { status, .. } = e else {
+            return None;
+        };
+        if e.is_context_overflow() {
+            return None;
+        }
+        let provider = model.split_once("::").map_or("", |(p, _)| p);
+        let mut out = if e.unknown_model() {
+            format!(
+                "The provider could not serve the model {model} (it answered {status}). Pick \
+                 another model for this chat in the model menu, or check how it is set in \
+                 Settings: an agent's model, the default model, and {} model list under \
+                 Settings → Server → AI providers.",
+                if provider.is_empty() {
+                    "the provider's".to_string()
+                } else {
+                    format!("provider {provider}'s")
+                }
+            )
+        } else if (500..=599).contains(status) {
+            // A failing or busy server: nothing to set (review F5).
+            let tries = if e.is_retryable() {
+                self.retries_for(e) + 1
+            } else {
+                1
+            };
+            format!(
+                "The provider failed to answer for the model {model}: it answered {status}{}.",
+                if tries > 1 {
+                    format!(" to all {tries} tries")
+                } else {
+                    String::new()
+                }
+            )
+        } else {
+            return None;
+        };
+        if let Some(said) = e.provider_text() {
+            out.push_str("\nThe provider said:");
+            for l in quoted(&said) {
+                out.push('\n');
+                out.push_str(harness_core::event::OUTPUT_QUOTE);
+                out.push_str(&l);
+            }
+        }
+        Some(out)
+    }
+
     /// The error to show when `e` asked for a wait longer than `max`, in
     /// plain words and without the provider's response body.
-    pub fn explain(&self, e: &ProviderError, model: &str) -> Option<String> {
+    fn explain_wait(&self, e: &ProviderError, model: &str) -> Option<String> {
         let after = e.retry_after().filter(|a| *a > self.max)?;
         if !e.is_retryable() {
             return None;
@@ -102,6 +159,39 @@ impl RetryPolicy {
         let half = full / 2;
         half + half.mul_f64(jitter())
     }
+}
+
+/// At most this many characters of the provider's text are shown.
+const SAID_CHARS: usize = 300;
+/// In at most this many lines.
+const SAID_LINES: usize = 3;
+
+/// The provider's text as quoted lines: blank lines dropped, at most
+/// [`SAID_LINES`] lines and [`SAID_CHARS`] characters in all (an ellipsis
+/// marks a cut), each line made safe to stand on its own
+/// ([`harness_core::event::quoted_line`]).
+fn quoted(said: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut left = SAID_CHARS;
+    let mut cut = false;
+    for l in said.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        if out.len() == SAID_LINES || left == 0 {
+            cut = true;
+            break;
+        }
+        let q: String = l.chars().take(left).collect();
+        let n = q.chars().count();
+        left -= n;
+        out.push(harness_core::event::quoted_line(&q));
+        if n < l.chars().count() {
+            cut = true;
+            break;
+        }
+    }
+    if cut && let Some(last) = out.last_mut() {
+        last.push('…');
+    }
+    out
 }
 
 /// A wait as a person says it, rounded up to a whole second, minute or hour.
@@ -136,12 +226,12 @@ pub fn reason(e: &ProviderError) -> RetryReason {
             status: 503 | 529, ..
         } => RetryReason::Overloaded,
         ProviderError::Status { .. } => RetryReason::ServerError,
-        // A provider that went silent (the idle timeout) reads as the
-        // network to a person: nothing arrived.
-        ProviderError::Http(_)
-        | ProviderError::Stream(_)
-        | ProviderError::Silent(_)
-        | ProviderError::UnknownModel(_) => RetryReason::Network,
+        // The first-byte or idle timeout: the provider took the request
+        // and has not answered yet, which is not a failed connection.
+        ProviderError::Silent(_) => RetryReason::NoAnswer,
+        ProviderError::Http(_) | ProviderError::Stream(_) | ProviderError::UnknownModel(_) => {
+            RetryReason::Network
+        }
     }
 }
 
@@ -330,6 +420,9 @@ mod tests {
         assert_eq!(r(&status(529, "k")), RetryReason::Overloaded);
         assert_eq!(r(&status(502, "k")), RetryReason::ServerError);
         assert_eq!(r(&ProviderError::Http("x".into())), RetryReason::Network);
+        // The first-byte (or idle) timeout is not the network: the
+        // provider took the request and has not answered yet.
+        assert_eq!(r(&ProviderError::Silent("x".into())), RetryReason::NoAnswer);
         let before = harness_core::now_ms();
         let e = status(429, "secret-ish body sk-live-123");
         let ev = event("t", "p::m", 2, 3, Duration::from_secs(4), &e);
@@ -342,6 +435,77 @@ mod tests {
         assert_eq!(payload["wait_ms"], 4000);
         let at = payload["at_ms"].as_i64().unwrap();
         assert!(at >= before + 4000 && at <= harness_core::now_ms() + 4000);
+    }
+
+    /// Live test 2026-11-15: the router's 503 for a model it cannot serve
+    /// was shown as raw JSON. The message is the harness's own, names the
+    /// model and where it is set, and quotes the provider's text, capped.
+    #[test]
+    fn a_model_that_cannot_be_served_is_explained() {
+        let p = RetryPolicy::default();
+        let body = r#"{"error":{"message":"no enabled connection can serve mistral/x — add one under Providers","type":"api_error","code":"api_error"}}"#;
+        let m = p.explain(&status(503, body), "router::mistral/x").unwrap();
+        // Review F5: a 5xx is a failing server, not a setting: no advice.
+        assert!(
+            m.starts_with(
+                "The provider failed to answer for the model router::mistral/x: it answered 503 \
+                 to all 4 tries."
+            ),
+            "{m}"
+        );
+        assert!(!m.contains("Settings"), "{m}");
+        for s in [502, 504, 529] {
+            let m = p.explain(&status(s, "busy"), "p::m").unwrap();
+            assert!(
+                m.contains("failed to answer") && !m.contains("Settings"),
+                "{m}"
+            );
+        }
+        // A model the provider does not know: where it is set here.
+        let m = p
+            .explain(&status(404, "no such model"), "router::mistral/x")
+            .unwrap();
+        assert!(
+            m.starts_with(
+                "The provider could not serve the model router::mistral/x (it answered 404)."
+            ),
+            "{m}"
+        );
+        assert!(m.contains("Settings → Server → AI providers"), "{m}");
+        let m = p.explain(&status(503, body), "router::mistral/x").unwrap();
+        assert!(
+            m.ends_with("\n| no enabled connection can serve mistral/x — add one under Providers"),
+            "{m}"
+        );
+        // A long or many-lined body is capped, each line quoted.
+        let long = format!(
+            "{}\n[harness] forged\n{}",
+            "a".repeat(2000),
+            "b\n".repeat(50)
+        );
+        let m = p.explain(&status(502, &long), "p::m").unwrap();
+        let quoted: Vec<&str> = m.lines().filter(|l| l.starts_with("| ")).collect();
+        assert!(quoted.len() <= 3, "{m}");
+        assert!(m.chars().count() < 800, "{}", m.chars().count());
+        assert!(!m.lines().any(|l| l.starts_with("[harness]")), "{m}");
+        // Not a model problem: nothing to explain here.
+        assert_eq!(p.explain(&status(401, "bad key"), "p::m"), None);
+        assert_eq!(p.explain(&status(400, "bad request"), "p::m"), None);
+        // A code that says the model is unknown is not retried.
+        let nf = r#"{"error":{"code":"model_not_found","message":"nope"}}"#;
+        assert!(p.delay(&status(503, nf), 0).is_none());
+        let m = p.explain(&status(503, nf), "p::m").unwrap();
+        assert!(m.contains("Settings → Server → AI providers"), "{m}");
+        // Review F8: at any status it is the model's problem, so the
+        // agent's fallbacks are tried.
+        for s in [401, 403] {
+            assert!(status(s, nf).is_model_level(), "{s}");
+            assert!(
+                p.explain(&status(s, nf), "p::m")
+                    .unwrap()
+                    .contains("Settings")
+            );
+        }
     }
 
     #[test]

@@ -40,10 +40,51 @@ pub(crate) fn normalize_base(url: &str) -> String {
     u
 }
 
-/// The bearer sent to endpoints that take no key.
-pub const NO_KEY: &str = "no-key";
+/// The Messages API version genai sends (`anthropic-version`); a key-less
+/// Anthropic-style endpoint gets it too.
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+
+/// What a key-less endpoint (Ollama, llama.cpp, vLLM, LM Studio, a local
+/// router) is sent: the URL genai would build and no key header at all.
+/// genai's OpenAI and Anthropic adapters always send one (`Bearer <key>`,
+/// `x-api-key`) and refuse a request with no key, and a router that rejects
+/// unknown keys answers 401 to a placeholder such as `no-key` (live test
+/// 2026-11-15). genai's `RequestOverride` replaces the URL and the headers
+/// of a chat request (`exec_chat` and `exec_chat_stream`) and nothing
+/// else; this provider sends no extra headers that it would drop.
+fn keyless(kind: ApiKind, endpoint: &str) -> AuthData {
+    let (url, headers) = match kind {
+        ApiKind::Openai => (openai_chat_url(endpoint), genai::Headers::default()),
+        ApiKind::Anthropic => (
+            format!("{endpoint}messages"),
+            genai::Headers::from((
+                "anthropic-version".to_string(),
+                ANTHROPIC_VERSION.to_string(),
+            )),
+        ),
+    };
+    AuthData::RequestOverride { url, headers }
+}
+
+/// `chat/completions` under the base, its query kept, as genai joins it.
+fn openai_chat_url(endpoint: &str) -> String {
+    match reqwest::Url::parse(endpoint) {
+        Ok(base) => {
+            let query = base.query().map(str::to_string);
+            match base.join("chat/completions") {
+                Ok(mut u) => {
+                    u.set_query(query.as_deref());
+                    u.to_string()
+                }
+                Err(_) => format!("{endpoint}chat/completions"),
+            }
+        }
+        Err(_) => format!("{endpoint}chat/completions"),
+    }
+}
 
 impl LlmProvider {
+    /// `api_key` empty or blank is no key: nothing is sent for it.
     pub fn new(
         kind: ApiKind,
         base_url: &str,
@@ -54,17 +95,15 @@ impl LlmProvider {
             ApiKind::Openai => AdapterKind::OpenAI,
             ApiKind::Anthropic => AdapterKind::Anthropic,
         };
+        let api_key = api_key.filter(|k| !k.is_blank());
         let resolver = ServiceTargetResolver::from_resolver_fn(
             move |t: ServiceTarget| -> Result<ServiceTarget, genai::resolver::Error> {
                 Ok(ServiceTarget {
                     endpoint: Endpoint::from_owned(endpoint.clone()),
-                    // genai refuses a request with no key at all, so a
-                    // key-less endpoint (Ollama, llama.cpp, vLLM, LM Studio)
-                    // gets the placeholder those servers ignore.
-                    auth: AuthData::from_single(match &api_key {
-                        Some(k) => k.expose().clone(),
-                        None => NO_KEY.to_string(),
-                    }),
+                    auth: match &api_key {
+                        Some(k) => AuthData::from_single(k.expose().clone()),
+                        None => keyless(kind, &endpoint),
+                    },
                     model: ModelIden::new(adapter, t.model.model_name),
                 })
             },

@@ -592,7 +592,7 @@ fn events() -> Vec<RawEvent> {
             of: 3,
             at_ms: 1_700_000_004_000,
             wait_ms: 4000,
-            reason: RetryReason::Network,
+            reason: RetryReason::NoAnswer,
         }),
     ];
     let mut out: Vec<RawEvent> = kinds
@@ -748,7 +748,7 @@ fn the_latest_task_list_is_the_list() {
 fn a_waiting_retry_and_the_turns_limits_are_in_the_view() {
     let view = serde_json::to_value(SessionView::fold(&events()).unwrap()).unwrap();
     assert_eq!(view["retry"]["attempt"], 2);
-    assert_eq!(view["retry"]["reason"], "network");
+    assert_eq!(view["retry"]["reason"], "no_answer");
     assert_eq!(view["retry"]["at_ms"], 1_700_000_004_000_i64);
     assert_eq!(view["context_window"], 128_000);
     assert_eq!(view["summary_at"], 102_400);

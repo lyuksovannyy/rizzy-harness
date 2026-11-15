@@ -56,6 +56,145 @@ async fn an_edit_of_a_file_never_read_is_refused_and_says_to_read_it() {
     assert_eq!(get(&dir, "a.txt"), "1\ntwo\n");
 }
 
+/// Live test 2026-11-15: a model that had read a file with `cat` in `bash`
+/// had both its edits refused. The guard does not parse commands; the
+/// refusal shows the lines around the first match instead, numbered as
+/// `read` shows them, and counts as reading the file at that moment: the
+/// same edit sent again goes through, unless the file changes first.
+#[tokio::test]
+async fn a_refused_unread_edit_shows_the_lines_and_the_same_edit_then_applies() {
+    let (dir, ctx) = ws();
+    let body: String = (1..=20).map(|i| format!("line {i}\n")).collect();
+    put(&dir, "a.txt", &body);
+    let e = edit(&ctx, "a.txt", "line 10\n", "ten\n").await;
+    assert!(!e.ok, "{}", e.output);
+    assert_eq!(get(&dir, "a.txt"), body, "nothing changed");
+    for n in 7..=13 {
+        assert!(
+            e.output.contains(&format!("\tline {n}\n")),
+            "line {n}: {}",
+            e.output
+        );
+    }
+    assert!(
+        !e.output.contains("\tline 3\n"),
+        "only around the match: {}",
+        e.output
+    );
+    assert!(
+        e.output.contains("send the same edit again"),
+        "{}",
+        e.output
+    );
+    let again = edit(&ctx, "a.txt", "line 10\n", "ten\n").await;
+    assert!(again.ok, "{}", again.output);
+    assert!(get(&dir, "a.txt").contains("line 9\nten\nline 11\n"));
+}
+
+/// Shown lines are what the file held then: a change on disk before the
+/// next edit is judged as after a `read` (refused where it changed, with
+/// the lines as they are now).
+#[tokio::test]
+async fn lines_shown_by_a_refusal_go_stale_like_a_read() {
+    let (dir, ctx) = ws();
+    put(&dir, "a.txt", "alpha\nbeta\n");
+    let e = edit(&ctx, "a.txt", "beta", "BETA").await;
+    assert!(!e.ok && e.output.contains("\tbeta"), "{}", e.output);
+    put(&dir, "a.txt", "alpha\nzeta\n");
+    let again = edit(&ctx, "a.txt", "beta", "BETA").await;
+    assert!(!again.ok, "{}", again.output);
+    assert!(again.output.contains("changed on disk"), "{}", again.output);
+    assert_eq!(get(&dir, "a.txt"), "alpha\nzeta\n");
+}
+
+/// Text that is not in the file shows nothing and counts as nothing: the
+/// refusal names the one call to make.
+#[tokio::test]
+async fn an_unread_edit_whose_text_is_missing_says_to_read() {
+    let (dir, ctx) = ws();
+    put(&dir, "a.txt", "one\ntwo\n");
+    let e = edit(&ctx, "a.txt", "three", "3").await;
+    assert!(!e.ok, "{}", e.output);
+    assert!(
+        e.output.contains("`read` with path `a.txt`"),
+        "{}",
+        e.output
+    );
+    assert!(!e.output.contains("\tone"), "{}", e.output);
+    let again = edit(&ctx, "a.txt", "one", "1").await;
+    assert!(!again.ok, "not seen yet: {}", again.output);
+}
+
+/// Review F4: a file `read` refuses as binary (UTF-8 with NUL bytes) gets
+/// the plain refusal: no lines, not seen, the retry is refused too.
+#[tokio::test]
+async fn a_file_read_refuses_as_binary_gets_no_shortcut() {
+    let (dir, ctx) = ws();
+    put(&dir, "b.bin", "head\0\0\nkey=AAAA\nmore\0\n");
+    let r = run(&Read, &ctx, json!({"path": "b.bin"})).await;
+    assert!(!r.ok, "{}", r.output);
+    for _ in 0..2 {
+        let e = edit(&ctx, "b.bin", "key=AAAA", "key=BBBB").await;
+        assert!(!e.ok, "{}", e.output);
+        assert!(!e.output.contains("key=AAAA"), "{}", e.output);
+    }
+    assert_eq!(get(&dir, "b.bin"), "head\0\0\nkey=AAAA\nmore\0\n");
+}
+
+/// Review F7: `replace_all` or several `edits` would change text the
+/// refusal did not show: the plain refusal, and the retry is refused.
+#[tokio::test]
+async fn replace_all_or_several_edits_get_no_shortcut() {
+    let (dir, ctx) = ws();
+    let mut body = String::from("x = 1\n");
+    for i in 0..100 {
+        body.push_str(&format!("filler {i}\n"));
+    }
+    body.push_str("x = 1\n");
+    put(&dir, "a.txt", &body);
+    let all =
+        json!({"path": "a.txt", "old_string": "x = 1", "new_string": "x = 2", "replace_all": true});
+    let two = json!({"path": "a.txt", "edits": [
+        {"old_string": "filler 1\n", "new_string": "f1\n"},
+        {"old_string": "filler 99\n", "new_string": "f99\n"}
+    ]});
+    for input in [all, two] {
+        for _ in 0..2 {
+            let e = run(&Edit, &ctx, input.clone()).await;
+            assert!(!e.ok, "{}", e.output);
+            assert!(e.output.contains("Call `read`"), "{}", e.output);
+        }
+    }
+    assert_eq!(get(&dir, "a.txt"), body);
+}
+
+/// Several matches without `replace_all`: the plain refusal, nothing seen.
+#[tokio::test]
+async fn an_ambiguous_unread_edit_gets_the_plain_refusal() {
+    let (dir, ctx) = ws();
+    put(&dir, "a.txt", "a\nsame\nb\nsame\n");
+    let e = edit(&ctx, "a.txt", "same", "diff").await;
+    assert!(!e.ok && e.output.contains("Call `read`"), "{}", e.output);
+    assert!(!e.output.contains("\tsame"), "{}", e.output);
+    let again = edit(&ctx, "a.txt", "same", "diff").await;
+    assert!(!again.ok, "not seen: {}", again.output);
+    assert_eq!(get(&dir, "a.txt"), "a\nsame\nb\nsame\n");
+}
+
+/// Review F9: an agent that may not `read` sees no lines through the
+/// refusal.
+#[tokio::test]
+async fn no_lines_for_an_agent_without_read() {
+    let (dir, mut ctx) = ws();
+    ctx.read_offered = false;
+    put(&dir, "a.txt", "secret line\n");
+    let e = edit(&ctx, "a.txt", "secret line", "x").await;
+    assert!(!e.ok, "{}", e.output);
+    assert!(!e.output.contains("secret"), "{}", e.output);
+    let again = edit(&ctx, "a.txt", "secret line", "x").await;
+    assert!(!again.ok, "{}", again.output);
+}
+
 #[tokio::test]
 async fn a_partial_read_is_enough_for_edit() {
     let (dir, ctx) = ws();
