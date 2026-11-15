@@ -222,7 +222,6 @@ fn updates_keep_trigger_ids_and_secrets() {
         !s.routine_pause("a", "blocked", 7).unwrap(),
         "already paused"
     );
-    assert_eq!(s.routine_count_failure("a", true).unwrap(), 1);
     let r = s.routine("a").unwrap().unwrap();
     assert_eq!(r.paused_reason.as_deref(), Some("failures"));
     let resume = RoutinePatch {
@@ -378,6 +377,75 @@ fn runs_finish_once_and_missed_runs_fold() {
     assert_eq!(older.len(), 1);
     assert_eq!(older[0].run_id, "m1");
     assert_eq!(s.run_count("a").unwrap(), 3);
+}
+
+/// A run's end and its count against the routine are one transaction: the
+/// routine shows the failure the moment the run shows its end (a test on a
+/// slow runner read one without the other), a completed run resets the
+/// count, an uncounted end leaves it, and the routine is paused once, at
+/// the given number of failures in a row.
+#[test]
+fn a_runs_end_and_its_count_are_one_write() {
+    let (s, w) = store();
+    s.routine_create(&routine("a", "u1", &w, vec![]), CAPS, 1)
+        .unwrap();
+    let failures = |s: &Store| {
+        let r = s.routine("a").unwrap().unwrap();
+        (r.consecutive_failures, r.paused_reason)
+    };
+    let start = |id: &str, at: i64| {
+        assert_eq!(
+            s.run_start(&run(id, "a", "pending", at)).unwrap(),
+            Claimed::Started
+        );
+    };
+    start("f1", 10);
+    assert_eq!(
+        s.run_finish_counted("f1", "error", Some("x"), 11, Some(true), 3)
+            .unwrap(),
+        (true, false)
+    );
+    assert_eq!(failures(&s), (1, None));
+    // A second end of the same run counts nothing.
+    assert_eq!(
+        s.run_finish_counted("f1", "error", Some("x"), 12, Some(true), 3)
+            .unwrap(),
+        (false, false)
+    );
+    assert_eq!(failures(&s), (1, None));
+    // An end that counts for neither leaves the count.
+    start("i1", 20);
+    assert!(
+        s.run_finish("i1", "interrupted", Some("stopped"), 21)
+            .unwrap()
+    );
+    assert_eq!(failures(&s), (1, None));
+    // A completed run resets it.
+    start("c1", 30);
+    assert_eq!(
+        s.run_finish_counted("c1", "completed", None, 31, Some(false), 3)
+            .unwrap(),
+        (true, false)
+    );
+    assert_eq!(failures(&s), (0, None));
+    // The third failure in a row pauses the routine, once.
+    for (i, id) in ["g1", "g2", "g3", "g4"].into_iter().enumerate() {
+        let at = 40 + 10 * i as i64;
+        start(id, at);
+        let (ended, paused) = s
+            .run_finish_counted(id, "error", None, at + 1, Some(true), 3)
+            .unwrap();
+        assert!(ended);
+        assert_eq!(paused, i == 2, "{id}");
+    }
+    assert_eq!(failures(&s), (4, Some("failures".into())));
+    // An unknown run changes nothing.
+    assert_eq!(
+        s.run_finish_counted("nope", "error", None, 99, Some(true), 3)
+            .unwrap(),
+        (false, false)
+    );
+    assert_eq!(failures(&s).0, 4);
 }
 
 #[test]

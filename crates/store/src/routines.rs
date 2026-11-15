@@ -698,26 +698,6 @@ impl Store {
         )? > 0)
     }
 
-    /// Count a finished run against the routine: a failure adds one to its
-    /// failures in a row, anything else resets them. Returns the count.
-    pub fn routine_count_failure(&self, id: &str, failed: bool) -> Result<i64> {
-        let conn = self.lock();
-        conn.execute(
-            "UPDATE routines SET consecutive_failures =
-                 CASE WHEN ?2 THEN consecutive_failures + 1 ELSE 0 END
-             WHERE routine_id = ?1",
-            params![id, failed],
-        )?;
-        Ok(conn
-            .query_row(
-                "SELECT consecutive_failures FROM routines WHERE routine_id = ?1",
-                params![id],
-                |r| r.get(0),
-            )
-            .optional()?
-            .unwrap_or(0))
-    }
-
     // ---- triggers ----
 
     pub fn trigger(&self, id: &str) -> Result<Option<TriggerRow>> {
@@ -990,6 +970,30 @@ impl Store {
         reason: Option<&str>,
         now: i64,
     ) -> Result<bool> {
+        Ok(self
+            .run_finish_counted(run_id, status, reason, now, None, 0)?
+            .0)
+    }
+
+    /// [`Store::run_finish`], and in the same transaction the run is counted
+    /// against its routine: `count` `Some(true)` adds one to its failures
+    /// in a row, `Some(false)` resets them, `None` leaves them; at `max`
+    /// failures the routine is paused with the reason `failures` unless it
+    /// is paused already. Returns whether the run was still running and
+    /// whether this paused the routine.
+    ///
+    /// One transaction: nobody reads a finished run whose routine does not
+    /// count it yet (a test did, on a slow runner), and a crash between the
+    /// two keeps both or neither.
+    pub fn run_finish_counted(
+        &self,
+        run_id: &str,
+        status: &str,
+        reason: Option<&str>,
+        now: i64,
+        count: Option<bool>,
+        max: i64,
+    ) -> Result<(bool, bool)> {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         let Some(routine) = tx
@@ -1002,7 +1006,7 @@ impl Store {
             )
             .optional()?
         else {
-            return Ok(false);
+            return Ok((false, false));
         };
         match foldable(&tx, &routine, status, reason, run_id)? {
             Some(into) => {
@@ -1024,8 +1028,34 @@ impl Store {
                 )?;
             }
         }
+        let mut paused = false;
+        if let Some(failed) = count {
+            tx.execute(
+                "UPDATE routines SET consecutive_failures =
+                     CASE WHEN ?2 THEN consecutive_failures + 1 ELSE 0 END
+                 WHERE routine_id = ?1",
+                params![routine, failed],
+            )?;
+            if failed {
+                let n: i64 = tx
+                    .query_row(
+                        "SELECT consecutive_failures FROM routines WHERE routine_id = ?1",
+                        params![routine],
+                        |r| r.get(0),
+                    )
+                    .optional()?
+                    .unwrap_or(0);
+                if n >= max {
+                    paused = tx.execute(
+                        "UPDATE routines SET paused_reason = 'failures', updated_ms = ?2
+                         WHERE routine_id = ?1 AND paused_reason IS NULL",
+                        params![routine, now],
+                    )? > 0;
+                }
+            }
+        }
         tx.commit()?;
-        Ok(true)
+        Ok((true, paused))
     }
 
     pub fn run(&self, run_id: &str) -> Result<Option<RunRow>> {
