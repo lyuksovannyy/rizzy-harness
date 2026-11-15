@@ -108,7 +108,7 @@ async function chat(p, text) {
     // 2. A private detail says where it stays.
     const script = JSON.stringify([{ tool: 'remember', input: { text: 'Alex has asthma', sensitive: true } }]);
     await chat(p, `script: ${script}`);
-    await p.waitForFunction(() => document.querySelector('.tool-memory')?.textContent?.includes('in this workspace only'));
+    await p.waitForFunction(() => document.querySelector('.tool-memory')?.textContent?.includes('in your Personal workspace only'));
     mine = await facts(p);
     check(mine.length === 1 && mine[0].place === 'workspace', `kept in Personal: ${JSON.stringify(mine)}`);
     await p.emulateMedia({ colorScheme: 'dark' });
@@ -164,15 +164,26 @@ async function chat(p, text) {
     await ctx2.addInitScript((k) => localStorage.setItem('harness.login', k), key);
     await keyed(ctx2);
     const p2 = await ctx2.newPage();
+    PAGE = p2;
     p2.on('pageerror', (e) => errors.push(e.message));
     await p2.goto(URL_);
+    // A new member's first visit is the two-step onboarding.
+    await p2.click('button:text-is("Continue")');
+    await p2.click('button:text-is("Finish")');
+    await p2.waitForSelector('h1.greeting');
     await api(p2, 'PUT', '/api/me/workspace', { workspace_id: ws });
-    await p2.goto(`${URL_}#/settings/workspace/facts`);
-    await p2.waitForSelector(`text=${SHARED}`);
-    check(!(await p2.$('input[aria-label="New fact"]')), 'a member does not edit it by hand');
-    await p2.screenshot({ path: `${S}/shots/workspace-memory-member-light.png` });
+    // A tab keeps the workspace it opened in: a new one opens in Acme.
+    await p2.close();
+    const p3 = await ctx2.newPage();
+    PAGE = p3;
+    p3.on('pageerror', (e) => errors.push(e.message));
+    await p3.goto(`${URL_}#/settings/workspace/facts`);
+    await p3.waitForSelector(`text=${SHARED}`);
+    check(!(await p3.$('input[aria-label="New fact"]')), 'a member does not edit it by hand');
+    await p3.screenshot({ path: `${S}/shots/workspace-memory-member-light.png` });
     // What a member's chat there is given is checked in
     // crates/master/tests/memory_places_http.rs (the demo model does not echo it).
+    PAGE = p;
     await ctx2.close();
 
     // 4. A phone-width view of the question in a second workspace.
