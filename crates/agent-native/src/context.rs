@@ -261,6 +261,7 @@ impl Sections {
         // the model reads right before the message.
         let notes = (!mcp_notes.is_empty()).then(|| mcp_notes.join("\n"));
         let per_turn = [
+            extra.mode_note.as_deref(),
             extra.user_instructions_unread.as_deref(),
             extra.instructions_unread.as_deref(),
             extra.skills_unread.as_deref(),

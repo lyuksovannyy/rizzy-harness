@@ -345,3 +345,71 @@ async fn the_operators_file_in_the_data_directory_is_out_of_every_tools_reach() 
         );
     }
 }
+
+/// Plan mode end to end (X.7, T.7): in both execution modes the chat's
+/// `bash` runs in the read-only shell, contained (a `host` chat's too, in
+/// a PID namespace of its own), reads work and nothing is written; after
+/// the person switches to auto the same command writes. A bubblewrap that
+/// cannot size a tmpfs has no read-only shell: then `bash` is refused and
+/// says why.
+#[tokio::test]
+async fn plan_mode_runs_bash_read_only_in_both_execution_modes() {
+    let Some(mut n) = node().await else { return };
+    std::fs::write(n.ws.join("kept.txt"), "original\n").unwrap();
+    let shell = harness_tools::contain::find_bwrap()
+        .map(|b| harness_tools::contain::sized_tmpfs(&b))
+        .unwrap_or(false);
+    for mode in [ExecMode::Sandbox, ExecMode::Host] {
+        let sid = n.create(mode).await;
+        n.link
+            .to_node
+            .try_send(MasterToNode::SetApprovalMode {
+                lowering: true,
+                req_id: "plan".into(),
+                session_id: sid,
+                mode: harness_core::policy::ApprovalMode::Plan,
+            })
+            .unwrap();
+        n.ack().await.unwrap();
+        let out = n
+            .run(
+                sid,
+                "run: cat kept.txt; echo pid=$$; touch planned.txt; echo x >> kept.txt; \
+                 echo t > $TMPDIR/t && cat $TMPDIR/t",
+            )
+            .await
+            .join("\n");
+        assert!(!n.ws.join("planned.txt").exists(), "{mode:?}: {out}");
+        assert_eq!(
+            std::fs::read_to_string(n.ws.join("kept.txt")).unwrap(),
+            "original\n",
+            "{mode:?}: {out}"
+        );
+        if !shell {
+            assert!(
+                !bwrap::required(),
+                "HARNESS_REQUIRE_BWRAP=1 but there is no read-only shell here: {out}"
+            );
+            eprintln!("SKIPPED (no read-only shell with this bubblewrap): {out}");
+            assert!(out.contains("no read-only shell"), "{mode:?}: {out}");
+            continue;
+        }
+        assert!(out.contains("original"), "{mode:?}: reads: {out}");
+        assert!(out.contains("pid=2"), "{mode:?}: not contained: {out}");
+        assert!(out.contains("Read-only file system"), "{mode:?}: {out}");
+        // The person leaves plan mode: the same kind of command writes.
+        n.link
+            .to_node
+            .try_send(MasterToNode::SetApprovalMode {
+                lowering: false,
+                req_id: "auto".into(),
+                session_id: sid,
+                mode: harness_core::policy::ApprovalMode::Auto,
+            })
+            .unwrap();
+        n.ack().await.unwrap();
+        let out = n.run(sid, "run: touch planned.txt").await.join("\n");
+        assert!(n.ws.join("planned.txt").exists(), "{mode:?}: {out}");
+        std::fs::remove_file(n.ws.join("planned.txt")).unwrap();
+    }
+}
