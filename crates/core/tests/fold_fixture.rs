@@ -51,6 +51,26 @@ fn staged(call_id: Option<&str>, by: StagedBy) -> ArtifactStaged {
     }
 }
 
+/// A usage naming `models`, `each` input tokens apiece.
+fn forged(models: &[&str], each: u64) -> Usage {
+    Usage {
+        input_tokens: each * models.len() as u64,
+        by_model: models
+            .iter()
+            .map(|m| {
+                (
+                    m.to_string(),
+                    ModelTokens {
+                        input_tokens: each,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect(),
+        ..Default::default()
+    }
+}
+
 fn events() -> Vec<RawEvent> {
     let sid: SessionId = "01a19bf2-0000-7000-8000-00000000f1f0".parse().unwrap();
     let t = || "t1".to_string();
@@ -482,6 +502,15 @@ fn events() -> Vec<RawEvent> {
             usage: Some(Usage {
                 input_tokens: 900,
                 output_tokens: 60,
+                by_model: [(
+                    "demo::small".to_string(),
+                    ModelTokens {
+                        input_tokens: 900,
+                        output_tokens: 60,
+                        ..Default::default()
+                    },
+                )]
+                .into(),
                 ..Default::default()
             }),
         }),
@@ -517,6 +546,15 @@ fn events() -> Vec<RawEvent> {
             usage: Some(Usage {
                 input_tokens: 2_000,
                 output_tokens: 300,
+                by_model: [(
+                    "demo::mock".to_string(),
+                    ModelTokens {
+                        input_tokens: 2_000,
+                        output_tokens: 300,
+                        ..Default::default()
+                    },
+                )]
+                .into(),
                 ..Default::default()
             }),
             tokens_after: Some(1_234),
@@ -617,18 +655,75 @@ fn events() -> Vec<RawEvent> {
             tool_calls: vec![],
             blocks: vec![],
         }),
+        // Model ids come from the node, so a forged event is folded like
+        // any other: prototype names are plain buckets ("constructor" is
+        // in web/src/fold.test.ts: vitest's strict equality compares
+        // `.constructor`), and with two
+        // slots left at the cap "10" and "11" are admitted before "9"
+        // (byte order, as `Usage::add` admits; review of PR 119 M1).
+        EventKind::TurnEnded(TurnEnded {
+            turn_id: "forged-1".into(),
+            reason: TurnEndReason::Completed,
+            usage: Some(forged(
+                &[
+                    "openai::gpt-4o",
+                    "__proto__",
+                    "toString",
+                    "p::f00",
+                    "p::f01",
+                    "p::f02",
+                    "p::f03",
+                    "p::f04",
+                    "p::f05",
+                    "p::f06",
+                    "p::f07",
+                    "p::f08",
+                    "p::f09",
+                ],
+                7,
+            )),
+        }),
+        EventKind::TurnEnded(TurnEnded {
+            turn_id: "forged-2".into(),
+            reason: TurnEndReason::Completed,
+            usage: Some(forged(&["9", "10", "11"], 3)),
+        }),
         // The turn's limits reach the view; the totals never carry them.
         EventKind::TurnEnded(TurnEnded {
             turn_id: "t5".into(),
             reason: TurnEndReason::Completed,
+            // Who used which tokens (the cost estimate's input): the main
+            // model with cache reads and writes, a sub-agent on the small
+            // model, and 100 input tokens no model was stamped on.
             usage: Some(Usage {
                 input_tokens: 900,
                 output_tokens: 10,
                 context_tokens: 800,
+                cache_read_tokens: 300,
+                cache_write_tokens: 100,
                 window: Some(128_000),
                 summary_at: Some(102_400),
                 model: Some("openai::gpt-4o".into()),
-                ..Default::default()
+                by_model: [
+                    (
+                        "openai::gpt-4o".to_string(),
+                        ModelTokens {
+                            input_tokens: 600,
+                            output_tokens: 8,
+                            cache_read_tokens: 300,
+                            cache_write_tokens: 100,
+                        },
+                    ),
+                    (
+                        "demo::small".to_string(),
+                        ModelTokens {
+                            input_tokens: 200,
+                            output_tokens: 2,
+                            ..Default::default()
+                        },
+                    ),
+                ]
+                .into(),
             }),
         }),
         EventKind::TurnStarted(TurnStarted {

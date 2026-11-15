@@ -11,7 +11,6 @@
 //! tools: [bash, read, write, edit, grep, glob]   # or: all
 //! model: openrouter::openai/gpt-4o                # optional, <provider>::<raw>
 //! effort: high                                    # low | medium | high | max
-//! budget: standard                                # lean | standard
 //! ui: rich                                        # rich | display | off
 //! delegates: [coder, scout]                       # may hand sub-tasks to these
 //! max_subagents: 4                                # per turn (default 4)
@@ -49,7 +48,7 @@ pub mod edits;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use harness_core::agent::{AgentSpec, Budget, ToolSelection, UiLevel};
+use harness_core::agent::{AgentSpec, ToolSelection, UiLevel};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -133,8 +132,6 @@ struct Frontmatter {
     model: Option<String>,
     #[serde(default)]
     effort: Option<String>,
-    #[serde(default)]
-    budget: Budget,
     #[serde(default)]
     ui: UiLevel,
     #[serde(default)]
@@ -269,15 +266,6 @@ impl Features {
             .flat_map(|(_, tools)| tools.iter().map(|t| t.to_string()))
             .collect()
     }
-
-    /// Work that runs long gets the standard budget; the rest stays lean.
-    fn budget(&self) -> Budget {
-        if self.edit_files || self.commands || self.delegate {
-            Budget::Standard
-        } else {
-            Budget::Lean
-        }
-    }
 }
 
 /// An agent as listed in the UI.
@@ -373,7 +361,6 @@ pub fn custom(
         tools: ToolSelection::List(features.tools()),
         model: None,
         effort: None,
-        budget: features.budget(),
         ui: UiLevel::Rich,
         delegates: if features.delegate { delegates } else { vec![] },
         max_subagents: None,
@@ -475,7 +462,6 @@ fn build(id: &str, fm: Frontmatter, body: &str, origin: Origin) -> Result<Agent,
             no_effort: vec![],
             context_windows: Default::default(),
             effort: fm.effort,
-            budget: fm.budget,
             ui: fm.ui,
             prompt_hash,
             deny_tools: vec![],

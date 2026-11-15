@@ -3582,8 +3582,8 @@ impl NativeBackend {
         for r in results {
             match r {
                 Ok(Some(u)) => {
-                    usage.input_tokens += u.input_tokens;
-                    usage.output_tokens += u.output_tokens;
+                    // The cache counts and the per-model breakdown too.
+                    usage.add(&u);
                     usage.context_tokens = usage.context_tokens.max(u.input_tokens);
                 }
                 Ok(None) => {}
@@ -4382,7 +4382,6 @@ mod tests {
             no_effort: vec![],
             context_windows: Default::default(),
             effort: None,
-            budget: Default::default(),
             ui: Default::default(),
             prompt_hash: "h".into(),
             deny_tools: vec![],

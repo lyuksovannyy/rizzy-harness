@@ -8,6 +8,7 @@ import { pageApi } from "../apiPages";
 import { dropModels, embedFirst, type Plan, planChanges, planFrom, planProblems, renameModel, setMain } from "../lib/modelPlan";
 import type { Agent, ProviderModel, ProviderPreset, ProvidersState, ProviderState } from "../types";
 import { type CustomModels, ModelPicker } from "./ModelPicker";
+import { CurrencyField, draftOf, ModelPrices, type PriceDraft, priceOf } from "./ModelPrices";
 
 /** The built-in demo provider's id. */
 const DEMO = "demo";
@@ -96,6 +97,18 @@ const bare = (raw: string): ProviderModel => ({
   missing_since: null,
 });
 
+/** The saved models' prices as the fields show them. */
+const draftsOf = (models: ProviderModel[]): Record<string, PriceDraft> =>
+  Object.fromEntries(models.filter((m) => m.price).map((m) => [m.id, draftOf(m.price)]));
+
+/** `m` with the price its fields say, none when they say none (a bad one
+ * never reaches here: Save is off). */
+const withPrice = (m: ProviderModel, d: PriceDraft | undefined): ProviderModel => {
+  const { price: had, ...rest } = m;
+  const r = d ? priceOf(d) : { price: had ?? null };
+  return "price" in r && r.price ? { ...rest, price: r.price } : rest;
+};
+
 /** Saved URLs come back normalised; a trailing slash is not a new endpoint. */
 const sameUrl = (a: string, b: string) => a.trim().replace(/\/+$/, "") === b.trim().replace(/\/+$/, "");
 
@@ -153,6 +166,9 @@ export function ProviderForm(props: {
   const [listing, setListing] = useState<ProviderModel[] | null>(null);
   const [fetched, setFetched] = useState<number | null>(null);
   const [chosen, setChosen] = useState<string[]>(() => (embeddings ? [] : (existing?.models.map((m) => m.id) ?? [])));
+  // Prices as typed, by raw id: kept apart from the models, since a listed
+  // model shows the listing's entry, which has none.
+  const [prices, setPrices] = useState<Record<string, PriceDraft>>(() => draftsOf(existing?.models ?? []));
   const [plan, setPlan] = useState<Plan>(() => planFor(existing?.id ?? null));
   const [tested, setTested] = useState<{ sig: string; at: number } | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
@@ -197,6 +213,7 @@ export function ProviderForm(props: {
     setBase(ex?.base_url ?? p?.base_url ?? "");
     setOwn(embeddings ? [] : (ex?.models ?? []));
     setChosen(embeddings ? [] : (ex?.models.map((m) => m.id) ?? []));
+    setPrices(draftsOf(ex?.models ?? []));
     setPlan(planFor(ex?.id ?? null));
     setListing(null);
     setFetched(null);
@@ -329,7 +346,7 @@ export function ProviderForm(props: {
         base_url: preset.url_editable ? url : undefined,
         api_key: key || undefined,
         // Memory's embeddings model is not a chat model.
-        models: embeddings ? (existing?.models ?? []) : chosen.map((id) => shownById.get(id) ?? bare(id)),
+        models: embeddings ? (existing?.models ?? []) : chosen.map((id) => withPrice(shownById.get(id) ?? bare(id), prices[id])),
       });
       setKey("");
       if (!edit) setSavedAs(pid);
@@ -406,7 +423,8 @@ export function ProviderForm(props: {
   const problems = !embeddings && agents.length ? planProblems(plan, chosen.map(LOCAL), agents, label) : [];
   // A saved provider may end with no chat models (one kept for memory only).
   const enough = embeddings ? chosen.length === 1 : chosen.length > 0 || !!existing;
-  const canSave = !busy && !!preset && enough && problems.length === 0 && !invalid && !needsTest && left === 0;
+  const badPrice = !embeddings && chosen.some((id) => prices[id] && "error" in priceOf(prices[id]));
+  const canSave = !busy && !!preset && enough && problems.length === 0 && !invalid && !needsTest && left === 0 && !badPrice;
   const testing = busy === "test";
   // Off but still focusable, so focus stays on it while it lists.
   const testOff = !!busy || !preset || !url;
@@ -542,6 +560,14 @@ export function ProviderForm(props: {
             fetchedMs={fetched}
             onRemoveUnavailable={existing && !embeddings ? (raw) => void removeGone(raw) : undefined}
           />
+          {!embeddings && (
+            <ModelPrices
+              models={chosen}
+              drafts={prices}
+              currency={state.currency}
+              onChange={(id, d) => setPrices((p) => ({ ...p, [id]: d }))}
+            />
+          )}
         </>
       )}
       {invalid && (name || prefix || !custom) && <div className="error-text">{invalid}</div>}
@@ -653,6 +679,7 @@ export function ProvidersSettings(props: { onChanged: () => void }) {
         </ul>
         {delErr && <div className="error-text">{delErr}</div>}
         {msg && <div className="muted">{msg}</div>}
+        <CurrencyField currency={state.currency} onSaved={(currency) => changed({ ...state, currency })} />
         {!editing && (
           <div>
             <button type="button" onClick={() => setEditing("new")}>

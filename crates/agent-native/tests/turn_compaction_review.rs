@@ -292,7 +292,6 @@ fn agent_w(w: u64) -> AgentSpec {
         no_effort: vec![],
         context_windows: vec![("m".to_string(), w)].into_iter().collect(),
         effort: None,
-        budget: Default::default(),
         ui: Default::default(),
         prompt_hash: "h".into(),
         deny_tools: vec![],

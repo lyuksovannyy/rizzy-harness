@@ -1,5 +1,5 @@
 // Port of crates/core/src/view.rs. The shared fixture test keeps them equal.
-import type { Item, RawEvent, SessionView, StagedArtifact, TodoItem } from "./types";
+import type { Item, ModelTokens, RawEvent, SessionView, StagedArtifact, TodoItem, Usage } from "./types";
 
 export function emptyView(): SessionView {
   return {
@@ -20,6 +20,81 @@ export function emptyView(): SessionView {
 }
 
 export class FoldError extends Error {}
+
+/** `Usage::add` in crates/core/src/event.rs: the sums, and the per-model
+ * breakdown up to MAX_USAGE_MODELS (a model past it stays unattributed). */
+export const MAX_USAGE_MODELS = 16;
+
+// Model ids come from the node's events, so they are never used to index an
+// object through its prototype ("__proto__", "constructor"): reads check own
+// keys, writes define own properties (review of PR 119, M1). The objects stay
+// plain, so the view keeps the JSON shape the Rust fold writes.
+type ByModel = Record<string, ModelTokens>;
+const own = (o: ByModel, k: string): ModelTokens | undefined => (Object.hasOwn(o, k) ? o[k] : undefined);
+const put = (o: ByModel, k: string, v: ModelTokens) =>
+  Object.defineProperty(o, k, { value: v, writable: true, enumerable: true, configurable: true });
+
+/** Rust's BTreeMap<String> order: UTF-8 bytes, which is code point order
+ * (JS objects list integer-like keys first, and `sort()` compares UTF-16). */
+function byteOrder(a: string, b: string): number {
+  const x = [...a];
+  const y = [...b];
+  for (let i = 0; i < Math.min(x.length, y.length); i++) {
+    const d = x[i]!.codePointAt(0)! - y[i]!.codePointAt(0)!;
+    if (d !== 0) return d;
+  }
+  return x.length - y.length;
+}
+
+const sortedKeys = (o: ByModel) => Object.keys(o).sort(byteOrder);
+
+/** A model's tokens as serde writes them (zero cache counts left out). */
+function tokensOf(t: ModelTokens): ModelTokens {
+  const c: ModelTokens = { input_tokens: t.input_tokens, output_tokens: t.output_tokens };
+  if (t.cache_read_tokens) c.cache_read_tokens = t.cache_read_tokens;
+  if (t.cache_write_tokens) c.cache_write_tokens = t.cache_write_tokens;
+  return c;
+}
+
+function addUsage(to: Usage, u: Usage) {
+  to.input_tokens += u.input_tokens;
+  to.output_tokens += u.output_tokens;
+  if (u.cache_read_tokens) to.cache_read_tokens = (to.cache_read_tokens ?? 0) + u.cache_read_tokens;
+  if (u.cache_write_tokens) to.cache_write_tokens = (to.cache_write_tokens ?? 0) + u.cache_write_tokens;
+  const from = u.by_model ?? {};
+  for (const model of sortedKeys(from)) {
+    const t = own(from, model)!;
+    const by = (to.by_model ??= {});
+    const mine = own(by, model);
+    if (mine) {
+      mine.input_tokens += t.input_tokens;
+      mine.output_tokens += t.output_tokens;
+      if (t.cache_read_tokens) mine.cache_read_tokens = (mine.cache_read_tokens ?? 0) + t.cache_read_tokens;
+      if (t.cache_write_tokens) mine.cache_write_tokens = (mine.cache_write_tokens ?? 0) + t.cache_write_tokens;
+    } else if (Object.keys(by).length < MAX_USAGE_MODELS) {
+      put(by, model, tokensOf(t));
+    }
+  }
+}
+
+/** `Usage::capped`: an event's usage as the fold keeps it, its known fields
+ * only and at most MAX_USAGE_MODELS models, the first in byte order. */
+export function cappedUsage(u: Usage): Usage {
+  const c: Usage = { input_tokens: u.input_tokens, output_tokens: u.output_tokens, context_tokens: u.context_tokens };
+  if (u.cache_read_tokens) c.cache_read_tokens = u.cache_read_tokens;
+  if (u.cache_write_tokens) c.cache_write_tokens = u.cache_write_tokens;
+  if (u.window != null) c.window = u.window;
+  if (u.summary_at != null) c.summary_at = u.summary_at;
+  if (u.model != null) c.model = u.model;
+  const from = u.by_model ?? {};
+  const keys = sortedKeys(from).slice(0, MAX_USAGE_MODELS);
+  if (keys.length > 0) {
+    const by: ByModel = {};
+    for (const k of keys) put(by, k, tokensOf(own(from, k)!));
+    c.by_model = by;
+  }
+  return c;
+}
 
 const KNOWN = new Set([
   "session_created",
@@ -69,14 +144,6 @@ const CLEARS_RETRY = new Set([
   "model_fallback",
   "retry_given_up",
 ]);
-
-/** A /compact's cost, added to the chat's (X.20). */
-function addUsage(v: SessionView, u: { input_tokens: number; output_tokens: number; cache_read_tokens?: number; cache_write_tokens?: number }) {
-  v.usage.input_tokens += u.input_tokens;
-  v.usage.output_tokens += u.output_tokens;
-  if (u.cache_read_tokens) v.usage.cache_read_tokens = (v.usage.cache_read_tokens ?? 0) + u.cache_read_tokens;
-  if (u.cache_write_tokens) v.usage.cache_write_tokens = (v.usage.cache_write_tokens ?? 0) + u.cache_write_tokens;
-}
 
 function lastTool(v: SessionView, callId: string): Extract<Item, { type: "tool" }> | undefined {
   for (let i = v.items.length - 1; i >= 0; i--) {
@@ -166,12 +233,7 @@ export function apply(v: SessionView, e: RawEvent): void {
       break;
     case "handoff_written": {
       // Its cost is the chat's, like a turn's (the sums only).
-      if (p.usage) {
-        v.usage.input_tokens += p.usage.input_tokens;
-        v.usage.output_tokens += p.usage.output_tokens;
-        if (p.usage.cache_read_tokens) v.usage.cache_read_tokens = (v.usage.cache_read_tokens ?? 0) + p.usage.cache_read_tokens;
-        if (p.usage.cache_write_tokens) v.usage.cache_write_tokens = (v.usage.cache_write_tokens ?? 0) + p.usage.cache_write_tokens;
-      }
+      if (p.usage) addUsage(v.usage, p.usage);
       const it: Extract<Item, { type: "handoff" }> = { type: "handoff", through_seq: p.through_seq };
       if (p.text != null) it.text = p.text;
       if (p.model != null) it.model = p.model;
@@ -291,10 +353,7 @@ export function apply(v: SessionView, e: RawEvent): void {
     }
     case "turn_ended":
       if (p.usage) {
-        v.usage.input_tokens += p.usage.input_tokens;
-        v.usage.output_tokens += p.usage.output_tokens;
-        if (p.usage.cache_read_tokens) v.usage.cache_read_tokens = (v.usage.cache_read_tokens ?? 0) + p.usage.cache_read_tokens;
-        if (p.usage.cache_write_tokens) v.usage.cache_write_tokens = (v.usage.cache_write_tokens ?? 0) + p.usage.cache_write_tokens;
+        addUsage(v.usage, p.usage);
         v.context_tokens = p.usage.context_tokens;
         if (p.usage.window != null) v.context_window = p.usage.window;
         else delete v.context_window;
@@ -303,6 +362,10 @@ export function apply(v: SessionView, e: RawEvent): void {
         if (p.usage.model != null) v.context_model = p.usage.model;
         else delete v.context_model;
       }
+      // The turn that ended, also when it reported none (an interrupted
+      // one): never an older turn's as the last.
+      if (p.usage) v.turn_usage = cappedUsage(p.usage);
+      else delete v.turn_usage;
       v.running_turn = null;
       v.running_agent = null;
       v.items.push({ type: "turn_end", turn_id: p.turn_id, reason: p.reason });
@@ -334,7 +397,7 @@ export function apply(v: SessionView, e: RawEvent): void {
     case "history_summarized": {
       // A person's /compact (X.20): its cost is the chat's, and the meter
       // shows the shorter context until the next turn reports its own.
-      if (p.usage) addUsage(v, p.usage);
+      if (p.usage) addUsage(v.usage, p.usage);
       if (p.tokens_after != null) v.context_tokens = p.tokens_after;
       const it: Extract<Item, { type: "summary" }> = { type: "summary", through_seq: p.through_seq, text: p.text };
       if (p.manual === true) it.manual = true;
@@ -343,7 +406,7 @@ export function apply(v: SessionView, e: RawEvent): void {
       break;
     }
     case "compact_failed":
-      if (p.usage) addUsage(v, p.usage);
+      if (p.usage) addUsage(v.usage, p.usage);
       v.items.push({ type: "error", message: p.reason });
       break;
     case "context_shortened": {

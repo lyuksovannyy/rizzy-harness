@@ -59,6 +59,7 @@ const STATE: ProvidersState = {
   default_model: null,
   agent_models: {},
   configured: false,
+  currency: "USD",
 };
 const CFG: MemoryCfg = {
   backend: "builtin",

@@ -103,7 +103,6 @@ fn agent(ui: UiLevel) -> AgentSpec {
         no_effort: vec![],
         context_windows: Default::default(),
         effort: None,
-        budget: Default::default(),
         ui,
         prompt_hash: "h".into(),
         deny_tools: vec![],

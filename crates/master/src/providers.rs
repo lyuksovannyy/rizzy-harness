@@ -155,6 +155,10 @@ pub fn model_list(cfg: &Config) -> Vec<ModelInfo> {
                     vision: m.vision == Some(true),
                     tools: m.tools == Some(true),
                     unavailable: m.unavailable,
+                    price: m.price.clone().map(|price| crate::pricing::PriceInfo {
+                        price,
+                        currency: cfg.pricing.currency.clone(),
+                    }),
                 }
             })
         })

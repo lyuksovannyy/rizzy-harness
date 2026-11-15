@@ -599,9 +599,17 @@ impl Provider for ModelRouter {
         deltas: mpsc::UnboundedSender<String>,
     ) -> Result<Completion, ProviderError> {
         let (route, raw) = self.resolve(&req.model)?;
-        let mut req = req.clone();
-        req.model = raw.to_string();
-        route.provider.complete(&req, deltas).await
+        let mut sent = req.clone();
+        sent.model = raw.to_string();
+        let mut c = route.provider.complete(&sent, deltas).await?;
+        // Who used these tokens: the prefixed model asked for, whatever
+        // the provider claims. Every model call of a turn, a fallback, a
+        // summary, a sub-agent or a hand-off note passes here, so the
+        // turn's `Usage::add` keeps a per-model breakdown to price.
+        if let Some(u) = c.usage.as_mut() {
+            u.stamp(&req.model);
+        }
+        Ok(c)
     }
 }
 
@@ -945,5 +953,80 @@ mod tests {
             ));
         }
         assert_eq!(r.name(), "multi-provider");
+    }
+
+    /// Reports usage under whatever (wrong) model a provider might claim.
+    struct Counting;
+
+    #[async_trait::async_trait]
+    impl Provider for Counting {
+        fn name(&self) -> &'static str {
+            "counting"
+        }
+        async fn complete(
+            &self,
+            _req: &ChatRequest,
+            _deltas: mpsc::UnboundedSender<String>,
+        ) -> Result<Completion, ProviderError> {
+            Ok(Completion {
+                usage: Some(Usage {
+                    input_tokens: 1000,
+                    output_tokens: 20,
+                    cache_read_tokens: 700,
+                    cache_write_tokens: 100,
+                    model: Some("not-me".into()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+        }
+    }
+
+    /// Every call's usage leaves the router under the prefixed model it
+    /// was asked for, so a turn's sums can be priced per model.
+    #[tokio::test]
+    async fn router_stamps_each_calls_usage_with_its_model() {
+        let r = ModelRouter::new(vec![
+            Route {
+                prefix: "a".into(),
+                provider: std::sync::Arc::new(Counting),
+            },
+            Route {
+                prefix: "b".into(),
+                provider: std::sync::Arc::new(Named("b")),
+            },
+        ]);
+        let req = |model: &str| ChatRequest {
+            model: model.into(),
+            messages: vec![],
+            tools: vec![],
+            effort: None,
+            cache: false,
+            limits: None,
+            no_tool_calls: false,
+            max_tokens: None,
+        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let u = r
+            .complete(&req("a::m-1"), tx.clone())
+            .await
+            .unwrap()
+            .usage
+            .unwrap();
+        let by: Vec<_> = u.by_model.iter().collect();
+        assert_eq!(by.len(), 1, "{by:?}");
+        assert_eq!(by[0].0, "a::m-1");
+        assert_eq!(
+            (
+                by[0].1.input_tokens,
+                by[0].1.output_tokens,
+                by[0].1.cache_read_tokens,
+                by[0].1.cache_write_tokens
+            ),
+            (1000, 20, 700, 100)
+        );
+        // No usage reported: nothing to stamp, none made up.
+        let c = r.complete(&req("b::x"), tx).await.unwrap();
+        assert!(c.usage.is_none());
     }
 }

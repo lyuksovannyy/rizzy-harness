@@ -35,15 +35,6 @@ impl ToolSelection {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Budget {
-    /// Short prompts, fewer steps: chat-style and throwaway work.
-    #[default]
-    Lean,
-    Standard,
-}
-
 /// Which `ui:` blocks an agent's replies may use (`ui:` in its frontmatter).
 /// The agent loop enforces it when it records a message; the prompt only
 /// tells the model what is available.
@@ -110,8 +101,6 @@ pub struct AgentSpec {
     /// `low` | `medium` | `high` | `max`; only applied if the model supports it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
-    #[serde(default)]
-    pub budget: Budget,
     #[serde(default)]
     pub ui: UiLevel,
     /// Hash of everything above that changes behaviour.

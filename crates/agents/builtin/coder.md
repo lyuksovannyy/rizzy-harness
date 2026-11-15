@@ -4,7 +4,6 @@ description: Software engineer that reads, changes and tests code in the workspa
 aliases: [dev]
 category: IT
 tools: [bash, bash_output, bash_stop, tool_output, read, write, edit, grep, glob, outline, graph_query, publish, todo, skill, web_search, web_fetch, remember, mcp]
-budget: standard
 ui: rich
 memory: false
 delegates: [scout, researcher, reviewer]

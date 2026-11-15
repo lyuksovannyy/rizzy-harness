@@ -112,8 +112,7 @@ in the database).
 | Manage workspace | Doesn't exist | Shown, disabled, "planned" |
 
 The features live in `harness_agents::Features`. A custom agent stores them, and its tool list
-(and `budget`: `standard` when it may change files, run commands or delegate, else `lean`) comes
-from them. For built-in and file agents they are **derived** from the definition
+comes from them (the `budget` field once derived here was never read and is gone, X.18). For built-in and file agents they are **derived** from the definition
 (`Features::of`), so the grid shows what the agent really does. The tool list stays the source of
 truth for those. Node policy still wins: a switch is a request, not a permission (PLAN.md §0).
 

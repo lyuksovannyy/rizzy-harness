@@ -3,7 +3,6 @@ name: Smol
 description: Small, fast helper for short literal tasks on text you give it, such as rephrasing, translating, extracting or summarising.
 category: General
 tools: []
-budget: lean
 ui: rich
 memory: false
 project_memory: false

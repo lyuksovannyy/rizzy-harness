@@ -2998,6 +2998,23 @@ mark {
 }
 /* ModelPicker: a scrolling list of rows; a row is the model, the tags of
    what the provider reported, and (when chosen) its agents. */
+/* A provider's model prices (ModelPrices.tsx). */
+.price-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.price-table th,
+.price-table td {
+  padding: 2px 4px;
+  text-align: left;
+  font-weight: normal;
+}
+.price-table th[scope="row"] {
+  max-width: 14em;
+}
+.price-table input {
+  width: 6em;
+}
 .model-pick {
   gap: var(--space-2);
 }

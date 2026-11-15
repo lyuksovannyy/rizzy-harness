@@ -136,6 +136,7 @@ export const pageApi = {
   saveAgentModels: (b: { agent_models: Record<string, AgentChain | null>; default_model?: string | null }) =>
     call<ProvidersState>("PUT", "/api/admin/agent-models", b),
   demoProvider: () => call<ProvidersState>("POST", "/api/admin/providers/demo"),
+  savePricing: (currency: string) => call<{ currency: string }>("PUT", "/api/admin/pricing", { currency }),
   saveSettings: (p: Prefs) => call<Prefs>("PUT", "/api/me/settings", p),
   addMemory: (text: string, kind: FactKind = "fact") =>
     call<MemoryFact>("POST", "/api/memory", { text, kind }),
