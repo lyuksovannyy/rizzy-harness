@@ -1062,7 +1062,11 @@ that writes on its own copy) and do not see each other's changes; the
 agents are told to start together only work that is independent. Merging
 needs git 2.43 or newer on the node. None of this runs your repository's config, hooks, filters, merge drivers or
 attributes. Sub-agents that only
-read work in the folder itself. Only the latest 10 checkpoints per folder are kept (`checkpoints_keep`
+read work in the folder itself, and so do those whose only tools that
+change things are `publish` and MCP tools (they write no file directly; a
+filesystem-style MCP server can still write the folder, with its calls'
+own approval); one that can write, edit or run a writable shell gets its
+own copy. Only the latest 10 checkpoints per folder are kept (`checkpoints_keep`
 in `node.toml`). "Rewind" undoes a turn and everything after it. Before an
 undo or rewind changes a file it saves the folder as it is, your own edits
 since the turn included, as a checkpoint of its own, so "Undo anyway" loses
@@ -1155,12 +1159,18 @@ with one line saying what runs unasked:
   mode: their effects are only the server's word). `bash` runs in the
   **read-only shell** (docs/read-only-shell.md): contained in bubblewrap with
   the chat's folder and everything else bound read-only and only its own
-  `/tmp` (1 GiB by default, `[sandbox] read_only_tmp_mib`; gone when the command ends) writable, in a sandbox chat
+  temp folder (`$TMPDIR`: `/tmp`, or `/.harness-tmp` when the chat's folder
+  is under the host's `/tmp`; 256 MiB by default, `[sandbox]
+  read_only_tmp_mib`; gone when the command ends) writable, and **no
+  network** unless `[sandbox] read_only_network = true` (a change from
+  before: plan mode's shell had the node's network), in a sandbox chat
   and in a host chat alike; `git log`, `git diff`, `git status`, `grep` work,
   and any write fails with "Read-only file system". `CARGO_TARGET_DIR` points
-  into that `/tmp`, so `cargo build` and `cargo test` work where `~/.cargo`
-  and `~/.rustup` are in `[sandbox] read` (or `write`, read-only here) and
-  the build fits; toolchains that must write their home or the folder (`npm
+  into the temp folder, so `cargo build` and `cargo test` work where the
+  toolchain folders are in `[sandbox] read` (narrow ones: `~/.cargo/registry`,
+  `~/.cargo/bin`, `~/.rustup/toolchains`, not `~/.cargo` with its
+  `credentials.toml`) and the build, which starts from nothing in every
+  command, fits; toolchains that must write their home or the folder (`npm
   install`) fail: a planner reads, greps, runs `git`, and runs scripts and
   tests that write nothing or only to `$TMPDIR`. On a node without that
   containment (no bubblewrap, `[sandbox] mode = "off"`, a bubblewrap that
@@ -1302,7 +1312,8 @@ network = "on"                       # on | off (off: no network for the shell, 
 read = []                            # more read-only folders, e.g. "~/.cargo"
 write = []                           # more read-write folders, e.g. "~/.cache"
 # bwrap = "/usr/bin/bwrap"           # which bubblewrap; default: the first root-owned one on PATH
-read_only_tmp_mib = 1024             # the read-only shell's /tmp per command, in memory (64 .. 65536)
+read_only_tmp_mib = 256              # the read-only shell's temp folder per running command, host memory (64 .. 65536)
+read_only_network = false            # the read-only shell (plan mode, read-only agents) reaches the network; never wider than `network`
 
 [execution]
 sandbox = "auto"                     # auto | strict | off: offer the sandbox mode (bubblewrap), see "Execution modes"
@@ -2958,9 +2969,11 @@ new agent) always runs in the **read-only shell** (docs/read-only-shell.md),
 whatever the chat's mode: the node picks it from the tools the agent has, so
 no setting or agent spec can give a read-only agent a shell that writes. They
 can run `git log`, `git diff`, `git blame`, `grep ... | sort | uniq -c` and
-tests whose output goes to `/tmp` (`cargo test` does: `CARGO_TARGET_DIR` points
-there, with `~/.cargo` and `~/.rustup` in `[sandbox] read`), with the network
-as `[sandbox] network` says; nothing they run can change the folder, and their
+tests whose output goes to `$TMPDIR` (`cargo test` of a small crate does:
+`CARGO_TARGET_DIR` points there, with the toolchain folders in `[sandbox]
+read`), with **no network** unless node.toml sets `[sandbox]
+read_only_network = true` (their commands run unasked and may run the
+repository's own code); nothing they run can change the folder, and their
 commands ask no card in Ask or Accept edits (Ask every call asks). A read-only
 agent still works in its parent's folder (no copy, nothing merged back), may
 run on the small model and may be started in plan mode. Where the node has no

@@ -279,6 +279,12 @@ describe("an agent's page", () => {
     );
   });
 
+  test("a fixed agent with read-only commands says its shell is read-only", async () => {
+    api.agent.mockResolvedValue(detail(agent("looker", { origin: "file", builtin: false, features: { ...NEW_FEATURES, read_files: true, read_only_commands: true } })));
+    await show(admin, "looker");
+    expect(host.textContent).toContain("its commands run in a read-only shell");
+  });
+
   test("read-only without permission", async () => {
     api.agent.mockResolvedValue(detail(reviewer, { prompt: "Review it." }));
     await show(member, "reviewer");

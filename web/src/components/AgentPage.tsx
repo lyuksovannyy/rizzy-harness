@@ -68,7 +68,7 @@ export const FEATURE_GROUPS: { title: string; items: Feature[] }[] = [
       {
         key: "read_only_commands",
         label: "Read-only commands",
-        hint: "Runs commands that can only look (git log, grep, tests) in a read-only shell; only for an agent that changes nothing else",
+        hint: "Runs commands that can only look (git log, grep, tests) in a read-only shell without network; only for an agent that changes nothing else",
       },
       { key: "mcp", label: "MCP servers", hint: "Uses the tools of the MCP servers the node runs for the chat" },
       { key: "delegate", label: "Launch sub-agents", hint: "Hands sub-tasks to the agents available as sub-agents" },
@@ -538,6 +538,9 @@ export function AgentPage(props: {
           <div className="field">
             <span className="field-label">Features{locked && " (fixed for this agent)"}</span>
             <FeatureGrid features={draft.features} disabled={!canEdit || locked} onChange={(features) => set({ features })} />
+            {locked && draft.features.read_only_commands && (
+              <p className="field-hint">No tool of this agent changes files, so its commands run in a read-only shell, without network.</p>
+            )}
           </div>
           {listed && !creating && (
             <div className="field">
