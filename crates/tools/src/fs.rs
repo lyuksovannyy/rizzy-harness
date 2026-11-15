@@ -73,6 +73,9 @@ impl Tool for Read {
     fn risk(&self) -> ToolRisk {
         ToolRisk::ReadOnly
     }
+    fn refusal(&self, ctx: &ToolCtx, input: &Value) -> Option<String> {
+        crate::path_refusal(ctx, input, false)
+    }
     async fn run(&self, ctx: &ToolCtx, input: Value) -> ToolOutcome {
         let path = match str_arg(&input, "path").and_then(|p| ctx.resolve(p)) {
             Ok(p) => p,
@@ -173,6 +176,9 @@ impl Tool for Write {
     }
     fn risk(&self) -> ToolRisk {
         ToolRisk::Mutating
+    }
+    fn refusal(&self, ctx: &ToolCtx, input: &Value) -> Option<String> {
+        crate::path_refusal(ctx, input, true)
     }
     async fn run(&self, ctx: &ToolCtx, input: Value) -> ToolOutcome {
         let shown = str_arg(&input, "path").unwrap_or_default().to_string();

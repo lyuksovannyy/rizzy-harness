@@ -71,6 +71,11 @@ struct N {
 }
 
 async fn start(db: &std::path::Path, policy: NodePolicy) -> N {
+    // As `node run` builds it from the same node.toml.
+    let native = NativeConfig {
+        allow_outside_workspace: policy.allow_outside_workspace,
+        ..Default::default()
+    };
     let cfg = NodeConfig {
         node_id: "n".into(),
         hostname: "test".into(),
@@ -85,7 +90,7 @@ async fn start(db: &std::path::Path, policy: NodePolicy) -> N {
                 tools.push(Arc::new(McpWrite));
                 tools
             },
-            NativeConfig::default(),
+            native,
         )),
         default_model: "mock".into(),
         secrets: Default::default(),
@@ -507,16 +512,18 @@ async fn accept_edits_covers_edits_inside_the_folder_only() {
             deny,
         )
         .await;
+    // Out of the folder (this node keeps the file tools in it) and in
+    // `.git` the tool refuses them anyway: no card, its refusal (T51).
+    assert_eq!(about(&asked), ["bash touch b.txt"]);
+    let outs = outputs(&n, sid);
     assert_eq!(
-        about(&asked),
-        [
-            "write ../out/escape.txt".to_string(),
-            format!("write {}", abs.display()),
-            "write lnk/via-link.txt".into(),
-            "write dangling".into(),
-            "write .git/config".into(),
-            "bash touch b.txt".into(),
-        ]
+        outs.iter()
+            .filter(|o| o.contains("outside the session workspace")
+                || o.contains("dangling")
+                || o.contains("inside a .git directory"))
+            .count(),
+        5,
+        "{outs:?}"
     );
     assert_eq!(std::fs::read_to_string(ws.join("a.txt")).unwrap(), "y\n");
     assert!(ws.join("c.txt").exists());
@@ -961,10 +968,11 @@ async fn accept_edits_covers_a_new_folder_and_not_git_in_any_case() {
             deny,
         )
         .await;
-    assert_eq!(
-        about(&asked),
-        ["write .GIT/config", "write .Git/hooks/pre-commit"]
-    );
+    // `.git` is refused by the tool in every mode: no card (T51).
+    assert!(asked.is_empty(), "{:?}", about(&asked));
+    let outs = outputs(&n, sid);
+    assert!(outs[1].contains("inside a .git directory"), "{}", outs[1]);
+    assert!(outs[2].contains("inside a .git directory"), "{}", outs[2]);
     assert!(ws.join("src/new/mod.rs").exists());
 }
 
@@ -1460,4 +1468,202 @@ async fn a_node_can_turn_chat_grants_off_and_a_routines_chat_gets_none() {
     let parsed: NodePolicy = toml::from_str("chat_grants = false\n").unwrap();
     assert!(!parsed.chat_grants);
     assert!(NodePolicy::default().chat_grants, "on by default");
+}
+
+/// Every `approval_requested` of `sid`, policy refusals included.
+fn requested(n: &N, sid: SessionId) -> Vec<ApprovalRequested> {
+    n.node
+        .store()
+        .events_after(sid, 0, 100_000)
+        .unwrap()
+        .iter()
+        .filter_map(|e| match e.typed() {
+            Ok(EventKind::ApprovalRequested(a)) => Some(a),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A call its tool refuses whatever the person answers (a path or
+/// `workdir` outside the chat's folder on a node with
+/// `allow_outside_workspace = false`) shows no card, in Ask and in Ask all:
+/// the tool's own refusal is its result, and the log holds no
+/// `approval_requested` for it (T51). A call inside the folder still asks.
+#[tokio::test]
+async fn a_call_the_tool_refuses_anyway_shows_no_card() {
+    for mode in [ApprovalMode::Ask, ApprovalMode::AskAll] {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        let out = dir.path().join("out");
+        std::fs::create_dir(&ws).unwrap();
+        std::fs::create_dir(&out).unwrap();
+        std::fs::write(out.join("there.txt"), "x\n").unwrap();
+        let mut n = start(
+            &dir.path().join("node.db"),
+            policy(dir.path(), ApprovalMode::Auto),
+        )
+        .await;
+        let sid = n.create(&ws, Some(mode), None, false).await;
+        let abs = out.join("there.txt").display().to_string();
+        let asked = n
+            .turn(
+                sid,
+                &script(&[
+                    ("write", json!({"path": "../out/new.txt", "content": "e"})),
+                    (
+                        "edit",
+                        json!({"path": abs, "old_string": "x", "new_string": "y"}),
+                    ),
+                    ("read", json!({"path": "../out/there.txt"})),
+                    ("grep", json!({"pattern": "x", "path": "../out"})),
+                    (
+                        "bash",
+                        json!({"command": "touch b.txt", "workdir": "../out"}),
+                    ),
+                    ("write", json!({"path": ".git/config", "content": "e"})),
+                    ("write", json!({"path": "in.txt", "content": "i"})),
+                ]),
+                None,
+                deny,
+            )
+            .await;
+        assert_eq!(about(&asked), ["write in.txt"], "{mode:?}");
+        assert_eq!(about(&requested(&n, sid)), ["write in.txt"], "{mode:?}");
+        let outs = outputs(&n, sid);
+        for (i, why) in [
+            "is outside the session workspace",
+            "is outside the session workspace",
+            "is outside the session workspace",
+            "is outside the session workspace",
+            "not run: workdir `../out`",
+            "inside a .git directory",
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert!(outs[i].contains(why), "{mode:?} call {i}: {}", outs[i]);
+        }
+        assert_eq!(outs[6], harness_core::event::denied_text(None), "{mode:?}");
+        assert_eq!(std::fs::read_dir(&out).unwrap().count(), 1, "{mode:?}");
+        assert_eq!(
+            std::fs::read_to_string(out.join("there.txt")).unwrap(),
+            "x\n"
+        );
+    }
+}
+
+/// On a node that lets the file tools leave the folder, the same calls
+/// are possible, so they still ask.
+#[tokio::test]
+async fn outside_the_folder_still_asks_where_the_node_allows_it() {
+    // Accept edits too: its rule covers the folder only (T50).
+    for mode in [ApprovalMode::Ask, ApprovalMode::AcceptEdits] {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        let out = dir.path().join("out");
+        std::fs::create_dir(&ws).unwrap();
+        std::fs::create_dir(&out).unwrap();
+        std::fs::write(out.join("there.txt"), "x\n").unwrap();
+        let mut n = start(
+            &dir.path().join("node.db"),
+            NodePolicy {
+                allow_outside_workspace: true,
+                ..policy(dir.path(), ApprovalMode::Auto)
+            },
+        )
+        .await;
+        let sid = n.create(&ws, Some(mode), None, false).await;
+        let abs = out.join("there.txt").display().to_string();
+        let asked = n
+            .turn(
+                sid,
+                &script(&[
+                    ("write", json!({"path": "../out/new.txt", "content": "e"})),
+                    (
+                        "edit",
+                        json!({"path": abs, "old_string": "x", "new_string": "y"}),
+                    ),
+                    // `.git` is refused in every mode: still no card.
+                    ("write", json!({"path": ".git/config", "content": "e"})),
+                ]),
+                None,
+                deny,
+            )
+            .await;
+        assert_eq!(
+            about(&asked),
+            ["write ../out/new.txt".to_string(), format!("edit {abs}")],
+            "{mode:?}"
+        );
+    }
+}
+
+/// The early refusal never replaces the tool's own check when it runs: a
+/// path inside the folder when the card is shown, swapped for a link that
+/// leads out before the person allows it, is refused at run time.
+#[tokio::test]
+async fn a_path_swapped_after_the_card_is_still_refused_when_it_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    let out = dir.path().join("out");
+    std::fs::create_dir_all(ws.join("sub")).unwrap();
+    std::fs::create_dir(&out).unwrap();
+    let mut n = start(
+        &dir.path().join("node.db"),
+        policy(dir.path(), ApprovalMode::Auto),
+    )
+    .await;
+    let sid = n.create(&ws, Some(ApprovalMode::Ask), None, false).await;
+    let (sub, target) = (ws.join("sub"), out.clone());
+    let asked = n
+        .turn(
+            sid,
+            &script(&[("write", json!({"path": "sub/f.txt", "content": "e"}))]),
+            None,
+            move |_| {
+                if !sub.is_symlink() {
+                    std::fs::remove_dir(&sub).unwrap();
+                    std::os::unix::fs::symlink(&target, &sub).unwrap();
+                }
+                Decision::Allow
+            },
+        )
+        .await;
+    assert_eq!(about(&asked), ["write sub/f.txt"]);
+    let o = outputs(&n, sid).pop().unwrap();
+    assert!(o.contains("outside the session workspace"), "{o}");
+    assert_eq!(std::fs::read_dir(&out).unwrap().count(), 0);
+}
+
+/// A tool `denied_tools` names is refused by the node's policy as before,
+/// with its record, whatever its path.
+#[tokio::test]
+async fn a_denied_tool_is_refused_by_policy_as_before() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    let mut n = start(
+        &dir.path().join("node.db"),
+        NodePolicy {
+            denied_tools: vec!["write".into()],
+            ..policy(dir.path(), ApprovalMode::Auto)
+        },
+    )
+    .await;
+    let sid = n.create(&ws, Some(ApprovalMode::Ask), None, false).await;
+    let asked = n
+        .turn(
+            sid,
+            &script(&[
+                ("write", json!({"path": "in.txt", "content": "i"})),
+                ("write", json!({"path": "../out.txt", "content": "e"})),
+            ]),
+            None,
+            deny,
+        )
+        .await;
+    assert_eq!(about(&asked), ["write in.txt", "write ../out.txt"]);
+    assert!(asked.iter().all(|a| a.reason.contains("denied by")));
+    assert!(!ws.join("in.txt").exists());
+    assert!(!dir.path().join("out.txt").exists());
 }
