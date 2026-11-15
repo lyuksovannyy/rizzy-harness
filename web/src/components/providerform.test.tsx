@@ -539,3 +539,20 @@ describe("countdown", () => {
     expect(seen.at(-1)).toBe(10);
   });
 });
+
+describe("the currency", () => {
+  test("Save only for three letters A-Z (the server's rule), upper-cased as typed", async () => {
+    const { CurrencyField } = await import("./ModelPrices");
+    act(() => root.render(<CurrencyField currency="USD" onSaved={() => {}} />));
+    const input = host.querySelector<HTMLInputElement>("input")!;
+    const saveBtn = () => button("Save");
+    expect(saveBtn().disabled).toBe(true);
+    for (const bad of ["US", "U1", "EU€", ""]) {
+      type(input, bad);
+      expect(saveBtn().disabled, bad).toBe(true);
+    }
+    type(input, "eur");
+    expect(input.value).toBe("EUR");
+    expect(saveBtn().disabled).toBe(false);
+  });
+});

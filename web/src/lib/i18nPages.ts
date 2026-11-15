@@ -38,7 +38,8 @@ export const pages = {
     "An estimate at the prices the server's admin set, as they are now: not the bill. Price changes since, and discounts or charges only the provider knows of, are not in it.",
   "cost.noPrices": "No model this chat used has a price set.",
   "cost.unpricedModels": "Not priced: {models} (no price set for a kind of token it used).",
-  "cost.unattributed": "{n} tokens were recorded before costs were tracked per model, and are not priced.",
+  "cost.unattributed":
+    "{n} tokens were not recorded under a model (a chat from an older version, or past the 16 models a chat tracks) and are not priced.",
   "conv.context": "context",
   "conv.ofWindow": "{pct}% of {window}",
   "conv.summaryAt": "summary at {pct}%",

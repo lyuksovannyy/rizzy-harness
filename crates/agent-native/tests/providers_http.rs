@@ -813,3 +813,39 @@ async fn a_cut_call_in_the_history_is_sent_as_an_object() {
         .unwrap();
     assert_eq!(input, json!({}), "{body}");
 }
+
+/// An OpenAI-compatible router's cache counts (OpenRouter writes the cache
+/// writes as `prompt_tokens_details.cache_write_tokens`): both reach the
+/// usage, so the cost estimate prices them as cache, not as plain input,
+/// and `prompt_tokens` already includes them.
+#[tokio::test]
+async fn openai_compatible_cache_reads_and_writes_reach_the_usage() {
+    let chunk = |v: Value| format!("data: {v}\n\n");
+    let sse = [
+        chunk(json!({"choices":[{"index":0,"delta":{"content":"ok"}}]})),
+        chunk(json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]})),
+        chunk(json!({"choices":[],"usage":{"prompt_tokens":4000,"completion_tokens":7,"total_tokens":4007,
+            "prompt_tokens_details":{"cached_tokens":3000,"cache_write_tokens":500}}})),
+        "data: [DONE]\n\n".to_string(),
+    ]
+    .concat();
+    let (base, _seen) = serve("/v1/chat/completions", sse).await;
+    let p = LlmProvider::new(
+        ApiKind::Openai,
+        &format!("{base}/v1"),
+        Some(Secret::new("k".into())),
+    )
+    .unwrap();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let u = p.complete(&request(), tx).await.unwrap().usage.unwrap();
+    assert_eq!(
+        (
+            u.input_tokens,
+            u.output_tokens,
+            u.cache_read_tokens,
+            u.cache_write_tokens
+        ),
+        (4000, 7, 3000, 500),
+        "{u:?}"
+    );
+}

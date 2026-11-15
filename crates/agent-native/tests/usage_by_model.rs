@@ -92,6 +92,20 @@ impl Provider for Script {
                     hint: RetryHint::default(),
                 });
             }
+            // Works one step, then its provider refuses it (no fallback):
+            // a sub-agent that fails after spending tokens.
+            "boom"
+                if req
+                    .messages
+                    .iter()
+                    .any(|m| matches!(m, ChatMsg::Tool { .. })) =>
+            {
+                return Err(ProviderError::Status {
+                    status: 401,
+                    body: "Incorrect API key".into(),
+                    hint: RetryHint::default(),
+                });
+            }
             "flaky" => {
                 let mut failed = self.flaky_failed.lock().unwrap();
                 if !*failed {
@@ -147,6 +161,7 @@ impl Provider for Script {
                 {
                     tool_call(0, "delegate", json!({"agent": "reader", "task": "look"}))
                 }
+                "boom" => tool_call(0, "note", json!({"text": "x"})),
                 "noter" => {
                     let i = {
                         let mut n = self.noter_steps.lock().unwrap();
@@ -265,6 +280,8 @@ impl TurnHost for Host {
             finish: None,
             error: None,
             note: None,
+            unapplied: None,
+            applied: true,
         })
     }
 }
@@ -578,4 +595,21 @@ async fn a_hand_off_note_lands_under_the_model_that_wrote_it() {
     let u = out.usage.unwrap();
     assert_eq!(u.by_model, p.ledger());
     assert_eq!(u.by_model["p::chat"].input_tokens, 900);
+}
+
+#[tokio::test]
+async fn a_sub_agent_that_fails_still_counts_what_it_spent() {
+    // The child's turn ends in an error after one model call: the node
+    // returns its usage whatever the reason, and the parent adds it.
+    let p = Arc::new(Script::default());
+    let b = backend(p.clone(), None);
+    let mut lead = spec("lead", None, &[], &[]);
+    lead.delegates = vec![spec("reader", Some("p::boom"), &["note"], &[])];
+    let out = Turn::new("p::lead", lead).run(&b).await;
+    assert_eq!(out.reason, TurnEndReason::Completed, "{:?}", out.error);
+    let by = assert_matches(&out, &p);
+    assert_eq!(
+        by["p::boom"].input_tokens, 1000,
+        "the failed child's one call"
+    );
 }

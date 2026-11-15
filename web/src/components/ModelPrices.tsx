@@ -34,7 +34,8 @@ export function priceOf(d: PriceDraft): { price: ModelPrice | null } | { error: 
   for (const [k, label] of CLASSES) {
     const raw = d[k].trim();
     if (raw === "") continue;
-    const n = Number(raw);
+    // A plain decimal only: `Number` would also take "0x10" or "1e2".
+    const n = /^(\d+\.?\d*|\.\d+)$/.test(raw) ? Number(raw) : Number.NaN;
     if (!Number.isFinite(n) || n < 0 || n > MAX_PRICE) return { error: `${label}: a number from 0 to ${MAX_PRICE}` };
     price[k] = n;
   }
@@ -104,6 +105,9 @@ export function ModelPrices(props: {
   );
 }
 
+/** What the server takes (`pricing::clean_currency`, after upper-casing). */
+export const CURRENCY_RE = /^[A-Z]{3}$/;
+
 /** The server's one currency for every price. */
 export function CurrencyField(props: { currency: string; onSaved: (c: string) => void }) {
   const [value, setValue] = useState(props.currency);
@@ -129,7 +133,7 @@ export function CurrencyField(props: { currency: string; onSaved: (c: string) =>
           Currency of model prices <span className="muted small">· ISO code, one for the whole server; changing it converts no price</span>
           <input className="mono" value={value} maxLength={3} onChange={(e) => setValue(e.target.value.toUpperCase())} />
         </label>
-        <button type="button" disabled={busy || value === props.currency} onClick={() => void save()}>
+        <button type="button" disabled={busy || value === props.currency || !CURRENCY_RE.test(value)} onClick={() => void save()}>
           Save
         </button>
       </div>

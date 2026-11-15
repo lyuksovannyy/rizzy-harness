@@ -1368,6 +1368,18 @@ impl Usage {
         }
     }
 
+    /// This usage as a fold keeps it: at most [`MAX_USAGE_MODELS`] models,
+    /// the first in key (byte) order, as [`Usage::add`] admits them; the
+    /// rest stay in the sums, unattributed. A node writes the event, so a
+    /// forged one is bounded here too, not only in `add`.
+    pub fn capped(&self) -> Usage {
+        let mut u = self.clone();
+        if u.by_model.len() > MAX_USAGE_MODELS {
+            u.by_model = u.by_model.into_iter().take(MAX_USAGE_MODELS).collect();
+        }
+        u
+    }
+
     /// This usage, all of it attributed to `model` (one model call's, as
     /// the provider router stamps it).
     pub fn stamp(&mut self, model: &str) {

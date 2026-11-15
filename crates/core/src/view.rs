@@ -510,8 +510,10 @@ impl SessionView {
                     self.context_window = u.window;
                     self.summary_at = u.summary_at;
                     self.context_model = u.model.clone();
-                    self.turn_usage = Some(u.clone());
                 }
+                // The turn that ended, also when it reported none (an
+                // interrupted one): never an older turn's as the last.
+                self.turn_usage = t.usage.as_ref().map(Usage::capped);
                 self.running_turn = None;
                 self.running_agent = None;
                 self.items.push(Item::TurnEnd {

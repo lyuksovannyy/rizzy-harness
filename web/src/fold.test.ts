@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { apply, emptyView, fold, FoldError } from "./fold";
-import fixture from "./__fixtures__/session.json";
+import { readFileSync } from "node:fs";
+
+// Parsed, not imported: a JSON module is compiled to an object literal, where
+// a "__proto__" key (the fixture has one: model ids are the node's) sets the
+// prototype instead of making a key.
+const fixture = JSON.parse(readFileSync(new URL("./__fixtures__/session.json", import.meta.url), "utf8"));
 import type { RawEvent } from "./types";
 
 describe("fold", () => {

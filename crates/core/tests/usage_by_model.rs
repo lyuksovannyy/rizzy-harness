@@ -167,3 +167,99 @@ fn the_view_keeps_the_chat_and_the_last_turn() {
     assert_eq!(view.usage.by_model["p::small"].input_tokens, 1200);
     assert_eq!(view.turn_usage, Some(second));
 }
+
+fn ended(seq: u64, turn: &str, usage: Option<Usage>) -> harness_core::RawEvent {
+    use harness_core::event::*;
+    let (k, p) = EventKind::TurnEnded(TurnEnded {
+        turn_id: turn.into(),
+        reason: TurnEndReason::Completed,
+        usage,
+    })
+    .into_parts();
+    harness_core::RawEvent {
+        session_id: "01a19bf2-0000-7000-8000-00000000f1f0".parse().unwrap(),
+        seq,
+        ts_ms: 0,
+        kind: k,
+        payload: p,
+    }
+}
+
+/// From the review of PR 119: an event from before the field folds, all of
+/// it unattributed.
+#[test]
+fn an_old_event_without_by_model_folds() {
+    let mut e = ended(1, "t", None);
+    e.payload = serde_json::json!({"turn_id": "t", "reason": "completed",
+        "usage": {"input_tokens": 10, "output_tokens": 2, "context_tokens": 9}});
+    let v = SessionView::fold(&[e]).unwrap();
+    assert!(v.usage.by_model.is_empty());
+    assert_eq!(v.usage.input_tokens, 10);
+}
+
+/// A turn that ended with no usage (interrupted by a restart: the node
+/// writes none) leaves no last-turn figure, not the turn before's.
+#[test]
+fn an_interrupted_turn_leaves_no_last_turn_usage() {
+    let v = SessionView::fold(&[
+        ended(1, "t1", Some(call("p::main", 1000, 10, 0, 0))),
+        ended(2, "t2", None),
+    ])
+    .unwrap();
+    assert_eq!(v.turn_usage, None);
+    assert_eq!(v.usage.input_tokens, 1000, "the chat's sums stay");
+}
+
+/// A forged event's breakdown is capped where it is read, in key (byte)
+/// order, as `Usage::add` admits: "10" before "9", the 17th key dropped
+/// (its tokens stay in the sums, unattributed).
+#[test]
+fn reading_an_event_caps_its_breakdown_in_byte_order() {
+    let mut u = Usage::default();
+    for i in 0..15 {
+        u.add(&call(&format!("p::m{i:02}"), 1, 0, 0, 0));
+    }
+    // One slot left in the chat; the next turn names "9", "10" and more.
+    let mut next = Usage::default();
+    for k in ["9", "10", "__proto__", "constructor"] {
+        next.by_model.insert(
+            k.to_string(),
+            ModelTokens {
+                input_tokens: 5,
+                ..Default::default()
+            },
+        );
+        next.input_tokens += 5;
+    }
+    let mut big = Usage::default();
+    for i in 0..MAX_USAGE_MODELS + 1 {
+        big.by_model.insert(
+            format!("q::{i:02}"),
+            ModelTokens {
+                input_tokens: 1,
+                ..Default::default()
+            },
+        );
+        big.input_tokens += 1;
+    }
+    let v = SessionView::fold(&[
+        ended(1, "t1", Some(u)),
+        ended(2, "t2", Some(next)),
+        ended(3, "t3", Some(big)),
+    ])
+    .unwrap();
+    assert_eq!(v.usage.by_model.len(), MAX_USAGE_MODELS);
+    assert!(v.usage.by_model.contains_key("10"));
+    assert!(!v.usage.by_model.contains_key("9"));
+    let last = v.turn_usage.unwrap();
+    assert_eq!(last.by_model.len(), MAX_USAGE_MODELS, "capped when read");
+    assert!(
+        !last.by_model.contains_key("q::16"),
+        "the byte-greatest goes"
+    );
+    assert_eq!(
+        last.input_tokens,
+        MAX_USAGE_MODELS as u64 + 1,
+        "the sums stay"
+    );
+}

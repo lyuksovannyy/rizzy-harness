@@ -512,8 +512,9 @@ into the form, not yet saved, changes neither the listing nor the marks.
 ### What a chat costs (an estimate)
 
 The chat header shows the tokens a chat used and, once the server has prices,
-an estimate of what it cost: `≈ $0.42 (last turn $0.03)`. The sub-agents in
-the side panel show theirs. There is no built-in price table: prices change
+an estimate of what it cost: `≈ $0.42 (last turn $0.03)`. The chat's figure
+already includes its sub-agents; each sub-agent row in the side panel shows
+its own share, a breakdown rather than something to add. There is no built-in price table: prices change
 and only you know the deal you have, so a server admin sets them per model in
 Settings → Server → AI providers → Edit → **Prices (optional)**, per million
 tokens: input, cached input (read from the provider's prompt cache), cache
@@ -547,12 +548,19 @@ price; reasoning tokens count as output, as providers bill them. A model is
 priced only if every kind of token it used has a price: if the small model has
 no cached-input price and a chat read from its cache, its tokens are left out
 and the header says `≈ $0.42 + unpriced` instead of a figure that is too low.
-Chats from before this version have no per-model record and show as unpriced.
+A sub-agent that fails or is cancelled still counts what it spent until then.
+At most 16 models per chat (and per turn) are tracked separately; tokens of
+any further model, and chats from before this version, have no per-model
+record and show as unpriced.
 
 What it is not: the bill. It uses the prices as they are now, not as they
 were when the chat ran; it knows nothing of discounts, free tiers, batch
-prices, long-context surcharges or a 1-hour cache write's higher rate; and
-nothing limits or stops spending. The provider's own console has the real
+prices, long-context surcharges or a 1-hour cache write's higher rate; it
+prices cache writes only as the provider reports them (Anthropic's
+`cache_creation_input_tokens`, an OpenAI-compatible router's
+`prompt_tokens_details.cache_write_tokens` such as OpenRouter's): a provider
+that reports none has its cache writes priced as plain input; and nothing
+limits or stops spending. The provider's own console has the real
 figure.
 
 An agent has one model; one model may serve several agents. A model call
