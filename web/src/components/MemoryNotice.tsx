@@ -157,7 +157,11 @@ export function MemoryNotice({
         </>
       );
       foot =
-        st.keep === false ? (
+        st.keep !== false && st.decides && st.decides !== "you" ? (
+          <>
+            {rt("memory.sendHint")} {button("keep", true)} · {button("dismiss")}
+          </>
+        ) : st.keep === false ? (
           <>
             {rt(st.decides === "admin" ? "memory.forAdmin" : "memory.forManager")} {button("dismiss")}
           </>
@@ -166,6 +170,18 @@ export function MemoryNotice({
             {rt("memory.waitingHint")} {button("keep", true)} · {button("dismiss")}
           </>
         );
+      break;
+    case "sent":
+      head = (
+        <>
+          {rt("memory.sentOn")} {quote(isForget ? (old ?? "") : fact)}
+        </>
+      );
+      foot = (
+        <>
+          {rt(st.decides === "admin" ? "memory.forAdmin" : "memory.forManager")} {button("dismiss")}
+        </>
+      );
       break;
     case "kept":
       head = (

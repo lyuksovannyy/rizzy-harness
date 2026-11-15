@@ -384,12 +384,14 @@ pub async fn turn_memory(m: &Master, row: &SessionRow) -> TurnMemory {
     let recorded = crate::lock(&m.inner.turn_memory).get(&turn).copied();
     let mut t = match recorded {
         Some(t) => t,
+        // Not recorded (a restart): who sent the turn is unknown, so no
+        // `remember` of it applies without a click, and none reaches a
+        // shared place (a workspace's or a project's memory): it could be
+        // an untrusted turn's (review F9).
         None => TurnMemory {
             personal: ws::uses_memory(m, row).await,
-            project: true,
-            workspace: crate::memory::workspace_switch(m, row, None).await,
-            // Not recorded (a restart): who sent it is unknown, so no
-            // `remember` of it applies without a click.
+            project: false,
+            workspace: false,
             by_owner: false,
         },
     };

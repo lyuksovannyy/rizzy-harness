@@ -539,7 +539,8 @@ async fn project_memory_is_proposed_confirmed_and_recalled() {
     let outside = new_chat(&t, &alex, None).await;
     say(&t, &alex, &outside, "when are the beds watered?").await;
     assert!(!last_context(&t).contains("watered at dawn"));
-    // Outside a project, a project proposal becomes a personal one.
+    // Outside a project, a project fact is refused, never re-filed under
+    // another place (review of pull request 107, F8).
     say(
         &t,
         &alex,
@@ -547,17 +548,9 @@ async fn project_memory_is_proposed_confirmed_and_recalled() {
         "remember project: tomatoes need stakes",
     )
     .await;
-    let mut personal = vec![];
-    for _ in 0..100 {
-        let (_, v) = req(&t, Method::GET, "/api/memory", None, &alex).await;
-        personal = v["memories"].as_array().unwrap().clone();
-        if !personal.is_empty() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    assert_eq!(personal.len(), 1);
-    assert_eq!(personal[0]["text"], "tomatoes need stakes");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let (_, v) = req(&t, Method::GET, "/api/memory", None, &alex).await;
+    assert!(v["memories"].as_array().unwrap().is_empty(), "{v}");
 
     // Added by hand: active at once. Personal memory routes cannot reach it.
     let (st, f) = req(
@@ -951,9 +944,8 @@ async fn team_workspace_projects() {
         mine["memories"].as_array().unwrap().is_empty(),
         "nothing personal filed: {mine}"
     );
-    // Alex manages the project, so he sees the proposal waiting (T54: a
-    // waiting change reaches those who may keep it); Bob sees his own.
-    assert_eq!(project_facts(&t, &alex, &id).await.len(), 1);
+    // The proposal is Bob's alone; he keeps it, then it is Alex's to curate.
+    assert!(project_facts(&t, &alex, &id).await.is_empty());
     let fid = facts[0]["id"].as_str().unwrap().to_string();
     let fact = format!("/api/projects/{id}/memory/{fid}");
     // Bob may word his proposal, but activating it needs a manager, unless
@@ -976,13 +968,7 @@ async fn team_workspace_projects() {
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
-    // Still only waiting: nothing active for Alex's agents yet.
-    assert!(
-        project_facts(&t, &alex, &id)
-            .await
-            .iter()
-            .all(|f| f["status"] == "proposed")
-    );
+    assert!(project_facts(&t, &alex, &id).await.is_empty());
     let (st, v) = req(
         &t,
         Method::PATCH,
@@ -1115,7 +1101,7 @@ async fn agent_memory_switches_in_a_project() {
     let memory = format!("/api/projects/{id}/memory");
 
     // Project memory off: the brief, not the facts; a project `remember`
-    // is filed as a personal proposal, as outside a project.
+    // is refused, as outside a project (F8).
     let sid = chat_with("outsider").await;
     say(&t, &alex, &sid, "when are the beds watered?").await;
     let ctx = last_context(&t);
@@ -1123,9 +1109,9 @@ async fn agent_memory_switches_in_a_project() {
     assert!(!ctx.contains("watered at dawn"), "{ctx}");
     assert!(!ctx.contains("scope \"project\""), "{ctx}");
     say(&t, &alex, &sid, "remember project: compost by the shed").await;
-    let mine = wait_facts(&t, &alex, "/api/memory", 1).await;
-    assert_eq!(mine.len(), 1, "{mine:?}");
-    assert_eq!(mine[0]["text"], "compost by the shed");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let (_, mine) = req(&t, Method::GET, "/api/memory", None, &alex).await;
+    assert!(mine["memories"].as_array().unwrap().is_empty(), "{mine}");
     assert_eq!(
         project_facts(&t, &alex, &id).await.len(),
         1,
@@ -1147,10 +1133,12 @@ async fn agent_memory_switches_in_a_project() {
         facts.iter().any(|f| f["text"] == "tomatoes need stakes"),
         "{facts:?}"
     );
+    // Nothing personal at all: the refused project save above filed none,
+    // and this agent's own-memory switch is off.
     let (_, v) = req(&t, Method::GET, "/api/memory", None, &alex).await;
     assert_eq!(
         v["memories"].as_array().unwrap().len(),
-        1,
+        0,
         "nothing new: {v}"
     );
 }

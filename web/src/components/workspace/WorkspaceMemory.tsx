@@ -34,6 +34,16 @@ export function WorkspaceMemory(props: WorkspacePanelProps & { version: number }
   const waiting = data.memories.filter((f) => f.status === "proposed");
   const active = data.memories.filter((f) => f.status === "active");
   const retired = data.memories.filter((f) => f.status === "retired");
+  const day = (ms?: number | null) => (ms ? new Date(ms).toLocaleDateString() : "");
+  // Who did what to a shared fact (review F4): every member sees it.
+  const credit = (f: MemoryFact) => {
+    const parts = [
+      f.added_by && `added by ${f.added_by}${f.added_ms ? `, ${day(f.added_ms)}` : ""}`,
+      f.kept_by && `kept by ${f.kept_by}`,
+      f.retired_by && `retired by ${f.retired_by}${f.retired_ms ? `, ${day(f.retired_ms)}` : ""}`,
+    ].filter(Boolean);
+    return parts.length ? <span className="muted small fact-credit">{parts.join(" · ")}</span> : null;
+  };
   const what = (f: MemoryFact) => {
     const old = byText(f.proposal?.replaces);
     if (f.proposal?.drop) return `Forget: “${f.text}”`;
@@ -55,8 +65,13 @@ export function WorkspaceMemory(props: WorkspacePanelProps & { version: number }
               <li key={f.id} className="fact proposed">
                 <div className="fact-text">{what(f)}</div>
                 <div className="row fact-meta small">
-                  {f.mine && <span className="muted">From your chat</span>}
-                  {edit && (
+                  {f.mine && (
+                    <span className="muted">
+                      {f.proposal?.submitted ? "From your chat, sent on" : "From your chat, only you see it: Keep it in the chat to send it on"}
+                    </span>
+                  )}
+                  {!f.mine && f.proposed_by && <span className="muted">Proposed by {f.proposed_by}</span>}
+                  {edit && !f.mine && (
                     <button className="link" onClick={() => act(pageApi.updateWorkspaceFact(id, f.id, { status: "active" }))}>
                       Keep
                     </button>
@@ -94,6 +109,7 @@ export function WorkspaceMemory(props: WorkspacePanelProps & { version: number }
             ) : (
               <li key={f.id} className="fact">
                 <div className="fact-text">{f.text}</div>
+                {credit(f)}
                 {edit && (
                   <div className="row fact-meta small">
                     <button className="link" onClick={() => setEditing({ id: f.id, text: f.text })}>
@@ -128,14 +144,18 @@ export function WorkspaceMemory(props: WorkspacePanelProps & { version: number }
             {retired.map((f) => (
               <li key={f.id} className="fact retired">
                 <div className="fact-text">{f.text}</div>
+                {credit(f)}
                 {edit && (
                   <div className="row fact-meta small">
                     <button className="link" onClick={() => act(pageApi.updateWorkspaceFact(id, f.id, { status: "active" }))}>
                       Restore
                     </button>
-                    <button className="link" onClick={() => act(pageApi.deleteWorkspaceFact(id, f.id))}>
-                      Delete
-                    </button>
+                    {/* Only admins and owners delete, and only what is retired (review F5). */}
+                    {data.can_set && (
+                      <button className="link" onClick={() => act(pageApi.deleteWorkspaceFact(id, f.id))}>
+                        Delete
+                      </button>
+                    )}
                   </div>
                 )}
               </li>

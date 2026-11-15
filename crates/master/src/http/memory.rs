@@ -204,12 +204,13 @@ struct MemoryPatch {
 /// applies too); `true` when it did.
 async fn kept(
     m: &Master,
+    who: &Principal,
     mem: &dyn MemoryStore,
     cur: &Fact,
     status: Option<Status>,
 ) -> ApiResult<bool> {
     if status == Some(Status::Active) && cur.status == Status::Proposed {
-        crate::memory::keep_proposal(m, mem, cur)
+        crate::memory::keep_proposal(m, mem, cur, who.user_id.as_deref())
             .await
             .map_err(memory_err)?;
         return Ok(true);
@@ -230,7 +231,7 @@ async fn update(
             .await
             .map_err(memory_err)?;
     }
-    let status = if kept(&m, &*mem, &cur, b.status).await? {
+    let status = if kept(&m, &who, &*mem, &cur, b.status).await? {
         None
     } else {
         b.status
@@ -297,10 +298,15 @@ async fn remove(
 // ---- a workspace's shared memory ----
 
 /// The caller's standing for workspace `id`'s memory: a member (404
-/// otherwise), and whether they may change it ([`crate::memory::may_edit`];
-/// the API token, an owner of every workspace, may).
+/// otherwise), whether they may change it ([`crate::memory::may_edit`]),
+/// whether they may set its switch and purge retired facts (the `settings`
+/// permission). The API token acts as an owner of a team workspace, but a
+/// Personal workspace's memory is its person's alone: 404 (review F12).
 async fn ws_standing(m: &Master, who: &Principal, id: &str) -> ApiResult<(String, bool, bool)> {
     let a = access(m, who, id).await?;
+    if who.user_id.is_none() && a.personal {
+        return Err(not_found());
+    }
     let ws = a.id().to_string();
     let may = match &who.user_id {
         Some(u) => crate::memory::may_edit(m, u, &ws).await,
@@ -322,10 +328,60 @@ async fn chat_owners(
         .collect())
 }
 
-/// Every member reads the workspace's memory (active and retired facts);
-/// proposals are shown to those who may decide them and to the person whose
-/// chat made each (a "waiting" count for the tab). The source chat is named
-/// only to its owner: chats stay private.
+/// Every account's name, for "added by"; one whose account is gone reads
+/// "a former member".
+pub(super) async fn names(m: &Master) -> ApiResult<std::collections::HashMap<String, String>> {
+    Ok(m.inner
+        .mirror
+        .call(|s| s.list_users())
+        .await?
+        .into_iter()
+        .map(|u| (u.user_id, u.username))
+        .collect())
+}
+
+/// Who added, kept and retired `f`, and who proposed it, as a tab shows it.
+pub(super) fn credit(
+    v: &mut Value,
+    f: &Fact,
+    authors: &std::collections::HashMap<String, crate::memory::Authorship>,
+    metas: &std::collections::HashMap<String, crate::memory::ProposalMeta>,
+    names: &std::collections::HashMap<String, String>,
+) {
+    let name = |id: &Option<String>| match id {
+        Some(id) => json!(
+            names
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| "a former member".into())
+        ),
+        None => Value::Null,
+    };
+    if let Some(a) = authors.get(&f.id) {
+        v["added_by"] = name(&a.by);
+        v["added_ms"] = json!(if a.at > 0 { a.at } else { f.created_ms });
+        v["kept_by"] = name(&a.kept_by);
+        v["kept_ms"] = json!(a.kept_at);
+        v["retired_by"] = name(&a.retired_by);
+        v["retired_ms"] = json!(a.retired_at);
+    } else {
+        v["added_ms"] = json!(f.created_ms);
+    }
+    if let Some(meta) = metas.get(&f.id) {
+        v["proposal"] = json!({
+            "replaces": meta.replaces,
+            "drop": meta.drop,
+            "submitted": meta.submitted,
+        });
+        v["proposed_by"] = name(&meta.by);
+    }
+}
+
+/// Every member reads the workspace's memory (active and retired facts,
+/// with who added, kept and retired each). A waiting change is shown to the
+/// person whose chat made it, and to those who may decide it only once that
+/// person sent it on (review F2: their chat is private). The source chat is
+/// named only to its owner.
 async fn ws_list(
     State(m): State<Master>,
     headers: HeaderMap,
@@ -340,6 +396,8 @@ async fn ws_list(
         .map_err(memory_err)?;
     let owners = chat_owners(&m).await?;
     let metas = crate::memory::proposal_metas(&m).await;
+    let authors = crate::memory::authorships(&m).await;
+    let names = names(&m).await?;
     let mine = |f: &Fact| {
         f.source_session
             .and_then(|s| owners.get(&s).cloned().flatten())
@@ -350,19 +408,20 @@ async fn ws_list(
     for f in &facts {
         let own = mine(f);
         if f.status == Status::Proposed {
-            if !(may || own) {
+            let sent = metas.get(&f.id).is_some_and(|x| x.submitted);
+            if !(own || (may && sent)) {
                 continue;
             }
-            waiting += 1;
+            if may && sent {
+                waiting += 1;
+            }
         }
         let mut v = json!(f);
         if !own {
             v["source_session"] = Value::Null;
         }
         v["mine"] = json!(own);
-        if let Some(meta) = metas.get(&f.id) {
-            v["proposal"] = json!(meta);
-        }
+        credit(&mut v, f, &authors, &metas, &names);
         out.push(v);
     }
     let members_edit = crate::memory::members_edit(&m, &ws).await;
@@ -381,7 +440,8 @@ struct NewWsFact {
     text: String,
 }
 
-/// Added by hand: those who may change the memory; active at once.
+/// Added by hand: those who may change the memory; active at once, with
+/// its author recorded.
 async fn ws_add(
     State(m): State<Master>,
     headers: HeaderMap,
@@ -407,20 +467,30 @@ async fn ws_add(
         })
         .await
         .map_err(memory_err)?;
+    if let Some(f) = &f {
+        crate::memory::note_added(&m, f, who.user_id.as_deref()).await;
+    }
     let _ = m.inner.live.send(Live::MemoryChanged);
     Ok(Json(json!(f)))
 }
 
-/// A fact of workspace `ws`'s memory, if the caller may act on it: those
-/// who may change the memory act on every fact; the person whose chat made
-/// a proposal may only reword or withdraw it.
+/// A fact of workspace `ws`'s memory and what the caller may do with it:
+/// `Edit` (those who may change the memory: any fact, and a proposal once
+/// it was sent on), `Own` (the person whose chat made a proposal: reword or
+/// withdraw it while it waits).
+#[derive(PartialEq, Eq)]
+enum WsRight {
+    Edit,
+    Own,
+}
+
 async fn ws_fact(
     m: &Master,
     who: &Principal,
     id: &str,
     fact: &str,
-) -> ApiResult<(Store, Fact, bool)> {
-    let (ws, may, _) = ws_standing(m, who, id).await?;
+) -> ApiResult<(Store, Fact, WsRight, bool, String)> {
+    let (ws, may, admin) = ws_standing(m, who, id).await?;
     let mem = memory_store(m)?;
     let f = mem
         .get(fact)
@@ -428,16 +498,22 @@ async fn ws_fact(
         .map_err(memory_err)?
         .filter(|f| f.owner_id.as_deref() == Some(workspace_owner(&ws).as_str()))
         .ok_or_else(not_found)?;
-    if may {
-        return Ok((mem, f, true));
-    }
     let owners = chat_owners(m).await?;
     let own = f.status == Status::Proposed
         && f.source_session
             .and_then(|s| owners.get(&s).cloned().flatten())
             .is_some_and(|o| who.user_id.as_deref() == Some(o.as_str()));
+    let sent = crate::memory::proposal_meta(m, &f.id).await.submitted;
     if own {
-        Ok((mem, f, false))
+        return Ok((mem, f, WsRight::Own, admin, ws));
+    }
+    // Another person's proposal that they have not sent on is not shown,
+    // even to an admin: 404 as for any fact one may not see.
+    if f.status == Status::Proposed && !sent {
+        return Err(not_found());
+    }
+    if may {
+        Ok((mem, f, WsRight::Edit, admin, ws))
     } else {
         Err(forbidden(
             "only the workspace's admins change its memory here",
@@ -463,8 +539,8 @@ async fn ws_update(
     Json(b): Json<WsPatch>,
 ) -> ApiResult<Json<Value>> {
     let who = require(&m, &headers).await?;
-    let (mem, cur, may) = ws_fact(&m, &who, &id, &fact).await?;
-    if !may && b.status.is_some() {
+    let (mem, cur, right, _, _) = ws_fact(&m, &who, &id, &fact).await?;
+    if right == WsRight::Own && b.status.is_some() {
         return Err(forbidden(
             "a workspace admin keeps proposals into its memory",
         ));
@@ -472,25 +548,54 @@ async fn ws_update(
     if b.text.is_some() {
         mem.update(&fact, b.text, None).await.map_err(memory_err)?;
     }
-    let status = if kept(&m, &*mem, &cur, b.status).await? {
-        None
-    } else {
-        b.status
-    };
-    let f = mem.update(&fact, None, status).await.map_err(memory_err)?;
+    if b.status == Some(Status::Active) && cur.status == Status::Proposed {
+        crate::memory::keep_proposal(&m, &*mem, &cur, who.user_id.as_deref())
+            .await
+            .map_err(memory_err)?;
+    } else if let Some(st) = b.status {
+        mem.update(&fact, None, Some(st))
+            .await
+            .map_err(memory_err)?;
+        if st == Status::Retired || cur.status == Status::Retired {
+            crate::memory::note_retired(&m, &cur, who.user_id.as_deref(), st == Status::Retired)
+                .await;
+        }
+    }
+    let f = mem.get(&fact).await.map_err(memory_err)?;
     let _ = m.inner.live.send(Live::MemoryChanged);
     Ok(Json(f.map(|f| json!(f)).unwrap_or(json!({ "ok": true }))))
 }
 
+/// Removing from a workspace's memory (review F5): a waiting change may be
+/// withdrawn by its proposer or dismissed by one who may decide it; a fact
+/// is hard-deleted only once retired, and only by the workspace's admins
+/// and owners. Everyone else retires (PATCH `retired`), which keeps it
+/// listed with who retired it.
 async fn ws_remove(
     State(m): State<Master>,
     headers: HeaderMap,
     Path((id, fact)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
     let who = require(&m, &headers).await?;
-    let (mem, _, _) = ws_fact(&m, &who, &id, &fact).await?;
+    let (mem, cur, _, admin, _) = ws_fact(&m, &who, &id, &fact).await?;
+    match cur.status {
+        Status::Proposed => {}
+        Status::Retired if admin => {}
+        Status::Retired => {
+            return Err(forbidden(
+                "only the workspace's admins delete retired facts",
+            ));
+        }
+        Status::Active => {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "retire a fact first; only a retired fact can be deleted".into(),
+            ));
+        }
+    }
     mem.delete(&fact).await.map_err(memory_err)?;
     crate::memory::clear_meta(&m, &fact).await;
+    crate::memory::clear_authorship(&m, &fact).await;
     let _ = m.inner.live.send(Live::MemoryChanged);
     Ok(Json(json!({ "ok": true })))
 }
@@ -589,6 +694,11 @@ async fn state_json(
     let (fact, target) = (shown[0].take(), shown[1].take());
     let forget = input.get("forget").is_some() && input.get("text").is_none();
     use crate::memory::CallState as S;
+    // Sent on by the person: it waits for those who may decide it.
+    let sent = match &fact {
+        Some(f) => crate::memory::proposal_meta(m, &f.id).await.submitted,
+        None => false,
+    };
     let state = match r.state {
         S::Saved | S::Kept if r.added.is_some() && fact.is_none() => "gone",
         S::Saved if forget => "forgot",
@@ -597,6 +707,7 @@ async fn state_json(
         S::Kept => "kept",
         // Kept or discarded on a Memory tab meanwhile.
         S::Pending => match fact.as_ref().map(|f| f.status) {
+            Some(Status::Proposed) if sent => "sent",
             Some(Status::Proposed) => "pending",
             Some(_) => "kept",
             None if forget && target.as_ref().is_some_and(|t| t.status == Status::Retired) => {
@@ -620,7 +731,8 @@ async fn state_json(
         "forget": forget,
         "reason": r.why,
         "decides": r.decides,
-        "keep": r.decides == "you",
+        // Keep applies it where the person may, else sends it on (once).
+        "keep": r.decides == "you" || !sent,
         "text": input.get("text"),
     });
     if let Some(f) = fact.as_ref().or(target.as_ref()) {
@@ -653,7 +765,7 @@ async fn decide(
     let uid = who.user_id.clone().unwrap_or_default();
     crate::memory::decide(&m, &uid, row.session_id, &call_id, d)
         .await
-        .map_err(|why| ApiError(StatusCode::CONFLICT, why.into()))?;
+        .map_err(|why| ApiError(StatusCode::CONFLICT, why))?;
     Ok(Json(state_json(&m, &who, &row, &call_id, &input).await?))
 }
 

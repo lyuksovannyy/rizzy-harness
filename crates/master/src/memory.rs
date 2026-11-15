@@ -176,8 +176,22 @@ pub async fn may_edit(m: &Master, user: &str, ws: &str) -> bool {
     let Ok(Some(mr)) = m.inner.mirror.call(move |s| s.member(&w, &u)).await else {
         return false;
     };
+    match Role::parse(&mr.role_id) {
+        Some(r) if r.perms().contains(&Perm::Settings) => true,
+        // The switch is for members: a guest ("chat only") never edits it.
+        Some(Role::Guest) | None => false,
+        Some(_) => members_edit(m, ws).await,
+    }
+}
+
+/// May `user` hard-delete facts of `ws`'s memory (only retired ones): its
+/// admins and owners, never a member through the switch (review F5).
+pub async fn may_purge(m: &Master, user: &str, ws: &str) -> bool {
+    let (w, u) = (ws.to_string(), user.to_string());
+    let Ok(Some(mr)) = m.inner.mirror.call(move |s| s.member(&w, &u)).await else {
+        return false;
+    };
     Role::parse(&mr.role_id).is_some_and(|r| r.perms().contains(&Perm::Settings))
-        || members_edit(m, ws).await
 }
 
 /// Whether a chat of `row`, run by an agent with switches `f` (`None`:
@@ -310,6 +324,123 @@ pub struct ProposalMeta {
     pub replaces: Option<String>,
     #[serde(default)]
     pub drop: bool,
+    /// Whose chat made it. A proposal from a person's chat is theirs alone
+    /// (their chat is private) until they click Keep (review F2).
+    #[serde(default)]
+    pub by: Option<String>,
+    /// They kept it but may not apply it: it now waits for those who may,
+    /// shown to them with the proposer's name.
+    #[serde(default)]
+    pub submitted: bool,
+}
+
+/// Who added a shared fact and when, who kept it, who retired it: for a
+/// workspace's and a project's memory (review F4). In the master's `kv`
+/// by fact id; a person's own facts carry none.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Authorship {
+    #[serde(default)]
+    pub by: Option<String>,
+    #[serde(default)]
+    pub at: i64,
+    #[serde(default)]
+    pub kept_by: Option<String>,
+    #[serde(default)]
+    pub kept_at: Option<i64>,
+    #[serde(default)]
+    pub retired_by: Option<String>,
+    #[serde(default)]
+    pub retired_at: Option<i64>,
+}
+
+fn author_key(id: &str) -> String {
+    format!("memory.author:{id}")
+}
+
+/// Every shared fact's authorship, by fact id.
+pub async fn authorships(m: &Master) -> HashMap<String, Authorship> {
+    let rows = m
+        .inner
+        .mirror
+        .call(|s| s.kv_prefix("memory.author:"))
+        .await
+        .unwrap_or_default();
+    rows.into_iter()
+        .filter_map(|(k, v)| {
+            let id = k.strip_prefix("memory.author:")?.to_string();
+            Some((id, serde_json::from_str(&v).ok()?))
+        })
+        .collect()
+}
+
+pub async fn authorship(m: &Master, id: &str) -> Authorship {
+    let k = author_key(id);
+    m.inner
+        .mirror
+        .call(move |s| s.kv_get(&k))
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_str(&v).ok())
+        .unwrap_or_default()
+}
+
+async fn set_authorship(m: &Master, id: &str, a: &Authorship) {
+    let (k, v) = (author_key(id), serde_json::to_string(a));
+    let Ok(v) = v else { return };
+    if let Err(e) = m.inner.mirror.call(move |s| s.kv_set(&k, &v)).await {
+        tracing::warn!(error = %e, "could not record who changed a fact");
+    }
+}
+
+/// Is `f` in a shared place (a team workspace's or a project's memory)?
+async fn shared(m: &Master, f: &Fact) -> bool {
+    match fact_place(f) {
+        Some(Place::Project(_)) => true,
+        Some(Place::Workspace(ws)) => {
+            let w = ws.to_string();
+            !m.inner
+                .mirror
+                .call(move |s| s.workspace(&w))
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|w| w.personal())
+        }
+        _ => false,
+    }
+}
+
+/// Record that `user` added `f` (a shared fact; a no-op elsewhere).
+pub async fn note_added(m: &Master, f: &Fact, user: Option<&str>) {
+    if shared(m, f).await {
+        let a = Authorship {
+            by: user.map(str::to_string),
+            at: harness_core::now_ms(),
+            ..Default::default()
+        };
+        set_authorship(m, &f.id, &a).await;
+    }
+}
+
+/// Record that `user` retired (`retired`) or restored `f`.
+pub async fn note_retired(m: &Master, f: &Fact, user: Option<&str>, retired: bool) {
+    if shared(m, f).await {
+        let mut a = authorship(m, &f.id).await;
+        if retired {
+            a.retired_by = user.map(str::to_string);
+            a.retired_at = Some(harness_core::now_ms());
+        } else {
+            a.retired_by = None;
+            a.retired_at = None;
+        }
+        set_authorship(m, &f.id, &a).await;
+    }
+}
+
+pub async fn clear_authorship(m: &Master, id: &str) {
+    let k = author_key(id);
+    let _ = m.inner.mirror.call(move |s| s.kv_delete(&k)).await;
 }
 
 fn meta_key(id: &str) -> String {
@@ -367,8 +498,22 @@ pub async fn keep_proposal(
     m: &Master,
     mem: &dyn MemoryStore,
     f: &Fact,
+    keeper: Option<&str>,
 ) -> Result<bool, MemoryError> {
     let meta = proposal_meta(m, &f.id).await;
+    // The cap holds for what is kept, not only for what saves at once
+    // (review F7): a model's proposal counts like its save.
+    if !meta.drop
+        && let Some(owners) = cap_owners(m, f).await
+    {
+        let used = model_used(mem, &owners, meta.replaces.as_deref()).await;
+        if used + cost(f) > CARRIED_CHARS {
+            return Err(MemoryError::Invalid(format!(
+                "memory is full ({used} of {CARRIED_CHARS} characters of facts the assistant \
+                 saved there): retire some before keeping this"
+            )));
+        }
+    }
     let mut retired = false;
     if let Some(t) = &meta.replaces
         && let Some(old) = mem.get(t).await?
@@ -378,14 +523,56 @@ pub async fn keep_proposal(
         mem.update(&old.id, None, Some(Status::Retired)).await?;
         retired = true;
     }
+    if retired
+        && let Some(t) = &meta.replaces
+        && let Some(old) = mem.get(t).await?
+    {
+        note_retired(m, &old, keeper, true).await;
+    }
     if meta.drop {
         mem.delete(&f.id).await?;
+        clear_authorship(m, &f.id).await;
     } else {
         mem.update(&f.id, None, Some(Status::Active)).await?;
+        if shared(m, f).await {
+            let mut a = authorship(m, &f.id).await;
+            a.by = a.by.or(meta.by.clone());
+            if a.at == 0 {
+                a.at = f.created_ms;
+            }
+            a.kept_by = keeper.map(str::to_string);
+            a.kept_at = Some(harness_core::now_ms());
+            set_authorship(m, &f.id, &a).await;
+        }
     }
     clear_meta(m, &f.id).await;
     let _ = m.inner.live.send(Live::MemoryChanged);
     Ok(retired)
+}
+
+/// The places whose model saves share a cap with `f`'s, `None` for a
+/// project's (no cap there: every fact is kept by a person).
+async fn cap_owners(m: &Master, f: &Fact) -> Option<Vec<String>> {
+    match fact_place(f)? {
+        Place::User(u) => Some(cap_places(m, u, u).await),
+        Place::Workspace(ws) => {
+            let w = ws.to_string();
+            let owner = m
+                .inner
+                .mirror
+                .call(move |s| s.workspace(&w))
+                .await
+                .ok()
+                .flatten()
+                .and_then(|w| w.personal_owner);
+            let key = workspace_owner(ws);
+            Some(match owner {
+                Some(u) => cap_places(m, &key, &u).await,
+                None => vec![key],
+            })
+        }
+        Place::Project(_) => None,
+    }
 }
 
 /// A line for the next turn of a chat: a save refused, or one waiting for
@@ -451,6 +638,17 @@ fn one_line(t: &str) -> String {
     t.split('\n')
         .map(|l| {
             quoted_line(l.strip_suffix('\r').unwrap_or(l))
+                .chars()
+                // Bidi controls reorder what is shown, so the Memory tab and
+                // the model could read different text (review F11).
+                .map(|c| {
+                    if matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}') {
+                        '\u{FFFD}'
+                    } else {
+                        c
+                    }
+                })
+                .collect::<String>()
                 .trim()
                 .to_string()
         })
@@ -603,7 +801,15 @@ pub async fn file(m: &Master, node_id: &str, e: &RawEvent) {
         source_session: Some(sid),
         dedupe_key: dedupe.clone(),
     };
-    let about = about(m, &row, &input, allowed).await;
+    // `sensitive` always wins: a private detail is about the person, whatever
+    // place the model named (review F1), so it never reaches a team's or a
+    // project's memory by the agent's doing.
+    let sensitive = input.get("sensitive").and_then(|v| v.as_bool()) == Some(true);
+    let about = if sensitive {
+        About::Me
+    } else {
+        about(m, &row, &input, allowed).await
+    };
     // A chat without an owner (the API token's): a proposal of the
     // owner-less facts, as before; it has no workspace to share with.
     let (Some(user), Some(ws)) = (row.owner_id.clone(), row.workspace_id.clone()) else {
@@ -615,20 +821,24 @@ pub async fn file(m: &Master, node_id: &str, e: &RawEvent) {
         return;
     };
     let home = is_personal_of(m, &ws, &user).await;
-    // A project fact where the chat has no project (or no project memory)
-    // is filed about the person instead, as it always was.
-    let project = if about == About::Project && allowed.project {
-        projects::proposal_owner(m, &row).await
-    } else {
-        None
-    };
-    let about = match (about, &project) {
-        (About::Project, None) => About::Me,
-        (a, _) => a,
-    };
     match about {
         About::Project => {
-            let Some(owner) = project else { return };
+            // Never re-filed under another place (review F8).
+            let p = if allowed.project {
+                projects::project_of(m, &row).await
+            } else {
+                None
+            };
+            let Some(p) = p else {
+                refuse(m, sid, call_id, &t, "this chat has no project memory").await;
+                return;
+            };
+            let owner = projects::memory_owner(&p.project_id);
+            let decides = if projects::may_change_facts(m, &user, &p).await {
+                "you"
+            } else {
+                "manager"
+            };
             // Project memory keeps its confirm step.
             save(
                 m,
@@ -638,7 +848,7 @@ pub async fn file(m: &Master, node_id: &str, e: &RawEvent) {
                 new(owner, Status::Proposed),
                 None,
                 false,
-                "manager",
+                decides,
             )
             .await;
         }
@@ -686,7 +896,6 @@ pub async fn file(m: &Master, node_id: &str, e: &RawEvent) {
                 .await;
                 return;
             }
-            let sensitive = input.get("sensitive").and_then(|v| v.as_bool()) == Some(true);
             if sensitive && !home {
                 // A private detail never goes to a team's shared memory by
                 // the agent's doing: it is offered for the person's
@@ -808,6 +1017,44 @@ async fn cap_check(
     Ok(())
 }
 
+/// Changes that may wait in one place at a time: per person, and in all
+/// (review F7: an agent cannot flood "Waiting").
+const PENDING_PER_PERSON: usize = 10;
+const PENDING_PER_PLACE: usize = 50;
+
+/// Whether another proposal from `by` fits in `owner`'s place.
+async fn pending_room(
+    m: &Master,
+    mem: &dyn MemoryStore,
+    owner: &str,
+    by: Option<&str>,
+) -> Result<(), String> {
+    let waiting: Vec<Fact> = match mem.list(Some(owner)).await {
+        Ok(fs) => fs
+            .into_iter()
+            .filter(|f| f.status == Status::Proposed)
+            .collect(),
+        Err(_) => return Ok(()),
+    };
+    if waiting.len() >= PENDING_PER_PLACE {
+        return Err(format!(
+            "{} changes already wait in this memory: they must be kept or dismissed first",
+            waiting.len()
+        ));
+    }
+    let metas = proposal_metas(m).await;
+    let mine = waiting
+        .iter()
+        .filter(|f| metas.get(&f.id).and_then(|x| x.by.as_deref()) == by)
+        .count();
+    if mine >= PENDING_PER_PERSON {
+        return Err(format!(
+            "{mine} of this person's changes already wait in this memory: keep or dismiss some first"
+        ));
+    }
+    Ok(())
+}
+
 /// Add `f` for call `call_id` (a fact, or a proposal that may replace or
 /// drop `target`), retire `target` when it applies at once, and record it;
 /// a waiting one is noted for the next turn.
@@ -823,24 +1070,47 @@ async fn save(
     decides: &str,
 ) {
     let t = f.text.clone();
+    // Whose chat it is: the author of a shared fact, the proposer of a
+    // waiting one.
+    let by = m
+        .inner
+        .mirror
+        .call(move |s| s.session(sid))
+        .await
+        .ok()
+        .flatten()
+        .and_then(|r| r.owner_id);
+    if !at_once
+        && let Some(owner) = f.owner_id.clone()
+        && let Err(why) = pending_room(m, mem, &owner, by.as_deref()).await
+    {
+        refuse(m, sid, call_id, &t, &why).await;
+        return;
+    }
     match mem.add(f).await {
         Ok(Some(added)) => {
             let drop = target.is_some_and(|(_, drop)| drop);
             if at_once && let Some((old, _)) = target {
                 retire(m, mem, old).await;
+                note_retired(m, old, by.as_deref(), true).await;
+            }
+            if at_once {
+                note_added(m, &added, by.as_deref()).await;
             }
             if !at_once {
-                if let Some((old, drop)) = target {
-                    set_meta(
-                        m,
-                        &added.id,
-                        &ProposalMeta {
-                            replaces: Some(old.id.clone()),
-                            drop,
-                        },
-                    )
-                    .await;
-                }
+                // Every proposal names its proposer and starts private to
+                // them (review F2).
+                set_meta(
+                    m,
+                    &added.id,
+                    &ProposalMeta {
+                        replaces: target.map(|(old, _)| old.id.clone()),
+                        drop,
+                        by: by.clone(),
+                        submitted: false,
+                    },
+                )
+                .await;
                 let whom = match decides {
                     "admin" => "a workspace admin",
                     "manager" => "a project manager",
@@ -974,6 +1244,7 @@ async fn change(
         None if at_once => {
             // `forget` alone, applied.
             retire(m, mem, &target).await;
+            note_retired(m, &target, Some(&user), true).await;
             set_record(
                 m,
                 sid,
@@ -1090,7 +1361,8 @@ pub async fn decide(
     sid: SessionId,
     call_id: &str,
     d: Decision,
-) -> Result<CallRecord, &'static str> {
+) -> Result<CallRecord, String> {
+    let decided = || "already decided".to_string();
     let mem = m.memory().ok_or("memory is not set up on this server")?;
     let mut r = call_record(m, sid, call_id)
         .await
@@ -1103,53 +1375,74 @@ pub async fn decide(
     match (d, r.state) {
         (Decision::Keep, CallState::Pending) => {
             let Some(f) = added.filter(|f| f.status == Status::Proposed) else {
-                return Err("already decided");
+                return Err(decided());
             };
+            let mut meta = proposal_meta(m, &f.id).await;
             if !may_touch(m, user, &f).await {
-                return Err(match r.decides.as_str() {
-                    "admin" => "only a workspace admin can keep this",
-                    "manager" => "only someone who manages the project can keep this",
-                    _ => "you may no longer change this fact",
-                });
+                // Step two (review F2): the person sends their own private
+                // proposal on to those who may decide it; once.
+                if meta.submitted {
+                    return Err(match r.decides.as_str() {
+                        "admin" => "it already waits for a workspace admin".into(),
+                        "manager" => "it already waits for a project manager".into(),
+                        _ => "you may no longer change this fact".into(),
+                    });
+                }
+                meta.submitted = true;
+                meta.by = meta.by.or(Some(user.to_string()));
+                set_meta(m, &f.id, &meta).await;
+                set_record(m, sid, call_id, &r).await;
+                let _ = m.inner.live.send(Live::MemoryChanged);
+                return Ok(r);
             }
-            let meta = proposal_meta(m, &f.id).await;
-            r.retired = keep_proposal(m, &*mem, &f)
+            r.retired = keep_proposal(m, &*mem, &f, Some(user))
                 .await
-                .map_err(|_| "could not keep it")?;
+                .map_err(|e| match e {
+                    MemoryError::Invalid(why) => why,
+                    _ => "could not keep it".to_string(),
+                })?;
             if meta.drop {
                 r.added = None;
             }
             r.state = CallState::Kept;
         }
         (Decision::Dismiss, CallState::Pending) => {
-            if let Some(f) = added.filter(|f| f.status == Status::Proposed) {
-                mem.delete(&f.id)
-                    .await
-                    .map_err(|_| "could not dismiss it")?;
-                clear_meta(m, &f.id).await;
-            }
+            // Only while it still waits: kept on a tab meanwhile, or gone,
+            // is decided, and the block then shows what is (review F3).
+            let Some(f) = added.filter(|f| f.status == Status::Proposed) else {
+                return Err(decided());
+            };
+            mem.delete(&f.id)
+                .await
+                .map_err(|_| "could not dismiss it".to_string())?;
+            clear_meta(m, &f.id).await;
+            clear_authorship(m, &f.id).await;
             r.state = CallState::Dismissed;
         }
         (Decision::Undo, CallState::Saved | CallState::Kept) => {
             for f in added.iter().chain(target.iter().filter(|_| r.retired)) {
                 if !may_touch(m, user, f).await {
-                    return Err("you may no longer change this fact");
+                    return Err("you may no longer change this fact".into());
                 }
             }
             if let Some(f) = &added {
-                mem.delete(&f.id).await.map_err(|_| "could not undo it")?;
+                mem.delete(&f.id)
+                    .await
+                    .map_err(|_| "could not undo it".to_string())?;
+                clear_authorship(m, &f.id).await;
             }
             if r.retired
                 && let Some(f) = target.filter(|f| f.status == Status::Retired)
             {
                 mem.update(&f.id, None, Some(Status::Active))
                     .await
-                    .map_err(|_| "could not undo it")?;
+                    .map_err(|_| "could not undo it".to_string())?;
+                note_retired(m, &f, Some(user), false).await;
             }
             r.retired = false;
             r.state = CallState::Undone;
         }
-        _ => return Err("already decided"),
+        _ => return Err(decided()),
     }
     set_record(m, sid, call_id, &r).await;
     let _ = m.inner.live.send(Live::MemoryChanged);
@@ -1306,9 +1599,13 @@ pub async fn turn_block(
             at(ws_at_once)
         ));
     }
+    // Offered only where the chat has a project and project memory (F8).
+    if allowed.project && projects::project_of(m, row).await.is_some() {
+        s.push_str("\"project\" for the chat's project, ");
+    }
     s.push_str(
-        "\"project\" for the chat's project. A sub-agent's call always waits. Correct a fact \
-         with `replaces` and drop one with `forget`, by its id.",
+        "and `sensitive` always keeps a fact with the person. A sub-agent's call always waits. \
+         Correct a fact with `replaces` and drop one with `forget`, by its id.",
     );
     if mine_at_once && let Some(u) = &user {
         let used = model_used(&*mem, &cap_places(m, u, u).await, None).await;
@@ -1375,6 +1672,14 @@ mod tests {
         assert_eq!(place_of("workspace:a:b"), None);
         assert_eq!(place_of("member:w:u"), None);
         assert_eq!(place_of(""), None);
+    }
+
+    #[test]
+    fn bidi_controls_cannot_reorder_a_fact() {
+        assert_eq!(
+            one_line("abc\u{202E}def\u{2066}x"),
+            "abc\u{FFFD}def\u{FFFD}x"
+        );
     }
 
     #[test]

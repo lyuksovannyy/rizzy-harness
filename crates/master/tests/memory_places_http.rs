@@ -1464,13 +1464,23 @@ async fn a_change_the_person_may_not_make_waits_and_foreign_facts_are_untouched(
     let ids = call_ids(&s, &bob, &sid).await;
     let sid_replace = sid.clone();
     assert_eq!(ids.len(), 2);
+    // Private to Bob first: the manager does not see them (F2) ...
+    assert!(
+        project_facts(&s, &carol, &rocket)
+            .await
+            .iter()
+            .all(|f| f["status"] != "proposed")
+    );
     for cid in &ids {
         let v = line(&s, &bob, &sid, cid).await;
         assert_eq!(
-            (&v["state"], &v["keep"], &v["place"]),
-            (&json!("pending"), &json!(false), &json!("project")),
+            (&v["state"], &v["decides"], &v["place"]),
+            (&json!("pending"), &json!("manager"), &json!("project")),
             "{v}"
         );
+        // ... until his Keep sends each on, once.
+        let (st, v) = click(&s, &bob, &sid, cid, "keep").await;
+        assert_eq!((st, &v["state"]), (StatusCode::OK, &json!("sent")), "{v}");
         let (st, _) = click(&s, &bob, &sid, cid, "keep").await;
         assert_eq!(st, StatusCode::CONFLICT);
     }
@@ -1715,12 +1725,19 @@ async fn a_members_save_waits_for_an_admin_then_reaches_everyone() {
     let v = line(&s, &bob, &sid, &cid).await;
     assert_eq!(
         (&v["state"], &v["decides"], &v["keep"]),
-        (&json!("pending"), &json!("admin"), &json!(false)),
+        (&json!("pending"), &json!("admin"), &json!(true)),
         "{v}"
     );
+    // His chat is private: until he sends it on, the admin does not see it
+    // (review F2).
+    let v = ws_facts(&s, &carol, &acme).await;
+    assert_eq!(v["waiting"], 0, "{v}");
+    assert!(find(&ws_list(&v), "Acme uses Postgres 16").is_none(), "{v}");
+    let (st, v) = click(&s, &bob, &sid, &cid, "keep").await;
+    assert_eq!((st, &v["state"]), (StatusCode::OK, &json!("sent")), "{v}");
     let (st, _) = click(&s, &bob, &sid, &cid, "keep").await;
-    assert_eq!(st, StatusCode::CONFLICT);
-    // Not given to anyone yet; the admin sees it waiting.
+    assert_eq!(st, StatusCode::CONFLICT, "sent once");
+    // Not given to anyone yet; the admin sees it waiting, with his name.
     chat(&s, &carol, &acme, "which database?").await;
     assert!(!last_user_message(&s).contains("Postgres 16"));
     let v = ws_facts(&s, &carol, &acme).await;
@@ -1728,7 +1745,11 @@ async fn a_members_save_waits_for_an_admin_then_reaches_everyone() {
     let p = find(&ws_list(&v), "Acme uses Postgres 16")
         .cloned()
         .unwrap();
-    assert_eq!(p["status"], "proposed");
+    assert_eq!(
+        (&p["status"], &p["proposed_by"]),
+        (&json!("proposed"), &json!("bob")),
+        "{p}"
+    );
     let pid = p["id"].as_str().unwrap();
     let (st, v) = call(
         &s,
@@ -1743,6 +1764,23 @@ async fn a_members_save_waits_for_an_admin_then_reaches_everyone() {
         chat(&s, who, &acme, "which database?").await;
         assert!(last_user_message(&s).contains("Acme uses Postgres 16"));
     }
+    assert_eq!(line(&s, &bob, &sid, &cid).await["state"], "kept");
+    // Who added it and who kept it, on the tab (review F4).
+    let f = find(
+        &ws_list(&ws_facts(&s, &bob, &acme).await),
+        "Acme uses Postgres 16",
+    )
+    .cloned()
+    .unwrap();
+    assert_eq!(
+        (&f["added_by"], &f["kept_by"]),
+        (&json!("bob"), &json!("carol")),
+        "{f}"
+    );
+    // Bob's Dismiss now is too late: 409, and the block still says kept
+    // (review F3).
+    let (st, _) = click(&s, &bob, &sid, &cid, "dismiss").await;
+    assert_eq!(st, StatusCode::CONFLICT);
     assert_eq!(line(&s, &bob, &sid, &cid).await["state"], "kept");
 }
 
@@ -1853,6 +1891,9 @@ async fn replace_and_forget_of_a_workspace_fact_by_who_may_and_who_may_not() {
         settled(&ws_list(&ws_facts(&s, &carol, &acme).await)),
         before
     );
+    // He sends it on with Keep; then Carol sees it.
+    let (st, v) = click(&s, &bob, &sid, &cid, "keep").await;
+    assert_eq!((st, &v["state"]), (StatusCode::OK, &json!("sent")), "{v}");
     let drop = ws_list(&ws_facts(&s, &carol, &acme).await)
         .into_iter()
         .find(|f| f["proposal"]["drop"] == json!(true))
@@ -1885,13 +1926,21 @@ async fn replace_and_forget_of_a_workspace_fact_by_who_may_and_who_may_not() {
         .unwrap();
     assert!(r.status().is_success());
     ended(&s, &bob, &sid, 2).await;
+    // A proposal in Bob's chat: his to see first, not Carol's.
     let f = find(
-        &ws_list(&ws_facts(&s, &carol, &acme).await),
+        &ws_list(&ws_facts(&s, &bob, &acme).await),
         "planted by a token",
     )
     .cloned()
     .unwrap();
     assert_eq!(f["status"], "proposed");
+    assert!(
+        find(
+            &ws_list(&ws_facts(&s, &carol, &acme).await),
+            "planted by a token"
+        )
+        .is_none()
+    );
 }
 
 #[tokio::test]
@@ -1944,4 +1993,310 @@ async fn leaving_ends_access_and_the_memory_stays_with_the_workspace() {
             .unwrap()
             .is_empty()
     );
+}
+
+// ---- the review of pull request 107: its probes, as regression tests ----
+
+/// F1: `sensitive` always wins over `about`: a private detail never lands
+/// in a team's memory, even from an owner's own turn.
+#[tokio::test]
+async fn a_sensitive_fact_never_lands_in_the_team_memory_whatever_about_says() {
+    let s = start().await;
+    let (bob, carol, acme) = acme_with_bob(&s).await;
+    share(&s, &carol, &acme, true).await;
+    let sid = chat(
+        &s,
+        &carol,
+        &acme,
+        &script(&[
+            json!({"text": "Carol has type 1 diabetes", "about": "workspace", "sensitive": true}),
+        ]),
+    )
+    .await;
+    assert!(
+        find(
+            &ws_list(&ws_facts(&s, &bob, &acme).await),
+            "Carol has type 1 diabetes"
+        )
+        .is_none()
+    );
+    let cid = call_id(&s, &carol, &sid).await;
+    let v = line(&s, &carol, &sid, &cid).await;
+    assert_eq!(
+        (&v["state"], &v["place"], &v["workspace_personal"]),
+        (&json!("pending"), &json!("workspace"), &json!(true)),
+        "offered for her Personal workspace: {v}"
+    );
+}
+
+/// F3: Dismiss after the proposal was kept elsewhere is 409, and the block
+/// shows what is.
+#[tokio::test]
+async fn dismiss_after_an_admin_kept_it_is_refused_and_the_block_says_kept() {
+    let s = start().await;
+    let (bob, carol, acme) = acme_with_bob(&s).await;
+    let sid = chat(
+        &s,
+        &bob,
+        &acme,
+        &script(&[json!({"text": "Acme uses Postgres 16", "about": "workspace"})]),
+    )
+    .await;
+    let cid = call_id(&s, &bob, &sid).await;
+    click(&s, &bob, &sid, &cid, "keep").await;
+    let pid = find(
+        &ws_list(&ws_facts(&s, &carol, &acme).await),
+        "Acme uses Postgres 16",
+    )
+    .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (st, _) = call(
+        &s,
+        Method::PATCH,
+        &format!("/api/workspaces/{acme}/facts/{pid}"),
+        Some(json!({"status": "active"})),
+        &carol,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, _) = click(&s, &bob, &sid, &cid, "dismiss").await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    assert_eq!(line(&s, &bob, &sid, &cid).await["state"], "kept");
+    let f = find(
+        &ws_list(&ws_facts(&s, &carol, &acme).await),
+        "Acme uses Postgres 16",
+    )
+    .cloned()
+    .unwrap();
+    assert_eq!(f["status"], "active");
+}
+
+/// A Personal fact's id named from a team chat changes nothing.
+#[tokio::test]
+async fn a_personal_fact_id_from_a_team_chat_is_refused() {
+    let s = start().await;
+    let (bob, carol, acme) = acme_with_bob(&s).await;
+    share(&s, &bob, &acme, true).await;
+    let personal = personal_id(&s, &bob).await;
+    chat(
+        &s,
+        &bob,
+        &personal,
+        &script(&[json!({"text": HEALTH, "sensitive": true})]),
+    )
+    .await;
+    let id = find(&memories(&s, &bob).await, HEALTH).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let sid = chat(
+        &s,
+        &bob,
+        &acme,
+        &script(&[json!({"text": "Bob is healthy", "replaces": id, "about": "workspace"})]),
+    )
+    .await;
+    let cid = call_id(&s, &bob, &sid).await;
+    assert_eq!(line(&s, &bob, &sid, &cid).await["state"], "refused");
+    let sid = chat(&s, &bob, &acme, &script(&[json!({"forget": id})])).await;
+    let cid = call_id(&s, &bob, &sid).await;
+    assert_eq!(line(&s, &bob, &sid, &cid).await["state"], "refused");
+    assert!(ws_list(&ws_facts(&s, &carol, &acme).await).is_empty());
+    assert_eq!(
+        find(&memories(&s, &bob).await, HEALTH).unwrap()["status"],
+        "active"
+    );
+}
+
+/// F6: the switch is for members; a guest never edits the shared memory.
+#[tokio::test]
+async fn a_guest_never_edits_the_shared_memory_even_with_the_switch_on() {
+    let s = start().await;
+    let carol = user(&s, "carol").await;
+    let gus = user(&s, "gus").await;
+    let acme = team(&s, &carol, "Acme").await;
+    add(&s, &carol, &acme, "gus", "guest").await;
+    call(
+        &s,
+        Method::PUT,
+        &format!("/api/workspaces/{acme}/facts/settings"),
+        Some(json!({"members_edit": true})),
+        &carol,
+    )
+    .await;
+    let (st, _) = call(
+        &s,
+        Method::POST,
+        &format!("/api/workspaces/{acme}/facts"),
+        Some(json!({"text": "planted by a guest"})),
+        &gus,
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN);
+    assert!(
+        find(
+            &ws_list(&ws_facts(&s, &carol, &acme).await),
+            "planted by a guest"
+        )
+        .is_none()
+    );
+    assert_eq!(ws_facts(&s, &gus, &acme).await["can_edit"], false);
+}
+
+/// F4, F5: who added each shared fact shows; with the switch on a member
+/// retires (traced) but never deletes; a retired fact is deleted only by an
+/// admin.
+#[tokio::test]
+async fn shared_facts_show_their_author_and_are_retired_not_deleted() {
+    let s = start().await;
+    let (bob, carol, acme) = acme_with_bob(&s).await;
+    call(
+        &s,
+        Method::PUT,
+        &format!("/api/workspaces/{acme}/facts/settings"),
+        Some(json!({"members_edit": true})),
+        &carol,
+    )
+    .await;
+    chat(
+        &s,
+        &bob,
+        &acme,
+        &script(&[json!({"text": "Acme sends reports to x.example", "about": "workspace"})]),
+    )
+    .await;
+    call(
+        &s,
+        Method::POST,
+        &format!("/api/workspaces/{acme}/facts"),
+        Some(json!({"text": "Acme deploys with --force"})),
+        &bob,
+    )
+    .await;
+    let facts = ws_list(&ws_facts(&s, &carol, &acme).await);
+    for text in [
+        "Acme sends reports to x.example",
+        "Acme deploys with --force",
+    ] {
+        let f = find(&facts, text).unwrap();
+        assert_eq!(f["added_by"], "bob", "{f}");
+        assert!(f["added_ms"].as_i64().unwrap() > 0, "{f}");
+    }
+    let id = find(&facts, "Acme deploys with --force").unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let path = format!("/api/workspaces/{acme}/facts/{id}");
+    let (st, _) = call(&s, Method::DELETE, &path, None, &bob).await;
+    assert_eq!(
+        st,
+        StatusCode::CONFLICT,
+        "an active fact is retired, not deleted"
+    );
+    let (st, _) = call(
+        &s,
+        Method::PATCH,
+        &path,
+        Some(json!({"status": "retired"})),
+        &bob,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let f = find(
+        &ws_list(&ws_facts(&s, &carol, &acme).await),
+        "Acme deploys with --force",
+    )
+    .cloned()
+    .unwrap();
+    assert_eq!(
+        (&f["status"], &f["retired_by"]),
+        (&json!("retired"), &json!("bob")),
+        "{f}"
+    );
+    let (st, _) = call(&s, Method::DELETE, &path, None, &bob).await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "only an admin purges");
+    let (st, _) = call(&s, Method::DELETE, &path, None, &carol).await;
+    assert_eq!(st, StatusCode::OK);
+    // An author whose account is gone reads "a former member".
+    let me = get(&s, "/api/me", &bob).await;
+    let bob_id = me["user"]["user_id"].as_str().unwrap().to_string();
+    call(
+        &s,
+        Method::DELETE,
+        &format!("/api/users/{bob_id}"),
+        None,
+        &s.admin,
+    )
+    .await;
+    let f = find(
+        &ws_list(&ws_facts(&s, &carol, &acme).await),
+        "Acme sends reports to x.example",
+    )
+    .cloned()
+    .unwrap();
+    assert_eq!(f["added_by"], "a former member", "{f}");
+}
+
+/// F7: proposals are bounded per person.
+#[tokio::test]
+async fn a_persons_waiting_changes_are_bounded() {
+    let s = start().await;
+    let (bob, _carol, acme) = acme_with_bob(&s).await;
+    let many: Vec<Value> = (0..11)
+        .map(|i| json!({"text": format!("Acme fact number {i}"), "about": "workspace"}))
+        .collect();
+    let sid = chat(&s, &bob, &acme, &script(&many)).await;
+    let ids = call_ids(&s, &bob, &sid).await;
+    assert_eq!(line(&s, &bob, &sid, &ids[9]).await["state"], "pending");
+    let v = line(&s, &bob, &sid, &ids[10]).await;
+    assert_eq!(v["state"], "refused", "{v}");
+    assert!(
+        v["reason"].as_str().unwrap().contains("already wait"),
+        "{v}"
+    );
+}
+
+/// F8: `project` where the chat has none is refused and never re-filed,
+/// and the turn is not offered it.
+#[tokio::test]
+async fn about_project_without_a_project_is_refused() {
+    let s = start().await;
+    let bob = user(&s, "bob").await;
+    let personal = personal_id(&s, &bob).await;
+    let sid = chat(
+        &s,
+        &bob,
+        &personal,
+        &script(&[json!({"text": "Bob likes plums", "about": "project"})]),
+    )
+    .await;
+    let cid = call_id(&s, &bob, &sid).await;
+    assert_eq!(line(&s, &bob, &sid, &cid).await["state"], "refused");
+    assert!(memories(&s, &bob).await.is_empty());
+    again(&s, &bob, &sid, "ok").await;
+    assert!(!last_user_message(&s).contains("\"project\" for the chat's project"));
+}
+
+/// F12: the API token never reaches a Personal workspace's memory.
+#[tokio::test]
+async fn the_api_token_does_not_read_a_personal_workspaces_memory() {
+    let s = start().await;
+    let bob = user(&s, "bob").await;
+    let personal = personal_id(&s, &bob).await;
+    remember(
+        &s,
+        &bob,
+        &personal,
+        json!({"text": HEALTH, "sensitive": true}),
+    )
+    .await;
+    let r = reqwest::Client::new()
+        .get(format!("{}/api/workspaces/{personal}/facts", s.base))
+        .bearer_auth("tok")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
 }

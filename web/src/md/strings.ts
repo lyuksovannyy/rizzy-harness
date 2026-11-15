@@ -82,6 +82,8 @@ const en = {
   "memory.forgotProject": "Forgot in the project:",
   "memory.forgotShared": "Forgot in this workspace's memory:",
   "memory.forAdmin": "Waits for a workspace admin, who sees it under Workspace → Memory.",
+  "memory.sendHint": "Only you see this. Keep sends it to whoever decides; Dismiss drops it.",
+  "memory.sentOn": "Sent on, waiting:",
   "memory.forManager": "Waits for a project manager, who sees it on the project's Memory tab.",
   "memory.gone": "No longer in memory:",
   "memory.undo": "Undo",

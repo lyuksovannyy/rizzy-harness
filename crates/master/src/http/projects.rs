@@ -902,10 +902,14 @@ fn proposal_visible(
     f: &harness_memory::Fact,
     owners: &HashMap<SessionId, Option<String>>,
     decides: bool,
+    metas: &HashMap<String, crate::memory::ProposalMeta>,
 ) -> bool {
+    // A proposal from a person's chat is theirs alone until they send it on
+    // (review F2); then those who may decide it see it.
+    let sent = metas.get(&f.id).is_some_and(|x| x.submitted);
     match who.user_id.as_deref() {
         None => true,
-        Some(_) if decides => true,
+        Some(_) if decides && sent => true,
         Some(me) => f
             .source_session
             .and_then(|s| owners.get(&s).cloned().flatten())
@@ -920,16 +924,26 @@ fn decides(a: &Access, row: &ProjectRow) -> bool {
 
 /// A fact as the caller sees it: the source chat only when it is theirs;
 /// a proposal says what it would replace or drop (`proposal`).
-fn fact_json(
-    who: &Principal,
-    f: &harness_memory::Fact,
-    owners: &HashMap<SessionId, Option<String>>,
-    metas: &HashMap<String, crate::memory::ProposalMeta>,
-) -> Value {
+struct Credits {
+    owners: HashMap<SessionId, Option<String>>,
+    metas: HashMap<String, crate::memory::ProposalMeta>,
+    authors: HashMap<String, crate::memory::Authorship>,
+    names: HashMap<String, String>,
+}
+
+async fn credits(m: &Master) -> ApiResult<Credits> {
+    Ok(Credits {
+        owners: chat_owners(m).await?,
+        metas: crate::memory::proposal_metas(m).await,
+        authors: crate::memory::authorships(m).await,
+        names: super::memory::names(m).await?,
+    })
+}
+
+fn fact_json(who: &Principal, f: &harness_memory::Fact, c: &Credits) -> Value {
+    let owners = &c.owners;
     let mut v = json!(f);
-    if let Some(meta) = metas.get(&f.id) {
-        v["proposal"] = json!(meta);
-    }
+    super::memory::credit(&mut v, f, &c.authors, &c.metas, &c.names);
     let own = f
         .source_session
         .and_then(|s| owners.get(&s))
@@ -951,8 +965,7 @@ async fn list_memory(
         .list(Some(&p::memory_owner(&row.project_id)))
         .await
         .map_err(memory_err)?;
-    let owners = chat_owners(&m).await?;
-    let metas = crate::memory::proposal_metas(&m).await;
+    let c = credits(&m).await?;
     let decides = decides(&a, &row);
     let shown: Vec<Value> = facts
         .iter()
@@ -960,9 +973,9 @@ async fn list_memory(
         // shown to every member, restorable by those who may manage.
         .filter(|f| {
             f.status != harness_memory::Status::Proposed
-                || proposal_visible(&who, f, &owners, decides)
+                || proposal_visible(&who, f, &c.owners, decides, &c.metas)
         })
-        .map(|f| fact_json(&who, f, &owners, &metas))
+        .map(|f| fact_json(&who, f, &c))
         .collect();
     Ok(Json(json!({ "memories": shown })))
 }
@@ -979,7 +992,7 @@ async fn add_memory(
     Path(id): Path<String>,
     Json(b): Json<NewFactBody>,
 ) -> ApiResult<Json<Value>> {
-    let (_, row) = managed(&m, &headers, &id).await?;
+    let (who, row) = managed(&m, &headers, &id).await?;
     let mem = memory_store(&m)?;
     let f = mem
         .add(harness_memory::NewFact {
@@ -992,6 +1005,9 @@ async fn add_memory(
         })
         .await
         .map_err(memory_err)?;
+    if let Some(f) = &f {
+        crate::memory::note_added(&m, f, who.user_id.as_deref()).await;
+    }
     let _ = m.inner.live.send(Live::MemoryChanged);
     Ok(Json(json!(f)))
 }
@@ -1017,11 +1033,12 @@ async fn own_project_fact(
     let mem = memory_store(m)?;
     let f = mem.get(fact).await.map_err(memory_err)?;
     let owners = chat_owners(m).await?;
+    let metas = crate::memory::proposal_metas(m).await;
     let f = match f {
         Some(f)
             if f.owner_id.as_deref() == Some(p::memory_owner(&row.project_id).as_str())
                 && (f.status != harness_memory::Status::Proposed
-                    || proposal_visible(&who, &f, &owners, decides(&a, &row))) =>
+                    || proposal_visible(&who, &f, &owners, decides(&a, &row), &metas)) =>
         {
             f
         }
@@ -1066,14 +1083,13 @@ async fn update_memory(
         if let Some(t) = b.text {
             mem.update(&fact, Some(t), None).await.map_err(memory_err)?;
         }
-        crate::memory::keep_proposal(&m, &*mem, &cur)
+        crate::memory::keep_proposal(&m, &*mem, &cur, who.user_id.as_deref())
             .await
             .map_err(memory_err)?;
-        let owners = chat_owners(&m).await?;
-        let metas = crate::memory::proposal_metas(&m).await;
+        let c = credits(&m).await?;
         let now = mem.get(&fact).await.map_err(memory_err)?;
         return Ok(Json(match now {
-            Some(f) => fact_json(&who, &f, &owners, &metas),
+            Some(f) => fact_json(&who, &f, &c),
             None => json!({ "ok": true }),
         }));
     }
@@ -1082,10 +1098,21 @@ async fn update_memory(
         .await
         .map_err(memory_err)?
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "no such memory".into()))?;
+    if let Some(st) = b.status
+        && cur.status != harness_memory::Status::Proposed
+        && (st == harness_memory::Status::Retired || cur.status == harness_memory::Status::Retired)
+    {
+        crate::memory::note_retired(
+            &m,
+            &cur,
+            who.user_id.as_deref(),
+            st == harness_memory::Status::Retired,
+        )
+        .await;
+    }
     let _ = m.inner.live.send(Live::MemoryChanged);
-    let owners = chat_owners(&m).await?;
-    let metas = crate::memory::proposal_metas(&m).await;
-    Ok(Json(fact_json(&who, &f, &owners, &metas)))
+    let c = credits(&m).await?;
+    Ok(Json(fact_json(&who, &f, &c)))
 }
 
 async fn delete_memory(
@@ -1093,9 +1120,19 @@ async fn delete_memory(
     headers: HeaderMap,
     Path((id, fact)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
-    let (_, mem, _, _) = own_project_fact(&m, &headers, &id, &fact).await?;
+    let (_, mem, _, cur) = own_project_fact(&m, &headers, &id, &fact).await?;
+    // Retire, never delete, a fact in use (review F5): a proposal may be
+    // withdrawn or dismissed, a retired fact purged by a manager
+    // (`own_project_fact` asked "may manage" for it).
+    if cur.status == harness_memory::Status::Active {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "retire a fact first; only a retired fact can be deleted".into(),
+        ));
+    }
     mem.delete(&fact).await.map_err(memory_err)?;
     crate::memory::clear_meta(&m, &fact).await;
+    crate::memory::clear_authorship(&m, &fact).await;
     let _ = m.inner.live.send(Live::MemoryChanged);
     Ok(Json(json!({ "ok": true })))
 }

@@ -636,9 +636,11 @@ places:
 
 The assistant says which place it means when it saves (`about`: you, the
 workspace, the project); when it does not say, the fact goes to your facts.
-A private detail about you is never put in a team's memory by the
-assistant: in a team chat it is offered for your Personal workspace, and
-waits for your Keep.
+A fact it marks as a private detail always stays with you, whatever place it
+named: it is never put in a team's or a project's memory by the assistant
+(in a team chat it is offered for your Personal workspace, and waits for
+your Keep). A project fact in a chat without a project is refused, not
+saved elsewhere.
 
 - **In your Personal workspace it saves as you talk**, without asking, in
   every chat (also one that read web pages or files: the owner's decision of
@@ -653,10 +655,19 @@ waits for your Keep.
   hand (add, edit, retire, restore, delete) and so their assistants' saves
   apply at once; with the switch "Every member may change this memory"
   (Settings → Workspace → Memory, off by default) every member's do.
-  Otherwise the block says it waits for a workspace admin, who sees it under
-  **Waiting** on the workspace's Memory tab (and a count on its Overview)
-  with Keep and Dismiss. Saves to your own facts from a team chat wait for
+  Guests never change it, switch or not. Otherwise the change waits, and
+  first only you see it (your chat is private): the block says what the
+  assistant wants, and your **Keep** sends it on to a workspace admin, who
+  then sees it under **Waiting** on the workspace's Memory tab (with your
+  name, and a count on its Overview) with Keep and Dismiss; your
+  **Dismiss** drops it. Saves to your own facts from a team chat wait for
   your Keep in the block.
+- **Every member sees who wrote what** in a workspace's or a project's
+  memory: "added by", "kept by" and "retired by", with dates ("a former
+  member" once that account is gone). Facts there are retired, never
+  deleted, by whoever may change them; only the workspace's admins and
+  owners (a project's managers) delete a fact, and only one already
+  retired.
 - **Correcting and dropping facts works for every place** the chat is given
   (the owner, 2026-11-14: "replaces / forget - must work in all memory types
   with ability to revert the change via the block"). A correction stays
@@ -674,8 +685,10 @@ waits for your Keep.
   there (the workspace's own memory is given either way). Your answer can be
   changed later in Settings → Workspace.
 - **Who sees what.** Your facts and your Personal workspace's memory: you
-  alone, not a workspace's admins, not the server's admins. A team's memory:
-  its members only; leaving the workspace ends your access at once, and the
+  alone, not a workspace's admins, not the server's admins, not the API
+  token. A team's memory: its members, and the API token (which acts as an
+  owner of every team workspace). Leaving a workspace ends your access at
+  once, and the
   memory stays with the workspace. Deleting a workspace deletes its memory;
   deleting an account deletes its facts and its Personal workspace's memory.
 - What the assistant reads: each place's facts, newest first, up to 3,000

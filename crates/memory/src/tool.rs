@@ -41,7 +41,8 @@ impl Tool for Remember {
          (decisions, conventions). With \"me\", set `sensitive` for anything the person would not \
          want a colleague to see: health, money, identity documents, details near passwords or \
          accounts, family, relationships, beliefs, legal matters; it stays in their Personal \
-         workspace only. Never put something private about a person in \"workspace\". Never keep a \
+         workspace only, whatever `about` says (`sensitive` always wins). Never put something \
+         private about a person in \"workspace\". Never keep a \
          password, key or token. To correct a fact you were shown, pass its id as `replaces` with \
          the new text; to drop one, pass its id as `forget` alone. The person sees every call in \
          the chat: some save at once (with Undo), others wait for someone's Keep."
@@ -59,7 +60,7 @@ impl Tool for Remember {
                 "kind": { "type": "string", "enum": ["fact", "preference", "location"] },
                 "sensitive": {
                     "type": "boolean",
-                    "description": "With about \"me\": a private detail (health, money, identity, family...), kept in the person's Personal workspace only"
+                    "description": "A private detail about the person (health, money, identity, family...): kept in their Personal workspace only, whatever `about` says"
                 },
                 "replaces": { "type": "string", "description": "Id of a fact this one corrects (it stays in that fact's place)" },
                 "forget": { "type": "string", "description": "Id of a fact to drop (no text)" }

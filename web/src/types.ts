@@ -818,8 +818,18 @@ export interface MemoryFact {
   workspace_id?: string;
   workspace_name?: string | null;
   workspace_personal?: boolean;
-  /** On a Memory tab: a proposal's change besides adding itself. */
-  proposal?: { replaces?: string | null; drop?: boolean };
+  /** On a Memory tab: a proposal's change besides adding itself, and
+   * whether its proposer sent it on to those who decide. */
+  proposal?: { replaces?: string | null; drop?: boolean; submitted?: boolean };
+  /** On a shared Memory tab: who proposed, added, kept and retired it
+   * ("a former member" once their account is gone), and when. */
+  proposed_by?: string | null;
+  added_by?: string | null;
+  added_ms?: number;
+  kept_by?: string | null;
+  kept_ms?: number | null;
+  retired_by?: string | null;
+  retired_ms?: number | null;
   /** On a workspace's Memory tab: made by the viewer's own chat. */
   mine?: boolean;
 }
@@ -844,6 +854,7 @@ export interface MemoryCallState {
   state:
     | "saved"
     | "pending"
+    | "sent"
     | "kept"
     | "dismissed"
     | "refused"
