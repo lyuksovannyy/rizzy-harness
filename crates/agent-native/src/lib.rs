@@ -110,13 +110,30 @@ fn wrap_up_note(max_steps: usize) -> String {
     )
 }
 
+/// Which of the harness's step notes a step's result carried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StepNote {
+    Half,
+    WrapUp,
+}
+
+/// After the wrap-up note went out, the chat's limit was raised: the next
+/// request offers tools again (review F5).
+const RAISED_NOTE: &str = "[harness] The step limit of this chat was raised: this is not \
+     the last request after all, and you may continue the work.";
+
+/// How many steps after a context overflow was compacted another one may
+/// be compacted in the same turn (review F3): enough that the turn has made
+/// progress since, so two overflows in a row still end it.
+const OVERFLOW_AGAIN_STEPS: usize = 8;
+
 /// The note the request after step `steps` gets: the wrap-up's for a
 /// person's turn that used its budget, the half-budget one at half.
-fn step_note(person: bool, steps: usize, max_steps: usize) -> Option<String> {
+fn step_note(person: bool, steps: usize, max_steps: usize) -> Option<(StepNote, String)> {
     if person && steps >= max_steps {
-        Some(wrap_up_note(max_steps))
+        Some((StepNote::WrapUp, wrap_up_note(max_steps)))
     } else if max_steps >= HALF_NOTE_MIN_STEPS && steps == max_steps / 2 {
-        Some(half_note(steps, max_steps))
+        Some((StepNote::Half, half_note(steps, max_steps)))
     } else {
         None
     }
@@ -209,6 +226,12 @@ impl harness_core::backend::TurnHost for Logged<'_> {
 
     fn tool_denied(&self, tool: &str) -> bool {
         self.host.tool_denied(tool)
+    }
+
+    // Not forwarding it would run every chat at the node's limit, whatever
+    // its owner set (tests/host_forwarding.rs).
+    fn step_limit(&self) -> Option<usize> {
+        self.host.step_limit()
     }
 
     async fn delegate(
@@ -1636,7 +1659,9 @@ impl NativeBackend {
         };
         // A callback turn's own cap (`callback_max_steps`), never above the
         // backend's.
-        let max_steps = ctx
+        // A person's turn and a sub-agent's follow the chat's own limit
+        // (`TurnHost::step_limit`, X.14), read again before every request.
+        let mut max_steps = ctx
             .extra
             .max_steps
             .map_or(self.config.max_steps, |n| n.min(self.config.max_steps));
@@ -1661,19 +1686,20 @@ impl NativeBackend {
         let mut started = false;
         // A request the provider refused as too long is compacted and sent
         // again once per turn; a second refusal ends the turn.
-        let mut overflowed = false;
         // Messages in a row whose tool calls were cut by the output limit.
         let mut cut_steps = 0;
         // Same call, same result (T.1): this turn's only, never the model's.
         let mut guard = repeat::RepeatGuard::default();
         let mut repeat_stop = false;
-        let cap_error = if max_steps < self.config.max_steps || callback.is_some() {
-            format!(
-                "stopped after {max_steps} steps: a turn nobody started may take no more \
-                 (`callback_max_steps` in node.toml)"
-            )
-        } else {
-            format!("stopped after {max_steps} steps (`max_steps` in node.toml)")
+        let cap_error = |max_steps: usize| {
+            if callback.is_some() {
+                format!(
+                    "stopped after {max_steps} steps: a turn nobody started may take no more \
+                     (`callback_max_steps` in node.toml)"
+                )
+            } else {
+                format!("stopped after {max_steps} steps (`max_steps` in node.toml)")
+            }
         };
         // A sub-agent's last request offers `finish` alone, after the
         // harness's note, so a child the step cap or the repeated-call
@@ -1691,26 +1717,53 @@ impl NativeBackend {
         // The note for the next request, as the step's last tool result
         // carried it into the log (`tool_call_finished.note`), so a later
         // request rebuilds it byte for byte; set where that was possible.
-        let mut noted = false;
+        let mut noted: Option<StepNote> = None;
+        // This turn's own cap (a callback turn's `callback_max_steps`, or
+        // the node's), and under it the chat's limit, read again before
+        // every request (`TurnHost::step_limit`, X.14): a callback turn too
+        // (review F2), so a chat set to 3 never takes 20 unattended steps.
+        let own_cap = max_steps;
+        let cap_now = || match host.step_limit() {
+            Some(n) => own_cap.min(n.max(1)),
+            None => own_cap,
+        };
+        // Steps when a context overflow was last compacted, and whether the
+        // wrap-up it led to hides every tool output (review F3).
+        let mut overflow_at: Option<usize> = None;
+        let mut mask_all = false;
         let mut steps = 0usize;
         loop {
+            max_steps = cap_now();
             if last.is_none() && !wrap_up {
-                if child && steps + 1 == max_steps {
-                    last = Some(cap_error.clone());
+                // `>=`: a limit lowered below the steps used gives the last
+                // request next.
+                if child && steps + 1 >= max_steps {
+                    last = Some(cap_error(max_steps));
                     messages.push(ChatMsg::Note(harness_core::subagent::LAST_STEP_NOTE.into()));
                 } else if steps >= max_steps {
                     if !person {
                         break;
                     }
                     wrap_up = true;
-                    if !noted {
+                    // Whatever the step's result carried, the wrap-up
+                    // request has its own note (review F5).
+                    if noted != Some(StepNote::WrapUp) {
                         messages.push(ChatMsg::Note(wrap_up_note(max_steps)));
                     }
-                } else if !noted && let Some(n) = step_note(person, steps, max_steps) {
-                    messages.push(ChatMsg::Note(n));
+                } else {
+                    // The wrap-up note went out, and the limit was raised
+                    // since: the model is told it may go on (review F5).
+                    if noted == Some(StepNote::WrapUp) {
+                        messages.push(ChatMsg::Note(RAISED_NOTE.into()));
+                    }
+                    if noted.is_none()
+                        && let Some((_, n)) = step_note(person, steps, max_steps)
+                    {
+                        messages.push(ChatMsg::Note(n));
+                    }
                 }
             }
-            noted = false;
+            noted = None;
             steps += 1;
             // What the person wrote while the turn ran (X.5), before each
             // request: after the step's tool results and their notes, as
@@ -1745,6 +1798,9 @@ impl NativeBackend {
             let mut sent = messages.clone();
             if let Some(k) = keep {
                 mask::mask_old_outputs(&mut sent, k);
+            }
+            if mask_all {
+                mask::mask_all_outputs(&mut sent);
             }
             let req = ChatRequest {
                 model: model.clone(),
@@ -1820,14 +1876,15 @@ impl NativeBackend {
                 }
                 Step::Done(Err(e)) if !emitted && e.is_context_overflow() => {
                     // `tried`: compaction failed or did not shrink anything
-                    // this turn, which the error then says.
+                    // this turn, which the error then says. No "start a new
+                    // chat": the chat goes on (review F3).
                     let fail = |usage: Usage, what: &str, tried: u32| TurnOutcome {
                         reason: TurnEndReason::Error,
                         usage: Some(usage),
                         error: Some(format!(
                             "The conversation is too long for the context window of {model}{what}{}. \
-                             Start a new chat, or switch to a model with a larger context window. \
-                             (provider: {})",
+                             Ask for less at a time, or switch to a model with a larger context \
+                             window. (provider: {})",
                             if tried > 0 {
                                 "; summarising older turns was tried and did not help"
                             } else {
@@ -1836,7 +1893,19 @@ impl NativeBackend {
                             e.log_line()
                         )),
                     };
-                    if overflowed {
+                    // Out of room for good in a person's turn: its wrap-up
+                    // request instead, every older tool output hidden, so
+                    // it ends with its account (review F3). Only when that
+                    // request overflows too is it an error.
+                    let to_wrap_up = person && !wrap_up && last.is_none();
+                    let again = overflow_at.is_none_or(|at| steps >= at + OVERFLOW_AGAIN_STEPS);
+                    if !again {
+                        if to_wrap_up {
+                            wrap_up = true;
+                            mask_all = true;
+                            messages.push(ChatMsg::Note(wrap_up_note(max_steps)));
+                            continue;
+                        }
                         return fail(
                             usage,
                             if compact_failures > 0 {
@@ -1847,7 +1916,7 @@ impl NativeBackend {
                             compact_failures,
                         );
                     }
-                    overflowed = true;
+                    overflow_at = Some(steps);
                     tracing::warn!(model = %model, error = %e.log_line(), "context overflow; compacting");
                     let before = {
                         let mut m = messages.clone();
@@ -1914,7 +1983,14 @@ impl NativeBackend {
                         provider::estimate_tokens(&m)
                     };
                     if after >= before {
-                        // Nothing to shrink: the same request would fail again.
+                        // Nothing to shrink: the same request would fail
+                        // again; a person's turn still gives its account.
+                        if to_wrap_up {
+                            wrap_up = true;
+                            mask_all = true;
+                            messages.push(ChatMsg::Note(wrap_up_note(max_steps)));
+                            continue;
+                        }
                         return fail(usage, "", compact_failures);
                     }
                     continue;
@@ -2440,13 +2516,14 @@ impl NativeBackend {
                     guard.record(key, changes, outcome.ok, &output)
                 });
                 // The step's last result carries the next request's note
-                // (half the budget, or the wrap-up), so the log has it.
+                // (half the budget, or the wrap-up), so the log has it; the
+                // limit read again now (review F5).
                 let note = match (i + 1 == n_calls)
-                    .then(|| step_note(person, steps, max_steps))
+                    .then(|| step_note(person, steps, cap_now()))
                     .flatten()
                 {
-                    Some(n) => {
-                        noted = true;
+                    Some((kind, n)) => {
+                        noted = Some(kind);
                         Some(match note {
                             Some(g) => format!("{g}\n\n{n}"),
                             None => n,
@@ -2565,7 +2642,7 @@ impl NativeBackend {
         TurnOutcome {
             reason: TurnEndReason::Error,
             usage: Some(usage),
-            error: Some(cap_error),
+            error: Some(cap_error(max_steps)),
         }
     }
 }
@@ -4163,10 +4240,11 @@ mod tests {
         let (delegated, child, p) = briefed(forever).await;
         // The step cap's own text names why (review SB-1).
         assert!(
-            delegated.output.contains(
+            delegated.output.contains(&format!(
                 "\nSub-agent @researcher finished: failed (its turn ended without a `finish` \
-                 call: error: stopped after 50 steps (`max_steps` in node.toml)). "
-            ),
+                 call: error: stopped after {} steps (`max_steps` in node.toml)). ",
+                harness_core::policy::DEFAULT_MAX_STEPS
+            )),
             "{}",
             delegated.output
         );

@@ -216,7 +216,8 @@ Settings has four sections:
   defaults it gives, and whether your facts (your memories) are used in its
   chats: always in Personal; in a team workspace you are asked when you join
   it (its creator too). Until you answer, the answer is no; you can change it
-  here at any time (see **Memory.** further down).
+  here at any time (see **Memory.** further down); and the workspace's
+  memory (Memory tab), which every member reads.
 - **Workspace admin** (admins and owners; not for Personal): its name, default
   agents (chats and Agentic), the model each agent uses there (the Assistant's, `general`, is the
   workspace's default model), members and roles, deleting it.
@@ -280,7 +281,8 @@ status, duration, tokens and the first sentence of its answer.
 - **Agentic routines** run in the approval mode you pick when you create or
   edit them, Auto by default (the owner's decision of 2026-11-14). A scheduled
   routine in Auto runs commands with nobody present, bounded by the node's
-  `max_approval_mode` and, in a sandbox chat, by the sandbox. A run that uses a
+  `max_approval_mode` and, in a sandbox chat, by the sandbox; each run may
+  take up to the node's `max_steps` (1,000 by default) unattended steps. A run that uses a
   webhook's data always asks, whatever the routine's mode: whoever calls the
   webhook writes into its prompt. When a run asks, a command, an edit or a
   publish waits for your click in "Waiting for you" and is cancelled after 24
@@ -617,65 +619,93 @@ sub-agent keeps its own list in its own session. A new Agentic chat starts
 with the Agentic default agent (your `default_agentic_agent`, else the
 workspace's, else the Software Developer), not the chat default.
 
-**Memory.** The assistant keeps short facts about you for later chats (Settings → Account
-→ Memory lists every one of them).
+**Memory.** The assistant keeps short facts for later chats, in three
+places:
 
-- **In your Personal workspace it saves them as you talk**, without asking,
-  in every chat (also one that read web pages or files: the owner's decision
-  of 2026-11-14 was "No, always save"). Each change shows as its own
-  **memory block** in the chat, where the assistant made it: "Saved to your
-  facts: …", "Saved, in this workspace only: …", "Replaced: old → new" or
+- **Your facts**: about you (your preferences, people, how you work). Only
+  you see them (Settings → Account → Memory). They follow you into a team
+  workspace only after you answer its question yes (see below).
+- **The workspace's memory**: one per workspace (the owner, 2026-11-14:
+  "Workspace memory available to all users in it"). In a team, it is how the
+  workspace works (its conventions, systems, who does what): every member's
+  chats there are given it, and every member reads it under Settings →
+  Workspace → Memory, whatever they answered about their own facts. In your
+  Personal workspace, where you are the only member, it holds private details
+  about you (health, money, identity documents, family), given to your chats
+  there and nowhere else.
+- **The project's memory**, for the chats of a project (docs/projects.md).
+
+The assistant says which place it means when it saves (`about`: you, the
+workspace, the project); when it does not say, the fact goes to your facts.
+A fact it marks as a private detail always stays with you, whatever place it
+named: it is never put in a team's or a project's memory by the assistant
+(in a team chat it is offered for your Personal workspace, and waits for
+your Keep). A project fact in a chat without a project is refused, not
+saved elsewhere.
+
+- **In your Personal workspace it saves as you talk**, without asking, in
+  every chat (also one that read web pages or files: the owner's decision of
+  2026-11-14 was "No, always save"). Each change shows as its own **memory
+  block** in the chat, where the assistant made it: "Saved to your facts:
+  …", "Saved, in your Personal workspace only: …", "Replaced: old → new" or
   "Forgot: …", each with **Undo**. Undo removes a save, brings back the fact
   a replacement or forgetting retired, and the block then says it was undone
-  (after a reload too). The next chat already knows a saved fact. Replaced
-  and forgotten facts are kept under "Replaced or forgotten", restorable.
-- **Correcting and dropping facts works for every kind** the chat is given:
-  your facts, facts kept in the workspace, and the project's facts (the
-  owner, 2026-11-14: "replaces / forget - must work in all memory types with
-  ability to revert the change via the block"). A correction stays where the
-  fact was (your facts, the same workspace, the same project). It applies at
-  once where you could make that change yourself, with Undo on the block: in
-  your own chats for your facts, and for a project's facts if you manage the
-  project (or its members may confirm facts). Otherwise the block says it
-  waits for a project manager, and nothing changes. A retired project fact
-  shows on the project's Memory tab under "Replaced or forgotten", with
-  Restore for managers.
-- **Elsewhere it asks, in the chat.** In a team workspace, from a
-  sub-agent, from a message not sent by you signed in (the API token, a
-  routine's run), and for any fact you wrote yourself, the block says what
-  the assistant wants to remember, replace or forget, with **Keep** and
-  **Dismiss**: nothing changes until you click Keep.
-- **Two places.** Ordinary things about you (your preferences, people, how you
-  work) go to **your facts**, which can follow you into team workspaces.
-  Private details (health, money, identity documents, family, anything you
-  would not want a colleague's workspace to see) are **kept in the workspace
-  where they came up**: in your Personal workspace they stay there and are
-  never used anywhere else. The assistant decides which is which when it
-  saves; it can be wrong, so every fact shows its place on the Memory page
-  and **Keep private** / **Move to your facts** moves it.
-- **Team workspaces ask first.** When you join one (or create it), a question
-  at the top of the page asks whether its agents may use your facts. Until
-  you answer yes, nothing of your facts is read or added there. With yes,
-  your chats there read your facts and the assistant *suggests* new ones,
-  which wait under To review until you keep them. Your answer can be changed
-  later in Settings → Workspace. Leaving a workspace deletes what was kept in
-  it about you.
-- **Nobody else sees your memory**: not the workspace's members, not its
-  admins, not the server's admins. Deleting an account deletes its memory.
-- What the assistant reads: your facts, newest first, up to 3,000 characters
-  each turn (older ones only when your message matches them). The facts it
-  saved itself may take up to 3,000 characters; past that, a save is
-  refused and the next turn asks it to merge or drop facts first. Facts you
-  add yourself do not count. A save that waits for you, or was refused, is
-  named to the assistant in the next turn. Only you see these blocks and
-  can use their buttons.
+  (after a reload too). The next chat already knows a saved fact.
+- **In a team, a save to the workspace's memory applies at once only if
+  you could make it yourself**: its admins and owners change the memory by
+  hand (add, edit, retire, restore, delete) and so their assistants' saves
+  apply at once; with the switch "Every member may change this memory"
+  (Settings → Workspace → Memory, off by default) every member's do.
+  Guests never change it, switch or not. Otherwise the change waits, and
+  first only you see it (your chat is private): the block says what the
+  assistant wants, and your **Keep** sends it on to a workspace admin, who
+  then sees it under **Waiting** on the workspace's Memory tab (with your
+  name, and a count on its Overview) with Keep and Dismiss; your
+  **Dismiss** drops it. Saves to your own facts from a team chat wait for
+  your Keep in the block.
+- **Every member sees who wrote what** in a workspace's or a project's
+  memory: "added by", "kept by" and "retired by", with dates ("a former
+  member" once that account is gone). Facts there are retired, never
+  deleted, by whoever may change them; only the workspace's admins and
+  owners (a project's managers) delete a fact, and only one already
+  retired.
+- **Correcting and dropping facts works for every place** the chat is given
+  (the owner, 2026-11-14: "replaces / forget - must work in all memory types
+  with ability to revert the change via the block"). A correction stays
+  where the fact was. It applies at once where you could make that change
+  yourself, with Undo on the block; otherwise it waits for whoever may decide
+  it (a workspace admin on the workspace's Memory tab, a project manager on
+  the project's), who sees exactly what it would replace or drop. Retired
+  facts stay under "Replaced or forgotten", restorable.
+- **Never at once**: a sub-agent's save, a message not sent by you signed in
+  (the API token, a routine's run), a change to a fact you wrote yourself.
+  Those blocks ask, with **Keep** and **Dismiss**.
+- **Team workspaces ask about your facts.** When you join one (or create
+  it), a question at the top of the page asks whether its agents may use
+  your facts. Until you answer yes, nothing of your facts is read or added
+  there (the workspace's own memory is given either way). Your answer can be
+  changed later in Settings → Workspace.
+- **Who sees what.** Your facts and your Personal workspace's memory: you
+  alone, not a workspace's admins, not the server's admins, not the API
+  token. A team's memory: its members, and the API token (which acts as an
+  owner of every team workspace). Leaving a workspace ends your access at
+  once, and the
+  memory stays with the workspace. Deleting a workspace deletes its memory;
+  deleting an account deletes its facts and its Personal workspace's memory.
+- What the assistant reads: each place's facts, newest first, up to 3,000
+  characters each turn (older ones only when the message matches them). What
+  the assistant saved itself may take up to 3,000 characters per place
+  (your facts and your Personal workspace together); past that, a save is
+  refused and the next turn asks it to merge or drop facts first. Facts
+  people add by hand do not count. A team's memory is other people's
+  writing, and the assistant is told so.
 - Temporary chats, turns started by an external event and turns that
   report a finished background command read and write no memory. Anything
   that looks like a password, key or token is refused ("my passwords are in
   1Password" is fine; the password itself is not).
 
-Project memory works as before: facts proposed for a project wait on the
-project's Memory tab (docs/projects.md).
+A data directory made before workspace memory existed must be recreated
+(facts kept per person in a workspace are not carried over).
 
 Who may create workspaces (also a switch under Settings → Server → Workspaces):
 
@@ -928,7 +958,7 @@ env_pass = []                        # extra variables the agent's shell gets (s
 
 [limits]
 tool_stream_bytes = 1048576          # live output one tool call may stream (4096 .. 1 GiB)
-max_steps = 50                       # model calls that run tools in one turn; a person's turn then gets one to sum up (1 .. 1000)
+max_steps = 1000                     # model calls that run tools in one turn, and the most a chat may be set to; a person's turn then gets one to sum up (1 .. 10000)
 bash_timeout_max_s = 3600            # longest a bash call may run, whatever it asks for (1 .. 3600)
 model_first_byte_timeout_s = 600     # wait for a model's first answer (10 .. 3600)
 model_idle_timeout_s = 300           # then the longest gap between its events (10 .. 3600)
@@ -938,7 +968,7 @@ background_per_session = 8           # background commands one chat may run at o
 background_per_node = 64             # background commands this node runs at once, all chats (0 .. 256)
 background_output_kb = 256           # output kept in memory per background command (16 .. 4096)
 callback_turns = 3                   # turns the agent may run in a row without you when commands end; 0: off (0 .. 20)
-callback_max_steps = 20              # model calls one such turn may make, never above max_steps (1 .. 1000)
+callback_max_steps = 20              # model calls one such turn may make, never above max_steps or the chat's own limit (1 .. 10000)
 
 [sandbox]
 mode = "required"                    # required | best-effort | off
@@ -1487,7 +1517,30 @@ rest of its output is read and dropped. The result the model gets has its
 own, smaller cap and says when the live stream was cut.
 
 **Step and time limits.** A turn may make `[limits] max_steps` model calls
-that run tools (default 50, 1 to 1000; a sub-agent's turn has the same cap).
+that run tools (default 1,000, 1 to 10,000 in the node's `node.toml`). The
+default is the owner's decision (2026-11-15: "Raise max to 1000 by default +
+add ability for session owners to override max steps (min: 1 - {max
+setted})"). **What it costs:** with Auto as the default approval mode, one
+message can run up to a thousand model requests with nobody clicking
+anything, and each of those steps can carry several tool calls. Sub-agents
+multiply it: by default a turn may start 4 of them, running in parallel, each
+with up to the chat's limit of its own (more where node.toml's
+`max_subagents` and `max_delegation_depth` allow), so one message can cost
+about (1 + its sub-agents) times the limit. The sub-agent token budget
+(`max_subagent_tokens`, below) only refuses new sub-agents once it is spent;
+it does not stop one already running (a follow-up). What bounds it: the chat's own step limit,
+the node's `max_steps`, the repeated-call guard (the same call with the same
+result is refused and then ends the turn), the model stream timeouts, Stop,
+and the provider's own rate and spending limits. A chat's owner can set the
+chat's own limit, from 1 up to the node's, in the composer next to the
+approval mode ("N steps"): the node clamps whatever it is sent, records it in
+the chat (shown as "Step limit: N"), keeps it across a restart, and applies
+it from the running turn's next request (a limit below what the turn has
+used gives it its wrap-up next). A callback turn (see "Background commands")
+takes the lower of `callback_max_steps` and the chat's own limit. Only the owner (or the API token) can change
+it; nothing the model, a tool, a skill or an MCP server writes can. A
+sub-agent's cap is at most its parent chat's limit (a sub-agent whose parent
+chat was deleted gets 1); a routine's chat uses the node's limit.
 Halfway through, the agent is told how many it has used. A person's turn then
 gets one more call that runs no tool: the tools stay listed (the provider's
 cache) but the provider is asked for no tool call (`tool_choice: none`), the

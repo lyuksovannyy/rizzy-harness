@@ -261,6 +261,7 @@ export type Item =
   | { type: "agent_changed"; agent: AgentRef }
   /** The owner changed the approval mode; `requested` when the node gave less. */
   | { type: "approval_mode_changed"; mode: ApprovalMode; requested?: ApprovalMode }
+  | { type: "step_limit_changed"; max_steps: number; requested?: number }
   | { type: "summary"; through_seq: number; text: string }
   /** The turn's main model failed or is unavailable: `model` (prefixed) answered instead of `from`. */
   | { type: "fallback"; turn_id: string; model: string; from: string; reason?: string | null }
@@ -304,6 +305,9 @@ export interface SessionView {
   background?: Record<string, BackgroundState>;
   /** The agent's task list (the latest `todo_updated`); absent when empty. */
   todo?: TodoItem[];
+  /** The chat's own step limit (the latest `step_limit_changed`); absent:
+   * the node's. */
+  max_steps?: number;
   /** A model call waits to be sent again (`model_retry`); absent otherwise. */
   retry?: ModelRetry;
   /** The latest turn's limits (`turn_ended.usage`): the window of the model it
@@ -752,6 +756,9 @@ export interface NodeInfo {
   max_approval?: ApprovalMode | null;
   /** What a new chat there gets when the person picks none. */
   default_approval?: ApprovalMode | null;
+  /** Its `[limits] max_steps` (X.14), the most a chat's own limit may be;
+   * absent: the node cannot change a chat's limit. */
+  max_steps?: number | null;
 }
 
 /** A server-wide account role (Settings → Users), not a workspace role. */
@@ -872,6 +879,33 @@ export interface MemoryFact {
   workspace_id?: string;
   workspace_name?: string | null;
   workspace_personal?: boolean;
+  /** On a Memory tab: a proposal's change besides adding itself, and
+   * whether its proposer sent it on to those who decide. */
+  proposal?: { replaces?: string | null; drop?: boolean; submitted?: boolean };
+  /** On a shared Memory tab: who proposed, added, kept and retired it
+   * ("a former member" once their account is gone), and when. */
+  proposed_by?: string | null;
+  added_by?: string | null;
+  added_ms?: number;
+  kept_by?: string | null;
+  kept_ms?: number | null;
+  retired_by?: string | null;
+  retired_ms?: number | null;
+  /** On a workspace's Memory tab: made by the viewer's own chat. */
+  mine?: boolean;
+}
+
+/** A workspace's shared memory (Settings → Workspace → Memory). */
+export interface WorkspaceFacts {
+  memories: MemoryFact[];
+  /** The viewer may change it by hand and keep proposals. */
+  can_edit: boolean;
+  /** The viewer may set `members_edit` (admins and owners). */
+  can_set: boolean;
+  /** Every member may change it, and their agents' saves apply at once. */
+  members_edit: boolean;
+  /** Proposals the viewer sees. */
+  waiting: number;
 }
 
 /** What one `remember` call of a chat did (`GET /api/sessions/{id}/memory/{call}`). */
@@ -881,6 +915,7 @@ export interface MemoryCallState {
   state:
     | "saved"
     | "pending"
+    | "sent"
     | "kept"
     | "dismissed"
     | "refused"
@@ -890,9 +925,11 @@ export interface MemoryCallState {
     | "waiting"
     | "project";
   place?: "user" | "workspace" | "project";
-  /** False: the person may not change this project fact; it waits for a
-   * project manager (Dismiss only). */
+  /** With `workspace`: the viewer's Personal workspace. */
+  workspace_personal?: boolean;
+  /** False: the viewer may not keep it (Dismiss only); `decides` says who. */
   keep?: boolean;
+  decides?: "you" | "admin" | "manager";
   /** The text the call asked for (shown when nothing was filed). */
   text?: string | null;
   /** The fact the call added. */

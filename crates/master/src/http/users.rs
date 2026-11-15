@@ -271,8 +271,19 @@ pub(super) async fn delete_user(
         .map(|ms| ms.workspace.workspace_id)
         .collect();
     m.inner.mirror.call(move |s| s.delete_user(&uid)).await?;
-    // What memory held about them goes with the account (PLAN.md T49).
-    crate::memory::forget_person(&m, &target.user_id, &workspaces).await;
+    // What memory held about them goes with the account (PLAN.md T49), and
+    // the memory of every workspace that went with it (their Personal one,
+    // a team they were the last member of).
+    crate::memory::forget_person(&m, &target.user_id, None).await;
+    for ws in workspaces {
+        let w = ws.clone();
+        if matches!(
+            m.inner.mirror.call(move |s| s.workspace(&w)).await,
+            Ok(None)
+        ) {
+            crate::memory::forget_workspace(&m, &ws).await;
+        }
+    }
     auth::close_sockets(&m, &target.user_id);
     // Their stored files lost their rows with the account; unlink them.
     crate::storage::on_user_deleted(&m).await;

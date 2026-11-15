@@ -1640,6 +1640,23 @@ impl Store {
         Ok(out)
     }
 
+    /// The chat's own step limit as its log says (the latest
+    /// `step_limit_changed`'s `max_steps`, X.14); `None`: never set.
+    pub fn last_step_limit(&self, sid: SessionId) -> Result<Option<u64>> {
+        let conn = self.lock();
+        let payload: Option<String> = conn
+            .query_row(
+                "SELECT payload FROM events WHERE session_id = ?1
+                 AND kind = 'step_limit_changed' ORDER BY seq DESC LIMIT 1",
+                params![sid.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(payload
+            .and_then(|p| serde_json::from_str::<serde_json::Value>(&p).ok())
+            .and_then(|v| v.get("max_steps").and_then(|n| n.as_u64())))
+    }
+
     /// The latest `session_created` or `approval_mode_changed` of `sid`: the
     /// chat's approval mode as its log says (T50), so a lowering is never
     /// gated like a raise. One read on the primary key.

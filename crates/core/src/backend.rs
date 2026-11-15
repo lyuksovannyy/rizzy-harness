@@ -21,6 +21,15 @@ pub trait TurnHost: Send + Sync {
     /// further model request).
     async fn emit(&self, kind: EventKind) -> Result<(), LogError>;
 
+    /// The chat's step limit now (X.14): what the owner set for it, within
+    /// the node's, read before every model request so a change reaches a
+    /// running turn; a sub-agent's is at most its parent chat's. `None`:
+    /// the backend's own `max_steps`. Only the node answers it; nothing a
+    /// model, a tool or a server writes changes it.
+    fn step_limit(&self) -> Option<usize> {
+        None
+    }
+
     /// Ask whether a tool call may run. The host applies node policy first
     /// and only asks the user if policy requires it. Emits the approval events.
     async fn approve(&self, call_id: &str, tool: &str, input: &Value, risk: ToolRisk) -> Decision;

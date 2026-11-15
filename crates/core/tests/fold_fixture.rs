@@ -364,6 +364,11 @@ fn events() -> Vec<RawEvent> {
             group: "g1".into(),
             message_id: "m4".into(),
         }),
+        // The owner set the chat's step limit; the node clamped it (X.14).
+        EventKind::StepLimitChanged(StepLimitChanged {
+            max_steps: 1000,
+            requested: Some(5000),
+        }),
         // A turn that used its step budget ends at a limit, not an error.
         EventKind::TurnEnded(TurnEnded {
             turn_id: "t2".into(),

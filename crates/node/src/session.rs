@@ -71,6 +71,11 @@ pub(crate) struct Session {
     /// Held while a mode change is recorded and applied, so the mode in
     /// force is always the log's latest.
     mode_change: tokio::sync::Mutex<()>,
+    /// The chat's own step limit (X.14): `None` until the owner sets one
+    /// ([`Self::set_step_limit`], recorded as `step_limit_changed`),
+    /// rebuilt from the log at load. Read before every model request of a
+    /// person's turn, so a change reaches the running turn.
+    steps: Mutex<Option<usize>>,
     /// Calls the Accept edits rule let through, by call id, until the loop
     /// asks ([`TurnHost::confined`]).
     confined: Mutex<std::collections::HashSet<String>>,
@@ -301,6 +306,12 @@ pub(crate) const MODE_ROUTINE: &str =
     "a routine's chat keeps the routine's approval setting; change it in the routine";
 pub(crate) const MODE_CHAT: &str = "a chat without tools has no approval mode to change";
 
+/// Why a step-limit change is refused (X.14).
+pub(crate) const STEPS_SUB_AGENT: &str =
+    "a sub-agent's steps follow the chat that started it; change that chat's step limit";
+pub(crate) const STEPS_ROUTINE: &str = "a routine's chat keeps the node's step limit";
+pub(crate) const STEPS_CHAT: &str = "a chat without tools has no step limit to change";
+
 /// Everything needed to start a session, already validated by the runtime.
 pub(crate) struct NewSession {
     pub title: String,
@@ -356,6 +367,7 @@ impl Session {
             model: model.clone(),
             mode: Arc::new(Mutex::new(mode)),
             mode_change: tokio::sync::Mutex::new(()),
+            steps: Mutex::new(None),
             confined: Mutex::new(std::collections::HashSet::new()),
             profile,
             incognito,
@@ -474,6 +486,10 @@ impl Session {
             model: meta.model,
             mode: Arc::new(Mutex::new(mode)),
             mode_change: tokio::sync::Mutex::new(()),
+            // The log's latest as it is: `current_steps` clamps it by
+            // node.toml as it is now, so a node limit raised again later
+            // brings back exactly what the owner chose (review F7).
+            steps: Mutex::new(view.max_steps.map(|n| (n as usize).max(1))),
             confined: Mutex::new(std::collections::HashSet::new()),
             profile: meta.profile,
             incognito: meta.incognito,
@@ -1016,6 +1032,79 @@ impl Session {
         .map_err(|e| e.to_string())?;
         *self.mode.lock().unwrap_or_else(|p| p.into_inner()) = mode;
         Ok(mode)
+    }
+
+    /// The owner's change of the chat's step limit (X.14): sent as a
+    /// lowering that would raise the limit in force, refused (recording
+    /// nothing; the master's copy was behind). Otherwise clamped to
+    /// `1..=` node.toml's `[limits] max_steps` whatever was sent, recorded
+    /// as `step_limit_changed` by this session (one writer), then applied:
+    /// from the running turn's next request on (a limit below the steps it
+    /// has used gives it its wrap-up request next). Refused for a
+    /// sub-agent's chat, a routine's and a chat without tools. Returns the
+    /// limit in force.
+    pub(crate) async fn set_step_limit(
+        &self,
+        requested: i64,
+        lowering: bool,
+    ) -> Result<usize, String> {
+        if self.profile != Profile::Agentic {
+            return Err(STEPS_CHAT.into());
+        }
+        if self.parent_session.is_some() {
+            return Err(STEPS_SUB_AGENT.into());
+        }
+        if self.no_callbacks {
+            return Err(STEPS_ROUTINE.into());
+        }
+        let _change = self.mode_change.lock().await;
+        let max = self.node.cfg.policy.limits.max_steps;
+        let limit = requested.clamp(1, max as i64) as usize;
+        // Sent as a lowering (the master skipped the level check) but a
+        // raise of the limit in force: its copy of the log was behind.
+        let now = self.current_steps();
+        if lowering && limit > now {
+            return Err(format!(
+                "{}: it is {now} now; send it again",
+                harness_protocol::STEPS_NOT_A_LOWERING
+            ));
+        }
+        // An explicit choice is recorded whenever it differs from the
+        // log's own value, even if it equals what is in force (review F7):
+        // a node limit raised later must not bring an old value back.
+        if Some(limit) == *self.steps.lock().unwrap_or_else(|p| p.into_inner()) {
+            return Ok(limit);
+        }
+        // The log first: a change it does not hold is not made.
+        self.append(EventKind::StepLimitChanged(StepLimitChanged {
+            max_steps: limit as u64,
+            requested: (limit as i64 != requested).then_some(requested),
+        }))
+        .await
+        .map_err(|e| e.to_string())?;
+        *self.steps.lock().unwrap_or_else(|p| p.into_inner()) = Some(limit);
+        Ok(limit)
+    }
+
+    /// The step limit of this chat's person's turns now: its own, or the
+    /// node's. A sub-agent's: at most its parent chat's (X.14).
+    pub(crate) fn current_steps(&self) -> usize {
+        let max = self.node.cfg.policy.limits.max_steps;
+        let own = self
+            .steps
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .unwrap_or(max)
+            .min(max);
+        match self.parent_session {
+            None => own,
+            Some(pid) => match self.node.session(pid) {
+                Some(parent) if parent.id != self.id => own.min(parent.current_steps()),
+                // Its parent is gone (deleted): the smallest limit, as the
+                // mode falls back to Ask (review N1).
+                _ => 1,
+            },
+        }
     }
 
     /// Whether `write` or `edit` with `input` changes a file inside this
@@ -3102,6 +3191,10 @@ impl Session {
 impl TurnHost for Session {
     async fn emit(&self, kind: EventKind) -> Result<(), harness_core::backend::LogError> {
         Session::emit(self, kind).await
+    }
+
+    fn step_limit(&self) -> Option<usize> {
+        Some(self.current_steps())
     }
 
     async fn delegate(

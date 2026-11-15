@@ -840,7 +840,7 @@ tool_timeout_sec = 120
         for bad in [
             "callback_turns = 21",
             "callback_max_steps = 0",
-            "callback_max_steps = 1001",
+            "callback_max_steps = 10001",
         ] {
             let p: NodePolicy = toml::from_str(&format!("[limits]\n{bad}\n")).unwrap();
             let e = p.validate().unwrap_err();
@@ -1039,7 +1039,7 @@ tool_timeout_sec = 120
             "env_pass = [\"\"]\n",
             "[limits]\ntool_stream_bytes = 10\n",
             "[limits]\nmax_steps = 0\n",
-            "[limits]\nmax_steps = 1001\n",
+            "[limits]\nmax_steps = 10001\n",
             "[limits]\nbash_timeout_max_s = 0\n",
             "[limits]\nbash_timeout_max_s = 3601\n",
             "[limits]\ntool_bytes = 65536\n",
@@ -1093,20 +1093,21 @@ tool_timeout_sec = 120
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("node.toml");
         let d = NodePolicy::load(&f).unwrap();
-        assert_eq!(d.limits.max_steps, 50);
+        // The owner's 1,000 (2026-11-15).
+        assert_eq!(d.limits.max_steps, 1000);
         assert_eq!(d.limits.bash_timeout_max_s, 3600);
         std::fs::write(&f, "[limits]\nmax_steps = 2\nbash_timeout_max_s = 1\n").unwrap();
         let p = NodePolicy::load(&f).unwrap();
         assert_eq!((p.limits.max_steps, p.limits.bash_timeout_max_s), (2, 1));
         std::fs::write(
             &f,
-            "[limits]\nmax_steps = 1000\nbash_timeout_max_s = 3600\n",
+            "[limits]\nmax_steps = 10000\nbash_timeout_max_s = 3600\n",
         )
         .unwrap();
         assert!(NodePolicy::load(&f).is_ok(), "the range ends are valid");
         for (bad, key, range) in [
-            ("max_steps = 0", "max_steps", "1 and 1000"),
-            ("max_steps = 1001", "max_steps", "1 and 1000"),
+            ("max_steps = 0", "max_steps", "1 and 10000"),
+            ("max_steps = 10001", "max_steps", "1 and 10000"),
             ("bash_timeout_max_s = 0", "bash_timeout_max_s", "1 and 3600"),
             (
                 "bash_timeout_max_s = 3601",

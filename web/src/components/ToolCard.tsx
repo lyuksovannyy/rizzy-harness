@@ -10,7 +10,6 @@ import type { Decision, Item, Source } from "../types";
 import { CallInput, useOpenFields } from "./CallInput";
 import { PublishCard, SaveAsArtifact } from "./ChatArtifacts";
 import { MemoryNotice } from "./MemoryNotice";
-import { ProjectMemoryNotice } from "./ProjectChip";
 
 type Tool = Extract<Item, { type: "tool" }>;
 /** Cards that show a file (or ran a command that made one): "Save as artifact" sits on them. */
@@ -152,19 +151,18 @@ function summaryRaw(tool: string, input: Tool["input"]): string {
   }
 }
 
-/** `blocked`: the viewer may not drive this chat here (its workspace role,
- * the account's grant), so an approval offers Deny only; the server refuses
- * the rest anyway. `projectId`: the chat's project, where a project-scoped
- * `remember` waits. `cwd`: the chat's folder, so a path outside it is
- * named. */
 /** The longest note with a denial (`policy::MAX_DENY_NOTE`). */
 const MAX_DENY_NOTE = 2000;
 
+/** `blocked`: the viewer may not drive this chat here (its workspace role,
+ * the account's grant), so an approval offers Deny only; the server refuses
+ * the rest anyway. `projectId`: the chat's project (a `remember` for it
+ * shows in the same memory block as any other). `cwd`: the chat's folder,
+ * so a path outside it is named. */
 export function ToolCard({
   sessionId,
   item,
   blocked,
-  projectId,
   cwd,
 }: {
   sessionId: string;
@@ -216,9 +214,7 @@ export function ToolCard({
   // A memory block, not a tool card, from the moment the call is made:
   // the server says what it did (saved, waiting, refused) and offers Undo.
   if (item.tool === "remember" && (status === "ok" || status === "running"))
-    return item.input?.scope === "project" ? (
-      <ProjectMemoryNotice text={asText(item.input?.text)} project={projectId ?? null} />
-    ) : (
+    return (
       <MemoryNotice
         text={asText(item.input?.text ?? "")}
         sessionId={sessionId}

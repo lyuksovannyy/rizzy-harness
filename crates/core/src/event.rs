@@ -87,6 +87,7 @@ pub enum EventKind {
     ApprovalModeChanged(ApprovalModeChanged),
     ChatAllowAdded(ChatAllowAdded),
     ChatAllowRemoved(ChatAllowRemoved),
+    StepLimitChanged(StepLimitChanged),
 }
 
 impl EventKind {
@@ -139,6 +140,7 @@ impl EventKind {
             EventKind::ApprovalModeChanged(_) => "approval_mode_changed",
             EventKind::ChatAllowAdded(_) => "chat_allow_added",
             EventKind::ChatAllowRemoved(_) => "chat_allow_removed",
+            EventKind::StepLimitChanged(_) => "step_limit_changed",
         }
     }
 }
@@ -1188,6 +1190,22 @@ pub struct ApprovalModeChanged {
     pub requested: Option<crate::policy::ApprovalMode>,
 }
 
+/// The chat's step limit changed (X.14): the owner's change, as the node
+/// clamped it to `1..=` its own `[limits] max_steps`. Appended by the
+/// session actor only, on a command from the master; nothing the model
+/// writes, no tool and no sub-agent records one. The fold takes
+/// `max_steps` as the chat's limit from here on, so a restart and the UI
+/// rebuild it from the log (the node clamps it again on load).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StepLimitChanged {
+    /// The model calls with tools a turn of this chat may make now.
+    pub max_steps: u64,
+    /// What was asked for, when the node gave something else (below 1 or
+    /// above its limit).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested: Option<i64>,
+}
+
 /// The session's active agent changed (selector, not an @mention: a mention
 /// only affects one turn and is recorded in that turn's `TurnStarted`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1407,6 +1425,10 @@ mod tests {
                 decision: Decision::Deny,
                 by: ResolvedBy::User,
                 note: Some("not on main".into()),
+            }),
+            EventKind::StepLimitChanged(StepLimitChanged {
+                max_steps: 1000,
+                requested: Some(5000),
             }),
             EventKind::VariantSelected(VariantSelected {
                 group: "g".into(),

@@ -916,7 +916,10 @@ async fn the_memory_switch_keeps_memory_out_of_team_chats() {
         "boss",
     )
     .await;
-    assert!(!offered_remember_since(&s, from));
+    // `remember` stays offered there for Acme's own memory (every member's
+    // chats have it, T54), but a fact about Bob files nothing: his facts
+    // are kept out.
+    let _ = from;
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(memories().await, 1, "nothing filed from Acme");
 
