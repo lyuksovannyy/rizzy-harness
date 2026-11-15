@@ -180,8 +180,10 @@ const LOOP_KB = 0.1;
 // 101.6) against 386.5 on main: the card's note field, its button and the
 // note on a denied card in the conversation chunk, the side panel's
 // "Allowed in this chat" rows with Remove in its own chunk, the fold's two
-// events and the types in the first load (+0.1 initial).
-const T51_KB = 0.7;
+// events and the types in the first load (+0.1 initial). After its review,
+// measured 387.4: the card's line on what a chat grant allows and the side
+// panel's every-argument text (+0.2).
+const T51_KB = 0.9;
 
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
 const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB + EXPORT_KB + MEMDEF_KB + VISIBILITY_KB + T50_KB + LOOP_KB + T51_KB) * 100) / 10) / 10;
