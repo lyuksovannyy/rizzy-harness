@@ -45,8 +45,8 @@ use tokio_util::sync::CancellationToken;
 pub use approval::{CallKey, call_key};
 pub use background::{BashOutput, BashStop};
 pub use bash::{
-    Bash, ENDED_MS_LEAD, FOREGROUND_DESCRIPTION, KEPT_OUTPUT_LEAD, STILL_ALIVE_TAIL, ShellChild,
-    foreground_schema,
+    Bash, ENDED_MS_LEAD, FOREGROUND_DESCRIPTION, KEPT_OUTPUT_LEAD, READ_ONLY_NOTE,
+    STILL_ALIVE_TAIL, ShellChild, foreground_schema,
 };
 pub use edit::Edit;
 pub use env::ToolEnv;
@@ -221,6 +221,10 @@ pub struct ToolCtx {
     /// before any card) shows the file's lines only then; otherwise it
     /// gives the plain refusal and shows nothing (T45, T51).
     pub read_unasked: bool,
+    /// `bash` runs in the read-only shell ([`sandbox::Grants::read_only`],
+    /// T.7): set by the node's loop for a chat in plan mode and for an agent
+    /// with no tool that writes, never from the call's arguments.
+    pub read_only_shell: bool,
 }
 
 impl ToolCtx {
@@ -249,6 +253,7 @@ impl ToolCtx {
             recall: None,
             read_offered: true,
             read_unasked: true,
+            read_only_shell: false,
         }
     }
 

@@ -4131,6 +4131,7 @@ impl NativeBackend {
             read_offered: self.read_offered(ctx, host),
             // Only `refusal` reads it (`refusal_ctx`).
             read_unasked: false,
+            read_only_shell: false,
         };
         // stdout and stderr are interleaved into one coalesced stream (as a
         // terminal shows them); the final result carries both. `coalesce`

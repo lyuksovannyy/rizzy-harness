@@ -159,6 +159,40 @@ pub fn binds_of(bwrap: &Path) -> (Binds, Option<String>) {
     (binds, version)
 }
 
+/// The size of a read-only shell's `/tmp` (T.7): a tmpfs in the command's
+/// own mount namespace, so a command that fills it fills memory of its own
+/// cgroup up to this, never the node's disk, and it is gone when the
+/// command ends.
+pub const READ_ONLY_TMP_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Whether `bwrap --help` lists `--size` (sizing a tmpfs). Asked once per
+/// path; `false` when it cannot be read.
+pub fn sized_tmpfs(bwrap: &Path) -> bool {
+    type Seen = std::sync::Mutex<Vec<(PathBuf, bool)>>;
+    static SEEN: std::sync::OnceLock<Seen> = std::sync::OnceLock::new();
+    let seen = SEEN.get_or_init(Default::default);
+    if let Ok(s) = seen.lock()
+        && let Some((_, b)) = s.iter().find(|(p, _)| p == bwrap)
+    {
+        return *b;
+    }
+    let sized = std::process::Command::new(bwrap)
+        .arg("--help")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .is_some_and(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .split_whitespace()
+                .any(|w| w == "--size")
+        });
+    if let Ok(mut s) = seen.lock() {
+        s.push((bwrap.to_path_buf(), sized));
+    }
+    sized
+}
+
 /// `bubblewrap 0.13.1` gives (0, 13).
 pub(crate) fn parse_version(v: &str) -> Option<(u32, u32)> {
     let num = v
@@ -209,17 +243,29 @@ pub struct Contain {
     net_ns: bool,
     /// How checked grants are bound (T.8c), from bubblewrap's version.
     binds: Binds,
+    /// Whether this bubblewrap can size a tmpfs (`--size`): the read-only
+    /// shell's `/tmp` (T.7) is offered only with a bound.
+    sized_tmpfs: bool,
 }
 
 impl Contain {
     pub fn new(bwrap: PathBuf, form: Form) -> Self {
         let (binds, _) = binds_of(&bwrap);
+        let sized_tmpfs = sized_tmpfs(&bwrap);
         Self {
             bwrap,
             form,
             net_ns: true,
             binds,
+            sized_tmpfs,
         }
+    }
+
+    /// Whether a read-only shell (T.7) can be contained by this
+    /// bubblewrap: its `/tmp` is a tmpfs of [`READ_ONLY_TMP_BYTES`], so it
+    /// needs `--size`.
+    pub fn sizes_tmpfs(&self) -> bool {
+        self.sized_tmpfs
     }
 
     /// The same with the binds given (tests: the older bubblewrap's way on
@@ -270,6 +316,7 @@ impl Contain {
     /// With `net_off` (`[sandbox] network = "off"`, decided by the node's
     /// [`crate::sandbox::Sandbox`], never per call) the command also gets a
     /// network namespace of its own (T.8b).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn command(
         &self,
         exe: &Path,
@@ -278,6 +325,7 @@ impl Contain {
         mark: Option<&Mark>,
         net_off: bool,
         view: &[Mount],
+        ro_tmp: Option<u64>,
     ) -> std::process::Command {
         use std::os::unix::process::CommandExt;
         let mut c = match image {
@@ -292,7 +340,7 @@ impl Contain {
         }
         c.arg("--")
             .arg(&self.bwrap)
-            .args(self.args(cwd, net_off, view))
+            .args(self.args_with(cwd, net_off, view, ro_tmp))
             .arg(IMAGE_TOKEN);
         c
     }
@@ -316,7 +364,21 @@ impl Contain {
     /// view (T.8c). The view's mounts are bound in `view`'s order (a folder
     /// before what is inside it); the root is made read-only last, so
     /// nothing outside the mounts can be created in it.
+    #[cfg(test)]
     fn args(&self, cwd: &Path, net_off: bool, view: &[Mount]) -> Vec<OsString> {
+        self.args_with(cwd, net_off, view, None)
+    }
+
+    /// [`Self::args`]; with `ro_tmp` (a read-only shell, T.7) `/tmp` is a
+    /// tmpfs of that many bytes, the one place the command may write: it
+    /// lives in the command's own mount namespace and goes with it.
+    fn args_with(
+        &self,
+        cwd: &Path,
+        net_off: bool,
+        view: &[Mount],
+        ro_tmp: Option<u64>,
+    ) -> Vec<OsString> {
         let mut a: Vec<OsString> = [
             // Through PR_SET_PDEATHSIG: bwrap dies with its guard (a
             // single-threaded process), and bwrap's init dies with bwrap.
@@ -340,7 +402,14 @@ impl Contain {
         // A private `/dev` (null, zero, full, random, urandom, tty, a pts
         // instance of its own, shm in the view's tmpfs): no host device.
         // An empty `/tmp`: the command's temp folder is `TMPDIR`.
-        a.extend(["--dev", "/dev", "--dir", "/tmp"].map(OsString::from));
+        a.extend(["--dev", "/dev"].map(OsString::from));
+        match ro_tmp {
+            Some(bytes) => {
+                a.extend(["--size".into(), bytes.to_string().into()]);
+                a.extend(["--tmpfs", "/tmp"].map(OsString::from));
+            }
+            None => a.extend(["--dir", "/tmp"].map(OsString::from)),
+        }
         for m in view {
             let path = m.path.as_os_str().to_owned();
             match (&m.source, self.binds) {
@@ -1094,6 +1163,27 @@ mod tests {
         assert_eq!(m, ContainMode::Strict);
         assert!(serde_json::from_str::<ContainMode>("\"required\"").is_err());
         assert_eq!(ContainMode::default(), ContainMode::Auto);
+    }
+
+    /// The read-only shell's `/tmp` (T.7) is a sized tmpfs, made before the
+    /// root goes read-only; every other command's is an empty folder.
+    #[test]
+    fn only_the_read_only_shell_gets_a_sized_tmp() {
+        let c = Contain::new("/usr/bin/bwrap".into(), Form::Full);
+        let plain = c.args(Path::new("/w"), false, &[]);
+        assert!(plain.windows(2).any(|w| w == ["--dir", "/tmp"]));
+        assert!(!plain.iter().any(|x| x == "--tmpfs" || x == "--size"));
+        let ro = c.args_with(Path::new("/w"), false, &[], Some(READ_ONLY_TMP_BYTES));
+        let size = READ_ONLY_TMP_BYTES.to_string();
+        assert!(
+            ro.windows(4)
+                .any(|w| w == ["--size", size.as_str(), "--tmpfs", "/tmp"]),
+            "{ro:?}"
+        );
+        assert!(!ro.windows(2).any(|w| w == ["--dir", "/tmp"]));
+        let tmpfs = ro.iter().position(|x| x == "--tmpfs").unwrap();
+        let remount = ro.iter().position(|x| x == "--remount-ro").unwrap();
+        assert!(tmpfs < remount);
     }
 
     #[test]

@@ -685,6 +685,7 @@ impl Sandbox {
     /// The wrapper's command line up to and including `--`; with
     /// `contain`, inside bubblewrap started in the given folder by its
     /// guard (T.8e), both marked with this node's temp root and `session`.
+    #[allow(clippy::too_many_arguments)]
     fn wrapper(
         &self,
         rw: &[Grant],
@@ -693,6 +694,7 @@ impl Sandbox {
         contain: Option<(&crate::contain::Contain, &Path)>,
         session: &OsStr,
         probe: Option<&Probe>,
+        read_only: bool,
     ) -> std::process::Command {
         let mark = self.tmp_root.as_ref().map(|root| crate::contain::Mark {
             root: root.clone(),
@@ -701,13 +703,18 @@ impl Sandbox {
         // The system folders: not session-writable. node.toml's extras may
         // lie where a session can write (inside a workspace root, inside
         // another `write` entry): each by its identity (R1d-1).
-        let extra_rw: Vec<Grant> = self.extra_write.iter().filter_map(Extra::grant).collect();
-        let extra_ro: Vec<Grant> = self
+        let mut extra_rw: Vec<Grant> = self.extra_write.iter().filter_map(Extra::grant).collect();
+        let mut extra_ro: Vec<Grant> = self
             .read
             .iter()
             .map(|p| Grant::system(p))
             .chain(self.extra_read.iter().filter_map(Extra::grant))
             .collect();
+        // A read-only shell (T.7): node.toml's `write` entries too are only
+        // read.
+        if read_only {
+            extra_ro.append(&mut extra_rw);
+        }
         let all_rw: Vec<Grant> = rw.iter().chain(&extra_rw).cloned().collect();
         let all_ro: Vec<Grant> = extra_ro.iter().chain(ro).cloned().collect();
         let mut c = match contain {
@@ -719,6 +726,7 @@ impl Sandbox {
                 mark.as_ref(),
                 self.network == Network::Off && self.network_namespace(b),
                 &view(&all_rw, &all_ro),
+                read_only.then_some(crate::contain::READ_ONLY_TMP_BYTES),
             ),
             None => self.own_program(),
         };
@@ -742,6 +750,12 @@ impl Sandbox {
         }
         for g in all_rw.iter().chain(&devices()) {
             g.push_args(&mut c, "--rw");
+        }
+        // The read-only shell's `/tmp` is the tmpfs of its own mount
+        // namespace (never the host's: it is not in the view), so Landlock
+        // grants it by path inside.
+        if read_only && contain.is_some() {
+            Grant::system(Path::new(READ_ONLY_TMP)).push_args(&mut c, "--rw");
         }
         for g in &all_ro {
             g.push_args(&mut c, "--ro");
@@ -830,6 +844,7 @@ impl Sandbox {
             None,
             OsStr::new("probe"),
             Some(&probe),
+            false,
         );
         c.env_clear()
             .current_dir(scratch)
@@ -925,6 +940,7 @@ impl Sandbox {
             Some((contain, scratch)),
             OsStr::new("probe"),
             Some(&probe),
+            false,
         );
         // Through the guard, as every command: its channel stays open (no
         // kill order) until the probe has ended.
@@ -976,6 +992,21 @@ impl Sandbox {
 pub const NO_CONTAINMENT: &str = "this chat runs in the sandbox mode and the node has no \
      working bubblewrap containment for it: nothing was started";
 
+/// Why there is no read-only shell where the shell is not contained: the
+/// Landlock rules alone cannot stop `chmod`, `chown`, timestamps or extended
+/// attributes (the kernel's Landlock documentation lists them as not
+/// restricted), so they are not offered as read-only.
+pub const READ_ONLY_NO_CONTAIN: &str = "this node has no working bubblewrap containment, and its \
+     Landlock rules alone cannot keep a command from changing files' modes, owners or times";
+
+/// How a read-only command refused for want of its confinement begins.
+pub const READ_ONLY_REFUSED: &str = "not run: no read-only shell here";
+
+/// Why there is no read-only shell with a bubblewrap that cannot size a
+/// tmpfs: the read-only shell's `/tmp` would be unbounded memory.
+pub const READ_ONLY_NO_SIZE: &str = "this node's bubblewrap cannot limit the size of a tmpfs \
+     (`--size`), which the read-only shell's /tmp needs";
+
 /// How a tool's child processes are started.
 #[derive(Debug, Clone, Default)]
 pub enum Confinement {
@@ -1012,7 +1043,27 @@ pub struct Grants {
     /// Where the command starts (`bash`'s `workdir`): a folder inside the
     /// session folder, checked again here; the session folder when `None`.
     pub cwd: Option<PathBuf>,
+    /// The read-only shell (ADOPTION_PLAN T.7, X.7; docs/read-only-shell.md):
+    /// every grant read-only, the session's folder and node.toml's `write`
+    /// entries included, and nothing writable but a `/tmp` of the command's
+    /// own ([`crate::contain::READ_ONLY_TMP_BYTES`], gone when it ends).
+    /// Only ever contained (bubblewrap's read-only binds, Landlock inside
+    /// as a second layer): where this confinement cannot contain it the
+    /// command is refused ([`Confinement::read_only_shell`]), never run
+    /// with Landlock alone, which leaves `chmod`, `chown`, `utime` and
+    /// extended attributes open. Overrides `workspace_write` and
+    /// `owned_write`.
+    pub read_only: bool,
 }
+
+/// The read-only shell's only writable folder: a tmpfs at this path in the
+/// command's own mount namespace.
+pub const READ_ONLY_TMP: &str = "/tmp";
+
+/// The environment a read-only shell adds: git reads without taking the
+/// index lock or refreshing the index (`git status` would otherwise try to
+/// write `.git/index` and fail on the read-only folder).
+pub const READ_ONLY_ENV: &[(&str, &str)] = &[("GIT_OPTIONAL_LOCKS", "0")];
 
 impl Confinement {
     /// The marker of this confinement's contained commands (T.8e): the
@@ -1039,6 +1090,26 @@ impl Confinement {
         match self {
             Self::Confined { sandbox, .. } => sandbox.tmp_root.as_deref(),
             _ => None,
+        }
+    }
+
+    /// Whether this confinement can run the read-only shell
+    /// ([`Grants::read_only`]): `Err` says why not, in words for the model
+    /// and the person. Only a contained shell with a bubblewrap that sizes
+    /// a tmpfs can; Landlock alone is never offered as read-only.
+    pub fn read_only_shell(&self) -> Result<(), String> {
+        match self {
+            Self::Refused(why) => Err(format!("this node has no contained shell for it ({why})")),
+            Self::Unconfined => Err(
+                "this node runs commands without its sandbox ([sandbox] mode = \"off\"), so \
+                 nothing can keep a command from writing"
+                    .into(),
+            ),
+            Self::Confined { sandbox, .. } => match sandbox.contain.get() {
+                None => Err(READ_ONLY_NO_CONTAIN.into()),
+                Some(c) if !c.sizes_tmpfs() => Err(READ_ONLY_NO_SIZE.into()),
+                Some(_) => Ok(()),
+            },
         }
     }
 
@@ -1118,6 +1189,15 @@ impl Confinement {
         grants: Grants,
         shell: bool,
     ) -> Result<(tokio::process::Command, bool), String> {
+        // The read-only shell: contained, or not at all (T.7), whatever
+        // else this confinement would do.
+        if grants.read_only {
+            if !shell {
+                return Err("internal error: a read-only command must be a shell".into());
+            }
+            self.read_only_shell()
+                .map_err(|why| format!("{READ_ONLY_REFUSED}: {why}"))?;
+        }
         if let Self::Refused(why) = self {
             return Err(why.to_string());
         }
@@ -1159,9 +1239,11 @@ impl Confinement {
                     Some(p) => p.identity(),
                     None => harness_core::folder::Identity::of(&ws)?,
                 };
+                let workspace_write = grants.workspace_write && !grants.read_only;
                 let mut rw: Vec<Grant> = grants
                     .owned_write
                     .iter()
+                    .filter(|_| !grants.read_only)
                     .map(|p| Grant::made(p, "the tool's output folder"))
                     .collect::<Result<_, _>>()?;
                 let mut ro: Vec<Grant> = Vec::new();
@@ -1178,7 +1260,7 @@ impl Confinement {
                 checked.extend(grants.read.iter().cloned());
                 checked.extend(grants.read_identified.iter().map(|(p, _)| p.clone()));
                 let ws_grant = Grant::identified(&ws, ws_id, "the session's folder");
-                if grants.workspace_write {
+                if workspace_write {
                     rw.push(ws_grant);
                 } else {
                     ro.push(ws_grant);
@@ -1201,7 +1283,7 @@ impl Confinement {
                             o.top_id,
                             "the sub-agent's folder",
                         ));
-                        if grants.workspace_write {
+                        if workspace_write {
                             rw.push(Grant::identified(
                                 &o.git,
                                 o.git_id,
@@ -1237,7 +1319,9 @@ impl Confinement {
                         ));
                     }
                 }
-                if let Some(t) = tmp {
+                // The read-only shell writes only its own `/tmp`, never the
+                // session's temp folder another command reads later.
+                if let Some(t) = tmp.as_ref().filter(|_| !grants.read_only) {
                     make_private_dir(t)?;
                     rw.push(Grant::made(t, "the session's temp folder")?);
                 }
@@ -1263,10 +1347,16 @@ impl Confinement {
                     contain.map(|b| (b, start.as_path())),
                     session,
                     None,
+                    grants.read_only,
                 );
                 c.arg(program);
                 env.apply_std(&mut c);
-                if let Some(t) = tmp {
+                if grants.read_only {
+                    c.env("TMPDIR", READ_ONLY_TMP);
+                    for (k, v) in READ_ONLY_ENV {
+                        c.env(k, v);
+                    }
+                } else if let Some(t) = tmp {
                     c.env("TMPDIR", t);
                 }
                 c
@@ -2886,7 +2976,7 @@ mod tests {
 
     /// The wrapper's arguments for a command with no grants of its own.
     fn wrapper_args(sb: &Sandbox) -> Vec<String> {
-        sb.wrapper(&[], &[], false, None, OsStr::new("-"), None)
+        sb.wrapper(&[], &[], false, None, OsStr::new("-"), None, false)
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect()
