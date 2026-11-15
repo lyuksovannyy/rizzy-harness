@@ -1723,6 +1723,9 @@ async fn reviewer_guard_batched_vs_in_order() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reviewer_manual_summary_between_turns_rebuilds() {
     use harness_core::backend::{CompactCtx, CompactOutcome};
+    // Its reads land in `RAN` too: beside the guard test they were counted
+    // as that test's calls (the `rust` check failed on that once).
+    let _serial = SERIAL.lock().await;
     let mut failures = vec![];
     let mut done_n = 0;
     for seed in 1..=16u64 {
