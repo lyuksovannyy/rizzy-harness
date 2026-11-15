@@ -396,8 +396,9 @@ mod tests {
     }
 }
 
-/// Runs the real program when installed (`rizzy-harness graphify install`); a
-/// no-op otherwise. HARNESS_GRAPHIFY_TEST=1 makes it mandatory.
+/// Runs the real program when the pinned version is installed
+/// (`rizzy-harness graphify install`); a no-op otherwise.
+/// HARNESS_GRAPHIFY_TEST=1 makes it mandatory.
 #[cfg(test)]
 mod real {
     use super::*;
@@ -409,6 +410,18 @@ mod real {
                 std::env::var("HARNESS_GRAPHIFY_TEST").is_err(),
                 "graphify not installed"
             );
+            return;
+        }
+        // Only the pinned version is under test: another one is a different
+        // third-party program (0.9.109, installed by hand, finds no keyword
+        // match in this five-node graph and answers on a real repository).
+        let found = installed_version().await.unwrap_or_default();
+        if !found.split_whitespace().any(|w| w == VERSION) {
+            assert!(
+                std::env::var("HARNESS_GRAPHIFY_TEST").is_err(),
+                "graphify {VERSION} is pinned, found {found:?}"
+            );
+            eprintln!("not run: graphify {VERSION} is pinned, found {found:?}");
             return;
         }
         let repo = tempfile::tempdir().unwrap();
