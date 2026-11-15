@@ -56,8 +56,9 @@ impl Tool for Read {
     fn description(&self) -> &'static str {
         "Read a text file. Output lines are prefixed with their 1-based line number and a tab \
          (not part of the file). Use offset/limit for large files; a long read stops early and \
-         says where to go on. Reading a file (any part of it) is what lets `edit` and `write` \
-         change it."
+         says where to go on. Reading a file with `read` (this tool; any part of it) is what \
+         lets `edit` and `write` change it: read it here before you change it, since `cat`, \
+         `head` or `sed` in `bash` do not count."
     }
     fn schema(&self) -> Value {
         json!({
@@ -160,9 +161,11 @@ impl Tool for Write {
         "write"
     }
     fn description(&self) -> &'static str {
-        "Create a file, or replace an existing one with the given content. An existing file must \
-         have been read in this session (any part of it) and not changed since; to change part \
-         of a file, `edit` is usually better. Parent directories are created."
+        "Create a file, or replace an existing one with the given content. A new file needs no \
+         read. An existing file must have been read with the `read` tool (any part of it; `cat`, \
+         `head` or `sed` in `bash` do not count), or written by you, in this session, and not \
+         changed since; without `read`, only files you created or wrote here can be replaced. \
+         To change part of a file, `edit` is usually better. Parent directories are created."
     }
     fn schema(&self) -> Value {
         json!({
@@ -178,7 +181,7 @@ impl Tool for Write {
         ToolRisk::Mutating
     }
     fn refusal(&self, ctx: &ToolCtx, input: &Value) -> Option<String> {
-        crate::path_refusal(ctx, input, true)
+        crate::path_refusal(ctx, input, true).or_else(|| unread_now(ctx, input))
     }
     async fn run(&self, ctx: &ToolCtx, input: Value) -> ToolOutcome {
         let shown = str_arg(&input, "path").unwrap_or_default().to_string();
@@ -218,6 +221,36 @@ impl Tool for Write {
     }
 }
 
+/// The refusal of a `write` over an existing file never read here.
+fn unread_text(ctx: &ToolCtx, shown: &str) -> String {
+    if !ctx.read_offered {
+        return format!(
+            "{shown} already exists and has not been read with `read` in this session, and \
+             `read` is not available to this agent here, so it can replace only files it \
+             created or wrote in this session; nothing was written."
+        );
+    }
+    format!(
+        "{shown} already exists and has not been read with `read` in this session (reading it \
+         with `cat`, `head` or `sed` in `bash` does not count), so writing it would replace \
+         content you have not seen; nothing was written. Read it with `read` first, then write \
+         it (or change only part of it with `edit`)."
+    )
+}
+
+/// Before any card (T51): a `write` over an existing regular file this
+/// session has never read is refused by `run` whatever anyone answers, so
+/// it is refused now, with the same words. A file read before and changed
+/// since may be read again before the call runs: left to `run`, which
+/// checks everything again (this never allows).
+fn unread_now(ctx: &ToolCtx, input: &Value) -> Option<String> {
+    let shown = input.get("path")?.as_str()?;
+    let path = ctx.resolve_for_write(shown).ok()?;
+    let md = std::fs::symlink_metadata(&path).ok()?;
+    (md.file_type().is_file() && ctx.seen.get(&ctx.seen_key(&path)).is_none())
+        .then(|| unread_text(ctx, shown))
+}
+
 /// `write` over an existing file: only one the agent read in this session
 /// and that has not changed since (`edit`'s rule). A new file needs nothing.
 /// Returns what the write replaces, as `FileSeen::base` has it: `""` for no
@@ -236,11 +269,7 @@ async fn check_overwrite(
         Ok(_) => {}
     }
     let Some(seen) = ctx.seen.get(key) else {
-        return Err(format!(
-            "{shown} already exists and has not been read in this session, so writing it would \
-             replace content you have not seen; nothing was written. Read it with `read` first, \
-             then write it (or change only part of it with `edit`)."
-        ));
+        return Err(unread_text(ctx, shown));
     };
     let live = hash_file(path).await?;
     if live.as_ref().map(|(sha, _)| *sha) != Some(seen.sha) {

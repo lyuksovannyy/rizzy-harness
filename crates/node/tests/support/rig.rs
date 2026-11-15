@@ -205,6 +205,80 @@ impl Rig {
         });
     }
 
+    /// One turn of a lead agent that may delegate to `dev` (a `bash`
+    /// sub-agent), running the scripted `text` (`delegate: dev=... | ...`);
+    /// waits for the lead's turn to end and returns it with the outputs of
+    /// its `delegate` calls.
+    pub async fn lead_turn(&mut self, text: &str) -> (Turn, Vec<String>) {
+        let spec = |id: &str, delegates| harness_core::agent::AgentSpec {
+            agent_id: id.into(),
+            name: id.into(),
+            system_prompt: "work".into(),
+            tools: harness_core::agent::ToolSelection::List(vec!["bash".into()]),
+            model: None,
+            fallbacks: vec![],
+            unavailable: vec![],
+            no_effort: vec![],
+            context_windows: Default::default(),
+            effort: None,
+            budget: Default::default(),
+            ui: Default::default(),
+            prompt_hash: "h".into(),
+            deny_tools: vec![],
+            delegates,
+            caps: None,
+        };
+        let mark = self.seen.len();
+        self.n += 1;
+        self.send(MasterToNode::Prompt {
+            savings: None,
+            context: None,
+            reply: None,
+            agent: Some(spec("lead", vec![spec("dev", vec![])])),
+            attachments: vec![],
+            compare: vec![],
+            req_id: format!("p{}", self.n),
+            session_id: self.sid,
+            text: text.into(),
+            images: vec![],
+            agent_named: false,
+        });
+        loop {
+            self.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
+            if self.seen.last().is_some_and(|e| e.session_id == self.sid) {
+                break;
+            }
+        }
+        let mine: Vec<EventKind> = self.seen[mark..]
+            .iter()
+            .filter(|e| e.session_id == self.sid)
+            .filter_map(|e| e.typed().ok())
+            .collect();
+        let calls: Vec<String> = mine
+            .iter()
+            .filter_map(|k| match k {
+                EventKind::ToolCallStarted(c) if c.tool == "delegate" => Some(c.call_id.clone()),
+                _ => None,
+            })
+            .collect();
+        let outs = mine
+            .iter()
+            .filter_map(|k| match k {
+                EventKind::ToolCallFinished(f) if calls.contains(&f.call_id) => {
+                    Some(f.output.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        let id = mine.iter().find_map(|k| match k {
+            EventKind::Checkpoint(c) if c.phase == CheckpointPhase::After => {
+                Some(c.turn_id.clone())
+            }
+            _ => None,
+        });
+        (Turn { id, phases: vec![] }, outs)
+    }
+
     /// Undo `turn`; returns what the caller sees and the folder around it.
     pub async fn restore(&mut self, turn: &str, force: bool) -> Restore {
         self.restore_with(turn, force, false).await
