@@ -245,7 +245,7 @@ impl harness_tools::Tool for Read {
     fn refusal(&self, _: &ToolCtx, input: &Value) -> Option<String> {
         input.get("refuse").map(|_| "REFUSED-EARLY".to_string())
     }
-    async fn run(&self, _: &ToolCtx, input: Value) -> ToolOutcome {
+    async fn run(&self, ctx: &ToolCtx, input: Value) -> ToolOutcome {
         RAN.lock()
             .unwrap()
             .push(input["path"].as_str().unwrap_or("?").to_string());
@@ -274,7 +274,19 @@ impl harness_tools::Tool for Read {
             k += 1;
             out.push_str(&format!("{path} line {k}: let x = {k};\n"));
         }
-        ToolOutcome::ok(out)
+        let mut o = ToolOutcome::ok(out);
+        // In a session with a folder, a real file is named as the real
+        // `read` names it, so the folders above it are looked in (B.9).
+        if !ctx.workspace.as_os_str().is_empty()
+            && let Ok(real) = ctx.workspace.join(&path).canonicalize()
+        {
+            o.seen = Some(FileSeen {
+                path: real.display().to_string(),
+                sha256: "0".repeat(64),
+                base: None,
+            });
+        }
+        o
     }
 }
 
@@ -424,6 +436,7 @@ fn kind_of(m: &ChatMsg) -> String {
         ChatMsg::UserImages { .. } => "UI".into(),
         ChatMsg::Opening(_) => "O".into(),
         ChatMsg::Summary(t) => format!("SUM({})", t.chars().take(30).collect::<String>()),
+        ChatMsg::StepContext(_) => "SC".into(),
         ChatMsg::Note(t) => format!("N({})", t.chars().take(30).collect::<String>()),
         ChatMsg::CallNote(_) => "CN".into(),
         ChatMsg::Assistant { tool_calls, .. } => format!(
@@ -1895,4 +1908,148 @@ async fn reviewer_manual_summary_between_turns_rebuilds() {
     eprintln!("manual summaries made: {done_n}");
     assert!(done_n >= 8, "too few summaries made: {done_n}");
     assert!(failures.is_empty(), "failing seeds {failures:?}");
+}
+
+/// The stress above with a folder: the reads of a step touch new
+/// subfolders, finish in any order, fail, are refused or denied, and a
+/// Stop cuts some turns. Every step's block of instruction files (B.9)
+/// names its folders in the order of the step's calls, never in the
+/// order they finished; the 16-file cap names the rest; every request is
+/// what the log rebuilds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reviewer_parallel_stress_with_nested_files() {
+    let _serial = SERIAL.lock().await;
+    let mut failures = vec![];
+    let (mut blocks, mut multi) = (0usize, 0usize);
+    for seed in 1..=30u64 {
+        let d = tempfile::tempdir().unwrap();
+        let ws = d.path().canonicalize().unwrap();
+        for n in 0..40 {
+            let dir = ws.join(format!("d{n}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("f.rs"), "fn f() {}\n").unwrap();
+            match n % 5 {
+                4 => {}
+                3 => std::fs::write(dir.join("CLAUDE.md"), format!("RULE-d{n}\n")).unwrap(),
+                _ => std::fs::write(dir.join("AGENTS.md"), format!("RULE-d{n}\n")).unwrap(),
+            }
+        }
+        // Older than the turn by more than the clock margin.
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        let steps_n = 12;
+        let stop_at = (seed % 4 == 0).then(|| (seed as usize * 5) % steps_n);
+        let mut steps = stress_script(seed, steps_n, stop_at);
+        let mut r = Lcg(seed * 977 + 1);
+        for st in &mut steps {
+            for c in &mut st.tool_calls {
+                if c.tool == "read" {
+                    c.input["path"] = json!(format!("d{}/f.rs", r.pick(40)));
+                    c.input["delay"] = json!(r.pick(25));
+                }
+            }
+        }
+        let steps = Arc::new(steps);
+        let s2 = steps.clone();
+        let p = Model::new(
+            W,
+            Box::new(move |i| {
+                s2.get(i).cloned().unwrap_or_else(|| Completion {
+                    text: "done".into(),
+                    ..Default::default()
+                })
+            }),
+        );
+        let b = backend(p.clone());
+        let mut host = LogHost::new(SessionId::new(), vec![]);
+        host.unasked = true;
+        open_turn(&host, vec![]);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        *STOP.lock().unwrap() = Some(cancel.clone());
+        let out = b
+            .run_turn(TurnCtx {
+                session_id: host.sid,
+                turn_id: "now".into(),
+                history: vec![],
+                user_text: "USER-ASKS read and fix.".into(),
+                cwd: ws.clone(),
+                model: "m".into(),
+                agent: Some(agent()),
+                compare: vec![],
+                parent_session: None,
+                extra: TurnExtra::default(),
+                cancel: cancel.clone(),
+                host: &host,
+            })
+            .await;
+        let log = host.log();
+        let mut errs = vec![];
+        // The folders of each step's calls that read a file, in call
+        // order; then its block.
+        let mut step_calls: Vec<(String, String)> = vec![];
+        let mut ok: std::collections::HashSet<String> = Default::default();
+        for e in &log {
+            match e.typed() {
+                Ok(EventKind::AssistantMessage(a)) => {
+                    step_calls = a
+                        .tool_calls
+                        .iter()
+                        .filter_map(|c| {
+                            let dir = c.input["path"].as_str()?.split('/').next()?;
+                            Some((c.call_id.clone(), dir.to_string()))
+                        })
+                        .collect();
+                }
+                Ok(EventKind::ToolCallFinished(f)) if f.seen.is_some() => {
+                    ok.insert(f.call_id);
+                }
+                Ok(EventKind::ContextSent(c)) if c.frame == ContextFrame::Step => {
+                    let calls: Vec<&String> = step_calls
+                        .iter()
+                        .filter(|(id, _)| ok.contains(id))
+                        .map(|(_, d)| d)
+                        .collect();
+                    blocks += 1;
+                    let named: Vec<String> = c
+                        .sections
+                        .iter()
+                        .filter_map(|s| s.text.strip_prefix("==> \""))
+                        .filter_map(|t| t.split('/').next())
+                        .map(str::to_string)
+                        .collect();
+                    if named.len() > 1 {
+                        multi += 1;
+                    }
+                    let at: Vec<Option<usize>> = named
+                        .iter()
+                        .map(|n| calls.iter().position(|c| *c == n))
+                        .collect();
+                    let ordered =
+                        at.iter().all(Option::is_some) && at.windows(2).all(|w| w[0] < w[1]);
+                    if !ordered {
+                        errs.push(format!("block {named:?} not in call order {calls:?}"));
+                    }
+                }
+                _ => {}
+            }
+        }
+        let (compared, bad) = check_every_step(&log, &p.main(), None, 0);
+        if let Some(b) = bad {
+            errs.push(format!("rebuild: {b}"));
+        }
+        eprintln!(
+            "seed {seed}: {:?}, compared {compared}, {}",
+            out.reason,
+            if errs.is_empty() {
+                "ok".into()
+            } else {
+                errs.join(" | ")
+            }
+        );
+        if !errs.is_empty() {
+            failures.push(seed);
+        }
+    }
+    eprintln!("step blocks: {blocks}, with more than one folder: {multi}");
+    assert!(blocks > 30 && multi > 10, "the cases happened");
+    assert!(failures.is_empty(), "failing seeds: {failures:?}");
 }

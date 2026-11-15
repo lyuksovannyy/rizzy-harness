@@ -19,6 +19,7 @@ pub mod manual_compact;
 pub mod mask;
 pub mod mock;
 pub mod models;
+pub mod nested;
 #[cfg(test)]
 mod parallel_tests;
 #[cfg(test)]
@@ -839,6 +840,10 @@ fn transcript_of(
             ChatMsg::Note(t) | ChatMsg::CallNote(t) | ChatMsg::Opening(t) | ChatMsg::Summary(t) => {
                 out.push_str(&format!("{t}\n\n"))
             }
+            // A step's instruction files (B.9): context, not conversation,
+            // as the openings' blocks are left out of a summary; an in-turn
+            // summary keeps them verbatim after it.
+            ChatMsg::StepContext(_) => {}
             ChatMsg::System(_) => {}
         }
     }
@@ -1355,7 +1360,7 @@ pub fn rebuild_spans(
     } else {
         Default::default()
     };
-    let block = |turn: &str| block_of.get(turn).cloned().flatten();
+    let block = |turn: &str| block_of.openings.get(turn).cloned().flatten();
     let keep = |m: &AssistantMessage| match &m.variant {
         None => true,
         Some(v) => match chosen.get(&v.group) {
@@ -1474,6 +1479,16 @@ pub fn rebuild_spans(
                         content: f.output,
                     });
                     out.extend(f.note.map(ChatMsg::CallNote));
+                }
+            }
+            // A step's instruction files (B.9), where the log has them:
+            // after that step's results and notes, as the loop added them.
+            // Left out of the summariser's transcript, as the openings'
+            // blocks are.
+            EventKind::ContextSent(c) if c.frame == ContextFrame::Step => {
+                if let Some(b) = block_of.steps.get(&e.seq).cloned().flatten() {
+                    close_open(&mut out, &mut open);
+                    out.push(ChatMsg::StepContext(b));
                 }
             }
             // Where the log has it: after a step's results, or between
@@ -2042,6 +2057,151 @@ impl NativeBackend {
             (None, true) => ContextFrame::Task,
             (None, false) => ContextFrame::Person,
         };
+        // The instruction files of subfolders (B.9, T65): those the
+        // history holds are read again (replaced when changed, withdrawn
+        // when gone, kept when the look did not end in time), and the
+        // folders of the files this turn's messages mention are looked in.
+        // Only in a session with a folder of its own.
+        let mut nested_ws = if ctx.cwd.as_os_str().is_empty() {
+            None
+        } else {
+            self.start_ctx(&ctx, host).workspace_dir().ok()
+        };
+        let nested_budget = nested::Budget::for_window(window_of(&model));
+        // What changed since this turn began (a sub-agent's: since the turn
+        // that delegated to it began) is not taken in it.
+        let turn_began = std::time::SystemTime::now();
+        let nested_since = ctx
+            .extra
+            .changes_since
+            .map_or(turn_began, |s| s.min(turn_began));
+        // Those the history holds, with their sizes as sent.
+        let mut nested_live: Vec<(String, usize)> = context::nested_live(recent);
+        // Folders looked in this turn: not again before the next turn (a
+        // file made in one later is found then).
+        let mut nested_checked: HashSet<std::path::PathBuf> = HashSet::new();
+        // Named, not loaded, this turn: once each.
+        let mut nested_named: HashSet<String> = HashSet::new();
+        // What this turn's `write` and `edit` calls wrote (real paths).
+        let mut nested_written: HashSet<std::path::PathBuf> = HashSet::new();
+        // Real paths touched since the last look, in call order.
+        let mut nested_touched: Vec<std::path::PathBuf> = Vec::new();
+        // Kept although not read again this turn (the look timed out).
+        let mut nested_unread: Vec<String> = Vec::new();
+        let mut nested_items: Vec<context::Nested> = Vec::new();
+        let mut nested_notes: Vec<String> = Vec::new();
+        if let Some(ws) = nested_ws.clone() {
+            let mentioned: Vec<std::path::PathBuf> = ctx
+                .extra
+                .files_seen
+                .iter()
+                .chain(ctx.extra.queued.iter().flat_map(mentioned))
+                .map(|f| std::path::PathBuf::from(&f.path))
+                .collect();
+            if !nested_live.is_empty() || !mentioned.is_empty() {
+                let ask = nested::Ask {
+                    ws,
+                    protected: self.config.protected_dirs.clone(),
+                    file_cap: nested_budget.file,
+                    since: None,
+                    written: HashSet::new(),
+                };
+                let live: Vec<String> = nested_live.iter().map(|(p, _)| p.clone()).collect();
+                let looked = nested::bounded(
+                    move || {
+                        let again: Vec<(String, Option<nested::File>)> = live
+                            .iter()
+                            .map(|p| (p.clone(), ask.pick(&nested::folder_of(p))))
+                            .collect();
+                        let skip: HashSet<std::path::PathBuf> =
+                            live.iter().map(|p| nested::folder_of(p)).collect();
+                        let found = ask.look(&mentioned, &skip);
+                        (again, found)
+                    },
+                    &ctx.cancel,
+                    nested::READ_TIMEOUT,
+                )
+                .await;
+                match looked {
+                    Some((again, found)) => {
+                        let mut now: Vec<(String, usize)> = Vec::new();
+                        let mut fresh: Vec<nested::File> = Vec::new();
+                        for (p, f) in again {
+                            match f {
+                                Some(nested::File {
+                                    path,
+                                    got: nested::Got::Text(t),
+                                }) if path == p => {
+                                    let t = self.config.secrets.scrub(&t);
+                                    let t = match nested_budget.refusal(&now, t.len()) {
+                                        None => t,
+                                        Some(why) => nested::named(&p, &why),
+                                    };
+                                    now.push((p.clone(), t.len()));
+                                    nested_items.push(context::Nested {
+                                        path: p,
+                                        text: Some(t),
+                                        known: true,
+                                    });
+                                }
+                                // Gone, or the folder's file is another one
+                                // now (its `AGENTS.md` went, a `CLAUDE.md`
+                                // stands in): this one is withdrawn.
+                                other => {
+                                    nested_items.push(context::Nested {
+                                        path: p,
+                                        text: None,
+                                        known: true,
+                                    });
+                                    fresh.extend(other);
+                                }
+                            }
+                        }
+                        for (dir, f) in found {
+                            nested_checked.insert(dir);
+                            fresh.extend(f);
+                        }
+                        for f in fresh {
+                            match nested_new(
+                                f,
+                                &mut now,
+                                &mut nested_named,
+                                &nested_budget,
+                                &self.config.secrets,
+                            ) {
+                                Some(Ok((path, text))) => nested_items.push(context::Nested {
+                                    path,
+                                    text: Some(text),
+                                    known: true,
+                                }),
+                                Some(Err(note)) => nested_notes.push(note),
+                                None => {}
+                            }
+                        }
+                        nested_live = now;
+                    }
+                    None => {
+                        // As after a step: no more looks this turn.
+                        if !ctx.cancel.is_cancelled() {
+                            nested_ws = None;
+                        }
+                        tracing::warn!(
+                            "the instruction files of subfolders were not read again this turn \
+                             (the look did not end in time); those sent stay as they were, and \
+                             none are looked for again this turn"
+                        );
+                        for (p, _) in &nested_live {
+                            nested_unread.push(p.clone());
+                            nested_items.push(context::Nested {
+                                path: p.clone(),
+                                text: None,
+                                known: false,
+                            });
+                        }
+                    }
+                }
+            }
+        }
         // The harness's context block (X.1): quoted under a line of the
         // harness's (R76-1), since project text, board cards, recalled facts
         // and the repository's instruction files are written by other
@@ -2062,7 +2222,12 @@ impl NativeBackend {
                 extra.skill_asked = None;
             }
             let notes: &[String] = if callback.is_some() { &[] } else { &mcp_notes };
-            context::Sections::of(&extra, notes, &self.config.secrets)
+            let mut sections = context::Sections::of(&extra, notes, &self.config.secrets);
+            sections.with_nested(nested_items, &self.config.secrets);
+            if !nested_notes.is_empty() {
+                sections.push_turn(nested_notes.join("\n"), &self.config.secrets);
+            }
+            sections
         };
         let mut plan = context::plan(&sections, &context::had(recent), frame);
         // Per-turn context sits after the history: the system prompt and the
@@ -2304,7 +2469,16 @@ impl NativeBackend {
                 summary = Some($text);
                 let this_turn = messages.split_off(turn_idx);
                 let own = user_idx - turn_idx;
-                let replanned = context::plan(&sections, &context::had(recent), frame);
+                let had_now = context::had(recent);
+                let replanned = context::plan(&sections, &had_now, frame);
+                // One kept without being read again this turn (B.9) is gone
+                // with the summary: a touch loads it again.
+                nested_live.retain(|(p, _)| {
+                    !nested_unread.contains(p)
+                        || had_now
+                            .get(&context::SectionKey::Nested(p.clone()))
+                            .is_some_and(|d| !d.is_empty())
+                });
                 let (m, sp) = history_msgs(summary.as_deref(), recent, replanned.as_ref());
                 messages = m;
                 spans = sp;
@@ -2330,6 +2504,103 @@ impl NativeBackend {
                     }
                 }
                 images::attach(&mut messages, &loaded);
+            }};
+        }
+        // A look in the folders above the files touched since the last one
+        // (B.9, T65), in call order: their instruction files the history
+        // does not hold yet, as a block of the harness's of its own,
+        // recorded where it stands (`context_sent`, frame `step`), so every
+        // later request rebuilds it there and nothing before it moves (T52).
+        // After a step's results and notes, and after the messages the
+        // person sent meanwhile (their mentions).
+        macro_rules! nested_look {
+            () => {{
+            // The instruction files of the subfolders this step touched
+            // (B.9, T65), in call order, after its results and notes: a
+            // block of the harness's of its own, recorded where it stands
+            // (`context_sent`, frame `step`), so every later request
+            // rebuilds it there and nothing before it moves (T52).
+            if !nested_touched.is_empty()
+                && let Some(ws) = nested_ws.clone()
+            {
+                let touched = std::mem::take(&mut nested_touched);
+                let mut skip = nested_checked.clone();
+                skip.extend(nested_live.iter().map(|(p, _)| nested::folder_of(p)));
+                let ask = nested::Ask {
+                    ws,
+                    protected: self.config.protected_dirs.clone(),
+                    file_cap: nested_budget.file,
+                    since: Some(nested_since),
+                    written: nested_written.clone(),
+                };
+                match nested::bounded(
+                    move || ask.look(&touched, &skip),
+                    &ctx.cancel,
+                    nested::READ_TIMEOUT,
+                )
+                .await
+                {
+                    Some(found) => {
+                        let mut sent: Vec<SentSection> = Vec::new();
+                        for (dir, f) in found {
+                            // One that changed during the turn is looked at
+                            // again on the next touch.
+                            if !matches!(
+                                &f,
+                                Some(nested::File {
+                                    got: nested::Got::Changed,
+                                    ..
+                                })
+                            ) {
+                                nested_checked.insert(dir);
+                            }
+                            let Some(f) = f else { continue };
+                            match nested_new(
+                                f,
+                                &mut nested_live,
+                                &mut nested_named,
+                                &nested_budget,
+                                &self.config.secrets,
+                            ) {
+                                Some(Ok((path, text))) => sent.push(SentSection {
+                                    key: context::SectionKey::Nested(path).as_str().into_owned(),
+                                    digest: context::digest(&text),
+                                    text,
+                                    note: None,
+                                }),
+                                Some(Err(note)) => sent.push(SentSection {
+                                    key: context::TURN.into(),
+                                    digest: String::new(),
+                                    text: note,
+                                    note: None,
+                                }),
+                                None => {}
+                            }
+                        }
+                        if !sent.is_empty() {
+                            let step = context::Plan {
+                                frame: ContextFrame::Step,
+                                sections: sent,
+                            };
+                            if host.emit(step.record(&ctx.turn_id)).await.is_err() {
+                                return stopped(usage);
+                            }
+                            messages.extend(step.text().map(ChatMsg::StepContext));
+                        }
+                    }
+                    None if ctx.cancel.is_cancelled() => {}
+                    // A disk that hangs once would hold every step: no
+                    // more looks this turn.
+                    None => {
+                        nested_ws = None;
+                        tracing::warn!(
+                            "the instruction files of subfolders were not looked for after this \
+                             step (the look did not end in time); none are looked for again this \
+                             turn"
+                        )
+                    }
+                }
+            }
             }};
         }
         // Shortening inside the turn (X.15): the line, the cut sizes and
@@ -2402,6 +2673,7 @@ impl NativeBackend {
                     guard.restart();
                     for f in q.iter().flat_map(mentioned) {
                         seen_now.note_if_unknown(f);
+                        nested_touched.push(std::path::PathBuf::from(&f.path));
                     }
                     messages.extend(q.iter().map(queued_msg));
                     if q.iter().any(|m| !m.images.is_empty()) {
@@ -2414,6 +2686,8 @@ impl NativeBackend {
                         }
                         images::attach(&mut messages, &loaded);
                     }
+                    // Their mentions' folders, right after them (B.9).
+                    nested_look!();
                 }
                 Ok(_) => {}
                 Err(_) => return stopped(usage),
@@ -3507,7 +3781,7 @@ impl NativeBackend {
                         .filter(|f| outcome.ok && self.config.secrets.scrub(&f.path) == f.path);
                     if host
                         .emit(EventKind::ToolCallFinished(ToolCallFinished {
-                            seen,
+                            seen: seen.clone(),
                             call_id: call.call_id.clone(),
                             ok: outcome.ok,
                             output: output.clone(),
@@ -3523,6 +3797,15 @@ impl NativeBackend {
                     }
                     if outcome.ok && URL_SOURCES.contains(&call.tool.as_str()) {
                         trusted.insert(call.call_id.clone());
+                    }
+                    // A file a call touched, as the log has it: the folders
+                    // above it are looked in after the step (B.9).
+                    if let Some(f) = &seen {
+                        let real = std::path::PathBuf::from(&f.path);
+                        if matches!(call.tool.as_str(), "write" | "edit") {
+                            nested_written.insert(real.clone());
+                        }
+                        nested_touched.push(real);
                     }
                     messages.push(ChatMsg::Tool {
                         call_id: call.call_id.clone(),
@@ -3559,6 +3842,9 @@ impl NativeBackend {
                 }
                 Err(_) => return stopped(usage),
             }
+            // The instruction files of the subfolders this step touched
+            // (B.9, T65), in call order, after its results and notes.
+            nested_look!();
             if repeat_stop {
                 // A child gets one more request, `finish` alone, whatever
                 // the step count (review SB-1).
@@ -4484,6 +4770,44 @@ fn background_access(
     {
         Some(bg) => Access::On(bg),
         None => Access::default(),
+    }
+}
+
+/// What a newly found instruction file of a subfolder adds (B.9): its
+/// path and section, now in `live`; or a line for this turn only that
+/// names it, once a turn (`named`), when it changed during the turn or
+/// would pass the caps; or nothing (it is in `live` already, or its path
+/// is one the scrubber would change, which the log could not keep).
+fn nested_new(
+    f: nested::File,
+    live: &mut Vec<(String, usize)>,
+    named: &mut HashSet<String>,
+    budget: &nested::Budget,
+    secrets: &SecretSet,
+) -> Option<Result<(String, String), String>> {
+    if secrets.scrub(&f.path) != f.path {
+        tracing::warn!("an instruction file of a subfolder is not loaded: its path holds a secret");
+        return None;
+    }
+    if live.iter().any(|(p, _)| *p == f.path) {
+        return None;
+    }
+    let text = match f.got {
+        nested::Got::Changed => {
+            return named
+                .insert(f.path.clone())
+                .then(|| Err(nested::changed_now(&f.path)));
+        }
+        nested::Got::Text(t) => secrets.scrub(&t),
+    };
+    match budget.refusal(live, text.len()) {
+        None => {
+            live.push((f.path.clone(), text.len()));
+            Some(Ok((f.path, text)))
+        }
+        Some(why) => named
+            .insert(f.path.clone())
+            .then(|| Err(nested::named(&f.path, &why))),
     }
 }
 

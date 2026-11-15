@@ -53,22 +53,31 @@ pub const BLOCK_CAP: usize = 1024 * 1024;
 /// The key of a section that is this turn's own.
 pub const TURN: &str = "turn";
 
+/// How a nested instruction file's key begins (`instructions:web/AGENTS.md`).
+pub const NESTED_PREFIX: &str = "instructions:";
+
 /// A standing section.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum SectionKey {
     /// The node operator's instruction file.
     UserInstructions,
     Instructions,
+    /// One instruction file of a subfolder of the working folder, by its
+    /// path from there (`web/AGENTS.md`; B.9, T65): loaded when a call
+    /// touches a file under it, a section of its own so it is replaced or
+    /// withdrawn alone.
+    Nested(String),
     Skills,
     /// The master's parts ([`StandingKey`]).
     Master(StandingKey),
 }
 
 impl SectionKey {
-    pub fn as_str(self) -> &'static str {
-        match self {
+    pub fn as_str(&self) -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed(match self {
             SectionKey::UserInstructions => "user_instructions",
             SectionKey::Instructions => "instructions",
+            SectionKey::Nested(p) => return format!("{NESTED_PREFIX}{p}").into(),
             SectionKey::Skills => "skills",
             SectionKey::Master(k) => match k {
                 StandingKey::Memory => "memory",
@@ -83,10 +92,13 @@ impl SectionKey {
                 StandingKey::EarlierChats => "earlier_chats",
                 StandingKey::Board => "board",
             },
-        }
+        })
     }
 
     pub fn parse(s: &str) -> Option<Self> {
+        if let Some(p) = s.strip_prefix(NESTED_PREFIX) {
+            return (!p.is_empty()).then(|| SectionKey::Nested(p.to_string()));
+        }
         [
             SectionKey::UserInstructions,
             SectionKey::Instructions,
@@ -100,11 +112,19 @@ impl SectionKey {
     /// What the section is, for the harness's sentences: `None` for one
     /// that changes with the message (recall lines, notes, earlier chats),
     /// which replaces or leaves its earlier copy without a sentence.
-    fn what(self) -> Option<(&'static str, bool)> {
+    fn what(&self) -> Option<(String, bool)> {
         // (noun phrase, plural)
-        Some(match self {
+        let (what, many) = match self {
             SectionKey::UserInstructions => ("The node operator's instructions", true),
             SectionKey::Instructions => ("The repository's instruction files", true),
+            // The path as one line, in quotation marks: a folder's name is
+            // the repository's text.
+            SectionKey::Nested(p) => {
+                return Some((
+                    format!("The instruction file {}", crate::nested::path_label(p)),
+                    false,
+                ));
+            }
             SectionKey::Skills => ("The list of skills", false),
             SectionKey::Master(k) => match k {
                 StandingKey::Memory => ("What you remember about the person", false),
@@ -119,11 +139,12 @@ impl SectionKey {
                 | StandingKey::ProjectRecall
                 | StandingKey::EarlierChats => return None,
             },
-        })
+        };
+        Some((what.to_string(), many))
     }
 
     /// The harness's sentence for a section sent again because it changed.
-    fn replaced(self) -> Option<String> {
+    fn replaced(&self) -> Option<String> {
         let (what, many) = self.what()?;
         let (verb, one) = if many {
             ("replace", "ones")
@@ -136,12 +157,13 @@ impl SectionKey {
     }
 
     /// The harness's sentence for a section sent earlier that is gone now.
-    fn withdrawn(self) -> Option<String> {
+    fn withdrawn(&self) -> Option<String> {
         let (what, many) = self.what()?;
         let verb = if many { "apply" } else { "applies" };
         let why = match self {
             SectionKey::UserInstructions => ": the node's instruction file is gone",
             SectionKey::Instructions => ": none were found for this turn",
+            SectionKey::Nested(_) => ": the file is gone",
             SectionKey::Skills => ": no skills are offered now",
             SectionKey::Master(StandingKey::Memory | StandingKey::Workspace) => {
                 ": memory is not given now"
@@ -252,6 +274,47 @@ impl Sections {
         .collect();
         Self { standing, per_turn }
     }
+
+    /// A line of this turn's own (a nested instruction file named, not
+    /// loaded: B.9), first among them.
+    pub fn push_turn(&mut self, text: String, secrets: &harness_core::SecretSet) {
+        if !text.is_empty() {
+            self.per_turn.insert(0, capped(secrets.scrub(&text)));
+        }
+    }
+
+    /// The instruction files of subfolders (B.9, T65) after the
+    /// repository's own, in the order given: each re-read at this turn's
+    /// start (`text`: what it gives now; `None` and `known`: it is gone;
+    /// `None` and not `known`: it was not read this turn, so nothing about
+    /// it changes), or loaded now for a file the turn's message mentions.
+    /// Scrubbed and capped as every section.
+    pub fn with_nested(&mut self, nested: Vec<Nested>, secrets: &harness_core::SecretSet) {
+        let at = self
+            .standing
+            .iter()
+            .position(|s| s.key == SectionKey::Instructions)
+            .map_or(self.standing.len(), |i| i + 1);
+        let items = nested.into_iter().map(|n| Standing {
+            key: SectionKey::Nested(n.path),
+            text: n
+                .text
+                .filter(|t| !t.is_empty())
+                .map(|t| capped(secrets.scrub(&t))),
+            tied: None,
+            known: n.known,
+        });
+        self.standing.splice(at..at, items);
+    }
+}
+
+/// One instruction file of a subfolder for [`Sections::with_nested`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Nested {
+    /// Its path from the working folder (`web/AGENTS.md`).
+    pub path: String,
+    pub text: Option<String>,
+    pub known: bool,
 }
 
 /// `t` cut to [`SECTION_CAP`] bytes on a character boundary, with a note.
@@ -283,6 +346,7 @@ fn whose(frame: ContextFrame) -> Whose {
         ContextFrame::Person => Whose::Person,
         ContextFrame::Task => Whose::Task,
         ContextFrame::Callback => Whose::Callback,
+        ContextFrame::Step => Whose::Step,
     }
 }
 
@@ -328,9 +392,18 @@ fn standing_key(s: &SentSection) -> Option<SectionKey> {
     SectionKey::parse(&s.key)
 }
 
-/// The last record of each turn in `window`, in the order those records
-/// stand, for turns whose start is in it.
-fn last_records(window: &[RawEvent]) -> Vec<ContextSent> {
+/// A record that counts in a window: a turn's opening record, or a step's
+/// block (B.9), with the seq it stands at.
+struct Record {
+    seq: u64,
+    sent: ContextSent,
+}
+
+/// The records of `window` that the history holds, in the order they
+/// stand, for turns whose start is in it: each turn's last opening record
+/// (an in-turn summary records the opening again) and every step record
+/// ([`ContextFrame::Step`], each a block of its own after its step).
+fn records(window: &[RawEvent]) -> Vec<Record> {
     let mut started = HashSet::new();
     let mut last: HashMap<String, usize> = HashMap::new();
     let mut records = Vec::new();
@@ -340,8 +413,13 @@ fn last_records(window: &[RawEvent]) -> Vec<ContextSent> {
                 started.insert(t.turn_id);
             }
             Ok(EventKind::ContextSent(c)) if started.contains(&c.turn_id) => {
-                last.insert(c.turn_id.clone(), records.len());
-                records.push(c);
+                if c.frame != ContextFrame::Step {
+                    last.insert(c.turn_id.clone(), records.len());
+                }
+                records.push(Record {
+                    seq: e.seq,
+                    sent: c,
+                });
             }
             _ => {}
         }
@@ -349,8 +427,8 @@ fn last_records(window: &[RawEvent]) -> Vec<ContextSent> {
     records
         .into_iter()
         .enumerate()
-        .filter(|(i, c)| last.get(&c.turn_id) == Some(i))
-        .map(|(_, c)| c)
+        .filter(|(i, r)| r.sent.frame == ContextFrame::Step || last.get(&r.sent.turn_id) == Some(i))
+        .map(|(_, r)| r)
         .collect()
 }
 
@@ -359,8 +437,8 @@ fn last_records(window: &[RawEvent]) -> Vec<ContextSent> {
 /// empty for one withdrawn.
 pub fn had(window: &[RawEvent]) -> HashMap<SectionKey, String> {
     let mut out = HashMap::new();
-    for c in last_records(window) {
-        for s in &c.sections {
+    for r in records(window) {
+        for s in &r.sent.sections {
             if let Some(k) = standing_key(s) {
                 out.insert(k, s.digest.clone());
             }
@@ -369,33 +447,67 @@ pub fn had(window: &[RawEvent]) -> HashMap<SectionKey, String> {
     out
 }
 
-/// Each turn's opening block as the history is rebuilt from `window`: a
-/// standing section only in the last record that sent or withdrew it, and
-/// in none when `superseded` (the turn being built) sends or withdraws it.
-pub fn blocks(
-    window: &[RawEvent],
-    superseded: &HashSet<SectionKey>,
-) -> HashMap<String, Option<String>> {
-    let records = last_records(window);
+/// The instruction files of subfolders the history in `window` holds
+/// (B.9): each one's path and the size of its text as sent, in the order
+/// they were first sent; one withdrawn since is not among them.
+pub fn nested_live(window: &[RawEvent]) -> Vec<(String, usize)> {
+    let mut order: Vec<String> = Vec::new();
+    let mut size: HashMap<String, usize> = HashMap::new();
+    for r in records(window) {
+        for s in &r.sent.sections {
+            if let Some(SectionKey::Nested(p)) = standing_key(s) {
+                if !order.contains(&p) {
+                    order.push(p.clone());
+                }
+                size.insert(p, s.text.len());
+            }
+        }
+    }
+    order
+        .into_iter()
+        .filter_map(|p| match size.get(&p) {
+            Some(&n) if n > 0 => Some((p, n)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The context blocks of a history rebuilt from a window ([`blocks`]).
+#[derive(Debug, Default)]
+pub struct Blocks {
+    /// Each turn's opening block.
+    pub openings: HashMap<String, Option<String>>,
+    /// Each step's block (B.9), by the seq its record stands at.
+    pub steps: HashMap<u64, Option<String>>,
+}
+
+/// The blocks as the history is rebuilt from `window`: a standing section
+/// only in the last record that sent or withdrew it, and in none when
+/// `superseded` (the turn being built) sends or withdraws it.
+pub fn blocks(window: &[RawEvent], superseded: &HashSet<SectionKey>) -> Blocks {
+    let records = records(window);
     let mut owner: HashMap<SectionKey, usize> = HashMap::new();
-    for (i, c) in records.iter().enumerate() {
-        for s in &c.sections {
+    for (i, r) in records.iter().enumerate() {
+        for s in &r.sent.sections {
             if let Some(k) = standing_key(s) {
                 owner.insert(k, i);
             }
         }
     }
-    records
-        .iter()
-        .enumerate()
-        .map(|(i, c)| {
-            let kept = c.sections.iter().filter(|s| match standing_key(s) {
-                Some(k) => owner.get(&k) == Some(&i) && !superseded.contains(&k),
-                None => true,
-            });
-            (c.turn_id.clone(), render(c.frame, kept))
-        })
-        .collect()
+    let mut out = Blocks::default();
+    for (i, r) in records.iter().enumerate() {
+        let kept = r.sent.sections.iter().filter(|s| match standing_key(s) {
+            Some(k) => owner.get(&k) == Some(&i) && !superseded.contains(&k),
+            None => true,
+        });
+        let block = render(r.sent.frame, kept);
+        if r.sent.frame == ContextFrame::Step {
+            out.steps.insert(r.seq, block);
+        } else {
+            out.openings.insert(r.sent.turn_id.clone(), block);
+        }
+    }
+    out
 }
 
 /// What a turn sends: its sections in the order they go.
@@ -440,6 +552,7 @@ pub fn plan(
         // Its place's list goes or changes: so does it.
         let known = s.known
             || s.tied
+                .as_ref()
                 .is_some_and(|t| out.iter().any(|o| o.key == t.as_str()));
         match &s.text {
             Some(t) => {
@@ -448,14 +561,14 @@ pub fn plan(
                     continue;
                 }
                 out.push(SentSection {
-                    key: s.key.as_str().into(),
+                    key: s.key.as_str().into_owned(),
                     digest: d,
                     text: t.clone(),
                     note: before.and_then(|_| s.key.replaced()),
                 });
             }
             None if known && before.is_some() => out.push(SentSection {
-                key: s.key.as_str().into(),
+                key: s.key.as_str().into_owned(),
                 digest: String::new(),
                 text: String::new(),
                 note: s.key.withdrawn(),
