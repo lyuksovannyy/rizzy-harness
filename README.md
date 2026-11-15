@@ -808,6 +808,20 @@ same folder (or in a folder that contains it, or one inside it), and no
 chat can start working in that folder while an undo runs there; wait a
 moment, or cancel the other chat, and try again.
 
+**Two chats in one folder.** A checkpoint is a picture of the whole folder,
+so what another chat (yours or a teammate's) changed there while a turn ran
+is in that turn's picture too. An undo or rewind never puts that back
+without asking: it is refused, naming the files another chat changed (with
+its edit tools, or its own undo) or may have changed (with a command, a
+background command or a sub-agent) since the turn began, and saying
+nothing else about that chat. "Undo anyway" goes ahead; the other chat then
+gets a line naming its files that were put back, with nothing about yours,
+and it cannot bring them back itself (the copy is in your undo's
+checkpoint), so it has to make those changes again. Commands are judged by
+the other chat's whole turn: if it ran a command while your turn changed a
+file, that file is named even if the command never touched it. Your own
+edits in your editor during a turn still count as the turn's.
+
 **Approval modes.** Each agentic chat has an approval mode: how much runs
 without a click. The picker in the composer shows it and offers three, each
 with one line saying what runs unasked:

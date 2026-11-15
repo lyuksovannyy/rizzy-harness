@@ -8,6 +8,7 @@ pub mod exec;
 mod git;
 mod images;
 mod instructions;
+mod others;
 mod outbox;
 pub mod policy;
 mod session;

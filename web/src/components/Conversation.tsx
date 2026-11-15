@@ -124,7 +124,8 @@ function Undo(props: {
       {err && (
         <div className="error-text">
           {err}{" "}
-          {err.includes("changed after the turn") && (
+          {/* Every refusal a forced undo goes past says so. */}
+          {(err.includes("changed after the turn") || err.includes('"Undo anyway"')) && (
             <button type="button" className="link" onClick={() => void run(true)}>
               Undo anyway
             </button>

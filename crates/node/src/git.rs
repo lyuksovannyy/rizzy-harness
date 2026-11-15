@@ -1214,7 +1214,7 @@ pub struct Names {
 }
 
 impl Names {
-    fn of(paths: &[Vec<u8>]) -> Self {
+    pub(crate) fn of(paths: &[Vec<u8>]) -> Self {
         Self {
             shown: paths.iter().take(SHOWN_MAX).map(|p| shown(p)).collect(),
             more: paths.len().saturating_sub(SHOWN_MAX),
@@ -1560,6 +1560,16 @@ impl RestoreDiff {
         let keep: std::collections::HashSet<&str> = files.iter().map(String::as_str).collect();
         self.rows
             .retain(|r| keep.contains(String::from_utf8_lossy(&r.path).as_ref()));
+    }
+
+    /// The paths it differs in that are files (not gitlinks), as an event
+    /// names them.
+    pub fn paths(&self) -> Vec<String> {
+        self.rows
+            .iter()
+            .filter(|r| !r.gitlink)
+            .map(|r| String::from_utf8_lossy(&r.path).into_owned())
+            .collect()
     }
 }
 

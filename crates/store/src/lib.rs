@@ -1640,6 +1640,67 @@ impl Store {
         Ok(out)
     }
 
+    /// The events of `sid`, of the kinds in `kinds`, from its last
+    /// `turn_started` before `since_ms` on (from its start when there is
+    /// none): what an undo reads of another chat in its folder (PLAN.md
+    /// T57). Both reads walk the primary key from the log's end and stop
+    /// early for a recent `since_ms`; the kinds are filtered in SQL, so no
+    /// delta is parsed.
+    pub fn events_since_turn_at(
+        &self,
+        sid: SessionId,
+        since_ms: i64,
+        kinds: &[&str],
+    ) -> Result<Vec<RawEvent>> {
+        let id = sid.to_string();
+        let floor: i64 = {
+            let conn = self.lock();
+            conn.query_row(
+                "SELECT seq FROM events
+                 WHERE session_id = ?1 AND kind = 'turn_started' AND ts_ms < ?2
+                 ORDER BY seq DESC LIMIT 1",
+                params![id, since_ms],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0)
+        };
+        let conn = self.lock();
+        let marks = vec!["?"; kinds.len().max(1)].join(", ");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT seq, ts_ms, kind, payload FROM events
+             WHERE session_id = ?1 AND seq >= ?2 AND kind IN ({marks}) ORDER BY seq"
+        ))?;
+        let none = String::new();
+        let mut args: Vec<&dyn rusqlite::ToSql> = vec![&id, &floor];
+        if kinds.is_empty() {
+            args.push(&none);
+        }
+        for k in kinds {
+            args.push(k);
+        }
+        let rows = stmt.query_map(args.as_slice(), |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (seq, ts_ms, kind, payload) = row?;
+            out.push(RawEvent {
+                session_id: sid,
+                seq: seq as u64,
+                ts_ms,
+                kind,
+                payload: serde_json::from_str(&payload)?,
+            });
+        }
+        Ok(out)
+    }
+
     /// The latest `session_created` or `approval_mode_changed` of `sid`: the
     /// chat's approval mode as its log says (T50), so a lowering is never
     /// gated like a raise. One read on the primary key.
