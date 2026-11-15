@@ -61,6 +61,12 @@ describe("retry", () => {
     expect(host.textContent).toBe("openai::gpt-4o: rate limit. Trying again now (attempt 2 of 3)");
   });
 
+  test("a provider that has not answered yet is not called a connection failure", () => {
+    vi.spyOn(Date, "now").mockReturnValue(NOW);
+    act(() => root.render(<RetryNote retry={retry({ reason: "no_answer", of: 1, attempt: 1 })} />));
+    expect(host.textContent).toBe("openai::gpt-4o: no answer yet. Trying again in 12 s (attempt 1 of 1)");
+  });
+
   test("a class this build does not know is shown as text", () => {
     vi.spyOn(Date, "now").mockReturnValue(NOW);
     act(() => root.render(<RetryNote retry={retry({ reason: "<b>new</b>" as ModelRetry["reason"] })} />));

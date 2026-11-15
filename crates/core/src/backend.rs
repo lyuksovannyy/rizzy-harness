@@ -82,6 +82,13 @@ pub trait TurnHost: Send + Sync {
         None
     }
 
+    /// Where this session's `recall` calls go (the node's link to the
+    /// master, bound to this session); `None` where there is none (tests,
+    /// a runtime without a master).
+    fn recall(&self) -> Option<std::sync::Arc<dyn crate::recall::RecallSource>> {
+        None
+    }
+
     /// This session's folder as pinned when the session was created
     /// ([`crate::folder::FolderPin`]): every tool call checks it before it
     /// reads, writes or starts anything there. `None` where no folder is
@@ -314,36 +321,60 @@ pub struct StandingPart {
 }
 
 /// Which standing part: each is its own section of the context block,
-/// sent again only when it changes (X.1, review R4).
+/// and the history holds only its current version (X.1, reviews R4, F1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StandingKey {
     /// The chat owner's own facts (`memory::turn_block`).
     Memory,
+    /// Older own facts this message recalls.
+    MemoryRecall,
     /// The workspace's memory: a Personal workspace's private details, a
     /// team's shared memory.
     Workspace,
+    /// Older workspace facts this message recalls.
+    WorkspaceRecall,
     /// What `remember` does in this chat.
     Remember,
+    /// The counter of saved memory and the notes on earlier calls.
+    MemoryNotes,
     /// A project chat's brief: name, instructions, what `remember` does
     /// there (`projects::turn_context`).
     Project,
     /// The project's facts.
     ProjectMemory,
+    /// Older project facts this message recalls.
+    ProjectRecall,
+    /// The owner's earlier chats in the project (a chat's first turn).
+    EarlierChats,
     /// The project's open cards.
     Board,
 }
 
 impl StandingKey {
     /// Every key, in the order the block sends them.
-    pub const ALL: [StandingKey; 6] = [
+    pub const ALL: [StandingKey; 11] = [
         StandingKey::Memory,
+        StandingKey::MemoryRecall,
         StandingKey::Workspace,
+        StandingKey::WorkspaceRecall,
         StandingKey::Remember,
+        StandingKey::MemoryNotes,
         StandingKey::Project,
         StandingKey::ProjectMemory,
+        StandingKey::ProjectRecall,
+        StandingKey::EarlierChats,
         StandingKey::Board,
     ];
+
+    /// Derived from memory (facts, recall, notes on saves, earlier chats):
+    /// a turn the master gave no context withdraws it (review F2).
+    pub fn is_memory(self) -> bool {
+        !matches!(
+            self,
+            StandingKey::Remember | StandingKey::Project | StandingKey::Board
+        )
+    }
 }
 
 /// How the node's environment line ([`TurnExtra::environment`]) begins.

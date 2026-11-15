@@ -1215,7 +1215,7 @@ pub struct Names {
 }
 
 impl Names {
-    fn of(paths: &[Vec<u8>]) -> Self {
+    pub(crate) fn of(paths: &[Vec<u8>]) -> Self {
         Self {
             shown: paths.iter().take(SHOWN_MAX).map(|p| shown(p)).collect(),
             more: paths.len().saturating_sub(SHOWN_MAX),
@@ -1497,6 +1497,77 @@ pub async fn changed(repo: &Repo, a: &str, b: &str) -> Result<Vec<(char, String)
         .collect())
 }
 
+/// The SHA-256 (lowercase hex) of each of `paths` in snapshot `commit`,
+/// `""` for a path the snapshot does not hold as a file; a path missing
+/// from the answer could not be read (a name with a line break, say). One
+/// `cat-file --batch` for all of them; runs in the shadow only (PLAN.md
+/// T57: whether a turn's own writes explain a file's whole change).
+pub async fn blob_hashes(
+    repo: &Repo,
+    commit: &str,
+    paths: &[String],
+) -> std::collections::HashMap<String, String> {
+    use sha2::{Digest, Sha256};
+    let mut out = std::collections::HashMap::new();
+    let asked: Vec<&String> = paths.iter().filter(|p| !p.contains('\n')).collect();
+    if asked.is_empty() {
+        return out;
+    }
+    let input: Vec<u8> = asked
+        .iter()
+        .flat_map(|p| format!("{commit}:{p}\n").into_bytes())
+        .collect();
+    let Ok(raw) = run_raw(repo, &["cat-file", "--batch"], None, Some(input)).await else {
+        return out;
+    };
+    // `<oid> <type> <size>\n<bytes>\n`, or `<spec> missing\n`, in order.
+    let mut rest: &[u8] = &raw;
+    for p in asked {
+        let Some(nl) = rest.iter().position(|b| *b == b'\n') else {
+            break;
+        };
+        let head = String::from_utf8_lossy(&rest[..nl]).into_owned();
+        rest = &rest[nl + 1..];
+        let f: Vec<&str> = head.split(' ').collect();
+        match f.as_slice() {
+            [_, kind, size] => {
+                let Ok(n) = size.parse::<usize>() else { break };
+                if rest.len() < n + 1 {
+                    break;
+                }
+                if *kind == "blob" {
+                    out.insert(p.clone(), hex::encode(Sha256::digest(&rest[..n])));
+                }
+                rest = &rest[n + 1..];
+            }
+            _ if head.ends_with(" missing") => {
+                out.insert(p.clone(), String::new());
+            }
+            _ => break,
+        }
+    }
+    out
+}
+
+/// When the oldest checkpoint still kept in this repository was taken (ms
+/// since the epoch), if any.
+pub async fn oldest_kept_ms(repo: &Repo) -> Option<i64> {
+    let out = run(
+        repo,
+        &[
+            "for-each-ref",
+            "--sort=committerdate",
+            "--count=1",
+            "--format=%(committerdate:unix)",
+            "refs/harness/",
+        ],
+        None,
+    )
+    .await
+    .ok()?;
+    out.trim().parse::<i64>().ok().map(|s| s * 1000)
+}
+
 /// Whether a snapshot is still kept: a checkpoint ref points at it (old ones
 /// are pruned; their objects stay until the next garbage collection, which
 /// runs rarely, so the object alone does not say it is kept) and it can be
@@ -1562,6 +1633,16 @@ impl RestoreDiff {
         let keep: std::collections::HashSet<&str> = files.iter().map(String::as_str).collect();
         self.rows
             .retain(|r| keep.contains(String::from_utf8_lossy(&r.path).as_ref()));
+    }
+
+    /// The paths it differs in that are files (not gitlinks), as an event
+    /// names them.
+    pub fn paths(&self) -> Vec<String> {
+        self.rows
+            .iter()
+            .filter(|r| !r.gitlink)
+            .map(|r| String::from_utf8_lossy(&r.path).into_owned())
+            .collect()
     }
 }
 

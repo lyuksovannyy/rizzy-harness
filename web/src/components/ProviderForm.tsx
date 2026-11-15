@@ -235,6 +235,8 @@ export function ProviderForm(props: {
   let keyNote = "· stored only on this server (0600)";
   if (existing && existing.key !== "none") {
     if (!sameUrl(url, existing.base_url)) keyNote = "· a new endpoint needs its key again";
+    // Set but empty: nothing is sent for it, as for no key at all.
+    else if (existing.key === "blank") keyNote = "· the key set for it is empty, which counts as no key: nothing is sent";
     else if (existing.key.startsWith("env:")) keyNote = `· read from ${existing.key.slice(4)}; leave empty to keep`;
     else keyNote = "· a key is stored; leave empty to keep";
   }

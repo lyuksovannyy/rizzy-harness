@@ -774,6 +774,44 @@ async fn the_next_turn_does_not_take_the_last_turns_context() {
     assert!(!own.contains("CTX-ONLY-FOR-THE-FIRST-TURN"), "{own}");
 }
 
+/// Review F2 of PR 108: a turn that only reads queued messages is sent the
+/// master's context of the newest one (computed for that message), its
+/// standing parts included; never the last turn's.
+#[tokio::test]
+async fn a_queued_only_turn_takes_the_queued_messages_context() {
+    let model = Gated::new(|_, _| answer("ok"));
+    let mut n = Node::start(model.clone()).await;
+    let sid = n.create(ApprovalMode::Auto).await;
+    n.send_json(
+        json!({"type": "session.prompt", "req_id": "p1", "session_id": sid,
+        "text": "hello", "context": {"turn": "CTX-FIRST",
+            "standing": [{"part": "workspace", "text": "SHARED-OLD"}]}}),
+    );
+    assert_eq!(n.ack("p1").await, Ok(()));
+    model.entered.notified().await;
+    n.send_json(
+        json!({"type": "session.prompt", "req_id": "p2", "session_id": sid,
+        "text": "and then", "context": {"turn": "CTX-QUEUED",
+            "standing": [{"part": "workspace", "text": "SHARED-NEW"}]}}),
+    );
+    assert_eq!(n.ack("p2").await, Ok(()));
+    model.gate.notify_one();
+    n.ended(2).await;
+    let reqs = model.requests();
+    let own = reqs[1]
+        .messages
+        .iter()
+        .rev()
+        .find_map(|m| m.user_text())
+        .unwrap();
+    assert!(
+        own.contains("CTX-QUEUED") && own.contains("SHARED-NEW"),
+        "{own}"
+    );
+    assert!(!own.contains("CTX-FIRST"), "{own}");
+    assert_eq!(holding(&reqs[1], "SHARED-OLD"), 0, "the old version left");
+}
+
 /// Review ST-5: a message that names another agent (the picker, or an
 /// @mention the master resolved) while a turn of this one runs is
 /// refused with the old reason and why; one that names none waits, as

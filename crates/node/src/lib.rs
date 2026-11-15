@@ -8,8 +8,10 @@ pub mod exec;
 mod git;
 mod images;
 mod instructions;
+mod others;
 mod outbox;
 pub mod policy;
+mod recall;
 mod session;
 
 use std::collections::HashMap;
@@ -116,6 +118,7 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::StopBackground { .. }
         | MasterToNode::ApprovalRespond { .. }
         | MasterToNode::ArtifactFetch { .. }
+        | MasterToNode::RecallResult { .. }
         | MasterToNode::Diff { .. } => None,
     }
 }
@@ -182,6 +185,8 @@ pub(crate) struct Inner {
     stopping: AtomicBool,
     /// Background commands (T.8d): the node's count and its `[limits]`.
     pub(crate) background: Arc<harness_tools::background::Registry>,
+    /// `recall` calls waiting for the master's answer (PLAN.md T55).
+    pub(crate) recalls: recall::Pending,
     /// Room for turn diffs being read ([`DIFF_AT_ONCE`]).
     diffs: Arc<tokio::sync::Semaphore>,
 }
@@ -463,6 +468,7 @@ impl NodeRuntime {
             stages,
             stopping: AtomicBool::new(false),
             background: harness_tools::background::Registry::new(bg_limits, bg_secrets),
+            recalls: Default::default(),
             diffs: Arc::new(tokio::sync::Semaphore::new(DIFF_AT_ONCE)),
         });
         for row in rows {
@@ -587,6 +593,12 @@ impl NodeRuntime {
             {
                 capabilities.push(harness_protocol::CAP_REMEMBER.into());
             }
+            // `recall` likewise (PLAN.md T55): the master answers searches
+            // only from a node that offers it.
+            if self.inner.cfg.backend.has_tool("recall") && !self.inner.cfg.policy.denies("recall")
+            {
+                capabilities.push(harness_protocol::CAP_RECALL.into());
+            }
             if self.inner.cfg.profile == harness_core::event::Profile::Agentic {
                 // The modes it offers and their gaps (N.10a), as decided at
                 // start.
@@ -654,6 +666,12 @@ impl NodeRuntime {
                         offset,
                         len,
                     } => this.fetch(req_id, session_id, stage_id, offset, len),
+                    // The answer to a search a tool call waits for.
+                    MasterToNode::RecallResult {
+                        req_id,
+                        hits,
+                        error,
+                    } => this.inner.recalls.answer(&req_id, hits, error),
                     // Likewise a turn's diff (X.12): a read of two
                     // checkpoints, in a task of its own, never behind a
                     // command of the session (a restore holds its lane).
@@ -1206,6 +1224,14 @@ impl NodeRuntime {
                 self.fetch(req_id, session_id, stage_id, offset, len);
                 Ok(())
             }
+            MasterToNode::RecallResult {
+                req_id,
+                hits,
+                error,
+            } => {
+                self.inner.recalls.answer(&req_id, hits, error);
+                Ok(())
+            }
             MasterToNode::ArtifactStage {
                 session_id,
                 path,
@@ -1449,6 +1475,13 @@ impl NodeRuntime {
 
     /// Delete a session: cancel its turn, wait for it to end, drop the log.
     pub async fn delete(&self, sid: SessionId) -> Result<(), String> {
+        let folder = self.session(sid).map(|s| {
+            s.cwd()
+                .canonicalize()
+                .unwrap_or_else(|_| s.cwd().to_path_buf())
+                .to_string_lossy()
+                .into_owned()
+        });
         if let Some(s) = self.session(sid) {
             s.cancel();
             let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -1481,12 +1514,26 @@ impl NodeRuntime {
         if let Some(root) = &self.inner.cfg.policy.sandbox_tmp {
             let _ = std::fs::remove_dir_all(root.join(sid.to_string()));
         }
+        // Its file changes stay in the folder after its log goes: a write
+        // tombstone (folder and time span, no content) keeps another
+        // chat's undo refusing over them (PLAN.md T57).
+        let now = harness_core::now_ms();
         let existed = self
             .inner
             .cfg
             .store
             .call(move |s| {
-                let existed = s.delete_session(sid, false)?;
+                let writes = match folder {
+                    Some(f) => s
+                        .events_since_turn_at(sid, i64::MIN, others::KINDS)
+                        .map(|e| others::write_span(&e, now).map(|(a, b)| (f, a, b)))?,
+                    None => None,
+                };
+                let existed = s.delete_session_leaving(
+                    sid,
+                    false,
+                    writes.as_ref().map(|(f, a, b)| (f.as_str(), *a, *b)),
+                )?;
                 s.checkpoint()?;
                 Ok::<_, harness_store::StoreError>(existed)
             })

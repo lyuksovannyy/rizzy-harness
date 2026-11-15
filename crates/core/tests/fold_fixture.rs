@@ -243,6 +243,7 @@ fn events() -> Vec<RawEvent> {
                 agent_id: "coder".into(),
                 name: "Coder".into(),
                 prompt_hash: "h1".into(),
+                withheld: vec![],
             },
         }),
         EventKind::TurnStarted(TurnStarted {
@@ -252,6 +253,7 @@ fn events() -> Vec<RawEvent> {
                 agent_id: "writer".into(),
                 name: "Writer".into(),
                 prompt_hash: "h2".into(),
+                withheld: vec![],
             }),
             environment: Some("[harness] Environment of this turn: the node's clock reads Saturday 2026-11-14 10:32 (Europe/Riga, UTC+02:00).".into()),
         }),
@@ -592,7 +594,7 @@ fn events() -> Vec<RawEvent> {
             of: 3,
             at_ms: 1_700_000_004_000,
             wait_ms: 4000,
-            reason: RetryReason::Network,
+            reason: RetryReason::NoAnswer,
         }),
         // What the model was sent with the turn's message (X.1): never
         // shown, and the wait it is in stays shown.
@@ -760,7 +762,7 @@ fn the_latest_task_list_is_the_list() {
 fn a_waiting_retry_and_the_turns_limits_are_in_the_view() {
     let view = serde_json::to_value(SessionView::fold(&events()).unwrap()).unwrap();
     assert_eq!(view["retry"]["attempt"], 2);
-    assert_eq!(view["retry"]["reason"], "network");
+    assert_eq!(view["retry"]["reason"], "no_answer");
     assert_eq!(view["retry"]["at_ms"], 1_700_000_004_000_i64);
     assert_eq!(view["context_window"], 128_000);
     assert_eq!(view["summary_at"], 102_400);

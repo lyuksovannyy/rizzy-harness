@@ -118,7 +118,8 @@ async fn send_json(
     key: Option<&Secret<String>>,
     cap: usize,
 ) -> Result<Value, ProviderError> {
-    match (kind, key) {
+    // An empty key is no key: no header for it.
+    match (kind, key.filter(|k| !k.is_blank())) {
         (ApiKind::Anthropic, Some(k)) => {
             rb = rb
                 .header("x-api-key", k.expose())

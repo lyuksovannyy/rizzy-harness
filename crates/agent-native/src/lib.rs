@@ -244,6 +244,10 @@ impl harness_core::backend::TurnHost for Logged<'_> {
         self.host.artifacts()
     }
 
+    fn recall(&self) -> Option<Arc<dyn harness_core::recall::RecallSource>> {
+        self.host.recall()
+    }
+
     // Both reach every tool call's context. Not forwarding them (the
     // trait's default answers `None`) turned the per-call pin check off and
     // denied a sub-agent its own folder (tests/host_forwarding.rs).
@@ -490,7 +494,12 @@ Next step:\n\
 What to do next.\n\n\
 Keep exact paths, names, commands, numbers and error messages. Write \"none\" under a heading \
 with nothing to say. Write up to about 1,000 words in all, far fewer when the session is \
-short. Do not continue the work, and write nothing before \"Goal:\".\n\n",
+short. Do not continue the work, and write nothing before \"Goal:\".\n\n\
+Record what was said, done and found, with its outcome as it was stated then: never check it \
+again, correct it, work it out again or add a result that is not in the transcript, even where \
+you think it is wrong. Where the transcript itself shows that something was wrong or \
+uncertain, say that it was called so and by whom (\"the person said the total was wrong\", \
+\"the test run contradicted it\").\n\n",
     transcript_labels!(),
     "The text under \"Earlier summary:\" is your own summary of what came before, under the \
 same headings: update it, do not nest it. Write the six headings once: keep what still holds, \
@@ -642,6 +651,17 @@ fn transcript(
             ChatMsg::Tool { content, .. } => {
                 let short: String = content.chars().take(TRANSCRIPT_RESULT_CHARS).collect();
                 quoted_part(&mut out, PART_RESULT, &short);
+                // Said where it is cut: without it a summariser read the
+                // cut text as all the assistant saw and "corrected" an
+                // answer taken from the rest (live test 2026-11-15).
+                let total = content.chars().count();
+                if total > TRANSCRIPT_RESULT_CHARS {
+                    out.push_str(&format!(
+                        "{NOTE_LEAD} The tool result above is cut here for this summary: \
+                         {TRANSCRIPT_RESULT_CHARS} of its {total} characters are shown, and the \
+                         assistant saw all of it.\n\n"
+                    ));
+                }
             }
             // The harness's own words, not the user's: as they are.
             ChatMsg::Note(t) | ChatMsg::CallNote(t) | ChatMsg::Opening(t) => {
@@ -794,8 +814,10 @@ impl NativeBackend {
         // Proposing a memory does none of a task's work: `remember` alone
         // leaves a delegate with nothing to work with (A.11, on nodes that
         // register it).
+        // Nor does searching earlier chats (`recall`).
         let usable = |name: &str| {
             name != "remember"
+                && name != "recall"
                 && d.allows_tool(name)
                 && !host.tool_denied(name)
                 && self
@@ -810,6 +832,7 @@ impl NativeBackend {
             .iter()
             .map(|n| match n.as_str() {
                 "remember" => "memory".to_string(),
+                "recall" => "earlier chats search".to_string(),
                 n => n.replace('_', " "),
             })
             .collect();
@@ -2660,16 +2683,16 @@ impl NativeBackend {
                 // The repeated-call guard first: the same bad call again
                 // and again is refused, and ends the turn, as any other.
                 let key = harness_tools::call_key(&ctx.cwd, &call.tool, &call.input);
-                let admission = match (guard.admit(key), bad_args) {
+                let admission = match (guard.admit(key, &call.tool), bad_args) {
                     (repeat::Admission::Run, Some(e)) => Err(e),
                     (a, _) => Ok(a),
                 };
                 let (outcome, refused) = match admission {
                     Err(e) => (ToolOutcome::err(e), None),
                     Ok(admission) => match admission {
-                        repeat::Admission::Refuse { note, stop } => {
+                        repeat::Admission::Refuse { output, note, stop } => {
                             repeat_stop |= stop;
-                            (ToolOutcome::err(repeat::REFUSED_OUTPUT), Some(note))
+                            (ToolOutcome::err(output), Some(note))
                         }
                         repeat::Admission::Ended => (ToolOutcome::err(repeat::ENDED_OUTPUT), None),
                         repeat::Admission::Run => {
@@ -2704,8 +2727,15 @@ impl NativeBackend {
                         t.name() == call.tool
                             && t.risk() == harness_core::policy::ToolRisk::Mutating
                     });
-                    guard.record(key, changes, outcome.ok, &output)
+                    if outcome.denied {
+                        guard.record_denied(key, &output)
+                    } else {
+                        guard.record(key, &call.tool, changes, outcome.ok, &output)
+                    }
                 });
+                // A trial after the second rule's refusal that failed the
+                // same way ends the turn after this step.
+                repeat_stop |= guard.ended();
                 // The step's last result carries the next request's note
                 // (half the budget, or the wrap-up), so the log has it; the
                 // limit read again now (review F5).
@@ -3262,12 +3292,17 @@ impl NativeBackend {
                     // Taken in every case, so a note never stays behind for
                     // a later call with this id (review N1).
                     let note = host.denial_note(&call.call_id);
-                    return ToolOutcome::err(if ctx.cancel.is_cancelled() {
-                        "[cancelled before approval]".to_string()
-                    } else {
-                        // The person's note, quoted after the fixed sentence.
-                        harness_core::event::denied_text(note.as_deref())
-                    });
+                    // Marked as a denial here, never read from the text:
+                    // the repeated-call guard's second rule skips it.
+                    return ToolOutcome {
+                        denied: true,
+                        ..ToolOutcome::err(if ctx.cancel.is_cancelled() {
+                            "[cancelled before approval]".to_string()
+                        } else {
+                            // The person's note, quoted after the fixed sentence.
+                            harness_core::event::denied_text(note.as_deref())
+                        })
+                    };
                 }
                 harness_core::policy::Decision::AllowSession => {
                     allowed_this_turn.insert(key);
@@ -3307,6 +3342,12 @@ impl NativeBackend {
             background: background_access(ctx, host),
             skills: ctx.extra.skills.clone(),
             seen: self.seen.session(ctx.session_id),
+            recall: host.recall(),
+            read_offered: ctx.agent.as_ref().is_none_or(|a| a.allows_tool("read"))
+                && self
+                    .tools
+                    .iter()
+                    .any(|t| t.name() == "read" && t.enabled(&ctx.extra.savings)),
         };
         // stdout and stderr are interleaved into one coalesced stream (as a
         // terminal shows them); the final result carries both. `coalesce`

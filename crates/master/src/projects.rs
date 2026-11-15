@@ -531,21 +531,22 @@ fn board_line(
 }
 
 /// What a turn in a chat of project `p` gets after the history (never in
-/// the system prompt; PLAN.md "Token savings"), by part (X.1, review R4):
-/// the project's name, instructions and what `remember` does there
-/// (`brief`), its facts (`facts`, when `allowed.project`) and the open cards
-/// (`board`) are standing sections of the turn's context block, each sent
-/// again only when it changes; the recall lines past the facts' cap and,
-/// on the chat's first turn, its owner's earlier chats in the project
-/// (`earlier_chats`, when `allowed.project`) are this message's alone
-/// (`turn`). `remember` says whether the turn may propose project facts
-/// (it has the tool); `allowed.personal` whether personal ones too.
+/// the system prompt; PLAN.md "Token savings"), by part, each a section of
+/// the turn's context block of its own key (X.1, reviews R4 and F1): the
+/// project's name, instructions and what `remember` does there (`brief`),
+/// its facts (`facts`, when `allowed.project`), the recall lines past
+/// their cap (`facts_recall`), the open cards (`board`) and, on the chat's
+/// first turn, its owner's earlier chats in the project (`earlier`, when
+/// `allowed.project`). `remember` says whether the turn may propose
+/// project facts (it has the tool); `allowed.personal` whether personal
+/// ones too.
 #[derive(Debug, Default)]
 pub struct ProjectContext {
     pub brief: String,
     pub facts: Option<String>,
+    pub facts_recall: Option<String>,
     pub board: Option<String>,
-    pub turn: Option<String>,
+    pub earlier: Option<String>,
 }
 
 pub async fn turn_context(
@@ -581,23 +582,23 @@ pub async fn turn_context(
         }
     }
     out.brief = s;
-    let mut turn: Vec<String> = Vec::new();
-    if let Some(mem) = m.memory().filter(|_| allowed.project)
-        && let Some((list, tail)) = facts_block(&*mem, &memory_owner(&p.project_id), text).await
-    {
-        out.facts = Some(list);
-        turn.extend(tail);
+    // The places `turn_places` names, as `recall` reads them.
+    for place in crate::memory::turn_places(chat, allowed, Some(p)) {
+        if let crate::memory::TurnPlace::Project(key) = place
+            && let Some(mem) = m.memory()
+            && let Some((list, tail)) = facts_block(&*mem, &key, text).await
+        {
+            out.facts = Some(list);
+            out.facts_recall = tail;
+        }
     }
     let pid = p.project_id.clone();
     if let Ok((cols, cards)) = m.inner.mirror.call(move |s| s.board(&pid)).await {
         out.board = board_line(&cols, &cards);
     }
-    if allowed.project
-        && let Some(block) = earlier_chats(m, p, chat).await
-    {
-        turn.push(block);
+    if allowed.project {
+        out.earlier = earlier_chats(m, p, chat).await;
     }
-    out.turn = (!turn.is_empty()).then(|| turn.join("\n\n"));
     out
 }
 

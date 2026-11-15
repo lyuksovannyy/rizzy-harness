@@ -8,7 +8,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import type { Agent, ProviderModel, ProviderPreset, ProvidersState } from "../types";
+import type { Agent, ProviderModel, ProviderPreset, ProviderState, ProvidersState } from "../types";
 
 const testProvider = vi.fn();
 const saveProvider = vi.fn();
@@ -391,6 +391,17 @@ describe("a saved provider", () => {
     );
   const changed = vi.fn();
   const ids = () => [...host.querySelectorAll(".model-pick > ul > li .mono")].map((e) => e.textContent);
+
+  test("a key that is set but empty says it counts as no key", async () => {
+    providerModels.mockResolvedValue({ models: [], fetched_ms: Date.now() });
+    const blank: ProviderState = { ...SAVED.providers[1]!, key: "blank" };
+    const state: ProvidersState = { ...SAVED, providers: [SAVED.providers[0]!, blank] };
+    await act(async () =>
+      root.render(<ProviderForm key="blank" state={state} agents={AGENTS} edit={blank} onSaved={saved} onState={changed} />),
+    );
+    expect(host.textContent).toContain("counts as no key");
+    expect(host.textContent).not.toContain("a key is stored");
+  });
 
   test("lists from the server's cache, with no refresh, and marks what the provider dropped", async () => {
     providerModels.mockResolvedValue({ models: [m("gpt-4o", { context: 128000 }), m("o3")], fetched_ms: Date.now() - 3 * 3_600_000 });

@@ -954,7 +954,7 @@
         "attempt": 2,
         "model": "openai::gpt-4o",
         "of": 3,
-        "reason": "network",
+        "reason": "no_answer",
         "turn_id": "t6",
         "wait_ms": 4000
       },
@@ -1462,7 +1462,7 @@
       "attempt": 2,
       "model": "openai::gpt-4o",
       "of": 3,
-      "reason": "network",
+      "reason": "no_answer",
       "turn_id": "t6",
       "wait_ms": 4000
     },

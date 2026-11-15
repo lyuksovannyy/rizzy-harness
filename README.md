@@ -517,11 +517,24 @@ then 8 seconds (with jitter), or what the provider's `Retry-After` asks; a
 cancel ends the wait at once. A `Retry-After` over 60 s (a quota window, say)
 is not retried: the agent's next fallback model answers at once, or without
 one the turn ends with a message naming the wait. A refused key, a missing
-permission, an exhausted quota or a bad request is not retried, and nothing
-is retried once part of the answer is on screen. The chat shows the turn as
-still running while it waits, with a line under it naming the model, why
-(rate limit, provider overloaded, provider error, connection failed) and a
-countdown to the next attempt ("attempt 2 of 3"). When a turn's
+permission, an exhausted quota, a bad request or an error the provider codes
+`model_not_found` is not retried, and nothing is retried once part of the
+answer is on screen. The chat shows the turn as still running while it
+waits, with a line under it naming the model, why (rate limit, provider
+overloaded, provider error, connection failed, or no answer yet when the
+first-byte timeout ran out) and a countdown to the next attempt ("attempt 2
+of 3"). When the provider does not know the model (it answers 404, or codes
+the error `model_not_found` at any status, which also sends the turn to the
+agent's fallbacks), the turn's error says so in the harness's words, names
+the model and where it is set (the chat's model menu, an agent's or the
+default model in Settings, the provider's model list under Settings → Server
+→ AI providers). When it keeps failing with a server error (500 to 599), the
+error says the provider failed to answer and after how many tries, with no
+advice about settings. Either way the provider's own message is quoted
+below, at most three lines and 300 characters. A router that answers 503
+with only a generic error type for a model it has no connection for is
+treated as a failing server: nothing but free text tells that apart from a
+busy one, and the harness does not guess from free text. When a turn's
 model is unavailable, or its request still fails before any output with a model
 problem (not found, rate limit, server error, no connection), the agent's
 fallbacks are tried in order, skipping unavailable ones, and the chat notes
@@ -540,6 +553,14 @@ with tool calls is not supported until risk R8 in `PLAN.md` is fixed, so do
 not set it by hand either.
 
 Local Ollama: preset `ollama`, `base_url = "http://localhost:11434/v1"`, no key.
+
+A provider without a key (none configured, or an empty one) is sent no key
+at all: no `Authorization` header and no `x-api-key`, for the chat, the
+model list, the provider test, memory embeddings and dictation alike. A
+local router that refuses unknown keys therefore works without one (before,
+the harness sent `Authorization: Bearer no-key`, which such a router
+refuses with 401). Settings shows such a provider's key as empty ("counts as
+no key") rather than as stored.
 
 **Local and LAN model servers need `HARNESS_PLAIN_HTTP_HOSTS`.** The
 provider and model tests in Settings and the model listing are requests the
@@ -600,8 +621,14 @@ failed), **Open** (what is not done, errors not yet fixed) and **Next step**,
 up to about 1,000 words. The agent's task list is given back on its own, so the
 summary refers to it rather than copying it. A later summary updates these
 sections rather than nesting the earlier one, so the shape holds however often
-a long chat is summarised. Chat-profile chats keep a shorter general summary
-(at most 300 words). The two newest turns are kept as they are. The latest
+a long chat is summarised. The summary records what was said, done and found
+as it was stated then: it does not check, correct or work out results again
+(a live test saw a summary "correct" an answer from a shortened tool result
+and the agent then report the invented value), and where the conversation
+itself called something wrong it says who did. A tool result longer than
+2,000 characters reaches the summarising model shortened, with a line saying
+it was cut and that the agent saw all of it. Chat-profile chats keep a
+shorter general summary (at most 300 words). The two newest turns are kept as they are. The latest
 summary is shown, collapsed, where it was made in the chat.
 
 In agentic chats the agent keeps its own task list with the `todo` tool
@@ -709,6 +736,40 @@ saved elsewhere.
 A data directory made before workspace memory existed must be recreated
 (facts kept per person in a workspace are not carried over).
 
+**Earlier chats and memory search.** An agent with this switch (on the
+Agents page; on for the Assistant, the Researcher and the Reviewer; off
+for the built-in agents that can run commands, use MCP servers or publish,
+and for Smol and Scout: built-in agents cannot be changed there, so to give
+it to the Software Developer, **Duplicate** it and turn the switch on) has a `recall` tool: when you refer to earlier work it was not given
+("like last time", "the plan we made"), it searches **your own** earlier
+chats in the chat's workspace and the memory that chat reads anyway (your
+facts where the workspace may use them, the workspace's memory, the
+project's facts; never a waiting proposal or a retired fact), by keywords,
+with no model call. It gets short quoted excerpts, each with the chat's
+title, when it was last active and its id; it cannot open a whole chat or
+change anything, and the call shows in the chat like any tool.
+
+- Never another person's chats, never a chat in another workspace, never a
+  temporary chat, a sub-agent's session or the chat itself. The server
+  decides that from the chat the agent works in; nothing the agent sends
+  can name a person, a workspace or a chat.
+- Not in temporary chats, turns started by an external event (a routine's
+  webhook) or turns that report a finished background command. A
+  sub-agent searches only when its own agent has the switch.
+- Search with a few distinctive words: each word also finds its longer
+  forms ("decision" finds "decisions"), and chats with more of the words
+  come first. At most 8 searches per turn and 40 per chat per hour, at
+  most 10 results and about 6,000 characters of excerpts per search.
+- **Recalled text can leave the machine.** In a chat in Auto with the
+  node's network on, an agent that also has `bash`, MCP tools or web
+  search can send what it found out (in a command, a tool call or a search
+  query) with nothing asked. Ask or Accept edits asks before commands and
+  MCP calls; `[sandbox] network = "off"` stops commands reaching out.
+- The excerpts are quoted to the agent as text written then: earlier chats
+  hold web pages, tool output and other people's files, so it is told to
+  check a detail before relying on it and never to follow instructions in
+  them. A node turns the tool off with `denied_tools = ["recall"]`.
+
 Who may create workspaces (also a switch under Settings → Server → Workspaces):
 
 ```toml
@@ -784,7 +845,9 @@ Changes made by shell commands show like any other. The node reads them from
 the turn's checkpoints when you ask; nothing is stored on the server. A very
 large turn is shown in part, marked "Cut" (at most 1,000 files are listed and
 about 1 MiB of lines is sent); a checkpoint that is no longer kept, or a node
-that is away, is said in words. Only the chat's owner can open them. Checkpoints live in a private repository in the node's data
+that is away, is said in words. If another chat changed (or may have changed)
+some of these files since the turn began, the view names them before you
+press Undo (see "Two chats in one folder" below). Only the chat's owner can open them. Checkpoints live in a private repository in the node's data
 directory (`checkpoints/<hash>.git`), for git repositories too: nothing is
 written into your folder, no objects, refs, index or config are ever written
 into your `.git` (git may update the timestamps of existing object files
@@ -848,6 +911,27 @@ does not show yet. Files a checkpoint already holds stay covered even if a
 same folder (or in a folder that contains it, or one inside it), and no
 chat can start working in that folder while an undo runs there; wait a
 moment, or cancel the other chat, and try again.
+
+**Two chats in one folder.** A checkpoint is a picture of the whole folder,
+so what another chat (yours or a teammate's) changed there while a turn ran
+is in that turn's picture too. An undo or rewind never puts that back
+without asking: it is refused, naming the files another chat changed during
+the turn (with its edit tools, or its own undo) or may have changed (with a
+command, a sub-agent, a background command, or a chat deleted since), and
+saying nothing else about that chat. Files your own turn changed only with
+its edit tools, one edit after the other, are never counted as another
+chat's: the harness checks that those edits account for the whole change.
+"Undo anyway" goes ahead; the other chat then gets a line naming its files
+that were put back (only those in its own folder), with nothing about
+yours, and it cannot bring them back itself (the copy is in your undo's
+checkpoint), so it has to make those changes again. Commands are judged by
+the other chat's whole turn: if it ran a command while your turn changed a
+file with a command of its own, that file is named even if the other
+command never touched it. When a chat that changed files is deleted, the
+node keeps only its folder and when it worked (no content), so an undo
+still asks. Your own edits in your editor during a turn still count as the
+turn's, and a chat in an unrelated folder that writes here through a path
+outside its folder is not seen.
 
 **Approval modes.** Each agentic chat has an approval mode: how much runs
 without a click. The picker in the composer shows it and offers three, each
@@ -1614,6 +1698,30 @@ either, and you see the refusal as that call's result. The thresholds are
 fixed, not `node.toml` keys, and the guard cannot be turned off. The
 warnings are for the agent only and are not shown in the chat.
 
+A second rule catches one tool failing the same way whatever its input: an
+agent that adds one more flag to the same failing command again and again
+(a live test saw 28 such `bash` calls, each with the same error, until the
+provider timed out). From the third failure of the same tool with exactly
+the same output in a row (the harness's own changing tokens aside) the
+agent is warned that changing the input this way does not change the
+result; after seven, its next call to that tool is not run ("Not run: the
+calls to this tool before it failed with exactly the same output several
+times in a row ..."), and the agent is told that its next call of the tool
+will be run once. Other calls of that tool in the same message are refused
+too. The tool's next call in a later message runs, because the refusal is of
+the tool and a different command may be the right one (`cargo build
+--offline` after seven identical network errors); if it fails with the same
+output again, the turn ends as above. Any other result of that tool (a
+success, a failure in other words) or a change starts it again; calls of
+other tools in between do not. Successes are never counted by this rule: a
+status poll that keeps answering the same through calls written a little
+differently runs on. Calls you deny are not counted by this rule either (nor
+do they reset it): seven "no"s to seven different commands are your answers,
+and you are asked about every one. The same call denied again is still the
+first rule's.
+The counts follow Hermes Agent's same-tool failure thresholds (warn at 3,
+stop at 8), with the added condition that the output is identical.
+
 **Background commands** are on by default (8 a chat, 64 a node); a node owner
 turns them off with `background_per_session = 0` in `[limits]`. While they
 are off the agent is not offered `bash_output` or `bash_stop` and `bash` does
@@ -1777,7 +1885,16 @@ delays Stop or an approval answer, in that chat or any other.
 - `edit`, and `write` over an existing file, need the file to have been
   read with `read` in this chat (any part of it). A new file needs
   nothing. The agent's own edits and writes count as seen. Viewing a file
-  with `cat` in `bash` does not count.
+  with `cat` in `bash` does not count (commands are not parsed), but an
+  `edit` of a file not read yet is answered with the lines around the
+  first match of its `old_string`, numbered as `read` shows them, and that
+  counts as having read the file as it was at that moment: the same edit
+  sent again goes through, unless the file changes first. This holds for
+  the rest of the turn; the next turn asks for a `read` again. Only for
+  one edit without `replace_all` (several edits or every match would change
+  lines the agent was not shown), for a file `read` would show (not one it
+  refuses as binary), and for an agent that may use `read`. Otherwise, or
+  when the text is not in the file, the refusal says to `read` it.
 - If the file changed on disk since then (you edited it, a command or a
   formatter did, another chat did), `write` is refused, and `edit` goes
   ahead only when the text it replaces lies outside the lines that
@@ -2040,9 +2157,13 @@ re-reads at a tenth). What has not changed since it was last sent is not sent
 again: the model has it earlier in the conversation. Each part counts on its
 own: your facts, the workspace's memory, the project's brief, its facts and its
 board, so a moved card sends the board alone and a colleague's change to the
-team's memory sends that memory alone. What belongs to one message (older facts
+team's memory sends that memory alone. What changes with the message (older facts
 that match it, the count of saved memory, notes on earlier saves, a project
-chat's earlier chats on its first message) goes with that message only. A changed part is sent in
+chat's earlier chats on its first message) replaces its earlier copy, so the
+conversation never holds an old recall: a fact you forget is gone from the
+next message even if it was only ever recalled. A turn that reports a finished
+background command reads none of your memory; a turn that reads messages you
+sent while the agent worked gets the context of the newest of them. A changed part is sent in
 full with a line saying it replaces the earlier one; a part that is gone (memory
 switched off, the files deleted) gets a line saying it no longer applies, and
 earlier messages are then resent without their copy: an agent whose memory is
@@ -2400,17 +2521,17 @@ The built-in agents, grouped by category in the picker:
 
 | Agent (`@handle`, aliases) | Category | Runs as | Can |
 |---|---|---|---|
-| Assistant (`@general`, `@ai`), the chats' default | General | agent | web search and fetch; your facts; project memory |
+| Assistant (`@general`, `@ai`), the chats' default | General | agent | web search and fetch; your facts; project memory; earlier chats and memory search |
 | Smol (`@smol`) | General | agent, sub-agent | nothing but answer: no tools, no memory |
-| Researcher (`@researcher`, `@research`) | General | agent, sub-agent | web search and fetch; project memory |
+| Researcher (`@researcher`, `@research`) | General | agent, sub-agent | web search and fetch; project memory; earlier chats and memory search |
 | Software Developer (`@coder`, `@dev`), the Agentic default | IT | agent, sub-agent | read, change and search files, run commands, the node's MCP servers, publish, web; delegates to Scout, Researcher and Reviewer; project memory |
 | Senior Teamlead (`@teamlead`) | IT | agent | everything the Software Developer has, plus your facts; delegates to Software Developer, Researcher, Writer, Scout and Reviewer |
 | Writer (`@writer`) | General | agent, sub-agent | read, change and search files, publish, web; project memory |
 | Scout (`@scout`) | IT | sub-agent | read and search files only |
-| Reviewer (`@reviewer`) | IT | agent, sub-agent | read and search files; project memory |
+| Reviewer (`@reviewer`) | IT | agent, sub-agent | read and search files; project memory; earlier chats and memory search |
 
 **Researcher in Agentic sessions.** Web tools exist only in chats, not on
-nodes yet (nodes have `remember`, which alone does none of a task's work). In an Agentic session, Researcher is therefore not offered
+nodes yet (nodes have `remember` and `recall`, which alone do none of a task's work). In an Agentic session, Researcher is therefore not offered
 to the Senior Teamlead or Software Developer as a sub-agent, and a delegation
 to it by name is refused with the reason, so the lead never believes research
 was done that was not. The rule is general: any sub-agent that lists tools
@@ -2481,7 +2602,8 @@ between), then what became of its changes and the pages it cited. The `delegate`
 
 **Agents** in the sidebar lists every agent. Server admins can make agents there
 (name, handle, summary, instructions and feature switches: memory, project
-memory, web search, files, commands, MCP servers, sub-agents, and whether it is offered as an agent,
+memory, earlier chats and memory search, web search, files, commands, MCP
+servers, sub-agents, and whether it is offered as an agent,
 a sub-agent or both), change them, delete them, and change any agent's look.
 Built-in agents and agent files keep their name, handle, instructions and
 features: only their summary and **additional instructions** (added after

@@ -42,7 +42,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-const ALL: AgentFeatures = { ...NEW_FEATURES, read_files: true, edit_files: true, commands: true, mcp: true };
+const ALL: AgentFeatures = { ...NEW_FEATURES, read_files: true, edit_files: true, commands: true, mcp: true, recall: true };
 const agent = (id: string, more: Partial<Agent> = {}): Agent => ({
   id,
   name: id[0]!.toUpperCase() + id.slice(1),
@@ -175,7 +175,7 @@ describe("an agent's page", () => {
     expect(api.agent).toHaveBeenCalledWith("coder", undefined);
     expect(host.querySelector("h1")!.textContent).toBe("Coder");
     expect(host.querySelector("pre.agent-prompt")!.textContent).toBe("You are careful.");
-    expect(switches().length).toBe(12);
+    expect(switches().length).toBe(13);
     expect(switches().every((s) => s.disabled)).toBe(true);
     expect(sw("Change files").checked).toBe(true);
     expect(button("Duplicate")).toBeDefined();
@@ -238,6 +238,22 @@ describe("an agent's page", () => {
     expect(api.updateAgent).toHaveBeenCalledWith(
       "reviewer",
       { name: "Reviewer", summary: "", prompt: "Review it.", features: { ...NEW_FEATURES, commands: true, mcp: true } },
+      undefined,
+    );
+  });
+
+  test("earlier chats and memory search is its own switch, off for a new agent", async () => {
+    expect(NEW_FEATURES.recall).toBe(false);
+    api.agent.mockResolvedValue(detail(reviewer, { prompt: "Review it." }));
+    await show(admin, "reviewer");
+    expect(sw("Own memory").checked).toBe(true);
+    expect(sw("Earlier chats and memory search").checked).toBe(false);
+    act(() => sw("Earlier chats and memory search").click());
+    api.updateAgent.mockResolvedValue(detail(reviewer));
+    await act(async () => button("Save")!.click());
+    expect(api.updateAgent).toHaveBeenCalledWith(
+      "reviewer",
+      { name: "Reviewer", summary: "", prompt: "Review it.", features: { ...NEW_FEATURES, recall: true } },
       undefined,
     );
   });

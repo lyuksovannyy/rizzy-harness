@@ -58,98 +58,91 @@ pub const TURN: &str = "turn";
 pub enum SectionKey {
     Instructions,
     Skills,
-    /// The chat owner's own facts.
-    Memory,
-    /// The workspace's memory (private details, or a team's shared one).
-    Workspace,
-    /// What `remember` does in this chat.
-    Remember,
-    /// A project's brief.
-    Project,
-    /// A project's facts.
-    ProjectMemory,
-    /// A project's board.
-    Board,
+    /// The master's parts ([`StandingKey`]).
+    Master(StandingKey),
 }
 
 impl SectionKey {
-    pub const ALL: [SectionKey; 8] = [
-        SectionKey::Instructions,
-        SectionKey::Skills,
-        SectionKey::Memory,
-        SectionKey::Workspace,
-        SectionKey::Remember,
-        SectionKey::Project,
-        SectionKey::ProjectMemory,
-        SectionKey::Board,
-    ];
-
     pub fn as_str(self) -> &'static str {
         match self {
             SectionKey::Instructions => "instructions",
             SectionKey::Skills => "skills",
-            SectionKey::Memory => "memory",
-            SectionKey::Workspace => "workspace",
-            SectionKey::Remember => "remember",
-            SectionKey::Project => "project",
-            SectionKey::ProjectMemory => "project_memory",
-            SectionKey::Board => "board",
+            SectionKey::Master(k) => match k {
+                StandingKey::Memory => "memory",
+                StandingKey::MemoryRecall => "memory_recall",
+                StandingKey::Workspace => "workspace",
+                StandingKey::WorkspaceRecall => "workspace_recall",
+                StandingKey::Remember => "remember",
+                StandingKey::MemoryNotes => "memory_notes",
+                StandingKey::Project => "project",
+                StandingKey::ProjectMemory => "project_memory",
+                StandingKey::ProjectRecall => "project_recall",
+                StandingKey::EarlierChats => "earlier_chats",
+                StandingKey::Board => "board",
+            },
         }
     }
 
     pub fn parse(s: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|k| k.as_str() == s)
+        [SectionKey::Instructions, SectionKey::Skills]
+            .into_iter()
+            .chain(StandingKey::ALL.map(SectionKey::Master))
+            .find(|k| k.as_str() == s)
     }
 
-    fn of(k: StandingKey) -> Self {
-        match k {
-            StandingKey::Memory => SectionKey::Memory,
-            StandingKey::Workspace => SectionKey::Workspace,
-            StandingKey::Remember => SectionKey::Remember,
-            StandingKey::Project => SectionKey::Project,
-            StandingKey::ProjectMemory => SectionKey::ProjectMemory,
-            StandingKey::Board => SectionKey::Board,
-        }
-    }
-
-    /// What the section is, for the harness's sentences.
-    fn what(self) -> (&'static str, bool) {
+    /// What the section is, for the harness's sentences: `None` for one
+    /// that changes with the message (recall lines, notes, earlier chats),
+    /// which replaces or leaves its earlier copy without a sentence.
+    fn what(self) -> Option<(&'static str, bool)> {
         // (noun phrase, plural)
-        match self {
+        Some(match self {
             SectionKey::Instructions => ("The repository's instruction files", true),
             SectionKey::Skills => ("The list of skills", false),
-            SectionKey::Memory => ("What you remember about the person", false),
-            SectionKey::Workspace => ("The workspace's memory", false),
-            SectionKey::Remember => ("What `remember` does in this chat", false),
-            SectionKey::Project => ("The project's brief", false),
-            SectionKey::ProjectMemory => ("The project's facts", true),
-            SectionKey::Board => ("The project's board", false),
-        }
+            SectionKey::Master(k) => match k {
+                StandingKey::Memory => ("What you remember about the person", false),
+                StandingKey::Workspace => ("The workspace's memory", false),
+                StandingKey::Remember => ("What `remember` does in this chat", false),
+                StandingKey::Project => ("The project's brief", false),
+                StandingKey::ProjectMemory => ("The project's facts", true),
+                StandingKey::Board => ("The project's board", false),
+                StandingKey::MemoryRecall
+                | StandingKey::WorkspaceRecall
+                | StandingKey::MemoryNotes
+                | StandingKey::ProjectRecall
+                | StandingKey::EarlierChats => return None,
+            },
+        })
     }
 
     /// The harness's sentence for a section sent again because it changed.
-    fn replaced(self) -> String {
-        let (what, many) = self.what();
+    fn replaced(self) -> Option<String> {
+        let (what, many) = self.what()?;
         let (verb, one) = if many {
             ("replace", "ones")
         } else {
             ("replaces", "one")
         };
-        format!("{what} below {verb} the {one} sent earlier in this conversation.")
+        Some(format!(
+            "{what} below {verb} the {one} sent earlier in this conversation."
+        ))
     }
 
     /// The harness's sentence for a section sent earlier that is gone now.
-    fn withdrawn(self) -> String {
-        let (what, many) = self.what();
+    fn withdrawn(self) -> Option<String> {
+        let (what, many) = self.what()?;
         let verb = if many { "apply" } else { "applies" };
         let why = match self {
             SectionKey::Instructions => ": none were found for this turn",
             SectionKey::Skills => ": no skills are offered now",
-            SectionKey::Memory | SectionKey::Workspace => ": memory is not given now",
-            SectionKey::Remember => ": `remember` is not offered now",
-            SectionKey::Project | SectionKey::ProjectMemory | SectionKey::Board => "",
+            SectionKey::Master(StandingKey::Memory | StandingKey::Workspace) => {
+                ": memory is not given now"
+            }
+            SectionKey::Master(StandingKey::Remember) => ": `remember` is not offered now",
+            SectionKey::Master(_) => "",
         };
-        format!("{what} sent earlier in this conversation no longer {verb}{why}.")
+        Some(format!(
+            "{what} sent earlier in this conversation no longer {verb}{why}."
+        ))
     }
 }
 
@@ -200,9 +193,13 @@ impl Sections {
                 prep(parts.iter().find(|p| p.part == k).map(|p| p.text.as_str()))
             });
             standing.push(Standing {
-                key: SectionKey::of(k),
+                key: SectionKey::Master(k),
                 text,
-                known: extra.standing.is_some(),
+                // A turn the master gave no context (a callback turn, one
+                // that reads queued messages without theirs) keeps the
+                // brief and the board and reads no memory: what memory the
+                // earlier openings hold is withdrawn (review F2).
+                known: extra.standing.is_some() || k.is_memory(),
             });
         }
         // The master's own line last: a routine's untrusted note is what
@@ -415,23 +412,32 @@ pub fn plan(
                     key: s.key.as_str().into(),
                     digest: d,
                     text: t.clone(),
-                    note: before.map(|_| s.key.replaced()),
+                    note: before.and_then(|_| s.key.replaced()),
                 });
             }
             None if s.known && before.is_some() => out.push(SentSection {
                 key: s.key.as_str().into(),
                 digest: String::new(),
                 text: String::new(),
-                note: Some(s.key.withdrawn()),
+                note: s.key.withdrawn(),
             }),
             None => {}
         }
     }
-    out.extend(sections.per_turn.iter().map(|t| SentSection {
-        key: TURN.into(),
-        digest: String::new(),
-        text: t.clone(),
-        note: None,
+    // After a callback turn's opening the block's lines are the files and
+    // the skills; this turn's own lines (a read that failed) go into its
+    // first line as notes (review N2).
+    out.extend(sections.per_turn.iter().map(|t| {
+        let (text, note) = match frame {
+            ContextFrame::Callback => (String::new(), Some(t.clone())),
+            _ => (t.clone(), None),
+        };
+        SentSection {
+            key: TURN.into(),
+            digest: String::new(),
+            text,
+            note,
+        }
     }));
     (!out.is_empty()).then_some(Plan {
         frame,

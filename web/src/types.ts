@@ -321,7 +321,7 @@ export interface SessionView {
   chat_allows?: Record<string, ChatAllow>;
 }
 
-export type RetryReason = "rate_limit" | "overloaded" | "server_error" | "network";
+export type RetryReason = "rate_limit" | "overloaded" | "server_error" | "network" | "no_answer";
 
 export interface ModelRetry {
   turn_id: string;
@@ -368,6 +368,12 @@ export interface TurnDiff {
   cut?: boolean;
   /** Nested git repositories, whose files are not compared. */
   nested?: string[];
+  /** Files another chat in the folder changed during the turn (its edit
+   * tools, its undo): an undo asks first (PLAN.md T57). Nothing about it. */
+  others_wrote?: string[];
+  /** Files another chat may have changed during the turn (its commands, a
+   * background command, a chat deleted since), not in `others_wrote`. */
+  others_may?: string[];
 }
 
 export type DiffStatus = "added" | "deleted" | "modified" | "renamed" | "type_changed";
@@ -450,6 +456,8 @@ export interface AgentFeatures {
   memory: boolean;
   /** In a project's chats, the project's facts the same way (docs/projects.md). */
   project_memory: boolean;
+  /** `recall`: searches your own earlier chats and memory; its own switch. */
+  recall: boolean;
   web: boolean;
   read_files: boolean;
   edit_files: boolean;
