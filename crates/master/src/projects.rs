@@ -531,12 +531,23 @@ fn board_line(
 }
 
 /// What a turn in a chat of project `p` gets after the history (never in
-/// the system prompt; PLAN.md "Token savings"): the project's name and
-/// instructions, its facts (`facts_block`, when `allowed.project`), and
-/// the open cards; on the chat's first turn, its owner's earlier chats in
-/// the project (`earlier_chats`, when `allowed.project`). `remember` says
-/// whether the turn may propose project facts (it has the tool);
-/// `allowed.personal` whether personal ones too.
+/// the system prompt; PLAN.md "Token savings"), by part (X.1, review R4):
+/// the project's name, instructions and what `remember` does there
+/// (`brief`), its facts (`facts`, when `allowed.project`) and the open cards
+/// (`board`) are standing sections of the turn's context block, each sent
+/// again only when it changes; the recall lines past the facts' cap and,
+/// on the chat's first turn, its owner's earlier chats in the project
+/// (`earlier_chats`, when `allowed.project`) are this message's alone
+/// (`turn`). `remember` says whether the turn may propose project facts
+/// (it has the tool); `allowed.personal` whether personal ones too.
+#[derive(Debug, Default)]
+pub struct ProjectContext {
+    pub brief: String,
+    pub facts: Option<String>,
+    pub board: Option<String>,
+    pub turn: Option<String>,
+}
+
 pub async fn turn_context(
     m: &Master,
     p: &ProjectRow,
@@ -544,7 +555,8 @@ pub async fn turn_context(
     text: &str,
     allowed: TurnMemory,
     remember: bool,
-) -> String {
+) -> ProjectContext {
+    let mut out = ProjectContext::default();
     let mut s = format!("Project \"{}\"", p.name);
     if !p.description.is_empty() {
         s.push_str(" — ");
@@ -558,25 +570,6 @@ pub async fn turn_context(
         s.push_str("\n\nProject instructions:\n");
         s.push_str(&p.instructions);
     }
-    if let Some(mem) = m.memory().filter(|_| allowed.project)
-        && let Some(block) = facts_block(&*mem, &memory_owner(&p.project_id), text).await
-    {
-        s.push_str("\n\n");
-        s.push_str(&block);
-    }
-    let pid = p.project_id.clone();
-    if let Ok((cols, cards)) = m.inner.mirror.call(move |s| s.board(&pid)).await
-        && let Some(line) = board_line(&cols, &cards)
-    {
-        s.push_str("\n\n");
-        s.push_str(&line);
-    }
-    if allowed.project
-        && let Some(block) = earlier_chats(m, p, chat).await
-    {
-        s.push_str("\n\n");
-        s.push_str(&block);
-    }
     if remember {
         s.push_str(
             "\n\nTo keep a lasting decision or fact about this project, call `remember` with \
@@ -587,7 +580,25 @@ pub async fn turn_context(
             s.push_str(" Personal memory is off in this chat: use no other scope.");
         }
     }
-    s
+    out.brief = s;
+    let mut turn: Vec<String> = Vec::new();
+    if let Some(mem) = m.memory().filter(|_| allowed.project)
+        && let Some((list, tail)) = facts_block(&*mem, &memory_owner(&p.project_id), text).await
+    {
+        out.facts = Some(list);
+        turn.extend(tail);
+    }
+    let pid = p.project_id.clone();
+    if let Ok((cols, cards)) = m.inner.mirror.call(move |s| s.board(&pid)).await {
+        out.board = board_line(&cols, &cards);
+    }
+    if allowed.project
+        && let Some(block) = earlier_chats(m, p, chat).await
+    {
+        turn.push(block);
+    }
+    out.turn = (!turn.is_empty()).then(|| turn.join("\n\n"));
+    out
 }
 
 /// The owner's earlier chats in project `p`, for the first turn of `chat`
@@ -675,7 +686,7 @@ async fn facts_block(
     mem: &dyn harness_memory::MemoryStore,
     owner: &str,
     text: &str,
-) -> Option<String> {
+) -> Option<(String, Option<String>)> {
     let active: Vec<harness_memory::Fact> = match mem.list(Some(owner)).await {
         Ok(all) => all
             .into_iter()
@@ -698,16 +709,20 @@ async fn facts_block(
         })
         .unwrap_or(active.len());
     let (newest, older) = active.split_at(fit);
-    let mut s = String::from(
+    let mut s = format!(
         "What this project has established (confirmed, newest first; may be outdated; each line \
-         starts with the fact's id):",
+         starts with the fact's id). {}",
+        crate::memory::IDS_ARE_FOR_REMEMBER
     );
     for f in newest {
         s.push_str(&crate::memory::rendered(f));
     }
     if older.is_empty() {
-        return Some(s);
+        return Some((s, None));
     }
+    // Past the cap: this message's recall, sent with this turn only.
+    let list = s;
+    let mut s = String::new();
     let recalled: Vec<harness_memory::Fact> = if text.trim().is_empty() {
         Vec::new()
     } else {
@@ -727,19 +742,22 @@ async fn facts_block(
         }
     };
     if !recalled.is_empty() {
-        s.push_str("\nOlder ones that match this message:");
+        s.push_str("Older project facts that match this message:");
         for f in &recalled {
             s.push_str(&crate::memory::rendered(f));
         }
     }
+    let gap = if s.is_empty() { "" } else { "\n" };
     match older.len().saturating_sub(recalled.len()) {
         0 => {}
-        1 => s.push_str("\n(1 older fact not shown; ask the person if one may matter.)"),
+        1 => s.push_str(&format!(
+            "{gap}(1 older project fact not shown; ask the person if one may matter.)"
+        )),
         n => s.push_str(&format!(
-            "\n({n} older facts not shown; ask the person if one may matter.)"
+            "{gap}({n} older project facts not shown; ask the person if one may matter.)"
         )),
     }
-    Some(s)
+    Some((list, (!s.is_empty()).then_some(s)))
 }
 
 #[cfg(test)]

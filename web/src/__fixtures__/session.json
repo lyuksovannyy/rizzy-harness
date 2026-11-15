@@ -963,11 +963,28 @@
       "ts_ms": 1700000000065
     },
     {
+      "kind": "context_sent",
+      "payload": {
+        "frame": "person",
+        "sections": [
+          {
+            "digest": "ab12",
+            "key": "instructions",
+            "text": "Run cargo fmt."
+          }
+        ],
+        "turn_id": "t6"
+      },
+      "seq": 67,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000066
+    },
+    {
       "kind": "from_a_newer_node",
       "payload": {
         "anything": true
       },
-      "seq": 67,
+      "seq": 68,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
       "ts_ms": 0
     }
@@ -1007,7 +1024,7 @@
     "context_model": "openai::gpt-4o",
     "context_tokens": 800,
     "context_window": 128000,
-    "head_seq": 67,
+    "head_seq": 68,
     "items": [
       {
         "text": "fix the bug",

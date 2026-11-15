@@ -1940,11 +1940,18 @@ impl Master {
         if allowed.personal || allowed.workspace {
             let offers = agent.allows_tool("remember")
                 && self.node_has(&row.node_id, harness_protocol::CAP_REMEMBER);
-            let (block, calls) = memory::turn_block(self, &row, &text, allowed, offers).await;
-            standing.extend(block.map(|text| harness_core::backend::StandingPart {
-                part: harness_core::backend::StandingKey::Memory,
-                text,
-            }));
+            let block = memory::turn_block(self, &row, &text, allowed, offers).await;
+            use harness_core::backend::StandingKey as K;
+            for (part, text) in [
+                (K::Memory, block.own),
+                (K::Workspace, block.workspace),
+                (K::Remember, block.about),
+            ] {
+                standing
+                    .extend(text.map(|text| harness_core::backend::StandingPart { part, text }));
+            }
+            turn_context.extend(block.turn);
+            let calls = block.calls;
             noted = calls;
         }
         // A callback turn's opening is rebuilt from the log alone on every
@@ -1953,10 +1960,17 @@ impl Master {
             let remember = allowed.project
                 && agent.allows_tool("remember")
                 && self.node_has(&row.node_id, harness_protocol::CAP_REMEMBER);
-            standing.push(harness_core::backend::StandingPart {
-                part: harness_core::backend::StandingKey::Project,
-                text: projects::turn_context(self, p, &row, &text, allowed, remember).await,
-            });
+            let ctx = projects::turn_context(self, p, &row, &text, allowed, remember).await;
+            use harness_core::backend::StandingKey as K;
+            for (part, text) in [
+                (K::Project, Some(ctx.brief)),
+                (K::ProjectMemory, ctx.facts),
+                (K::Board, ctx.board),
+            ] {
+                standing
+                    .extend(text.map(|text| harness_core::backend::StandingPart { part, text }));
+            }
+            turn_context.extend(ctx.turn);
         }
         // Last, so it is what the model reads right before answering.
         if untrusted {

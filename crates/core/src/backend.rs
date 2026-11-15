@@ -313,14 +313,37 @@ pub struct StandingPart {
     pub text: String,
 }
 
-/// Which standing part: each is its own section of the context block.
+/// Which standing part: each is its own section of the context block,
+/// sent again only when it changes (X.1, review R4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StandingKey {
-    /// What the model remembers about the chat's owner (`memory::turn_block`).
+    /// The chat owner's own facts (`memory::turn_block`).
     Memory,
-    /// A project chat's brief, facts and board (`projects::turn_context`).
+    /// The workspace's memory: a Personal workspace's private details, a
+    /// team's shared memory.
+    Workspace,
+    /// What `remember` does in this chat.
+    Remember,
+    /// A project chat's brief: name, instructions, what `remember` does
+    /// there (`projects::turn_context`).
     Project,
+    /// The project's facts.
+    ProjectMemory,
+    /// The project's open cards.
+    Board,
+}
+
+impl StandingKey {
+    /// Every key, in the order the block sends them.
+    pub const ALL: [StandingKey; 6] = [
+        StandingKey::Memory,
+        StandingKey::Workspace,
+        StandingKey::Remember,
+        StandingKey::Project,
+        StandingKey::ProjectMemory,
+        StandingKey::Board,
+    ];
 }
 
 /// How the node's environment line ([`TurnExtra::environment`]) begins.

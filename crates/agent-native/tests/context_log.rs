@@ -1253,3 +1253,120 @@ fn the_rendered_block_is_capped() {
     assert!(b.ends_with("bytes of context with one message]"));
     assert_eq!(context::render(ContextFrame::Person, &sections).unwrap(), b);
 }
+
+/// Review R4: the counter of saved memory and the notes on earlier calls
+/// are this turn's; a `remember` that changes the counter leaves the fact
+/// lists, unchanged, where they were sent.
+#[tokio::test]
+async fn a_new_counter_does_not_send_the_lists_again() {
+    let p = script(0);
+    let sid = SessionId::new();
+    let mut log = Vec::new();
+    let with = |used: u32, minute: u32| {
+        let mut ex = extra(None, minute);
+        ex.standing = Some(vec![
+            StandingPart {
+                part: StandingKey::Memory,
+                text: "What you remember about the user:\n- [a] likes tea".into(),
+            },
+            StandingPart {
+                part: StandingKey::Workspace,
+                text: "This workspace's shared memory:\n- [w] deploys on Fridays".into(),
+            },
+        ]);
+        ex.context = Some(format!(
+            "[harness] Memory the assistant saved for this person: {used} of 3000 characters."
+        ));
+        ex
+    };
+    turn(
+        &p,
+        NativeConfig::default(),
+        &mut log,
+        sid,
+        "t1",
+        "one",
+        with(10, 1),
+    )
+    .await;
+    let (r2, c2) = turn(
+        &p,
+        NativeConfig::default(),
+        &mut log,
+        sid,
+        "t2",
+        "two",
+        with(40, 2),
+    )
+    .await;
+    let o2 = opening(&r2[0]);
+    assert!(o2.contains("40 of 3000"), "{o2}");
+    assert!(
+        !o2.contains("likes tea") && !o2.contains("deploys on Fridays"),
+        "{o2}"
+    );
+    assert!(standing(&c2[0]).is_empty());
+}
+
+/// Review R4: a colleague's change to the team's shared memory sends that
+/// one section again, once; the person's own facts stay where they were.
+#[tokio::test]
+async fn a_colleagues_change_sends_the_shared_memory_once() {
+    let p = script(0);
+    let sid = SessionId::new();
+    let mut log = Vec::new();
+    let with = |shared: &str, minute: u32| {
+        let mut ex = extra(Some(agents_md()), minute);
+        ex.standing = Some(vec![
+            StandingPart {
+                part: StandingKey::Memory,
+                text: "What you remember about the user:\n- [a] likes tea".into(),
+            },
+            StandingPart {
+                part: StandingKey::Workspace,
+                text: format!("This workspace's shared memory:\n{shared}"),
+            },
+        ]);
+        ex
+    };
+    turn(
+        &p,
+        NativeConfig::default(),
+        &mut log,
+        sid,
+        "t1",
+        "one",
+        with("- [w] deploys on Fridays", 1),
+    )
+    .await;
+    let changed = "- [w2] deploys on Thursdays";
+    let (r2, c2) = turn(
+        &p,
+        NativeConfig::default(),
+        &mut log,
+        sid,
+        "t2",
+        "two",
+        with(changed, 2),
+    )
+    .await;
+    assert_eq!(standing(&c2[0]), ["workspace"]);
+    let all = bytes(&r2[0]);
+    assert!(!all.contains("deploys on Fridays"), "old version gone");
+    assert_eq!(all.matches("deploys on Thursdays").count(), 1);
+    assert_eq!(all.matches("likes tea").count(), 1);
+    assert!(opening(&r2[0]).contains("The workspace's memory below replaces"));
+    let (r3, c3) = turn(
+        &p,
+        NativeConfig::default(),
+        &mut log,
+        sid,
+        "t3",
+        "three",
+        with(changed, 3),
+    )
+    .await;
+    assert!(standing(&c3[0]).is_empty());
+    let last = r2.last().unwrap();
+    assert_eq!(r3[0].messages[..last.messages.len()], last.messages[..]);
+}

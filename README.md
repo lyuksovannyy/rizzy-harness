@@ -2037,7 +2037,12 @@ is recorded with the turn (never shown in the chat), so every later message
 resends that message exactly as it was and the provider reads the whole
 conversation up to the last tool result from its cache (Anthropic bills those
 re-reads at a tenth). What has not changed since it was last sent is not sent
-again: the model has it earlier in the conversation. A changed part is sent in
+again: the model has it earlier in the conversation. Each part counts on its
+own: your facts, the workspace's memory, the project's brief, its facts and its
+board, so a moved card sends the board alone and a colleague's change to the
+team's memory sends that memory alone. What belongs to one message (older facts
+that match it, the count of saved memory, notes on earlier saves, a project
+chat's earlier chats on its first message) goes with that message only. A changed part is sent in
 full with a line saying it replaces the earlier one; a part that is gone (memory
 switched off, the files deleted) gets a line saying it no longer applies, and
 earlier messages are then resent without their copy: an agent whose memory is

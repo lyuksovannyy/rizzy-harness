@@ -412,10 +412,44 @@ async fn above_the_cap_the_newest_that_fit_and_recalled_ones() {
     );
     // The model is told the list is not complete.
     assert!(
-        ctx.contains("(3 older facts not shown; ask the person if one may matter.)"),
+        ctx.contains("(3 older project facts not shown; ask the person if one may matter.)"),
         "{ctx}"
     );
     assert!(!ctx.contains("Memory tab"), "{ctx}");
+}
+
+/// Review R4: past the cap the recall lines are this message's alone; the
+/// fact list is a standing section, sent once. A second message that
+/// recalls another older fact sends that recall without the list again.
+#[tokio::test]
+async fn past_the_cap_new_recall_goes_without_the_list_again() {
+    let s = start(Offer::Yes).await;
+    let pid = project(&s).await;
+    let filler = "alpha bravo charlie delta echo foxtrot golf hotel ".repeat(9);
+    for i in 1..=12 {
+        let extra = match i {
+            1 => "zeppelin ",
+            2 => "submarine ",
+            _ => "",
+        };
+        fact(&s, &pid, format!("Fact {i:02} {extra}{filler}").trim()).await;
+    }
+    let sid = coding_chat(&s, Some(&pid)).await;
+    say(&s, &sid, "what about the zeppelin?").await;
+    let first = last_context(&s);
+    assert!(
+        first.contains("Fact 12 ") && first.contains("Fact 01 zeppelin"),
+        "{first}"
+    );
+    say(&s, &sid, "and the submarine?").await;
+    let second = last_context(&s);
+    assert!(second.contains("Fact 02 submarine"), "recalled: {second}");
+    assert!(!second.contains("Fact 12 "), "the list again: {second}");
+    assert!(
+        !second.contains("What this project has established"),
+        "{second}"
+    );
+    assert!(second.contains("older project facts not shown"), "{second}");
 }
 
 #[tokio::test]

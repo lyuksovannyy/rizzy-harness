@@ -58,79 +58,98 @@ pub const TURN: &str = "turn";
 pub enum SectionKey {
     Instructions,
     Skills,
+    /// The chat owner's own facts.
     Memory,
+    /// The workspace's memory (private details, or a team's shared one).
+    Workspace,
+    /// What `remember` does in this chat.
+    Remember,
+    /// A project's brief.
     Project,
+    /// A project's facts.
+    ProjectMemory,
+    /// A project's board.
+    Board,
 }
 
 impl SectionKey {
+    pub const ALL: [SectionKey; 8] = [
+        SectionKey::Instructions,
+        SectionKey::Skills,
+        SectionKey::Memory,
+        SectionKey::Workspace,
+        SectionKey::Remember,
+        SectionKey::Project,
+        SectionKey::ProjectMemory,
+        SectionKey::Board,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             SectionKey::Instructions => "instructions",
             SectionKey::Skills => "skills",
             SectionKey::Memory => "memory",
+            SectionKey::Workspace => "workspace",
+            SectionKey::Remember => "remember",
             SectionKey::Project => "project",
+            SectionKey::ProjectMemory => "project_memory",
+            SectionKey::Board => "board",
         }
     }
 
     pub fn parse(s: &str) -> Option<Self> {
-        [
-            SectionKey::Instructions,
-            SectionKey::Skills,
-            SectionKey::Memory,
-            SectionKey::Project,
-        ]
-        .into_iter()
-        .find(|k| k.as_str() == s)
+        Self::ALL.into_iter().find(|k| k.as_str() == s)
     }
 
     fn of(k: StandingKey) -> Self {
         match k {
             StandingKey::Memory => SectionKey::Memory,
+            StandingKey::Workspace => SectionKey::Workspace,
+            StandingKey::Remember => SectionKey::Remember,
             StandingKey::Project => SectionKey::Project,
+            StandingKey::ProjectMemory => SectionKey::ProjectMemory,
+            StandingKey::Board => SectionKey::Board,
+        }
+    }
+
+    /// What the section is, for the harness's sentences.
+    fn what(self) -> (&'static str, bool) {
+        // (noun phrase, plural)
+        match self {
+            SectionKey::Instructions => ("The repository's instruction files", true),
+            SectionKey::Skills => ("The list of skills", false),
+            SectionKey::Memory => ("What you remember about the person", false),
+            SectionKey::Workspace => ("The workspace's memory", false),
+            SectionKey::Remember => ("What `remember` does in this chat", false),
+            SectionKey::Project => ("The project's brief", false),
+            SectionKey::ProjectMemory => ("The project's facts", true),
+            SectionKey::Board => ("The project's board", false),
         }
     }
 
     /// The harness's sentence for a section sent again because it changed.
-    fn replaced(self) -> &'static str {
-        match self {
-            SectionKey::Instructions => {
-                "The repository's instruction files below replace the ones sent earlier in this \
-                 conversation."
-            }
-            SectionKey::Skills => {
-                "The list of skills below replaces the one sent earlier in this conversation."
-            }
-            SectionKey::Memory => {
-                "What you remember about the person, below, replaces what was sent of it earlier \
-                 in this conversation."
-            }
-            SectionKey::Project => {
-                "The project's brief, facts and board below replace the ones sent earlier in \
-                 this conversation."
-            }
-        }
+    fn replaced(self) -> String {
+        let (what, many) = self.what();
+        let (verb, one) = if many {
+            ("replace", "ones")
+        } else {
+            ("replaces", "one")
+        };
+        format!("{what} below {verb} the {one} sent earlier in this conversation.")
     }
 
     /// The harness's sentence for a section sent earlier that is gone now.
-    fn withdrawn(self) -> &'static str {
-        match self {
-            SectionKey::Instructions => {
-                "The repository's instruction files sent earlier in this conversation no longer \
-                 apply: none were found for this turn."
-            }
-            SectionKey::Skills => {
-                "The list of skills sent earlier in this conversation no longer applies: no \
-                 skills are offered now."
-            }
-            SectionKey::Memory => {
-                "What was sent earlier in this conversation of what you remember about the \
-                 person no longer applies: memory is not given now."
-            }
-            SectionKey::Project => {
-                "The project's brief, facts and board sent earlier in this conversation no \
-                 longer apply."
-            }
-        }
+    fn withdrawn(self) -> String {
+        let (what, many) = self.what();
+        let verb = if many { "apply" } else { "applies" };
+        let why = match self {
+            SectionKey::Instructions => ": none were found for this turn",
+            SectionKey::Skills => ": no skills are offered now",
+            SectionKey::Memory | SectionKey::Workspace => ": memory is not given now",
+            SectionKey::Remember => ": `remember` is not offered now",
+            SectionKey::Project | SectionKey::ProjectMemory | SectionKey::Board => "",
+        };
+        format!("{what} sent earlier in this conversation no longer {verb}{why}.")
     }
 }
 
@@ -175,7 +194,7 @@ impl Sections {
                 ..read(&extra.skills_list, &extra.skills_unread)
             },
         ];
-        for k in [StandingKey::Memory, StandingKey::Project] {
+        for k in StandingKey::ALL {
             let text = extra.standing.as_ref().and_then(|parts| {
                 // One of each; a second of a kind would be a master's bug.
                 prep(parts.iter().find(|p| p.part == k).map(|p| p.text.as_str()))
@@ -396,14 +415,14 @@ pub fn plan(
                     key: s.key.as_str().into(),
                     digest: d,
                     text: t.clone(),
-                    note: before.map(|_| s.key.replaced().to_string()),
+                    note: before.map(|_| s.key.replaced()),
                 });
             }
             None if s.known && before.is_some() => out.push(SentSection {
                 key: s.key.as_str().into(),
                 digest: String::new(),
                 text: String::new(),
-                note: Some(s.key.withdrawn().to_string()),
+                note: Some(s.key.withdrawn()),
             }),
             None => {}
         }
