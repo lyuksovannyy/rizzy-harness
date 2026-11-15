@@ -42,7 +42,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-const ALL: AgentFeatures = { ...NEW_FEATURES, read_files: true, edit_files: true, commands: true };
+const ALL: AgentFeatures = { ...NEW_FEATURES, read_files: true, edit_files: true, commands: true, mcp: true };
 const agent = (id: string, more: Partial<Agent> = {}): Agent => ({
   id,
   name: id[0]!.toUpperCase() + id.slice(1),
@@ -175,7 +175,7 @@ describe("an agent's page", () => {
     expect(api.agent).toHaveBeenCalledWith("coder", undefined);
     expect(host.querySelector("h1")!.textContent).toBe("Coder");
     expect(host.querySelector("pre.agent-prompt")!.textContent).toBe("You are careful.");
-    expect(switches().length).toBe(11);
+    expect(switches().length).toBe(12);
     expect(switches().every((s) => s.disabled)).toBe(true);
     expect(sw("Change files").checked).toBe(true);
     expect(button("Duplicate")).toBeDefined();
@@ -219,6 +219,27 @@ describe("an agent's page", () => {
     api.deleteAgent.mockResolvedValue({ ok: true });
     await act(async () => button("Delete Reviewer")!.click());
     expect(onOpen).toHaveBeenCalledWith(null);
+  });
+
+  test("MCP servers is its own switch: off for a new agent, saved when turned on", async () => {
+    expect(NEW_FEATURES.mcp).toBe(false);
+    api.agent.mockResolvedValue(detail(coder));
+    await show(admin, "coder");
+    // A built-in shows its own, read off the definition, and keeps it.
+    expect(sw("MCP servers").checked).toBe(true);
+    expect(sw("MCP servers").disabled).toBe(true);
+    api.agent.mockResolvedValue(detail(reviewer, { prompt: "Review it.", features: { ...NEW_FEATURES, commands: true } }));
+    await show(admin, "reviewer");
+    expect(sw("Run commands").checked).toBe(true);
+    expect(sw("MCP servers").checked).toBe(false);
+    act(() => sw("MCP servers").click());
+    api.updateAgent.mockResolvedValue(detail(reviewer));
+    await act(async () => button("Save")!.click());
+    expect(api.updateAgent).toHaveBeenCalledWith(
+      "reviewer",
+      { name: "Reviewer", summary: "", prompt: "Review it.", features: { ...NEW_FEATURES, commands: true, mcp: true } },
+      undefined,
+    );
   });
 
   test("read-only without permission", async () => {

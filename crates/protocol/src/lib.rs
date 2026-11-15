@@ -46,6 +46,113 @@ pub const CAP_BACKGROUND: &str = "background";
 /// The master resumes chats only on nodes whose hello listed it.
 pub const CAP_CALLBACK: &str = "callback";
 
+/// The node capability that announces `session.diff` (X.12, PLAN.md T53).
+/// The master asks for a turn's changes only on nodes whose hello listed it.
+pub const CAP_DIFF: &str = "diff";
+
+/// The largest serialized `session.diff_result` a node sends: a quarter of
+/// the link's frame, so one answer holds the node's ordered output back by
+/// a few seconds at most on a slow link. The node cuts what does not fit
+/// and says so (`TurnDiff::cut`).
+pub const MAX_DIFF_JSON: usize = 2 * 1024 * 1024;
+
+/// What one turn changed in its session's folder, computed by the owning
+/// node from the turn's two checkpoints (X.12). A view, never an event:
+/// nothing of it is logged or stored, on the node or the master.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnDiff {
+    /// The changed files, in git's order (by path).
+    pub files: Vec<DiffFile>,
+    /// Changed files past the listed ones (not named, only counted).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub more_files: u64,
+    /// Something was left out to keep the answer small: a file's lines, or
+    /// whole files' lines past the total budget. Each such file says so.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cut: bool,
+    /// Git repositories nested in the folder, which no checkpoint holds:
+    /// their files are not compared (docs/undo-and-stash.md §2.6).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nested: Vec<String>,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
+/// How a file changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffStatus {
+    Added,
+    Deleted,
+    Modified,
+    /// Moved (`old_path` says from where), maybe also changed.
+    Renamed,
+    /// A file became a link, or the other way round.
+    TypeChanged,
+}
+
+/// What the answer holds of a file's content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffContent {
+    /// Line changes in `hunks` (none for a pure rename or a mode change).
+    Text,
+    /// Git found binary content: only the sizes are given.
+    Binary,
+    /// A side is larger than the node compares line by line.
+    TooLarge,
+    /// Left out: the answer's budget was spent on the files before it.
+    Omitted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffFile {
+    /// Relative to the checkpoint's folder (lossy UTF-8; hidden characters
+    /// are the viewer's to mark).
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_path: Option<String>,
+    pub status: DiffStatus,
+    pub content: DiffContent,
+    /// Git's modes (`100644`, `100755`, `120000` for a link); absent on the
+    /// side that does not exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old_size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_size: Option<u64>,
+    /// Lines added and removed in the hunks given.
+    #[serde(default)]
+    pub added: u32,
+    #[serde(default)]
+    pub removed: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hunks: Vec<DiffHunk>,
+    /// Some of this file's lines, or of one long line, were cut.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cut: bool,
+}
+
+/// One hunk of a unified diff with three lines of context.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffHunk {
+    pub old_start: u32,
+    pub old_lines: u32,
+    pub new_start: u32,
+    pub new_lines: u32,
+    /// The text after the second `@@` (the function git found), if any.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub section: String,
+    /// Each line with its mark first: ` ` context, `+` added, `-` removed,
+    /// `\` "no newline at end of file" for the line before it.
+    pub lines: Vec<String>,
+}
+
 /// The node capability that says it offers `remember` to its sessions
 /// (registered there and not in its `denied_tools`). The tool runs nothing
 /// on the node; the master files a mirrored call as a proposal only from a
@@ -236,6 +343,17 @@ pub enum NodeToMaster {
         #[serde(default)]
         data: String,
         eof: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    /// The answer to `session.diff` (pull only: never sent unasked): the
+    /// turn's changes, or why there are none to show, in words for the
+    /// person. At most `MAX_DIFF_JSON` serialized.
+    #[serde(rename = "session.diff_result")]
+    DiffResult {
+        req_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diff: Option<Box<TurnDiff>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
@@ -450,6 +568,19 @@ pub enum MasterToNode {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
     },
+    /// What one turn changed (X.12): read from the turn's checkpoints,
+    /// answered by one `session.diff_result`, never by an ack, handled
+    /// outside the node's command loop, and nothing is logged. `rewind`:
+    /// this turn and every later one (before this turn against the latest
+    /// state, what a rewind would undo). Only to nodes with `CAP_DIFF`.
+    #[serde(rename = "session.diff")]
+    Diff {
+        req_id: String,
+        session_id: SessionId,
+        turn_id: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        rewind: bool,
+    },
 }
 
 impl MasterToNode {
@@ -472,7 +603,8 @@ impl MasterToNode {
             // A fetch is answered by its chunk, never acked.
             MasterToNode::Welcome { .. }
             | MasterToNode::Resume { .. }
-            | MasterToNode::ArtifactFetch { .. } => None,
+            | MasterToNode::ArtifactFetch { .. }
+            | MasterToNode::Diff { .. } => None,
         }
     }
 }
@@ -596,6 +728,62 @@ mod tests {
             matches!(busy, NodeToMaster::ArtifactChunk { data, error: Some(e), .. }
             if data.is_empty() && e == "busy")
         );
+    }
+
+    /// X.12: `session.diff` is answered by its result, never acked; the
+    /// result carries the diff or the node's words.
+    #[test]
+    fn diff_messages_wire_shapes() {
+        let sid: SessionId = "0193f2a0-0000-7000-8000-000000000001".parse().unwrap();
+        let ask = MasterToNode::Diff {
+            req_id: "r".into(),
+            session_id: sid,
+            turn_id: "t1".into(),
+            rewind: false,
+        };
+        assert_eq!(ask.req_id(), None);
+        let v = serde_json::to_value(&ask).unwrap();
+        assert_eq!(
+            v,
+            json!({"type": "session.diff", "req_id": "r",
+                   "session_id": "0193f2a0-0000-7000-8000-000000000001", "turn_id": "t1"})
+        );
+        assert_eq!(serde_json::from_value::<MasterToNode>(v).unwrap(), ask);
+        let diff = TurnDiff {
+            files: vec![DiffFile {
+                path: "a.txt".into(),
+                old_path: None,
+                status: DiffStatus::Modified,
+                content: DiffContent::Text,
+                old_mode: Some("100644".into()),
+                new_mode: Some("100644".into()),
+                old_size: Some(4),
+                new_size: Some(8),
+                added: 1,
+                removed: 0,
+                hunks: vec![DiffHunk {
+                    old_start: 1,
+                    old_lines: 1,
+                    new_start: 1,
+                    new_lines: 2,
+                    section: String::new(),
+                    lines: vec![" one".into(), "+two".into()],
+                }],
+                cut: false,
+            }],
+            ..Default::default()
+        };
+        let ans = NodeToMaster::DiffResult {
+            req_id: "r".into(),
+            diff: Some(Box::new(diff)),
+            error: None,
+        };
+        let v = serde_json::to_value(&ans).unwrap();
+        assert_eq!(v["type"], "session.diff_result");
+        assert_eq!(v["diff"]["files"][0]["status"], "modified");
+        assert_eq!(v["diff"]["files"][0]["hunks"][0]["lines"][1], "+two");
+        assert!(v["diff"].get("cut").is_none(), "{v}");
+        assert_eq!(serde_json::from_value::<NodeToMaster>(v).unwrap(), ans);
     }
 
     #[test]

@@ -16,6 +16,7 @@ mod agent_edits;
 mod approval_mode;
 mod artifacts;
 mod background;
+mod diff;
 mod hooks;
 mod levels;
 mod links;
@@ -209,6 +210,7 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
         .merge(media::routes())
         .merge(artifacts::routes())
         .merge(background::routes())
+        .merge(diff::routes())
         .merge(approval_mode::routes())
         .merge(step_limit::routes())
         .merge(storage::routes())

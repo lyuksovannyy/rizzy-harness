@@ -215,6 +215,11 @@ pub struct Features {
     pub edit_files: bool,
     /// Run shell commands.
     pub commands: bool,
+    /// The tools of the MCP servers the node runs for the chat (X.3). Its
+    /// own switch: commands do not bring it. Off when absent, so a page
+    /// agent saved before the switch has no MCP tools until it is turned on.
+    #[serde(default)]
+    pub mcp: bool,
     /// Hand sub-tasks to the agents available as sub-agents.
     pub delegate: bool,
     /// In the agent picker and `@mentions`.
@@ -233,8 +238,7 @@ impl Features {
             (self.read_files, READ_TOOLS),
             (self.edit_files, EDIT_TOOLS),
             (self.commands, COMMAND_TOOLS),
-            // MCP servers' tools run programs too (X.3): with commands.
-            (self.commands, &[harness_core::agent::MCP_ALL][..]),
+            (self.mcp, &[harness_core::agent::MCP_ALL][..]),
             (
                 self.edit_files || self.commands,
                 &[PUBLISH_TOOL, TODO_TOOL][..],
@@ -421,6 +425,7 @@ fn build(id: &str, fm: Frontmatter, body: &str, origin: Origin) -> Result<Agent,
         read_files: any(READ_TOOLS),
         edit_files: any(EDIT_TOOLS),
         commands: any(COMMAND_TOOLS),
+        mcp: mcp_listed(&fm.tools),
         delegate: !fm.delegates.is_empty(),
         as_agent: fm.available_as.contains(&Use::Agent),
         as_subagent: fm.available_as.contains(&Use::Subagent),
@@ -538,6 +543,17 @@ pub(crate) fn settle(agents: &mut [Agent]) -> Vec<AgentError> {
             .collect();
     }
     errors
+}
+
+/// Whether a tool list asks for MCP tools: `all`, `mcp`, or one by name
+/// (what [`AgentSpec::allows_mcp`] reads before a turn's `deny_tools`).
+fn mcp_listed(tools: &ToolSelection) -> bool {
+    match tools {
+        ToolSelection::All(_) => true,
+        ToolSelection::List(l) => l.iter().any(|t| {
+            t == harness_core::agent::MCP_ALL || t.starts_with(harness_core::agent::MCP_PREFIX)
+        }),
+    }
 }
 
 /// Stable text form of a tool selection for hashing.
