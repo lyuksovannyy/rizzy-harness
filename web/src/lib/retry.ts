@@ -12,13 +12,19 @@ export const RETRYABLE: readonly TurnEndReason[] = ["error", "interrupted", "sto
  * the chat's last turn, a person's (not a callback turn), ended without an
  * answer and not by their Stop, with no message or turn after it. The
  * caller adds what the items do not hold (a turn running, a sub-agent's
- * chat, a routine's own run, an undo of the turn, the viewer's access). */
+ * chat, a routine's own run, an undo of the turn, the viewer's access).
+ * Not checked here: an undo of another turn after the failure (a "Rewind
+ * files" of an earlier turn), which the items do not order against the
+ * end; the node refuses that retry and the line says why. */
 export function canRetry(items: readonly Item[], i: number): boolean {
   const end = items[i];
   if (end?.type !== "turn_end" || !RETRYABLE.includes(end.reason)) return false;
   // Nothing that starts or answers a turn after it.
   for (let k = i + 1; k < items.length; k++) {
     const it = items[k]!;
+    // A message sent while it ran and never read waits for the turn
+    // after the retry: the node accepts the retry (core `retry::check`).
+    if (it.type === "user" && it.queued) continue;
     if (["user", "callback", "retry", "turn_end", "assistant", "tool"].includes(it.type)) return false;
   }
   // The item that started it: never a callback turn.

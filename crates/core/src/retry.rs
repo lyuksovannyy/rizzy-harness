@@ -5,7 +5,7 @@
 
 use crate::RawEvent;
 use crate::event::{
-    CheckpointPhase, EventKind, RETRY_ERROR_CHARS, RetryOf, TurnEndReason, retryable,
+    CheckpointPhase, EventKind, RETRY_ERROR_CHARS, RetryOf, TurnEndReason, UserMessage, retryable,
 };
 
 /// Whether `failed` may be retried in `history` (the session's whole log),
@@ -75,6 +75,10 @@ pub fn check(history: &[RawEvent], failed: &str) -> Result<RetryOf, String> {
     if !has_message {
         return Err("its message was never recorded; send it again".into());
     }
+    // A restart or a stop records the node's own sentence ("… Send a
+    // message to continue."), not a failure of the attempt: the opening
+    // says how it was cut off instead (review of PR 128, M1).
+    let error = error.filter(|_| reason == TurnEndReason::Error);
     let error = error.map(|e| {
         let mut cut: String = e.chars().take(RETRY_ERROR_CHARS).collect();
         if cut.len() < e.len() {
@@ -91,43 +95,77 @@ pub fn check(history: &[RawEvent], failed: &str) -> Result<RetryOf, String> {
     })
 }
 
-/// The person's text of the message turn `failed` answers, for what the
-/// master looks up by it (recall, project facts): its own message, the
-/// last message it read that was sent while an earlier turn ran, or, for a
-/// retry, the message of the turn it retried. `None` when the log does not
-/// hold it.
-pub fn message(log: &[RawEvent], failed: &str) -> Option<String> {
+/// The message turn `failed` answers, with its seq: the turn's own
+/// message, the last message it read that was sent while an earlier turn
+/// ran, or, for a retry, the message of the turn it retried (followed down
+/// the chain). `None` when `log` does not hold it. One pass; only the
+/// kinds it needs are parsed.
+pub fn message_event(log: &[RawEvent], failed: &str) -> Option<(u64, UserMessage)> {
+    use std::collections::HashMap;
+    let mut own: HashMap<String, (u64, UserMessage)> = HashMap::new();
+    let mut retried: HashMap<String, String> = HashMap::new();
+    let mut delivered: HashMap<String, u64> = HashMap::new();
+    let mut by_seq: HashMap<u64, UserMessage> = HashMap::new();
+    for e in log {
+        if !matches!(
+            e.kind.as_str(),
+            "user_message" | "turn_started" | "queued_delivered"
+        ) {
+            continue;
+        }
+        match e.typed() {
+            Ok(EventKind::UserMessage(m)) if m.queued => {
+                by_seq.insert(e.seq, m);
+            }
+            Ok(EventKind::UserMessage(m)) => {
+                own.entry(m.turn_id.clone()).or_insert((e.seq, m));
+            }
+            Ok(EventKind::TurnStarted(t)) => {
+                if let Some(r) = t.retry {
+                    retried.insert(t.turn_id, r.turn_id);
+                }
+            }
+            Ok(EventKind::QueuedDelivered(d)) => {
+                if let Some(&s) = d.seqs.last() {
+                    delivered.insert(d.turn_id, s);
+                }
+            }
+            _ => {}
+        }
+    }
     let mut turn = failed.to_string();
     // Each retry names an earlier turn: at most one step per turn.
-    for _ in 0..log.len() {
-        let mut retried: Option<String> = None;
-        let mut delivered: Vec<u64> = Vec::new();
-        for e in log {
-            match e.typed() {
-                Ok(EventKind::UserMessage(m)) if !m.queued && m.turn_id == turn => {
-                    return Some(m.text);
-                }
-                Ok(EventKind::TurnStarted(t)) if t.turn_id == turn => {
-                    retried = t.retry.map(|r| r.turn_id);
-                }
-                Ok(EventKind::QueuedDelivered(d)) if d.turn_id == turn => {
-                    delivered.extend(d.seqs);
-                }
-                _ => {}
-            }
+    for _ in 0..=retried.len() {
+        if let Some(m) = own.remove(&turn) {
+            return Some(m);
         }
-        if let Some(&seq) = delivered.last() {
-            return log
-                .iter()
-                .find(|e| e.seq == seq)
-                .and_then(|e| match e.typed() {
-                    Ok(EventKind::UserMessage(m)) => Some(m.text),
-                    _ => None,
-                });
+        if let Some(seq) = delivered.get(&turn) {
+            return by_seq.remove(seq).map(|m| (*seq, m));
         }
-        turn = retried?;
+        turn = retried.remove(&turn)?;
     }
     None
+}
+
+/// The person's text of the message turn `failed` answers
+/// ([`message_event`]), for what the master looks up by it (recall,
+/// project facts).
+pub fn message(log: &[RawEvent], failed: &str) -> Option<String> {
+    message_event(log, failed).map(|(_, m)| m.text)
+}
+
+/// The turn of `log` a Retry may still need the message of: the running
+/// retry's failed turn, else the log's last turn when it may be retried.
+/// [`message_event`] of it is what no summary may replace (X.21).
+pub fn pending(log: &[RawEvent], running: Option<&RetryOf>) -> Option<String> {
+    if let Some(r) = running {
+        return Some(r.turn_id.clone());
+    }
+    let last = log.iter().rposition(|e| e.kind == "turn_started")?;
+    let Ok(EventKind::TurnStarted(t)) = log[last].typed() else {
+        return None;
+    };
+    check(&log[last..], &t.turn_id).ok().map(|_| t.turn_id)
 }
 
 #[cfg(test)]
@@ -219,8 +257,32 @@ mod tests {
             let r = check(&l.events, "t2").unwrap();
             assert_eq!(r.turn_id, "t2");
             assert_eq!(r.reason, reason);
-            assert_eq!(r.error.as_deref(), Some("the model is not available"));
+            // Only an error is the attempt's own; a restart's or a stop's
+            // sentence ("Send a message to continue.") is the node's.
+            let want = (reason == TurnEndReason::Error).then_some("the model is not available");
+            assert_eq!(r.error.as_deref(), want, "{reason:?}");
         }
+    }
+
+    #[test]
+    fn the_pending_message_is_the_running_retrys_or_the_failed_last_turns() {
+        let mut l = Log::new();
+        l.turn("t1", TurnEndReason::Error);
+        assert_eq!(pending(&l.events, None).as_deref(), Some("t1"));
+        let (seq, m) = message_event(&l.events, "t1").unwrap();
+        assert_eq!((seq, m.text.as_str()), (2, "fix the bug"));
+        let r = RetryOf {
+            turn_id: "t1".into(),
+            reason: TurnEndReason::Error,
+            error: None,
+            failed_model: None,
+            model: None,
+        };
+        assert_eq!(pending(&l.events, Some(&r)).as_deref(), Some("t1"));
+        // A completed last turn needs nothing kept.
+        l.turn("t2", TurnEndReason::Completed);
+        assert_eq!(pending(&l.events, None), None);
+        assert_eq!(pending(&[], None), None);
     }
 
     #[test]

@@ -132,12 +132,19 @@ last resort could not shorten), "turn interrupted" (the node restarted
 mid-turn) or "turn stopped" (the node was stopped) — its line has **Retry**.
 It runs your same message again, without your typing it and without a second
 copy in the chat: the text, the attached files, the images and the `@` files
-as the message recorded them (a mentioned file is not read again), with the
-chat's current agent, model, approval mode and settings. The failed attempt
-stays above, marked as failed, and the agent is sent it too: what it did
-happened (a command it ran ran, a file it wrote is written), and the harness
-tells the agent so and asks it to check the current state before repeating a
-command or an edit, then carry on from where the attempt stopped. When the
+as the message recorded them (a mentioned file is not read again; a `/skill`
+at its start loads again), with the chat's current agent, model, approval
+mode and settings and the reasoning effort the attempt ran at. The failed
+attempt stays above, marked as failed, and the agent is sent it too: a call
+that shows a result ran (a command ran, a file is written), a call with no
+result recorded may or may not have run, a denied call did not run; the
+harness tells the agent so and asks it to check the current state before
+repeating a command or an edit, then carry on from where the attempt
+stopped. Your message reaches the agent in every request of the retry: no
+summary, automatic or `/compact`, replaces the turn that holds it while it
+may still be retried (the attempt's old tool results may be shortened to a
+note instead). A message with images is retried only on a model that sees
+images. When the
 retry runs on another model than the attempt did, its line says so. The retry
 is a turn of its own: Undo on it undoes only what the retry changed, and the
 failed attempt's changes keep their own Undo. Retry is not offered after you

@@ -266,6 +266,7 @@ fn events() -> Vec<RawEvent> {
                 name: "Coder".into(),
                 prompt_hash: "h1".into(),
                 withheld: vec![],
+                effort: None,
             },
         }),
         EventKind::TurnStarted(TurnStarted {
@@ -276,6 +277,7 @@ fn events() -> Vec<RawEvent> {
                 name: "Writer".into(),
                 prompt_hash: "h2".into(),
                 withheld: vec![],
+                effort: None,
             }),
             environment: Some("[harness] Environment of this turn: the node's clock reads Saturday 2026-11-14 10:32 (Europe/Riga, UTC+02:00).".into()),
             retry: None,

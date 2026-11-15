@@ -133,6 +133,12 @@ export function chatMarkdown(view: SessionView, title: string, opts: ExportOptio
       case "callback":
         out.push(`_The agent was resumed after ${it.bg_ids.map((b) => oneLine(b)).join(", ")} ended._`, "");
         break;
+      case "retry":
+        out.push(
+          `_Retried${it.model && it.failed_model && it.model !== it.failed_model ? ` with ${oneLine(it.model)} (the attempt above used ${oneLine(it.failed_model)})` : ""}._`,
+          "",
+        );
+        break;
       default:
         break;
     }

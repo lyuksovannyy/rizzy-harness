@@ -94,10 +94,11 @@ async fn retry(
             ));
         }
     }
-    // The message's text, for what the turn looks up by it (recall,
-    // project facts) and a leading `@agent`: never sent, the node has it.
-    let text = match harness_core::retry::message(&last, &turn) {
-        Some(t) => t,
+    // The message, for what the turn looks up by its words (recall,
+    // project facts) and a leading `@agent` (never sent: the node has
+    // it), and whether it has images the model must see.
+    let message = match harness_core::retry::message_event(&last, &turn) {
+        Some((_, m)) => Some(m),
         None => {
             let all = m
                 .inner
@@ -110,9 +111,14 @@ async fn retry(
                     )
                 })
                 .await?;
-            harness_core::retry::message(&all, &turn).unwrap_or_default()
+            harness_core::retry::message_event(&all, &turn).map(|(_, m)| m)
         }
     };
+    let images = message.as_ref().is_some_and(|m| !m.images.is_empty());
+    let text = message.map(|m| m.text).unwrap_or_default();
+    // The effort the failed turn ran at (its `turn_started.agent`), not
+    // the agent's default: the retry runs as the attempt did.
+    let effort = failed_effort(&last, &turn);
     // A chat a routine started from an external event stays untrusted for
     // every turn the owner runs there, a retry too.
     let flags = crate::routines::on_owner_prompt(&m, sid).await;
@@ -132,10 +138,60 @@ async fn retry(
             ),
             untrusted: flags.untrusted,
             by_owner: who.user_id.is_some() && who.user_id == row.owner_id,
+            effort,
             retry: Some(turn),
+            retry_images: images,
             ..Default::default()
         },
     )
     .await?;
     Ok(Json(json!({ "ok": true })))
+}
+
+/// The reasoning effort turn `turn` ran at, as its `turn_started.agent`
+/// recorded it (the message's choice, else the agent's).
+fn failed_effort(events: &[harness_core::RawEvent], turn: &str) -> Option<String> {
+    events.iter().find_map(|e| match e.typed() {
+        Ok(harness_core::event::EventKind::TurnStarted(t)) if t.turn_id == turn => {
+            t.agent.and_then(|a| a.effort)
+        }
+        _ => None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use harness_core::agent::AgentSpec;
+    use harness_core::event::{EventKind, TurnStarted};
+
+    /// A retry runs at the effort the failed turn ran at (review of PR
+    /// 128): the node records it in `turn_started.agent`.
+    #[test]
+    fn the_failed_turns_effort_is_read_from_its_start() {
+        let mut spec: AgentSpec = serde_json::from_value(serde_json::json!({
+            "agent_id": "dev", "name": "Dev", "system_prompt": "x", "prompt_hash": "h", "tools": "all"
+        }))
+        .unwrap();
+        spec.effort = Some("high".into());
+        let (kind, payload) = EventKind::TurnStarted(TurnStarted {
+            turn_id: "t1".into(),
+            agent: Some(spec.agent_ref()),
+            cause: None,
+            environment: None,
+            retry: None,
+        })
+        .into_parts();
+        let e = harness_core::RawEvent {
+            session_id: harness_core::SessionId::new(),
+            seq: 1,
+            ts_ms: 0,
+            kind,
+            payload,
+        };
+        assert_eq!(
+            super::failed_effort(&[e.clone()], "t1").as_deref(),
+            Some("high")
+        );
+        assert_eq!(super::failed_effort(&[e], "t2"), None);
+    }
 }

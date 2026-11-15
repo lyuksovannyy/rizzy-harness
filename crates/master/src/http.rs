@@ -1350,6 +1350,7 @@ async fn prompt(
                 by_owner: who.user_id.is_some() && who.user_id == row.owner_id,
                 files: b.files,
                 retry: None,
+                retry_images: false,
             },
         )
         .await;

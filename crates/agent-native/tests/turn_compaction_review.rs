@@ -12,7 +12,9 @@ use harness_agent_native::{
     split_summary,
 };
 use harness_core::agent::{AgentSpec, ToolSelection};
-use harness_core::backend::{AgentBackend, TurnCtx, TurnExtra, TurnHost, TurnOutcome};
+use harness_core::backend::{
+    AgentBackend, CompactCtx, CompactOutcome, TurnCtx, TurnExtra, TurnHost, TurnOutcome,
+};
 use harness_core::event::*;
 use harness_core::policy::{Decision, ToolRisk};
 use harness_core::{RawEvent, SessionId};
@@ -1002,11 +1004,17 @@ async fn a_retry_after_a_failed_turn_rebuilds_at_every_step() {
         })
         .await;
     let log = host.log();
+    // The failed turn holds the message the retry answers: never summarised
+    // (review of PR 128, H1); its results may be cleared instead.
     assert!(
-        log.iter().any(|e| e.kind == "history_summarized"),
-        "the failed turn was summarised inside the retry"
+        !log.iter().any(|e| e.kind == "history_summarized"),
+        "the failed turn, which holds the message, was summarised"
     );
     let main = p.main();
+    assert!(
+        main.iter().all(|s| users_with(&s.msgs, "earlier ask") == 1),
+        "the message is in every request"
+    );
     // The first request: the message once, the six reads, then the
     // opening with the background end and the retry line last.
     let first = &main[0].msgs;
@@ -1993,4 +2001,790 @@ async fn rebuild_matches_live_with_nested_instruction_files() {
         loaded > 10 && replaced > 0 && withdrawn > 0 && folded > 0,
         "the cases happened"
     );
+}
+
+// ---- a Retry's message is never summarised away (review of PR 128, H1) --
+
+fn users_with(msgs: &[ChatMsg], needle: &str) -> usize {
+    msgs.iter()
+        .filter(|m| match m {
+            ChatMsg::User(t) | ChatMsg::Opening(t) => t.contains(needle),
+            _ => false,
+        })
+        .count()
+}
+
+/// `previous_turn`'s events with its turn id and message words renamed,
+/// numbered on from `from_seq`, without its queued message, its answer
+/// and (with `end` false) its end: an older completed turn or a failed one.
+fn turn_like(sid: SessionId, turn: &str, ask: &str, from_seq: u64, end: bool) -> Vec<RawEvent> {
+    let (h, _, _) = previous_turn(sid);
+    let mut out = Vec::new();
+    for e in h {
+        match e.typed() {
+            Ok(EventKind::UserMessage(m)) if m.queued => continue,
+            Ok(EventKind::AssistantMessage(m)) if m.message_id == "mend" => continue,
+            Ok(EventKind::TurnEnded(_)) if !end => continue,
+            _ => {}
+        }
+        let text = serde_json::to_string(&e.payload)
+            .unwrap()
+            .replace("\"t1", &format!("\"{turn}"))
+            .replace("earlier ask", ask)
+            .replace("\"message_id\":\"m", &format!("\"message_id\":\"{turn}m"));
+        let seq = from_seq + out.len() as u64;
+        out.push(RawEvent {
+            seq,
+            payload: serde_json::from_str(&text).unwrap(),
+            ..e
+        });
+    }
+    out
+}
+
+fn failed(sid: SessionId, mut history: Vec<RawEvent>, turn: &str) -> Vec<RawEvent> {
+    let mut next = history.last().map_or(0, |e| e.seq);
+    for k in [
+        EventKind::Error(ErrorEvent {
+            turn_id: Some(turn.into()),
+            message: "provider returned 400: no".into(),
+        }),
+        EventKind::TurnEnded(TurnEnded {
+            turn_id: turn.into(),
+            reason: TurnEndReason::Error,
+            usage: None,
+        }),
+    ] {
+        next += 1;
+        history.push(ev(sid, next, k));
+    }
+    history
+}
+
+fn retry_of(turn: &str) -> RetryOf {
+    RetryOf {
+        turn_id: turn.into(),
+        reason: TurnEndReason::Error,
+        error: Some("provider returned 400: no".into()),
+        failed_model: None,
+        model: None,
+    }
+}
+
+async fn run_retry(
+    b: &NativeBackend,
+    host: &LogHost,
+    history: Vec<RawEvent>,
+    turn: &str,
+    of: &str,
+) -> TurnOutcome {
+    run_retry_as(b, host, history, turn, of, Some(agent())).await
+}
+
+async fn run_retry_as(
+    b: &NativeBackend,
+    host: &LogHost,
+    history: Vec<RawEvent>,
+    turn: &str,
+    of: &str,
+    agent: Option<AgentSpec>,
+) -> TurnOutcome {
+    host.push(EventKind::TurnStarted(TurnStarted {
+        cause: None,
+        agent: None,
+        turn_id: turn.into(),
+        environment: None,
+        retry: Some(retry_of(of)),
+    }));
+    b.run_turn(TurnCtx {
+        session_id: host.sid,
+        turn_id: turn.into(),
+        history,
+        user_text: "RETRY-ASK fix the parser".into(),
+        cwd: Default::default(),
+        model: "m".into(),
+        agent,
+        compare: vec![],
+        parent_session: None,
+        extra: TurnExtra {
+            retry: Some(retry_of(of)),
+            ..Default::default()
+        },
+        cancel: Default::default(),
+        host,
+    })
+    .await
+}
+
+fn notes(n: usize) -> Script {
+    let big = "n".repeat(3_000);
+    Box::new(move |i| {
+        if i < n {
+            Completion {
+                tool_calls: vec![ToolCallRef {
+                    call_id: format!("c{i}"),
+                    tool: "note".into(),
+                    input: json!({"text": format!("{i} {big}")}),
+                }],
+                ..Default::default()
+            }
+        } else {
+            Completion {
+                text: "done".into(),
+                ..Default::default()
+            }
+        }
+    })
+}
+
+/// The retry's own steps fill the window: the in-turn summary takes the
+/// older turn, never the failed one that holds the message, which is in
+/// every request of the retry, verbatim and once. Failed on the first
+/// version: 21 of 42 requests had it, the rest only the summary.
+#[tokio::test]
+async fn a_retrys_message_survives_an_in_turn_summary() {
+    let sid = SessionId::new();
+    let older = turn_like(sid, "t0", "OLDER-ASK", 1, true);
+    let next = older.len() as u64 + 1;
+    let mut history = older;
+    history.extend(turn_like(
+        sid,
+        "t1",
+        "RETRY-ASK fix the parser",
+        next,
+        false,
+    ));
+    let history = failed(sid, history, "t1");
+    let p = Model::new(W, notes(41));
+    let b = backend(p.clone());
+    let host = LogHost::new(sid, history.clone());
+    let start = history.len();
+    let out = run_retry(&b, &host, history, "now", "t1").await;
+    let log = host.log();
+    let summaries: Vec<u64> = log
+        .iter()
+        .filter_map(|e| match e.typed() {
+            Ok(EventKind::HistorySummarized(h)) => Some(h.through_seq),
+            _ => None,
+        })
+        .collect();
+    let t1_start = log
+        .iter()
+        .find(|e| e.kind == "turn_started" && e.payload["turn_id"] == "t1")
+        .unwrap()
+        .seq;
+    assert!(!summaries.is_empty(), "the older turn was summarised");
+    assert!(
+        summaries.iter().all(|&s| s < t1_start),
+        "a summary reached the failed turn: {summaries:?} >= {t1_start}"
+    );
+    let main = p.main();
+    let per: Vec<usize> = main
+        .iter()
+        .map(|s| users_with(&s.msgs, "RETRY-ASK"))
+        .collect();
+    assert!(per.iter().all(|&n| n == 1), "{per:?}");
+    let (compared, bad) = check_every_step(&log, &main, None, start);
+    assert!(bad.is_none(), "{out:?}, compared {compared}: {bad:?}");
+}
+
+/// A retry of a retry after the person's `/compact`, the real one
+/// (`compact_now`, which keeps one turn: the failed retry): it summarises
+/// the older turn and leaves the first, which holds the message. Failed on
+/// the first version: the retry was sent only the summary.
+#[tokio::test]
+async fn a_retry_after_compact_keeps_the_message() {
+    let sid = SessionId::new();
+    let older = turn_like(sid, "t0", "OLDER-ASK", 1, true);
+    let next = older.len() as u64 + 1;
+    let mut history = older;
+    history.extend(turn_like(
+        sid,
+        "t1",
+        "RETRY-ASK fix the parser",
+        next,
+        false,
+    ));
+    let mut history = failed(sid, history, "t1");
+    let mut seq = history.last().unwrap().seq;
+    for k in [
+        EventKind::TurnStarted(TurnStarted {
+            cause: None,
+            agent: None,
+            turn_id: "t2".into(),
+            environment: None,
+            retry: Some(retry_of("t1")),
+        }),
+        EventKind::Error(ErrorEvent {
+            turn_id: Some("t2".into()),
+            message: "boom".into(),
+        }),
+        EventKind::TurnEnded(TurnEnded {
+            turn_id: "t2".into(),
+            reason: TurnEndReason::Error,
+            usage: None,
+        }),
+    ] {
+        seq += 1;
+        history.push(ev(sid, seq, k));
+    }
+    let p = Model::new(W, notes(0));
+    let b = backend(p.clone());
+    let done = b
+        .compact_now(CompactCtx {
+            session_id: sid,
+            history: history.clone(),
+            model: "m".into(),
+            window: Some(W),
+            focus: None,
+            cancel: Default::default(),
+        })
+        .await;
+    let Some(CompactOutcome::Done {
+        through_seq, text, ..
+    }) = done
+    else {
+        panic!("no summary: {done:?}")
+    };
+    let t1_start = history
+        .iter()
+        .find(|e| e.kind == "turn_started" && e.payload["turn_id"] == "t1")
+        .unwrap()
+        .seq;
+    assert!(through_seq < t1_start, "{through_seq} >= {t1_start}");
+    seq += 1;
+    history.push(ev(
+        sid,
+        seq,
+        EventKind::HistorySummarized(HistorySummarized {
+            turn_id: String::new(),
+            through_seq,
+            text,
+            manual: true,
+            focus: None,
+            usage: None,
+            tokens_after: None,
+        }),
+    ));
+    assert!(harness_core::retry::check(&history, "t2").is_ok());
+    let host = LogHost::new(sid, history.clone());
+    run_retry(&b, &host, history, "t3", "t2").await;
+    let main = p.main();
+    assert_eq!(users_with(&main[0].msgs, "RETRY-ASK"), 1);
+    assert_eq!(users_with(&main[0].msgs, "OLDER-ASK"), 0, "summarised");
+}
+
+/// A link in the message a retry answers is the person's: the retry may
+/// fetch it (URL provenance reads the message in the history).
+#[tokio::test]
+async fn a_link_in_the_retried_message_is_the_persons() {
+    let sid = SessionId::new();
+    let history = failed(
+        sid,
+        turn_like(
+            sid,
+            "t1",
+            "RETRY-ASK read https://docs.example/page",
+            1,
+            false,
+        ),
+        "t1",
+    );
+    let p = Model::new(
+        W,
+        Box::new(|i| match i {
+            0 => Completion {
+                tool_calls: vec![ToolCallRef {
+                    call_id: "f1".into(),
+                    tool: "web_fetch".into(),
+                    input: json!({"url": "https://docs.example/page"}),
+                }],
+                ..Default::default()
+            },
+            _ => Completion {
+                text: "done".into(),
+                ..Default::default()
+            },
+        }),
+    );
+    let b = NativeBackend::new(p.clone(), vec![Arc::new(Fetch)], NativeConfig::default());
+    let host = LogHost::new(sid, history.clone());
+    run_retry_as(&b, &host, history, "now", "t1", None).await;
+    let out = host
+        .log()
+        .iter()
+        .find_map(|e| match e.typed() {
+            Ok(EventKind::ToolCallFinished(f)) if f.call_id == "f1" => Some(f.output),
+            _ => None,
+        })
+        .expect("the fetch finished");
+    assert_eq!(out, "seen=true");
+}
+
+/// `web_fetch` that answers whether its URL was observed in the turn.
+struct Fetch;
+
+#[async_trait::async_trait]
+impl harness_tools::Tool for Fetch {
+    fn name(&self) -> &'static str {
+        "web_fetch"
+    }
+    fn description(&self) -> &'static str {
+        "fetch"
+    }
+    fn schema(&self) -> Value {
+        json!({"type": "object"})
+    }
+    fn risk(&self) -> ToolRisk {
+        ToolRisk::ReadOnly
+    }
+    async fn run(&self, ctx: &ToolCtx, input: Value) -> ToolOutcome {
+        let url = input["url"].as_str().unwrap_or_default();
+        let seen = ctx.observed.iter().any(|t| t.contains(url));
+        ToolOutcome::ok(format!("seen={seen}"))
+    }
+}
+
+// ---- a Retry property test (the review of PR 128) ------------------------
+
+fn notes_script(seed: u64, steps: usize) -> Script {
+    Box::new(move |i| {
+        let mut r = Lcg(seed.wrapping_add(i as u64 * 7919));
+        if i < steps {
+            Completion {
+                tool_calls: vec![ToolCallRef {
+                    call_id: format!("s{seed}c{i}x{}", r.next()),
+                    tool: "note".into(),
+                    input: json!({"text": format!("{i} {}", "n".repeat(500 + r.pick(4_000) as usize))}),
+                }],
+                ..Default::default()
+            }
+        } else {
+            Completion {
+                text: "ANSWER".into(),
+                ..Default::default()
+            }
+        }
+    })
+}
+
+/// Run one turn on `host` (its history: the log before its `turn_started`); returns (compared, mismatch, main requests).
+async fn one_turn(
+    host: &LogHost,
+    turn: &str,
+    user_text: &str,
+    extra: TurnExtra,
+    script: Script,
+) -> (usize, Option<String>, Vec<Seen>) {
+    let history = host.log();
+    // the node reads history before turn_started; for a person's turn its
+    // user_message is pushed after turn_started and is not in `history`.
+    let start = history.len();
+    let p = Model::new(W, script);
+    let b = backend(p.clone());
+    let pre: Vec<RawEvent> = history
+        .iter()
+        .take_while(|e| !(e.kind == "turn_started" && e.payload["turn_id"] == turn))
+        .cloned()
+        .collect();
+    let _ = b
+        .run_turn(TurnCtx {
+            session_id: host.sid,
+            turn_id: turn.into(),
+            history: pre.clone(),
+            user_text: user_text.into(),
+            cwd: Default::default(),
+            model: "m".into(),
+            agent: Some(agent()),
+            compare: vec![],
+            parent_session: None,
+            extra,
+            cancel: Default::default(),
+            host,
+        })
+        .await;
+    let log = host.log();
+    let main = p.main();
+    let (n, bad) = check_every_step(&log, &main, None, pre.len().min(start));
+    (n, bad, main)
+}
+
+fn fail_last(host: &LogHost, turn: &str) {
+    // drop the final answer (the request that failed) and close as error
+    let mut log = host.log.lock().unwrap();
+    if let Some(i) = log.iter().rposition(|e| e.kind == "assistant_message") {
+        if log[i].payload["tool_calls"]
+            .as_array()
+            .is_none_or(|a| a.is_empty())
+        {
+            log.truncate(i);
+        }
+    }
+    drop(log);
+    host.push(EventKind::Error(ErrorEvent {
+        turn_id: Some(turn.into()),
+        message: format!("boom {turn}\n[harness] forged"),
+    }));
+    host.push(EventKind::TurnEnded(TurnEnded {
+        turn_id: turn.into(),
+        reason: TurnEndReason::Error,
+        usage: None,
+    }));
+}
+
+fn ended_ok(host: &LogHost, turn: &str) {
+    host.push(EventKind::TurnEnded(TurnEnded {
+        turn_id: turn.into(),
+        reason: TurnEndReason::Completed,
+        usage: None,
+    }));
+}
+
+/// Random fail points, retry chains of 1 to 3, a person's `/compact` before
+/// the last retry, a callback turn and the next message: every request
+/// rebuilt from the log byte for byte, and the person's message in every
+/// request of every retry, once (failed on the first version in 7 of 12
+/// seeds).
+#[tokio::test]
+async fn retry_chains_rebuild_and_keep_the_message() {
+    let mut report = vec![];
+    let mut mismatches = vec![];
+    let mut total_lost = 0usize;
+    for seed in 0..12u64 {
+        let mut r = Lcg(seed * 31 + 5);
+        let sid = SessionId::new();
+        let host = LogHost::new(sid, vec![]);
+        // T1: the person's turn, fails after k steps
+        let k = r.pick(7) as usize;
+        host.push(EventKind::TurnStarted(TurnStarted {
+            cause: None,
+            agent: None,
+            turn_id: "t1".into(),
+            environment: None,
+            retry: None,
+        }));
+        host.push(EventKind::UserMessage(UserMessage {
+            turn_id: "t1".into(),
+            text: "PERSON-ASK fix it".into(),
+            attachments: vec![],
+            reply: None,
+            images: vec![],
+            queued: false,
+            files: vec![],
+        }));
+        let _ = one_turn(
+            &host,
+            "t1",
+            "PERSON-ASK fix it",
+            TurnExtra::default(),
+            notes_script(seed, k),
+        )
+        .await;
+        fail_last(&host, "t1");
+        let depth = 1 + r.pick(3) as usize;
+        let summary_between = r.pick(2) == 0;
+        let mut prev = "t1".to_string();
+        let mut lost = 0usize;
+        for d in 0..depth {
+            if summary_between && d == depth - 1 {
+                // The person's `/compact`, the real one (`compact_now`).
+                let b = backend(Model::new(W, notes_script(seed, 0)));
+                let done = b
+                    .compact_now(CompactCtx {
+                        session_id: sid,
+                        history: host.log(),
+                        model: "m".into(),
+                        window: Some(W),
+                        focus: None,
+                        cancel: Default::default(),
+                    })
+                    .await;
+                if let Some(CompactOutcome::Done {
+                    through_seq, text, ..
+                }) = done
+                {
+                    host.push(EventKind::HistorySummarized(HistorySummarized {
+                        turn_id: String::new(),
+                        through_seq,
+                        text,
+                        manual: true,
+                        focus: None,
+                        usage: None,
+                        tokens_after: None,
+                    }));
+                }
+            }
+            let check = harness_core::retry::check(&host.log(), &prev);
+            let ro = match check {
+                Ok(r) => r,
+                Err(e) => {
+                    mismatches.push(format!("seed {seed}: check refused {prev}: {e}"));
+                    break;
+                }
+            };
+            let id = format!("r{d}");
+            host.push(EventKind::TurnStarted(TurnStarted {
+                cause: None,
+                agent: None,
+                turn_id: id.clone(),
+                environment: None,
+                retry: Some(ro.clone()),
+            }));
+            let last = d == depth - 1;
+            let steps = 1 + r.pick(12) as usize;
+            let (n, bad, main) = one_turn(
+                &host,
+                &id,
+                "",
+                TurnExtra {
+                    retry: Some(ro),
+                    ..Default::default()
+                },
+                notes_script(seed + 100 + d as u64, steps),
+            )
+            .await;
+            lost += main
+                .iter()
+                .filter(|s| users_with(&s.msgs, "PERSON-ASK") != 1)
+                .count();
+            if let Some(b) = bad {
+                mismatches.push(format!("seed {seed} {id}: {b}"));
+            }
+            report.push(format!("seed {seed} k={k} depth={depth} summary={summary_between} {id}: compared {n}, requests {}, without the message {}", main.len(),
+                main.iter().filter(|s| users_with(&s.msgs, "PERSON-ASK") != 1).count()));
+            if last {
+                ended_ok(&host, &id);
+            } else {
+                fail_last(&host, &id);
+            }
+            prev = id;
+        }
+        // a callback turn after, then the person's next turn
+        host.push(EventKind::BackgroundEnded(BackgroundEnded {
+            bg_id: "bg-1".into(),
+            reason: BackgroundReason::Exited,
+            exit_code: Some(0),
+            signal: None,
+            confirmed: BackgroundConfirmed::Ended,
+            ran_ms: 1,
+            output_bytes: 3,
+            tail: "BG".into(),
+            tail_cut: false,
+            delivered: false,
+        }));
+        host.push(EventKind::TurnStarted(TurnStarted {
+            cause: Some(TurnCause::Callback(vec!["bg-1".into()])),
+            agent: None,
+            turn_id: "cb".into(),
+            environment: None,
+            retry: None,
+        }));
+        let (n, bad, _) = one_turn(
+            &host,
+            "cb",
+            "",
+            TurnExtra {
+                cause: Some(TurnCause::Callback(vec!["bg-1".into()])),
+                ..Default::default()
+            },
+            notes_script(seed + 500, 2),
+        )
+        .await;
+        if let Some(b) = bad {
+            mismatches.push(format!("seed {seed} cb: {b}"));
+        }
+        ended_ok(&host, "cb");
+        host.push(EventKind::TurnStarted(TurnStarted {
+            cause: None,
+            agent: None,
+            turn_id: "n1".into(),
+            environment: None,
+            retry: None,
+        }));
+        host.push(EventKind::UserMessage(UserMessage {
+            turn_id: "n1".into(),
+            text: "NEXT".into(),
+            attachments: vec![],
+            reply: None,
+            images: vec![],
+            queued: false,
+            files: vec![],
+        }));
+        let (n2, bad2, _) = one_turn(
+            &host,
+            "n1",
+            "NEXT",
+            TurnExtra::default(),
+            notes_script(seed + 900, 2),
+        )
+        .await;
+        if let Some(b) = bad2 {
+            mismatches.push(format!("seed {seed} n1: {b}"));
+        }
+        report.push(format!("seed {seed}: callback compared {n}, next compared {n2}; retry requests without the message: {lost}"));
+        total_lost += lost;
+        let msgs = host
+            .log()
+            .iter()
+            .filter(|e| e.kind == "user_message")
+            .count();
+        assert_eq!(msgs, 2, "seed {seed}: one message per person's prompt");
+    }
+    for l in &report {
+        eprintln!("{l}");
+    }
+    for m in &mismatches {
+        eprintln!("MISMATCH {m}");
+    }
+    assert!(
+        mismatches.is_empty(),
+        "{} rebuild mismatches",
+        mismatches.len()
+    );
+    assert_eq!(
+        total_lost, 0,
+        "retry requests without the message: {total_lost}"
+    );
+}
+
+/// What a retry is told of each call of the failed attempt is true (review
+/// of PR 128, M1): one with a result ran; one with no result recorded may
+/// or may not have run; one whose approval was denied (here at a restart)
+/// did not run, and says so (it said "may have run" before).
+#[test]
+fn a_retry_is_told_which_calls_ran() {
+    let sid = SessionId::new();
+    let mut seq = 0;
+    let mut log = Vec::new();
+    let push = |log: &mut Vec<RawEvent>, seq: &mut u64, k: EventKind| {
+        *seq += 1;
+        log.push(ev(sid, *seq, k));
+    };
+    push(
+        &mut log,
+        &mut seq,
+        EventKind::TurnStarted(TurnStarted {
+            cause: None,
+            agent: None,
+            turn_id: "t1".into(),
+            environment: None,
+            retry: None,
+        }),
+    );
+    push(
+        &mut log,
+        &mut seq,
+        EventKind::UserMessage(UserMessage {
+            turn_id: "t1".into(),
+            text: "deploy it".into(),
+            attachments: vec![],
+            reply: None,
+            images: vec![],
+            queued: false,
+            files: vec![],
+        }),
+    );
+    let call = |id: &str, cmd: &str| ToolCallRef {
+        call_id: id.into(),
+        tool: "bash".into(),
+        input: json!({"command": cmd}),
+    };
+    push(
+        &mut log,
+        &mut seq,
+        EventKind::AssistantMessage(AssistantMessage {
+            author: None,
+            variant: None,
+            turn_id: "t1".into(),
+            message_id: "m1".into(),
+            text: String::new(),
+            tool_calls: vec![
+                call("ran", "echo built >> build.log"),
+                call("orphan", "echo half >> deploy.log"),
+                call("card", "rm -rf build"),
+            ],
+            blocks: vec![],
+        }),
+    );
+    push(
+        &mut log,
+        &mut seq,
+        EventKind::ToolCallFinished(ToolCallFinished {
+            seen: None,
+            call_id: "ran".into(),
+            ok: true,
+            output: "RAN-OUTPUT".into(),
+            exit_code: Some(0),
+            truncated: false,
+            sources: vec![],
+            note: None,
+        }),
+    );
+    push(
+        &mut log,
+        &mut seq,
+        EventKind::ApprovalRequested(
+            serde_json::from_value(
+                json!({"approval_id": "a1", "call_id": "card", "tool": "bash",
+            "input": {"command": "rm -rf build"}, "reason": "asks"}),
+            )
+            .unwrap(),
+        ),
+    );
+    push(
+        &mut log,
+        &mut seq,
+        EventKind::ApprovalResolved(ApprovalResolved {
+            approval_id: "a1".into(),
+            decision: Decision::Deny,
+            by: ResolvedBy::Interrupted,
+            note: None,
+        }),
+    );
+    push(
+        &mut log,
+        &mut seq,
+        EventKind::TurnEnded(TurnEnded {
+            turn_id: "t1".into(),
+            reason: TurnEndReason::Interrupted,
+            usage: None,
+        }),
+    );
+    let r = harness_core::retry::check(&log, "t1").unwrap();
+    assert_eq!(r.error, None, "a restart's sentence is not quoted");
+    push(
+        &mut log,
+        &mut seq,
+        EventKind::TurnStarted(TurnStarted {
+            cause: None,
+            agent: None,
+            turn_id: "t2".into(),
+            environment: None,
+            retry: Some(r),
+        }),
+    );
+    let msgs = rebuild(&log, &Rebuild::default());
+    let result = |id: &str| {
+        msgs.iter()
+            .find_map(|m| match m {
+                ChatMsg::Tool { call_id, content } if call_id == id => Some(content.clone()),
+                _ => None,
+            })
+            .unwrap()
+    };
+    assert_eq!(result("ran"), "RAN-OUTPUT");
+    assert_eq!(result("orphan"), harness_agent_native::NO_RESULT_RECORDED);
+    assert_eq!(result("card"), harness_agent_native::DENIED_NOT_RUN);
+    let Some(ChatMsg::Opening(o)) = msgs.last() else {
+        panic!("no opening: {msgs:?}")
+    };
+    for part in [
+        "cut off when the node restarted",
+        "a tool call with a result ran",
+        "none was recorded may or may not have run",
+        "denied did not run",
+    ] {
+        assert!(o.contains(part), "{part}: {o}");
+    }
+    assert!(!o.contains("Send a message"), "{o}");
 }

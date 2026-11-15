@@ -1238,6 +1238,7 @@ fn started(turn: &str, agent: &str, name: &str) -> EventKind {
             name: name.into(),
             prompt_hash: "h".into(),
             withheld: vec![],
+            effort: None,
         }),
         cause: None,
         environment: None,

@@ -132,6 +132,12 @@ pub const NO_RESULT_RECORDED: &str = "No result was recorded for this call: its 
      be written). It may have run fully, partly or not at all. Check the current state (files, \
      processes, git status) before you repeat it; do not repeat it blindly.";
 
+/// What a call with no result reads as when its approval was denied (by
+/// the person, the policy, or the restart that closed the turn): it never
+/// started, so it did not run (review of PR 128, M1).
+pub const DENIED_NOT_RUN: &str = "No result was recorded for this call: its approval was \
+     denied, so it did not run.";
+
 /// The harness's note before a person's turn's wrap-up request, after its
 /// `max_steps` steps.
 fn wrap_up_note(max_steps: usize) -> String {
@@ -648,8 +654,12 @@ fn note_compact_failure(failures: &mut u32, model: &str) {
 /// last `turn_ended` (a background end a callback turn's opening takes),
 /// and before the turn in which a queued message no `queued_delivered`
 /// names was sent (the next turn reads it at its start; the node's
-/// `unread`).
-fn opening_cut(recent: &[RawEvent]) -> usize {
+/// `unread`); and before the turn that holds the message a Retry answers
+/// (X.21: the running retry's, `running`, or the log's last turn when it
+/// may still be retried, `harness_core::retry::pending`), so the message
+/// is sent verbatim to every request of the retry. The failed attempts'
+/// steps after it are left to the in-turn tiers (their results cleared).
+fn opening_cut(recent: &[RawEvent], running: Option<&harness_core::event::RetryOf>) -> usize {
     let mut end = recent
         .iter()
         .rposition(|e| e.kind == "turn_ended")
@@ -662,13 +672,22 @@ fn opening_cut(recent: &[RawEvent]) -> usize {
             _ => {}
         }
     }
+    let turn_of = |at: usize| {
+        recent[..=at]
+            .iter()
+            .rposition(|e| e.kind == "turn_started")
+            .unwrap_or(0)
+    };
     if let Some(&(_, first)) = unread.first()
         && first < end
     {
-        end = recent[..=first]
-            .iter()
-            .rposition(|e| e.kind == "turn_started")
-            .unwrap_or(0);
+        end = turn_of(first);
+    }
+    if let Some(turn) = harness_core::retry::pending(recent, running)
+        && let Some((seq, _)) = harness_core::retry::message_event(recent, &turn)
+        && let Some(at) = recent.iter().position(|e| e.seq == seq)
+    {
+        end = end.min(turn_of(at));
     }
     end
 }
@@ -1250,6 +1269,31 @@ pub fn rebuild_spans(
             None => v.index == 0,
         },
     };
+    // Calls whose approval was denied: one left without a result did not
+    // run (`DENIED_NOT_RUN`), whatever closed its turn.
+    let denied: HashSet<String> = {
+        let mut asked: std::collections::HashMap<String, String> = Default::default();
+        let mut out = HashSet::new();
+        for e in history {
+            match e.kind.as_str() {
+                "approval_requested" => {
+                    if let Ok(EventKind::ApprovalRequested(a)) = e.typed() {
+                        asked.insert(a.approval_id, a.call_id);
+                    }
+                }
+                "approval_resolved" => {
+                    if let Ok(EventKind::ApprovalResolved(r)) = e.typed()
+                        && r.decision == harness_core::policy::Decision::Deny
+                        && let Some(c) = asked.get(&r.approval_id)
+                    {
+                        out.insert(c.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        out
+    };
     let mut out = Vec::new();
     let mut open: Vec<String> = Vec::new();
     // Queued messages by seq: sent while a turn ran, read where their
@@ -1257,9 +1301,14 @@ pub fn rebuild_spans(
     let mut queued: std::collections::HashMap<u64, UserMessage> = Default::default();
     let close_open = |out: &mut Vec<ChatMsg>, open: &mut Vec<String>| {
         for call_id in open.drain(..) {
+            let content = if denied.contains(&call_id) {
+                DENIED_NOT_RUN
+            } else {
+                NO_RESULT_RECORDED
+            };
             out.push(ChatMsg::Tool {
                 call_id,
-                content: NO_RESULT_RECORDED.into(),
+                content: content.into(),
             });
         }
     };
@@ -4086,7 +4135,7 @@ impl NativeBackend {
         // Never what the running turn's opening reads from the log (review
         // H1 of X.15): an unread queued message it takes at its start, or a
         // background end a callback turn's opening takes.
-        let old = &recent[..kept.min(opening_cut(recent))];
+        let old = &recent[..kept.min(opening_cut(recent, ctx.extra.retry.as_ref()))];
         // If the kept turns alone are what is large, summarising the rest
         // saves little and would repeat on every turn: skip it.
         // Sized as the requests carry it, context blocks included (review

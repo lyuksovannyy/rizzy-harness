@@ -99,11 +99,16 @@ impl Fake {
         if has_retry {
             return t;
         }
+        // `image`: the message carries an image (a reference, as the node
+        // records it).
+        let mut m = json!({"turn_id": t, "text": text});
+        if text.contains("image") {
+            m["images"] = json!([{"media_id": "m1", "sha256": "ab", "mime": "image/png",
+                "name": "shot.png", "width": 1, "height": 1}]);
+        }
         self.emit(
             sid,
-            EventKind::UserMessage(
-                serde_json::from_value(json!({"turn_id": t, "text": text})).unwrap(),
-            ),
+            EventKind::UserMessage(serde_json::from_value(m).unwrap()),
         );
         if text.contains("hang") {
             return t;
@@ -235,6 +240,7 @@ struct T {
     base: String,
     alex: String,
     local: Seen,
+    chats: Seen,
     children: Children,
     old: Seen,
     _dir: tempfile::TempDir,
@@ -259,7 +265,7 @@ async fn start() -> T {
     master.add_link(l, true).await.unwrap();
     let (l, old, _) = fake("old", Profile::Agentic, &[]);
     master.add_link(l, false).await.unwrap();
-    let (l, _, _) = fake("master", Profile::Chat, &[harness_protocol::CAP_RETRY]);
+    let (l, chats, _) = fake("master", Profile::Chat, &[harness_protocol::CAP_RETRY]);
     master.add_link(l, true).await.unwrap();
     harness_master::routines::start_with(
         &master,
@@ -283,6 +289,7 @@ async fn start() -> T {
         base,
         alex,
         local,
+        chats,
         children,
         old,
         _dir: dir,
@@ -622,4 +629,92 @@ async fn a_routines_own_run_is_not_retried_here() {
     let later = send(&t, &t.alex, sid, "fail again").await;
     let (st, v) = req(&t, Method::POST, &path(sid, &later), None, &t.alex).await;
     assert_eq!(st, StatusCode::OK, "{v}");
+}
+
+/// The message a retry runs again had an image: the model it would now run
+/// on cannot see images (an unlisted model counts as not seeing them), so
+/// the retry is refused with the prompt route's words and nothing is sent.
+#[tokio::test]
+async fn a_retry_with_images_needs_a_model_that_sees_them() {
+    let t = start().await;
+    let sid = chat(&t, &t.alex, "local", None).await;
+    let failed = send(&t, &t.alex, sid, "fail with an image").await;
+    let (st, v) = req(&t, Method::POST, &path(sid, &failed), None, &t.alex).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert!(
+        v["error"].as_str().unwrap().contains("can't see images"),
+        "{v}"
+    );
+    assert!(retries(&t.local).is_empty());
+}
+
+/// A chat a webhook routine started holds data from an external event: the
+/// owner's later turn there runs untrusted, and so does its retry (the
+/// untrusted note, no web tools, no `remember`, no `recall`).
+#[tokio::test]
+async fn a_retry_in_a_webhook_chat_stays_untrusted() {
+    let t = start().await;
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        "/api/routines",
+        Some(json!({
+            "name": "hooked",
+            "spec": {"profile": "chat", "agent_id": "general", "prompt": "Got {{event.body.id}}"},
+            "triggers": [{"kind": "webhook", "config": {}}],
+        })),
+        &t.alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "{v}");
+    let id = v["routine"]["routine_id"].as_str().unwrap().to_string();
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        &format!("/api/routines/{id}/run"),
+        Some(json!({"event": {"id": 7}})),
+        &t.alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{v}");
+    let run = v["run_id"].as_str().unwrap().to_string();
+    let mut sid: Option<SessionId> = None;
+    for _ in 0..500 {
+        let (_, r) = req(
+            &t,
+            Method::GET,
+            &format!("/api/routines/{id}/runs/{run}"),
+            None,
+            &t.alex,
+        )
+        .await;
+        if let Some(s) = r["session_id"].as_str() {
+            sid = Some(s.parse().unwrap());
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let sid = sid.expect("the run made a chat");
+    last_turn(&t, &t.alex, sid, 4).await;
+    let later = send(&t, &t.alex, sid, "fail please").await;
+    let (st, v) = req(&t, Method::POST, &path(sid, &later), None, &t.alex).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let sent = t
+        .chats
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|m| matches!(m, MasterToNode::Retry { .. }))
+        .cloned()
+        .expect("the retry went to the chat's node");
+    let MasterToNode::Retry { agent, context, .. } = sent else {
+        unreachable!()
+    };
+    let turn = context.and_then(|c| c.turn).unwrap_or_default();
+    assert!(turn.contains("come from an external event"), "{turn}");
+    let deny = agent.unwrap().deny_tools;
+    for tool in ["web_fetch", "remember", "recall"] {
+        assert!(deny.iter().any(|t| t == tool), "{tool}: {deny:?}");
+    }
 }

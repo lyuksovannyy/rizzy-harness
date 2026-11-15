@@ -147,13 +147,19 @@ impl Session {
             retry: Some(retry),
             ..extra
         };
+        // The message's own text, as the person's words of this turn: a
+        // `/skill` at its start loads as it did for the failed turn, the
+        // in-turn fold's summariser is told what was asked, and a link in
+        // it is the person's (review of PR 128). It is not sent again: the
+        // opening is the harness's line, the message is in the history.
+        let asked = harness_core::retry::message(&history, failed).unwrap_or_default();
         let this = self.clone();
         tokio::spawn(async move {
             let (reason, _) = this
                 .clone()
                 .run_turn(
                     turn_id.clone(),
-                    String::new(),
+                    asked,
                     history,
                     agent.clone(),
                     vec![],

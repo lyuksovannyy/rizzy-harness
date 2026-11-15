@@ -398,6 +398,9 @@ pub struct PromptOpts {
     /// leading `@agent`); it is not sent. Attachments, images, files, an
     /// answer and parallel answers must be empty.
     pub retry: Option<String>,
+    /// The message a retry runs again carries images: the model it now
+    /// runs on must see them, as for a prompt with images.
+    pub retry_images: bool,
 }
 
 /// The model a turn runs on: the agent's (resolved), else the one chosen
@@ -1957,6 +1960,7 @@ impl Master {
             by_owner,
             files,
             retry,
+            retry_images,
         } = opts;
         let resume = !callback.is_empty();
         if retry.is_some()
@@ -2051,7 +2055,7 @@ impl Master {
         )?;
         // `media::prompt_images` checked the chat's own model; an @mention or
         // parallel answers may bring others.
-        if !images.is_empty() {
+        if !images.is_empty() || retry_images {
             let main = turn_model(&agent, session_model.as_deref(), &row);
             if let Some(blind) = blind(&r, &main, &compare) {
                 return Err(CommandError::Rejected(media::blind_message(&blind)));

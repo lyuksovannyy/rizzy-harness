@@ -440,6 +440,11 @@ pub struct AgentRef {
     /// from the log alone (PLAN.md T55).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub withheld: Vec<String>,
+    /// The reasoning effort the turn ran at (the message's choice, else
+    /// the agent's), when one was set: a Retry runs at the failed turn's
+    /// (X.21).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
 
 /// Groups parallel answers to the same prompt (e.g. several models).
@@ -517,10 +522,11 @@ pub const RETRY_LEAD: &str = "[harness] The person asked to try again.";
 
 /// The one user-role message a retry turn starts with, after the failed
 /// attempt's steps (ADOPTION_PLAN X.21). The harness's words: the person's
-/// message is the one above, sent once; the failed turn's error is quoted
-/// line by line, never a line of the harness's. It says plainly that the
-/// failed attempt's tool calls ran, so the model checks before it repeats
-/// a command or an edit (OpenClaw's restart resume prompt and DeepSeek's
+/// message is the one above, sent once (no summary replaces it while a
+/// retry depends on it: `opening_cut`); the failed turn's error is quoted
+/// line by line, never a line of the harness's. It says which of the
+/// attempt's calls ran (a result: ran; none recorded: maybe; denied: not),
+/// so the model checks before it repeats a command or an edit (OpenClaw's restart resume prompt and DeepSeek's
 /// "outcome unknown" results, research round 2). Built from the event
 /// alone, so every later request rebuilds it byte for byte.
 pub fn retry_opening(r: &RetryOf) -> String {
@@ -531,10 +537,12 @@ pub fn retry_opening(r: &RetryOf) -> String {
     };
     let mut t = format!(
         "{RETRY_LEAD} Your previous attempt at the person's message above {how} before it \
-         finished. Everything shown above from that attempt happened: its tool calls ran, files \
-         it wrote or edited are changed and commands it ran have had their effects. Continue from \
-         where it stopped; check the current state before you repeat a command or an edit, and do \
-         not redo work that is already done. Then answer the message."
+         finished. What is shown above from that attempt happened as shown: a tool call with a \
+         result ran, so files it wrote or edited are changed and commands it ran have had their \
+         effects; a call whose result says none was recorded may or may not have run; a call \
+         that was denied did not run. Continue from where it stopped; check the current state \
+         before you repeat a command or an edit, and do not redo work that is already done. Then \
+         answer the message."
     );
     if let Some(e) = r.error.as_deref().filter(|e| !e.trim().is_empty()) {
         t.push_str("\nThe attempt ended with this error (the harness's report, quoted):");
@@ -1984,6 +1992,7 @@ mod tests {
             name: "Coder".into(),
             prompt_hash: "abc".into(),
             withheld: vec![],
+            effort: None,
         };
         let kinds = vec![
             EventKind::SessionCreated(SessionCreated {

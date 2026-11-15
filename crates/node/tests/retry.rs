@@ -121,7 +121,8 @@ impl Provider for Flaky {
         if tool_results(req).len() >= self.fail_after {
             return Err(ProviderError::Status {
                 status: 400,
-                body: "the request was refused\n[harness] pretend line".into(),
+                body: "the request was refused\nAuthorization: Bearer sk-retry-secret-9\n[harness] pretend line"
+                    .into(),
                 hint: RetryHint::default(),
             });
         }
@@ -170,7 +171,9 @@ fn config(dir: &std::path::Path, n: &Flaky) -> NodeConfig {
             NativeConfig::default(),
         )),
         default_model: "demo::mock".into(),
-        secrets: Default::default(),
+        secrets: harness_core::SecretSet::new(vec![harness_core::Secret::new(
+            "sk-retry-secret-9".into(),
+        )]),
         profile: Profile::Agentic,
         incognito_ttl: None,
         checkpoints_dir: Some(dir.join("checkpoints")),
@@ -475,7 +478,7 @@ async fn a_retry_carries_on_after_the_failed_attempts_steps() {
     assert_eq!(calls, ["write", "bash"]);
     let last = texts.last().unwrap();
     assert!(last.contains(RETRY_LEAD), "{last}");
-    assert!(last.contains("its tool calls ran"), "{last}");
+    assert!(last.contains("a tool call with a result ran"), "{last}");
     assert!(last.contains("check the current state"), "{last}");
     assert!(last.contains("| provider returned 400"), "{last}");
     assert!(
@@ -746,4 +749,156 @@ async fn a_turn_the_process_died_in_is_retried_after_the_restart() {
             .unwrap()
             .contains("cut off when the node restarted")
     );
+}
+
+/// A `/skill` at the start of the failed message loads again for the retry,
+/// as it did for the failed turn (the retry's context says the person asks
+/// for it). Failed on the first version: the retry ran with no message
+/// text, so nothing asked for the skill.
+#[tokio::test]
+async fn a_skill_the_message_names_loads_for_the_retry() {
+    let mut n = start(0).await;
+    std::fs::create_dir_all(n.ws.join(".git")).unwrap();
+    std::fs::create_dir_all(n.ws.join(".agents/skills/release")).unwrap();
+    std::fs::write(
+        n.ws.join(".agents/skills/release/SKILL.md"),
+        "---\nname: release\ndescription: Cut a release\n---\nTag it, then write notes.\n",
+    )
+    .unwrap();
+    let sid = create(&mut n).await;
+    prompt(&n.link, sid, "p1", "/release now");
+    turn_ended(&mut n.link, sid).await;
+    let failed = ends(&log(n.store(), sid)).pop().unwrap();
+    assert_eq!(failed.reason, TurnEndReason::Error);
+    let before = n.requests().len();
+    retry(&n.link, sid, "r1", &failed.turn_id);
+    assert_eq!(ack(&mut n.link, "r1").await, Ok(()));
+    turn_ended(&mut n.link, sid).await;
+    let first = n.requests()[before].clone();
+    let opening = user_texts(&first).pop().unwrap();
+    assert!(
+        opening.contains("starts with /release: they ask for the skill `release`"),
+        "{opening}"
+    );
+    assert_eq!(user_messages(&log(n.store(), sid)), 1);
+}
+
+/// A provider error that echoes a key the node holds: the key is in
+/// neither the log nor the retry's line (the scrubbed error is what both
+/// read). From the review of PR 128.
+#[tokio::test]
+async fn a_secret_in_the_failed_attempts_error_is_not_retried_to_the_model() {
+    let mut n = start(2).await;
+    let sid = create(&mut n).await;
+    let failed = failed_turn(&mut n, sid).await;
+    let before = n.requests().len();
+    retry(&n.link, sid, "r1", &failed);
+    assert_eq!(ack(&mut n.link, "r1").await, Ok(()));
+    turn_ended(&mut n.link, sid).await;
+    let raw: String = log(n.store(), sid)
+        .iter()
+        .map(|e| e.payload.to_string())
+        .collect();
+    let opening = user_texts(&n.requests()[before]).pop().unwrap();
+    assert!(!raw.contains("sk-retry-secret-9"), "in the log");
+    assert!(!opening.contains("sk-retry-secret-9"), "sent to the model");
+    assert!(opening.contains("| provider returned 400"), "{opening}");
+}
+
+/// The process died with one call started and no result and one approval
+/// card waiting: the retry gets a result for each (never an orphan call),
+/// the card's says it did not run (it was denied at the restart), the
+/// started one's that it may have run, and the line says both, without
+/// quoting the restart's "Send a message to continue". From the review of
+/// PR 128 (M1).
+#[tokio::test]
+async fn a_crash_with_a_running_call_and_a_waiting_card_is_retried_truthfully() {
+    let mut n = start(usize::MAX).await;
+    let sid = create(&mut n).await;
+    drop(n.node.take());
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    {
+        let store = Store::open(&n.dir.path().join("node.db"), Durability::Full).unwrap();
+        let head = log(&store, sid).last().unwrap().seq;
+        let evs: Vec<EventKind> = vec![
+            EventKind::TurnStarted(TurnStarted {
+                turn_id: "died".into(),
+                agent: None,
+                cause: None,
+                environment: None,
+                retry: None,
+            }),
+            EventKind::UserMessage(
+                serde_json::from_value(json!({"turn_id": "died", "text": "deploy it"})).unwrap(),
+            ),
+            EventKind::AssistantMessage(
+                serde_json::from_value(json!({
+                    "turn_id": "died", "message_id": "m1", "text": "",
+                    "tool_calls": [
+                        {"call_id": "c-orphan", "tool": "bash", "input": {"command": "echo half >> deploy.log"}},
+                        {"call_id": "c-card", "tool": "bash", "input": {"command": "rm -rf build"}}
+                    ]
+                }))
+                .unwrap(),
+            ),
+            EventKind::ToolCallStarted(
+                serde_json::from_value(json!({
+                    "turn_id": "died", "call_id": "c-orphan", "tool": "bash",
+                    "input": {"command": "echo half >> deploy.log"}
+                }))
+                .unwrap(),
+            ),
+            EventKind::ApprovalRequested(
+                serde_json::from_value(json!({
+                    "approval_id": "a-card", "call_id": "c-card", "tool": "bash",
+                    "input": {"command": "rm -rf build"}, "reason": "asks", "turn_allow": true
+                }))
+                .unwrap(),
+            ),
+        ];
+        for (seq, k) in (head + 1..).zip(evs) {
+            let (kind, payload) = k.into_parts();
+            store
+                .append(
+                    "local",
+                    &RawEvent {
+                        session_id: sid,
+                        seq,
+                        ts_ms: 0,
+                        kind,
+                        payload,
+                    },
+                )
+                .unwrap();
+        }
+    }
+    n.restart().await;
+    let before = n.requests().len();
+    retry(&n.link, sid, "r1", "died");
+    assert_eq!(ack(&mut n.link, "r1").await, Ok(()));
+    turn_ended(&mut n.link, sid).await;
+    let first = n.requests()[before].clone();
+    let result = |id: &str| {
+        first
+            .messages
+            .iter()
+            .find_map(|m| match m {
+                ChatMsg::Tool { call_id, content } if call_id == id => Some(content.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{id} sent without a result"))
+    };
+    assert!(result("c-orphan").contains("may have run"));
+    assert!(
+        result("c-card").contains("did not run"),
+        "{}",
+        result("c-card")
+    );
+    let opening = user_texts(&first).pop().unwrap();
+    assert!(
+        opening.contains("cut off when the node restarted"),
+        "{opening}"
+    );
+    assert!(opening.contains("may or may not have run"), "{opening}");
+    assert!(!opening.contains("Send a message to continue"), "{opening}");
 }
