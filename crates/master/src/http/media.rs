@@ -109,7 +109,7 @@ fn blob_owner(who: &Principal, r: &MediaRow) -> ApiResult<()> {
 }
 
 fn changed(m: &Master, who: &Principal) {
-    m.changed("media", who.user_id.clone());
+    m.changed("media", crate::Audience::owner(who.user_id.as_deref()));
 }
 
 #[derive(Deserialize)]

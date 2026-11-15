@@ -272,6 +272,11 @@ impl Tool for Bash {
         ToolRisk::Mutating
     }
 
+    /// A `workdir` out of the folder.
+    fn refusal(&self, ctx: &ToolCtx, input: &Value) -> Option<String> {
+        workdir(ctx, input.get("workdir")?.as_str()?).err()
+    }
+
     async fn run(&self, ctx: &ToolCtx, input: Value) -> ToolOutcome {
         let command = match str_arg(&input, "command") {
             Ok(c) => c.to_string(),

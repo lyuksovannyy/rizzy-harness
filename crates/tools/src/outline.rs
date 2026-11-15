@@ -36,6 +36,10 @@ impl Tool for Outline {
         s.outline_tool
     }
 
+    fn refusal(&self, ctx: &ToolCtx, input: &Value) -> Option<String> {
+        crate::path_refusal(ctx, input, false)
+    }
+
     async fn run(&self, ctx: &ToolCtx, input: Value) -> ToolOutcome {
         let path = match str_arg(&input, "path").and_then(|p| ctx.resolve(p)) {
             Ok(p) => p,

@@ -599,7 +599,28 @@ pub trait Tool: Send + Sync {
     fn enabled(&self, _savings: &harness_core::savings::Savings) -> bool {
         true
     }
+    /// The refusal `run` would give `input` whatever anyone answers, read
+    /// from the call and the node's configuration in `ctx` alone (a path or
+    /// folder out of reach): asked before the approval card, so no card asks
+    /// about a call that cannot happen (PLAN.md T51). `None`, the default,
+    /// is no opinion. It only ever refuses earlier: `run` checks again, as
+    /// the file system can change while a card waits.
+    fn refusal(&self, _ctx: &ToolCtx, _input: &Value) -> Option<String> {
+        None
+    }
     async fn run(&self, ctx: &ToolCtx, input: Value) -> ToolOutcome;
+}
+
+/// [`Tool::refusal`] of a tool whose `run` starts by resolving its `path`
+/// argument with [`ToolCtx::resolve`] (or, for a write,
+/// [`ToolCtx::resolve_for_write`]): that same check's error.
+pub(crate) fn path_refusal(ctx: &ToolCtx, input: &Value, write: bool) -> Option<String> {
+    let p = input.get("path")?.as_str()?;
+    if write {
+        ctx.resolve_for_write(p).err()
+    } else {
+        ctx.resolve(p).err()
+    }
 }
 
 pub type ToolSet = Vec<Arc<dyn Tool>>;

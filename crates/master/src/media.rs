@@ -373,7 +373,7 @@ pub(crate) async fn prompted(m: &Master, row: &SessionRow, images: &[String]) {
         .call(move |s| s.media_uses_add(&sid, &ids))
         .await
     {
-        Ok(()) => m.changed("media", row.owner_id.clone()),
+        Ok(()) => m.changed("media", crate::Audience::owner(row.owner_id.as_deref())),
         Err(e) => tracing::warn!(error = %e, "could not record which chat carries an image"),
     }
 }
@@ -396,7 +396,7 @@ pub async fn delete(m: &Master, who: &Principal, ids: Vec<String>) -> harness_st
         .await?;
     crate::storage::unlink(m, gone.blobs).await;
     if gone.items > 0 {
-        m.changed("media", who.user_id.clone());
+        m.changed("media", crate::Audience::owner(who.user_id.as_deref()));
     }
     Ok(gone.items)
 }

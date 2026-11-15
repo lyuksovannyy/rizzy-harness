@@ -354,9 +354,11 @@ async fn changed_topics_reach_only_their_owner() {
     let [(alex, alex_id), (bob, _)] = users(&t).await;
     let mut a = socket(&t, &alex).await;
     let mut b = socket(&t, &bob).await;
-    t.master.changed("media", Some(alex_id));
-    // Shared (no owner): everyone hears it, and it marks where to stop.
-    t.master.changed("artifacts", None);
+    t.master
+        .changed("media", harness_master::Audience::User(alex_id));
+    // Everyone hears this one, and it marks where to stop.
+    t.master
+        .changed("artifacts", harness_master::Audience::Everyone);
     assert_eq!(
         topics_until(&mut a, "artifacts_changed").await,
         ["media_changed", "artifacts_changed"]

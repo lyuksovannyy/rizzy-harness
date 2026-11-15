@@ -829,7 +829,7 @@ async fn creating_a_chat_announces_it_after_stamping() {
             Live::Event(e) if e.kind == "session_created" && e.session_id.to_string() == sid => {
                 after_created = Some(0)
             }
-            Live::SessionsChanged => {
+            Live::SessionsChanged(_) => {
                 if let Some(n) = after_created.as_mut() {
                     *n += 1;
                 }

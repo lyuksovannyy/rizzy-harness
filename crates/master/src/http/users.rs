@@ -21,7 +21,7 @@ use serde_json::json;
 
 use super::{ApiError, ApiResult, require_admin};
 use crate::workspaces as ws;
-use crate::{Live, Master, auth};
+use crate::{Master, auth};
 
 pub(super) fn user_json(u: &harness_store::UserRow) -> serde_json::Value {
     json!({
@@ -210,8 +210,8 @@ pub(super) async fn update_user(
         // Disabled owners stop counting as owners, and whether the user may
         // drive their agentic chats (`blocked`) may have changed: running
         // ones that lost their access stop.
-        let _ = m.inner.live.send(Live::WorkspacesChanged);
-        let _ = m.inner.live.send(Live::SessionsChanged);
+        let rosters = super::workspaces::rosters_of(&m, &target.user_id).await;
+        super::workspaces::account_changed(&m, &target.user_id, rosters);
         ws::sweep_revoked(&m, vec![target.user_id.clone()]);
     }
     Ok(Json(user_json(&load_user(&m, &id).await?)))
@@ -275,21 +275,28 @@ pub(super) async fn delete_user(
     // the memory of every workspace that went with it (their Personal one,
     // a team they were the last member of).
     crate::memory::forget_person(&m, &target.user_id, None).await;
+    // The teams that outlived them show them gone from their rosters.
+    let mut rosters = Vec::new();
     for ws in workspaces {
         let w = ws.clone();
-        if matches!(
-            m.inner.mirror.call(move |s| s.workspace(&w)).await,
-            Ok(None)
-        ) {
-            crate::memory::forget_workspace(&m, &ws).await;
+        match m.inner.mirror.call(move |s| s.workspace(&w)).await {
+            Ok(None) => crate::memory::forget_workspace(&m, &ws).await,
+            Ok(Some(_)) => rosters.push(ws),
+            Err(_) => {}
         }
     }
     auth::close_sockets(&m, &target.user_id);
     // Their stored files lost their rows with the account; unlink them.
     crate::storage::on_user_deleted(&m).await;
-    crate::projects::forget_gone(&m, projects).await;
-    let _ = m.inner.live.send(Live::WorkspacesChanged);
-    let _ = m.inner.live.send(Live::SessionsChanged);
+    // Only theirs went: their Personal workspace's, a team's they were the
+    // last member of.
+    crate::projects::forget_gone(
+        &m,
+        projects,
+        &[crate::Audience::User(target.user_id.clone())],
+    )
+    .await;
+    super::workspaces::account_changed(&m, &target.user_id, rosters);
     // Their running agentic chats stop (the account is gone), and every
     // chat of theirs is deleted on the master and on its node (P-6).
     ws::sweep_revoked(&m, vec![target.user_id]);
