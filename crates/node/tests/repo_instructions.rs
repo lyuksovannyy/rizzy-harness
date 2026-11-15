@@ -112,6 +112,11 @@ async fn start_as(profile: harness_core::event::Profile) -> Node {
     .unwrap();
     std::fs::write(repo.join("sub/CLAUDE.md"), "Keep sub small.\n").unwrap();
     std::fs::write(repo.join("sub/keep.txt"), "kept\n").unwrap();
+    // The files were there before any turn: a file written less than
+    // `nested::CLOCK_MARGIN` before a turn begins counts as changed during
+    // it and waits (T65), which on a fast machine held `sub/CLAUDE.md` back
+    // from the first turn of a test.
+    tokio::time::sleep(harness_agent_native::nested::CLOCK_MARGIN * 3).await;
     let seen: Arc<Mutex<Vec<String>>> = Arc::default();
     let spy = Spy(
         Mock {
