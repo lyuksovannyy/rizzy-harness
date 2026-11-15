@@ -250,6 +250,10 @@ pub struct SessionView {
     /// are gone.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub chat_allows: BTreeMap<String, ChatAllow>,
+    /// The latest turn's own usage (`turn_ended.usage`), for what the last
+    /// turn cost; `usage` above is the whole chat's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_usage: Option<Usage>,
 }
 
 /// One background command as the log shows it.
@@ -512,6 +516,9 @@ impl SessionView {
                     self.summary_at = u.summary_at;
                     self.context_model = u.model.clone();
                 }
+                // The turn that ended, also when it reported none (an
+                // interrupted one): never an older turn's as the last.
+                self.turn_usage = t.usage.as_ref().map(Usage::capped);
                 self.running_turn = None;
                 self.running_agent = None;
                 self.items.push(Item::TurnEnd {

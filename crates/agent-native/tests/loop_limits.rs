@@ -187,7 +187,6 @@ async fn an_agent_definition_cannot_run_more_steps_than_the_node_allows() {
         no_effort: vec![],
         context_windows: Default::default(),
         effort: None,
-        budget: harness_core::agent::Budget::Standard,
         ui: Default::default(),
         prompt_hash: "h".into(),
         deny_tools: vec![],

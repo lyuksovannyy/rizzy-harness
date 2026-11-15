@@ -28,6 +28,7 @@ pub mod outbound;
 pub mod pdf;
 pub mod prefs;
 pub mod presets;
+pub mod pricing;
 pub mod projects;
 pub mod providers;
 pub mod recall;
@@ -136,7 +137,7 @@ impl Audience {
 
 /// A model the UI may offer, with what it supports (PLAN.md §0: capabilities
 /// come from configuration, never guessed; unreported is `false`).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct ModelInfo {
     /// `<provider_id>::<raw>`.
     pub id: String,
@@ -154,6 +155,10 @@ pub struct ModelInfo {
     /// Missing from its provider's latest listing; the composer does not
     /// offer it, but sessions and agents naming it still resolve.
     pub unavailable: bool,
+    /// What the server's admin set it to cost (none: unpriced), for the
+    /// chat's cost estimate. Not secret: every signed-in user reads it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price: Option<pricing::PriceInfo>,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -291,7 +291,6 @@ fn agent(window: Option<u64>) -> AgentSpec {
         no_effort: vec![],
         context_windows: window.map(|w| ("m".to_string(), w)).into_iter().collect(),
         effort: None,
-        budget: Default::default(),
         ui: Default::default(),
         prompt_hash: "h".into(),
         deny_tools: vec![],

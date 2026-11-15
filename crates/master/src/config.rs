@@ -48,6 +48,8 @@ pub struct Config {
     pub media: crate::media::MediaConfig,
     #[serde(skip_serializing_if = "crate::artifacts::ArtifactsConfig::is_default")]
     pub artifacts: crate::artifacts::ArtifactsConfig,
+    #[serde(skip_serializing_if = "crate::pricing::PricingConfig::is_default")]
+    pub pricing: crate::pricing::PricingConfig,
 }
 
 impl Default for Config {
@@ -68,6 +70,7 @@ impl Default for Config {
             storage: Default::default(),
             media: Default::default(),
             artifacts: Default::default(),
+            pricing: Default::default(),
         }
     }
 }
@@ -91,6 +94,7 @@ struct RawConfig {
     storage: crate::storage::StorageConfig,
     media: crate::media::MediaConfig,
     artifacts: crate::artifacts::ArtifactsConfig,
+    pricing: crate::pricing::PricingConfig,
 }
 
 impl From<RawConfig> for Config {
@@ -111,6 +115,7 @@ impl From<RawConfig> for Config {
             storage: r.storage,
             media: r.media,
             artifacts: r.artifacts,
+            pricing: r.pricing,
         };
         c.normalize();
         c
@@ -438,7 +443,7 @@ impl ChatConfig {
 
 /// A model as the provider reported it, or as an admin described it
 /// (`custom`). `None`: not reported (treated as unsupported at runtime).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelConfig {
     /// The provider's raw id (no prefix).
@@ -466,6 +471,10 @@ pub struct ModelConfig {
     /// When a listing first missed it (ms since the epoch).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub missing_since: Option<i64>,
+    /// What the server's admin set it to cost, per million tokens, in
+    /// `[pricing] currency` (none: unpriced). Listings never change it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price: Option<crate::pricing::ModelPrice>,
 }
 
 impl From<harness_agent_native::models::ModelMeta> for ModelConfig {
@@ -635,6 +644,12 @@ impl Config {
         if self.providers.is_empty() {
             bail!("no providers");
         }
+        // As stored: three upper-case letters (the API cleans what it is sent).
+        match crate::pricing::clean_currency(&self.pricing.currency) {
+            Ok(c) if c == self.pricing.currency => {}
+            Ok(c) => bail!("[pricing] currency: write it as {c:?}"),
+            Err(e) => bail!("[pricing] currency: {e}"),
+        }
         for (i, p) in self.providers.iter().enumerate() {
             let at = format!("[[providers]] {:?}", p.id);
             if !valid_provider_id(&p.id) {
@@ -653,6 +668,11 @@ impl Config {
                 .any(|m| m.id.trim().is_empty() || m.id.contains("::"))
             {
                 bail!("{at}: model ids must be non-empty and must not contain \"::\"");
+            }
+            for m in &p.models {
+                if let Some(Err(e)) = m.price.as_ref().map(|x| x.check()) {
+                    bail!("{at} model {:?}: {e}", m.id);
+                }
             }
             if p.kind == ProviderKind::Mock {
                 continue;

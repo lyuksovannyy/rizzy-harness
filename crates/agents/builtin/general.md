@@ -4,7 +4,6 @@ description: Everyday assistant for questions, explanations, writing help and qu
 aliases: [ai]
 category: General
 tools: [web_search, web_fetch, remember]
-budget: lean
 ui: rich
 available_as: [agent]
 ---

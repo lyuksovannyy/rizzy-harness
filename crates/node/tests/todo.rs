@@ -197,7 +197,6 @@ fn agent(id: &str, tools: &[&str], delegates: Vec<AgentSpec>) -> AgentSpec {
         no_effort: vec![],
         context_windows: Default::default(),
         effort: None,
-        budget: Default::default(),
         ui: Default::default(),
         prompt_hash: "h".into(),
         deny_tools: vec![],

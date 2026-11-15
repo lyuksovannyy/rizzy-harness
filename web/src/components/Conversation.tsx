@@ -41,6 +41,7 @@ import { Markdown } from "./Markdown";
 import { NodeBadge } from "./NodeBadge";
 import { ExecBadge } from "./ExecBadge";
 import { compactTokens, ContextMeter } from "./ContextMeter";
+import { CostMeter } from "./CostMeter";
 import { RetryNote } from "./RetryNote";
 import { LiveCtx } from "../lib/liveCtx";
 import { repliedBlock, ReplyBubble } from "./ReplyBubble";
@@ -371,6 +372,7 @@ export default function Conversation(props: {
                 }`}
               >
                 {compact(view.usage.input_tokens + view.usage.output_tokens)} {t("conv.tokens")} ·{" "}
+                <CostMeter usage={view.usage} turn={view.turn_usage} models={props.models} />
                 <ContextMeter used={view.context_tokens} window={view.context_window} summaryAt={view.summary_at} model={view.context_model ?? meta?.model ?? ""} />
               </span>
             )}
@@ -839,6 +841,7 @@ export default function Conversation(props: {
               key={sessionId}
               sessionId={sessionId}
               view={view ?? null}
+              models={props.models}
               away={!!node && !node.connected}
               nodeLabel={node ? (node.embedded ? "local" : node.hostname) : nodeId}
               yielded={diffOf?.session === sessionId}

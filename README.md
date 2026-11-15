@@ -509,6 +509,60 @@ and listings never mark it. Testing a saved provider in the UI refreshes its
 listing too, but only with its saved key and preset: a test with a key typed
 into the form, not yet saved, changes neither the listing nor the marks.
 
+### What a chat costs (an estimate)
+
+The chat header shows the tokens a chat used and, once the server has prices,
+an estimate of what it cost: `≈ $0.42 (last turn $0.03)`. The chat's figure
+already includes its sub-agents; each sub-agent row in the side panel shows
+its own share, a breakdown rather than something to add. There is no built-in price table: prices change
+and only you know the deal you have, so a server admin sets them per model in
+Settings → Server → AI providers → Edit → **Prices (optional)**, per million
+tokens: input, cached input (read from the provider's prompt cache), cache
+write, and output. Every field may stay empty. They are stored with the model
+in `config.toml`, in one currency for the whole server (Settings → Server → AI
+providers, `[pricing] currency`, an ISO code; changing it converts nothing):
+
+```toml
+[pricing]
+currency = "EUR"                     # default USD
+
+[[providers]]
+# ...
+models = [
+  { id = "big-model", price = { input = 3.0, cached_input = 0.3, cache_write = 3.75, output = 15.0 } },
+  { id = "small-model", price = { input = 0.25, output = 1.25 } },
+]
+```
+
+A price must be a number from 0 to 10,000; a bad one is refused (a save
+fails with the reason; the server does not start with one in the file). Only
+server admins set prices or the currency; everyone signed in reads them with
+the model list, and sees the estimate of their own chats only.
+
+What is counted: every model call the chat made, each under the model that
+answered it: the turn's main calls, a retry, a fallback model, the summaries
+written between and inside turns, sub-agents (on their own model, the small
+one included), parallel answers and hand-off notes. Input read from or written
+to the cache is priced at its own price, the rest of the input at the input
+price; reasoning tokens count as output, as providers bill them. A model is
+priced only if every kind of token it used has a price: if the small model has
+no cached-input price and a chat read from its cache, its tokens are left out
+and the header says `≈ $0.42 + unpriced` instead of a figure that is too low.
+A sub-agent that fails or is cancelled still counts what it spent until then.
+At most 16 models per chat (and per turn) are tracked separately; tokens of
+any further model, and chats from before this version, have no per-model
+record and show as unpriced.
+
+What it is not: the bill. It uses the prices as they are now, not as they
+were when the chat ran; it knows nothing of discounts, free tiers, batch
+prices, long-context surcharges or a 1-hour cache write's higher rate; it
+prices cache writes only as the provider reports them (Anthropic's
+`cache_creation_input_tokens`, an OpenAI-compatible router's
+`prompt_tokens_details.cache_write_tokens` such as OpenRouter's): a provider
+that reports none has its cache writes priced as plain input; and nothing
+limits or stops spending. The provider's own console has the real
+figure.
+
 An agent has one model; one model may serve several agents. A model call
 that fails before any output for a passing reason (rate limit 429, server
 error 500/502/503/504, Anthropic's overloaded 529, no connection, a stream

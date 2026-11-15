@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
 use uuid::Uuid;
@@ -1452,9 +1453,46 @@ pub struct Usage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary_at: Option<u64>,
     /// The model `window` is of: the one that answered last (a fallback's
-    /// when one answered), so it matches `context_tokens`.
+    /// when one answered), so it matches `context_tokens`. A label for the
+    /// window only: it says nothing about who used the tokens (`by_model`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// The sums above split by the model (prefixed id) that used them: the
+    /// provider router stamps each call's own, and [`Usage::add`] keeps
+    /// them as calls, fallbacks, summaries, sub-agents and hand-off notes
+    /// are added up. At most [`MAX_USAGE_MODELS`] models; tokens in no
+    /// bucket (a call no router stamped, a model past the cap, a log from
+    /// before this field) are unattributed, which a price estimate shows
+    /// as unpriced rather than guess.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub by_model: BTreeMap<String, ModelTokens>,
+}
+
+/// How many models one usage breaks down (a turn's: its model, its
+/// fallbacks, its sub-agents' and compared models; a chat's in the view).
+/// Bounds what the breakdown adds to every usage event (model ids are at
+/// most 256 bytes); a model past it stays in the totals, unattributed.
+pub const MAX_USAGE_MODELS: usize = 16;
+
+/// One model's share of a [`Usage`] (`input_tokens` includes the cache
+/// reads and writes, as the totals do).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelTokens {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cache_read_tokens: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cache_write_tokens: u64,
+}
+
+impl ModelTokens {
+    pub fn add(&mut self, t: &ModelTokens) {
+        self.input_tokens += t.input_tokens;
+        self.output_tokens += t.output_tokens;
+        self.cache_read_tokens += t.cache_read_tokens;
+        self.cache_write_tokens += t.cache_write_tokens;
+    }
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -1463,12 +1501,47 @@ fn is_zero(n: &u64) -> bool {
 
 impl Usage {
     /// Add another call's usage (context size is the latest call's; the
-    /// limits stay this turn's own).
+    /// limits stay this turn's own). Its breakdown is merged; a usage
+    /// without one adds to the totals only (unattributed).
     pub fn add(&mut self, u: &Usage) {
         self.input_tokens += u.input_tokens;
         self.output_tokens += u.output_tokens;
         self.cache_read_tokens += u.cache_read_tokens;
         self.cache_write_tokens += u.cache_write_tokens;
+        for (model, t) in &u.by_model {
+            if let Some(mine) = self.by_model.get_mut(model) {
+                mine.add(t);
+            } else if self.by_model.len() < MAX_USAGE_MODELS {
+                self.by_model.insert(model.clone(), t.clone());
+            }
+        }
+    }
+
+    /// This usage as a fold keeps it: at most [`MAX_USAGE_MODELS`] models,
+    /// the first in key (byte) order, as [`Usage::add`] admits them; the
+    /// rest stay in the sums, unattributed. A node writes the event, so a
+    /// forged one is bounded here too, not only in `add`.
+    pub fn capped(&self) -> Usage {
+        let mut u = self.clone();
+        if u.by_model.len() > MAX_USAGE_MODELS {
+            u.by_model = u.by_model.into_iter().take(MAX_USAGE_MODELS).collect();
+        }
+        u
+    }
+
+    /// This usage, all of it attributed to `model` (one model call's, as
+    /// the provider router stamps it).
+    pub fn stamp(&mut self, model: &str) {
+        let t = ModelTokens {
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            cache_read_tokens: self.cache_read_tokens,
+            cache_write_tokens: self.cache_write_tokens,
+        };
+        self.by_model.clear();
+        if t != ModelTokens::default() {
+            self.by_model.insert(model.to_string(), t);
+        }
     }
 }
 

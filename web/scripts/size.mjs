@@ -243,6 +243,18 @@ const X15_KB = 0.4;
 // a tenth).
 const X16_KB = 0.9;
 
+// The chat's cost estimate (X.18, feat/cost-estimate), measured 397.6
+// (initial 102.0) against 395.4 (initial 101.9) on main: the estimate, its
+// rounding and words and the header's cost in the conversation chunk
+// (+0.8), the per-model price fields and the currency field in the
+// provider form's chunk (Settings and onboarding), the sub-agent line's
+// cost in the side panel, and in the first load the fold's per-model sums
+// (+0.1). After its review, measured 397.9 (initial 102.3) against 395.4
+// (initial 101.9) on main with pull request 118: the fold reads model ids
+// by own key only, in byte order, capped where an event is read (first
+// load, +0.3), the currency rule and the decimal-only price fields (+0.3).
+const COST_KB = 2.5;
+
 // `@path` file mentions (ADOPTION_PLAN X.17, PLAN.md T63, feat/context-inputs),
 // measured 396.6 (initial 102.6) against 395.4 (initial 101.9) on main: in the
 // first load, the composer's path tokens, its "Files" group and "no match"
@@ -254,7 +266,7 @@ const X16_KB = 0.9;
 const X17_KB = 1.2; // the measure is a few hundredths over 396.6
 
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
-const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB + EXPORT_KB + MEMDEF_KB + VISIBILITY_KB + T50_KB + LOOP_KB + DIFF_KB + T51_KB + WSMEM_KB + STEPS_KB + AGENT_SWITCHES_KB + T57_KB + X15_KB + X16_KB + X17_KB) * 100) / 10) / 10;
+const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB + EXPORT_KB + MEMDEF_KB + VISIBILITY_KB + T50_KB + LOOP_KB + DIFF_KB + T51_KB + WSMEM_KB + STEPS_KB + AGENT_SWITCHES_KB + T57_KB + X15_KB + X16_KB + COST_KB + X17_KB) * 100) / 10) / 10;
 // Raised from 103 to 106 once the Phase A pages merged (103.7 measured: the
 // new sidebar, account button and routine-result rows are on the first
 // screen), then lowered to 104 at Phase B (102.3 measured) once the login
