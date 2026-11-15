@@ -169,9 +169,16 @@ const fileOf = (path: string, lines: string[]): TurnDiff["files"][number] => ({
   hunks: [{ old_start: 1, old_lines: lines.length, new_start: 1, new_lines: lines.length, lines }],
 });
 
+// The page this draws is the largest the panel ever draws at once
+// (OPEN_FILES x LINES_SHOWN rows), which takes jsdom several seconds on a
+// loaded CI runner: 5.8 s against the default 5 s limit once. The answer is
+// no larger than it must be to prove the bound (files past the open ones,
+// more lines than one "Show more" step), and the test has its own limit.
 test("a huge answer draws a bounded page; closed files have no lines; Show more adds them (review D3)", async () => {
-  const many = Array.from({ length: 5000 }, (_, i) => `+l${i}`);
-  turnDiff.mockImplementationOnce(() => Promise.resolve({ files: Array.from({ length: 60 }, (_, i) => fileOf(`f${i}`, many)) }));
+  const many = Array.from({ length: LINES_SHOWN + 2200 }, (_, i) => `+l${i}`);
+  turnDiff.mockImplementationOnce(() =>
+    Promise.resolve({ files: Array.from({ length: OPEN_FILES + 2 }, (_, i) => fileOf(`f${i}`, many)) }),
+  );
   await render();
   const rows = host.querySelectorAll(".diff-line").length;
   expect(rows).toBe(OPEN_FILES * LINES_SHOWN);
@@ -185,7 +192,7 @@ test("a huge answer draws a bounded page; closed files have no lines; Show more 
   expect(more.textContent).toBe("Show 2,000 more lines");
   await act(async () => more.click());
   expect(first.querySelectorAll(".diff-line").length).toBe(LINES_SHOWN + 2000);
-});
+}, 30_000);
 
 test("code is marked only where it hides something: indentation stays, CRLF said once (review D6)", async () => {
   turnDiff.mockImplementationOnce(() =>
