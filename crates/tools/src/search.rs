@@ -84,6 +84,9 @@ impl Tool for Grep {
     fn risk(&self) -> ToolRisk {
         ToolRisk::ReadOnly
     }
+    fn parallel_safe(&self) -> bool {
+        true
+    }
     fn refusal(&self, ctx: &ToolCtx, input: &Value) -> Option<String> {
         root(ctx, input).err()
     }
@@ -218,6 +221,9 @@ impl Tool for Glob {
     }
     fn risk(&self) -> ToolRisk {
         ToolRisk::ReadOnly
+    }
+    fn parallel_safe(&self) -> bool {
+        true
     }
     fn refusal(&self, ctx: &ToolCtx, input: &Value) -> Option<String> {
         root(ctx, input).err()

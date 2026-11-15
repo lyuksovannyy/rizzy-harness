@@ -571,15 +571,24 @@ pub fn asked_line(n: &str) -> String {
     )
 }
 
+/// Names whose `/name` is a built-in command of the chat's composer, not a
+/// skill's shortcut (`/compact`, ADOPTION_PLAN X.20): a skill of that name
+/// is still listed to the model and loads through the `skill` tool, but
+/// `/name` never invokes it.
+pub const RESERVED: &[&str] = &["compact"];
+
 /// The skill the person's message names with `/name` at its start (the
 /// first word, without a trailing `:`, `,` or `.`), if there is one of
-/// that name.
+/// that name and the name is not [`RESERVED`].
 pub fn invoked(text: &str, c: &Catalogue) -> Option<String> {
     let rest = text.trim_start().strip_prefix('/')?;
     let name = rest
         .split(char::is_whitespace)
         .next()?
         .trim_end_matches([':', ',', '.']);
+    if RESERVED.contains(&name) {
+        return None;
+    }
     c.skills
         .iter()
         .find(|s| s.name == name)

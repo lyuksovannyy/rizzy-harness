@@ -713,6 +713,31 @@ it was cut and that the agent saw all of it. Chat-profile chats keep a
 shorter general summary (at most 300 words). The latest summary is shown,
 collapsed, where it was made in the chat.
 
+**Summarise now: `/compact`.** Type `/compact` in a chat's message box, or
+`/compact keep the database migration details` with words on what to keep
+in focus, and the chat's history is summarised now instead of when it fills
+up: everything before your last message and its answer, which stay word for
+word (an automatic summary keeps the last two turns), with the task list and
+standing context given back as after any summary. Your focus words, on the
+same line as `/compact`, go to the summarising model as yours, quoted, for
+emphasis only (at most 2,000 characters; a longer text is cut and says so;
+more lines after the command are refused with a hint). `/compact` is the
+built-in command: a skill named `compact` is still offered to the agent,
+but `/compact` never loads it. The chat shows "Summarising
+the chat for the model…" until the summary appears ("summarised for the
+model at your request", with your focus and the summary under it), and the
+context meter drops to the new size. It works between turns only (a running
+turn shortens its own context when it must; Stop it first if you want to
+summarise now), one at a time, and no message is sent while it runs; Stop
+shows while it runs and cancels it. A message you sent during the last turn
+that no turn has read yet is read first: `/compact` waits until then. A chat
+too short to summarise, a model error, a summary that would not be smaller
+or Stop is said in plain words, and nothing is lost: the chat keeps showing
+every message, only what the model is sent gets shorter. After two failed
+summaries in a row, send a message before trying again. The summary's cost
+counts in the chat's usage. Only the chat's owner can do it; no agent,
+routine or tool can.
+
 In agentic chats the agent keeps its own task list with the `todo` tool
 (Software Developer, Senior Teamlead, Writer, custom agents that edit files
 or run commands, and agents with `tools: all`; add `todo` to a file agent's
@@ -1130,7 +1155,10 @@ directory, be inside it, or contain it: with the default data directory
 `grep`, `glob`, `outline`) never reach into the data directory, even with
 `allow_outside_workspace = true` or through a symlink. The shell runs in a
 sandbox that cannot open it either (see "The shell sandbox" below); its
-output is still scrubbed of the API token and known keys.
+output is still scrubbed of the API token and known keys. When the model asks for several `read`, `grep`, `glob` or `outline`
+calls in one step and none needs a card, they run at the same time (at most
+8 at once); their results still appear, and reach the model, in the order it
+asked. Every other call, `bash` included, runs alone in its place.
 `allow_outside_workspace = true` lets `write` and `edit` change any file
 of the node's user outside the data directory, `~/.bashrc` and
 `~/.gitconfig` included, which is the same as running a command outside
@@ -2281,7 +2309,9 @@ with the tool gets the list too.
 **Asking for one.** A message of yours that starts with `/name` (a skill's
 name, then your text; `/name:` works too) asks the agent to load that skill
 first, a manual one included. A task one agent hands another never does.
-There is no menu for it yet.
+There is no menu for it yet. `/compact` is taken by the built-in command
+(see "Summarise now"): a skill named `compact` is still offered to the
+agent, but cannot be asked for this way (a manual one not at all).
 
 **What a skill can do: nothing by itself.** Nothing in a skill runs when it is
 found or loaded (no `` !`command` `` expansion); a script it names runs only

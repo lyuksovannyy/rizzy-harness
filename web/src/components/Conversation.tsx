@@ -6,6 +6,7 @@ import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, 
 import { api } from "../api";
 import { pageApi } from "../apiPages";
 import { endWords, turnStart } from "../lib/callback";
+import { useCompact } from "../lib/compact";
 import { dropDraft } from "../lib/drafts";
 import { useFeatures } from "../lib/features";
 import { t } from "../lib/i18n";
@@ -245,6 +246,7 @@ export default function Conversation(props: {
 
   const meta = view?.meta;
   const running = !!view?.running_turn;
+  const summarise = useCompact(sessionId, view);
   const items = view?.items ?? [];
   // The view is mutated in place, so memoise on what the result depends on.
   const provSig = provenanceSignature(items);
@@ -647,8 +649,9 @@ export default function Conversation(props: {
                   case "summary":
                     // Only the latest summary is what the model sees now.
                     return view.items.findLastIndex((x) => x.type === "summary") !== i ? null : (
-                      <details key={i} className="divider summary">
-                        <summary>{t("conv.summary")}</summary>
+                      <details key={i} className="divider summary" data-testid="summary">
+                        <summary>{t(it.manual ? "conv.summaryManual" : "conv.summary")}</summary>
+                        {it.focus && <p>{t("conv.summaryFocus", { focus: it.focus })}</p>}
                         <p>{it.text}</p>
                       </details>
                     );
@@ -738,6 +741,11 @@ export default function Conversation(props: {
               </div>
             )}
             {running && view?.retry && <RetryNote retry={view.retry} />}
+            {summarise.compacting && !running && (
+              <div className="thinking" data-testid="compacting">
+                {t("conv.compacting")}
+              </div>
+            )}
           </div>
         </BlockCtx>
       </div>
@@ -785,9 +793,12 @@ export default function Conversation(props: {
             agenticBlocked={null}
             readOnly={blocked}
             running={running}
+            // While a /compact runs, Stop cancels it (the same route).
+            compacting={summarise.compacting && !running}
             draft={keepsDraft ? sessionId : undefined}
             voice={props.voice}
             onStop={() => void pageApi.cancel(sessionId)}
+            compact={summarise.start}
             images={features?.media.vision_images ? { workspace: workspaceId, left: CHAT_IMAGES - imagesUsed } : null}
             onSubmit={async (s) => {
               stick.current = true;

@@ -228,6 +228,29 @@ impl RepeatGuard {
         Admission::Run
     }
 
+    /// Whether one more call of `tool`, after `already` calls of it in the
+    /// same parallel batch, may join the batch. A batch's calls are all
+    /// admitted before any of them is recorded, so this keeps out every
+    /// call whose admission could depend on an earlier call of the batch:
+    /// the second rule near its refusal (identical failures of the calls
+    /// before it would refuse it, run one after another), or a tool whose
+    /// refusal was sent or whose trial runs (a failed trial ends the turn
+    /// and the calls after it are not run). The loop also keeps one call
+    /// key once per batch, so the first rule counts every repeat exactly
+    /// as it does in order. What remains can differ from the order only by
+    /// being stricter: a change an earlier call of the batch makes
+    /// ([`Self::restart`]) does not reset a later one's count until the
+    /// next step.
+    pub fn batchable(&self, tool: &str, already: u32) -> bool {
+        if self.ended {
+            return false;
+        }
+        match self.tools.get(&tool_digest(tool)) {
+            None => already + 1 < TOOL_REFUSE_AT,
+            Some(s) => s.refused.is_none() && !s.trial && s.runs + already + 1 < TOOL_REFUSE_AT,
+        }
+    }
+
     /// Something changed: every call's count starts again. Each keeps its
     /// last result, so a call that then only repeats it is judged against
     /// it (and is no progress itself).

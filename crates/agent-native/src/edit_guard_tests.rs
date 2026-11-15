@@ -206,6 +206,7 @@ async fn a_summary_keeps_what_was_read() {
             turn_id: "t".into(),
             through_seq: through,
             text: "The agent read f.txt.".into(),
+            ..Default::default()
         })],
     );
     let ev = turn(

@@ -188,6 +188,15 @@ pub(crate) struct Session {
     /// When this chat's last notes were started, for `[limits]
     /// handoff_notes_per_hour` (in memory: a restart gives one more hour).
     note_tries: Mutex<std::collections::VecDeque<std::time::Instant>>,
+    /// A person's `/compact` running (X.20): no turn starts meanwhile
+    /// (`claim_turn` refuses with `COMPACTING`), and Stop or a delete
+    /// cancels it. Set and read under `turn`'s lock.
+    compacting: Mutex<Option<CancellationToken>>,
+    /// The agent and settings the last person's turn would read its
+    /// queued messages with (`read_queued`): a `/compact` that ends with
+    /// messages pending starts that turn (X.20 review M1). None after a
+    /// restart: those messages wait for the person's next one.
+    reader: Mutex<Option<(Option<AgentSpec>, TurnExtra)>>,
 }
 
 /// The most messages that wait at once for the running turn to read them
@@ -399,6 +408,8 @@ impl Session {
             turn_env: Mutex::new(None),
             note: Mutex::new(None),
             note_tries: Mutex::default(),
+            compacting: Mutex::new(None),
+            reader: Mutex::new(None),
             node: node.clone(),
             id,
             head: tokio::sync::Mutex::new(0),
@@ -521,6 +532,8 @@ impl Session {
             turn_env: Mutex::new(None),
             note: Mutex::new(None),
             note_tries: Mutex::default(),
+            compacting: Mutex::new(None),
+            reader: Mutex::new(None),
             node,
             id,
             head: tokio::sync::Mutex::new(view.head_seq),
@@ -1350,6 +1363,7 @@ impl Session {
                     by_stop,
                 )
                 .await;
+            this.keep_reader(agent.clone(), after.clone());
             this.read_queued(reason, agent, after, turn_id).await;
         });
         Ok(())
@@ -1453,6 +1467,8 @@ impl Session {
             reason,
             TurnEndReason::Completed | TurnEndReason::Error | TurnEndReason::Limit
         ) {
+            #[cfg(feature = "testing")]
+            crate::testing::queued_hold(self.id).await;
             let Some((turn_id, user_text, history, extra, cancel, by_stop)) = self
                 .start_queued(agent.as_ref(), after.clone(), &ended)
                 .await
@@ -1615,7 +1631,7 @@ impl Session {
             compare: false,
         })
         .map_err(|e| {
-            if e == TURN_RUNNING {
+            if e == TURN_RUNNING || e == harness_protocol::COMPACTING {
                 harness_protocol::CALLBACK_BUSY.to_string()
             } else {
                 e
@@ -1759,6 +1775,7 @@ impl Session {
                     by_stop,
                 )
                 .await;
+            this.keep_reader(person.clone(), after.clone());
             this.read_queued(reason, person, after, turn_id).await;
         });
         Ok(())
@@ -1812,6 +1829,11 @@ impl Session {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .is_some()
+            || self
+                .compacting
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .is_some()
         {
             return Err(HANDOFF_BUSY.into());
         }
@@ -1926,6 +1948,201 @@ impl Session {
             this.end_note(&cancel);
         });
         Ok(())
+    }
+
+    /// A person's `/compact` (X.20, PLAN.md T64): summarise the chat's
+    /// history now with their focus text. Only between turns: refused
+    /// while a turn runs (the turn shortens its own context, X.15), for a
+    /// sub-agent's chat, and for a chat too short to summarise (no event);
+    /// one at a time. Acked once started; the outcome is recorded by this
+    /// session (one writer): `history_summarized` (`manual`) only if
+    /// nothing joined the log since what it read, else `compact_failed`.
+    /// No turn starts meanwhile (`claim_turn`); Stop and a delete cancel
+    /// it. A hand-off note being written is dropped: the person goes first.
+    pub(crate) async fn compact(
+        self: &Arc<Self>,
+        focus: Option<String>,
+        windows: std::collections::BTreeMap<String, u64>,
+    ) -> Result<(), String> {
+        use harness_protocol::{COMPACT_BUSY, COMPACT_TURN_RUNNING};
+        if self.parent_session.is_some() {
+            return Err("A sub-agent's chat is not summarised by hand.".into());
+        }
+        if self.node.is_stopping() {
+            return Err(harness_protocol::NODE_STOPPING.into());
+        }
+        // The person's words, as the summariser and the log will have them.
+        let focus = focus
+            .map(|f| cut_focus(&self.node.cfg.secrets.scrub(f.trim())))
+            .filter(|f| !f.is_empty());
+        // Under `queue` and `turn`: no turn starts between this check and
+        // the claim (`claim_turn` reads `compacting` under `turn`).
+        let queue = self.queue.lock().await;
+        let cancel = CancellationToken::new();
+        {
+            let t = self.turn.lock().unwrap_or_else(|p| p.into_inner());
+            if t.is_some() {
+                return Err(COMPACT_TURN_RUNNING.into());
+            }
+            // A message sent during the last turn that no turn read yet:
+            // the turn that reads it may be about to claim the slot (it
+            // waits for `queue`), and must not find it taken (review M1).
+            if !self
+                .pending
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .is_empty()
+            {
+                return Err(harness_protocol::COMPACT_PENDING.into());
+            }
+            let mut c = self.compacting.lock().unwrap_or_else(|p| p.into_inner());
+            if c.is_some() {
+                return Err(COMPACT_BUSY.into());
+            }
+            *c = Some(cancel.clone());
+        }
+        drop(queue);
+        self.cancel_note();
+        let id = self.id;
+        let history = match self
+            .node
+            .cfg
+            .store
+            .call(move |s| s.events_after(id, 0, usize::MAX >> 1))
+            .await
+        {
+            Ok(h) => h,
+            Err(e) => {
+                self.end_compact();
+                return Err(e.to_string());
+            }
+        };
+        if let Err(e) = self.node.cfg.backend.compact_check(&history) {
+            self.end_compact();
+            return Err(e);
+        }
+        let through = history.last().map_or(0, |e| e.seq);
+        let model = history
+            .iter()
+            .rev()
+            .find_map(|e| match e.typed() {
+                Ok(EventKind::TurnEnded(t)) => t.usage.and_then(|u| u.model),
+                _ => None,
+            })
+            .unwrap_or_else(|| self.model.clone());
+        let window = windows.get(&model).copied();
+        let this = self.clone();
+        tokio::spawn(async move {
+            let out = this
+                .node
+                .cfg
+                .backend
+                .compact_now(harness_core::backend::CompactCtx {
+                    session_id: id,
+                    history,
+                    model,
+                    window,
+                    focus: focus.clone(),
+                    cancel: cancel.clone(),
+                })
+                .await;
+            let failed_reason = harness_core::event::compact_failed_reason;
+            let failed = |reason: String, usage| {
+                EventKind::CompactFailed(harness_core::event::CompactFailed {
+                    reason,
+                    usage: Some(usage).filter(|u: &Usage| *u != Usage::default()),
+                })
+            };
+            let ev = match out {
+                None => failed(
+                    failed_reason("this chat's agent cannot summarise its history"),
+                    Usage::default(),
+                ),
+                Some(harness_core::backend::CompactOutcome::Failed { reason, usage }) => {
+                    failed(reason, usage)
+                }
+                Some(harness_core::backend::CompactOutcome::Done {
+                    through_seq,
+                    text,
+                    usage,
+                    tokens_after,
+                }) => {
+                    let summary = EventKind::HistorySummarized(HistorySummarized {
+                        turn_id: String::new(),
+                        through_seq,
+                        text,
+                        manual: true,
+                        focus,
+                        usage: Some(usage.clone()),
+                        tokens_after: Some(tokens_after),
+                    });
+                    match this
+                        .append_if_head(through, || !cancel.is_cancelled(), summary)
+                        .await
+                    {
+                        Ok(Some(_)) => {
+                            tracing::debug!(session = %id, "manual summary recorded");
+                            this.end_compact();
+                            return;
+                        }
+                        Ok(None) if cancel.is_cancelled() => {
+                            failed(failed_reason("it was stopped"), usage)
+                        }
+                        Ok(None) => failed(
+                            failed_reason("the chat changed while it was being summarised"),
+                            usage,
+                        ),
+                        Err(e) => {
+                            tracing::warn!(session = %id, error = %e, "could not record a manual summary");
+                            failed(failed_reason("its log could not be written"), usage)
+                        }
+                    }
+                }
+            };
+            // The outcome is the person's to see, whatever stopped it (a
+            // deleted chat's log takes nothing).
+            if let Err(e) = this.append(ev).await {
+                tracing::warn!(session = %id, error = %e, "could not record a failed summary");
+            }
+            this.end_compact();
+        });
+        Ok(())
+    }
+
+    /// The `/compact` is over, whatever its outcome: turns may start
+    /// again, and messages that wait to be read (none can arrive while it
+    /// runs, and it is refused while any wait; this is the second guard of
+    /// review M1) start the turn that reads them, as after a turn.
+    fn end_compact(self: &Arc<Self>) {
+        {
+            let _t = self.turn.lock().unwrap_or_else(|p| p.into_inner());
+            self.compacting
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .take();
+        }
+        let waiting = !self
+            .pending
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_empty();
+        let reader = self
+            .reader
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        if let (true, Some((agent, after))) = (waiting, reader) {
+            let this = self.clone();
+            tokio::spawn(async move {
+                this.read_queued(TurnEndReason::Completed, agent, after, String::new())
+                    .await;
+            });
+        }
+    }
+
+    /// What the last person's turn reads its queued messages with.
+    fn keep_reader(&self, agent: Option<AgentSpec>, after: TurnExtra) {
+        *self.reader.lock().unwrap_or_else(|p| p.into_inner()) = Some((agent, after));
     }
 
     /// Start a turn in the log: read the history before it, then record
@@ -3181,6 +3398,15 @@ impl Session {
         if t.is_some() {
             return Err(TURN_RUNNING.into());
         }
+        // A person's `/compact` runs: its summary is taken first (X.20).
+        if self
+            .compacting
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_some()
+        {
+            return Err(harness_protocol::COMPACTING.into());
+        }
         *t = Some(turn);
         drop(t);
         // The person (or a callback) goes first: a note being written is
@@ -3673,6 +3899,14 @@ impl Session {
             t.cancel.cancel();
         }
         self.cancel_note();
+        if let Some(c) = self
+            .compacting
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+        {
+            c.cancel();
+        }
     }
 
     /// Mark the running turn as the stop's to end, unless it was cancelled
@@ -4303,6 +4537,18 @@ fn applied_count(a: &crate::git::Applied) -> String {
 /// A turn's changes as a diff (X.12); its own file.
 #[path = "session_diff.rs"]
 mod diff;
+
+/// A `/compact` focus cut to `COMPACT_FOCUS_MAX_CHARS` characters, saying
+/// where (X.20).
+fn cut_focus(f: &str) -> String {
+    let max = harness_core::event::COMPACT_FOCUS_MAX_CHARS;
+    if f.chars().count() <= max {
+        return f.to_string();
+    }
+    let mut out: String = f.chars().take(max).collect();
+    out.push_str(&format!(" [cut at {max} characters]"));
+    out
+}
 
 #[cfg(test)]
 mod tests {

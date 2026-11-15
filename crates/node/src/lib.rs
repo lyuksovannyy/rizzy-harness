@@ -39,6 +39,7 @@ fn starts_work(msg: &MasterToNode) -> bool {
             | MasterToNode::Prompt { .. }
             | MasterToNode::Callback { .. }
             | MasterToNode::Handoff { .. }
+            | MasterToNode::Compact { .. }
             | MasterToNode::Restore { .. }
             | MasterToNode::ArtifactStage { .. }
     )
@@ -109,6 +110,7 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::Prompt { session_id, .. }
         | MasterToNode::Callback { session_id, .. }
         | MasterToNode::Handoff { session_id, .. }
+        | MasterToNode::Compact { session_id, .. }
         | MasterToNode::SetAgent { session_id, .. }
         | MasterToNode::SetApprovalMode { session_id, .. }
         | MasterToNode::RevokeAllow { session_id, .. }
@@ -300,9 +302,33 @@ pub mod testing {
         h
     }
 
+    static QUEUED_HOLD: Holds = std::sync::Mutex::new(Vec::new());
+
+    /// Arm a hold for session `sid`'s next start of a turn for the messages
+    /// sent while the last one ran: after the ended turn freed the slot and
+    /// before the next one claims it (X.20 review M1, a `/compact` in that
+    /// window).
+    pub fn hold_next_queued_start(sid: harness_core::SessionId) -> Arc<EndHold> {
+        let h = Arc::new(EndHold {
+            held: tokio::sync::Notify::new(),
+            go: tokio::sync::Semaphore::new(0),
+            is_held: Default::default(),
+        });
+        QUEUED_HOLD.lock().unwrap().push((sid, h.clone()));
+        h
+    }
+
+    pub(crate) async fn queued_hold(sid: harness_core::SessionId) {
+        wait_on(&QUEUED_HOLD, sid).await;
+    }
+
     pub(crate) async fn end_hold(sid: harness_core::SessionId) {
+        wait_on(&END_HOLD, sid).await;
+    }
+
+    async fn wait_on(holds: &Holds, sid: harness_core::SessionId) {
         let h = {
-            let mut all = END_HOLD.lock().unwrap();
+            let mut all = holds.lock().unwrap();
             all.iter()
                 .position(|(s, _)| *s == sid)
                 .map(|i| all.remove(i).1)
@@ -634,6 +660,7 @@ impl NodeRuntime {
                 if self.inner.cfg.policy.limits.handoff_notes_per_hour > 0 {
                     capabilities.push(harness_protocol::CAP_HANDOFF.into());
                 }
+                capabilities.push(harness_protocol::CAP_COMPACT.into());
                 // Off is silent: with `callback_turns = 0` the master asks
                 // nothing, and an end waits for the person as before.
                 if self.inner.cfg.policy.limits.callback_turns > 0 {
@@ -1165,6 +1192,19 @@ impl NodeRuntime {
                 self.audit("session.handoff", session_id).await;
                 match self.session(session_id) {
                     Some(s) => s.handoff(small_model, windows, low_effort).await,
+                    None => Err("unknown session".into()),
+                }
+            }
+            MasterToNode::Compact {
+                session_id,
+                focus,
+                windows,
+                ..
+            } => {
+                // It starts a model call: audited like a hand-off note.
+                self.audit("session.compact", session_id).await;
+                match self.session(session_id) {
+                    Some(s) => s.compact(focus, windows).await,
                     None => Err("unknown session".into()),
                 }
             }

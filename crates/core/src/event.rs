@@ -92,6 +92,7 @@ pub enum EventKind {
     ChatAllowRemoved(ChatAllowRemoved),
     StepLimitChanged(StepLimitChanged),
     HandoffWritten(HandoffWritten),
+    CompactFailed(CompactFailed),
 }
 
 impl EventKind {
@@ -148,6 +149,7 @@ impl EventKind {
             EventKind::ChatAllowRemoved(_) => "chat_allow_removed",
             EventKind::StepLimitChanged(_) => "step_limit_changed",
             EventKind::HandoffWritten(_) => "handoff_written",
+            EventKind::CompactFailed(_) => "compact_failed",
         }
     }
 }
@@ -821,12 +823,53 @@ pub fn own_words(model_text: &str) -> &str {
 
 /// Older turns were replaced by a summary for the model (the log keeps them;
 /// only what is sent to the provider shrinks).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct HistorySummarized {
+    /// The turn that wrote it; empty for a person's `/compact` (`manual`).
     pub turn_id: String,
     /// Every event with `seq <= through_seq` is covered by `text`.
     pub through_seq: u64,
     pub text: String,
+    /// A person's `/compact` (ADOPTION_PLAN X.20, PLAN.md T64): written
+    /// between turns by the session's one writer on the node, at the
+    /// chat owner's request.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub manual: bool,
+    /// Manual only: the person's words on what to keep in focus, as the
+    /// summariser was given them (scrubbed, at most
+    /// [`COMPACT_FOCUS_MAX_CHARS`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus: Option<String>,
+    /// Manual only: the summary calls' usage, counted in the chat's (a
+    /// turn's own summaries are counted in its turn).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+    /// Manual only: the estimated size of the next request (tokens), which
+    /// the chat's context meter shows until a turn reports its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens_after: Option<u64>,
+}
+
+/// The longest focus text a `/compact` passes on (characters); a longer one
+/// is cut there, with a line saying so.
+pub const COMPACT_FOCUS_MAX_CHARS: usize = 2_000;
+
+/// A person's `/compact` made no summary (X.20): the provider failed, the
+/// summary was not smaller than what it would replace, the chat changed
+/// meanwhile, or Stop. Nothing was replaced. Written by the session's one
+/// writer; `reason` is the harness's words, never a provider's body.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompactFailed {
+    pub reason: String,
+    /// The calls' usage, counted in the chat's, as a turn's discarded
+    /// summary is in its turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+}
+
+/// The sentence a `compact_failed` carries, `why` its plain cause.
+pub fn compact_failed_reason(why: &str) -> String {
+    format!("The chat was not summarised: {why}. Nothing was lost.")
 }
 
 /// What the model is sent was shortened during a turn (ADOPTION_PLAN X.15,

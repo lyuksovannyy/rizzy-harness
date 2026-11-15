@@ -367,6 +367,23 @@ fn a_slash_name_invokes_a_skill() {
     assert_eq!(skills::invoked("/etc/review is broken", &c), None);
 }
 
+/// `/compact` is the composer's built-in command (X.20): a skill named
+/// `compact` is still listed to the model and loads through the tool, but
+/// `/compact` at the start of a message never invokes it.
+#[test]
+fn a_built_in_command_name_invokes_no_skill() {
+    let t = tree();
+    put(
+        &t.home.join("compact/SKILL.md"),
+        skill_md("compact", "Pack things", ""),
+    );
+    let c = skills::discover(&[node_root(&t.home)], &[]).catalogue;
+    assert!(c.skills.iter().any(|s| s.name == "compact"));
+    assert_eq!(skills::invoked("/compact the boxes", &c), None);
+    assert_eq!(skills::invoked("/compact", &c), None);
+    assert!(skills::render(&c, 10_000).unwrap().contains("compact"));
+}
+
 /// The tool is read-only, takes a name and an optional file.
 #[test]
 fn the_tool_is_read_only() {

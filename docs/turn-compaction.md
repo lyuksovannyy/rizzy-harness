@@ -149,6 +149,30 @@ So clearing does what it should for the window, and a weaker model can still ans
 from what it no longer sees; the stub and the system prompt tell it not to, which
 helps but does not guarantee it.
 
+## By hand: `/compact` (ADOPTION_PLAN X.20, PLAN.md T64)
+
+Between turns the chat's owner can summarise now: `/compact [focus]` in the
+composer. It travels as its own route and message (`POST
+/api/sessions/{id}/compact`, `session.compact`), never as a prompt, and the
+node runs the summariser of a turn's start (`compact_with`, the same prompt,
+shrink check and breaker) as an operation of the session's one writer:
+
+- **Kept:** the last turn verbatim (`MANUAL_KEEP_TURNS` = 1; a turn's start
+  keeps `KEEP_TURNS` = 2), what the next turn's opening reads
+  (`opening_cut`), and, as after any summary, the task list and the standing
+  context. Less than 1,000 tokens before the last turn is "too short".
+- **Focus:** the person's words, scrubbed and cut to 2,000 characters, as
+  the transcript's last part under a `Focus:` label, quoted like every part
+  (T38); both summary prompts say what that part is and that it shifts
+  emphasis only.
+- **Recorded:** `history_summarized` with `manual`, `focus`, `usage` and
+  `tokens_after`, appended only if the log's head is still what was read;
+  otherwise, and on a model error, a summary that is not smaller, or Stop,
+  `compact_failed` with the reason. Two failures since the last turn refuse
+  the next.
+- **Order:** refused while a turn runs; while it runs no turn starts (a
+  prompt is refused, a callback asked again later, a hand-off note dropped).
+
 ## What the others do (research)
 
 - Hermes: prunes old tool results over 200 characters with no model call before

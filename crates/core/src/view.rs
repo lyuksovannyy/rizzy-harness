@@ -33,6 +33,12 @@ pub enum Item {
     Summary {
         through_seq: u64,
         text: String,
+        /// Made at the person's `/compact` (X.20), with what they asked
+        /// to keep in focus.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        manual: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        focus: Option<String>,
     },
     /// What the model is sent was shortened here (`context_shortened`,
     /// X.15): older tool results as one-line stubs (`cleared`), this turn's
@@ -529,10 +535,29 @@ impl SessionView {
             EventKind::VariantSelected(v) => {
                 self.variant_selection.insert(v.group, v.message_id);
             }
-            EventKind::HistorySummarized(h) => self.items.push(Item::Summary {
-                through_seq: h.through_seq,
-                text: h.text,
-            }),
+            EventKind::HistorySummarized(h) => {
+                // A person's `/compact`: its cost is the chat's, like a
+                // hand-off note's, and the meter shows the shorter context
+                // until the next turn reports its own (X.20).
+                if let Some(u) = &h.usage {
+                    self.usage.add(u);
+                }
+                if let Some(n) = h.tokens_after {
+                    self.context_tokens = n;
+                }
+                self.items.push(Item::Summary {
+                    through_seq: h.through_seq,
+                    text: h.text,
+                    manual: h.manual,
+                    focus: h.focus,
+                })
+            }
+            EventKind::CompactFailed(c) => {
+                if let Some(u) = &c.usage {
+                    self.usage.add(u);
+                }
+                self.items.push(Item::Error { message: c.reason });
+            }
             EventKind::ContextShortened(c) => self.items.push(Item::Shortened {
                 turn_id: c.turn_id,
                 cleared: c.cleared.is_some(),

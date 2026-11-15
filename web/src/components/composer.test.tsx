@@ -265,3 +265,79 @@ describe("writing while the agent works", () => {
     act(() => root.unmount());
   });
 });
+
+describe("/compact", () => {
+  test("in a chat it is a command with its focus, never a message", async () => {
+    const sent: string[] = [];
+    const compacted: string[] = [];
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    act(() =>
+      root.render(
+        <Composer
+          where="session"
+          agents={[]}
+          models={[]}
+          workers={[]}
+          agentId=""
+          onAgentChange={() => {}}
+          agenticBlocked={null}
+          onSubmit={async (s) => void sent.push(s.text)}
+          compact={async (f) => void compacted.push(f)}
+        />,
+      ),
+    );
+    const textarea = host.querySelector("textarea")!;
+    const send = async (value: string) => {
+      act(() => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(textarea, value);
+        textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      await act(async () => {
+        textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      });
+    };
+    await send("/compact keep the database migration details");
+    await send("/compact");
+    await send("/compactness is a word");
+    expect(compacted).toEqual(["keep the database migration details", ""]);
+    expect(sent).toEqual(["/compactness is a word"]);
+    expect(textarea.value).toBe("");
+    // More lines after it: neither a summary nor a message, a hint.
+    await send("/compact keep x\nthen do y");
+    expect(compacted.length).toBe(2);
+    expect(sent.length).toBe(1);
+    expect(host.textContent).toContain("same line");
+    act(() => root.unmount());
+  });
+
+  test("while a /compact runs, Stop shows and cancels it", () => {
+    let stopped = 0;
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    act(() =>
+      root.render(
+        <Composer
+          where="session"
+          agents={[]}
+          models={[]}
+          workers={[]}
+          agentId=""
+          onAgentChange={() => {}}
+          agenticBlocked={null}
+          onSubmit={async () => {}}
+          compact={async () => {}}
+          compacting
+          onStop={() => void stopped++}
+        />,
+      ),
+    );
+    const stop = host.querySelector<HTMLButtonElement>("button.send.stop");
+    expect(stop).not.toBeNull();
+    act(() => stop!.click());
+    expect(stopped).toBe(1);
+    act(() => root.unmount());
+  });
+});

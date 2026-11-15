@@ -32,6 +32,10 @@ impl Tool for Outline {
         ToolRisk::ReadOnly
     }
 
+    fn parallel_safe(&self) -> bool {
+        true
+    }
+
     fn enabled(&self, s: &harness_core::savings::Savings) -> bool {
         s.outline_tool
     }
