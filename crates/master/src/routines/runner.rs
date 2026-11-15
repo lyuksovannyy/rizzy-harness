@@ -875,48 +875,30 @@ async fn end_run(
 ) {
     let now = handle(m).map_or_else(harness_core::now_ms, |h| h.clock.now());
     let (id, st) = (run_id.to_string(), status.to_string());
+    // Failures in a row pause the routine; a completed run resets them.
+    // Skipped, missed, cancelled and blocked runs count for neither. The
+    // run's end and the count are one transaction in the store.
+    let failed = matches!(status, "error" | "failed" | "timed_out" | "interrupted");
+    let count = (failed || status == "completed").then_some(failed);
     let ended = m
         .inner
         .mirror
-        .call(move |s| s.run_finish(&id, &st, reason.as_deref(), now))
+        .call(move |s| s.run_finish_counted(&id, &st, reason.as_deref(), now, count, MAX_FAILURES))
         .await;
     match ended {
-        Ok(true) => {
-            counted(m, routine_id, status, now).await;
+        Ok((true, paused)) => {
+            if paused {
+                audit(
+                    m,
+                    "routine.paused",
+                    json!({ "routine_id": routine_id, "reason": "failures" }),
+                )
+                .await;
+            }
             changed(m, owner);
         }
-        Ok(false) => {}
+        Ok((false, _)) => {}
         Err(e) => tracing::warn!(run = %run_id, error = %e, "routines: could not end a run"),
-    }
-}
-
-/// Count a finished run: failures in a row pause the routine; a completed
-/// run resets them. Skipped, missed, cancelled and blocked runs count for
-/// neither.
-async fn counted(m: &Master, routine_id: &str, status: &str, now: i64) {
-    let failed = matches!(status, "error" | "failed" | "timed_out" | "interrupted");
-    if !failed && status != "completed" {
-        return;
-    }
-    let id = routine_id.to_string();
-    let res = m
-        .inner
-        .mirror
-        .call(move |s| {
-            let n = s.routine_count_failure(&id, failed)?;
-            if failed && n >= MAX_FAILURES {
-                return s.routine_pause(&id, "failures", now);
-            }
-            Ok(false)
-        })
-        .await;
-    if let Ok(true) = res {
-        audit(
-            m,
-            "routine.paused",
-            json!({ "routine_id": routine_id, "reason": "failures" }),
-        )
-        .await;
     }
 }
 
@@ -1286,7 +1268,7 @@ pub(crate) const NOT_STARTED: &str =
 /// A run that was waiting (a retry kept in memory) when the server stopped.
 pub(crate) const RESTARTED: &str = "the server restarted before the run started";
 
-/// End a run `interrupted` with `why`, not counted (`counted` is skipped).
+/// End a run `interrupted` with `why`, not counted against its routine.
 async fn end_uncounted(m: &Master, run_id: &str, owner: &str, why: &str) {
     let now = handle(m).map_or_else(harness_core::now_ms, |h| h.clock.now());
     let (id, why) = (run_id.to_string(), why.to_string());
