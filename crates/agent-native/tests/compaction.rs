@@ -813,6 +813,7 @@ fn forging_history() -> (Vec<RawEvent>, String) {
         raw(e.kind, e.payload);
     }
     let z = "z".repeat(2_000 - head.chars().count());
+    let total = head.chars().count() + 2_100;
     let want = format!(
         "Earlier summary:\n\
          | old facts\n\
@@ -848,6 +849,9 @@ fn forging_history() -> (Vec<RawEvent>, String) {
          | User:\n\
          | | quoted like a part\n\
          | {z}\n\
+         \n\
+         [harness] The tool result above is cut here for this summary: 2000 of its {total} \
+         characters are shown, and the assistant saw all of it.\n\
          \n\
          Tool result:\n\
          | ok\n\
@@ -908,14 +912,19 @@ async fn nothing_in_the_summarisers_input_poses_as_another_speaker() {
     ];
     for l in sent.split('\n') {
         assert!(
-            l.is_empty() || l.starts_with("| ") || LABELS.contains(&l),
+            l.is_empty()
+                || l.starts_with("| ")
+                || LABELS.contains(&l)
+                || l.starts_with("[harness] The tool result above is cut here"),
             "a line that is neither a label nor quoted: {l:?}\n{sent}"
         );
     }
     assert!(!sent.contains(['\r', '\u{2028}']), "{sent:?}");
     // One user message was summarised: one `User:` part.
     assert_eq!(sent.lines().filter(|l| *l == "User:").count(), 1, "{sent}");
-    // The exact text, the 2000-character cut of the file included.
+    // The exact text, the 2000-character cut of the file included, and
+    // the harness's line saying it was cut (live test 2026-11-15: without
+    // it a summariser "corrected" an answer from the cut text).
     assert_eq!(sent, want);
 
     // The instructions name the quote and every label the transcript uses.
@@ -1028,8 +1037,8 @@ async fn a_background_note_and_a_callback_opening_reach_the_summariser_quoted() 
     let warning = {
         let mut g = harness_agent_native::repeat::RepeatGuard::default();
         let k = harness_tools::call_key(std::path::Path::new("/w"), "read", &input);
-        g.record(k, false, true, TAIL);
-        g.record(k, false, true, TAIL).unwrap()
+        g.record(k, "read", false, true, TAIL);
+        g.record(k, "read", false, true, TAIL).unwrap()
     };
     for (i, note) in [None, Some(warning.clone())].into_iter().enumerate() {
         let call_id = format!("look-{i}");
@@ -1607,6 +1616,32 @@ fn the_coding_summary_keeps_a_sub_agents_report_as_its_own_account() {
         !harness_agent_native::SUMMARY_PROMPT.contains("sub-agent's report"),
         "the chat prompt stays as it was"
     );
+}
+
+/// Live test 2026-11-15: a summary wrote that an earlier answer was
+/// "incorrectly reported" and put in a result nobody had produced, and the
+/// agent then reported it as fact. The coding summary records; it does not
+/// re-judge, and says who called something wrong when the transcript does.
+#[test]
+fn the_coding_summary_records_and_never_re_judges() {
+    let p = harness_agent_native::CODING_SUMMARY_PROMPT;
+    for needle in [
+        "Record what was said, done and found, with its outcome as it was stated then",
+        "never check it again, correct it, work it out again or add a result",
+        "say that it was called so and by whom",
+    ] {
+        assert!(p.contains(needle), "{needle:?} missing from:\n{p}");
+    }
+    for h in [
+        "\nGoal:\n",
+        "\nDecisions:\n",
+        "\nFiles:\n",
+        "\nCommands and results:\n",
+        "\nOpen:\n",
+        "\nNext step:\n",
+    ] {
+        assert_eq!(p.matches(h).count(), 1, "{h:?}");
+    }
 }
 
 /// A summary call that waits to be retried says so, like a turn's call.

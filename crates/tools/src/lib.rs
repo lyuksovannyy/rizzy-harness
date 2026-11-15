@@ -211,6 +211,9 @@ pub struct ToolCtx {
     /// Where `recall` sends its query: the session's link to the master
     /// (`TurnHost::recall`); `None` where there is none.
     pub recall: Option<Arc<dyn harness_core::recall::RecallSource>>,
+    /// The agent may call `read` here (its tools include it): only then
+    /// does `edit`'s refusal of an unread file show the file's lines.
+    pub read_offered: bool,
 }
 
 impl ToolCtx {
@@ -237,6 +240,7 @@ impl ToolCtx {
             skills: None,
             seen: Default::default(),
             recall: None,
+            read_offered: true,
         }
     }
 
@@ -531,6 +535,11 @@ pub struct ToolOutcome {
     /// The file a `read`, `write` or `edit` left the agent knowing: the
     /// loop records it with the call's result (`tool_call_finished.seen`).
     pub seen: Option<harness_core::event::FileSeen>,
+    /// The person (or the approval path) denied the call: it did not run.
+    /// Set by the loop where it handles the denial, never read from the
+    /// text (a command could print the same words). The repeated-call
+    /// guard's second rule does not count it.
+    pub denied: bool,
 }
 
 impl ToolOutcome {

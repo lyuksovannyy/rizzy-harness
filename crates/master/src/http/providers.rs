@@ -26,7 +26,15 @@ fn bad(msg: impl Into<String>) -> ApiError {
     ApiError(StatusCode::BAD_REQUEST, msg.into())
 }
 
-fn key_state(p: &ProviderConfig) -> String {
+/// How the provider's key is set, for the settings page: `env:VAR`,
+/// `stored`, `none`, or `blank` when one is set but empty, since nothing
+/// is sent for an empty key (it counts as no key).
+fn key_state(p: &ProviderConfig, data_dir: &std::path::Path) -> String {
+    if (p.api_key_env.is_some() || p.api_key_secret.is_some())
+        && matches!(crate::providers::resolve_key(p, data_dir), Ok((None, _)))
+    {
+        return "blank".to_string();
+    }
     match (&p.api_key_env, &p.api_key_secret) {
         (Some(v), _) => format!("env:{v}"),
         (None, Some(_)) => "stored".to_string(),
@@ -43,7 +51,7 @@ fn model_json(m: &ModelConfig) -> serde_json::Value {
     })
 }
 
-fn state_json(cfg: &Config) -> serde_json::Value {
+fn state_json(cfg: &Config, data_dir: &std::path::Path) -> serde_json::Value {
     json!({
         "providers": cfg.providers.iter().map(|p| json!({
             "id": p.id,
@@ -51,7 +59,7 @@ fn state_json(cfg: &Config) -> serde_json::Value {
             "preset": p.preset,
             "kind": p.kind,
             "base_url": p.base_url,
-            "key": key_state(p),
+            "key": key_state(p, data_dir),
             "models": p.models.iter().map(model_json).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
         "presets": presets::PRESETS,
@@ -66,7 +74,8 @@ pub(super) async fn get_providers(
     headers: HeaderMap,
 ) -> ApiResult<Json<serde_json::Value>> {
     require_admin(&m, &headers).await?;
-    Ok(Json(state_json(&runtime(&m)?.config())))
+    let rt = runtime(&m)?;
+    Ok(Json(state_json(&rt.config(), rt.data_dir())))
 }
 
 fn preset(id: &str) -> ApiResult<&'static Preset> {
@@ -409,7 +418,7 @@ pub(super) async fn put_provider(
         m.forget_listing(&id).await;
     }
     tracing::info!(provider = %id, preset = %p.id, "provider saved");
-    Ok(Json(state_json(&rt.config())))
+    Ok(Json(state_json(&rt.config(), rt.data_dir())))
 }
 
 pub(super) async fn delete_provider(
@@ -430,7 +439,7 @@ pub(super) async fn delete_provider(
     forget_key(&rt, old.as_ref());
     m.forget_listing(&id).await;
     tracing::info!(provider = %id, "provider deleted");
-    Ok(Json(state_json(&rt.config())))
+    Ok(Json(state_json(&rt.config(), rt.data_dir())))
 }
 
 /// `PUT` / `DELETE` on the action paths (`/test`, `/demo`), which axum
@@ -480,7 +489,7 @@ pub(super) async fn use_demo(
     }
     cfg.default_model = Some(format!("{}::mock", presets::DEMO));
     apply(&m, &rt, cfg)?;
-    Ok(Json(state_json(&rt.config())))
+    Ok(Json(state_json(&rt.config(), rt.data_dir())))
 }
 
 /// `Some(None)` for an explicit `null`, `None` when the field is missing.
@@ -538,7 +547,7 @@ pub(super) async fn put_agent_models(
         None => {}
     }
     apply(&m, &rt, cfg)?;
-    Ok(Json(state_json(&rt.config())))
+    Ok(Json(state_json(&rt.config(), rt.data_dir())))
 }
 
 /// Set how an agent looks. The body must name a shape, eyes and an accent
@@ -651,7 +660,7 @@ pub(super) async fn delete_model(
     // takes the place of a main model, a default falls back.
     apply(&m, &rt, cfg)?;
     tracing::info!(provider = %id, model = %raw, "model removed");
-    Ok(Json(state_json(&rt.config())))
+    Ok(Json(state_json(&rt.config(), rt.data_dir())))
 }
 
 /// `DELETE …/models/refresh`, which axum routes to the refresh action: the
@@ -790,5 +799,33 @@ pub(super) async fn test_model(
             "ms": started.elapsed().as_millis() as u64,
         }))),
         Err(e) => fail(scrub(e)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn provider(extra: &str) -> ProviderConfig {
+        toml::from_str(&format!(
+            "id = \"r\"\nname = \"R\"\npreset = \"custom_openai\"\nkind = \"openai\"\n\
+             base_url = \"http://127.0.0.1:1/v1\"\n{extra}"
+        ))
+        .unwrap()
+    }
+
+    /// Review F6: a key that is set but empty is sent as no key, and the
+    /// settings page says so instead of "stored".
+    #[test]
+    fn a_blank_key_is_reported_as_blank() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("secrets.toml");
+        crate::secrets::set(&path, "provider-r", Some(&Secret::new("  ".into()))).unwrap();
+        crate::secrets::set(&path, "provider-s", Some(&Secret::new("sk-1".into()))).unwrap();
+        let blank = provider("api_key_secret = \"provider-r\"");
+        assert_eq!(key_state(&blank, dir.path()), "blank");
+        let real = provider("api_key_secret = \"provider-s\"");
+        assert_eq!(key_state(&real, dir.path()), "stored");
+        assert_eq!(key_state(&provider(""), dir.path()), "none");
     }
 }

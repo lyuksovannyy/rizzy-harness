@@ -54,6 +54,7 @@ pub fn resolve_key(
         }
         (None, None) => (None, vec![]),
     })
+    .map(|(k, env)| (k.filter(|k| !k.is_blank()), env))
 }
 
 /// The web tools for the chat runtime, from `[web]`. Returns the tools and
@@ -292,9 +293,10 @@ fn secret(data_dir: &Path, name: &Option<String>) -> anyhow::Result<Option<Secre
         None => Ok(None),
         Some(n) => {
             let path = data_dir.join("secrets.toml");
-            Ok(Some(crate::secrets::get(&path, n)?.with_context(|| {
-                format!("secret {n:?} not found in {}", path.display())
-            })?))
+            let k: Secret<String> = crate::secrets::get(&path, n)?
+                .with_context(|| format!("secret {n:?} not found in {}", path.display()))?;
+            // An empty key is no key: nothing is sent for it.
+            Ok(Some(k).filter(|k| !k.is_blank()))
         }
     }
 }

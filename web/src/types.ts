@@ -321,7 +321,7 @@ export interface SessionView {
   chat_allows?: Record<string, ChatAllow>;
 }
 
-export type RetryReason = "rate_limit" | "overloaded" | "server_error" | "network";
+export type RetryReason = "rate_limit" | "overloaded" | "server_error" | "network" | "no_answer";
 
 export interface ModelRetry {
   turn_id: string;

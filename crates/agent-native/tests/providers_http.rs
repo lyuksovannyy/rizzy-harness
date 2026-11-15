@@ -89,21 +89,124 @@ async fn openai_compatible_stream() {
     assert_eq!(body["tools"][0]["function"]["name"], "bash");
 }
 
-#[tokio::test]
-async fn keyless_endpoint_still_completes() {
-    let sse = [
+/// A router that refuses any key it does not know (live test 2026-11-15):
+/// it fails the request when an `Authorization` or `x-api-key` header is
+/// present at all.
+async fn serve_keyless(path: &'static str, body: String) -> (String, Seen) {
+    let seen: Seen = Arc::default();
+    let s2 = seen.clone();
+    let app = Router::new().route(
+        path,
+        post(move |headers: HeaderMap, req: String| {
+            let seen = s2.clone();
+            let body = body.clone();
+            async move {
+                *seen.lock().unwrap() =
+                    Some((headers.clone(), serde_json::from_str(&req).unwrap()));
+                if headers.contains_key("authorization") || headers.contains_key("x-api-key") {
+                    return (
+                        axum::http::StatusCode::UNAUTHORIZED,
+                        r#"{"error":{"message":"invalid API key"}}"#,
+                    )
+                        .into_response();
+                }
+                ([("content-type", "text/event-stream")], body).into_response()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (format!("http://{addr}"), seen)
+}
+
+fn ok_sse() -> String {
+    [
         r#"data: {"id":"c","object":"chat.completion.chunk","created":1,"model":"test-model","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#,
         "data: [DONE]",
     ]
     .join("\n\n")
-        + "\n\n";
-    let (base, seen) = serve("/v1/chat/completions", sse).await;
+        + "\n\n"
+}
+
+#[tokio::test]
+async fn keyless_endpoint_gets_no_authorization_header() {
+    let (base, seen) = serve_keyless("/v1/chat/completions", ok_sse()).await;
     let p = LlmProvider::new(ApiKind::Openai, &format!("{base}/v1"), None).unwrap();
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let c = p.complete(&request(), tx).await.unwrap();
     assert_eq!(c.text, "ok");
-    let (headers, _) = seen.lock().unwrap().clone().unwrap();
-    assert_eq!(headers["authorization"], "Bearer no-key");
+    let (headers, body) = seen.lock().unwrap().clone().unwrap();
+    assert!(!headers.contains_key("authorization"), "{headers:?}");
+    assert_eq!(body["model"], "test-model");
+    assert_eq!(body["stream"], true);
+}
+
+#[tokio::test]
+async fn an_empty_key_is_no_key() {
+    let (base, seen) = serve_keyless("/v1/chat/completions", ok_sse()).await;
+    for k in ["", "  "] {
+        let p = LlmProvider::new(
+            ApiKind::Openai,
+            &format!("{base}/v1"),
+            Some(Secret::new(k.into())),
+        )
+        .unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let c = p.complete(&request(), tx).await.unwrap();
+        assert_eq!(c.text, "ok");
+        let (headers, _) = seen.lock().unwrap().clone().unwrap();
+        assert!(!headers.contains_key("authorization"), "{headers:?}");
+    }
+}
+
+#[tokio::test]
+async fn keyless_anthropic_endpoint_gets_no_key_header() {
+    let ev = |name: &str, data: Value| format!("event: {name}\ndata: {data}\n\n");
+    let sse = [
+        ev("message_start", json!({"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"test-model","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":1,"output_tokens":1}}})),
+        ev("content_block_start", json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}})),
+        ev("content_block_delta", json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}})),
+        ev("content_block_stop", json!({"type":"content_block_stop","index":0})),
+        ev("message_delta", json!({"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":1}})),
+        ev("message_stop", json!({"type":"message_stop"})),
+    ]
+    .concat();
+    let (base, seen) = serve_keyless("/v1/messages", sse).await;
+    let p = LlmProvider::new(ApiKind::Anthropic, &format!("{base}/v1"), None).unwrap();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let c = p.complete(&request(), tx).await.unwrap();
+    assert_eq!(c.text, "ok");
+    let (headers, body) = seen.lock().unwrap().clone().unwrap();
+    assert!(!headers.contains_key("x-api-key"), "{headers:?}");
+    assert!(headers.contains_key("anthropic-version"), "{headers:?}");
+    assert!(body["system"].to_string().contains("be brief"), "{body}");
+}
+
+#[tokio::test]
+async fn list_models_sends_no_header_for_an_empty_key() {
+    use axum::routing::get;
+    let app = Router::new().route(
+        "/v1/models",
+        get(|headers: HeaderMap| async move {
+            if headers.contains_key("authorization") || headers.contains_key("x-api-key") {
+                (axum::http::StatusCode::UNAUTHORIZED, "invalid API key").into_response()
+            } else {
+                (axum::http::StatusCode::OK, r#"{"data":[{"id":"m"}]}"#).into_response()
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}/v1", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    use harness_agent_native::models::list_models;
+    let empty = Secret::new(String::new());
+    for kind in [ApiKind::Openai, ApiKind::Anthropic] {
+        let got = list_models(kind, &base, Some(&empty), false, &None)
+            .await
+            .unwrap();
+        assert_eq!(got.len(), 1, "{kind:?}");
+    }
 }
 
 #[tokio::test]

@@ -517,11 +517,24 @@ then 8 seconds (with jitter), or what the provider's `Retry-After` asks; a
 cancel ends the wait at once. A `Retry-After` over 60 s (a quota window, say)
 is not retried: the agent's next fallback model answers at once, or without
 one the turn ends with a message naming the wait. A refused key, a missing
-permission, an exhausted quota or a bad request is not retried, and nothing
-is retried once part of the answer is on screen. The chat shows the turn as
-still running while it waits, with a line under it naming the model, why
-(rate limit, provider overloaded, provider error, connection failed) and a
-countdown to the next attempt ("attempt 2 of 3"). When a turn's
+permission, an exhausted quota, a bad request or an error the provider codes
+`model_not_found` is not retried, and nothing is retried once part of the
+answer is on screen. The chat shows the turn as still running while it
+waits, with a line under it naming the model, why (rate limit, provider
+overloaded, provider error, connection failed, or no answer yet when the
+first-byte timeout ran out) and a countdown to the next attempt ("attempt 2
+of 3"). When the provider does not know the model (it answers 404, or codes
+the error `model_not_found` at any status, which also sends the turn to the
+agent's fallbacks), the turn's error says so in the harness's words, names
+the model and where it is set (the chat's model menu, an agent's or the
+default model in Settings, the provider's model list under Settings → Server
+→ AI providers). When it keeps failing with a server error (500 to 599), the
+error says the provider failed to answer and after how many tries, with no
+advice about settings. Either way the provider's own message is quoted
+below, at most three lines and 300 characters. A router that answers 503
+with only a generic error type for a model it has no connection for is
+treated as a failing server: nothing but free text tells that apart from a
+busy one, and the harness does not guess from free text. When a turn's
 model is unavailable, or its request still fails before any output with a model
 problem (not found, rate limit, server error, no connection), the agent's
 fallbacks are tried in order, skipping unavailable ones, and the chat notes
@@ -540,6 +553,14 @@ with tool calls is not supported until risk R8 in `PLAN.md` is fixed, so do
 not set it by hand either.
 
 Local Ollama: preset `ollama`, `base_url = "http://localhost:11434/v1"`, no key.
+
+A provider without a key (none configured, or an empty one) is sent no key
+at all: no `Authorization` header and no `x-api-key`, for the chat, the
+model list, the provider test, memory embeddings and dictation alike. A
+local router that refuses unknown keys therefore works without one (before,
+the harness sent `Authorization: Bearer no-key`, which such a router
+refuses with 401). Settings shows such a provider's key as empty ("counts as
+no key") rather than as stored.
 
 **Local and LAN model servers need `HARNESS_PLAIN_HTTP_HOSTS`.** The
 provider and model tests in Settings and the model listing are requests the
@@ -600,8 +621,14 @@ failed), **Open** (what is not done, errors not yet fixed) and **Next step**,
 up to about 1,000 words. The agent's task list is given back on its own, so the
 summary refers to it rather than copying it. A later summary updates these
 sections rather than nesting the earlier one, so the shape holds however often
-a long chat is summarised. Chat-profile chats keep a shorter general summary
-(at most 300 words). The two newest turns are kept as they are. The latest
+a long chat is summarised. The summary records what was said, done and found
+as it was stated then: it does not check, correct or work out results again
+(a live test saw a summary "correct" an answer from a shortened tool result
+and the agent then report the invented value), and where the conversation
+itself called something wrong it says who did. A tool result longer than
+2,000 characters reaches the summarising model shortened, with a line saying
+it was cut and that the agent saw all of it. Chat-profile chats keep a
+shorter general summary (at most 300 words). The two newest turns are kept as they are. The latest
 summary is shown, collapsed, where it was made in the chat.
 
 In agentic chats the agent keeps its own task list with the `todo` tool
@@ -1669,6 +1696,30 @@ either, and you see the refusal as that call's result. The thresholds are
 fixed, not `node.toml` keys, and the guard cannot be turned off. The
 warnings are for the agent only and are not shown in the chat.
 
+A second rule catches one tool failing the same way whatever its input: an
+agent that adds one more flag to the same failing command again and again
+(a live test saw 28 such `bash` calls, each with the same error, until the
+provider timed out). From the third failure of the same tool with exactly
+the same output in a row (the harness's own changing tokens aside) the
+agent is warned that changing the input this way does not change the
+result; after seven, its next call to that tool is not run ("Not run: the
+calls to this tool before it failed with exactly the same output several
+times in a row ..."), and the agent is told that its next call of the tool
+will be run once. Other calls of that tool in the same message are refused
+too. The tool's next call in a later message runs, because the refusal is of
+the tool and a different command may be the right one (`cargo build
+--offline` after seven identical network errors); if it fails with the same
+output again, the turn ends as above. Any other result of that tool (a
+success, a failure in other words) or a change starts it again; calls of
+other tools in between do not. Successes are never counted by this rule: a
+status poll that keeps answering the same through calls written a little
+differently runs on. Calls you deny are not counted by this rule either (nor
+do they reset it): seven "no"s to seven different commands are your answers,
+and you are asked about every one. The same call denied again is still the
+first rule's.
+The counts follow Hermes Agent's same-tool failure thresholds (warn at 3,
+stop at 8), with the added condition that the output is identical.
+
 **Background commands** are on by default (8 a chat, 64 a node); a node owner
 turns them off with `background_per_session = 0` in `[limits]`. While they
 are off the agent is not offered `bash_output` or `bash_stop` and `bash` does
@@ -1832,7 +1883,16 @@ delays Stop or an approval answer, in that chat or any other.
 - `edit`, and `write` over an existing file, need the file to have been
   read with `read` in this chat (any part of it). A new file needs
   nothing. The agent's own edits and writes count as seen. Viewing a file
-  with `cat` in `bash` does not count.
+  with `cat` in `bash` does not count (commands are not parsed), but an
+  `edit` of a file not read yet is answered with the lines around the
+  first match of its `old_string`, numbered as `read` shows them, and that
+  counts as having read the file as it was at that moment: the same edit
+  sent again goes through, unless the file changes first. This holds for
+  the rest of the turn; the next turn asks for a `read` again. Only for
+  one edit without `replace_all` (several edits or every match would change
+  lines the agent was not shown), for a file `read` would show (not one it
+  refuses as binary), and for an agent that may use `read`. Otherwise, or
+  when the text is not in the file, the refusal says to `read` it.
 - If the file changed on disk since then (you edited it, a command or a
   formatter did, another chat did), `write` is refused, and `edit` goes
   ahead only when the text it replaces lies outside the lines that

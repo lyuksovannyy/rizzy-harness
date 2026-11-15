@@ -3,6 +3,10 @@ use serde_json::{Value, json};
 
 use crate::{Tool, ToolCtx, ToolOutcome, str_arg};
 
+/// A NUL byte in this many first bytes makes a file binary: `read`
+/// refuses it, and `edit` shows none of its lines.
+pub(crate) const BINARY_SNIFF: usize = 8192;
+
 const DEFAULT_READ_LINES: usize = 2000;
 const MAX_LINE_CHARS: usize = 2000;
 /// With bounded reads: the default window, and the per-line cap.
@@ -545,7 +549,7 @@ fn read_window(
     let io = |e: std::io::Error| format!("{}: {e}", path.display());
     let mut r = std::io::BufReader::with_capacity(64 * 1024, f.take(cap + 1));
     let head = r.fill_buf().map_err(io)?;
-    if head.iter().take(8192).any(|b| *b == 0) {
+    if head.iter().take(BINARY_SNIFF).any(|b| *b == 0) {
         return Err(format!("{} looks like a binary file", path.display()));
     }
     // A line's bytes kept for display: enough for `max_chars` characters.

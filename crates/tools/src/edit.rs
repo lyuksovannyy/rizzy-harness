@@ -652,6 +652,75 @@ pub(crate) fn stale_refusal(
     }
 }
 
+/// Lines of context shown around the first match by [`unread_refusal`].
+const UNREAD_CONTEXT: usize = 3;
+
+/// The refusal for a file not read in this session. The guard does not
+/// parse `bash` commands (a `cat` is not a read; research 08 §6.1), so a
+/// model that looked at the file another way gets the lines around the
+/// first match of its first `old_string`, numbered as `read` numbers them,
+/// and the file counts as read as it is at this moment (hashed now, with
+/// this text as the snapshot): the same edit sent again applies, unless the
+/// file changes on disk first, which the guard then refuses as stale. Like
+/// a `read`'s window, any part shown counts. The record is kept for the
+/// rest of this turn only: the log keeps a call's `seen` when it succeeded,
+/// so the next turn asks for a read again. Text not in the file shows
+/// nothing and counts as nothing. Only for what a `read` would have shown
+/// and only where the retry changes nothing unseen (review F4, F7, F9):
+/// the agent may call `read`; the file is not one `read` refuses as
+/// binary; the call is one edit without `replace_all` (several edits, or
+/// every match, would change lines it was not shown).
+fn unread_refusal(ctx: &ToolCtx, key: &Path, shown: &str, text: &str, specs: &[Spec]) -> String {
+    if !ctx.read_offered {
+        return format!("{shown} has not been read in this session; nothing was changed.");
+    }
+    let plain = || {
+        format!(
+            "{shown} has not been read in this session; nothing was changed. Call `read` with \
+             path `{shown}` (the part that holds the text you are replacing is enough), then \
+             edit it."
+        )
+    };
+    let binary = text
+        .as_bytes()
+        .iter()
+        .take(crate::fs::BINARY_SNIFF)
+        .any(|b| *b == 0);
+    let [spec] = specs else {
+        return plain();
+    };
+    if binary || spec.all {
+        return plain();
+    }
+    let at = locate(&View::new(text), &mut None, spec)
+        .ok()
+        .and_then(|found| found.spans.first().map(|s| (s.a, s.b)));
+    let Some((a, b)) = at else {
+        return plain();
+    };
+    let mut starts = vec![0];
+    starts.extend(text.match_indices('\n').map(|(i, _)| i + 1));
+    if text.ends_with('\n') {
+        starts.pop();
+    }
+    let (lo, hi) = (line_of(text, a), line_of(text, b.saturating_sub(1).max(a)));
+    let first = lo.saturating_sub(UNREAD_CONTEXT).max(1);
+    let last = (hi + UNREAD_CONTEXT)
+        .min(starts.len())
+        .min(first + MAX_CHANGED_LINES - 1)
+        .max(first);
+    let start = starts[first - 1];
+    let end = starts.get(last).copied().unwrap_or(text.len());
+    ctx.seen.record(key, text.as_bytes());
+    format!(
+        "{shown} has not been read in this session, so nothing was changed. Its lines around \
+         the first match of `old_string` read now (numbered as `read` numbers them):\n{}\
+         This counts as reading the file as it is now: send the same edit again to make it \
+         (it is refused if the file changes on disk before then).",
+        show(ctx, text, start, end)
+    )
+}
+
 /// The edit itself: the guard, every spec matched against `text`, the new
 /// text and the report.
 fn edit(
@@ -663,10 +732,7 @@ fn edit(
     specs: &[Spec],
 ) -> Result<(String, String), String> {
     let Some(seen) = ctx.seen.get(key) else {
-        return Err(format!(
-            "{shown} has not been read in this session; nothing was changed. Read it first with \
-             `read` (the part that holds the text you are replacing is enough), then edit it."
-        ));
+        return Err(unread_refusal(ctx, key, shown, text, specs));
     };
     let stale = crate::seen::sha256(text.as_bytes()) != seen.sha;
     // Changed on disk, and nothing says what the agent saw: refuse at once

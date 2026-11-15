@@ -16,6 +16,15 @@ impl<T> Secret<T> {
     }
 }
 
+impl Secret<String> {
+    /// An empty key, or one of spaces only: no key at all. A provider
+    /// request sends no key header for it (a router that refuses unknown
+    /// keys refuses `Bearer ` as well).
+    pub fn is_blank(&self) -> bool {
+        self.0.trim().is_empty()
+    }
+}
+
 impl<T> fmt::Debug for Secret<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("Secret(<redacted>)")

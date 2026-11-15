@@ -12,6 +12,7 @@ const WHY: Record<RetryReason, Key> = {
   overloaded: "retry.overloaded",
   server_error: "retry.server_error",
   network: "retry.network",
+  no_answer: "retry.no_answer",
 };
 
 /** Whole seconds until `at_ms` (rounded up): never below 0, and never more
