@@ -243,29 +243,25 @@ pub struct Contain {
     net_ns: bool,
     /// How checked grants are bound (T.8c), from bubblewrap's version.
     binds: Binds,
-    /// Whether this bubblewrap can size a tmpfs (`--size`): the read-only
-    /// shell's `/tmp` (T.7) is offered only with a bound.
-    sized_tmpfs: bool,
 }
 
 impl Contain {
     pub fn new(bwrap: PathBuf, form: Form) -> Self {
         let (binds, _) = binds_of(&bwrap);
-        let sized_tmpfs = sized_tmpfs(&bwrap);
         Self {
             bwrap,
             form,
             net_ns: true,
             binds,
-            sized_tmpfs,
         }
     }
 
     /// Whether a read-only shell (T.7) can be contained by this
     /// bubblewrap: its `/tmp` is a tmpfs of [`READ_ONLY_TMP_BYTES`], so it
-    /// needs `--size`.
+    /// needs `--size`. Asked of bubblewrap the first time it is needed
+    /// (the start's probes run it no more often than before).
     pub fn sizes_tmpfs(&self) -> bool {
-        self.sized_tmpfs
+        sized_tmpfs(&self.bwrap)
     }
 
     /// The same with the binds given (tests: the older bubblewrap's way on
