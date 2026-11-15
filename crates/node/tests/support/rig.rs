@@ -206,8 +206,8 @@ impl Rig {
         });
     }
 
-    /// One turn of a lead agent that may delegate to `dev` (a `bash`
-    /// sub-agent), running the scripted `text` (`delegate: dev=... | ...`);
+    /// One turn of a lead agent that may delegate to `dev` (a `bash` and
+    /// `write` sub-agent: one that changes files, so its shell writes), running the scripted `text` (`delegate: dev=... | ...`);
     /// waits for the lead's turn to end and returns it with the outputs of
     /// its `delegate` calls.
     pub async fn lead_turn(&mut self, text: &str) -> (Turn, Vec<String>) {
@@ -215,7 +215,7 @@ impl Rig {
             agent_id: id.into(),
             name: id.into(),
             system_prompt: "work".into(),
-            tools: harness_core::agent::ToolSelection::List(vec!["bash".into()]),
+            tools: harness_core::agent::ToolSelection::List(vec!["bash".into(), "write".into()]),
             model: None,
             fallbacks: vec![],
             unavailable: vec![],
