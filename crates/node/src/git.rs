@@ -43,6 +43,7 @@ use std::time::Duration;
 use tokio::process::Command;
 
 mod at;
+mod diff;
 mod upkeep;
 mod user_repo;
 
@@ -1300,6 +1301,7 @@ async fn snapshot_within(
     .map_err(|_| "snapshot took too long (folder too large?)".to_string())?
 }
 
+pub use diff::turn_diff;
 pub use upkeep::{check_kept_packs, gc_in_background, hold, pin_changed, sweep_stale_locks};
 
 /// The line prefix in a snapshot's message that names one left-out
@@ -3636,3 +3638,8 @@ mod child_tests;
 #[cfg(test)]
 #[path = "git_restore_memory_tests.rs"]
 mod restore_memory_tests;
+
+/// A turn's changes as a diff (X.12). Test-only; lives in its own file.
+#[cfg(test)]
+#[path = "git_diff_tests.rs"]
+mod diff_tests;

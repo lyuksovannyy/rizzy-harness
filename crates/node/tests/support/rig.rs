@@ -24,6 +24,8 @@ pub struct Rig {
     _node: NodeRuntime,
     link: NodeLink,
     pub seen: Vec<RawEvent>,
+    /// What the node's hello announced.
+    pub caps: Vec<String>,
     sid: SessionId,
     pub n: u32,
 }
@@ -88,16 +90,17 @@ impl Rig {
         };
         let node = NodeRuntime::start(cfg).await.unwrap();
         let mut link = node.attach().await;
-        match link.from_node.recv().await.unwrap() {
-            NodeToMaster::Hello { .. } => {}
+        let caps = match link.from_node.recv().await.unwrap() {
+            NodeToMaster::Hello { capabilities, .. } => capabilities,
             other => panic!("expected hello, got {other:?}"),
-        }
+        };
         let mut rig = Self {
             dir,
             ws,
             _node: node,
             link,
             seen: vec![],
+            caps,
             sid: SessionId::new(),
             n: 0,
         };
@@ -245,6 +248,39 @@ impl Rig {
             phases: cps.into_iter().map(|(_, p)| p).collect(),
             folder_before,
             folder_after: self.files(),
+        }
+    }
+
+    /// What `turn` changed (X.12), or with `rewind` it and every later
+    /// turn; the node's words when there is nothing to show.
+    pub async fn diff(
+        &mut self,
+        turn: &str,
+        rewind: bool,
+    ) -> Result<harness_protocol::TurnDiff, String> {
+        self.n += 1;
+        let req = format!("d{}", self.n);
+        self.send(MasterToNode::Diff {
+            req_id: req.clone(),
+            session_id: self.sid,
+            turn_id: turn.into(),
+            rewind,
+        });
+        loop {
+            match self.recv().await {
+                NodeToMaster::Event { event } => self.seen.push(event),
+                NodeToMaster::DiffResult {
+                    req_id,
+                    diff,
+                    error,
+                } if req_id == req => {
+                    break match (diff, error) {
+                        (Some(d), None) => Ok(*d),
+                        (_, e) => Err(e.unwrap_or_default()),
+                    };
+                }
+                _ => {}
+            }
         }
     }
 
