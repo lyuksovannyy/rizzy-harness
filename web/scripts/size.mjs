@@ -175,9 +175,13 @@ const T50_KB = 1.3;
 // Measured with approval modes merged on top: the total passes 386.4 by
 // less than a tenth (+0.1).
 const LOOP_KB = 0.1;
+// X.14 (2026-11-15, the chat's step limit): the lazy "N steps" control and
+// its form (StepLimitPick), the fold of `step_limit_changed`, its divider and
+// the route call; measured 387.3 (rounded) after it against 386.5 before.
+const STEPS_KB = 0.9;
 
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
-const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB + EXPORT_KB + MEMDEF_KB + VISIBILITY_KB + T50_KB + LOOP_KB) * 100) / 10) / 10;
+const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB + EXPORT_KB + MEMDEF_KB + VISIBILITY_KB + T50_KB + LOOP_KB + STEPS_KB) * 100) / 10) / 10;
 // Raised from 103 to 106 once the Phase A pages merged (103.7 measured: the
 // new sidebar, account button and routine-result rows are on the first
 // screen), then lowered to 104 at Phase B (102.3 measured) once the login
