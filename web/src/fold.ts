@@ -336,7 +336,7 @@ export function apply(v: SessionView, e: RawEvent): void {
     }
     case "images_withheld": {
       // As the Rust view: the row says its image was not shown (X.23).
-      for (const id of p.calls ?? []) {
+      for (const id of Array.isArray(p.calls) ? p.calls : []) {
         const t = lastTool(v, id);
         if (t?.result) t.result.output += "\n\n" + IMAGE_WITHHELD_ROW;
       }
