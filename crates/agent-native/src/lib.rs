@@ -221,6 +221,10 @@ impl harness_core::backend::TurnHost for Logged<'_> {
         self.host.tool_denied(tool)
     }
 
+    fn runs_unasked(&self, tool: &str, risk: harness_core::policy::ToolRisk) -> bool {
+        self.failure().is_none() && self.host.runs_unasked(tool, risk)
+    }
+
     // Not forwarding it would run every chat at the node's limit, whatever
     // its owner set (tests/host_forwarding.rs).
     fn step_limit(&self) -> Option<usize> {
@@ -328,11 +332,11 @@ pub const DELEGATE: &str = "delegate";
 /// What the `delegate` description says about calls in one step (the live
 /// test of 2026-11-15: "write the function" and "write its tests" started
 /// together, each blind to the other).
-pub const DELEGATE_PARALLEL: &str = "Several calls in one step run at the same time, each \
-     sub-agent on its own copy of the folder, and they do not see each other's changes: in \
-     one step delegate only independent work (different files, or reading only); delegate \
-     work that builds on another sub-agent's result in a later step, after that result is \
-     back.";
+pub const DELEGATE_PARALLEL: &str = "Several calls in one step run at the same time, and \
+     they do not see each other's changes (a sub-agent that can change files works on its own \
+     copy of the folder; one that only reads works in this folder): in one step delegate only \
+     independent work (different files, or reading only); delegate work that builds on another \
+     sub-agent's result in a later step, after that result is back.";
 
 /// `finish`, offered in a sub-agent's turn only (handled by the loop).
 fn finish_spec() -> ToolSpec {
@@ -986,7 +990,12 @@ impl NativeBackend {
             Ok(o) => {
                 use harness_core::subagent::{ChildResult, ChildStatus, render, status_of};
                 let status = status_of(o.finish.as_ref(), o.reason);
-                let ok = o.reason == TurnEndReason::Completed && status != ChildStatus::Failed;
+                // A child whose changes are not in the folder did not get
+                // its job done, whatever it reports (review of PR 118, M1):
+                // the card is not green, and the result ends with what to do.
+                let ok = o.reason == TurnEndReason::Completed
+                    && status != ChildStatus::Failed
+                    && o.applied;
                 let (output, truncated) = render(&ChildResult {
                     child: o.child,
                     agent_id: &spec.agent_id,
@@ -996,6 +1005,7 @@ impl NativeBackend {
                     error: o.error.as_deref(),
                     note: o.note.as_deref(),
                     unapplied: o.unapplied.as_deref(),
+                    applied: o.applied,
                 });
                 (
                     ToolOutcome {
@@ -2986,6 +2996,7 @@ impl NativeBackend {
                 // before the tool card, the approval and the run (Pi's
                 // repair-then-validate): a repaired value is what all three
                 // see; a wrong one is the call's result and nothing runs.
+                let mut precheck: Option<Arc<dyn harness_tools::Tool>> = None;
                 let bad_args = match tools.iter().find(|t| t.name == call.tool) {
                     None => Some(unknown_tool(&call.tool, &tools)),
                     Some(spec) if call.input.is_object() => {
@@ -3006,19 +3017,11 @@ impl NativeBackend {
                         match harness_tools::args::check(&schema, &call.input, closed) {
                             Ok(v) => {
                                 call.input = v;
-                                // A call its tool would refuse whatever
-                                // anyone answers (a path or `workdir` the
-                                // node puts out of reach) is refused now,
-                                // with the tool's words, before anyone is
-                                // asked (T51); the tool checks again when
-                                // it runs. A denied tool keeps its policy
-                                // refusal.
-                                match own {
-                                    Some(t) if !host.tool_denied(&call.tool) => {
-                                        t.refusal(&self.refusal_ctx(&ctx, host), &call.input)
-                                    }
-                                    _ => None,
-                                }
+                                // Asked once the repeated-call guard admits
+                                // the call (below). A denied tool keeps its
+                                // policy refusal.
+                                precheck = own.filter(|_| !host.tool_denied(&call.tool)).cloned();
+                                None
                             }
                             Err(e) => Some(format!(
                                 "This tool call was not run: {e}. Call it again with that fixed."
@@ -3045,8 +3048,21 @@ impl NativeBackend {
                 // The repeated-call guard first: the same bad call again
                 // and again is refused, and ends the turn, as any other.
                 let key = harness_tools::call_key(&ctx.cwd, &call.tool, &call.input);
+                // A call its tool would refuse whatever anyone answers (a
+                // path or `workdir` the node puts out of reach, an unread
+                // file for `edit`/`write`) is refused now, with the tool's
+                // words, before anyone is asked (T51), and only once the
+                // guard admits it: a refusal can count a file as read
+                // (`edit`'s), which must not happen for a call never made.
+                // The tool checks again when it runs.
                 let admission = match (guard.admit(key, &call.tool), bad_args) {
                     (repeat::Admission::Run, Some(e)) => Err(e),
+                    (repeat::Admission::Run, None) => match precheck
+                        .and_then(|t| t.refusal(&self.refusal_ctx(&ctx, host), &call.input))
+                    {
+                        Some(e) => Err(e),
+                        None => Ok(repeat::Admission::Run),
+                    },
                     (a, _) => Ok(a),
                 };
                 let (outcome, refused) = match admission {
@@ -3820,7 +3836,9 @@ impl NativeBackend {
             skills: ctx.extra.skills.clone(),
             seen: self.seen.session(ctx.session_id),
             recall: host.recall(),
-            read_offered: self.read_offered(ctx),
+            read_offered: self.read_offered(ctx, host),
+            // Only `refusal` reads it (`refusal_ctx`).
+            read_unasked: false,
         };
         // stdout and stderr are interleaved into one coalesced stream (as a
         // terminal shows them); the final result carries both. `coalesce`
@@ -3911,8 +3929,9 @@ impl NativeBackend {
     /// call of the same turn (`run_tool`).
     /// Whether this turn offers `read` (the read-first guard's refusals
     /// point at it only then).
-    fn read_offered(&self, ctx: &TurnCtx<'_>) -> bool {
+    fn read_offered(&self, ctx: &TurnCtx<'_>, host: &dyn harness_core::backend::TurnHost) -> bool {
         ctx.agent.as_ref().is_none_or(|a| a.allows_tool("read"))
+            && !host.tool_denied("read")
             && self
                 .tools
                 .iter()
@@ -3928,9 +3947,12 @@ impl NativeBackend {
         ctx: &TurnCtx<'_>,
         host: &dyn harness_core::backend::TurnHost,
     ) -> ToolCtx {
+        let read_offered = self.read_offered(ctx, host);
         ToolCtx {
             seen: self.seen.session(ctx.session_id),
-            read_offered: self.read_offered(ctx),
+            read_offered,
+            read_unasked: read_offered
+                && host.runs_unasked("read", harness_core::policy::ToolRisk::ReadOnly),
             ..self.start_ctx(ctx, host)
         }
     }
@@ -4706,6 +4728,7 @@ mod tests {
                 error: out.error.clone(),
                 note: None,
                 unapplied: None,
+                applied: true,
             })
         }
     }

@@ -2711,20 +2711,57 @@ impl SubRepo {
         result: &str,
         child: &str,
     ) -> Result<Applied, NotApplied> {
-        merge::apply(&self.repo, base, result, child, None).await
+        merge::apply(&self.repo, base, result, child, merge::Hooks::default()).await
     }
 
-    /// [`Self::apply`] with `between` run after the merge is computed and
-    /// before the folder is checked again (tests).
+    /// [`Self::apply`] with test hooks (see [`merge::Hooks`]).
     #[cfg(test)]
     pub(crate) async fn apply_with(
         &self,
         base: &str,
         result: &str,
         child: &str,
-        between: &(dyn Fn() + Send + Sync),
+        hooks: merge::Hooks<'_>,
     ) -> Result<Applied, NotApplied> {
-        merge::apply(&self.repo, base, result, child, Some(between)).await
+        merge::apply(&self.repo, base, result, child, hooks).await
+    }
+
+    /// What the child made that its result snapshot leaves out because the
+    /// repository ignores it (a folder of only such files as one entry,
+    /// `dir/`): never brought back, so the parent is told (review of PR
+    /// 118, H3). Read in the shadow with the child's folder as work tree
+    /// and an empty index (git's own ignore rules, as the snapshot reads
+    /// them); its own `.git` is never listed.
+    pub async fn ignored(&self, folder: &ChildFolder) -> Names {
+        if folder.pin.check().is_err() {
+            return Names::default();
+        }
+        let repo = self.repo.with_root(&folder.path).scratch();
+        let Ok(idx) = fresh_index(&repo).await else {
+            return Names::default();
+        };
+        let _files = IndexFiles(idx.clone());
+        let out = run_raw(
+            &repo,
+            &[
+                "ls-files",
+                "-z",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "--directory",
+            ],
+            Some(&idx),
+            None,
+        )
+        .await
+        .unwrap_or_default();
+        let paths: Vec<Vec<u8>> = out
+            .split(|b| *b == 0)
+            .filter(|p| !p.is_empty())
+            .map(<[u8]>::to_vec)
+            .collect();
+        Names::of(&paths)
     }
 
     /// The child's changes from `base` to `result`, bounded like a turn's

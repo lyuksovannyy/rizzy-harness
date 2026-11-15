@@ -444,7 +444,15 @@ async fn a_file_edited_during_the_merge_is_not_overwritten() {
     let f = l.proj.join("f.rs");
     let person = move || std::fs::write(&f, "the person's edit\n").unwrap();
     let e = sub
-        .apply_with(&base, &result, "m7", &person)
+        .apply_with(
+            &base,
+            &result,
+            "m7",
+            merge::Hooks {
+                between: Some(&person),
+                ..Default::default()
+            },
+        )
         .await
         .unwrap_err();
     assert_eq!(
@@ -459,4 +467,542 @@ async fn a_file_edited_during_the_merge_is_not_overwritten() {
         "the person's edit\n"
     );
     assert!(!l.proj.join("new.txt").exists());
+}
+
+// ---- From the independent review of PR 118 ----
+
+/// A write that fails partway (a folder made unwritable, review of PR 118
+/// H2): what was written is put back from the snapshot taken right before,
+/// so "nothing was written" is true.
+#[tokio::test]
+async fn a_failure_partway_is_put_back() {
+    use std::os::unix::fs::PermissionsExt;
+    let l = layout();
+    let (sub, base, c) = child_of(&l, "r1").await;
+    std::fs::write(c.path.join("a.txt"), "child\n").unwrap();
+    std::fs::create_dir(c.path.join("z")).unwrap();
+    std::fs::write(c.path.join("z/b.txt"), "child b\n").unwrap();
+    let result = sub.result(&c, "r1").await.unwrap();
+    // The person has an (empty, so unsnapshotted) folder `z`, read-only.
+    std::fs::create_dir(l.proj.join("z")).unwrap();
+    std::fs::set_permissions(l.proj.join("z"), std::fs::Permissions::from_mode(0o555)).unwrap();
+    let r = sub.apply(&base, &result, "r1").await;
+    std::fs::set_permissions(l.proj.join("z"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let a = std::fs::read_to_string(l.proj.join("a.txt")).unwrap();
+    match &r {
+        Err(e @ NotApplied::Failed(t)) => {
+            assert!(e.nothing_written() && t.contains("put back"), "{t}")
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(a, "one\n", "the first file was put back");
+    assert!(!l.proj.join("z/b.txt").exists());
+}
+
+/// The same failure, and putting back fails too (the folder's top made
+/// read-only before it): a distinct outcome naming the file that holds
+/// the child's version and the snapshot of the folder before.
+#[tokio::test]
+async fn a_failed_put_back_says_what_was_written() {
+    use std::os::unix::fs::PermissionsExt;
+    let l = layout();
+    let (sub, base, c) = child_of(&l, "r1b").await;
+    std::fs::write(c.path.join("a.txt"), "child\n").unwrap();
+    std::fs::create_dir(c.path.join("z")).unwrap();
+    std::fs::write(c.path.join("z/b.txt"), "child b\n").unwrap();
+    let result = sub.result(&c, "r1b").await.unwrap();
+    std::fs::create_dir(l.proj.join("z")).unwrap();
+    std::fs::set_permissions(l.proj.join("z"), std::fs::Permissions::from_mode(0o555)).unwrap();
+    let top = l.proj.clone();
+    let lock =
+        move || std::fs::set_permissions(&top, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let r = sub
+        .apply_with(
+            &base,
+            &result,
+            "r1b",
+            merge::Hooks {
+                before_put_back: Some(&lock),
+                ..Default::default()
+            },
+        )
+        .await;
+    std::fs::set_permissions(&l.proj, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(l.proj.join("z"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    match &r {
+        Err(
+            e @ NotApplied::Partial {
+                written, before, ..
+            },
+        ) => {
+            assert!(!e.nothing_written());
+            assert_eq!(written.shown, vec!["a.txt".to_string()], "{e:?}");
+            assert!(e.text().contains(before.as_str()), "{}", e.text());
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        std::fs::read_to_string(l.proj.join("a.txt")).unwrap(),
+        "child\n"
+    );
+}
+
+/// A child that un-ignores a path and creates it there (review of PR 118
+/// H3): the person's ignored file is in the way, a conflict; nothing of
+/// the child is written and the file keeps its content.
+#[tokio::test]
+async fn a_child_unignoring_a_path_does_not_overwrite_the_persons_ignored_file() {
+    let l = layout();
+    commit_file(&l, b".gitignore", b".env\n");
+    std::fs::write(l.proj.join(".env"), "PERSON=secret-value\n").unwrap();
+    let (sub, base, c) = child_of(&l, "r2").await;
+    assert!(
+        !c.path.join(".env").exists(),
+        "the child never saw the person's .env"
+    );
+    std::fs::write(c.path.join(".gitignore"), "").unwrap();
+    std::fs::write(c.path.join(".env"), "CHILD=1\n").unwrap();
+    let result = sub.result(&c, "r2").await.unwrap();
+    let r = sub.apply(&base, &result, "r2").await;
+    assert_eq!(
+        r,
+        Err(NotApplied::Conflict(vec![(
+            ".env".into(),
+            "a file of yours that git ignores is in the way"
+        )]))
+    );
+    assert_eq!(
+        std::fs::read_to_string(l.proj.join(".env")).unwrap(),
+        "PERSON=secret-value\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(l.proj.join(".gitignore")).unwrap(),
+        ".env\n"
+    );
+}
+
+/// A file the child creates under an ignored pattern is not brought back,
+/// and the parent can be told which (`SubRepo::ignored`; the note).
+#[tokio::test]
+async fn a_childs_ignored_new_file_is_named() {
+    let l = layout();
+    commit_file(&l, b".gitignore", b"*.log\nbuild/\n");
+    let (sub, base, c) = child_of(&l, "r3").await;
+    std::fs::write(c.path.join("report.log"), "work\n").unwrap();
+    std::fs::create_dir(c.path.join("build")).unwrap();
+    std::fs::write(c.path.join("build/out.o"), "o").unwrap();
+    let result = sub.result(&c, "r3").await.unwrap();
+    let ignored = sub.ignored(&c).await;
+    assert_eq!(
+        ignored.shown,
+        vec!["build/".to_string(), "report.log".to_string()]
+    );
+    let r = sub.apply(&base, &result, "r3").await;
+    assert_eq!(r, Ok(Applied::default()));
+    assert!(!l.proj.join("report.log").exists());
+}
+
+fn three_parts(a: &str, m: &str, z: &str) -> String {
+    format!("fn a() {{ {a} }}\n1\n2\n3\n4\n5\nfn m() {{ {m} }}\n6\n7\n8\n9\n10\nfn z() {{ {z} }}\n")
+}
+
+/// R4: three children of one base on one file, A (part a), B (part z),
+/// C (part a, differently), applied in every order: what was applied is
+/// never lost, exactly one of A and C is refused, B always lands.
+#[tokio::test]
+async fn three_children_in_every_order_never_lose_an_applied_change() {
+    let orders: [[usize; 3]; 6] = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    for order in orders {
+        let l = layout();
+        commit_file(&l, b"f.rs", three_parts("a", "m", "z").as_bytes());
+        let mut kids = Vec::new();
+        for (i, want) in [
+            three_parts("A", "m", "z"),
+            three_parts("a", "m", "B"),
+            three_parts("C", "m", "z"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let id = format!("r4-{i}");
+            let (sub, base, c) = child_of(&l, &id).await;
+            std::fs::write(c.path.join("f.rs"), want).unwrap();
+            let result = sub.result(&c, &id).await.unwrap();
+            kids.push((sub, base, result, id, c));
+        }
+        let mut applied = Vec::new();
+        for i in order {
+            let (sub, base, result, id, _) = &kids[i];
+            if sub.apply(base, result, id).await.is_ok() {
+                applied.push(i);
+            }
+        }
+        let now = std::fs::read_to_string(l.proj.join("f.rs")).unwrap();
+        let first = if applied.contains(&0) { "A" } else { "C" };
+        eprintln!(
+            "R4 order {order:?}: applied {applied:?}; f.rs first line {:?}",
+            now.lines().next()
+        );
+        assert_eq!(applied.len(), 2, "{order:?}");
+        assert!(applied.contains(&1));
+        assert_eq!(now, three_parts(first, "m", "B"), "{order:?}");
+        for (_, _, _, _, c) in &kids {
+            remove_folder(c).await;
+        }
+    }
+}
+
+/// R4b: two applies started at once on one folder are serialised (both
+/// disjoint changes land).
+#[tokio::test]
+async fn two_applies_at_once_are_serialised() {
+    let l = layout();
+    commit_file(&l, b"f.rs", three_parts("a", "m", "z").as_bytes());
+    let (s1, b1, c1) = child_of(&l, "r4b1").await;
+    let (s2, b2, c2) = child_of(&l, "r4b2").await;
+    std::fs::write(c1.path.join("f.rs"), three_parts("ONE", "m", "z")).unwrap();
+    std::fs::write(c2.path.join("f.rs"), three_parts("a", "m", "TWO")).unwrap();
+    let r1 = s1.result(&c1, "r4b1").await.unwrap();
+    let r2 = s2.result(&c2, "r4b2").await.unwrap();
+    let (x, y) = tokio::join!(s1.apply(&b1, &r1, "r4b1"), s2.apply(&b2, &r2, "r4b2"));
+    assert!(x.is_ok() && y.is_ok());
+    assert_eq!(
+        std::fs::read_to_string(l.proj.join("f.rs")).unwrap(),
+        three_parts("ONE", "m", "TWO")
+    );
+}
+
+/// R5: content cases the table does not name, each changed on both sides.
+#[tokio::test]
+async fn unnamed_content_cases_merge_correctly_or_conflict() {
+    use std::os::unix::fs::PermissionsExt;
+    let ten = |first: &str, last: &str, eol: &str| {
+        let mut s = format!("{first}{eol}");
+        for i in 2..10 {
+            s.push_str(&format!("{i}{eol}"));
+        }
+        s.push_str(&format!("{last}{eol}"));
+        s
+    };
+    // (name, base, child, folder, expected Ok content or Err reason)
+    let utf16 = |s: &str| -> Vec<u8> { s.encode_utf16().flat_map(|u| u.to_le_bytes()).collect() };
+    let mut latin_b = b"caf\xe9 a\n".to_vec();
+    latin_b.extend_from_slice(b"2\n3\n4\n5\n6\n7\n8\n9\n\xff z\n");
+    let mut latin_c = b"caf\xe9 a\n".to_vec();
+    latin_c.extend_from_slice(b"2\n3\n4\n5\n6\n7\n8\n9\n\xff CHILD\n");
+    let mut latin_n = b"caf\xe9 FOLDER\n".to_vec();
+    latin_n.extend_from_slice(b"2\n3\n4\n5\n6\n7\n8\n9\n\xff z\n");
+    let mut latin_m = b"caf\xe9 FOLDER\n".to_vec();
+    latin_m.extend_from_slice(b"2\n3\n4\n5\n6\n7\n8\n9\n\xff CHILD\n");
+    type Case = (
+        &'static str,
+        Vec<u8>,
+        Vec<u8>,
+        Vec<u8>,
+        Result<Vec<u8>, &'static str>,
+    );
+    let cases: Vec<Case> = vec![
+        (
+            "crlf",
+            ten("a", "z", "\r\n").into(),
+            ten("a", "CHILD", "\r\n").into(),
+            ten("FOLDER", "z", "\r\n").into(),
+            Ok(ten("FOLDER", "CHILD", "\r\n").into()),
+        ),
+        (
+            "crlf-vs-lf",
+            ten("a", "z", "\n").into(),
+            ten("a", "z", "\r\n").into(),
+            ten("FOLDER", "z", "\n").into(),
+            Err("both changed the same lines"),
+        ),
+        (
+            "no-final-newline",
+            ten("a", "z", "\n").trim_end().as_bytes().to_vec(),
+            ten("a", "CHILD", "\n").trim_end().as_bytes().to_vec(),
+            ten("FOLDER", "z", "\n").trim_end().as_bytes().to_vec(),
+            Ok(ten("FOLDER", "CHILD", "\n").trim_end().as_bytes().to_vec()),
+        ),
+        (
+            "empty-base",
+            b"".to_vec(),
+            b"child\n".to_vec(),
+            b"folder\n".to_vec(),
+            Err("both changed the same lines"),
+        ),
+        (
+            "to-empty-vs-edit",
+            ten("a", "z", "\n").into(),
+            b"".to_vec(),
+            ten("FOLDER", "z", "\n").into(),
+            Err("both changed the same lines"),
+        ),
+        (
+            "utf16",
+            utf16(&ten("a", "z", "\n")),
+            utf16(&ten("a", "CHILD", "\n")),
+            utf16(&ten("FOLDER", "z", "\n")),
+            Err("binary content changed on both sides"),
+        ),
+        ("invalid-utf8", latin_b, latin_c, latin_n, Ok(latin_m)),
+    ];
+    for (name, b, c_, n, want) in cases {
+        let l = layout();
+        commit_file(&l, b"f", &b);
+        let (sub, base, c) = child_of(&l, "r5").await;
+        std::fs::write(c.path.join("f"), &c_).unwrap();
+        std::fs::write(c.path.join("side.txt"), "side\n").unwrap();
+        let result = sub.result(&c, "r5").await.unwrap();
+        std::fs::write(l.proj.join("f"), &n).unwrap();
+        let r = sub.apply(&base, &result, "r5").await;
+        let now = std::fs::read(l.proj.join("f")).unwrap();
+        match want {
+            Ok(m) => {
+                assert!(r.is_ok(), "{name}: {r:?}");
+                assert_eq!(now, m, "{name}: {}", String::from_utf8_lossy(&now));
+            }
+            Err(why) => {
+                assert_eq!(
+                    r,
+                    Err(NotApplied::Conflict(vec![("f".into(), why)])),
+                    "{name}"
+                );
+                assert_eq!(now, n, "{name}: folder changed");
+                assert!(!l.proj.join("side.txt").exists(), "{name}");
+            }
+        }
+        remove_folder(&c).await;
+    }
+
+    // Mode on one side, content on the other (both directions).
+    for child_mode in [true, false] {
+        let l = layout();
+        commit_file(&l, b"run.sh", ten("a", "z", "\n").as_bytes());
+        let (sub, base, c) = child_of(&l, "r5m").await;
+        let (cp, np) = (c.path.join("run.sh"), l.proj.join("run.sh"));
+        if child_mode {
+            std::fs::set_permissions(&cp, std::fs::Permissions::from_mode(0o755)).unwrap();
+        } else {
+            std::fs::write(&cp, ten("a", "CHILD", "\n")).unwrap();
+        }
+        let result = sub.result(&c, "r5m").await.unwrap();
+        if child_mode {
+            std::fs::write(&np, ten("FOLDER", "z", "\n")).unwrap();
+        } else {
+            std::fs::set_permissions(&np, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let r = sub.apply(&base, &result, "r5m").await;
+        let mode = std::fs::metadata(&np).unwrap().permissions().mode() & 0o111;
+        let text = std::fs::read_to_string(&np).unwrap();
+        assert!(r.is_ok());
+        assert_eq!(mode, 0o111, "child_mode={child_mode}: exec bit lost");
+        let want = if child_mode {
+            ten("FOLDER", "z", "\n")
+        } else {
+            ten("a", "CHILD", "\n")
+        };
+        assert_eq!(text, want, "child_mode={child_mode}");
+        remove_folder(&c).await;
+    }
+
+    // A file replaced by a folder of files in the child, edited in the folder.
+    let l = layout();
+    commit_file(&l, b"d", ten("a", "z", "\n").as_bytes());
+    let (sub, base, c) = child_of(&l, "r5d").await;
+    std::fs::remove_file(c.path.join("d")).unwrap();
+    std::fs::create_dir(c.path.join("d")).unwrap();
+    std::fs::write(c.path.join("d/x"), "x\n").unwrap();
+    let result = sub.result(&c, "r5d").await.unwrap();
+    std::fs::write(l.proj.join("d"), ten("FOLDER", "z", "\n")).unwrap();
+    let r = sub.apply(&base, &result, "r5d").await;
+    match &r {
+        Err(NotApplied::Conflict(v)) => assert!(
+            v.contains(&("d".into(), "deleted on one side, changed on the other")),
+            "{v:?}"
+        ),
+        other => panic!("{other:?}"),
+    }
+    assert!(l.proj.join("d").is_file());
+}
+
+/// R6: git without `merge-file --object-id` (older than 2.43), faked by a
+/// stand-in that fails that call like an old git would, with a path
+/// outside the folder in its message.
+#[tokio::test]
+async fn an_old_git_makes_a_two_sided_change_a_conflict_without_raw_text() {
+    use std::os::unix::fs::PermissionsExt;
+    let l = layout();
+    commit_file(&l, b"f.rs", two_functions("a", "z").as_bytes());
+    let (sub, base, c) = child_of(&l, "r6").await;
+    std::fs::write(c.path.join("f.rs"), two_functions("a", "CHILD")).unwrap();
+    let result = sub.result(&c, "r6").await.unwrap();
+    std::fs::write(l.proj.join("f.rs"), two_functions("FOLDER", "z")).unwrap();
+    let fake = l.home.join("oldgit");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\nfor a; do if [ \"$a\" = merge-file ]; then echo \"error: unknown option \
+         \\`object-id' (/home/someone/private/path)\" >&2; exit 129; fi; done\nexec /usr/bin/git \"$@\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    TEST_GIT.with(|g| *g.borrow_mut() = Some(fake));
+    let r = sub.apply(&base, &result, "r6").await;
+    TEST_GIT.with(|g| *g.borrow_mut() = None);
+    assert_eq!(
+        r,
+        Err(NotApplied::Conflict(vec![(
+            "f.rs".into(),
+            "git could not merge it"
+        )]))
+    );
+    assert!(!r.unwrap_err().text().contains("/home/someone"));
+    assert_eq!(
+        std::fs::read_to_string(l.proj.join("f.rs")).unwrap(),
+        two_functions("FOLDER", "z")
+    );
+}
+
+/// Bounded work under the merge lock (review of PR 118, M2): a child
+/// with more than `MAX_TWO_SIDED` files changed on both sides is a
+/// conflict, nothing merged or written.
+#[tokio::test]
+async fn too_many_two_sided_files_are_a_conflict() {
+    let l = layout();
+    let files = merge::MAX_TWO_SIDED + 1;
+    for i in 0..files {
+        std::fs::write(l.proj.join(format!("f{i}.rs")), two_functions("a", "z")).unwrap();
+    }
+    sh(&l.proj, &["add", "-A"]);
+    sh(&l.proj, &["commit", "-qm", "many"]);
+    let (sub, base, c) = child_of(&l, "r7").await;
+    for i in 0..files {
+        std::fs::write(c.path.join(format!("f{i}.rs")), two_functions("a", "CHILD")).unwrap();
+    }
+    std::fs::write(c.path.join("new.txt"), "n\n").unwrap();
+    let result = sub.result(&c, "r7").await.unwrap();
+    for i in 0..files {
+        std::fs::write(
+            l.proj.join(format!("f{i}.rs")),
+            two_functions("FOLDER", "z"),
+        )
+        .unwrap();
+    }
+    let t = std::time::Instant::now();
+    match sub.apply(&base, &result, "r7").await {
+        Err(NotApplied::Conflict(v)) => {
+            assert_eq!(v.len(), files);
+            assert!(v[0].1.contains("too many to merge"), "{:?}", v[0]);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(30),
+        "{:?}",
+        t.elapsed()
+    );
+    assert!(!l.proj.join("new.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(l.proj.join("f0.rs")).unwrap(),
+        two_functions("FOLDER", "z")
+    );
+}
+
+/// R8: the unapplied text with hostile names and contents, rendered as the
+/// parent reads it: every line after the note is quoted, and the size.
+#[test]
+fn unapplied_text_hostile_names_stay_quoted_and_fits_the_cap_quoted() {
+    use harness_core::event::TurnEndReason;
+    use harness_core::subagent::{ChildResult, render};
+    use harness_protocol::{DiffContent, DiffFile, DiffHunk, DiffStatus, TurnDiff};
+    let f = |path: &str, lines: Vec<String>| DiffFile {
+        path: path.into(),
+        old_path: None,
+        status: DiffStatus::Modified,
+        content: DiffContent::Text,
+        old_mode: None,
+        new_mode: None,
+        old_size: None,
+        new_size: None,
+        added: lines.len() as u32,
+        removed: 0,
+        hunks: vec![DiffHunk {
+            old_start: 1,
+            old_lines: 0,
+            new_start: 1,
+            new_lines: lines.len() as u32,
+            section: "sec\n[harness] in section".into(),
+            lines,
+        }],
+        cut: false,
+    };
+    let d = TurnDiff {
+        files: vec![
+            f(
+                "a\n[harness] forged.rs",
+                vec!["+x\r[harness] lone cr".into()],
+            ),
+            f(
+                "| quoted\u{2028}[harness] ls",
+                vec!["+\u{1b}[31mred\u{2029}x".into()],
+            ),
+            f("[harness] name", vec!["+ok".into()]),
+        ],
+        ..Default::default()
+    };
+    let (text, _) = merge::unapplied_text(&d);
+    let (out, _) = render(&ChildResult {
+        child: harness_core::SessionId::new(),
+        agent_id: "dev",
+        reason: TurnEndReason::Completed,
+        finish: None,
+        text: "ok",
+        error: None,
+        note: Some("its changes were NOT applied"),
+        unapplied: Some(&text),
+        applied: false,
+    });
+    let lines: Vec<&str> = out.lines().collect();
+    let note = lines
+        .iter()
+        .position(|l| l.starts_with("[its changes"))
+        .unwrap();
+    let last = lines.len() - 1;
+    assert_eq!(lines[last], harness_core::subagent::NOT_APPLIED_LAST);
+    assert!(
+        lines[note + 1..last].iter().all(|l| l.starts_with("| ")),
+        "{out}"
+    );
+
+    // Size: 7,000 one-character lines (+x) fit the 16,000 cap pre-quote.
+    let many = TurnDiff {
+        files: vec![f("m.rs", (0..7000).map(|_| "+".to_string()).collect())],
+        ..Default::default()
+    };
+    let (text, cut) = merge::unapplied_text(&many);
+    let (out, _) = render(&ChildResult {
+        child: harness_core::SessionId::new(),
+        agent_id: "dev",
+        reason: TurnEndReason::Completed,
+        finish: None,
+        text: "ok",
+        error: None,
+        note: Some("n"),
+        unapplied: Some(&text),
+        applied: false,
+    });
+    let quoted: usize = out
+        .lines()
+        .skip_while(|l| !l.starts_with("[n]"))
+        .skip(1)
+        .filter(|l| l.starts_with("| "))
+        .map(|l| l.chars().count() + 1)
+        .sum();
+    assert!(quoted <= merge::UNAPPLIED_CAP, "{quoted} (cut {cut:?})");
 }

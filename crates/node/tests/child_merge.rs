@@ -83,7 +83,7 @@ async fn overlapping_children_leave_the_folder_alone_and_hand_back_the_diff() {
         "{out}"
     );
     assert!(
-        out.contains("redo the changes with your own tools"),
+        out.ends_with(harness_core::subagent::NOT_APPLIED_LAST),
         "{out}"
     );
     let lines: Vec<&str> = out.lines().collect();
@@ -97,8 +97,9 @@ async fn overlapping_children_leave_the_folder_alone_and_hand_back_the_diff() {
         .iter()
         .position(|l| l.starts_with("[its changes were NOT applied"))
         .expect("the note");
+    let last = lines.len() - 1;
     assert!(
-        lines[note + 1..].iter().all(|l| l.starts_with("| ")),
+        lines[note + 1..last].iter().all(|l| l.starts_with("| ")),
         "{out}"
     );
     // Nothing of that child was written, not even its other file (when the
@@ -106,4 +107,72 @@ async fn overlapping_children_leave_the_folder_alone_and_hand_back_the_diff() {
     if lost == "TWO" {
         assert!(r.read("also.txt").is_none());
     }
+}
+
+/// A child whose changes were not applied is not reported ok, whatever
+/// it says of itself (review of PR 118, M1): the call is `ok: false`
+/// (the card is not green), its own status line is kept, and the result
+/// ends with the harness's instruction to apply the changes.
+#[tokio::test]
+async fn a_refused_childs_delegate_result_is_not_ok_and_ends_with_what_to_do() {
+    let mut r = rig_with_file().await;
+    let (_, outs) = r
+        .lead_turn(
+            "delegate: dev=run: sed -i 's/{ a }/{ ONE }/' f.rs | \
+             dev=run: sed -i 's/{ a }/{ TWO }/' f.rs",
+        )
+        .await;
+    let refused = outs
+        .iter()
+        .find(|o| o.contains("NOT applied"))
+        .expect("one refused");
+    let applied = outs
+        .iter()
+        .find(|o| !o.contains("NOT applied"))
+        .expect("one applied");
+    let ok_of = |out: &String| {
+        r.seen
+            .iter()
+            .filter_map(|e| e.typed().ok())
+            .find_map(|k| match k {
+                harness_core::event::EventKind::ToolCallFinished(f) if &f.output == out => {
+                    Some(f.ok)
+                }
+                _ => None,
+            })
+            .expect("its event")
+    };
+    assert!(!ok_of(refused), "{refused}");
+    assert!(ok_of(applied), "{applied}");
+    assert!(
+        refused.lines().any(|l| l.contains("finished: done")),
+        "{refused}"
+    );
+    assert!(
+        refused.ends_with(harness_core::subagent::NOT_APPLIED_LAST),
+        "{refused}"
+    );
+    assert!(!applied.contains(harness_core::subagent::NOT_APPLIED_LAST));
+}
+
+/// What the child made that the repository ignores is named in the note,
+/// not dropped without a word.
+#[tokio::test]
+async fn a_childs_ignored_files_are_named_in_the_note() {
+    let mut r = rig_with_file().await;
+    r.write(".gitignore", "*.log\n");
+    r.git(&["add", "."]);
+    r.git(&["commit", "-qm", "ignore logs"]);
+    let (_, outs) = r
+        .lead_turn("delegate: dev=run: echo work > report.log")
+        .await;
+    assert!(
+        outs[0].contains(
+            "1 path(s) the sub-agent made that the repository ignores were not brought back: \
+             `report.log`"
+        ),
+        "{}",
+        outs[0]
+    );
+    assert!(r.read("report.log").is_none());
 }

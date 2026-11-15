@@ -52,6 +52,7 @@ impl TurnHost for Host {
             error: None,
             note: None,
             unapplied: None,
+            applied: true,
         })
     }
 }

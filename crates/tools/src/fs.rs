@@ -161,10 +161,11 @@ impl Tool for Write {
         "write"
     }
     fn description(&self) -> &'static str {
-        "Create a file, or replace an existing one with the given content. An existing file must \
-         have been read with the `read` tool in this session (any part of it; `cat`, `head` or \
-         `sed` in `bash` do not count) and not changed since; to change part of a file, `edit` \
-         is usually better. Parent directories are created."
+        "Create a file, or replace an existing one with the given content. A new file needs no \
+         read. An existing file must have been read with the `read` tool (any part of it; `cat`, \
+         `head` or `sed` in `bash` do not count), or written by you, in this session, and not \
+         changed since; without `read`, only files you created or wrote here can be replaced. \
+         To change part of a file, `edit` is usually better. Parent directories are created."
     }
     fn schema(&self) -> Value {
         json!({
@@ -221,7 +222,14 @@ impl Tool for Write {
 }
 
 /// The refusal of a `write` over an existing file never read here.
-fn unread_text(shown: &str) -> String {
+fn unread_text(ctx: &ToolCtx, shown: &str) -> String {
+    if !ctx.read_offered {
+        return format!(
+            "{shown} already exists and has not been read with `read` in this session, and \
+             `read` is not available to this agent here, so it can replace only files it \
+             created or wrote in this session; nothing was written."
+        );
+    }
     format!(
         "{shown} already exists and has not been read with `read` in this session (reading it \
          with `cat`, `head` or `sed` in `bash` does not count), so writing it would replace \
@@ -240,7 +248,7 @@ fn unread_now(ctx: &ToolCtx, input: &Value) -> Option<String> {
     let path = ctx.resolve_for_write(shown).ok()?;
     let md = std::fs::symlink_metadata(&path).ok()?;
     (md.file_type().is_file() && ctx.seen.get(&ctx.seen_key(&path)).is_none())
-        .then(|| unread_text(shown))
+        .then(|| unread_text(ctx, shown))
 }
 
 /// `write` over an existing file: only one the agent read in this session
@@ -261,7 +269,7 @@ async fn check_overwrite(
         Ok(_) => {}
     }
     let Some(seen) = ctx.seen.get(key) else {
-        return Err(unread_text(shown));
+        return Err(unread_text(ctx, shown));
     };
     let live = hash_file(path).await?;
     if live.as_ref().map(|(sha, _)| *sha) != Some(seen.sha) {

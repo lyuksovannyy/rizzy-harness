@@ -3137,12 +3137,12 @@ impl Session {
         // did) reaches the parent's folder, since no event would record it.
         let log_failed =
             child.log_failed.load(Ordering::SeqCst) || self.log_failed.load(Ordering::SeqCst);
-        let (merge_note, unapplied) = match iso {
+        let (merge_note, unapplied, applied) = match iso {
             Some(i) => {
-                let (n, d) = self.merge_back(i, child_id, !log_failed).await;
-                (Some(n), d)
+                let (n, d, a) = self.merge_back(i, child_id, !log_failed).await;
+                (Some(n), d, a)
             }
-            None => (None, None),
+            None => (None, None, true),
         };
         let log = self
             .node
@@ -3188,6 +3188,7 @@ impl Session {
             error,
             note,
             unapplied,
+            applied,
         })
     }
 
@@ -3316,11 +3317,15 @@ impl Session {
         iso: Isolation,
         child: SessionId,
         apply: bool,
-    ) -> (String, Option<String>) {
+    ) -> (String, Option<String>, bool) {
         let id = child.to_string();
         let kept = "it is kept in this node's checkpoint store (sub-agent snapshots)";
-        let (note, unapplied) = match iso.sub.result(&iso.child, &id).await {
-            Err(e) => (format!("its changes could not be collected: {e}"), None),
+        let (mut note, unapplied, landed) = match iso.sub.result(&iso.child, &id).await {
+            Err(e) => (
+                format!("its changes could not be collected: {e}"),
+                None,
+                false,
+            ),
             Ok(result) => {
                 let applied = match (apply, self.checked_folder()) {
                     (false, _) => Err(crate::git::NotApplied::Failed(
@@ -3330,7 +3335,7 @@ impl Session {
                     (true, Err(e)) => Err(crate::git::NotApplied::Failed(e)),
                 };
                 match applied {
-                    Ok(a) => (applied_note(&a), None),
+                    Ok(a) => (applied_note(&a), None, true),
                     Err(e) => {
                         let (diff, cut) = self.unapplied(&iso, &result).await;
                         let follows = match (&diff, cut) {
@@ -3346,29 +3351,45 @@ impl Session {
                         };
                         // A failed log keeps its words (nothing would record a
                         // merge); anything else says why it did not apply.
-                        let why = if apply {
-                            format!("its changes were NOT applied: {}", e.text())
-                        } else {
+                        let why = if !apply {
                             "its changes were not applied, because a session log could not be \
                              written"
                                 .to_string()
+                        } else if e.nothing_written() {
+                            format!("its changes were NOT applied: {}", e.text())
+                        } else {
+                            format!("its changes were applied only in part: {}", e.text())
+                        };
+                        let written = if e.nothing_written() {
+                            "Nothing of this sub-agent's work was written"
+                        } else {
+                            "Check those files"
                         };
                         (
                             format!(
-                                "{}. Nothing of this sub-agent's work was written; redo the \
-                                 changes with your own tools if they are still wanted; {kept} \
-                                 as {result}.{follows}",
+                                "{}. {written}; {kept} as {result}.{follows}",
                                 why.trim_end_matches('.')
                             ),
                             diff,
+                            false,
                         )
                     }
                 }
             }
         };
+        // What the result snapshot leaves out, said rather than dropped.
+        let ignored = iso.sub.ignored(&iso.child).await;
+        if !ignored.is_empty() {
+            note.push_str(&format!(
+                " {} path(s) the sub-agent made that the repository ignores were not brought \
+                 back: {}.",
+                ignored.shown.len() + ignored.more,
+                ignored.listed()
+            ));
+        }
         crate::git::remove_folder(&iso.child).await;
         iso.sub.prune(self.node.cfg.policy.checkpoints_keep).await;
-        (note, unapplied)
+        (note, unapplied, landed)
     }
 
     /// A child's changes from its base, as lines for the parent, and what
@@ -3612,6 +3633,10 @@ impl TurnHost for Session {
 
     fn tool_denied(&self, tool: &str) -> bool {
         self.node.cfg.policy.denies(tool)
+    }
+
+    fn runs_unasked(&self, tool: &str, risk: ToolRisk) -> bool {
+        !self.node.cfg.policy.denies(tool) && !self.current_mode().needs_approval(risk)
     }
 
     fn background(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
@@ -4033,6 +4058,18 @@ fn tool_reason(tool: &str, risk: ToolRisk, input: &Value, policy: &crate::NodePo
 
 /// The merge note for a child's result that was applied.
 fn applied_note(a: &crate::git::Applied) -> String {
+    let mut s = applied_count(a);
+    if !a.nested_skipped.is_empty() {
+        s.push_str(&format!(
+            "; {} change(s) to nested repositories were not applied: {}",
+            a.nested_skipped.shown.len() + a.nested_skipped.more,
+            a.nested_skipped.listed()
+        ));
+    }
+    s
+}
+
+fn applied_count(a: &crate::git::Applied) -> String {
     match (a.written, a.same) {
         (0, 0) => "no file changes".to_string(),
         (0, _) => "its changes were already in the folder".to_string(),

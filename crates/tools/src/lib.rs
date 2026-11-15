@@ -214,6 +214,12 @@ pub struct ToolCtx {
     /// The agent may call `read` here (its tools include it): only then
     /// does `edit`'s refusal of an unread file show the file's lines.
     pub read_offered: bool,
+    /// A `read` of a file would run right now with no card and no policy
+    /// refusal (the chat's mode, the node's `denied_tools`; the loop asks
+    /// the host). `edit`'s early refusal of an unread file (its `refusal`,
+    /// before any card) shows the file's lines only then; otherwise it
+    /// gives the plain refusal and shows nothing (T45, T51).
+    pub read_unasked: bool,
 }
 
 impl ToolCtx {
@@ -241,6 +247,7 @@ impl ToolCtx {
             seen: Default::default(),
             recall: None,
             read_offered: true,
+            read_unasked: true,
         }
     }
 
