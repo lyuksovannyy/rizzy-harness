@@ -140,6 +140,9 @@ pub struct NodeInfo {
     /// What a new chat there gets when the person picks none
     /// (`approval-default:*`).
     pub default_approval: Option<harness_core::policy::ApprovalMode>,
+    /// Its `[limits] max_steps` (`steps-max:*`, X.14), the most a chat's
+    /// own step limit may be; `None`: a node that cannot change one.
+    pub max_steps: Option<u64>,
 }
 
 /// The approval modes in a hello's capabilities (T50): its ceiling and its
@@ -517,6 +520,8 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         // `Master::set_approval_mode` checks a raise itself: a lowering,
         // like a denial, is never refused for the owner's level.
         | MasterToNode::SetApprovalMode { .. }
+        // `Master::set_step_limit` checks a raise itself, as the mode.
+        | MasterToNode::SetStepLimit { .. }
         | MasterToNode::Delete { .. }
         | MasterToNode::Resume { .. }
         | MasterToNode::ArtifactFetch { .. }
@@ -1081,6 +1086,7 @@ impl Master {
                     exec_gaps: Vec::new(),
                     max_approval: None,
                     default_approval: None,
+                    max_steps: None,
                 },
                 tx: None,
                 resuming: HashSet::new(),
@@ -1093,6 +1099,11 @@ impl Master {
             entry.info.profile = profile;
             (entry.info.exec_modes, entry.info.exec_gaps) = exec_of(&capabilities);
             (entry.info.max_approval, entry.info.default_approval) = approval_of(&capabilities);
+            entry.info.max_steps = capabilities.iter().find_map(|c| {
+                c.strip_prefix(harness_protocol::CAP_STEPS_MAX_PREFIX)?
+                    .parse()
+                    .ok()
+            });
             entry.capabilities = capabilities;
             entry.tx = Some(link.to_node.clone());
             entry.resuming.clear();
@@ -2144,6 +2155,73 @@ impl Master {
             req_id,
             session_id: sid,
             mode,
+        })
+        .await
+    }
+
+    /// A chat's own step limit as its log says (the latest
+    /// `step_limit_changed`), and its node's limit: what a raise is
+    /// measured against (X.14).
+    pub async fn step_limit_of(
+        &self,
+        sid: SessionId,
+    ) -> Result<(Option<u64>, Option<u64>), CommandError> {
+        let own = self
+            .inner
+            .mirror
+            .call(move |s| s.last_step_limit(sid))
+            .await?;
+        let node = self.owner(sid).await?;
+        let max = lock(&self.inner.nodes)
+            .get(&node)
+            .and_then(|n| n.info.max_steps);
+        Ok((own, max))
+    }
+
+    /// Change a chat's step limit on its node, which clamps it to
+    /// `1..=` its own limit and records it (X.14). `raise`: more steps than
+    /// the chat has now, so it passes the checks of every command that
+    /// makes a chat work, as a raise of the approval mode does; a lowering
+    /// passes neither. Never sent to a node that did not announce
+    /// `steps-max:*`.
+    pub async fn set_step_limit(
+        &self,
+        sid: SessionId,
+        max_steps: i64,
+        raise: bool,
+    ) -> Result<(), CommandError> {
+        let node = self.owner(sid).await?;
+        if raise {
+            let (diverged, row) = self
+                .inner
+                .mirror
+                .call(move |s| {
+                    Ok::<_, harness_store::StoreError>((s.diverged_seq(sid)?, s.session(sid)?))
+                })
+                .await?;
+            if diverged.is_some() {
+                return Err(CommandError::Rejected(DIVERGED.into()));
+            }
+            let row = row.ok_or(CommandError::UnknownSession)?;
+            if let Some(why) = workspaces::work_refusal(self, &row).await {
+                return Err(CommandError::Forbidden(why));
+            }
+        }
+        let known = lock(&self.inner.nodes)
+            .get(&node)
+            .is_some_and(|n| n.info.max_steps.is_some());
+        if !known {
+            return Err(CommandError::Rejected(
+                "this chat's node cannot change its step limit (a node older than this server, \
+                 or one that is away)"
+                    .into(),
+            ));
+        }
+        self.send_command(&node, |req_id| MasterToNode::SetStepLimit {
+            req_id,
+            session_id: sid,
+            max_steps,
+            lowering: !raise,
         })
         .await
     }

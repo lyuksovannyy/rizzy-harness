@@ -111,7 +111,7 @@ fn said(text: &str) -> Completion {
     }
 }
 
-fn turn<'a>(host: &'a Host, cwd: &std::path::Path) -> TurnCtx<'a> {
+fn turn<'a>(host: &'a dyn TurnHost, cwd: &std::path::Path) -> TurnCtx<'a> {
     TurnCtx {
         session_id: SessionId::new(),
         turn_id: "t".into(),
@@ -662,4 +662,60 @@ async fn the_next_turn_rebuilds_this_turns_requests_byte_for_byte() {
         last.messages[..],
         "the cached prefix moved"
     );
+}
+
+/// A host that says the chat's step limit (`TurnHost::step_limit`, X.14).
+#[derive(Default)]
+struct Limited(Mutex<Vec<EventKind>>, usize);
+
+#[async_trait::async_trait]
+impl TurnHost for Limited {
+    async fn emit(&self, kind: EventKind) -> Result<(), harness_core::backend::LogError> {
+        self.0.lock().unwrap().push(kind);
+        Ok(())
+    }
+    async fn approve(&self, _: &str, _: &str, _: &Value, _: ToolRisk) -> Decision {
+        Decision::Allow
+    }
+    fn step_limit(&self) -> Option<usize> {
+        Some(self.1)
+    }
+}
+
+/// A person's turn follows its chat's limit, below the node's: its steps,
+/// then the wrap-up, whose note names the chat's number.
+#[tokio::test]
+async fn a_turn_follows_its_chats_step_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = Limited(Mutex::default(), 2);
+    let p = Script::new(|n, req| {
+        if req.no_tool_calls {
+            said("done")
+        } else {
+            bash_call(n)
+        }
+    });
+    let b = NativeBackend::new(p.clone(), harness_tools::builtin(), steps(50));
+    let out = b.run_turn(turn(&host, dir.path())).await;
+    assert_eq!(out.reason, TurnEndReason::Limit);
+    let seen = p.seen();
+    assert_eq!(seen.len(), 3, "two steps, then the wrap-up");
+    assert!(text_of(&seen[2]).contains("This turn has used its 2 steps"));
+}
+
+/// A sub-agent's cap is at most its parent chat's limit (the host says the
+/// parent's): its last request is `finish` alone at that number.
+#[tokio::test]
+async fn a_sub_agents_cap_follows_its_parent_chats_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = Limited(Mutex::default(), 2);
+    let p = Script::new(|n, _| bash_call(n));
+    let b = NativeBackend::new(p.clone(), harness_tools::builtin(), steps(50));
+    let mut t = turn(&host, dir.path());
+    t.parent_session = Some(SessionId::new());
+    let out = b.run_turn(t).await;
+    assert_eq!(out.reason, TurnEndReason::Error);
+    let seen = p.seen();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[1].tools.len(), 1, "finish alone");
 }
