@@ -27,6 +27,7 @@ pub mod prefs;
 pub mod presets;
 pub mod projects;
 pub mod providers;
+pub mod recall;
 pub mod resolver;
 pub mod response;
 pub mod routines;
@@ -250,6 +251,8 @@ pub struct MasterInner {
     /// Lines for a chat's next turn about its `remember` calls (refused,
     /// waiting for the person: `memory::Notes`).
     notes: memory::Notes,
+    /// Which chats' running turns may use `recall`, and their counts.
+    recall: recall::Grants,
     /// The routine scheduler, once `start_routines` ran.
     routines: OnceLock<routines::RoutinesHandle>,
     /// The blob store, once `storage::open` ran (before any node links, so
@@ -517,7 +520,9 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::Delete { .. }
         | MasterToNode::Resume { .. }
         | MasterToNode::ArtifactFetch { .. }
-        | MasterToNode::ArtifactRelease { .. } => None,
+        | MasterToNode::ArtifactRelease { .. }
+        // An answer to the node's own search: nothing is written.
+        | MasterToNode::RecallResult { .. } => None,
     }
 }
 
@@ -598,6 +603,7 @@ impl Master {
                 pdf: OnceLock::new(),
                 turn_memory: Mutex::new(HashMap::new()),
                 notes: Default::default(),
+                recall: Default::default(),
                 routines: OnceLock::new(),
                 storage: OnceLock::new(),
                 pulls: Default::default(),
@@ -1203,6 +1209,18 @@ impl Master {
         }
     }
 
+    /// Send `msg` to `node_id` without waiting for an ack (an answer to the
+    /// node's own request). Dropped when the node is gone or not keeping
+    /// up: its request then times out there.
+    pub(crate) fn send_unacked(&self, node_id: &str, msg: MasterToNode) {
+        let nodes = lock(&self.inner.nodes);
+        if let Some(tx) = nodes.get(node_id).and_then(|n| n.tx.as_ref())
+            && tx.try_send(msg).is_err()
+        {
+            tracing::warn!(node = %node_id, "could not send an answer to the node");
+        }
+    }
+
     fn resume_done(&self, node_id: &str, sid: SessionId) {
         if let Some(n) = lock(&self.inner.nodes).get_mut(node_id) {
             n.resuming.remove(&sid);
@@ -1299,6 +1317,11 @@ impl Master {
                     self.forget(session_id).await;
                 }
             }
+            NodeToMaster::Recall {
+                req_id,
+                session_id,
+                query,
+            } => recall::handle(self, node_id, req_id, session_id, query),
             NodeToMaster::ArtifactChunk {
                 req_id,
                 offset,
@@ -1890,6 +1913,23 @@ impl Master {
         if untrusted {
             deny_untrusted(&mut agent);
         }
+        // `recall` (PLAN.md T55): only in a turn the owner's own chat runs
+        // for them, on a node that offers it. Not in a temporary chat, an
+        // untrusted (webhook) turn or a callback turn: there the agent may
+        // be steered by text nobody wrote, and the owner's earlier chats
+        // must not be within its reach.
+        let may_recall = !row.incognito
+            && !untrusted
+            && !resume
+            && row.owner_id.is_some()
+            && row.workspace_id.is_some()
+            && self.node_has(&row.node_id, harness_protocol::CAP_RECALL);
+        if !may_recall {
+            recall::deny(&mut agent);
+        }
+        let recalls = may_recall
+            && (agent.allows_tool("recall")
+                || agent.delegates.iter().any(|d| d.allows_tool("recall")));
         // The owner's facts, whole while they fit, each with its id
         // (`memory::turn_block`).
         let mut noted = Vec::new();
@@ -1906,6 +1946,9 @@ impl Master {
                 && self.node_has(&row.node_id, harness_protocol::CAP_REMEMBER);
             turn_context
                 .push(projects::turn_context(self, p, &row, &text, allowed, remember).await);
+        }
+        if recalls && agent.allows_tool("recall") {
+            turn_context.push(recall::CONTEXT_LINE.into());
         }
         // Last, so it is what the model reads right before answering.
         if untrusted {
@@ -1926,6 +1969,9 @@ impl Master {
         let chat = row.profile.as_deref() == Some("chat");
         let savings = r.token_savings().map(|t| t.for_turn(chat));
         if resume {
+            // A callback turn searches nothing, also not with a grant an
+            // earlier turn of the chat left.
+            self.inner.recall.set(sid, false);
             let mut msg = MasterToNode::Callback {
                 req_id: String::new(),
                 session_id: sid,
@@ -1971,6 +2017,7 @@ impl Master {
         // files nothing from a turn whose `turn_started` has a cause, which
         // the log decides, also after a restart (review S3-1).
         let before = lock(&self.inner.turn_memory).insert(sid, allowed);
+        let recall_before = self.inner.recall.set(sid, recalls);
         let sent = self
             .send_command(&row.node_id, move |req_id| {
                 if let MasterToNode::Prompt { req_id: r, .. } = &mut msg {
@@ -1989,6 +2036,8 @@ impl Master {
                 Some(b) => tm.insert(sid, b),
                 None => tm.remove(&sid),
             };
+            drop(tm);
+            self.inner.recall.restore(sid, recall_before);
         }
         sent?;
         // The notes rode on this turn: do not repeat them (review M5).
@@ -2212,6 +2261,7 @@ impl Master {
 
     /// Drop the mirror copy of a session and refuse its events from now on.
     async fn forget(&self, sid: SessionId) {
+        self.inner.recall.forget(sid);
         let res = self
             .inner
             .mirror

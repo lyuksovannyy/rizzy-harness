@@ -186,6 +186,8 @@ const READ_TOOLS: &[&str] = &["read", "grep", "glob", "outline", "graph_query"];
 const EDIT_TOOLS: &[&str] = &["write", "edit"];
 const COMMAND_TOOLS: &[&str] = &["bash", "bash_output", "bash_stop", "tool_output"];
 const MEMORY_TOOL: &str = "remember";
+/// Searching earlier chats and memory: its own switch.
+const RECALL_TOOL: &str = "recall";
 /// Offered with either switch that builds things; no switch of its own.
 const PUBLISH_TOOL: &str = "publish";
 /// The agent's own task list: with the same switches, for the same reason
@@ -207,6 +209,10 @@ pub struct Features {
     /// instructions and board reach every agent: they are its brief.
     #[serde(default = "yes")]
     pub project_memory: bool,
+    /// `recall`: searches the person's own earlier chats and memory
+    /// (PLAN.md T55). Its own switch, off when absent.
+    #[serde(default)]
+    pub recall: bool,
     /// `web_search` and `web_fetch`.
     pub web: bool,
     /// Read and search files.
@@ -234,6 +240,7 @@ impl Features {
         let groups = [
             // The master offers it per turn only for the memory it may write.
             (self.memory || self.project_memory, &[MEMORY_TOOL][..]),
+            (self.recall, &[RECALL_TOOL][..]),
             (self.web, WEB_TOOLS),
             (self.read_files, READ_TOOLS),
             (self.edit_files, EDIT_TOOLS),
@@ -421,6 +428,7 @@ fn build(id: &str, fm: Frontmatter, body: &str, origin: Origin) -> Result<Agent,
     let features = Features {
         memory: fm.memory,
         project_memory: fm.project_memory,
+        recall: fm.tools.allows(RECALL_TOOL),
         web: any(WEB_TOOLS),
         read_files: any(READ_TOOLS),
         edit_files: any(EDIT_TOOLS),

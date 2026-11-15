@@ -1606,6 +1606,7 @@ dependencies = [
  "harness-agent-native",
  "harness-core",
  "harness-link",
+ "harness-memory",
  "harness-protocol",
  "harness-store",
  "harness-tools",

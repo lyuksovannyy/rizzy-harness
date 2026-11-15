@@ -36,6 +36,8 @@ walkdir.workspace = true
 harness-agent-native.workspace = true
 # The real link under the node in `tests/control_over_link.rs` (A.21).
 harness-link.workspace = true
+# `recall`, the tool, in `tests/recall.rs`.
+harness-memory.workspace = true
 rusqlite.workspace = true
 tempfile.workspace = true
 

@@ -3063,6 +3063,13 @@ impl TurnHost for Session {
         }))
     }
 
+    fn recall(&self) -> Option<Arc<dyn harness_core::recall::RecallSource>> {
+        Some(Arc::new(crate::recall::LinkRecall {
+            node: self.node.clone(),
+            session: self.id,
+        }))
+    }
+
     fn confined(&self, call_id: &str) -> bool {
         self.confined
             .lock()

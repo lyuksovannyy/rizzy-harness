@@ -127,7 +127,7 @@ pub async fn saves_without_a_click(m: &Master, row: &SessionRow, allowed: TurnMe
 
 /// The owner keys a chat of `row` reads and writes personal facts under:
 /// its owner's own facts and theirs kept in the chat's workspace.
-fn places(row: &SessionRow) -> Vec<Option<String>> {
+pub(crate) fn places(row: &SessionRow) -> Vec<Option<String>> {
     match (row.owner_id.as_deref(), row.workspace_id.as_deref()) {
         (Some(u), Some(ws)) => vec![Some(u.to_string()), Some(member_owner(ws, u))],
         (Some(u), None) => vec![Some(u.to_string())],

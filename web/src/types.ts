@@ -394,6 +394,8 @@ export interface AgentFeatures {
   memory: boolean;
   /** In a project's chats, the project's facts the same way (docs/projects.md). */
   project_memory: boolean;
+  /** `recall`: searches your own earlier chats and memory; its own switch. */
+  recall: boolean;
   web: boolean;
   read_files: boolean;
   edit_files: boolean;

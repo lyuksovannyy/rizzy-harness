@@ -10,6 +10,7 @@ mod images;
 mod instructions;
 mod outbox;
 pub mod policy;
+mod recall;
 mod session;
 
 use std::collections::HashMap;
@@ -113,7 +114,8 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::Cancel { .. }
         | MasterToNode::StopBackground { .. }
         | MasterToNode::ApprovalRespond { .. }
-        | MasterToNode::ArtifactFetch { .. } => None,
+        | MasterToNode::ArtifactFetch { .. }
+        | MasterToNode::RecallResult { .. } => None,
     }
 }
 
@@ -173,6 +175,8 @@ pub(crate) struct Inner {
     stopping: AtomicBool,
     /// Background commands (T.8d): the node's count and its `[limits]`.
     pub(crate) background: Arc<harness_tools::background::Registry>,
+    /// `recall` calls waiting for the master's answer (PLAN.md T55).
+    pub(crate) recalls: recall::Pending,
 }
 
 impl Inner {
@@ -452,6 +456,7 @@ impl NodeRuntime {
             stages,
             stopping: AtomicBool::new(false),
             background: harness_tools::background::Registry::new(bg_limits, bg_secrets),
+            recalls: Default::default(),
         });
         for row in rows {
             let s = Session::load(inner.clone(), row.session_id).await?;
@@ -575,6 +580,12 @@ impl NodeRuntime {
             {
                 capabilities.push(harness_protocol::CAP_REMEMBER.into());
             }
+            // `recall` likewise (PLAN.md T55): the master answers searches
+            // only from a node that offers it.
+            if self.inner.cfg.backend.has_tool("recall") && !self.inner.cfg.policy.denies("recall")
+            {
+                capabilities.push(harness_protocol::CAP_RECALL.into());
+            }
             if self.inner.cfg.profile == harness_core::event::Profile::Agentic {
                 // The modes it offers and their gaps (N.10a), as decided at
                 // start.
@@ -633,6 +644,12 @@ impl NodeRuntime {
                         offset,
                         len,
                     } => this.fetch(req_id, session_id, stage_id, offset, len),
+                    // The answer to a search a tool call waits for.
+                    MasterToNode::RecallResult {
+                        req_id,
+                        hits,
+                        error,
+                    } => this.inner.recalls.answer(&req_id, hits, error),
                     // Answered here, at once: they must not wait behind a
                     // slow restore or delete (AUDIT S10), nor behind the
                     // output queued for the master (A.21): their acks go
@@ -1098,6 +1115,14 @@ impl NodeRuntime {
                 len,
             } => {
                 self.fetch(req_id, session_id, stage_id, offset, len);
+                Ok(())
+            }
+            MasterToNode::RecallResult {
+                req_id,
+                hits,
+                error,
+            } => {
+                self.inner.recalls.answer(&req_id, hits, error);
                 Ok(())
             }
             MasterToNode::ArtifactStage {

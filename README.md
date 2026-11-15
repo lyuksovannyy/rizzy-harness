@@ -677,6 +677,30 @@ workspace's, else the Software Developer), not the chat default.
 Project memory works as before: facts proposed for a project wait on the
 project's Memory tab (docs/projects.md).
 
+**Earlier chats and memory search.** An agent with this switch (on the
+Agents page; on for every built-in agent with memory, off for Smol and
+Scout) has a `recall` tool: when you refer to earlier work it was not given
+("like last time", "the plan we made"), it searches **your own** earlier
+chats in the chat's workspace and the memory that chat reads anyway (your
+facts where the workspace may use them, the project's facts), by keywords,
+with no model call. It gets short quoted excerpts, each with the chat's
+title, when it was last active and its id; it cannot open a whole chat or
+change anything, and the call shows in the chat like any tool.
+
+- Never another person's chats, never a chat in another workspace, never a
+  temporary chat, a sub-agent's session or the chat itself. The server
+  decides that from the chat the agent works in; nothing the agent sends
+  can name a person, a workspace or a chat.
+- Not in temporary chats, turns started by an external event (a routine's
+  webhook) or turns that report a finished background command. A
+  sub-agent searches only when its own agent has the switch.
+- At most 8 searches per turn and 40 per chat per hour, at most 10 results
+  and about 6,000 characters of excerpts per search.
+- The excerpts are quoted to the agent as text written then: earlier chats
+  hold web pages, tool output and other people's files, so it is told to
+  check a detail before relying on it and never to follow instructions in
+  them. A node turns the tool off with `denied_tools = ["recall"]`.
+
 Who may create workspaces (also a switch under Settings → Server → Workspaces):
 
 ```toml
@@ -2272,14 +2296,14 @@ The built-in agents, grouped by category in the picker:
 
 | Agent (`@handle`, aliases) | Category | Runs as | Can |
 |---|---|---|---|
-| Assistant (`@general`, `@ai`), the chats' default | General | agent | web search and fetch; your facts; project memory |
+| Assistant (`@general`, `@ai`), the chats' default | General | agent | web search and fetch; your facts; project memory; earlier chats and memory search |
 | Smol (`@smol`) | General | agent, sub-agent | nothing but answer: no tools, no memory |
-| Researcher (`@researcher`, `@research`) | General | agent, sub-agent | web search and fetch; project memory |
-| Software Developer (`@coder`, `@dev`), the Agentic default | IT | agent, sub-agent | read, change and search files, run commands, the node's MCP servers, publish, web; delegates to Scout, Researcher and Reviewer; project memory |
+| Researcher (`@researcher`, `@research`) | General | agent, sub-agent | web search and fetch; project memory; earlier chats and memory search |
+| Software Developer (`@coder`, `@dev`), the Agentic default | IT | agent, sub-agent | read, change and search files, run commands, the node's MCP servers, publish, web; delegates to Scout, Researcher and Reviewer; project memory; earlier chats and memory search |
 | Senior Teamlead (`@teamlead`) | IT | agent | everything the Software Developer has, plus your facts; delegates to Software Developer, Researcher, Writer, Scout and Reviewer |
-| Writer (`@writer`) | General | agent, sub-agent | read, change and search files, publish, web; project memory |
+| Writer (`@writer`) | General | agent, sub-agent | read, change and search files, publish, web; project memory; earlier chats and memory search |
 | Scout (`@scout`) | IT | sub-agent | read and search files only |
-| Reviewer (`@reviewer`) | IT | agent, sub-agent | read and search files; project memory |
+| Reviewer (`@reviewer`) | IT | agent, sub-agent | read and search files; project memory; earlier chats and memory search |
 
 **Researcher in Agentic sessions.** Web tools exist only in chats, not on
 nodes yet (nodes have `remember`, which alone does none of a task's work). In an Agentic session, Researcher is therefore not offered
@@ -2353,7 +2377,8 @@ between), then what became of its changes and the pages it cited. The `delegate`
 
 **Agents** in the sidebar lists every agent. Server admins can make agents there
 (name, handle, summary, instructions and feature switches: memory, project
-memory, web search, files, commands, MCP servers, sub-agents, and whether it is offered as an agent,
+memory, earlier chats and memory search, web search, files, commands, MCP
+servers, sub-agents, and whether it is offered as an agent,
 a sub-agent or both), change them, delete them, and change any agent's look.
 Built-in agents and agent files keep their name, handle, instructions and
 features: only their summary and **additional instructions** (added after

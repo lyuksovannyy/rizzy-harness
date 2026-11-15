@@ -21,6 +21,7 @@ const ALL_TOOLS: &[&str] = &[
     "web_search",
     "web_fetch",
     "remember",
+    "recall",
     "delegate",
 ];
 
@@ -45,6 +46,8 @@ fn builtin_roster_is_exactly_the_table() {
         "web_search",
         "web_fetch",
         "remember",
+        // Earlier chats and memory search (PLAN.md T55).
+        "recall",
         // Every MCP tool of the node's servers (X.3).
         "mcp",
     ];
@@ -67,7 +70,7 @@ fn builtin_roster_is_exactly_the_table() {
             name: "Assistant",
             category: "General",
             runs_as: (true, false),
-            tools: &["web_search", "web_fetch", "remember"],
+            tools: &["web_search", "web_fetch", "remember", "recall"],
             user_facts: true,
             project_memory: true,
             delegates: &[],
@@ -89,7 +92,7 @@ fn builtin_roster_is_exactly_the_table() {
             name: "Researcher",
             category: "General",
             runs_as: (true, true),
-            tools: &["web_search", "web_fetch", "remember"],
+            tools: &["web_search", "web_fetch", "remember", "recall"],
             user_facts: false,
             project_memory: true,
             delegates: &[],
@@ -134,6 +137,7 @@ fn builtin_roster_is_exactly_the_table() {
                 "todo",
                 "skill",
                 "remember",
+                "recall",
             ],
             user_facts: false,
             project_memory: true,
@@ -164,6 +168,7 @@ fn builtin_roster_is_exactly_the_table() {
                 "graph_query",
                 "skill",
                 "remember",
+                "recall",
             ],
             user_facts: false,
             project_memory: true,
@@ -346,6 +351,7 @@ fn features() -> harness_agents::Features {
     harness_agents::Features {
         memory: true,
         project_memory: true,
+        recall: false,
         web: true,
         read_files: true,
         edit_files: false,
@@ -831,4 +837,42 @@ fn mcp_servers_are_their_own_switch() {
     )
     .unwrap();
     assert!(!old.features.mcp);
+}
+
+/// "Earlier chats and memory search" is its own switch (the owner,
+/// 2026-11-14): on for the built-ins that have memory, off for Smol and
+/// Scout; a page agent asks for `recall` only with it; a page agent saved
+/// before the switch reads with it off.
+#[test]
+fn recall_is_its_own_switch() {
+    for a in builtins() {
+        let want = !matches!(a.id.as_str(), "smol" | "scout");
+        assert_eq!(a.features.recall, want, "{}", a.id);
+        assert_eq!(a.spec.allows_tool("recall"), want, "{}", a.id);
+    }
+    let make = |recall: bool| {
+        harness_agents::custom(
+            "r",
+            "R",
+            "",
+            "r",
+            harness_agents::Features {
+                recall,
+                ..features()
+            },
+            vec![],
+        )
+        .unwrap()
+    };
+    assert!(!make(false).spec.allows_tool("recall"));
+    assert!(make(true).spec.allows_tool("recall") && make(true).features.recall);
+    // Memory on does not bring it.
+    assert!(features().memory && !make(false).features.recall);
+    let old: harness_agents::edits::Custom = serde_json::from_str(
+        r#"{"name":"Old","summary":"","prompt":"p","features":{"memory":true,"web":false,
+        "read_files":true,"edit_files":false,"commands":false,"delegate":false,
+        "as_agent":true,"as_subagent":true}}"#,
+    )
+    .unwrap();
+    assert!(!old.features.recall);
 }

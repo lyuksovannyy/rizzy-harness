@@ -1080,10 +1080,35 @@ impl Store {
         workspace: Option<&str>,
         limit: usize,
     ) -> Result<Vec<SearchHit>> {
+        self.search_with(fts_query, owner, workspace, limit, 14)
+    }
+
+    /// [`Self::search`] for the `recall` tool (PLAN.md T55): always one
+    /// owner's chats in one workspace (both required, so no caller can
+    /// search across them), with the longest excerpt FTS5 makes (64
+    /// tokens). Temporary chats and sub-agent sessions are never hits.
+    pub fn recall_search(
+        &self,
+        fts_query: &str,
+        owner: &str,
+        workspace: &str,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>> {
+        self.search_with(fts_query, Some(owner), Some(workspace), limit, 64)
+    }
+
+    fn search_with(
+        &self,
+        fts_query: &str,
+        owner: Option<&str>,
+        workspace: Option<&str>,
+        limit: usize,
+        tokens: u8,
+    ) -> Result<Vec<SearchHit>> {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(&format!(
             "SELECT f.session_id, s.title,
-                    snippet(chat_fts, -1, char(2), char(3), '…', 14),
+                    snippet(chat_fts, -1, char(2), char(3), '…', {tokens}),
                     bm25(chat_fts, 0.0, 3.0, 1.0) AS score, s.updated_ms
              FROM chat_fts f JOIN sessions s ON s.session_id = f.session_id
              {WS_JOINS}

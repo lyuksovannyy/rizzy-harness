@@ -343,6 +343,8 @@ async fn serve(
     if memory.is_some() {
         web_tools.push(Arc::new(harness_memory::Remember));
     }
+    // Searching earlier chats needs no memory store (PLAN.md T55).
+    web_tools.push(Arc::new(harness_memory::Recall));
     if let Some(k) = web_key {
         secrets.add(k);
     }
@@ -671,8 +673,8 @@ async fn agentic_node(
     Ok((rt, graphify))
 }
 
-/// The tools an agentic node registers: the built-in ones, `graph_query`
-/// and `remember` (it runs nothing here: the master files the mirrored call
+/// The tools an agentic node registers: the built-in ones, `graph_query`,
+/// `recall` and `remember` (it runs nothing here: the master files the mirrored call
 /// as a proposal the person confirms; `denied_tools` turns it off). Each
 /// turn offers those its agent allows; node policy still gates every call.
 fn agentic_tools(graphify: &Arc<harness_tools::graphify::GraphifyState>) -> harness_tools::ToolSet {
@@ -681,6 +683,8 @@ fn agentic_tools(graphify: &Arc<harness_tools::graphify::GraphifyState>) -> harn
         graphify.clone(),
     )));
     tools.push(Arc::new(harness_memory::Remember));
+    // Runs nothing here either: the master answers it (PLAN.md T55).
+    tools.push(Arc::new(harness_memory::Recall));
     tools
 }
 

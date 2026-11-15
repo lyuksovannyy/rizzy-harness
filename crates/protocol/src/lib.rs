@@ -53,6 +53,13 @@ pub const CAP_CALLBACK: &str = "callback";
 /// in chats on such a node.
 pub const CAP_REMEMBER: &str = "remember";
 
+/// The node capability that says it offers `recall` to its sessions
+/// (registered there and not in its `denied_tools`) and speaks
+/// `recall.request`. The master offers the tool only in chats on such a
+/// node, answers requests only from one, and sends `recall.result` only to
+/// one (PLAN.md T55).
+pub const CAP_RECALL: &str = "recall";
+
 /// The node capability that says it runs sessions of an execution mode
 /// (N.10a): `exec:sandbox`, `exec:host`. Announced from the node's own
 /// self-test and `[execution]` at start; what the UI offers and names. The
@@ -212,6 +219,15 @@ pub enum NodeToMaster {
         ok: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+    },
+    /// A `recall` call of a session this node runs (PLAN.md T55): words to
+    /// look for and nothing else. The master decides whose chats and which
+    /// memory from `session_id` alone and answers with one `recall.result`.
+    #[serde(rename = "recall.request")]
+    Recall {
+        req_id: String,
+        session_id: SessionId,
+        query: harness_core::recall::RecallQuery,
     },
     /// Bytes of a staged file, answering `artifact.fetch` (pull only: a
     /// node never sends one unasked). `error: "busy"` asks for a retry.
@@ -422,6 +438,16 @@ pub enum MasterToNode {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
     },
+    /// The answer to a `recall.request`: hits, or why there are none. Only
+    /// to nodes whose hello listed `CAP_RECALL`; never acked.
+    #[serde(rename = "recall.result")]
+    RecallResult {
+        req_id: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        hits: Vec<harness_core::recall::RecallHit>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
 }
 
 impl MasterToNode {
@@ -443,7 +469,8 @@ impl MasterToNode {
             // A fetch is answered by its chunk, never acked.
             MasterToNode::Welcome { .. }
             | MasterToNode::Resume { .. }
-            | MasterToNode::ArtifactFetch { .. } => None,
+            | MasterToNode::ArtifactFetch { .. }
+            | MasterToNode::RecallResult { .. } => None,
         }
     }
 }
@@ -452,6 +479,46 @@ impl MasterToNode {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// `recall.request` carries words only: a field naming a user, a
+    /// workspace or a chat does not parse, so a node cannot widen the scope
+    /// the master takes from the session (PLAN.md T55).
+    #[test]
+    fn recall_messages_carry_words_only() {
+        let sid: SessionId = "0193f2a0-0000-7000-8000-000000000001".parse().unwrap();
+        let r = NodeToMaster::Recall {
+            req_id: "r".into(),
+            session_id: sid,
+            query: harness_core::recall::RecallQuery {
+                query: "plan".into(),
+                scope: harness_core::recall::RecallIn::Chats,
+                limit: Some(3),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&r).unwrap(),
+            json!({"type": "recall.request", "req_id": "r", "session_id": sid,
+                   "query": {"query": "plan", "in": "chats", "limit": 3}})
+        );
+        for extra in ["user_id", "owner", "workspace_id", "session_id", "chats"] {
+            let v = json!({"type": "recall.request", "req_id": "r", "session_id": sid,
+                           "query": {"query": "plan", extra: "x"}});
+            assert!(
+                serde_json::from_value::<NodeToMaster>(v).is_err(),
+                "{extra}"
+            );
+        }
+        let a = MasterToNode::RecallResult {
+            req_id: "r".into(),
+            hits: vec![],
+            error: Some("no".into()),
+        };
+        assert_eq!(
+            serde_json::to_value(&a).unwrap(),
+            json!({"type": "recall.result", "req_id": "r", "error": "no"})
+        );
+        assert_eq!(a.req_id(), None, "never acked");
+    }
 
     #[test]
     fn wire_shapes_are_stable() {
