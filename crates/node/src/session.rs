@@ -52,6 +52,10 @@ struct Running {
     compare: bool,
 }
 
+/// Where a person's answer to a waiting approval goes: the decision and the
+/// note that came with a denial.
+type Answer = oneshot::Sender<(Decision, Option<String>)>;
+
 pub(crate) struct Session {
     node: Arc<Inner>,
     id: SessionId,
@@ -82,7 +86,15 @@ pub(crate) struct Session {
     /// A chat that never gets a callback turn (`session_created`).
     no_callbacks: bool,
     turn: Mutex<Option<RunningTurn>>,
-    approvals: Mutex<HashMap<String, oneshot::Sender<Decision>>>,
+    approvals: Mutex<HashMap<String, Answer>>,
+    /// The person's notes with denials, by call id, until the loop takes
+    /// the one of the call it is closing ([`TurnHost::denial_note`]).
+    deny_notes: Mutex<HashMap<String, String>>,
+    /// Calls the person allowed for the rest of this chat, by grant id
+    /// (`chat_allow_added`, less `chat_allow_removed`): their `call_key`.
+    /// Rebuilt from the log at load; a sub-agent's chat has none and
+    /// takes none from its parent.
+    grants: Mutex<HashMap<String, harness_tools::CallKey>>,
     /// An append of the running turn failed: the rest of its appends fail
     /// without being tried, so the turn ends (cleared when a turn starts).
     log_failed: AtomicBool,
@@ -363,6 +375,8 @@ impl Session {
             no_callbacks,
             turn: Mutex::new(None),
             approvals: Mutex::new(HashMap::new()),
+            deny_notes: Mutex::new(HashMap::new()),
+            grants: Mutex::new(HashMap::new()),
             log_failed: AtomicBool::new(false),
             unclosed: AtomicBool::new(false),
             unresolved: Mutex::new(Vec::new()),
@@ -428,6 +442,24 @@ impl Session {
             .max()
             .unwrap_or(0)
             + 1;
+        // The chat's grants as its log holds them: the key recorded when the
+        // person answered, never one worked out again from the logged input
+        // (stored scrubbed, and a path's link may lead elsewhere now: review
+        // H1, H2). A grant without a valid key covers nothing.
+        let mut grants: HashMap<String, harness_tools::CallKey> = HashMap::new();
+        for e in &events {
+            match e.typed() {
+                Ok(EventKind::ChatAllowAdded(g)) => {
+                    if let Some(k) = harness_tools::CallKey::from_hex(&g.key) {
+                        grants.insert(g.grant_id, k);
+                    }
+                }
+                Ok(EventKind::ChatAllowRemoved(g)) => {
+                    grants.remove(&g.grant_id);
+                }
+                _ => {}
+            }
+        }
         let (bg, ends) = background_table(
             &node,
             meta.profile,
@@ -465,6 +497,8 @@ impl Session {
             no_callbacks: meta.no_callbacks,
             turn: Mutex::new(None),
             approvals: Mutex::new(HashMap::new()),
+            deny_notes: Mutex::new(HashMap::new()),
+            grants: Mutex::new(grants),
             log_failed: AtomicBool::new(false),
             unclosed: AtomicBool::new(false),
             unresolved: Mutex::new(Vec::new()),
@@ -745,6 +779,7 @@ impl Session {
                 approval_id,
                 decision: Decision::Deny,
                 by: ResolvedBy::Interrupted,
+                note: None,
             }))
             .await
             .map_err(fail)?;
@@ -958,7 +993,14 @@ impl Session {
     /// then applied: from the next call on. A card waiting now is not
     /// answered by it. Refused for a sub-agent's chat, a routine's and a
     /// chat without tools. Returns the mode in force.
-    pub(crate) async fn set_mode(&self, requested: ApprovalMode) -> Result<ApprovalMode, String> {
+    /// `lowering`: the master skipped the owner's level check because its
+    /// copy of the log said this lowers the mode; refused, with nothing
+    /// recorded, when it would raise it (the copy was behind).
+    pub(crate) async fn set_mode(
+        &self,
+        requested: ApprovalMode,
+        lowering: bool,
+    ) -> Result<ApprovalMode, String> {
         if self.profile != Profile::Agentic {
             return Err(MODE_CHAT.into());
         }
@@ -970,8 +1012,16 @@ impl Session {
         }
         let _change = self.mode_change.lock().await;
         let mode = self.node.cfg.policy.effective_mode(Some(requested));
-        if mode == read_mode(&self.mode) {
+        let now = read_mode(&self.mode);
+        if mode == now {
             return Ok(mode);
+        }
+        if lowering && mode > now {
+            return Err(format!(
+                "{}: it is in {} now; send it again",
+                harness_protocol::MODE_NOT_A_LOWERING,
+                now.id()
+            ));
         }
         // The log first: a change it does not hold is not made.
         self.append(EventKind::ApprovalModeChanged(ApprovalModeChanged {
@@ -2035,6 +2085,7 @@ impl Session {
                     approval_id,
                     decision: Decision::Deny,
                     by: ResolvedBy::Cancelled,
+                    note: None,
                 }))
                 .await;
         }
@@ -3013,12 +3064,19 @@ impl Session {
 
     /// Record an approval's answer; `false` if the log refused it (the
     /// approval then stays in `unresolved` for the turn's end to deny).
-    async fn resolve(&self, approval_id: String, decision: Decision, by: ResolvedBy) -> bool {
+    async fn resolve(
+        &self,
+        approval_id: String,
+        decision: Decision,
+        by: ResolvedBy,
+        note: Option<String>,
+    ) -> bool {
         let written = self
             .emit(EventKind::ApprovalResolved(ApprovalResolved {
                 approval_id: approval_id.clone(),
                 decision,
                 by,
+                note,
             }))
             .await
             .is_ok();
@@ -3065,15 +3123,59 @@ impl Session {
         self.unclosed.load(Ordering::SeqCst)
     }
 
-    pub(crate) fn respond(&self, approval_id: &str, decision: Decision) -> Result<(), String> {
+    /// A person's answer. `note` goes only with a denial: with an allow it
+    /// is dropped here, whatever the master sent; it is cut to
+    /// [`harness_core::policy::MAX_DENY_NOTE`] characters.
+    pub(crate) fn respond(
+        &self,
+        approval_id: &str,
+        decision: Decision,
+        note: Option<String>,
+    ) -> Result<(), String> {
+        let note = note
+            .filter(|_| !decision.allows())
+            .map(|n| {
+                n.chars()
+                    .take(harness_core::policy::MAX_DENY_NOTE)
+                    .collect::<String>()
+            })
+            .filter(|n| !n.trim().is_empty());
         let tx = self
             .approvals
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(approval_id)
             .ok_or_else(|| "no such pending approval".to_string())?;
-        tx.send(decision)
+        tx.send((decision, note))
             .map_err(|_| "approval is no longer pending".to_string())
+    }
+
+    /// The person's removal of a call they allowed for this chat: recorded
+    /// as `chat_allow_removed` before it stops covering the call.
+    pub(crate) async fn revoke_allow(&self, grant_id: &str) -> Result<(), String> {
+        // It stops covering the call first (review L4); put back if the log
+        // does not take its removal.
+        let Some(key) = self
+            .grants
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(grant_id)
+        else {
+            return Err(format!("no call allowed for this chat as {grant_id}"));
+        };
+        if let Err(e) = self
+            .append(EventKind::ChatAllowRemoved(ChatAllowRemoved {
+                grant_id: grant_id.into(),
+            }))
+            .await
+        {
+            self.grants
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(grant_id.into(), key);
+            return Err(e.to_string());
+        }
+        Ok(())
     }
 
     fn current_cancel(&self) -> Option<CancellationToken> {
@@ -3154,6 +3256,13 @@ impl TurnHost for Session {
             pin: self.pin.clone(),
             count,
         }))
+    }
+
+    fn denial_note(&self, call_id: &str) -> Option<String> {
+        self.deny_notes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(call_id)
     }
 
     fn confined(&self, call_id: &str) -> bool {
@@ -3260,6 +3369,7 @@ impl TurnHost for Session {
                     input: input.clone(),
                     reason: format!("`{tool}` is denied by this node's policy"),
                     turn_allow: false,
+                    chat_allow: false,
                 }))
                 .await;
             if requested.is_ok() {
@@ -3267,7 +3377,7 @@ impl TurnHost for Session {
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .push(approval_id.clone());
-                self.resolve(approval_id, Decision::Deny, ResolvedBy::Policy)
+                self.resolve(approval_id, Decision::Deny, ResolvedBy::Policy, None)
                     .await;
             }
             return Decision::Deny;
@@ -3292,6 +3402,29 @@ impl TurnHost for Session {
         // only this call: the approval id is bound to this one waiting
         // request, and the loop records the key of the call it is running.
         let background_start = is_background_start(tool, input);
+        // "For this chat": the same exact call, allowed before in this chat
+        // (never a background start: one click is one command). Only in
+        // `ask` and `accept_edits`: `ask_all` means every call (T51), and
+        // `auto` never gets here.
+        let grants_apply = mode != ApprovalMode::AskAll && self.node.cfg.policy.chat_grants;
+        let key = harness_tools::call_key(&self.cwd, tool, input);
+        if grants_apply
+            && !background_start
+            && self
+                .grants
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .values()
+                .any(|k| *k == key)
+        {
+            return Decision::Allow;
+        }
+        // Not for a sub-agent's chat, nor a routine's (it keeps its
+        // routine's setting, review L1).
+        let chat_allow = grants_apply
+            && !background_start
+            && self.parent_session.is_none()
+            && !self.no_callbacks;
         let approval_id = new_id();
         let mut reason = approval_reason(tool, risk, input, &self.node.cfg.policy, self.exec_mode);
         // An MCP tool's card names the server and its own name of the tool
@@ -3322,6 +3455,7 @@ impl TurnHost for Session {
                 // "For this turn" would cover every identical start of the
                 // turn (N-2): a background start is asked for each time.
                 turn_allow: !background_start,
+                chat_allow,
             }))
             .await;
         if requested.is_ok() {
@@ -3341,21 +3475,59 @@ impl TurnHost for Session {
         let cancel = self.current_cancel().unwrap_or_default();
         // The cancel first (review N-8): an answer that arrives with it,
         // after a stop or a cancel began, allows nothing.
-        let (decision, by) = tokio::select! {
+        let (decision, by, note) = tokio::select! {
             biased;
-            _ = cancel.cancelled() => (Decision::Deny, ResolvedBy::Cancelled),
+            _ = cancel.cancelled() => (Decision::Deny, ResolvedBy::Cancelled, None),
             r = rx => match r {
-                Ok(d) => (d, ResolvedBy::User),
-                Err(_) => (Decision::Deny, ResolvedBy::Cancelled),
+                Ok((d, note)) => (d, ResolvedBy::User, note),
+                Err(_) => (Decision::Deny, ResolvedBy::Cancelled, None),
             },
+        };
+        // "For this chat" where it was not offered allows this one call,
+        // and is recorded as that (review L2).
+        let decision = if decision == Decision::AllowChat && !chat_allow {
+            Decision::Allow
+        } else {
+            decision
         };
         self.approvals
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(&approval_id);
         // An approval the log does not hold allows nothing.
-        if !self.resolve(approval_id, decision, by).await {
+        if !self
+            .resolve(approval_id.clone(), decision, by, note.clone())
+            .await
+        {
             return Decision::Deny;
+        }
+        if let Some(n) = note {
+            self.deny_notes
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(call_id.to_string(), n);
+        }
+        if decision == Decision::AllowChat {
+            let grant_id = new_id();
+            // The log first: a grant it does not hold covers nothing more
+            // than this call.
+            if self
+                .emit(EventKind::ChatAllowAdded(ChatAllowAdded {
+                    grant_id: grant_id.clone(),
+                    approval_id,
+                    tool: tool.into(),
+                    input: input.clone(),
+                    key: key.hex(),
+                }))
+                .await
+                .is_ok()
+            {
+                self.grants
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .insert(grant_id, key);
+            }
+            return Decision::Allow;
         }
         // Not offered for a background start, and not taken either: one
         // click is one command.

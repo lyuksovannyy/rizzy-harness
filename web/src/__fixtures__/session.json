@@ -784,13 +784,95 @@
       "ts_ms": 1700000000051
     },
     {
-      "kind": "approval_mode_changed",
+      "kind": "tool_call_started",
       "payload": {
-        "mode": "auto"
+        "call_id": "c-deny",
+        "input": {
+          "command": "rm -rf build"
+        },
+        "tool": "bash",
+        "turn_id": "t4"
       },
       "seq": 53,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
       "ts_ms": 1700000000052
+    },
+    {
+      "kind": "approval_requested",
+      "payload": {
+        "approval_id": "a-deny",
+        "call_id": "c-deny",
+        "chat_allow": true,
+        "input": {
+          "command": "rm -rf build"
+        },
+        "reason": "runs programs",
+        "tool": "bash",
+        "turn_allow": true
+      },
+      "seq": 54,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000053
+    },
+    {
+      "kind": "approval_resolved",
+      "payload": {
+        "approval_id": "a-deny",
+        "by": "user",
+        "decision": "deny",
+        "note": "keep the build folder"
+      },
+      "seq": 55,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000054
+    },
+    {
+      "kind": "chat_allow_added",
+      "payload": {
+        "approval_id": "a1",
+        "grant_id": "g1",
+        "input": {
+          "command": "cargo test"
+        },
+        "key": "abababababababababababababababababababababababababababababababab",
+        "tool": "bash"
+      },
+      "seq": 56,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000055
+    },
+    {
+      "kind": "chat_allow_added",
+      "payload": {
+        "approval_id": "a1",
+        "grant_id": "g2",
+        "input": {
+          "command": "cargo build"
+        },
+        "key": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "tool": "bash"
+      },
+      "seq": 57,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000056
+    },
+    {
+      "kind": "chat_allow_removed",
+      "payload": {
+        "grant_id": "g2"
+      },
+      "seq": 58,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000057
+    },
+    {
+      "kind": "approval_mode_changed",
+      "payload": {
+        "mode": "auto"
+      },
+      "seq": 59,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000058
     },
     {
       "kind": "approval_mode_changed",
@@ -798,18 +880,18 @@
         "mode": "accept_edits",
         "requested": "auto"
       },
-      "seq": 54,
+      "seq": 60,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000053
+      "ts_ms": 1700000000059
     },
     {
       "kind": "turn_started",
       "payload": {
         "turn_id": "t5"
       },
-      "seq": 55,
+      "seq": 61,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000054
+      "ts_ms": 1700000000060
     },
     {
       "kind": "model_retry",
@@ -822,9 +904,9 @@
         "turn_id": "t5",
         "wait_ms": 2000
       },
-      "seq": 56,
+      "seq": 62,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000055
+      "ts_ms": 1700000000061
     },
     {
       "kind": "assistant_message",
@@ -834,9 +916,9 @@
         "tool_calls": [],
         "turn_id": "t5"
       },
-      "seq": 57,
+      "seq": 63,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000056
+      "ts_ms": 1700000000062
     },
     {
       "kind": "turn_ended",
@@ -852,18 +934,18 @@
           "window": 128000
         }
       },
-      "seq": 58,
+      "seq": 64,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000057
+      "ts_ms": 1700000000063
     },
     {
       "kind": "turn_started",
       "payload": {
         "turn_id": "t6"
       },
-      "seq": 59,
+      "seq": 65,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000058
+      "ts_ms": 1700000000064
     },
     {
       "kind": "model_retry",
@@ -876,16 +958,16 @@
         "turn_id": "t6",
         "wait_ms": 4000
       },
-      "seq": 60,
+      "seq": 66,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000059
+      "ts_ms": 1700000000065
     },
     {
       "kind": "from_a_newer_node",
       "payload": {
         "anything": true
       },
-      "seq": 61,
+      "seq": 67,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
       "ts_ms": 0
     }
@@ -906,6 +988,14 @@
         "timeout_s": 60
       }
     },
+    "chat_allows": {
+      "g1": {
+        "input": {
+          "command": "cargo test"
+        },
+        "tool": "bash"
+      }
+    },
     "checkpoints": {
       "t1": {
         "after": null,
@@ -917,7 +1007,7 @@
     "context_model": "openai::gpt-4o",
     "context_tokens": 800,
     "context_window": 128000,
-    "head_seq": 61,
+    "head_seq": 67,
     "items": [
       {
         "text": "fix the bug",
@@ -1291,6 +1381,26 @@
         ],
         "reason": "3 turns in a row without you (node limit)",
         "type": "callback_refused"
+      },
+      {
+        "approval": {
+          "approval_id": "a-deny",
+          "by": "user",
+          "chat_allow": true,
+          "decision": "deny",
+          "note": "keep the build folder",
+          "reason": "runs programs",
+          "turn_allow": true
+        },
+        "author": null,
+        "call_id": "c-deny",
+        "input": {
+          "command": "rm -rf build"
+        },
+        "live_output": "",
+        "result": null,
+        "tool": "bash",
+        "type": "tool"
       },
       {
         "mode": "auto",

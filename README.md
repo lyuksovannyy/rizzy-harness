@@ -888,7 +888,12 @@ node.toml was tightened meanwhile. A fresh `node.toml` allows `auto`. A node's
 owner lowers it with one line, `max_approval_mode = "ask"` (or
 `"accept_edits"`), then restarts the node: from then on every chat there,
 sandbox and host, runs at most at that mode whatever anyone picks, and the
-picker shows the higher modes disabled with the reason.
+picker shows the higher modes disabled with the reason. In `ask`, a call the
+person allowed "for this chat" still runs without a card; `ask_all` asks for
+every call, granted ones included. To make every change and command ask on a
+node, also set `chat_grants = false` in its `node.toml`: no card offers "for
+this chat" there, and grants already in a chat's log are not honoured while
+it is off.
 
 **Approving a call.** In `ask` mode a command, a write, an edit or a publish
 waits on a card that shows the whole call: every argument, the full path (and
@@ -896,9 +901,26 @@ whether it is absolute or outside the chat's folder), long text with its size,
 beginning and end and a "show all" for the middle, runs of blanks as counted
 markers, and hidden or look-alike characters as codes. "Allow once" runs this
 call; "Allow this exact call for this turn" also lets the identical call run
-again without asking until the turn ends (any other call still asks); "Deny"
-refuses it. If you allow while part of the input is collapsed, the card says how
-many characters you have not expanded.
+again without asking until the turn ends (any other call still asks); "Allow
+this exact call for this chat" lets the identical call (the same command and
+every other argument, its working folder included; for a file, the same change
+to the same file) run without asking for the rest of the chat, also after a
+restart, until you remove it: the chat's side panel lists each one under
+"Allowed in this chat" with Remove. **What that allows:** the same command,
+with the same arguments, runs with no card for the rest of the chat, and
+it runs whatever the files it reads say at that moment: allowing `make test`
+allows whatever the Makefile and the tests say then, and in Accept edits the
+agent can change those files without a card, so such a grant amounts to
+letting it run code of its choice unasked. The card says so beside the
+button. It applies in Ask and Accept edits only
+(Ask every call means every call), never in another chat or in a sub-agent's
+chat, never to a background start, and never past the node's `denied_tools`.
+"Deny" refuses the call; the field beside it takes an optional note (up to
+2,000 characters) that reaches the agent with the denial, quoted as your own
+words, so you can say what to do instead. The field is never focused by
+itself and Enter in it answers nothing: only the Deny button sends it. If you
+allow while part of the input is collapsed, the card says how many characters
+you have not expanded.
 
 `node.toml`: the node's own policy. It is authoritative: the master can only
 ask for stricter settings.
@@ -927,6 +949,7 @@ narrowing node.toml applies to existing chats.
 
 ```toml
 max_approval_mode = "auto"           # ask_all | ask | accept_edits | auto: the most any chat here may use (see "Approval modes")
+chat_grants = true                   # offer and honour "Allow this exact call for this chat"; false: never
 workspace_roots = ["/home/me/code"]  # session cwd must be inside one of these
 denied_tools = []                    # e.g. ["bash"]; "delegate" turns sub-agents off
 allow_outside_workspace = false
@@ -993,7 +1016,8 @@ names it):
   user with no question asked, and nothing stands between a steered agent
   and the machine. The warning shown when you choose the host shell says
   so. A node's owner who does not want that sets `max_approval_mode = "ask"`
-  in its `node.toml`. A card in a host chat says the command runs in the
+  and `chat_grants = false` in its `node.toml` (with `ask` alone, a call the
+  person allowed "for this chat" still runs unasked). A card in a host chat says the command runs in the
   host shell. Run such a node as a dedicated
   OS user that holds nothing else.
 
@@ -2275,7 +2299,7 @@ install -m 0755 rizzy-harness /usr/local/bin/rizzy-harness    # the same binary 
 
 ```toml
 # This node decides what the master may do here.
-max_approval_mode = "auto"   # the default; "ask" makes every chat here ask
+max_approval_mode = "auto"   # the default; "ask" makes every chat here ask (with chat_grants = false)
 workspace_roots = ["/home/rizzy-harness/work"]
 ```
 

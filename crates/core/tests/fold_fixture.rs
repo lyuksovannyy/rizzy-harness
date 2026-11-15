@@ -126,11 +126,13 @@ fn events() -> Vec<RawEvent> {
             input: json!({"command": "cargo test"}),
             reason: "runs programs".into(),
             turn_allow: false,
+            chat_allow: false,
         }),
         EventKind::ApprovalResolved(ApprovalResolved {
             approval_id: "a1".into(),
             decision: Decision::AllowSession,
             by: ResolvedBy::User,
+            note: None,
         }),
         EventKind::ToolOutputDelta(ToolOutputDelta {
             call_id: "c1".into(),
@@ -211,6 +213,7 @@ fn events() -> Vec<RawEvent> {
             input: json!({}),
             reason: "changes files".into(),
             turn_allow: false,
+            chat_allow: false,
         }),
         EventKind::Checkpoint(Checkpoint {
             turn_id: t(),
@@ -483,6 +486,48 @@ fn events() -> Vec<RawEvent> {
                 todo("Fix the build", TodoStatus::InProgress),
                 todo("Run the tests", TodoStatus::Pending),
             ],
+        }),
+        // A denial with the person's note (T51): the card keeps it.
+        EventKind::ToolCallStarted(ToolCallStarted {
+            author: None,
+            turn_id: "t4".into(),
+            call_id: "c-deny".into(),
+            tool: "bash".into(),
+            input: json!({"command": "rm -rf build"}),
+        }),
+        EventKind::ApprovalRequested(ApprovalRequested {
+            approval_id: "a-deny".into(),
+            call_id: "c-deny".into(),
+            tool: "bash".into(),
+            input: json!({"command": "rm -rf build"}),
+            reason: "runs programs".into(),
+            turn_allow: true,
+            chat_allow: true,
+        }),
+        EventKind::ApprovalResolved(ApprovalResolved {
+            approval_id: "a-deny".into(),
+            decision: Decision::Deny,
+            by: ResolvedBy::User,
+            note: Some("keep the build folder".into()),
+        }),
+        // A call allowed for the rest of the chat, another allowed and then
+        // removed (T51): the view lists only the first.
+        EventKind::ChatAllowAdded(ChatAllowAdded {
+            grant_id: "g1".into(),
+            approval_id: "a1".into(),
+            tool: "bash".into(),
+            input: json!({"command": "cargo test"}),
+            key: "ab".repeat(32),
+        }),
+        EventKind::ChatAllowAdded(ChatAllowAdded {
+            grant_id: "g2".into(),
+            approval_id: "a1".into(),
+            tool: "bash".into(),
+            input: json!({"command": "cargo build"}),
+            key: "cd".repeat(32),
+        }),
+        EventKind::ChatAllowRemoved(ChatAllowRemoved {
+            grant_id: "g2".into(),
         }),
         // The owner's mode changes (T50): the latest is the chat's mode; a
         // clamped one says what was asked.

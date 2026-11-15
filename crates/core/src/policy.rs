@@ -218,9 +218,18 @@ pub enum ToolRisk {
 pub enum Decision {
     Allow,
     Deny,
-    /// Allow this tool for the rest of the session.
+    /// Allow this exact call for the rest of the turn (the wire name is
+    /// older than the turn scope).
     AllowSession,
+    /// Allow this exact call for the rest of the chat: the node records the
+    /// grant (`chat_allow_added`), rebuilds it from the log after a restart,
+    /// and never passes it to a sub-agent or another chat.
+    AllowChat,
 }
+
+/// The most characters a person's note with a denial may have; the master
+/// refuses a longer one and the node cuts one to it.
+pub const MAX_DENY_NOTE: usize = 2000;
 
 impl Decision {
     pub fn allows(self) -> bool {

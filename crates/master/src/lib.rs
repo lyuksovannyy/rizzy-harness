@@ -517,6 +517,8 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::Create { .. }
         | MasterToNode::Cancel { .. }
         | MasterToNode::StopBackground { .. }
+        // Removing a grant takes power away, like a denial.
+        | MasterToNode::RevokeAllow { .. }
         // `Master::set_approval_mode` checks a raise itself: a lowering,
         // like a denial, is never refused for the owner's level.
         | MasterToNode::SetApprovalMode { .. }
@@ -2161,6 +2163,7 @@ impl Master {
             ));
         }
         self.send_command(&node, |req_id| MasterToNode::SetApprovalMode {
+            lowering: !raise,
             req_id,
             session_id: sid,
             mode,
@@ -2409,18 +2412,48 @@ impl Master {
         });
     }
 
+    /// A person's answer. `note` goes only with a denial (dropped with an
+    /// allow); `allow_chat` and a note only to a node that announced
+    /// `CAP_ANSWERS` (an older node would drop the link on `allow_chat`).
     pub async fn respond_approval(
         &self,
         sid: SessionId,
         approval_id: String,
         decision: harness_core::policy::Decision,
+        note: Option<String>,
     ) -> Result<(), CommandError> {
         let node = self.owner(sid).await?;
+        let answers = self.node_has(&node, harness_protocol::CAP_ANSWERS);
+        if decision == harness_core::policy::Decision::AllowChat && !answers {
+            return Err(CommandError::Rejected(
+                "this chat's node cannot allow a call for the whole chat (a node older than \
+                 this server); allow it once or for this turn"
+                    .into(),
+            ));
+        }
+        let note = note.filter(|_| !decision.allows() && answers);
         self.send_command(&node, |req_id| MasterToNode::ApprovalRespond {
             req_id,
             session_id: sid,
             approval_id,
             decision,
+            note,
+        })
+        .await
+    }
+
+    /// Remove a call the person allowed for the rest of a chat.
+    pub async fn revoke_allow(&self, sid: SessionId, grant_id: String) -> Result<(), CommandError> {
+        let node = self.owner(sid).await?;
+        if !self.node_has(&node, harness_protocol::CAP_ANSWERS) {
+            return Err(CommandError::Rejected(
+                "this chat's node keeps no calls allowed for the chat".into(),
+            ));
+        }
+        self.send_command(&node, |req_id| MasterToNode::RevokeAllow {
+            req_id,
+            session_id: sid,
+            grant_id,
         })
         .await
     }

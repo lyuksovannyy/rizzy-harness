@@ -216,6 +216,10 @@ impl harness_core::backend::TurnHost for Logged<'_> {
         self.host.approve(call_id, tool, input, risk).await
     }
 
+    fn denial_note(&self, call_id: &str) -> Option<String> {
+        self.host.denial_note(call_id)
+    }
+
     fn confined(&self, call_id: &str) -> bool {
         self.host.confined(call_id)
     }
@@ -2309,18 +2313,19 @@ impl NativeBackend {
                                 .await
                             {
                                 harness_core::policy::Decision::Deny => {
+                                    let note = host.denial_note(&call.call_id);
                                     refusal = Some(if ctx.cancel.is_cancelled() {
                                         "[cancelled before approval]".to_string()
                                     } else {
-                                        "The user denied this tool call. Ask how to proceed or \
-                                         try something else."
-                                            .to_string()
+                                        harness_core::event::denied_text(note.as_deref())
                                     });
                                 }
                                 harness_core::policy::Decision::AllowSession => {
                                     allowed_this_turn.insert(key);
                                 }
-                                harness_core::policy::Decision::Allow => {}
+                                // The node keeps a chat's grants.
+                                harness_core::policy::Decision::Allow
+                                | harness_core::policy::Decision::AllowChat => {}
                             }
                         }
                     }
@@ -3061,17 +3066,22 @@ impl NativeBackend {
                 .await;
             match decision {
                 harness_core::policy::Decision::Deny => {
+                    // Taken in every case, so a note never stays behind for
+                    // a later call with this id (review N1).
+                    let note = host.denial_note(&call.call_id);
                     return ToolOutcome::err(if ctx.cancel.is_cancelled() {
                         "[cancelled before approval]".to_string()
                     } else {
-                        "The user denied this tool call. Ask how to proceed or try something else."
-                            .to_string()
+                        // The person's note, quoted after the fixed sentence.
+                        harness_core::event::denied_text(note.as_deref())
                     });
                 }
                 harness_core::policy::Decision::AllowSession => {
                     allowed_this_turn.insert(key);
                 }
-                harness_core::policy::Decision::Allow => {}
+                // The node keeps a chat's grants.
+                harness_core::policy::Decision::Allow
+                | harness_core::policy::Decision::AllowChat => {}
             }
         }
         // Bounded, with a byte budget for the whole call (PLAN.md T9): a

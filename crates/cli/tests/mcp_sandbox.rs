@@ -200,6 +200,7 @@ impl Node {
                             session_id: sid,
                             approval_id: a.approval_id,
                             decision: harness_core::policy::Decision::Allow,
+                            note: None,
                         })
                         .unwrap();
                 }

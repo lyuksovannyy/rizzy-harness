@@ -435,6 +435,7 @@ fn approval_answer(req: &str) -> MasterToNode {
         session_id: SessionId::new(),
         approval_id: "a1".into(),
         decision: Decision::Allow,
+        note: None,
     }
 }
 
