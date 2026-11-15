@@ -45,6 +45,7 @@ export const FEATURE_GROUPS: { title: string; items: Feature[] }[] = [
       { key: "memory", label: "Own memory", hint: "Your facts from Settings → Memory: recalled into its answers, new ones proposed" },
       { key: null, label: "Workspace memory", hint: "Facts the whole workspace shares" },
       { key: "project_memory", label: "Project memory", hint: "In a project's chats: the project's facts recalled, new ones proposed" },
+      { key: "recall", label: "Earlier chats and memory search", hint: "Searches your own earlier chats in the workspace and your memory when you refer to past work" },
     ],
   },
   {
@@ -75,6 +76,7 @@ export const FEATURE_GROUPS: { title: string; items: Feature[] }[] = [
 export const NEW_FEATURES: AgentFeatures = {
   memory: true,
   project_memory: true,
+  recall: false,
   web: true,
   read_files: false,
   edit_files: false,

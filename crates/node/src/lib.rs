@@ -11,6 +11,7 @@ mod instructions;
 mod others;
 mod outbox;
 pub mod policy;
+mod recall;
 mod session;
 
 use std::collections::HashMap;
@@ -117,6 +118,7 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::StopBackground { .. }
         | MasterToNode::ApprovalRespond { .. }
         | MasterToNode::ArtifactFetch { .. }
+        | MasterToNode::RecallResult { .. }
         | MasterToNode::Diff { .. } => None,
     }
 }
@@ -183,6 +185,8 @@ pub(crate) struct Inner {
     stopping: AtomicBool,
     /// Background commands (T.8d): the node's count and its `[limits]`.
     pub(crate) background: Arc<harness_tools::background::Registry>,
+    /// `recall` calls waiting for the master's answer (PLAN.md T55).
+    pub(crate) recalls: recall::Pending,
     /// Room for turn diffs being read ([`DIFF_AT_ONCE`]).
     diffs: Arc<tokio::sync::Semaphore>,
 }
@@ -464,6 +468,7 @@ impl NodeRuntime {
             stages,
             stopping: AtomicBool::new(false),
             background: harness_tools::background::Registry::new(bg_limits, bg_secrets),
+            recalls: Default::default(),
             diffs: Arc::new(tokio::sync::Semaphore::new(DIFF_AT_ONCE)),
         });
         for row in rows {
@@ -588,6 +593,12 @@ impl NodeRuntime {
             {
                 capabilities.push(harness_protocol::CAP_REMEMBER.into());
             }
+            // `recall` likewise (PLAN.md T55): the master answers searches
+            // only from a node that offers it.
+            if self.inner.cfg.backend.has_tool("recall") && !self.inner.cfg.policy.denies("recall")
+            {
+                capabilities.push(harness_protocol::CAP_RECALL.into());
+            }
             if self.inner.cfg.profile == harness_core::event::Profile::Agentic {
                 // The modes it offers and their gaps (N.10a), as decided at
                 // start.
@@ -655,6 +666,12 @@ impl NodeRuntime {
                         offset,
                         len,
                     } => this.fetch(req_id, session_id, stage_id, offset, len),
+                    // The answer to a search a tool call waits for.
+                    MasterToNode::RecallResult {
+                        req_id,
+                        hits,
+                        error,
+                    } => this.inner.recalls.answer(&req_id, hits, error),
                     // Likewise a turn's diff (X.12): a read of two
                     // checkpoints, in a task of its own, never behind a
                     // command of the session (a restore holds its lane).
@@ -1198,6 +1215,14 @@ impl NodeRuntime {
                 len,
             } => {
                 self.fetch(req_id, session_id, stage_id, offset, len);
+                Ok(())
+            }
+            MasterToNode::RecallResult {
+                req_id,
+                hits,
+                error,
+            } => {
+                self.inner.recalls.answer(&req_id, hits, error);
                 Ok(())
             }
             MasterToNode::ArtifactStage {

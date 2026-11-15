@@ -425,6 +425,12 @@ pub struct AgentRef {
     pub name: String,
     /// Hash of the system prompt + tool list the agent had for this turn.
     pub prompt_hash: String,
+    /// Tools the master withheld from this turn whatever the agent's list
+    /// says (`AgentSpec::deny_tools`: `recall` in an untrusted turn, say),
+    /// recorded so the master can later tell what the turn was offered
+    /// from the log alone (PLAN.md T55).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub withheld: Vec<String>,
 }
 
 /// Groups parallel answers to the same prompt (e.g. several models).
@@ -1380,6 +1386,7 @@ mod tests {
             agent_id: "coder".into(),
             name: "Coder".into(),
             prompt_hash: "abc".into(),
+            withheld: vec![],
         };
         let kinds = vec![
             EventKind::SessionCreated(SessionCreated {

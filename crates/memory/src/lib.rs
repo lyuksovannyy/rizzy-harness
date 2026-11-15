@@ -13,6 +13,7 @@
 mod embed;
 mod mem0;
 mod qdrant;
+mod recall;
 mod sqlite;
 mod tool;
 
@@ -22,6 +23,7 @@ use serde::{Deserialize, Serialize};
 pub use embed::{ApiStyle, Embedder, Preset};
 pub use mem0::Mem0Memory;
 pub use qdrant::QdrantIndex;
+pub use recall::{Recall, render as render_recall};
 pub use sqlite::{DB_SCHEMA, MIGRATIONS, SqliteMemory};
 pub use tool::Remember;
 

@@ -7,6 +7,7 @@ pub mod backend;
 pub mod event;
 pub mod folder;
 pub mod policy;
+pub mod recall;
 pub mod refs;
 pub mod savings;
 pub mod secret;

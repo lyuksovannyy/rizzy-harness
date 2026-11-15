@@ -252,6 +252,10 @@ impl harness_core::backend::TurnHost for Logged<'_> {
         self.host.artifacts()
     }
 
+    fn recall(&self) -> Option<Arc<dyn harness_core::recall::RecallSource>> {
+        self.host.recall()
+    }
+
     // Both reach every tool call's context. Not forwarding them (the
     // trait's default answers `None`) turned the per-call pin check off and
     // denied a sub-agent its own folder (tests/host_forwarding.rs).
@@ -818,8 +822,10 @@ impl NativeBackend {
         // Proposing a memory does none of a task's work: `remember` alone
         // leaves a delegate with nothing to work with (A.11, on nodes that
         // register it).
+        // Nor does searching earlier chats (`recall`).
         let usable = |name: &str| {
             name != "remember"
+                && name != "recall"
                 && d.allows_tool(name)
                 && !host.tool_denied(name)
                 && self
@@ -834,6 +840,7 @@ impl NativeBackend {
             .iter()
             .map(|n| match n.as_str() {
                 "remember" => "memory".to_string(),
+                "recall" => "earlier chats search".to_string(),
                 n => n.replace('_', " "),
             })
             .collect();
@@ -3142,6 +3149,7 @@ impl NativeBackend {
             background: background_access(ctx, host),
             skills: ctx.extra.skills.clone(),
             seen: self.seen.session(ctx.session_id),
+            recall: host.recall(),
             read_offered: ctx.agent.as_ref().is_none_or(|a| a.allows_tool("read"))
                 && self
                     .tools

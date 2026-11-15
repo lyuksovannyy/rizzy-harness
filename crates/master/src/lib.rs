@@ -28,6 +28,7 @@ pub mod prefs;
 pub mod presets;
 pub mod projects;
 pub mod providers;
+pub mod recall;
 pub mod resolver;
 pub mod response;
 pub mod routines;
@@ -254,6 +255,8 @@ pub struct MasterInner {
     /// Lines for a chat's next turn about its `remember` calls (refused,
     /// waiting for the person: `memory::Notes`).
     notes: memory::Notes,
+    /// `recall`'s counts per turn and hour, and its searches per node.
+    recall: recall::Grants,
     /// The routine scheduler, once `start_routines` ran.
     routines: OnceLock<routines::RoutinesHandle>,
     /// The blob store, once `storage::open` ran (before any node links, so
@@ -528,6 +531,8 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::Resume { .. }
         | MasterToNode::ArtifactFetch { .. }
         | MasterToNode::ArtifactRelease { .. }
+        // An answer to the node's own search: nothing is written.
+        | MasterToNode::RecallResult { .. }
         // A read of two checkpoints: no event, no work.
         | MasterToNode::Diff { .. } => None,
     }
@@ -610,6 +615,7 @@ impl Master {
                 pdf: OnceLock::new(),
                 turn_memory: Mutex::new(HashMap::new()),
                 notes: Default::default(),
+                recall: Default::default(),
                 routines: OnceLock::new(),
                 storage: OnceLock::new(),
                 pulls: Default::default(),
@@ -1223,6 +1229,21 @@ impl Master {
         }
     }
 
+    /// Send `msg` to `node_id` without waiting for an ack (an answer to the
+    /// node's own request). Dropped when the node is gone or not keeping
+    /// up: its request then times out there. Whether it was queued.
+    pub(crate) fn send_unacked(&self, node_id: &str, msg: MasterToNode) -> bool {
+        let nodes = lock(&self.inner.nodes);
+        let sent = nodes
+            .get(node_id)
+            .and_then(|n| n.tx.as_ref())
+            .is_some_and(|tx| tx.try_send(msg).is_ok());
+        if !sent {
+            tracing::warn!(node = %node_id, "could not send an answer to the node");
+        }
+        sent
+    }
+
     fn resume_done(&self, node_id: &str, sid: SessionId) {
         if let Some(n) = lock(&self.inner.nodes).get_mut(node_id) {
             n.resuming.remove(&sid);
@@ -1319,6 +1340,11 @@ impl Master {
                     self.forget(session_id).await;
                 }
             }
+            NodeToMaster::Recall {
+                req_id,
+                session_id,
+                query,
+            } => recall::handle(self, node_id, req_id, session_id, query),
             NodeToMaster::ArtifactChunk {
                 req_id,
                 offset,
@@ -1893,12 +1919,6 @@ impl Master {
         let mut turn_context: Vec<String> = context.into_iter().collect();
         // The agent's memory switches (on the Agents page).
         let features = r.agents().get(&agent.agent_id).map(|a| a.features);
-        // Incognito chats, chats with an agent whose memory is off, and chats
-        // in a team workspace where the owner keeps their memory out neither
-        // write nor read personal memory.
-        let personal = !row.incognito
-            && features.is_none_or(|f| f.memory)
-            && workspaces::uses_memory(self, &row).await;
         // A project chat always gets the project's brief and board; its
         // facts, and `remember` for them, unless the agent's project memory
         // is off. The owner's personal-memory switch leaves them in.
@@ -1911,25 +1931,35 @@ impl Master {
         // project facts (the brief and board stay), no `remember`.
         // Nor does a callback turn: nobody wrote anything to recall by, and
         // program output must not steer what is remembered.
-        let allowed = projects::TurnMemory {
-            // The workspace's memory reaches every member's chats there,
-            // whatever their join answer (that is about their own facts),
-            // for an agent with any memory switch on (T54).
-            workspace: !row.incognito
-                && memory::workspace_switch(self, &row, features).await
-                && !untrusted
-                && !resume,
-            by_owner: by_owner && !untrusted && !resume,
-            personal: personal && !untrusted && !resume,
-            project: project.is_some()
-                && features.is_none_or(|f| f.project_memory)
-                && !untrusted
-                && !resume,
-        };
+        let attended = !untrusted && !resume;
+        let mut allowed =
+            memory::turn_allowed(self, &row, features, project.is_some(), by_owner).await;
+        allowed.workspace &= attended;
+        allowed.by_owner &= attended;
+        allowed.personal &= attended;
+        allowed.project &= attended;
         projects::offer_remember(r.agents(), &mut agent, allowed);
         if untrusted {
             deny_untrusted(&mut agent);
         }
+        // `recall` (PLAN.md T55): only in a turn the owner's own chat runs
+        // for them, on a node that offers it. Not in a temporary chat, an
+        // untrusted (webhook) turn or a callback turn: there the agent may
+        // be steered by text nobody wrote, and the owner's earlier chats
+        // must not be within its reach.
+        let may_recall = !row.incognito
+            && !untrusted
+            && !resume
+            && row.owner_id.is_some()
+            && row.workspace_id.is_some()
+            && self.node_has(&row.node_id, harness_protocol::CAP_RECALL);
+        if !may_recall {
+            recall::deny(&mut agent);
+        }
+        // What the master decided here reaches the log with the turn
+        // (`AgentRef::withheld` in `turn_started`), which is what a later
+        // search is checked against: no flag is kept here.
+        let recalls = may_recall && agent.allows_tool("recall");
         // The owner's facts, whole while they fit, each with its id
         // (`memory::turn_block`).
         let mut noted = Vec::new();
@@ -1948,6 +1978,9 @@ impl Master {
                 && self.node_has(&row.node_id, harness_protocol::CAP_REMEMBER);
             turn_context
                 .push(projects::turn_context(self, p, &row, &text, allowed, remember).await);
+        }
+        if recalls {
+            turn_context.push(recall::CONTEXT_LINE.into());
         }
         // Last, so it is what the model reads right before answering.
         if untrusted {
@@ -2322,6 +2355,7 @@ impl Master {
 
     /// Drop the mirror copy of a session and refuse its events from now on.
     async fn forget(&self, sid: SessionId) {
+        self.inner.recall.forget(sid);
         let res = self
             .inner
             .mirror

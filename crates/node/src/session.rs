@@ -3439,6 +3439,13 @@ impl TurnHost for Session {
         }))
     }
 
+    fn recall(&self) -> Option<Arc<dyn harness_core::recall::RecallSource>> {
+        Some(Arc::new(crate::recall::LinkRecall {
+            node: self.node.clone(),
+            session: self.id,
+        }))
+    }
+
     fn denial_note(&self, call_id: &str) -> Option<String> {
         self.deny_notes
             .lock()

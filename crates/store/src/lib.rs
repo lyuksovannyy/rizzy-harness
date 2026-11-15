@@ -568,6 +568,18 @@ pub const HIT_END: char = '\u{3}';
 /// the deepest a search panel tab can page.
 pub const SEARCH_WINDOW: usize = 500;
 
+/// A session's open turn, as the log has it ([`Store::open_turn`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenTurn {
+    pub turn_id: String,
+    /// The agent `turn_started` names (`None`: none recorded).
+    pub agent_id: Option<String>,
+    /// The tools the master withheld from the turn (`AgentRef::withheld`).
+    pub withheld: Vec<String>,
+    /// A callback turn (`turn_started.cause`).
+    pub callback: bool,
+}
+
 /// One chat matching a search.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SearchHit {
@@ -1090,27 +1102,103 @@ impl Store {
         workspace: Option<&str>,
         limit: usize,
     ) -> Result<Vec<SearchHit>> {
+        self.search_with(fts_query, owner, workspace, limit, 14, [None, None])
+    }
+
+    /// The `recall` tool's search (PLAN.md T55): always one owner's chats
+    /// in one workspace (both required, so no caller can search across
+    /// them), never `except` (the asking chat and its parent, left out in
+    /// the query so a long one cannot crowd the others out of the window),
+    /// with the longest excerpt FTS5 makes (64 tokens). Temporary chats and
+    /// sub-agent sessions are never hits. `terms` are FTS5 terms, each
+    /// already quoted (`"word"*`): a chat matches any of them, and chats
+    /// that match more of them come first, then by rank.
+    pub fn recall_search(
+        &self,
+        terms: &[String],
+        owner: &str,
+        workspace: &str,
+        except: [SessionId; 2],
+        limit: usize,
+    ) -> Result<Vec<SearchHit>> {
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let except = except.map(|e| e.to_string());
+        let any = terms.join(" OR ");
+        let found = self.search_with(
+            &any,
+            Some(owner),
+            Some(workspace),
+            SEARCH_WINDOW,
+            64,
+            [Some(&except[0]), Some(&except[1])],
+        )?;
+        if terms.len() == 1 || found.len() <= 1 {
+            return Ok(found.into_iter().take(limit).collect());
+        }
+        // How many of the terms each found chat holds.
+        let mut count: HashMap<SessionId, usize> = HashMap::new();
+        {
+            let conn = self.lock();
+            let ids: Vec<String> = found.iter().map(|h| h.session_id.to_string()).collect();
+            let marks = vec!["?"; ids.len()].join(",");
+            let mut stmt = conn.prepare(&format!(
+                "SELECT DISTINCT session_id FROM chat_fts WHERE chat_fts MATCH ? \
+                 AND session_id IN ({marks})"
+            ))?;
+            for t in terms {
+                let args = std::iter::once(t.as_str()).chain(ids.iter().map(String::as_str));
+                let rows =
+                    stmt.query_map(rusqlite::params_from_iter(args), |r| r.get::<_, String>(0))?;
+                for r in rows {
+                    if let Ok(sid) = r?.parse::<SessionId>() {
+                        *count.entry(sid).or_default() += 1;
+                    }
+                }
+            }
+        }
+        let mut found = found;
+        // Stable: equal counts keep their rank order.
+        found.sort_by_key(|h| std::cmp::Reverse(count.get(&h.session_id).copied().unwrap_or(0)));
+        found.truncate(limit);
+        Ok(found)
+    }
+
+    fn search_with(
+        &self,
+        fts_query: &str,
+        owner: Option<&str>,
+        workspace: Option<&str>,
+        limit: usize,
+        tokens: u8,
+        except: [Option<&str>; 2],
+    ) -> Result<Vec<SearchHit>> {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(&format!(
             "SELECT f.session_id, s.title,
-                    snippet(chat_fts, -1, char(2), char(3), '…', 14),
+                    snippet(chat_fts, -1, char(2), char(3), '…', {tokens}),
                     bm25(chat_fts, 0.0, 3.0, 1.0) AS score, s.updated_ms
              FROM chat_fts f JOIN sessions s ON s.session_id = f.session_id
              {WS_JOINS}
              WHERE chat_fts MATCH ?1 AND s.incognito = 0 AND s.parent_id IS NULL
                AND (?2 IS NULL OR s.owner_id = ?2)
                AND (?3 IS NULL OR {EFFECTIVE_WS} = ?3)
+               AND s.session_id IS NOT ?4 AND s.session_id IS NOT ?5
              ORDER BY score LIMIT {SEARCH_WINDOW}"
         ))?;
-        let rows = stmt.query_map(params![fts_query, owner, workspace], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, f64>(3)?,
-                r.get::<_, i64>(4)?,
-            ))
-        })?;
+        let rows = stmt.query_map(
+            params![fts_query, owner, workspace, except[0], except[1]],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, f64>(3)?,
+                    r.get::<_, i64>(4)?,
+                ))
+            },
+        )?;
         let mut out: Vec<SearchHit> = Vec::new();
         for row in rows {
             let (sid, title, snippet, score, updated_ms) = row?;
@@ -1845,6 +1933,38 @@ impl Store {
             }
         }
         Ok(None)
+    }
+
+    /// The turn of `sid` that is open in the log (its last `turn_started`
+    /// with no `turn_ended` after it), as `recall` checks it (PLAN.md T55):
+    /// its id, its agent, what the master withheld from it, and whether a
+    /// callback started it. `None` when no turn is open.
+    pub fn open_turn(&self, sid: SessionId) -> Result<Option<OpenTurn>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT kind, payload FROM events WHERE session_id = ?1
+               AND kind IN ('turn_started', 'turn_ended') ORDER BY seq DESC LIMIT 1",
+        )?;
+        let row: Option<(String, String)> = stmt
+            .query_row(params![sid.to_string()], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?;
+        let Some((kind, payload)) = row else {
+            return Ok(None);
+        };
+        if kind != "turn_started" {
+            return Ok(None);
+        }
+        let v: serde_json::Value = serde_json::from_str(&payload)?;
+        let text = |v: &serde_json::Value| v.as_str().map(str::to_string);
+        Ok(Some(OpenTurn {
+            turn_id: text(&v["turn_id"]).unwrap_or_default(),
+            agent_id: text(&v["agent"]["agent_id"]),
+            withheld: v["agent"]["withheld"]
+                .as_array()
+                .map(|a| a.iter().filter_map(text).collect())
+                .unwrap_or_default(),
+            callback: v.get("cause").is_some_and(|c| !c.is_null()),
+        }))
     }
 
     /// `owner`'s chats (`None`: every chat) whose last turn finished after

@@ -208,6 +208,9 @@ pub struct ToolCtx {
     /// check it, `read` and they record it (T.2). A table of its own
     /// unless the loop binds the session's.
     pub seen: seen::SessionSeen,
+    /// Where `recall` sends its query: the session's link to the master
+    /// (`TurnHost::recall`); `None` where there is none.
+    pub recall: Option<Arc<dyn harness_core::recall::RecallSource>>,
     /// The agent may call `read` here (its tools include it): only then
     /// does `edit`'s refusal of an unread file show the file's lines.
     pub read_offered: bool,
@@ -236,6 +239,7 @@ impl ToolCtx {
             background: Default::default(),
             skills: None,
             seen: Default::default(),
+            recall: None,
             read_offered: true,
         }
     }

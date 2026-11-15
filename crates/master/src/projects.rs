@@ -558,11 +558,14 @@ pub async fn turn_context(
         s.push_str("\n\nProject instructions:\n");
         s.push_str(&p.instructions);
     }
-    if let Some(mem) = m.memory().filter(|_| allowed.project)
-        && let Some(block) = facts_block(&*mem, &memory_owner(&p.project_id), text).await
-    {
-        s.push_str("\n\n");
-        s.push_str(&block);
+    for place in crate::memory::turn_places(chat, allowed, Some(p)) {
+        if let crate::memory::TurnPlace::Project(key) = place
+            && let Some(mem) = m.memory()
+            && let Some(block) = facts_block(&*mem, &key, text).await
+        {
+            s.push_str("\n\n");
+            s.push_str(&block);
+        }
     }
     let pid = p.project_id.clone();
     if let Ok((cols, cards)) = m.inner.mirror.call(move |s| s.board(&pid)).await

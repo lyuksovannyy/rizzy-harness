@@ -274,8 +274,9 @@ async fn builtin_delegates_outside_a_repository_by_role() {
     }
     assert!(
         outs.iter().any(|o| o.contains(
-            "@researcher was not started: none of its tools (web search, web fetch, memory) \
-             are available on this node. Do the work another way or tell the user."
+            "@researcher was not started: none of its tools (web search, web fetch, memory, \
+             earlier chats search) are available on this node. Do the work another way or tell \
+             the user."
         )),
         "researcher: {outs:#?}"
     );
