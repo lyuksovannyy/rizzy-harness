@@ -22,7 +22,7 @@ row opens the agent page read-only.
    - **Memory**: User facts · Workspace memory · Project memory
    - **Web**: Web search
    - **Available as**: Agent · Sub-agent
-   - **Tools**: Read files · Change files · Run commands · Launch sub-agents · Manage workspace
+   - **Tools**: Read files · Change files · Run commands · MCP servers · Launch sub-agents · Manage workspace
 
 ## Built-in agents
 
@@ -106,6 +106,7 @@ in the database).
 | Read files | `read`, `grep`, `glob`, `outline`, `graph_query` | Works (tool list) |
 | Change files | `write`, `edit` | Works (tool list) |
 | Run commands | `bash`, `tool_output` | Works (tool list) |
+| MCP servers | `mcp`: every tool of the MCP servers the node runs for the chat (X.3) | Works (tool list); its own switch since 2026-11-14 (the owner: "apart permission like file access, web search"), no longer implied by Run commands. A page agent saved before it reads with it off. On for Software Developer and Senior Teamlead; a file agent has it when its `tools` are `all`, hold `mcp` or name an `mcp__…` tool. Sub-agents never get MCP tools; `denied_tools` on the node still wins |
 | Launch sub-agents | `delegates` + the `delegate` tool, one level deep | Works: may delegate to every agent available as a sub-agent (except itself), default caps (4 runs, 200k tokens per turn) |
 | Manage workspace | Doesn't exist | Shown, disabled, "planned" |
 

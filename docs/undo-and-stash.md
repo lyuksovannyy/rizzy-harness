@@ -698,3 +698,21 @@ waits for Gate 3, except task 1.
 - Pin times on an SSD or an idle machine: B.3 measured neither.
 - If the owner wants the revert commit created automatically after an undo, that is a different
   rule. It needs their explicit yes, because it writes into the user's repository.
+
+## Appendix: a turn's diff (X.12, built 2026-11-14)
+
+The checkpoints this note builds on also show what a turn changed: "Show changes" on the
+turn's row (`web/src/components/DiffPanel.tsx`) asks the owning node, which compares the
+turn's `before` and `after` snapshots in the shadow repository (`crates/node/src/git/diff.rs`,
+three git calls: `diff --raw -z -M`, `cat-file --batch-check` for sizes, then `diff -p` of the
+files that fit the budgets, named after `--` with `--literal-pathspecs`). The rows are the ones
+§2.6 counts (nested repositories and gitlinks left out; ignored files are in no snapshot),
+except that a rename is one row naming both paths. With "Include later turns" the range is the
+one a rewind restores: the turn's `before` against the latest recorded state. It is a view:
+nothing is appended to the log or kept on the master (PLAN.md T53). Measured with
+`git_diff_tests.rs`'s ignored `diff_cost_on_a_few_thousand_files` on the rotational USB disk
+(warm cache, load average about 20 from other builds, no sandbox jail around git): a repository
+of 3,000 files, a turn that edited 200 of them and added 20, 0.022 to 0.025 s for the whole
+read on the node, an answer of 88 KiB. Not measured: the jailed git of a node with
+`[sandbox]` on (one wrapper start per git call, three calls), a cold cache, a turn near the
+caps.

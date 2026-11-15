@@ -14,6 +14,7 @@ import type {
   AdminWorkspace,
   AdminWorkspaceMember,
   Decision,
+  TurnDiff,
   FactKind,
   GraphifyStatus,
   MemoryCallState,
@@ -71,6 +72,9 @@ export const pageApi = {
     call<{ ok: boolean }>("POST", `/api/sessions/${id}/variants`, { group, message_id }),
   restoreTurn: (id: string, turn: string, force = false, rewind = false) =>
     call<{ ok: boolean }>("POST", `/api/sessions/${id}/turns/${turn}/restore`, { force, rewind }),
+  /** What a turn changed (with `rewind`, it and every later turn), from its node. */
+  turnDiff: (id: string, turn: string, rewind = false, signal?: AbortSignal) =>
+    call<TurnDiff>("GET", `/api/sessions/${id}/turns/${encodeURIComponent(turn)}/diff${rewind ? "?rewind=1" : ""}`, undefined, signal),
   /** The owner's new title for a chat (cleaned and capped by the server). */
   renameSession: (id: string, title: string) => call<{ ok: boolean; title: string }>("PUT", `/api/sessions/${id}/title`, { title }),
   /** `media` also deletes the caller's Media items that came from the chat. */

@@ -20,7 +20,14 @@ vi.mock("../api", () => ({
   call: (...a: unknown[]) => call(...a),
   HttpError: Error,
 }));
-vi.mock("../apiPages", () => ({ pageApi: { deleteSession: vi.fn(() => Promise.resolve({ ok: true })), approve: vi.fn() } }));
+vi.mock("../apiPages", () => ({
+  pageApi: {
+    deleteSession: vi.fn(() => Promise.resolve({ ok: true })),
+    approve: vi.fn(),
+    turnDiff: vi.fn(() => Promise.resolve({ files: [] })),
+    restoreTurn: vi.fn(() => Promise.resolve({ ok: true })),
+  },
+}));
 const artifactsApi = { forSession: vi.fn(() => Promise.resolve([])), save: vi.fn(() => Promise.resolve({ requested: true })) };
 vi.mock("../lib/artifacts", async (original) => ({ ...(await original<typeof import("../lib/artifacts")>()), artifactsApi }));
 const mediaApi = { list: vi.fn(), get: vi.fn() };
@@ -105,8 +112,13 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-async function show(items: Item[], row: SessionRow | null, profile: "chat" | "agentic" = "agentic") {
-  current = view(items, profile);
+async function show(
+  items: Item[],
+  row: SessionRow | null,
+  profile: "chat" | "agentic" = "agentic",
+  checkpoints: SessionView["checkpoints"] = {},
+) {
+  current = { ...view(items, profile), checkpoints };
   await act(async () => root.render(<Conversation live={live} sessionId={SID} row={row} nodes={[]} agents={[]} models={[]} />));
   await act(() => new Promise((r) => setTimeout(r, 0)));
 }
@@ -397,5 +409,24 @@ describe("an unread message when no turn runs (review ST-3)", () => {
       sessionRow(),
     );
     expect(host.querySelector(".queued-mark")!.textContent).toBe("not read yet: goes with your next message");
+  });
+});
+
+describe("a turn's changes (X.12)", () => {
+  test("the files-changed row opens the changes beside the chat, and closing gives focus back", async () => {
+    const items: Item[] = [{ type: "turn_end", turn_id: "t1", reason: "completed" }];
+    await show(items, sessionRow(), "agentic", { t1: { before: "a", after: "b", files: ["a.txt"], restored: false } });
+    expect(host.textContent).toContain("1 file changed");
+    const open = [...host.querySelectorAll("button")].find((b) => b.textContent === "Show changes")!;
+    open.focus();
+    await act(async () => open.click());
+    await until(() => host.querySelector(".diff-panel"));
+    expect(api.turnDiff).toHaveBeenCalledWith(SID, "t1", false, expect.anything());
+    // Undo stays on the row.
+    expect([...host.querySelectorAll(".undo button")].some((b) => b.textContent === "Undo file changes")).toBe(true);
+    const close = host.querySelector<HTMLButtonElement>("button[aria-label='Close the changes']")!;
+    await act(async () => close.click());
+    expect(host.querySelector(".diff-panel")).toBeNull();
+    expect(document.activeElement).toBe(open);
   });
 });
