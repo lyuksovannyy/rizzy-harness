@@ -90,6 +90,7 @@ pub enum EventKind {
     ChatAllowAdded(ChatAllowAdded),
     ChatAllowRemoved(ChatAllowRemoved),
     StepLimitChanged(StepLimitChanged),
+    HandoffWritten(HandoffWritten),
 }
 
 impl EventKind {
@@ -145,6 +146,7 @@ impl EventKind {
             EventKind::ChatAllowAdded(_) => "chat_allow_added",
             EventKind::ChatAllowRemoved(_) => "chat_allow_removed",
             EventKind::StepLimitChanged(_) => "step_limit_changed",
+            EventKind::HandoffWritten(_) => "handoff_written",
         }
     }
 }
@@ -1424,6 +1426,46 @@ pub struct TodoUpdated {
     pub call_id: String,
     #[serde(default)]
     pub items: Vec<crate::todo::TodoItem>,
+}
+
+/// A hand-off note for whoever continues this chat's work in a new chat
+/// (ADOPTION_PLAN X.16, PLAN.md T60, docs/handoff-notes.md): the
+/// model-written part, written between turns once the chat has been idle
+/// (`crate::handoff::due`). The fixed part (what was asked, the files
+/// changed, the task list, how the last turn ended) is never stored here:
+/// every reader builds it from the log itself (`crate::handoff::Facts`).
+/// Appended by the session's one writer on the node, only when nothing
+/// was appended since `through_seq` (so its seq is `through_seq + 1`);
+/// the latest one is the note. Not sent to the chat's own model: it is
+/// for the next chat, the person and nothing else.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HandoffWritten {
+    /// The note covers every event up to this one.
+    pub through_seq: u64,
+    /// The model's note, cut to `crate::handoff::NOTE_CHARS`. `None`: no
+    /// model wrote one (each model in `failed` failed), so readers use the
+    /// fixed part alone; the event still covers the chat up to
+    /// `through_seq`, so no note is tried again until the chat goes on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// The model that wrote `text` (prefixed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Models tried before it, in order, with the reason's class only
+    /// (never the provider's response).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failed: Vec<NoteFailure>,
+    /// What writing it cost: counted in the chat's usage like a turn's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+}
+
+/// A model that did not write the note, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoteFailure {
+    pub model: String,
+    /// `unknown to this node`, `failed`, `empty answer`.
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

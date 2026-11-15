@@ -516,6 +516,10 @@ the skill `name`\"), so you can load it again; do not copy its text. ",
     transcript_data!()
 );
 
+// After the transcript macros, which its prompt uses.
+mod handoff;
+pub use handoff::HANDOFF_PROMPT;
+
 /// The labels of [`transcript`]'s parts: each stands on a line of its own,
 /// written by the harness, with the part's text quoted under it.
 const PART_SUMMARY: &str = "Earlier summary:";
@@ -1617,6 +1621,12 @@ fn fallback_event(turn_id: &str, model: &str, from: &str, reason: String) -> Eve
 impl AgentBackend for NativeBackend {
     fn name(&self) -> &'static str {
         "native"
+    }
+    async fn write_note(
+        &self,
+        ctx: harness_core::backend::NoteCtx,
+    ) -> Option<harness_core::backend::NoteOutcome> {
+        self.note(ctx).await
     }
     fn has_tool(&self, name: &str) -> bool {
         self.tools.iter().any(|t| t.name() == name)

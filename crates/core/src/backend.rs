@@ -396,10 +396,38 @@ pub struct TurnOutcome {
     pub error: Option<String>,
 }
 
+/// A request to write a chat's hand-off note (X.16): the model part, from
+/// the chat's log, one request per model in order until one writes it.
+pub struct NoteCtx {
+    pub session_id: crate::SessionId,
+    /// Every event of the chat, in seq order.
+    pub history: Vec<RawEvent>,
+    /// The models to try, in order (the small model, then the chat's own),
+    /// each with its context window when the master knows it.
+    pub models: Vec<(String, Option<u64>)>,
+    /// A turn that starts cancels it: nothing is then written.
+    pub cancel: CancellationToken,
+}
+
+/// What came of a [`NoteCtx`]: the note and who wrote it, or only the
+/// models that failed (`text: None`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NoteOutcome {
+    pub text: Option<String>,
+    pub model: Option<String>,
+    pub failed: Vec<crate::event::NoteFailure>,
+    pub usage: Option<Usage>,
+}
+
 #[async_trait::async_trait]
 pub trait AgentBackend: Send + Sync {
     fn name(&self) -> &'static str;
     async fn run_turn(&self, ctx: TurnCtx<'_>) -> TurnOutcome;
+    /// Write a hand-off note's model part. `None`: this backend writes no
+    /// notes, or the request was cancelled; nothing is recorded.
+    async fn write_note(&self, _ctx: NoteCtx) -> Option<NoteOutcome> {
+        None
+    }
     /// Whether this backend has a tool of that name registered (for what a
     /// node announces; the agent and the node's policy still decide each
     /// turn's tools).

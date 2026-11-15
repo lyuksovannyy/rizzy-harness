@@ -2,8 +2,8 @@
 
 use harness_core::{RawEvent, SessionId};
 use harness_store::{
-    CardPatch, NewCard, NewColumn, NewProject, NewUser, ProjectPatch, Role, Store, StoreError,
-    TemplateRow,
+    CardPatch, EarlierSource, NewCard, NewColumn, NewProject, NewUser, ProjectPatch, Role, Store,
+    StoreError, TemplateRow,
 };
 use serde_json::json;
 
@@ -606,12 +606,13 @@ fn earlier_chats_are_the_owners_own_in_the_project_newest_first() {
     let got = s.earlier_chats("p", "u1", me, 5).unwrap();
     let ids: Vec<SessionId> = got.iter().map(|c| c.session_id).collect();
     assert_eq!(ids, vec![b, a], "{got:?}");
-    assert_eq!(got[0].text, "bravo reply");
-    assert!(!got[0].summary);
+    assert_eq!(got[0].text.as_deref(), Some("bravo reply"));
+    assert_eq!(got[0].source, EarlierSource::LastReply);
+    assert!(got[0].facts.is_empty(), "nothing to hand off");
     assert_eq!(got[0].title, "chat 200");
     assert_eq!(got[0].updated_ms, 202);
-    assert_eq!(got[1].text, "Goal: alpha");
-    assert!(got[1].summary);
+    assert_eq!(got[1].text.as_deref(), Some("Goal: alpha"));
+    assert_eq!(got[1].source, EarlierSource::Summary);
     // The limit counts chats with text.
     let got = s.earlier_chats("p", "u1", me, 1).unwrap();
     assert_eq!(got.len(), 1);
@@ -619,7 +620,118 @@ fn earlier_chats_are_the_owners_own_in_the_project_newest_first() {
     // The other member reads only their own.
     let theirs = s.earlier_chats("p", "u2", me, 5).unwrap();
     assert_eq!(theirs.len(), 1);
-    assert_eq!(theirs[0].text, "charlie secret");
+    assert_eq!(theirs[0].text.as_deref(), Some("charlie secret"));
+}
+
+/// A hand-off note (X.16) is preferred over the summary and the last
+/// reply, with the facts its log shows; a note no model wrote leaves the
+/// summary in place but the facts still go; a note older than the chat's
+/// last turn is marked stale; a chat with only facts is still listed.
+#[test]
+fn earlier_chats_prefer_the_hand_off_note_and_carry_the_facts() {
+    let (s, w) = store();
+    project(&s, "p", &w);
+    let none = json!({});
+    let ended = ("turn_ended", json!({"turn_id": "t", "reason": "completed"}));
+    let started = ("turn_started", json!({"turn_id": "t"}));
+    let asked = (
+        "user_message",
+        json!({"turn_id": "t", "text": "add a --json flag"}),
+    );
+    let changed = (
+        "checkpoint",
+        json!({"turn_id": "t", "phase": "after", "git_ref": "r", "files": ["src/cli.rs"]}),
+    );
+    let todo = (
+        "todo_updated",
+        json!({"turn_id": "t", "call_id": "c", "items": [{"content": "Docs", "status": "pending"}]}),
+    );
+    let summary = (
+        "history_summarized",
+        json!({"turn_id": "t", "through_seq": 2, "text": "Goal: json"}),
+    );
+    let noted = chat_with(
+        &s,
+        "u1",
+        &w,
+        Some("p"),
+        100,
+        none.clone(),
+        &[
+            started.clone(),
+            asked.clone(),
+            changed.clone(),
+            said("Done, tests pass."),
+            summary.clone(),
+            ended.clone(),
+            ("handoff_written", json!({"through_seq": 7, "text": "Status:\nDocs left."})),
+        ],
+    );
+    let failed = chat_with(
+        &s,
+        "u1",
+        &w,
+        Some("p"),
+        200,
+        none.clone(),
+        &[
+            started.clone(),
+            asked.clone(),
+            todo.clone(),
+            said("Done."),
+            summary.clone(),
+            ended.clone(),
+            (
+                "handoff_written",
+                json!({"through_seq": 7, "failed": [{"model": "x::y", "reason": "failed"}]}),
+            ),
+        ],
+    );
+    let stale = chat_with(
+        &s,
+        "u1",
+        &w,
+        Some("p"),
+        300,
+        none.clone(),
+        &[
+            started.clone(),
+            asked.clone(),
+            changed.clone(),
+            ended.clone(),
+            ("handoff_written", json!({"through_seq": 5, "text": "Status:\nold"})),
+            started.clone(),
+            ended.clone(),
+        ],
+    );
+    let facts_only = chat_with(
+        &s,
+        "u1",
+        &w,
+        Some("p"),
+        400,
+        none.clone(),
+        &[started, asked, changed, ended],
+    );
+    let me = chat_with(&s, "u1", &w, Some("p"), 900, none, &[]);
+    let got = s.earlier_chats("p", "u1", me, 5).unwrap();
+    let by = |sid| got.iter().find(|c| c.session_id == sid).unwrap();
+    let n = by(noted);
+    assert_eq!(n.source, EarlierSource::Note);
+    assert_eq!(n.text.as_deref(), Some("Status:\nDocs left."));
+    assert!(!n.stale);
+    // The note does not make the chat "last active": its turn's end does.
+    assert_eq!(n.updated_ms, 106);
+    assert_eq!(n.facts[0], "Asked first: add a --json flag");
+    assert!(n.facts.iter().any(|l| l == "Files changed (1): src/cli.rs"), "{:?}", n.facts);
+    let f = by(failed);
+    assert_eq!(f.source, EarlierSource::Summary);
+    assert!(f.facts.iter().any(|l| l.starts_with("Task list: 0 of 1 done")), "{:?}", f.facts);
+    let st = by(stale);
+    assert_eq!((st.source, st.stale), (EarlierSource::Note, true));
+    let fo = by(facts_only);
+    assert_eq!((fo.source, fo.text.clone()), (EarlierSource::None, None));
+    assert!(!fo.facts.is_empty());
 }
 
 /// A chat whose owner left the project's workspace is back in Personal:

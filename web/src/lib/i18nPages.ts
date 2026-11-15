@@ -24,6 +24,8 @@ export const pages = {
   "conv.exportSave": "Download .md",
   "conv.deleteConfirm": "Delete this chat for good?",
   "conv.summary": "Earlier messages were summarised for the model",
+  "conv.handoff": "Hand-off note for the next chat, written by {model}",
+  "conv.handoffFixed": "Hand-off note: the next chat gets the facts from this chat's log only ({why})",
   "conv.shortened": "Context shortened for the model ({what}): about {before} to {after} tokens. Everything stays shown here.",
   "conv.shortCleared": "older tool results cleared",
   "conv.shortSteps": "{n} steps summarised",

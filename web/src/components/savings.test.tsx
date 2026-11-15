@@ -28,6 +28,8 @@ const savings = {
   repo_map_tokens: 1024,
   outline_tool: false,
   graphify: false,
+  handoff_notes: "small_model",
+  small_subagents: false,
 } satisfies TokenSavings;
 
 const api = {
@@ -41,11 +43,16 @@ const { SavingsSettings } = await import("./Savings");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
+const models = [
+  { id: "p::big", name: "big", provider_id: "p", default: true },
+  { id: "p::small", name: "small", provider_id: "p", default: false },
+] as unknown as import("../types").ModelInfo[];
+
 async function mount() {
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
-  await act(async () => root.render(<SavingsSettings />));
+  await act(async () => root.render(<SavingsSettings models={models} />));
   await act(async () => {});
   return host;
 }
@@ -65,5 +72,31 @@ describe("graphify card", () => {
     expect(steps.open).toBe(true);
     expect(steps.querySelector("pre")!.textContent).toBe(status.steps.join("\n"));
     expect(steps.textContent).toContain("/srv/harness/node.toml");
+  });
+});
+
+describe("small model card", () => {
+  test("one small model, a note writer and the sub-agent switch, each saved", async () => {
+    const host = await mount();
+    const card = host.querySelector("[data-testid=small-model]")!;
+    expect(card).not.toBeNull();
+    const pick = card.querySelector("select[aria-label='Small model']") as HTMLSelectElement;
+    expect([...pick.options].map((o) => o.value)).toEqual(["", "p::big", "p::small"]);
+    await act(async () => {
+      pick.value = "p::small";
+      pick.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(api.saveSavings).toHaveBeenLastCalledWith(expect.objectContaining({ small_model: "p::small" }));
+    const writer = card.querySelector("select[aria-label='Hand-off notes']") as HTMLSelectElement;
+    expect(writer.value).toBe("small_model");
+    await act(async () => {
+      writer.value = "off";
+      writer.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(api.saveSavings).toHaveBeenLastCalledWith(expect.objectContaining({ handoff_notes: "off" }));
+    const sub = card.querySelector("input[type=checkbox]") as HTMLInputElement;
+    expect(sub.checked).toBe(false);
+    await act(async () => sub.click());
+    expect(api.saveSavings).toHaveBeenLastCalledWith(expect.objectContaining({ small_subagents: true }));
   });
 });

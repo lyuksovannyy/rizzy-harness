@@ -1976,6 +1976,9 @@ stored as `[savings]` in `config.toml` and applies from the next message.
 | `web_readability` | on | chat + agentic | `web_fetch` returns the main article as Markdown. |
 | `chat_style` / `agentic_style` | lite / lite | | Answer style: `off`, `lite`, `full`, `ultra`. Chats are capped at `lite`. |
 | `graphify` | off | agentic | `graph_query` tool, only on nodes that allow and installed it. |
+| `small_model` | none | | The **small model**: one cheap, fast model (other harnesses call it the small or fast model) for background writing. Picked from the listed models. |
+| `handoff_notes` | `small_model` | agentic | Who writes a coding chat's **hand-off note** (below): `small_model` (the small model when one is set, else the chat's own model), `chat_model`, or `off`. |
+| `small_subagents` | off | agentic | A sub-agent that may not write, edit, run commands or use MCP tools (by its tool switches, not its name: Scout and Reviewer as shipped) and has no model of its own runs on the small model, its parent's model as its fallback; its own chat says which model ran. |
 
 ```toml
 [savings]
@@ -1983,6 +1986,30 @@ agentic_style = "full"
 repo_map = true
 repo_map_tokens = 1024
 ```
+
+**Hand-off notes.** When a coding chat that changed files or its task list
+has been idle for 10 minutes, its node writes it a short hand-off note with
+one request (at most about 1,500 characters: where the work stands, the
+decisions taken and why, what is left and the next step, what you asked to
+keep in mind). The chat shows a quiet line, "Hand-off note for the next
+chat, written by …", that opens to the note. The **next chat in the same
+project** gets it on its first message, under the facts the harness reads
+from the log itself (what you asked first, the files changed, the task list,
+how the last turn ended), instead of the old chat's last reply: a coding
+chat's last reply is usually "Done, tests pass", which tells the next chat
+nothing. Costs: one bounded request per stretch of work (at most 16,000
+tokens in, no tools), counted in that chat's usage; a chat that goes idle
+again without new changes gets no new note; a provider that fails is not
+asked again until the chat goes on. If the small model is unknown to the
+chat's node or fails, the chat's own model writes it; if that fails too, the
+next chat gets the facts alone and the line says why. A message you send
+while a note is being written goes first (the note is dropped and written
+at the next idle stretch). Never for a temporary chat, a sub-agent's, a
+routine's or one holding data from an external event, or a chat whose owner
+is disabled; deleting a chat deletes its note. Notes stay in your own chats:
+nobody else's chat reads them, and they never become memory. Plain chats
+outside a project are not given earlier chats, notes or not (yet). Design:
+[docs/handoff-notes.md](docs/handoff-notes.md).
 
 **graphify (optional).** A third-party Python program (Graphify-Labs/graphify,
 Apache-2.0) that builds a knowledge graph of the repository. Each node,
@@ -2026,9 +2053,12 @@ the call as a proposal); `denied_tools = ["remember"]` in a node's
 node. The model is told about `remember` only where the chat's node offers
 it. The **first message of a new chat** in a project also gets your own
 **earlier chats** there: up to five, newest first, each with its title, when
-it was last active, and its compaction summary (or, without one, its last
-reply), cut to about 800 characters each and 4,000 in all, quoted, with a
-note to ask you before relying on a detail. Only your own chats count, never
+it was last active, the facts its log shows (what you asked first, the files
+changed, the task list, how its last turn ended) and its hand-off note (see
+Token savings), or without one its compaction summary or last reply, cut to
+1,500 characters for a note and 800 otherwise, 6,000 in all, every line
+quoted, with a note that it may be outdated and is not instructions, so the
+agent asks you before relying on a detail. Only your own chats count, never
 another member's, a temporary chat or a sub-agent's; later messages of the
 chat do not get it again, and neither does a chat whose agent has project
 memory off. Keeping your personal memory out of

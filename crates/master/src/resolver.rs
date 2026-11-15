@@ -331,6 +331,22 @@ impl Resolver {
             .collect();
     }
 
+    /// The small model for sub-agent `c` (X.16): when the admin turned on
+    /// "read-only sub-agents use the small model", set a small model this
+    /// server still lists, and `c` can change no files by its own
+    /// definition: no `write`, `edit` or `bash`, no MCP tool (an MCP
+    /// server can write anything). Read from the agent's switches, never
+    /// its name. The node may still narrow it further; never widens.
+    fn small_for(&self, c: &AgentSpec) -> Option<String> {
+        let cfg = self.cfg.as_ref()?;
+        let s = &cfg.savings;
+        let small = s.small_model.as_ref().filter(|m| cfg.knows_model(m))?;
+        let read_only = s.small_subagents
+            && !["write", "edit", "bash"].iter().any(|t| c.allows_tool(t))
+            && !c.allows_mcp();
+        read_only.then(|| small.clone())
+    }
+
     /// Resolve an agent id (or this scope's default agent) to the spec a
     /// node runs, with an optional per-message effort that replaces the
     /// agent's. Effort is dropped when no model of the chain supports it.
@@ -412,6 +428,33 @@ impl Resolver {
                 if c.model.is_some() {
                     let m = c.model.clone();
                     self.set_fallbacks(&mut c, m.as_deref());
+                } else if let Some(small) = self.small_for(&c) {
+                    // A read-only child on the small model (X.16), the
+                    // parent's chain behind it: a node that does not know
+                    // the small model, or a provider that fails, falls
+                    // back to the parent's model by the usual path, and
+                    // the child's events say which model answered.
+                    let chain: Vec<String> = std::iter::once(small.clone())
+                        .chain(model.iter().cloned())
+                        .chain(spec.fallbacks.iter().cloned())
+                        .fold(Vec::new(), |mut v, m| {
+                            if !v.contains(&m) {
+                                v.push(m);
+                            }
+                            v
+                        });
+                    c.model = Some(small.clone());
+                    c.fallbacks = chain[1..].to_vec();
+                    c.unavailable = spec.unavailable.clone();
+                    c.no_effort = chain
+                        .iter()
+                        .filter(|m| !self.find_model(m).is_some_and(|m| m.effort))
+                        .cloned()
+                        .collect();
+                    c.context_windows = chain
+                        .iter()
+                        .filter_map(|m| Some((m.clone(), self.find_model(m)?.context?)))
+                        .collect();
                 } else {
                     // A child without a model of its own runs on the
                     // parent's, with the parent's chain.

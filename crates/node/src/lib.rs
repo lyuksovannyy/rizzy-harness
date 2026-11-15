@@ -38,6 +38,7 @@ fn starts_work(msg: &MasterToNode) -> bool {
         MasterToNode::Create { .. }
             | MasterToNode::Prompt { .. }
             | MasterToNode::Callback { .. }
+            | MasterToNode::Handoff { .. }
             | MasterToNode::Restore { .. }
             | MasterToNode::ArtifactStage { .. }
     )
@@ -107,6 +108,7 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::Delete { session_id, .. }
         | MasterToNode::Prompt { session_id, .. }
         | MasterToNode::Callback { session_id, .. }
+        | MasterToNode::Handoff { session_id, .. }
         | MasterToNode::SetAgent { session_id, .. }
         | MasterToNode::SetApprovalMode { session_id, .. }
         | MasterToNode::RevokeAllow { session_id, .. }
@@ -626,6 +628,8 @@ impl NodeRuntime {
                 capabilities.push(harness_protocol::CAP_BACKGROUND.into());
                 // A turn's changes, read from its checkpoints (X.12).
                 capabilities.push(harness_protocol::CAP_DIFF.into());
+                // Hand-off notes (X.16): the master asks once a chat idles.
+                capabilities.push(harness_protocol::CAP_HANDOFF.into());
                 // Off is silent: with `callback_turns = 0` the master asks
                 // nothing, and an end waits for the person as before.
                 if self.inner.cfg.policy.limits.callback_turns > 0 {
@@ -1143,6 +1147,19 @@ impl NodeRuntime {
                         s.callback(bg_ids, agent, savings.unwrap_or_default(), standing)
                             .await
                     }
+                    None => Err("unknown session".into()),
+                }
+            }
+            MasterToNode::Handoff {
+                session_id,
+                small_model,
+                windows,
+                ..
+            } => {
+                // It starts a model call: audited like a callback.
+                self.audit("session.handoff", session_id).await;
+                match self.session(session_id) {
+                    Some(s) => s.handoff(small_model, windows).await,
                     None => Err("unknown session".into()),
                 }
             }

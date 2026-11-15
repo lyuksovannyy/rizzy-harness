@@ -13,14 +13,15 @@ use rusqlite::{Connection, OptionalExtension, params};
 // module path (`routines::RoutineMark`), so no `pub use` lines are added.
 pub mod artifacts;
 pub mod blobs;
+mod handoff;
 pub mod media;
 pub mod migrate;
 mod projects;
 pub mod routines;
 pub mod session_images;
 pub use projects::{
-    CardPatch, CardRow, ColumnRow, EarlierChat, NewCard, NewColumn, NewProject, ProjectLink,
-    ProjectPatch, ProjectRow, TemplateRow,
+    CardPatch, CardRow, ColumnRow, EarlierChat, EarlierSource, NewCard, NewColumn, NewProject,
+    ProjectLink, ProjectPatch, ProjectRow, TemplateRow,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -872,9 +873,15 @@ impl Store {
                 params![sid, owner, e.ts_ms],
             )?;
         }
+        // A hand-off note (X.16) is bookkeeping written once the chat has
+        // been idle: it does not make the chat "last active" (the list's
+        // order, the earlier chats' dates), so the chat does not jump to
+        // the top of the list ten minutes after the person left it.
         tx.execute(
-            "UPDATE sessions SET head_seq = ?2, updated_ms = ?3 WHERE session_id = ?1",
-            params![sid, e.seq as i64, e.ts_ms],
+            "UPDATE sessions SET head_seq = ?2,
+                 updated_ms = CASE WHEN ?4 = 'handoff_written' THEN updated_ms ELSE ?3 END
+             WHERE session_id = ?1",
+            params![sid, e.seq as i64, e.ts_ms, e.kind],
         )?;
         match e.kind.as_str() {
             "session_created" => {

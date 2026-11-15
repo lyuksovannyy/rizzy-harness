@@ -49,6 +49,31 @@ pub struct TokenSavings {
     /// `graph_query` tool backed by graphify (only on nodes that allow it
     /// and have it installed).
     pub graphify: bool,
+    /// The small model (prefixed), which other harnesses call the small or
+    /// fast model: background writing and the switches below use it.
+    /// `None`: none set. A node that does not know it falls back to the
+    /// chat's own model (it decides; the master only names it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub small_model: Option<String>,
+    /// Who writes a coding chat's hand-off note (docs/handoff-notes.md).
+    pub handoff_notes: NoteWriter,
+    /// A sub-agent that can change no files (no `write`, `edit`, `bash` or
+    /// MCP tool) and has no model of its own runs on the small model, its
+    /// parent's model as its first fallback.
+    pub small_subagents: bool,
+}
+
+/// Who writes hand-off notes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoteWriter {
+    /// No notes: the next chat gets the fixed part alone.
+    Off,
+    /// The chat's own model.
+    ChatModel,
+    /// The small model when one is set, else the chat's own model.
+    #[default]
+    SmallModel,
 }
 
 impl Default for TokenSavings {
@@ -66,6 +91,9 @@ impl Default for TokenSavings {
             repo_map_tokens: 1024,
             outline_tool: true,
             graphify: false,
+            small_model: None,
+            handoff_notes: NoteWriter::default(),
+            small_subagents: false,
         }
     }
 }

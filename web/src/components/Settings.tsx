@@ -243,7 +243,7 @@ export default function Settings(props: {
             <MemoryCfgForm />
           </div>
         )}
-        {tab === "savings" && <SavingsSettings />}
+        {tab === "savings" && <SavingsSettings models={props.models} />}
         {tab === "nodes" && <Nodes nodes={props.nodes} />}
         {tab === "users" && <Users me={props.me} />}
         {tab === "workspaces" && <ServerWorkspaces me={props.me} onChanged={wsChanged} />}
