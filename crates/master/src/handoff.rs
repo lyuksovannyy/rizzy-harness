@@ -25,11 +25,22 @@ pub const SWEEP: Duration = Duration::from_secs(60);
 /// was away all that time; the next chat reads the fixed part alone).
 pub const MAX_AGE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
+/// How long an acked note may take to land before the chat is asked again
+/// (the node restarted mid-call, a Stop while it wrote, a failed append):
+/// as long as the idle time, so a slow model is not asked twice, and the
+/// node answers "busy" while it still writes and "nothing due" once it
+/// landed.
+pub const REASK_MS: i64 = harness_core::handoff::IDLE_MS;
+
 #[derive(Default)]
 pub(crate) struct Handoffs {
-    /// Chats looked at and settled (not due, refused, asked), by the head
-    /// seq they had then: looked at again only once it moved.
+    /// Chats looked at and settled (not due, refused), by the head seq they
+    /// had then: looked at again only once it moved.
     settled: Mutex<HashMap<SessionId, u64>>,
+    /// Chats whose node acked a note, by the head seq then, when (master
+    /// clock) and the node: looked at again once the head moved, after
+    /// `REASK_MS`, or when that node says hello again.
+    asked: Mutex<HashMap<SessionId, (u64, i64, String)>>,
 }
 
 /// Start the sweep (the binary calls this once the master serves).
@@ -50,12 +61,24 @@ pub(crate) fn start(m: &Master) {
 
 #[derive(Debug, PartialEq, Eq)]
 enum Next {
+    /// Not due, refused, or answered: not again until the chat moves.
     Settled,
+    /// The node took it: wait for the note (`REASK_MS`).
+    Asked,
+    /// Busy or away: the next sweep.
     Retry,
+    /// The node did not answer in time: the next sweep, and none of its
+    /// other chats in this one.
+    Slow,
 }
 
 /// One look at every chat that may be due a note; returns how many were
-/// asked for one.
+/// asked for one. Only chats in a project: nothing reads another chat's
+/// note yet (a chat moved into a project later gets one at the next sweep
+/// if due). Chats of a node that is away or takes no notes are skipped
+/// before their log is read; a node that does not answer in time is
+/// skipped for the rest of the sweep, so it cannot hold up every other
+/// chat's note by the ack timeout each.
 pub(crate) async fn sweep(m: &Master) -> usize {
     let savings = m.token_savings().unwrap_or_default();
     if savings.handoff_notes == NoteWriter::Off {
@@ -76,25 +99,54 @@ pub(crate) async fn sweep(m: &Master) -> usize {
         }
     };
     let mut asked = 0;
-    for (sid, head) in chats {
+    let mut slow: std::collections::HashSet<String> = Default::default();
+    for (sid, head, node) in chats {
         if m.is_stopping() {
             break;
         }
         if lock(&m.inner.handoffs.settled).get(&sid) == Some(&head) {
             continue;
         }
+        let pending = lock(&m.inner.handoffs.asked)
+            .get(&sid)
+            .is_some_and(|(h, at, _)| *h == head && now - *at < REASK_MS);
+        if pending || slow.contains(&node) {
+            continue;
+        }
+        // Presence first: an away node's chats are not read every sweep.
+        if !m.node_has(&node, harness_protocol::CAP_HANDOFF) {
+            continue;
+        }
         let (next, sent) = check(m, sid, &savings).await;
         asked += usize::from(sent);
-        if next == Next::Settled {
-            lock(&m.inner.handoffs.settled).insert(sid, head);
+        match next {
+            Next::Settled => {
+                lock(&m.inner.handoffs.asked).remove(&sid);
+                lock(&m.inner.handoffs.settled).insert(sid, head);
+            }
+            Next::Asked => {
+                lock(&m.inner.handoffs.asked).insert(sid, (head, harness_core::now_ms(), node));
+            }
+            Next::Retry => {}
+            Next::Slow => {
+                slow.insert(node);
+            }
         }
     }
     asked
 }
 
+/// Node `node` said hello again: a note it acked before may have died with
+/// it, so its chats are asked again at the next sweep (the node answers
+/// "nothing due" for those whose note landed).
+pub(crate) fn node_back(m: &Master, node: &str) {
+    lock(&m.inner.handoffs.asked).retain(|_, (_, _, n)| n != node);
+}
+
 /// The chat was deleted from the mirror.
 pub(crate) fn forget(m: &Master, sid: SessionId) {
     lock(&m.inner.handoffs.settled).remove(&sid);
+    lock(&m.inner.handoffs.asked).remove(&sid);
 }
 
 /// One chat: ask its node for a note when one is due and the owner may
@@ -150,6 +202,13 @@ async fn check(
         Ok(harness_core::event::EventKind::TurnEnded(t)) => t.usage.and_then(|u| u.model),
         _ => None,
     });
+    let low_effort = small
+        .iter()
+        .chain(last_model.iter())
+        .chain(std::iter::once(&row.model))
+        .filter(|id| m.find_model(id).is_some_and(|i| i.effort))
+        .cloned()
+        .collect();
     let windows = small
         .iter()
         .chain(last_model.iter())
@@ -163,17 +222,17 @@ async fn check(
                 session_id: sid,
                 small_model: small,
                 windows,
+                low_effort,
             }
         })
         .await;
     match sent {
-        Ok(()) => (Next::Settled, true),
+        Ok(()) => (Next::Asked, true),
         Err(CommandError::Rejected(e)) if e == harness_protocol::HANDOFF_BUSY => {
             (Next::Retry, false)
         }
-        Err(CommandError::NodeOffline(_) | CommandError::Timeout | CommandError::NodeStopping) => {
-            (Next::Retry, false)
-        }
+        Err(CommandError::Timeout) => (Next::Slow, false),
+        Err(CommandError::NodeOffline(_) | CommandError::NodeStopping) => (Next::Retry, false),
         Err(e) => {
             tracing::debug!(session = %sid, error = %e, "hand-off notes: the node wrote none");
             (Next::Settled, false)

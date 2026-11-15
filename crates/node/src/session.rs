@@ -185,6 +185,9 @@ pub(crate) struct Session {
     /// claims the slot, a Stop and a delete cancel it, so it never holds
     /// the chat against the person.
     note: Mutex<Option<CancellationToken>>,
+    /// When this chat's last notes were started, for `[limits]
+    /// handoff_notes_per_hour` (in memory: a restart gives one more hour).
+    note_tries: Mutex<std::collections::VecDeque<std::time::Instant>>,
 }
 
 /// The most messages that wait at once for the running turn to read them
@@ -395,6 +398,7 @@ impl Session {
             queued_context: Mutex::new(None),
             turn_env: Mutex::new(None),
             note: Mutex::new(None),
+            note_tries: Mutex::default(),
             node: node.clone(),
             id,
             head: tokio::sync::Mutex::new(0),
@@ -516,6 +520,7 @@ impl Session {
             queued_context: Mutex::new(None),
             turn_env: Mutex::new(None),
             note: Mutex::new(None),
+            note_tries: Mutex::default(),
             node,
             id,
             head: tokio::sync::Mutex::new(view.head_seq),
@@ -1777,8 +1782,15 @@ impl Session {
         self: &Arc<Self>,
         small_model: Option<String>,
         windows: std::collections::BTreeMap<String, u64>,
+        low_effort: Vec<String>,
     ) -> Result<(), String> {
         use harness_protocol::{HANDOFF_BUSY, HANDOFF_NOTHING};
+        let per_hour = self.node.cfg.policy.limits.handoff_notes_per_hour;
+        if per_hour == 0 {
+            return Err(format!(
+                "{HANDOFF_NOTHING}: hand-off notes are off on this node (handoff_notes_per_hour = 0)"
+            ));
+        }
         if self.profile != Profile::Agentic
             || self.parent_session.is_some()
             || self.incognito
@@ -1830,6 +1842,25 @@ impl Session {
             self.end_note(&cancel);
             return Err(HANDOFF_NOTHING.into());
         }
+        // The node's bound on unattended note calls per chat (a master that
+        // asks and cancels in a loop meets it too: a cancelled note leaves
+        // no event, so the chat stays due).
+        {
+            let mut tries = self.note_tries.lock().unwrap_or_else(|p| p.into_inner());
+            let hour = std::time::Duration::from_secs(3600);
+            while tries.front().is_some_and(|t| t.elapsed() >= hour) {
+                tries.pop_front();
+            }
+            if tries.len() >= per_hour {
+                drop(tries);
+                self.end_note(&cancel);
+                return Err(format!(
+                    "{HANDOFF_NOTHING}: {per_hour} notes started for this chat in the last hour \
+                     (handoff_notes_per_hour)"
+                ));
+            }
+            tries.push_back(std::time::Instant::now());
+        }
         let through = history.last().map_or(0, |e| e.seq);
         let chat_model = history
             .iter()
@@ -1860,6 +1891,7 @@ impl Session {
                     session_id: id,
                     history,
                     models,
+                    low_effort,
                     cancel: cancel.clone(),
                 })
                 .await;

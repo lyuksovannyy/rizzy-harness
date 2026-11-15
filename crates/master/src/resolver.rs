@@ -156,6 +156,21 @@ impl Master {
     }
 }
 
+/// The tools that only read (files, the repository's map, a command's
+/// stored output, the chat's own task list, earlier chats, skills): a
+/// sub-agent limited to these may run on the small model (X.16).
+pub const READ_ONLY_TOOLS: &[&str] = &[
+    "read",
+    "grep",
+    "glob",
+    "outline",
+    "graph_query",
+    "tool_output",
+    "todo",
+    "recall",
+    "skill",
+];
+
 impl Resolver {
     /// The server's config with this scope's chains, when the master
     /// manages its providers.
@@ -333,17 +348,23 @@ impl Resolver {
 
     /// The small model for sub-agent `c` (X.16): when the admin turned on
     /// "read-only sub-agents use the small model", set a small model this
-    /// server still lists, and `c` can change no files by its own
-    /// definition: no `write`, `edit` or `bash`, no MCP tool (an MCP
-    /// server can write anything). Read from the agent's switches, never
-    /// its name. The node may still narrow it further; never widens.
+    /// server still lists, and every tool `c` may use is one that only
+    /// reads ([`READ_ONLY_TOOLS`]). An allow-list, from the agent's own
+    /// switches, never its name: a tool added later (or `publish`,
+    /// `remember`, web tools, MCP, "all tools") is not read-only until
+    /// someone puts it on the list. The node may still narrow it.
     fn small_for(&self, c: &AgentSpec) -> Option<String> {
         let cfg = self.cfg.as_ref()?;
         let s = &cfg.savings;
         let small = s.small_model.as_ref().filter(|m| cfg.knows_model(m))?;
         let read_only = s.small_subagents
-            && !["write", "edit", "bash"].iter().any(|t| c.allows_tool(t))
-            && !c.allows_mcp();
+            && match &c.tools {
+                harness_core::agent::ToolSelection::List(l) => l
+                    .iter()
+                    .filter(|t| c.allows_tool(t))
+                    .all(|t| READ_ONLY_TOOLS.contains(&t.as_str())),
+                harness_core::agent::ToolSelection::All(_) => false,
+            };
         read_only.then(|| small.clone())
     }
 
@@ -699,5 +720,46 @@ mod tests {
         assert_eq!(cfg.effective_default().as_deref(), Some("demo::other"));
         assert_eq!(cfg.agent_models["general"].fallbacks, ["demo::mock"]);
         assert!(!cfg.agent_models.contains_key("coder"));
+    }
+
+    /// Review of PR 117: "read-only" is an allow-list. `publish`,
+    /// `remember`, a web tool or any tool not on it keeps a sub-agent on
+    /// its parent's model; only tools that read move it to the small one.
+    #[test]
+    fn only_tools_that_read_put_a_sub_agent_on_the_small_model() {
+        let m = master();
+        let mut r = m.resolver(None);
+        let mut cfg = crate::config::Config::default();
+        cfg.providers[0].models.push(crate::config::ModelConfig {
+            id: "small".into(),
+            ..Default::default()
+        });
+        cfg.savings.small_model = Some("demo::small".into());
+        cfg.savings.small_subagents = true;
+        r.cfg = Some(cfg);
+        let spec = |tools: &str| {
+            harness_agents::parse(
+                "x",
+                &format!("---\nname: X\ntools: [{tools}]\navailable_as: [subagent]\n---\nDo.\n"),
+                false,
+            )
+            .unwrap()
+            .spec
+        };
+        for tools in [
+            "read, publish",
+            "read, remember",
+            "read, todo, publish, bash_output",
+            "read, web_fetch",
+            "read, write",
+            "read, mcp",
+        ] {
+            assert_eq!(r.small_for(&spec(tools)), None, "{tools}");
+        }
+        assert_eq!(
+            r.small_for(&spec("read, grep, glob, outline, graph_query, skill"))
+                .as_deref(),
+            Some("demo::small")
+        );
     }
 }

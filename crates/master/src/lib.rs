@@ -1129,6 +1129,8 @@ impl Master {
         {
             return Err(format!("node {node_id} is revoked"));
         }
+        // Notes this node acked before may have died with its last link.
+        handoff::node_back(self, &node_id);
         let _ = link.to_node.try_send(MasterToNode::Welcome {
             protocol_version: PROTOCOL_VERSION,
         });

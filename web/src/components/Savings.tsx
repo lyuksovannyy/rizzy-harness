@@ -125,10 +125,14 @@ function SmallModelCard(props: { s: TokenSavings; models: ModelInfo[]; save: (n:
       <h3>Small model and hand-off notes</h3>
       <p className="muted small">
         A cheap, fast model for background writing, as other harnesses call their small or fast model. When a coding
-        chat that changed files or its task list has been idle for 10 minutes, one request writes a short hand-off note
-        (where the work stands, decisions, what is next); the next chat in the same project reads it with the facts from
-        the log (what was asked, files changed, the task list). Costs one bounded request per stretch of work, counted in
-        that chat&apos;s usage.
+        chat in a project that changed files or its task list has been idle for 10 minutes, one request writes a short
+        hand-off note (where the work stands, decisions, what is next); the next chat in the same project reads it with
+        the facts from the log (what was asked, files changed, the task list). Costs one request per stretch of work (up
+        to about 16,600 input tokens and 800 output), counted in that chat&apos;s usage.
+      </p>
+      <p className="muted small" data-testid="small-model-where">
+        With a small model set, a chat&apos;s recent turns, tool output included, are sent to the small model&apos;s
+        provider, which may not be the provider the chat uses.
       </p>
       <label>
         Small model
@@ -166,8 +170,8 @@ function SmallModelCard(props: { s: TokenSavings; models: ModelInfo[]; save: (n:
           checked={s.small_subagents}
           onChange={(e) => save({ ...s, small_subagents: e.target.checked })}
         />
-        Read-only sub-agents use the small model (those that may not write, edit, run commands or use MCP tools, and
-        have no model of their own)
+        Read-only sub-agents use the small model (those whose every tool only reads: read, search, outline, task list,
+        earlier chats, skills; and that have no model of their own)
       </label>
     </div>
   );

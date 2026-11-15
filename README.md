@@ -1092,6 +1092,7 @@ background_per_node = 64             # background commands this node runs at onc
 background_output_kb = 256           # output kept in memory per background command (16 .. 4096)
 callback_turns = 3                   # turns the agent may run in a row without you when commands end; 0: off (0 .. 20)
 callback_max_steps = 20              # model calls one such turn may make, never above max_steps or the chat's own limit (1 .. 10000)
+handoff_notes_per_hour = 4           # hand-off notes this node writes per chat per hour; 0: off, the server asks for none (0 .. 60)
 
 [sandbox]
 mode = "required"                    # required | best-effort | off
@@ -1987,8 +1988,9 @@ repo_map = true
 repo_map_tokens = 1024
 ```
 
-**Hand-off notes.** When a coding chat that changed files or its task list
-has been idle for 10 minutes, its node writes it a short hand-off note with
+**Hand-off notes.** When a coding chat in a project that changed files or
+its task list has been idle for 10 minutes, its node writes it a short
+hand-off note with
 one request (at most about 1,500 characters: where the work stands, the
 decisions taken and why, what is left and the next step, what you asked to
 keep in mind). The chat shows a quiet line, "Hand-off note for the next
@@ -1997,8 +1999,10 @@ project** gets it on its first message, under the facts the harness reads
 from the log itself (what you asked first, the files changed, the task list,
 how the last turn ended), instead of the old chat's last reply: a coding
 chat's last reply is usually "Done, tests pass", which tells the next chat
-nothing. Costs: one bounded request per stretch of work (at most 16,000
-tokens in, no tools), counted in that chat's usage; a chat that goes idle
+nothing. Costs: one bounded request per stretch of work, counted in that
+chat's usage: up to about 16,600 input tokens, not cached, plus at most 800
+output tokens, on the small model, or on the chat's own model when no small
+model is set (the default); a chat that goes idle
 again without new changes gets no new note; a provider that fails is not
 asked again until the chat goes on. If the small model is unknown to the
 chat's node or fails, the chat's own model writes it; if that fails too, the
@@ -2006,9 +2010,15 @@ next chat gets the facts alone and the line says why. A message you send
 while a note is being written goes first (the note is dropped and written
 at the next idle stretch). Never for a temporary chat, a sub-agent's, a
 routine's or one holding data from an external event, or a chat whose owner
-is disabled; deleting a chat deletes its note. Notes stay in your own chats:
-nobody else's chat reads them, and they never become memory. Plain chats
-outside a project are not given earlier chats, notes or not (yet). Design:
+is disabled; deleting a chat deletes its note. **Where the text goes:** with
+a small model set, the chat's recent turns, tool output included, are sent to
+the small model's provider, which may not be the provider the chat itself
+uses. A node's owner turns notes off on that node with
+`handoff_notes_per_hour = 0` in `node.toml` (`[limits]`), which also bounds
+how many it writes per chat per hour (4 by default). Notes stay in your own chats:
+nobody else's chat reads them, and they never become memory. Chats outside a
+project get no note: nothing would read it yet (a chat moved into a project
+later gets one, if due). Design:
 [docs/handoff-notes.md](docs/handoff-notes.md).
 
 **graphify (optional).** A third-party Python program (Graphify-Labs/graphify,

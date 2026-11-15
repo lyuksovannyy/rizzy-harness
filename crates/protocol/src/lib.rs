@@ -537,6 +537,10 @@ pub enum MasterToNode {
         /// input is sized to the writing model's.
         #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
         windows: std::collections::BTreeMap<String, u64>,
+        /// Those models that take a reasoning effort: the note asks them
+        /// for the lowest, the others for none.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        low_effort: Vec<String>,
     },
     /// The user picked one of several parallel answers.
     #[serde(rename = "session.select_variant")]

@@ -80,6 +80,9 @@ describe("small model card", () => {
     const host = await mount();
     const card = host.querySelector("[data-testid=small-model]")!;
     expect(card).not.toBeNull();
+    expect(card.querySelector("[data-testid=small-model-where]")!.textContent).toContain(
+      "sent to the small model's provider, which may not be the provider the chat uses",
+    );
     const pick = card.querySelector("select[aria-label='Small model']") as HTMLSelectElement;
     expect([...pick.options].map((o) => o.value)).toEqual(["", "p::big", "p::small"]);
     await act(async () => {

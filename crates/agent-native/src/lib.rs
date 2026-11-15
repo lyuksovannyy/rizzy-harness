@@ -2398,6 +2398,7 @@ impl NativeBackend {
                 cache: sv.prompt_cache,
                 limits: Some(self.config.stream_limits),
                 no_tool_calls: wrap_up,
+                max_tokens: None,
             };
             // A passing failure is retried (bounded, with backoff) before
             // the fallbacks, but only while this attempt has shown nothing:
@@ -3310,6 +3311,7 @@ impl NativeBackend {
                     cache: ctx.extra.savings.prompt_cache,
                     limits: Some(self.config.stream_limits),
                     no_tool_calls: false,
+                    max_tokens: None,
                 };
                 let mut retries = 0;
                 let step = loop {
@@ -3601,6 +3603,7 @@ impl NativeBackend {
                 cache: false,
                 limits: Some(self.config.stream_limits),
                 no_tool_calls: false,
+                max_tokens: None,
             };
             let c = match self.complete_quietly(ctx, &req).await {
                 Ok(c) => c,
@@ -3712,6 +3715,7 @@ impl NativeBackend {
             cache: false,
             limits: Some(self.config.stream_limits),
             no_tool_calls: false,
+            max_tokens: None,
         };
         let c = match self.complete_quietly(ctx, &req).await {
             Ok(c) => c,

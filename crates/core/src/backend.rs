@@ -405,6 +405,9 @@ pub struct NoteCtx {
     /// The models to try, in order (the small model, then the chat's own),
     /// each with its context window when the master knows it.
     pub models: Vec<(String, Option<u64>)>,
+    /// Those of `models` that take a reasoning effort (the master knows):
+    /// they are asked for the lowest; the others for none.
+    pub low_effort: Vec<String>,
     /// A turn that starts cancels it: nothing is then written.
     pub cancel: CancellationToken,
 }

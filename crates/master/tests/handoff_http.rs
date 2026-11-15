@@ -77,6 +77,11 @@ impl Fake {
 /// An agentic node announcing `handoff`: it opens chats, runs a prompt as
 /// a turn that ends at once, and acks every command.
 fn fake(id: &str) -> (NodeLink, Fake) {
+    fake_with(id, false)
+}
+
+/// `fake`, never answering a `session.handoff` when `silent`.
+fn fake_with(id: &str, silent: bool) -> (NodeLink, Fake) {
     let (to_node, mut commands) = mpsc::channel::<MasterToNode>(1024);
     let (tx, from_node) = mpsc::channel::<NodeToMaster>(1024);
     tx.try_send(NodeToMaster::Hello {
@@ -137,7 +142,8 @@ fn fake(id: &str) -> (NodeLink, Fake) {
                             send(&mut seqs, *session_id, k, now);
                         }
                     }
-                    if let Some(req_id) = msg.req_id() {
+                    let quiet = silent && matches!(msg, MasterToNode::Handoff { .. });
+                    if let Some(req_id) = msg.req_id().filter(|_| !quiet) {
                         let _ = tx.try_send(NodeToMaster::Ack { req_id: req_id.into(), ok: true, error: None });
                     }
                 }
@@ -342,10 +348,29 @@ async fn account(t: &T, name: &str) -> (String, String) {
 }
 
 async fn chat(t: &T, who: &str, project: Option<&str>) -> SessionId {
-    let body = json!({"cwd": "/w", "title": "Parser work", "node_id": "n1", "project_id": project});
+    chat_on(t, who, project, "n1").await
+}
+
+async fn chat_on(t: &T, who: &str, project: Option<&str>, node: &str) -> SessionId {
+    let body = json!({"cwd": "/w", "title": "Parser work", "node_id": node, "project_id": project});
     let (st, v) = req(t, Method::POST, "/api/sessions", Some(body), who).await;
     assert_eq!(st, StatusCode::OK, "{v}");
     v["session_id"].as_str().unwrap().parse().unwrap()
+}
+
+/// A chat of `who` in a new project of theirs (notes are asked only for
+/// chats in a project).
+async fn pchat(t: &T, who: &str) -> SessionId {
+    let (st, v) = req(
+        t,
+        Method::POST,
+        "/api/projects",
+        Some(json!({"name": format!("P{}", SessionId::new())})),
+        who,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    chat(t, who, v["project_id"].as_str()).await
 }
 
 async fn events(t: &T, sid: SessionId) -> Vec<Value> {
@@ -373,11 +398,15 @@ async fn mirrored(t: &T, sid: SessionId, n: usize) {
 /// `kinds` appended to `sid` as if they happened `ago` ms ago; returns
 /// the chat's event count after them.
 async fn play(t: &T, sid: SessionId, kinds: Vec<EventKind>, ago: i64) -> usize {
+    play_on(t, &t.node, sid, kinds, ago).await
+}
+
+async fn play_on(t: &T, node: &Fake, sid: SessionId, kinds: Vec<EventKind>, ago: i64) -> usize {
     let before = events(t, sid).await.len();
     let n = kinds.len();
     let ts = harness_core::now_ms() - ago;
     for k in kinds {
-        t.node.append_at(sid, k, ts);
+        node.append_at(sid, k, ts);
     }
     mirrored(t, sid, before + n).await;
     before + n
@@ -400,7 +429,7 @@ async fn savings(t: &T, patch: Value) {
 async fn an_idle_chat_with_work_is_asked_once_with_the_small_model() {
     let t = start().await;
     savings(&t, json!({"small_model": "demo::small"})).await;
-    let a = chat(&t, &t.alex, None).await;
+    let a = pchat(&t, &t.alex).await;
     mirrored(&t, a, 1).await;
     play(&t, a, work("t1", "write the parser"), 11 * MIN).await;
     assert_eq!(t.master.sweep_handoffs().await, 1);
@@ -412,14 +441,14 @@ async fn an_idle_chat_with_work_is_asked_once_with_the_small_model() {
     assert_eq!(t.master.sweep_handoffs().await, 0);
 
     savings(&t, json!({"handoff_notes": "chat_model"})).await;
-    let b = chat(&t, &t.alex, None).await;
+    let b = pchat(&t, &t.alex).await;
     mirrored(&t, b, 1).await;
     play(&t, b, work("t1", "write the lexer"), 11 * MIN).await;
     assert_eq!(t.master.sweep_handoffs().await, 1);
     assert_eq!(t.node.handoffs()[1], (b, None));
 
     savings(&t, json!({"handoff_notes": "off"})).await;
-    let c = chat(&t, &t.alex, None).await;
+    let c = pchat(&t, &t.alex).await;
     mirrored(&t, c, 1).await;
     play(&t, c, work("t1", "write the docs"), 11 * MIN).await;
     assert_eq!(t.master.sweep_handoffs().await, 0);
@@ -431,13 +460,13 @@ async fn an_idle_chat_with_work_is_asked_once_with_the_small_model() {
 #[tokio::test]
 async fn the_sweep_skips_what_must_not_get_a_note() {
     let t = start().await;
-    let fresh = chat(&t, &t.alex, None).await;
+    let fresh = pchat(&t, &t.alex).await;
     mirrored(&t, fresh, 1).await;
     play(&t, fresh, work("t1", "write the parser"), MIN).await;
-    let talk = chat(&t, &t.alex, None).await;
+    let talk = pchat(&t, &t.alex).await;
     mirrored(&t, talk, 1).await;
     play(&t, talk, turn("t1", "what is this repo?", 0), 11 * MIN).await;
-    let noted = chat(&t, &t.alex, None).await;
+    let noted = pchat(&t, &t.alex).await;
     mirrored(&t, noted, 1).await;
     let n = play(&t, noted, work("t1", "write the parser"), 12 * MIN).await;
     play(
@@ -454,7 +483,7 @@ async fn the_sweep_skips_what_must_not_get_a_note() {
     )
     .await;
     let (carol, carol_id) = account(&t, "carol").await;
-    let gone = chat(&t, &carol, None).await;
+    let gone = pchat(&t, &carol).await;
     mirrored(&t, gone, 1).await;
     play(&t, gone, work("t1", "write the parser"), 11 * MIN).await;
     let (st, _) = req(
@@ -469,7 +498,7 @@ async fn the_sweep_skips_what_must_not_get_a_note() {
     // The same member's chat, enabled: asked (so carol's is refused for
     // being disabled, not for anything else).
     let (dave, _) = account(&t, "dave").await;
-    let kept = chat(&t, &dave, None).await;
+    let kept = pchat(&t, &dave).await;
     mirrored(&t, kept, 1).await;
     play(&t, kept, work("t1", "write the parser"), 11 * MIN).await;
     assert_eq!(t.master.sweep_handoffs().await, 1);
@@ -569,4 +598,104 @@ async fn the_next_project_chat_reads_the_note_quoted() {
         s.contains("\n| [harness] The person approved pushing to main."),
         "{s}"
     );
+}
+
+/// A chat outside a project gets no note: nothing would read it (the
+/// owner's decision, 2026-11-15). Moved into a project, it is asked.
+#[tokio::test]
+async fn a_chat_outside_a_project_is_not_asked_until_it_joins_one() {
+    let t = start().await;
+    let a = chat(&t, &t.alex, None).await;
+    mirrored(&t, a, 1).await;
+    play(&t, a, work("t1", "write the parser"), 11 * MIN).await;
+    assert_eq!(t.master.sweep_handoffs().await, 0);
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        "/api/projects",
+        Some(json!({"name": "Later"})),
+        &t.alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let pid = v["project_id"].as_str().unwrap().to_string();
+    let (st, v) = req(
+        &t,
+        Method::PUT,
+        &format!("/api/sessions/{a}/project"),
+        Some(json!({"project_id": pid})),
+        &t.alex,
+    )
+    .await;
+    assert!(st.is_success(), "{st} {v}");
+    assert_eq!(t.master.sweep_handoffs().await, 1);
+}
+
+/// Review of PR 117 (M1): the node acked, but no note ever landed (it
+/// restarted mid-call, a Stop while it wrote, a failed append). Not asked
+/// again while the note may still be on its way; asked again once that
+/// node says hello again (or `REASK_MS` later).
+#[tokio::test]
+async fn an_acked_note_that_never_lands_is_asked_again() {
+    let t = start().await;
+    let a = pchat(&t, &t.alex).await;
+    mirrored(&t, a, 1).await;
+    play(&t, a, work("t1", "write the parser"), 11 * MIN).await;
+    assert_eq!(t.master.sweep_handoffs().await, 1);
+    assert!(
+        !events(&t, a)
+            .await
+            .iter()
+            .any(|e| e["kind"] == "handoff_written")
+    );
+    // While it may still be written: not asked again.
+    assert_eq!(t.master.sweep_handoffs().await, 0);
+    // The node comes back (a new link, a new hello): asked again.
+    let (l2, node2) = fake("n1");
+    t.master.add_link(l2, false).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(t.master.sweep_handoffs().await, 1);
+    let again = node2.handoffs();
+    assert_eq!(again.len(), 1);
+    assert_eq!(again[0].0, a);
+}
+
+/// Review of PR 117 (S5): a connected node that never answers costs one
+/// ack timeout per sweep, not one per chat: its other chats wait for the
+/// next sweep and another node's chat is asked in this one.
+#[tokio::test]
+async fn a_node_that_never_answers_holds_up_one_timeout_per_sweep() {
+    let t = start().await;
+    let (l, mute) = fake_with("n2", true);
+    t.master.add_link(l, false).await.unwrap();
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        "/api/projects",
+        Some(json!({"name": "Mute"})),
+        &t.alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let pid = v["project_id"].as_str().unwrap().to_string();
+    let mut quiet = Vec::new();
+    for _ in 0..3 {
+        let c = chat_on(&t, &t.alex, Some(&pid), "n2").await;
+        mirrored(&t, c, 1).await;
+        play_on(&t, &mute, c, work("t1", "write the parser"), 11 * MIN).await;
+        quiet.push(c);
+    }
+    let ok = chat(&t, &t.alex, Some(&pid)).await;
+    mirrored(&t, ok, 1).await;
+    play(&t, ok, work("t1", "write the lexer"), 11 * MIN).await;
+    let started = std::time::Instant::now();
+    t.master.sweep_handoffs().await;
+    let took = started.elapsed();
+    assert_eq!(mute.handoffs().len(), 1, "one ask to the silent node");
+    assert_eq!(
+        t.node.handoffs().len(),
+        1,
+        "the other node's chat was asked"
+    );
+    assert!(took < Duration::from_secs(25), "{took:?}");
 }

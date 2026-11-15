@@ -54,6 +54,10 @@ impl Provider for Slow {
 /// A node whose only provider is `demo` (so `gone::x` is a model it does
 /// not know), its chats on `demo::mock`.
 fn config(dir: &std::path::Path, slow: bool) -> NodeConfig {
+    config_with(dir, slow, harness_node::policy::DEFAULT_HANDOFF_PER_HOUR)
+}
+
+fn config_with(dir: &std::path::Path, slow: bool, per_hour: usize) -> NodeConfig {
     let router = ModelRouter::new(vec![Route {
         prefix: "demo".into(),
         provider: Arc::new(Slow { slow }),
@@ -64,6 +68,10 @@ fn config(dir: &std::path::Path, slow: bool) -> NodeConfig {
         policy: NodePolicy {
             workspace_roots: vec![dir.into()],
             max_approval_mode: ApprovalMode::Auto,
+            limits: harness_node::policy::LimitsPolicy {
+                handoff_notes_per_hour: per_hour,
+                ..Default::default()
+            },
             ..Default::default()
         },
         store: Store::open(&dir.join("node.db"), Durability::Full).unwrap(),
@@ -185,6 +193,7 @@ fn handoff(link: &NodeLink, sid: SessionId, req_id: &str, small: Option<&str>) {
             session_id: sid,
             small_model: small.map(str::to_string),
             windows: Default::default(),
+            low_effort: vec![],
         })
         .unwrap();
 }
@@ -439,4 +448,64 @@ async fn a_routines_or_a_sub_agents_chat_gets_none() {
     let e = ack(&mut link, "c").await.unwrap_err();
     assert!(e.starts_with(HANDOFF_NOTHING), "{e}");
     assert!(notes(node.store(), child).is_empty());
+}
+
+/// The node's owner turns notes off (`handoff_notes_per_hour = 0`): the
+/// node does not announce them and refuses the command.
+#[tokio::test]
+async fn a_node_with_notes_off_neither_offers_nor_writes_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    let node = NodeRuntime::start(config_with(dir.path(), false, 0))
+        .await
+        .unwrap();
+    let mut link = node.attach().await;
+    match link.from_node.recv().await.unwrap() {
+        NodeToMaster::Hello { capabilities, .. } => {
+            assert!(
+                !capabilities
+                    .iter()
+                    .any(|c| c == harness_protocol::CAP_HANDOFF)
+            );
+        }
+        other => panic!("expected hello, got {other:?}"),
+    }
+    let sid = create(&mut link, &ws, false).await;
+    turn(&mut link, sid, work("Write the parser")).await;
+    handoff(&link, sid, "h", None);
+    let e = ack(&mut link, "h").await.unwrap_err();
+    assert!(e.contains("handoff_notes_per_hour = 0"), "{e}");
+    assert!(notes(node.store(), sid).is_empty());
+}
+
+/// A master that asks and cancels in a loop (a cancelled note leaves no
+/// event, so the chat stays due) gets at most `handoff_notes_per_hour`
+/// note calls per chat.
+#[tokio::test]
+async fn asking_and_cancelling_in_a_loop_is_bounded_per_hour() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    let node = NodeRuntime::start(config_with(dir.path(), true, 2))
+        .await
+        .unwrap();
+    let mut link = attach(&node).await;
+    let sid = create(&mut link, &ws, false).await;
+    turn(&mut link, sid, work("Write the parser")).await;
+    for i in 0..2 {
+        handoff(&link, sid, &format!("h{i}"), None);
+        assert_eq!(ack(&mut link, &format!("h{i}")).await, Ok(()));
+        link.to_node
+            .try_send(MasterToNode::Cancel {
+                req_id: format!("x{i}"),
+                session_id: sid,
+            })
+            .unwrap();
+        ack(&mut link, &format!("x{i}")).await.unwrap();
+    }
+    handoff(&link, sid, "h2", None);
+    let e = ack(&mut link, "h2").await.unwrap_err();
+    assert!(e.contains("in the last hour"), "{e}");
+    assert!(notes(node.store(), sid).is_empty());
 }

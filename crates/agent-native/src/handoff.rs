@@ -46,6 +46,10 @@ reader gets it, so do not copy it. ",
 /// Tokens the request needs beside the transcript: the prompt and a reply
 /// of at most [`harness_core::handoff::NOTE_CHARS`] characters.
 pub const NOTE_OVERHEAD: u64 = 1_536;
+/// The most output a note's request may write: `NOTE_CHARS` (1,500
+/// characters, about 400 tokens in English) with room for other languages
+/// and the headings, so the provider stops before the cut, not after.
+pub const NOTE_MAX_TOKENS: u32 = 800;
 /// The most input a note reads, whatever the window (cost: a note is one
 /// cheap call, not a second compaction).
 pub const NOTE_INPUT_MAX: u64 = 16_000;
@@ -124,10 +128,16 @@ impl NativeBackend {
                 model: model.clone(),
                 messages: vec![ChatMsg::System(HANDOFF_PROMPT.into()), ChatMsg::User(input)],
                 tools: vec![],
-                effort: None,
+                // The lowest effort for a model that takes one (the master
+                // says which); none for the rest, as a summary sends.
+                effort: ctx
+                    .low_effort
+                    .contains(model)
+                    .then_some(crate::provider::Effort::Low),
                 cache: false,
                 limits: Some(self.config.stream_limits),
                 no_tool_calls: false,
+                max_tokens: Some(NOTE_MAX_TOKENS),
             };
             let (tx, _rx) = mpsc::unbounded_channel();
             let r = tokio::select! {
@@ -321,6 +331,7 @@ mod tests {
             session_id: SessionId::new(),
             history,
             models: models.iter().map(|m| (m.to_string(), None)).collect(),
+            low_effort: vec!["p::small".into()],
             cancel: CancellationToken::new(),
         }
     }
@@ -344,6 +355,12 @@ mod tests {
         assert_eq!(reqs.len(), 1);
         assert!(reqs[0].tools.is_empty());
         assert!(reqs[0].limits.is_some(), "the stream limits every call has");
+        assert_eq!(
+            reqs[0].max_tokens,
+            Some(NOTE_MAX_TOKENS),
+            "the output is bounded"
+        );
+        assert_eq!(reqs[0].effort, Some(crate::provider::Effort::Low));
         assert!(matches!(&reqs[0].messages[0], ChatMsg::System(s) if s == HANDOFF_PROMPT));
     }
 
@@ -375,7 +392,12 @@ mod tests {
         assert_eq!(out.failed[1].reason, "failed");
         assert!(!format!("{out:?}").contains("boom"));
         // One request per model, no retry.
-        assert_eq!(p.reqs.lock().unwrap().len(), 4);
+        {
+            let reqs = p.reqs.lock().unwrap();
+            assert_eq!(reqs.len(), 4);
+            // A model that takes no effort is sent none.
+            assert!(reqs.iter().all(|r| r.effort.is_none()));
+        }
         let empty = backend(script("   "), Default::default());
         let out = empty.note(ctx(chat("ok"), &["p::m"])).await.unwrap();
         assert_eq!(out.failed[0].reason, "empty answer");

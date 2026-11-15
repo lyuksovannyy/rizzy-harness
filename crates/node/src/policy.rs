@@ -282,6 +282,12 @@ pub struct LimitsPolicy {
     /// Model calls one callback turn may make; the cap is the lower of this
     /// and `max_steps`.
     pub callback_max_steps: usize,
+    /// Hand-off notes (X.16) this node writes per chat per hour: model
+    /// calls the master asks for while nobody watches. 0 turns them off on
+    /// this node (it does not announce `handoff` and refuses the command).
+    /// The bound also stops a master that asks and cancels in a loop: a
+    /// cancelled note leaves no event, so the chat stays due.
+    pub handoff_notes_per_hour: usize,
 }
 
 /// `max_approval_mode` when node.toml does not say: `auto`, so the owner's
@@ -295,6 +301,11 @@ pub const DEFAULT_CALLBACK_TURNS: usize = 3;
 pub const MAX_CALLBACK_TURNS: usize = 20;
 /// `[limits] callback_max_steps` by default.
 pub const DEFAULT_CALLBACK_MAX_STEPS: usize = 20;
+/// `[limits] handoff_notes_per_hour` by default (a note per stretch of
+/// work is one; the rest is room for one cancelled by a turn and asked
+/// again), and the most it may say.
+pub const DEFAULT_HANDOFF_PER_HOUR: usize = 4;
+pub const MAX_HANDOFF_PER_HOUR: usize = 60;
 
 /// The most `[limits] max_subagents` and `max_delegation_depth` may say.
 pub const MAX_SUBAGENTS: u32 = 32;
@@ -317,6 +328,7 @@ impl Default for LimitsPolicy {
             background_output_kb: harness_tools::background::DEFAULT_OUTPUT_KB,
             callback_turns: DEFAULT_CALLBACK_TURNS,
             callback_max_steps: DEFAULT_CALLBACK_MAX_STEPS,
+            handoff_notes_per_hour: DEFAULT_HANDOFF_PER_HOUR,
         }
     }
 }
@@ -513,6 +525,12 @@ impl NodePolicy {
                 self.limits.callback_turns,
                 0,
                 MAX_CALLBACK_TURNS,
+            ),
+            (
+                "handoff_notes_per_hour",
+                self.limits.handoff_notes_per_hour,
+                0,
+                MAX_HANDOFF_PER_HOUR,
             ),
             (
                 "callback_max_steps",

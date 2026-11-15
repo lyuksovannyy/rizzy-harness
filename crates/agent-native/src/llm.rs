@@ -413,6 +413,9 @@ impl Provider for LlmProvider {
         if let Some(e) = req.effort {
             opts = opts.with_reasoning_effort(effort(e));
         }
+        if let Some(n) = req.max_tokens {
+            opts = opts.with_max_tokens(n);
+        }
         // No answer without tool calls is asked of a model the loop would
         // refuse one from (the tools stay listed: Anthropic needs them once
         // the history holds tool use).
@@ -675,6 +678,7 @@ mod tests {
             cache: false,
             limits: None,
             no_tool_calls: false,
+            max_tokens: None,
         });
         assert_eq!(r.messages.len(), 2, "the note was sent as a message");
     }
@@ -708,6 +712,7 @@ mod tests {
             cache: false,
             limits: None,
             no_tool_calls: false,
+            max_tokens: None,
         });
         assert_eq!(r.messages.len(), 4);
         assert_eq!(r.tools.as_ref().map(|t| t.len()), Some(1));
@@ -739,6 +744,7 @@ mod tests {
             cache: false,
             limits: None,
             no_tool_calls: false,
+            max_tokens: None,
         });
         let parts = r.messages[0].content.parts();
         assert_eq!(parts.len(), 2);
@@ -787,6 +793,7 @@ mod tests {
             cache: true,
             limits: None,
             no_tool_calls: false,
+            max_tokens: None,
         }))
     }
 
@@ -838,6 +845,7 @@ mod tests {
             cache: false,
             limits: None,
             no_tool_calls: false,
+            max_tokens: None,
         });
         assert!(marked(&off).is_empty());
     }
@@ -869,6 +877,7 @@ mod tests {
                 cache: true,
                 limits: None,
                 no_tool_calls: false,
+                max_tokens: None,
             });
             let at = marked(&r);
             assert!(at.len() <= 4, "{n}: {at:?}");
@@ -913,6 +922,7 @@ mod tests {
                 cache: false,
                 limits: None,
                 no_tool_calls: false,
+                max_tokens: None,
             };
             let r = &r;
             async move {

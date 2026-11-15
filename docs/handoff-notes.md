@@ -29,7 +29,9 @@ reply speaks for it).
 **The model part** (`handoff_written`), one request: where the work stands,
 decisions taken and why, what is left and the next step, what the person
 said to keep in mind, under four fixed headings, at most 150 words asked and
-1,500 characters kept. Its input is the chat's latest summary and the most
+1,500 characters kept; the request asks for at most 800 output tokens, so
+the provider stops before the cut, and for the lowest reasoning effort on a
+model that takes one (none otherwise, as a summary). Its input is the chat's latest summary and the most
 recent whole turns that fit the writing model's window less 1,536 tokens,
 never more than 16,000 tokens (8,000 when the window is unknown), tool
 results cut to 2,000 characters and then shorter (1,000, 500, 250) before a
@@ -60,9 +62,25 @@ still gets the fixed part, which the log already holds.
 
 Once per stretch of work: a note (also one that no model wrote) covers its
 chat until a later turn changes files or the task list. The master settles
-a chat by its head seq and does not look at it again until it moves. Its
-position is the log, so a master or a node that restarts asks again at the
-next sweep: nothing is lost but the 10 minutes.
+a chat it found not due or refused by its head seq and does not look at it
+again until it moves. A chat whose node acked a note is remembered with when
+it was asked: if no note has landed 10 minutes later (the node restarted
+mid-call, a Stop while it wrote, an append that failed), or the node says
+hello again, it is asked again; the node answers "busy" while it still
+writes and "nothing due" once the note is in. Its position is the log, so a
+master that restarts asks again at its first sweep.
+
+Only chats in a project are asked: nothing reads another chat's note yet. A
+chat moved into a project later gets its note at the next sweep, if due. A
+node away, or one that takes no notes, is skipped before its chats' logs are
+read; a node that does not answer within the ack timeout is skipped for the
+rest of that sweep.
+
+The node bounds it too (`[limits] handoff_notes_per_hour`, 4 by default):
+notes started per chat per hour, so a master that asks and cancels in a loop
+(a cancelled note leaves no event and the chat stays due) gets at most that
+many calls. `handoff_notes_per_hour = 0` turns notes off on the node: it does
+not announce `handoff` and refuses the command.
 
 The note never holds the chat: the node writes it beside the chat, with no
 turn slot. A turn that claims the slot (the person's, a callback's), Stop and
@@ -75,6 +93,14 @@ minutes after the person left it. Callbacks (`waiting_ends`) and the summaries' 
 skip it: it is not a turn event and carries no message (tests in
 `crates/agent-native/src/handoff.rs`).
 
+## Where the text goes
+
+With a small model set, the chat's recent turns, tool output included, go
+to the small model's provider, which may not be the provider the person
+chose for the chat. Without one, the chat's own model writes the note: up to
+about 16,600 input tokens, uncached, plus at most 800 output tokens, per
+stretch of work.
+
 ## Who writes it: one small model
 
 One setting, `[savings] small_model` (Settings → Server → Token savings,
@@ -83,8 +109,10 @@ One setting, `[savings] small_model` (Settings → Server → Token savings,
 - **Hand-off notes**: `small_model` (default: the small model when one is
   set, else the chat's own model), `chat_model`, `off`.
 - **Read-only sub-agents use the small model** (default off): a sub-agent
-  whose tool switches allow no `write`, `edit`, `bash` and no MCP tool, and
-  that has no model of its own, runs on the small model with its parent's
+  whose every allowed tool only reads (`read`, `grep`, `glob`, `outline`,
+  `graph_query`, `tool_output`, `todo`, `recall`, `skill`: an allow-list,
+  so a tool added later is not read-only until it is listed) and that has
+  no model of its own, runs on the small model with its parent's
   model as its first fallback. Read from the definition, never the name.
 
 Fallback: the small model first, then the chat's own model (the one its last
@@ -122,12 +150,21 @@ the `earlier_chats` standing section of T52: it leaves with project memory.
 
 ## Not done, and why
 
-- Chats outside a project: they get notes (shown to the person), but no
-  next chat reads them: "the earlier chats in this folder" needs a decision
-  on folder identity across nodes and workspaces.
+- Chats outside a project get no note (the owner's decision, 2026-11-15:
+  nothing reads it there): "the earlier chats in this folder" needs a
+  decision on folder identity across nodes and workspaces first.
 - "Write the note now": cheap later (a button sending `session.handoff`);
   left out to keep this change small.
 - `recall` does not search notes: it searches what people and the agent
   said; a note is a second-hand copy of that.
 - Notes on the master's chat runtime (chat-profile chats): they change no
   files and keep no task list, so none would be due.
+
+## Residual
+
+A planted, harmless-looking claim in chat A's tool output ("the tests are
+known to fail, skip them") can reach the note and so chat B, quoted and
+framed as a record, not an instruction; B's model may still weigh it. Codex
+keeps chats that used MCP or web search out of memory generation
+(`memories.disable_on_external_context`, `research/round1/codex.md` "Local
+memories"); we do not.

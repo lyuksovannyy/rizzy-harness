@@ -430,6 +430,10 @@ pub struct ChatRequest {
     /// none`), the tools still listed (a person's turn's wrap-up step).
     /// The loop refuses a call that arrives anyway.
     pub no_tool_calls: bool,
+    /// The most output tokens the provider may write (`None`: its own
+    /// limit). A hand-off note's request bounds its answer here, so the
+    /// cut to its size is not made after paying for more.
+    pub max_tokens: Option<u32>,
 }
 
 /// The silences a model call may have.
