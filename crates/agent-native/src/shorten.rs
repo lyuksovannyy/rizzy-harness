@@ -281,8 +281,14 @@ fn layout(msgs: &[ChatMsg], spans: &[Span], st: &State) -> Layout {
         else {
             continue;
         };
+        // The person's messages stay, and so do the instruction files a
+        // step loaded (B.9): the log says they were sent, and they still
+        // apply to the files of the steps after the fold.
         for i in from..to {
-            skip[i] = !matches!(msgs[i], ChatMsg::User(_) | ChatMsg::UserImages { .. });
+            skip[i] = !matches!(
+                msgs[i],
+                ChatMsg::User(_) | ChatMsg::UserImages { .. } | ChatMsg::StepContext(_)
+            );
         }
         note_at.insert(open, fold_note(f));
     }

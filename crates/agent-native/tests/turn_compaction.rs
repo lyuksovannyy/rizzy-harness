@@ -108,7 +108,8 @@ impl Seen {
                 | ChatMsg::Note(t)
                 | ChatMsg::CallNote(t)
                 | ChatMsg::Opening(t)
-                | ChatMsg::Summary(t) => t.clone(),
+                | ChatMsg::Summary(t)
+                | ChatMsg::StepContext(t) => t.clone(),
                 ChatMsg::UserImages { text, .. } => text.clone(),
                 ChatMsg::Assistant { text, tool_calls } => format!(
                     "{text}\n{}",

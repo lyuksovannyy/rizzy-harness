@@ -346,27 +346,11 @@ pub(crate) fn read_user(path: &Path, cap: usize) -> UserFile {
     out
 }
 
-/// `text` with every line indented by two spaces (review of PR 120): the
-/// blocks' own lines (a lead, a `==> path <==` header, a note) never are,
-/// so nothing in one file can pose as another section's label or header,
-/// though all of them stand in one quoted block. Every line break a
-/// reader may show as one counts (`\r`, U+2028...), as in quoting.
+/// Every line of a file indented by two spaces
+/// ([`harness_tools::inside::indent_lines`], shared with the instruction
+/// files of subfolders the loop loads: B.9).
 fn indent(text: &str) -> String {
-    const BREAKS: [char; 7] = ['\n', '\r', '\x0b', '\x0c', '\u{85}', '\u{2028}', '\u{2029}'];
-    let mut out = String::with_capacity(text.len() + text.len() / 16 + 2);
-    out.push_str("  ");
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        out.push(c);
-        if BREAKS.contains(&c) {
-            // `\r\n` is one break.
-            if c == '\r' && chars.peek() == Some(&'\n') {
-                out.push(chars.next().unwrap());
-            }
-            out.push_str("  ");
-        }
-    }
-    out
+    harness_tools::inside::indent_lines(text)
 }
 
 /// [`read`] with the full cap, its text only.

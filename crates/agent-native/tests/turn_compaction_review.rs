@@ -402,6 +402,7 @@ fn kind_of(m: &ChatMsg) -> String {
         ChatMsg::UserImages { .. } => "UI".into(),
         ChatMsg::Opening(_) => "O".into(),
         ChatMsg::Summary(t) => format!("SUM({})", t.chars().take(30).collect::<String>()),
+        ChatMsg::StepContext(_) => "SC".into(),
         ChatMsg::Note(t) => format!("N({})", t.chars().take(30).collect::<String>()),
         ChatMsg::CallNote(_) => "CN".into(),
         ChatMsg::Assistant { tool_calls, .. } => format!(
@@ -1458,4 +1459,382 @@ async fn a_mentioned_file_survives_an_in_turn_summary() {
     let (compared, bad) = check_every_step(&log, &main, None, 0);
     assert!(compared > 0);
     assert!(bad.is_none(), "{}", bad.unwrap());
+}
+
+// ---- nested instruction files (B.9, T65) ---------------------------------
+
+/// `read` of a real file of the working folder: the result names it as the
+/// real `read` does (`seen`), so the folders above it are looked in.
+struct NestedRead;
+
+#[async_trait::async_trait]
+impl harness_tools::Tool for NestedRead {
+    fn name(&self) -> &'static str {
+        "read"
+    }
+    fn description(&self) -> &'static str {
+        "read a file"
+    }
+    fn schema(&self) -> Value {
+        json!({"type": "object"})
+    }
+    fn risk(&self) -> ToolRisk {
+        ToolRisk::ReadOnly
+    }
+    fn parallel_safe(&self) -> bool {
+        true
+    }
+    async fn run(&self, ctx: &ToolCtx, input: Value) -> ToolOutcome {
+        if let Some(ms) = input["delay"].as_u64() {
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+        }
+        let Some(path) = input["path"].as_str() else {
+            return ToolOutcome::err("no path");
+        };
+        let Ok(real) = ctx.workspace.join(path).canonicalize() else {
+            return ToolOutcome::err("no such file");
+        };
+        let chars = input["n"].as_u64().unwrap_or(3_000) as usize;
+        let mut out = String::new();
+        let mut k = 0;
+        while out.len() < chars {
+            k += 1;
+            out.push_str(&format!("{path} line {k}: let x = {k};\n"));
+        }
+        let mut o = ToolOutcome::ok(out);
+        o.seen = Some(FileSeen {
+            path: real.display().to_string(),
+            sha256: "0".repeat(64),
+            base: None,
+        });
+        o
+    }
+}
+
+/// Writes or deletes an instruction file as a command would: during a turn
+/// it is not taken before a later turn, and at a turn's start it is
+/// replaced or withdrawn.
+struct Change;
+
+#[async_trait::async_trait]
+impl harness_tools::Tool for Change {
+    fn name(&self) -> &'static str {
+        "change"
+    }
+    fn description(&self) -> &'static str {
+        "change a file"
+    }
+    fn schema(&self) -> Value {
+        json!({"type": "object"})
+    }
+    fn risk(&self) -> ToolRisk {
+        ToolRisk::Mutating
+    }
+    async fn run(&self, ctx: &ToolCtx, input: Value) -> ToolOutcome {
+        change_file(&ctx.workspace, &input);
+        ToolOutcome::ok("changed")
+    }
+}
+
+fn change_file(ws: &std::path::Path, input: &Value) {
+    let p = ws.join(input["path"].as_str().unwrap_or("x"));
+    match input["text"].as_str() {
+        Some(t) => {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, t).unwrap();
+        }
+        None => {
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+}
+
+/// Folders `d0`..`d7`, each with a subfolder `s`, files in both; most with
+/// an instruction file (some large, some `CLAUDE.md`), some none.
+fn nested_tree() -> (tempfile::TempDir, std::path::PathBuf) {
+    let d = tempfile::tempdir().unwrap();
+    let ws = d.path().canonicalize().unwrap();
+    for k in 0..8 {
+        for (dir, has) in [
+            (format!("d{k}"), k % 4 != 3),
+            (format!("d{k}/s"), k % 2 == 0),
+        ] {
+            std::fs::create_dir_all(ws.join(&dir)).unwrap();
+            for j in 0..3 {
+                std::fs::write(ws.join(format!("{dir}/f{j}.rs")), "fn f() {}\n").unwrap();
+            }
+            if has {
+                let name = if k == 5 { "CLAUDE.md" } else { "AGENTS.md" };
+                let body = format!("RULE-{dir}\n") + &"keep it tidy\n".repeat(k * 60);
+                std::fs::write(ws.join(&dir).join(name), body).unwrap();
+            }
+        }
+    }
+    // Older than the turn by more than the clock margin: there before it.
+    std::thread::sleep(std::time::Duration::from_millis(120));
+    (d, ws)
+}
+
+fn nested_change(r: &mut Lcg, tag: &str) -> Value {
+    let k = r.pick(8);
+    let dir = if r.pick(2) == 0 {
+        format!("d{k}")
+    } else {
+        format!("d{k}/s")
+    };
+    let path = format!("{dir}/AGENTS.md");
+    match r.pick(3) {
+        0 => json!({ "path": path }),
+        _ => {
+            json!({ "path": path, "text": format!("RULE-{dir} {tag}\n{}", "changed\n".repeat(r.pick(300) as usize)) })
+        }
+    }
+}
+
+fn nested_script(seed: u64, steps: usize, tag: &str) -> Vec<Completion> {
+    let mut r = Lcg(seed);
+    let sizes = [300u64, 1_200, 3_000, 6_000, 12_000];
+    let mut out = vec![];
+    for i in 0..steps {
+        let read = |r: &mut Lcg, k: usize| {
+            let d = r.pick(8);
+            let dir = if r.pick(2) == 0 {
+                format!("d{d}")
+            } else {
+                format!("d{d}/s")
+            };
+            ToolCallRef {
+                call_id: format!("{tag}{i}_{k}"),
+                tool: "read".into(),
+                input: json!({"path": format!("{dir}/f{}.rs", r.pick(3)), "n": sizes[r.pick(5) as usize]}),
+            }
+        };
+        let calls = match r.pick(10) {
+            0..=3 => vec![read(&mut r, 0)],
+            4..=6 => (0..2 + r.pick(3) as usize)
+                .map(|k| read(&mut r, k))
+                .collect(),
+            7 => vec![ToolCallRef {
+                call_id: format!("{tag}{i}_0"),
+                tool: "change".into(),
+                input: nested_change(&mut r, tag),
+            }],
+            _ => vec![ToolCallRef {
+                call_id: format!("{tag}{i}_0"),
+                tool: "note".into(),
+                input: json!({"text": format!("{i} {}", "n".repeat(1_000 + r.pick(3_000) as usize))}),
+            }],
+        };
+        out.push(Completion {
+            text: if r.pick(4) == 0 {
+                format!("step {i}")
+            } else {
+                String::new()
+            },
+            tool_calls: calls,
+            ..Default::default()
+        });
+    }
+    out
+}
+
+fn nested_agent() -> AgentSpec {
+    let mut a = agent();
+    a.tools = ToolSelection::List(vec!["read".into(), "note".into(), "change".into()]);
+    a
+}
+
+async fn nested_turn(
+    b: &NativeBackend,
+    host: &LogHost,
+    ws: &std::path::Path,
+    turn_id: &str,
+) -> TurnOutcome {
+    let history = host.log();
+    host.push(EventKind::TurnStarted(TurnStarted {
+        cause: None,
+        agent: None,
+        turn_id: turn_id.into(),
+        environment: None,
+    }));
+    host.push(EventKind::UserMessage(UserMessage {
+        turn_id: turn_id.into(),
+        text: "USER-ASKS read and fix.".into(),
+        attachments: vec![],
+        reply: None,
+        images: vec![],
+        queued: false,
+        files: vec![],
+    }));
+    let out = b
+        .run_turn(TurnCtx {
+            session_id: host.sid,
+            turn_id: turn_id.into(),
+            history,
+            user_text: "USER-ASKS read and fix.".into(),
+            cwd: ws.to_path_buf(),
+            model: "m".into(),
+            agent: Some(nested_agent()),
+            compare: vec![],
+            parent_session: None,
+            extra: TurnExtra::default(),
+            cancel: Default::default(),
+            host,
+        })
+        .await;
+    host.push(EventKind::TurnEnded(TurnEnded {
+        turn_id: turn_id.into(),
+        reason: out.reason,
+        usage: None,
+    }));
+    out
+}
+
+/// Item 1 with instruction files of subfolders (B.9): random steps whose
+/// reads touch new subfolders (alone, and several in one step, in parallel
+/// finishing out of order), whose commands change, add and delete
+/// instruction files during the turn, while the turn clears and folds;
+/// then a second turn after more changes (replaced, withdrawn, re-read).
+/// Every request of both turns is what the log rebuilds at that point,
+/// byte for byte, and a loaded file stays in every later request of its
+/// turn after clearing and folding.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rebuild_matches_live_with_nested_instruction_files() {
+    let mut report = vec![];
+    let mut failures = 0;
+    let (mut loaded, mut folded, mut replaced, mut withdrawn) = (0, 0, 0, 0);
+    let mut summarised = 0;
+    for seed in 1..=6u64 {
+        let parallel = seed % 2 == 0;
+        let (_d, ws) = nested_tree();
+        let sid = SessionId::new();
+        let mut host = LogHost::new(sid, vec![]);
+        host.unasked = parallel;
+        for (t, turn_id) in ["one", "two"].iter().enumerate() {
+            if t == 1 {
+                // Between the turns: more changes, read at the next start.
+                let mut r = Lcg(seed * 7 + 3);
+                for _ in 0..4 {
+                    change_file(&ws, &nested_change(&mut r, "between"));
+                }
+            }
+            let mut steps = nested_script(seed * 31 + t as u64, 70, turn_id);
+            if parallel {
+                for s in &mut steps {
+                    let n = s.tool_calls.len() as u64;
+                    for (k, c) in s.tool_calls.iter_mut().enumerate() {
+                        if c.tool == "read" && n > 1 {
+                            c.input["delay"] = json!((n - k as u64) * 3);
+                        }
+                    }
+                }
+            }
+            let n = steps.len();
+            let steps = Arc::new(steps);
+            let s2 = steps.clone();
+            let p = Model::new(
+                W,
+                Box::new(move |i| {
+                    if i < n {
+                        s2[i].clone()
+                    } else {
+                        Completion {
+                            text: "done".into(),
+                            ..Default::default()
+                        }
+                    }
+                }),
+            );
+            let b = NativeBackend::new(
+                p.clone(),
+                vec![
+                    Arc::new(NestedRead),
+                    Arc::new(Note),
+                    Arc::new(Change),
+                    Arc::new(harness_tools::todo::Todo),
+                ],
+                NativeConfig {
+                    coding_summary: true,
+                    ..Default::default()
+                },
+            );
+            let start = host.log().len();
+            let out = nested_turn(&b, &host, &ws, turn_id).await;
+            let log = host.log();
+            let (compared, bad) = check_every_step(&log, &p.main(), None, start);
+            // Which loaded files every later request of the turn holds.
+            let mut sent_rules: Vec<String> = vec![];
+            for e in &log[start..] {
+                if let Ok(EventKind::ContextSent(c)) = e.typed() {
+                    for sec in &c.sections {
+                        if sec.key.starts_with("instructions:") {
+                            if sec.text.is_empty() {
+                                withdrawn += 1;
+                            } else {
+                                loaded += 1;
+                                if sec.note.is_some() {
+                                    replaced += 1;
+                                }
+                                if c.frame == ContextFrame::Step
+                                    && let Some(label) = sec.text.lines().next()
+                                {
+                                    sent_rules.push(format!("| {label}"));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let folds = host
+                .shortened()
+                .iter()
+                .filter(|c| c.folded.is_some())
+                .count();
+            folded += folds;
+            // Summaries of earlier turns made inside this turn (T59).
+            summarised += log[start..]
+                .iter()
+                .filter(|e| e.kind == "history_summarized")
+                .count();
+            let last = p.main().last().cloned();
+            let lost: Vec<&String> = sent_rules
+                .iter()
+                .filter(|r| {
+                    last.as_ref().is_some_and(|s| {
+                        !s.msgs
+                            .iter()
+                            .any(|m| matches!(m, ChatMsg::User(t) if t.contains(r.as_str())))
+                    })
+                })
+                .collect();
+            report.push(format!(
+                "seed {seed} turn {turn_id} parallel {parallel}: {:?}, {} requests, {folds} folds, compared {compared}, {}, lost {lost:?}",
+                out.reason,
+                p.main().len(),
+                bad.as_deref().unwrap_or("all equal")
+            ));
+            if bad.is_some() || !lost.is_empty() {
+                failures += 1;
+            }
+        }
+    }
+    for l in &report {
+        eprintln!("{l}");
+    }
+    eprintln!(
+        "loaded {loaded}, replaced {replaced}, withdrawn {withdrawn}, folds {folded}, in-turn \
+         summaries of earlier turns {summarised}"
+    );
+    assert!(
+        summarised > 0,
+        "the case happened: a summary of earlier turns inside a turn"
+    );
+    assert_eq!(
+        failures, 0,
+        "rebuild differs from live, or a loaded file was lost"
+    );
+    assert!(
+        loaded > 10 && replaced > 0 && withdrawn > 0 && folded > 0,
+        "the cases happened"
+    );
 }

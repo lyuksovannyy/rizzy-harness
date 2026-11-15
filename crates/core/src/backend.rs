@@ -318,6 +318,12 @@ pub struct TurnExtra {
     /// right after this turn's `turn_started`, and the loop sends them, in
     /// order, before this turn's own message. Set only by the node.
     pub queued: Vec<crate::event::UserMessage>,
+    /// For a sub-agent's turn: when the turn that delegated to it (the
+    /// first of its chain) began. A subfolder's instruction file changed
+    /// since then (by the parent agent too) is not taken in this turn
+    /// (ADOPTION_PLAN B.9, PLAN.md T65). `None`: this turn's own start. Set
+    /// only by the node.
+    pub changes_since: Option<std::time::SystemTime>,
 }
 
 /// The master's context for one person's message (sent with
