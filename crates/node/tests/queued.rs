@@ -741,7 +741,9 @@ async fn a_message_after_an_error_starts_the_next_turn() {
 
 /// Review ST-8: a turn the node starts for waiting messages takes the
 /// savings, not the last turn's per-turn context (a routine's note, a
-/// recall for other words).
+/// recall for other words). The first turn's message keeps its own
+/// context in the history (X.1: it is rebuilt as it was sent); the new
+/// turn's message does not carry it again.
 #[tokio::test]
 async fn the_next_turn_does_not_take_the_last_turns_context() {
     let model = Gated::new(|_, _| answer("ok"));
@@ -749,7 +751,7 @@ async fn the_next_turn_does_not_take_the_last_turns_context() {
     let sid = n.create(ApprovalMode::Auto).await;
     n.send_json(
         json!({"type": "session.prompt", "req_id": "p1", "session_id": sid,
-        "text": "hello", "context": "CTX-ONLY-FOR-THE-FIRST-TURN"}),
+        "text": "hello", "context": {"turn": "CTX-ONLY-FOR-THE-FIRST-TURN"}}),
     );
     assert_eq!(n.ack("p1").await, Ok(()));
     model.entered.notified().await;
@@ -760,7 +762,15 @@ async fn the_next_turn_does_not_take_the_last_turns_context() {
     let reqs = model.requests();
     assert_eq!(holding(&reqs[0], "CTX-ONLY-FOR-THE-FIRST-TURN"), 1);
     assert_eq!(holding(&reqs[1], "and then"), 1);
-    assert_eq!(holding(&reqs[1], "CTX-ONLY-FOR-THE-FIRST-TURN"), 0);
+    assert_eq!(holding(&reqs[1], "CTX-ONLY-FOR-THE-FIRST-TURN"), 1);
+    let own = reqs[1]
+        .messages
+        .iter()
+        .rev()
+        .find_map(|m| m.user_text())
+        .unwrap();
+    assert!(own.contains("and then"), "{own}");
+    assert!(!own.contains("CTX-ONLY-FOR-THE-FIRST-TURN"), "{own}");
 }
 
 /// Review ST-5: a message that names another agent (the picker, or an

@@ -240,6 +240,21 @@ fn last_context(s: &S) -> String {
         .unwrap_or_default()
 }
 
+/// The latest user message of the last request that holds `needle`.
+fn latest_holding(s: &S, needle: &str) -> String {
+    let reqs = s.rec.reqs.lock().unwrap();
+    reqs.last()
+        .unwrap()
+        .messages
+        .iter()
+        .rev()
+        .find_map(|m| match m {
+            ChatMsg::User(u) if u.contains(needle) => Some(u.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
 /// The tools the model was offered in the last request.
 fn last_tools(s: &S) -> Vec<String> {
     let reqs = s.rec.reqs.lock().unwrap();
@@ -346,7 +361,13 @@ async fn all_active_project_facts_reach_a_turn_that_shares_no_words_with_them() 
     // A proposal waiting for review is not part of it.
     say(&s, &sid, "remember project: an unconfirmed guess").await;
     say(&s, &sid, "continue").await;
-    let ctx = last_context(&s);
+    // The project's part did not change since the first message, so it is
+    // not sent again (X.1): the model has it in that message.
+    let msg = latest_holding(&s, "What this project has established");
+    // The block only: the first message's own text is the proposal.
+    let ctx = harness_agent_native::provider::split_context(&msg)
+        .map(|(c, _)| c)
+        .unwrap_or_default();
     let at = |needle: &str| {
         ctx.find(needle)
             .unwrap_or_else(|| panic!("{needle:?} missing from {ctx}"))
