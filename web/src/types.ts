@@ -263,6 +263,16 @@ export type Item =
   | { type: "approval_mode_changed"; mode: ApprovalMode; requested?: ApprovalMode }
   | { type: "step_limit_changed"; max_steps: number; requested?: number }
   | { type: "summary"; through_seq: number; text: string }
+  /** What the model is sent was shortened in this turn (`context_shortened`, X.15): older tool results cleared, the first `steps` steps summarised (`text` is the model's). The chat keeps showing everything. */
+  | {
+      type: "shortened";
+      turn_id: string;
+      cleared: boolean;
+      steps?: number;
+      text?: string;
+      tokens_before: number;
+      tokens_after: number;
+    }
   /** The turn's main model failed or is unavailable: `model` (prefixed) answered instead of `from`. */
   | { type: "fallback"; turn_id: string; model: string; from: string; reason?: string | null }
   /** A file the user saved as an artifact ("Save as artifact"). */

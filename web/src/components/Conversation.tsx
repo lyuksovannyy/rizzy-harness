@@ -40,7 +40,7 @@ import { useAvatarState } from "./avatarState";
 import { Markdown } from "./Markdown";
 import { NodeBadge } from "./NodeBadge";
 import { ExecBadge } from "./ExecBadge";
-import { ContextMeter } from "./ContextMeter";
+import { compactTokens, ContextMeter } from "./ContextMeter";
 import { RetryNote } from "./RetryNote";
 import { LiveCtx } from "../lib/liveCtx";
 import { repliedBlock, ReplyBubble } from "./ReplyBubble";
@@ -650,6 +650,30 @@ export default function Conversation(props: {
                         <p>{it.text}</p>
                       </details>
                     );
+                  case "shortened": {
+                    const what = [
+                      it.cleared ? t("conv.shortCleared") : "",
+                      it.steps ? t("conv.shortSteps", { n: String(it.steps) }) : "",
+                    ]
+                      .filter(Boolean)
+                      .join(", ");
+                    const line = t("conv.shortened", {
+                      what,
+                      before: compactTokens(it.tokens_before),
+                      after: compactTokens(it.tokens_after),
+                    });
+                    // The summary is the model's text: shown as text.
+                    return it.text ? (
+                      <details key={i} className="divider summary">
+                        <summary>{line}</summary>
+                        <p>{it.text}</p>
+                      </details>
+                    ) : (
+                      <div key={i} className="divider">
+                        {line}
+                      </div>
+                    );
+                  }
                   case "turn_end": {
                     const cp = view.checkpoints[it.turn_id];
                     const laterChanges = view.items.slice(i + 1).some((x) => {

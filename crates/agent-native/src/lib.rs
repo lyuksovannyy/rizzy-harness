@@ -25,6 +25,7 @@ pub mod repeat;
 #[cfg(test)]
 mod repeat_tests;
 pub mod retry;
+pub mod shorten;
 pub mod style;
 #[cfg(test)]
 mod todo_tests;
@@ -533,7 +534,7 @@ pub const TODO_LEAD: &str = "[harness] Your task list";
 
 /// The task list given back with a summary: one harness line, then every
 /// item quoted (the items are the model's text).
-fn todo_note(items: &[harness_core::todo::TodoItem]) -> String {
+pub(crate) fn todo_note(items: &[harness_core::todo::TodoItem]) -> String {
     format!(
         "{TODO_LEAD} as it stood when that summary was written, from your `todo` tool (call it \
          with the whole list to change it). The {} item(s) below each start with \"{OUTPUT_QUOTE}\"; \
@@ -567,6 +568,36 @@ fn note_compact_failure(failures: &mut u32, model: &str) {
             "compaction keeps failing; not trying again this turn"
         );
     }
+}
+
+/// Where a summary of `recent` must stop so that the next turn's opening
+/// still finds in the log what it reads there: before anything after the
+/// last `turn_ended` (a background end a callback turn's opening takes),
+/// and before the turn in which a queued message no `queued_delivered`
+/// names was sent (the next turn reads it at its start; the node's
+/// `unread`).
+fn opening_cut(recent: &[RawEvent]) -> usize {
+    let mut end = recent
+        .iter()
+        .rposition(|e| e.kind == "turn_ended")
+        .map_or(0, |i| i + 1);
+    let mut unread: Vec<(u64, usize)> = Vec::new();
+    for (i, e) in recent.iter().enumerate() {
+        match e.typed() {
+            Ok(EventKind::UserMessage(m)) if m.queued => unread.push((e.seq, i)),
+            Ok(EventKind::QueuedDelivered(d)) => unread.retain(|(s, _)| !d.seqs.contains(s)),
+            _ => {}
+        }
+    }
+    if let Some(&(_, first)) = unread.first()
+        && first < end
+    {
+        end = recent[..=first]
+            .iter()
+            .rposition(|e| e.kind == "turn_started")
+            .unwrap_or(0);
+    }
+    end
 }
 
 /// The latest summary in a history, and the events after it.
@@ -616,22 +647,38 @@ fn quoted_part(out: &mut String, label: &str, text: &str) {
 /// are built by `history_to_messages` and are not changed by it.
 /// `todo`: the task list as it stood at the end of `events`, shown last
 /// under its own label.
+#[cfg(test)]
 fn transcript(
     prev: Option<&str>,
     events: &[RawEvent],
     todo: Option<&[harness_core::todo::TodoItem]>,
+) -> String {
+    transcript_of(
+        prev,
+        &summary_messages(events),
+        todo,
+        TRANSCRIPT_RESULT_CHARS,
+    )
+}
+
+/// [`transcript`] of messages, each tool result cut to `cut` characters.
+fn transcript_of(
+    prev: Option<&str>,
+    msgs: &[ChatMsg],
+    todo: Option<&[harness_core::todo::TodoItem]>,
+    cut: usize,
 ) -> String {
     let mut out = String::new();
     if let Some(p) = prev {
         // Model text too: the last summary, read from the log.
         quoted_part(&mut out, PART_SUMMARY, p);
     }
-    for m in summary_messages(events) {
-        match &m {
+    for m in msgs {
+        match m {
             // Images reach the summariser by name only. The text is the
             // person's with each attachment's content after it.
             ChatMsg::User(_) | ChatMsg::UserImages { .. } => {
-                let t = images::as_text(&m).unwrap_or_default();
+                let t = images::as_text(m).unwrap_or_default();
                 quoted_part(&mut out, PART_USER, &t);
             }
             ChatMsg::Assistant { text, tool_calls } => {
@@ -649,22 +696,22 @@ fn transcript(
                 }
             }
             ChatMsg::Tool { content, .. } => {
-                let short: String = content.chars().take(TRANSCRIPT_RESULT_CHARS).collect();
+                let short: String = content.chars().take(cut).collect();
                 quoted_part(&mut out, PART_RESULT, &short);
                 // Said where it is cut: without it a summariser read the
                 // cut text as all the assistant saw and "corrected" an
                 // answer taken from the rest (live test 2026-11-15).
                 let total = content.chars().count();
-                if total > TRANSCRIPT_RESULT_CHARS {
+                if total > cut {
                     out.push_str(&format!(
                         "{NOTE_LEAD} The tool result above is cut here for this summary: \
-                         {TRANSCRIPT_RESULT_CHARS} of its {total} characters are shown, and the \
+                         {cut} of its {total} characters are shown, and the \
                          assistant saw all of it.\n\n"
                     ));
                 }
             }
             // The harness's own words, not the user's: as they are.
-            ChatMsg::Note(t) | ChatMsg::CallNote(t) | ChatMsg::Opening(t) => {
+            ChatMsg::Note(t) | ChatMsg::CallNote(t) | ChatMsg::Opening(t) | ChatMsg::Summary(t) => {
                 out.push_str(&format!("{t}\n\n"))
             }
             ChatMsg::System(_) => {}
@@ -995,6 +1042,7 @@ pub fn summary_messages(history: &[RawEvent]) -> Vec<ChatMsg> {
         history,
         &Rebuild {
             unread_too: true,
+            transcript: true,
             ..Default::default()
         },
     )
@@ -1027,6 +1075,11 @@ pub struct Rebuild<'a> {
     /// The agent the request is for: another agent's earlier answers are
     /// marked with its name.
     pub agent: Option<&'a str>,
+    /// For the summariser's transcript: what the log shortened in a turn
+    /// (`context_shortened`, X.15) is shown as [`shorten::How::TRANSCRIPT`]
+    /// says (results whole, a fold's note on its own), not as requests
+    /// send it.
+    pub transcript: bool,
 }
 
 /// The harness's line in front of an earlier answer of another agent of
@@ -1051,8 +1104,35 @@ fn unanswered_note(reason: TurnEndReason) -> String {
     )
 }
 
-/// The provider conversation from a session log, as `how` says.
+/// The provider conversation from a session log, as `how` says, with what
+/// the log shortened (`context_shortened`, X.15) applied.
 pub fn rebuild(history: &[RawEvent], how: &Rebuild<'_>) -> Vec<ChatMsg> {
+    let (msgs, spans) = rebuild_spans(history, how);
+    let how = if how.transcript {
+        shorten::How::TRANSCRIPT
+    } else {
+        shorten::How::REQUEST
+    };
+    shorten::apply(&msgs, &spans, &shorten::State::of(history), how)
+}
+
+/// [`rebuild`] before anything shortened is applied, and where each turn's
+/// messages begin: what the loop keeps, shortening each request itself.
+pub fn rebuild_spans(
+    history: &[RawEvent],
+    how: &Rebuild<'_>,
+) -> (Vec<ChatMsg>, Vec<shorten::Span>) {
+    // Where each turn's messages begin; a message of no turn of its own
+    // (a tool result, a note) belongs to the turn before it.
+    let mut spans: Vec<shorten::Span> = Vec::new();
+    let mark = |spans: &mut Vec<shorten::Span>, at: usize, turn: &str| {
+        if spans.last().is_none_or(|s| s.turn_id != turn) {
+            spans.push(shorten::Span {
+                turn_id: turn.to_string(),
+                start: at,
+            });
+        }
+    };
     // Parallel answers: only the chosen one (default: the first) is history.
     let mut chosen: std::collections::HashMap<String, String> = Default::default();
     // The turns that have a person's message, and the agents' names.
@@ -1113,6 +1193,7 @@ pub fn rebuild(history: &[RawEvent], how: &Rebuild<'_>) -> Vec<ChatMsg> {
             }
             EventKind::UserMessage(m) => {
                 close_open(&mut out, &mut open);
+                mark(&mut spans, out.len(), &m.turn_id);
                 let env = opening
                     .take()
                     .filter(|(turn, _)| *turn == m.turn_id)
@@ -1140,10 +1221,12 @@ pub fn rebuild(history: &[RawEvent], how: &Rebuild<'_>) -> Vec<ChatMsg> {
                 let last = if opens { taken.pop() } else { None };
                 for m in &taken {
                     close_open(&mut out, &mut open);
+                    mark(&mut spans, out.len(), &d.turn_id);
                     out.push(queued_msg(m));
                 }
                 if let Some(m) = last {
                     close_open(&mut out, &mut open);
+                    mark(&mut spans, out.len(), &d.turn_id);
                     let b = block(&d.turn_id);
                     let text = context::opening(
                         env.as_deref(),
@@ -1157,6 +1240,9 @@ pub fn rebuild(history: &[RawEvent], how: &Rebuild<'_>) -> Vec<ChatMsg> {
             EventKind::AssistantMessage(m) if !keep(&m) => {}
             EventKind::AssistantMessage(m) => {
                 close_open(&mut out, &mut open);
+                if !m.text.is_empty() || !m.tool_calls.is_empty() {
+                    mark(&mut spans, out.len(), &m.turn_id);
+                }
                 if let Some((turn, answered)) = &mut opened
                     && *turn == m.turn_id
                 {
@@ -1228,6 +1314,13 @@ pub fn rebuild(history: &[RawEvent], how: &Rebuild<'_>) -> Vec<ChatMsg> {
                 close_open(&mut out, &mut open);
                 opening = None;
                 provider::open_callback(&mut out, c.callback_ids());
+                // The opening took the notes before it into itself: the
+                // turn begins where it stands.
+                let at = out.len().saturating_sub(1);
+                while spans.last().is_some_and(|s| s.start >= at) {
+                    spans.pop();
+                }
+                mark(&mut spans, at, &turn_id);
                 if let Some(ChatMsg::Opening(t)) = out.last_mut() {
                     context::after_callback(t, block(&turn_id).as_deref(), environment.as_deref());
                 }
@@ -1245,7 +1338,7 @@ pub fn rebuild(history: &[RawEvent], how: &Rebuild<'_>) -> Vec<ChatMsg> {
         left.sort_by_key(|(seq, _)| *seq);
         out.extend(left.iter().map(|(_, m)| queued_msg(m)));
     }
-    out
+    (out, spans)
 }
 
 /// A message the person sent while a turn ran, as the model reads it where
@@ -1596,6 +1689,8 @@ impl NativeBackend {
         }
         let mut usage = Usage::default();
         let (mut summary, mut recent) = split_summary(&ctx.history);
+        // What the log shortened (X.15): applied to every request.
+        let mut shortening = shorten::State::of(&ctx.history);
         // The file tools' guard as the log leaves it (after a restart or a
         // failed append, the log decides).
         self.seen.sync(ctx.session_id, &ctx.history);
@@ -1613,6 +1708,17 @@ impl NativeBackend {
         usage.window = window_of(&model);
         usage.summary_at = Some(limit as u64);
         usage.model = Some(model.clone());
+        // X.15: where results may be cleared inside a turn, the model is told
+        // once, in the system prompt (the same bytes every turn, so cached).
+        // With a known window, clearing (X.15) replaces the count-based mask
+        // (`keep_tool_outputs`): the mask hid outputs by count every `keep`
+        // steps, rewrote the cache that often and kept clearing from ever
+        // acting on a large window (review M1). It stays for an unknown
+        // window, and as the last resort after a provider's refusal.
+        if window_of(&model).is_some() {
+            system = format!("{system}\n\n{}", shorten::SYSTEM_NOTE);
+            keep = None;
+        }
         // Failed or useless summaries this turn; two stop further attempts.
         let mut compact_failures = 0u32;
         let estimate = |events: &[RawEvent]| {
@@ -1632,6 +1738,7 @@ impl NativeBackend {
                     window_of(&model),
                     summary.as_deref(),
                     recent,
+                    KEEP_TURNS,
                     limit / 4,
                     &mut usage,
                     &mut compact_failures,
@@ -1754,7 +1861,9 @@ impl NativeBackend {
                     None => base_system.clone(),
                 };
                 let mut m = vec![ChatMsg::System(system)];
-                m.extend(rebuild(
+                // As the log has it: what it shortened is applied to each
+                // request ([`shorten::apply`]), with this turn's own.
+                let (h, spans) = rebuild_spans(
                     recent,
                     &Rebuild {
                         blocks: true,
@@ -1762,10 +1871,18 @@ impl NativeBackend {
                         agent: author.as_deref(),
                         ..Default::default()
                     },
-                ));
-                m
+                );
+                m.extend(h);
+                let spans: Vec<shorten::Span> = spans
+                    .into_iter()
+                    .map(|s| shorten::Span {
+                        start: s.start + 1,
+                        ..s
+                    })
+                    .collect();
+                (m, spans)
             };
-        let mut messages = history_msgs(summary.as_deref(), recent, plan.as_ref());
+        let (mut messages, mut spans) = history_msgs(summary.as_deref(), recent, plan.as_ref());
         // The opening as the loop sends it and the log rebuilds it.
         let callback_base = callback.as_ref().map(|ids| {
             provider::open_callback(&mut messages, ids);
@@ -1817,8 +1934,27 @@ impl NativeBackend {
             host.images(&wanted).await
         };
         images::attach(&mut messages, &loaded);
+        // Each earlier turn's messages, then this turn's own (X.15).
+        let with_turn = |spans: &[shorten::Span], turn_idx: usize| {
+            let mut all: Vec<shorten::Span> = spans
+                .iter()
+                .filter(|s| s.start < turn_idx)
+                .cloned()
+                .collect();
+            all.push(shorten::Span {
+                turn_id: ctx.turn_id.clone(),
+                start: turn_idx,
+            });
+            all
+        };
         if !ctx.compare.is_empty() {
-            return self.compare(&ctx, messages, usage, author, ui).await;
+            let sent = shorten::apply(
+                &messages,
+                &with_turn(&spans, turn_idx),
+                &shortening,
+                shorten::How::REQUEST,
+            );
+            return self.compare(&ctx, sent, usage, author, ui).await;
         }
         let background_on = matches!(
             background_access(&ctx, host),
@@ -1923,6 +2059,69 @@ impl NativeBackend {
         // wrap-up it led to hides every tool output (review F3).
         let mut overflow_at: Option<usize> = None;
         let mut mask_all = false;
+        // After a summary of earlier turns made inside this turn: the
+        // history before this turn's messages is rebuilt from what is left.
+        // A standing section this turn did not send because a turn now
+        // summarised had it is sent again: the opening is rebuilt with
+        // everything the window lacks, and recorded again (the last record
+        // of a turn is the one its opening is rebuilt with); a block
+        // nothing is left for is recorded empty.
+        macro_rules! rebase {
+            ($text:expr, $through:expr) => {{
+                let through_seq: u64 = $through;
+                let start = recent.partition_point(|ev| ev.seq <= through_seq);
+                recent = &recent[start..];
+                summary = Some($text);
+                let this_turn = messages.split_off(turn_idx);
+                let own = user_idx - turn_idx;
+                let replanned = context::plan(&sections, &context::had(recent), frame);
+                let (m, sp) = history_msgs(summary.as_deref(), recent, replanned.as_ref());
+                messages = m;
+                spans = sp;
+                // A callback turn's opening already holds the notes the
+                // rebuilt history ends with.
+                if callback.is_some() {
+                    while matches!(messages.last(), Some(ChatMsg::Note(_))) {
+                        messages.pop();
+                    }
+                }
+                turn_idx = messages.len();
+                user_idx = turn_idx + own;
+                messages.extend(this_turn);
+                if replanned != plan {
+                    let record = replanned.clone().unwrap_or(context::Plan {
+                        frame,
+                        sections: vec![],
+                    });
+                    plan = replanned;
+                    messages[user_idx] = opening_msg(plan.as_ref());
+                    if host.emit(record.record(&ctx.turn_id)).await.is_err() {
+                        return stopped(usage);
+                    }
+                }
+                images::attach(&mut messages, &loaded);
+            }};
+        }
+        // Shortening inside the turn (X.15): the line, the cut sizes and
+        // the tail of the answering model's window; unknown, nothing is
+        // shortened inside a turn (the reactive path below stays).
+        let limits_of = |m: &str| {
+            window_of(m)
+                .and_then(|w| shorten::Limits::of(w, compact::threshold(configured, Some(w))))
+        };
+        let folding = configured != Some(0);
+        let mut folds = 0u32;
+        // No check before the request has grown by `min_cut` since the last.
+        let mut next_check = 0u64;
+        // The provider's count of the last request less our estimate of it
+        // (Pi's measure: reported usage, plus an estimate of what is new).
+        let mut calib = 0i64;
+        // The task list as it stands, for a fold (`todo_updated`).
+        let mut todo_now = ctx
+            .history
+            .last()
+            .and_then(|e| harness_core::todo::as_of(&ctx.history, e.seq))
+            .filter(|_| offers_todo);
         let mut steps = 0usize;
         loop {
             max_steps = cap_now();
@@ -1987,7 +2186,189 @@ impl NativeBackend {
                 Err(_) => return stopped(usage),
             }
             let message_id = new_id();
-            let mut sent = messages.clone();
+            // X.15: a request above the window's line is shortened, in one
+            // large cut, before it is sent.
+            if let Some(lim) = limits_of(&model) {
+                let size = |st: &shorten::State, msgs: &[ChatMsg], sp: &[shorten::Span]| {
+                    let mut m = shorten::apply(msgs, sp, st, shorten::How::REQUEST);
+                    if let Some(k) = keep {
+                        mask::mask_old_outputs(&mut m, k);
+                    }
+                    // The provider's correction, bounded both ways: real
+                    // tokenizers stay within about 0.6 to 1.6 times our
+                    // four characters a token (code, other languages), so
+                    // a quarter down and the estimate again up (twice it)
+                    // keep every honest correction, while a router that
+                    // reports nonsense cannot make every step look full
+                    // and summarise again and again (review M2).
+                    let est = provider::estimate_tokens(&m) as i64;
+                    (est + calib.clamp(-est / 4, est)).max(0) as u64
+                };
+                let mut all = with_turn(&spans, turn_idx);
+                let before = size(&shortening, &messages, &all);
+                if before > lim.at.max(next_check) {
+                    let old = shortening.clone();
+                    let mut new = shortening.clone();
+                    let mut cleared = None;
+                    // Tier 1: the oldest results before the tail, until the
+                    // request is at the target; only for a cut worth it.
+                    if let Some(tail) = shorten::tail_start(&messages, lim.tail)
+                        && let Some((point, saved)) = shorten::plan_clear(
+                            &messages,
+                            &all,
+                            &new,
+                            tail,
+                            before.saturating_sub(lim.target),
+                        )
+                        && saved >= lim.min_cut
+                    {
+                        new.cleared = Some(point.clone());
+                        cleared = Some(point);
+                    }
+                    let mut now = size(&new, &messages, &all);
+                    // The newest step alone is over the line (many results
+                    // in one step, live test 2026-11-15: 30 reads in one
+                    // message): its older results too, all but its last.
+                    if now > lim.at
+                        && let Some(last) = shorten::last_result(&messages)
+                        && let Some((point, saved)) = shorten::plan_clear(
+                            &messages,
+                            &all,
+                            &new,
+                            last,
+                            now.saturating_sub(lim.target),
+                        )
+                        && saved >= lim.min_cut
+                    {
+                        new.cleared = Some(point.clone());
+                        cleared = Some(point);
+                        now = size(&new, &messages, &all);
+                    }
+                    // Tier 2, when clearing leaves too little room before
+                    // the line: earlier turns into the summary, then this
+                    // turn's steps before the tail into one of its own.
+                    let mut folded = None;
+                    let room = lim.at - lim.min_cut;
+                    if now > room && folding && folds < shorten::MAX_FOLDS {
+                        let earlier = recent.iter().any(|e| e.kind == "turn_started");
+                        if earlier {
+                            let Ok(c) = self
+                                .compact(
+                                    &ctx,
+                                    &model,
+                                    window_of(&model),
+                                    summary.as_deref(),
+                                    recent,
+                                    0,
+                                    lim.min_cut as usize,
+                                    &mut usage,
+                                    &mut compact_failures,
+                                )
+                                .await
+                            else {
+                                return stopped(usage);
+                            };
+                            if let Some((text, through_seq)) = c {
+                                rebase!(text, through_seq);
+                                all = with_turn(&spans, turn_idx);
+                                now = size(&new, &messages, &all);
+                            }
+                        }
+                        let span = all.last().cloned().expect("this turn's span");
+                        if now > room
+                            && let Some(tail) = shorten::tail_start(&messages, lim.tail)
+                            && let Some((steps_n, range)) =
+                                shorten::plan_fold(&messages, &span, &new, tail)
+                            // Only when it can make room: with the steps gone
+                            // altogether the request must be under the room
+                            // (a system prompt and tools that fill the window
+                            // are left to the last resort, not summarised
+                            // again and again; review, low).
+                            && now.saturating_sub(provider::estimate_tokens(&messages[range.clone()]))
+                                <= room
+                        {
+                            let prev = new.folds.get(&ctx.turn_id).map(|f| f.text.clone());
+                            let text = self
+                                .fold_steps(
+                                    &ctx,
+                                    &model,
+                                    window_of(&model),
+                                    prev.as_deref(),
+                                    &messages[range],
+                                    harness_core::event::own_words(&ctx.user_text),
+                                    &mut usage,
+                                    &mut compact_failures,
+                                )
+                                .await;
+                            if let Some(text) = text {
+                                let f = Folded {
+                                    steps: steps_n,
+                                    text,
+                                    todo: todo_now.clone(),
+                                };
+                                let mut with = new.clone();
+                                with.folds.insert(ctx.turn_id.clone(), f.clone());
+                                let after = size(&with, &messages, &all);
+                                // The shrink check (A.7): the summary is at
+                                // most nine tenths of what it replaces.
+                                let got = provider::estimate_tokens(&[ChatMsg::Note(
+                                    shorten::fold_note(&f),
+                                )]);
+                                let replaced = got + now.saturating_sub(after);
+                                if got * 10 > replaced * SUMMARY_MAX_TENTHS {
+                                    tracing::warn!(
+                                        model = %model,
+                                        summary_tokens = got,
+                                        replaced_tokens = replaced,
+                                        "summary of the turn's steps does not shrink them; discarded"
+                                    );
+                                    note_compact_failure(&mut compact_failures, &model);
+                                } else {
+                                    folds += 1;
+                                    new = with;
+                                    folded = Some(f);
+                                }
+                            }
+                        }
+                    }
+                    let after = size(&new, &messages, &all);
+                    if cleared.is_some() || folded.is_some() {
+                        if host
+                            .emit(EventKind::ContextShortened(ContextShortened {
+                                turn_id: ctx.turn_id.clone(),
+                                cleared,
+                                folded,
+                                tokens_before: before,
+                                tokens_after: after,
+                            }))
+                            .await
+                            .is_err()
+                        {
+                            return stopped(usage);
+                        }
+                        // A result the model can no longer see may be read
+                        // again without counting as a loop (once per call).
+                        for (tool, input) in shorten::hidden(&messages, &all, &old, &new) {
+                            guard.forgive(harness_tools::call_key(&ctx.cwd, &tool, &input));
+                        }
+                        shortening = new;
+                    }
+                    next_check = after + lim.min_cut;
+                    if ctx.cancel.is_cancelled() {
+                        return TurnOutcome {
+                            reason: TurnEndReason::Cancelled,
+                            usage: Some(usage),
+                            error: None,
+                        };
+                    }
+                }
+            }
+            let mut sent = shorten::apply(
+                &messages,
+                &with_turn(&spans, turn_idx),
+                &shortening,
+                shorten::How::REQUEST,
+            );
             if let Some(k) = keep {
                 mask::mask_old_outputs(&mut sent, k);
             }
@@ -2132,6 +2513,7 @@ impl NativeBackend {
                                 window_of(&model),
                                 summary.as_deref(),
                                 recent,
+                                KEEP_TURNS,
                                 0,
                                 &mut usage,
                                 &mut compact_failures,
@@ -2143,41 +2525,7 @@ impl NativeBackend {
                         c
                     };
                     if let Some((text, through_seq)) = compacted {
-                        let start = recent.partition_point(|ev| ev.seq <= through_seq);
-                        recent = &recent[start..];
-                        summary = Some(text);
-                        let this_turn = messages.split_off(turn_idx);
-                        let own = user_idx - turn_idx;
-                        // A standing section this turn did not send because
-                        // a turn now summarised had it is sent again: the
-                        // opening is rebuilt with everything the window
-                        // lacks, and recorded again (the last record of a
-                        // turn is the one its opening is rebuilt with); a
-                        // block nothing is left for is recorded empty.
-                        let replanned = context::plan(&sections, &context::had(recent), frame);
-                        messages = history_msgs(summary.as_deref(), recent, replanned.as_ref());
-                        // A callback turn's opening already holds the notes
-                        // the rebuilt history ends with.
-                        if callback.is_some() {
-                            while matches!(messages.last(), Some(ChatMsg::Note(_))) {
-                                messages.pop();
-                            }
-                        }
-                        turn_idx = messages.len();
-                        user_idx = turn_idx + own;
-                        messages.extend(this_turn);
-                        if replanned != plan {
-                            let record = replanned.clone().unwrap_or(context::Plan {
-                                frame,
-                                sections: vec![],
-                            });
-                            plan = replanned;
-                            messages[user_idx] = opening_msg(plan.as_ref());
-                            if host.emit(record.record(&ctx.turn_id)).await.is_err() {
-                                return stopped(usage);
-                            }
-                        }
-                        images::attach(&mut messages, &loaded);
+                        rebase!(text, through_seq);
                     }
                     if ctx.cancel.is_cancelled() {
                         return TurnOutcome {
@@ -2240,6 +2588,9 @@ impl NativeBackend {
             if let Some(u) = &completion.usage {
                 usage.add(u);
                 usage.context_tokens = u.input_tokens;
+                if u.input_tokens > 0 {
+                    calib = u.input_tokens as i64 - provider::estimate_tokens(&req.messages) as i64;
+                }
             }
             if host
                 .emit(self.assistant_message(
@@ -2774,6 +3125,9 @@ impl NativeBackend {
                     return stopped(usage);
                 }
                 // The task list the tool accepted, before its result.
+                if outcome.ok && offers_todo && outcome.todo.is_some() {
+                    todo_now = outcome.todo.clone();
+                }
                 if let Some(items) = outcome.todo.clone().filter(|_| outcome.ok)
                     && host
                         .emit(EventKind::TodoUpdated(TodoUpdated {
@@ -3104,11 +3458,14 @@ impl NativeBackend {
         }
     }
 
-    /// Summarise everything before the last `KEEP_TURNS` turns with
-    /// `model`, whose context window is `window` when known. The old part
-    /// is read in pieces at turn boundaries that each fit the window (with
-    /// the summary so far), so no part of it is dropped unread; a single
-    /// turn larger than the window stops it there. Each piece's summary
+    /// Summarise everything before the last `keep` turns (`KEEP_TURNS`
+    /// between turns; 0 inside a turn, X.15) with `model`, whose context
+    /// window is `window` when known. The old part is read in pieces at
+    /// turn boundaries that each fit the window (with the summary so far),
+    /// so no part of it is dropped unread; a single turn larger than the
+    /// window is read with its tool results cut shorter (down to 250
+    /// characters each), and only one that does not fit even so stops it
+    /// there. Each piece's summary
     /// covers everything up to its `through_seq` and is emitted at once,
     /// so a cancel or failure midway leaves the last one valid. Skipped
     /// when the old part is under `min_old` tokens. Returns the newest
@@ -3124,6 +3481,7 @@ impl NativeBackend {
         window: Option<u64>,
         prev: Option<&str>,
         recent: &[RawEvent],
+        keep: usize,
         min_old: usize,
         usage: &mut Usage,
         failures: &mut u32,
@@ -3137,10 +3495,18 @@ impl NativeBackend {
             .filter(|(_, e)| e.kind == "turn_started")
             .map(|(i, _)| i)
             .collect();
-        if starts.len() <= KEEP_TURNS {
+        if starts.len() <= keep {
             return Ok(None);
         }
-        let old = &recent[..starts[starts.len() - KEEP_TURNS]];
+        let kept = if keep == 0 {
+            recent.len()
+        } else {
+            starts[starts.len() - keep]
+        };
+        // Never what the running turn's opening reads from the log (review
+        // H1 of X.15): an unread queued message it takes at its start, or a
+        // background end a callback turn's opening takes.
+        let old = &recent[..kept.min(opening_cut(recent))];
         // If the kept turns alone are what is large, summarising the rest
         // saves little and would repeat on every turn: skip it.
         // Sized as the requests carry it, context blocks included (review
@@ -3160,12 +3526,16 @@ impl NativeBackend {
             part.last()
                 .and_then(|e| harness_core::todo::as_of(&ctx.history, e.seq))
         };
-        let fits = |prev: Option<&str>, part: &[RawEvent]| {
+        let text_of = |prev: Option<&str>, part: &[RawEvent], cut: usize| {
+            transcript_of(prev, &summary_messages(part), todo_at(part).as_deref(), cut)
+        };
+        let fits_cut = |prev: Option<&str>, part: &[RawEvent], cut: usize| {
             budget.is_none_or(|b| {
-                let t = transcript(prev, part, todo_at(part).as_deref());
-                provider::estimate_tokens(&[ChatMsg::User(t)]) <= b
+                provider::estimate_tokens(&[ChatMsg::User(text_of(prev, part, cut))]) <= b
             })
         };
+        let fits =
+            |prev: Option<&str>, part: &[RawEvent]| fits_cut(prev, part, TRANSCRIPT_RESULT_CHARS);
         // Where a piece may end: the start of each later turn, or the end.
         let ends: Vec<usize> = starts
             .iter()
@@ -3177,29 +3547,44 @@ impl NativeBackend {
         let mut done = None;
         let mut from = 0;
         while from < old.len() {
-            // The longest piece that fits (pieces only grow by whole turns).
-            let Some(end) = ends
+            // The longest piece that fits (pieces only grow by whole turns);
+            // a single turn that does not fit is read with its results cut
+            // shorter (X.15), rather than left whole for every later request.
+            let longest = ends
                 .iter()
                 .copied()
                 .filter(|&e| e > from)
                 .take_while(|&e| fits(prev.as_deref(), &old[from..e]))
-                .last()
-            else {
-                tracing::warn!(
-                    model,
-                    "a turn is larger than the summarising model's context window; not summarised"
-                );
-                break;
+                .last();
+            let (end, cut) = match longest {
+                Some(e) => (e, TRANSCRIPT_RESULT_CHARS),
+                None => {
+                    let e = ends
+                        .iter()
+                        .copied()
+                        .find(|&e| e > from)
+                        .unwrap_or(old.len());
+                    let cut = [1_000, 500, 250]
+                        .into_iter()
+                        .find(|&c| fits_cut(prev.as_deref(), &old[from..e], c));
+                    match cut {
+                        Some(c) => (e, c),
+                        None => {
+                            tracing::warn!(
+                                model,
+                                "a turn is larger than the summarising model's context window; \
+                                 not summarised"
+                            );
+                            break;
+                        }
+                    }
+                }
             };
             let req = ChatRequest {
                 model: model.to_string(),
                 messages: vec![
                     ChatMsg::System(prompt.into()),
-                    ChatMsg::User(transcript(
-                        prev.as_deref(),
-                        &old[from..end],
-                        todo_at(&old[from..end]).as_deref(),
-                    )),
+                    ChatMsg::User(text_of(prev.as_deref(), &old[from..end], cut)),
                 ],
                 tools: vec![],
                 effort: None,
@@ -3254,6 +3639,87 @@ impl NativeBackend {
             from = end;
         }
         Ok(done)
+    }
+
+    /// Summarise steps of the running turn (X.15) with `model`: the
+    /// person's words (or a sub-agent's task) for what the turn is for, the
+    /// previous summary of its steps, then `steps` as the summariser's
+    /// transcript, each tool result cut to fit the window (at least 250
+    /// characters each; one request, never split). `None` when nothing
+    /// usable came back: a failed request or an empty summary counts
+    /// against the turn's breaker (A.7), a cancel does not.
+    #[allow(clippy::too_many_arguments)]
+    async fn fold_steps(
+        &self,
+        ctx: &TurnCtx<'_>,
+        model: &str,
+        window: Option<u64>,
+        prev: Option<&str>,
+        steps: &[ChatMsg],
+        task: &str,
+        usage: &mut Usage,
+        failures: &mut u32,
+    ) -> Option<String> {
+        if *failures >= MAX_COMPACT_FAILURES {
+            return None;
+        }
+        let (prompt, overhead) = if self.config.coding_summary {
+            (CODING_SUMMARY_PROMPT, compact::CODING_SUMMARY_OVERHEAD)
+        } else {
+            (SUMMARY_PROMPT, compact::SUMMARY_OVERHEAD)
+        };
+        let budget = window.map(|w| w.saturating_sub(overhead));
+        let opening = {
+            let mut t = String::new();
+            let task: String = task.chars().take(TRANSCRIPT_RESULT_CHARS).collect();
+            if !task.is_empty() {
+                quoted_part(&mut t, PART_USER, &task);
+            }
+            t
+        };
+        let text_of = |cut: usize| format!("{opening}{}", transcript_of(prev, steps, None, cut));
+        let fits = |t: &str| {
+            budget.is_none_or(|b| provider::estimate_tokens(&[ChatMsg::User(t.into())]) <= b)
+        };
+        let Some(text) = [TRANSCRIPT_RESULT_CHARS, 1_000, 500, 250]
+            .into_iter()
+            .map(text_of)
+            .find(|t| fits(t))
+        else {
+            tracing::warn!(
+                model,
+                "the turn's steps are larger than the summarising model's context window; \
+                 not summarised"
+            );
+            note_compact_failure(failures, model);
+            return None;
+        };
+        let req = ChatRequest {
+            model: model.to_string(),
+            messages: vec![ChatMsg::System(prompt.into()), ChatMsg::User(text)],
+            tools: vec![],
+            effort: None,
+            cache: false,
+            limits: Some(self.config.stream_limits),
+            no_tool_calls: false,
+        };
+        let c = match self.complete_quietly(ctx, &req).await {
+            Ok(c) => c,
+            Err(e) => {
+                if let Some(e) = e {
+                    tracing::warn!(model, error = %e.log_line(), "summary call failed");
+                    note_compact_failure(failures, model);
+                }
+                return None;
+            }
+        };
+        usage.add(&c.usage.unwrap_or_default());
+        let text = c.text.trim().to_string();
+        if text.is_empty() {
+            note_compact_failure(failures, model);
+            return None;
+        }
+        Some(text)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5590,6 +6056,7 @@ mod tests {
                 None,
                 None,
                 &history,
+                KEEP_TURNS,
                 0,
                 &mut usage,
                 &mut failures,
@@ -5605,6 +6072,7 @@ mod tests {
                 None,
                 None,
                 &history,
+                KEEP_TURNS,
                 0,
                 &mut usage,
                 &mut failures,
@@ -5660,6 +6128,7 @@ mod tests {
                 Some(window),
                 None,
                 &history,
+                KEEP_TURNS,
                 0,
                 &mut usage,
                 &mut 0,

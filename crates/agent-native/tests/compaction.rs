@@ -503,8 +503,11 @@ async fn the_summariser_reads_only_what_fits_its_window() {
     let s = host.summaries();
     assert_eq!(s.len(), sums.len());
     assert!(s.windows(2).all(|w| w[0].through_seq < w[1].through_seq));
-    // Through turn 3 (seq 2..=13) in the end.
-    assert_eq!(s.last().unwrap().through_seq, 13);
+    // Through turn 3 (seq 2..=13) before the turn; then, the two kept
+    // turns alone being over what the 5k window holds less its reserve,
+    // through turn 5 (seq 21) at the turn's first request (X.15).
+    assert!(s.iter().any(|h| h.through_seq == 13), "{s:?}");
+    assert_eq!(s.last().unwrap().through_seq, 21);
 
     // One turn alone is larger than the summariser's window: no summary
     // at all rather than one that silently drops that turn.
@@ -1565,7 +1568,7 @@ async fn later_summaries_update_the_sections_of_the_one_before() {
         window: BIG,
         summary_window: window,
         hold: None,
-        replies: vec![Reply::Sections; 3],
+        replies: vec![Reply::Sections; 5],
         calls: Mutex::default(),
     });
     let b = coding_backend(p.clone(), Some(1_000));
@@ -1580,7 +1583,9 @@ async fn later_summaries_update_the_sections_of_the_one_before() {
     .await;
     assert_eq!(out.reason, TurnEndReason::Completed, "{:?}", out.error);
     let sums = summary_requests(&p);
-    assert_eq!(sums.len(), 3, "one turn a piece: {:?}", tokens(&sums));
+    // Turns 1-3 before the turn; turns 4 and 5, the kept ones, at its first
+    // request, since they alone are over what the window holds (X.15).
+    assert_eq!(sums.len(), 5, "one turn a piece: {:?}", tokens(&sums));
     for c in &sums {
         assert!(
             c.tokens + 1_400 <= window,
@@ -1601,8 +1606,8 @@ async fn later_summaries_update_the_sections_of_the_one_before() {
     assert!(prompt.contains("update it"), "{prompt}");
     assert!(prompt.contains("do not nest"), "{prompt}");
     let s = host.summaries();
-    assert_eq!(s.len(), 3);
-    assert!(s.last().unwrap().text.starts_with("Goal:\nSUMMARY3"));
+    assert_eq!(s.len(), 5);
+    assert!(s.last().unwrap().text.starts_with("Goal:\nSUMMARY5"));
 }
 
 /// A sub-agent's report reaches the summariser as a tool result; the coding

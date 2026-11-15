@@ -38,6 +38,7 @@ const KNOWN = new Set([
   "agent_changed",
   "variant_selected",
   "history_summarized",
+  "context_shortened",
   "model_fallback",
   "model_retry",
   "retry_given_up",
@@ -62,6 +63,7 @@ const CLEARS_RETRY = new Set([
   "tool_call_started",
   "turn_ended",
   "history_summarized",
+  "context_shortened",
   "model_fallback",
   "retry_given_up",
 ]);
@@ -307,6 +309,21 @@ export function apply(v: SessionView, e: RawEvent): void {
     case "history_summarized":
       v.items.push({ type: "summary", through_seq: p.through_seq, text: p.text });
       break;
+    case "context_shortened": {
+      const it: Extract<Item, { type: "shortened" }> = {
+        type: "shortened",
+        turn_id: p.turn_id,
+        cleared: p.cleared != null,
+        tokens_before: p.tokens_before,
+        tokens_after: p.tokens_after,
+      };
+      if (p.folded != null) {
+        it.steps = p.folded.steps;
+        it.text = p.folded.text;
+      }
+      v.items.push(it);
+      break;
+    }
     case "model_retry":
       v.retry = { turn_id: p.turn_id, model: p.model, attempt: p.attempt, of: p.of, at_ms: p.at_ms, wait_ms: p.wait_ms, reason: p.reason };
       break;

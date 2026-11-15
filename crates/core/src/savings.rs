@@ -26,7 +26,9 @@ pub struct TokenSavings {
     /// caches by itself).
     pub prompt_cache: bool,
     /// Replace tool outputs older than the last `keep_tool_outputs` with a
-    /// short placeholder (observation masking).
+    /// short placeholder (observation masking). Only for a model whose
+    /// window is unknown: with a known one the loop clears old outputs
+    /// when the context nears the window instead (X.15).
     pub mask_old_outputs: bool,
     pub keep_tool_outputs: u32,
     /// Strip colours/progress bars, collapse repeats, failures-only test

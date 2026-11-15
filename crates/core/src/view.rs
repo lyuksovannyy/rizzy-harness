@@ -34,6 +34,20 @@ pub enum Item {
         through_seq: u64,
         text: String,
     },
+    /// What the model is sent was shortened here (`context_shortened`,
+    /// X.15): older tool results as one-line stubs (`cleared`), this turn's
+    /// first `steps` steps as a summary (`text`, model-written). Everything
+    /// stays shown in the chat as it was.
+    Shortened {
+        turn_id: String,
+        cleared: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        steps: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        tokens_before: u64,
+        tokens_after: u64,
+    },
     Assistant {
         message_id: String,
         text: String,
@@ -304,6 +318,7 @@ impl SessionView {
                 | EventKind::ToolCallStarted(_)
                 | EventKind::TurnEnded(_)
                 | EventKind::HistorySummarized(_)
+                | EventKind::ContextShortened(_)
                 | EventKind::ModelFallback(_)
                 | EventKind::RetryGivenUp(_)
         ) {
@@ -499,6 +514,14 @@ impl SessionView {
             EventKind::HistorySummarized(h) => self.items.push(Item::Summary {
                 through_seq: h.through_seq,
                 text: h.text,
+            }),
+            EventKind::ContextShortened(c) => self.items.push(Item::Shortened {
+                turn_id: c.turn_id,
+                cleared: c.cleared.is_some(),
+                steps: c.folded.as_ref().map(|f| f.steps),
+                text: c.folded.map(|f| f.text),
+                tokens_before: c.tokens_before,
+                tokens_after: c.tokens_after,
             }),
             EventKind::ModelFallback(f) => self.items.push(Item::Fallback {
                 turn_id: f.turn_id,

@@ -115,6 +115,9 @@ export function chatMarkdown(view: SessionView, title: string, opts: ExportOptio
       case "summary":
         out.push("_Earlier messages were summarised for the model here._", "");
         break;
+      case "shortened":
+        out.push("_The context sent to the model was shortened here._", "");
+        break;
       case "error":
         out.push(`> Error: ${oneLine(it.message, 500)}`, "");
         break;

@@ -373,11 +373,12 @@ impl Provider for Mock {
         }
         // After a tool result (and any harness notes after it), summarise
         // it (or cite it) and stop.
-        let last_real = req
-            .messages
-            .iter()
-            .rev()
-            .find(|m| !matches!(m, ChatMsg::Note(_) | ChatMsg::CallNote(_)));
+        let last_real = req.messages.iter().rev().find(|m| {
+            !matches!(
+                m,
+                ChatMsg::Note(_) | ChatMsg::CallNote(_) | ChatMsg::Summary(_)
+            )
+        });
         if let Some(ChatMsg::Tool { content, .. }) = last_real {
             let words = if user.starts_with("cite:") {
                 cite_answer(content)

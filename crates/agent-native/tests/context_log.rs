@@ -237,7 +237,7 @@ fn bytes(req: &ChatRequest) -> String {
             ChatMsg::UserImages { text, .. } => format!("user:{text}"),
             ChatMsg::Tool { call_id, content } => format!("tool {call_id}:{content}"),
             ChatMsg::Assistant { text, tool_calls } => format!("assistant:{text}{tool_calls:?}"),
-            ChatMsg::Note(t) | ChatMsg::CallNote(t) => format!("note:{t}"),
+            ChatMsg::Note(t) | ChatMsg::CallNote(t) | ChatMsg::Summary(t) => format!("note:{t}"),
         })
         .collect::<Vec<_>>()
         .join("\u{0}")

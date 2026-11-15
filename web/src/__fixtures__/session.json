@@ -948,6 +948,25 @@
       "ts_ms": 1700000000064
     },
     {
+      "kind": "context_shortened",
+      "payload": {
+        "cleared": {
+          "results": 1,
+          "turn_id": "t6"
+        },
+        "folded": {
+          "steps": 2,
+          "text": "Read <b>main.rs</b>; the bug is in parse."
+        },
+        "tokens_after": 9000,
+        "tokens_before": 31000,
+        "turn_id": "t6"
+      },
+      "seq": 66,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000065
+    },
+    {
       "kind": "model_retry",
       "payload": {
         "at_ms": 1700000004000,
@@ -958,9 +977,9 @@
         "turn_id": "t6",
         "wait_ms": 4000
       },
-      "seq": 66,
+      "seq": 67,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000065
+      "ts_ms": 1700000000066
     },
     {
       "kind": "context_sent",
@@ -975,16 +994,16 @@
         ],
         "turn_id": "t6"
       },
-      "seq": 67,
+      "seq": 68,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000066
+      "ts_ms": 1700000000067
     },
     {
       "kind": "from_a_newer_node",
       "payload": {
         "anything": true
       },
-      "seq": 68,
+      "seq": 69,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
       "ts_ms": 0
     }
@@ -1024,7 +1043,7 @@
     "context_model": "openai::gpt-4o",
     "context_tokens": 800,
     "context_window": 128000,
-    "head_seq": 68,
+    "head_seq": 69,
     "items": [
       {
         "text": "fix the bug",
@@ -1440,6 +1459,15 @@
         "reason": "completed",
         "turn_id": "t5",
         "type": "turn_end"
+      },
+      {
+        "cleared": true,
+        "steps": 2,
+        "text": "Read <b>main.rs</b>; the bug is in parse.",
+        "tokens_after": 9000,
+        "tokens_before": 31000,
+        "turn_id": "t6",
+        "type": "shortened"
       }
     ],
     "max_steps": 1000,
