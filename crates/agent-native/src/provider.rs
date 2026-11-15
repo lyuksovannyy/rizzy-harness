@@ -316,9 +316,10 @@ pub fn block(context: &str, notes: &[&str], whose: Whose) -> Option<String> {
             let (quoted, lines) = quote_lines(context);
             Some(format!(
                 "{INSTRUCTIONS_LEAD}, not the person's words and not program output: the \
-                 {lines} line(s) below, each starting with \"{OUTPUT_QUOTE}\", are the \
-                 repository's AGENTS.md / CLAUDE.md files and the list of skills, as the harness \
-                 read them for this turn.{notes}{quoted}"
+                 {lines} line(s) below, each starting with \"{OUTPUT_QUOTE}\", are what the \
+                 harness adds for this turn, such as the repository's AGENTS.md / CLAUDE.md files, \
+                 the list of skills and, where memory is on, what you remember and the project's \
+                 brief.{notes}{quoted}"
             ))
         }
     }

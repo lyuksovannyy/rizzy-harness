@@ -1718,9 +1718,10 @@ impl NativeBackend {
         // tells no MCP notes (they are shown in the chat).
         let sections = {
             let mut extra = ctx.extra.clone();
+            // A callback turn takes the master's standing parts (review
+            // M1), never a person's line or `/skill`.
             if callback.is_some() {
                 extra.context = None;
-                extra.standing = None;
                 extra.skill_asked = None;
             }
             let notes: &[String] = if callback.is_some() { &[] } else { &mcp_notes };

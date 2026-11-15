@@ -2162,8 +2162,12 @@ that match it, the count of saved memory, notes on earlier saves, a project
 chat's earlier chats on its first message) replaces its earlier copy, so the
 conversation never holds an old recall: a fact you forget is gone from the
 next message even if it was only ever recalled. A turn that reports a finished
-background command reads none of your memory; a turn that reads messages you
-sent while the agent worked gets the context of the newest of them. A changed part is sent in
+background command reads the same memory the chat's agent reads in your turns
+(it cannot save or search memory), so when nothing changed it costs no new
+cache write; a turn that reads messages you sent while the agent worked gets
+the context of the newest of them when it was made for the same agent, and
+otherwise reads none. A tool result that quoted a fact earlier stays in the
+conversation as it was, like the agent's own earlier answers. A changed part is sent in
 full with a line saying it replaces the earlier one; a part that is gone (memory
 switched off, the files deleted) gets a line saying it no longer applies, and
 earlier messages are then resent without their copy: an agent whose memory is

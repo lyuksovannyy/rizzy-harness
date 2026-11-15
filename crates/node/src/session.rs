@@ -23,8 +23,22 @@ use crate::Inner;
 
 /// The master's context of a queued message ([`Session::queued_context`]).
 struct QueuedContext {
+    /// The agent the master computed it for.
+    agent: Option<String>,
+    /// The turn that was running when the message was queued.
+    turn: String,
     context: Option<String>,
     standing: Option<Vec<harness_core::backend::StandingPart>>,
+}
+
+impl QueuedContext {
+    /// Whether a turn of `agent` that starts after turn `ended` may be
+    /// sent it: only when it was queued while `ended` ran and computed for
+    /// that agent (review H1). After a Stop the next turn to end is
+    /// another (a callback turn, the person's next), so it is not used.
+    fn usable(&self, ended: &str, agent: Option<&str>) -> bool {
+        self.turn == ended && self.agent.as_deref() == agent
+    }
 }
 
 struct RunningTurn {
@@ -1217,6 +1231,7 @@ impl Session {
             // since left the slot to this message's own turn.
             match self.running_turn() {
                 Some(r) if !r.cancelled => {
+                    let running = r.turn_id.clone();
                     let queued = self
                         .enqueue(r, input, &compare, agent.as_ref(), agent_named)
                         .await;
@@ -1225,6 +1240,8 @@ impl Session {
                             .queued_context
                             .lock()
                             .unwrap_or_else(|p| p.into_inner()) = Some(QueuedContext {
+                            agent: agent.as_ref().map(|a| a.agent_id.clone()),
+                            turn: running,
                             context: extra.context.clone(),
                             standing: extra.standing.clone(),
                         });
@@ -1289,7 +1306,7 @@ impl Session {
             let (reason, _) = this
                 .clone()
                 .run_turn(
-                    turn_id,
+                    turn_id.clone(),
                     user_text,
                     history,
                     agent.clone(),
@@ -1299,7 +1316,7 @@ impl Session {
                     by_stop,
                 )
                 .await;
-            this.read_queued(reason, agent, after).await;
+            this.read_queued(reason, agent, after, turn_id).await;
         });
         Ok(())
     }
@@ -1396,16 +1413,19 @@ impl Session {
         mut reason: TurnEndReason,
         agent: Option<AgentSpec>,
         after: TurnExtra,
+        mut ended: String,
     ) {
         while matches!(
             reason,
             TurnEndReason::Completed | TurnEndReason::Error | TurnEndReason::Limit
         ) {
-            let Some((turn_id, user_text, history, extra, cancel, by_stop)) =
-                self.start_queued(agent.as_ref(), after.clone()).await
+            let Some((turn_id, user_text, history, extra, cancel, by_stop)) = self
+                .start_queued(agent.as_ref(), after.clone(), &ended)
+                .await
             else {
                 return;
             };
+            ended = turn_id.clone();
             reason = self
                 .clone()
                 .run_turn(
@@ -1430,6 +1450,7 @@ impl Session {
         &self,
         agent: Option<&AgentSpec>,
         extra: TurnExtra,
+        ended: &str,
     ) -> Option<(
         String,
         String,
@@ -1451,15 +1472,17 @@ impl Session {
             return None;
         }
         // The context of the newest message it reads, computed for that
-        // message; none after a restart (then it reads no memory: F2).
-        // Never the last turn's (ST-8).
+        // message, only when it was computed for the agent that runs this
+        // turn and queued while the turn that just ended ran (review H1);
+        // otherwise none (after a restart, a Stop, another agent): then it
+        // reads no memory (F2). Never the last turn's (ST-8).
         let mut extra = extra;
-        if let Some(q) = self
+        let kept = self
             .queued_context
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .take()
-        {
+            .take();
+        if let Some(q) = kept.filter(|q| q.usable(ended, agent.map(|a| a.agent_id.as_str()))) {
             extra.context = q.context;
             extra.standing = q.standing;
         }
@@ -1519,6 +1542,7 @@ impl Session {
         bg_ids: Vec<String>,
         agent: Option<AgentSpec>,
         savings: harness_core::savings::Savings,
+        standing: Option<Vec<harness_core::backend::StandingPart>>,
     ) -> Result<(), String> {
         use harness_protocol::{CALLBACK_NOTHING, MAX_CALLBACK_IDS};
         let mut wanted = bg_ids.clone();
@@ -1668,10 +1692,17 @@ impl Session {
             savings: savings.clone(),
             ..Default::default()
         };
+        // The master's standing parts for the chat's agent (review M1):
+        // the turn reads the memory a person's turn of it would, and its
+        // request extends the last one when nothing changed. None: it
+        // reads none.
+        let partial = standing.is_some();
         let extra = TurnExtra {
             savings,
             cause: Some(cause),
             max_steps: Some(limits.callback_steps()),
+            standing,
+            standing_partial: partial,
             ..Default::default()
         };
         let this = self.clone();
@@ -1679,7 +1710,7 @@ impl Session {
             let (reason, _) = this
                 .clone()
                 .run_turn(
-                    turn_id,
+                    turn_id.clone(),
                     String::new(),
                     history,
                     agent,
@@ -1689,7 +1720,7 @@ impl Session {
                     by_stop,
                 )
                 .await;
-            this.read_queued(reason, person, after).await;
+            this.read_queued(reason, person, after, turn_id).await;
         });
         Ok(())
     }
@@ -1725,6 +1756,10 @@ impl Session {
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .clear();
+            self.queued_context
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .take();
             return Err("no message waits to be read".into());
         }
         self.log_failed.store(false, Ordering::SeqCst);
@@ -1760,6 +1795,13 @@ impl Session {
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .retain(|(s, _)| !seqs.contains(s));
+            // A person's own turn reads them with its own context.
+            if msg.is_some() {
+                self.queued_context
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .take();
+            }
             if let Some(msg) = msg {
                 written = self.emit(EventKind::UserMessage(msg.clone())).await;
             }
@@ -3564,6 +3606,11 @@ impl TurnHost for Session {
             *self.pending.lock().unwrap_or_else(|p| p.into_inner()) = taken;
             return Ok(Vec::new());
         };
+        // Read now, by this turn: no later turn is sent their context.
+        self.queued_context
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take();
         let seqs = taken.iter().map(|(s, _)| *s).collect();
         if let Err(e) = Session::emit(
             self,
@@ -3989,5 +4036,38 @@ mod tests {
         assert!(r.contains("accept connections"), "{r}");
         let fg = serde_json::json!({"command": "ls", "background": false});
         assert!(!approval_reason("bash", ToolRisk::Mutating, &fg, &p, None).contains("KEEPS"));
+    }
+}
+
+#[cfg(test)]
+mod queued_context_tests {
+    use super::QueuedContext;
+
+    fn q(agent: Option<&str>, turn: &str) -> QueuedContext {
+        QueuedContext {
+            agent: agent.map(str::to_string),
+            turn: turn.into(),
+            context: None,
+            standing: None,
+        }
+    }
+
+    /// Review H1: a queued message's context goes only to the turn that
+    /// reads it right after the turn it was queued in, run by the agent it
+    /// was computed for. After a Stop (the next turn to end is a callback
+    /// turn or another) or for another agent it is not used.
+    #[test]
+    fn a_queued_context_fits_only_its_turn_and_agent() {
+        assert!(q(Some("general"), "t1").usable("t1", Some("general")));
+        assert!(
+            !q(Some("general"), "t1").usable("t1", Some("coder")),
+            "another agent"
+        );
+        assert!(
+            !q(Some("general"), "t1").usable("cb-2", Some("general")),
+            "after a Stop"
+        );
+        assert!(q(None, "t1").usable("t1", None));
+        assert!(!q(None, "t1").usable("t1", Some("coder")));
     }
 }

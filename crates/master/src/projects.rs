@@ -543,6 +543,8 @@ fn board_line(
 #[derive(Debug, Default)]
 pub struct ProjectContext {
     pub brief: String,
+    /// What `remember` does in the project (part of the `remember` section).
+    pub remember: Option<String>,
     pub facts: Option<String>,
     pub facts_recall: Option<String>,
     pub board: Option<String>,
@@ -571,17 +573,21 @@ pub async fn turn_context(
         s.push_str("\n\nProject instructions:\n");
         s.push_str(&p.instructions);
     }
+    out.brief = s;
+    // What `remember` does here goes with the turn's other `remember`
+    // lines (the `remember` section), so the brief is the same in a turn
+    // that cannot file (a callback turn) and does not move.
     if remember {
-        s.push_str(
-            "\n\nTo keep a lasting decision or fact about this project, call `remember` with \
-             scope \"project\"; to correct or drop one, pass its id as `replaces` (with the new \
-             text) or `forget`.",
+        let mut r = String::from(
+            "To keep a lasting decision or fact about this project, call `remember` with scope \
+             \"project\"; to correct or drop one, pass its id as `replaces` (with the new text) \
+             or `forget`.",
         );
         if !allowed.personal {
-            s.push_str(" Personal memory is off in this chat: use no other scope.");
+            r.push_str(" Personal memory is off in this chat: use no other scope.");
         }
+        out.remember = Some(r);
     }
-    out.brief = s;
     // The places `turn_places` names, as `recall` reads them.
     for place in crate::memory::turn_places(chat, allowed, Some(p)) {
         if let crate::memory::TurnPlace::Project(key) = place

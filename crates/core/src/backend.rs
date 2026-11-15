@@ -234,6 +234,8 @@ pub struct TurnExtra {
     /// `None`: the master gave no context this turn (a callback turn, a
     /// turn that reads queued messages), which withdraws nothing.
     pub standing: Option<Vec<StandingPart>>,
+    /// `standing` is a callback turn's ([`MasterContext::unattended`]).
+    pub standing_partial: bool,
     /// The repository's instruction files (`AGENTS.md`, `CLAUDE.md`), read
     /// by the node at the start of this turn. Set only by the node, never
     /// from the protocol. A standing section of the context block (X.1):
@@ -299,6 +301,13 @@ pub struct MasterContext {
     pub turn: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub standing: Vec<StandingPart>,
+    /// A callback turn's (review M1): the standing lists only. The parts
+    /// keyed on a person's message (recall lines, notes on earlier saves,
+    /// earlier chats) and what `remember` does are not given, which says
+    /// nothing about them: the model keeps what it has of them unless
+    /// their place changed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unattended: bool,
 }
 
 impl MasterContext {

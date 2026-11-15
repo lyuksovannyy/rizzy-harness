@@ -927,3 +927,47 @@ async fn parallel_answers_take_no_message_while_they_run() {
     model.gate.notify_one();
     n.ended(1).await;
 }
+
+// ---- Round-3 re-check of PR 108 (H1): kept as a regression test ----
+
+/// F2/queued: the running turn is an @mention of agent "coder" (memory
+/// off: its context has no memory part). A plain message sent meanwhile
+/// is resolved by the master for the chat's own agent "general" (memory
+/// on): its context holds the owner's facts. The turn the node starts for
+/// that message runs as "coder", and is sent general's memory.
+#[tokio::test]
+async fn rv3_queued_context_of_another_agent() {
+    let model = Gated::new(|_, _| answer("ok"));
+    let mut n = Node::start(model.clone()).await;
+    let sid = n.create(ApprovalMode::Auto).await;
+    let spec = |id: &str, p: &str| {
+        json!({"agent_id": id, "name": id, "system_prompt": p, "tools": "all",
+               "prompt_hash": format!("h-{id}")})
+    };
+    n.send_json(
+        json!({"type": "session.prompt", "req_id": "p1", "session_id": sid,
+        "text": "@coder look", "agent": spec("coder", "CODER-PROMPT"), "agent_named": true,
+        "context": {"turn": "CTX-1", "standing": []}}),
+    );
+    assert_eq!(n.ack("p1").await, Ok(()));
+    model.entered.notified().await;
+    n.send_json(
+        json!({"type": "session.prompt", "req_id": "p2", "session_id": sid,
+        "text": "and also", "agent": spec("general", "GENERAL-PROMPT"),
+        "context": {"turn": "CTX-2",
+            "standing": [{"part": "memory", "text": "OWN-FACT-ZZ lives at Elm"}]}}),
+    );
+    assert_eq!(n.ack("p2").await, Ok(()));
+    model.gate.notify_one();
+    n.ended(2).await;
+    let reqs = model.requests();
+    assert_eq!(reqs.len(), 2);
+    let sys = match &reqs[1].messages[0] {
+        ChatMsg::System(s) => s.clone(),
+        o => panic!("{o:?}"),
+    };
+    assert!(
+        !(sys.contains("CODER-PROMPT") && holding(&reqs[1], "OWN-FACT-ZZ") > 0),
+        "the memory-off agent's turn is sent the other agent's memory"
+    );
+}

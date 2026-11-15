@@ -492,6 +492,12 @@ pub enum MasterToNode {
         agent: Option<AgentSpec>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         savings: Option<harness_core::savings::Savings>,
+        /// The standing parts of the master's context for the chat's agent
+        /// and owner (`MasterContext::unattended`, X.1 review M1): the
+        /// turn's request extends the last one when they did not change.
+        /// Absent: the turn reads no memory.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context: Option<Box<harness_core::backend::MasterContext>>,
     },
     /// The user picked one of several parallel answers.
     #[serde(rename = "session.select_variant")]
@@ -982,6 +988,7 @@ mod tests {
             bg_ids: vec!["bg-1".into(), "bg-2".into()],
             agent: None,
             savings: None,
+            context: None,
         };
         let v = serde_json::to_value(&c).unwrap();
         assert_eq!(

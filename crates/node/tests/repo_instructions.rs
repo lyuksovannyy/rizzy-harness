@@ -214,6 +214,7 @@ impl Node {
             context: Some(Box::new(harness_core::backend::MasterContext {
                 turn: Some("Person: Ann".into()),
                 standing: vec![],
+                unattended: false,
             })),
             reply: None,
             agent,

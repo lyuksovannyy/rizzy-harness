@@ -1724,3 +1724,424 @@ async fn a_memory_off_agent_after_a_mention_reads_no_facts() {
     let all = bytes(&r3[0]);
     assert!(!all.contains("likes short answers"), "{all}");
 }
+
+// ---- Round-3 re-check of PR 108: kept as regression tests ----
+
+fn rv3_parts(with: &[(StandingKey, &str)]) -> Vec<StandingPart> {
+    with.iter()
+        .map(|(k, t)| StandingPart {
+            part: *k,
+            text: t.to_string(),
+        })
+        .collect()
+}
+
+fn rv3_all_memory() -> Vec<(StandingKey, &'static str)> {
+    vec![
+        (StandingKey::Memory, "OWN-LIST-ZQ1 lives at Elm"),
+        (StandingKey::MemoryRecall, "OWN-RECALL-ZQ2 older fact"),
+        (StandingKey::Workspace, "WS-LIST-ZQ3 deploy fridays"),
+        (StandingKey::WorkspaceRecall, "WS-RECALL-ZQ4 older ws"),
+        (
+            StandingKey::MemoryNotes,
+            "NOTES-ZQ5 saved 120 of 3000; your call 'OWN-NOTE-FACT' waits",
+        ),
+        (StandingKey::ProjectMemory, "PROJ-LIST-ZQ6 db is pg"),
+        (StandingKey::ProjectRecall, "PROJ-RECALL-ZQ7 older proj"),
+        (StandingKey::EarlierChats, "EARLIER-ZQ8 chat about Elm"),
+    ]
+}
+
+const RV3_MARKS: [&str; 9] = [
+    "ZQ1",
+    "ZQ2",
+    "ZQ3",
+    "ZQ4",
+    "ZQ5",
+    "ZQ6",
+    "ZQ7",
+    "ZQ8",
+    "OWN-NOTE-FACT",
+];
+
+fn rv3_full() -> TurnExtra {
+    let mut ex = extra(Some(agents_md()), 1);
+    let mut all = rv3_all_memory();
+    all.push((StandingKey::Remember, "REMEMBER-ABOUT"));
+    all.push((StandingKey::Project, "PROJECT-BRIEF"));
+    all.push((StandingKey::Board, "BOARD-LINE"));
+    ex.standing = Some(rv3_parts(&all));
+    ex
+}
+
+/// 1(a)/(c)/(d): every memory-derived part, then a turn whose master
+/// context has none of them (memory off; brief and board stay): no
+/// marker anywhere in any request of that turn or the next.
+#[tokio::test]
+async fn rv3_every_memory_part_leaves_on_memory_off() {
+    let p = script(1);
+    let sid = SessionId::new();
+    let mut log = Vec::new();
+    let (r1, _) = turn(
+        &p,
+        NativeConfig::default(),
+        &mut log,
+        sid,
+        "t1",
+        "one",
+        rv3_full(),
+    )
+    .await;
+    for m in RV3_MARKS {
+        assert!(bytes(&r1[0]).contains(m), "setup: {m}");
+    }
+    let mut off = extra(Some(agents_md()), 2);
+    off.standing = Some(rv3_parts(&[
+        (StandingKey::Project, "PROJECT-BRIEF"),
+        (StandingKey::Board, "BOARD-LINE"),
+    ]));
+    let (r2, c2) = turn(
+        &p,
+        NativeConfig::default(),
+        &mut log,
+        sid,
+        "t2",
+        "two",
+        off.clone(),
+    )
+    .await;
+    let (r3, _) = turn(
+        &p,
+        NativeConfig::default(),
+        &mut log,
+        sid,
+        "t3",
+        "three",
+        off,
+    )
+    .await;
+    for r in r2.iter().chain(r3.iter()) {
+        let all = bytes(r);
+        for m in RV3_MARKS {
+            assert!(!all.contains(m), "{m} still sent: {all}");
+        }
+        assert!(all.contains("PROJECT-BRIEF") && all.contains("BOARD-LINE"));
+    }
+    let _ = c2;
+}
+
+/// 1(b): each part changed or dropped one at a time (a forget): the old
+/// text is gone from the next request; the others stay once each.
+#[tokio::test]
+async fn rv3_each_part_dropped_alone_leaves() {
+    for (i, (drop_key, drop_text)) in rv3_all_memory().into_iter().enumerate() {
+        let p = script(0);
+        let sid = SessionId::new();
+        let mut log = Vec::new();
+        turn(
+            &p,
+            NativeConfig::default(),
+            &mut log,
+            sid,
+            "t1",
+            "one",
+            rv3_full(),
+        )
+        .await;
+        let mut ex = rv3_full();
+        ex.standing.as_mut().unwrap().retain(|s| s.part != drop_key);
+        let (r2, _) = turn(&p, NativeConfig::default(), &mut log, sid, "t2", "two", ex).await;
+        let all = bytes(&r2[0]);
+        let mark = &drop_text[drop_text.find("ZQ").unwrap()..][..3];
+        assert!(!all.contains(mark), "case {i}: {drop_key:?} still sent");
+        for (k, t) in rv3_all_memory() {
+            if k != drop_key {
+                let m = &t[t.find("ZQ").unwrap()..][..3];
+                assert_eq!(all.matches(m).count(), 1, "case {i}: {k:?}");
+            }
+        }
+    }
+}
+
+/// 1 compaction: the summariser's input holds no section text.
+#[tokio::test]
+async fn rv3_summary_input_holds_no_memory() {
+    let p = script(1);
+    let sid = SessionId::new();
+    let mut log = Vec::new();
+    turn(
+        &p,
+        NativeConfig::default(),
+        &mut log,
+        sid,
+        "t1",
+        "one",
+        rv3_full(),
+    )
+    .await;
+    rv3_callback(&p, &mut log, sid, "cb1").await;
+    turn(
+        &p,
+        NativeConfig::default(),
+        &mut log,
+        sid,
+        "t2",
+        "two",
+        rv3_full(),
+    )
+    .await;
+    let msgs = harness_agent_native::summary_messages(&log);
+    let s = format!("{msgs:?}");
+    for m in RV3_MARKS
+        .iter()
+        .chain(["REMEMBER-ABOUT", "PROJECT-BRIEF", "BOARD-LINE"].iter())
+    {
+        assert!(!s.contains(m), "{m} in summary input: {s}");
+    }
+}
+
+/// A callback turn the master gave nothing (the fallback: it reads no
+/// memory), appended to the log with its cause.
+async fn rv3_callback(
+    p: &Arc<Script>,
+    log: &mut Vec<RawEvent>,
+    sid: SessionId,
+    id: &str,
+) -> (Vec<ChatRequest>, Vec<ContextSent>) {
+    rv3_callback_with(p, log, sid, id, None).await
+}
+
+/// A callback turn with the master's standing parts (`unattended`), as
+/// `Master::prompt` sends them since review M1.
+async fn rv3_callback_with(
+    p: &Arc<Script>,
+    log: &mut Vec<RawEvent>,
+    sid: SessionId,
+    id: &str,
+    standing: Option<Vec<StandingPart>>,
+) -> (Vec<ChatRequest>, Vec<ContextSent>) {
+    let ex = TurnExtra {
+        cause: Some(TurnCause::Callback(vec!["bg-1".into()])),
+        instructions: Some(agents_md()),
+        skills_list: Some(skills()),
+        standing_partial: standing.is_some(),
+        standing,
+        ..Default::default()
+    };
+    let b = NativeBackend::new(p.clone(), harness_tools::builtin(), NativeConfig::default());
+    let before = p.seen.lock().unwrap().len();
+    let host = Host::default();
+    let out = b
+        .run_turn(TurnCtx {
+            session_id: sid,
+            turn_id: id.into(),
+            history: log.clone(),
+            user_text: String::new(),
+            cwd: std::env::temp_dir(),
+            model: "x".into(),
+            agent: None,
+            compare: vec![],
+            parent_session: None,
+            extra: ex.clone(),
+            cancel: Default::default(),
+            host: &host,
+        })
+        .await;
+    assert_eq!(out.reason, TurnEndReason::Completed, "{out:?}");
+    let mut kinds = vec![EventKind::TurnStarted(TurnStarted {
+        turn_id: id.into(),
+        agent: None,
+        cause: ex.cause.clone(),
+        environment: None,
+    })];
+    kinds.extend(host.0.lock().unwrap().iter().cloned());
+    kinds.push(EventKind::TurnEnded(TurnEnded {
+        turn_id: id.into(),
+        reason: TurnEndReason::Completed,
+        usage: None,
+    }));
+    for k in kinds {
+        let (kind, payload) = k.into_parts();
+        let seq = log.len() as u64 + 1;
+        log.push(RawEvent {
+            session_id: sid,
+            seq,
+            ts_ms: 0,
+            kind,
+            payload,
+        });
+    }
+    let reqs = p.seen.lock().unwrap()[before..].to_vec();
+    (reqs, host.records())
+}
+
+/// 3: ten background ends, each a callback turn followed by a person's
+/// turn with memory: notes in history stay bounded; each fact once; the
+/// person's turn after a callback re-sends the same bytes of the section;
+/// a callback after a callback withdraws nothing again.
+#[tokio::test]
+async fn rv3_ten_callbacks_bounded() {
+    let p = script(0);
+    let sid = SessionId::new();
+    let mut log = Vec::new();
+    turn(
+        &p,
+        NativeConfig::default(),
+        &mut log,
+        sid,
+        "t0",
+        "zero",
+        rv3_full(),
+    )
+    .await;
+    let mut last_person = None;
+    for i in 0..10 {
+        let (rc, cc) = rv3_callback(&p, &mut log, sid, &format!("cb{i}")).await;
+        let all = bytes(&rc[0]);
+        for m in RV3_MARKS {
+            assert!(!all.contains(m), "callback {i} holds {m}");
+        }
+        assert!(all.contains("PROJECT-BRIEF") && all.contains("REMEMBER-ABOUT"));
+        if i == 3 {
+            // two callbacks in a row: the second withdraws nothing again
+            let (rc2, cc2) = rv3_callback(&p, &mut log, sid, "cbx").await;
+            let _ = cc2;
+            let a2 = bytes(&rc2[0]);
+            assert_eq!(
+                a2.matches("no longer applies").count(),
+                all.matches("no longer applies").count(),
+                "{a2}"
+            );
+        }
+        let _ = cc;
+        let (rp, cp) = turn(
+            &p,
+            NativeConfig::default(),
+            &mut log,
+            sid,
+            &format!("t{}", i + 1),
+            "again",
+            rv3_full(),
+        )
+        .await;
+        let all = bytes(&rp[0]);
+        for m in RV3_MARKS {
+            assert_eq!(all.matches(m).count(), 1, "person turn {i}: {m}: {all}");
+        }
+        let notes = all.matches("no longer applies").count();
+        let rep = all.matches("replaces the one sent earlier").count()
+            + all.matches("replace the ones sent earlier").count();
+        assert!(notes <= 2, "unbounded withdrawal notes: {notes}");
+        assert_eq!(rep, 0, "a re-send after a withdrawal is not a replacement");
+        last_person = Some(cp);
+    }
+    let _ = last_person;
+}
+
+/// The lists a callback turn is sent (review M1): what a person's turn of
+/// the same agent reads, without the parts keyed on a message.
+fn rv3_lists() -> Vec<StandingPart> {
+    rv3_full()
+        .standing
+        .unwrap()
+        .into_iter()
+        .filter(|p| {
+            matches!(
+                p.part,
+                StandingKey::Memory
+                    | StandingKey::Workspace
+                    | StandingKey::Project
+                    | StandingKey::ProjectMemory
+                    | StandingKey::Board
+            )
+        })
+        .collect()
+}
+
+/// Review M1: with memory unchanged, a callback turn's first request
+/// keeps the whole last request as its prefix, and the person's turn after
+/// it keeps the callback's whole last request (it was 1,572 of 8,174 bytes
+/// when the callback withdrew all memory).
+#[tokio::test]
+async fn a_callback_after_unchanged_memory_keeps_the_whole_prefix() {
+    let p = script(4);
+    let sid = SessionId::new();
+    let mut log = Vec::new();
+    turn(
+        &p,
+        NativeConfig::default(),
+        &mut log,
+        sid,
+        "t0",
+        "zero",
+        rv3_full(),
+    )
+    .await;
+    let (r1, _) = turn(
+        &p,
+        NativeConfig::default(),
+        &mut log,
+        sid,
+        "t1",
+        "one",
+        rv3_full(),
+    )
+    .await;
+    let last = r1.last().unwrap().clone();
+    let (rc, cc) = rv3_callback_with(&p, &mut log, sid, "cb", Some(rv3_lists())).await;
+    assert_eq!(
+        common(&last, &rc[0]),
+        bytes(&last).len(),
+        "the callback's prefix"
+    );
+    assert!(cc.iter().all(|c| standing(c).is_empty()), "{cc:?}");
+    // It reads what the person's turn read: the facts are there.
+    assert!(bytes(&rc[0]).contains("ZQ1"));
+    let lastc = rc.last().unwrap().clone();
+    let (r2, _) = turn(
+        &p,
+        NativeConfig::default(),
+        &mut log,
+        sid,
+        "t2",
+        "two",
+        rv3_full(),
+    )
+    .await;
+    assert_eq!(
+        common(&lastc, &r2[0]),
+        bytes(&lastc).len(),
+        "the next person turn's prefix"
+    );
+}
+
+/// Review M1: memory switched off between the person's turn and a callback
+/// turn: the master's lists for the callback hold no facts, so the callback
+/// withdraws them, and their recall lines with them; its request holds no
+/// fact.
+#[tokio::test]
+async fn a_callback_after_memory_was_switched_off_holds_no_fact() {
+    let p = script(0);
+    let sid = SessionId::new();
+    let mut log = Vec::new();
+    turn(
+        &p,
+        NativeConfig::default(),
+        &mut log,
+        sid,
+        "t1",
+        "one",
+        rv3_full(),
+    )
+    .await;
+    let brief_only: Vec<StandingPart> = rv3_lists()
+        .into_iter()
+        .filter(|p| matches!(p.part, StandingKey::Project | StandingKey::Board))
+        .collect();
+    let (rc, _) = rv3_callback_with(&p, &mut log, sid, "cb", Some(brief_only)).await;
+    let all = bytes(&rc[0]);
+    for m in RV3_MARKS {
+        assert!(!all.contains(m), "{m} still sent: {all}");
+    }
+    assert!(all.contains("PROJECT-BRIEF") && all.contains("REMEMBER-ABOUT"));
+}

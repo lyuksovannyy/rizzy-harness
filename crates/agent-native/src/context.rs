@@ -149,6 +149,10 @@ impl SectionKey {
 struct Standing {
     key: SectionKey,
     text: Option<String>,
+    /// The list whose place it belongs to: when that list is sent again
+    /// or withdrawn, this goes too, even where its own absence says
+    /// nothing (a callback turn).
+    tied: Option<SectionKey>,
     /// Whether its absence means it is gone. A turn the master gave no
     /// context (a callback turn, one that reads queued messages) says
     /// nothing about memory or the project; a read that failed or timed
@@ -173,6 +177,7 @@ impl Sections {
         };
         let read = |text: &Option<String>, unread: &Option<String>| Standing {
             key: SectionKey::Instructions,
+            tied: None,
             text: if unread.is_some() {
                 None
             } else {
@@ -192,14 +197,29 @@ impl Sections {
                 // One of each; a second of a kind would be a master's bug.
                 prep(parts.iter().find(|p| p.part == k).map(|p| p.text.as_str()))
             });
+            let tied = match k {
+                StandingKey::MemoryRecall | StandingKey::MemoryNotes => Some(StandingKey::Memory),
+                StandingKey::WorkspaceRecall => Some(StandingKey::Workspace),
+                StandingKey::ProjectRecall | StandingKey::EarlierChats => {
+                    Some(StandingKey::ProjectMemory)
+                }
+                _ => None,
+            };
+            // A callback turn's context has the lists only: what is keyed
+            // on a person's message, and `remember`, are not given and so
+            // say nothing (review M1). A turn the master gave no context
+            // at all (a queued-only turn it lost the context of) keeps the
+            // brief and the board and reads no memory (review F2).
+            let known = match &extra.standing {
+                Some(_) if extra.standing_partial => tied.is_none() && k != StandingKey::Remember,
+                Some(_) => true,
+                None => k.is_memory(),
+            };
             standing.push(Standing {
                 key: SectionKey::Master(k),
                 text,
-                // A turn the master gave no context (a callback turn, one
-                // that reads queued messages without theirs) keeps the
-                // brief and the board and reads no memory: what memory the
-                // earlier openings hold is withdrawn (review F2).
-                known: extra.standing.is_some() || k.is_memory(),
+                tied: tied.map(SectionKey::Master),
+                known,
             });
         }
         // The master's own line last: a routine's untrusted note is what
@@ -399,9 +419,13 @@ pub fn plan(
     had: &HashMap<SectionKey, String>,
     frame: ContextFrame,
 ) -> Option<Plan> {
-    let mut out = Vec::new();
+    let mut out: Vec<SentSection> = Vec::new();
     for s in &sections.standing {
         let before = had.get(&s.key).filter(|d| !d.is_empty());
+        // Its place's list goes or changes: so does it.
+        let known = s.known
+            || s.tied
+                .is_some_and(|t| out.iter().any(|o| o.key == t.as_str()));
         match &s.text {
             Some(t) => {
                 let d = digest(t);
@@ -415,7 +439,7 @@ pub fn plan(
                     note: before.and_then(|_| s.key.replaced()),
                 });
             }
-            None if s.known && before.is_some() => out.push(SentSection {
+            None if known && before.is_some() => out.push(SentSection {
                 key: s.key.as_str().into(),
                 digest: String::new(),
                 text: String::new(),

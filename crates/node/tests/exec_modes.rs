@@ -388,6 +388,7 @@ async fn a_session_whose_mode_is_no_longer_offered_runs_nothing_after_a_restart(
                     bg_ids: vec!["bg-1".into()],
                     agent: None,
                     savings: None,
+                    context: None,
                 },
             ),
             (
