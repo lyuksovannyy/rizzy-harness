@@ -162,12 +162,14 @@ enum End {
     Background,
 }
 
-/// The start of both of `bash`'s descriptions. That a `cat` is not a read
-/// for the read-first guard (PLAN.md T45: in the live test of 2026-11-15
-/// edits were refused after the agent looked at a file through the shell).
+/// The start of both of `bash`'s descriptions. Where it runs (the live
+/// test of 2026-11-15: 36 calls began with `cd <the chat's own folder> &&`)
+/// and that a `cat` is not a read for the read-first guard (PLAN.md T45:
+/// edits refused after the agent looked at a file through the shell).
 macro_rules! lead {
     () => {
-        "Run a shell command with bash in the session workspace. Returns combined \
+        "Run a shell command with bash. It already runs in the chat's folder: do not start it \
+         with `cd` to that folder; to run it elsewhere, set `workdir`. Returns combined \
          stdout/stderr and the exit code. Avoid interactive commands. To look at a file you \
          mean to change, use `read`, not `cat` or `sed` here: `edit` and `write` accept only a \
          file read with `read`. A command stops at its timeout (60 s when none is given)."

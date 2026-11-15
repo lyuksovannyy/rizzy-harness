@@ -341,3 +341,25 @@ async fn the_file_tools_say_read_comes_first_and_cat_does_not_count() {
     ));
     assert!(described("read").await.contains("in `bash` do not count"));
 }
+
+/// `bash` already starts in the chat's folder (the live test: 36 calls
+/// began with `cd <that folder> &&`): the model is told so, and that
+/// `workdir` runs a command elsewhere.
+#[tokio::test]
+async fn bash_says_it_already_runs_in_the_chats_folder() {
+    let d = described("bash").await;
+    assert!(
+        d.contains(
+            "It already runs in the chat's folder: do not start it with `cd` to that folder; to \
+             run it elsewhere, set `workdir`."
+        ),
+        "{d}"
+    );
+    assert_eq!(
+        harness_tools::FOREGROUND_DESCRIPTION
+            .split(". ")
+            .nth(1)
+            .map(|s| s.starts_with("It already runs in the chat's folder")),
+        Some(true)
+    );
+}
