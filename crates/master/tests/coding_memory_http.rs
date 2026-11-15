@@ -240,6 +240,21 @@ fn last_context(s: &S) -> String {
         .unwrap_or_default()
 }
 
+/// The latest user message of the last request that holds `needle`.
+fn latest_holding(s: &S, needle: &str) -> String {
+    let reqs = s.rec.reqs.lock().unwrap();
+    reqs.last()
+        .unwrap()
+        .messages
+        .iter()
+        .rev()
+        .find_map(|m| match m {
+            ChatMsg::User(u) if u.contains(needle) => Some(u.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
 /// The tools the model was offered in the last request.
 fn last_tools(s: &S) -> Vec<String> {
     let reqs = s.rec.reqs.lock().unwrap();
@@ -346,7 +361,13 @@ async fn all_active_project_facts_reach_a_turn_that_shares_no_words_with_them() 
     // A proposal waiting for review is not part of it.
     say(&s, &sid, "remember project: an unconfirmed guess").await;
     say(&s, &sid, "continue").await;
-    let ctx = last_context(&s);
+    // The project's part did not change since the first message, so it is
+    // not sent again (X.1): the model has it in that message.
+    let msg = latest_holding(&s, "What this project has established");
+    // The block only: the first message's own text is the proposal.
+    let ctx = harness_agent_native::provider::split_context(&msg)
+        .map(|(c, _)| c)
+        .unwrap_or_default();
     let at = |needle: &str| {
         ctx.find(needle)
             .unwrap_or_else(|| panic!("{needle:?} missing from {ctx}"))
@@ -391,10 +412,44 @@ async fn above_the_cap_the_newest_that_fit_and_recalled_ones() {
     );
     // The model is told the list is not complete.
     assert!(
-        ctx.contains("(3 older facts not shown; ask the person if one may matter.)"),
+        ctx.contains("(3 older project facts not shown; ask the person if one may matter.)"),
         "{ctx}"
     );
     assert!(!ctx.contains("Memory tab"), "{ctx}");
+}
+
+/// Review R4: past the cap the recall lines are this message's alone; the
+/// fact list is a standing section, sent once. A second message that
+/// recalls another older fact sends that recall without the list again.
+#[tokio::test]
+async fn past_the_cap_new_recall_goes_without_the_list_again() {
+    let s = start(Offer::Yes).await;
+    let pid = project(&s).await;
+    let filler = "alpha bravo charlie delta echo foxtrot golf hotel ".repeat(9);
+    for i in 1..=12 {
+        let extra = match i {
+            1 => "zeppelin ",
+            2 => "submarine ",
+            _ => "",
+        };
+        fact(&s, &pid, format!("Fact {i:02} {extra}{filler}").trim()).await;
+    }
+    let sid = coding_chat(&s, Some(&pid)).await;
+    say(&s, &sid, "what about the zeppelin?").await;
+    let first = last_context(&s);
+    assert!(
+        first.contains("Fact 12 ") && first.contains("Fact 01 zeppelin"),
+        "{first}"
+    );
+    say(&s, &sid, "and the submarine?").await;
+    let second = last_context(&s);
+    assert!(second.contains("Fact 02 submarine"), "recalled: {second}");
+    assert!(!second.contains("Fact 12 "), "the list again: {second}");
+    assert!(
+        !second.contains("What this project has established"),
+        "{second}"
+    );
+    assert!(second.contains("older project facts not shown"), "{second}");
 }
 
 #[tokio::test]

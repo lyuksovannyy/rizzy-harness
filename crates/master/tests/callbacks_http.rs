@@ -1328,3 +1328,72 @@ async fn a_callback_with_text_or_context_is_refused() {
     }
     assert!(t.node.callbacks().is_empty());
 }
+
+/// Review M1 of PR 108: a callback turn is sent the standing parts of the
+/// master's context for the chat's agent and owner, as a person's turn of
+/// that agent reads them (the owner's facts here), so its request extends
+/// the last one; nothing keyed on a message (recall lines, notes) and no
+/// grant: `recall` and `remember` stay withheld from the unattended turn.
+#[tokio::test]
+async fn a_callback_turn_gets_the_standing_parts_and_no_grant() {
+    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let t = start(Store::open_in_memory().unwrap(), dir.path()).await;
+    let sid = memory_chat(&t).await;
+    let owner = t
+        .master
+        .inner_mirror()
+        .session(sid)
+        .unwrap()
+        .unwrap()
+        .owner_id;
+    t.master
+        .memory()
+        .unwrap()
+        .add(harness_memory::NewFact {
+            owner_id: owner,
+            text: "Alex keeps a cat named Tofu".into(),
+            kind: harness_memory::FactKind::Fact,
+            status: harness_memory::Status::Active,
+            source_session: None,
+            dedupe_key: None,
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    t.node.append(sid, started("bg-1"));
+    t.node
+        .append(sid, ended("bg-1", BackgroundReason::Exited, false));
+    until_callbacks(&t.node, 1).await;
+    let (agent, context) = t
+        .node
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|m| match m {
+            MasterToNode::Callback { agent, context, .. } => {
+                Some((agent.clone().unwrap(), context.clone().unwrap()))
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert!(context.unattended);
+    assert!(context.turn.is_none());
+    use harness_core::backend::StandingKey as K;
+    let memory = context
+        .standing
+        .iter()
+        .find(|p| p.part == K::Memory)
+        .expect("the owner's facts");
+    assert!(memory.text.contains("Tofu"), "{}", memory.text);
+    assert!(
+        context.standing.iter().all(|p| !matches!(
+            p.part,
+            K::MemoryRecall | K::MemoryNotes | K::Remember | K::EarlierChats
+        )),
+        "{:?}",
+        context.standing
+    );
+    assert!(!agent.allows_tool("recall"), "recall withheld");
+    assert!(!agent.allows_tool("remember"), "remember withheld");
+}

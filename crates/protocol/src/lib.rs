@@ -460,10 +460,13 @@ pub enum MasterToNode {
         /// Token-saving methods for this turn (absent = all off).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         savings: Option<harness_core::savings::Savings>,
-        /// Per-turn context (memory recall...), placed after the history so
-        /// the cached prefix does not change. Not stored in the log.
+        /// The master's context for this message (the person's settings,
+        /// memory, the project's brief and board), placed after the history
+        /// so the cached prefix does not change. The loop records what it
+        /// sent of it in the turn's `context_sent` and sends a standing part
+        /// again only when it changed (X.1).
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        context: Option<String>,
+        context: Option<Box<harness_core::backend::MasterContext>>,
         /// An answer to a choices or form block; `text` is then the user's
         /// note (may be empty). The node checks it against its own log.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -489,6 +492,12 @@ pub enum MasterToNode {
         agent: Option<AgentSpec>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         savings: Option<harness_core::savings::Savings>,
+        /// The standing parts of the master's context for the chat's agent
+        /// and owner (`MasterContext::unattended`, X.1 review M1): the
+        /// turn's request extends the last one when they did not change.
+        /// Absent: the turn reads no memory.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context: Option<Box<harness_core::backend::MasterContext>>,
     },
     /// The user picked one of several parallel answers.
     #[serde(rename = "session.select_variant")]
@@ -979,6 +988,7 @@ mod tests {
             bg_ids: vec!["bg-1".into(), "bg-2".into()],
             agent: None,
             savings: None,
+            context: None,
         };
         let v = serde_json::to_value(&c).unwrap();
         assert_eq!(

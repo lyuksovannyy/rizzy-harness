@@ -468,7 +468,9 @@ const FLOOR_LINES: usize = 10;
 /// first, then skills are left out, with a note saying how many and how to
 /// reach them. A manual skill is not listed; skill folders that could not
 /// be read are named; the one the person invoked is named last. `None`
-/// when there is nothing to say.
+/// when there is nothing to say. The node renders it without the invoked
+/// one, which goes to the turn as [`asked_line`] (a standing section and a
+/// line for one turn: X.1).
 pub fn render(c: &Catalogue, cap: usize) -> Option<String> {
     let listed: Vec<&Skill> = c.skills.iter().filter(|s| !s.manual).collect();
     let mut after: Vec<String> = Vec::new();
@@ -491,10 +493,7 @@ pub fn render(c: &Catalogue, cap: usize) -> Option<String> {
         ));
     }
     if let Some(n) = c.invoked.as_deref() {
-        after.push(format!(
-            "[The person's message starts with /{n}: they ask for the skill `{n}`. Load it with \
-             the `skill` tool first.]"
-        ));
+        after.push(asked_line(n));
     }
     if listed.is_empty() && after.is_empty() {
         return None;
@@ -562,6 +561,14 @@ pub fn render(c: &Catalogue, cap: usize) -> Option<String> {
         out.push_str(&note(total - n));
     }
     Some(finish(out))
+}
+
+/// The line saying the person's message asks for skill `n` (`/n`).
+pub fn asked_line(n: &str) -> String {
+    format!(
+        "[The person's message starts with /{n}: they ask for the skill `{n}`. Load it with the \
+         `skill` tool first.]"
+    )
 }
 
 /// The skill the person's message names with `/name` at its start (the

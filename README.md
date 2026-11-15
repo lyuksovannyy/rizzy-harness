@@ -720,7 +720,9 @@ saved elsewhere.
   memory stays with the workspace. Deleting a workspace deletes its memory;
   deleting an account deletes its facts and its Personal workspace's memory.
 - What the assistant reads: each place's facts, newest first, up to 3,000
-  characters each turn (older ones only when the message matches them). What
+  characters (older ones only when the message matches them), looked up each
+  turn and sent again only when they changed (see "What goes with each
+  message"). What
   the assistant saved itself may take up to 3,000 characters per place
   (your facts and your Personal workspace together); past that, a save is
   refused and the next turn asks it to merge or drop facts first. Facts
@@ -1927,7 +1929,7 @@ stored as `[savings]` in `config.toml` and applies from the next message.
 
 | Method | Default | Applies to | What it does |
 |---|---|---|---|
-| `prompt_cache` | on | chat + agentic | Marks cacheable the instructions and tools, the end of the history before this turn's message, the end of the history before the previous turn's message, and the newest message (at most 4, Anthropic's limit); Anthropic bills re-reads at 10% or less. Within a turn each step reads the one before. Across turns the next turn reads everything up to the end of the turn before this one, byte for byte, and writes only the newest turn once: this turn's own message carries the per-turn context, which the next turn sends without, so it and the steps after it are not read again (PLAN.md T43). A summary, an image no longer shown, or a change in which tool outputs are hidden makes one request write the history again. |
+| `prompt_cache` | on | chat + agentic | Marks cacheable the instructions and tools, the end of the history before this turn's message, the end of the history before the previous turn's message, and the newest message (at most 4, Anthropic's limit); Anthropic bills re-reads at 10% or less. Within a turn each step reads the one before. Across turns the next turn reads everything up to this turn's last tool result, byte for byte: what was sent with this turn's message (instruction files, skills, memory, the project's brief, your settings line) is recorded with the turn and sent again exactly, and what has not changed is not sent again at all (PLAN.md T52). Usage shows cache reads and writes per turn (the token meter's tooltip). A summary, an image no longer shown, or a change in which tool outputs are hidden makes one request write the history again. |
 | `mask_old_outputs` | on, keep 8 | agentic | Tool outputs older than the newest 8–15 become a one-line note; hidden in batches so the cache stays valid. |
 | `filter_shell_output` | on | agentic | Colours, progress bars, build noise and passing-test lines removed, repeats folded; the full output stays on the node (`tool_output`). |
 | `bounded_reads` | on | agentic | 400-line read windows, 60 grep matches grouped by file. |
@@ -2009,16 +2011,17 @@ FIFO, within the same 5-second bound); no `git` process is started. The branch
 name is the repository's text: it is shown on one line, at most 120
 characters, with its quotation marks read as `'`. The line is recorded with
 the turn, so later messages resend it exactly and the provider's cache still
-covers that message; it costs about 60 tokens a message. (The instruction
-files, a project's context and recalled memory are not recorded: the message
-they come with is resent without them, so the cache stops there; see
-`prompt_cache` below.) Your own time zone, if you set one in your settings, is
-still sent separately with your messages.
+covers that message; it costs about 60 tokens a message. The rest of what goes
+with a message (instruction files, skills, memory, a project's context) is
+recorded the same way (see "What goes with each message" below). Your own time
+zone, if you set one in your settings, is still sent separately with your
+messages.
 
 ## Repository instructions (AGENTS.md)
 
-In an agentic chat the node reads the repository's own instruction files and
-sends them to the model with every message, the way Codex does: the
+In an agentic chat the node reads the repository's own instruction files at
+every message and sends them to the model when they are new or changed, the way
+Codex does: the
 `AGENTS.md` in each folder from the top of the git repository holding the
 chat's folder down to the chat's folder itself (only that folder when it is in
 no repository), and `CLAUDE.md` in a folder that has no `AGENTS.md` (an empty
@@ -2049,11 +2052,10 @@ the reason while the message goes on. A read that takes more than 5 seconds
 (a hung network disk) is given up with a note; the node logs each refused,
 cut or timed-out read (paths and reasons, never the text).
 
-**Cost:** the files are sent fresh with every message, after the part of the
-request the provider caches: about 1k tokens a message for a typical
-`AGENTS.md`, up to the cap (about 8k tokens), not reused from one message to
-the next (the steps within one message do reuse it). Moving them to a cached
-place is for later (with X.1).
+**Cost:** about 1k tokens for a typical `AGENTS.md` (up to the cap, about 8k
+tokens), sent with the first message, again only when a file changed (with a
+line saying the new files replace the earlier ones) and once after the chat is
+compacted; between those, nothing (see "What goes with each message").
 
 ## Skills
 
@@ -2137,9 +2139,57 @@ folders may be links anywhere outside the data directory. On a node other
 people's chats use, they can read the skills in `[skills] roots`: keep secrets
 out of them, or set `roots = []`.
 
-**Cost:** about 25 tokens per listed skill with every message, up to the cap
-(about 2k tokens), sent fresh like the instruction files; a body costs only
-when it is loaded.
+**Cost:** about 25 tokens per listed skill, up to the cap (about 2k tokens),
+sent like the instruction files: with the first message and again only when the
+list changes; a body costs only when it is loaded.
+
+## What goes with each message
+
+Besides your words, a message to the model carries a block the harness adds
+in front of them, every line quoted under one line of the harness's: the
+repository's instruction files, the list of skills, your memory facts, a
+project's brief, facts and board, a line with your name and local time, and
+notes (an MCP server that did not start, a `/skill` you asked for). The block
+is recorded with the turn (never shown in the chat), so every later message
+resends that message exactly as it was and the provider reads the whole
+conversation up to the last tool result from its cache (Anthropic bills those
+re-reads at a tenth). What has not changed since it was last sent is not sent
+again: the model has it earlier in the conversation. Each part counts on its
+own: your facts, the workspace's memory, the project's brief, its facts and its
+board, so a moved card sends the board alone and a colleague's change to the
+team's memory sends that memory alone. What changes with the message (older facts
+that match it, the count of saved memory, notes on earlier saves, a project
+chat's earlier chats on its first message) replaces its earlier copy, so the
+conversation never holds an old recall: a fact you forget is gone from the
+next message even if it was only ever recalled. A turn that reports a finished
+background command reads the same memory the chat's agent reads in your turns
+(it cannot save or search memory), so when nothing changed it costs no new
+cache write; a turn that reads messages you sent while the agent worked gets
+the context of the newest of them when it was made for the same agent, and
+otherwise reads none. A tool result that quoted a fact earlier stays in the
+conversation as it was, like the agent's own earlier answers. A changed part is sent in
+full with a line saying it replaces the earlier one; a part that is gone (memory
+switched off, the files deleted) gets a line saying it no longer applies, and
+earlier messages are then resent without their copy: an agent whose memory is
+off (an `@mention`, the Agents page switch, a team workspace that does not use
+your memory) reads none of your facts, and a fact you forget or correct is gone
+from the next message. A file that could not be read in time is kept as the
+model last saw it, with a note. After the chat is compacted, everything is sent
+once more. In a plain chat the line with your name has your local time, so it
+goes with every message; in a chat on a node the node's environment line has
+the clock instead, and the line only names you and your time zone.
+
+When more than one agent answers in a chat, each earlier answer of another
+agent is marked with that agent's name, so the agent answering now does not
+take it for its own. A message that got no answer (the provider refused, you
+stopped it at once) stays in the conversation with a note saying so, so the
+next message can say "try again".
+
+The record is part of the chat: only you can see it (admins cannot), it is
+deleted with the chat, and anything that looks like a configured secret is
+removed before it is sent or recorded. A fact you later forget or edit is not
+sent again, but stays in the records of the chats it was already sent to,
+until you delete them.
 
 ## Rich messages
 

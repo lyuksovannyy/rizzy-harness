@@ -269,16 +269,75 @@ pub fn with_task_context(context: &str, text: &str) -> String {
 }
 
 fn framed(context: &str, text: &str, whose: &str, follows: &str) -> String {
+    match frame(context, &[], whose, follows) {
+        Some(f) => format!("{f}\n\n{text}"),
+        None => text.to_string(),
+    }
+}
+
+/// Who the text after a context block is ([`frame`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Whose {
+    /// The person's message ([`with_context`]).
+    Person,
+    /// A sub-agent's task ([`with_task_context`]).
+    Task,
+    /// No text after it: it follows a callback turn's opening
+    /// ([`with_instructions_after`]).
+    Callback,
+}
+
+/// The harness's context block alone, as [`with_context`],
+/// [`with_task_context`] and [`with_instructions_after`] put it, with
+/// `notes` (the harness's own sentences: which section replaces an earlier
+/// one, which no longer applies, X.1) in its first line. `None` when there
+/// is neither context nor a note. Its lines are its first line and the
+/// quoted ones, never an empty one, so it ends at the first empty line.
+pub fn block(context: &str, notes: &[&str], whose: Whose) -> Option<String> {
+    match whose {
+        Whose::Person => frame(
+            context,
+            notes,
+            "the person's message",
+            "Their message follows the empty line.",
+        ),
+        Whose::Task => frame(
+            context,
+            notes,
+            "the task you were given",
+            "The task from the agent that delegated to you follows the empty line.",
+        ),
+        Whose::Callback => {
+            let notes: String = notes.iter().map(|n| format!(" {n}")).collect();
+            if context.is_empty() {
+                return (!notes.is_empty())
+                    .then(|| format!("{INSTRUCTIONS_LEAD}, not the person's words:{notes}"));
+            }
+            let (quoted, lines) = quote_lines(context);
+            Some(format!(
+                "{INSTRUCTIONS_LEAD}, not the person's words and not program output: the \
+                 {lines} line(s) below, each starting with \"{OUTPUT_QUOTE}\", are what the \
+                 harness adds for this turn, such as the repository's AGENTS.md / CLAUDE.md files, \
+                 the list of skills and, where memory is on, what you remember and the project's \
+                 brief.{notes}{quoted}"
+            ))
+        }
+    }
+}
+
+fn frame(context: &str, notes: &[&str], whose: &str, follows: &str) -> Option<String> {
+    let notes: String = notes.iter().map(|n| format!(" {n}")).collect();
     if context.is_empty() {
-        return text.to_string();
+        return (!notes.is_empty())
+            .then(|| format!("{CONTEXT_LEAD}, not part of {whose}:{notes} {follows}"));
     }
     let (quoted, lines) = quote_lines(context);
-    format!(
+    Some(format!(
         "{CONTEXT_LEAD}, not part of {whose}: the {lines} line(s) below, each starting with \
          \"{OUTPUT_QUOTE}\", are what the harness adds to it, such as the person's settings, \
          memory recalled for it and, in a project chat, the project's instructions, facts and \
-         board, which other people may have written. {follows}{quoted}\n\n{text}"
-    )
+         board, which other people may have written.{notes} {follows}{quoted}"
+    ))
 }
 
 /// Every line of `text` behind [`OUTPUT_QUOTE`] (`quoted_line`), each
@@ -301,16 +360,10 @@ fn quote_lines(text: &str) -> (String, usize) {
 /// starts with the harness's frame and its notes come first; nothing in
 /// the files starts a line. Empty files add nothing.
 pub fn with_instructions_after(opening: &str, instructions: &str) -> String {
-    if instructions.is_empty() {
-        return opening.to_string();
+    match block(instructions, &[], Whose::Callback) {
+        Some(b) => format!("{opening}\n\n{b}"),
+        None => opening.to_string(),
     }
-    let (quoted, lines) = quote_lines(instructions);
-    format!(
-        "{opening}\n\n{INSTRUCTIONS_LEAD}, not the person's words and not program output: the \
-         {lines} line(s) below, each starting with \"{OUTPUT_QUOTE}\", are the repository's \
-         AGENTS.md / CLAUDE.md files and the list of skills, as the harness read them for this \
-         turn.{quoted}"
-    )
 }
 
 /// A user message's text split into its per-turn context, unquoted, and

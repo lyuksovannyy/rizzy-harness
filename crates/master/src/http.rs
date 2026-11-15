@@ -1320,7 +1320,11 @@ async fn prompt(
                 context: Some(
                     crate::prefs::Prefs::load(&m, who.user_id.as_deref())
                         .await
-                        .model_context(&who.username, jiff::Timestamp::now()),
+                        .model_context(
+                            &who.username,
+                            jiff::Timestamp::now(),
+                            row.profile.as_deref() == Some("chat"),
+                        ),
                 ),
                 attachments,
                 compare: b.compare,

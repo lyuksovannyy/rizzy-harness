@@ -596,6 +596,18 @@ fn events() -> Vec<RawEvent> {
             wait_ms: 4000,
             reason: RetryReason::NoAnswer,
         }),
+        // What the model was sent with the turn's message (X.1): never
+        // shown, and the wait it is in stays shown.
+        EventKind::ContextSent(ContextSent {
+            turn_id: "t6".into(),
+            frame: ContextFrame::Person,
+            sections: vec![SentSection {
+                key: "instructions".into(),
+                digest: "ab12".into(),
+                text: "Run cargo fmt.".into(),
+                note: None,
+            }],
+        }),
     ];
     let mut out: Vec<RawEvent> = kinds
         .into_iter()

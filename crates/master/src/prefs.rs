@@ -189,7 +189,13 @@ impl Prefs {
 
     /// A short context block for the model: who the user is, their local
     /// date and time, and (if given) where they are. Empty fields are left out.
-    pub fn model_context(&self, username: &str, now: jiff::Timestamp) -> String {
+    /// `clock`: whether it says the time. A chat on a node (agentic) opens
+    /// every message with the node's environment line, which has the
+    /// node's clock and zone; a second clock in another zone only made the
+    /// two disagree (review R10), so there it names the person's zone, if
+    /// set, and no time. A plain chat has no environment line and gets the
+    /// time as before.
+    pub fn model_context(&self, username: &str, now: jiff::Timestamp, clock: bool) -> String {
         let opt = |o: &Option<String>| o.as_deref().map(str::trim).unwrap_or("").to_string();
         let display = opt(&self.display_name);
         let name = if display.is_empty() {
@@ -204,6 +210,12 @@ impl Prefs {
             .filter(|t| !t.is_empty())
             .and_then(|t| jiff::tz::TimeZone::get(t).ok().map(|z| (t, z)));
         let mut out = match tz {
+            _ if !clock => match tz {
+                Some((zone_name, _)) => {
+                    format!("Context: the user's name is {name}. Their time zone is {zone_name}.")
+                }
+                None => format!("Context: the user's name is {name}."),
+            },
             Some((zone_name, zone)) => format!(
                 "Context: the user's name is {name}. Their local time is {} ({zone_name}).",
                 now.to_zoned(zone).strftime("%A %Y-%m-%d %H:%M"),
@@ -268,11 +280,11 @@ mod context_tests {
         };
         // 2026-01-15 22:30 UTC is 00:30 the next day in Riga (UTC+2).
         let now: jiff::Timestamp = "2026-01-15T22:30:00Z".parse().unwrap();
-        let c = p.model_context("alex", now);
+        let c = p.model_context("alex", now, true);
         assert!(c.contains("Alex"), "{c}");
         assert!(c.contains("Friday 2026-01-16 00:30 (Europe/Riga)"), "{c}");
         assert!(c.contains("Riga, Latvia"), "{c}");
-        let bare = Prefs::default().model_context("bob", now);
+        let bare = Prefs::default().model_context("bob", now, true);
         assert!(
             bare.contains("bob") && !bare.contains("They are in"),
             "{bare}"
@@ -283,6 +295,27 @@ mod context_tests {
             "{bare}"
         );
         assert!(!bare.contains("local time"), "{bare}");
+    }
+
+    /// Review R10: a chat on a node has the node's clock in its
+    /// environment line; the master's line then says no time (the two
+    /// disagreed), only the person's zone when they set one.
+    #[test]
+    fn an_agentic_chat_gets_no_second_clock() {
+        let now: jiff::Timestamp = "2026-01-15T22:30:00Z".parse().unwrap();
+        let p = Prefs {
+            timezone: Some("Europe/Riga".into()),
+            city: Some("Riga".into()),
+            ..Default::default()
+        };
+        let c = p.model_context("alex", now, false);
+        assert_eq!(
+            c,
+            "Context: the user's name is alex. Their time zone is Europe/Riga. They are in \
+             Riga; use it for local questions (transit, shops, news, weather)."
+        );
+        let bare = Prefs::default().model_context("bob", now, false);
+        assert_eq!(bare, "Context: the user's name is bob.");
     }
 
     #[test]
