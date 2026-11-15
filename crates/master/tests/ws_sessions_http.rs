@@ -337,9 +337,16 @@ async fn changing_your_password_closes_all_your_sockets() {
 }
 
 /// A login that runs out while its socket sits open: the timer finds it,
-/// and the checks did not keep it alive.
+/// and the checks (every 100 ms, about 50 of them before it runs out) did
+/// not keep it alive.
+///
+/// The login lasts long enough for its socket to open and answer on a
+/// loaded runner (it is checked to be open before it runs out); the wait
+/// for the close only fails a hung test: a socket the checks kept alive
+/// would never close.
 #[tokio::test]
 async fn an_expired_login_closes_its_socket_on_the_timer() {
+    const LASTS_MS: i64 = 5_000;
     let t = start(Duration::from_millis(100)).await;
     let [(_, alex_id), _] = users(&t).await;
     let id = "ab".repeat(32);
@@ -352,14 +359,18 @@ async fn an_expired_login_closes_its_socket_on_the_timer() {
             &auth::sha256_hex(&key),
             &alex_id,
             now,
-            now + 1_500,
+            now + LASTS_MS,
         )
         .unwrap();
     let c = format!("{}={id}", auth::cookie_name());
     common::remember(&c, &json!({"login_key": key}));
     let mut s = socket(&t, &c).await;
     alive(&mut s).await;
-    assert_eq!(ended(&mut s, Duration::from_secs(4)).await, SIGNED_OUT);
+    assert!(
+        harness_core::now_ms() < now + LASTS_MS,
+        "the socket opened only after its login ran out: no test of the timer"
+    );
+    assert_eq!(ended(&mut s, Duration::from_secs(30)).await, SIGNED_OUT);
 }
 
 /// A login removed with no message sent (a missed or future revoke path):

@@ -315,9 +315,14 @@ async fn run_of(t: &T, c: &str, id: &str, run: &str) -> Value {
     v
 }
 
+/// How long a poll below waits before it fails the test: only for a hung
+/// test, never a measure (a loaded runner is slow, not wrong).
+const HUNG: Duration = Duration::from_secs(60);
+
 /// Poll run `run` until its status is `status`.
 async fn wait_status(t: &T, c: &str, id: &str, run: &str, status: &str) -> Value {
-    for _ in 0..500 {
+    let by = std::time::Instant::now() + HUNG;
+    while std::time::Instant::now() < by {
         let v = run_of(t, c, id, run).await;
         if v["status"] == status {
             return v;
@@ -325,6 +330,19 @@ async fn wait_status(t: &T, c: &str, id: &str, run: &str, status: &str) -> Value
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     panic!("run never became {status}: {}", run_of(t, c, id, run).await);
+}
+
+/// Poll chat `sid`'s events until `pred` holds for them.
+async fn wait_events(t: &T, c: &str, sid: &str, pred: impl Fn(&[Value]) -> bool) -> Vec<Value> {
+    let by = std::time::Instant::now() + HUNG;
+    while std::time::Instant::now() < by {
+        let evs = events(t, c, sid).await;
+        if pred(&evs) {
+            return evs;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("events never matched: {:#?}", events(t, c, sid).await);
 }
 
 async fn runs(t: &T, c: &str, id: &str) -> Vec<Value> {
@@ -335,7 +353,8 @@ async fn runs(t: &T, c: &str, id: &str) -> Vec<Value> {
 
 /// Poll the routine's runs until `pred` holds for them.
 async fn wait_runs(t: &T, c: &str, id: &str, pred: impl Fn(&[Value]) -> bool) -> Vec<Value> {
-    for _ in 0..500 {
+    let by = std::time::Instant::now() + HUNG;
+    while std::time::Instant::now() < by {
         let list = runs(t, c, id).await;
         if pred(&list) {
             return list;
@@ -370,7 +389,8 @@ async fn events(t: &T, c: &str, sid: &str) -> Vec<Value> {
 
 /// The id of the newest approval asked in chat `sid`, once there is one.
 async fn approval_in(t: &T, c: &str, sid: &str) -> String {
-    for _ in 0..500 {
+    let by = std::time::Instant::now() + HUNG;
+    while std::time::Instant::now() < by {
         if let Some(e) = events(t, c, sid)
             .await
             .iter()
@@ -563,7 +583,8 @@ async fn run_now_starts_a_chat_in_the_team_workspace_and_reports_back() {
     assert!(session_ids(&t, &all, &alex).await.contains(&sid));
 
     // Live: alex heard of it, bob did not.
-    t.master.changed("artifacts", None);
+    t.master
+        .changed("artifacts", harness_master::Audience::Everyone);
     assert!(routine_topics(&mut a_sock).await > 0);
     assert_eq!(routine_topics(&mut b_sock).await, 0);
 
@@ -1779,7 +1800,15 @@ async fn a_run_cut_by_a_stop_is_interrupted_uncounted_and_not_run_again() {
         } else {
             started(&t, &alex, &id).await
         };
-        wait_status(&t, &alex, &id, &run, "running").await;
+        // A stop while the run's turn runs: `running` is written before
+        // the prompt goes out, and a stop before its `turn_started` is the
+        // other case (`a_run_whose_turn_never_started_is_interrupted_uncounted`).
+        let v = wait_status(&t, &alex, &id, &run, "running").await;
+        let sid = v["session_id"].as_str().unwrap().to_string();
+        wait_events(&t, &alex, &sid, |e| {
+            e.iter().any(|e| e["kind"] == "turn_started")
+        })
+        .await;
         t.master.begin_stop();
         assert!(t.chat.stop(Duration::from_secs(20)).await.is_empty());
         let v = wait_status(&t, &alex, &id, &run, "interrupted").await;

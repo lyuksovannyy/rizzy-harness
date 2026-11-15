@@ -316,7 +316,7 @@ pub async fn hourly(m: &Master) {
 
 /// Tell the owner's open pages that their routines or runs changed.
 pub(crate) fn changed(m: &Master, owner: &str) {
-    m.changed("routines", Some(owner.to_string()));
+    m.changed("routines", crate::Audience::User(owner.to_string()));
 }
 
 /// Record `kind` with `detail` (ids and reasons only: never prompt text).

@@ -84,6 +84,9 @@ impl Tool for Grep {
     fn risk(&self) -> ToolRisk {
         ToolRisk::ReadOnly
     }
+    fn refusal(&self, ctx: &ToolCtx, input: &Value) -> Option<String> {
+        root(ctx, input).err()
+    }
     async fn run(&self, ctx: &ToolCtx, input: Value) -> ToolOutcome {
         let pattern = match str_arg(&input, "pattern") {
             Ok(p) => p.to_string(),
@@ -215,6 +218,9 @@ impl Tool for Glob {
     }
     fn risk(&self) -> ToolRisk {
         ToolRisk::ReadOnly
+    }
+    fn refusal(&self, ctx: &ToolCtx, input: &Value) -> Option<String> {
+        root(ctx, input).err()
     }
     async fn run(&self, ctx: &ToolCtx, input: Value) -> ToolOutcome {
         let pattern = match str_arg(&input, "pattern") {

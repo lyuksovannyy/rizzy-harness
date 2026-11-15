@@ -971,11 +971,20 @@ with one line saying what runs unasked:
 - **Accept edits**: `write` and `edit` of a file inside the chat's own folder
   run without a card; they are checkpointed and the turn's Undo takes them
   back. A path out of the folder (`../x`, an absolute path elsewhere, a link
-  that leads out or dangles), anything in `.git`, every command, every
-  publish and every other tool still ask. The node judges the path, from
-  the call itself, as the file tool resolves it.
+  that leads out or dangles) asks on a node with
+  `allow_outside_workspace = true`; elsewhere the tool refuses it, and so
+  does every node for anything in `.git`, without a card (see below). Every
+  command, every publish and every other tool still ask. The node judges
+  the path, from the call itself, as the file tool resolves it.
 - **Ask**: every command, write, edit and publish waits on a card. Reads,
   searches and the task list never ask.
+
+No mode shows a card for a call that cannot happen: a path the file tool
+would refuse whatever you answer (outside the folder on a node with
+`allow_outside_workspace = false`, inside `.git` for a write, the node's data
+directory) or a `bash` `workdir` outside the folder is refused before anyone
+is asked, with the tool's own reason, and the tool still checks again when an
+allowed call runs.
 
 These defaults are the owner's decision of 2026-11-14, in their words: "default accept mode is Auto for every chat type, no limits for apart chat types or agentic host access modes, so each can use auto, always accept, manual, etc...". Pick another mode for a new chat beside its
 folder, or change it in the open chat at any time; the chat shows each change.

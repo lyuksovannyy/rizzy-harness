@@ -960,7 +960,8 @@ async fn media_changed_reaches_only_the_owner() {
     let (st, _) = upload(&t, &alex, "a.png", &png(1, 1, b"live")).await;
     assert_eq!(st, StatusCode::CREATED);
     // A shared topic marks where to stop reading.
-    t.master.changed("artifacts", None);
+    t.master
+        .changed("artifacts", harness_master::Audience::Everyone);
     assert_eq!(
         topics_until(&mut a, "artifacts_changed").await,
         ["media_changed", "artifacts_changed"]

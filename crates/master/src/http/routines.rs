@@ -890,7 +890,10 @@ async fn seen(
         .await?;
     if marked {
         r::changed(&m, &row.owner_id);
-        let _ = m.inner.live.send(crate::Live::SessionsChanged);
+        // The attention list is the routine owner's.
+        m.nudge(crate::Live::SessionsChanged(crate::Audience::User(
+            row.owner_id.clone(),
+        )));
     }
     Ok(Json(json!({ "ok": true })))
 }

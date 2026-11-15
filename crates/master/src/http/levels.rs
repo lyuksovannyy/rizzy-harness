@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 use super::workspaces::{changed, guard_target, load_member, member_json};
 use super::{ApiError, ApiResult, require, require_admin};
 use crate::workspaces::{self, Perm, Role, access};
-use crate::{Live, Master, levels};
+use crate::{Master, levels};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -103,8 +103,8 @@ pub(super) async fn set_ceiling(
         if !found {
             return Err(ApiError(StatusCode::NOT_FOUND, "unknown user".into()));
         }
-        let _ = m.inner.live.send(Live::WorkspacesChanged);
-        let _ = m.inner.live.send(Live::SessionsChanged);
+        let rosters = super::workspaces::rosters_of(&m, &target.user_id).await;
+        super::workspaces::account_changed(&m, &target.user_id, rosters);
         // Lowered: their chats above the new ceiling stop (every workspace).
         if to < from {
             workspaces::sweep_revoked(&m, vec![id.clone()]);
@@ -203,7 +203,7 @@ pub(super) async fn set_member_level(
             return Err(ApiError(StatusCode::NOT_FOUND, "no such member".into()));
         }
         // `blocked` on their chats here may have changed.
-        changed(&m, true);
+        changed(&m, &[crate::Audience::Workspace(a.id().to_string())], true);
         if to < from {
             workspaces::sweep_revoked(&m, vec![user_id.clone()]);
         }

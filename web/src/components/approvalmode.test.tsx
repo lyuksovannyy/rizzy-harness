@@ -5,12 +5,19 @@
 // person's pick only; an open chat asks the server, which the node clamps.
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { describe, expect, test } from "vitest";
+import { beforeAll, describe, expect, test } from "vitest";
 import type { ApprovalMode, NodeInfo } from "../types";
 import { Composer, type Submission } from "./Composer";
 import { fold } from "../fold";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+// The picker is a lazy chunk whose first load (a module transform) can take
+// over a second on a loaded runner, past the 500 ms `picker` used to poll:
+// load it once here, under the hook's own limit.
+beforeAll(async () => {
+  await import("./ApprovalModePick");
+}, 30_000);
 
 const node = (over: Partial<NodeInfo> = {}): NodeInfo => ({
   node_id: "node-1",
@@ -28,9 +35,11 @@ const node = (over: Partial<NodeInfo> = {}): NodeInfo => ({
 
 const tick = () => act(async () => new Promise((r) => setTimeout(r, 10)));
 
+/** The picker once it has rendered, polled under a deadline. */
 async function picker(host: HTMLElement) {
   const q = () => host.querySelector<HTMLButtonElement>(".approval-pick .select-button");
-  for (let i = 0; i < 50 && !q(); i++) await tick();
+  const by = Date.now() + 4000;
+  while (!q() && Date.now() < by) await tick();
   return q();
 }
 

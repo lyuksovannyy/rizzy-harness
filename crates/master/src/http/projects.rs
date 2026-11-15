@@ -18,9 +18,10 @@ use serde_json::{Value, json};
 
 use super::{ApiError, ApiResult, CreateBody, memory_err, memory_store, require, visible_session};
 use crate::auth::Principal;
+use crate::memory::{audience_of, memory_changed};
 use crate::projects::{self as p, ProjectSettings};
 use crate::workspaces::{Access, WsError};
-use crate::{Live, Master};
+use crate::{Audience, Live, Master};
 
 pub(super) fn routes() -> Router<Master> {
     Router::new()
@@ -75,8 +76,10 @@ fn some<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T
     T::deserialize(d).map(Some)
 }
 
-fn changed(m: &Master) {
-    let _ = m.inner.live.send(Live::ProjectsChanged);
+/// Tell `to` (a project's workspace, or a chat's owner) that projects
+/// changed (T58).
+fn changed(m: &Master, to: Audience) {
+    m.nudge(Live::ProjectsChanged(to));
 }
 
 /// `?workspace=` on list calls, as on the chat list.
@@ -284,7 +287,7 @@ async fn create(
         .call(move |s| s.create_project(&new, p::MAX_PROJECTS))
         .await
         .map_err(store_err)?;
-    changed(&m);
+    changed(&m, Audience::Workspace(row.workspace_id.clone()));
     Ok(Json(detail_json(&m, &who, &a, &row).await?))
 }
 
@@ -365,7 +368,7 @@ async fn update(
         .call(move |s| s.update_project(&pid, &patch))
         .await?
         .ok_or_else(|| not_found("project"))?;
-    changed(&m);
+    changed(&m, Audience::Workspace(row.workspace_id.clone()));
     Ok(Json(detail_json(&m, &who, &a, &row).await?))
 }
 
@@ -379,9 +382,11 @@ async fn remove(
     let pid = row.project_id.clone();
     m.inner.mirror.call(move |s| s.delete_project(&pid)).await?;
     p::delete_memory(&m, &row.project_id).await;
-    changed(&m);
-    let _ = m.inner.live.send(Live::SessionsChanged);
-    let _ = m.inner.live.send(Live::MemoryChanged);
+    // Every member's chats in it left it; nothing private is said by that.
+    let ws = Audience::Workspace(row.workspace_id.clone());
+    changed(&m, ws.clone());
+    m.nudge(Live::SessionsChanged(ws.clone()));
+    m.nudge(Live::MemoryChanged(ws));
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -440,8 +445,9 @@ async fn set_chat_project(
         .mirror
         .call(move |s| s.set_session_project(sid, project.as_deref()))
         .await?;
-    changed(&m);
-    let _ = m.inner.live.send(Live::SessionsChanged);
+    // Which project a chat is in shows only to its owner.
+    changed(&m, Audience::Chat(sid));
+    m.nudge(Live::SessionsChanged(Audience::Chat(sid)));
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -548,7 +554,7 @@ async fn board(
 
 /// Answer a board change: tell every client, return the new board.
 async fn board_changed(m: &Master, who: &Principal, project: &str) -> ApiResult<Json<Value>> {
-    changed(m);
+    changed(m, Audience::Project(project.to_string()));
     Ok(Json(board_json(m, who, project).await?))
 }
 
@@ -848,7 +854,7 @@ async fn save_template(
         .call(move |s| s.create_board_template(&t, p::MAX_TEMPLATES))
         .await
         .map_err(store_err)?;
-    changed(&m);
+    changed(&m, Audience::Workspace(row.workspace_id.clone()));
     Ok(Json(out))
 }
 
@@ -876,7 +882,7 @@ async fn delete_template(
         .mirror
         .call(move |s| s.delete_board_template(&id))
         .await?;
-    changed(&m);
+    changed(&m, Audience::Workspace(t.workspace_id.clone()));
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -1008,7 +1014,7 @@ async fn add_memory(
     if let Some(f) = &f {
         crate::memory::note_added(&m, f, who.user_id.as_deref()).await;
     }
-    let _ = m.inner.live.send(Live::MemoryChanged);
+    memory_changed(&m, Audience::Project(row.project_id.clone()));
     Ok(Json(json!(f)))
 }
 
@@ -1068,6 +1074,7 @@ async fn update_memory(
     Json(b): Json<FactPatch>,
 ) -> ApiResult<Json<Value>> {
     let (who, mem, may_activate, cur) = own_project_fact(&m, &headers, &id, &fact).await?;
+    let before = audience_of(&m, &cur).await;
     if b.status == Some(harness_memory::Status::Active) && !may_activate {
         return Err(ApiError(
             StatusCode::FORBIDDEN,
@@ -1110,7 +1117,11 @@ async fn update_memory(
         )
         .await;
     }
-    let _ = m.inner.live.send(Live::MemoryChanged);
+    let after = audience_of(&m, &f).await;
+    if after != before {
+        memory_changed(&m, after);
+    }
+    memory_changed(&m, before);
     let c = credits(&m).await?;
     Ok(Json(fact_json(&who, &f, &c)))
 }
@@ -1121,6 +1132,7 @@ async fn delete_memory(
     Path((id, fact)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
     let (_, mem, _, cur) = own_project_fact(&m, &headers, &id, &fact).await?;
+    let to = audience_of(&m, &cur).await;
     // Retire, never delete, a fact in use (review F5): a proposal may be
     // withdrawn or dismissed, a retired fact purged by a manager
     // (`own_project_fact` asked "may manage" for it).
@@ -1133,6 +1145,6 @@ async fn delete_memory(
     mem.delete(&fact).await.map_err(memory_err)?;
     crate::memory::clear_meta(&m, &fact).await;
     crate::memory::clear_authorship(&m, &fact).await;
-    let _ = m.inner.live.send(Live::MemoryChanged);
+    memory_changed(&m, to);
     Ok(Json(json!({ "ok": true })))
 }

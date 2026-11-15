@@ -20,6 +20,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -68,8 +69,10 @@ fn rate() -> usize {
         << 10
 }
 
-/// Forward bytes both ways at `rate` bytes a second each.
-async fn throttled(target: SocketAddr, rate: usize) -> String {
+/// Forward bytes both ways at `rate` bytes a second each; while `hold` is
+/// set, nothing goes from the node to the master (the uplink takes
+/// nothing, as `control_under_load`'s stalled reader).
+async fn throttled(target: SocketAddr, rate: usize, hold: Arc<AtomicBool>) -> String {
     let sock = TcpSocket::new_v4().unwrap();
     sock.set_recv_buffer_size(PROXY_BUF).unwrap();
     sock.bind("127.0.0.1:0".parse().unwrap()).unwrap();
@@ -82,18 +85,27 @@ async fn throttled(target: SocketAddr, rate: usize) -> String {
             };
             let (ri, wi) = inbound.into_split();
             let (ro, wo) = outbound.into_split();
-            tokio::spawn(pace(ri, wo, rate));
-            tokio::spawn(pace(ro, wi, rate));
+            tokio::spawn(pace(ri, wo, rate, Some(hold.clone())));
+            tokio::spawn(pace(ro, wi, rate, None));
         }
     });
     url
 }
 
-/// A token bucket with no saved-up burst.
-async fn pace(mut r: OwnedReadHalf, mut w: OwnedWriteHalf, rate: usize) {
+/// A token bucket with no saved-up burst; it reads nothing while `hold`
+/// is set.
+async fn pace(
+    mut r: OwnedReadHalf,
+    mut w: OwnedWriteHalf,
+    rate: usize,
+    hold: Option<Arc<AtomicBool>>,
+) {
     let mut buf = vec![0u8; 16 * 1024];
     let mut next = Instant::now();
     loop {
+        while hold.as_ref().is_some_and(|h| h.load(Ordering::SeqCst)) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
         let n = match r.read(&mut buf).await {
             Ok(0) | Err(_) => return,
             Ok(n) => n,
@@ -121,6 +133,8 @@ struct Seen {
 struct Master {
     to_node: mpsc::Sender<MasterToNode>,
     seen: Arc<Mutex<Seen>>,
+    /// Set: the proxy carries nothing from the node (see [`throttled`]).
+    hold: Arc<AtomicBool>,
 }
 
 impl Master {
@@ -218,7 +232,8 @@ async fn master(
             }
         }
     });
-    let url = throttled(target, rate()).await;
+    let hold = Arc::new(AtomicBool::new(false));
+    let url = throttled(target, rate(), hold.clone()).await;
     let seen = Arc::new(Mutex::new(Seen::default()));
     let (to_tx, to_rx) = tokio::sync::oneshot::channel();
     let (s, st) = (seen.clone(), stop.clone());
@@ -253,6 +268,7 @@ async fn master(
         Master {
             to_node: to_rx.await.unwrap(),
             seen,
+            hold,
         }
     })
 }
@@ -386,6 +402,12 @@ async fn a_stop_and_an_approval_answer_are_acknowledged_within_the_ack_timeout_o
         |s| s.deltas.get(&sid).copied().unwrap_or(0) > 0,
     )
     .await;
+    // Fill with the uplink held, then let it move at its rate again: the
+    // flooders' 12 MiB fill the queue however slowly a loaded machine runs
+    // them, where a moving uplink could drain them as fast as they write
+    // (the old "the uplink never filled"). The Stop below goes out on the
+    // same slow, full uplink either way.
+    m.hold.store(true, Ordering::SeqCst);
     let mut floods = vec![];
     for i in 0..FLOODERS {
         floods.push(m.start(&ws, &format!("flood{i}"), FLOOD).await.0);
@@ -396,6 +418,7 @@ async fn a_stop_and_an_approval_answer_are_acknowledged_within_the_ack_timeout_o
     let filled = filling.elapsed();
     eprintln!("A.21 over the link: held back {filled:?} after the flood started");
     assert!(beating(&beat).await, "the command stopped by itself");
+    m.hold.store(false, Ordering::SeqCst);
 
     let (read0, t0) = (m.seen.lock().unwrap().read, Instant::now());
     m.send(MasterToNode::ApprovalRespond {

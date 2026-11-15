@@ -647,8 +647,34 @@ fn an_unversioned_file_whose_tables_break_migration_1_is_refused_as_a_mismatch()
 /// migration is logged before and after, naming the file and both
 /// versions; a creation (0 to the latest) and a failed one's "after" are
 /// not.
+///
+/// Runs alone in a child process. `tracing` caches whether a log line is
+/// wanted per call site, process-wide: another test of this file that
+/// reaches the same line on another thread while this one's subscriber is
+/// being set up can leave it cached as unwanted, and the line is lost here
+/// (seen under load: the "schema migrated" line missing, 1 of 4 runs).
 #[test]
 fn a_real_migration_is_logged_before_and_after_and_a_creation_is_not() {
+    const CHILD: &str = "HARNESS_TEST_MIGRATION_LOG_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "a_real_migration_is_logged_before_and_after_and_a_creation_is_not",
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success() && String::from_utf8_lossy(&out.stdout).contains("1 passed"),
+            "the child failed: {}\n{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        return;
+    }
     use std::sync::{Arc, Mutex};
     struct Capture(Arc<Mutex<Vec<String>>>);
     impl tracing::Subscriber for Capture {
