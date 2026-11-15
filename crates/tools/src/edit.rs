@@ -662,18 +662,38 @@ const UNREAD_CONTEXT: usize = 3;
 /// a `read`'s window, any part shown counts. The record is kept for the
 /// rest of this turn only: the log keeps a call's `seen` when it succeeded,
 /// so the next turn asks for a read again. Text not in the file shows
-/// nothing and counts as nothing.
+/// nothing and counts as nothing. Only for what a `read` would have shown
+/// and only where the retry changes nothing unseen (review F4, F7, F9):
+/// the agent may call `read`; the file is not one `read` refuses as
+/// binary; the call is one edit without `replace_all` (several edits, or
+/// every match, would change lines it was not shown).
 fn unread_refusal(ctx: &ToolCtx, key: &Path, shown: &str, text: &str, specs: &[Spec]) -> String {
-    let at = specs.first().and_then(|spec| {
-        let found = locate(&View::new(text), &mut None, spec).ok()?;
-        found.spans.first().map(|s| (s.a, s.b))
-    });
-    let Some((a, b)) = at else {
-        return format!(
+    if !ctx.read_offered {
+        return format!("{shown} has not been read in this session; nothing was changed.");
+    }
+    let plain = || {
+        format!(
             "{shown} has not been read in this session; nothing was changed. Call `read` with \
              path `{shown}` (the part that holds the text you are replacing is enough), then \
              edit it."
-        );
+        )
+    };
+    let binary = text
+        .as_bytes()
+        .iter()
+        .take(crate::fs::BINARY_SNIFF)
+        .any(|b| *b == 0);
+    let [spec] = specs else {
+        return plain();
+    };
+    if binary || spec.all {
+        return plain();
+    }
+    let at = locate(&View::new(text), &mut None, spec)
+        .ok()
+        .and_then(|found| found.spans.first().map(|s| (s.a, s.b)));
+    let Some((a, b)) = at else {
+        return plain();
     };
     let mut starts = vec![0];
     starts.extend(text.match_indices('\n').map(|(i, _)| i + 1));

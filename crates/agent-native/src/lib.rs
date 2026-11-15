@@ -2448,8 +2448,15 @@ impl NativeBackend {
                         t.name() == call.tool
                             && t.risk() == harness_core::policy::ToolRisk::Mutating
                     });
-                    guard.record(key, &call.tool, changes, outcome.ok, &output)
+                    if outcome.denied {
+                        guard.record_denied(key, &output)
+                    } else {
+                        guard.record(key, &call.tool, changes, outcome.ok, &output)
+                    }
                 });
+                // A trial after the second rule's refusal that failed the
+                // same way ends the turn after this step.
+                repeat_stop |= guard.ended();
                 // The step's last result carries the next request's note
                 // (half the budget, or the wrap-up), so the log has it.
                 let note = match (i + 1 == n_calls)
@@ -3000,12 +3007,16 @@ impl NativeBackend {
                 .await;
             match decision {
                 harness_core::policy::Decision::Deny => {
-                    return ToolOutcome::err(if ctx.cancel.is_cancelled() {
-                        "[cancelled before approval]".to_string()
-                    } else {
-                        "The user denied this tool call. Ask how to proceed or try something else."
-                            .to_string()
-                    });
+                    return ToolOutcome {
+                        denied: true,
+                        ..ToolOutcome::err(if ctx.cancel.is_cancelled() {
+                            "[cancelled before approval]".to_string()
+                        } else {
+                            "The user denied this tool call. Ask how to proceed or try something \
+                             else."
+                                .to_string()
+                        })
+                    };
                 }
                 harness_core::policy::Decision::AllowSession => {
                     allowed_this_turn.insert(key);
@@ -3043,6 +3054,11 @@ impl NativeBackend {
             background: background_access(ctx, host),
             skills: ctx.extra.skills.clone(),
             seen: self.seen.session(ctx.session_id),
+            read_offered: ctx.agent.as_ref().is_none_or(|a| a.allows_tool("read"))
+                && self
+                    .tools
+                    .iter()
+                    .any(|t| t.name() == "read" && t.enabled(&ctx.extra.savings)),
         };
         // stdout and stderr are interleaved into one coalesced stream (as a
         // terminal shows them); the final result carries both. `coalesce`

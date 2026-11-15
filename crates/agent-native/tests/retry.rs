@@ -535,11 +535,12 @@ async fn a_fallback_answer_reports_its_own_window() {
 /// 2026-11-15), verbatim.
 const ROUTER_503: &str = "{\"error\":{\"message\":\"no enabled connection can serve mistral/does-not-exist-9 \u{2014} add one under Providers\",\"type\":\"api_error\",\"code\":\"api_error\"}}";
 
-/// A provider that cannot serve the model: the turn's error says so in the
-/// harness's words and where the model is set here, with the provider's
-/// own text quoted below it, never the raw JSON body.
+/// The router's 503 for a model it has no connection for: after the
+/// retries the turn's error says in the harness's words that the provider
+/// failed, with the provider's own text quoted below it, never the raw
+/// JSON body (a 503 is no setting to point at: review F5).
 #[tokio::test]
-async fn a_model_the_provider_cannot_serve_is_named_in_the_harness_words() {
+async fn a_provider_that_fails_is_named_in_the_harness_words() {
     let m = "router::mistral/does-not-exist-9";
     let p = Scripted::new(vec![(
         m,
@@ -550,10 +551,11 @@ async fn a_model_the_provider_cannot_serve_is_named_in_the_harness_words() {
     assert_eq!(out.reason, TurnEndReason::Error);
     let e = out.error.unwrap_or_default();
     assert!(
-        e.starts_with(&format!("The provider could not serve the model {m}")),
+        e.starts_with(&format!(
+            "The provider failed to answer for the model {m}: it answered 503 to all 4 tries."
+        )),
         "{e}"
     );
-    assert!(e.contains("Settings"), "where it is set: {e}");
     assert!(
         e.contains("\n| no enabled connection can serve mistral/does-not-exist-9"),
         "{e}"
@@ -578,4 +580,18 @@ async fn model_not_found_is_not_retried() {
         e.starts_with("The provider could not serve the model m"),
         "{e}"
     );
+}
+
+/// Review F8: `model_not_found` from a gateway's 401 reaches the agent's
+/// fallback chain.
+#[tokio::test]
+async fn model_not_found_at_401_falls_back() {
+    let body = "{\"error\":{\"message\":\"no access\",\"code\":\"model_not_found\"}}";
+    let p = Scripted::new(vec![("m", vec![Reply::Body(401, body)])]);
+    let b = backend(p.clone(), fast());
+    let host = Host::default();
+    let out = run(&b, &host, "m", agent(&["n"])).await;
+    assert_eq!(out.reason, TurnEndReason::Completed, "{:?}", out.error);
+    assert_eq!(p.calls(), ["m", "n"]);
+    assert_eq!(host.answer().as_deref(), Some("answer from n"));
 }

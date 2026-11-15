@@ -30,12 +30,28 @@
 //!   fired, the turn burned 139k tokens). Per tool, a streak of failures
 //!   whose results are identical (after [`stable`]); the third is warned
 //!   ([`TOOL_WARN_AT`]), and after seven the next call to that tool is not
-//!   run ([`TOOL_REFUSE_AT`]); asking again in a later message ends the turn,
-//!   as above. Any other result of the tool (a success, a failure in other
-//!   words) ends the streak, and so does a change ([`RepeatGuard::restart`]);
-//!   calls of other tools in between do not. Only failures count: a poll
-//!   that succeeds with the same answer is the first rule's (same call) or
-//!   no loop at all. The thresholds are Hermes's same-tool failure counts
+//!   run ([`TOOL_REFUSE_AT`]): that refusal is the strong notice, and it
+//!   says the tool's next call will be run once. Other calls of the tool in
+//!   the refusing message are refused too. The tool's next call in a later
+//!   message (whenever it comes) **is run**, as a trial: the refusal is of
+//!   the tool, not of one call, so a sound call (`cargo build --offline`
+//!   after seven identical resolver errors) must get its chance. If the
+//!   trial fails with the same output again, the turn ends after that step
+//!   as the first rule ends it; any other result resets the rule. It cannot
+//!   loop: each cycle costs seven identical failures, one refusal and one
+//!   trial, a trial that repeats the failure ends the turn, and one that
+//!   does not starts the count from one, so the next refusal needs seven
+//!   new identical failures (with `max_steps` as the outer bound). Any
+//!   other result of the tool (a success, a failure in other words) ends
+//!   the streak, and so does a change ([`RepeatGuard::restart`]); calls of
+//!   other tools in between do not. Only failures count: a poll that
+//!   succeeds with the same answer is the first rule's (same call) or no
+//!   loop at all. A call the person denied is neither counted nor a reset
+//!   ([`RepeatGuard::record_denied`]): every denial reads the same, and
+//!   seven "no"s to seven different commands are the person's answers, not
+//!   a stuck model (the first rule still counts the same call denied
+//!   again). The loop marks the denial on the outcome
+//!   (`ToolOutcome::denied`), never from the text. The thresholds are Hermes's same-tool failure counts
 //!   (warn at 3, halt at 8; `agent/tool_guardrails.py`, research round 2
 //!   synth 01 §2), which also need no identical result; with one required
 //!   here the rule is stricter, and it never refuses on argument churn
@@ -94,13 +110,25 @@ struct Streak {
     refused: Option<u32>,
 }
 
+/// The second rule's state of one tool.
+struct ToolStreak {
+    outcome: u64,
+    /// Identical failures in a row since the last change.
+    runs: u32,
+    /// The step (assistant message) of its refusal.
+    refused: Option<u32>,
+    /// The call after the refusal is running: if it fails the same way, the
+    /// turn ends.
+    trial: bool,
+}
+
 /// The guard of one turn.
 #[derive(Default)]
 pub struct RepeatGuard {
     calls: HashMap<CallKey, Streak>,
     /// The second rule: per tool (a digest of its name), its identical
     /// failures in a row.
-    tools: HashMap<u64, Streak>,
+    tools: HashMap<u64, ToolStreak>,
     /// The model's message whose calls are being admitted.
     step: u32,
     /// A refusal ended the turn: nothing more runs in it.
@@ -170,27 +198,29 @@ impl RepeatGuard {
         }
         if let Some(s) = self.tools.get_mut(&tool_digest(tool))
             && s.runs + 1 >= TOOL_REFUSE_AT
+            && !s.trial
         {
-            let stop = refuse(s);
-            self.ended = stop;
-            let note = if stop {
-                stop_note()
-            } else {
-                format!(
-                    "{NOTE_LEAD} This call was not run: the last {} calls to this tool failed \
-                     with exactly the same output, whatever their input, with nothing changing \
-                     in between that the harness can see. Changing the input this way does not \
-                     change the result: read what the error says and try a different approach, \
-                     or end your turn and tell the person what blocks you. Calling this tool \
-                     again in your next message ends the turn.",
-                    TOOL_REFUSE_AT - 1
-                )
-            };
-            return Admission::Refuse {
-                output: TOOL_REFUSED_OUTPUT,
-                note,
-                stop,
-            };
+            match s.refused {
+                // The model was sent the refusal: this call is the trial.
+                Some(at) if at < step => s.trial = true,
+                _ => {
+                    s.refused.get_or_insert(step);
+                    return Admission::Refuse {
+                        output: TOOL_REFUSED_OUTPUT,
+                        note: format!(
+                            "{NOTE_LEAD} This call was not run: the last {} calls to this tool \
+                             failed with exactly the same output, whatever their input, with \
+                             nothing changing in between that the harness can see. Changing the \
+                             input this way does not change the result: read what the error says \
+                             and try a different approach, or end your turn and tell the person \
+                             what blocks you. Your next call of this tool, in a later message, \
+                             is run once; if it fails with the same output again, the turn ends.",
+                            TOOL_REFUSE_AT - 1
+                        ),
+                        stop: false,
+                    };
+                }
+            }
         }
         Admission::Run
     }
@@ -199,28 +229,38 @@ impl RepeatGuard {
     /// last result, so a call that then only repeats it is judged against
     /// it (and is no progress itself).
     pub fn restart(&mut self) {
-        for s in self.calls.values_mut().chain(self.tools.values_mut()) {
+        for s in self.calls.values_mut() {
             s.runs = 0;
             s.refused = None;
         }
+        for s in self.tools.values_mut() {
+            s.runs = 0;
+            s.refused = None;
+            s.trial = false;
+        }
     }
 
-    /// After a call ran: its result as logged. Returns the model's warning
-    /// line when this result repeats the last one.
-    pub fn record(
-        &mut self,
-        key: CallKey,
-        tool: &str,
-        changes: bool,
-        ok: bool,
-        output: &str,
-    ) -> Option<String> {
+    /// A refusal or a failed trial ended the turn: the loop ends it after
+    /// this step.
+    pub fn ended(&self) -> bool {
+        self.ended
+    }
+
+    /// After a call the person denied: the first rule counts it as any
+    /// result (the same call denied again is refused the fifth time); the
+    /// second rule leaves the tool's streak as it was, neither counted nor
+    /// reset.
+    pub fn record_denied(&mut self, key: CallKey, output: &str) -> Option<String> {
         if self.ended {
             return None;
         }
-        let mut h = std::hash::DefaultHasher::new();
-        (ok, stable(output).as_ref()).hash(&mut h);
-        let outcome = h.finish();
+        let runs = self.record_call(key, false, false, outcome_of(false, output));
+        (runs >= WARN_AT).then(|| same_call_warning(runs))
+    }
+
+    /// The first rule's count of `key` after a result: its identical
+    /// results since the last change.
+    fn record_call(&mut self, key: CallKey, changes: bool, ok: bool, outcome: u64) -> u32 {
         let (runs, change) = match self.calls.get(&key) {
             Some(s) if s.outcome == outcome => (s.runs + 1, false),
             // A new result of a call made before: something moved, if it
@@ -242,6 +282,24 @@ impl RepeatGuard {
                 refused: None,
             },
         );
+        runs
+    }
+
+    /// After a call ran: its result as logged. Returns the model's warning
+    /// line when this result repeats the last one.
+    pub fn record(
+        &mut self,
+        key: CallKey,
+        tool: &str,
+        changes: bool,
+        ok: bool,
+        output: &str,
+    ) -> Option<String> {
+        if self.ended {
+            return None;
+        }
+        let outcome = outcome_of(ok, output);
+        let runs = self.record_call(key, changes, ok, outcome);
         // The second rule: this tool's identical failures in a row; any
         // other result of it ends the streak.
         let t = tool_digest(tool);
@@ -249,28 +307,36 @@ impl RepeatGuard {
             self.tools.remove(&t);
             0
         } else {
-            let n = match self.tools.get(&t) {
-                Some(s) if s.outcome == outcome => s.runs + 1,
-                _ => 1,
-            };
-            self.tools.insert(
-                t,
-                Streak {
-                    outcome,
-                    runs: n,
-                    refused: None,
-                },
-            );
-            n
+            match self.tools.get_mut(&t) {
+                Some(s) if s.outcome == outcome && s.trial => {
+                    // The trial after the refusal failed the same way.
+                    self.ended = true;
+                    return Some(format!(
+                        "{NOTE_LEAD} This call failed with exactly the same output as the \
+                         calls to this tool before its refusal, so the turn ends here; the \
+                         calls after it in this message are not run."
+                    ));
+                }
+                Some(s) if s.outcome == outcome => {
+                    s.runs += 1;
+                    s.runs
+                }
+                _ => {
+                    self.tools.insert(
+                        t,
+                        ToolStreak {
+                            outcome,
+                            runs: 1,
+                            refused: None,
+                            trial: false,
+                        },
+                    );
+                    1
+                }
+            }
         };
         if runs >= WARN_AT {
-            return Some(format!(
-                "{NOTE_LEAD} This exact call has now given the same result {runs} times in \
-                 this turn, with nothing changing in between that the harness can see; asking \
-                 again will not change it. If you are waiting for something outside to \
-                 change, wait inside one command (a loop with a sleep and a deadline) or run \
-                 it in the background. Call number {REFUSE_AT} of it will not be run."
-            ));
+            return Some(same_call_warning(runs));
         }
         (failed >= TOOL_WARN_AT).then(|| {
             format!(
@@ -284,6 +350,24 @@ impl RepeatGuard {
             )
         })
     }
+}
+
+/// The digest of a result as the guard compares it.
+fn outcome_of(ok: bool, output: &str) -> u64 {
+    let mut h = std::hash::DefaultHasher::new();
+    (ok, stable(output).as_ref()).hash(&mut h);
+    h.finish()
+}
+
+/// The first rule's warning after `runs` identical results.
+fn same_call_warning(runs: u32) -> String {
+    format!(
+        "{NOTE_LEAD} This exact call has now given the same result {runs} times in this turn, \
+         with nothing changing in between that the harness can see; asking again will not \
+         change it. If you are waiting for something outside to change, wait inside one \
+         command (a loop with a sleep and a deadline) or run it in the background. Call number \
+         {REFUSE_AT} of it will not be run."
+    )
 }
 
 /// The note of a refusal that ends the turn.
@@ -526,11 +610,59 @@ mod tests {
             a => panic!("{a:?}"),
         }
         assert_eq!(g.admit(k(1), "read"), Admission::Run, "another tool runs");
+        assert!(
+            matches!(
+                g.admit(k(98), "bash"),
+                Admission::Refuse { stop: false, .. }
+            ),
+            "the same message: refused again"
+        );
+        // Review F1: the next call of the tool, in a later message, is the
+        // trial and runs; failing the same way again ends the turn.
         g.next_step();
-        assert!(matches!(
-            g.admit(k(100), "bash"),
-            Admission::Refuse { stop: true, .. }
-        ));
+        assert_eq!(g.admit(k(100), "bash"), Admission::Run);
+        assert!(
+            g.record(k(100), "bash", false, false, "error: read-only")
+                .is_some()
+        );
+        assert!(g.ended());
+        assert_eq!(g.admit(k(101), "bash"), Admission::Ended);
+
+        // A trial with another result resets the rule.
+        let mut g = RepeatGuard::default();
+        for i in 1..TOOL_REFUSE_AT {
+            g.record(k(i), "bash", false, false, "error");
+        }
+        assert!(matches!(g.admit(k(60), "bash"), Admission::Refuse { .. }));
+        g.next_step();
+        assert_eq!(g.admit(k(61), "bash"), Admission::Run);
+        assert!(g.record(k(61), "bash", false, true, "built").is_none());
+        assert!(!g.ended());
+        for i in 62..62 + TOOL_REFUSE_AT - 2 {
+            assert_eq!(g.admit(k(i), "bash"), Admission::Run, "call {i}");
+            g.record(k(i), "bash", false, false, "error");
+        }
+        assert_eq!(
+            g.admit(k(90), "bash"),
+            Admission::Run,
+            "counting from one again"
+        );
+
+        // Review F2: denials are neither counted nor a reset.
+        let mut g = RepeatGuard::default();
+        let denied = "The user denied this tool call. Ask how to proceed or try something else.";
+        for i in 1..3 * TOOL_REFUSE_AT {
+            assert_eq!(g.admit(k(i), "bash"), Admission::Run, "denial {i}");
+            g.record_denied(k(i), denied);
+        }
+        for i in 1..TOOL_REFUSE_AT {
+            g.record(k(200 + i), "bash", false, false, "error");
+            g.record_denied(k(300 + i), denied);
+        }
+        assert!(
+            matches!(g.admit(k(400), "bash"), Admission::Refuse { .. }),
+            "denials between the failures did not reset them"
+        );
 
         // A success in between, or a change, starts the streak again.
         let mut g = RepeatGuard::default();

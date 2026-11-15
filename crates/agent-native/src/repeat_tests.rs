@@ -1105,8 +1105,8 @@ fn builtin() -> Opts {
 /// adding one flag to the same failing command, each answered with the same
 /// error. Each call is another call, so the exact-call rule never fired.
 /// The second rule warns at the third identical failure of the same tool
-/// and refuses the eighth call; asking for it in the next message ends the
-/// turn, as the first rule does.
+/// and refuses the eighth call; the next call of the tool, in the next
+/// message, runs as a trial, fails the same way and ends the turn.
 #[tokio::test]
 async fn a_loop_of_near_identical_calls_with_the_same_failure_ends_at_the_guard() {
     let host = Host::new(Decision::Allow);
@@ -1125,8 +1125,8 @@ async fn a_loop_of_near_identical_calls_with_the_same_failure_ends_at_the_guard(
     let fin = host.noted();
     assert_eq!(
         lines_of(dir.path(), "runs"),
-        repeat::TOOL_REFUSE_AT as usize - 1,
-        "{fin:?}"
+        repeat::TOOL_REFUSE_AT as usize,
+        "seven failures, the refusal, then the trial that fails the same way: {fin:?}"
     );
     assert_eq!(r.out.reason, TurnEndReason::Error, "{:?}", r.out);
     assert!(
@@ -1157,6 +1157,66 @@ async fn a_loop_of_near_identical_calls_with_the_same_failure_ends_at_the_guard(
         refused + 2,
         "the next message's call ends it: {fin:?}"
     );
+    let trial = fin[refused + 1].2.as_deref().unwrap_or("");
+    assert!(trial.contains("turn ends here"), "{fin:?}");
+}
+
+/// Review F1/F3: after seven identical resolver errors and the refusal, a
+/// sound command in the next message (`cargo build --offline`) runs, and
+/// its success resets the rule: the turn goes on.
+#[tokio::test]
+async fn a_sound_call_after_the_refusal_runs_and_resets_the_rule() {
+    let host = Host::new(Decision::Allow);
+    let dir = tempfile::tempdir().unwrap();
+    let fail = |i: usize| {
+        bash(&format!(
+            "echo run >> runs; echo 'error: failed to get `serde` as a dependency'; exit 101 #{i}"
+        ))
+    };
+    let mut calls: Vec<_> = (0..repeat::TOOL_REFUSE_AT as usize).map(fail).collect();
+    calls.push(bash("echo run >> runs; echo 'Finished dev [offline]'"));
+    calls.push(bash("echo run >> runs; echo 'test result: ok'"));
+    let r = run_in(&host, calls, builtin(), dir.path()).await;
+    let fin = host.noted();
+    let refused = repeat::TOOL_REFUSE_AT as usize - 1;
+    assert!(fin[refused].1.contains("Not run"), "{fin:?}");
+    let note = fin[refused].2.as_deref().unwrap_or("");
+    assert!(
+        note.contains("is run once"),
+        "the refusal says what comes: {note}"
+    );
+    assert!(fin[refused + 1].0 && fin[refused + 2].0, "{fin:?}");
+    assert_eq!(lines_of(dir.path(), "runs"), refused + 2, "{fin:?}");
+    assert_eq!(r.out.reason, TurnEndReason::Completed, "{:?}", r.out);
+}
+
+/// Review F1: obeying the refusal (reading something first) and then
+/// running a sound command later does not end the turn.
+#[tokio::test]
+async fn reading_after_the_refusal_then_a_sound_call_does_not_end_the_turn() {
+    let host = Host::new(Decision::Allow);
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("Cargo.toml"), "[package]\n").unwrap();
+    let fail = |i: usize| bash(&format!("echo 'error: network unreachable'; exit 1 #{i}"));
+    let mut calls: Vec<_> = (0..repeat::TOOL_REFUSE_AT as usize).map(fail).collect();
+    calls.push(("read", json!({"path": "Cargo.toml"})));
+    calls.push(bash("echo run >> runs; echo ok"));
+    let r = run_in(&host, calls, builtin(), dir.path()).await;
+    assert_eq!(lines_of(dir.path(), "runs"), 1, "{:?}", host.noted());
+    assert_eq!(r.out.reason, TurnEndReason::Completed, "{:?}", r.out);
+}
+
+/// Review F2: the person's denials of different commands are their
+/// answers, not a stuck model: every one of them is asked.
+#[tokio::test]
+async fn denials_of_different_commands_never_trip_the_second_rule() {
+    let host = Host::new(Decision::Deny);
+    let n = 2 * repeat::TOOL_REFUSE_AT as usize;
+    let calls = (0..n).map(|i| bash(&format!("touch f{i}"))).collect();
+    let r = run_in(&host, calls, builtin(), tempfile::tempdir().unwrap().path()).await;
+    assert_eq!(host.asked_about("bash"), n, "{:?}", host.noted());
+    assert!(!host.noted().iter().any(|f| f.1.contains("Not run")));
+    assert_eq!(r.out.reason, TurnEndReason::Completed, "{:?}", r.out);
 }
 
 /// Reading the same file in different ranges gives a different result

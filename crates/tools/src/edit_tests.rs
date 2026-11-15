@@ -125,6 +125,76 @@ async fn an_unread_edit_whose_text_is_missing_says_to_read() {
     assert!(!again.ok, "not seen yet: {}", again.output);
 }
 
+/// Review F4: a file `read` refuses as binary (UTF-8 with NUL bytes) gets
+/// the plain refusal: no lines, not seen, the retry is refused too.
+#[tokio::test]
+async fn a_file_read_refuses_as_binary_gets_no_shortcut() {
+    let (dir, ctx) = ws();
+    put(&dir, "b.bin", "head\0\0\nkey=AAAA\nmore\0\n");
+    let r = run(&Read, &ctx, json!({"path": "b.bin"})).await;
+    assert!(!r.ok, "{}", r.output);
+    for _ in 0..2 {
+        let e = edit(&ctx, "b.bin", "key=AAAA", "key=BBBB").await;
+        assert!(!e.ok, "{}", e.output);
+        assert!(!e.output.contains("key=AAAA"), "{}", e.output);
+    }
+    assert_eq!(get(&dir, "b.bin"), "head\0\0\nkey=AAAA\nmore\0\n");
+}
+
+/// Review F7: `replace_all` or several `edits` would change text the
+/// refusal did not show: the plain refusal, and the retry is refused.
+#[tokio::test]
+async fn replace_all_or_several_edits_get_no_shortcut() {
+    let (dir, ctx) = ws();
+    let mut body = String::from("x = 1\n");
+    for i in 0..100 {
+        body.push_str(&format!("filler {i}\n"));
+    }
+    body.push_str("x = 1\n");
+    put(&dir, "a.txt", &body);
+    let all =
+        json!({"path": "a.txt", "old_string": "x = 1", "new_string": "x = 2", "replace_all": true});
+    let two = json!({"path": "a.txt", "edits": [
+        {"old_string": "filler 1\n", "new_string": "f1\n"},
+        {"old_string": "filler 99\n", "new_string": "f99\n"}
+    ]});
+    for input in [all, two] {
+        for _ in 0..2 {
+            let e = run(&Edit, &ctx, input.clone()).await;
+            assert!(!e.ok, "{}", e.output);
+            assert!(e.output.contains("Call `read`"), "{}", e.output);
+        }
+    }
+    assert_eq!(get(&dir, "a.txt"), body);
+}
+
+/// Several matches without `replace_all`: the plain refusal, nothing seen.
+#[tokio::test]
+async fn an_ambiguous_unread_edit_gets_the_plain_refusal() {
+    let (dir, ctx) = ws();
+    put(&dir, "a.txt", "a\nsame\nb\nsame\n");
+    let e = edit(&ctx, "a.txt", "same", "diff").await;
+    assert!(!e.ok && e.output.contains("Call `read`"), "{}", e.output);
+    assert!(!e.output.contains("\tsame"), "{}", e.output);
+    let again = edit(&ctx, "a.txt", "same", "diff").await;
+    assert!(!again.ok, "not seen: {}", again.output);
+    assert_eq!(get(&dir, "a.txt"), "a\nsame\nb\nsame\n");
+}
+
+/// Review F9: an agent that may not `read` sees no lines through the
+/// refusal.
+#[tokio::test]
+async fn no_lines_for_an_agent_without_read() {
+    let (dir, mut ctx) = ws();
+    ctx.read_offered = false;
+    put(&dir, "a.txt", "secret line\n");
+    let e = edit(&ctx, "a.txt", "secret line", "x").await;
+    assert!(!e.ok, "{}", e.output);
+    assert!(!e.output.contains("secret"), "{}", e.output);
+    let again = edit(&ctx, "a.txt", "secret line", "x").await;
+    assert!(!again.ok, "{}", again.output);
+}
+
 #[tokio::test]
 async fn a_partial_read_is_enough_for_edit() {
     let (dir, ctx) = ws();

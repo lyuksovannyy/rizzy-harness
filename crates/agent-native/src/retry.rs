@@ -74,31 +74,51 @@ impl RetryPolicy {
     }
 
     /// The error to show for `e` in the harness's own words, when there is
-    /// one: a wait longer than `max` (without the provider's body), or a
-    /// model the provider cannot serve (`cannot_serve`), named with where
-    /// it is set here and the provider's text quoted below, capped.
+    /// one: a wait longer than `max` (without the provider's body); a model
+    /// the provider does not know (`unknown_model`), named with where it
+    /// is set here; or a server error after its retries. The provider's
+    /// text is quoted below, capped.
     pub fn explain(&self, e: &ProviderError, model: &str) -> Option<String> {
         if let Some(m) = self.explain_wait(e, model) {
             return Some(m);
         }
-        if !e.cannot_serve() {
-            return None;
-        }
         let ProviderError::Status { status, .. } = e else {
             return None;
         };
+        if e.is_context_overflow() {
+            return None;
+        }
         let provider = model.split_once("::").map_or("", |(p, _)| p);
-        let mut out = format!(
-            "The provider could not serve the model {model} (it answered {status}). Pick another \
-             model for this chat in the model menu, or check how it is set in Settings: an \
-             agent's model, the default model, and {} model list under Settings → Server → AI \
-             providers.",
-            if provider.is_empty() {
-                "the provider's".to_string()
+        let mut out = if e.unknown_model() {
+            format!(
+                "The provider could not serve the model {model} (it answered {status}). Pick \
+                 another model for this chat in the model menu, or check how it is set in \
+                 Settings: an agent's model, the default model, and {} model list under \
+                 Settings → Server → AI providers.",
+                if provider.is_empty() {
+                    "the provider's".to_string()
+                } else {
+                    format!("provider {provider}'s")
+                }
+            )
+        } else if (500..=599).contains(status) {
+            // A failing or busy server: nothing to set (review F5).
+            let tries = if e.is_retryable() {
+                self.retries_for(e) + 1
             } else {
-                format!("provider {provider}'s")
-            }
-        );
+                1
+            };
+            format!(
+                "The provider failed to answer for the model {model}: it answered {status}{}.",
+                if tries > 1 {
+                    format!(" to all {tries} tries")
+                } else {
+                    String::new()
+                }
+            )
+        } else {
+            return None;
+        };
         if let Some(said) = e.provider_text() {
             out.push_str("\nThe provider said:");
             for l in quoted(&said) {
@@ -425,13 +445,34 @@ mod tests {
         let p = RetryPolicy::default();
         let body = r#"{"error":{"message":"no enabled connection can serve mistral/x — add one under Providers","type":"api_error","code":"api_error"}}"#;
         let m = p.explain(&status(503, body), "router::mistral/x").unwrap();
+        // Review F5: a 5xx is a failing server, not a setting: no advice.
         assert!(
             m.starts_with(
-                "The provider could not serve the model router::mistral/x (it answered 503)."
+                "The provider failed to answer for the model router::mistral/x: it answered 503 \
+                 to all 4 tries."
+            ),
+            "{m}"
+        );
+        assert!(!m.contains("Settings"), "{m}");
+        for s in [502, 504, 529] {
+            let m = p.explain(&status(s, "busy"), "p::m").unwrap();
+            assert!(
+                m.contains("failed to answer") && !m.contains("Settings"),
+                "{m}"
+            );
+        }
+        // A model the provider does not know: where it is set here.
+        let m = p
+            .explain(&status(404, "no such model"), "router::mistral/x")
+            .unwrap();
+        assert!(
+            m.starts_with(
+                "The provider could not serve the model router::mistral/x (it answered 404)."
             ),
             "{m}"
         );
         assert!(m.contains("Settings → Server → AI providers"), "{m}");
+        let m = p.explain(&status(503, body), "router::mistral/x").unwrap();
         assert!(
             m.ends_with("\n| no enabled connection can serve mistral/x — add one under Providers"),
             "{m}"
@@ -453,7 +494,18 @@ mod tests {
         // A code that says the model is unknown is not retried.
         let nf = r#"{"error":{"code":"model_not_found","message":"nope"}}"#;
         assert!(p.delay(&status(503, nf), 0).is_none());
-        assert!(p.explain(&status(503, nf), "p::m").is_some());
+        let m = p.explain(&status(503, nf), "p::m").unwrap();
+        assert!(m.contains("Settings → Server → AI providers"), "{m}");
+        // Review F8: at any status it is the model's problem, so the
+        // agent's fallbacks are tried.
+        for s in [401, 403] {
+            assert!(status(s, nf).is_model_level(), "{s}");
+            assert!(
+                p.explain(&status(s, nf), "p::m")
+                    .unwrap()
+                    .contains("Settings")
+            );
+        }
     }
 
     #[test]

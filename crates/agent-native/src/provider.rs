@@ -480,6 +480,9 @@ impl ProviderError {
             ProviderError::UnknownModel(_) | ProviderError::Http(_) | ProviderError::Silent(_) => {
                 true
             }
+            // `model_not_found` at any status (a 401 or 403 from a
+            // gateway too): another model may answer (review F8).
+            ProviderError::Status { body, .. } if model_not_found(body) => true,
             ProviderError::Status { status, body, .. } => match status {
                 404 | 408 | 429 | 500..=599 => true,
                 400 => body.to_ascii_lowercase().contains("model"),
@@ -551,16 +554,16 @@ impl ProviderError {
                     || msg.contains("input token count")))
     }
 
-    /// The provider answered that it cannot serve the model: a 404, a
-    /// server error (500 to 599, which a router also sends for a model it
-    /// has no connection for), or an error coded `model_not_found` at any
-    /// status. Not a rate limit, an exhausted quota or a too-long request.
-    /// Only the status and the error's code decide, never its free text.
-    pub fn cannot_serve(&self) -> bool {
+    /// The provider answered that it does not know the model: a 404, or an
+    /// error coded `model_not_found` at any status. A setting to fix, so
+    /// the message points at where the model is set. Only the status and
+    /// the error's code decide, never its free text (a router's 503 for a
+    /// model it has no connection for reads like any busy server).
+    pub fn unknown_model(&self) -> bool {
         let ProviderError::Status { status, body, .. } = self else {
             return false;
         };
-        !self.is_context_overflow() && (matches!(status, 404 | 500..=599) || model_not_found(body))
+        !self.is_context_overflow() && (*status == 404 || model_not_found(body))
     }
 
     /// The provider's own words for a failed request: the error body's

@@ -521,15 +521,18 @@ answer is on screen. The chat shows the turn as still running while it
 waits, with a line under it naming the model, why (rate limit, provider
 overloaded, provider error, connection failed, or no answer yet when the
 first-byte timeout ran out) and a countdown to the next attempt ("attempt 2
-of 3"). When the provider cannot serve the model (it answers 404, a server
-error, or `model_not_found`), the turn's error says so in the harness's
-words, names the model and where it is set (the chat's model menu, an
-agent's or the default model in Settings, the provider's model list under
-Settings → Server → AI providers) and quotes the provider's own message
+of 3"). When the provider does not know the model (it answers 404, or codes
+the error `model_not_found` at any status, which also sends the turn to the
+agent's fallbacks), the turn's error says so in the harness's words, names
+the model and where it is set (the chat's model menu, an agent's or the
+default model in Settings, the provider's model list under Settings → Server
+→ AI providers). When it keeps failing with a server error (500 to 599), the
+error says the provider failed to answer and after how many tries, with no
+advice about settings. Either way the provider's own message is quoted
 below, at most three lines and 300 characters. A router that answers 503
 with only a generic error type for a model it has no connection for is
-still retried three times first: nothing but free text tells that apart
-from a busy server, and the harness does not guess from free text. When a turn's
+treated as a failing server: nothing but free text tells that apart from a
+busy one, and the harness does not guess from free text. When a turn's
 model is unavailable, or its request still fails before any output with a model
 problem (not found, rate limit, server error, no connection), the agent's
 fallbacks are tried in order, skipping unavailable ones, and the chat notes
@@ -554,7 +557,8 @@ at all: no `Authorization` header and no `x-api-key`, for the chat, the
 model list, the provider test, memory embeddings and dictation alike. A
 local router that refuses unknown keys therefore works without one (before,
 the harness sent `Authorization: Bearer no-key`, which such a router
-refuses with 401).
+refuses with 401). Settings shows such a provider's key as empty ("counts as
+no key") rather than as stored.
 
 **Local and LAN model servers need `HARNESS_PLAIN_HTTP_HOSTS`.** The
 provider and model tests in Settings and the model listing are requests the
@@ -1566,14 +1570,19 @@ the same output in a row (the harness's own changing tokens aside) the
 agent is warned that changing the input this way does not change the
 result; after seven, its next call to that tool is not run ("Not run: the
 calls to this tool before it failed with exactly the same output several
-times in a row ..."), and calling that tool again in a later message ends
-the turn as above. Any other result of that tool (a success, a failure in
-other words) or a change starts it again; calls of other tools in between
-do not. Successes are never counted by this rule: a status poll that keeps
-answering the same through calls written a little differently runs on. A
-call you deny gives the same result every time, so it counts too: after
-seven denied calls of one tool in a row you are not asked about the agent's
-next call to it.
+times in a row ..."), and the agent is told that its next call of the tool
+will be run once. Other calls of that tool in the same message are refused
+too. The tool's next call in a later message runs, because the refusal is of
+the tool and a different command may be the right one (`cargo build
+--offline` after seven identical network errors); if it fails with the same
+output again, the turn ends as above. Any other result of that tool (a
+success, a failure in other words) or a change starts it again; calls of
+other tools in between do not. Successes are never counted by this rule: a
+status poll that keeps answering the same through calls written a little
+differently runs on. Calls you deny are not counted by this rule either (nor
+do they reset it): seven "no"s to seven different commands are your answers,
+and you are asked about every one. The same call denied again is still the
+first rule's.
 The counts follow Hermes Agent's same-tool failure thresholds (warn at 3,
 stop at 8), with the added condition that the output is identical.
 
@@ -1745,8 +1754,11 @@ delays Stop or an approval answer, in that chat or any other.
   first match of its `old_string`, numbered as `read` shows them, and that
   counts as having read the file as it was at that moment: the same edit
   sent again goes through, unless the file changes first. This holds for
-  the rest of the turn; the next turn asks for a `read` again. When the
-  text is not in the file, the refusal says to `read` it.
+  the rest of the turn; the next turn asks for a `read` again. Only for
+  one edit without `replace_all` (several edits or every match would change
+  lines the agent was not shown), for a file `read` would show (not one it
+  refuses as binary), and for an agent that may use `read`. Otherwise, or
+  when the text is not in the file, the refusal says to `read` it.
 - If the file changed on disk since then (you edited it, a command or a
   formatter did, another chat did), `write` is refused, and `edit` goes
   ahead only when the text it replaces lies outside the lines that
