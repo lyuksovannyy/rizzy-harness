@@ -285,12 +285,24 @@ impl SessionSeen {
         self.put(path, sha, snapshot)
     }
 
-    /// Record what an event already says the agent knows (a file the
-    /// person mentioned, T63): its hash only, keyed on its path as given.
-    /// A record that does not parse is skipped.
+    /// Record what the turn's own message says the agent knows (a file
+    /// the person mentioned, T63): its hash only, keyed on its path as
+    /// given. It is newer than anything the table holds at the turn's
+    /// start. A record that does not parse is skipped.
     pub fn note(&self, f: &FileSeen) {
         if let Some(sha) = unhex(&f.sha256) {
             self.put(Path::new(&f.path), sha, None);
+        }
+    }
+
+    /// [`Self::note`] for a message queued while a turn ran: only where
+    /// the table holds nothing of the file, so an older hash never
+    /// replaces a newer `read` or `write` (review of PR 120). An older
+    /// record kept means at worst "read it again", never a wrong accept;
+    /// the next turn's [`SeenStore::sync`] orders them by the log.
+    pub fn note_if_unknown(&self, f: &FileSeen) {
+        if self.get(Path::new(&f.path)).is_none() {
+            self.note(f);
         }
     }
 
@@ -379,6 +391,30 @@ impl Drop for PathLock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review of PR 120: a queued message's older hash of a file does not
+    /// replace a newer record of it; the turn's own message's does.
+    #[test]
+    fn a_queued_mention_never_replaces_a_newer_record() {
+        let t = SessionSeen::default();
+        let p = Path::new("/w/a.rs");
+        let newer = t.record(p, b"written by the turn");
+        let old = FileSeen {
+            path: "/w/a.rs".into(),
+            sha256: hex(&sha256(b"as the person sent it")),
+            base: None,
+        };
+        t.note_if_unknown(&old);
+        assert_eq!(hex(&t.get(p).unwrap().sha), newer.sha256);
+        t.note(&old);
+        assert_eq!(hex(&t.get(p).unwrap().sha), old.sha256);
+        let q = Path::new("/w/b.rs");
+        t.note_if_unknown(&FileSeen {
+            path: "/w/b.rs".into(),
+            ..old.clone()
+        });
+        assert_eq!(hex(&t.get(q).unwrap().sha), old.sha256);
+    }
     use harness_core::EventKind;
     use harness_core::event::ToolCallFinished;
 

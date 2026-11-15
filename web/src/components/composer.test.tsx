@@ -305,7 +305,7 @@ describe("@ file mentions (T63)", () => {
         textarea.dispatchEvent(new Event("input", { bubbles: true }));
       });
       await act(async () => {
-        vi.advanceTimersByTime(200);
+        vi.advanceTimersByTime(400);
         await Promise.resolve();
         await Promise.resolve();
       });
@@ -321,17 +321,38 @@ describe("@ file mentions (T63)", () => {
     const popup = c.host.querySelector(".mention-popup")!;
     expect(popup.textContent).toContain("Files");
     expect(popup.textContent).toContain("@src/main.rs");
-    expect(c.asked).toEqual(["src/ma"]);
+    expect(c.asked[0]).toBe("src/ma");
     c.key("Enter");
     expect(c.textarea.value).toBe("fix @src/main.rs ");
     // The person goes on typing after the mention (happy-dom reports no
     // caret move of its own).
     await c.type("fix @src/main.rs now");
     expect(c.host.querySelector(".mention-popup")).toBeNull();
+    // Shown before sending: the path that goes with the message.
+    expect(c.host.querySelector(".composer .chips")?.textContent).toContain("src/main.rs");
     await act(async () => {
       c.key("Enter");
       await vi.dynamicImportSettled();
       await Promise.resolve();
+    });
+    expect(c.sent[0]!.files).toEqual(["src/main.rs"]);
+    c.unmount();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  test("only paths the folder holds are attached; one taken off is not sent", async () => {
+    vi.useFakeTimers();
+    const c = await mountSession("s1", ["src/main.rs", "src/lib.rs"]);
+    await c.type("bump @types/node and fix @src/main.rs and @src/lib.rs now");
+    const chips = () => [...c.host.querySelectorAll(".composer .chips li")].map((x) => x.textContent?.trim());
+    expect(chips()).toEqual(["src/main.rs", "src/lib.rs"]);
+    act(() => c.host.querySelector<HTMLButtonElement>('.composer .chips button[aria-label$="src/lib.rs"]')!.click());
+    expect(chips()).toEqual(["src/main.rs"]);
+    await act(async () => {
+      c.key("Enter");
+      await vi.dynamicImportSettled();
+      for (let i = 0; i < 6; i++) await Promise.resolve();
     });
     expect(c.sent[0]!.files).toEqual(["src/main.rs"]);
     c.unmount();

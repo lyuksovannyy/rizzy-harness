@@ -1,4 +1,4 @@
-import { ArrowUp, CornerDownRight, FileText, Globe, Image, Loader2, Mic, Paperclip, Square, X } from "lucide-react";
+import { ArrowUp, AtSign, CornerDownRight, FileText, Globe, Image, Loader2, Mic, Paperclip, Square, X } from "lucide-react";
 import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { t } from "../lib/i18n";
 import { pickable } from "../lib/agents";
@@ -344,6 +344,30 @@ export function Composer(props: {
     };
   }, [fileQuery, filesOf]);
   const hits = fileQuery != null && fileHits?.query === fileQuery ? fileHits.paths : null;
+  // The paths the text mentions that the folder holds, shown as chips
+  // before sending (each can be taken off): only these go with the
+  // message, so nothing reaches the model the person did not see listed.
+  const [found, setFound] = useState<string[]>([]);
+  const [dropped, setDropped] = useState<string[]>([]);
+  const known = useRef(new Map<string, boolean>());
+  const hasPathToken = !!filesOf && /(^|[\s([{'"])@[^\s@]*[/.]/.test(text);
+  useEffect(() => {
+    if (!filesOf || !hasPathToken) {
+      setFound([]);
+      return;
+    }
+    let live = true;
+    const timer = setTimeout(() => {
+      import("../lib/fileMentions")
+        .then((m) => m.existing(filesOf, m.fileMentions(text), known.current))
+        .then((paths) => live && setFound(paths), () => {});
+    }, 300);
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
+  }, [text, filesOf, hasPathToken]);
+  const attached = found.filter((p) => !dropped.includes(p));
   const suggestions: { id: string; title: string; hint: string; origin?: string | null; agent?: Agent; file?: boolean }[] = !mention
     ? []
     : fileQuery != null
@@ -417,12 +441,16 @@ export function Composer(props: {
         ...(images.length ? { images } : {}),
         ...(home && mode === "agentic" ? { execMode: exec } : {}),
         ...(home && mode === "agentic" && approvalPick ? { approvalMode: approvalPick } : {}),
-        ...(filesOf ? { files: (await import("../lib/fileMentions")).fileMentions(body) } : {}),
+        ...(filesOf && attached.length
+          ? { files: (await import("../lib/fileMentions")).fileMentions(body).filter((p) => attached.includes(p)) }
+          : {}),
       });
       if (mode === "agentic") rememberFolder(cwd.trim());
       if (home) props.onLearn?.(body, mode);
       setText("");
       setFiles([]);
+      setFound([]);
+      setDropped([]);
       setPictures([]);
       setManual(false);
       // The host shell is chosen again, with its warning, for each chat.
@@ -577,7 +605,7 @@ export function Composer(props: {
           onKeyDown={onKeyDown}
           onPaste={(e) => takeImages(e, e.clipboardData.files)}
         />
-        {files.length + pictures.length > 0 && (
+        {files.length + pictures.length + attached.length > 0 && (
           <ul className="chips" aria-label={t("composer.attachments")}>
             {pictures.map((x) => (
               <li key={x.key} className="chip image-chip">
@@ -590,6 +618,14 @@ export function Composer(props: {
                 )}
                 {x.name}
                 <button type="button" className="link" aria-label={`${t("composer.remove")} ${x.name}`} onClick={() => setPictures((p) => p.filter((y) => y !== x))}>
+                  <X size={14} />
+                </button>
+              </li>
+            ))}
+            {attached.map((p) => (
+              <li key={`@${p}`} className="chip" title={t("composer.mentionHint")}>
+                <AtSign size={14} /> {p}
+                <button type="button" className="link" aria-label={`${t("composer.remove")} ${p}`} onClick={() => setDropped((d) => [...d, p])}>
                   <X size={14} />
                 </button>
               </li>

@@ -243,6 +243,7 @@ impl Rig {
             text: text.into(),
             images: vec![],
             agent_named: false,
+            files: vec![],
         });
         loop {
             self.until(|k| matches!(k, EventKind::TurnEnded(_))).await;

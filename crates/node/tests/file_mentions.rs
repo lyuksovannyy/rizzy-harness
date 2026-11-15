@@ -315,20 +315,23 @@ async fn refused_mentions_are_named_and_show_nothing() {
     let refs: Vec<&str> = files.iter().map(String::as_str).collect();
     n.turn(sid, "look", &refs).await;
     let m = n.mentions(sid);
-    assert_eq!(m.len(), 30);
+    // A path that names nothing is the person's text, not a mention.
+    assert_eq!(m.len(), 29);
     for x in &m[..7] {
         assert_eq!(x.state, MentionState::Refused, "{}", x.path);
     }
     assert_eq!(m[7].state, MentionState::TooLarge);
     assert_eq!(m[8].state, MentionState::Binary);
-    assert_eq!(m[9].state, MentionState::Missing);
-    assert!(m[10..20].iter().all(|x| x.state == MentionState::File));
-    assert!(m[20..].iter().all(|x| x.state == MentionState::Refused));
+    assert!(m[9..19].iter().all(|x| x.state == MentionState::File));
+    assert!(m[19..].iter().all(|x| x.state == MentionState::Refused));
     let sent = n.seen.lock().unwrap()[0].clone();
     for canary in ["OUTSIDE-CANARY", "KEY-CANARY", "root:", "xxxxxxxx"] {
         assert!(!sent.contains(canary), "{canary} in {sent}");
     }
-    assert!(sent.contains("\"missing.rs\": there is no file or folder at that path"));
+    assert!(
+        !sent.contains("missing.rs\""),
+        "no note for a path that names nothing"
+    );
 }
 
 /// A node that denies `read` shows no mentioned file (the node decides)

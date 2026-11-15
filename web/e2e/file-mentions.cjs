@@ -1,8 +1,9 @@
 // `@path` file mentions (T63, ADOPTION_PLAN X.17) end to end: in an agentic
 // chat, typing `@src/ma` lists the folder's matching paths under "Files", a
 // folder opens its entries, Enter picks one, a bare word still lists agents,
-// a path with no match says so, and the sent message shows the mention as a
-// chip with its path (the node read the file into the message).
+// a path with no match says so, only paths the folder holds become chips
+// before sending, and the sent message shows the mention as a chip with its
+// path (the node read the file into the message).
 // Usage: node web/e2e/file-mentions.cjs <path-to-harness-binary> [work-dir]
 const { chromium } = require('playwright');
 const { spawn } = require('child_process');
@@ -74,7 +75,13 @@ let PAGE = null;
     await p.keyboard.type('and @nope.rs');
     await p.waitForSelector('.mention-none');
     log('no match:', (await p.textContent('.mention-none')).trim());
-    await p.fill(box, 'fix @src/main.rs please');
+    // Only paths the folder holds go: shown as chips before sending.
+    await p.fill(box, 'fix @src/main.rs please, not @types/node');
+    await p.waitForSelector('.composer .chips >> text=src/main.rs');
+    const before = await p.$$eval('.composer .chips li', (n) => n.map((x) => x.textContent.trim()));
+    check(before.length === 1, 'only the existing path is a chip: ' + before);
+    await p.focus(box);
+    await p.keyboard.press('End');
     await p.keyboard.press('Enter');
     await p.waitForSelector('.msg.user .chip >> text=src/main.rs');
     log('the sent message shows the mention as a chip');

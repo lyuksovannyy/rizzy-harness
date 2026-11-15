@@ -600,7 +600,7 @@ async fn a_callback_turn_gets_the_repositorys_instruction_files() {
     assert!(
         opening[files..].contains(&format!("\n{OUTPUT_QUOTE}==> AGENTS.md <==\n"))
             && opening[files..]
-                .contains(&format!("\n{OUTPUT_QUOTE}Run cargo fmt before you stop.")),
+                .contains(&format!("\n{OUTPUT_QUOTE}  Run cargo fmt before you stop.")),
         "{opening}"
     );
 }

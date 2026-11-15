@@ -284,7 +284,12 @@ pub fn complete(ctx: &ToolCtx, query: &str) -> Result<Vec<Candidate>, String> {
         let base = if dir.is_empty() { "/" } else { dir };
         // Only inside the chat's folder, whatever node.toml allows a
         // `read`: completion lists names, and lists only the folder's.
-        let Ok(real) = ctx.resolve(base) else {
+        // Where it really leads, links followed: in outside mode `resolve`
+        // does not follow them (review of PR 120, r3).
+        let Ok(real) = ctx
+            .resolve(base)
+            .and_then(|p| p.canonicalize().map_err(|e| e.to_string()))
+        else {
             return Ok(vec![]);
         };
         if !real.starts_with(&ws) || !real.is_dir() {
@@ -598,6 +603,12 @@ mod tests {
         assert_eq!(complete(&c, "src/m").unwrap(), ["src/main.rs"]);
         assert!(complete(&c, "../").unwrap().is_empty());
         assert!(complete(&c, "data-link/").unwrap().is_empty());
+        // A link out of the folder is not listed through, outside mode on.
+        std::fs::create_dir_all(t.base.join("outside")).unwrap();
+        std::fs::write(t.base.join("outside/OUTSIDE-NAME.txt"), "").unwrap();
+        std::os::unix::fs::symlink(t.base.join("outside"), t.ws.join("out")).unwrap();
+        assert!(complete(&c, "out/").unwrap().is_empty());
+        assert!(complete(&c, "out/OUT").unwrap().is_empty());
         assert!(complete(&c, "/etc/").unwrap().is_empty());
         let top = complete(&c, "").unwrap();
         assert!(top.contains(&"src/".to_string()), "{top:?}");

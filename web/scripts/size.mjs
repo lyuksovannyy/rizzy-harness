@@ -244,13 +244,14 @@ const X15_KB = 0.4;
 const X16_KB = 0.9;
 
 // `@path` file mentions (ADOPTION_PLAN X.17, PLAN.md T63, feat/context-inputs),
-// measured 396.4 (initial 102.3) against 395.4 (initial 101.9) on main: in the
-// first load, the composer's path tokens, its "Files" group and "no match" line
-// and the debounce (+0.4); a lazy chunk with the paths a message mentions and
-// the folder's completion call, which only a chat with a folder loads (+0.3,
-// most of it the chunk's own overhead); the chip and its title in the
-// conversation's chunk (+0.2); the fold's `files` (+0.1).
-const X17_KB = 0.9;
+// measured 396.6 (initial 102.6) against 395.4 (initial 101.9) on main: in the
+// first load, the composer's path tokens, its "Files" group and "no match"
+// line, the debounce, and (after review) the chips of the paths that will go
+// with the message, each removable (+0.7); a lazy chunk with the paths a
+// message mentions, the existence check and the folder's completion call,
+// which only a chat with a folder loads (+0.3, most of it the chunk's own
+// overhead); the chip in the conversation's chunk (+0.1); the fold (+0.1).
+const X17_KB = 1.2; // the measure is a few hundredths over 396.6
 
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
 const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB + EXPORT_KB + MEMDEF_KB + VISIBILITY_KB + T50_KB + LOOP_KB + DIFF_KB + T51_KB + WSMEM_KB + STEPS_KB + AGENT_SWITCHES_KB + T57_KB + X15_KB + X16_KB + X17_KB) * 100) / 10) / 10;

@@ -872,8 +872,11 @@ name is a bare word is `@./Makefile`, a folder `@coder/`. While you type, a
 "Files" list offers matching paths from the chat's folder (a search by name
 honours `.gitignore`; after a `/` it lists that folder's entries, so a folder
 you pick opens them); "No file or folder by that name" says so before you
-send. The sent message shows each mention as a chip
-with its path. The node reads each path under the rules the agent's own `read`
+send. Only a token that names a file or folder the chat's folder holds is a
+mention: each one shows as a chip above the box before you send (take one off
+with its ×), and only those go with the message; `@types/node` or any other
+path that names nothing stays plain text, with no note to the agent. The
+sent message shows each mention as a chip with its path. The node reads each path under the rules the agent's own `read`
 follows: never outside the chat's folder (unless node.toml's
 `allow_outside_workspace` lets `read` go there), never the node's data
 directory, never through a link that leads out, and not at all on a node
@@ -883,8 +886,9 @@ with its path and line count, read when you sent the message. Caps: at most
 20 files per message (the rest are named), 64 KiB of text for all of them
 together (a file that does not fit is cut at a line, and the agent is told to
 `read` the rest from that line), a file over 256 KiB or a binary file is named
-and not shown, a folder lists at most 200 entries, and a path that does not
-exist is said plainly. A file shown (whole, or its first lines) counts as read
+and not shown, and a folder lists at most 200 entries. The file's text
+reaches the agent with the node's secrets scrubbed, as a `read` of it would.
+A file shown (whole, or its first lines) counts as read
 for the rule that `edit` and `write` change only files the agent has read, so
 the agent can edit it straight away. A chat without a folder offers no files.
 
@@ -1156,7 +1160,8 @@ repository = true                    # read the chat repository's .agents/skills
 roots = ["~/.agents/skills", "~/.claude/skills"]  # this machine's skill folders; every chat on the node can read them
 
 [instructions]
-# user_file = "~/.codex/AGENTS.md"   # the operator's instruction file; default: AGENTS.md in the node's data directory.
+# user_file = "/srv/rizzy-harness/AGENTS.md"  # the operator's instruction file; default: AGENTS.md in the node's data directory.
+                                     # Refused inside a workspace root, a [sandbox] folder or /etc, /usr, /opt (see "Your own instructions")
                                      # It reaches EVERY chat on this node, whoever owns it (see "Your own instructions")
 ```
 
@@ -2200,18 +2205,34 @@ What `~/.claude/CLAUDE.md` is to Claude Code and `~/.codex/AGENTS.md` to
 Codex: one file of your own rules ("answer in British English", "never run
 `git push`") that the node sends with every agentic chat, in front of the
 repository's files. By default it is `AGENTS.md` in the node's data directory
-(`~/.local/share/rizzy-harness/AGENTS.md` unless `--data-dir` says otherwise),
-which no agent's tool can read or change, in either execution mode; node.toml
-`[instructions] user_file` names another file (absolute or under `~/`; a file
-an agent can write is then one it can rewrite). No file, or an empty one: nothing
-is sent. It is read at the start of every message like the repository's files,
-cut at 16 KiB (or half the repository files' cap on a small context window)
-with a note, sent again only when it changed, withdrawn when you delete it,
-and kept through compaction. Only the regular file at that very path is read:
-a link there is not followed (name the file itself in node.toml), a folder or
-FIFO is named, not opened, and a read that takes over 5 seconds is given up
-with a note. The model is told it is the node operator's text, not your
-message, and that it changes no setting.
+(`~/.local/share/rizzy-harness/AGENTS.md` unless `--data-dir` says otherwise).
+node.toml `[instructions] user_file` names another file (absolute or under
+`~/`), but not one an agent could reach: the node refuses to start when it
+lies inside a `workspace_roots` entry (by default your home folder, so
+`~/.codex/AGENTS.md` is refused), inside a `[sandbox]` read or write folder,
+or inside `/etc`, `/usr`, `/opt` and the other folders the sandbox lets every
+command read; put it in a folder of its own such as `/srv/rizzy-harness/`.
+Wherever it lies, the file joins the node's protected paths: `read`, `write`,
+`edit`, `@` mentions and the folder listing refuse it in every mode, and the
+shell gets no grant on it. In the sandbox mode the shell does not see it at
+all (bubblewrap's file view holds only its grants); in the host mode this
+rests on Landlock alone (the same rules, no bubblewrap), so it holds where
+Landlock is enforced and has that mode's gaps (see "Execution modes": a
+command can ask another service of this user, over a socket, to change it
+below Linux 7.1). The node reads it only when it belongs to the node's own
+user or root (another account's file would set every chat's instructions,
+so it is named, not read), and warns in its log and in `doctor` when
+another user can write the file or its folder. No file, or an empty one:
+nothing is sent. It is read at the start of every message like the
+repository's files, in a 5-second bound of its own, cut at 16 KiB (or half
+the repository files' cap on a small context window) with a note, sent again
+only when it changed, withdrawn when you delete it, and kept through
+compaction. Only the regular file at that very path is read: a link there is
+not followed (name the file itself in node.toml; a link in a folder above it
+is), a folder or FIFO is named, not opened. The model is told it is the node
+operator's text, not your message, and that it changes no setting; every
+line of it (and of the repository's files) reaches the model indented by two
+spaces, so no line of a file can pose as the label of another.
 
 **On a node several people use**, this file reaches every chat on the node,
 whoever owns it: it is the operator's setting, like `[skills] roots`. Write

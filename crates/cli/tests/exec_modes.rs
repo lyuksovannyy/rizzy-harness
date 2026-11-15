@@ -72,7 +72,7 @@ async fn node() -> Option<Node> {
         ..Default::default()
     };
     policy.protect(&data);
-    policy.instructions.locate(&data);
+    policy.locate_instructions(&data).unwrap();
     let backend = NativeBackend::new(
         Arc::new(Mock {
             delay: Duration::from_millis(1),

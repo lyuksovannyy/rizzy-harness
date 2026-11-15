@@ -45,6 +45,7 @@ const en = {
   "composer.chars": "characters",
   "composer.truncated": "cut to fit",
   "composer.files": "Files",
+  "composer.mentionHint": "Goes with the message: the agent gets this file's content",
   "composer.noFile": "No file or folder by that name in this chat's folder",
   "composer.remove": "Remove",
   "composer.incognito": "Incognito",

@@ -1732,13 +1732,12 @@ impl NativeBackend {
         // The files this turn's messages mentioned (T63): the history does
         // not hold them yet; the next turn's sync reads them from the log.
         let seen_now = self.seen.session(ctx.session_id);
-        for f in ctx
-            .extra
-            .files_seen
-            .iter()
-            .chain(ctx.extra.queued.iter().flat_map(mentioned))
-        {
+        for f in &ctx.extra.files_seen {
             seen_now.note(f);
+        }
+        // Sent while the last turn ran: that turn's own records may be newer.
+        for f in ctx.extra.queued.iter().flat_map(mentioned) {
+            seen_now.note_if_unknown(f);
         }
         // The model answering this turn. Until the turn has any output, a
         // model-level failure moves on to the next of the agent's fallbacks;
@@ -2217,7 +2216,7 @@ impl NativeBackend {
                     // A new request from the person is a change (T.1).
                     guard.restart();
                     for f in q.iter().flat_map(mentioned) {
-                        seen_now.note(f);
+                        seen_now.note_if_unknown(f);
                     }
                     messages.extend(q.iter().map(queued_msg));
                     if q.iter().any(|m| !m.images.is_empty()) {

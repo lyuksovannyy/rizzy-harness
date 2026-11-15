@@ -2070,7 +2070,7 @@ impl Session {
                 harness_core::ui::answer_text(canonical, &text)
             }
         };
-        Ok(UserMessage {
+        let msg = UserMessage {
             turn_id,
             text,
             attachments,
@@ -2078,7 +2078,14 @@ impl Session {
             images,
             queued: false,
             files,
-        })
+        };
+        // Scrubbed here, as the log will store it (`append` scrubs every
+        // payload): the model is sent this very message, so it never gets
+        // a node secret the log does not hold, and the next request
+        // rebuilds it byte for byte (review of PR 120, H2; PLAN.md T59).
+        let mut v = serde_json::to_value(&msg).map_err(|e| e.to_string())?;
+        self.node.cfg.secrets.scrub_value(&mut v);
+        serde_json::from_value(v).map_err(|e| e.to_string())
     }
 
     /// A context like a `read` call's of this session (T63): its folder
@@ -2127,7 +2134,18 @@ impl Session {
         )
         .await
         {
-            Bounded::Done(m) => Ok(m),
+            // File content, scrubbed as a `read` result is.
+            Bounded::Done(mut m) => {
+                let secrets = &self.node.cfg.secrets;
+                for f in &mut m {
+                    f.text = secrets.scrub(&f.text);
+                    f.path = secrets.scrub(&f.path);
+                }
+                // A path that names nothing is the person's text, not a
+                // mention (review of PR 120): no note to the model.
+                m.retain(|f| f.state != MentionState::Missing);
+                Ok(m)
+            }
             Bounded::TimedOut => Err(format!(
                 "the mentioned files took longer than {} s to read; send the message again, or \
                  without them",
@@ -2278,58 +2296,57 @@ impl Session {
         let protected = policy.protected_dirs.clone();
         // The instruction files first, in a bound of their own: a slow
         // skill folder must not cost the turn its AGENTS.md (review S3).
-        // The node operator's own file first (node.toml `[instructions]`),
-        // read in the same bound: it is on this machine's disk too.
+        // The node operator's own file (node.toml `[instructions]`) in a
+        // bound of its own, beside the repository's: a stalled one costs
+        // the turn neither the other's read (review of PR 120, H1).
         let files_protected = protected.clone();
         let user_file = policy.instructions.located.clone();
-        let has_user_file = user_file.is_some();
         let user_cap = ins::user_cap_for(window);
-        let files = ins::bounded(
-            move || {
-                let user = user_file.map(|p| ins::read_user(&p, user_cap));
-                (user, ins::read(&dir, &granted, &files_protected, cap))
-            },
-            cancel,
-            ins::READ_TIMEOUT,
-        )
-        .await;
-        let problems = match files {
-            Bounded::Done((user, r)) => {
-                let mut problems = r.problems;
-                if let Some(u) = user {
-                    extra.user_instructions = u.text;
-                    problems.extend(u.problem.map(|p| format!("the node's own file: {p}")));
+        let (user, files) = tokio::join!(
+            async {
+                match user_file {
+                    Some(p) => Some(
+                        ins::bounded(
+                            move || ins::read_user(&p, user_cap),
+                            cancel,
+                            ins::READ_TIMEOUT,
+                        )
+                        .await,
+                    ),
+                    None => None,
                 }
+            },
+            ins::bounded(
+                move || ins::read(&dir, &granted, &files_protected, cap),
+                cancel,
+                ins::READ_TIMEOUT,
+            )
+        );
+        let mut problems = user
+            .map(|u| ins::with_user_file(&mut extra, u))
+            .unwrap_or_default();
+        match files {
+            Bounded::Done(r) => {
                 extra.instructions = r.text;
-                problems
+                problems.extend(r.problems);
             }
             // Not read this turn: the files the model has stay (X.1,
             // review R3); the note goes with this turn only.
             Bounded::TimedOut => {
-                if has_user_file {
-                    extra.user_instructions_unread = Some(ins::user_not_read(true));
-                }
                 extra.instructions_unread = Some(ins::timed_out());
-                vec![format!("timed out after {} s", ins::READ_TIMEOUT.as_secs())]
+                problems.push(format!("timed out after {} s", ins::READ_TIMEOUT.as_secs()));
             }
             // The turn is stopping; the backend sees the cancel itself.
             Bounded::Cancelled => {
-                if has_user_file {
-                    extra.user_instructions_unread = Some(ins::user_not_read(false));
-                }
                 extra.instructions_unread = Some(ins::not_read());
                 extra.skills_unread = Some(ins::SKILLS_NOT_READ.into());
                 return extra;
             }
             Bounded::Failed(e) => {
                 tracing::warn!(session = %self.id, error = %e, "reading the instruction files failed");
-                if has_user_file {
-                    extra.user_instructions_unread = Some(ins::user_not_read(false));
-                }
                 extra.instructions_unread = Some(ins::not_read());
-                vec![]
             }
-        };
+        }
         let skill_problems = if roots.is_empty() {
             vec![]
         } else {
