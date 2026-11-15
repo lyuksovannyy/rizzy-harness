@@ -202,6 +202,7 @@ impl Rig {
             text: format!("run: {cmd}"),
             images: vec![],
             agent_named: false,
+            files: vec![],
         });
     }
 

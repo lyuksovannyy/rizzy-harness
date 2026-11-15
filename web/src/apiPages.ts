@@ -73,6 +73,8 @@ export const pageApi = {
   restoreTurn: (id: string, turn: string, force = false, rewind = false) =>
     call<{ ok: boolean }>("POST", `/api/sessions/${id}/turns/${turn}/restore`, { force, rewind }),
   /** What a turn changed (with `rewind`, it and every later turn), from its node. */
+  /** Paths of a chat's folder for the composer's `@` completion (T63). */
+  files: (id: string, q: string) => call<{ paths: string[] }>("GET", `/api/sessions/${id}/files?q=${encodeURIComponent(q)}`),
   turnDiff: (id: string, turn: string, rewind = false, signal?: AbortSignal) =>
     call<TurnDiff>("GET", `/api/sessions/${id}/turns/${encodeURIComponent(turn)}/diff${rewind ? "?rewind=1" : ""}`, undefined, signal),
   /** The owner's new title for a chat (cleaned and capped by the server). */

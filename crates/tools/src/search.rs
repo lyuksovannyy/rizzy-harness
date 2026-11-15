@@ -47,6 +47,25 @@ fn walker(
         .build()
 }
 
+/// [`walker`] for the composer's completion (`crate::mention::complete`).
+pub(crate) fn walk_folder(
+    root: &PathBuf,
+    protected: &std::sync::Arc<Vec<PathBuf>>,
+    own: Option<PathBuf>,
+) -> ignore::Walk {
+    walker(root, protected, own)
+}
+
+/// A folder `path` is (or is in) a protected folder, judged by its real
+/// path too.
+pub(crate) fn in_protected_dir(path: &Path, protected: &[PathBuf]) -> bool {
+    !protected.is_empty()
+        && (protected.iter().any(|d| path.starts_with(d))
+            || path
+                .canonicalize()
+                .is_ok_and(|real| protected.iter().any(|d| real.starts_with(d))))
+}
+
 fn in_protected(path: &Path, kind: Option<std::fs::FileType>, protected: &[PathBuf]) -> bool {
     if protected.is_empty() {
         return false;

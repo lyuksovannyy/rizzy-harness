@@ -18,6 +18,7 @@ mod artifacts;
 mod background;
 mod chat_allows;
 mod diff;
+mod files;
 mod hooks;
 mod levels;
 mod links;
@@ -212,6 +213,7 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
         .merge(artifacts::routes())
         .merge(background::routes())
         .merge(diff::routes())
+        .merge(files::routes())
         .merge(approval_mode::routes())
         .merge(chat_allows::routes())
         .merge(step_limit::routes())
@@ -1211,6 +1213,9 @@ struct PromptBody {
     /// Media item ids of images for this message (`media::prompt_images`).
     #[serde(default)]
     images: Vec<String>,
+    /// Paths the person mentioned with `@path` (`files::check_mentions`).
+    #[serde(default)]
+    files: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -1286,6 +1291,7 @@ async fn prompt(
     let row = visible_session(&m, &who, &id).await?;
     // Before the uploads are taken, so a refusal leaves them for later.
     agentic_gate(&m, &who, &row).await?;
+    files::check_mentions(&m, &row, &b.files)?;
     let images = crate::media::prompt_images(&m, &who, &row, &b.images)
         .await
         .map_err(|(c, e)| ApiError(c, e))?;
@@ -1333,6 +1339,7 @@ async fn prompt(
                 images,
                 callback: vec![],
                 by_owner: who.user_id.is_some() && who.user_id == row.owner_id,
+                files: b.files,
             },
         )
         .await;
@@ -1367,6 +1374,9 @@ fn check_reply_body(r: &harness_core::event::FormReply, b: &PromptBody) -> ApiRe
     }
     if !b.images.is_empty() {
         return bad("an answer cannot carry images");
+    }
+    if !b.files.is_empty() {
+        return bad("an answer cannot mention files");
     }
     if harness_core::ui::too_large(r) {
         return bad(harness_core::ui::TOO_LARGE);

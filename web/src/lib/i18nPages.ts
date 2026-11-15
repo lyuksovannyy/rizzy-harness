@@ -5,6 +5,7 @@
 import { extend } from "./i18n";
 
 export const pages = {
+  "conv.mentioned": "A file of the chat's folder, mentioned with @: the agent got its content with this message",
   "nav.logout": "Log out",
   "workspace.new": "New workspace…",
   "workspace.newName": "Workspace name",

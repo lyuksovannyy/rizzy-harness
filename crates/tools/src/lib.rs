@@ -21,6 +21,7 @@ mod fs;
 pub mod graphify;
 pub mod inside;
 pub mod mcp;
+pub mod mention;
 mod outline;
 pub mod outputs;
 mod publish;

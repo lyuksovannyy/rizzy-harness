@@ -121,7 +121,8 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::ApprovalRespond { .. }
         | MasterToNode::ArtifactFetch { .. }
         | MasterToNode::RecallResult { .. }
-        | MasterToNode::Diff { .. } => None,
+        | MasterToNode::Diff { .. }
+        | MasterToNode::Files { .. } => None,
     }
 }
 
@@ -191,6 +192,8 @@ pub(crate) struct Inner {
     pub(crate) recalls: recall::Pending,
     /// Room for turn diffs being read ([`DIFF_AT_ONCE`]).
     diffs: Arc<tokio::sync::Semaphore>,
+    /// Room for `@` completions being walked (T63), as many as diffs.
+    file_lists: Arc<tokio::sync::Semaphore>,
 }
 
 impl Inner {
@@ -472,6 +475,7 @@ impl NodeRuntime {
             background: harness_tools::background::Registry::new(bg_limits, bg_secrets),
             recalls: Default::default(),
             diffs: Arc::new(tokio::sync::Semaphore::new(DIFF_AT_ONCE)),
+            file_lists: Arc::new(tokio::sync::Semaphore::new(DIFF_AT_ONCE)),
         });
         for row in rows {
             let s = Session::load(inner.clone(), row.session_id).await?;
@@ -628,6 +632,8 @@ impl NodeRuntime {
                 capabilities.push(harness_protocol::CAP_BACKGROUND.into());
                 // A turn's changes, read from its checkpoints (X.12).
                 capabilities.push(harness_protocol::CAP_DIFF.into());
+                // `@` file mentions and their completion (T63).
+                capabilities.push(harness_protocol::CAP_FILES.into());
                 // Hand-off notes (X.16): the master asks once a chat idles.
                 // Off is silent, as for callbacks: with
                 // `handoff_notes_per_hour = 0` the master asks nothing.
@@ -689,6 +695,13 @@ impl NodeRuntime {
                         turn_id,
                         rewind,
                     } => this.diff(req_id, session_id, turn_id, rewind),
+                    // The composer's completion (T63): a bounded walk of
+                    // names, in a task of its own, nothing logged.
+                    MasterToNode::Files {
+                        req_id,
+                        session_id,
+                        query,
+                    } => this.files(req_id, session_id, query),
                     // Answered here, at once: they must not wait behind a
                     // slow restore or delete (AUDIT S10), nor behind the
                     // output queued for the master (A.21): their acks go
@@ -903,6 +916,42 @@ impl NodeRuntime {
         });
     }
 
+    /// Answer `session.files` (T63) from a task of its own; never acked:
+    /// the result is the answer. Nothing is logged but the node's audit
+    /// line (the session id only). At most [`DIFF_AT_ONCE`] at once,
+    /// beside the diffs' own room.
+    fn files(&self, req_id: String, sid: SessionId, query: String) {
+        self.audit_inline("session.files", sid);
+        let Ok(permit) = self.inner.file_lists.clone().try_acquire_owned() else {
+            return self.inner.publish(NodeToMaster::FilesResult {
+                req_id,
+                paths: vec![],
+                error: Some("the node is listing files for other requests; try again".into()),
+            });
+        };
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            let res = match inner.session(sid) {
+                Some(s) => s.complete_files(query).await,
+                None => Err("unknown session".to_string()),
+            };
+            let msg = match res {
+                Ok(paths) => NodeToMaster::FilesResult {
+                    req_id,
+                    paths,
+                    error: None,
+                },
+                Err(e) => NodeToMaster::FilesResult {
+                    req_id,
+                    paths: vec![],
+                    error: Some(e),
+                },
+            };
+            inner.publish_wait(msg).await;
+        });
+    }
+
     /// "Save as artifact": check the path now (the ack carries a refusal),
     /// copy it later, ending in `artifact_staged` or
     /// `artifact_stage_failed` on the session's log.
@@ -1109,6 +1158,7 @@ impl NodeRuntime {
                 context,
                 reply,
                 images,
+                files,
                 ..
             } => {
                 self.audit("session.prompt", session_id).await;
@@ -1129,6 +1179,7 @@ impl NodeRuntime {
                     attachments,
                     reply,
                     images,
+                    files,
                 };
                 match self.session(session_id) {
                     Some(s) => s.prompt(input, agent, agent_named, compare, extra).await,
@@ -1281,6 +1332,14 @@ impl NodeRuntime {
                 rewind,
             } => {
                 self.diff(req_id, session_id, turn_id, rewind);
+                Ok(())
+            }
+            MasterToNode::Files {
+                req_id,
+                session_id,
+                query,
+            } => {
+                self.files(req_id, session_id, query);
                 Ok(())
             }
         };

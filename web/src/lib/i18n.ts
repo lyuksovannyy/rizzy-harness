@@ -44,6 +44,8 @@ const en = {
   "composer.attachments": "Attachments",
   "composer.chars": "characters",
   "composer.truncated": "cut to fit",
+  "composer.files": "Files",
+  "composer.noFile": "No file or folder by that name in this chat's folder",
   "composer.remove": "Remove",
   "composer.incognito": "Incognito",
   "composer.incognitoHint": "Temporary chat: not in history, search or memory, deleted after a day. The AI provider still receives it.",

@@ -381,6 +381,15 @@
             "truncated": false
           }
         ],
+        "files": [
+          {
+            "lines": 1,
+            "path": "CHANGELOG.md",
+            "shown": 1,
+            "state": "file",
+            "text": "## 1.0\n"
+          }
+        ],
         "images": [
           {
             "height": 720,
@@ -1251,6 +1260,9 @@
       {
         "attachments": [
           "notes.md"
+        ],
+        "files": [
+          "CHANGELOG.md"
         ],
         "images": [
           {

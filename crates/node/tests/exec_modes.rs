@@ -156,6 +156,7 @@ fn prompt(sid: SessionId, text: &str) -> MasterToNode {
         context: None,
         images: vec![],
         agent_named: false,
+        files: vec![],
     }
 }
 
@@ -673,6 +674,7 @@ async fn a_sub_agents_mode_is_its_parents() {
             context,
             images,
             agent_named: false,
+            files: vec![],
         })
         .unwrap();
     ack(&mut n).await.unwrap();

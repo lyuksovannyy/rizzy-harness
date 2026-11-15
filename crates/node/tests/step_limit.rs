@@ -153,6 +153,7 @@ impl N {
             context: None,
             images: vec![],
             agent_named: false,
+            files: vec![],
         });
     }
 

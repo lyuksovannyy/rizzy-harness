@@ -172,6 +172,7 @@ fn turn(id: &str, text: &str, _ts: i64) -> Vec<EventKind> {
             reply: None,
             images: vec![],
             queued: false,
+            files: vec![],
         }),
         EventKind::TurnEnded(TurnEnded {
             turn_id: id.into(),
@@ -198,6 +199,7 @@ fn work(id: &str, ask: &str) -> Vec<EventKind> {
             reply: None,
             images: vec![],
             queued: false,
+            files: vec![],
         }),
         EventKind::Checkpoint(Checkpoint {
             turn_id: id.into(),

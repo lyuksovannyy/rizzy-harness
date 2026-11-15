@@ -127,6 +127,7 @@ impl Node {
                 context: None,
                 images: vec![],
                 agent_named: false,
+                files: vec![],
             })
             .unwrap();
         self.ack().await;

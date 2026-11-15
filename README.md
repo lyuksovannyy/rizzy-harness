@@ -863,6 +863,31 @@ say-so. The same holds for an image's name, which older messages show in
 place of the image.
 To have such a link read, paste it into your message.
 
+**Mentioning a file.** In an agentic chat, type `@` and a path to hand the
+agent a file of the chat's folder with your message, as Claude Code, OpenCode
+and goose do: the agent gets its content at once, without spending a `read`
+on it. A token with a `/` or a `.` is a path (`@src/main.rs`, `@README.md`,
+`@docs/`), anything else stays an agent's handle (`@coder`); a file whose
+name is a bare word is `@./Makefile`, a folder `@coder/`. While you type, a
+"Files" list offers matching paths from the chat's folder (a search by name
+honours `.gitignore`; after a `/` it lists that folder's entries, so a folder
+you pick opens them); "No file or folder by that name" says so before you
+send. The sent message shows each mention as a chip
+with its path. The node reads each path under the rules the agent's own `read`
+follows: never outside the chat's folder (unless node.toml's
+`allow_outside_workspace` lets `read` go there), never the node's data
+directory, never through a link that leads out, and not at all on a node
+whose `denied_tools` holds `read`; it asks no approval, since sending the
+message is yours. A file arrives quoted line by line, like an attached file,
+with its path and line count, read when you sent the message. Caps: at most
+20 files per message (the rest are named), 64 KiB of text for all of them
+together (a file that does not fit is cut at a line, and the agent is told to
+`read` the rest from that line), a file over 256 KiB or a binary file is named
+and not shown, a folder lists at most 200 entries, and a path that does not
+exist is said plainly. A file shown (whole, or its first lines) counts as read
+for the rule that `edit` and `write` change only files the agent has read, so
+the agent can edit it straight away. A chat without a folder offers no files.
+
 Every agentic turn is checkpointed and its file changes can be undone
 from the chat. "Show changes" on a turn's "N files changed" row opens what
 the turn changed beside the chat: each file with its added and removed lines

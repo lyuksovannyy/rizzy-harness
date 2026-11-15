@@ -14,6 +14,7 @@ pub mod config;
 pub mod diff;
 pub mod env;
 mod favicon;
+pub mod files;
 mod handoff;
 mod http;
 pub mod levels;
@@ -303,6 +304,8 @@ pub struct MasterInner {
     pulls: artifact_pull::Pulls,
     /// Turn diffs waiting for their node's answer (X.12).
     diffs: diff::Waiting,
+    /// `@` completions waiting for their node's answer (T63).
+    files: files::Waiting,
     /// Staged-file events per node and hour.
     artifact_throttle: artifacts::Throttle,
     /// Open UI sockets by user, so a login that ends closes them.
@@ -381,6 +384,9 @@ pub struct PromptOpts {
     /// HTTP prompt route decides it): only then may the turn's `remember`
     /// apply without a click (PLAN.md T49).
     pub by_owner: bool,
+    /// Paths the person mentioned with `@path` (PLAN.md T63): names only,
+    /// which the node reads under its own `read` rules.
+    pub files: Vec<String>,
 }
 
 /// The model a turn runs on: the agent's (resolved), else the one chosen
@@ -574,7 +580,9 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         // An answer to the node's own search: nothing is written.
         | MasterToNode::RecallResult { .. }
         // A read of two checkpoints: no event, no work.
-        | MasterToNode::Diff { .. } => None,
+        | MasterToNode::Diff { .. }
+        // A listing of names for the composer: no event.
+        | MasterToNode::Files { .. } => None,
     }
 }
 
@@ -660,6 +668,7 @@ impl Master {
                 storage: OnceLock::new(),
                 pulls: Default::default(),
                 diffs: Default::default(),
+                files: Default::default(),
                 artifact_throttle: Default::default(),
                 sockets: Default::default(),
                 outbound: Mutex::new(outbound::Outbound::from_env()),
@@ -1243,6 +1252,7 @@ impl Master {
                 // Its transfers stop; their versions wait for the next hello.
                 artifact_pull::node_down(&this, &nid);
                 diff::node_down(&this, &nid);
+                files::node_down(&this, &nid);
             }
             drop(nodes);
             let _ = this.inner.live.send(Live::NodesChanged);
@@ -1433,6 +1443,19 @@ impl Master {
                 match (diff, error) {
                     (Some(d), None) => Ok(d),
                     (_, e) => Err(e.unwrap_or_else(|| "the node sent no changes".into())),
+                },
+            ),
+            NodeToMaster::FilesResult {
+                req_id,
+                paths,
+                error,
+            } => files::on_answer(
+                self,
+                node_id,
+                req_id,
+                match error {
+                    None => Ok(paths),
+                    Some(e) => Err(e),
                 },
             ),
         }
@@ -1919,6 +1942,7 @@ impl Master {
             images,
             callback,
             by_owner,
+            files,
         } = opts;
         let resume = !callback.is_empty();
         if resume
@@ -1928,7 +1952,8 @@ impl Master {
                 || !compare.is_empty()
                 || reply.is_some()
                 || untrusted
-                || !images.is_empty())
+                || !images.is_empty()
+                || !files.is_empty())
         {
             return Err(CommandError::Rejected(
                 "a callback turn carries no message, attachment, image or context".into(),
@@ -2181,6 +2206,7 @@ impl Master {
             reply,
             images,
             agent_named: picked,
+            files,
         };
         // The link drops a frame over 8 MiB; the margin covers the request
         // id and the framing.

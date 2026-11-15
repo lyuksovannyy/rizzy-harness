@@ -3,7 +3,8 @@
 //!
 //! `read` records the file's SHA-256; `edit` and `write` refuse a file the
 //! agent has not read, or that changed since, and record what they wrote. The event log is the authority: each such call's
-//! `tool_call_finished` carries a [`FileSeen`], and at the start of every
+//! `tool_call_finished` carries a [`FileSeen`] (and so does a file the
+//! person mentioned with `@path` in its `user_message`, PLAN.md T63), and at the start of every
 //! turn the session's table is rebuilt from the log ([`SeenStore::sync`]),
 //! so a node restart loses nothing but the snapshots below.
 //!
@@ -177,13 +178,27 @@ impl SeenStore {
     /// log names.
     pub fn sync(&self, session: SessionId, history: &[RawEvent]) {
         let mut latest: HashMap<PathBuf, (Sha, u64)> = HashMap::new();
+        let mut take = |s: &serde_json::Value, seq: u64| {
+            if let Ok(f) = serde_json::from_value::<FileSeen>(s.clone())
+                && let Some(sha) = unhex(&f.sha256)
+            {
+                latest.insert(PathBuf::from(&f.path), (sha, seq));
+            }
+        };
         for e in history {
             if e.kind == "tool_call_finished"
                 && let Some(s) = e.payload.get("seen")
-                && let Ok(f) = serde_json::from_value::<FileSeen>(s.clone())
-                && let Some(sha) = unhex(&f.sha256)
             {
-                latest.insert(PathBuf::from(&f.path), (sha, e.seq));
+                take(s, e.seq);
+            }
+            // A file the person mentioned (`@path`, T63) that the node read
+            // all of and showed, as a `read` would record it.
+            if e.kind == "user_message"
+                && let Some(files) = e.payload.get("files").and_then(|f| f.as_array())
+            {
+                for s in files.iter().filter_map(|f| f.get("seen")) {
+                    take(s, e.seq);
+                }
             }
         }
         // Keep the most recent files only.
@@ -268,6 +283,15 @@ impl SessionSeen {
             .flatten()
             .map(|s| Arc::new(s.to_string()));
         self.put(path, sha, snapshot)
+    }
+
+    /// Record what an event already says the agent knows (a file the
+    /// person mentioned, T63): its hash only, keyed on its path as given.
+    /// A record that does not parse is skipped.
+    pub fn note(&self, f: &FileSeen) {
+        if let Some(sha) = unhex(&f.sha256) {
+            self.put(Path::new(&f.path), sha, None);
+        }
     }
 
     /// [`Self::record`] for a file too large to hold: its hash only.

@@ -291,6 +291,7 @@ mod tests {
             reply: None,
             images: vec![],
             queued: false,
+            files: vec![],
         })
     }
 

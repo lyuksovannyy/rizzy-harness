@@ -317,6 +317,9 @@ pub(crate) struct Input {
     pub reply: Option<FormReply>,
     /// Images, with their bytes (`session.prompt.images`).
     pub images: Vec<harness_protocol::ChatImage>,
+    /// Paths the person mentioned with `@path` (`session.prompt.files`),
+    /// read by [`Session::read_mentions`] (T63).
+    pub files: Vec<String>,
 }
 
 /// A sub-agent's private, node-owned folder.
@@ -1331,6 +1334,7 @@ impl Session {
         drop(queue);
         let extra = TurnExtra {
             images: msg.images.clone(),
+            files_seen: msg.files.iter().filter_map(|f| f.seen.clone()).collect(),
             queued,
             ..extra
         };
@@ -2047,7 +2051,9 @@ impl Session {
             attachments,
             reply,
             images,
+            files,
         } = input;
+        let files = self.read_mentions(files).await?;
         let images = self.keep_images(images).await?;
         let text = match &reply {
             None => text,
@@ -2071,7 +2077,92 @@ impl Session {
             reply,
             images,
             queued: false,
+            files,
         })
+    }
+
+    /// A context like a `read` call's of this session (T63): its folder
+    /// and that folder's pin, a sub-agent's own folder, the node's
+    /// protected folders and node.toml's `allow_outside_workspace`.
+    fn read_ctx(&self) -> harness_tools::ToolCtx {
+        let mut ctx = harness_tools::ToolCtx::new(self.cwd.clone());
+        ctx.pin = self.pin.clone();
+        ctx.owned = self.owned.clone();
+        ctx.protected = Arc::new(self.node.cfg.policy.protected_dirs.clone());
+        ctx.allow_outside_workspace = self.node.cfg.policy.allow_outside_workspace;
+        ctx
+    }
+
+    /// The files a message mentions (`@path`, T63), read now under the
+    /// `read` tool's rules (`harness_tools::mention`): the person's own
+    /// act, so no approval card is asked for, as none is for an attached
+    /// file; but node.toml's `denied_tools = ["read"]` holds (the node
+    /// decides) and each is then named, not read. Only in an agentic chat;
+    /// waited for at most the instruction files' bound.
+    async fn read_mentions(&self, files: Vec<String>) -> Result<Vec<FileMention>, String> {
+        use crate::instructions::{self as ins, Bounded};
+        if files.is_empty() {
+            return Ok(vec![]);
+        }
+        if self.profile != Profile::Agentic {
+            return Err("this chat has no folder, so it has no files to mention".into());
+        }
+        if files.len() > harness_protocol::MAX_PROMPT_FILES
+            || files
+                .iter()
+                .any(|f| f.len() > harness_protocol::MAX_PROMPT_FILE_BYTES)
+        {
+            return Err(format!(
+                "at most {} mentioned files per message, each path at most {} bytes",
+                harness_protocol::MAX_PROMPT_FILES,
+                harness_protocol::MAX_PROMPT_FILE_BYTES
+            ));
+        }
+        let ctx = self.read_ctx();
+        let denied = self.node.cfg.policy.denies("read");
+        match ins::bounded(
+            move || harness_tools::mention::read_all(&ctx, &files, denied),
+            &CancellationToken::new(),
+            ins::READ_TIMEOUT,
+        )
+        .await
+        {
+            Bounded::Done(m) => Ok(m),
+            Bounded::TimedOut => Err(format!(
+                "the mentioned files took longer than {} s to read; send the message again, or \
+                 without them",
+                ins::READ_TIMEOUT.as_secs()
+            )),
+            Bounded::Cancelled | Bounded::Failed(_) => {
+                Err("the mentioned files could not be read".into())
+            }
+        }
+    }
+
+    /// Paths of this chat's folder for the composer's `@` completion
+    /// (T63, `harness_tools::mention::complete`): none in a chat without a
+    /// folder, none on a node that denies `read`, none in a folder that no
+    /// longer passes its checks.
+    pub(crate) async fn complete_files(&self, query: String) -> Result<Vec<String>, String> {
+        use crate::instructions::{self as ins, Bounded};
+        if self.profile != Profile::Agentic
+            || self.node.cfg.policy.denies("read")
+            || self.check_cwd_still_allowed().is_err()
+        {
+            return Ok(vec![]);
+        }
+        let ctx = self.read_ctx();
+        match ins::bounded(
+            move || harness_tools::mention::complete(&ctx, &query),
+            &CancellationToken::new(),
+            ins::READ_TIMEOUT,
+        )
+        .await
+        {
+            Bounded::Done(r) => r,
+            Bounded::TimedOut => Err("listing the folder took too long".into()),
+            Bounded::Cancelled | Bounded::Failed(_) => Err("the folder could not be listed".into()),
+        }
     }
 
     /// Free the turn slot if `turn_id` still holds it.
@@ -3338,6 +3429,7 @@ impl Session {
             reply: None,
             images: vec![],
             queued: false,
+            files: vec![],
         };
         let extra = TurnExtra {
             savings,

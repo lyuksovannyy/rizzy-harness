@@ -411,6 +411,7 @@ fn an_open_message_names_the_agent_that_wrote_it() {
             reply: None,
             images: vec![],
             queued: false,
+            files: vec![],
         }),
     );
     for e in [

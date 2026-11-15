@@ -174,6 +174,8 @@ export function apply(v: SessionView, e: RawEvent): void {
       const item: Extract<Item, { type: "user" }> = { type: "user", turn_id: p.turn_id, text: p.text };
       const names = ((p.attachments ?? []) as { name: string }[]).map((a) => a.name);
       if (names.length) item.attachments = names;
+      const files = ((p.files ?? []) as { path: string }[]).map((f) => f.path);
+      if (files.length) item.files = files;
       if (p.reply != null) item.reply = p.reply;
       if (p.images?.length) item.images = p.images;
       if (p.queued) item.queued = { seq: e.seq, read: false };
