@@ -176,6 +176,18 @@ macro_rules! lead {
     };
 }
 
+/// Added to `bash`'s description where it runs in the read-only shell
+/// (plan mode, an agent with no tool that writes: T.7). What a model will
+/// hit there: every write fails with "Read-only file system", and git's
+/// optional index refresh is off so `git status` and `git diff` work.
+pub const READ_ONLY_NOTE: &str = "This shell is READ-ONLY: the folder and everything else it \
+     sees are mounted read-only, and only $TMPDIR (/tmp, at most 256 MiB, emptied when the \
+     command ends) can be written. Use it to look: ls, cat, grep, find, git log, git diff, git \
+     show, git status, git blame, listing tests or packages. Anything that writes fails with \
+     \"Read-only file system\": editing or creating files, git add, commit, checkout, stash or \
+     fetch, installing packages, builds or tests that write into the folder (send their output \
+     to $TMPDIR where the tool allows it). Do not retry a write: it cannot succeed here.";
+
 /// `bash`'s description where background commands are off (the node's
 /// `background_per_session = 0`, a sub-agent): nothing about them.
 pub const FOREGROUND_DESCRIPTION: &str = lead!();
@@ -351,6 +363,7 @@ impl Tool for Bash {
             &ctx.protected,
             crate::sandbox::Grants {
                 workspace_write: true,
+                read_only: ctx.read_only_shell,
                 owned: ctx.owned.clone(),
                 cwd,
                 read_identified: crate::skills::shell_reads(ctx),

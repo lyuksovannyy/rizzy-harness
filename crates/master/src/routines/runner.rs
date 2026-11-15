@@ -1519,6 +1519,13 @@ mod approval_tests {
                 assert!(approval_for(&spec(m), true, by_hand, None) <= ApprovalMode::Ask);
             }
         }
+        // A routine in plan mode stays in it, webhook data or not (X.7).
+        for (untrusted, by_hand) in [(true, false), (false, false), (true, true)] {
+            assert_eq!(
+                run_mode(ApprovalMode::Plan, untrusted, by_hand),
+                ApprovalMode::Plan
+            );
+        }
         // With `UNATTENDED_MAX = Ask` (O6) a scheduled run asks whatever
         // the spec says; `run_mode` is the whole rule.
         assert_eq!(

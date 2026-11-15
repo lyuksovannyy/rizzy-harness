@@ -91,7 +91,9 @@ describe("the approval mode of a new chat", () => {
     expect(b.textContent).toContain("Ask");
     act(() => b.click());
     const opts = options(c.host);
-    expect(opts.map((o) => o.li.querySelector(".option-label")!.textContent)).toEqual(["Ask", "Accept edits", "Auto"]);
+    expect(opts.map((o) => o.li.querySelector(".option-label")!.textContent)).toEqual(["Plan", "Ask", "Accept edits", "Auto"]);
+    // Plan is below every ceiling: always on offer.
+    expect(opts.find((o) => o.text.startsWith("Plan"))!.disabled).toBe(false);
     const auto = opts.find((o) => o.text.startsWith("Auto"))!;
     expect(auto.disabled).toBe(true);
     expect(auto.text).toContain("max_approval_mode");

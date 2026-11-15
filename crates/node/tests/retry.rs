@@ -551,6 +551,48 @@ async fn a_retry_carries_on_after_the_failed_attempts_steps() {
     );
 }
 
+/// A turn that failed in Auto and is retried after the chat entered plan
+/// mode runs under plan mode: the node reads the chat's mode when the retry
+/// runs, it is not taken from the failed turn's record (X.21 with X.7). The
+/// stand-in model's retry asks for a `write`: refused, nothing written;
+/// what the failed attempt did in Auto stays as it was.
+#[tokio::test]
+async fn a_retry_runs_under_the_chats_mode_as_it_is_now() {
+    let mut n = start(2).await;
+    let sid = create(&mut n).await;
+    let failed = failed_turn(&mut n, sid).await;
+    n.link
+        .to_node
+        .try_send(MasterToNode::SetApprovalMode {
+            lowering: true,
+            req_id: "plan".into(),
+            session_id: sid,
+            mode: ApprovalMode::Plan,
+        })
+        .unwrap();
+    assert_eq!(ack(&mut n.link, "plan").await, Ok(()));
+
+    retry(&n.link, sid, "r1", &failed);
+    assert_eq!(ack(&mut n.link, "r1").await, Ok(()));
+    turn_ended(&mut n.link, sid).await;
+
+    assert!(!n.ws.join("b.txt").exists(), "the retry wrote in plan mode");
+    let l = log(n.store(), sid);
+    let last = kinds(&l)
+        .into_iter()
+        .rev()
+        .find_map(|k| match k {
+            EventKind::ToolCallFinished(f) => Some((f.ok, f.output)),
+            _ => None,
+        })
+        .expect("the retry's call has a result");
+    assert!(!last.0 && last.1.contains("plan mode"), "{last:?}");
+    assert_eq!(
+        std::fs::read_to_string(n.ws.join("a.txt")).unwrap(),
+        "one\n"
+    );
+}
+
 /// Only the last failed turn: not one that completed, not one with a turn
 /// after it, not while a turn runs, and only once while the retry runs.
 #[tokio::test]

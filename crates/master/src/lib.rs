@@ -1503,10 +1503,13 @@ impl Master {
                     self.note_dropped_parent(node_id, e.session_id, parent)
                         .await;
                 }
-                if e.kind == "tool_call_started"
-                    && e.payload.get("tool").and_then(|v| v.as_str()) == Some("remember")
-                {
-                    memory::file(self, node_id, &e).await;
+                // A `remember` is filed from its result, once the node ran
+                // it and it succeeded (review M1 of PR 125).
+                if e.kind == "tool_call_started" {
+                    memory::started(&e);
+                }
+                if e.kind == "tool_call_finished" {
+                    memory::finished(self, node_id, &e).await;
                 }
                 if matches!(e.kind.as_str(), "artifact_staged" | "artifact_stage_failed") {
                     artifacts::on_applied(self, node_id, &e).await;

@@ -42,6 +42,15 @@ jobs:
           # A containment test that cannot run fails instead of skipping.
           HARNESS_REQUIRE_BWRAP: "1"
           HARNESS_REQUIRE_FUSE: "1"
+      # The node as it ships: `crates/cli`'s dev-dependency turns on
+      # harness-node's `testing` hooks for the whole workspace test build,
+      # so the step above never builds the node without them. Its own suite
+      # once more in the shipped feature set (plan mode, approvals, the
+      # node's policy), so a difference between the two cannot hide.
+      - run: cargo test -p harness-node
+        env:
+          HARNESS_REQUIRE_BWRAP: "1"
+          HARNESS_REQUIRE_FUSE: "1"
 
   deny:
     runs-on: ubuntu-latest

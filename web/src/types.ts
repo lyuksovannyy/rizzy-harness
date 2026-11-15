@@ -8,9 +8,10 @@ export interface RawEvent {
   payload: any; // eslint-disable-line @typescript-eslint/no-explicit-any
 }
 
-/** Strictest first (T50): `accept_edits` lets `write`/`edit` inside the chat's
+/** Strictest first (T50): `plan` changes nothing (X.7: refused, not asked;
+ * `bash` read-only); `accept_edits` lets `write`/`edit` inside the chat's
  * folder run without a card; `auto` runs everything unasked. */
-export type ApprovalMode = "ask_all" | "ask" | "accept_edits" | "auto";
+export type ApprovalMode = "plan" | "ask_all" | "ask" | "accept_edits" | "auto";
 export type Decision = "allow" | "deny" | "allow_session" | "allow_chat";
 export type ResolvedBy = "user" | "policy" | "cancelled" | "interrupted";
 export type TurnEndReason = "completed" | "cancelled" | "error" | "interrupted" | "stopped" | "limit";

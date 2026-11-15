@@ -69,6 +69,15 @@ pub trait TurnHost: Send + Sync {
         false
     }
 
+    /// The chat's approval mode in force now (T50), as the node reads it
+    /// for every call: its own, under the node's ceiling and, for a
+    /// sub-agent, its parent's. The loop reads it for plan mode (X.7):
+    /// what it offers, refuses and how `bash` runs. `None` where there is
+    /// no mode (chat sessions, tests): nothing is changed by it then.
+    fn approval_mode(&self) -> Option<crate::policy::ApprovalMode> {
+        None
+    }
+
     /// Whether this node's policy denies `tool` outright (`denied_tools`).
     /// A sub-agent whose declared tools are all denied or unregistered here
     /// is not offered as a delegate.
@@ -319,6 +328,13 @@ pub struct TurnExtra {
     /// A lower step cap for this turn than the backend's own `max_steps`
     /// (a callback turn's `callback_max_steps`). Set only by the node.
     pub max_steps: Option<usize>,
+    /// The harness's line about the chat's mode for this turn (plan mode,
+    /// X.7: what the agent may do and that it ends with a plan), set by the
+    /// loop from [`TurnHost::approval_mode`] at the turn's start. Sent in
+    /// the context block as a per-turn section and recorded with it
+    /// (`context_sent`), so later requests rebuild the message byte for
+    /// byte. Never from the protocol.
+    pub mode_note: Option<String>,
     /// Messages the person sent while an earlier turn ran that it never
     /// read (X.5): the node recorded them as read (`queued_delivered`)
     /// right after this turn's `turn_started`, and the loop sends them, in

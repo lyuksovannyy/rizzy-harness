@@ -920,14 +920,36 @@ async fn a_restarted_master_asks_once_and_loses_nothing() {
 /// takes events in order and files a proposal while it takes the call, so
 /// once the barrier is mirrored the call has been decided.
 async fn remember_in(t: &T, node: &Fake, sid: SessionId, turn: &str, text: &str, n: usize) {
+    let _ = n;
+    let before = count(t, sid).await;
     node.raw(
         sid,
         "tool_call_started",
         json!({"turn_id": turn, "call_id": format!("call-{text}"), "tool": "remember",
                "input": {"text": text}}),
     );
+    // As a node reports a call it ran: the master files from the result
+    // (review M1 of PR 125).
+    node.raw(
+        sid,
+        "tool_call_finished",
+        json!({"call_id": format!("call-{text}"), "ok": true, "output": "Sent to memory."}),
+    );
     node.raw(sid, "error", json!({"message": "barrier"}));
-    mirrored(t, sid, n).await;
+    mirrored(t, sid, before + 3).await;
+}
+
+/// How many events of `sid` the mirror holds.
+async fn count(t: &T, sid: SessionId) -> usize {
+    let (_, v) = req(
+        &t.base,
+        Method::GET,
+        &format!("/api/sessions/{sid}/events"),
+        None,
+        TOKEN,
+    )
+    .await;
+    v["events"].as_array().map_or(0, |e| e.len())
 }
 
 /// Alex's agentic chat with the General agent, whose memory is on (the
@@ -962,14 +984,21 @@ async fn forget_is_ignored(t: &T, sid: SessionId, turn: &str, n: usize) {
         .await
         .unwrap()
         .unwrap();
+    let _ = n;
+    let before = count(t, sid).await;
     t.node.raw(
         sid,
         "tool_call_started",
         json!({"turn_id": turn, "call_id": format!("forget-{turn}"), "tool": "remember",
                "input": {"forget": kept.id}}),
     );
+    t.node.raw(
+        sid,
+        "tool_call_finished",
+        json!({"call_id": format!("forget-{turn}"), "ok": true, "output": "Sent to memory."}),
+    );
     t.node.raw(sid, "error", json!({"message": "barrier"}));
-    mirrored(t, sid, n).await;
+    mirrored(t, sid, before + 3).await;
     let now = mem.get(&kept.id).await.unwrap().unwrap();
     assert_eq!(
         now.status,
@@ -1089,15 +1118,20 @@ async fn a_callback_turns_remember_is_never_filed_and_the_persons_turn_keeps_its
         json!({"turn_id": "cb", "call_id": "call-r", "tool": "remember",
                "input": {"text": "steered-after-restart"}}),
     );
+    n2.raw(
+        sid,
+        "tool_call_finished",
+        json!({"call_id": "call-r", "ok": true, "output": "Sent to memory."}),
+    );
     n2.raw(sid, "error", json!({"message": "barrier"}));
     let by = std::time::Instant::now() + HUNG;
     while std::time::Instant::now() < by {
-        if m2.inner_mirror().head_seq(sid).unwrap() >= head + 2 {
+        if m2.inner_mirror().head_seq(sid).unwrap() >= head + 3 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert!(m2.inner_mirror().head_seq(sid).unwrap() >= head + 2);
+    assert!(m2.inner_mirror().head_seq(sid).unwrap() >= head + 3);
     assert!(
         facts(&m2, sid).await.is_empty(),
         "filed after a restart: {:?}",
@@ -1112,10 +1146,15 @@ async fn a_callback_turns_remember_is_never_filed_and_the_persons_turn_keeps_its
         json!({"turn_id": "p2", "call_id": "call-c", "tool": "remember",
                "input": {"text": "control-after-restart"}}),
     );
+    n2.raw(
+        sid,
+        "tool_call_finished",
+        json!({"call_id": "call-c", "ok": true, "output": "Sent to memory."}),
+    );
     n2.raw(sid, "error", json!({"message": "barrier"}));
     let by = std::time::Instant::now() + HUNG;
     while std::time::Instant::now() < by {
-        if m2.inner_mirror().head_seq(sid).unwrap() >= head + 5 {
+        if m2.inner_mirror().head_seq(sid).unwrap() >= head + 7 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;

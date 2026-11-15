@@ -63,6 +63,8 @@ const DiffPanel = lazy(() => import("./DiffPanel"));
 const ExportChat = lazy(() => import("./ExportChat"));
 // Loaded on the chat's first task list (the agent's `todo` tool).
 const TodoPanel = lazy(() => import("./TodoPanel"));
+// Plan mode's bar (X.7), loaded on the first chat in plan mode.
+const PlanBar = lazy(() => import("./PlanBar"));
 
 /** Whether the chat has anything the side panel could list: its chunk loads
  * on the first sub-agent or background command. Cheap; builds no rows. */
@@ -245,7 +247,7 @@ function useRunSeen(mark: RoutineMark | null | undefined) {
 /** A chat takes this many images in all (docs/media.md §6.6). */
 const CHAT_IMAGES = 50;
 /** An approval mode in the chat's own words (T50). */
-const MODE_NAMES: Record<ApprovalMode, string> = { ask_all: "ask every call", ask: "ask", accept_edits: "accept edits", auto: "auto" };
+const MODE_NAMES: Record<ApprovalMode, string> = { plan: "plan", ask_all: "ask every call", ask: "ask", accept_edits: "accept edits", auto: "auto" };
 
 function compact(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(n >= 10000 ? 0 : 1)}k` : String(n);
@@ -371,6 +373,9 @@ export default function Conversation(props: {
   if (view?.todo?.length) todoFor.current = sessionId;
   // The turn whose changes are open beside the chat, and the row's button
   // that opened them (focus goes back to it on close).
+  // Plan mode's bar: a send that failed after the mode changed.
+  const [carryErr, setCarryErr] = useState<string | null>(null);
+  useEffect(() => setCarryErr(null), [sessionId]);
   const [diffOf, setDiffOf] = useState<{ session: string; turn: string; rewind: boolean } | null>(null);
   const diffOpener = useRef<HTMLElement | null>(null);
   const closeDiff = () => {
@@ -819,6 +824,24 @@ export default function Conversation(props: {
               <TodoPanel key={sessionId} items={view?.todo ?? []} running={running} />
             </Suspense>
           )}
+          {meta?.approval_mode === "plan" && !running && !meta.parent_session && !meta.no_callbacks && node?.max_approval && (
+            <Suspense fallback={null}>
+              <PlanBar
+                max={node.max_approval}
+                onCarry={async (m, text) => {
+                  setCarryErr(null);
+                  await pageApi.setApprovalMode(sessionId, m);
+                  stick.current = true;
+                  // The bar is gone once the mode changed: a failed send is
+                  // said here, where it stays.
+                  await api.prompt(sessionId, text, {}).catch((x) => {
+                    setCarryErr(`The mode changed, but "${text}" was not sent: ${x instanceof Error ? x.message : String(x)}`);
+                  });
+                }}
+              />
+            </Suspense>
+          )}
+          {carryErr && <div className="error-text">{carryErr}</div>}
           <Composer
             where="session"
             agents={props.agents}

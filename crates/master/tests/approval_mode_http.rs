@@ -419,3 +419,58 @@ async fn a_node_without_approval_modes_is_not_sent_it() {
     );
     assert!(changes(&t.old).is_empty());
 }
+
+/// Plan mode (X.7) is one more mode on the same route: the owner enters it
+/// (a lowering: no level check, like a denial) and leaves it; nobody else
+/// does either; an owner whose level no longer allows the chat's execution
+/// mode may enter plan mode and may not leave it.
+#[tokio::test]
+async fn plan_mode_is_the_owners_to_enter_and_to_leave() {
+    let t = start().await;
+    let (bob, bob_id) = account(&t, "bob", "member").await;
+    let (carol, _) = account(&t, "carol", "admin").await;
+    let sid = chat(&t, &bob, "remote", None).await;
+    for (who, mode) in [(&carol, "plan"), (&t.alex, "plan")] {
+        let (st, v) = req(
+            &t,
+            Method::POST,
+            &path(sid),
+            Some(json!({"mode": mode})),
+            who,
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND, "{v}");
+    }
+    assert!(changes(&t.remote).is_empty());
+    let (st, v) = req(
+        &t,
+        Method::PUT,
+        &format!("/api/users/{bob_id}/exec-ceiling"),
+        Some(json!({"level": "none"})),
+        &t.alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        &path(sid),
+        Some(json!({"mode": "plan"})),
+        &bob,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(changes(&t.remote), [(sid, ApprovalMode::Plan)]);
+    // The fake node records nothing, so the master's copy still says
+    // `ask`: leaving for `auto` is a raise, and refused at this level.
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        &path(sid),
+        Some(json!({"mode": "auto"})),
+        &bob,
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{v}");
+    assert_eq!(changes(&t.remote).len(), 1);
+}
