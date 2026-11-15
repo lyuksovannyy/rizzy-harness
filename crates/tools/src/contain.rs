@@ -159,11 +159,14 @@ pub fn binds_of(bwrap: &Path) -> (Binds, Option<String>) {
     (binds, version)
 }
 
-/// The size of a read-only shell's `/tmp` (T.7): a tmpfs in the command's
-/// own mount namespace, so a command that fills it takes up to this much
-/// memory (charged where the node's own processes are: commands have no
-/// cgroup of their own), never the node's disk, and it is gone when the
-/// command ends.
+/// The default size of a read-only shell's temp folder (T.7; node.toml
+/// `[sandbox] read_only_tmp_mib`): a tmpfs in the command's own mount
+/// namespace. What a command writes there is host memory that no
+/// process's RSS shows (the OOM killer picks another process and frees
+/// none of it) until the command ends; up to this much per running
+/// read-only command, background ones included. It never reaches the
+/// node's disk. 256 MiB: enough for scripts and small test builds, which
+/// start from nothing in every command (PLAN.md T70).
 pub const READ_ONLY_TMP_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Whether `bwrap --help` lists `--size` (sizing a tmpfs). Asked once per
@@ -258,7 +261,7 @@ impl Contain {
     }
 
     /// Whether a read-only shell (T.7) can be contained by this
-    /// bubblewrap: its `/tmp` is a tmpfs of [`READ_ONLY_TMP_BYTES`], so it
+    /// bubblewrap: its `/tmp` is a sized tmpfs, so it
     /// needs `--size`. Asked of bubblewrap the first time it is needed
     /// (the start's probes run it no more often than before).
     pub fn sizes_tmpfs(&self) -> bool {
@@ -322,7 +325,7 @@ impl Contain {
         mark: Option<&Mark>,
         net_off: bool,
         view: &[Mount],
-        ro_tmp: Option<u64>,
+        ro_tmp: Option<(u64, &Path)>,
     ) -> std::process::Command {
         use std::os::unix::process::CommandExt;
         let mut c = match image {
@@ -366,15 +369,16 @@ impl Contain {
         self.args_with(cwd, net_off, view, None)
     }
 
-    /// [`Self::args`]; with `ro_tmp` (a read-only shell, T.7) `/tmp` is a
-    /// tmpfs of that many bytes, the one place the command may write: it
+    /// [`Self::args`]; with `ro_tmp` (a read-only shell, T.7) a tmpfs of
+    /// that many bytes at that path (`/tmp`, or elsewhere where something
+    /// granted lies beneath `/tmp`), the one place the command may write: it
     /// lives in the command's own mount namespace and goes with it.
     fn args_with(
         &self,
         cwd: &Path,
         net_off: bool,
         view: &[Mount],
-        ro_tmp: Option<u64>,
+        ro_tmp: Option<(u64, &Path)>,
     ) -> Vec<OsString> {
         let mut a: Vec<OsString> = [
             // Through PR_SET_PDEATHSIG: bwrap dies with its guard (a
@@ -401,9 +405,17 @@ impl Contain {
         // An empty `/tmp`: the command's temp folder is `TMPDIR`.
         a.extend(["--dev", "/dev"].map(OsString::from));
         match ro_tmp {
-            Some(bytes) => {
+            Some((bytes, path)) if path == Path::new("/tmp") => {
                 a.extend(["--size".into(), bytes.to_string().into()]);
                 a.extend(["--tmpfs", "/tmp"].map(OsString::from));
+            }
+            // A folder under the host's `/tmp` is in the view: `/tmp` is
+            // the empty folder (read-only with the root) and the tmpfs is
+            // elsewhere.
+            Some((bytes, path)) => {
+                a.extend(["--dir", "/tmp"].map(OsString::from));
+                a.extend(["--size".into(), bytes.to_string().into()]);
+                a.extend(["--tmpfs".into(), path.as_os_str().to_owned()]);
             }
             None => a.extend(["--dir", "/tmp"].map(OsString::from)),
         }
@@ -1170,7 +1182,12 @@ mod tests {
         let plain = c.args(Path::new("/w"), false, &[]);
         assert!(plain.windows(2).any(|w| w == ["--dir", "/tmp"]));
         assert!(!plain.iter().any(|x| x == "--tmpfs" || x == "--size"));
-        let ro = c.args_with(Path::new("/w"), false, &[], Some(READ_ONLY_TMP_BYTES));
+        let ro = c.args_with(
+            Path::new("/w"),
+            false,
+            &[],
+            Some((READ_ONLY_TMP_BYTES, Path::new("/tmp"))),
+        );
         let size = READ_ONLY_TMP_BYTES.to_string();
         assert!(
             ro.windows(4)

@@ -1062,7 +1062,11 @@ that writes on its own copy) and do not see each other's changes; the
 agents are told to start together only work that is independent. Merging
 needs git 2.43 or newer on the node. None of this runs your repository's config, hooks, filters, merge drivers or
 attributes. Sub-agents that only
-read work in the folder itself. Only the latest 10 checkpoints per folder are kept (`checkpoints_keep`
+read work in the folder itself, and so do those whose only tools that
+change things are `publish` and MCP tools (they write no file directly; a
+filesystem-style MCP server can still write the folder, with its calls'
+own approval); one that can write, edit or run a writable shell gets its
+own copy. Only the latest 10 checkpoints per folder are kept (`checkpoints_keep`
 in `node.toml`). "Rewind" undoes a turn and everything after it. Before an
 undo or rewind changes a file it saves the folder as it is, your own edits
 since the turn included, as a checkpoint of its own, so "Undo anyway" loses
@@ -1155,12 +1159,19 @@ with one line saying what runs unasked:
   mode: their effects are only the server's word). `bash` runs in the
   **read-only shell** (docs/read-only-shell.md): contained in bubblewrap with
   the chat's folder and everything else bound read-only and only its own
-  `/tmp` (256 MiB, gone when the command ends) writable, in a sandbox chat
+  temp folder (`$TMPDIR`: `/tmp`, or `/.harness-tmp` when the chat's folder
+  is under the host's `/tmp`; 256 MiB by default, `[sandbox]
+  read_only_tmp_mib`; gone when the command ends) writable, and **no
+  network** unless `[sandbox] read_only_network = true` (a change from
+  before: plan mode's shell had the node's network), in a sandbox chat
   and in a host chat alike; `git log`, `git diff`, `git status`, `grep` work,
-  and any write fails with "Read-only file system". Toolchains that need a
-  writable home or build folder cannot build or test there (`cargo` fails
-  on a read-only `~/.rustup` even with `CARGO_TARGET_DIR=$TMPDIR`; `npm
-  install` fails): a planner reads, greps, runs `git`, and runs scripts and
+  and any write fails with "Read-only file system". `CARGO_TARGET_DIR` points
+  into the temp folder, so `cargo build` and `cargo test` work where the
+  toolchain folders are in `[sandbox] read` (narrow ones: `~/.cargo/registry`,
+  `~/.cargo/bin`, `~/.rustup/toolchains`, not `~/.cargo` with its
+  `credentials.toml`) and the build, which starts from nothing in every
+  command, fits; toolchains that must write their home or the folder (`npm
+  install`) fail: a planner reads, greps, runs `git`, and runs scripts and
   tests that write nothing or only to `$TMPDIR`. On a node without that
   containment (no bubblewrap, `[sandbox] mode = "off"`, a bubblewrap that
   cannot size a tmpfs) plan mode has **no shell** and the agent is told why.
@@ -1301,6 +1312,8 @@ network = "on"                       # on | off (off: no network for the shell, 
 read = []                            # more read-only folders, e.g. "~/.cargo"
 write = []                           # more read-write folders, e.g. "~/.cache"
 # bwrap = "/usr/bin/bwrap"           # which bubblewrap; default: the first root-owned one on PATH
+read_only_tmp_mib = 256              # the read-only shell's temp folder per running command, host memory (64 .. 65536)
+read_only_network = false            # the read-only shell (plan mode, read-only agents) reaches the network; never wider than `network`
 
 [execution]
 sandbox = "auto"                     # auto | strict | off: offer the sandbox mode (bubblewrap), see "Execution modes"
@@ -2194,7 +2207,7 @@ stored as `[savings]` in `config.toml` and applies from the next message.
 | `graphify` | off | agentic | `graph_query` tool, only on nodes that allow and installed it. |
 | `small_model` | none | | The **small model**: one cheap, fast model (other harnesses call it the small or fast model) for background writing. Picked from the listed models. |
 | `handoff_notes` | `small_model` | agentic | Who writes a coding chat's **hand-off note** (below): `small_model` (the small model when one is set, else the chat's own model), `chat_model`, or `off`. |
-| `small_subagents` | off | agentic | A sub-agent that may not write, edit, run commands or use MCP tools (by its tool switches, not its name: Scout and Reviewer as shipped) and has no model of its own runs on the small model, its parent's model as its fallback; its own chat says which model ran. |
+| `small_subagents` | off | agentic | A sub-agent that changes nothing (every tool it may use is on the read-only list: no `write`, `edit`, `publish`, writable shell, MCP tool or tool not yet listed; its `bash` in the read-only shell, `remember` and the web tools do not count; by its tools, not its name: Scout, Reviewer and Researcher as shipped) and has no model of its own runs on the small model, its parent's model as its fallback; its own chat says which model ran. |
 
 ```toml
 [savings]
@@ -2925,8 +2938,8 @@ The built-in agents, grouped by category in the picker:
 | Software Developer (`@coder`, `@dev`), the Agentic default | IT | agent, sub-agent | read, change and search files, run commands, the node's MCP servers, publish, web; delegates to Scout, Researcher and Reviewer; project memory |
 | Senior Teamlead (`@teamlead`) | IT | agent | everything the Software Developer has, plus your facts; delegates to Software Developer, Researcher, Writer, Scout and Reviewer |
 | Writer (`@writer`) | General | agent, sub-agent | read, change and search files, publish, web; project memory |
-| Scout (`@scout`) | IT | sub-agent | read and search files only |
-| Reviewer (`@reviewer`) | IT | agent, sub-agent | read and search files; project memory; earlier chats and memory search |
+| Scout (`@scout`) | IT | sub-agent | read and search files; read-only commands (`git log`, `git diff`, `grep` pipelines, in the read-only shell) |
+| Reviewer (`@reviewer`) | IT | agent, sub-agent | read and search files; read-only commands (`git diff`, `git log`, `git blame`, tests that write only to `/tmp`); project memory; earlier chats and memory search |
 
 **Researcher in Agentic sessions.** Web tools exist only in chats, not on
 nodes yet (nodes have `remember` and `recall`, which alone do none of a task's work). In an Agentic session, Researcher is therefore not offered
@@ -2949,10 +2962,25 @@ tool").
 
 "Your facts" are the memories in Settings → Account; an agent without them
 neither recalls nor proposes them. Scout and Reviewer are read-only by their
-tool list: they are offered no tool that writes or runs anything, and the loop
-refuses any other call. That is not a sandbox: there is no read-only shell
-yet, so Reviewer cannot list a change itself and reviews what it is given or
-reads.
+tool list: every tool they may call changes nothing (one allow-list the master,
+the node and the loop all read, PLAN.md T70), and the loop refuses any other
+call. Their `bash` (the **Read-only commands** switch, on for both, off for a
+new agent) always runs in the **read-only shell** (docs/read-only-shell.md),
+whatever the chat's mode: the node picks it from the tools the agent has, so
+no setting or agent spec can give a read-only agent a shell that writes. They
+can run `git log`, `git diff`, `git blame`, `grep ... | sort | uniq -c` and
+tests whose output goes to `$TMPDIR` (`cargo test` of a small crate does:
+`CARGO_TARGET_DIR` points there, with the toolchain folders in `[sandbox]
+read`), with **no network** unless node.toml sets `[sandbox]
+read_only_network = true` (their commands run unasked and may run the
+repository's own code); nothing they run can change the folder, and their
+commands ask no card in Ask or Accept edits (Ask every call asks). A read-only
+agent still works in its parent's folder (no copy, nothing merged back), may
+run on the small model and may be started in plan mode. Where the node has no
+read-only shell (no bubblewrap, `[sandbox] mode = "off"`) they get no `bash`
+and are told why. A custom agent gets the switch only when someone turns it
+on, and it adds a shell only to an agent that changes nothing else; an agent
+whose list holds `bash` and only reading tools gets the read-only shell too.
 
 A message that starts with `@handle` (an id or an alias: `@dev fix the
 build`) goes to that agent for one turn; the chat's agent stays. An agent

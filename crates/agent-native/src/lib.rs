@@ -439,6 +439,30 @@ fn plan_no_shell(why: &str) -> String {
     )
 }
 
+/// The shell tools a read-only agent gets only in the read-only shell.
+const SHELL_TOOLS: [&str; 3] = ["bash", "bash_output", "bash_stop"];
+
+/// The harness's line for a read-only agent whose node has no read-only
+/// shell: sent in the context block, so the model knows why `bash` is
+/// missing.
+fn reader_note_without_shell(why: &str) -> String {
+    format!(
+        "[harness] This agent cannot change files, so its shell would be the read-only shell, and \
+         this node has none ({why}): there is no `bash` here. Look with `read`, `grep` and \
+         `glob`, and name the commands you would have run in your report."
+    )
+}
+
+/// The result of a read-only agent's shell tool where the node has no
+/// read-only shell.
+fn reader_no_shell(tool: &str, why: &str) -> String {
+    format!(
+        "[harness] `{tool}` was not run: this agent cannot change files, so its shell is the \
+         read-only shell, and this node has none ({why}). Look with `read`, `grep` and `glob`, \
+         and name the commands to run in your report."
+    )
+}
+
 /// The result of `delegate` in plan mode to an agent that can write, or
 /// where this turn offers no agent that only reads.
 fn plan_no_writer(agent: Option<&str>) -> String {
@@ -952,6 +976,10 @@ impl NativeBackend {
         // the first of its three places; the dispatcher and the read-only
         // shell are the others), and `bash` says it is read-only.
         let plan = is_plan(host);
+        // The read-only shell (T.7): in plan mode and for an agent that
+        // changes nothing else (PLAN.md T70); without one on this node its
+        // shell tools are left out, and the context block says why.
+        let read_only = self.read_only_turn(agent, host);
         let mut specs: Vec<ToolSpec> = self
             .tools
             .iter()
@@ -961,15 +989,20 @@ impl NativeBackend {
             .filter(|t| background_on || !matches!(t.name(), "bash_output" | "bash_stop"))
             .filter(|t| !plan || self.plan_refusal(t.name(), mcp).is_none())
             .filter(|t| !(plan && t.name() == "bash") || self.read_only_shell().is_ok())
+            .filter(|t| self.shell_refusal(t.name(), agent, host).is_none())
             .map(|t| match (t.name(), background_on) {
                 ("bash", false) => ToolSpec {
                     name: t.name().to_string(),
-                    description: shell_text(harness_tools::FOREGROUND_DESCRIPTION, plan),
+                    description: self.shell_text(
+                        harness_tools::FOREGROUND_DESCRIPTION,
+                        read_only,
+                        agent,
+                    ),
                     schema: harness_tools::foreground_schema(self.config.bash_timeout_max),
                 },
                 ("bash", true) => ToolSpec {
                     name: t.name().to_string(),
-                    description: shell_text(t.description(), plan),
+                    description: self.shell_text(t.description(), read_only, agent),
                     schema: t.schema_for(self.config.bash_timeout_max),
                 },
                 _ => ToolSpec {
@@ -986,7 +1019,7 @@ impl NativeBackend {
                 a.delegates
                     .iter()
                     .filter(|d| self.delegate_gap(d, savings, host).is_none())
-                    .filter(|d| !plan || !self.writes(d))
+                    .filter(|d| !plan || !self.writes(d, host))
                     .collect()
             })
             .unwrap_or_default();
@@ -1040,9 +1073,9 @@ impl NativeBackend {
         if tool.starts_with(harness_tools::mcp::PREFIX) {
             return Some(harness_core::policy::plan_refusal(tool));
         }
-        let t = self.tools.iter().chain(mcp).find(|t| t.name() == tool)?;
+        self.tools.iter().chain(mcp).find(|t| t.name() == tool)?;
         ApprovalMode::Plan
-            .refuses(tool, t.risk())
+            .refuses(tool)
             .then(|| harness_core::policy::plan_refusal(tool))
     }
 
@@ -1053,26 +1086,78 @@ impl NativeBackend {
         self.config.sandbox.read_only_shell()
     }
 
-    /// Whether `d` can change files: it may use every tool, MCP tools, or a
-    /// registered mutating tool other than `bash` (a child in plan mode
-    /// gets the read-only shell). A read-only-risk tool plan mode refuses
-    /// (`remember`) does not make a writer: the child's call is refused
-    /// like any (a child inherits the mode). This refuses a writer before
-    /// a child exists.
-    fn writes(&self, d: &harness_core::agent::AgentSpec) -> bool {
-        use harness_core::agent::ToolSelection;
-        let ToolSelection::List(declared) = &d.tools else {
-            return true;
-        };
-        declared.iter().filter(|t| d.allows_tool(t)).any(|t| {
-            t == "mcp"
-                || t.starts_with(harness_tools::mcp::PREFIX)
-                || self.tools.iter().any(|x| {
-                    x.name() == t
-                        && x.risk() == harness_core::policy::ToolRisk::Mutating
-                        && t != harness_core::policy::PLAN_SHELL
-                })
-        })
+    /// `bash`'s description, with what the read-only shell means (and its
+    /// size on this node) added where it runs there.
+    fn shell_text(
+        &self,
+        description: &str,
+        read_only: bool,
+        agent: Option<&harness_core::agent::AgentSpec>,
+    ) -> String {
+        if read_only {
+            let size = self.config.sandbox.read_only_tmp();
+            let net = self.config.sandbox.read_only_network();
+            let web = agent.is_none_or(|a| a.allows_tool("web_fetch"))
+                && self.tools.iter().any(|t| t.name() == "web_fetch");
+            format!(
+                "{description} {}",
+                harness_tools::read_only_note(size, net, web)
+            )
+        } else {
+            description.to_string()
+        }
+    }
+
+    /// Whether `bash` runs in the read-only shell this turn (T.7, PLAN.md
+    /// T70): in plan mode, and for an agent that changes nothing else by
+    /// the shared rule on this node ([`Self::writes`], the same answer the
+    /// node's sub-agent folders read). Read at each call; nothing in the
+    /// agent's spec or in the call can ask for a writable shell.
+    fn read_only_turn(
+        &self,
+        agent: Option<&harness_core::agent::AgentSpec>,
+        host: &dyn harness_core::backend::TurnHost,
+    ) -> bool {
+        is_plan(host) || agent.is_some_and(|a| !self.writes(a, host))
+    }
+
+    /// Why a read-only agent's shell tools are not offered or run here
+    /// (outside plan mode, which says it its own way): its shell must be
+    /// the read-only shell and this node has none. `None` for any other
+    /// tool or agent, and for a tool the agent may not use (that call is
+    /// an unknown tool, as before).
+    fn shell_refusal(
+        &self,
+        tool: &str,
+        agent: Option<&harness_core::agent::AgentSpec>,
+        host: &dyn harness_core::backend::TurnHost,
+    ) -> Option<String> {
+        let asked = agent.is_some_and(|a| a.allows_tool(tool));
+        if !SHELL_TOOLS.contains(&tool)
+            || !asked
+            || is_plan(host)
+            || !self.read_only_turn(agent, host)
+        {
+            return None;
+        }
+        self.read_only_shell()
+            .err()
+            .map(|why| reader_no_shell(tool, &why))
+    }
+
+    /// Whether `d` can change things on this node: the shared rule
+    /// ([`harness_core::agent::AgentSpec::changes_things`], PLAN.md T70)
+    /// with the node's `denied_tools`. Its `bash` does not make a writer
+    /// (it runs in the read-only shell); `remember` does not either (a
+    /// child's call waits for a person, and plan mode refuses it: a child
+    /// inherits the mode). This refuses a writer in plan mode before a
+    /// child exists.
+    fn writes(
+        &self,
+        d: &harness_core::agent::AgentSpec,
+        host: &dyn harness_core::backend::TurnHost,
+    ) -> bool {
+        d.changes_things(|t| !host.tool_denied(t))
     }
 
     /// Why `d` cannot be started here, if it declared tools and none of them
@@ -1179,12 +1264,6 @@ impl NativeBackend {
         if let Some(why) = self.delegate_gap(spec, &ctx.extra.savings, host) {
             return (ToolOutcome::err(why), none);
         }
-        // Plan mode (X.7): a child that can write is not started (nor
-        // given a follow-up: above the `session` branch, T68); one that
-        // only reads is, and inherits the mode (the node's ceiling).
-        if is_plan(host) && self.writes(spec) {
-            return (ToolOutcome::err(plan_no_writer(Some(&spec.agent_id))), none);
-        }
         // A follow-up names the child by the id its result began with; the
         // node decides whether it is this session's (T68).
         // Present but not an id (a number, an object, an empty string) is
@@ -1213,6 +1292,20 @@ impl NativeBackend {
                 }
             }
         };
+        // Plan mode (X.7): a child that can write is not started, nor
+        // given a follow-up (T68); one that only reads is, and inherits the
+        // mode (the node's ceiling).
+        if is_plan(host) && self.writes(spec, host) {
+            let why = match follow_up {
+                Some(sid) => format!(
+                    "[harness] plan mode: @{} `{sid}` was not continued: it changes files, and \
+                     nothing may change in plan mode. Describe the work in your plan.",
+                    spec.agent_id
+                ),
+                None => plan_no_writer(Some(&spec.agent_id)),
+            };
+            return (ToolOutcome::err(why), none);
+        }
         let (tx, mut rx) = mpsc::unbounded_channel();
         let started: Box<dyn FnOnce(harness_core::SessionId) + Send> = Box::new(move |sid| {
             let _ = tx.send(sid);
@@ -2365,10 +2458,23 @@ impl NativeBackend {
             let mut extra = ctx.extra.clone();
             // Plan mode (X.7): the harness's line on what the turn may do,
             // read at the turn's start and recorded with the block.
-            extra.mode_note = is_plan(host).then(|| match self.read_only_shell() {
-                Ok(()) => PLAN_NOTE.to_string(),
-                Err(why) => plan_note_without_shell(&why),
-            });
+            extra.mode_note = is_plan(host)
+                .then(|| match self.read_only_shell() {
+                    Ok(()) => PLAN_NOTE.to_string(),
+                    Err(why) => plan_note_without_shell(&why),
+                })
+                // A read-only agent that would have a shell, on a node with
+                // no read-only shell (T.7): why `bash` is missing.
+                .or_else(|| {
+                    let agent = ctx.agent.as_ref()?;
+                    let wants = agent.allows_tool(harness_core::agent::SHELL)
+                        && !host.tool_denied(harness_core::agent::SHELL)
+                        && self.read_only_turn(Some(agent), host);
+                    wants
+                        .then(|| self.read_only_shell().err())
+                        .flatten()
+                        .map(|why| reader_note_without_shell(&why))
+                });
             // A callback turn takes the master's standing parts (review
             // M1), never a person's line or `/skill`.
             if callback.is_some() {
@@ -3682,7 +3788,9 @@ impl NativeBackend {
                         self.plan_refusal(&call.tool, &mcp_tools)
                             .or_else(|| (call.tool == DELEGATE).then(|| plan_no_writer(None)))
                     })
-                    .flatten();
+                    .flatten()
+                    // A read-only agent's shell where the node has none.
+                    .or_else(|| self.shell_refusal(&call.tool, ctx.agent.as_ref(), host));
                 let bad_args = match tools.iter().find(|t| t.name == call.tool) {
                     _ if plan_refused.is_some() => plan_refused,
                     None => Some(unknown_tool(&call.tool, &tools)),
@@ -3719,13 +3827,14 @@ impl NativeBackend {
                     Some(_) => None,
                 };
                 // May run at the same time as its neighbours: one of our
-                // own tools that declares itself read-only and parallel
-                // safe (an allow-list: MCP tools never, their effects are
-                // the server's word), with valid arguments, that would run
-                // with no card here (the node's mode and `denied_tools`).
+                // own tools that changes nothing by the shared list
+                // (`harness_core::agent::READ_ONLY_TOOLS`: MCP tools never,
+                // their effects are the server's word) and declares itself
+                // parallel safe, with valid arguments, that would run with
+                // no card here (the node's mode and `denied_tools`).
                 let parallel = bad_args.is_none()
                     && precheck.as_ref().is_some_and(|t| {
-                        t.risk() == harness_core::policy::ToolRisk::ReadOnly
+                        !harness_core::agent::tool_changes(t.name(), false)
                             && t.parallel_safe()
                             && t.enabled(&ctx.extra.savings)
                             && host.runs_unasked(t.name(), t.risk())
@@ -3889,9 +3998,14 @@ impl NativeBackend {
                     cancelled |= ctx.cancel.is_cancelled();
                     let output = self.config.secrets.scrub(&outcome.output);
                     let note = refused.or_else(|| {
+                        // A change by the shared rule: `bash` in the
+                        // read-only shell is none (PLAN.md T70).
                         let changes = self.tools.iter().chain(&mcp_tools).any(|t| {
                             t.name() == call.tool
-                                && t.risk() == harness_core::policy::ToolRisk::Mutating
+                                && harness_core::agent::tool_changes(
+                                    &call.tool,
+                                    self.read_only_turn(ctx.agent.as_ref(), host),
+                                )
                         });
                         if outcome.denied {
                             guard.record_denied(key, &output)
@@ -4664,8 +4778,18 @@ impl NativeBackend {
         }
         let key = harness_tools::call_key(&ctx.cwd, tool.name(), &call.input);
         if !allowed_this_turn.contains(&key) {
+            // `bash` in the read-only shell is asked about as what it is,
+            // a call that changes nothing (PLAN.md T70): unasked in `ask`
+            // and `accept_edits`, asked in `ask_all`, as `read` is.
+            let risk = if tool.name() == harness_core::agent::SHELL
+                && self.read_only_turn(ctx.agent.as_ref(), host)
+            {
+                harness_core::policy::ToolRisk::ReadOnly
+            } else {
+                tool.risk()
+            };
             let decision = host
-                .approve(&call.call_id, tool.name(), &call.input, tool.risk())
+                .approve(&call.call_id, tool.name(), &call.input, risk)
                 .await;
             match decision {
                 harness_core::policy::Decision::Deny => {
@@ -4732,9 +4856,10 @@ impl NativeBackend {
         // Bounded, with a byte budget for the whole call (PLAN.md T9): a
         // flood is cut with one marker, then read and dropped by the tool.
         let (sink, rx) = harness_tools::OutputSink::channel(self.config.tool_stream_bytes);
-        // The read-only shell (T.7): in plan mode, read at this call. The
-        // node's choice alone, never the call's.
-        let read_only_shell = is_plan(host);
+        // The read-only shell (T.7): in plan mode or for an agent that
+        // changes nothing else (PLAN.md T70), read at this call. The
+        // node's choice alone, never the call's or the spec's.
+        let read_only_shell = self.read_only_turn(ctx.agent.as_ref(), host);
         let tctx = ToolCtx {
             workspace: ctx.cwd.clone(),
             cancel: ctx.cancel.child_token(),
@@ -4841,16 +4966,6 @@ impl NativeBackend {
 /// Whether the chat is in plan mode now (X.7), as the node says.
 fn is_plan(host: &dyn harness_core::backend::TurnHost) -> bool {
     host.approval_mode() == Some(harness_core::policy::ApprovalMode::Plan)
-}
-
-/// `bash`'s description, with what the read-only shell means added where
-/// it runs there.
-fn shell_text(description: &str, read_only: bool) -> String {
-    if read_only {
-        format!("{description} {}", harness_tools::READ_ONLY_NOTE)
-    } else {
-        description.to_string()
-    }
 }
 
 /// The result of a call to a tool this turn does not offer: the tools it

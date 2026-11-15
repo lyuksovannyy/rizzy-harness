@@ -226,10 +226,10 @@ struct Probe(Arc<AtomicUsize>);
 #[async_trait::async_trait]
 impl harness_tools::Tool for Probe {
     fn name(&self) -> &'static str {
-        "probe"
+        "outline"
     }
     fn description(&self) -> &'static str {
-        "probe"
+        "outline"
     }
     fn schema(&self) -> Value {
         json!({"type": "object"})
@@ -364,7 +364,7 @@ async fn run(host: &Host, calls: Vec<(&'static str, Value)>) -> Run {
 }
 
 fn probe(input: Value) -> (&'static str, Value) {
-    ("probe", input)
+    ("outline", input)
 }
 
 /// The tool results of the last request, as the provider was sent them.
@@ -618,7 +618,7 @@ async fn a_new_turn_starts_a_new_count() {
                 text: String::new(),
                 tool_calls: vec![ToolCallRef {
                     call_id: id.clone(),
-                    tool: "probe".into(),
+                    tool: "outline".into(),
                     input: json!({"path": "a"}),
                 }],
                 blocks: vec![],
@@ -776,7 +776,7 @@ async fn a_test_run_after_each_delegation_runs() {
     };
     let lead = harness_core::agent::AgentSpec {
         agent_id: "lead".into(),
-        tools: harness_core::agent::ToolSelection::List(vec!["probe".into()]),
+        tools: harness_core::agent::ToolSelection::List(vec!["outline".into()]),
         delegates: vec![worker.clone()],
         ..worker
     };
@@ -823,7 +823,7 @@ async fn a_failed_delegation_is_no_change() {
     };
     let lead = harness_core::agent::AgentSpec {
         agent_id: "lead".into(),
-        tools: harness_core::agent::ToolSelection::List(vec!["probe".into()]),
+        tools: harness_core::agent::ToolSelection::List(vec!["outline".into()]),
         delegates: vec![worker.clone()],
         ..worker
     };

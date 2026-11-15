@@ -23,6 +23,9 @@ pub struct Rig {
     pub requests: Requests,
     /// The lead agent's caps in [`Rig::lead_turn`] (`None`: the defaults).
     pub lead_caps: Option<harness_core::agent::DelegateCaps>,
+    /// More sub-agents the lead may delegate to, or the rig's own with
+    /// other tools (a later one of the same id replaces the rig's).
+    pub delegates: Vec<harness_core::agent::AgentSpec>,
     pub dir: tempfile::TempDir,
     pub ws: PathBuf,
     _node: NodeRuntime,
@@ -155,6 +158,7 @@ impl Rig {
         let mut rig = Self {
             requests,
             lead_caps: None,
+            delegates: vec![],
             dir,
             ws,
             _node: node,
@@ -266,8 +270,8 @@ impl Rig {
         });
     }
 
-    /// One turn of a lead agent that may delegate to `dev` (a `bash`
-    /// sub-agent), `look` (reads only: `read`, `grep`) and `editor` (`read`
+    /// One turn of a lead agent that may delegate to `dev` (a `bash` and
+    /// `write` sub-agent: one that changes files, so its shell writes), `look` (reads only: `read`, `grep`) and `editor` (`read`
     /// and `edit`), running the scripted `text` (`delegate: dev=... | ...`);
     /// waits for the lead's turn to end and returns it with the outputs of
     /// its `delegate` calls.
@@ -307,14 +311,18 @@ impl Rig {
     pub fn lead(&self) -> harness_core::agent::AgentSpec {
         let mut lead = Self::spec(
             "lead",
-            &["bash"],
+            &["bash", "write"],
             vec![
-                Self::spec("dev", &["bash"], vec![]),
+                Self::spec("dev", &["bash", "write"], vec![]),
                 Self::spec("look", &["read", "grep"], vec![]),
                 Self::spec("editor", &["read", "edit"], vec![]),
             ],
         );
         lead.caps = self.lead_caps;
+        for d in &self.delegates {
+            lead.delegates.retain(|x| x.agent_id != d.agent_id);
+            lead.delegates.push(d.clone());
+        }
         lead
     }
 

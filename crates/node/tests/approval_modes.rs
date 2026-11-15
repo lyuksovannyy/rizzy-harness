@@ -644,7 +644,7 @@ async fn a_sub_agent_never_runs_above_its_parent() {
         agent_id: id.into(),
         name: id.into(),
         system_prompt: "work".into(),
-        tools: harness_core::agent::ToolSelection::List(vec!["bash".into()]),
+        tools: harness_core::agent::ToolSelection::List(vec!["bash".into(), "write".into()]),
         model: None,
         fallbacks: vec![],
         unavailable: vec![],
@@ -770,7 +770,7 @@ async fn a_sub_agent_prompted_later_follows_its_parent_also_after_a_restart() {
             "delegate: scout=read: notes.txt",
             Some(agent(
                 "lead",
-                &["bash"],
+                &["bash", "write"],
                 vec![agent("scout", &["read"], vec![])],
             )),
             deny,
@@ -793,7 +793,7 @@ async fn a_sub_agent_prompted_later_follows_its_parent_also_after_a_restart() {
             .turn(
                 child,
                 &script(&[("bash", json!({"command": "touch one.txt"}))]),
-                Some(agent("scout", &["bash"], vec![])),
+                Some(agent("scout", &["bash", "write"], vec![])),
                 deny,
             )
             .await;
@@ -806,7 +806,7 @@ async fn a_sub_agent_prompted_later_follows_its_parent_also_after_a_restart() {
         .turn(
             child,
             &script(&[("bash", json!({"command": "touch two.txt"}))]),
-            Some(agent("scout", &["bash"], vec![])),
+            Some(agent("scout", &["bash", "write"], vec![])),
             deny,
         )
         .await;
@@ -818,7 +818,7 @@ async fn a_sub_agent_prompted_later_follows_its_parent_also_after_a_restart() {
         .turn(
             child,
             &script(&[("bash", json!({"command": "touch three.txt"}))]),
-            Some(agent("scout", &["bash"], vec![])),
+            Some(agent("scout", &["bash", "write"], vec![])),
             deny,
         )
         .await;
@@ -1225,7 +1225,7 @@ async fn a_sub_agent_takes_no_chat_grant() {
         "delegate: scout=read: notes.txt",
         Some(agent(
             "lead",
-            &["bash"],
+            &["bash", "write"],
             vec![agent("scout", &["read"], vec![])],
         )),
         deny,
@@ -1246,7 +1246,7 @@ async fn a_sub_agent_takes_no_chat_grant() {
         .turn(
             child,
             &call,
-            Some(agent("scout", &["bash"], vec![])),
+            Some(agent("scout", &["bash", "write"], vec![])),
             |_| Decision::AllowChat,
         )
         .await;

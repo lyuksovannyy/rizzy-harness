@@ -4247,24 +4247,21 @@ impl Session {
             .await)
     }
 
-    /// Whether a sub-agent can change files here: its tools, narrowed by
-    /// its own denials and by this node's policy, include `write`, `edit` or
-    /// `bash` (no shell on a node is read-only).
+    /// Whether a sub-agent can change files here, so it needs a folder of
+    /// its own: `AgentSpec::needs_own_folder` (PLAN.md T70) on its tools,
+    /// narrowed by its own denials and by this node's policy. A reader's
+    /// `bash` does not count (it runs in the read-only shell; the loop
+    /// reads the same answer), nor do `publish` and MCP tools alone: those
+    /// agents work in this folder, as on main.
     fn can_change_files(&self, agent: &AgentSpec) -> bool {
         let policy = &self.node.cfg.policy;
         // In plan mode (X.7) the child is made in plan mode and stays in it
         // (its own recorded mode is its floor for life): its `bash` is the
-        // read-only shell and its `write` and `edit` are refused, so it
-        // works in this folder, as a reader does.
-        let tools: &[&str] = if self.current_mode() == ApprovalMode::Plan {
-            &[]
-        } else {
-            &["write", "edit", "bash"]
-        };
-        self.profile == Profile::Agentic
-            && tools
-                .iter()
-                .any(|t| agent.allows_tool(t) && !policy.denies(t))
+        // read-only shell and every tool that changes things is refused,
+        // so it works in this folder, as a reader does.
+        self.current_mode() != ApprovalMode::Plan
+            && self.profile == Profile::Agentic
+            && agent.needs_own_folder(|t| !policy.denies(t))
     }
 
     /// Prepare a folder for a sub-agent that can change files, seeded with
@@ -4292,9 +4289,9 @@ impl Session {
         let not_started = |e: String| {
             tracing::warn!(session = %self.id, error = %e, "no folder for a sub-agent that changes files; not started");
             format!(
-                "@{who} was not started: it can change files (write, edit or bash), and its \
-                 own folder could not be made ({e}). Make the change yourself, or delegate to \
-                 a sub-agent that only reads."
+                "@{who} was not started: it can change files (a tool that writes, publishes or \
+                 is an MCP server's), and its own folder could not be made ({e}). Make the \
+                 change yourself, or delegate to a sub-agent that only reads."
             )
         };
         if self.owned().is_some() {
@@ -4317,7 +4314,8 @@ impl Session {
             Ok(Some(s)) => s,
             Ok(None) => {
                 return Err(format!(
-                    "@{who} was not started: it can change files (write, edit or bash), and a \
+                    "@{who} was not started: it can change files (a tool that writes, publishes \
+                     or is an MCP server's), and a \
                      sub-agent that changes files works on its own copy of a git repository, \
                      but this folder is not a git repository (within this node's workspace \
                      roots). Make the change yourself, delegate to a sub-agent that only reads, \
@@ -4731,9 +4729,7 @@ impl TurnHost for Session {
 
     fn runs_unasked(&self, tool: &str, risk: ToolRisk) -> bool {
         let mode = self.current_mode();
-        !self.node.cfg.policy.denies(tool)
-            && !mode.needs_approval(risk)
-            && !mode.refuses(tool, risk)
+        !self.node.cfg.policy.denies(tool) && !mode.needs_approval(risk) && !mode.refuses(tool)
     }
 
     fn approval_mode(&self) -> Option<ApprovalMode> {
@@ -4856,7 +4852,7 @@ impl TurnHost for Session {
         // The loop refuses these before they get here, with the plain
         // sentence (`plan_refusal`); this is the node's own floor for a
         // call that reached it anyway (the mode changed in between).
-        if mode.refuses(tool, risk) {
+        if mode.refuses(tool) {
             return Decision::Deny;
         }
         if !mode.needs_approval(risk) {
@@ -4977,7 +4973,7 @@ impl TurnHost for Session {
             .unwrap_or_else(|p| p.into_inner())
             .remove(&approval_id);
         let (decision, by, note) =
-            if plan_denied || (decision.allows() && self.current_mode().refuses(tool, risk)) {
+            if plan_denied || (decision.allows() && self.current_mode().refuses(tool)) {
                 (
                     Decision::Deny,
                     ResolvedBy::Policy,
