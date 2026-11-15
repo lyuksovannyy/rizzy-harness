@@ -263,6 +263,12 @@ pub const GAPS: [&str; 5] = [
 /// person's message); every other refusal is the owner's to see.
 pub const CALLBACK_NOTHING: &str = "nothing to resume";
 
+/// A node's refusal of a `session.callback` while a turn of the chat runs
+/// (a [`CALLBACK_NOTHING`] for now): the master looks again later. The ends
+/// it named are then covered by that turn, or, beyond what one callback may
+/// name ([`MAX_CALLBACK_IDS`]), still wait and are asked for once it ended.
+pub const CALLBACK_BUSY: &str = "nothing to resume: a turn is already running";
+
 /// How a node's refusal of a `session.callback` on its own rules begins
 /// (its budget, `callback_turns = 0`, a chat that takes none). The node
 /// recorded `callback_refused` in the chat's log, which is where the owner
@@ -981,6 +987,8 @@ mod tests {
     /// when it is so.
     #[test]
     fn callback_and_no_callbacks_wire_shapes() {
+        // A busy chat's refusal is one that finds nothing to resume now.
+        assert!(CALLBACK_BUSY.starts_with(CALLBACK_NOTHING));
         let sid: SessionId = "0193f2a0-0000-7000-8000-000000000001".parse().unwrap();
         let c = MasterToNode::Callback {
             req_id: "r".into(),

@@ -10,12 +10,22 @@
 //!   ends that come while a check runs make it look once more, so several
 //!   ends become one turn.
 //! * **Its position is the log itself.** A check reads the mirror: the ends
-//!   after the chat's last `turn_started` and last `callback_refused`, less
-//!   those a refusal of the master's covers (its attention mark). Nothing
-//!   else is kept, so a master that restarts reads the same thing again
-//!   (`start` checks every chat updated in the last hour); a second send of
-//!   the same callback is refused by the node, which finds the end covered
-//!   by the first turn. No end is lost but by the 60-minute rule.
+//!   that wait (`harness_core::event::waiting_ends`, the node's own rule:
+//!   no person's turn, no `callback_refused` and no callback turn naming
+//!   them after them), less those a refusal of the master's covers (its
+//!   attention mark). Nothing else is kept, so a master that restarts reads
+//!   the same thing again (`start` checks every chat updated in the last
+//!   hour); a second send of the same callback is refused by the node,
+//!   which finds the end covered by the first turn. No end is lost but by
+//!   the 60-minute rule.
+//! * **What a turn is for is the node's to say.** The master asks for the
+//!   ends it saw after its settle; the node names in the turn's cause every
+//!   end of the chat that waits when the turn takes the slot (those asked
+//!   for first), so an end logged between the master's read and the turn
+//!   is in the turn's opening and the owner's row, and is covered by it.
+//!   One callback names at most `MAX_CALLBACK_IDS` (the oldest); what is
+//!   left waits, and the master looks again after `RETRY` (a node still
+//!   running that turn answers `CALLBACK_BUSY`, which is retried too).
 //! * **Admission** is a routine fire's (docs/routines.md), less the
 //!   `routines` permission: the owner's account exists, is enabled and owes
 //!   no password change; the agentic grant and permission in the chat's
@@ -210,7 +220,8 @@ async fn check(m: &Master, sid: SessionId) -> Next {
             let Some(row) = s.session(sid)? else {
                 return Ok(None);
             };
-            let ends = s.events_since_last_turn(sid, &["background_ended"])?;
+            let ends =
+                s.events_since_last_person_turn(sid, &["background_ended", "turn_started"])?;
             let mark = s.kv_get(&key(sid))?;
             Ok::<_, harness_store::StoreError>(Some((row, ends, mark)))
         })
@@ -229,13 +240,11 @@ async fn check(m: &Master, sid: SessionId) -> Next {
         .and_then(|v| serde_json::from_str::<Mark>(&v).ok())
         .filter(|k| k.kind == "not_resumed")
         .map_or(0, |k| k.seq);
-    let waiting: Vec<(u64, i64, BackgroundEnded)> = ends
+    // What waits: as the node reads its log (a callback turn covers the
+    // ends it names, a person's turn and a refusal all before them).
+    let waiting: Vec<(u64, i64, BackgroundEnded)> = harness_core::event::waiting_ends(&ends)
         .into_iter()
-        .filter(|e| e.seq > covered)
-        .filter_map(|e| match e.typed() {
-            Ok(EventKind::BackgroundEnded(b)) if b.calls_back() => Some((e.seq, e.ts_ms, b)),
-            _ => None,
-        })
+        .filter(|w| w.0 > covered)
         .collect();
     let Some(newest) = waiting.iter().map(|w| w.0).max() else {
         return Next::Done;
@@ -266,7 +275,7 @@ async fn check(m: &Master, sid: SessionId) -> Next {
             .retain(|seq, _| waiting.iter().any(|w| w.0 == *seq));
         seen
     };
-    let fresh: Vec<String> = waiting
+    let mut fresh: Vec<String> = waiting
         .iter()
         .zip(&seen)
         .filter(|(_, at)| now - **at <= MAX_AGE_MS)
@@ -288,6 +297,10 @@ async fn check(m: &Master, sid: SessionId) -> Next {
     if !takes {
         return Next::Retry;
     }
+    // One callback names at most `MAX_CALLBACK_IDS`, the oldest; the turn
+    // covers only those, so the rest are asked for once it has ended.
+    let more = fresh.len() > harness_protocol::MAX_CALLBACK_IDS;
+    fresh.truncate(harness_protocol::MAX_CALLBACK_IDS);
     let sent = m
         .prompt(
             sid,
@@ -299,7 +312,11 @@ async fn check(m: &Master, sid: SessionId) -> Next {
         )
         .await;
     match sent {
+        Ok(()) if more => Next::Retry,
         Ok(()) => Next::Done,
+        // A turn runs: the ends are its (it started after them), or, past
+        // the bound, still wait; the next look tells which.
+        Err(CommandError::Rejected(e)) if e == harness_protocol::CALLBACK_BUSY => Next::Retry,
         Err(CommandError::Rejected(e)) if e.starts_with(harness_protocol::CALLBACK_NOTHING) => {
             Next::Done
         }

@@ -232,44 +232,46 @@ fn background_table(
 }
 
 /// Whether `bg_ids` may resume a chat whose log is `history` (T.8d step
-/// 3, §4.4 step 5): each must name an end that may call back
-/// ([`BackgroundEnded::calls_back`]) recorded after the chat's last turn
-/// and its last refused callback. `Ok` holds the callback turns since the
-/// person's last message (the budget spent); `Err` says what is not there,
-/// behind [`harness_protocol::CALLBACK_NOTHING`].
-fn callback_check(history: &[RawEvent], bg_ids: &[String]) -> Result<usize, String> {
-    use harness_protocol::CALLBACK_NOTHING;
-    let mut floor = 0u64;
+/// 3, §4.4 step 5), and what the turn is for. Each id must name an end
+/// that waits ([`harness_core::event::waiting_ends`]: it may call back and
+/// no person's turn, refusal or callback turn naming it came after it).
+/// `Ok` holds the callback turns since the person's last message (the
+/// budget spent) and the ids the turn names: those asked for, then every
+/// other end that waits, oldest first, up to `MAX_CALLBACK_IDS` in all.
+/// The master read its mirror a moment before (its settle, a check that
+/// ran before the latest end); the node, the log's one writer, names what
+/// its log holds now, under the slot and the gate, so every end the
+/// turn's history holds as waiting is one the turn is for. An end left
+/// out by the bound stays waiting for the next callback. `Err` says what
+/// is not there, behind [`harness_protocol::CALLBACK_NOTHING`].
+fn callback_check(history: &[RawEvent], bg_ids: &[String]) -> Result<(usize, Vec<String>), String> {
+    use harness_protocol::{CALLBACK_NOTHING, MAX_CALLBACK_IDS};
     let mut in_a_row = 0usize;
-    let mut waiting: Vec<String> = Vec::new();
     for e in history {
         match e.typed() {
-            Ok(EventKind::TurnStarted(t)) => {
-                floor = e.seq;
-                waiting.clear();
-                if t.cause.is_some() {
-                    in_a_row += 1;
-                }
-            }
+            Ok(EventKind::TurnStarted(t)) if t.cause.is_some() => in_a_row += 1,
             Ok(EventKind::UserMessage(_)) => in_a_row = 0,
-            Ok(EventKind::CallbackRefused(_)) => {
-                floor = e.seq;
-                waiting.clear();
-            }
-            Ok(EventKind::BackgroundEnded(b)) if e.seq > floor && b.calls_back() => {
-                waiting.push(b.bg_id)
-            }
             _ => {}
         }
     }
+    let waiting = harness_core::event::waiting_ends(history);
     for id in bg_ids {
-        if !waiting.contains(id) {
+        if !waiting.iter().any(|w| &w.2.bg_id == id) {
             return Err(format!(
                 "{CALLBACK_NOTHING}: {id} has no end in this chat that waits for a turn"
             ));
         }
     }
-    Ok(in_a_row)
+    let mut named = bg_ids.to_vec();
+    for w in waiting {
+        if named.len() >= MAX_CALLBACK_IDS {
+            break;
+        }
+        if !named.contains(&w.2.bg_id) {
+            named.push(w.2.bg_id);
+        }
+    }
+    Ok((in_a_row, named))
 }
 
 /// A session's MCP servers (see [`Session::mcp`]): node.toml's, for an
@@ -1528,9 +1530,11 @@ impl Session {
     /// Resume this idle chat because background commands ended (a callback
     /// turn, T.8d step 3), as the master asks. The node decides: it starts
     /// the turn only if every id names an end in its own log that may call
-    /// back (it exited or timed out, and no step was told of it) with no
-    /// turn and no refusal after it, the chat may take callback turns at
-    /// all, and its budget of turns without the person's message lasts.
+    /// back (it exited or timed out, and no step was told of it) and still
+    /// waits (no person's turn, refusal or callback turn naming it after
+    /// it), the chat may take callback turns at all, and its budget of
+    /// turns without the person's message lasts. The turn's cause names
+    /// those ids and every other end that waits then (`callback_check`).
     /// A refusal on the node's own rules is recorded (`callback_refused`)
     /// and the ends wait for the person; one that finds nothing to resume
     /// says so ([`harness_protocol::CALLBACK_NOTHING`]) and records
@@ -1580,7 +1584,7 @@ impl Session {
         })
         .map_err(|e| {
             if e == TURN_RUNNING {
-                format!("{CALLBACK_NOTHING}: {e}")
+                harness_protocol::CALLBACK_BUSY.to_string()
             } else {
                 e
             }
@@ -1618,13 +1622,15 @@ impl Session {
                 return Err(e.to_string());
             }
         };
-        let refusal = match callback_check(&history, &bg_ids) {
+        // The ends the turn is for: the master's and every other that
+        // waits now (bounded); a refusal names the same.
+        let (refusal, bg_ids) = match callback_check(&history, &bg_ids) {
             Err(e) => {
                 drop(gate);
                 self.release(&turn_id);
                 return Err(e);
             }
-            Ok(in_a_row) => {
+            Ok((in_a_row, named)) => (
                 if self.no_callbacks {
                     Some("this chat takes no callback turns (a routine's chat)".to_string())
                 } else if self.bg.as_ref().is_some_and(|b| b.is_closed()) {
@@ -1639,8 +1645,9 @@ impl Session {
                     ))
                 } else {
                     None
-                }
-            }
+                },
+                named,
+            ),
         };
         if let Some(reason) = refusal {
             let recorded = self

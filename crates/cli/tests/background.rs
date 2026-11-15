@@ -16,6 +16,9 @@
 
 #[path = "support/bwrap.rs"]
 mod bwrap;
+#[path = "support/marker.rs"]
+mod marker;
+use marker::Mark;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -119,19 +122,19 @@ fn alive(pid: i32) -> bool {
     }
 }
 
-fn sleeps(secs: u32) -> Vec<i32> {
-    let want = format!("sleep\0{secs}\0");
+/// The live `sleep` processes of this test process's mark `m`.
+fn sleeps(m: Mark) -> Vec<i32> {
+    let want = m.cmdline();
     std::fs::read_dir("/proc")
         .unwrap()
         .filter_map(|e| e.ok()?.file_name().to_str()?.parse::<i32>().ok())
         .filter(|pid| {
-            std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|c| c == want.as_bytes())
-                && alive(*pid)
+            std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|c| c == want) && alive(*pid)
         })
         .collect()
 }
 
-struct Reaper(Vec<u32>);
+struct Reaper(Vec<Mark>);
 
 impl Drop for Reaper {
     fn drop(&mut self) {
@@ -149,7 +152,7 @@ impl Drop for Reaper {
 /// The T.8a escapers: `setsid`, `nohup … &`, a double fork with `setsid`,
 /// a child that ignores SIGTERM, and a plain background child.
 fn detached(base: u32) -> (String, Reaper) {
-    let s: Vec<u32> = (0..5).map(|i| base + i).collect();
+    let s: Vec<Mark> = (0..5).map(|i| Mark(base + i)).collect();
     let cmd = format!(
         "setsid sleep {} & nohup sleep {} >/dev/null 2>&1 & ( setsid sleep {} & ) ; \
          sh -c 'trap \"\" TERM; exec sleep {}' & sleep {} & ",
@@ -169,7 +172,7 @@ async fn all_started(r: &Reaper) {
 async fn none_left(r: &Reaper, how: &str) {
     let by = Instant::now() + Duration::from_secs(2);
     loop {
-        let left: Vec<(u32, Vec<i32>)> =
+        let left: Vec<(Mark, Vec<i32>)> =
             r.0.iter()
                 .map(|s| (*s, sleeps(*s)))
                 .filter(|(_, p)| !p.is_empty())
@@ -207,12 +210,12 @@ async fn a_background_start_returns_and_keeps_running() {
     let Some(sb) = f.sandbox() else { return };
     let (bg, mut ends) = table(on());
     let ctx = f.ctx(sb, &bg);
-    let _r = Reaper(vec![975_001]);
+    let _r = Reaper(vec![Mark(975_001)]);
     let t = Instant::now();
     let r = run(
         &Bash,
         &ctx,
-        json!({"command": "echo first; sleep 975001", "background": true, "timeout_secs": 600}),
+        json!({"command": format!("echo first; sleep {}", Mark(975_001)), "background": true, "timeout_secs": 600}),
     )
     .await;
     let took = t.elapsed();
@@ -231,7 +234,10 @@ async fn a_background_start_returns_and_keeps_running() {
     );
     let st = r.background.clone().expect("a background start");
     assert_eq!((st.bg_id.as_str(), st.timeout_s), ("bg-1", 600));
-    assert!(!sleeps(975_001).is_empty(), "it stopped with its call");
+    assert!(
+        !sleeps(Mark(975_001)).is_empty(),
+        "it stopped with its call"
+    );
     // bash_output reads it; the list names it.
     let o = run(&BashOutput, &ctx, json!({"id": "bg-1"})).await;
     assert!(
@@ -241,7 +247,7 @@ async fn a_background_start_returns_and_keeps_running() {
     );
     let l = run(&BashOutput, &ctx, json!({})).await;
     assert!(
-        l.output.contains("bg-1") && l.output.contains("sleep 975001"),
+        l.output.contains("bg-1") && l.output.contains(&format!("sleep {}", Mark(975_001))),
         "{}",
         l.output
     );
@@ -255,7 +261,7 @@ async fn a_background_start_returns_and_keeps_running() {
     let e = next_end(&mut ends, Duration::from_secs(10)).await;
     assert_eq!(e.reason, BackgroundReason::StoppedByAgent);
     assert_eq!(e.confirmed, BackgroundConfirmed::Ended);
-    assert!(sleeps(975_001).is_empty());
+    assert!(sleeps(Mark(975_001)).is_empty());
 }
 
 /// One that ends within the first wait is an ordinary result: nothing is
@@ -290,11 +296,11 @@ async fn a_background_start_without_a_timeout_is_refused() {
     let Some(sb) = f.sandbox() else { return };
     let (bg, _ends) = table(on());
     let ctx = f.ctx(sb, &bg);
-    let _r = Reaper(vec![975_011]);
+    let _r = Reaper(vec![Mark(975_011)]);
     let r = run(
         &Bash,
         &ctx,
-        json!({"command": "sleep 975011", "background": true}),
+        json!({"command": format!("sleep {}", Mark(975_011)), "background": true}),
     )
     .await;
     assert!(!r.ok && r.background.is_none(), "{}", r.output);
@@ -304,13 +310,13 @@ async fn a_background_start_without_a_timeout_is_refused() {
         r.output
     );
     tokio::time::sleep(Duration::from_millis(500)).await;
-    assert!(sleeps(975_011).is_empty(), "a process started");
+    assert!(sleeps(Mark(975_011)).is_empty(), "a process started");
     assert!(bg.running().is_empty());
     // With it, it starts.
     let r = run(
         &Bash,
         &ctx,
-        json!({"command": "sleep 975011", "background": true, "timeout_secs": 30}),
+        json!({"command": format!("sleep {}", Mark(975_011)), "background": true, "timeout_secs": 30}),
     )
     .await;
     assert!(r.background.is_some(), "{}", r.output);
@@ -382,6 +388,7 @@ async fn escapers_of_a_background_command_end_when_the_node_is_killed() {
             "--nocapture",
         ])
         .env("T8D_HELPER", "1")
+        .env(Mark::for_helper().0, Mark::for_helper().1)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -478,8 +485,9 @@ async fn full_tables_refuse_and_name_the_ids() {
     let b = reg.session(1, tx);
     let ctx_a = f.ctx(sb.clone(), &a);
     let ctx_b = f.ctx(sb, &b);
-    let _r = Reaper(vec![975_201, 975_202, 975_203]);
+    let _r = Reaper(vec![Mark(975_201), Mark(975_202), Mark(975_203)]);
     let start = |s: u32| {
+        let s = Mark(s);
         json!({"command": format!("sleep {s}"), "background": true, "timeout_secs": 600,
                // What the model might write to raise its own bounds.
                "background_per_session": 100, "background_per_node": 100,
@@ -533,8 +541,8 @@ async fn full_tables_refuse_and_name_the_ids() {
 #[tokio::test]
 async fn off_uncontained_and_unavailable_refuse() {
     let f = fixture();
-    let _r = Reaper(vec![975_301]);
-    let input = json!({"command": "sleep 975301", "background": true, "timeout_secs": 60});
+    let _r = Reaper(vec![Mark(975_301)]);
+    let input = json!({"command": format!("sleep {}", Mark(975_301)), "background": true, "timeout_secs": 60});
     // Uncontained: the Landlock-only shell, `contain = "off"` alike.
     let (bg, _e) = table(on());
     let mut ctx = ToolCtx::new(&f.ws);
@@ -560,7 +568,7 @@ async fn off_uncontained_and_unavailable_refuse() {
     let r = run(&Bash, &ctx, input).await;
     assert!(r.output.contains("sub-agent"), "{}", r.output);
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(sleeps(975_301).is_empty());
+    assert!(sleeps(Mark(975_301)).is_empty());
     assert!(bg.running().is_empty());
 }
 
@@ -1193,10 +1201,10 @@ async fn cancel_leaves_them_revocation_and_delete_stop_them() {
     // A turn and its cancel: the background command keeps running.
     n.prompt(&format!(
         "script: {}",
-        json!([{"tool": "bash", "input": {"command": "sleep 975498"}}])
+        json!([{"tool": "bash", "input": {"command": format!("sleep {}", Mark(975_498))}}])
     ));
     let by = Instant::now() + Duration::from_secs(20);
-    while sleeps(975_498).is_empty() {
+    while sleeps(Mark(975_498)).is_empty() {
         assert!(Instant::now() < by);
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -1273,9 +1281,9 @@ async fn a_foreground_call_without_a_timeout_ends_at_60_s() {
     let f = fixture();
     let Some(sb) = f.sandbox() else { return };
     let mut n = node_with(f, sb, vec![]).await;
-    let _r = Reaper(vec![975_601]);
+    let _r = Reaper(vec![Mark(975_601)]);
     let t = Instant::now();
-    n.turn(json!([{"tool": "bash", "input": {"command": "sleep 975601"}}]))
+    n.turn(json!([{"tool": "bash", "input": {"command": format!("sleep {}", Mark(975_601))}}]))
         .await;
     let took = t.elapsed();
     let r = n.results();
@@ -1390,16 +1398,17 @@ fn assert_shapes(sent: &[Vec<harness_agent_native::ChatMsg>]) {
 async fn the_default_node_takes_a_background_start_and_0_refuses_it() {
     let f = fixture();
     let Some(sb) = f.sandbox() else { return };
-    let _r = Reaper(vec![976_131, 976_132]);
+    let _r = Reaper(vec![Mark(976_131), Mark(976_132)]);
     let mut n = node_opts(f, sb, vec![], |_| {}, "auto").await;
-    n.turn(json!([bg("sleep 976131", 60)])).await;
+    n.turn(json!([bg(&format!("sleep {}", Mark(976_131)), 60)]))
+        .await;
     let r = n.results();
     assert!(
         r[0].contains("running in the background as bg-1"),
         "{}",
         r[0]
     );
-    assert_eq!(sleeps(976_131).len(), 1);
+    assert_eq!(sleeps(Mark(976_131)).len(), 1);
     n.turn(json!([{"tool": "bash_stop", "input": {"id": "bg-1"}}]))
         .await;
     // Off.
@@ -1413,7 +1422,8 @@ async fn the_default_node_takes_a_background_start_and_0_refuses_it() {
         "auto",
     )
     .await;
-    n.turn(json!([bg("sleep 976132", 60)])).await;
+    n.turn(json!([bg(&format!("sleep {}", Mark(976_132)), 60)]))
+        .await;
     let r = n.results();
     assert!(
         r[0].contains("background commands are off on this node")
@@ -1421,7 +1431,7 @@ async fn the_default_node_takes_a_background_start_and_0_refuses_it() {
         "{}",
         r[0]
     );
-    assert!(sleeps(976_132).is_empty());
+    assert!(sleeps(Mark(976_132)).is_empty());
     assert!(
         !n.kinds()
             .iter()
@@ -1674,7 +1684,7 @@ async fn one_click_starts_one_background_command() {
     use harness_core::policy::Decision;
     let f = fixture();
     let Some(sb) = f.sandbox() else { return };
-    let _r = Reaper(vec![975_941]);
+    let _r = Reaper(vec![Mark(975_941)]);
     let mut n = node_opts(
         f,
         sb,
@@ -1683,11 +1693,11 @@ async fn one_click_starts_one_background_command() {
         "ask",
     )
     .await;
-    let start = bg("sleep 975941", 60);
+    let start = bg(&format!("sleep {}", Mark(975_941)), 60);
     n.prompt(&format!(
         "script: {}",
         json!([
-            {"tool": "bash", "input": {"command": "sleep 975941", "timeout_secs": 5}},
+            {"tool": "bash", "input": {"command": format!("sleep {}", Mark(975_941)), "timeout_secs": 5}},
             start,
             start
         ])
@@ -1743,7 +1753,7 @@ async fn measure_64_background_commands() {
     let (tx, _ends) = mpsc::unbounded_channel();
     let tables: Vec<Arc<SessionBg>> = (0..8).map(|_| reg.session(1, tx.clone())).collect();
     let ctxs: Vec<ToolCtx> = tables.iter().map(|t| f.ctx(sb.clone(), t)).collect();
-    let _r = Reaper((975_700..975_764).collect());
+    let _r = Reaper((975_700..975_764).map(Mark).collect());
     let (rss0, procs0) = (rss_kib(), processes());
     let mut costs = vec![];
     for i in 0..64u32 {
@@ -1752,7 +1762,7 @@ async fn measure_64_background_commands() {
         let r = run(
             &Bash,
             &ctxs[(i / 8) as usize],
-            json!({"command": format!("head -c 600000 /dev/zero | tr '\\0' x; exec sleep {}", 975_700 + i),
+            json!({"command": format!("head -c 600000 /dev/zero | tr '\\0' x; exec sleep {}", Mark(975_700 + i)),
                    "background": true, "timeout_secs": 600}),
         )
         .await;
@@ -1808,11 +1818,11 @@ async fn measure_a_guard_held_long() {
         .unwrap_or(600);
     let (bg, mut ends) = table(on());
     let ctx = f.ctx(sb, &bg);
-    let _r = Reaper(vec![975_801]);
+    let _r = Reaper(vec![Mark(975_801)]);
     let r = run(
         &Bash,
         &ctx,
-        json!({"command": "exec sleep 975801", "background": true, "timeout_secs": 3600}),
+        json!({"command": format!("exec sleep {}", Mark(975_801)), "background": true, "timeout_secs": 3600}),
     )
     .await;
     assert!(r.background.is_some(), "{}", r.output);
@@ -1857,7 +1867,7 @@ async fn measure_a_guard_held_long() {
         s.output
     );
     assert_eq!(e.confirmed, BackgroundConfirmed::Ended, "{e:?}");
-    assert!(sleeps(975_801).is_empty());
+    assert!(sleeps(Mark(975_801)).is_empty());
 }
 
 // ---- the real binary: a stop signal and a `kill -9` ----
@@ -2220,10 +2230,12 @@ async fn a_stop_whose_ends_the_log_cannot_take_exits_1_naming_the_chat() {
         eprintln!("SKIPPED: no prlimit");
         return;
     }
-    let _r = Reaper(vec![975_951, 975_952]);
+    let _r = Reaper(vec![Mark(975_951), Mark(975_952)]);
     let mut s = real::serve_as(&data, true);
-    let sid = s.with_background(&ws, "sleep 975951").await;
-    assert!(!sleeps(975_951).is_empty());
+    let sid = s
+        .with_background(&ws, &format!("sleep {}", Mark(975_951)))
+        .await;
+    assert!(!sleeps(Mark(975_951)).is_empty());
     let st = std::process::Command::new("/usr/bin/prlimit")
         .args(["--pid", &s.pid().to_string(), "--fsize=0:0"])
         .status()
@@ -2241,7 +2253,7 @@ async fn a_stop_whose_ends_the_log_cannot_take_exits_1_naming_the_chat() {
         log.lines().last().unwrap_or("").contains(&sid) || log.contains(&format!("sessions {sid}")),
         "{log}"
     );
-    assert!(sleeps(975_951).is_empty());
+    assert!(sleeps(Mark(975_951)).is_empty());
     let s2 = real::serve(&data);
     let evs = s2.wait_for(&sid, |e| e["kind"] == "background_ended").await;
     assert_eq!(real::ends(&evs), vec!["node_restarted"], "{evs:#?}");

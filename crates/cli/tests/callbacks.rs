@@ -872,3 +872,72 @@ async fn a_message_during_a_callback_turn_starts_the_persons_turn_after_it() {
         "the person's turn gets the agent's sub-agents"
     );
 }
+
+/// The cause of a callback turn (the turn's opening and the owner's
+/// attention row follow it) names every end of the chat that waits when
+/// the turn starts, not only those the master listed: the master reads its
+/// mirror after a settle, and an end the node logged after that read but
+/// before the turn took the slot is in the turn's history. Named, it is
+/// covered by the turn; an end after the turn gets a callback of its own.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_callback_turn_names_every_end_that_waits_when_it_starts() {
+    let Some(mut n) = node().await else { return };
+    let sid = SessionId::new();
+    n.create(sid, json!({}));
+    let hold =
+        |f: &str, out: &str| format!("while [ ! -e {f} ]; do sleep 0.05; done; echo {out}; exit 1");
+    n.prompt(
+        sid,
+        &format!(
+            "script: {}",
+            json!([
+                bg(&hold("go-1", "one"), 120),
+                bg(&hold("go-2", "two"), 120),
+                bg(&hold("go-3", "three"), 120)
+            ])
+        ),
+    );
+    n.started(sid, "bg-3").await;
+    n.turn_ended(sid).await;
+    std::fs::write(n.ws.join("go-1"), "").unwrap();
+    n.ended(sid, "bg-1").await;
+    std::fs::write(n.ws.join("go-2"), "").unwrap();
+    n.ended(sid, "bg-2").await;
+    // The master read its mirror before bg-2's end and asks for bg-1.
+    let before = n.requests.lock().unwrap().len();
+    n.callback(sid, &["bg-1"]).await.unwrap();
+    n.turn_ended(sid).await;
+    let cause = |k: &EventKind| match k {
+        EventKind::TurnStarted(TurnStarted {
+            cause: Some(TurnCause::Callback(ids)),
+            ..
+        }) => Some(ids.clone()),
+        _ => None,
+    };
+    let causes: Vec<Vec<String>> = n.of(sid).iter().filter_map(cause).collect();
+    assert_eq!(causes, vec![vec!["bg-1".to_string(), "bg-2".to_string()]]);
+    let reqs = n.requests.lock().unwrap().clone();
+    let Some(harness_agent_native::ChatMsg::User(opening)) = reqs[before].messages.last() else {
+        panic!("{:?}", reqs[before].messages);
+    };
+    assert!(
+        opening.starts_with(&callback_opening(&["bg-1".into(), "bg-2".into()])),
+        "{opening}"
+    );
+    // bg-2 is the first turn's: asked for again, nothing to resume.
+    let e = n.callback(sid, &["bg-2"]).await.unwrap_err();
+    assert!(e.starts_with(harness_protocol::CALLBACK_NOTHING), "{e}");
+    // An end after the turn gets its own.
+    std::fs::write(n.ws.join("go-3"), "").unwrap();
+    n.ended(sid, "bg-3").await;
+    n.callback(sid, &["bg-3"]).await.unwrap();
+    n.turn_ended(sid).await;
+    let causes: Vec<Vec<String>> = n.of(sid).iter().filter_map(cause).collect();
+    assert_eq!(
+        causes,
+        vec![
+            vec!["bg-1".to_string(), "bg-2".to_string()],
+            vec!["bg-3".to_string()]
+        ]
+    );
+}
