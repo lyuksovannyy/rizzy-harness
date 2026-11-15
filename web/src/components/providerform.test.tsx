@@ -64,6 +64,7 @@ const STATE: ProvidersState = {
   default_model: null,
   agent_models: {},
   configured: false,
+  currency: "USD",
 };
 const agent = (id: string, name: string): Agent => ({
   id,
@@ -488,6 +489,39 @@ describe("a saved provider", () => {
     expect(saved).not.toHaveBeenCalled();
     expect(host.textContent).toContain("coder: at most 8 fallbacks");
   });
+
+  test("the admin edits model prices; a bad one keeps Save off; a listed model keeps its price", async () => {
+    // gpt-4o is saved with a price, and the listing's entry for it has none.
+    const priced: ProvidersState = {
+      ...SAVED,
+      providers: [
+        SAVED.providers[0]!,
+        { ...SAVED.providers[1]!, models: SAVED.providers[1]!.models.map((x) => (x.id === "gpt-4o" ? { ...x, price: { input: 2.5, output: 10 } } : x)) },
+      ],
+    };
+    providerModels.mockResolvedValue({ models: [m("gpt-4o"), m("gpt-3.5")], fetched_ms: Date.now() });
+    await act(async () =>
+      root.render(<ProviderForm key="prices" state={priced} agents={AGENTS} edit={priced.providers[1]} onSaved={saved} onState={changed} />),
+    );
+    expect(host.querySelector(".model-prices summary")!.textContent).toContain("1 of 3 set");
+    const price = (label: string) => host.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`)!;
+    expect(price("Input price of gpt-4o").value).toBe("2.5");
+    expect(host.textContent).toContain("in USD");
+    type(price("Output price of gpt-4o"), "12");
+    type(price("Input price of mine"), "-1");
+    expect(save().disabled).toBe(true);
+    expect(host.textContent).toContain("Input: a number from 0 to 10000");
+    type(price("Input price of mine"), "0.5");
+    type(price("Cached input price of mine"), "0.05");
+    expect(save().disabled).toBe(false);
+    saveProvider.mockResolvedValue(priced);
+    await act(async () => save().click());
+    const sent = saveProvider.mock.calls[0]![1].models as ProviderModel[];
+    const by = (id: string) => sent.find((x) => x.id === id)!;
+    expect(by("gpt-4o").price).toEqual({ input: 2.5, output: 12 });
+    expect(by("mine").price).toEqual({ input: 0.5, cached_input: 0.05 });
+    expect(by("gpt-3.5")).not.toHaveProperty("price");
+  });
 });
 
 describe("countdown", () => {
@@ -503,5 +537,22 @@ describe("countdown", () => {
     // Before, the deadline's first render still read 0: Save was open for a frame.
     expect(seen.slice(1)).not.toContain(0);
     expect(seen.at(-1)).toBe(10);
+  });
+});
+
+describe("the currency", () => {
+  test("Save only for three letters A-Z (the server's rule), upper-cased as typed", async () => {
+    const { CurrencyField } = await import("./ModelPrices");
+    act(() => root.render(<CurrencyField currency="USD" onSaved={() => {}} />));
+    const input = host.querySelector<HTMLInputElement>("input")!;
+    const saveBtn = () => button("Save");
+    expect(saveBtn().disabled).toBe(true);
+    for (const bad of ["US", "U1", "EU€", ""]) {
+      type(input, bad);
+      expect(saveBtn().disabled, bad).toBe(true);
+    }
+    type(input, "eur");
+    expect(input.value).toBe("EUR");
+    expect(saveBtn().disabled).toBe(false);
   });
 });

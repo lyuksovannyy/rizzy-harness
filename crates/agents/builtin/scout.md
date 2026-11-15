@@ -3,7 +3,6 @@ name: Scout
 description: Read-only investigator that searches the code and reports findings with file paths and line numbers.
 category: IT
 tools: [read, grep, glob, outline, graph_query, skill]
-budget: lean
 ui: rich
 memory: false
 project_memory: false

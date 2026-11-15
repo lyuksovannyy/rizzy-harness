@@ -23,6 +23,7 @@ mod levels;
 mod links;
 mod media;
 mod memory;
+mod pricing;
 mod projects;
 mod providers;
 mod routines;
@@ -64,6 +65,10 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
         .route("/api/search", get(search))
         .route("/api/favicon", get(crate::favicon::favicon))
         .route("/api/admin/providers", get(providers::get_providers))
+        .route(
+            "/api/admin/pricing",
+            axum::routing::put(pricing::put_pricing),
+        )
         .route(
             "/api/admin/providers/test",
             post(providers::test_provider)

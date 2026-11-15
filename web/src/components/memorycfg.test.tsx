@@ -75,6 +75,7 @@ const STATE: ProvidersState = {
   default_model: null,
   agent_models: {},
   configured: true,
+  currency: "USD",
 };
 
 let host: HTMLElement;

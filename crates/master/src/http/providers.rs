@@ -48,6 +48,7 @@ fn model_json(m: &ModelConfig) -> serde_json::Value {
         "id": m.id, "name": m.name, "context": m.context, "max_output": m.max_output,
         "effort": m.effort, "vision": m.vision, "tools": m.tools,
         "custom": m.custom, "unavailable": m.unavailable, "missing_since": m.missing_since,
+        "price": m.price,
     })
 }
 
@@ -66,6 +67,7 @@ fn state_json(cfg: &Config, data_dir: &std::path::Path) -> serde_json::Value {
         "default_model": cfg.effective_default(),
         "agent_models": cfg.agent_models,
         "configured": cfg.configured(),
+        "currency": cfg.pricing.currency,
     })
 }
 
@@ -199,6 +201,10 @@ pub(super) struct ModelBody {
     /// Added by hand rather than picked from a listing.
     #[serde(default)]
     custom: bool,
+    /// Per million tokens, in the server's currency; checked, never
+    /// dropped: a bad price refuses the whole save.
+    #[serde(default)]
+    price: Option<crate::pricing::ModelPrice>,
 }
 
 #[derive(Deserialize)]
@@ -225,7 +231,7 @@ fn clean_name(s: &str) -> String {
         .to_string()
 }
 
-fn clean_models(models: Vec<ModelBody>, kind: ProviderKind) -> Vec<ModelConfig> {
+fn clean_models(models: Vec<ModelBody>, kind: ProviderKind) -> ApiResult<Vec<ModelConfig>> {
     let tokens = |n: Option<u64>| n.filter(|n| (1..=MAX_TOKENS).contains(n));
     let mut out: Vec<ModelConfig> = Vec::new();
     for m in models {
@@ -238,7 +244,12 @@ fn clean_models(models: Vec<ModelBody>, kind: ProviderKind) -> Vec<ModelConfig> 
         {
             continue;
         }
+        let price = m.price.filter(|p| !p.is_empty());
+        if let Some(Err(e)) = price.as_ref().map(|p| p.check()) {
+            return Err(bad(format!("model {id:?}: {e}")));
+        }
         out.push(ModelConfig {
+            price,
             name: m
                 .name
                 .as_deref()
@@ -262,7 +273,7 @@ fn clean_models(models: Vec<ModelBody>, kind: ProviderKind) -> Vec<ModelConfig> 
             id,
         });
     }
-    out
+    Ok(out)
 }
 
 fn secrets_path(rt: &ProviderRuntime) -> std::path::PathBuf {
@@ -375,7 +386,7 @@ pub(super) async fn put_provider(
         return Err(bad("an API key is required"));
     }
     // No chat model is fine: a provider may serve memory embeddings only.
-    let mut models = clean_models(b.models, p.kind);
+    let mut models = clean_models(b.models, p.kind)?;
     // Marks stay while the URL does; the next listing re-checks them.
     let same_url = old
         .as_ref()
