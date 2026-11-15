@@ -357,6 +357,7 @@ fn open_turn(host: &LogHost, queued_seqs: Vec<u64>) {
         agent: None,
         turn_id: "now".into(),
         environment: None,
+        retry: None,
     }));
     if !queued_seqs.is_empty() {
         host.push(EventKind::QueuedDelivered(QueuedDelivered {
@@ -677,6 +678,7 @@ fn previous_turn(sid: SessionId) -> (Vec<RawEvent>, u64, UserMessage) {
         agent: None,
         turn_id: "t1".into(),
         environment: None,
+        retry: None,
     }));
     push(EventKind::UserMessage(UserMessage {
         turn_id: "t1".into(),
@@ -864,6 +866,7 @@ async fn a_callback_turns_ends_survive_an_in_turn_summary() {
         agent: None,
         turn_id: "now".into(),
         environment: None,
+        retry: None,
     }));
     let extra = TurnExtra {
         cause: Some(TurnCause::Callback(vec!["bg-1".into()])),
@@ -892,6 +895,156 @@ async fn a_callback_turns_ends_survive_an_in_turn_summary() {
         out.reason,
         bad.as_deref().unwrap_or("all equal")
     );
+    assert!(bad.is_none(), "rebuild differs from live");
+}
+
+/// A person's Retry (X.21) of a turn that failed partway: the failed
+/// attempt's six reads stay in the history, a background end logged after
+/// the failure goes into the retry's opening, the message is sent once,
+/// and an in-turn summary of the failed turn leaves every request of the
+/// retry rebuilt from the log byte for byte.
+#[tokio::test]
+async fn a_retry_after_a_failed_turn_rebuilds_at_every_step() {
+    let sid = SessionId::new();
+    let (h, _, _) = previous_turn(sid);
+    // The same turn, failed after its reads: no queued message, no answer,
+    // its error, then a background end while the chat was idle.
+    let mut history: Vec<RawEvent> = Vec::new();
+    for e in h {
+        match e.typed() {
+            Ok(EventKind::UserMessage(m)) if m.queued => continue,
+            Ok(EventKind::AssistantMessage(m)) if m.message_id == "mend" => continue,
+            Ok(EventKind::TurnEnded(_)) => continue,
+            _ => {}
+        }
+        let seq = history.len() as u64 + 1;
+        history.push(RawEvent { seq, ..e });
+    }
+    let mut next = history.len() as u64;
+    let mut push = |k: EventKind| {
+        next += 1;
+        history.push(ev(sid, next, k));
+    };
+    push(EventKind::Error(ErrorEvent {
+        turn_id: Some("t1".into()),
+        message: "provider returned 400: no".into(),
+    }));
+    push(EventKind::TurnEnded(TurnEnded {
+        turn_id: "t1".into(),
+        reason: TurnEndReason::Error,
+        usage: None,
+    }));
+    push(EventKind::BackgroundEnded(BackgroundEnded {
+        bg_id: "bg-1".into(),
+        reason: BackgroundReason::Exited,
+        exit_code: Some(0),
+        signal: None,
+        confirmed: BackgroundConfirmed::Ended,
+        ran_ms: 4000,
+        output_bytes: 20,
+        tail: "BG-TAIL built".into(),
+        tail_cut: false,
+        delivered: false,
+    }));
+    let big = "n".repeat(3_000);
+    let p = Model::new(
+        W,
+        Box::new(move |i| match i {
+            0..=40 => Completion {
+                tool_calls: vec![ToolCallRef {
+                    call_id: format!("c{i}"),
+                    tool: "note".into(),
+                    input: json!({"text": format!("{i} {big}")}),
+                }],
+                ..Default::default()
+            },
+            _ => Completion {
+                text: "done".into(),
+                ..Default::default()
+            },
+        }),
+    );
+    let b = backend(p.clone());
+    let host = LogHost::new(sid, history.clone());
+    let start = history.len();
+    let retry = RetryOf {
+        turn_id: "t1".into(),
+        reason: TurnEndReason::Error,
+        error: Some("provider returned 400: no".into()),
+        failed_model: None,
+        model: None,
+    };
+    host.push(EventKind::TurnStarted(TurnStarted {
+        cause: None,
+        agent: None,
+        turn_id: "now".into(),
+        environment: Some("[harness] Environment: test".into()),
+        retry: Some(retry.clone()),
+    }));
+    let out = b
+        .run_turn(TurnCtx {
+            session_id: host.sid,
+            turn_id: "now".into(),
+            history: history.clone(),
+            user_text: String::new(),
+            cwd: Default::default(),
+            model: "m".into(),
+            agent: Some(agent()),
+            compare: vec![],
+            parent_session: None,
+            extra: TurnExtra {
+                retry: Some(retry),
+                environment: Some("[harness] Environment: test".into()),
+                ..Default::default()
+            },
+            cancel: Default::default(),
+            host: &host,
+        })
+        .await;
+    let log = host.log();
+    assert!(
+        log.iter().any(|e| e.kind == "history_summarized"),
+        "the failed turn was summarised inside the retry"
+    );
+    let main = p.main();
+    // The first request: the message once, the six reads, then the
+    // opening with the background end and the retry line last.
+    let first = &main[0].msgs;
+    let texts: Vec<&String> = first
+        .iter()
+        .filter_map(|m| match m {
+            ChatMsg::User(t) => Some(t),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        texts.iter().filter(|t| t.contains("earlier ask")).count(),
+        1
+    );
+    assert_eq!(
+        first
+            .iter()
+            .filter(|m| matches!(m, ChatMsg::Tool { .. }))
+            .count(),
+        6
+    );
+    let opening = texts.last().unwrap();
+    assert!(opening.contains("BG-TAIL"), "{opening}");
+    assert!(
+        opening.trim_end().ends_with("| provider returned 400: no"),
+        "{opening}"
+    );
+    assert!(
+        opening.find("Environment: test").unwrap() < opening.find(RETRY_LEAD).unwrap(),
+        "{opening}"
+    );
+    let (compared, bad) = check_every_step(&log, &main, None, start);
+    eprintln!(
+        "{:?}; compared {compared}: {}",
+        out.reason,
+        bad.as_deref().unwrap_or("all equal")
+    );
+    assert!(compared > 5);
     assert!(bad.is_none(), "rebuild differs from live");
 }
 
@@ -1345,6 +1498,7 @@ async fn a_note_before_a_callback_end_survives_an_in_turn_summary() {
         agent: None,
         turn_id: "now".into(),
         environment: None,
+        retry: None,
     }));
     let extra = TurnExtra {
         cause: Some(TurnCause::Callback(vec!["bg-1".into()])),
@@ -1405,6 +1559,7 @@ async fn a_mentioned_file_survives_an_in_turn_summary() {
         agent: None,
         turn_id: "now".into(),
         environment: None,
+        retry: None,
     }));
     let msg = UserMessage {
         turn_id: "now".into(),
@@ -1656,6 +1811,7 @@ async fn nested_turn(
         agent: None,
         turn_id: turn_id.into(),
         environment: None,
+        retry: None,
     }));
     host.push(EventKind::UserMessage(UserMessage {
         turn_id: turn_id.into(),

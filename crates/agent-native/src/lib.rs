@@ -1420,6 +1420,33 @@ pub fn rebuild_spans(
                 }
                 opened = Some((turn_id, false));
             }
+            // A person's Retry (X.21) has no `user_message` either: its
+            // opening stands after the failed attempt's steps, the
+            // harness's line built from the event, then its block and
+            // environment line, as the loop sent it. The message it answers
+            // is the one above, once.
+            EventKind::TurnStarted(TurnStarted {
+                turn_id,
+                retry: Some(r),
+                environment,
+                ..
+            }) => {
+                close_open(&mut out, &mut open);
+                opening = None;
+                let notes = provider::take_notes(&mut out);
+                let at = out.len();
+                while spans.last().is_some_and(|s| s.start >= at) {
+                    spans.pop();
+                }
+                mark(&mut spans, at, &turn_id);
+                out.push(ChatMsg::Opening(provider::retry_text(
+                    &notes,
+                    environment.as_deref(),
+                    block(&turn_id).as_deref(),
+                    &r,
+                )));
+                opened = Some((turn_id, false));
+            }
             EventKind::TurnStarted(t) => {
                 opening = Some((t.turn_id, t.environment));
             }
@@ -1931,6 +1958,10 @@ impl NativeBackend {
         // skills) after the opening. Anything the node passed in the
         // others is ignored.
         let callback = ctx.extra.cause.as_ref().map(|c| c.callback_ids().to_vec());
+        // A person's Retry of the failed last turn (X.21): the person's
+        // frame, no message of its own (it is in the history, once), the
+        // harness's retry line after the failed attempt's steps.
+        let retry = ctx.extra.retry.clone().filter(|_| callback.is_none());
         let environment = ctx.extra.environment.as_deref().filter(|e| !e.is_empty());
         let frame = match (&callback, child) {
             (Some(_), _) => ContextFrame::Callback,
@@ -2160,16 +2191,25 @@ impl NativeBackend {
                 _ => String::new(),
             }
         });
+        let retry_notes = retry
+            .as_ref()
+            .map(|_| provider::take_notes(&mut messages))
+            .unwrap_or_default();
+        // The opening took the notes before it into itself.
+        let harness_opening = callback.is_some() || retry.is_some();
         let opening_msg = |plan: Option<&context::Plan>| {
             let block = plan.and_then(context::Plan::text);
             let block = block.as_deref();
-            match &callback_base {
-                Some(base) => {
+            match (&callback_base, &retry) {
+                (Some(base), _) => {
                     let mut t = base.clone();
                     context::after_callback(&mut t, block, environment);
                     ChatMsg::Opening(t)
                 }
-                None => images::user_msg(
+                (None, Some(r)) => {
+                    ChatMsg::Opening(provider::retry_text(&retry_notes, environment, block, r))
+                }
+                (None, None) => images::user_msg(
                     context::opening(environment, block, &ctx.user_text),
                     &ctx.extra.images,
                 ),
@@ -2178,15 +2218,14 @@ impl NativeBackend {
         // Where this turn's own messages begin: what an earlier turn never
         // read (X.5), then the person's message or the callback's opening.
         let mut turn_idx = messages.len();
-        if callback.is_none() {
+        if !harness_opening {
             // Recorded as read after `turn_started`, where the log has
             // them on every later request.
             messages.extend(ctx.extra.queued.iter().map(queued_msg));
         }
         messages.push(opening_msg(plan.as_ref()));
         let mut user_idx = messages.len() - 1;
-        // The opening took the notes before it into itself.
-        if callback.is_some() {
+        if harness_opening {
             turn_idx = user_idx;
         }
         // The block as sent, before any answer: the log rebuilds the
@@ -2356,9 +2395,9 @@ impl NativeBackend {
                 let (m, sp) = history_msgs(summary.as_deref(), recent, replanned.as_ref());
                 messages = m;
                 spans = sp;
-                // A callback turn's opening already holds the notes the
-                // rebuilt history ends with.
-                if callback.is_some() {
+                // A callback or retry turn's opening already holds the
+                // notes the rebuilt history ends with.
+                if harness_opening {
                     while matches!(messages.last(), Some(ChatMsg::Note(_))) {
                         messages.pop();
                     }
@@ -6471,6 +6510,7 @@ mod tests {
                 agent: None,
                 turn_id: t.clone(),
                 environment: None,
+                retry: None,
             }),
             &mut out,
         );

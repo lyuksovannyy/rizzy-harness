@@ -740,6 +740,7 @@ mod tests {
                     agent: None,
                     cause: None,
                     environment: None,
+                    retry: None,
                 }),
             ),
             ev(

@@ -310,6 +310,12 @@ pub struct TurnExtra {
     /// step 3): it opens with the harness's frame instead of `user_text`,
     /// which is then empty. Set only by the node, after its own checks.
     pub cause: Option<crate::event::TurnCause>,
+    /// The person's Retry of the failed last turn (`turn_started.retry`,
+    /// X.21): the turn opens with [`crate::event::retry_opening`] after the
+    /// failed attempt's steps instead of `user_text`, which is then empty
+    /// (the message is in the history, once). Set only by the node, after
+    /// its own checks.
+    pub retry: Option<crate::event::RetryOf>,
     /// A lower step cap for this turn than the backend's own `max_steps`
     /// (a callback turn's `callback_max_steps`). Set only by the node.
     pub max_steps: Option<usize>,

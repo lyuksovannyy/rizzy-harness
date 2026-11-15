@@ -293,6 +293,8 @@ export type Item =
     }
   /** A turn the harness started because these background commands ended while the chat was idle. */
   | { type: "callback"; turn_id: string; bg_ids: string[] }
+  /** The person's Retry of the failed turn `of` (`turn_started.retry`, X.21): a new turn answering the same message. */
+  | { type: "retry"; turn_id: string; of: string; reason: TurnEndReason; failed_model?: string; model?: string }
   /** The node did not resume the agent for these ends (`callback_refused`). */
   | { type: "callback_refused"; bg_ids: string[]; reason: string }
   /** A hand-off note for the next chat (`handoff_written`, X.16): `text` is the model's, shown as text. */

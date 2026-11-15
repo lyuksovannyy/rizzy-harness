@@ -28,6 +28,7 @@ mod memory;
 mod pricing;
 mod projects;
 mod providers;
+mod retry;
 mod routines;
 mod sessions;
 mod step_limit;
@@ -224,6 +225,7 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
         .merge(chat_allows::routes())
         .merge(step_limit::routes())
         .merge(compact::routes())
+        .merge(retry::routes())
         .merge(storage::routes())
         .merge(links::routes())
         .merge(sessions::routes())
@@ -1347,6 +1349,7 @@ async fn prompt(
                 callback: vec![],
                 by_owner: who.user_id.is_some() && who.user_id == row.owner_id,
                 files: b.files,
+                retry: None,
             },
         )
         .await;

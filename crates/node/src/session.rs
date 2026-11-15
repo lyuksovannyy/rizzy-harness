@@ -1742,6 +1742,7 @@ impl Session {
                 agent: agent.as_ref().map(AgentSpec::agent_ref),
                 cause: Some(cause.clone()),
                 environment,
+                retry: None,
             }))
             .await
         {
@@ -2204,6 +2205,7 @@ impl Session {
                 agent: agent.map(AgentSpec::agent_ref),
                 turn_id: turn_id.into(),
                 environment,
+                retry: None,
             }))
             .await;
         drop(gate);
@@ -4687,6 +4689,10 @@ fn applied_count(a: &crate::git::Applied) -> String {
 /// A turn's changes as a diff (X.12); its own file.
 #[path = "session_diff.rs"]
 mod diff;
+
+/// A person's Retry of the failed last turn (X.21); its own file.
+#[path = "session_retry.rs"]
+mod retry;
 
 /// A `/compact` focus cut to `COMPACT_FOCUS_MAX_CHARS` characters, saying
 /// where (X.20).
