@@ -96,6 +96,7 @@ fn events() -> Vec<RawEvent> {
             agent: None,
             turn_id: t(),
             environment: None,
+            retry: None,
         }),
         EventKind::UserMessage(UserMessage {
             turn_id: t(),
@@ -265,6 +266,7 @@ fn events() -> Vec<RawEvent> {
                 name: "Coder".into(),
                 prompt_hash: "h1".into(),
                 withheld: vec![],
+                effort: None,
             },
         }),
         EventKind::TurnStarted(TurnStarted {
@@ -275,8 +277,10 @@ fn events() -> Vec<RawEvent> {
                 name: "Writer".into(),
                 prompt_hash: "h2".into(),
                 withheld: vec![],
+                effort: None,
             }),
             environment: Some("[harness] Environment of this turn: the node's clock reads Saturday 2026-11-14 10:32 (Europe/Riga, UTC+02:00).".into()),
+            retry: None,
         }),
         // The turn's model failed before any output; a fallback answers.
         EventKind::ModelFallback(ModelFallback {
@@ -488,6 +492,7 @@ fn events() -> Vec<RawEvent> {
             agent: None,
             cause: Some(TurnCause::Callback(vec!["bg-2".into()])),
             environment: None,
+            retry: None,
         }),
         EventKind::AssistantMessage(AssistantMessage {
             author: None,
@@ -651,6 +656,7 @@ fn events() -> Vec<RawEvent> {
             agent: None,
             cause: None,
             environment: None,
+            retry: None,
         }),
         EventKind::ModelRetry(ModelRetry {
             turn_id: "t5".into(),
@@ -741,11 +747,66 @@ fn events() -> Vec<RawEvent> {
                 .into(),
             }),
         }),
+        // A turn that failed partway, then the person's Retry of it: a new
+        // turn naming it, with no second message (X.21).
+        EventKind::TurnStarted(TurnStarted {
+            turn_id: "t7".into(),
+            agent: None,
+            cause: None,
+            environment: None,
+            retry: None,
+        }),
+        EventKind::UserMessage(UserMessage {
+            turn_id: "t7".into(),
+            text: "Migrate the schema.".into(),
+            attachments: vec![],
+            files: vec![],
+            reply: None,
+            images: vec![],
+            queued: false,
+        }),
+        EventKind::Error(ErrorEvent {
+            turn_id: Some("t7".into()),
+            message: "The model is not available.".into(),
+        }),
+        EventKind::TurnEnded(TurnEnded {
+            turn_id: "t7".into(),
+            reason: TurnEndReason::Error,
+            usage: None,
+        }),
+        EventKind::TurnStarted(TurnStarted {
+            turn_id: "t8".into(),
+            agent: None,
+            cause: None,
+            environment: None,
+            retry: Some(RetryOf {
+                turn_id: "t7".into(),
+                reason: TurnEndReason::Error,
+                error: Some("The model is not available.".into()),
+                failed_model: Some("demo::small".into()),
+                model: Some("openai::gpt-4o".into()),
+            }),
+        }),
+        EventKind::AssistantMessage(AssistantMessage {
+            author: None,
+            variant: None,
+            turn_id: "t8".into(),
+            message_id: "m8".into(),
+            text: "Migrated.".into(),
+            tool_calls: vec![],
+            blocks: vec![],
+        }),
+        EventKind::TurnEnded(TurnEnded {
+            turn_id: "t8".into(),
+            reason: TurnEndReason::Completed,
+            usage: None,
+        }),
         EventKind::TurnStarted(TurnStarted {
             turn_id: "t6".into(),
             agent: None,
             cause: None,
             environment: None,
+            retry: None,
         }),
         EventKind::ContextShortened(ContextShortened {
             turn_id: "t6".into(),
@@ -885,6 +946,28 @@ fn a_callback_turn_and_a_refusal_are_items() {
         .unwrap();
     assert_eq!(r["bg_ids"], json!(["bg-5"]));
     assert!(r["reason"].as_str().unwrap().contains("node limit"));
+}
+
+/// A retry stands right after the failed turn's end, naming it; the
+/// message is one item, before the failed attempt (X.21).
+#[test]
+fn a_retry_is_an_item_after_the_failed_turn() {
+    let view = serde_json::to_value(SessionView::fold(&events()).unwrap()).unwrap();
+    let items = view["items"].as_array().unwrap();
+    let r = items.iter().position(|i| i["type"] == "retry").unwrap();
+    assert_eq!(items[r]["of"], "t7");
+    assert_eq!(items[r]["turn_id"], "t8");
+    assert_eq!(items[r]["reason"], "error");
+    assert_eq!(items[r - 1]["type"], "turn_end");
+    assert_eq!(items[r - 1]["reason"], "error");
+    assert_eq!(items[r + 1]["message_id"], "m8");
+    assert_eq!(
+        items
+            .iter()
+            .filter(|i| i["type"] == "user" && i["text"] == "Migrate the schema.")
+            .count(),
+        1
+    );
 }
 
 /// A shortened context is a quiet item in its turn: whether results were

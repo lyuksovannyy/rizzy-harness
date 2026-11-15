@@ -89,6 +89,9 @@ export const pageApi = {
   /** The node clamps it to 1..its limit and records it; the chat shows the result (X.14). */
   setStepLimit: (id: string, max_steps: number) =>
     call<{ ok: boolean }>("POST", `/api/sessions/${id}/step-limit`, { max_steps }),
+  /** A person's Retry of the failed last turn (X.21): the node runs its message again. */
+  retryTurn: (id: string, turn: string) =>
+    call<{ ok: boolean }>("POST", `/api/sessions/${id}/turns/${encodeURIComponent(turn)}/retry`),
   /** A person's /compact (X.20): the node summarises the chat now and records the outcome in its log. */
   compact: (id: string, focus: string) =>
     call<{ ok: boolean }>("POST", `/api/sessions/${id}/compact`, focus ? { focus } : {}),

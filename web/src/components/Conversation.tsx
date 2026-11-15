@@ -7,6 +7,7 @@ import { api } from "../api";
 import { pageApi } from "../apiPages";
 import { endWords, turnStart } from "../lib/callback";
 import { useCompact } from "../lib/compact";
+import { canRetry } from "../lib/retry";
 import { dropDraft } from "../lib/drafts";
 import { useFeatures } from "../lib/features";
 import { t } from "../lib/i18n";
@@ -153,6 +154,39 @@ function Undo(props: {
         </div>
       )}
     </div>
+  );
+}
+
+/** Retry on a failed turn's end line (X.21): the node runs the same message
+ * again with the chat's current agent and model, after the failed
+ * attempt's steps, which stay above. The route refuses what this misses. */
+function RetryTurn(props: { sessionId: string; turnId: string }) {
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const run = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      await pageApi.retryTurn(props.sessionId, props.turnId);
+    } catch (x) {
+      setErr(x instanceof Error ? x.message : String(x));
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      {" · "}
+      <button
+        type="button"
+        className="link"
+        disabled={busy}
+        title="Run your message again with this chat's agent and model; what this attempt did stays, and the agent is told"
+        onClick={() => void run()}
+      >
+        Retry
+      </button>
+      {err && <div className="error-text">{err}</div>}
+    </>
   );
 }
 
@@ -617,6 +651,16 @@ export default function Conversation(props: {
                         Started by {endWords(view.items.slice(0, i), it.bg_ids)}, not by you
                       </div>
                     );
+                  case "retry":
+                    // Where the person's message would be: they asked again.
+                    return (
+                      <div key={i} className="divider" role="note">
+                        Retried
+                        {it.model && it.failed_model && it.model !== it.failed_model
+                          ? ` with ${it.model} (the attempt above used ${it.failed_model})`
+                          : ""}
+                      </div>
+                    );
                   case "callback_refused":
                     return (
                       <div key={i} className="msg error">
@@ -729,12 +773,25 @@ export default function Conversation(props: {
                           }}
                         />
                       ) : null;
+                    // Not after an undo of its changes, nor where the viewer
+                    // cannot drive the chat, a sub-agent's chat or a routine's
+                    // own run (its first turn).
+                    const retry =
+                      !running &&
+                      !blocked &&
+                      !summarise.compacting &&
+                      !cp?.restored &&
+                      !props.row?.parent_id &&
+                      !meta?.parent_session &&
+                      !(routine && items.findIndex((x) => x.type === "turn_end") === i) &&
+                      canRetry(items, i);
                     return it.reason === "completed" ? (
                       undo
                     ) : (
                       <div key={i}>
                         <div className={`divider r-${it.reason}`}>
                           {it.reason === "limit" ? rt("ui.turn.limit") : `turn ${it.reason}`}
+                          {retry && <RetryTurn sessionId={sessionId} turnId={it.turn_id} />}
                         </div>
                         {undo}
                       </div>
