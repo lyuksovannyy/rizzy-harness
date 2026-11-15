@@ -776,6 +776,7 @@ fn seed_other_chat(store: &Store, ws: &Path, turns: u64, age_ms: i64) {
             agent: None,
             cause: None,
             environment: None,
+            continued_by: None,
             retry: None,
         }));
         put(EventKind::UserMessage(

@@ -286,6 +286,7 @@ mod tests {
                 agent: None,
                 cause: None,
                 environment: None,
+                continued_by: None,
                 retry: None,
             }),
             EventKind::UserMessage(UserMessage {

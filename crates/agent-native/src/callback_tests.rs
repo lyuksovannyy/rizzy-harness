@@ -148,6 +148,7 @@ fn history(sid: SessionId) -> Vec<RawEvent> {
                 agent: None,
                 cause: None,
                 environment: None,
+                continued_by: None,
                 retry: None,
             }),
         ),
@@ -291,6 +292,7 @@ async fn the_opening_has_one_harness_header_quoted_output_and_rebuilds_the_same(
             agent: None,
             cause: Some(TurnCause::Callback(vec!["bg-1".into()])),
             environment: None,
+            continued_by: None,
             retry: None,
         }),
     ));
@@ -446,6 +448,7 @@ async fn a_callback_turn_gets_the_instruction_files_after_its_opening() {
             agent: None,
             cause: Some(TurnCause::Callback(vec!["bg-1".into()])),
             environment: None,
+            continued_by: None,
             retry: None,
         }),
     ));
@@ -497,6 +500,7 @@ async fn a_callback_turn_gets_the_environment_line() {
             agent: None,
             cause: Some(TurnCause::Callback(vec!["bg-1".into()])),
             environment: Some(env.into()),
+            continued_by: None,
             retry: None,
         }),
     ));

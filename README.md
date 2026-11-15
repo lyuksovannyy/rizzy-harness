@@ -2998,6 +2998,31 @@ nothing the sub-agent writes can pass as the harness's), cut to 24,000
 characters when longer (the first 18,000 and the last 6,000, with a note
 between), then what became of its changes and the pages it cited. The `delegate` card shows the status next to the link.
 
+**Follow-ups.** A finished sub-agent keeps its conversation. The agent that
+started it can send it another message by calling `delegate` again with
+`session` set to the id its result began with (`session: <id>`): "now also
+cover the error path in the test you wrote" reaches the same sub-agent, which
+answers from what it already read instead of a new one reading everything
+again. What it keeps: its own conversation (its earlier tasks, tool calls,
+results and reports). What it does not keep: its files. One that changes files
+gets a fresh copy of the folder as it is now (your changes and other
+sub-agents' since included), at the same place, merged back when it ends as
+before; one that only reads works in the folder itself, as before. Its message
+starts with a line of the harness's saying so and telling it to read a file
+again before it edits it or relies on it. The usual rules for files it read
+hold: a `write` over a file that changed since it read it is refused until it
+reads it again; an `edit` is refused where the lines it edits changed, and
+otherwise runs with a note that the file changed. If its earlier changes were
+not applied, or applied only in part, the line says so. A follow-up counts against
+the turn's sub-agent and token limits like a new one; a sub-agent has at most
+8 runs; only the chat or sub-agent that started it can send it one (another
+chat's, a sub-agent's own sub-agent's, an unknown or a deleted id is refused
+with a sentence); one that is still working takes no second message; and it
+runs with what a new sub-agent of the same agent would get now, at most your
+chat's approval mode as it is now (in plan mode a sub-agent that changes files
+is not given one, and one started in plan mode stays in it). Its chat marks each follow-up, and the side
+panel lists the sub-agent once with its number of runs.
+
 **Agents** in the sidebar lists every agent. Server admins can make agents there
 (name, handle, summary, instructions and feature switches: memory, project
 memory, earlier chats and memory search, web search, files, commands, MCP

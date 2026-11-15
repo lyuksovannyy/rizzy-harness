@@ -898,3 +898,14 @@ fn a_budget_line_is_refused_by_name() {
     .unwrap_err();
     assert!(format!("{e:#}").contains("budget"), "{e:#}");
 }
+
+/// The Senior Teamlead is told once that a finished sub-agent can be given
+/// a follow-up by its id (PLAN.md T68), so it reaches the model.
+#[test]
+fn the_teamlead_knows_it_can_follow_up_a_sub_agent() {
+    let (set, _) = AgentSet::load(std::path::Path::new("/nonexistent"));
+    let lead = set.get("teamlead").unwrap();
+    let p = &lead.spec.system_prompt;
+    assert_eq!(p.matches("follow-up").count(), 1, "{p}");
+    assert!(p.contains("`session`"), "{p}");
+}

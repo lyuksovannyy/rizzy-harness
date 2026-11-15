@@ -200,6 +200,7 @@ fn log(sid: SessionId, own: &str, kinds: Vec<EventKind>) -> Vec<RawEvent> {
             agent: None,
             cause: None,
             environment: None,
+            continued_by: None,
             retry: None,
         }),
         EventKind::UserMessage(UserMessage {
@@ -361,6 +362,7 @@ async fn compaction_keeps_a_message_read_by_the_next_turn_once() {
             agent: None,
             cause: None,
             environment: None,
+            continued_by: None,
             retry: None,
         }),
         EventKind::UserMessage(UserMessage {
@@ -392,6 +394,7 @@ async fn compaction_keeps_a_message_read_by_the_next_turn_once() {
             agent: None,
             cause: None,
             environment: None,
+            continued_by: None,
             retry: None,
         }),
         EventKind::QueuedDelivered(QueuedDelivered {
@@ -417,6 +420,7 @@ async fn compaction_keeps_a_message_read_by_the_next_turn_once() {
             agent: None,
             cause: None,
             environment: None,
+            continued_by: None,
             retry: None,
         }),
         EventKind::UserMessage(UserMessage {

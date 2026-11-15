@@ -144,13 +144,15 @@ pub(crate) struct Session {
     /// The folder pinned at creation (or at load after a restart): its
     /// canonical path, device and inode. `None` for a chat session, and for
     /// an agentic one whose folder could not be pinned (it then refuses to
-    /// work). Checked by [`Self::checked_folder`] before every use.
-    pin: Option<harness_core::folder::FolderPin>,
+    /// work). Checked by [`Self::checked_folder`] before every use. Set
+    /// again only when a writing sub-agent is continued in a fresh copy of
+    /// its parent's folder at the same path (T68), before its turn starts.
+    pin_cell: Mutex<Option<harness_core::folder::FolderPin>>,
     /// A sub-agent's node-owned folder (`git::ChildFolder`): the session
     /// works in it although it lies in the node's protected sessions
     /// folder. Not kept across a restart (the folder is removed when the
-    /// sub-agent ends).
-    owned: Option<harness_core::folder::OwnedFolder>,
+    /// sub-agent ends); set again with `pin_cell` when it is continued.
+    owned_cell: Mutex<Option<harness_core::folder::OwnedFolder>>,
     /// How its commands run (N.10a): from its `session_created`, never
     /// changed; `None` for a chat session. Checked against what the node
     /// offers before every turn, callback, restore and delegation.
@@ -457,8 +459,8 @@ impl Session {
             unclosed: AtomicBool::new(false),
             unresolved: Mutex::new(Vec::new()),
             last_state: Mutex::new(None),
-            pin: pin_of(profile, &cwd),
-            owned,
+            pin_cell: Mutex::new(pin_of(profile, &cwd)),
+            owned_cell: Mutex::new(owned),
             exec_mode,
         });
         Self::record_ends(&s, ends);
@@ -586,8 +588,8 @@ impl Session {
             unclosed: AtomicBool::new(false),
             unresolved: Mutex::new(Vec::new()),
             last_state: Mutex::new(last_state),
-            pin,
-            owned: None,
+            pin_cell: Mutex::new(pin),
+            owned_cell: Mutex::new(None),
             // As recorded, never re-chosen: one the node no longer offers
             // runs nothing (`checked_folder`).
             exec_mode: meta.exec_mode,
@@ -1026,7 +1028,7 @@ impl Session {
         }
         // Its mode is still one this node offers (N.10a).
         self.node.cfg.policy.check_exec(self.exec_mode)?;
-        let dir = match &self.pin {
+        let dir = match self.pin() {
             Some(pin) => pin.check()?,
             None => {
                 return Err(format!(
@@ -1038,7 +1040,7 @@ impl Session {
         };
         // A sub-agent's node-owned folder: inside it, and the sandbox still
         // works; it is in the protected sessions folder by design.
-        if let Some(o) = &self.owned {
+        if let Some(o) = self.owned() {
             if !dir.starts_with(&o.top) {
                 return Err(format!(
                     "{}: {} is outside the sub-agent's folder",
@@ -1071,6 +1073,22 @@ impl Session {
             protected: policy.protected_dirs.clone(),
             sandbox: self.node.cfg.git_sandbox.clone(),
         }
+    }
+
+    /// This session's folder pin now (see `pin_cell`).
+    fn pin(&self) -> Option<harness_core::folder::FolderPin> {
+        self.pin_cell
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// This sub-agent's own folder now (see `owned_cell`).
+    fn owned(&self) -> Option<harness_core::folder::OwnedFolder> {
+        self.owned_cell
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 
     /// The mode in force for the next call: this chat's own, never above
@@ -1304,8 +1322,8 @@ impl Session {
             return false;
         };
         let mut ctx = harness_tools::ToolCtx::new(self.cwd.clone());
-        ctx.pin = self.pin.clone();
-        ctx.owned = self.owned.clone();
+        ctx.pin = self.pin();
+        ctx.owned = self.owned();
         ctx.protected = Arc::new(self.node.cfg.policy.protected_dirs.clone());
         ctx.allow_outside_workspace = false;
         let (Ok(real), Ok(ws)) = (ctx.resolve_for_write(path), ctx.workspace_dir()) else {
@@ -1845,6 +1863,7 @@ impl Session {
                 agent: agent.as_ref().map(AgentSpec::agent_ref),
                 cause: Some(cause.clone()),
                 environment,
+                continued_by: None,
                 retry: None,
             }))
             .await
@@ -2272,6 +2291,21 @@ impl Session {
         turn_id: &str,
         agent: Option<&AgentSpec>,
     ) -> Result<(Vec<RawEvent>, Vec<UserMessage>), String> {
+        self.begin_with(msg, turn_id, agent, None).await
+    }
+
+    /// [`Self::begin`] for a sub-agent's follow-up (T68): `follow_up` is the
+    /// parent's `delegate` call id, recorded as `continued_by`, and the
+    /// harness's line for the opening, recorded after the environment line
+    /// (both in `turn_started`), so the request and every later rebuild of
+    /// it carry the same bytes.
+    async fn begin_with(
+        &self,
+        msg: Option<&UserMessage>,
+        turn_id: &str,
+        agent: Option<&AgentSpec>,
+        follow_up: Option<(&str, &str)>,
+    ) -> Result<(Vec<RawEvent>, Vec<UserMessage>), String> {
         // The mode in force recorded first, if the log says another.
         self.record_clamp().await;
         // As for a callback turn (S3-4): no end lands between the read and
@@ -2303,13 +2337,23 @@ impl Session {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .clear();
-        let environment = self.environment_line(turn_id).await;
+        let mut environment = self.environment_line(turn_id).await;
+        if let Some((_, line)) = follow_up {
+            let both = match environment.take() {
+                Some(env) => format!("{env}\n{line}"),
+                None => line.to_string(),
+            };
+            *self.turn_env.lock().unwrap_or_else(|p| p.into_inner()) =
+                Some((turn_id.to_string(), both.clone()));
+            environment = Some(both);
+        }
         let started = self
             .emit(EventKind::TurnStarted(TurnStarted {
                 cause: None,
                 agent: agent.map(AgentSpec::agent_ref),
                 turn_id: turn_id.into(),
                 environment,
+                continued_by: follow_up.map(|(call, _)| call.to_string()),
                 retry: None,
             }))
             .await;
@@ -2423,8 +2467,8 @@ impl Session {
     /// protected folders and node.toml's `allow_outside_workspace`.
     fn read_ctx(&self) -> harness_tools::ToolCtx {
         let mut ctx = harness_tools::ToolCtx::new(self.cwd.clone());
-        ctx.pin = self.pin.clone();
-        ctx.owned = self.owned.clone();
+        ctx.pin = self.pin();
+        ctx.owned = self.owned();
         ctx.protected = Arc::new(self.node.cfg.policy.protected_dirs.clone());
         ctx.allow_outside_workspace = self.node.cfg.policy.allow_outside_workspace;
         ctx
@@ -2534,7 +2578,7 @@ impl Session {
             return None;
         }
         let dir = self.checked_folder().ok()?;
-        let granted = match &self.owned {
+        let granted = match self.owned() {
             Some(o) => o.top.clone(),
             None => self.node.cfg.policy.root_of(&dir).ok()?,
         };
@@ -2587,7 +2631,7 @@ impl Session {
         let Ok(dir) = self.checked_folder() else {
             return extra;
         };
-        let granted = match &self.owned {
+        let granted = match self.owned() {
             Some(o) => o.top.clone(),
             None => match self.node.cfg.policy.root_of(&dir) {
                 Ok(r) => r,
@@ -2862,7 +2906,7 @@ impl Session {
         // A sub-agent's folder is removed when it ends: no checkpoints.
         if self.profile != Profile::Agentic
             || self.node.cfg.policy.checkpoints_keep == 0
-            || self.owned.is_some()
+            || self.owned().is_some()
         {
             return Ok(None);
         }
@@ -3720,7 +3764,7 @@ impl Session {
                 owned: iso
                     .as_ref()
                     .map(|i| i.child.owned())
-                    .or_else(|| self.owned.clone()),
+                    .or_else(|| self.owned()),
             },
         )
         .await
@@ -3831,6 +3875,25 @@ impl Session {
                 by_stop,
             )
             .await;
+        Ok(self
+            .child_outcome(&child, iso, &msg.turn_id, reason, usage)
+            .await)
+    }
+
+    /// What a sub-agent's turn `turn_id` (its first or a follow-up) gives
+    /// its parent: its changes merged back (`iso`, a writing child's
+    /// folder), and its answer, `finish`, sources and end text read from
+    /// that turn's part of its log only: a follow-up never reports an
+    /// earlier run's words as its own.
+    async fn child_outcome(
+        &self,
+        child: &Arc<Session>,
+        iso: Option<Isolation>,
+        turn_id: &str,
+        reason: TurnEndReason,
+        usage: Option<Usage>,
+    ) -> harness_core::backend::DelegateOutcome {
+        let child_id = child.id;
         // Each session's log gates its own effects: the parent's turn goes
         // on, but nothing of a child whose log failed (or whose parent's
         // did) reaches the parent's folder, since no event would record it.
@@ -3850,6 +3913,14 @@ impl Session {
             .call(move |s| s.events_after(child_id, 0, usize::MAX >> 1))
             .await
             .unwrap_or_default();
+        // This turn's events: from its `turn_started` on.
+        let from = log
+            .iter()
+            .rposition(
+                |e| matches!(e.typed(), Ok(EventKind::TurnStarted(t)) if t.turn_id == turn_id),
+            )
+            .unwrap_or(0);
+        let log = &log[from..];
         let text = log
             .iter()
             .rev()
@@ -3859,7 +3930,7 @@ impl Session {
             })
             .unwrap_or_default();
         // Whatever the answer cites, the parent resolves through these.
-        let sources = harness_core::refs::sources_in(&log);
+        let sources = harness_core::refs::sources_in(log);
         let finish = harness_core::subagent::finish_in(log.iter().filter_map(|e| e.typed().ok()));
         // Why its turn ended, when it did not complete: the parent can tell
         // the step cap from the guard or a provider error.
@@ -3877,7 +3948,7 @@ impl Session {
             (Some(s), None) => Some(s.to_string()),
             (None, n) => n,
         };
-        Ok(harness_core::backend::DelegateOutcome {
+        harness_core::backend::DelegateOutcome {
             child: child_id,
             text,
             reason,
@@ -3888,7 +3959,292 @@ impl Session {
             note,
             unapplied,
             applied,
-        })
+        }
+    }
+
+    /// Send `task` to `child_id`, a sub-agent this session started, as its
+    /// next message, and wait for that turn (PLAN.md T68). The node decides
+    /// from its own records, never from the id as the model wrote it: the
+    /// child's `session_created` names this session as its parent, this
+    /// session's log holds a finished `delegate` call whose result names
+    /// it, it was started as `agent` (the delegate the call names, as the
+    /// node bounds it now), it has had fewer than `MAX_CHILD_RUNS` runs and
+    /// no turn of it runs. It runs with what a new child of that agent gets
+    /// now (tools, the parent's mode as a ceiling at every call, the
+    /// parent's execution mode, which it recorded at creation) and nothing
+    /// more: one that changes files works in a fresh copy of this folder at
+    /// the path its own had, merged back when it ends; one that only reads
+    /// works in this folder, as before. Either way it keeps its
+    /// conversation, not its files, and its opening says so.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_continue(
+        &self,
+        child_id: SessionId,
+        agent: AgentSpec,
+        task: String,
+        call_id: String,
+        refs: SharedRefs,
+        observed: Arc<Vec<String>>,
+        cancel: CancellationToken,
+        started: Box<dyn FnOnce(SessionId) + Send>,
+    ) -> Result<harness_core::backend::DelegateOutcome, String> {
+        use harness_core::subagent::MAX_CHILD_RUNS;
+        if self.node.is_stopping() {
+            return Err(harness_protocol::NODE_STOPPING.into());
+        }
+        // One sentence for unknown, deleted and foreign ids alike: the
+        // model learns nothing about sessions that are not its own.
+        let not_yours = || {
+            format!(
+                "`{child_id}` is not a sub-agent this chat started (a sub-agent can be given a \
+                 follow-up only by the chat or sub-agent that started it, by the id its \
+                 `delegate` result began with). Start a new one instead."
+            )
+        };
+        let Some(child) = self.node.session(child_id) else {
+            return Err(not_yours());
+        };
+        if child.parent_session != Some(self.id) || child.id == self.id {
+            return Err(not_yours());
+        }
+        // This session's own log names it as the result of one of its
+        // `delegate` calls; the last such result says whether its changes
+        // were applied.
+        let me = self.id;
+        let mine = self
+            .node
+            .cfg
+            .store
+            .call(move |s| s.events_after(me, 0, usize::MAX >> 1))
+            .await
+            .map_err(|e| e.to_string())?;
+        let head = format!("session: {child_id}\n");
+        let mut delegate_calls = std::collections::HashSet::new();
+        let mut last: Option<String> = None;
+        for e in &mine {
+            match e.typed() {
+                Ok(EventKind::ToolCallStarted(c)) if c.tool == "delegate" => {
+                    delegate_calls.insert(c.call_id);
+                }
+                Ok(EventKind::ToolCallFinished(f))
+                    if delegate_calls.contains(&f.call_id) && f.output.starts_with(&head) =>
+                {
+                    last = Some(f.output);
+                }
+                _ => {}
+            }
+        }
+        let Some(last) = last else {
+            return Err(not_yours());
+        };
+        let landed_before = harness_core::subagent::landed_in(&last);
+        let theirs = self
+            .node
+            .cfg
+            .store
+            .call(move |s| s.events_after(child_id, 0, usize::MAX >> 1))
+            .await
+            .map_err(|e| e.to_string())?;
+        let started_as = theirs.iter().find_map(|e| match e.typed() {
+            Ok(EventKind::SessionCreated(m)) => Some(m.agent_id),
+            _ => None,
+        });
+        let Some(Some(started_as)) = started_as else {
+            return Err(not_yours());
+        };
+        if started_as != agent.agent_id {
+            return Err(format!(
+                "`{child_id}` is @{started_as}, not @{}: name @{started_as} to give it a \
+                 follow-up, or start a new @{} without `session`.",
+                agent.agent_id, agent.agent_id
+            ));
+        }
+        let runs = theirs
+            .iter()
+            .filter(|e| matches!(e.typed(), Ok(EventKind::TurnStarted(_))))
+            .count();
+        if runs >= MAX_CHILD_RUNS {
+            return Err(format!(
+                "@{started_as} `{child_id}` has had {runs} runs, the most one sub-agent may have \
+                 ({MAX_CHILD_RUNS}). Start a new one with a complete brief."
+            ));
+        }
+        let here = self.checked_folder()?;
+        // Whether it changed files when it was made: its folder was its own
+        // (`<sessions>/<id>/files`). It changes files now only if a new one
+        // of this agent would; it never gains a writable folder, and one
+        // that wrote never works in this folder.
+        let own_dir = self
+            .sessions_dir()
+            .map(|d| real_path(&d).join(child_id.to_string()));
+        let wrote = own_dir.as_ref().is_some_and(|d| child.cwd.starts_with(d));
+        // A child made in plan mode stays in it for life (its own recorded
+        // mode is its floor, X.7): it changes nothing, whatever its agent
+        // could, and works in this folder as it did.
+        let made_in_plan = read_mode(&child.mode) == ApprovalMode::Plan;
+        let writes = !made_in_plan && self.can_change_files(&agent);
+        if wrote && self.current_mode() == ApprovalMode::Plan {
+            return Err(format!(
+                "[harness] plan mode: @{started_as} `{child_id}` was not continued: it changes \
+                 files, and nothing may change in plan mode. Describe the work in your plan."
+            ));
+        }
+        if wrote != writes {
+            return Err(format!(
+                "@{started_as} `{child_id}` cannot be given a follow-up: its agent {} files now \
+                 and it {} when it was started. Start a new one instead.",
+                if writes {
+                    "can change"
+                } else {
+                    "can no longer change"
+                },
+                if wrote { "could" } else { "could not" },
+            ));
+        }
+        let turn_id = new_id();
+        // As for a new child: the parent turn's context and its start (what
+        // changed in the folder since is not taken as instructions, T65).
+        let (savings, context, standing, began) = self
+            .turn
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map(|t| {
+                (
+                    t.savings.clone(),
+                    t.context.clone(),
+                    t.standing.clone(),
+                    Some(t.began),
+                )
+            })
+            .unwrap_or_default();
+        let parent_began = began.unwrap_or_else(std::time::SystemTime::now);
+        let by_stop = Arc::new(AtomicBool::new(false));
+        // Taken before its folder is touched: a second follow-up (another
+        // call of the same step, or a person's message) is refused here.
+        if child
+            .claim_turn(RunningTurn {
+                turn_id: turn_id.clone(),
+                cancel: cancel.clone(),
+                savings: savings.clone(),
+                context: context.clone(),
+                standing: standing.clone(),
+                publishes: Arc::default(),
+                by_stop: by_stop.clone(),
+                agent_id: Some(agent.agent_id.clone()),
+                callback: false,
+                compare: false,
+                began: parent_began,
+            })
+            .is_err()
+        {
+            return Err(format!(
+                "@{started_as} `{child_id}` is still working: one message at a time. Wait for \
+                 its result, or start a new one."
+            ));
+        }
+        let iso = if wrote {
+            match self.isolate(&agent, child_id, &here).await {
+                Ok(Some(i)) if i.cwd == child.cwd => Some(i),
+                Ok(Some(i)) => {
+                    crate::git::remove_folder(&i.child).await;
+                    child.release(&turn_id);
+                    return Err(format!(
+                        "@{started_as} `{child_id}` cannot be given a follow-up: this folder is \
+                         not where it was when the sub-agent started. Start a new one."
+                    ));
+                }
+                Ok(None) => None,
+                Err(e) => {
+                    child.release(&turn_id);
+                    // `isolate` speaks of a new child.
+                    return Err(e.replacen("was not started", "was not continued", 1));
+                }
+            }
+        } else {
+            None
+        };
+        // Its folder as a new child's would be pinned: the fresh copy, or
+        // this session's folder (with this session's own folder, for a
+        // read-only child of a sub-agent).
+        let (cwd, owned) = match &iso {
+            Some(i) => (i.cwd.clone(), Some(i.child.owned())),
+            None => (here.clone(), self.owned()),
+        };
+        if cwd != child.cwd {
+            child.release(&turn_id);
+            return Err(format!(
+                "@{started_as} `{child_id}` cannot be given a follow-up: this folder is not \
+                 where it was when the sub-agent started. Start a new one."
+            ));
+        }
+        *child.pin_cell.lock().unwrap_or_else(|p| p.into_inner()) = pin_of(child.profile, &cwd);
+        *child.owned_cell.lock().unwrap_or_else(|p| p.into_inner()) = owned;
+        if self.node.is_stopping() {
+            child.release(&turn_id);
+            if let Some(i) = iso {
+                crate::git::remove_folder(&i.child).await;
+            }
+            return Err(harness_protocol::NODE_STOPPING.into());
+        }
+        started(child_id);
+        let note = if wrote {
+            harness_core::subagent::follow_up_writes(landed_before)
+        } else {
+            harness_core::subagent::FOLLOW_UP_READS.to_string()
+        };
+        let msg = UserMessage {
+            turn_id,
+            text: self.node.cfg.secrets.scrub(&task),
+            attachments: vec![],
+            reply: None,
+            images: vec![],
+            queued: false,
+            files: vec![],
+        };
+        let extra = TurnExtra {
+            savings,
+            context,
+            standing,
+            refs: Some(refs),
+            observed: Some(observed),
+            changes_since: Some(parent_began),
+            ..Default::default()
+        };
+        let history = match child
+            .begin_with(
+                Some(&msg),
+                &msg.turn_id,
+                Some(&agent),
+                Some((call_id.as_str(), note.as_str())),
+            )
+            .await
+        {
+            Ok((h, _)) => h,
+            Err(e) => {
+                child.release(&msg.turn_id);
+                if let Some(i) = iso {
+                    crate::git::remove_folder(&i.child).await;
+                }
+                return Err(e);
+            }
+        };
+        let (reason, usage) = child
+            .clone()
+            .run_turn(
+                msg.turn_id.clone(),
+                msg.model_text(),
+                history,
+                Some(agent),
+                vec![],
+                extra,
+                cancel,
+                by_stop,
+            )
+            .await;
+        Ok(self
+            .child_outcome(&child, iso, &msg.turn_id, reason, usage)
+            .await)
     }
 
     /// Whether a sub-agent can change files here: its tools, narrowed by
@@ -3941,7 +4297,7 @@ impl Session {
                  a sub-agent that only reads."
             )
         };
-        if self.owned.is_some() {
+        if self.owned().is_some() {
             return Err(not_started(
                 "a sub-agent's own sub-agents may only read".to_string(),
             ));
@@ -4072,7 +4428,7 @@ impl Session {
                         } else if e.nothing_written() {
                             format!("its changes were NOT applied: {}", e.text())
                         } else {
-                            format!("its changes were applied only in part: {}", e.text())
+                            format!("{}: {}", harness_core::subagent::APPLIED_IN_PART, e.text())
                         };
                         let written = if e.nothing_written() {
                             "Nothing of this sub-agent's work was written"
@@ -4285,6 +4641,21 @@ impl TurnHost for Session {
             .await
     }
 
+    async fn continue_child(
+        &self,
+        child: SessionId,
+        agent: AgentSpec,
+        task: String,
+        call_id: String,
+        refs: SharedRefs,
+        observed: Arc<Vec<String>>,
+        cancel: CancellationToken,
+        started: Box<dyn FnOnce(SessionId) + Send>,
+    ) -> Result<harness_core::backend::DelegateOutcome, String> {
+        self.run_continue(child, agent, task, call_id, refs, observed, cancel, started)
+            .await
+    }
+
     async fn images(&self, sha256: &[String]) -> Vec<harness_core::backend::ImageData> {
         use base64::Engine as _;
         let (sid, wanted) = (self.id.to_string(), sha256.to_vec());
@@ -4328,7 +4699,7 @@ impl TurnHost for Session {
             stages,
             session: self.id,
             cwd,
-            pin: self.pin.clone(),
+            pin: self.pin(),
             count,
         }))
     }
@@ -4443,11 +4814,11 @@ impl TurnHost for Session {
     }
 
     fn folder_pin(&self) -> Option<harness_core::folder::FolderPin> {
-        self.pin.clone()
+        self.pin()
     }
 
     fn owned_folder(&self) -> Option<harness_core::folder::OwnedFolder> {
-        self.owned.clone()
+        self.owned()
     }
 
     fn exec_mode(&self) -> Option<harness_core::policy::ExecMode> {

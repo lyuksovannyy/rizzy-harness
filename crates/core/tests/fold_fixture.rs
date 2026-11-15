@@ -95,7 +95,7 @@ fn events() -> Vec<RawEvent> {
             cause: None,
             agent: None,
             turn_id: t(),
-            environment: None,
+            environment: None, continued_by: None,
             retry: None,
         }),
         EventKind::UserMessage(UserMessage {
@@ -279,7 +279,7 @@ fn events() -> Vec<RawEvent> {
                 withheld: vec![],
                 effort: None,
             }),
-            environment: Some("[harness] Environment of this turn: the node's clock reads Saturday 2026-11-14 10:32 (Europe/Riga, UTC+02:00).".into()),
+            environment: Some("[harness] Environment of this turn: the node's clock reads Saturday 2026-11-14 10:32 (Europe/Riga, UTC+02:00).".into()), continued_by: None,
             retry: None,
         }),
         // The turn's model failed before any output; a fallback answers.
@@ -491,7 +491,7 @@ fn events() -> Vec<RawEvent> {
             turn_id: "t4".into(),
             agent: None,
             cause: Some(TurnCause::Callback(vec!["bg-2".into()])),
-            environment: None,
+            environment: None, continued_by: None,
             retry: None,
         }),
         EventKind::AssistantMessage(AssistantMessage {
@@ -655,7 +655,7 @@ fn events() -> Vec<RawEvent> {
             turn_id: "t5".into(),
             agent: None,
             cause: None,
-            environment: None,
+            environment: None, continued_by: None,
             retry: None,
         }),
         EventKind::ModelRetry(ModelRetry {
@@ -747,6 +747,7 @@ fn events() -> Vec<RawEvent> {
                 .into(),
             }),
         }),
+        // A sub-agent's follow-up from its parent's call (T68).
         // A turn that failed partway, then the person's Retry of it: a new
         // turn naming it, with no second message (X.21).
         EventKind::TurnStarted(TurnStarted {
@@ -755,6 +756,7 @@ fn events() -> Vec<RawEvent> {
             cause: None,
             environment: None,
             retry: None,
+            continued_by: None,
         }),
         EventKind::UserMessage(UserMessage {
             turn_id: "t7".into(),
@@ -786,6 +788,7 @@ fn events() -> Vec<RawEvent> {
                 failed_model: Some("demo::small".into()),
                 model: Some("openai::gpt-4o".into()),
             }),
+            continued_by: None,
         }),
         EventKind::AssistantMessage(AssistantMessage {
             author: None,
@@ -806,6 +809,7 @@ fn events() -> Vec<RawEvent> {
             agent: None,
             cause: None,
             environment: None,
+            continued_by: Some("call-follow-up".into()),
             retry: None,
         }),
         EventKind::ContextShortened(ContextShortened {

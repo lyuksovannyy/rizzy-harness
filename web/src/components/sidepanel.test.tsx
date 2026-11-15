@@ -252,13 +252,16 @@ describe("the side panel's list", () => {
     approval: null,
   });
   const KID = "22222222-2222-2222-2222-222222222222";
-  const report = (status: string) => `session: ${KID}\nSub-agent @scout finished: ${status}. Its own report follows, every line behind "| "; the harness did not check it.\n| ok`;
+  // Two sub-agents never share a session id: a second call naming the same
+  // one is a follow-up, listed as that one (sideItems.test.ts).
+  const KID2 = "33333333-3333-3333-3333-333333333333";
+  const report = (status: string, kid = KID) => `session: ${kid}\nSub-agent @scout finished: ${status}. Its own report follows, every line behind "| "; the harness did not check it.\n| ok`;
 
   test("sub-agents on top, a separator, then commands; states as the log says", async () => {
     const v = view({ "bg-1": {} }, [
       { type: "user", turn_id: "t2", text: "go" },
       delegate("d1", "scout", "Find the <b>bug</b>\nand more", null, KID),
-      delegate("d2", "coder", "Fix it", { ok: false, output: report("failed") }),
+      delegate("d2", "coder", "Fix it", { ok: false, output: report("failed", KID2) }),
     ]);
     // The command started in this turn too.
     v.items.push(v.items.shift()!);
