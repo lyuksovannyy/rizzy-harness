@@ -1707,16 +1707,28 @@ impl Store {
             .optional()?)
     }
 
-    /// The events of `sid` after its last `turn_started` and its last
-    /// `callback_refused` (T.8d step 3: what a callback turn could still
-    /// take), of the kinds in `kinds`. One range read of the chat's events
-    /// for the floor, one for the rest; no index beyond the primary key.
-    pub fn events_since_last_turn(&self, sid: SessionId, kinds: &[&str]) -> Result<Vec<RawEvent>> {
+    /// The events of `sid` after its last person's turn (a `turn_started`
+    /// without a `cause`) and its last `callback_refused`, of the kinds in
+    /// `kinds` (T.8d step 3: what a callback turn could still take; a
+    /// callback turn covers only the ends it names, so the reader folds
+    /// those turns with `harness_core::event::waiting_ends`). One range
+    /// read of the chat's events for the floor, one for the rest; no index
+    /// beyond the primary key.
+    pub fn events_since_last_person_turn(
+        &self,
+        sid: SessionId,
+        kinds: &[&str],
+    ) -> Result<Vec<RawEvent>> {
         let floor: i64 = {
             let conn = self.lock();
             conn.query_row(
                 "SELECT COALESCE(MAX(seq), 0) FROM events
-                 WHERE session_id = ?1 AND kind IN ('turn_started', 'callback_refused')",
+                 WHERE session_id = ?1
+                   AND (kind = 'callback_refused'
+                        OR (kind = 'turn_started'
+                            AND CASE WHEN json_valid(payload)
+                                THEN json_type(payload, '$.cause') IS NULL
+                                ELSE 1 END))",
                 params![sid.to_string()],
                 |r| r.get(0),
             )?

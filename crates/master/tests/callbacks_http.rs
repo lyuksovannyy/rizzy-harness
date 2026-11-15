@@ -1413,3 +1413,22 @@ async fn a_callback_turn_gets_the_standing_parts_and_no_grant() {
     assert!(!agent.allows_tool("recall"), "recall withheld");
     assert!(!agent.allows_tool("remember"), "remember withheld");
 }
+
+/// More ends wait than one callback may name (`MAX_CALLBACK_IDS`): the
+/// master asks for the oldest that fit, and the rest, which no turn named,
+/// are not covered by that turn: the master asks for them once it ends.
+#[tokio::test]
+async fn ends_beyond_one_callbacks_bound_get_a_later_one() {
+    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let t = start(Store::open_in_memory().unwrap(), dir.path()).await;
+    let sid = chat(&t, &t.alex, None).await;
+    let max = harness_protocol::MAX_CALLBACK_IDS;
+    let ids: Vec<String> = (1..=max + 2).map(|i| format!("bg-{i}")).collect();
+    for id in &ids {
+        t.node
+            .append(sid, ended(id, BackgroundReason::Exited, false));
+    }
+    let cbs = until_callbacks_within(&t.node, 2, 40).await;
+    assert_eq!(cbs[0], (sid, ids[..max].to_vec()));
+    assert_eq!(cbs[1], (sid, ids[max..].to_vec()));
+}

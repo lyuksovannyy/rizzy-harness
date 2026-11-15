@@ -877,8 +877,12 @@ the code differs from the sections above, the code is described here.
   broadcast, which can lag). An end that may call back (`BackgroundEnded::calls_back`: it exited or
   timed out and no step was told of it, R7, R12) starts one check of its chat after 300 ms; ends
   that come during a check make it look once more, so ends together are one request. **Its
-  position is the log**: a check reads the ends after the chat's last `turn_started` and last
-  `callback_refused`, less those a refusal of the master's covers (its attention mark's `seq`).
+  position is the log**: a check reads the ends that wait by the node's own rule
+  (`harness_core::event::waiting_ends`: an end that may call back with no person's
+  `turn_started`, no `callback_refused` and no callback turn naming it after it), less those a
+  refusal of the master's covers (its attention mark's `seq`). It asks for at most
+  `MAX_CALLBACK_IDS`, the oldest; the rest wait (the turn covers only what it names) and are asked
+  for 15 s later, as is a chat whose node answers that a turn is running (`CALLBACK_BUSY`).
   At the master's start (`Master::start_callbacks`, from `serve`) every chat whose log moved in
   the last 65 minutes is checked once. A node that is away, does not ack in time or is stopping is
   tried again every 15 s; a node without `CAP_CALLBACK` is not asked. Duplicates are the node's to
@@ -895,7 +899,8 @@ the code differs from the sections above, the code is described here.
   nothing is refused on its behalf, whatever the end's age or the owner's standing: off is silent
   on the master's side too.
   At the master's start only chats with a `background_ended` in the last 65 minutes are checked,
-  and a check reads only the `background_ended` rows after the floor, in the SQL (S3-3).
+  and a check reads only the `background_ended` and `turn_started` rows after the floor (the last
+  person's turn or refusal), in the SQL (S3-3).
 - **Admission**, as §4.4 step 2 and exactly what the owner could do themselves at that moment: a
   chat **without an owner account** (made with the API token) is never resumed; nor a sub-agent's
   (`parent_id`); the account must exist, be enabled and owe no password change; then
@@ -918,8 +923,15 @@ the code differs from the sections above, the code is described here.
   check passed just before the slot was taken is in the log the turn reads, and every later one
   is queued for the turn (review S3-4; as first built the end could land between the read and
   `turn_started`): every id
-  must name an end in its log that may call back, with no turn and no `callback_refused` after it
-  (else "nothing to resume", recorded nowhere; a turn already running is that too); then, on its
+  must name an end in its log that still waits (as above; else "nothing to resume", recorded
+  nowhere; a turn already running is that too, `CALLBACK_BUSY`). **The turn names every end that
+  waits** (fixed 2026-11-15): the master reads its mirror after its 300 ms settle, so an end logged
+  after that read but before the turn takes the slot was in the turn's history, yet neither its
+  cause, its opening nor the owner's row named it, and the master's next check counted it covered
+  (found under load by `callbacks_real.rs`). Now the cause holds the ids asked for, then every
+  other end of the chat that waits at that moment, oldest first, up to `MAX_CALLBACK_IDS`; the
+  opening and the attention row follow the cause. Only ends of the same chat's log, in a turn
+  that starts anyway: who may trigger a callback and its admission are unchanged. Then, on its
   rules, refused and recorded as `callback_refused { bg_ids, reason }`: a `no_callbacks` chat, a
   table a revocation closed (until the owner writes), `callback_turns = 0`, or `callback_turns`
   callback turns since the last `user_message`. A node that is stopping refuses with
