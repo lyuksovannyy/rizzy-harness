@@ -7,7 +7,7 @@
 // recovery.
 import { act, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 import type {
   AdminWorkspace,
   Agent,
@@ -56,6 +56,13 @@ const { WorkspaceDelete } = await import("./WorkspaceDelete");
 const { ServerWorkspaces } = await import("./ServerWorkspaces");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+// The host warning is a lazy chunk whose first load (a module transform)
+// took over a second on a loaded runner, past the 500 ms the test polled:
+// load it once here, under the hook's own limit.
+beforeAll(async () => {
+  await import("../HostWarning");
+}, 30_000);
 
 const summary = (role: WorkspaceRole, more: Partial<WorkspaceSummary> = {}): WorkspaceSummary => ({
   workspace_id: "w-acme",
@@ -361,8 +368,11 @@ describe("Members", () => {
   // N.10a part 2: each member's level, set only up to the setter's own,
   // host only by an owner, never one's own, an owner's always host.
   const levelOf = (name: string) => host.querySelector<HTMLSelectElement>(`select[aria-label="Level of ${name}"]`);
+  // The warning is a lazy chunk (loaded once in `beforeAll`): wait for its
+  // render under a deadline, not for 50 polls.
   const warning = async () => {
-    for (let i = 0; i < 50 && !document.querySelector("dialog.host-warning"); i++) {
+    const by = Date.now() + 4000;
+    while (!document.querySelector("dialog.host-warning") && Date.now() < by) {
       await act(async () => new Promise((r) => setTimeout(r, 10)));
     }
     return document.querySelector<HTMLDialogElement>("dialog.host-warning");

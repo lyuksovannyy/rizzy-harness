@@ -485,13 +485,20 @@ async fn a_stop_after_an_approval_answer_ends_a_silent_command_while_the_uplink_
 
 /// The timeout of a foreground `bash` call that states none, here: the
 /// node's ceiling (`[limits] bash_timeout_max_s`) applies to the default
-/// (60 s) too, so the test does not wait a minute.
-const TIMEOUT: Duration = Duration::from_secs(15);
+/// (60 s) too, so the test does not wait a minute. It must outlast the fill
+/// with room to spare: on a loaded machine filling behind twelve flooders
+/// took 17 s to 26 s, past the 15 s this was (3 of 3 runs failed there).
+const TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Re-check B7-D1: a call's timeout ends a command that streams output while
 /// the out queue is full. No Stop; the uplink takes nothing from the fill
 /// until the look, `TIMEOUT` and `bound()` after the command was seen
 /// running (so after its call started).
+///
+/// `FEW` flooders, not B.7's twelve: what is shown is that the call's timer
+/// runs while its output's append waits for room, which needs the queue
+/// full and this session waiting, not a given number of appends ahead (that
+/// is the Stop's case below); fewer sessions fill it sooner.
 ///
 /// Failed before A.21 (2026-11-13, with the default 60 s): still writing
 /// 66 s and 75 s after its prompt; it ended only when the uplink read
@@ -508,7 +515,7 @@ async fn a_timeout_ends_a_streaming_command_while_the_uplink_takes_nothing() {
     .await;
     let (sid, dir) = running(&node, TALKING).await;
     let ran = Instant::now();
-    node.fill(FLOODERS, Some(sid)).await;
+    node.fill(FEW, Some(sid)).await;
     let filled = ran.elapsed();
     assert!(
         filled + Duration::from_secs(2) < TIMEOUT,

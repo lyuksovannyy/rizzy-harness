@@ -5,13 +5,29 @@
 // nothing; only a confirmed choice goes with the message, once.
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { describe, expect, test } from "vitest";
+import { beforeAll, describe, expect, test } from "vitest";
 import { mayPickHost } from "../lib/execModes";
 import { modeGaps } from "../lib/execWords";
 import type { ExecLevel, NodeInfo } from "../types";
 import { Composer, type Submission } from "./Composer";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+// The choice and its warning are lazy chunks. Their first load (a module
+// transform) took over a second on a loaded runner, past the 500 ms these
+// tests used to poll; load them once here, under the hook's own limit, so
+// each test's waits are for the render, not for the build.
+beforeAll(async () => {
+  await import("./ExecChoice");
+  await import("./HostWarning");
+}, 30_000);
+
+/** `q()` once it finds something, polled for at most `ms`; `null` after. */
+async function until<T>(q: () => T | null, ms = 4000): Promise<T | null> {
+  const by = Date.now() + ms;
+  while (!q() && Date.now() < by) await act(async () => new Promise((r) => setTimeout(r, 10)));
+  return q();
+}
 
 const node = (over: Partial<NodeInfo> = {}): NodeInfo => ({
   node_id: "node-1",
@@ -58,25 +74,17 @@ function mount(workers: NodeInfo[], hostRight: { level: ExecLevel } = { level: "
   set(host.querySelector("textarea")!, "fix the build");
   set(host.querySelector<HTMLInputElement>("input.mono")!, "/home/me/proj");
   const select = () => host.querySelector<HTMLSelectElement>('select[aria-label="How this chat\'s commands run"]');
-  // The choice is its own lazy chunk: wait for it (or for it not to come).
-  const loaded = async () => {
-    for (let i = 0; i < 50 && !select(); i++) {
-      await act(async () => new Promise((r) => setTimeout(r, 10)));
-    }
-    return select();
-  };
-  const dialog = async () => {
-    for (let i = 0; i < 50 && !document.querySelector("dialog.host-warning"); i++) {
-      await act(async () => new Promise((r) => setTimeout(r, 10)));
-    }
-    return document.querySelector<HTMLDialogElement>("dialog.host-warning");
-  };
+  // The choice is its own lazy chunk: wait for it.
+  const loaded = () => until(select);
+  // Or for it not to come: a short look, which can only miss a late one.
+  const absent = () => until(select, 500);
+  const dialog = () => until(() => document.querySelector<HTMLDialogElement>("dialog.host-warning"));
   const button = (d: Element, label: string) =>
     act(() => [...d.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === label)!.click());
   const send = async () => {
     await act(async () => host.querySelector<HTMLButtonElement>("button.send")!.click());
   };
-  return { host, sent, set, select, loaded, dialog, button, send, rerender, unmount: () => act(() => root.unmount()) };
+  return { host, sent, set, select, loaded, absent, dialog, button, send, rerender, unmount: () => act(() => root.unmount()) };
 }
 
 describe("the host shell for a new chat", () => {
@@ -120,6 +128,8 @@ describe("the host shell for a new chat", () => {
     c.unmount();
   });
 
+  // Four composers, each looked at for 500 ms to see the choice does not
+  // come: 2 s of looking alone, so this test has its own limit.
   test("offered only at the host level, and only where the node has a host shell", async () => {
     // N.10a part 2: the choice offers only modes at or below the effective
     // level in the chat's workspace (server admin or not, owner or not).
@@ -130,12 +140,12 @@ describe("the host shell for a new chat", () => {
       [[node({ exec_modes: ["sandbox"] })], { level: "host" }],
     ] as const) {
       const c = mount([...workers], right);
-      expect(await c.loaded()).toBeNull();
+      expect(await c.absent()).toBeNull();
       c.unmount();
     }
     expect(mayPickHost(node({ embedded: true }), { level: "host" })).toBe(true);
     expect(mayPickHost(node(), { level: "sandbox" })).toBe(false);
-  });
+  }, 15_000);
 
   test("a confirmed choice stays with its node when the selection moves on its own", async () => {
     // Review L-j: two nodes offer the host shell; it is confirmed for the

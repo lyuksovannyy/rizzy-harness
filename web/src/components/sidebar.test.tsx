@@ -6,7 +6,7 @@
 // menu's chunk loaded on intent.
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 import type { ProjectSummary } from "../lib/projects";
 import type { Route } from "../lib/routes";
 import type { Features, Me, SessionRow, WorkspaceSummary } from "../types";
@@ -18,6 +18,14 @@ function MenuStub() {
 vi.mock("./AccountMenu", () => ({ default: MenuStub }));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+// `render` imports the sidebar on first use; that first import (its whole
+// module graph, transformed) took 2.2 s of the first test's 5 s on a loaded
+// runner. Load it once here, under the hook's own limit, so each test's
+// time is its own.
+beforeAll(async () => {
+  await import("./Sidebar");
+}, 30_000);
 
 const personal: WorkspaceSummary = {
   workspace_id: "w1",
