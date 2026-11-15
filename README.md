@@ -923,9 +923,30 @@ work as changes against `HEAD`), as bytes: your repository's filters are
 not applied (an LFS repository's files arrive as the real files, line
 endings are not converted). No other chat can reach it, and it is
 deleted when the sub-agent ends. When the sub-agent ends, the files it changed are written into
-the folder; if you or another sub-agent changed one of them meanwhile,
-nothing is written and the agent is told. None of this runs your
-repository's config, hooks, filters or attributes. Sub-agents that only
+the folder. If you or another sub-agent changed one of them meanwhile,
+the two versions are merged file by file the way `git merge` does
+(changes to different parts of a file both land; the delegate card says
+how many files were merged). When the changes overlap, or a file was
+deleted on one side and changed on the other, added on both, a link, a
+binary file or over 1 MiB on both sides, nothing of that sub-agent is
+written, and the agent that delegated gets the list of those files and
+the sub-agent's whole diff (up to 16,000 characters) so it can make the
+changes itself; that result is marked failed and ends by telling the agent
+to apply the changes before it answers you. A file the sub-agent would
+create where you have a file git ignores (your `.env`, if it changed
+`.gitignore`) is treated the same way: yours is never overwritten. Files
+the sub-agent made that the repository ignores (build output, logs) and
+changes to nested repositories are not brought back; the card names them.
+If writing fails partway (a full disk, a read-only folder), the files
+already written are put back; if even that fails, the card says which
+files hold the sub-agent's version and which checkpoint holds the folder
+as it was. A child with more than 500 files changed on both sides, or
+whose merging takes over 60 seconds, is handed back the same way.
+Several sub-agents started in one step work at the same time (each one
+that writes on its own copy) and do not see each other's changes; the
+agents are told to start together only work that is independent. Merging
+needs git 2.43 or newer on the node. None of this runs your repository's config, hooks, filters, merge drivers or
+attributes. Sub-agents that only
 read work in the folder itself. Only the latest 10 checkpoints per folder are kept (`checkpoints_keep`
 in `node.toml`). "Rewind" undoes a turn and everything after it. Before an
 undo or rewind changes a file it saves the folder as it is, your own edits
@@ -1962,7 +1983,16 @@ delays Stop or an approval answer, in that chat or any other.
   one edit without `replace_all` (several edits or every match would change
   lines the agent was not shown), for a file `read` would show (not one it
   refuses as binary), and for an agent that may use `read`. Otherwise, or
-  when the text is not in the file, the refusal says to `read` it.
+  when the text is not in the file, the refusal says to `read` it. In
+  every mode that shows cards (Accept edits, Ask, Ask every call) such a
+  call shows no card: it would be refused whatever you answered, so it is
+  refused before you are asked. It is answered with the file's lines only
+  where a `read` of that file would run right then without a card and is
+  allowed (so not in Ask every call, nor where the node denies `read`);
+  otherwise the refusal shows nothing of the file. An agent without
+  `read` (or on a node that denies it) can change only files it created or
+  wrote in the chat. The `bash`, `read`, `edit` and `write` descriptions
+  the model gets say all of this.
 - If the file changed on disk since then (you edited it, a command or a
   formatter did, another chat did), `write` is refused, and `edit` goes
   ahead only when the text it replaces lies outside the lines that
@@ -2485,7 +2515,10 @@ Agentic sessions can run on other machines. Start the master with a node port
 In Settings → Server → Nodes choose **Create join command** and run the two
 printed commands on the other machine (same binary). That machine needs its own
 `config.toml` (provider + key) and `node.toml` (its workspace roots and
-limits: the node, not the master, decides what may run there). Revoke a node in
+limits: the node, not the master, decides what may run there), and `git` on
+its `PATH`: 2.43 or newer to merge two sub-agents' changes to one file (with
+an older git, a file both changed is handed back to the agent instead,
+nothing is lost). Revoke a node in
 the same place.
 
 Run each node from its own data directory, also a node on the master's own

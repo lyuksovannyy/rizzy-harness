@@ -44,6 +44,7 @@ use tokio::process::Command;
 
 mod at;
 mod diff;
+mod merge;
 mod upkeep;
 mod user_repo;
 
@@ -1302,6 +1303,7 @@ async fn snapshot_within(
 }
 
 pub use diff::turn_diff;
+pub use merge::{Applied, NotApplied, unapplied_text};
 pub use upkeep::{check_kept_packs, gc_in_background, hold, pin_changed, sweep_stale_locks};
 
 /// The line prefix in a snapshot's message that names one left-out
@@ -2700,55 +2702,77 @@ impl SubRepo {
         .await
     }
 
-    /// Write what changed from `base` to `result` into the parent's folder,
-    /// with the restore machinery: the changed files from the shadow's
-    /// blobs, deletions as deletions, nested repositories left alone, every
-    /// path checked to be inside the folder and outside the protected ones,
-    /// every write and delete made relative to directories opened without
-    /// following links (`restore_paths`). All or nothing for the conflict
-    /// check: when the folder changed any of those files since `base` (the
-    /// parent or another sub-agent), nothing is written. Returns how many
-    /// files were written or deleted.
-    pub async fn apply(&self, base: &str, result: &str, child: &str) -> Result<usize, String> {
-        let _guard = APPLY.lock().await;
-        let _busy = hold(&self.repo).await;
-        let diff = restore_diff(&self.repo, result, base).await?;
-        if diff.rows.iter().all(|r| r.gitlink) {
-            return Ok(0);
+    /// Write what changed from `base` to `result` into the parent's folder:
+    /// per file three ways against the folder as it is now, all or nothing
+    /// for the child, with the restore machinery (see [`merge`]).
+    pub async fn apply(
+        &self,
+        base: &str,
+        result: &str,
+        child: &str,
+    ) -> Result<Applied, NotApplied> {
+        merge::apply(&self.repo, base, result, child, merge::Hooks::default()).await
+    }
+
+    /// [`Self::apply`] with test hooks (see [`merge::Hooks`]).
+    #[cfg(test)]
+    pub(crate) async fn apply_with(
+        &self,
+        base: &str,
+        result: &str,
+        child: &str,
+        hooks: merge::Hooks<'_>,
+    ) -> Result<Applied, NotApplied> {
+        merge::apply(&self.repo, base, result, child, hooks).await
+    }
+
+    /// What the child made that its result snapshot leaves out because the
+    /// repository ignores it (a folder of only such files as one entry,
+    /// `dir/`): never brought back, so the parent is told (review of PR
+    /// 118, H3). Read in the shadow with the child's folder as work tree
+    /// and an empty index (git's own ignore rules, as the snapshot reads
+    /// them); its own `.git` is never listed.
+    pub async fn ignored(&self, folder: &ChildFolder) -> Names {
+        if folder.pin.check().is_err() {
+            return Names::default();
         }
-        let now = snapshot(
-            &self.repo,
-            &format!("refs/harness/{child}/now"),
-            "harness: folder before a sub-agent's result",
+        let repo = self.repo.with_root(&folder.path).scratch();
+        let Ok(idx) = fresh_index(&repo).await else {
+            return Names::default();
+        };
+        let _files = IndexFiles(idx.clone());
+        let out = run_raw(
+            &repo,
+            &[
+                "ls-files",
+                "-z",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "--directory",
+            ],
+            Some(&idx),
+            None,
         )
-        .await?;
-        let paths: Vec<String> = diff
-            .rows
-            .iter()
-            .filter(|r| !r.gitlink)
-            .map(|r| String::from_utf8_lossy(&r.path).into_owned())
+        .await
+        .unwrap_or_default();
+        let paths: Vec<Vec<u8>> = out
+            .split(|b| *b == 0)
+            .filter(|p| !p.is_empty())
+            .map(<[u8]>::to_vec)
             .collect();
-        let mut args = vec![
-            "diff",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--name-only",
-            base,
-            now.as_str(),
-            "--",
-        ];
-        args.extend(paths.iter().map(String::as_str));
-        let since = run(&self.repo, &args, None).await?;
-        if !since.is_empty() {
-            return Err(format!(
-                "the folder changed these files while the sub-agent worked: {}",
-                since.lines().collect::<Vec<_>>().join(", ")
-            ));
-        }
-        let plan = restore_plan(&self.repo, &diff, &now, true).await?;
-        secure_blobs(&self.repo, &plan).await?;
-        restore_paths(&self.repo, &plan, WriteLimits::SUB_AGENT).await?;
-        Ok(plan.touched.len())
+        Names::of(&paths)
+    }
+
+    /// The child's changes from `base` to `result`, bounded like a turn's
+    /// diff (for a parent whose child's result was not applied).
+    pub async fn changes(
+        &self,
+        base: &str,
+        result: &str,
+        scrub: &(dyn Fn(&str) -> String + Sync),
+    ) -> Result<harness_protocol::TurnDiff, String> {
+        turn_diff(&self.repo, base, result, scrub).await
     }
 
     /// Keep the shadow's sub-agent snapshots bounded (`keep` groups) and
@@ -3016,7 +3040,7 @@ mod tests {
         );
         std::fs::write(wt.path.join("a.txt"), "changed\n").unwrap();
         let result = sub.result(&wt, "c").await.unwrap();
-        assert_eq!(sub.apply(&base, &result, "c").await.unwrap(), 1);
+        assert_eq!(sub.apply(&base, &result, "c").await.unwrap().written, 1);
         remove_folder(&wt).await;
         assert!(!wt.path.exists() && !wt.dir.exists());
         assert_eq!(
@@ -3345,7 +3369,7 @@ mod tests {
         );
         std::fs::write(wt.path.join("b.txt"), "changed\n").unwrap();
         let result = sub.result(&wt, "c").await.unwrap();
-        assert_eq!(sub.apply(&base, &result, "c").await.unwrap(), 1);
+        assert_eq!(sub.apply(&base, &result, "c").await.unwrap().written, 1);
         remove_folder(&wt).await;
         assert_eq!(h.marked(), Vec::<String>::new());
     }
