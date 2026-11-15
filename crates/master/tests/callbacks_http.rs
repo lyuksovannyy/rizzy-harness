@@ -184,7 +184,7 @@ fn fake_with(
                                 turn_id: "cb".into(),
                                 agent: None,
                                 cause: Some(TurnCause::Callback(bg_ids.clone())),
-                                environment: None,
+                                environment: None, continued_by: None,
                             }), now);
                             if !*held.lock().unwrap() {
                                 send(&mut seqs, *session_id, EventKind::TurnEnded(TurnEnded {
@@ -202,7 +202,7 @@ fn fake_with(
                                 turn_id: "p".into(),
                                 agent: None,
                                 cause: None,
-                                environment: None,
+                                environment: None, continued_by: None,
                             }), now);
                             send(&mut seqs, *session_id, EventKind::UserMessage(harness_core::event::UserMessage {
                                 turn_id: "p".into(),

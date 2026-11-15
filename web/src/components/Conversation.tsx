@@ -551,6 +551,7 @@ export default function Conversation(props: {
                           </ul>
                         )}
                         {!!it.images?.length && <BubbleImages images={it.images} />}
+                        {view.follow_ups?.includes(it.turn_id) && <div className="queued-mark muted">{t("conv.followUp")}</div>}
                         {it.queued && !it.queued.read && (
                           <div className="queued-mark muted" title={t("conv.queuedHint")}>
                             {running ? t("conv.queued") : t("conv.queuedLater")}

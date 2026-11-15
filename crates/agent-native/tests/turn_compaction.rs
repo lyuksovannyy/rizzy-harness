@@ -435,6 +435,7 @@ fn logged(
         agent: None,
         turn_id: turn.into(),
         environment: None,
+        continued_by: None,
     }));
     push(EventKind::UserMessage(UserMessage {
         turn_id: turn.into(),

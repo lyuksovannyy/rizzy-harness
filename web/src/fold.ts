@@ -225,6 +225,8 @@ export function apply(v: SessionView, e: RawEvent): void {
     case "turn_started":
       // A callback turn stands where a person's message would.
       if (p.cause?.callback) v.items.push({ type: "callback", turn_id: p.turn_id, bg_ids: p.cause.callback });
+      // A sub-agent's follow-up from the chat that started it (T68).
+      if (p.continued_by) (v.follow_ups ??= []).push(p.turn_id);
       v.running_turn = p.turn_id;
       v.running_agent = p.agent ?? null;
       break;

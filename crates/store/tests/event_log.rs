@@ -50,6 +50,7 @@ fn script(sid: SessionId, n: u64) -> Vec<RawEvent> {
             agent: None,
             turn_id: "t1".into(),
             environment: None,
+            continued_by: None,
         }),
     ));
     for seq in 3..=n {
@@ -326,6 +327,7 @@ fn expired_incognito_only_selects_idle_incognito() {
                 agent: None,
                 turn_id: "t".into(),
                 environment: None,
+                continued_by: None,
             }),
         ),
     )
@@ -348,6 +350,7 @@ fn a_shown_input_block_needs_attention() {
                 agent: None,
                 turn_id: "t1".into(),
                 environment: None,
+                continued_by: None,
             }),
             EventKind::AssistantMessage(AssistantMessage {
                 turn_id: "t1".into(),
@@ -886,6 +889,7 @@ fn the_watchers_read_of_a_long_last_turn_is_its_ends_only() {
             agent: None,
             cause: None,
             environment: None,
+            continued_by: None,
         }),
     );
     assert_eq!(s.append("n", &started).unwrap(), AppendOutcome::Applied);
@@ -953,6 +957,7 @@ fn the_watchers_read_starts_after_the_persons_turn_not_a_callback_turn() {
                 agent: None,
                 cause,
                 environment: None,
+                continued_by: None,
             }),
         )
     };
@@ -1038,6 +1043,7 @@ fn a_finished_turn_is_unread_until_seen() {
                 agent: None,
                 turn_id: format!("t{from}"),
                 environment: None,
+                continued_by: None,
             }),
             EventKind::AssistantMessage(AssistantMessage {
                 turn_id: format!("t{from}"),

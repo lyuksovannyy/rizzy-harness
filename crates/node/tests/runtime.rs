@@ -748,6 +748,7 @@ async fn recovers_interrupted_turn_on_start() {
                 agent: None,
                 turn_id: "t1".into(),
                 environment: None,
+                continued_by: None,
             }),
             EventKind::ToolCallStarted(ToolCallStarted {
                 author: None,

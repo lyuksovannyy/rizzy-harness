@@ -95,7 +95,7 @@ fn events() -> Vec<RawEvent> {
             cause: None,
             agent: None,
             turn_id: t(),
-            environment: None,
+            environment: None, continued_by: None,
         }),
         EventKind::UserMessage(UserMessage {
             turn_id: t(),
@@ -276,7 +276,7 @@ fn events() -> Vec<RawEvent> {
                 prompt_hash: "h2".into(),
                 withheld: vec![],
             }),
-            environment: Some("[harness] Environment of this turn: the node's clock reads Saturday 2026-11-14 10:32 (Europe/Riga, UTC+02:00).".into()),
+            environment: Some("[harness] Environment of this turn: the node's clock reads Saturday 2026-11-14 10:32 (Europe/Riga, UTC+02:00).".into()), continued_by: None,
         }),
         // The turn's model failed before any output; a fallback answers.
         EventKind::ModelFallback(ModelFallback {
@@ -487,7 +487,7 @@ fn events() -> Vec<RawEvent> {
             turn_id: "t4".into(),
             agent: None,
             cause: Some(TurnCause::Callback(vec!["bg-2".into()])),
-            environment: None,
+            environment: None, continued_by: None,
         }),
         EventKind::AssistantMessage(AssistantMessage {
             author: None,
@@ -650,7 +650,7 @@ fn events() -> Vec<RawEvent> {
             turn_id: "t5".into(),
             agent: None,
             cause: None,
-            environment: None,
+            environment: None, continued_by: None,
         }),
         EventKind::ModelRetry(ModelRetry {
             turn_id: "t5".into(),
@@ -741,11 +741,13 @@ fn events() -> Vec<RawEvent> {
                 .into(),
             }),
         }),
+        // A sub-agent's follow-up from its parent's call (T68).
         EventKind::TurnStarted(TurnStarted {
             turn_id: "t6".into(),
             agent: None,
             cause: None,
             environment: None,
+            continued_by: Some("call-follow-up".into()),
         }),
         EventKind::ContextShortened(ContextShortened {
             turn_id: "t6".into(),

@@ -921,6 +921,7 @@ async fn a_callback_turn_after_a_guard_ended_turn_opens_with_the_ends_only() {
                 agent: None,
                 cause: Some(TurnCause::Callback(vec!["bg-1".into()])),
                 environment: None,
+                continued_by: None,
             }),
         ],
     );

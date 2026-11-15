@@ -19,6 +19,9 @@ export interface AgentRow {
   task: string;
   cut: boolean;
   state: RowState;
+  /** Its runs listed here: a follow-up (`delegate` with `session`, T68)
+   * is the same sub-agent again, one row with its latest call. */
+  runs: number;
 }
 
 export interface CommandRow extends BgRow {
@@ -67,14 +70,20 @@ export function sideItems(view: SessionView | null | undefined, keep: ReadonlySe
     if (i < from && state !== "running") return;
     const output = it.result ? it.result.output : it.live_output;
     const { head, cut } = commandHead(typeof it.input?.task === "string" ? it.input.task : "");
-    agents.push({
+    const child = /session: ([0-9a-f-]{36})/.exec(output)?.[1] ?? null;
+    const row: AgentRow = {
       call_id: it.call_id,
-      child: /session: ([0-9a-f-]{36})/.exec(output)?.[1] ?? null,
+      child,
       agent: typeof it.input?.agent === "string" ? it.input.agent : "?",
       task: head,
       cut,
       state,
-    });
+      runs: 1,
+    };
+    // A follow-up to a child already listed takes its row's place.
+    const at = child ? agents.findIndex((a) => a.child === child) : -1;
+    if (at >= 0) agents[at] = { ...row, runs: agents[at]!.runs + 1 };
+    else agents.push(row);
   });
   const commands: CommandRow[] = [];
   for (const [bg_id, b] of Object.entries(view.background ?? {})) {

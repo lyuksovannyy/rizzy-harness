@@ -467,6 +467,14 @@ pub struct TurnStarted {
     /// (the provider's prompt cache). Written by the node only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment: Option<String>,
+    /// In a sub-agent's log: the parent's `delegate` call that sent this
+    /// turn's message as a follow-up to the sub-agent it had already run
+    /// (PLAN.md T68). Absent for a sub-agent's first turn and every other
+    /// turn. Written by the node only, after it checked the sub-agent is
+    /// the calling session's own; the parent is `session_created`'s
+    /// `parent_session`. Not a `cause`: the turn has its `user_message`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continued_by: Option<String>,
 }
 
 /// What started a turn that no person's message started.
@@ -1919,6 +1927,7 @@ mod tests {
                 turn_id: "t".into(),
                 agent: Some(agent.clone()),
                 environment: None,
+                continued_by: None,
             }),
             EventKind::AssistantMessage(AssistantMessage {
                 turn_id: "t".into(),
@@ -2127,6 +2136,7 @@ mod tests {
                 agent: None,
                 turn_id: "t1".into(),
                 environment: None,
+                continued_by: None,
             })
         );
     }
@@ -2240,6 +2250,7 @@ mod background_note_tests {
             agent: None,
             cause: Some(TurnCause::Callback(vec!["bg-1".into(), "bg-3".into()])),
             environment: None,
+            continued_by: None,
         });
         let (kind, payload) = k.clone().into_parts();
         assert_eq!(
@@ -2314,6 +2325,7 @@ mod background_note_tests {
                 cause: cause
                     .map(|c| TurnCause::Callback(c.into_iter().map(String::from).collect())),
                 environment: None,
+                continued_by: None,
             })
         };
         let ids = |log: &[RawEvent]| -> Vec<String> {

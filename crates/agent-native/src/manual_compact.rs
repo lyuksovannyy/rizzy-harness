@@ -254,6 +254,7 @@ mod tests {
                 agent: None,
                 cause: None,
                 environment: None,
+                continued_by: None,
             }),
             EventKind::UserMessage(UserMessage {
                 turn_id: id.into(),

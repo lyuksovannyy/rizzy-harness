@@ -181,6 +181,36 @@ pub const NOT_APPLIED_LAST: &str = "[The sub-agent's changes are not in the fold
      them: apply them yourself now with your own tools, or delegate them again in a later \
      step, before you answer the person.]";
 
+/// The most runs one sub-agent has: its first and its follow-ups (PLAN.md
+/// T68). Each follow-up sends its whole conversation again, so a child
+/// asked over and over costs more than a fresh one; past this the parent
+/// starts a new one with a complete brief.
+pub const MAX_CHILD_RUNS: usize = 8;
+
+/// The harness's line in a follow-up's opening for a sub-agent that works
+/// in its parent's folder (one that only reads): what it saw may be out of
+/// date. Recorded in its `turn_started` (the environment line), so every
+/// later request rebuilds it byte for byte.
+pub const FOLLOW_UP_READS: &str = "[harness] This message is a follow-up from the agent that \
+     started you; your earlier work above is from an earlier run. The folder may have changed \
+     since then: read a file again before you rely on what you saw.";
+
+/// The same for a sub-agent that changes files: it works in a fresh copy of
+/// its parent's folder as that folder is now, not in the copy it had.
+/// `applied`: whether its last run's changes were applied to that folder.
+pub fn follow_up_writes(applied: bool) -> String {
+    let changes = if applied {
+        "your earlier changes were applied to it, and it may have changed since"
+    } else {
+        "your earlier changes were NOT applied to it, so they are not in this copy"
+    };
+    format!(
+        "[harness] This message is a follow-up from the agent that started you; your earlier \
+         work above is from an earlier run. You now work in a fresh copy of its folder as it is \
+         now ({changes}): read a file again before you edit it or rely on what you saw."
+    )
+}
+
 /// The status the parent sees: `failed` for a turn that did not complete,
 /// whatever it reported; else the child's own, when it called `finish`, or
 /// `done`.

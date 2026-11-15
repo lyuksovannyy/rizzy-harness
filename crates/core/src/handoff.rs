@@ -280,6 +280,7 @@ mod tests {
             agent: None,
             cause: None,
             environment: None,
+            continued_by: None,
         })
     }
 
