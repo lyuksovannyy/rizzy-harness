@@ -547,6 +547,249 @@ async fn a_failed_put_back_says_what_was_written() {
     );
 }
 
+// ---- From the re-check of PR 118 ----
+
+/// Every file, folder and link under `root` but `.git`: kind, mode and
+/// content, so a leftover empty folder or a changed mode shows.
+fn tree(root: &Path) -> std::collections::BTreeMap<String, String> {
+    use std::os::unix::fs::PermissionsExt;
+    walkdir::WalkDir::new(root)
+        .min_depth(1)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| e.file_name() != ".git")
+        .map(|e| e.unwrap())
+        .map(|e| {
+            let rel = e.path().strip_prefix(root).unwrap().display().to_string();
+            let t = e.file_type();
+            let what = if t.is_dir() {
+                "folder".to_string()
+            } else if t.is_symlink() {
+                format!("link {}", std::fs::read_link(e.path()).unwrap().display())
+            } else {
+                let mode = e.metadata().unwrap().permissions().mode() & 0o777;
+                format!("{mode:o} {}", std::fs::read_to_string(e.path()).unwrap())
+            };
+            (rel, what)
+        })
+        .collect()
+}
+
+/// RC1: the put-back after a failed write restored every path the write
+/// meant to change from the snapshot before it, with no look at the disk,
+/// so a file the person edited between the failure and the put-back was
+/// reverted and the outcome still said "put back as they were". Now only
+/// what still holds the child's version is put back; a file that changed
+/// meanwhile is left as it is and named.
+#[tokio::test]
+async fn a_put_back_leaves_what_changed_after_the_failed_write() {
+    use std::os::unix::fs::PermissionsExt;
+    let l = layout();
+    commit_file(&l, b"m.txt", b"m\n");
+    commit_file(&l, b"zz.txt", b"zz\n");
+    let (sub, base, c) = child_of(&l, "rc1").await;
+    std::fs::write(c.path.join("a.txt"), "child\n").unwrap();
+    std::fs::write(c.path.join("m.txt"), "child m\n").unwrap();
+    std::fs::create_dir(c.path.join("z")).unwrap();
+    std::fs::write(c.path.join("z/b.txt"), "child b\n").unwrap();
+    std::fs::write(c.path.join("zz.txt"), "child zz\n").unwrap();
+    let result = sub.result(&c, "rc1").await.unwrap();
+    std::fs::create_dir(l.proj.join("z")).unwrap();
+    std::fs::set_permissions(l.proj.join("z"), std::fs::Permissions::from_mode(0o555)).unwrap();
+    // `a.txt` was written by the child, `zz.txt` never reached; the person
+    // edits both before the put-back.
+    let (a, zz) = (l.proj.join("a.txt"), l.proj.join("zz.txt"));
+    let person = move || {
+        std::fs::write(&a, "person a\n").unwrap();
+        std::fs::write(&zz, "person\n").unwrap();
+    };
+    let r = sub
+        .apply_with(
+            &base,
+            &result,
+            "rc1",
+            merge::Hooks {
+                before_put_back: Some(&person),
+                ..Default::default()
+            },
+        )
+        .await;
+    std::fs::set_permissions(l.proj.join("z"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let read = |p: &str| std::fs::read_to_string(l.proj.join(p)).unwrap();
+    assert_eq!(read("zz.txt"), "person\n", "the put-back overwrote an edit");
+    assert_eq!(
+        read("a.txt"),
+        "person a\n",
+        "the put-back overwrote an edit"
+    );
+    assert_eq!(read("m.txt"), "m\n", "the child's file was put back");
+    match &r {
+        Err(e @ NotApplied::Failed(t)) => {
+            assert!(e.nothing_written(), "{t}");
+            assert!(
+                t.contains("put back as they were: `m.txt`")
+                    && t.contains("left as they are: `a.txt`, `zz.txt`"),
+                "{t}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// What the re-check did not reach: the put-back removes the files and
+/// folders the failed write made (and only those), restores a mode the
+/// write changed, and the turn's Undo afterwards still puts the folder
+/// back exactly as it was before the turn.
+#[tokio::test]
+async fn a_put_back_removes_only_what_the_failed_write_made_and_undo_is_exact() {
+    use std::os::unix::fs::PermissionsExt;
+    let l = layout();
+    commit_file(&l, b"m.sh", b"m\n");
+    std::fs::create_dir(l.proj.join("keep")).unwrap();
+    commit_file(&l, b"keep/k.txt", b"k\n");
+    let turn = checkpoint_repo(&l.proj, Some(&l.base), &l.bounds)
+        .await
+        .unwrap()
+        .unwrap();
+    // The person's own empty folder `z`, read-only: the write fails there.
+    std::fs::create_dir(l.proj.join("z")).unwrap();
+    std::fs::set_permissions(l.proj.join("z"), std::fs::Permissions::from_mode(0o555)).unwrap();
+    let start = tree(&l.proj);
+    let before = snapshot(&turn, "refs/harness/s/t/before", "b")
+        .await
+        .unwrap();
+    let (sub, base, c) = child_of(&l, "rc6").await;
+    // The parent's own change in the same turn.
+    std::fs::write(l.proj.join("keep/k.txt"), "parent\n").unwrap();
+    std::fs::create_dir_all(c.path.join("a/b")).unwrap();
+    std::fs::write(c.path.join("a/b/new.txt"), "new\n").unwrap();
+    std::fs::write(c.path.join("keep/n.txt"), "n\n").unwrap();
+    std::fs::set_permissions(c.path.join("m.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::create_dir(c.path.join("z")).unwrap();
+    std::fs::write(c.path.join("z/b.txt"), "child b\n").unwrap();
+    let result = sub.result(&c, "rc6").await.unwrap();
+    let r = sub.apply(&base, &result, "rc6").await;
+    match &r {
+        Err(e @ NotApplied::Failed(t)) => assert!(
+            e.nothing_written()
+                && t.contains("put back as they were: `a/b/new.txt`, `keep/n.txt`, `m.sh`"),
+            "{t}"
+        ),
+        other => panic!("{other:?}"),
+    }
+    let mut want = start.clone();
+    want.insert("keep/k.txt".into(), "644 parent\n".into());
+    assert_eq!(tree(&l.proj), want, "exactly the folder before the write");
+    let after = snapshot(&turn, "refs/harness/s/t/after", "a")
+        .await
+        .unwrap();
+    restore(&turn, &before, &after, false).await.unwrap();
+    std::fs::set_permissions(l.proj.join("z"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(tree(&l.proj), start, "Undo put the folder back exactly");
+}
+
+/// RC2: a child that replaces a tracked folder by a file of the same name
+/// was refused with "a file of yours that git ignores is in the way" (the
+/// folder the plan itself empties). It lands.
+#[tokio::test]
+async fn a_child_replacing_a_folder_by_a_file_lands() {
+    let l = layout();
+    std::fs::create_dir(l.proj.join("d")).unwrap();
+    commit_file(&l, b"d/x", b"x\n");
+    let (sub, base, c) = child_of(&l, "rc2").await;
+    std::fs::remove_file(c.path.join("d/x")).unwrap();
+    std::fs::remove_dir(c.path.join("d")).unwrap();
+    std::fs::write(c.path.join("d"), "file\n").unwrap();
+    let result = sub.result(&c, "rc2").await.unwrap();
+    let r = sub.apply(&base, &result, "rc2").await;
+    assert_eq!(r.unwrap().written, 2);
+    assert_eq!(std::fs::read_to_string(l.proj.join("d")).unwrap(), "file\n");
+}
+
+/// The same, and the folder also holds an ignored file of the person's:
+/// that file is in the way, named; nothing is written and it stays.
+#[tokio::test]
+async fn a_child_replacing_a_folder_with_an_ignored_file_in_it_is_a_conflict() {
+    let l = layout();
+    commit_file(&l, b".gitignore", b"*.log\n");
+    std::fs::create_dir(l.proj.join("d")).unwrap();
+    commit_file(&l, b"d/x", b"x\n");
+    std::fs::write(l.proj.join("d/keep.log"), "person\n").unwrap();
+    let (sub, base, c) = child_of(&l, "rc2b").await;
+    std::fs::remove_file(c.path.join("d/x")).unwrap();
+    std::fs::remove_dir(c.path.join("d")).unwrap();
+    std::fs::write(c.path.join("d"), "file\n").unwrap();
+    let result = sub.result(&c, "rc2b").await.unwrap();
+    let r = sub.apply(&base, &result, "rc2b").await;
+    assert_eq!(
+        r,
+        Err(NotApplied::Conflict(vec![(
+            "d/keep.log".into(),
+            "a file of yours that git ignores is in the way"
+        )]))
+    );
+    assert_eq!(std::fs::read_to_string(l.proj.join("d/x")).unwrap(), "x\n");
+    assert_eq!(
+        std::fs::read_to_string(l.proj.join("d/keep.log")).unwrap(),
+        "person\n"
+    );
+}
+
+/// A dangling, ignored link in the way is a conflict and stays.
+#[tokio::test]
+async fn a_dangling_ignored_link_in_the_way_is_a_conflict() {
+    let l = layout();
+    commit_file(&l, b".gitignore", b".env\n");
+    std::os::unix::fs::symlink("/nonexistent-rc3-target", l.proj.join(".env")).unwrap();
+    let (sub, base, c) = child_of(&l, "rc3").await;
+    std::fs::write(c.path.join(".gitignore"), "").unwrap();
+    std::fs::write(c.path.join(".env"), "CHILD=1\n").unwrap();
+    let result = sub.result(&c, "rc3").await.unwrap();
+    let r = sub.apply(&base, &result, "rc3").await;
+    assert!(matches!(r, Err(NotApplied::Conflict(_))), "{r:?}");
+    assert_eq!(
+        std::fs::read_link(l.proj.join(".env")).unwrap(),
+        Path::new("/nonexistent-rc3-target")
+    );
+}
+
+/// Blob content that looks like `cat-file --batch` headers does not
+/// desynchronise the reader; a clean three-way merge still lands.
+#[tokio::test]
+async fn batch_header_lookalikes_in_content_merge_cleanly() {
+    let l = layout();
+    let fake = "0123456789012345678901234567890123456789 blob 2\n";
+    let body = |a: &str, z: &str| format!("{a}\n{fake}1\n2\n3\n{fake}4\n5\n6\n{fake}{z}\n");
+    commit_file(&l, b"f.txt", body("a", "z").as_bytes());
+    let (sub, base, c) = child_of(&l, "rc4").await;
+    std::fs::write(c.path.join("f.txt"), body("a", "CHILD")).unwrap();
+    let result = sub.result(&c, "rc4").await.unwrap();
+    std::fs::write(l.proj.join("f.txt"), body("FOLDER", "z")).unwrap();
+    let a = sub.apply(&base, &result, "rc4").await.unwrap();
+    assert_eq!(a.written, 1);
+    assert_eq!(
+        std::fs::read_to_string(l.proj.join("f.txt")).unwrap(),
+        body("FOLDER", "CHILD")
+    );
+}
+
+/// An ordinary new file in a new folder still lands (no false positive of
+/// the in-the-way check).
+#[tokio::test]
+async fn an_ordinary_new_file_lands() {
+    let l = layout();
+    let (sub, base, c) = child_of(&l, "rc5").await;
+    std::fs::create_dir(c.path.join("n")).unwrap();
+    std::fs::write(c.path.join("n/new.txt"), "n\n").unwrap();
+    let result = sub.result(&c, "rc5").await.unwrap();
+    let r = sub.apply(&base, &result, "rc5").await;
+    assert_eq!(r.unwrap().written, 1);
+    assert_eq!(
+        std::fs::read_to_string(l.proj.join("n/new.txt")).unwrap(),
+        "n\n"
+    );
+}
+
 /// A child that un-ignores a path and creates it there (review of PR 118
 /// H3): the person's ignored file is in the way, a conflict; nothing of
 /// the child is written and the file keeps its content.

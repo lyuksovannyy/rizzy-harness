@@ -350,17 +350,18 @@ pub(super) async fn apply(
         .await
         .map_err(failed)?;
     secure_blobs(repo, &plan).await.map_err(failed)?;
+    let made = missing_dirs(repo, &plan).await;
     if let Err(e) = restore_paths(repo, &plan, WriteLimits::SUB_AGENT).await {
         // Not atomic across files: what was written is put back from the
         // snapshot taken right before, so "nothing was written" is true
-        // (review of PR 118, H2).
+        // (review of PR 118, H2), and only what still holds the child's
+        // version: a file changed since the failure is someone else's
+        // (re-check of PR 118, RC1).
         if let Some(f) = hooks.before_put_back {
             f();
         }
-        return Err(match put_back(repo, &again, &target, child).await {
-            Ok(()) => failed(format!(
-                "{e}; the files written before that were put back as they were"
-            )),
+        return Err(match put_back(repo, &again, &target, child, &made).await {
+            Ok(done) => failed(done.text(&e)),
             Err(put_back) => {
                 let touched: HashSet<&[u8]> = diff.rows.iter().map(|r| r.path.as_slice()).collect();
                 let written = match snapshot(
@@ -396,27 +397,143 @@ pub(super) async fn apply(
     })
 }
 
-/// Put back every path `target` changed against `again` (the folder right
-/// before the write) as `again` holds it.
-async fn put_back(repo: &Repo, again: &str, target: &str, child: &str) -> Result<(), String> {
-    let d = restore_diff(repo, again, target).await?;
+/// What a put-back after a failed write did.
+struct PutBack {
+    /// Files that held the child's version and were put back.
+    put: Vec<Vec<u8>>,
+    /// Files that held neither the child's version nor the one from before
+    /// the write: changed by someone else after the failure, left alone.
+    left: Vec<Vec<u8>>,
+}
+
+impl PutBack {
+    /// The outcome for the parent and the person, after the write's error.
+    fn text(&self, error: &str) -> String {
+        let mut s = if self.put.is_empty() {
+            format!("{error}; nothing of it was in the folder, so nothing needed putting back")
+        } else {
+            format!(
+                "{error}; the files written before that were put back as they were: {}",
+                Names::of(&self.put).listed()
+            )
+        };
+        if !self.left.is_empty() {
+            s.push_str(&format!(
+                "; these files changed in the folder after the write failed and were left as \
+                 they are: {}",
+                Names::of(&self.left).listed()
+            ));
+        }
+        s
+    }
+}
+
+/// Put back what the failed write left of the child: of the paths `target`
+/// changed against `again` (the folder right before the write), those the
+/// folder holds as `target` does now are put back as `again` holds them; a
+/// path already as in `again` needs nothing; a path that is neither was
+/// changed by someone else after the failure and is left alone (and named).
+/// Then the folders the write made (`made`, missing before it) above a file
+/// put back are removed when empty.
+async fn put_back(
+    repo: &Repo,
+    again: &str,
+    target: &str,
+    child: &str,
+    made: &[Vec<u8>],
+) -> Result<PutBack, String> {
+    let mut d = restore_diff(repo, again, target).await?;
     let now = snapshot(
         repo,
         &format!("refs/harness/{child}/failed"),
         "harness: folder after a sub-agent write failed partway",
     )
     .await?;
-    let plan = restore_plan(repo, &d, &now, false).await?;
+    // The folder now where it is not as the write meant to leave it.
+    let off: HashMap<Vec<u8>, Side> = diff_raw(repo, target, &now)
+        .await?
+        .into_iter()
+        .map(|r| (r.path.clone(), Side::new(&r)))
+        .collect();
+    let mut left = Vec::new();
+    d.rows.retain(|r| match off.get(&r.path) {
+        None => true,
+        Some(n) if *n == Side::old(r) => false,
+        Some(_) => {
+            left.push(r.path.clone());
+            false
+        }
+    });
+    // Checked: every path kept holds `target`'s version in `now`, and a
+    // folder the put-back would replace by a file is not emptied of a file
+    // no snapshot holds.
+    let plan = restore_plan(repo, &d, &now, true).await?;
     secure_blobs(repo, &plan).await?;
-    restore_paths(repo, &plan, WriteLimits::UNDO)
+    restore_paths(repo, &plan, WriteLimits::UNDO).await?;
+    let put: Vec<Vec<u8>> = d
+        .rows
+        .iter()
+        .filter(|r| !r.gitlink)
+        .map(|r| r.path.clone())
+        .collect();
+    // Folders the write made: above a file it created that was just
+    // deleted again. Deepest first; one that holds anything stays.
+    let created: Vec<&[u8]> = d
+        .rows
+        .iter()
+        .filter(|r| !r.gitlink && Side::old(r).absent())
+        .map(|r| r.path.as_slice())
+        .collect();
+    let made: HashSet<&[u8]> = made.iter().map(Vec::as_slice).collect();
+    let mut empty: Vec<Vec<u8>> = created
+        .iter()
+        .flat_map(|p| parents(p))
+        .filter(|d| made.contains(d))
+        .map(<[u8]>::to_vec)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    empty.sort_by_key(|d| std::cmp::Reverse(d.len()));
+    if !empty.is_empty() {
+        let root = repo.root.clone();
+        tokio::task::spawn_blocking(move || {
+            let top = super::at::Top::open(&root)?;
+            for d in &empty {
+                top.remove_empty_dir(&rel_path(d))?;
+            }
+            Ok::<_, String>(())
+        })
         .await
-        .map(|_| ())
+        .map_err(|e| e.to_string())??;
+    }
+    Ok(PutBack { put, left })
+}
+
+/// The folders above a path `plan` writes that are not on disk: the write
+/// makes them.
+async fn missing_dirs(repo: &Repo, plan: &super::RestorePlan) -> Vec<Vec<u8>> {
+    let root = repo.root.clone();
+    let dirs: HashSet<Vec<u8>> = plan
+        .writes
+        .iter()
+        .flat_map(|(_, _, p)| parents(p).map(<[u8]>::to_vec))
+        .collect();
+    tokio::task::spawn_blocking(move || {
+        dirs.into_iter()
+            .filter(|d| std::fs::symlink_metadata(root.join(rel_path(d))).is_err())
+            .collect()
+    })
+    .await
+    .unwrap_or_default()
 }
 
 /// The paths of `rows` (a restore of the target over the folder's
 /// snapshot) that the snapshot does not hold (`new` side absent) but that
 /// are on disk, or below a parent that is on disk as something other than
-/// a folder: files no snapshot holds, which the write would replace.
+/// a folder: files no snapshot holds, which the write would replace. A
+/// folder on disk where the plan writes a file (the child replaced a folder
+/// by a file) is in the way only through what it holds that the plan does
+/// not delete: those files are named (re-check of PR 118, RC2).
 async fn ignored_in_the_way(repo: &Repo, rows: &[DiffRow]) -> Vec<Vec<u8>> {
     let root = repo.root.clone();
     let added: Vec<Vec<u8>> = rows
@@ -430,18 +547,48 @@ async fn ignored_in_the_way(repo: &Repo, rows: &[DiffRow]) -> Vec<Vec<u8>> {
     // A parent the plan itself deletes (a file the child replaced by a
     // folder) is not in the way.
     let planned: HashSet<Vec<u8>> = rows.iter().map(|r| r.path.clone()).collect();
+    // What the plan deletes (the target does not have it).
+    let deleted: HashSet<Vec<u8>> = rows
+        .iter()
+        .filter(|r| Side::old(r).absent())
+        .map(|r| r.path.clone())
+        .collect();
     tokio::task::spawn_blocking(move || {
-        added
-            .into_iter()
-            .filter(|p| {
-                std::fs::symlink_metadata(root.join(rel_path(p))).is_ok()
-                    || parents(p).any(|d| {
-                        !planned.contains(d)
-                            && std::fs::symlink_metadata(root.join(rel_path(d)))
-                                .is_ok_and(|m| !m.is_dir())
-                    })
-            })
-            .collect()
+        let mut out = Vec::new();
+        for p in added {
+            let at = root.join(rel_path(&p));
+            match std::fs::symlink_metadata(&at) {
+                Ok(m) if m.is_dir() => {
+                    out.extend(
+                        walkdir::WalkDir::new(&at)
+                            .follow_links(false)
+                            .into_iter()
+                            .filter_map(|e| e.ok())
+                            .filter(|e| !e.file_type().is_dir())
+                            .filter_map(|e| {
+                                let rel = e.path().strip_prefix(&root).ok()?;
+                                Some(super::path_bytes(rel))
+                            })
+                            .filter(|f| !deleted.contains(f)),
+                    );
+                    continue;
+                }
+                Ok(_) => {
+                    out.push(p);
+                    continue;
+                }
+                Err(_) => {}
+            }
+            if parents(&p).any(|d| {
+                !planned.contains(d)
+                    && std::fs::symlink_metadata(root.join(rel_path(d))).is_ok_and(|m| !m.is_dir())
+            }) {
+                out.push(p);
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
     })
     .await
     .unwrap_or_default()
