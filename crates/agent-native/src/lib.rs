@@ -280,15 +280,6 @@ impl harness_core::backend::TurnHost for Logged<'_> {
     }
 }
 
-/// The record of the block a turn's opening carried (X.1).
-fn context_sent(turn_id: &str, plan: &context::Plan) -> EventKind {
-    EventKind::ContextSent(harness_core::event::ContextSent {
-        turn_id: turn_id.to_string(),
-        text: plan.text.clone(),
-        sections: plan.marks.clone(),
-    })
-}
-
 /// What the loop returns when an append failed; `run_turn` replaces the
 /// error with the log's.
 fn stopped(usage: Usage) -> TurnOutcome {
@@ -930,7 +921,13 @@ fn parse_effort(s: &str) -> Option<Effort> {
 /// got a result (interrupted turns) get a synthetic one so the transcript stays
 /// valid for providers that require every call to be answered.
 pub fn history_to_messages(history: &[RawEvent]) -> Vec<ChatMsg> {
-    messages_of(history, false, true)
+    rebuild(
+        history,
+        &Rebuild {
+            blocks: true,
+            ..Default::default()
+        },
+    )
 }
 
 /// [`history_to_messages`] for what a summary replaces (review ST-1): a
@@ -944,30 +941,94 @@ pub fn history_to_messages(history: &[RawEvent]) -> Vec<ChatMsg> {
 /// conversation, and the first turn after it sends every standing section
 /// again.
 pub fn summary_messages(history: &[RawEvent]) -> Vec<ChatMsg> {
-    messages_of(history, true, false)
+    rebuild(
+        history,
+        &Rebuild {
+            unread_too: true,
+            ..Default::default()
+        },
+    )
 }
 
-fn messages_of(history: &[RawEvent], unread_too: bool, blocks: bool) -> Vec<ChatMsg> {
+/// What a summary replaces, as the requests carry it (blocks included):
+/// what compaction sizes, while the transcript is [`summary_messages`].
+fn sized(history: &[RawEvent]) -> Vec<ChatMsg> {
+    rebuild(
+        history,
+        &Rebuild {
+            unread_too: true,
+            blocks: true,
+            ..Default::default()
+        },
+    )
+}
+
+/// How [`rebuild`] builds the provider conversation from a log.
+#[derive(Debug, Clone, Default)]
+pub struct Rebuild<'a> {
+    /// Queued messages never read go at the end ([`summary_messages`]).
+    pub unread_too: bool,
+    /// Each turn's opening carries its context block (`context_sent`,
+    /// X.1); the summariser's transcript leaves them out.
+    pub blocks: bool,
+    /// Standing sections the turn being built sends or withdraws: no
+    /// earlier opening keeps its copy (T52).
+    pub superseded: HashSet<context::SectionKey>,
+    /// The agent the request is for: another agent's earlier answers are
+    /// marked with its name.
+    pub agent: Option<&'a str>,
+}
+
+/// The harness's line in front of an earlier answer of another agent of
+/// the chat, so the agent answering now does not take it for its own.
+fn other_agent_line(name: &str) -> String {
+    format!(
+        "[harness] This answer is from another agent of this chat, \"{}\", not from you.",
+        harness_core::event::shown_name(name)
+    )
+}
+
+/// The harness's note after a message whose turn ended before any answer.
+fn unanswered_note(reason: TurnEndReason) -> String {
+    let how = match reason {
+        TurnEndReason::Error => "ended with an error",
+        TurnEndReason::Interrupted => "was cut off when the node stopped",
+        _ => "was stopped",
+    };
+    format!(
+        "[harness] The message above got no answer: its turn {how} before you replied. A \
+         message after it may ask the same again."
+    )
+}
+
+/// The provider conversation from a session log, as `how` says.
+pub fn rebuild(history: &[RawEvent], how: &Rebuild<'_>) -> Vec<ChatMsg> {
     // Parallel answers: only the chosen one (default: the first) is history.
     let mut chosen: std::collections::HashMap<String, String> = Default::default();
-    // The context block each turn's opening carried, its last record
-    // (`context_sent`, X.1), and the turns that have a person's message.
-    let mut block_of: std::collections::HashMap<String, String> = Default::default();
+    // The turns that have a person's message, and the agents' names.
     let mut with_message: HashSet<String> = HashSet::new();
+    let mut names: std::collections::HashMap<String, String> = Default::default();
     for e in history {
         match e.typed() {
             Ok(EventKind::VariantSelected(v)) => {
                 chosen.insert(v.group, v.message_id);
             }
-            Ok(EventKind::ContextSent(c)) if blocks => {
-                block_of.insert(c.turn_id, c.text);
-            }
             Ok(EventKind::UserMessage(m)) if !m.queued => {
                 with_message.insert(m.turn_id);
+            }
+            Ok(EventKind::TurnStarted(TurnStarted { agent: Some(a), .. })) => {
+                names.insert(a.agent_id, a.name);
             }
             _ => {}
         }
     }
+    // The context block each turn's opening carries (X.1, T52).
+    let block_of = if how.blocks {
+        context::blocks(history, &how.superseded)
+    } else {
+        Default::default()
+    };
+    let block = |turn: &str| block_of.get(turn).cloned().flatten();
     let keep = |m: &AssistantMessage| match &m.variant {
         None => true,
         Some(v) => match chosen.get(&v.group) {
@@ -992,6 +1053,8 @@ fn messages_of(history: &[RawEvent], unread_too: bool, blocks: bool) -> Vec<Chat
     // environment line `turn_started` recorded for it: their message, or,
     // in a turn that only reads queued messages, the last of those.
     let mut opening: Option<(String, Option<String>)> = None;
+    // The turn whose opening was built, and whether anything answered it.
+    let mut opened: Option<(String, bool)> = None;
     for e in history {
         let Ok(k) = e.typed() else { continue };
         match k {
@@ -1004,9 +1067,10 @@ fn messages_of(history: &[RawEvent], unread_too: bool, blocks: bool) -> Vec<Chat
                     .take()
                     .filter(|(turn, _)| *turn == m.turn_id)
                     .and_then(|(_, l)| l);
-                let block = block_of.get(&m.turn_id).map(String::as_str);
-                let text = context::opening(env.as_deref(), block, &m.model_text());
+                let b = block(&m.turn_id);
+                let text = context::opening(env.as_deref(), b.as_deref(), &m.model_text());
                 out.push(images::user_msg(text, &m.images));
+                opened = Some((m.turn_id, false));
             }
             // As the loop added them when it took them (`queued_msg`); the
             // last one opens a turn that has no message of its own, as the
@@ -1030,22 +1094,41 @@ fn messages_of(history: &[RawEvent], unread_too: bool, blocks: bool) -> Vec<Chat
                 }
                 if let Some(m) = last {
                     close_open(&mut out, &mut open);
-                    let block = block_of.get(&d.turn_id).map(String::as_str);
+                    let b = block(&d.turn_id);
                     let text = context::opening(
                         env.as_deref(),
-                        block,
+                        b.as_deref(),
                         &harness_core::event::queued_text(&m.model_text()),
                     );
                     out.push(images::user_msg(text, &m.images));
+                    opened = Some((d.turn_id, false));
                 }
             }
             EventKind::AssistantMessage(m) if !keep(&m) => {}
             EventKind::AssistantMessage(m) => {
                 close_open(&mut out, &mut open);
+                if let Some((turn, answered)) = &mut opened
+                    && *turn == m.turn_id
+                {
+                    *answered = true;
+                }
                 open = m.tool_calls.iter().map(|c| c.call_id.clone()).collect();
                 if !m.text.is_empty() || !m.tool_calls.is_empty() {
+                    // Another agent's answer says whose it is (only in a
+                    // chat more than one agent answers in).
+                    let text = match (&m.author, how.agent) {
+                        (Some(a), Some(now)) if a != now => {
+                            let line = other_agent_line(names.get(a).unwrap_or(a));
+                            if m.text.is_empty() {
+                                line
+                            } else {
+                                format!("{line}\n\n{}", m.text)
+                            }
+                        }
+                        _ => m.text,
+                    };
                     out.push(ChatMsg::Assistant {
-                        text: m.text,
+                        text,
                         tool_calls: m.tool_calls,
                     });
                 }
@@ -1068,6 +1151,21 @@ fn messages_of(history: &[RawEvent], unread_too: bool, blocks: bool) -> Vec<Chat
                     out.push(ChatMsg::Note(n));
                 }
             }
+            // A message nothing answered (the provider refused the key,
+            // the person stopped it at once) says so where its turn ended,
+            // so the next message, often the same again, reads as a retry.
+            EventKind::TurnEnded(t) => {
+                if let Some((turn, false)) = &opened
+                    && *turn == t.turn_id
+                    && !matches!(t.reason, TurnEndReason::Completed | TurnEndReason::Limit)
+                {
+                    close_open(&mut out, &mut open);
+                    out.push(ChatMsg::Note(unanswered_note(t.reason)));
+                }
+                if opened.as_ref().is_some_and(|(turn, _)| *turn == t.turn_id) {
+                    opened = None;
+                }
+            }
             // A callback turn has no `user_message`: its opening stands
             // where one would, built as the loop built it (T.8d step 3),
             // its block and environment line after it.
@@ -1081,9 +1179,9 @@ fn messages_of(history: &[RawEvent], unread_too: bool, blocks: bool) -> Vec<Chat
                 opening = None;
                 provider::open_callback(&mut out, c.callback_ids());
                 if let Some(ChatMsg::Opening(t)) = out.last_mut() {
-                    let block = block_of.get(&turn_id).map(String::as_str);
-                    context::after_callback(t, block, environment.as_deref());
+                    context::after_callback(t, block(&turn_id).as_deref(), environment.as_deref());
                 }
+                opened = Some((turn_id, false));
             }
             EventKind::TurnStarted(t) => {
                 opening = Some((t.turn_id, t.environment));
@@ -1092,7 +1190,7 @@ fn messages_of(history: &[RawEvent], unread_too: bool, blocks: bool) -> Vec<Chat
         }
     }
     close_open(&mut out, &mut open);
-    if unread_too {
+    if how.unread_too {
         let mut left: Vec<(u64, UserMessage)> = queued.into_iter().collect();
         left.sort_by_key(|(seq, _)| *seq);
         out.extend(left.iter().map(|(_, m)| queued_msg(m)));
@@ -1154,6 +1252,7 @@ fn observed_text(
     messages: &[ChatMsg],
     trusted: &HashSet<String>,
     current: Option<(usize, &str)>,
+    child: bool,
 ) -> Vec<String> {
     messages
         .iter()
@@ -1162,9 +1261,13 @@ fn observed_text(
             ChatMsg::Tool { call_id, content } => {
                 trusted.contains(call_id).then(|| content.clone())
             }
-            other => other.user_text().map(|t| match current {
-                Some((idx, own)) if idx == i => own.to_string(),
-                _ => context::earlier_own_words(t).to_string(),
+            other => other.user_text().and_then(|t| match current {
+                Some((idx, own)) if idx == i => Some(own.to_string()),
+                // In a sub-agent's session every "user" message is a task
+                // from the agent that delegated, never the person's words
+                // (review R7).
+                _ if child => None,
+                _ => Some(context::earlier_own_words(t).to_string()),
             }),
         })
         .collect()
@@ -1546,34 +1649,6 @@ impl NativeBackend {
                 .tools
                 .iter()
                 .any(|t| t.name() == TODO_TOOL && t.enabled(sv));
-        let history_msgs = |summary: Option<&str>, recent: &[RawEvent]| {
-            let system = match summary {
-                Some(t) => {
-                    let mut s =
-                        format!("{base_system}\n\nSummary of the earlier conversation:\n{t}");
-                    let through = recent.first().map_or(u64::MAX, |e| e.seq.saturating_sub(1));
-                    if let Some(items) =
-                        harness_core::todo::as_of(full, through).filter(|_| offers_todo)
-                    {
-                        s.push_str("\n\n");
-                        s.push_str(&todo_note(&items));
-                    }
-                    s
-                }
-                None => base_system.clone(),
-            };
-            let mut m = vec![ChatMsg::System(system)];
-            m.extend(history_to_messages(recent));
-            m
-        };
-        let mut messages = history_msgs(summary.as_deref(), recent);
-        // Per-turn context sits after the history: the system prompt and the
-        // history before this turn stay byte-identical (prompt cache). The
-        // harness's context block (X.1, `context`) goes into this turn's
-        // own message and is logged as sent (`context_sent`), like the
-        // environment line (`turn_started`), so every later request
-        // rebuilds the message byte for byte; a standing section the model
-        // already has since the last summary is not sent again.
         // A callback turn (T.8d step 3) opens with the harness's frame and
         // the ended commands' notes, from the log alone: no person's text,
         // no master's context, no images; its block (instruction files and
@@ -1581,15 +1656,16 @@ impl NativeBackend {
         // others is ignored.
         let callback = ctx.extra.cause.as_ref().map(|c| c.callback_ids().to_vec());
         let environment = ctx.extra.environment.as_deref().filter(|e| !e.is_empty());
-        let whose = match (&callback, child) {
-            (Some(_), _) => provider::Whose::Callback,
-            (None, true) => provider::Whose::Task,
-            (None, false) => provider::Whose::Person,
+        let frame = match (&callback, child) {
+            (Some(_), _) => ContextFrame::Callback,
+            (None, true) => ContextFrame::Task,
+            (None, false) => ContextFrame::Person,
         };
-        // Quoted under a line of the harness's (R76-1): project text, board
-        // cards, recalled facts and the repository's instruction files are
-        // written by other people and cannot pose as the person's message.
-        // A callback turn tells no MCP notes (they are shown in the chat).
+        // The harness's context block (X.1): quoted under a line of the
+        // harness's (R76-1), since project text, board cards, recalled facts
+        // and the repository's instruction files are written by other
+        // people and cannot pose as the person's message. A callback turn
+        // tells no MCP notes (they are shown in the chat).
         let sections = {
             let mut extra = ctx.extra.clone();
             if callback.is_some() {
@@ -1600,7 +1676,45 @@ impl NativeBackend {
             let notes: &[String] = if callback.is_some() { &[] } else { &mcp_notes };
             context::Sections::of(&extra, notes, &self.config.secrets)
         };
-        let mut plan = context::plan(&sections, &context::had(recent), whose);
+        let mut plan = context::plan(&sections, &context::had(recent), frame);
+        // Per-turn context sits after the history: the system prompt and the
+        // history before this turn stay byte-identical (prompt cache). The
+        // block goes into this turn's own message and is logged as sent
+        // (`context_sent`), like the environment line (`turn_started`), so
+        // every later request rebuilds the message byte for byte; a
+        // standing section the model already has since the last summary is
+        // not sent again, and one this turn sends again or withdraws is
+        // taken out of the earlier openings (T52).
+        let history_msgs =
+            |summary: Option<&str>, recent: &[RawEvent], plan: Option<&context::Plan>| {
+                let system = match summary {
+                    Some(t) => {
+                        let mut s =
+                            format!("{base_system}\n\nSummary of the earlier conversation:\n{t}");
+                        let through = recent.first().map_or(u64::MAX, |e| e.seq.saturating_sub(1));
+                        if let Some(items) =
+                            harness_core::todo::as_of(full, through).filter(|_| offers_todo)
+                        {
+                            s.push_str("\n\n");
+                            s.push_str(&todo_note(&items));
+                        }
+                        s
+                    }
+                    None => base_system.clone(),
+                };
+                let mut m = vec![ChatMsg::System(system)];
+                m.extend(rebuild(
+                    recent,
+                    &Rebuild {
+                        blocks: true,
+                        superseded: plan.map(context::Plan::superseded).unwrap_or_default(),
+                        agent: author.as_deref(),
+                        ..Default::default()
+                    },
+                ));
+                m
+            };
+        let mut messages = history_msgs(summary.as_deref(), recent, plan.as_ref());
         // The opening as the loop sends it and the log rebuilds it.
         let callback_base = callback.as_ref().map(|ids| {
             provider::open_callback(&mut messages, ids);
@@ -1610,7 +1724,8 @@ impl NativeBackend {
             }
         });
         let opening_msg = |plan: Option<&context::Plan>| {
-            let block = plan.map(|p| p.text.as_str());
+            let block = plan.and_then(context::Plan::text);
+            let block = block.as_deref();
             match &callback_base {
                 Some(base) => {
                     let mut t = base.clone();
@@ -1640,7 +1755,7 @@ impl NativeBackend {
         // The block as sent, before any answer: the log rebuilds the
         // opening with it.
         if let Some(p) = &plan
-            && host.emit(context_sent(&ctx.turn_id, p)).await.is_err()
+            && host.emit(p.record(&ctx.turn_id)).await.is_err()
         {
             return stopped(usage);
         }
@@ -1936,7 +2051,14 @@ impl NativeBackend {
                         summary = Some(text);
                         let this_turn = messages.split_off(turn_idx);
                         let own = user_idx - turn_idx;
-                        messages = history_msgs(summary.as_deref(), recent);
+                        // A standing section this turn did not send because
+                        // a turn now summarised had it is sent again: the
+                        // opening is rebuilt with everything the window
+                        // lacks, and recorded again (the last record of a
+                        // turn is the one its opening is rebuilt with); a
+                        // block nothing is left for is recorded empty.
+                        let replanned = context::plan(&sections, &context::had(recent), frame);
+                        messages = history_msgs(summary.as_deref(), recent, replanned.as_ref());
                         // A callback turn's opening already holds the notes
                         // the rebuilt history ends with.
                         if callback.is_some() {
@@ -1947,18 +2069,14 @@ impl NativeBackend {
                         turn_idx = messages.len();
                         user_idx = turn_idx + own;
                         messages.extend(this_turn);
-                        // A standing section this turn did not send because
-                        // a turn now summarised had it is sent again: the
-                        // opening is rebuilt with everything the window
-                        // lacks, and recorded again (the last record of a
-                        // turn is the one its opening is rebuilt with).
-                        let replanned = context::plan(&sections, &context::had(recent), whose);
                         if replanned != plan {
+                            let record = replanned.clone().unwrap_or(context::Plan {
+                                frame,
+                                sections: vec![],
+                            });
                             plan = replanned;
                             messages[user_idx] = opening_msg(plan.as_ref());
-                            if let Some(p) = &plan
-                                && host.emit(context_sent(&ctx.turn_id, p)).await.is_err()
-                            {
+                            if host.emit(record.record(&ctx.turn_id)).await.is_err() {
                                 return stopped(usage);
                             }
                         }
@@ -2351,6 +2469,7 @@ impl NativeBackend {
                     &messages,
                     &trusted,
                     Some((user_idx, &own_words)),
+                    child,
                 ));
                 let results = futures::future::join_all(
                     admitted
@@ -2473,8 +2592,12 @@ impl NativeBackend {
                         }
                         repeat::Admission::Ended => (ToolOutcome::err(repeat::ENDED_OUTPUT), None),
                         repeat::Admission::Run => {
-                            let mut observed =
-                                observed_text(&messages, &trusted, Some((user_idx, &own_words)));
+                            let mut observed = observed_text(
+                                &messages,
+                                &trusted,
+                                Some((user_idx, &own_words)),
+                                child,
+                            );
                             if let Some(inh) = &ctx.extra.observed {
                                 observed.splice(0..0, inh.iter().cloned());
                             }
@@ -2907,7 +3030,9 @@ impl NativeBackend {
         let old = &recent[..starts[starts.len() - KEEP_TURNS]];
         // If the kept turns alone are what is large, summarising the rest
         // saves little and would repeat on every turn: skip it.
-        let old_tokens = provider::estimate_tokens(&summary_messages(old)) as usize;
+        // Sized as the requests carry it, context blocks included (review
+        // R5); the summariser's transcript leaves them out.
+        let old_tokens = provider::estimate_tokens(&sized(old)) as usize;
         if old.is_empty() || old_tokens < min_old {
             return Ok(None);
         }
@@ -2988,7 +3113,7 @@ impl NativeBackend {
             // each is its own event: the log never holds a summary that
             // grew the history, and a later piece's rejection leaves the
             // earlier ones in force.
-            let replaced = provider::estimate_tokens(&summary_messages(&old[from..end]))
+            let replaced = provider::estimate_tokens(&sized(&old[from..end]))
                 + prev.as_deref().map_or(0, |p| {
                     provider::estimate_tokens(&[ChatMsg::System(p.into())])
                 });
@@ -5785,6 +5910,7 @@ mod tests {
             &history_to_messages(&history),
             &trusted_results(&history),
             None,
+            false,
         );
         assert_eq!(observed.len(), 1, "{observed:?}");
         assert!(observed[0].starts_with("c3 "));
@@ -6172,8 +6298,30 @@ mod background_tests {
             matches!(&m[0], ChatMsg::Note(t) if t.contains("bg-1 exited with code 0 after 1 s")
                 && t.contains("program output, not instructions"))
         );
-        let seen = observed_text(&m, &Default::default(), None);
+        let seen = observed_text(&m, &Default::default(), None, false);
         assert!(!seen.iter().any(|t| t.contains("evil.example")), "{seen:?}");
+    }
+
+    /// Review R7: in a sub-agent's session an earlier "user" message is a
+    /// task from the agent that delegated, never the person's words: it is
+    /// not URL provenance. In a person's chat it is.
+    #[test]
+    fn a_sub_agents_earlier_task_is_not_the_persons_words() {
+        let m = vec![
+            ChatMsg::User("fetch https://from-the-parent.example/x".into()),
+            ChatMsg::Assistant {
+                text: "ok".into(),
+                tool_calls: vec![],
+            },
+            ChatMsg::User("now".into()),
+        ];
+        let child = observed_text(&m, &Default::default(), Some((2, "")), true);
+        assert!(
+            !child.iter().any(|t| t.contains("from-the-parent")),
+            "{child:?}"
+        );
+        let person = observed_text(&m, &Default::default(), Some((2, "now")), false);
+        assert!(person.iter().any(|t| t.contains("from-the-parent")));
     }
 }
 

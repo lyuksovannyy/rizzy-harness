@@ -1951,14 +1951,27 @@ conversation up to the last tool result from its cache (Anthropic bills those
 re-reads at a tenth). What has not changed since it was last sent is not sent
 again: the model has it earlier in the conversation. A changed part is sent in
 full with a line saying it replaces the earlier one; a part that is gone (memory
-switched off, the files deleted) gets a line saying it no longer applies. After
-the chat is compacted, everything is sent once more. Your name and local time
-change every minute, so that line goes with every message.
+switched off, the files deleted) gets a line saying it no longer applies, and
+earlier messages are then resent without their copy: an agent whose memory is
+off (an `@mention`, the Agents page switch, a team workspace that does not use
+your memory) reads none of your facts, and a fact you forget or correct is gone
+from the next message. A file that could not be read in time is kept as the
+model last saw it, with a note. After the chat is compacted, everything is sent
+once more. In a plain chat the line with your name has your local time, so it
+goes with every message; in a chat on a node the node's environment line has
+the clock instead, and the line only names you and your time zone.
+
+When more than one agent answers in a chat, each earlier answer of another
+agent is marked with that agent's name, so the agent answering now does not
+take it for its own. A message that got no answer (the provider refused, you
+stopped it at once) stays in the conversation with a note saying so, so the
+next message can say "try again".
 
 The record is part of the chat: only you can see it (admins cannot), it is
 deleted with the chat, and anything that looks like a configured secret is
-removed before it is sent or recorded. A fact you later forget or edit stays
-in the records of the chats it was already sent to, until you delete them.
+removed before it is sent or recorded. A fact you later forget or edit is not
+sent again, but stays in the records of the chats it was already sent to,
+until you delete them.
 
 ## Rich messages
 

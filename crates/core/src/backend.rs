@@ -220,6 +220,13 @@ pub struct TurnExtra {
     /// rendered), a standing section like `instructions`. Set only by the
     /// node.
     pub skills_list: Option<String>,
+    /// Set when the instruction files could not be read this turn (the
+    /// read failed or timed out): the note for the model, sent for this
+    /// turn only. The files the model was last sent stay as they are:
+    /// nothing is sent or withdrawn for them. Set only by the node.
+    pub instructions_unread: Option<String>,
+    /// The same for the list of skills. Set only by the node.
+    pub skills_unread: Option<String>,
     /// The harness's line saying the person's message asks for a skill
     /// (`/name`), for this turn only. Set only by the node.
     pub skill_asked: Option<String>,

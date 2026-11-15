@@ -9,21 +9,30 @@
 //! replace an earlier one or no longer apply; one that has not changed is
 //! not sent again (the model has it in its history). This turn's own
 //! sections (the master's settings line and notes, a `/skill` line, MCP
-//! notes) are sent whenever they are given. The block goes into the turn's
-//! opening message and is recorded as it was sent (`context_sent`), so
-//! every later request rebuilds that message byte for byte from the log.
-//! After a summary the window holds no block, so everything standing is
-//! sent again: the instruction files survive compaction. Codex diffs its
-//! "world state" sections the same way (a replacement line for a changed
-//! AGENTS.md, a removal notice, everything again in a fresh window) and
-//! OpenCode freezes the rendered update text in a durable event
-//! (research/round2/synth/07-context-compaction-memory.md §2).
+//! notes, a note that a standing section could not be read this turn) are
+//! sent whenever they are given. The block goes into the turn's opening
+//! message and is recorded section by section (`context_sent`), so every
+//! later request rebuilds that message from the log.
+//!
+//! The history holds at most the current version of each standing
+//! section (T52): when a turn sends a standing section again or withdraws
+//! it, the earlier openings are rebuilt without their copy of it. So an
+//! agent whose memory is off reads none of the person's facts, and a
+//! forgotten fact leaves the next request; that turn pays one cache write
+//! from the earliest opening that held the section, and every request
+//! after it rebuilds byte for byte again. After a summary the window holds
+//! no block, so everything standing is sent again: the instruction files
+//! survive compaction. Codex diffs its "world state" sections the same way
+//! (a replacement line for a changed AGENTS.md, a removal notice,
+//! everything again in a fresh window) and OpenCode records the update in
+//! a durable event (research/round2/synth/07-context-compaction-memory.md
+//! §2).
 
 use std::collections::{HashMap, HashSet};
 
 use harness_core::RawEvent;
 use harness_core::backend::{StandingKey, TurnExtra};
-use harness_core::event::{EventKind, SectionMark};
+use harness_core::event::{ContextFrame, ContextSent, EventKind, OUTPUT_QUOTE, SentSection};
 use sha2::{Digest, Sha256};
 
 use crate::provider::{self, Whose};
@@ -33,69 +42,105 @@ use crate::provider::{self, Whose};
 /// the list of skills 8,000, memory 3,000 and recall); this one keeps a
 /// `context_sent` far below the log's 4 MiB event limit whatever a master
 /// sends, so a large project brief can never make the record fail and
-/// wedge the chat.
+/// wedge the chat. The MCP notes of a turn are one section and share it.
 pub const SECTION_CAP: usize = 256 * 1024;
 
-pub const INSTRUCTIONS: &str = "instructions";
-pub const SKILLS: &str = "skills";
-pub const MEMORY: &str = "memory";
-pub const PROJECT: &str = "project";
+/// The most of the rendered block one message carries, in bytes: quoting
+/// can make a section longer than it was (a control character becomes
+/// three bytes, every line gains `| `).
+pub const BLOCK_CAP: usize = 1024 * 1024;
 
-/// A standing section's key in the log.
-fn key_of(k: StandingKey) -> &'static str {
-    match k {
-        StandingKey::Memory => MEMORY,
-        StandingKey::Project => PROJECT,
-    }
+/// The key of a section that is this turn's own.
+pub const TURN: &str = "turn";
+
+/// A standing section.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SectionKey {
+    Instructions,
+    Skills,
+    Memory,
+    Project,
 }
 
-/// The harness's sentence for a section sent again because it changed.
-fn replaced(key: &str) -> &'static str {
-    match key {
-        INSTRUCTIONS => {
-            "The repository's instruction files below replace the ones sent earlier in this \
-             conversation."
-        }
-        SKILLS => "The list of skills below replaces the one sent earlier in this conversation.",
-        MEMORY => {
-            "What you remember about the person, below, replaces what was sent of it earlier in \
-             this conversation."
-        }
-        _ => {
-            "The project's brief, facts and board below replace the ones sent earlier in this \
-             conversation."
+impl SectionKey {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SectionKey::Instructions => "instructions",
+            SectionKey::Skills => "skills",
+            SectionKey::Memory => "memory",
+            SectionKey::Project => "project",
         }
     }
-}
 
-/// The harness's sentence for a section sent earlier that is gone now.
-fn withdrawn(key: &str) -> &'static str {
-    match key {
-        INSTRUCTIONS => {
-            "The repository's instruction files sent earlier in this conversation no longer \
-             apply: none were found for this turn."
+    pub fn parse(s: &str) -> Option<Self> {
+        [
+            SectionKey::Instructions,
+            SectionKey::Skills,
+            SectionKey::Memory,
+            SectionKey::Project,
+        ]
+        .into_iter()
+        .find(|k| k.as_str() == s)
+    }
+
+    fn of(k: StandingKey) -> Self {
+        match k {
+            StandingKey::Memory => SectionKey::Memory,
+            StandingKey::Project => SectionKey::Project,
         }
-        SKILLS => {
-            "The list of skills sent earlier in this conversation no longer applies: no skills \
-             are offered now."
+    }
+
+    /// The harness's sentence for a section sent again because it changed.
+    fn replaced(self) -> &'static str {
+        match self {
+            SectionKey::Instructions => {
+                "The repository's instruction files below replace the ones sent earlier in this \
+                 conversation."
+            }
+            SectionKey::Skills => {
+                "The list of skills below replaces the one sent earlier in this conversation."
+            }
+            SectionKey::Memory => {
+                "What you remember about the person, below, replaces what was sent of it earlier \
+                 in this conversation."
+            }
+            SectionKey::Project => {
+                "The project's brief, facts and board below replace the ones sent earlier in \
+                 this conversation."
+            }
         }
-        MEMORY => {
-            "What was sent earlier in this conversation of what you remember about the person \
-             no longer applies: memory is not given now."
-        }
-        _ => {
-            "The project's brief, facts and board sent earlier in this conversation no longer \
-             apply."
+    }
+
+    /// The harness's sentence for a section sent earlier that is gone now.
+    fn withdrawn(self) -> &'static str {
+        match self {
+            SectionKey::Instructions => {
+                "The repository's instruction files sent earlier in this conversation no longer \
+                 apply: none were found for this turn."
+            }
+            SectionKey::Skills => {
+                "The list of skills sent earlier in this conversation no longer applies: no \
+                 skills are offered now."
+            }
+            SectionKey::Memory => {
+                "What was sent earlier in this conversation of what you remember about the \
+                 person no longer applies: memory is not given now."
+            }
+            SectionKey::Project => {
+                "The project's brief, facts and board sent earlier in this conversation no \
+                 longer apply."
+            }
         }
     }
 }
 
 struct Standing {
-    key: &'static str,
+    key: SectionKey,
     text: Option<String>,
     /// Whether its absence means it is gone. A turn the master gave no
     /// context (a callback turn, one that reads queued messages) says
-    /// nothing about memory or the project.
+    /// nothing about memory or the project; a read that failed or timed
+    /// out says nothing about the files or the skills.
     known: bool,
 }
 
@@ -114,16 +159,20 @@ impl Sections {
             t.filter(|t| !t.is_empty())
                 .map(|t| capped(secrets.scrub(t)))
         };
-        let mut standing = vec![
-            Standing {
-                key: INSTRUCTIONS,
-                text: prep(extra.instructions.as_deref()),
-                known: true,
+        let read = |text: &Option<String>, unread: &Option<String>| Standing {
+            key: SectionKey::Instructions,
+            text: if unread.is_some() {
+                None
+            } else {
+                prep(text.as_deref())
             },
+            known: unread.is_none(),
+        };
+        let mut standing = vec![
+            read(&extra.instructions, &extra.instructions_unread),
             Standing {
-                key: SKILLS,
-                text: prep(extra.skills_list.as_deref()),
-                known: true,
+                key: SectionKey::Skills,
+                ..read(&extra.skills_list, &extra.skills_unread)
             },
         ];
         for k in [StandingKey::Memory, StandingKey::Project] {
@@ -132,7 +181,7 @@ impl Sections {
                 prep(parts.iter().find(|p| p.part == k).map(|p| p.text.as_str()))
             });
             standing.push(Standing {
-                key: key_of(k),
+                key: SectionKey::of(k),
                 text,
                 known: extra.standing.is_some(),
             });
@@ -141,6 +190,8 @@ impl Sections {
         // the model reads right before the message.
         let notes = (!mcp_notes.is_empty()).then(|| mcp_notes.join("\n"));
         let per_turn = [
+            extra.instructions_unread.as_deref(),
+            extra.skills_unread.as_deref(),
             extra.skill_asked.as_deref(),
             notes.as_deref(),
             extra.context.as_deref(),
@@ -176,12 +227,59 @@ pub fn digest(text: &str) -> String {
         .collect()
 }
 
-/// What the model's history holds of each standing section in `window`
-/// (the events after the last summary): the digest of the last mark of
-/// each key, empty for one withdrawn. Only a turn whose start is in the
-/// window counts, and of a turn only its last record (the one its opening
-/// is rebuilt with).
-pub fn had(window: &[RawEvent]) -> HashMap<String, String> {
+fn whose(frame: ContextFrame) -> Whose {
+    match frame {
+        ContextFrame::Person => Whose::Person,
+        ContextFrame::Task => Whose::Task,
+        ContextFrame::Callback => Whose::Callback,
+    }
+}
+
+/// The block for `sections` in `frame`, as the loop sends it and the log
+/// rebuilds it; `None` when it says nothing.
+pub fn render<'a>(
+    frame: ContextFrame,
+    sections: impl IntoIterator<Item = &'a SentSection>,
+) -> Option<String> {
+    let mut body: Vec<&str> = Vec::new();
+    let mut notes: Vec<&str> = Vec::new();
+    for s in sections {
+        if !s.text.is_empty() {
+            body.push(&s.text);
+        }
+        notes.extend(s.note.as_deref());
+    }
+    let block = provider::block(&body.join("\n\n"), &notes, whose(frame))?;
+    Some(block_capped(block))
+}
+
+/// The block cut to [`BLOCK_CAP`] at a line's end, with a quoted note.
+fn block_capped(mut b: String) -> String {
+    if b.len() <= BLOCK_CAP {
+        return b;
+    }
+    let mut end = BLOCK_CAP - 128;
+    while !b.is_char_boundary(end) {
+        end -= 1;
+    }
+    let end = b[..end].rfind('\n').unwrap_or(end);
+    b.truncate(end);
+    b.push_str(&format!(
+        "\n{OUTPUT_QUOTE}[cut: the harness sends at most {BLOCK_CAP} bytes of context with one \
+         message]"
+    ));
+    b
+}
+
+/// A standing key of a recorded section; `None` for this turn's own (and
+/// a key this build does not know, which is never taken out).
+fn standing_key(s: &SentSection) -> Option<SectionKey> {
+    SectionKey::parse(&s.key)
+}
+
+/// The last record of each turn in `window`, in the order those records
+/// stand, for turns whose start is in it.
+fn last_records(window: &[RawEvent]) -> Vec<ContextSent> {
     let mut started = HashSet::new();
     let mut last: HashMap<String, usize> = HashMap::new();
     let mut records = Vec::new();
@@ -197,60 +295,129 @@ pub fn had(window: &[RawEvent]) -> HashMap<String, String> {
             _ => {}
         }
     }
+    records
+        .into_iter()
+        .enumerate()
+        .filter(|(i, c)| last.get(&c.turn_id) == Some(i))
+        .map(|(_, c)| c)
+        .collect()
+}
+
+/// What the model's history holds of each standing section in `window`
+/// (the events after the last summary): the digest of its last record,
+/// empty for one withdrawn.
+pub fn had(window: &[RawEvent]) -> HashMap<SectionKey, String> {
     let mut out = HashMap::new();
-    for (i, c) in records.into_iter().enumerate() {
-        if last.get(&c.turn_id) == Some(&i) {
-            for m in c.sections {
-                out.insert(m.key, m.digest);
+    for c in last_records(window) {
+        for s in &c.sections {
+            if let Some(k) = standing_key(s) {
+                out.insert(k, s.digest.clone());
             }
         }
     }
     out
 }
 
-/// What a turn sends: its block and the marks its record carries.
+/// Each turn's opening block as the history is rebuilt from `window`: a
+/// standing section only in the last record that sent or withdrew it, and
+/// in none when `superseded` (the turn being built) sends or withdraws it.
+pub fn blocks(
+    window: &[RawEvent],
+    superseded: &HashSet<SectionKey>,
+) -> HashMap<String, Option<String>> {
+    let records = last_records(window);
+    let mut owner: HashMap<SectionKey, usize> = HashMap::new();
+    for (i, c) in records.iter().enumerate() {
+        for s in &c.sections {
+            if let Some(k) = standing_key(s) {
+                owner.insert(k, i);
+            }
+        }
+    }
+    records
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let kept = c.sections.iter().filter(|s| match standing_key(s) {
+                Some(k) => owner.get(&k) == Some(&i) && !superseded.contains(&k),
+                None => true,
+            });
+            (c.turn_id.clone(), render(c.frame, kept))
+        })
+        .collect()
+}
+
+/// What a turn sends: its sections in the order they go.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plan {
-    pub text: String,
-    pub marks: Vec<SectionMark>,
+    pub frame: ContextFrame,
+    pub sections: Vec<SentSection>,
+}
+
+impl Plan {
+    /// The block as the opening carries it.
+    pub fn text(&self) -> Option<String> {
+        render(self.frame, &self.sections)
+    }
+
+    /// The standing sections it sends or withdraws: the history before
+    /// it holds no earlier copy of them.
+    pub fn superseded(&self) -> HashSet<SectionKey> {
+        self.sections.iter().filter_map(standing_key).collect()
+    }
+
+    /// Its record.
+    pub fn record(&self, turn_id: &str) -> EventKind {
+        EventKind::ContextSent(ContextSent {
+            turn_id: turn_id.to_string(),
+            frame: self.frame,
+            sections: self.sections.clone(),
+        })
+    }
 }
 
 /// The block for `sections` given what the model `had`; `None` when there
 /// is nothing to send.
-pub fn plan(sections: &Sections, had: &HashMap<String, String>, whose: Whose) -> Option<Plan> {
-    let mut body: Vec<&str> = Vec::new();
-    let mut notes: Vec<&str> = Vec::new();
-    let mut marks = Vec::new();
+pub fn plan(
+    sections: &Sections,
+    had: &HashMap<SectionKey, String>,
+    frame: ContextFrame,
+) -> Option<Plan> {
+    let mut out = Vec::new();
     for s in &sections.standing {
-        let before = had.get(s.key).filter(|d| !d.is_empty());
+        let before = had.get(&s.key).filter(|d| !d.is_empty());
         match &s.text {
             Some(t) => {
                 let d = digest(t);
                 if before == Some(&d) {
                     continue;
                 }
-                if before.is_some() {
-                    notes.push(replaced(s.key));
-                }
-                body.push(t);
-                marks.push(SectionMark {
-                    key: s.key.into(),
+                out.push(SentSection {
+                    key: s.key.as_str().into(),
                     digest: d,
+                    text: t.clone(),
+                    note: before.map(|_| s.key.replaced().to_string()),
                 });
             }
-            None if s.known && before.is_some() => {
-                notes.push(withdrawn(s.key));
-                marks.push(SectionMark {
-                    key: s.key.into(),
-                    digest: String::new(),
-                });
-            }
+            None if s.known && before.is_some() => out.push(SentSection {
+                key: s.key.as_str().into(),
+                digest: String::new(),
+                text: String::new(),
+                note: Some(s.key.withdrawn().to_string()),
+            }),
             None => {}
         }
     }
-    body.extend(sections.per_turn.iter().map(String::as_str));
-    let text = provider::block(&body.join("\n\n"), &notes, whose)?;
-    Some(Plan { text, marks })
+    out.extend(sections.per_turn.iter().map(|t| SentSection {
+        key: TURN.into(),
+        digest: String::new(),
+        text: t.clone(),
+        note: None,
+    }));
+    (!out.is_empty()).then_some(Plan {
+        frame,
+        sections: out,
+    })
 }
 
 /// A person's or a sub-agent's opening text: the environment line, the

@@ -249,6 +249,20 @@ fn common(last: &ChatRequest, next: &ChatRequest) -> usize {
     a.bytes().zip(b.bytes()).take_while(|(x, y)| x == y).count()
 }
 
+/// The standing keys a record sent or withdrew.
+fn standing(c: &ContextSent) -> Vec<&str> {
+    c.sections
+        .iter()
+        .map(|s| s.key.as_str())
+        .filter(|k| *k != context::TURN)
+        .collect()
+}
+
+/// A record's block as its opening carries it.
+fn block(c: &ContextSent) -> String {
+    context::render(c.frame, &c.sections).unwrap()
+}
+
 fn opening(req: &ChatRequest) -> String {
     req.messages
         .iter()
@@ -371,8 +385,7 @@ async fn an_unchanged_section_is_not_sent_again() {
     .await;
     let o1 = opening(&r1[0]);
     assert!(o1.contains("Rule 1:") && o1.contains("- release:") && o1.contains("likes short"));
-    let keys: Vec<&str> = c1[0].sections.iter().map(|m| m.key.as_str()).collect();
-    assert_eq!(keys, ["instructions", "skills", "memory"]);
+    assert_eq!(standing(&c1[0]), ["instructions", "skills", "memory"]);
     let (r2, c2) = turn(
         &p,
         NativeConfig::default(),
@@ -389,7 +402,7 @@ async fn an_unchanged_section_is_not_sent_again() {
     assert!(!o2.contains("likes short"), "{o2}");
     assert!(o2.contains("local time is 10:02"), "{o2}");
     assert!(o2.ends_with("\n\ntwo"), "{o2}");
-    assert!(c2[0].sections.is_empty(), "{:?}", c2[0].sections);
+    assert!(standing(&c2[0]).is_empty(), "{:?}", c2[0].sections);
 }
 
 /// A changed section is sent in full again, with the harness's line saying
@@ -430,12 +443,13 @@ async fn a_changed_section_replaces_and_a_gone_one_is_withdrawn_once() {
         "{o2}"
     );
     assert!(!o2.contains("- release:"), "skills unchanged: {o2}");
-    assert_eq!(c2[0].sections.len(), 1);
-    assert_eq!(
-        r2[0].messages[..r1[0].messages.len()],
-        r1[0].messages[..],
-        "turn 1's message as it was sent"
-    );
+    assert_eq!(standing(&c2[0]), ["instructions"]);
+    // Turn 1's message no longer holds the old files (T52): the history
+    // holds the current version only.
+    let t1 = r2[0].messages[1].user_text().unwrap();
+    assert!(!t1.contains("Rule 1:"), "{t1}");
+    assert!(t1.contains("likes short"), "{t1}");
+    assert_eq!(r2[0].messages[..1], r1[0].messages[..1]);
     let (r3, c3) = turn(
         &p,
         NativeConfig::default(),
@@ -448,6 +462,7 @@ async fn a_changed_section_replaces_and_a_gone_one_is_withdrawn_once() {
     .await;
     let o3 = opening(&r3[0]);
     assert!(o3.contains("no longer apply: none were found"), "{o3}");
+    assert!(!bytes(&r3[0]).contains("Rule 1:"), "withdrawn everywhere");
     assert_eq!(c3[0].sections[0].digest, "");
     let (r4, _) = turn(
         &p,
@@ -559,7 +574,7 @@ async fn after_a_summary_every_standing_section_is_sent_again() {
     let o2 = opening(&r2[0]);
     assert!(o2.contains("Rule 1:") && o2.contains("- release:") && o2.contains("likes short"));
     assert!(!o2.contains("replace"), "{o2}");
-    assert_eq!(c2[0].sections.len(), 3);
+    assert_eq!(standing(&c2[0]).len(), 3);
 }
 
 /// A log without any record (a session older than X.1) loads: the next
@@ -594,7 +609,7 @@ async fn a_log_without_records_still_loads() {
     )
     .await;
     assert!(opening(&r2[0]).contains("Rule 1:"));
-    assert_eq!(c2[0].sections.len(), 3);
+    assert_eq!(standing(&c2[0]).len(), 3);
     let (r3, _) = turn(
         &p,
         NativeConfig::default(),
@@ -625,7 +640,7 @@ async fn a_section_past_the_cap_is_cut_the_same_when_sent_and_rebuilt() {
     let o1 = opening(&r1[0]);
     assert!(o1.contains("[cut: the harness sends at most"), "cut");
     assert!(o1.len() < SECTION_CAP * 2, "{}", o1.len());
-    assert!(o1.contains(&c1[0].text));
+    assert!(o1.contains(&block(&c1[0])));
     let rebuilt = history_to_messages(&log);
     let again = rebuilt.iter().find_map(|m| m.user_text()).unwrap();
     assert_eq!(again, o1);
@@ -651,8 +666,8 @@ async fn a_secret_in_a_section_is_scrubbed_before_it_is_sent() {
     );
     let (r1, c1) = turn(&p, config, &mut log, sid, "t1", "one", ex).await;
     assert!(!opening(&r1[0]).contains("sk-live-0123456789abcdef"));
-    assert!(!c1[0].text.contains("sk-live-0123456789abcdef"));
-    assert!(opening(&r1[0]).contains(&c1[0].text));
+    assert!(!block(&c1[0]).contains("sk-live-0123456789abcdef"));
+    assert!(opening(&r1[0]).contains(&block(&c1[0])));
 }
 
 /// Each sub-agent has its own log: two started in one step each get the
@@ -819,7 +834,7 @@ async fn a_turn_that_reads_queued_messages_rebuilds_its_opening() {
         sid,
         "t3",
         "three",
-        extra(None, 3),
+        extra(Some(format!("{}- Rule late.\n", agents_md())), 3),
     )
     .await;
     assert_eq!(
@@ -918,5 +933,323 @@ async fn a_summary_mid_turn_sends_the_withheld_sections_again() {
     let last = r4.last().unwrap();
     assert_eq!(r5[0].messages[..last.messages.len()], last.messages[..]);
     assert!(!opening(&r5[0]).contains("Rule 1:"));
-    assert!(c5[0].sections.is_empty(), "{:?}", c5[0].sections);
+    assert!(standing(&c5[0]).is_empty(), "{:?}", c5[0].sections);
+}
+
+// ---- Review of PR 108 (R1, R2, R3, R6): kept as regression tests ----
+
+/// R1: an agent whose memory is off (the master gives `standing` without a
+/// memory part) reads none of the person's facts: the earlier opening is
+/// rebuilt without them, and the withdrawal is said; the turn after it
+/// rebuilds byte for byte again.
+#[tokio::test]
+async fn a_memory_off_turn_holds_none_of_the_persons_facts() {
+    let p = script(0);
+    let sid = SessionId::new();
+    let mut log = Vec::new();
+    let ex1 = extra(Some(agents_md()), 1);
+    turn(&p, NativeConfig::default(), &mut log, sid, "t1", "hi", ex1).await;
+    let mut ex2 = extra(Some(agents_md()), 2);
+    ex2.standing = Some(vec![]);
+    let (r2, _) = turn(
+        &p,
+        NativeConfig::default(),
+        &mut log,
+        sid,
+        "t2",
+        "@other hi",
+        ex2.clone(),
+    )
+    .await;
+    let all = bytes(&r2[0]);
+    assert!(!all.contains("likes short answers"), "{all}");
+    assert!(all.contains("no longer applies: memory is not given now"));
+    // The instruction files, unchanged, stay where they were sent.
+    assert!(all.contains("Rule 1:"));
+    let mut ex3 = ex2;
+    ex3.context = Some("Context: the user's name is Ann.".into());
+    let (r3, _) = turn(&p, NativeConfig::default(), &mut log, sid, "t3", "and", ex3).await;
+    let last = r2.last().unwrap();
+    assert_eq!(r3[0].messages[..last.messages.len()], last.messages[..]);
+    assert!(!bytes(&r3[0]).contains("likes short answers"));
+}
+
+/// R2: a forgotten fact is gone from the next request; the new memory is
+/// there once.
+#[tokio::test]
+async fn a_forgotten_fact_is_gone_from_the_next_request() {
+    let p = script(0);
+    let sid = SessionId::new();
+    let mut log = Vec::new();
+    let mut ex1 = extra(None, 1);
+    ex1.standing = Some(memory("- f1: lives at 12 Elm Street"));
+    turn(&p, NativeConfig::default(), &mut log, sid, "t1", "hi", ex1).await;
+    let mut ex2 = extra(None, 2);
+    ex2.standing = Some(memory("- f2: likes short answers"));
+    let (r2, _) = turn(
+        &p,
+        NativeConfig::default(),
+        &mut log,
+        sid,
+        "t2",
+        "forget it",
+        ex2.clone(),
+    )
+    .await;
+    let all = bytes(&r2[0]);
+    assert!(!all.contains("12 Elm Street"), "{all}");
+    assert_eq!(all.matches("likes short answers").count(), 1);
+    let (r3, _) = turn(&p, NativeConfig::default(), &mut log, sid, "t3", "ok", ex2).await;
+    let last = r2.last().unwrap();
+    assert_eq!(r3[0].messages[..last.messages.len()], last.messages[..]);
+}
+
+/// R3: instruction files or skills that could not be read this turn are
+/// neither withdrawn nor sent again: the model keeps what it has, and the
+/// note goes with this turn only.
+#[tokio::test]
+async fn a_failed_read_withdraws_nothing() {
+    let p = script(0);
+    let sid = SessionId::new();
+    let mut log = Vec::new();
+    turn(
+        &p,
+        NativeConfig::default(),
+        &mut log,
+        sid,
+        "t1",
+        "one",
+        extra(Some(agents_md()), 1),
+    )
+    .await;
+    let mut ex2 = extra(None, 2);
+    ex2.skills_list = None;
+    ex2.instructions_unread = Some("[files not read this turn: slow disk]".into());
+    ex2.skills_unread = Some("[skills not looked for this turn]".into());
+    let (r2, c2) = turn(&p, NativeConfig::default(), &mut log, sid, "t2", "two", ex2).await;
+    let all = bytes(&r2[0]);
+    assert!(
+        all.contains("Rule 1:") && all.contains("- release:"),
+        "kept"
+    );
+    assert!(!all.contains("no longer appl"), "{all}");
+    assert!(all.contains("[files not read this turn: slow disk]"));
+    assert!(standing(&c2[0]).is_empty());
+    let (r3, _) = turn(
+        &p,
+        NativeConfig::default(),
+        &mut log,
+        sid,
+        "t3",
+        "three",
+        extra(Some(agents_md()), 3),
+    )
+    .await;
+    assert!(
+        !opening(&r3[0]).contains("Rule 1:"),
+        "unchanged: not sent again"
+    );
+}
+
+/// R6: a withdrawal-only block that a summary mid-turn makes unnecessary
+/// is recorded empty, so the next turn rebuilds the request the turn sent.
+#[tokio::test]
+async fn a_block_replanned_away_is_recorded_empty() {
+    let p = Arc::new(Overflowing {
+        seen: Mutex::default(),
+        failed: Mutex::default(),
+    });
+    let sid = SessionId::new();
+    let mut log = Vec::new();
+    let run = async |log: &mut Vec<RawEvent>, id: &str, text: &str, ins: Option<String>| {
+        let host = Host::default();
+        let b = NativeBackend::new(p.clone(), harness_tools::builtin(), NativeConfig::default());
+        let ex = TurnExtra {
+            instructions: ins,
+            ..Default::default()
+        };
+        let before = p.seen.lock().unwrap().len();
+        b.run_turn(TurnCtx {
+            session_id: sid,
+            turn_id: id.into(),
+            history: log.clone(),
+            user_text: text.into(),
+            cwd: std::env::temp_dir(),
+            model: "x".into(),
+            agent: None,
+            compare: vec![],
+            parent_session: None,
+            extra: ex.clone(),
+            cancel: Default::default(),
+            host: &host,
+        })
+        .await;
+        append(log, sid, id, text, &ex, &host);
+        (p.seen.lock().unwrap()[before..].to_vec(), host.records())
+    };
+    run(&mut log, "t1", &"word ".repeat(2000), Some(agents_md())).await;
+    run(&mut log, "t2", "two", Some(agents_md())).await;
+    run(&mut log, "t3", "three", Some(agents_md())).await;
+    let (r4, c4) = run(&mut log, "t4", "four", None).await;
+    assert_eq!(c4.len(), 2);
+    assert!(c4[1].sections.is_empty(), "{:?}", c4[1]);
+    let (r5, _) = run(&mut log, "t5", "five", None).await;
+    let last = r4.last().unwrap();
+    assert_eq!(r5[0].messages[..last.messages.len()], last.messages[..]);
+}
+
+fn raw(sid: SessionId, kinds: Vec<EventKind>) -> Vec<RawEvent> {
+    let mut log = Vec::new();
+    for k in kinds {
+        push(&mut log, sid, k);
+    }
+    log
+}
+
+fn user(turn: &str, text: &str) -> EventKind {
+    EventKind::UserMessage(UserMessage {
+        turn_id: turn.into(),
+        text: text.into(),
+        attachments: vec![],
+        reply: None,
+        images: vec![],
+        queued: false,
+    })
+}
+
+fn started(turn: &str, agent: &str, name: &str) -> EventKind {
+    EventKind::TurnStarted(TurnStarted {
+        turn_id: turn.into(),
+        agent: Some(AgentRef {
+            agent_id: agent.into(),
+            name: name.into(),
+            prompt_hash: "h".into(),
+        }),
+        cause: None,
+        environment: None,
+    })
+}
+
+fn said(turn: &str, author: &str, text: &str) -> EventKind {
+    EventKind::AssistantMessage(AssistantMessage {
+        turn_id: turn.into(),
+        message_id: format!("m-{turn}"),
+        text: text.into(),
+        tool_calls: vec![],
+        author: Some(author.into()),
+        variant: None,
+        blocks: vec![],
+    })
+}
+
+fn ended(turn: &str, reason: TurnEndReason) -> EventKind {
+    EventKind::TurnEnded(TurnEnded {
+        turn_id: turn.into(),
+        reason,
+        usage: None,
+    })
+}
+
+/// Live test: an agent addressed with `@mention` read its colleague's
+/// answers as if they were nobody's. In a chat where another agent
+/// answered, each of that agent's answers says whose it is; the agent's
+/// own answers, and every answer of a single-agent chat, are as they were.
+#[test]
+fn another_agents_answer_says_whose_it_is() {
+    let sid = SessionId::new();
+    let log = raw(
+        sid,
+        vec![
+            started("t1", "coder", "Software Developer"),
+            user("t1", "why does it fail?"),
+            said("t1", "coder", "The lock is taken twice."),
+            ended("t1", TurnEndReason::Completed),
+        ],
+    );
+    let plain = history_to_messages(&log);
+    let as_reviewer = harness_agent_native::rebuild(
+        &log,
+        &harness_agent_native::Rebuild {
+            blocks: true,
+            agent: Some("reviewer"),
+            ..Default::default()
+        },
+    );
+    let as_coder = harness_agent_native::rebuild(
+        &log,
+        &harness_agent_native::Rebuild {
+            blocks: true,
+            agent: Some("coder"),
+            ..Default::default()
+        },
+    );
+    let text = |m: &[ChatMsg]| match &m[1] {
+        ChatMsg::Assistant { text, .. } => text.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(text(&plain), "The lock is taken twice.");
+    assert_eq!(text(&as_coder), "The lock is taken twice.");
+    assert_eq!(
+        text(&as_reviewer),
+        "[harness] This answer is from another agent of this chat, \"Software Developer\", \
+         not from you.\n\nThe lock is taken twice."
+    );
+}
+
+/// Live test: a turn that failed before any answer (a provider's 401)
+/// left its message in the history, and the person's retry made the same
+/// message twice in a row. The unanswered message is kept (a "try again"
+/// still has it) with the harness's note saying it got no answer, in
+/// front of the next message; a completed turn gets none.
+#[test]
+fn an_unanswered_message_says_it_got_no_answer() {
+    let sid = SessionId::new();
+    let log = raw(
+        sid,
+        vec![
+            started("t1", "coder", "Coder"),
+            user("t1", "fix the build"),
+            ended("t1", TurnEndReason::Error),
+            started("t2", "coder", "Coder"),
+            user("t2", "fix the build"),
+            said("t2", "coder", "done"),
+            ended("t2", TurnEndReason::Completed),
+        ],
+    );
+    let m = place_notes(history_to_messages(&log));
+    let users: Vec<&str> = m.iter().filter_map(|m| m.user_text()).collect();
+    assert_eq!(users.len(), 2, "{m:?}");
+    assert_eq!(users[0], "fix the build");
+    assert!(
+        users[1]
+            .starts_with("[harness] The message above got no answer: its turn ended with an error"),
+        "{}",
+        users[1]
+    );
+    assert!(users[1].ends_with("\nfix the build"), "{}", users[1]);
+    assert_eq!(
+        m.iter()
+            .filter(|m| m.user_text().is_some_and(|t| t.contains("no answer")))
+            .count(),
+        1
+    );
+}
+
+/// R8: the rendered block is capped as a whole, whatever quoting makes of
+/// the sections; the cut is the same every time.
+#[test]
+fn the_rendered_block_is_capped() {
+    let sections: Vec<SentSection> = (0..6)
+        .map(|i| SentSection {
+            key: context::TURN.into(),
+            digest: String::new(),
+            // Control characters quote to three bytes each.
+            text: "\u{1}".repeat(SECTION_CAP) + &i.to_string(),
+            note: None,
+        })
+        .collect();
+    let b = context::render(ContextFrame::Person, &sections).unwrap();
+    assert!(b.len() <= context::BLOCK_CAP, "{}", b.len());
+    assert!(b.ends_with("bytes of context with one message]"));
+    assert_eq!(context::render(ContextFrame::Person, &sections).unwrap(), b);
 }

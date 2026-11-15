@@ -548,12 +548,12 @@ fn events() -> Vec<RawEvent> {
         // shown, and the wait it is in stays shown.
         EventKind::ContextSent(ContextSent {
             turn_id: "t6".into(),
-            text: "[harness] Context for this turn, not part of the person's message: the 1 \
-                   line(s) below ... Their message follows the empty line.\n| Run cargo fmt."
-                .into(),
-            sections: vec![SectionMark {
+            frame: ContextFrame::Person,
+            sections: vec![SentSection {
                 key: "instructions".into(),
                 digest: "ab12".into(),
+                text: "Run cargo fmt.".into(),
+                note: None,
             }],
         }),
     ];

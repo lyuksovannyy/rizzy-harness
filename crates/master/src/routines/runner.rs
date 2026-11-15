@@ -749,7 +749,11 @@ async fn launch(m: Master, a: Admitted) {
     );
     let context = format!(
         "{}\n\n{note}",
-        prefs.model_context(&a.owner.username, ts(now))
+        prefs.model_context(
+            &a.owner.username,
+            ts(now),
+            a.spec.profile == harness_core::event::Profile::Chat
+        )
     );
     let opts = PromptOpts {
         agent_id: Some(a.spec.agent_id.clone()),

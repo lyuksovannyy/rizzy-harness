@@ -543,38 +543,61 @@ pub struct QueuedDelivered {
     pub seqs: Vec<u64>,
 }
 
-/// The harness's context block a turn's opening message carried (X.1):
-/// the repository's instruction files, the list of skills, the master's
-/// standing parts (memory, project) where they changed, and this turn's
-/// own context. Recorded by the loop through the session's one writer,
-/// after the turn's message and before its first answer, so every later
-/// request rebuilds that message byte for byte from the log (the
-/// provider's prompt cache) and a section that has not changed is not
-/// sent again. Never shown: the UI's fold ignores it, as it never showed
-/// the context. The text passed the node's scrubber before it was sent.
+/// The harness's context block a turn's opening message carried (X.1),
+/// section by section: the repository's instruction files, the list of
+/// skills, the master's standing parts (memory, project) where they
+/// changed or went, and this turn's own context. Recorded by the loop
+/// through the session's one writer, after the turn's message and before
+/// its first answer, so every later request rebuilds that message from the
+/// log and a section that has not changed is not sent again. A later
+/// record that sends a standing key again or withdraws it takes that key
+/// out of every earlier opening when the history is rebuilt: the model
+/// reads at most the current version of each (T52). Never shown: the UI's
+/// fold ignores it. Its texts passed the node's scrubber before they were
+/// sent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextSent {
     pub turn_id: String,
-    /// The block exactly as the opening carried it: in front of the
-    /// person's message (or a sub-agent's task) after an empty line, or
-    /// after a callback turn's opening. Put back as it is, never
-    /// re-rendered. A later record for the same turn replaces it (the
-    /// turn's opening was sent again in full after a summary mid-turn).
-    pub text: String,
-    /// The standing sections this block sent or withdrew. The last mark
-    /// of a key since the last summary is what the model's history holds.
+    /// Whose text the block stands in front of (or after, for a callback
+    /// turn's opening); the lead line says so.
+    pub frame: ContextFrame,
+    /// In the order sent. Empty: the turn's opening carries no block (a
+    /// summary mid-turn made the one it had unnecessary). A later record
+    /// for the same turn replaces it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub sections: Vec<SectionMark>,
+    pub sections: Vec<SentSection>,
 }
 
-/// One standing section as a [`ContextSent`] left it.
+/// Where a [`ContextSent`] block stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextFrame {
+    /// In front of the person's message.
+    Person,
+    /// In front of a sub-agent's task.
+    Task,
+    /// After a callback turn's opening.
+    Callback,
+}
+
+/// One section of a [`ContextSent`] block.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SectionMark {
-    /// `instructions`, `skills`, `memory` or `project`.
+pub struct SentSection {
+    /// `instructions`, `skills`, `memory`, `project` (standing), or
+    /// `turn` (this turn's own, never taken out).
     pub key: String,
-    /// SHA-256 of the section's text as sent (hex); empty when the block
-    /// said the section no longer applies.
+    /// A standing section's SHA-256 of `text` (hex); empty when the block
+    /// said the section no longer applies, and for `turn`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub digest: String,
+    /// The section as sent (scrubbed, capped, unquoted); empty for a
+    /// withdrawal.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub text: String,
+    /// The harness's sentence in the block's first line: this replaces the
+    /// earlier one, or the earlier one no longer applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 /// How the harness's line after a queued message begins.

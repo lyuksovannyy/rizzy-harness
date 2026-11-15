@@ -1780,14 +1780,21 @@ impl Session {
                 extra.instructions = r.text;
                 r.problems
             }
+            // Not read this turn: the files the model has stay (X.1,
+            // review R3); the note goes with this turn only.
             Bounded::TimedOut => {
-                extra.instructions = Some(ins::timed_out());
+                extra.instructions_unread = Some(ins::timed_out());
                 vec![format!("timed out after {} s", ins::READ_TIMEOUT.as_secs())]
             }
             // The turn is stopping; the backend sees the cancel itself.
-            Bounded::Cancelled => return extra,
+            Bounded::Cancelled => {
+                extra.instructions_unread = Some(ins::not_read());
+                extra.skills_unread = Some(ins::SKILLS_NOT_READ.into());
+                return extra;
+            }
             Bounded::Failed(e) => {
                 tracing::warn!(session = %self.id, error = %e, "reading the instruction files failed");
+                extra.instructions_unread = Some(ins::not_read());
                 vec![]
             }
         };

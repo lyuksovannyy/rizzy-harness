@@ -68,9 +68,17 @@ pub(crate) const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// The block when the read took longer than [`READ_TIMEOUT`].
 pub(crate) fn timed_out() -> String {
     format!(
-        "{LEAD}\n[not read: reading the instruction files took longer than {} s]",
+        "[The repository's instruction files were not read this turn: reading them took longer \
+         than {} s. Those sent earlier in this conversation still apply.]",
         READ_TIMEOUT.as_secs()
     )
+}
+
+/// The note for a read of the instruction files that failed.
+pub(crate) fn not_read() -> String {
+    "[The repository's instruction files were not read this turn: the read failed. Those sent \
+     earlier in this conversation still apply.]"
+        .into()
 }
 
 /// Run `f` on a blocking thread and wait for it at most `limit`, or until
@@ -91,6 +99,9 @@ pub(crate) async fn bounded<T: Send + 'static>(
         _ = cancel.cancelled() => Bounded::Cancelled,
     }
 }
+
+pub(crate) const SKILLS_NOT_READ: &str = "[The skills were not looked for this turn: the search failed. The \
+     list sent earlier in this conversation still applies.]";
 
 /// Put what skill discovery found into `extra` (`harness_tools::skills`):
 /// the list (`skills_list`, a section of its own beside the instruction
@@ -115,15 +126,24 @@ pub(crate) fn with_skills(
             extra.skills = Some(std::sync::Arc::new(f.catalogue));
             f.problems
         }
+        // Not read this turn: the list the model has stays (X.1, review
+        // R3); the note goes with this turn only.
         Bounded::TimedOut => {
-            extra.skills_list = Some(format!(
-                "[skills not read: looking for them took longer than {} s]",
+            extra.skills_unread = Some(format!(
+                "[The skills were not looked for this turn: it took longer than {} s. The list \
+                 sent earlier in this conversation still applies.]",
                 READ_TIMEOUT.as_secs()
             ));
             vec![format!("timed out after {} s", READ_TIMEOUT.as_secs())]
         }
-        Bounded::Cancelled => vec![],
-        Bounded::Failed(e) => vec![format!("discovery failed: {e}")],
+        Bounded::Cancelled => {
+            extra.skills_unread = Some(SKILLS_NOT_READ.into());
+            vec![]
+        }
+        Bounded::Failed(e) => {
+            extra.skills_unread = Some(SKILLS_NOT_READ.into());
+            vec![format!("discovery failed: {e}")]
+        }
     }
 }
 
@@ -556,9 +576,14 @@ mod tests {
         };
         let problems = with_skills(&mut extra, Bounded::TimedOut, None, 8000);
         assert_eq!(extra.instructions.as_deref(), Some("FILES"));
-        assert_eq!(
-            extra.skills_list.as_deref(),
-            Some("[skills not read: looking for them took longer than 5 s]")
+        assert!(extra.skills_list.is_none());
+        assert!(
+            extra
+                .skills_unread
+                .as_deref()
+                .is_some_and(|n| n.contains("longer than 5 s")),
+            "{:?}",
+            extra.skills_unread
         );
         assert!(extra.skills.is_none());
         assert_eq!(problems.len(), 1);
