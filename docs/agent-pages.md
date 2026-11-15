@@ -22,7 +22,7 @@ row opens the agent page read-only.
    - **Memory**: User facts · Workspace memory · Project memory · Earlier chats and memory search
    - **Web**: Web search
    - **Available as**: Agent · Sub-agent
-   - **Tools**: Read files · Change files · Run commands · MCP servers · Launch sub-agents · Manage workspace
+   - **Tools**: Read files · Change files · Run commands · Read-only commands · MCP servers · Launch sub-agents · Manage workspace
 
 ## Built-in agents
 
@@ -36,12 +36,15 @@ The roster (`crates/agents/builtin/`, since 2026-11; Ultracode removed):
 | `coder` | `dev` | Software Developer | IT | agent, sub-agent | bash, tool_output, read, write, edit, grep, glob, outline, graph_query, publish, web, remember; delegates to scout, researcher, reviewer; project memory |
 | `teamlead` | | Senior Teamlead | IT | agent | the developer's tools; user facts; delegates to coder, researcher, writer, scout, reviewer (4 runs, 200k tokens per turn) |
 | `writer` | | Writer | General | agent, sub-agent | read, write, edit, grep, glob, web, publish, remember; project memory |
-| `scout` | | Scout | IT | sub-agent | read, grep, glob, outline, graph_query; no memory |
-| `reviewer` | | Reviewer | IT | agent, sub-agent | read, grep, glob, outline, graph_query, remember; project memory |
+| `scout` | | Scout | IT | sub-agent | read, grep, glob, outline, graph_query, read-only commands (`bash` in the read-only shell); no memory |
+| `reviewer` | | Reviewer | IT | agent, sub-agent | read, grep, glob, outline, graph_query, read-only commands (`bash` in the read-only shell), remember; project memory |
 
 `crates/agents/tests/agents.rs` (`builtin_roster_is_exactly_the_table`) checks every
-row against every tool. Scout and Reviewer are read-only by that list and the loop's
-refusal of other calls, not by a sandbox. A chat or routine that named `ultracode` falls
+row against every tool. Scout and Reviewer are read-only by that list (the shared rule,
+PLAN.md T70: every tool they may call is on `harness_core::agent::READ_ONLY_TOOLS`) and
+by the read-only shell the node then runs their `bash` in (docs/read-only-shell.md): they
+can run `git log`, `git diff`, `git blame`, pipelines and tests that write only to `/tmp`,
+and nothing they run can change the folder. A chat or routine that named `ultracode` falls
 back like any removed agent (below).
 
 **Defaults per mode.** `Profile::Chat` chats default to `general`, Agentic ones to `coder`
@@ -107,6 +110,7 @@ in the database).
 | Read files | `read`, `grep`, `glob`, `outline`, `graph_query` | Works (tool list) |
 | Change files | `write`, `edit` | Works (tool list) |
 | Run commands | `bash`, `tool_output` | Works (tool list) |
+| Read-only commands | `bash`, `bash_output`, `bash_stop`, `tool_output`, for an agent that changes nothing else (PLAN.md T70, docs/read-only-shell.md) | Works (tool list); its own switch since 2026-11-15 (the owner: every new agent capability is its own per-agent switch). The node runs that agent's `bash` in the read-only shell, judged from the tools it offers (the shared rule `AgentSpec::changes_things`), never from the switch: it can only add the shell to an agent that writes nothing, and with Change files, Run commands or MCP servers on it adds nothing (shown disabled). On for Scout and Reviewer, off for a new agent; a file agent shows it when its list holds `bash` and nothing else that changes things. Where the node has no read-only shell the agent gets no `bash` and is told why; `denied_tools = ["bash"]` still wins |
 | MCP servers | `mcp`: every tool of the MCP servers the node runs for the chat (X.3) | Works (tool list); its own switch since 2026-11-14 (the owner: "apart permission like file access, web search"), no longer implied by Run commands. A page agent saved before it reads with it off. On for Software Developer and Senior Teamlead; a file agent has it when its `tools` are `all`, hold `mcp` or name an `mcp__…` tool. Sub-agents never get MCP tools; `denied_tools` on the node still wins |
 | Launch sub-agents | `delegates` + the `delegate` tool, one level deep | Works: may delegate to every agent available as a sub-agent (except itself), default caps (4 runs, 200k tokens per turn) |
 | Manage workspace | Doesn't exist | Shown, disabled, "planned" |
