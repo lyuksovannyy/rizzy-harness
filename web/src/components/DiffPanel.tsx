@@ -330,6 +330,18 @@ export default function DiffPanel(props: {
             {diff.more_files ? `; ${diff.more_files} more changed file${diff.more_files === 1 ? " is" : "s are"} not listed` : ""}.⟩
           </p>
         )}
+        {!!diff?.others_wrote?.length && (
+          <p className="diff-cut small" role="note">
+            Another chat working in this folder changed {diff.others_wrote.map((n) => showHidden(n)).join(", ")} during
+            this turn. Undoing this turn would put that back too, so it asks first.
+          </p>
+        )}
+        {!!diff?.others_may?.length && (
+          <p className="diff-cut small" role="note">
+            Another chat ran commands in this folder during this turn, so{" "}
+            {diff.others_may.map((n) => showHidden(n)).join(", ")} may hold its changes. Undo asks first.
+          </p>
+        )}
         {!!diff?.nested?.length && (
           <p className="muted small">
             Git repositories inside the folder are not compared: {diff.nested.map((n) => showHidden(n)).join(", ")}.

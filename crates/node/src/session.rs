@@ -2443,14 +2443,20 @@ impl Session {
             ),
         };
         let after = cp.after.clone().unwrap_or_default();
-        // Turns from this one on, in order, and the latest recorded state.
+        // Turns from this one on, in order, and the latest recorded state
+        // (with when it was recorded, and when this turn's `after` was).
         let mut later: Vec<String> = Vec::new();
         let mut latest = after.clone();
+        let mut latest_ms = i64::MAX;
+        let mut after_ms = i64::MAX;
         let mut seen = false;
         for e in &events {
             if let Ok(EventKind::Checkpoint(c)) = e.typed() {
                 if c.turn_id == turn_id {
                     seen = true;
+                    if c.phase == CheckpointPhase::After && after_ms == i64::MAX {
+                        after_ms = e.ts_ms;
+                    }
                 }
                 if seen && c.phase == CheckpointPhase::After && !later.contains(&c.turn_id) {
                     later.push(c.turn_id.clone());
@@ -2460,9 +2466,30 @@ impl Session {
                     CheckpointPhase::Before | CheckpointPhase::BeforeRestore
                 ) {
                     latest = c.git_ref.clone();
+                    latest_ms = e.ts_ms;
                 }
             }
         }
+        // The undone span (T57): from the turn's start to the expected
+        // state's checkpoint (after it the changed-since check compares
+        // content); an interrupted restore has none, so until now.
+        let since = crate::others::span_start(&events, turn_id);
+        let end = match (&interrupted, rewind) {
+            (Some(_), _) => i64::MAX,
+            (None, true) => latest_ms,
+            (None, false) => after_ms,
+        };
+        let span = crate::others::Span {
+            since,
+            end,
+            before: Some(before.clone()),
+            after: match (&interrupted, rewind) {
+                (Some(_), _) => None,
+                (None, true) => Some(latest.clone()),
+                (None, false) => Some(after.clone()),
+            },
+            own: crate::others::own_writes(&events, since, end),
+        };
         if !rewind && cp.restored {
             return Err("already undone".into());
         }
@@ -2523,14 +2550,36 @@ impl Session {
                     d
                 }
             };
-            let plan = crate::git::restore_plan(&repo, &diff, &now.sha, !force).await?;
+            let plan = crate::git::restore_plan(&repo, &diff, &now.sha, !force).await;
+            // Another chat's work in the folder since this turn began is
+            // not this turn's to undo (T57): refused like a change made
+            // after the turn, unless forced; a forced undo tells that chat.
+            let touched: std::collections::BTreeSet<String> = match &plan {
+                Ok(p) => p.touched.iter().map(|(_, p)| p.clone()).collect(),
+                Err(_) => diff.paths().into_iter().collect(),
+            };
+            let foreign = self.foreign_work(&repo, &span, &touched).await;
+            let plan = match plan {
+                Ok(p) => p,
+                // The refusals "Undo anyway" goes past also name it.
+                Err(e)
+                    if !foreign.is_empty()
+                        && (e.contains("changed after the turn") || e.contains("Undo anyway")) =>
+                {
+                    return Err(format!("{e}; also, {}", foreign.why()));
+                }
+                Err(e) => return Err(e),
+            };
+            if !force && !foreign.is_empty() {
+                return Err(foreign.refusal());
+            }
             // Exactly the blobs the plan writes (it knows the folder's
             // nested repositories only from the snapshot just taken).
             crate::git::secure_blobs(&repo, &plan).await?;
-            Ok::<_, String>(plan)
+            Ok::<_, String>((plan, foreign))
         }
         .await;
-        let plan = match planned {
+        let (plan, foreign) = match planned {
             Ok(t) => t,
             Err(e) => {
                 crate::git::delete_ref(&repo, &saved_ref).await;
@@ -2625,11 +2674,138 @@ impl Session {
             .await
             .map_err(|e| kept(LogError(e.to_string()).to_string()))?;
         }
+        if !foreign.is_empty() {
+            // Forced over another chat's work: tell each such chat which of
+            // its files were put back (nothing about this one; its turn
+            // cannot start meanwhile, the folder is claimed), then say so
+            // here, "told" only for a note that was written (review F7). A
+            // crash between the files and these notes loses the notes.
+            let sessions: Vec<(SessionId, Arc<Session>)> = {
+                let map = self.node.sessions.lock().unwrap_or_else(|p| p.into_inner());
+                foreign
+                    .chats
+                    .iter()
+                    .filter_map(|(id, _, _)| map.get(id).map(|s| (*id, s.clone())))
+                    .collect()
+            };
+            let mut told = 0usize;
+            for (id, files, unlisted) in &foreign.chats {
+                let Some((_, other)) = sessions.iter().find(|(s, _)| s == id) else {
+                    continue;
+                };
+                let note = EventKind::Error(ErrorEvent {
+                    turn_id: None,
+                    message: crate::others::reverted_note(files, *unlisted),
+                });
+                match other.append(note).await {
+                    Ok(_) => told += 1,
+                    Err(e) => {
+                        tracing::warn!(session = %id, error = %e, "could not tell a chat its files were put back")
+                    }
+                }
+            }
+            self.append(EventKind::Error(ErrorEvent {
+                turn_id: None,
+                message: format!(
+                    "This undo put back files another chat working in this folder changed or \
+                     may have changed during the turn: {}.{}",
+                    crate::others::listed(&foreign.all()),
+                    match told {
+                        0 => "",
+                        1 => " That chat was told.",
+                        _ => " Those chats were told.",
+                    }
+                ),
+            }))
+            .await
+            .map_err(|e| kept(LogError(e.to_string()).to_string()))?;
+        }
         *self.last_state.lock().unwrap_or_else(|p| p.into_inner()) = Some(state.sha.clone());
         crate::git::prune(&repo, self.node.cfg.policy.checkpoints_keep).await;
         drop(busy);
         crate::git::gc_in_background(repo);
         Ok(())
+    }
+
+    /// Other chats' work in this folder over `span` on the files an undo
+    /// writes (`others::foreign_work`): the chats on this node whose folder
+    /// overlaps the checkpoint's, other than this one and its sub-agents,
+    /// and the write tombstones of deleted ones (pruned here once older
+    /// than every checkpoint kept for this folder). None of the chats can
+    /// be running: the folder is claimed (or, for a diff, it is a view).
+    async fn foreign_work(
+        &self,
+        repo: &crate::git::Repo,
+        span: &crate::others::Span,
+        touched: &std::collections::BTreeSet<String>,
+    ) -> crate::others::Foreign {
+        let all: Vec<(SessionId, Option<SessionId>, PathBuf)> = self
+            .node
+            .sessions
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .values()
+            .map(|s| (s.id, s.parent_session, s.cwd.clone()))
+            .collect();
+        let parent: HashMap<SessionId, Option<SessionId>> =
+            all.iter().map(|(id, p, _)| (*id, *p)).collect();
+        // This chat's sub-agents (and theirs) work for this turn.
+        let mine = |mut id: SessionId| {
+            for _ in 0..64 {
+                if id == self.id {
+                    return true;
+                }
+                match parent.get(&id).copied().flatten() {
+                    Some(p) => id = p,
+                    None => return false,
+                }
+            }
+            false
+        };
+        let root = real_path(&repo.root);
+        let ids: Vec<(SessionId, PathBuf)> = all
+            .iter()
+            .filter(|(id, _, _)| !mine(*id))
+            .map(|(id, _, cwd)| (*id, real_path(cwd)))
+            .filter(|(_, cwd)| overlaps(cwd, &root))
+            .collect();
+        let sessions: Vec<(Arc<Session>, PathBuf)> = {
+            let map = self.node.sessions.lock().unwrap_or_else(|p| p.into_inner());
+            ids.into_iter()
+                .filter_map(|(id, cwd)| map.get(&id).cloned().map(|s| (s, cwd)))
+                .collect()
+        };
+        let mut others = Vec::with_capacity(sessions.len());
+        for (s, cwd) in sessions {
+            // Its own checkpoints, where its turns' changes are read
+            // (none: every file the undo writes counts for it).
+            let theirs = s.checkpoint_repo().await.ok().flatten();
+            others.push(crate::others::Other {
+                id: s.id,
+                cwd,
+                repo: theirs,
+            });
+        }
+        let store = &self.node.cfg.store;
+        let folder = root.to_string_lossy().into_owned();
+        if let Some(oldest) = crate::git::oldest_kept_ms(repo).await {
+            let f = folder.clone();
+            if let Err(e) = store
+                .call(move |s| s.prune_write_tombstones(&f, oldest))
+                .await
+            {
+                tracing::warn!(error = %e, "write tombstones not pruned");
+            }
+        }
+        let tombstones = match store.call(|s| s.write_tombstones()).await {
+            Ok(t) => t,
+            // Unreadable: as if a deleted chat had worked here.
+            Err(e) => {
+                tracing::warn!(error = %e, "write tombstones unreadable");
+                vec![(folder, i64::MIN, i64::MAX)]
+            }
+        };
+        crate::others::foreign_work(store, repo, others, &tombstones, span, touched).await
     }
 
     /// Register a restore of `root` (the checkpoint's folder: the
@@ -3091,6 +3267,11 @@ impl Session {
 
     pub(crate) fn id(&self) -> SessionId {
         self.id
+    }
+
+    /// The chat's folder as recorded.
+    pub(crate) fn cwd(&self) -> &std::path::Path {
+        &self.cwd
     }
 
     pub(crate) fn is_running(&self) -> bool {

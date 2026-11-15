@@ -370,6 +370,16 @@ CREATE TABLE IF NOT EXISTS deleted_sessions (
     -- (NULL when the mirror never had a row for it).
     node_id    TEXT
 );
+-- Node only: what a deleted chat's file-changing calls left behind, so an
+-- undo in another chat still refuses over that work (PLAN.md T57). No chat
+-- content: the chat's folder (its real path) and the time span of those
+-- calls. Removed once older than every checkpoint kept for that folder.
+CREATE TABLE IF NOT EXISTS write_tombstones (
+    folder  TEXT NOT NULL,
+    from_ms INTEGER NOT NULL,
+    to_ms   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS write_tombstones_folder ON write_tombstones(folder);
 -- Uploaded documents waiting to be sent with a message (text extracted).
 -- Consumed (deleted) when the message is sent: the text then lives in the
 -- message's event. Unsent uploads expire.
@@ -1140,8 +1150,26 @@ impl Store {
     /// id is remembered so later events for it are refused (mirrors).
     /// Returns whether the session existed.
     pub fn delete_session(&self, sid: SessionId, tombstone: bool) -> Result<bool> {
+        self.delete_session_leaving(sid, tombstone, None)
+    }
+
+    /// [`Self::delete_session`], and in the same transaction a row of
+    /// `write_tombstones` for `writes` (folder, from, to): what the chat's
+    /// file-changing calls left behind (PLAN.md T57).
+    pub fn delete_session_leaving(
+        &self,
+        sid: SessionId,
+        tombstone: bool,
+        writes: Option<(&str, i64, i64)>,
+    ) -> Result<bool> {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
+        if let Some((folder, from, to)) = writes {
+            tx.execute(
+                "INSERT INTO write_tombstones (folder, from_ms, to_ms) VALUES (?1, ?2, ?3)",
+                params![folder, from, to],
+            )?;
+        }
         let id = sid.to_string();
         let node: Option<String> = tx
             .query_row(
@@ -1615,6 +1643,86 @@ impl Store {
         ))?;
         let id = sid.to_string();
         let mut args: Vec<&dyn rusqlite::ToSql> = vec![&id, &floor];
+        for k in kinds {
+            args.push(k);
+        }
+        let rows = stmt.query_map(args.as_slice(), |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (seq, ts_ms, kind, payload) = row?;
+            out.push(RawEvent {
+                session_id: sid,
+                seq: seq as u64,
+                ts_ms,
+                kind,
+                payload: serde_json::from_str(&payload)?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Every write tombstone: (folder, from_ms, to_ms). A few short rows
+    /// at most (one per deleted chat that changed files, until pruned).
+    pub fn write_tombstones(&self) -> Result<Vec<(String, i64, i64)>> {
+        let conn = self.lock();
+        let mut stmt =
+            conn.prepare_cached("SELECT folder, from_ms, to_ms FROM write_tombstones")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Remove the write tombstones of `folder` that ended before `before_ms`.
+    pub fn prune_write_tombstones(&self, folder: &str, before_ms: i64) -> Result<usize> {
+        let conn = self.lock();
+        Ok(conn.execute(
+            "DELETE FROM write_tombstones WHERE folder = ?1 AND to_ms < ?2",
+            params![folder, before_ms],
+        )?)
+    }
+
+    /// The events of `sid`, of the kinds in `kinds`, from its last
+    /// `turn_started` before `since_ms` on (from its start when there is
+    /// none): what an undo reads of another chat in its folder (PLAN.md
+    /// T57). Both reads walk the primary key from the log's end and stop
+    /// early for a recent `since_ms`; the kinds are filtered in SQL, so no
+    /// delta is parsed.
+    pub fn events_since_turn_at(
+        &self,
+        sid: SessionId,
+        since_ms: i64,
+        kinds: &[&str],
+    ) -> Result<Vec<RawEvent>> {
+        let id = sid.to_string();
+        let floor: i64 = {
+            let conn = self.lock();
+            conn.query_row(
+                "SELECT seq FROM events
+                 WHERE session_id = ?1 AND kind = 'turn_started' AND ts_ms < ?2
+                 ORDER BY seq DESC LIMIT 1",
+                params![id, since_ms],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0)
+        };
+        let conn = self.lock();
+        let marks = vec!["?"; kinds.len().max(1)].join(", ");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT seq, ts_ms, kind, payload FROM events
+             WHERE session_id = ?1 AND seq >= ?2 AND kind IN ({marks}) ORDER BY seq"
+        ))?;
+        let none = String::new();
+        let mut args: Vec<&dyn rusqlite::ToSql> = vec![&id, &floor];
+        if kinds.is_empty() {
+            args.push(&none);
+        }
         for k in kinds {
             args.push(k);
         }

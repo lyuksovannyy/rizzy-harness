@@ -809,7 +809,9 @@ Changes made by shell commands show like any other. The node reads them from
 the turn's checkpoints when you ask; nothing is stored on the server. A very
 large turn is shown in part, marked "Cut" (at most 1,000 files are listed and
 about 1 MiB of lines is sent); a checkpoint that is no longer kept, or a node
-that is away, is said in words. Only the chat's owner can open them. Checkpoints live in a private repository in the node's data
+that is away, is said in words. If another chat changed (or may have changed)
+some of these files since the turn began, the view names them before you
+press Undo (see "Two chats in one folder" below). Only the chat's owner can open them. Checkpoints live in a private repository in the node's data
 directory (`checkpoints/<hash>.git`), for git repositories too: nothing is
 written into your folder, no objects, refs, index or config are ever written
 into your `.git` (git may update the timestamps of existing object files
@@ -873,6 +875,27 @@ does not show yet. Files a checkpoint already holds stay covered even if a
 same folder (or in a folder that contains it, or one inside it), and no
 chat can start working in that folder while an undo runs there; wait a
 moment, or cancel the other chat, and try again.
+
+**Two chats in one folder.** A checkpoint is a picture of the whole folder,
+so what another chat (yours or a teammate's) changed there while a turn ran
+is in that turn's picture too. An undo or rewind never puts that back
+without asking: it is refused, naming the files another chat changed during
+the turn (with its edit tools, or its own undo) or may have changed (with a
+command, a sub-agent, a background command, or a chat deleted since), and
+saying nothing else about that chat. Files your own turn changed only with
+its edit tools, one edit after the other, are never counted as another
+chat's: the harness checks that those edits account for the whole change.
+"Undo anyway" goes ahead; the other chat then gets a line naming its files
+that were put back (only those in its own folder), with nothing about
+yours, and it cannot bring them back itself (the copy is in your undo's
+checkpoint), so it has to make those changes again. Commands are judged by
+the other chat's whole turn: if it ran a command while your turn changed a
+file with a command of its own, that file is named even if the other
+command never touched it. When a chat that changed files is deleted, the
+node keeps only its folder and when it worked (no content), so an undo
+still asks. Your own edits in your editor during a turn still count as the
+turn's, and a chat in an unrelated folder that writes here through a path
+outside its folder is not seen.
 
 **Approval modes.** Each agentic chat has an approval mode: how much runs
 without a click. The picker in the composer shows it and offers three, each

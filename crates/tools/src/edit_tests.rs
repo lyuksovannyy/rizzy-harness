@@ -768,3 +768,25 @@ async fn a_fuzzy_replace_all_overlapping_another_edit_is_refused() {
     assert!(!e.ok && e.output.contains("overlap"), "{}", e.output);
     assert_eq!(get(&dir, "a.txt"), "a \nb\na \nb\n");
 }
+
+// --- what each write replaced (PLAN.md T57) ------------------------------
+
+#[tokio::test]
+async fn edit_and_write_record_what_they_replaced() {
+    use crate::seen::{hex, sha256};
+    let (dir, ctx) = ws();
+    put(&dir, "a.txt", "one\n");
+    read(&ctx, "a.txt").await;
+    let e = edit(&ctx, "a.txt", "one", "two").await;
+    let s = e.seen.expect("an edit's record");
+    assert_eq!(s.base.as_deref(), Some(hex(&sha256(b"one\n")).as_str()));
+    assert_eq!(s.sha256, hex(&sha256(b"two\n")));
+    let w = run(&Write, &ctx, json!({"path": "a.txt", "content": "three\n"})).await;
+    let s = w.seen.expect("a write's record");
+    assert_eq!(s.base.as_deref(), Some(hex(&sha256(b"two\n")).as_str()));
+    // A new file: nothing was there.
+    let w = run(&Write, &ctx, json!({"path": "new.txt", "content": "x"})).await;
+    assert_eq!(w.seen.expect("record").base.as_deref(), Some(""));
+    // A read records no base.
+    assert_eq!(read(&ctx, "a.txt").await.seen.expect("record").base, None);
+}
