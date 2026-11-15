@@ -1019,6 +1019,11 @@ async fn in_plan_mode_a_writing_child_is_not_continued() {
         outs[0].contains("plan mode: @dev") && outs[0].contains("was not continued"),
         "{outs:#?}"
     );
+    assert!(
+        !outs[0].contains("   "),
+        "a lost line continuation: {:?}",
+        outs[0]
+    );
     assert_eq!(turns(&events_of(&r, child)).len(), 1);
     assert_eq!(r.read("b.txt").as_deref(), Some("one\n"));
 }

@@ -4083,7 +4083,8 @@ impl Session {
         let writes = !made_in_plan && self.can_change_files(&agent);
         if wrote && self.current_mode() == ApprovalMode::Plan {
             return Err(format!(
-                "[harness] plan mode: @{started_as} `{child_id}` was not continued: it changes                  files, and nothing may change in plan mode. Describe the work in your plan."
+                "[harness] plan mode: @{started_as} `{child_id}` was not continued: it changes \
+                 files, and nothing may change in plan mode. Describe the work in your plan."
             ));
         }
         if wrote != writes {
