@@ -1822,6 +1822,35 @@ impl Store {
         Ok(out)
     }
 
+    /// Every event of `sid` of one `kind`, ascending (a turn's diff reads
+    /// only the `checkpoint` events, X.12).
+    pub fn events_of_kind(&self, sid: SessionId, kind: &str) -> Result<Vec<RawEvent>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT seq, ts_ms, kind, payload FROM events WHERE session_id = ?1 AND kind = ?2 ORDER BY seq",
+        )?;
+        let rows = stmt.query_map(params![sid.to_string(), kind], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (seq, ts_ms, kind, payload) = row?;
+            out.push(RawEvent {
+                session_id: sid,
+                seq: seq as u64,
+                ts_ms,
+                kind,
+                payload: serde_json::from_str(&payload)?,
+            });
+        }
+        Ok(out)
+    }
+
     /// Events with `seq > after`, ascending, at most `limit`.
     pub fn events_after(&self, sid: SessionId, after: u64, limit: usize) -> Result<Vec<RawEvent>> {
         let conn = self.lock();

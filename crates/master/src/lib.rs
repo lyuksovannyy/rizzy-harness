@@ -11,6 +11,7 @@ pub mod avatars;
 pub mod blobs;
 mod callbacks;
 pub mod config;
+pub mod diff;
 pub mod env;
 mod favicon;
 mod http;
@@ -260,6 +261,8 @@ pub struct MasterInner {
     storage: OnceLock<storage::Storage>,
     /// Transfers of staged files from nodes.
     pulls: artifact_pull::Pulls,
+    /// Turn diffs waiting for their node's answer (X.12).
+    diffs: diff::Waiting,
     /// Staged-file events per node and hour.
     artifact_throttle: artifacts::Throttle,
     /// Open UI sockets by user, so a login that ends closes them.
@@ -522,7 +525,9 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::ArtifactFetch { .. }
         | MasterToNode::ArtifactRelease { .. }
         // An answer to the node's own search: nothing is written.
-        | MasterToNode::RecallResult { .. } => None,
+        | MasterToNode::RecallResult { .. }
+        // A read of two checkpoints: no event, no work.
+        | MasterToNode::Diff { .. } => None,
     }
 }
 
@@ -607,6 +612,7 @@ impl Master {
                 routines: OnceLock::new(),
                 storage: OnceLock::new(),
                 pulls: Default::default(),
+                diffs: Default::default(),
                 artifact_throttle: Default::default(),
                 sockets: Default::default(),
                 outbound: Mutex::new(outbound::Outbound::from_env()),
@@ -1164,6 +1170,7 @@ impl Master {
                 n.tx = None;
                 // Its transfers stop; their versions wait for the next hello.
                 artifact_pull::node_down(&this, &nid);
+                diff::node_down(&this, &nid);
             }
             drop(nodes);
             let _ = this.inner.live.send(Live::NodesChanged);
@@ -1338,6 +1345,19 @@ impl Master {
                     data,
                     eof,
                     error,
+                },
+            ),
+            NodeToMaster::DiffResult {
+                req_id,
+                diff,
+                error,
+            } => diff::on_answer(
+                self,
+                node_id,
+                req_id,
+                match (diff, error) {
+                    (Some(d), None) => Ok(d),
+                    (_, e) => Err(e.unwrap_or_else(|| "the node sent no changes".into())),
                 },
             ),
         }

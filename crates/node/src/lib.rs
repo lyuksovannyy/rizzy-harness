@@ -115,9 +115,16 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::StopBackground { .. }
         | MasterToNode::ApprovalRespond { .. }
         | MasterToNode::ArtifactFetch { .. }
-        | MasterToNode::RecallResult { .. } => None,
+        | MasterToNode::RecallResult { .. }
+        | MasterToNode::Diff { .. } => None,
     }
 }
+
+/// Turn diffs computed at once (X.12); one more is refused at once with
+/// [`DIFF_BUSY`], so a master asking in a loop cannot pile up git work.
+const DIFF_AT_ONCE: usize = 2;
+const DIFF_BUSY: &str =
+    "this node is already reading the changes of other turns; try again in a moment";
 
 pub struct NodeConfig {
     pub node_id: String,
@@ -177,6 +184,8 @@ pub(crate) struct Inner {
     pub(crate) background: Arc<harness_tools::background::Registry>,
     /// `recall` calls waiting for the master's answer (PLAN.md T55).
     pub(crate) recalls: recall::Pending,
+    /// Room for turn diffs being read ([`DIFF_AT_ONCE`]).
+    diffs: Arc<tokio::sync::Semaphore>,
 }
 
 impl Inner {
@@ -457,6 +466,7 @@ impl NodeRuntime {
             stopping: AtomicBool::new(false),
             background: harness_tools::background::Registry::new(bg_limits, bg_secrets),
             recalls: Default::default(),
+            diffs: Arc::new(tokio::sync::Semaphore::new(DIFF_AT_ONCE)),
         });
         for row in rows {
             let s = Session::load(inner.clone(), row.session_id).await?;
@@ -604,6 +614,8 @@ impl NodeRuntime {
                     p.effective_mode(None).id()
                 ));
                 capabilities.push(harness_protocol::CAP_BACKGROUND.into());
+                // A turn's changes, read from its checkpoints (X.12).
+                capabilities.push(harness_protocol::CAP_DIFF.into());
                 // Off is silent: with `callback_turns = 0` the master asks
                 // nothing, and an end waits for the person as before.
                 if self.inner.cfg.policy.limits.callback_turns > 0 {
@@ -650,6 +662,15 @@ impl NodeRuntime {
                         hits,
                         error,
                     } => this.inner.recalls.answer(&req_id, hits, error),
+                    // Likewise a turn's diff (X.12): a read of two
+                    // checkpoints, in a task of its own, never behind a
+                    // command of the session (a restore holds its lane).
+                    MasterToNode::Diff {
+                        req_id,
+                        session_id,
+                        turn_id,
+                        rewind,
+                    } => this.diff(req_id, session_id, turn_id, rewind),
                     // Answered here, at once: they must not wait behind a
                     // slow restore or delete (AUDIT S10), nor behind the
                     // output queued for the master (A.21): their acks go
@@ -822,6 +843,46 @@ impl NodeRuntime {
                 error: Some("publishing is off on this node".into()),
             }),
         }
+    }
+
+    /// Answer `session.diff` (X.12) from a task of its own; never acked:
+    /// the result is the answer. Nothing is logged or stored: a diff is a
+    /// view of two checkpoints the log already names. A stopping node
+    /// still answers (it starts no work).
+    fn diff(&self, req_id: String, sid: SessionId, turn_id: String, rewind: bool) {
+        // The node's own record that its master read a chat's files (the
+        // session id only, never a path or a line).
+        self.audit_inline("session.diff", sid);
+        let Ok(permit) = self.inner.diffs.clone().try_acquire_owned() else {
+            return self.inner.publish(NodeToMaster::DiffResult {
+                req_id,
+                diff: None,
+                error: Some(DIFF_BUSY.into()),
+            });
+        };
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            let res = match inner.session(sid) {
+                Some(s) => s.diff(&turn_id, rewind).await,
+                None => Err("unknown session".to_string()),
+            };
+            let msg = match res {
+                Ok(d) => NodeToMaster::DiffResult {
+                    req_id,
+                    diff: Some(Box::new(d)),
+                    error: None,
+                },
+                Err(e) => NodeToMaster::DiffResult {
+                    req_id,
+                    diff: None,
+                    error: Some(e),
+                },
+            };
+            // In order, waiting for room: an answer is never dropped for a
+            // full queue (the master's request would only time out).
+            inner.publish_wait(msg).await;
+        });
     }
 
     /// "Save as artifact": check the path now (the ack carries a refusal),
@@ -1139,6 +1200,15 @@ impl NodeRuntime {
                 stage_id,
                 ..
             } => self.release(session_id, &stage_id),
+            MasterToNode::Diff {
+                req_id,
+                session_id,
+                turn_id,
+                rewind,
+            } => {
+                self.diff(req_id, session_id, turn_id, rewind);
+                Ok(())
+            }
         };
         if let Some(req_id) = req_id {
             let ack = NodeToMaster::Ack {
