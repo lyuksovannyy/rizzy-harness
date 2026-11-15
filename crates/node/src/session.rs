@@ -341,6 +341,11 @@ struct Isolation {
 
 /// One chat's approval mode (read by its sub-agents through the node's
 /// session table, `Session::current_mode`).
+/// Why a sub-agent's changes were kept out of a folder whose chat is in
+/// plan mode (X.7) when the child ended.
+const PLAN_NOT_APPLIED: &str = "the chat is in plan mode, in which nothing is changed in its \
+     folder; carry them out after the person leaves plan mode";
+
 pub(crate) type ModeCell = Arc<Mutex<ApprovalMode>>;
 
 fn read_mode(c: &ModeCell) -> ApprovalMode {
@@ -3773,8 +3778,17 @@ impl Session {
     /// `bash` (no shell on a node is read-only).
     fn can_change_files(&self, agent: &AgentSpec) -> bool {
         let policy = &self.node.cfg.policy;
+        // In plan mode (X.7) the child is made in plan mode and stays in it
+        // (its own recorded mode is its floor for life): its `bash` is the
+        // read-only shell and its `write` and `edit` are refused, so it
+        // works in this folder, as a reader does.
+        let tools: &[&str] = if self.current_mode() == ApprovalMode::Plan {
+            &[]
+        } else {
+            &["write", "edit", "bash"]
+        };
         self.profile == Profile::Agentic
-            && ["write", "edit", "bash"]
+            && tools
                 .iter()
                 .any(|t| agent.allows_tool(t) && !policy.denies(t))
     }
@@ -3907,6 +3921,12 @@ impl Session {
                     (false, _) => Err(crate::git::NotApplied::Failed(
                         "a session log could not be written".into(),
                     )),
+                    // Plan mode (X.7) switched on while the child worked:
+                    // the node writes nothing into the folder either; the
+                    // changes stay in the store and are shown.
+                    (true, Ok(_)) if self.current_mode() == ApprovalMode::Plan => {
+                        Err(crate::git::NotApplied::Failed(PLAN_NOT_APPLIED.into()))
+                    }
                     (true, Ok(_)) => iso.sub.apply(&iso.base, &result, &id).await,
                     (true, Err(e)) => Err(crate::git::NotApplied::Failed(e)),
                 };
@@ -4221,7 +4241,14 @@ impl TurnHost for Session {
     }
 
     fn runs_unasked(&self, tool: &str, risk: ToolRisk) -> bool {
-        !self.node.cfg.policy.denies(tool) && !self.current_mode().needs_approval(risk)
+        let mode = self.current_mode();
+        !self.node.cfg.policy.denies(tool)
+            && !mode.needs_approval(risk)
+            && !mode.refuses(tool, risk)
+    }
+
+    fn approval_mode(&self) -> Option<ApprovalMode> {
+        (self.profile == Profile::Agentic).then(|| self.current_mode())
     }
 
     fn background(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
@@ -4336,6 +4363,13 @@ impl TurnHost for Session {
             return Decision::Deny;
         }
         let mode = self.current_mode();
+        // Plan mode (X.7): refused, never asked, and no card can lift it.
+        // The loop refuses these before they get here, with the plain
+        // sentence (`plan_refusal`); this is the node's own floor for a
+        // call that reached it anyway (the mode changed in between).
+        if mode.refuses(tool, risk) {
+            return Decision::Deny;
+        }
         if !mode.needs_approval(risk) {
             return Decision::Allow;
         }

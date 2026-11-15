@@ -485,3 +485,63 @@ async fn a_chat_without_a_project_gets_no_project_facts() {
     assert!(!ctx.contains("What this project has established"), "{ctx}");
     assert!(!ctx.contains("`remember`"), "{ctx}");
 }
+
+/// Plan mode (X.7): the node refuses `remember` (it is not offered, and a
+/// call naming it gets the plan sentence), and the master files nothing
+/// for the call the log holds all the same. The same chat in auto files it.
+#[tokio::test]
+async fn a_remember_in_plan_mode_files_nothing() {
+    let s = start(Offer::Yes).await;
+    let pid = project(&s).await;
+    let sid = coding_chat(&s, Some(&pid)).await;
+    let (st, v) = call(
+        &s,
+        Method::POST,
+        &format!("/api/sessions/{sid}/approval-mode"),
+        Some(json!({"mode": "plan"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    say(&s, &sid, "remember project: a fact planned, never kept").await;
+    assert!(
+        !last_tools(&s).contains(&"remember".to_string()),
+        "{:?}",
+        last_tools(&s)
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(project_facts(&s, &pid).await.is_empty());
+    let (_, v) = call(
+        &s,
+        Method::GET,
+        &format!("/api/sessions/{sid}/events"),
+        None,
+    )
+    .await;
+    let refused = v["events"].as_array().unwrap().iter().any(|e| {
+        e["kind"] == "tool_call_finished"
+            && e["payload"]["output"]
+                .as_str()
+                .is_some_and(|o| o.contains("plan mode: `remember` was not run"))
+    });
+    assert!(refused, "{v}");
+    // Out of plan mode the same call is filed.
+    let (st, v) = call(
+        &s,
+        Method::POST,
+        &format!("/api/sessions/{sid}/approval-mode"),
+        Some(json!({"mode": "auto"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    say(&s, &sid, "remember project: a fact kept").await;
+    let mut facts = vec![];
+    for _ in 0..200 {
+        facts = project_facts(&s, &pid).await;
+        if !facts.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(facts.len(), 1, "{facts:?}");
+    assert_eq!(facts[0]["text"], "a fact kept");
+}

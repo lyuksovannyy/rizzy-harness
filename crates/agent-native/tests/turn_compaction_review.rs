@@ -32,6 +32,9 @@ struct LogHost {
     /// Read-only calls run with no card, so `read`s of one step run
     /// together (X.19).
     unasked: bool,
+    /// The chat is in plan mode (X.7): its line goes into the context
+    /// block, and the mutating `note` is refused.
+    plan: bool,
 }
 
 impl LogHost {
@@ -42,6 +45,7 @@ impl LogHost {
             queued: Mutex::default(),
             asked: Mutex::new(0),
             unasked: false,
+            plan: false,
         }
     }
     fn push(&self, k: EventKind) -> u64 {
@@ -75,6 +79,10 @@ impl LogHost {
 impl TurnHost for LogHost {
     fn runs_unasked(&self, _: &str, risk: ToolRisk) -> bool {
         self.unasked && risk == ToolRisk::ReadOnly
+    }
+    fn approval_mode(&self) -> Option<harness_core::policy::ApprovalMode> {
+        self.plan
+            .then_some(harness_core::policy::ApprovalMode::Plan)
     }
     async fn emit(&self, kind: EventKind) -> Result<(), harness_core::backend::LogError> {
         self.push(kind);
@@ -560,7 +568,15 @@ fn random_script(seed: u64, steps: usize) -> (Vec<Completion>, Vec<(usize, Strin
 /// every step and compared byte for byte with what was sent.
 #[tokio::test]
 async fn rebuild_matches_live_at_every_step() {
-    rebuild_matches_live(false, 1..=8).await;
+    rebuild_matches_live(false, 1..=8, false).await;
+}
+
+/// Plan mode (X.7): the harness's plan line is sent in the turn's context
+/// block and recorded with it, the refused `note` calls are results like
+/// any, and every request still rebuilds byte for byte from the log.
+#[tokio::test]
+async fn rebuild_matches_live_in_plan_mode() {
+    rebuild_matches_live(false, 1..=3, true).await;
 }
 
 /// The same with the reads of a step running together (X.19), each later
@@ -568,10 +584,10 @@ async fn rebuild_matches_live_at_every_step() {
 /// every request, keep call order whichever finishes first.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn rebuild_matches_live_with_parallel_reads_finishing_out_of_order() {
-    rebuild_matches_live(true, 1..=4).await;
+    rebuild_matches_live(true, 1..=4, false).await;
 }
 
-async fn rebuild_matches_live(parallel: bool, seeds: std::ops::RangeInclusive<u64>) {
+async fn rebuild_matches_live(parallel: bool, seeds: std::ops::RangeInclusive<u64>, plan: bool) {
     let mut report = vec![];
     let mut failures = 0;
     for seed in seeds {
@@ -615,6 +631,7 @@ async fn rebuild_matches_live(parallel: bool, seeds: std::ops::RangeInclusive<u6
             };
             let mut host = LogHost::new(sid, history.clone());
             host.unasked = parallel;
+            host.plan = plan;
             *host.queued.lock().unwrap() = queued;
             let start = history.len();
             open_turn(&host, qseqs);
@@ -630,6 +647,26 @@ async fn rebuild_matches_live(parallel: bool, seeds: std::ops::RangeInclusive<u6
                         .any(|w| w.iter().all(|e| e.kind == "tool_call_started")),
                     "seed {seed}: no step ran in parallel"
                 );
+            }
+            if plan {
+                let sent = log.iter().any(|e| {
+                    e.kind == "context_sent" && e.payload.to_string().contains("Plan mode is on")
+                });
+                assert!(sent, "seed {seed}: the plan line is not recorded");
+                let first = &p.main()[0].msgs;
+                assert!(
+                    first
+                        .iter()
+                        .any(|m| matches!(m, ChatMsg::User(u) if u.contains("Plan mode is on"))),
+                    "seed {seed}: the plan line was not sent"
+                );
+                let refused = log.iter().any(|e| {
+                    e.kind == "tool_call_finished"
+                        && e.payload
+                            .to_string()
+                            .contains("plan mode: `note` was not run")
+                });
+                assert!(refused, "seed {seed}: no refused note");
             }
             let sh = host.shortened();
             let folds = sh.iter().filter(|c| c.folded.is_some()).count();

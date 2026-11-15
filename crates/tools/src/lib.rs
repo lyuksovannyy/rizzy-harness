@@ -222,8 +222,8 @@ pub struct ToolCtx {
     /// gives the plain refusal and shows nothing (T45, T51).
     pub read_unasked: bool,
     /// `bash` runs in the read-only shell ([`sandbox::Grants::read_only`],
-    /// T.7): set by the node's loop for a chat in plan mode and for an agent
-    /// with no tool that writes, never from the call's arguments.
+    /// T.7): set by the node's loop for a chat in plan mode, never from the
+    /// call's arguments.
     pub read_only_shell: bool,
 }
 

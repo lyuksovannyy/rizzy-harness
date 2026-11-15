@@ -775,6 +775,33 @@ async fn about(m: &Master, row: &SessionRow, input: &Value, allowed: TurnMemory)
     }
 }
 
+/// Whether `row`'s chat, or a chat above it (a sub-agent's parents, a few
+/// levels at most), is in plan mode by the latest mode its log holds. A
+/// read that fails counts as plan mode: nothing is filed then.
+async fn in_plan_mode(m: &Master, row: &SessionRow) -> bool {
+    use harness_core::policy::ApprovalMode;
+    let mut sid = row.session_id;
+    let mut parent = row.parent_id.clone();
+    for _ in 0..8 {
+        match m.approval_mode_of(sid).await {
+            Ok(Some(ApprovalMode::Plan)) | Err(_) => return true,
+            Ok(_) => {}
+        }
+        let Some(p) = parent
+            .take()
+            .and_then(|p| p.parse::<harness_core::SessionId>().ok())
+        else {
+            return false;
+        };
+        let Ok(Some(up)) = m.inner.mirror.call(move |s| s.session(p)).await else {
+            return true;
+        };
+        sid = up.session_id;
+        parent = up.parent_id;
+    }
+    true
+}
+
 /// A mirrored `remember` call, filed for the chat (never for an incognito
 /// chat, nor a turn that may write no memory: an untrusted or callback
 /// turn, an agent whose memory is off), and only from a node that offers
@@ -808,6 +835,13 @@ pub async fn file(m: &Master, node_id: &str, e: &RawEvent) {
         return;
     };
     if row.incognito {
+        return;
+    }
+    // Plan mode (X.7): the node refuses `remember` there, but its call is
+    // in the log all the same (`tool_call_started` comes first); nothing is
+    // filed for a chat in plan mode, or a sub-agent of one, as the log
+    // says now. Fails closed on a read error.
+    if in_plan_mode(m, &row).await {
         return;
     }
     if call_record(m, sid, call_id).await.is_some() {

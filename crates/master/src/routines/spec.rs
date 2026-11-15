@@ -321,6 +321,9 @@ mod tests {
         // The owner's default (2026-11-14), unless the routine sets its own.
         assert_eq!(s.approval_mode, ApprovalMode::Auto);
         for (name, mode) in [
+            // A routine may run in plan mode (X.7): a report that changes
+            // nothing.
+            ("plan", ApprovalMode::Plan),
             ("ask_all", ApprovalMode::AskAll),
             ("ask", ApprovalMode::Ask),
             ("accept_edits", ApprovalMode::AcceptEdits),
