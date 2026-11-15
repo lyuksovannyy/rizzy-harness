@@ -227,6 +227,10 @@ impl AgentSpec {
     /// in their parent's folder (no copy to merge back), may run on the
     /// small model and may be started in plan mode.
     pub fn changes_things(&self, offered: impl Fn(&str) -> bool) -> bool {
+        self.changes_with(&offered)
+    }
+
+    fn changes_with(&self, offered: &dyn Fn(&str) -> bool) -> bool {
         let ToolSelection::List(tools) = &self.tools else {
             return true;
         };
@@ -234,6 +238,34 @@ impl AgentSpec {
             .iter()
             .filter(|t| self.allows_tool(t) && offered(t))
             .any(|t| t == MCP_ALL || tool_changes(t, true))
+    }
+
+    /// **Whether this agent needs a folder of its own** as a sub-agent
+    /// (PLAN.md T70), from the same inputs as [`Self::changes_things`]: it
+    /// changes things, and at least one of the tools it may call (offered
+    /// by the node) can change files directly: `write`, `edit`, a writable
+    /// `bash` (which every agent that changes things has, if it has
+    /// `bash`), `all`, or a tool nobody listed. `publish` (an artifact
+    /// through the master) and MCP tools (their own server's calls, with
+    /// their own approval) do not: an agent with only those shares its
+    /// parent's folder, as on main, so a chat in a plain folder can still
+    /// delegate to a calendar or notes agent. So an agent that shares the
+    /// folder never has the writable shell, `write`, `edit` or an unlisted
+    /// tool (tested over every subset).
+    pub fn needs_own_folder(&self, offered: impl Fn(&str) -> bool) -> bool {
+        if !self.changes_with(&offered) {
+            return false;
+        }
+        let ToolSelection::List(tools) = &self.tools else {
+            return true;
+        };
+        tools
+            .iter()
+            .filter(|t| self.allows_tool(t) && offered(t))
+            .any(|t| {
+                let mcp = t == MCP_ALL || t.starts_with(MCP_PREFIX);
+                !mcp && t != "publish" && (t == SHELL || tool_changes(t, true))
+            })
     }
 
     pub fn agent_ref(&self) -> AgentRef {
@@ -343,6 +375,75 @@ mod tests {
         assert!(!listed(&["read", "mcp"], &["mcp"]).changes_things(all));
         assert!(!listed(&["read", "write", "bash"], &[]).changes_things(|t| t != "write"));
         assert!(listed(&["read", "write"], &[]).changes_things(|t| t != "bash"));
+    }
+
+    /// "Needs its own folder" (review of PR 131): over every subset of a
+    /// tool set, an agent that shares its parent's folder never has the
+    /// writable shell, `write`, `edit` or an unlisted tool; a reader never
+    /// needs a folder; `publish`- and MCP-only agents share it.
+    #[test]
+    fn an_agent_sharing_the_folder_never_writes_files_directly() {
+        let pool = [
+            "read",
+            "grep",
+            "write",
+            "edit",
+            "bash",
+            "bash_output",
+            "publish",
+            "mcp",
+            "mcp__notes__add",
+            "remember",
+            "web_fetch",
+            "notebook_edit",
+        ];
+        for mask in 0u32..(1 << pool.len()) {
+            let tools: Vec<&str> = (0..pool.len())
+                .filter(|i| mask & (1 << i) != 0)
+                .map(|i| pool[i])
+                .collect();
+            let a = listed(&tools, &[]);
+            let changes = a.changes_things(|_| true);
+            let own = a.needs_own_folder(|_| true);
+            if !changes {
+                assert!(!own, "{tools:?}");
+            }
+            if !own {
+                let writable_shell = changes && tools.contains(&"bash");
+                let direct = ["write", "edit", "notebook_edit"]
+                    .iter()
+                    .any(|t| tools.contains(t));
+                assert!(!writable_shell && !direct, "{tools:?} shares the folder");
+            }
+        }
+        let own = |t: &[&str]| listed(t, &[]).needs_own_folder(|_| true);
+        let changes = |t: &[&str]| listed(t, &[]).changes_things(|_| true);
+        for t in [
+            &["read", "mcp"][..],
+            &["read", "publish"],
+            &["read", "mcp__notes__add", "publish"],
+        ] {
+            assert!(changes(t) && !own(t), "{t:?}");
+        }
+        for t in [
+            &["read", "mcp", "bash"][..],
+            &["read", "publish", "bash"],
+            &["read", "write"],
+            &["notebook_edit"],
+        ] {
+            assert!(own(t), "{t:?}");
+        }
+        assert!(
+            !own(&["read", "bash"]),
+            "a reader: the read-only shell, shared folder"
+        );
+        let every = AgentSpec {
+            tools: ToolSelection::All(AllTools::All),
+            ..listed(&[], &[])
+        };
+        assert!(every.needs_own_folder(|_| true));
+        // The node's denial counts as for the other question.
+        assert!(!listed(&["read", "mcp", "bash"], &[]).needs_own_folder(|t| t != "bash"));
     }
 
     #[test]

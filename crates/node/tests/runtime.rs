@@ -1597,10 +1597,10 @@ async fn delegate_as_lead(
 /// A sub-agent that can change files gets its own worktree or is not
 /// started: in a folder that is not a repository the delegation is refused
 /// with the reason, no child session exists and nothing in the folder moved.
-/// "Can change files" is the shared rule (PLAN.md T70): `publish`, an MCP
-/// tool and a tool nobody listed count (before it, only `write`, `edit`
-/// and `bash` did); `bash` with nothing else that changes things does not
-/// (its shell is the read-only one: `a_reader_with_a_shell_*` below).
+/// "Needs its own folder" (PLAN.md T70): `write`, `edit`, a writable
+/// `bash` (an agent with MCP or `publish` beside it) and a tool nobody
+/// listed; not `bash` alone (the read-only shell: `a_reader_with_a_shell_*`)
+/// nor `publish` or MCP alone (`publish_and_mcp_sub_agents_*`).
 #[tokio::test]
 async fn a_writing_sub_agent_is_refused_outside_a_repository() {
     let mut h = Harness::new(auto_policy).await;
@@ -1611,8 +1611,8 @@ async fn a_writing_sub_agent_is_refused_outside_a_repository() {
         &["bash", "write"][..],
         &["write"],
         &["edit"],
-        &["read", "publish"],
-        &["read", "mcp"],
+        &["read", "mcp", "bash"],
+        &["read", "publish", "bash"],
         &["read", "notebook_edit"],
     ] {
         let out = delegate_as_lead(
@@ -1691,6 +1691,39 @@ async fn a_read_only_sub_agent_runs_outside_a_repository() {
     assert!(out.contains("\n| Tool said: "), "{out}");
     assert!(out.contains("hello from the folder"), "{out}");
     assert_eq!(h.node.store().sessions().unwrap().len(), 2);
+}
+
+/// `publish`-only and MCP-only sub-agents change things but write no file
+/// directly: they share the parent's folder and start outside a git
+/// repository, as on main (review of PR 131, item 4). They have no shell.
+#[tokio::test]
+async fn publish_and_mcp_sub_agents_share_the_folder_outside_a_repository() {
+    let mut h = Harness::new(auto_policy).await;
+    std::fs::write(h.ws.join("keep.txt"), "hello from the folder\n").unwrap();
+    let sid = h.create().await;
+    for tools in [&["read", "publish"][..], &["read", "mcp"]] {
+        let out = delegate_as_lead(
+            &mut h,
+            sid,
+            vec![agent_with("helper", tools, vec![])],
+            "delegate: helper=read: keep.txt",
+        )
+        .await;
+        let out = out.last().expect("a delegate call");
+        assert!(
+            out.contains("Sub-agent @helper finished: done."),
+            "{tools:?}: {out}"
+        );
+        assert!(out.contains("hello from the folder"), "{tools:?}: {out}");
+    }
+    let sessions = h.node.store().sessions().unwrap();
+    for s in sessions.iter().filter(|s| s.session_id != sid) {
+        assert_eq!(
+            std::path::Path::new(&s.cwd).canonicalize().unwrap(),
+            h.ws.canonicalize().unwrap(),
+            "a publish or MCP sub-agent got a folder of its own"
+        );
+    }
 }
 
 /// A sub-agent whose only tool that could change things is `bash` is a

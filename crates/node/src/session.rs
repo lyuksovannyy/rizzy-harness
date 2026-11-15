@@ -4248,11 +4248,11 @@ impl Session {
     }
 
     /// Whether a sub-agent can change files here, so it needs a folder of
-    /// its own: the shared rule (`AgentSpec::changes_things`, PLAN.md T70)
-    /// on its tools, narrowed by its own denials and by this node's policy.
-    /// Its `bash` does not count: an agent that changes nothing else runs
-    /// it in the read-only shell (the loop reads the same answer), so it
-    /// works in this folder, as a reader does.
+    /// its own: `AgentSpec::needs_own_folder` (PLAN.md T70) on its tools,
+    /// narrowed by its own denials and by this node's policy. A reader's
+    /// `bash` does not count (it runs in the read-only shell; the loop
+    /// reads the same answer), nor do `publish` and MCP tools alone: those
+    /// agents work in this folder, as on main.
     fn can_change_files(&self, agent: &AgentSpec) -> bool {
         let policy = &self.node.cfg.policy;
         // In plan mode (X.7) the child is made in plan mode and stays in it
@@ -4261,7 +4261,7 @@ impl Session {
         // so it works in this folder, as a reader does.
         self.current_mode() != ApprovalMode::Plan
             && self.profile == Profile::Agentic
-            && agent.changes_things(|t| !policy.denies(t))
+            && agent.needs_own_folder(|t| !policy.denies(t))
     }
 
     /// Prepare a folder for a sub-agent that can change files, seeded with

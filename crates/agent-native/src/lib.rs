@@ -993,12 +993,16 @@ impl NativeBackend {
             .map(|t| match (t.name(), background_on) {
                 ("bash", false) => ToolSpec {
                     name: t.name().to_string(),
-                    description: self.shell_text(harness_tools::FOREGROUND_DESCRIPTION, read_only),
+                    description: self.shell_text(
+                        harness_tools::FOREGROUND_DESCRIPTION,
+                        read_only,
+                        agent,
+                    ),
                     schema: harness_tools::foreground_schema(self.config.bash_timeout_max),
                 },
                 ("bash", true) => ToolSpec {
                     name: t.name().to_string(),
-                    description: self.shell_text(t.description(), read_only),
+                    description: self.shell_text(t.description(), read_only, agent),
                     schema: t.schema_for(self.config.bash_timeout_max),
                 },
                 _ => ToolSpec {
@@ -1084,10 +1088,21 @@ impl NativeBackend {
 
     /// `bash`'s description, with what the read-only shell means (and its
     /// size on this node) added where it runs there.
-    fn shell_text(&self, description: &str, read_only: bool) -> String {
+    fn shell_text(
+        &self,
+        description: &str,
+        read_only: bool,
+        agent: Option<&harness_core::agent::AgentSpec>,
+    ) -> String {
         if read_only {
             let size = self.config.sandbox.read_only_tmp();
-            format!("{description} {}", harness_tools::read_only_note(size))
+            let net = self.config.sandbox.read_only_network();
+            let web = agent.is_none_or(|a| a.allows_tool("web_fetch"))
+                && self.tools.iter().any(|t| t.name() == "web_fetch");
+            format!(
+                "{description} {}",
+                harness_tools::read_only_note(size, net, web)
+            )
         } else {
             description.to_string()
         }
@@ -1249,12 +1264,6 @@ impl NativeBackend {
         if let Some(why) = self.delegate_gap(spec, &ctx.extra.savings, host) {
             return (ToolOutcome::err(why), none);
         }
-        // Plan mode (X.7): a child that can write is not started (nor
-        // given a follow-up: above the `session` branch, T68); one that
-        // only reads is, and inherits the mode (the node's ceiling).
-        if is_plan(host) && self.writes(spec, host) {
-            return (ToolOutcome::err(plan_no_writer(Some(&spec.agent_id))), none);
-        }
         // A follow-up names the child by the id its result began with; the
         // node decides whether it is this session's (T68).
         // Present but not an id (a number, an object, an empty string) is
@@ -1283,6 +1292,20 @@ impl NativeBackend {
                 }
             }
         };
+        // Plan mode (X.7): a child that can write is not started, nor
+        // given a follow-up (T68); one that only reads is, and inherits the
+        // mode (the node's ceiling).
+        if is_plan(host) && self.writes(spec, host) {
+            let why = match follow_up {
+                Some(sid) => format!(
+                    "[harness] plan mode: @{} `{sid}` was not continued: it changes files, and \
+                     nothing may change in plan mode. Describe the work in your plan.",
+                    spec.agent_id
+                ),
+                None => plan_no_writer(Some(&spec.agent_id)),
+            };
+            return (ToolOutcome::err(why), none);
+        }
         let (tx, mut rx) = mpsc::unbounded_channel();
         let started: Box<dyn FnOnce(harness_core::SessionId) + Send> = Box::new(move |sid| {
             let _ = tx.send(sid);
