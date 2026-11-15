@@ -14,6 +14,9 @@
 
 #[path = "support/bwrap.rs"]
 mod bwrap;
+#[path = "support/marker.rs"]
+mod marker;
+use marker::Mark;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -102,21 +105,21 @@ fn alive(pid: i32) -> bool {
     }
 }
 
-/// Every live process whose command line is exactly `sleep <secs>`.
-fn sleeps(secs: u32) -> Vec<i32> {
-    let want = format!("sleep\0{secs}\0");
+/// Every live process whose command line is exactly `sleep <m>` (this
+/// test process's mark `m`).
+fn sleeps(m: Mark) -> Vec<i32> {
+    let want = m.cmdline();
     std::fs::read_dir("/proc")
         .unwrap()
         .filter_map(|e| e.ok()?.file_name().to_str()?.parse::<i32>().ok())
         .filter(|pid| {
-            std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|c| c == want.as_bytes())
-                && alive(*pid)
+            std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|c| c == want) && alive(*pid)
         })
         .collect()
 }
 
 /// Kills, on drop, every process still running one of these sleeps.
-struct Reaper(Vec<u32>);
+struct Reaper(Vec<Mark>);
 
 impl Drop for Reaper {
     fn drop(&mut self) {
@@ -136,7 +139,7 @@ impl Drop for Reaper {
 /// ignores SIGTERM; and, as a control, a plain background child. Each runs
 /// `sleep <base + i>`.
 fn detached(base: u32) -> (String, Reaper) {
-    let s: Vec<u32> = (0..5).map(|i| base + i).collect();
+    let s: Vec<Mark> = (0..5).map(|i| Mark(base + i)).collect();
     let cmd = format!(
         "setsid sleep {} & nohup sleep {} >/dev/null 2>&1 & ( setsid sleep {} & ) ; \
          sh -c 'trap \"\" TERM; exec sleep {}' & sleep {} & ",
@@ -158,7 +161,7 @@ async fn all_started(r: &Reaper) {
 async fn none_left(r: &Reaper, how: &str) {
     let by = Instant::now() + Duration::from_secs(2);
     loop {
-        let left: Vec<(u32, Vec<i32>)> =
+        let left: Vec<(Mark, Vec<i32>)> =
             r.0.iter()
                 .map(|s| (*s, sleeps(*s)))
                 .filter(|(_, p)| !p.is_empty())
@@ -254,6 +257,7 @@ async fn detached_children_end_when_the_node_is_killed() {
     let mut helper = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "helper_runs_detached_children", "--nocapture"])
         .env("T8A_HELPER", "1")
+        .env(Mark::for_helper().0, Mark::for_helper().1)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -564,7 +568,7 @@ fn have_python() -> bool {
 /// A service of the test outside the sandbox that starts `sleep <secs>`
 /// for each connection: one listener on a pathname socket outside every
 /// grant, one on an abstract socket (the stand-in for the session bus).
-fn service(path: &Path, abstract_name: &str, secs_path: u32, secs_abstract: u32) {
+fn service(path: &Path, abstract_name: &str, secs_path: Mark, secs_abstract: Mark) {
     use std::os::linux::net::SocketAddrExt;
     use std::os::unix::net::{SocketAddr, UnixListener};
     let by_path = UnixListener::bind(path).unwrap();
@@ -618,8 +622,8 @@ async fn a_service_outside_is_out_of_reach_by_path_and_by_name_from_abi_6() {
     }
     let abi = harness_tools::sandbox::effective_abi(&status);
     let (bus, name) = (f.root.join("bus"), format!("t8a-{}", std::process::id()));
-    let reaper = Reaper(vec![975_101, 975_102]);
-    service(&bus, &name, 975_101, 975_102);
+    let reaper = Reaper(vec![Mark(975_101), Mark(975_102)]);
+    service(&bus, &name, Mark(975_101), Mark(975_102));
     let r = run(
         &f.ctx(sb),
         json!({"command": format!("echo self=$$; {}", connect_script(&bus, &name))}),
@@ -627,7 +631,10 @@ async fn a_service_outside_is_out_of_reach_by_path_and_by_name_from_abi_6() {
     .await;
     assert!(r.output.contains("self=2"), "not contained: {}", r.output);
     tokio::time::sleep(Duration::from_secs(2)).await;
-    let (by_path, by_name) = (!sleeps(975_101).is_empty(), !sleeps(975_102).is_empty());
+    let (by_path, by_name) = (
+        !sleeps(Mark(975_101)).is_empty(),
+        !sleeps(Mark(975_102)).is_empty(),
+    );
     eprintln!(
         "Landlock ABI {abi}: after the contained command ended, the process started through \
          the pathname socket is {}, through the abstract socket {}",
@@ -669,12 +676,19 @@ async fn below_abi_6_only_an_abstract_socket_still_reaches_a_service_outside() {
     std::fs::write(&secret, "outside the session folder").unwrap();
     let stand_in = f.ws.join("landlock_abi4.py");
     copy_exe(ABI4, &stand_in);
-    let reaper = Reaper(vec![975_111, 975_112, 975_113, 975_114]);
-    service(&bus, &name, 975_111, 975_112);
+    let reaper = Reaper(vec![
+        Mark(975_111),
+        Mark(975_112),
+        Mark(975_113),
+        Mark(975_114),
+    ]);
+    service(&bus, &name, Mark(975_111), Mark(975_112));
     let script = format!(
-        "cat {} && echo FILE-POLICY-BROKEN; {}; setsid sleep 975113 & sleep 975114",
+        "cat {} && echo FILE-POLICY-BROKEN; {}; setsid sleep {} & sleep {}",
         secret.display(),
-        connect_script(&bus, &name)
+        connect_script(&bus, &name),
+        Mark(975_113),
+        Mark(975_114)
     );
     let conf = Confinement::Confined {
         sandbox: sb,
@@ -715,7 +729,7 @@ async fn below_abi_6_only_an_abstract_socket_still_reaches_a_service_outside() {
     let by = Instant::now() + Duration::from_secs(20);
     while [975_112, 975_113, 975_114]
         .iter()
-        .any(|s| sleeps(*s).is_empty())
+        .any(|s| sleeps(Mark(*s)).is_empty())
     {
         assert!(Instant::now() < by, "the processes never started");
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -731,14 +745,18 @@ async fn below_abi_6_only_an_abstract_socket_still_reaches_a_service_outside() {
         out.contains("FileNotFoundError"),
         "the pathname socket was there: {out}"
     );
-    none_left(&Reaper(vec![975_113, 975_114]), "inside the namespace").await;
+    none_left(
+        &Reaper(vec![Mark(975_113), Mark(975_114)]),
+        "inside the namespace",
+    )
+    .await;
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert!(
-        sleeps(975_111).is_empty(),
+        sleeps(Mark(975_111)).is_empty(),
         "the pathname socket reached the service: {out}"
     );
     assert!(
-        !sleeps(975_112).is_empty(),
+        !sleeps(Mark(975_112)).is_empty(),
         "closed: nothing reached the abstract socket; flip this test and PLAN.md T9: {out}"
     );
     drop(reaper);
@@ -775,7 +793,7 @@ fn leads_a_session(pid: i32) -> bool {
 /// (default 60).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_kill_just_after_the_inits_setsid_ends_the_namespace() {
-    const SECS: u32 = 975_120;
+    const SECS: Mark = Mark(975_120);
     let tries: u32 = std::env::var("T8A_TRIES")
         .ok()
         .and_then(|v| v.parse().ok())

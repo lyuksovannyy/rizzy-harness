@@ -18,6 +18,9 @@
 
 #[path = "support/bwrap.rs"]
 mod bwrap;
+#[path = "support/marker.rs"]
+mod marker;
+use marker::Mark;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -446,14 +449,15 @@ fn have_python() -> bool {
     ok
 }
 
-/// Live processes whose command line is exactly `sleep <secs>`.
-fn sleeps(secs: u32) -> Vec<i32> {
-    let want = format!("sleep\0{secs}\0");
+/// Live processes whose command line is exactly `sleep <secs>` (this test
+/// process's mark).
+fn sleeps(secs: Mark) -> Vec<i32> {
+    let want = secs.cmdline();
     std::fs::read_dir("/proc")
         .unwrap()
         .filter_map(|e| e.ok()?.file_name().to_str()?.parse::<i32>().ok())
         .filter(|pid| {
-            std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|c| c == want.as_bytes())
+            std::fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|c| c == want)
                 && std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| {
                     !s.rsplit(')')
                         .next()
@@ -466,7 +470,7 @@ fn sleeps(secs: u32) -> Vec<i32> {
 }
 
 /// Kills, by pid, every `sleep <n>` it names when dropped.
-struct Reaper(Vec<u32>);
+struct Reaper(Vec<Mark>);
 
 impl Drop for Reaper {
     fn drop(&mut self) {
@@ -483,7 +487,7 @@ impl Drop for Reaper {
 
 /// A service outside every grant (the stand-in for the session bus) that
 /// starts `sleep <secs>` for each connection.
-fn service(path: &Path, secs: u32) {
+fn service(path: &Path, secs: Mark) {
     let listener = std::os::unix::net::UnixListener::bind(path).unwrap();
     std::thread::spawn(move || {
         for conn in listener.incoming() {
@@ -527,8 +531,8 @@ async fn a_socket_outside_the_grants_cannot_be_reached() {
     }
     let abi = harness_tools::sandbox::effective_abi(&status);
     let bus = f.root.join("home/bus");
-    let reaper = Reaper(vec![976_101]);
-    service(&bus, 976_101);
+    let reaper = Reaper(vec![Mark(976_101)]);
+    service(&bus, Mark(976_101));
 
     let r = Bash
         .run(
@@ -550,7 +554,10 @@ async fn a_socket_outside_the_grants_cannot_be_reached() {
     assert!(!out.contains("unix-connected"), "{out}");
     assert!(out.contains("FileNotFoundError"), "{out}");
     tokio::time::sleep(Duration::from_millis(500)).await;
-    assert!(sleeps(976_101).is_empty(), "the service started a process");
+    assert!(
+        sleeps(Mark(976_101)).is_empty(),
+        "the service started a process"
+    );
     drop(reaper);
 }
 

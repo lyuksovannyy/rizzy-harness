@@ -20,6 +20,9 @@
 
 #[path = "support/bwrap.rs"]
 mod bwrap;
+#[path = "support/marker.rs"]
+mod marker;
+use marker::Mark;
 
 use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
@@ -165,7 +168,7 @@ fn cmdline(pid: i32) -> Vec<u8> {
 /// Live processes whose command line holds `needle` (a test's unique
 /// session folder: bubblewrap, its init and the guard carry it), or is
 /// exactly `sleep <secs>`.
-fn left(needle: &Path, secs: &[u32]) -> Vec<i32> {
+fn left(needle: &Path, secs: &[Mark]) -> Vec<i32> {
     let n = needle.as_os_str().as_encoded_bytes();
     let me = std::process::id() as i32;
     pids()
@@ -173,19 +176,18 @@ fn left(needle: &Path, secs: &[u32]) -> Vec<i32> {
         .filter(|p| *p != me)
         .filter(|p| {
             let c = cmdline(*p);
-            c.windows(n.len()).any(|w| w == n)
-                || secs.iter().any(|s| c == format!("sleep\0{s}\0").as_bytes())
+            c.windows(n.len()).any(|w| w == n) || secs.iter().any(|s| c == s.cmdline())
         })
         .filter(|p| alive(*p))
         .collect()
 }
 
 /// Live processes whose command line is exactly `sleep <secs>`.
-fn sleeps(secs: u32) -> Vec<i32> {
-    let want = format!("sleep\0{secs}\0");
+fn sleeps(secs: Mark) -> Vec<i32> {
+    let want = secs.cmdline();
     pids()
         .into_iter()
-        .filter(|p| cmdline(*p) == want.as_bytes() && alive(*p))
+        .filter(|p| cmdline(*p) == want && alive(*p))
         .collect()
 }
 
@@ -201,7 +203,7 @@ fn kill_all(pids: &[i32]) {
 }
 
 /// Kills, on drop, whatever [`left`] still finds for this test.
-struct Cleanup(PathBuf, Vec<u32>);
+struct Cleanup(PathBuf, Vec<Mark>);
 
 impl Drop for Cleanup {
     fn drop(&mut self) {
@@ -213,7 +215,7 @@ impl Drop for Cleanup {
 }
 
 /// Wait up to `within` for [`left`] to find nothing; what it still finds.
-fn gone_within(needle: &Path, secs: &[u32], within: Duration) -> Vec<i32> {
+fn gone_within(needle: &Path, secs: &[Mark], within: Duration) -> Vec<i32> {
     let by = Instant::now() + within;
     loop {
         let l = left(needle, secs);
@@ -250,7 +252,7 @@ fn describe(pids: &[i32]) -> String {
 /// `T8E_TRIES` sets the count (default 200).
 #[test]
 fn a_kill_of_the_node_just_after_a_spawn_leaves_nothing() {
-    const SECS: u32 = 974_801;
+    const SECS: Mark = Mark(974_801);
     let tries: u32 = std::env::var("T8E_TRIES")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -368,7 +370,7 @@ async fn helper_node_spawns_one_command() {
 async fn cancel_returns_only_after_everything_ended() {
     cancel_returns_only_after_everything_ended_with(
         Settings::default(),
-        [974_811, 974_812, 974_813],
+        [Mark(974_811), Mark(974_812), Mark(974_813)],
     )
     .await;
 }
@@ -383,12 +385,12 @@ async fn cancel_returns_only_after_everything_ended_with_the_network_off() {
             network: harness_tools::sandbox::Network::Off,
             ..Default::default()
         },
-        [974_951, 974_952, 974_953],
+        [Mark(974_951), Mark(974_952), Mark(974_953)],
     )
     .await;
 }
 
-async fn cancel_returns_only_after_everything_ended_with(settings: Settings, secs: [u32; 3]) {
+async fn cancel_returns_only_after_everything_ended_with(settings: Settings, secs: [Mark; 3]) {
     let f = fixture();
     let Some(sb) = f.sandbox_with(&settings) else {
         return;
@@ -618,8 +620,8 @@ async fn wait_for(what: &str, mut ok: impl FnMut() -> bool) {
 
 /// The detached children of `cli/tests/contain.rs`: `setsid`, `nohup`, a
 /// double fork with `setsid`, one that ignores SIGTERM, a plain one.
-fn detached(base: u32) -> (String, Vec<u32>) {
-    let s: Vec<u32> = (0..5).map(|i| base + i).collect();
+fn detached(base: u32) -> (String, Vec<Mark>) {
+    let s: Vec<Mark> = (0..5).map(|i| Mark(base + i)).collect();
     let cmd = format!(
         "setsid sleep {} & nohup sleep {} >/dev/null 2>&1 & ( setsid sleep {} & ) ; \
          sh -c 'trap \"\" TERM; exec sleep {}' & sleep {} & sleep 1000",
@@ -685,16 +687,17 @@ async fn a_kill_of_the_guard_alone_ends_the_namespace() {
 async fn a_command_cannot_reach_signal_or_outlive_its_guard() {
     let f = fixture();
     let Some(sb) = f.sandbox() else { return };
-    let _clean = Cleanup(f.ws.clone(), vec![974_831]);
+    let _clean = Cleanup(f.ws.clone(), vec![Mark(974_831)]);
     let gpid = f.ws.join("gpid");
     let ctx = f.ctx(sb);
     let cmd = format!(
-        "sleep 974831 & ls -l /proc/$$/fd; grep -E '^Sig(Blk|Ign)' /proc/self/status; \
+        "sleep {s} & ls -l /proc/$$/fd; grep -E '^Sig(Blk|Ign)' /proc/self/status; \
          while [ ! -s {g} ]; do sleep 0.01; done; g=$(cat {g}); \
          test -e /proc/$g && echo GUARD-VISIBLE; \
          kill -KILL $g; echo kill-guard=$?; kill -STOP $g; echo stop-guard=$?; \
          kill -KILL -1; echo kill-all=$?; echo done",
-        g = gpid.display()
+        g = gpid.display(),
+        s = Mark(974_831)
     );
     let h = tokio::spawn(async move { Bash.run(&ctx, json!({"command": cmd})).await });
     let mut guard = None;
@@ -740,7 +743,7 @@ async fn a_command_cannot_reach_signal_or_outlive_its_guard() {
         "{out}"
     );
     assert!(out.contains("kill-all=0"), "{out}");
-    let l = left(&f.ws, &[974_831]);
+    let l = left(&f.ws, &[Mark(974_831)]);
     assert!(
         l.is_empty(),
         "left when the call returned:\n{}",
@@ -807,7 +810,7 @@ async fn a_restarted_node_sweeps_what_a_dead_guard_left() {
     let f = fixture();
     let Some(sb) = f.sandbox() else { return };
     let root = f.data.join("sandbox-tmp");
-    for (secs, kill_bwrap) in [(974_841, false), (974_842, true)] {
+    for (secs, kill_bwrap) in [(Mark(974_841), false), (Mark(974_842), true)] {
         let _clean = Cleanup(f.ws.clone(), vec![secs]);
         let bwrap = orphan(&bwrap_argv(&f, sb.clone(), &format!("sleep {secs}")));
         wait_for("the orphan", || !sleeps(secs).is_empty()).await;
@@ -866,7 +869,7 @@ async fn the_sweep_touches_nothing_else() {
     let f = fixture();
     let Some(sb) = f.sandbox() else { return };
     let root = f.data.join("sandbox-tmp");
-    let (unmarked, other, live) = (974_851, 974_852, 974_853);
+    let (unmarked, other, live) = (Mark(974_851), Mark(974_852), Mark(974_853));
     let _clean = Cleanup(f.ws.clone(), vec![unmarked, other, live]);
     orphan(&replace_mark(
         &bwrap_argv(&f, sb.clone(), &format!("sleep {unmarked}")),
@@ -988,7 +991,7 @@ async fn the_guard_costs_little_per_command() {
 /// the command is gone within 2 s.
 #[test]
 fn a_node_killed_while_a_child_waits_before_exec_leaves_nothing() {
-    const SECS: u32 = 974_861;
+    const SECS: Mark = Mark(974_861);
     let f = fixture();
     if f.sandbox().is_none() {
         return;
@@ -1104,7 +1107,7 @@ fn under_shell(
 /// alone and named (re-check R-1: never judged by who is starting).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_restarted_node_ends_a_guard_whose_node_died() {
-    const SECS: u32 = 974_862;
+    const SECS: Mark = Mark(974_862);
     let f = fixture();
     let Some(sb) = f.sandbox() else { return };
     let mnt = f.ws.join("mnt");
@@ -1182,8 +1185,8 @@ async fn a_restarted_node_ends_a_guard_whose_node_died() {
 /// guard, and that sweep must not touch it. `T8E_TRIES` (default 60).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_guard_killed_in_its_first_millisecond_leaves_nothing_once_the_tool_returned() {
-    const SECS: u32 = 974_871;
-    const OTHER: u32 = 974_872;
+    const SECS: Mark = Mark(974_871);
+    const OTHER: Mark = Mark(974_872);
     let tries: u32 = std::env::var("T8E_TRIES")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -1306,7 +1309,7 @@ fn is_under(pid: i32, ancestor: i32) -> bool {
 /// plain `[exit code: 137]` (review N-7).
 #[tokio::test]
 async fn a_stop_signal_to_the_guard_is_not_reported_as_the_commands_exit() {
-    const SECS: u32 = 974_875;
+    const SECS: Mark = Mark(974_875);
     let f = fixture();
     let Some(sb) = f.sandbox() else { return };
     let _clean = Cleanup(f.ws.clone(), vec![SECS]);
@@ -1356,7 +1359,7 @@ fn the_stop_and_its_drain_fit_the_loops_grace() {
 /// and does not say "cancelled".
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_guard_that_does_not_answer_is_reported_within_the_loops_grace() {
-    const SECS: u32 = 974_881;
+    const SECS: Mark = Mark(974_881);
     let f = fixture();
     let Some(sb) = f.sandbox() else { return };
     let _clean = Cleanup(f.ws.clone(), vec![SECS]);
@@ -1528,7 +1531,7 @@ fn doctor_warns_when_a_session_can_replace_the_binary() {
 /// (`serve`, which runs `start_sandbox`), and the log names it.
 #[test]
 fn the_node_start_sweeps_what_a_dead_node_left() {
-    const SECS: u32 = 974_891;
+    const SECS: Mark = Mark(974_891);
     let f = fixture();
     let Some(sb) = f.sandbox() else { return };
     let _clean = Cleanup(f.ws.clone(), vec![SECS]);
@@ -1582,7 +1585,7 @@ fn serve_once(data: &Path) -> (bool, Vec<String>) {
 
 /// An ordinary `sleep <secs>` of this test, no mark: the victim the sweep
 /// must never touch. Its pid and start time (ticks since boot).
-fn victim(secs: u32) -> (std::process::Child, i32, u64) {
+fn victim(secs: Mark) -> (std::process::Child, i32, u64) {
     let c = std::process::Command::new("sleep")
         .arg(secs.to_string())
         .spawn()
@@ -1610,7 +1613,7 @@ fn victim(secs: u32) -> (std::process::Child, i32, u64) {
 /// second start logs nothing about it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_second_start_leaves_the_live_nodes_commands_alone() {
-    const SECS: u32 = 974_901;
+    const SECS: Mark = Mark(974_901);
     let f = fixture();
     let Some(sb) = f.sandbox() else { return };
     let _clean = Cleanup(f.ws.clone(), vec![SECS]);
@@ -1672,7 +1675,7 @@ async fn a_second_start_leaves_the_live_nodes_commands_alone() {
 /// survives two starts.
 #[test]
 fn a_planted_leftovers_file_kills_nothing() {
-    const SECS: u32 = 974_911;
+    const SECS: Mark = Mark(974_911);
     let f = fixture();
     if f.sandbox().is_none() {
         return;
@@ -1710,7 +1713,7 @@ fn a_planted_leftovers_file_kills_nothing() {
 /// line, its session escaped.
 #[test]
 fn a_session_with_a_line_break_injects_nothing() {
-    const SECS: u32 = 974_912;
+    const SECS: Mark = Mark(974_912);
     let f = fixture();
     if f.sandbox().is_none() {
         return;

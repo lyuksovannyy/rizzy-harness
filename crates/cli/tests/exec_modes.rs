@@ -12,6 +12,9 @@
 #[path = "support/bwrap.rs"]
 #[allow(dead_code)]
 mod bwrap;
+#[path = "support/marker.rs"]
+mod marker;
+use marker::Mark;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -256,8 +259,11 @@ async fn a_host_sessions_command_runs_outside_bubblewrap_and_a_sandbox_sessions_
 async fn a_host_session_gets_no_background_command() {
     let Some(mut n) = node().await else { return };
     let host = n.create(ExecMode::Host).await;
-    let text = r#"script: [{"tool": "bash", "input": {"command": "sleep 976321", "background": true, "timeout_secs": 30}}]"#;
-    let out = n.run(host, text).await.join("\n");
+    let mark = Mark(976_321);
+    let text = format!(
+        r#"script: [{{"tool": "bash", "input": {{"command": "sleep {mark}", "background": true, "timeout_secs": 30}}}}]"#
+    );
+    let out = n.run(host, &text).await.join("\n");
     assert!(
         out.contains(harness_tools::background::NOT_CONTAINED),
         "{out}"
@@ -265,8 +271,6 @@ async fn a_host_session_gets_no_background_command() {
     let alive = std::fs::read_dir("/proc")
         .unwrap()
         .filter_map(|e| e.ok()?.file_name().to_str()?.parse::<i32>().ok())
-        .any(|p| {
-            std::fs::read(format!("/proc/{p}/cmdline")).is_ok_and(|c| c == b"sleep\0976321\0")
-        });
+        .any(|p| std::fs::read(format!("/proc/{p}/cmdline")).is_ok_and(|c| c == mark.cmdline()));
     assert!(!alive, "a background command of the host session runs");
 }
