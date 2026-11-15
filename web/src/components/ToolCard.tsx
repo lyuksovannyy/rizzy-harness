@@ -334,6 +334,13 @@ export function ToolCard({
               Deny
             </button>
           </div>
+          {item.approval.chat_allow && !blocked && (
+            <div className="small muted chat-allow-said" role="note">
+              &ldquo;For this chat&rdquo; lets this exact call run with no card for the rest of the chat, also after a
+              restart, and it runs whatever the files it uses say then: allowing <code>make test</code> allows whatever
+              the Makefile and the tests say, which the agent may change.
+            </div>
+          )}
           {err && <div className="error-text">{showHidden(err)}</div>}
         </div>
       )}

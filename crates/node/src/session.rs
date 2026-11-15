@@ -430,17 +430,24 @@ impl Session {
             .max()
             .unwrap_or(0)
             + 1;
-        // The chat's grants as its log holds them, keyed again in its
-        // folder (an input the log holds scrubbed keys to another call, so
-        // that grant then covers nothing: closed, not open).
-        let grants: HashMap<String, harness_tools::CallKey> = view
-            .chat_allows
-            .iter()
-            .map(|(id, g)| {
-                let cwd = std::path::Path::new(&meta.cwd);
-                (id.clone(), harness_tools::call_key(cwd, &g.tool, &g.input))
-            })
-            .collect();
+        // The chat's grants as its log holds them: the key recorded when the
+        // person answered, never one worked out again from the logged input
+        // (stored scrubbed, and a path's link may lead elsewhere now: review
+        // H1, H2). A grant without a valid key covers nothing.
+        let mut grants: HashMap<String, harness_tools::CallKey> = HashMap::new();
+        for e in &events {
+            match e.typed() {
+                Ok(EventKind::ChatAllowAdded(g)) => {
+                    if let Some(k) = harness_tools::CallKey::from_hex(&g.key) {
+                        grants.insert(g.grant_id, k);
+                    }
+                }
+                Ok(EventKind::ChatAllowRemoved(g)) => {
+                    grants.remove(&g.grant_id);
+                }
+                _ => {}
+            }
+        }
         let (bg, ends) = background_table(
             &node,
             meta.profile,
@@ -3057,23 +3064,28 @@ impl Session {
     /// The person's removal of a call they allowed for this chat: recorded
     /// as `chat_allow_removed` before it stops covering the call.
     pub(crate) async fn revoke_allow(&self, grant_id: &str) -> Result<(), String> {
-        let known = self
+        // It stops covering the call first (review L4); put back if the log
+        // does not take its removal.
+        let Some(key) = self
             .grants
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .contains_key(grant_id);
-        if !known {
+            .remove(grant_id)
+        else {
             return Err(format!("no call allowed for this chat as {grant_id}"));
+        };
+        if let Err(e) = self
+            .append(EventKind::ChatAllowRemoved(ChatAllowRemoved {
+                grant_id: grant_id.into(),
+            }))
+            .await
+        {
+            self.grants
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(grant_id.into(), key);
+            return Err(e.to_string());
         }
-        self.append(EventKind::ChatAllowRemoved(ChatAllowRemoved {
-            grant_id: grant_id.into(),
-        }))
-        .await
-        .map_err(|e| e.to_string())?;
-        self.grants
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(grant_id);
         Ok(())
     }
 
@@ -3301,7 +3313,7 @@ impl TurnHost for Session {
         // (never a background start: one click is one command). Only in
         // `ask` and `accept_edits`: `ask_all` means every call (T51), and
         // `auto` never gets here.
-        let grants_apply = mode != ApprovalMode::AskAll;
+        let grants_apply = mode != ApprovalMode::AskAll && self.node.cfg.policy.chat_grants;
         let key = harness_tools::call_key(&self.cwd, tool, input);
         if grants_apply
             && !background_start
@@ -3314,7 +3326,12 @@ impl TurnHost for Session {
         {
             return Decision::Allow;
         }
-        let chat_allow = grants_apply && !background_start && self.parent_session.is_none();
+        // Not for a sub-agent's chat, nor a routine's (it keeps its
+        // routine's setting, review L1).
+        let chat_allow = grants_apply
+            && !background_start
+            && self.parent_session.is_none()
+            && !self.no_callbacks;
         let approval_id = new_id();
         let mut reason = approval_reason(tool, risk, input, &self.node.cfg.policy, self.exec_mode);
         // An MCP tool's card names the server and its own name of the tool
@@ -3373,6 +3390,13 @@ impl TurnHost for Session {
                 Err(_) => (Decision::Deny, ResolvedBy::Cancelled, None),
             },
         };
+        // "For this chat" where it was not offered allows this one call,
+        // and is recorded as that (review L2).
+        let decision = if decision == Decision::AllowChat && !chat_allow {
+            Decision::Allow
+        } else {
+            decision
+        };
         self.approvals
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -3391,10 +3415,6 @@ impl TurnHost for Session {
                 .insert(call_id.to_string(), n);
         }
         if decision == Decision::AllowChat {
-            // Not offered there: this one call only.
-            if !chat_allow {
-                return Decision::Allow;
-            }
             let grant_id = new_id();
             // The log first: a grant it does not hold covers nothing more
             // than this call.
@@ -3404,6 +3424,7 @@ impl TurnHost for Session {
                     approval_id,
                     tool: tool.into(),
                     input: input.clone(),
+                    key: key.hex(),
                 }))
                 .await
                 .is_ok()

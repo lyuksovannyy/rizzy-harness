@@ -1261,6 +1261,18 @@ async fn a_sub_agent_takes_no_chat_grant() {
         !added,
         "an allow_chat answer there allows the one call only"
     );
+    // And it is recorded as what it did: one allow (review L2).
+    let r = n
+        .node
+        .store()
+        .events_after(child, 0, 10_000)
+        .unwrap()
+        .iter()
+        .find_map(|e| match e.typed() {
+            Ok(EventKind::ApprovalResolved(r)) => Some(r.decision),
+            _ => None,
+        });
+    assert_eq!(r, Some(Decision::Allow));
 }
 
 /// Review of pull request 99: a change the master sent as a lowering that
@@ -1296,4 +1308,156 @@ async fn a_lowering_that_would_raise_is_refused_by_the_node() {
     });
     n.ack().await.unwrap();
     assert_eq!(n.mode(sid), ApprovalMode::AskAll);
+}
+// ---- Review of pull request 105 (H1, H2): a chat grant is the key the
+// person allowed, never one worked out again from the log after a restart.
+
+async fn review_start(
+    db: &std::path::Path,
+    policy: NodePolicy,
+    secrets: harness_core::SecretSet,
+) -> N {
+    let cfg = NodeConfig {
+        node_id: "n".into(),
+        hostname: "test".into(),
+        policy,
+        store: Store::open(db, Durability::Full).unwrap(),
+        backend: Arc::new(NativeBackend::new(
+            Arc::new(Mock {
+                delay: Duration::from_millis(5),
+            }),
+            harness_tools::builtin(),
+            NativeConfig::default(),
+        )),
+        default_model: "mock".into(),
+        secrets,
+        profile: Profile::Agentic,
+        incognito_ttl: None,
+        checkpoints_dir: Some(db.with_file_name("checkpoints")),
+        git_sandbox: None,
+        artifacts: None,
+    };
+    let node = NodeRuntime::start(cfg).await.unwrap();
+    let mut link = node.attach().await;
+    let capabilities = match link.from_node.recv().await.unwrap() {
+        NodeToMaster::Hello { capabilities, .. } => capabilities,
+        other => panic!("{other:?}"),
+    };
+    N {
+        node,
+        link,
+        capabilities,
+    }
+}
+
+/// A write grant made through a link follows the link's new target after
+/// a restart: the key is recomputed from the raw path at load.
+#[tokio::test]
+async fn review_write_grant_moves_with_a_repointed_link_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(ws.join("a")).unwrap();
+    std::fs::create_dir_all(ws.join("b")).unwrap();
+    std::os::unix::fs::symlink(ws.join("a"), ws.join("link")).unwrap();
+    let db = dir.path().join("node.db");
+    let call = script(&[("write", json!({"path": "link/f.txt", "content": "X"}))]);
+    let sid = {
+        let mut n = start(&db, policy(dir.path(), ApprovalMode::Auto)).await;
+        let sid = n.create(&ws, Some(ApprovalMode::Ask), None, false).await;
+        assert_eq!(
+            n.turn(sid, &call, None, |_| Decision::AllowChat)
+                .await
+                .len(),
+            1
+        );
+        assert!(ws.join("a/f.txt").exists());
+        std::fs::remove_file(ws.join("link")).unwrap();
+        std::os::unix::fs::symlink(ws.join("b"), ws.join("link")).unwrap();
+        let live = n.turn(sid, &call, None, deny).await.len();
+        eprintln!("LIVE (before restart) cards for write via re-pointed link: {live}");
+        assert_eq!(live, 1, "live: the grant covers a/f.txt only");
+        sid
+    };
+    let mut n = start(&db, policy(dir.path(), ApprovalMode::Auto)).await;
+    let after = n.turn(sid, &call, None, deny).await.len();
+    eprintln!(
+        "AFTER RESTART cards: {after}; b/f.txt exists: {}",
+        ws.join("b/f.txt").exists()
+    );
+    assert_eq!(
+        after, 1,
+        "after a restart the grant should still cover a/f.txt only"
+    );
+}
+
+/// A grant whose input held a secret: after a restart it covers the
+/// scrubbed text, a call the person never saw.
+#[tokio::test]
+async fn review_scrubbed_grant_covers_the_redacted_command_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    let db = dir.path().join("node.db");
+    let secrets = || {
+        harness_core::SecretSet::new(vec![harness_core::Secret::new(
+            "sk-supersecret-123".to_string(),
+        )])
+    };
+    let granted = script(&[(
+        "bash",
+        json!({"command": "echo sk-supersecret-123 > out.txt"}),
+    )]);
+    let redacted = script(&[("bash", json!({"command": "echo [REDACTED] > out.txt"}))]);
+    let sid = {
+        let mut n = review_start(&db, policy(dir.path(), ApprovalMode::Auto), secrets()).await;
+        let sid = n.create(&ws, Some(ApprovalMode::Ask), None, false).await;
+        assert_eq!(
+            n.turn(sid, &granted, None, |_| Decision::AllowChat)
+                .await
+                .len(),
+            1
+        );
+        let live = n.turn(sid, &redacted, None, deny).await.len();
+        eprintln!("LIVE cards for the redacted text: {live}");
+        assert_eq!(live, 1);
+        sid
+    };
+    let mut n = review_start(&db, policy(dir.path(), ApprovalMode::Auto), secrets()).await;
+    let after = n.turn(sid, &redacted, None, deny).await.len();
+    eprintln!(
+        "AFTER RESTART cards for the redacted text: {after}; out.txt = {:?}",
+        std::fs::read_to_string(ws.join("out.txt"))
+    );
+    assert_eq!(after, 1, "the redacted command was never allowed");
+}
+
+/// Review M2: `chat_grants = false` in node.toml: no card offers "for this
+/// chat", and a grant already in the log is not honoured. Review L1: a
+/// routine's chat is not offered it either.
+#[tokio::test]
+async fn a_node_can_turn_chat_grants_off_and_a_routines_chat_gets_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    let db = dir.path().join("node.db");
+    let call = script(&[("bash", json!({"command": "echo granted"}))]);
+    let sid = {
+        let mut n = start(&db, policy(dir.path(), ApprovalMode::Auto)).await;
+        let sid = n.create(&ws, Some(ApprovalMode::Ask), None, false).await;
+        n.turn(sid, &call, None, |_| Decision::AllowChat).await;
+        assert!(n.turn(sid, &call, None, deny).await.is_empty());
+        let routine = n.create(&ws, Some(ApprovalMode::Ask), None, true).await;
+        let asked = n.turn(routine, &call, None, deny).await;
+        assert!(!asked[0].chat_allow, "a routine's chat is not offered it");
+        sid
+    };
+    let mut p = policy(dir.path(), ApprovalMode::Auto);
+    p.chat_grants = false;
+    let mut n = start(&db, p).await;
+    let asked = n.turn(sid, &call, None, deny).await;
+    assert_eq!(asked.len(), 1, "the logged grant is not honoured");
+    assert!(!asked[0].chat_allow, "and none is offered");
+    let parsed: NodePolicy = toml::from_str("chat_grants = false\n").unwrap();
+    assert!(!parsed.chat_grants);
+    assert!(NodePolicy::default().chat_grants, "on by default");
 }

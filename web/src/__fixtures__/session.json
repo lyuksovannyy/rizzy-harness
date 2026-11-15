@@ -824,6 +824,7 @@
         "input": {
           "command": "cargo test"
         },
+        "key": "abababababababababababababababababababababababababababababababab",
         "tool": "bash"
       },
       "seq": 55,
@@ -838,6 +839,7 @@
         "input": {
           "command": "cargo build"
         },
+        "key": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
         "tool": "bash"
       },
       "seq": 56,

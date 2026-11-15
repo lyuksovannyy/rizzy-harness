@@ -298,9 +298,37 @@ async fn a_note_goes_with_a_denial_only_and_is_capped() {
 async fn allow_for_this_chat_and_its_removal_are_the_owners_alone() {
     let t = start().await;
     let (bob, _) = account(&t, "bob", "admin").await;
-    let sid = chat(&t, &t.alex, "local", None).await;
+    let (carol, _) = account(&t, "carol", "member").await;
+    let (dana, _) = account(&t, "dana", "member").await;
+    // A team workspace where dana is an admin, with alex's chat in it.
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        "/api/workspaces",
+        Some(json!({"name": "team"})),
+        &t.alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let team = v["workspace_id"].as_str().unwrap().to_string();
+    for (name, role) in [("carol", "member"), ("dana", "admin")] {
+        let (st, v) = req(
+            &t,
+            Method::POST,
+            &format!("/api/workspaces/{team}/members"),
+            Some(json!({"username": name, "role": role})),
+            &t.alex,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+    }
+    let sid = chat(&t, &t.alex, "local", Some(&team)).await;
     let grant = "0193f2a000007000800000000000abcd";
-    for (who, name) in [(&bob, "a server admin")] {
+    for (who, name) in [
+        (&bob, "a server admin"),
+        (&carol, "a member of the chat's workspace"),
+        (&dana, "an admin of the chat's workspace"),
+    ] {
         let (st, _) = answer(&t, who, sid, json!({"decision": "allow_chat"})).await;
         assert_eq!(st, StatusCode::NOT_FOUND, "{name}");
         let (st, _) = req(

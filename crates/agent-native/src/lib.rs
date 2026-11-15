@@ -2237,12 +2237,11 @@ impl NativeBackend {
                                 .await
                             {
                                 harness_core::policy::Decision::Deny => {
+                                    let note = host.denial_note(&call.call_id);
                                     refusal = Some(if ctx.cancel.is_cancelled() {
                                         "[cancelled before approval]".to_string()
                                     } else {
-                                        harness_core::event::denied_text(
-                                            host.denial_note(&call.call_id).as_deref(),
-                                        )
+                                        harness_core::event::denied_text(note.as_deref())
                                     });
                                 }
                                 harness_core::policy::Decision::AllowSession => {
@@ -2990,11 +2989,14 @@ impl NativeBackend {
                 .await;
             match decision {
                 harness_core::policy::Decision::Deny => {
+                    // Taken in every case, so a note never stays behind for
+                    // a later call with this id (review N1).
+                    let note = host.denial_note(&call.call_id);
                     return ToolOutcome::err(if ctx.cancel.is_cancelled() {
                         "[cancelled before approval]".to_string()
                     } else {
                         // The person's note, quoted after the fixed sentence.
-                        harness_core::event::denied_text(host.denial_note(&call.call_id).as_deref())
+                        harness_core::event::denied_text(note.as_deref())
                     });
                 }
                 harness_core::policy::Decision::AllowSession => {

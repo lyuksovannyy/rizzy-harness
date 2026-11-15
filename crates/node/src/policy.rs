@@ -17,6 +17,10 @@ pub struct NodePolicy {
     pub workspace_roots: Vec<PathBuf>,
     /// Tools that are always refused.
     pub denied_tools: Vec<String>,
+    /// "Allow this exact call for this chat" (PLAN.md T51): off, no card
+    /// offers it and grants already in a chat's log are not honoured, so
+    /// `max_approval_mode = "ask"` makes every change and command ask.
+    pub chat_grants: bool,
     /// Allow file tools to touch paths outside the session workspace.
     pub allow_outside_workspace: bool,
     /// File checkpoints kept per working folder for undo/rewind (0 = off).
@@ -363,6 +367,7 @@ impl Default for NodePolicy {
             max_approval_mode: DEFAULT_MAX_APPROVAL,
             workspace_roots: dirs::home_dir().into_iter().collect(),
             denied_tools: Vec::new(),
+            chat_grants: true,
             allow_outside_workspace: false,
             checkpoints_keep: 10,
             graphify: false,

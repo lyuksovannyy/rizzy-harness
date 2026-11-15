@@ -22,6 +22,20 @@ import { type AgentRow, type CommandRow, type RowState, sideItems } from "./side
 import { SubagentActivity } from "./SubagentActivity";
 import "./sidePanel.css";
 
+/** Every argument of a granted call, as the card shows them (review L3):
+ * `key: value` lines, long text cut with its size, so two grants never look
+ * the same. */
+const GRANT_FIELD_MAX = 120;
+function grantText(input: Record<string, unknown> | undefined): string {
+  return Object.entries(input ?? {})
+    .map(([k, v]) => {
+      const t = typeof v === "string" ? v : JSON.stringify(v);
+      const shown = t.length > GRANT_FIELD_MAX ? `${t.slice(0, GRANT_FIELD_MAX)}… (${t.length} characters)` : t;
+      return `${k}: ${shown}`;
+    })
+    .join("\n");
+}
+
 /** A stop the node took but whose end has not come back may be asked again after this. */
 const RETRY_AFTER_MS = 10000;
 
@@ -229,7 +243,7 @@ export default function SidePanel(props: {
           </li>
         )}
         {grants.map(([id, g]) => {
-          const what = String(g.input?.command ?? g.input?.path ?? JSON.stringify(g.input));
+          const what = grantText(g.input);
           const c = clicks[`grant:${id}`];
           return (
             <li key={id} className="side-row" data-kind="grant" data-grant={id}>
@@ -237,9 +251,7 @@ export default function SidePanel(props: {
                 <span className="mono side-name">{showHidden(g.tool)}</span>
               </div>
               {/* The model's text: shown as text, hidden characters marked. */}
-              <code className="side-what ellipsis" title={showHidden(what)}>
-                {showHidden(what)}
-              </code>
+              <pre className="side-what side-grant">{showHidden(what)}</pre>
               <div className="side-row-foot">
                 <span className="muted small" role="status">
                   {c?.state === "failed" ? <span className="error-text">{showHidden(c.error)}</span> : ""}

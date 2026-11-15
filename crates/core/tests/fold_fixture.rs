@@ -512,12 +512,14 @@ fn events() -> Vec<RawEvent> {
             approval_id: "a1".into(),
             tool: "bash".into(),
             input: json!({"command": "cargo test"}),
+            key: "ab".repeat(32),
         }),
         EventKind::ChatAllowAdded(ChatAllowAdded {
             grant_id: "g2".into(),
             approval_id: "a1".into(),
             tool: "bash".into(),
             input: json!({"command": "cargo build"}),
+            key: "cd".repeat(32),
         }),
         EventKind::ChatAllowRemoved(ChatAllowRemoved {
             grant_id: "g2".into(),

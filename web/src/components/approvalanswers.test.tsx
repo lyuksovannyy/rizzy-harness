@@ -83,8 +83,9 @@ describe("a denial's note", () => {
 });
 
 describe("allow for this chat", () => {
-  test("offered where the node offers it, and answers allow_chat", async () => {
+  test("offered where the node offers it, says what it allows, and answers allow_chat", async () => {
     const host = await mount(<ToolCard sessionId="s" item={card()} />);
+    expect(host.querySelector(".chat-allow-said")!.textContent).toContain("whatever the Makefile and the tests say");
     await act(async () => button(host, "Allow this exact call for this chat").click());
     expect(approve).toHaveBeenCalledWith("s", "a1", "allow_chat");
   });
@@ -96,11 +97,20 @@ describe("allow for this chat", () => {
 
   test("the side panel lists the chat's grants with Remove", async () => {
     const { default: SidePanel } = await import("./SidePanel");
-    const view: SessionView = { ...emptyView(), chat_allows: { g1: { tool: "bash", input: { command: "cargo test" } } } };
+    const view: SessionView = {
+      ...emptyView(),
+      chat_allows: {
+        g1: { tool: "bash", input: { command: "cargo test" } },
+        g2: { tool: "bash", input: { command: "cargo test", workdir: "sub", timeout_secs: 60 } },
+      },
+    };
     const host = await mount(<SidePanel sessionId="s" view={view} away={false} nodeLabel="local" />);
-    const row = host.querySelector('[data-kind="grant"]')!;
-    expect(row.textContent).toContain("cargo test");
-    await act(async () => button(host, "Remove").click());
+    const rows = [...host.querySelectorAll('[data-kind="grant"]')];
+    expect(rows[0]!.textContent).toContain("command: cargo test");
+    // Every argument shows: two grants never look the same (review L3).
+    expect(rows[1]!.textContent).toContain("workdir: sub");
+    expect(rows[1]!.textContent).toContain("timeout_secs: 60");
+    await act(async () => [...host.querySelectorAll("button")].find((b) => b.textContent === "Remove")!.click());
     expect(call).toHaveBeenCalledWith("DELETE", "/api/sessions/s/allows/g1");
   });
 });
