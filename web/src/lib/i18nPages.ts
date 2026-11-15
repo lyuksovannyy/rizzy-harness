@@ -60,6 +60,7 @@ export const pages = {
   "settings.memory": "Memory",
   "settings.password": "Password",
   "settings.overview": "Overview",
+  "settings.facts": "Memory",
   "settings.general": "General",
   "settings.models": "Models",
   "settings.members": "Members",

@@ -754,13 +754,18 @@ function ProjectMemory(props: { project: ProjectDetail; version: number; onOpen:
           ) : (
             <li key={f.id} className="fact">
               <div>{f.text}</div>
+              {(f.added_by || f.kept_by) && (
+                <div className="muted small fact-credit">
+                  {[f.added_by && `added by ${f.added_by}`, f.kept_by && `kept by ${f.kept_by}`].filter(Boolean).join(" · ")}
+                </div>
+              )}
               {manage && (
                 <div className="row fact-meta small">
                   <button className="link" onClick={() => setEditing({ id: f.id, text: f.text })}>
                     Edit
                   </button>
-                  <button className="link" onClick={() => act(projectsApi.deleteMemory(pid, f.id))}>
-                    Forget
+                  <button className="link" onClick={() => act(projectsApi.updateMemory(pid, f.id, { status: "retired" }))}>
+                    Retire
                   </button>
                 </div>
               )}
@@ -776,6 +781,7 @@ function ProjectMemory(props: { project: ProjectDetail; version: number; onOpen:
             {retired.map((f) => (
               <li key={f.id} className="fact retired">
                 <div className="fact-text">{f.text}</div>
+                {f.retired_by && <div className="muted small fact-credit">retired by {f.retired_by}</div>}
                 {manage && (
                   <div className="row fact-meta small">
                     <button className="link" onClick={() => act(projectsApi.updateMemory(pid, f.id, { status: "active" }))}>

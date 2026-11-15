@@ -218,9 +218,18 @@ pub enum ToolRisk {
 pub enum Decision {
     Allow,
     Deny,
-    /// Allow this tool for the rest of the session.
+    /// Allow this exact call for the rest of the turn (the wire name is
+    /// older than the turn scope).
     AllowSession,
+    /// Allow this exact call for the rest of the chat: the node records the
+    /// grant (`chat_allow_added`), rebuilds it from the log after a restart,
+    /// and never passes it to a sub-agent or another chat.
+    AllowChat,
 }
+
+/// The most characters a person's note with a denial may have; the master
+/// refuses a longer one and the node cuts one to it.
+pub const MAX_DENY_NOTE: usize = 2000;
 
 impl Decision {
     pub fn allows(self) -> bool {
@@ -228,11 +237,14 @@ impl Decision {
     }
 }
 
-/// Model calls one turn may make when node.toml does not say, and the range
-/// node.toml may set it in (`[limits] max_steps`).
-pub const DEFAULT_MAX_STEPS: usize = 50;
+/// Model calls with tools one turn may make when node.toml does not say,
+/// and the range node.toml may set it in (`[limits] max_steps`). 1,000 by
+/// the owner's decision (2026-11-15: "Raise max to 1000 by default + add
+/// ability for session owners to override max steps (min: 1 - {max
+/// setted})"); a chat's owner may set a lower limit for that chat (X.14).
+pub const DEFAULT_MAX_STEPS: usize = 1000;
 pub const MIN_MAX_STEPS: usize = 1;
-pub const MAX_MAX_STEPS: usize = 1000;
+pub const MAX_MAX_STEPS: usize = 10_000;
 
 /// Seconds a model call may wait for the provider's first answer (its
 /// response headers, then its first event), when node.toml does not say

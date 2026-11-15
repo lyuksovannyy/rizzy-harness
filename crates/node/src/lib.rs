@@ -107,6 +107,8 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::Callback { session_id, .. }
         | MasterToNode::SetAgent { session_id, .. }
         | MasterToNode::SetApprovalMode { session_id, .. }
+        | MasterToNode::RevokeAllow { session_id, .. }
+        | MasterToNode::SetStepLimit { session_id, .. }
         | MasterToNode::ArtifactStage { session_id, .. }
         | MasterToNode::ArtifactRelease { session_id, .. } => Some(*session_id),
         MasterToNode::Welcome { .. }
@@ -601,6 +603,13 @@ impl NodeRuntime {
                     "{}{}",
                     harness_protocol::CAP_APPROVAL_DEFAULT_PREFIX,
                     p.effective_mode(None).id()
+                ));
+                capabilities.push(harness_protocol::CAP_ANSWERS.into());
+                // Its step limit (X.14): the most a chat's own may be.
+                capabilities.push(format!(
+                    "{}{}",
+                    harness_protocol::CAP_STEPS_MAX_PREFIX,
+                    p.limits.max_steps
                 ));
                 capabilities.push(harness_protocol::CAP_BACKGROUND.into());
                 // A turn's changes, read from its checkpoints (X.12).
@@ -1125,11 +1134,28 @@ impl NodeRuntime {
             // In the session's lane, which a running turn does not hold: a
             // change made while a turn runs applies from its next call (T50).
             MasterToNode::SetApprovalMode {
-                session_id, mode, ..
+                session_id,
+                mode,
+                lowering,
+                ..
             } => {
                 self.audit("session.set_approval_mode", session_id).await;
                 match self.session(session_id) {
-                    Some(s) => s.set_mode(mode).await.map(|_| ()),
+                    Some(s) => s.set_mode(mode, lowering).await.map(|_| ()),
+                    None => Err("unknown session".into()),
+                }
+            }
+            // As the mode: in the session's lane; the running turn reads
+            // the limit before each request (X.14).
+            MasterToNode::SetStepLimit {
+                session_id,
+                max_steps,
+                lowering,
+                ..
+            } => {
+                self.audit("session.set_step_limit", session_id).await;
+                match self.session(session_id) {
+                    Some(s) => s.set_step_limit(max_steps, lowering).await.map(|_| ()),
                     None => Err("unknown session".into()),
                 }
             }
@@ -1146,11 +1172,23 @@ impl NodeRuntime {
                 session_id,
                 approval_id,
                 decision,
+                note,
                 ..
             } => match self.session(session_id) {
-                Some(s) => s.respond(&approval_id, decision),
+                Some(s) => s.respond(&approval_id, decision, note),
                 None => Err("unknown session".into()),
             },
+            MasterToNode::RevokeAllow {
+                session_id,
+                grant_id,
+                ..
+            } => {
+                self.audit("session.revoke_allow", session_id).await;
+                match self.session(session_id) {
+                    Some(s) => s.revoke_allow(&grant_id).await,
+                    None => Err("unknown session".into()),
+                }
+            }
             MasterToNode::ArtifactFetch {
                 req_id,
                 session_id,

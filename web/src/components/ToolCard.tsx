@@ -10,7 +10,6 @@ import type { Decision, Item, Source } from "../types";
 import { CallInput, useOpenFields } from "./CallInput";
 import { PublishCard, SaveAsArtifact } from "./ChatArtifacts";
 import { MemoryNotice } from "./MemoryNotice";
-import { ProjectMemoryNotice } from "./ProjectChip";
 
 type Tool = Extract<Item, { type: "tool" }>;
 /** Cards that show a file (or ran a command that made one): "Save as artifact" sits on them. */
@@ -152,16 +151,18 @@ function summaryRaw(tool: string, input: Tool["input"]): string {
   }
 }
 
+/** The longest note with a denial (`policy::MAX_DENY_NOTE`). */
+const MAX_DENY_NOTE = 2000;
+
 /** `blocked`: the viewer may not drive this chat here (its workspace role,
  * the account's grant), so an approval offers Deny only; the server refuses
- * the rest anyway. `projectId`: the chat's project, where a project-scoped
- * `remember` waits. `cwd`: the chat's folder, so a path outside it is
- * named. */
+ * the rest anyway. `projectId`: the chat's project (a `remember` for it
+ * shows in the same memory block as any other). `cwd`: the chat's folder,
+ * so a path outside it is named. */
 export function ToolCard({
   sessionId,
   item,
   blocked,
-  projectId,
   cwd,
 }: {
   sessionId: string;
@@ -174,6 +175,10 @@ export function ToolCard({
   const [open, setOpen] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // The person's note for a denial (T51): kept while they type, sent only
+  // with Deny; never focused by itself, so nothing typed elsewhere lands
+  // here, and Enter in it answers nothing (row W.6).
+  const [note, setNote] = useState("");
   const [openFields, toggleField] = useOpenFields();
   const status = statusOf(item);
   // The input exactly as the event carried it: the fold keeps the object it
@@ -194,7 +199,9 @@ export function ToolCard({
     setBusy(true);
     setErr(null);
     try {
-      await pageApi.approve(sessionId, item.approval.approval_id, d);
+      const n = d === "deny" ? note.trim() : "";
+      if (n) await pageApi.approve(sessionId, item.approval.approval_id, d, n);
+      else await pageApi.approve(sessionId, item.approval.approval_id, d);
     } catch (x) {
       setErr(x instanceof Error ? x.message : String(x));
     } finally {
@@ -207,9 +214,7 @@ export function ToolCard({
   // A memory block, not a tool card, from the moment the call is made:
   // the server says what it did (saved, waiting, refused) and offers Undo.
   if (item.tool === "remember" && (status === "ok" || status === "running"))
-    return item.input?.scope === "project" ? (
-      <ProjectMemoryNotice text={asText(item.input?.text)} project={projectId ?? null} />
-    ) : (
+    return (
       <MemoryNotice
         text={asText(item.input?.text ?? "")}
         sessionId={sessionId}
@@ -295,14 +300,53 @@ export function ToolCard({
                     Allow this exact call for this turn
                   </button>
                 )}
+                {item.approval.chat_allow && (
+                  <button
+                    disabled={busy}
+                    aria-describedby={notExpanded > 0 ? `unseen-${item.approval.approval_id}` : undefined}
+                    title="The same call runs without asking for the rest of this chat; remove it from the side panel"
+                    onClick={() => decide("allow_chat")}
+                  >
+                    Allow this exact call for this chat
+                  </button>
+                )}
               </>
             )}
+            <input
+              className="deny-note"
+              aria-label="Note for the agent with Deny (optional)"
+              placeholder="Why not? (optional, sent with Deny)"
+              maxLength={MAX_DENY_NOTE}
+              value={note}
+              disabled={busy}
+              onChange={(e) => setNote(e.target.value)}
+              // Enter answers nothing: only the Deny button sends the note.
+              onKeyDown={(e) => {
+                if (e.key === "Enter") e.preventDefault();
+                e.stopPropagation();
+              }}
+            />
             <button className="danger" disabled={busy} onClick={() => decide("deny")}>
               Deny
             </button>
           </div>
+          {item.approval.chat_allow && !blocked && (
+            <div className="small muted chat-allow-said" role="note">
+              &ldquo;For this chat&rdquo; lets this exact call run with no card for the rest of the chat, also after a
+              restart, and it runs whatever the files it uses say then: allowing <code>make test</code> allows whatever
+              the Makefile and the tests say, which the agent may change.
+            </div>
+          )}
           {err && <div className="error-text">{showHidden(err)}</div>}
         </div>
+      )}
+      {item.approval?.decision === "deny" && item.approval.note && (
+        <div className="approval-note muted">
+          Denied with your note: <span className="deny-said">{showHidden(item.approval.note)}</span>
+        </div>
+      )}
+      {item.approval?.decision === "allow_chat" && (
+        <div className="approval-note muted">Allowed for this chat</div>
       )}
       {item.approval && item.approval.decision !== null && item.approval.by !== "user" && (
         <div className="approval-note muted">

@@ -18,6 +18,7 @@ import type {
   FactKind,
   GraphifyStatus,
   MemoryCallState,
+  WorkspaceFacts,
   MemoryCfg,
   MemoryFact,
   MemorySource,
@@ -83,6 +84,9 @@ export const pageApi = {
   /** The node clamps it and records it; the chat shows the result (T50). */
   setApprovalMode: (id: string, mode: ApprovalMode) =>
     call<{ ok: boolean }>("POST", `/api/sessions/${id}/approval-mode`, { mode }),
+  /** The node clamps it to 1..its limit and records it; the chat shows the result (X.14). */
+  setStepLimit: (id: string, max_steps: number) =>
+    call<{ ok: boolean }>("POST", `/api/sessions/${id}/step-limit`, { max_steps }),
   saveAgentAvatar: (id: string, avatar: AgentAvatar) =>
     call<Agent>("PUT", `/api/admin/agents/${encodeURIComponent(id)}/avatar`, avatar),
   /** One agent with its instructions; the model line follows `scope` like `agents`. */
@@ -160,6 +164,13 @@ export const pageApi = {
   /** `settings` is the whole document. */
   updateWorkspace: (id: string, b: { name?: string; settings?: WorkspaceSettings }) =>
     call<WorkspaceDetail>("PATCH", ws(id), b),
+  workspaceFacts: (id: string) => call<WorkspaceFacts>("GET", `${ws(id)}/facts`),
+  addWorkspaceFact: (id: string, text: string) => call<MemoryFact>("POST", `${ws(id)}/facts`, { text }),
+  updateWorkspaceFact: (id: string, fact: string, b: { text?: string; status?: "active" | "retired" }) =>
+    call<MemoryFact>("PATCH", `${ws(id)}/facts/${fact}`, b),
+  deleteWorkspaceFact: (id: string, fact: string) => call<{ ok: boolean }>("DELETE", `${ws(id)}/facts/${fact}`),
+  setWorkspaceFactsSettings: (id: string, members_edit: boolean) =>
+    call<{ members_edit: boolean }>("PUT", `${ws(id)}/facts/settings`, { members_edit }),
   setWorkspaceMemory: (id: string, use_memory: boolean) =>
     call<WorkspaceDetail>("PUT", `${ws(id)}/memory`, { use_memory }),
   deleteWorkspace: (id: string) => call<{ ok: boolean }>("DELETE", ws(id)),
@@ -183,6 +194,9 @@ export const pageApi = {
   setWorkspaceOwner: (id: string, owner: string) => call<AdminWorkspace>("PATCH", adminWs(id), { owner }),
   adminDeleteWorkspace: (id: string) => call<{ ok: boolean }>("DELETE", adminWs(id)),
   cancel: (id: string) => call("POST", `/api/sessions/${id}/cancel`),
-  approve: (id: string, approvalId: string, decision: Decision) =>
-    call("POST", `/api/sessions/${id}/approvals/${approvalId}`, { decision }),
+  /** `note` goes with a denial only (the server drops it with an allow). */
+  approve: (id: string, approvalId: string, decision: Decision, note?: string) =>
+    call("POST", `/api/sessions/${id}/approvals/${approvalId}`, note ? { decision, note } : { decision }),
+  /** Remove a call allowed for the rest of the chat (T51). */
+  revokeAllow: (id: string, grantId: string) => call("DELETE", `/api/sessions/${id}/allows/${grantId}`),
 };

@@ -17,6 +17,8 @@ import type {
   WorkspaceMember,
   WorkspaceRole,
   WorkspaceSummary,
+  MemoryFact,
+  WorkspaceFacts,
 } from "../../types";
 import type { WorkspacePanelProps } from "./panel";
 
@@ -36,11 +38,17 @@ const api = {
   saveWorkspacePolicy: vi.fn(),
   setWorkspaceOwner: vi.fn(),
   adminDeleteWorkspace: vi.fn(),
+  workspaceFacts: vi.fn(),
+  addWorkspaceFact: vi.fn(),
+  updateWorkspaceFact: vi.fn(),
+  deleteWorkspaceFact: vi.fn(),
+  setWorkspaceFactsSettings: vi.fn(),
 };
 vi.mock("../../api", () => ({ api }));
 vi.mock("../../apiPages", () => ({ pageApi: api }));
 
 const { WorkspaceOverview } = await import("./WorkspaceOverview");
+const { WorkspaceMemory } = await import("./WorkspaceMemory");
 const { WorkspaceGeneral } = await import("./WorkspaceGeneral");
 const { WorkspaceMembers } = await import("./WorkspaceMembers");
 const { WorkspaceModels } = await import("./WorkspaceModels");
@@ -113,6 +121,7 @@ let host: HTMLElement;
 let root: Root;
 beforeEach(() => {
   for (const f of Object.values(api)) f.mockReset();
+  api.workspaceFacts.mockResolvedValue(facts());
   vi.stubGlobal("confirm", () => true);
   host = document.createElement("div");
   document.body.append(host);
@@ -125,6 +134,20 @@ afterEach(() => {
 });
 
 const render = (el: ReactNode) => act(async () => root.render(el));
+const fact = (id: string, text: string, more: Partial<MemoryFact> = {}): MemoryFact => ({
+  id,
+  owner_id: "workspace:w-acme",
+  text,
+  kind: "fact",
+  status: "active",
+  source_session: null,
+  created_ms: 1,
+  updated_ms: 1,
+  ...more,
+});
+function facts(more: Partial<WorkspaceFacts> = {}): WorkspaceFacts {
+  return { memories: [], can_edit: false, can_set: false, members_edit: false, waiting: 0, ...more };
+}
 const props = (role: WorkspaceRole = "admin", more: Partial<WorkspacePanelProps> = {}): WorkspacePanelProps => ({
   me: me(role),
   workspace: summary(role),
@@ -214,6 +237,57 @@ describe("Overview", () => {
     expect(api.workspaceMembers).not.toHaveBeenCalled();
     expect(host.textContent).not.toContain("Use my memory");
     expect(button("Leave stored")).toBeUndefined();
+  });
+});
+
+describe("Memory (the workspace's, T54)", () => {
+  test("a member reads it; only proposals from their own chats show, and they may withdraw them", async () => {
+    api.workspaceFacts.mockResolvedValue(
+      facts({ memories: [fact("f1", "Acme deploys on Fridays"), fact("p1", "Acme uses Postgres", { status: "proposed", mine: true })], waiting: 1 }),
+    );
+    await render(<WorkspaceMemory {...props("member")} version={0} />);
+    expect(host.textContent).toContain("Acme deploys on Fridays");
+    expect(host.textContent).toContain("Waiting (1)");
+    expect(host.textContent).toContain("From your chat");
+    expect(button("Keep")).toBeUndefined();
+    expect(host.querySelector('input[aria-label="New fact"]')).toBeNull();
+    expect(host.textContent).not.toContain("Every member may change this memory");
+    api.deleteWorkspaceFact.mockResolvedValue({ ok: true });
+    await click(button("Dismiss"));
+    expect(api.deleteWorkspaceFact).toHaveBeenCalledWith("w-acme", "p1");
+  });
+
+  test("an admin keeps what waits, sees what a proposal would replace or drop, and sets the switch", async () => {
+    api.workspaceFacts.mockResolvedValue(
+      facts({
+        memories: [
+          fact("f1", "Acme deploys on Fridays"),
+          fact("p1", "Acme deploys on Thursdays", { status: "proposed", proposal: { replaces: "f1" } }),
+          fact("p2", "Acme deploys on Fridays", { status: "proposed", proposal: { replaces: "f1", drop: true } }),
+        ],
+        can_edit: true,
+        can_set: true,
+        waiting: 2,
+      }),
+    );
+    await render(<WorkspaceMemory {...props("admin")} version={0} />);
+    expect(host.textContent).toContain("Replace “Acme deploys on Fridays” with “Acme deploys on Thursdays”");
+    expect(host.textContent).toContain("Forget: “Acme deploys on Fridays”");
+    api.updateWorkspaceFact.mockResolvedValue({});
+    await click([...host.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === "Keep")!);
+    expect(api.updateWorkspaceFact).toHaveBeenCalledWith("w-acme", "p1", { status: "active" });
+    api.setWorkspaceFactsSettings.mockResolvedValue({ members_edit: true });
+    const sw = [...host.querySelectorAll("label")].find((l) => l.textContent?.includes("Every member may change this memory"))!.querySelector("input")!;
+    await click(sw);
+    expect(api.setWorkspaceFactsSettings).toHaveBeenCalledWith("w-acme", true);
+  });
+
+  test("the Overview counts what waits for an admin's Keep", async () => {
+    api.workspace.mockResolvedValue(detail());
+    api.workspaceMembers.mockResolvedValue({ members: [] });
+    api.workspaceFacts.mockResolvedValue(facts({ can_edit: true, waiting: 2 }));
+    await render(<WorkspaceOverview {...props("admin")} />);
+    expect(host.textContent).toContain("2 changes wait for your Keep in this workspace's memory.");
   });
 });
 
