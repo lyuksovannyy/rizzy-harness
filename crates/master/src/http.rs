@@ -1888,7 +1888,7 @@ async fn mark_seen(
         .mirror
         .call(move |s| s.mark_seen(&viewer, sid, b.seq))
         .await?;
-    let _ = m.inner.live.send(crate::Live::SessionsChanged);
+    m.nudge(crate::Live::SessionsChanged(crate::Audience::Chat(sid)));
     Ok(Json(json!({ "ok": true })))
 }
 

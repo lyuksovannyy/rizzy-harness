@@ -42,7 +42,7 @@ use harness_store::SessionRow;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{CommandError, Live, Master, PromptOpts, lock};
+use crate::{Audience, CommandError, Live, Master, PromptOpts, lock};
 
 /// An end recorded longer ago than this when the master would resume its
 /// chat starts no turn (the master was down, or the node away): the agent
@@ -109,7 +109,7 @@ pub(crate) fn on_applied(m: &Master, e: &RawEvent) {
                 .or_default()
                 .running
                 .insert(b.bg_id, b.ends_by_ms);
-            let _ = m.inner.live.send(Live::SessionsChanged);
+            m.nudge(Live::SessionsChanged(Audience::Chat(sid)));
         }
         Ok(EventKind::BackgroundEnded(b)) => {
             {
@@ -122,7 +122,7 @@ pub(crate) fn on_applied(m: &Master, e: &RawEvent) {
                     c.seen_at.insert(e.seq, harness_core::now_ms().min(e.ts_ms));
                 }
             }
-            let _ = m.inner.live.send(Live::SessionsChanged);
+            m.nudge(Live::SessionsChanged(Audience::Chat(sid)));
             if b.calls_back() {
                 trigger(m, sid);
             }
@@ -377,7 +377,7 @@ async fn write_mark(m: &Master, sid: SessionId, mark: Mark) {
     if let Err(e) = m.inner.mirror.call(move |s| s.kv_set(&k, &v)).await {
         tracing::warn!(session = %sid, error = %e, "callbacks: could not record an attention mark");
     }
-    let _ = m.inner.live.send(Live::SessionsChanged);
+    m.nudge(Live::SessionsChanged(Audience::Chat(sid)));
 }
 
 async fn read_mark(m: &Master, sid: SessionId) -> Option<Mark> {

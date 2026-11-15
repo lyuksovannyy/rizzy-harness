@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{ApiError, ApiResult, require, visible_session};
-use crate::{Live, Master};
+use crate::{Audience, Live, Master};
 
 pub(super) fn routes() -> Router<Master> {
     Router::new().route("/api/sessions/{id}/title", put(rename))
@@ -47,6 +47,6 @@ async fn rename(
     {
         return Err(ApiError(StatusCode::NOT_FOUND, "unknown session".into()));
     }
-    let _ = m.inner.live.send(Live::SessionsChanged);
+    m.nudge(Live::SessionsChanged(Audience::Chat(sid)));
     Ok(Json(json!({ "ok": true, "title": title })))
 }

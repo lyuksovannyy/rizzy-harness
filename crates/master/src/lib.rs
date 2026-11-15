@@ -75,25 +75,61 @@ const MAX_CAPABILITY: usize = 64;
 const MAINTENANCE_FIRST: Duration = Duration::from_secs(60);
 const MAINTENANCE_EVERY: Duration = Duration::from_secs(3600);
 
-/// Messages fanned out to UI WebSockets.
+/// Messages fanned out to UI WebSockets. The `…Changed` ones carry no
+/// content, and each names who may be told (PLAN.md T58): when a nudge
+/// reaches a socket is itself news, so a socket only gets those about
+/// things its user may see.
 #[derive(Debug, Clone)]
 pub enum Live {
     Event(RawEvent),
-    SessionsChanged,
+    SessionsChanged(Audience),
+    /// Every signed-in socket: nodes are a server-wide list, and a node
+    /// coming or going says nothing about anyone's chats.
     NodesChanged,
-    MemoryChanged,
+    MemoryChanged(Audience),
     /// A workspace, its members, their roles or the server's workspace
     /// policy changed (content-free: each client refetches its own view).
-    WorkspacesChanged,
+    WorkspacesChanged(Audience),
     /// Projects, their boards or which chats they hold changed.
-    ProjectsChanged,
+    ProjectsChanged(Audience),
     /// A feature's list changed (`routines`, `media`, `artifacts`): sent as
-    /// `<topic>_changed`, without content, to `owner`'s sockets only, or to
-    /// every socket when `owner` is `None` (a workspace-shared change).
+    /// `<topic>_changed`, without content, to `to`.
     Changed {
         topic: &'static str,
-        owner: Option<String>,
+        to: Audience,
     },
+}
+
+/// Whose sockets a content-free nudge reaches. Resolved when it is sent
+/// to each socket, so a member removed in between is not told. The API
+/// token (the machine owner's key) is told everything, as it may read
+/// everything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Audience {
+    /// One account.
+    User(String),
+    /// The owner of this chat, read when sent; nobody but the API token
+    /// while it has none or is gone (a deleted chat's nudge names its
+    /// owner with [`Audience::User`]).
+    Chat(SessionId),
+    /// The members of this workspace (a Personal one: its owner).
+    Workspace(String),
+    /// The members of this project's workspace.
+    Project(String),
+    /// Only the API token: what no account owns (memory kept with no
+    /// owner, which only the token writes and reads).
+    Token,
+    /// Every signed-in socket: a server-wide setting or list that says
+    /// nothing about what anyone does. Never for a chat, a person's
+    /// memory or a workspace's things.
+    Everyone,
+}
+
+impl Audience {
+    /// [`Audience::User`] of `owner`, or [`Audience::Token`] without one.
+    pub fn owner(owner: Option<&str>) -> Self {
+        owner.map_or(Self::Token, |o| Self::User(o.to_string()))
+    }
 }
 
 /// A model the UI may offer, with what it supports (PLAN.md §0: capabilities
@@ -778,10 +814,14 @@ impl Master {
         self.inner.live.subscribe()
     }
 
-    /// Tell the UIs that `topic`'s list changed: `owner`'s sockets, or all
-    /// of them when `None` (see `Live::Changed`).
-    pub fn changed(&self, topic: &'static str, owner: Option<String>) {
-        let _ = self.inner.live.send(Live::Changed { topic, owner });
+    /// Tell `to`'s UIs that `topic`'s list changed (see `Live::Changed`).
+    pub fn changed(&self, topic: &'static str, to: Audience) {
+        let _ = self.inner.live.send(Live::Changed { topic, to });
+    }
+
+    /// Raise a content-free nudge (see [`Live`]).
+    pub(crate) fn nudge(&self, l: Live) {
+        let _ = self.inner.live.send(l);
     }
 
     /// Whether `node_id` has a link right now.
@@ -1419,9 +1459,10 @@ impl Master {
                 ) {
                     callbacks::on_applied(self, &e);
                 }
+                let sid = e.session_id;
                 let _ = self.inner.live.send(Live::Event(e));
                 if structural {
-                    let _ = self.inner.live.send(Live::SessionsChanged);
+                    self.nudge(Live::SessionsChanged(Audience::Chat(sid)));
                 }
             }
             Ok(AppendOutcome::Duplicate) => {}
@@ -1436,7 +1477,7 @@ impl Master {
                         seq,
                         "two writers sent different events under one seq (a copied node key or a node restored from an old disk); this session's mirror is frozen until it is deleted"
                     );
-                    let _ = self.inner.live.send(Live::SessionsChanged);
+                    self.nudge(Live::SessionsChanged(Audience::Chat(e.session_id)));
                 }
                 self.stop_diverged(node_id, e.session_id);
             }
@@ -1521,7 +1562,7 @@ impl Master {
         {
             Ok(true) => {
                 tracing::error!(node = %node_id, session = %sid, seq, reason, "refused an event from a node; this session's mirror is frozen until it is deleted");
-                let _ = self.inner.live.send(Live::SessionsChanged);
+                self.nudge(Live::SessionsChanged(Audience::Chat(sid)));
             }
             Ok(false) => {}
             Err(err) => {
@@ -1799,9 +1840,10 @@ impl Master {
         if let Some(parent) = dropped {
             tracing::warn!(node = %node_id, session = %sid, parent = %parent, "a node named another owner's chat as the parent of a new session; it is a top-level session");
         }
-        let _ = self.inner.live.send(Live::SessionsChanged);
+        self.nudge(Live::SessionsChanged(Audience::Chat(sid)));
         if linked {
-            let _ = self.inner.live.send(Live::ProjectsChanged);
+            // A chat's place in a project shows only to its owner.
+            self.nudge(Live::ProjectsChanged(Audience::Chat(sid)));
         }
         Ok(sid)
     }
@@ -2360,16 +2402,24 @@ impl Master {
             .inner
             .mirror
             .call(move |s| {
+                // Read first: the row is gone after, and only its owner is
+                // told (T58).
+                let owner = s.session(sid)?.and_then(|r| r.owner_id);
                 s.delete_session(sid, true)?;
                 s.kv_delete(&auto_model_key(sid))?;
-                s.checkpoint()
+                s.checkpoint()?;
+                Ok::<_, harness_store::StoreError>(owner)
             })
             .await;
-        if let Err(e) = res {
-            tracing::warn!(session = %sid, error = %e, "deleting mirror copy failed");
-        }
+        let owner = match res {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::warn!(session = %sid, error = %e, "deleting mirror copy failed");
+                None
+            }
+        };
         callbacks::forget(self, sid).await;
-        let _ = self.inner.live.send(Live::SessionsChanged);
+        self.nudge(Live::SessionsChanged(Audience::owner(owner.as_deref())));
     }
 
     /// A node still has a session we deleted (it was offline): tell it again.

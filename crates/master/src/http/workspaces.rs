@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use super::{ApiError, ApiResult, require, require_admin, runtime};
 use crate::auth::Principal;
 use crate::workspaces::{self, Access, Perm, Role, WorkspaceSettings, access};
-use crate::{Live, Master, levels};
+use crate::{Audience, Live, Master, levels};
 use harness_core::policy::ExecLevel;
 
 const ONLY_YOU: &str = "a Personal workspace has only you";
@@ -34,13 +34,17 @@ fn no_member() -> ApiError {
     ApiError(StatusCode::NOT_FOUND, "no such member".into())
 }
 
-/// Tell every UI to refetch its workspaces, and its chats too when their
-/// rows changed: chats moved workspace (they fall back to their owners'
-/// Personal ones), or a role changed, which changes `blocked` on them.
-pub(super) fn changed(m: &Master, chats_changed: bool) {
-    let _ = m.inner.live.send(Live::WorkspacesChanged);
-    if chats_changed {
-        let _ = m.inner.live.send(Live::SessionsChanged);
+/// Tell `to`'s UIs to refetch their workspaces, and their chats too when
+/// their rows changed: chats moved workspace (they fall back to their
+/// owners' Personal ones), or a role changed, which changes `blocked` on
+/// them. `to` is who may see the change (T58): a workspace's members, and
+/// whoever just left it.
+pub(super) fn changed(m: &Master, to: &[Audience], chats_changed: bool) {
+    for a in to {
+        m.nudge(Live::WorkspacesChanged(a.clone()));
+        if chats_changed {
+            m.nudge(Live::SessionsChanged(a.clone()));
+        }
     }
 }
 
@@ -255,7 +259,7 @@ pub(super) async fn create(
         .mirror
         .call(move |s| s.create_workspace(&name, &uid))
         .await?;
-    changed(&m, false);
+    changed(&m, &[Audience::Workspace(w.workspace_id.clone())], false);
     // Its owner's level there is `host`, so their ceiling decides.
     Ok(Json(summary_json(
         &w,
@@ -338,7 +342,7 @@ pub(super) async fn patch(
             Ok::<_, StoreError>(())
         })
         .await?;
-    changed(&m, false);
+    changed(&m, &[Audience::Workspace(a.id().to_string())], false);
     detail(&m, &who, &access(&m, &who, &id).await?).await
 }
 
@@ -369,7 +373,7 @@ pub(super) async fn set_memory(
         .mirror
         .call(move |s| s.set_use_memory(&ws, &uid, on))
         .await?;
-    changed(&m, false);
+    changed(&m, &[Audience::Workspace(a.id().to_string())], false);
     detail(&m, &who, &access(&m, &who, &id).await?).await
 }
 
@@ -389,9 +393,40 @@ pub(super) async fn delete(
     }
     let ws = a.id().to_string();
     let members = delete_workspace(&m, ws).await?.unwrap_or_default();
-    changed(&m, true);
+    changed(&m, &former(&members), true);
     workspaces::sweep_revoked(&m, members);
     Ok(Json(json!({ "ok": true })))
+}
+
+/// Who is told that account `user_id` changed (its role, ceiling, being
+/// disabled or deleted): the account itself, and the members of every
+/// workspace it is in, whose rosters show it. `rosters` are those
+/// workspaces, read before a deletion took the memberships.
+pub(super) fn account_changed(m: &Master, user_id: &str, rosters: Vec<String>) {
+    let mut to: Vec<Audience> = rosters.into_iter().map(Audience::Workspace).collect();
+    to.push(Audience::User(user_id.to_string()));
+    for a in &to {
+        m.nudge(Live::WorkspacesChanged(a.clone()));
+    }
+    // Only their own chats' `blocked` moves.
+    m.nudge(Live::SessionsChanged(Audience::User(user_id.to_string())));
+}
+
+/// The workspaces `user_id` is a member of (for [`account_changed`]).
+pub(super) async fn rosters_of(m: &Master, user_id: &str) -> Vec<String> {
+    let of = user_id.to_string();
+    m.inner
+        .mirror
+        .call(move |s| s.memberships(&of))
+        .await
+        .map(|ms| ms.into_iter().map(|w| w.workspace.workspace_id).collect())
+        .unwrap_or_default()
+}
+
+/// Each of `members` by account: a deleted workspace has no members left
+/// to resolve.
+fn former(members: &[String]) -> Vec<Audience> {
+    members.iter().cloned().map(Audience::User).collect()
 }
 
 /// Delete workspace `ws`; returns who was in it (for the revocation
@@ -420,7 +455,11 @@ async fn delete_workspace(m: &Master, ws: String) -> ApiResult<Option<Vec<String
             Ok::<_, StoreError>(s.delete_workspace(&ws)?.then_some((members, chats)))
         })
         .await?;
-    crate::projects::forget_gone(m, projects).await;
+    let told = gone
+        .as_ref()
+        .map(|(members, _)| former(members))
+        .unwrap_or_default();
+    crate::projects::forget_gone(m, projects, &told).await;
     // Its memory is the workspace's, and goes with it.
     if gone.is_some() {
         crate::memory::forget_workspace(m, &ws_id).await;
@@ -522,7 +561,7 @@ pub(super) async fn add_member(
         Err(e) => return Err(e.into()),
     }
     let row = load_member(&m, a.id(), &user.user_id).await?;
-    changed(&m, false);
+    changed(&m, &[Audience::Workspace(a.id().to_string())], false);
     Ok(Json(member_json(&m, &row, true).await))
 }
 
@@ -564,7 +603,7 @@ pub(super) async fn set_role(
     let row = load_member(&m, a.id(), &user_id).await?;
     audit_owner_change(&m, &who, a.id(), &target, &row).await;
     // Their chats here may have become read-only, or writable again.
-    changed(&m, true);
+    changed(&m, &[Audience::Workspace(a.id().to_string())], true);
     // An owner made a member falls to their stored level: their running
     // chats above it stop.
     workspaces::sweep_revoked(&m, vec![user_id]);
@@ -639,7 +678,15 @@ pub(super) async fn remove_member(
     let detail = json!({"by": levels::by(&who), "user": user_id, "workspace": a.id(),
         "from": from, "to": null, "reason": "removed"});
     levels::audit(&m, "level.workspace", detail).await;
-    changed(&m, true);
+    // The one who left is told too: they are no member to reach any more.
+    changed(
+        &m,
+        &[
+            Audience::Workspace(a.id().to_string()),
+            Audience::User(user_id.clone()),
+        ],
+        true,
+    );
     // Their chats from here are back in Personal, where their account's
     // ceiling applies from their next action; what was running for this
     // workspace stops now.
@@ -762,7 +809,8 @@ pub(super) async fn admin_policy(
     cfg.workspaces.members_can_create = b.members_can_create;
     rt.save(cfg)
         .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?;
-    changed(&m, false);
+    // A server-wide setting (who may create workspaces).
+    changed(&m, &[Audience::Everyone], false);
     Ok(Json(json!({ "members_can_create": b.members_can_create })))
 }
 
@@ -810,7 +858,7 @@ pub(super) async fn admin_patch(
     let row = load_member(&m, &id, &b.owner).await?;
     audit_owner_change(&m, &who, &id, &target, &row).await;
     // Their chats here may have become writable.
-    changed(&m, true);
+    changed(&m, &[Audience::Workspace(id.clone())], true);
     admin_one(&m, &id)
         .await?
         .map(Json)
@@ -829,7 +877,7 @@ pub(super) async fn admin_delete(
     let Some(members) = delete_workspace(&m, id).await? else {
         return Err(workspaces::WsError::NotFound.into());
     };
-    changed(&m, true);
+    changed(&m, &former(&members), true);
     workspaces::sweep_revoked(&m, members);
     Ok(Json(json!({ "ok": true })))
 }

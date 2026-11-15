@@ -41,7 +41,7 @@ use serde_json::json;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::watch;
 
-use crate::{Live, Master, auth, lock};
+use crate::{Audience, Live, Master, auth, lock};
 
 const PAGE: usize = 1000;
 
@@ -450,10 +450,76 @@ async fn catch_up(m: &Master, out: &mut Out, sid: SessionId, last: &mut u64) -> 
     }
 }
 
+/// Whether `who` is told a nudge addressed to `to` (T58), read now: a
+/// member removed since it was raised is not. A store error tells nobody
+/// but the API token.
+async fn reaches(m: &Master, who: &auth::Principal, to: &Audience) -> bool {
+    let Some(me) = who.user_id.clone() else {
+        return true;
+    };
+    match to {
+        Audience::Everyone => true,
+        Audience::Token => false,
+        Audience::User(u) => *u == me,
+        Audience::Chat(sid) => may_see(m, who, *sid).await,
+        Audience::Workspace(ws) => {
+            let ws = ws.clone();
+            member_now(m, move |_| Ok(Some(ws)), me).await
+        }
+        Audience::Project(p) => {
+            let p = p.clone();
+            member_now(m, move |s| Ok(s.project(&p)?.map(|r| r.workspace_id)), me).await
+        }
+    }
+}
+
+/// Whether `me` is a member (or the Personal owner) of the workspace
+/// `which` finds.
+async fn member_now(
+    m: &Master,
+    which: impl FnOnce(&harness_store::Store) -> Result<Option<String>, harness_store::StoreError>
+    + Send
+    + 'static,
+    me: String,
+) -> bool {
+    m.inner
+        .mirror
+        .call(move |s| {
+            let Some(ws) = which(s)? else {
+                return Ok(false);
+            };
+            if s.member(&ws, &me)?.is_some() {
+                return Ok(true);
+            }
+            Ok::<_, harness_store::StoreError>(
+                s.workspace(&ws)?
+                    .is_some_and(|w| w.personal_owner.as_deref() == Some(me.as_str())),
+            )
+        })
+        .await
+        .unwrap_or(false)
+}
+
 async fn may_see(m: &Master, who: &auth::Principal, sid: SessionId) -> bool {
     match m.inner.mirror.call(move |s| s.session(sid)).await {
         Ok(Some(r)) => who.can_see(r.owner_id.as_deref()),
         _ => false,
+    }
+}
+
+/// Send `kind` when `who` may be told about `to`; false when the socket
+/// failed.
+async fn nudge(
+    m: &Master,
+    who: &auth::Principal,
+    out: &mut Out,
+    to: &Audience,
+    kind: &str,
+) -> bool {
+    if reaches(m, who, to).await {
+        out.send(json!({ "type": kind })).await
+    } else {
+        true
     }
 }
 
@@ -539,20 +605,16 @@ async fn run(
                         }
                         _ => true,
                     },
-                    Ok(Live::SessionsChanged) => out.send(json!({"type": "sessions_changed"})).await,
+                    // Content-free, and only to those who may see what
+                    // changed (T58).
                     Ok(Live::NodesChanged) => out.send(json!({"type": "nodes_changed"})).await,
-                    // No content: each client refetches its own memories.
-                    Ok(Live::MemoryChanged) => out.send(json!({"type": "memory_changed"})).await,
-                    Ok(Live::WorkspacesChanged) => out.send(json!({"type": "workspaces_changed"})).await,
-                    Ok(Live::ProjectsChanged) => out.send(json!({"type": "projects_changed"})).await,
-                    // Content-free and only for the owner (or everyone, for a
-                    // change to something shared).
-                    Ok(Live::Changed { topic, owner }) => {
-                        if owner.is_none() || who.can_see(owner.as_deref()) {
-                            out.send(json!({"type": format!("{topic}_changed")})).await
-                        } else {
-                            true
-                        }
+                    Ok(Live::SessionsChanged(to)) => nudge(&m, &who, &mut out, &to, "sessions_changed").await,
+                    // Each client refetches its own memories.
+                    Ok(Live::MemoryChanged(to)) => nudge(&m, &who, &mut out, &to, "memory_changed").await,
+                    Ok(Live::WorkspacesChanged(to)) => nudge(&m, &who, &mut out, &to, "workspaces_changed").await,
+                    Ok(Live::ProjectsChanged(to)) => nudge(&m, &who, &mut out, &to, "projects_changed").await,
+                    Ok(Live::Changed { topic, to }) => {
+                        nudge(&m, &who, &mut out, &to, &format!("{topic}_changed")).await
                     }
                     // Revocation does not travel on this channel, so a lag
                     // cannot skip it.
@@ -562,9 +624,13 @@ async fn run(
                             ok &= catch_up(&m, &mut out, *sid, last).await;
                         }
                         // A dropped message may have been any of them.
+                        // Each is this user's own refetch: the socket learns
+                        // nothing about anyone else from it.
                         ok = ok && out.send(json!({"type": "sessions_changed"})).await
                             && out.send(json!({"type": "workspaces_changed"})).await
-                            && out.send(json!({"type": "projects_changed"})).await;
+                            && out.send(json!({"type": "projects_changed"})).await
+                            && out.send(json!({"type": "memory_changed"})).await
+                            && out.send(json!({"type": "nodes_changed"})).await;
                         for topic in TOPICS {
                             ok = ok && out.send(json!({"type": format!("{topic}_changed")})).await;
                         }

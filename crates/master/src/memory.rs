@@ -40,7 +40,7 @@ use serde_json::Value;
 
 use crate::projects::TurnMemory;
 use crate::workspaces::{Perm, Role};
-use crate::{Live, Master, projects, workspaces};
+use crate::{Audience, Live, Master, projects, workspaces};
 
 /// What a turn carries whole of each place (newest first), and the cap on
 /// what the model may save without a click in one: the facts the model
@@ -85,6 +85,36 @@ pub fn place_of(key: &str) -> Option<Place<'_>> {
         return id(p).map(|_| Place::Project(p));
     }
     id(key).map(|_| Place::User(key))
+}
+
+/// Who is told that a fact kept under owner key `key` changed (T58): a
+/// person's facts that person, a workspace's or a project's its members,
+/// owner-less facts the API token alone.
+pub fn place_audience(key: Option<&str>) -> Audience {
+    match key.and_then(place_of) {
+        Some(Place::User(u)) => Audience::User(u.to_string()),
+        Some(Place::Workspace(w)) => Audience::Workspace(w.to_string()),
+        Some(Place::Project(p)) => Audience::Project(p.to_string()),
+        None => Audience::Token,
+    }
+}
+
+/// Who is told that `f` changed: a proposal not sent on yet is its
+/// proposer's alone (it came from their private chat, review F2);
+/// anything else its place's.
+pub async fn audience_of(m: &Master, f: &Fact) -> Audience {
+    if f.status == Status::Proposed {
+        let meta = proposal_meta(m, &f.id).await;
+        if !meta.submitted {
+            return Audience::owner(meta.by.as_deref());
+        }
+    }
+    place_audience(f.owner_id.as_deref())
+}
+
+/// Tell `to`'s sockets that memory changed (content-free).
+pub fn memory_changed(m: &Master, to: Audience) {
+    m.nudge(Live::MemoryChanged(to));
 }
 
 pub fn fact_place(f: &Fact) -> Option<Place<'_>> {
@@ -546,7 +576,8 @@ pub async fn keep_proposal(
         }
     }
     clear_meta(m, &f.id).await;
-    let _ = m.inner.live.send(Live::MemoryChanged);
+    // Kept: it is its place's now.
+    memory_changed(m, place_audience(f.owner_id.as_deref()));
     Ok(retired)
 }
 
@@ -1153,7 +1184,16 @@ async fn save(
                 },
             )
             .await;
-            let _ = m.inner.live.send(Live::MemoryChanged);
+            // A waiting proposal is the chat owner's alone until they send
+            // it on; a save is its place's.
+            memory_changed(
+                m,
+                if at_once {
+                    place_audience(added.owner_id.as_deref())
+                } else {
+                    Audience::Chat(sid)
+                },
+            );
         }
         Ok(None) => {}
         Err(MemoryError::Invalid(why)) => refuse(m, sid, call_id, &t, &why).await,
@@ -1259,7 +1299,7 @@ async fn change(
                 },
             )
             .await;
-            let _ = m.inner.live.send(Live::MemoryChanged);
+            memory_changed(m, place_audience(target.owner_id.as_deref()));
             return;
         }
         // A waiting `forget`: a proposal holding the fact's text, which
@@ -1307,10 +1347,9 @@ async fn change(
 }
 
 async fn add(m: &Master, mem: &dyn MemoryStore, f: NewFact) {
+    let to = place_audience(f.owner_id.as_deref());
     match mem.add(f).await {
-        Ok(Some(_)) => {
-            let _ = m.inner.live.send(Live::MemoryChanged);
-        }
+        Ok(Some(_)) => memory_changed(m, to),
         Ok(None) => {}
         Err(err) => tracing::warn!(error = %err, "could not file a memory proposal"),
     }
@@ -1318,9 +1357,7 @@ async fn add(m: &Master, mem: &dyn MemoryStore, f: NewFact) {
 
 async fn retire(m: &Master, mem: &dyn MemoryStore, f: &Fact) {
     match mem.update(&f.id, None, Some(Status::Retired)).await {
-        Ok(_) => {
-            let _ = m.inner.live.send(Live::MemoryChanged);
-        }
+        Ok(_) => memory_changed(m, place_audience(f.owner_id.as_deref())),
         Err(e) => tracing::warn!(error = %e, "could not retire a memory"),
     }
 }
@@ -1372,6 +1409,9 @@ pub async fn decide(
     };
     let added = get(&r.added).await;
     let target = get(&r.target).await;
+    // The chat's own memory block (its owner's), and whoever saw a fact
+    // this changes (T58).
+    let mut told = vec![Audience::Chat(sid)];
     match (d, r.state) {
         (Decision::Keep, CallState::Pending) => {
             let Some(f) = added.filter(|f| f.status == Status::Proposed) else {
@@ -1392,7 +1432,9 @@ pub async fn decide(
                 meta.by = meta.by.or(Some(user.to_string()));
                 set_meta(m, &f.id, &meta).await;
                 set_record(m, sid, call_id, &r).await;
-                let _ = m.inner.live.send(Live::MemoryChanged);
+                // Sent on: those who decide it see it now.
+                memory_changed(m, Audience::Chat(sid));
+                memory_changed(m, place_audience(f.owner_id.as_deref()));
                 return Ok(r);
             }
             r.retired = keep_proposal(m, &*mem, &f, Some(user))
@@ -1412,6 +1454,7 @@ pub async fn decide(
             let Some(f) = added.filter(|f| f.status == Status::Proposed) else {
                 return Err(decided());
             };
+            told.push(audience_of(m, &f).await);
             mem.delete(&f.id)
                 .await
                 .map_err(|_| "could not dismiss it".to_string())?;
@@ -1426,6 +1469,7 @@ pub async fn decide(
                 }
             }
             if let Some(f) = &added {
+                told.push(place_audience(f.owner_id.as_deref()));
                 mem.delete(&f.id)
                     .await
                     .map_err(|_| "could not undo it".to_string())?;
@@ -1434,6 +1478,7 @@ pub async fn decide(
             if r.retired
                 && let Some(f) = target.filter(|f| f.status == Status::Retired)
             {
+                told.push(place_audience(f.owner_id.as_deref()));
                 mem.update(&f.id, None, Some(Status::Active))
                     .await
                     .map_err(|_| "could not undo it".to_string())?;
@@ -1445,7 +1490,10 @@ pub async fn decide(
         _ => return Err(decided()),
     }
     set_record(m, sid, call_id, &r).await;
-    let _ = m.inner.live.send(Live::MemoryChanged);
+    told.dedup();
+    for to in told {
+        memory_changed(m, to);
+    }
     Ok(r)
 }
 
@@ -1712,7 +1760,7 @@ async fn forget_owner(m: &Master, owner: &str) {
                 clear_meta(m, &f.id).await;
             }
             if !facts.is_empty() {
-                let _ = m.inner.live.send(Live::MemoryChanged);
+                memory_changed(m, place_audience(Some(owner)));
             }
         }
         Err(e) => tracing::warn!(error = %e, "could not list facts to delete"),

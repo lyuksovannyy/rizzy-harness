@@ -452,8 +452,9 @@ pub async fn ids(m: &Master) -> HashSet<String> {
 
 /// After such a deletion: forget the facts of every project it took (the
 /// memory store is not in master.db, so no foreign key reaches it), and
-/// tell the clients.
-pub async fn forget_gone(m: &Master, before: HashSet<String>) {
+/// tell `to` (who could see them: the workspace is gone, so its members
+/// are named by account).
+pub async fn forget_gone(m: &Master, before: HashSet<String>, to: &[crate::Audience]) {
     let now = ids(m).await;
     let gone: Vec<&String> = before.iter().filter(|p| !now.contains(*p)).collect();
     if gone.is_empty() {
@@ -462,8 +463,10 @@ pub async fn forget_gone(m: &Master, before: HashSet<String>) {
     for p in gone {
         delete_memory(m, p).await;
     }
-    let _ = m.inner.live.send(crate::Live::ProjectsChanged);
-    let _ = m.inner.live.send(crate::Live::MemoryChanged);
+    for a in to {
+        m.nudge(crate::Live::ProjectsChanged(a.clone()));
+        m.nudge(crate::Live::MemoryChanged(a.clone()));
+    }
 }
 
 /// Forget every fact of a deleted project.
