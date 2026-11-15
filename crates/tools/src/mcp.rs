@@ -128,6 +128,9 @@ pub const MAX_TOOL_TIMEOUT_S: u64 = 3600;
 
 /// Bytes of a server's stderr kept (its last ones) for error messages.
 const STDERR_KEEP: usize = 2048;
+/// How long a server whose start failed is given to have its error output
+/// read before the note is built without the rest.
+const STDERR_GRACE: Duration = Duration::from_secs(2);
 
 /// How long a stop waits for a server's process to be gone.
 pub const STOP_WAIT: Duration = Duration::from_secs(6);
@@ -970,7 +973,8 @@ async fn start(name: &str, cfg: &ServerConfig, ctx: &ToolCtx) -> Result<Up, Stri
     let stdout = child.stdout.take().ok_or("no stdout")?;
     let stderr_pipe = child.stderr.take();
     let stderr = Arc::new(Mutex::new(Tail::default()));
-    if let Some(mut e) = stderr_pipe {
+    // Ends once the server's error output closed and was read.
+    let stderr_read = stderr_pipe.map(|mut e| {
         let tail = stderr.clone();
         tokio::spawn(async move {
             let mut buf = [0u8; 4096];
@@ -982,8 +986,8 @@ async fn start(name: &str, cfg: &ServerConfig, ctx: &ToolCtx) -> Result<Up, Stri
                     .unwrap_or_else(|p| p.into_inner())
                     .push(&buf[..n]);
             }
-        });
-    }
+        })
+    });
     let (live, exited_tx) = {
         let (tx, rx) = watch::channel(None);
         (
@@ -1011,24 +1015,33 @@ async fn start(name: &str, cfg: &ServerConfig, ctx: &ToolCtx) -> Result<Up, Stri
     // Through the trait: its future is declared `Send`, which the free
     // function's is not proven to be.
     use rmcp::service::ClientServiceExt as _;
-    let service = info
+    let service = match info
         .serve_with_lifecycle(
             (reader, writer),
             rmcp::service::ClientLifecycleMode::Initialize,
         )
         .await
-        .map_err(|e| {
-            if oversize.load(Ordering::SeqCst) {
-                over_cap()
-            } else {
-                let tail = stderr.lock().unwrap_or_else(|p| p.into_inner()).text();
-                if tail.is_empty() {
-                    format!("initialize failed: {e}")
-                } else {
-                    format!("initialize failed: {e}; the end of its error output: {tail}")
-                }
+    {
+        Ok(s) => s,
+        Err(_) if oversize.load(Ordering::SeqCst) => return Err(over_cap()),
+        Err(e) => {
+            // Its stdout closed (it exited) or it answered wrong. Its error
+            // output closes with it but is read by another task, which may
+            // not have run yet: stop the server and give that task a
+            // moment to read the rest, so the note says why. Bounded: a
+            // child that keeps the pipe open is not waited for.
+            live.kill.cancel();
+            if let Some(read) = stderr_read {
+                let _ = tokio::time::timeout(STDERR_GRACE, read).await;
             }
-        })?;
+            let tail = stderr.lock().unwrap_or_else(|p| p.into_inner()).text();
+            return Err(if tail.is_empty() {
+                format!("initialize failed: {e}")
+            } else {
+                format!("initialize failed: {e}; the end of its error output: {tail}")
+            });
+        }
+    };
     drop(fifo_dir);
     let listed = list(name, cfg, service.peer().clone()).await?;
     let _ = guard.disarm();
