@@ -93,6 +93,7 @@ pub enum EventKind {
     StepLimitChanged(StepLimitChanged),
     HandoffWritten(HandoffWritten),
     CompactFailed(CompactFailed),
+    ImagesWithheld(ImagesWithheld),
 }
 
 impl EventKind {
@@ -150,6 +151,7 @@ impl EventKind {
             EventKind::StepLimitChanged(_) => "step_limit_changed",
             EventKind::HandoffWritten(_) => "handoff_written",
             EventKind::CompactFailed(_) => "compact_failed",
+            EventKind::ImagesWithheld(_) => "images_withheld",
         }
     }
 }
@@ -1378,6 +1380,38 @@ pub struct ToolCallFinished {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<ToolImage>,
 }
+
+/// The provider refused a request that carried images `read` returned,
+/// and the same request without them was answered (X.23, PLAN.md T71):
+/// from here on, the images of these calls are withheld. Keyed by call,
+/// not by image: which of the request's images the provider refused is not
+/// known, so all of them go, and a later `read` of one of the files is a
+/// new call, shown again (alone). It applies to the calls before it in the
+/// log (a provider that numbers calls per message reuses ids). Only the
+/// node's loop records it, before the answer that request got, so every
+/// later request rebuilds without them. Shown in the call's row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImagesWithheld {
+    pub turn_id: String,
+    /// The `read` calls whose images the refused request carried.
+    pub calls: Vec<String>,
+    /// The provider's HTTP status.
+    pub status: u16,
+    /// The provider's own words, made one line, scrubbed of the node's
+    /// secrets and cut to [`ImagesWithheld::MAX_REASON`] characters. For the
+    /// person; the model is not sent it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
+}
+
+impl ImagesWithheld {
+    pub const MAX_REASON: usize = 200;
+}
+
+/// What a tool call's row says after its image was withheld (both folds
+/// add it to the result's output, after an empty line).
+pub const IMAGE_WITHHELD_ROW: &str =
+    "[image not shown to the model: the provider refused a request that carried it]";
 
 /// An image a tool call returned (`tool_call_finished.image`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

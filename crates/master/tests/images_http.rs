@@ -522,6 +522,12 @@ async fn images_are_refused_where_they_cannot_go() {
     ];
     let (st, v) = prompt(&t, &sid, json!({"text": "hi", "images": huge})).await;
     assert_eq!(st, StatusCode::PAYLOAD_TOO_LARGE, "{v}");
+    // One image over 3.5 MiB, alone under 5 MiB: its base64 would not fit
+    // the providers' 5 MB, so every request showing it would fail (T71).
+    let one = image(&t, "one.png", big_png(3, 3_800_000), Some(&sid)).await;
+    let (st, v) = prompt(&t, &sid, json!({"text": "hi", "images": [one]})).await;
+    assert_eq!(st, StatusCode::PAYLOAD_TOO_LARGE, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("3.5 MiB"), "{v}");
 
     // Not an image, or not one's own: never sent.
     let wav = [b"RIFF\x24\0\0\0WAVEfmt ".as_slice(), &[0u8; 64]].concat();

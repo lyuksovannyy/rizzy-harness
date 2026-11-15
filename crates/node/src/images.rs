@@ -32,6 +32,14 @@ pub(crate) fn accept(images: Vec<ChatImage>) -> Result<(Vec<ImageRef>, Vec<Sessi
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(img.data.as_bytes())
             .map_err(|_| format!("{}: the image data is not base64", img.name))?;
+        // Each image's base64 must fit the providers' 5 MB (T71): a larger
+        // one would be refused on every request that showed it.
+        if bytes.len() as u64 > harness_core::image::MAX_FILE_BYTES {
+            return Err(format!(
+                "{}: images go to models at most 3.5 MiB each",
+                img.name
+            ));
+        }
         total += bytes.len() as u64;
         if total > MAX_IMAGE_BYTES {
             return Err("too much attached to one message".into());
@@ -83,5 +91,11 @@ mod tests {
         assert!(accept(vec![bad]).is_err());
         let big = vec![0u8; (MAX_IMAGE_BYTES / 2) as usize + 1];
         assert!(accept(vec![img(&big, "image/png"), img(&big, "image/png")]).is_err());
+        // One image over 3.5 MiB, alone under the message's 5 MiB: refused,
+        // its base64 would not fit the providers' 5 MB (T71).
+        let cap = harness_core::image::MAX_FILE_BYTES as usize;
+        let e = accept(vec![img(&vec![0u8; cap + 1], "image/png")]).unwrap_err();
+        assert!(e.contains("3.5 MiB"), "{e}");
+        assert!(accept(vec![img(&vec![0u8; cap], "image/png")]).is_ok());
     }
 }

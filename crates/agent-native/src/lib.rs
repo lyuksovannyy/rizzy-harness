@@ -50,7 +50,7 @@ use manual_compact::{MODEL_FAILED, Manual, NOT_SMALLER, STOPPED, TOO_LARGE, TOO_
 use tokio::sync::mpsc;
 
 pub use provider::{
-    ChatMsg, ChatRequest, Completion, Effort, ImagePart, NOTES_THEN_MESSAGE, Provider,
+    ChatMsg, ChatRequest, Completion, Effort, ImagePart, ImageState, NOTES_THEN_MESSAGE, Provider,
     ProviderError, RetryHint, StopReason, StreamLimits, ToolSpec, escape_leads, estimate_tokens,
     place_notes, without_notes,
 };
@@ -1347,21 +1347,17 @@ fn image_name(input: &serde_json::Value) -> String {
 }
 
 /// The message after a `read` result that returned an image (X.23).
-fn tool_image_msg(
-    call_id: String,
-    name: String,
-    i: &harness_core::event::ToolImage,
-    data: Option<Arc<str>>,
-) -> ChatMsg {
+fn tool_image_msg(call_id: String, name: String, i: &harness_core::event::ToolImage) -> ChatMsg {
     ChatMsg::ToolImage {
         call_id,
         image: provider::ImagePart {
             sha256: i.sha256.clone(),
             mime: i.mime.clone(),
             name,
-            data,
+            data: None,
         },
         bytes: i.bytes,
+        state: provider::ImageState::Shown,
     }
 }
 
@@ -1578,7 +1574,7 @@ pub fn rebuild_spans(
                     out.extend(f.note.map(ChatMsg::CallNote));
                     // Its image, by reference: the bytes come from the
                     // chat's store when a request shows it (X.23).
-                    out.extend(f.image.map(|i| tool_image_msg(f.call_id, name, &i, None)));
+                    out.extend(f.image.map(|i| tool_image_msg(f.call_id, name, &i)));
                 }
             }
             // A step's instruction files (B.9), where the log has them:
@@ -1591,6 +1587,10 @@ pub fn rebuild_spans(
                     out.push(ChatMsg::StepContext(b));
                 }
             }
+            // The provider refused a request that carried these calls'
+            // images (T71): from here on they are withheld, as the loop
+            // withheld them in the request that was answered.
+            EventKind::ImagesWithheld(w) => images::withhold(&mut out, &w.calls),
             // Where the log has it: after a step's results, or between
             // turns; the same text the loop added when it arrived.
             EventKind::BackgroundEnded(b) => {
@@ -2552,6 +2552,9 @@ impl NativeBackend {
         // again once per turn; a second refusal ends the turn.
         // Messages in a row whose tool calls were cut by the output limit.
         let mut cut_steps = 0;
+        // The bytes of the images `read` returned that the last request
+        // showed (at most its window's, X.23).
+        let mut img_cache: Vec<harness_core::backend::ImageData> = Vec::new();
         // Images `read` returned this turn (X.23, `images::TURN_IMAGES`).
         let mut turn_images = 0usize;
         // Same call, same result (T.1): this turn's only, never the model's.
@@ -3031,13 +3034,21 @@ impl NativeBackend {
             // their bytes from the chat's store where the loop no longer
             // holds them (X.23): chosen from the conversation alone, so a
             // rebuild from the log shows the same ones.
+            // The cache holds the bytes of the images this request shows
+            // and nothing else: an image is loaded once while it stays in
+            // the window, and dropped when it leaves (review of PR 130).
             images::tool_window(&mut sent, sees(&model));
-            let missing = images::tool_missing(&sent);
+            let wanted = images::tool_wanted(&sent);
+            img_cache.retain(|d| wanted.contains(&d.sha256));
+            let missing: Vec<String> = wanted
+                .into_iter()
+                .filter(|s| !img_cache.iter().any(|d| d.sha256 == *s))
+                .collect();
             if !missing.is_empty() {
-                loaded.extend(host.images(&missing).await);
+                img_cache.extend(host.images(&missing).await);
             }
-            images::tool_fill(&mut sent, &loaded);
-            let req = ChatRequest {
+            images::tool_fill(&mut sent, &img_cache);
+            let mut req = ChatRequest {
                 model: model.clone(),
                 messages: provider::place_notes(sent),
                 tools: if last.is_some() {
@@ -3056,6 +3067,9 @@ impl NativeBackend {
             // the fallbacks, but only while this attempt has shown nothing:
             // a partial answer is never repeated.
             let mut retries = 0;
+            // A refusal that may be the images: the calls withheld for the
+            // one resend, the original error and request (T71).
+            let mut resent: Option<(Vec<String>, ProviderError, ChatRequest)> = None;
             let (step, emitted) = loop {
                 let (tx, rx) = mpsc::unbounded_channel();
                 let turn_id = ctx.turn_id.clone();
@@ -3099,9 +3113,48 @@ impl NativeBackend {
                     }
                     continue;
                 }
+                // The provider refused a request that carried images `read`
+                // returned, for its content (T71): it is sent once more with
+                // every one of them withheld. If that is answered, the
+                // images were the cause and the record below keeps them out
+                // of every later request; if it fails too, they were not,
+                // and the original error stands as it was.
+                if resent.is_none()
+                    && let (Step::Done(Err(e)), false) = &r
+                    && e.may_be_the_images()
+                {
+                    let calls = images::carried(&req.messages);
+                    if !calls.is_empty() {
+                        let (Step::Done(Err(e)), _) = r else {
+                            unreachable!("matched above")
+                        };
+                        tracing::warn!(
+                            model = %model,
+                            error = %e.log_line(),
+                            images = calls.len(),
+                            "the provider refused a request with images; sending it without them"
+                        );
+                        let mut again = req.clone();
+                        images::withhold(&mut again.messages, &calls);
+                        let first = std::mem::replace(&mut req, again);
+                        resent = Some((calls, e, first));
+                        continue;
+                    }
+                }
+                if let (Step::Done(Err(_)), false) = &r
+                    && let Some((_, e, first)) = resent.take()
+                {
+                    req = first;
+                    break (Step::Done(Err(e)), false);
+                }
                 break r;
             };
             started |= emitted;
+            // The resend was answered: record which calls' images it went
+            // without, before that answer (T71).
+            let withheld = resent
+                .filter(|_| matches!(step, Step::Done(Ok(_))))
+                .map(|(calls, e, _)| (calls, e));
             let completion = match step {
                 Step::Cancelled => {
                     return TurnOutcome {
@@ -3246,6 +3299,20 @@ impl NativeBackend {
                 && host.emit(l).await.is_err()
             {
                 return stopped(usage);
+            }
+            if let Some((calls, e)) = withheld {
+                if host
+                    .emit(EventKind::ImagesWithheld(self.withheld_record(
+                        &ctx.turn_id,
+                        calls.clone(),
+                        &e,
+                    )))
+                    .await
+                    .is_err()
+                {
+                    return stopped(usage);
+                }
+                images::withhold(&mut messages, &calls);
             }
             started = true;
             if let Some(u) = &completion.usage {
@@ -3884,6 +3951,18 @@ impl NativeBackend {
                         }
                         _ => (None, None, None),
                     };
+                    // An image file the model was not shown (no vision, a
+                    // cap, not kept) was not read by it: `write` must not
+                    // count it as seen (review of PR 130).
+                    if image_note.is_some() && image.is_none() {
+                        outcome.seen = None;
+                    } else if image.is_some()
+                        && let Some(f) = &outcome.seen
+                    {
+                        // Shown: now it counts as read (`read` left this to
+                        // the loop for an image file).
+                        seen_now.note(f);
+                    }
                     let output = self.config.secrets.scrub(&outcome.output);
                     let note = refused.or_else(|| {
                         let changes = self.tools.iter().chain(&mcp_tools).any(|t| {
@@ -4078,7 +4157,6 @@ impl NativeBackend {
         Option<String>,
         Option<ChatMsg>,
     ) {
-        use base64::Engine as _;
         let sees = agent.is_some_and(|a| a.vision.iter().any(|m| m == model));
         if !sees {
             return (None, Some(images::tool_image_unseen(model)), None);
@@ -4101,9 +4179,6 @@ impl NativeBackend {
             return (None, Some(images::tool_image_capped(&why)), None);
         }
         let name = image_name(&call.input);
-        let data: Arc<str> = base64::engine::general_purpose::STANDARD
-            .encode(&img.bytes)
-            .into();
         let r = harness_core::event::ToolImage {
             sha256: img.sha256.clone(),
             mime: img.mime.to_string(),
@@ -4129,12 +4204,51 @@ impl NativeBackend {
         *turn += 1;
         step.0 += 1;
         step.1 += len;
-        let msg = tool_image_msg(call.call_id.clone(), name, &r, Some(data));
+        // Without its bytes: a request loads those of the images it shows
+        // from the store, so the turn holds only its window's (review of
+        // PR 130, item 1).
+        let msg = tool_image_msg(call.call_id.clone(), name, &r);
         (
             Some(r),
             Some(images::TOOL_IMAGE_SENT.to_string()),
             Some(msg),
         )
+    }
+
+    /// The record of images withheld after the provider refused a request
+    /// that carried them (T71): the calls, the status, and the provider's
+    /// words made one line, scrubbed of the node's secrets and cut short.
+    fn withheld_record(
+        &self,
+        turn_id: &str,
+        calls: Vec<String>,
+        e: &ProviderError,
+    ) -> harness_core::event::ImagesWithheld {
+        let status = match e {
+            ProviderError::Status { status, .. } => *status,
+            _ => 0,
+        };
+        let said = e.provider_text().unwrap_or_default();
+        let one_line: String = self
+            .config
+            .secrets
+            .scrub(&said)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut reason: String = one_line
+            .chars()
+            .take(harness_core::event::ImagesWithheld::MAX_REASON)
+            .collect();
+        if reason.len() < one_line.len() {
+            reason.push('…');
+        }
+        harness_core::event::ImagesWithheld {
+            turn_id: turn_id.to_string(),
+            calls,
+            status,
+            reason,
+        }
     }
 
     /// The repository map for this turn's working folder, if enabled. Built
@@ -8185,6 +8299,7 @@ mod place_notes_tests {
                 data: None,
             },
             bytes: 10,
+            state: provider::ImageState::Shown,
         };
         let tool = |c: &str| ChatMsg::Tool {
             call_id: c.into(),

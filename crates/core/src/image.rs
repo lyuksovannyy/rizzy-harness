@@ -5,9 +5,25 @@
 //! hostile input. The master's sniffer (`crates/master/src/sniff.rs`) and
 //! the `read` tool share these.
 
-/// The most bytes of images one message carries (the upload path), and of
-/// one image file `read` returns (X.23).
+/// The most bytes of images one message carries together (the upload
+/// path), and of the images one step or one request of `read` shows
+/// together (X.23): a total of raw bytes; each image is also at most
+/// [`MAX_FILE_BYTES`].
 pub const MAX_BYTES: u64 = 5 * 1024 * 1024;
+
+/// The most bytes of one image sent to a model, read or attached. The
+/// provider's limit is on what it receives, the base64: Anthropic refuses
+/// an image whose base64 is over 5 MiB (Pi caps the base64 at 4.5 MB,
+/// OpenCode at `5 * 1024 * 1024`). Base64 is `4 * ceil(n / 3)` bytes, so
+/// 3.5 MiB raw (3,670,016 bytes) is 4,893,356 bytes of base64: 349,524
+/// bytes (6.7%) under 5 MiB. A file of 3.75 to 5 MiB, under the old cap,
+/// was refused by the provider on every request that showed it.
+pub const MAX_FILE_BYTES: u64 = 7 * 512 * 1024;
+
+/// The base64 length of `n` bytes (standard alphabet, padded).
+pub const fn base64_len(n: u64) -> u64 {
+    n.div_ceil(3) * 4
+}
 
 /// The longest side `read` sends, in pixels: the largest Anthropic's
 /// Messages API takes (it refuses a request with a larger image); others
@@ -181,6 +197,23 @@ fn le32(b: &[u8], at: usize) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The cap is on what the provider receives: the largest file's base64
+    /// is under Anthropic's 5 MiB per image, with room to spare.
+    #[test]
+    fn the_largest_file_fits_five_mib_of_base64() {
+        assert_eq!(MAX_FILE_BYTES, 3_670_016);
+        assert_eq!(base64_len(MAX_FILE_BYTES), 4_893_356);
+        assert!(base64_len(MAX_FILE_BYTES) <= 5 * 1024 * 1024 - 300_000);
+        assert!(
+            base64_len(MAX_BYTES) > 5 * 1024 * 1024,
+            "the old cap did not fit"
+        );
+        use base64::Engine as _;
+        let b = vec![7u8; MAX_FILE_BYTES as usize];
+        let enc = base64::engine::general_purpose::STANDARD.encode(&b);
+        assert_eq!(enc.len() as u64, base64_len(MAX_FILE_BYTES));
+    }
 
     #[test]
     fn formats_by_magic_only() {

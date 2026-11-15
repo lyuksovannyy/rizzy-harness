@@ -225,6 +225,20 @@ pub async fn prompt_images(
         ));
     }
     let items = chat_items(m, who, ids).await?;
+    // Each image's base64 must fit the providers' 5 MB (PLAN.md T71): a
+    // larger one would be refused on every request that showed it.
+    if let Some(r) = items
+        .iter()
+        .find(|r| r.blob.size > harness_core::image::MAX_FILE_BYTES)
+    {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "{}: images go to models at most 3.5 MiB each; attach a smaller one.",
+                r.name
+            ),
+        ));
+    }
     if items.iter().map(|r| r.blob.size).sum::<u64>() > MAX_IMAGE_BYTES {
         return Err((StatusCode::PAYLOAD_TOO_LARGE, TOO_MUCH.into()));
     }

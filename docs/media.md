@@ -298,6 +298,7 @@ re-encoded it, which also drops EXIF and GPS), then sends the message with their
 | at most 4 images, each once | 413 · 400 |
 | the chat is not incognito | 409 "Images can't go into an incognito chat." |
 | each is the caller's own item (the API token: anyone's), an image in PNG, JPEG, WebP or GIF (what every vision provider reads) | 404 · 415 |
+| at most 3.5 MiB each (`image::MAX_FILE_BYTES`: its base64 must fit the providers' 5 MB, PLAN.md T71) | 413 "<name>: images go to models at most 3.5 MiB each; attach a smaller one." |
 | at most 5 MiB together | 413 "Too much attached to one message" |
 | the chat's node announced the `images` capability | 422 "This chat's worker can't take images yet; update it." |
 | the chat's model sees images (`vision` in the model's configuration; unlisted counts as no) | 422 "<model> can't see images; choose a model that can." |
@@ -352,14 +353,17 @@ source does.
   (`harness_core::image::raster`, the four formats every vision provider
   reads); the name does not count, and an SVG stays a text read. The header
   gives the size (`image::dimensions`, shared with `sniff.rs`); nothing is
-  decoded. Refused with a note: over 5 MiB (`image::MAX_BYTES`, the upload
-  path's cap, checked before the file is loaded), over 8,000 px a side, or a
-  header that cannot be read. There is no resizing: the upload path resizes
-  in the browser, and the node has no image decoder.
+  decoded. Refused with a note: over 3.5 MiB (`image::MAX_FILE_BYTES`,
+  checked before the file is loaded; the providers' limit is on the base64,
+  Anthropic's 5 MB per image, and 3.5 MiB is 4,893,356 bytes of it; the same
+  cap now applies to an attached image), over 8,000 px a side, or a header
+  that cannot be read. There is no resizing: the upload path resizes in the
+  browser, and the node has no image decoder.
 - **Who gets it:** only a model of the turn's chain listed with vision
   (`AgentSpec.vision`, filled by the master's resolver from the model list).
   Any other model gets the harness's line that the file is an image it
-  cannot see. Decided per request, so a fallback without vision gets none.
+  cannot see, and the file does not count as read. Decided per request, so a
+  fallback or a switch to a model without vision leaves every read image out.
 - **Where the bytes live:** the loop calls `TurnHost::keep_image` before it
   records the result; the node puts them into `session_images` (the table
   above), keyed by (chat, sha256), at most 100 MiB of images a chat
@@ -373,13 +377,25 @@ source does.
   Tool results carry text only (genai's `ToolResponse`, OpenAI's tool role),
   so `place_notes` moves a step's images after all of its results and the
   provider gets them as one user-role message, each under the harness's line
-  naming the file and the call. A request shows the newest 4 images, 5 MiB
-  together (`tool_window`, from the conversation alone); their bytes come
-  from the store when the loop no longer holds them, so a rebuild sends the
-  same bytes. Per step at most 4 (5 MiB), per turn 20; the rest get a line.
-  A cleared result loses its image; a summary's transcript says an image was
-  shown, never shows it; parallel answers carry none. Each image counts
-  `IMAGE_CHARS` (4,000 characters, about 1,000 tokens) in the estimate.
+  naming the file and the call and saying it is a file from the folder, not
+  the person's words. A request shows the newest 4 images, 5 MiB together
+  (`tool_window`, from the conversation alone). The loop's conversation holds
+  no bytes: each request loads those of the images it shows from the store
+  into a cache that keeps exactly them, so a turn holds at most its window's
+  and loads each image once while it stays there. One whose bytes are gone is
+  the harness's line that it could not be loaded. Per step at most 4 (5 MiB),
+  per turn 20; the rest get a line. A cleared result loses its image; a
+  summary's transcript says an image was shown, never shows it; parallel
+  answers carry none. Each image counts `IMAGE_CHARS` (4,000 characters,
+  about 1,000 tokens) in the estimate.
+- **A refused image** (`ProviderError::may_be_the_images`: 400, 413 or 422,
+  not an overflow, not an unknown model): the request is sent once more with
+  every image it carried withheld. Answered: the loop records
+  `images_withheld` (the calls, the status, the provider's words scrubbed and
+  cut short), and those calls' images are the harness's line from then on,
+  in every rebuilt request too; the call's row says the image was not shown.
+  Refused again: the original error stands and nothing is recorded. A later
+  `read` of the file is a new call and is shown again, alone.
 
 ## Deleting, honestly
 

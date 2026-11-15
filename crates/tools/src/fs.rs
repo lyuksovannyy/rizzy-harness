@@ -56,7 +56,7 @@ impl Tool for Read {
     fn description(&self) -> &'static str {
         "Read a text file. Output lines are prefixed with their 1-based line number and a tab \
          (not part of the file). Use offset/limit for large files; a long read stops early and \
-         says where to go on. An image file (PNG, JPEG, WebP, GIF; at most 5 MiB) is shown to \
+         says where to go on. An image file (PNG, JPEG, WebP, GIF; at most 3.5 MiB) is shown to \
          you as the image when your model takes images (offset and limit do not apply). \
          Reading a file with `read` (this tool; any part of it) is what lets `edit` and \
          `write` change it: read it here before you change it, since `cat`, \
@@ -115,7 +115,15 @@ impl Tool for Read {
                     img.height,
                     shown_size(img.bytes.len() as u64)
                 ));
-                o.seen = Some(ctx.seen.record(&ctx.seen_key(&path), &img.bytes));
+                // What the agent would know of the file, not recorded here:
+                // a model that is not shown the image has not read it, so
+                // the loop records it only when it shows it (review of PR
+                // 130), and `write` over it follows the read-first rule then.
+                o.seen = Some(harness_core::event::FileSeen {
+                    path: ctx.seen_key(&path).display().to_string(),
+                    sha256: img.sha256.clone(),
+                    base: None,
+                });
                 o.image = Some(img);
                 return o;
             }
@@ -576,12 +584,12 @@ pub(crate) fn shown_size(n: u64) -> String {
 
 /// The image in a regular file, if its first bytes are a PNG, JPEG, WebP
 /// or GIF (`harness_core::image::raster`): at most
-/// [`harness_core::image::MAX_BYTES`] (the size is checked before a byte
+/// [`harness_core::image::MAX_FILE_BYTES`] (the size is checked before a byte
 /// past the magic number is read), its header readable, no side over
 /// [`harness_core::image::MAX_SIDE`]. Nothing is decoded. `Ok(None)` for
 /// any other file, which `read` reads as text (an SVG is text).
 fn read_image(path: &std::path::Path) -> Result<Option<crate::FileImage>, String> {
-    use harness_core::image::{MAX_BYTES, MAX_SIDE};
+    use harness_core::image::{MAX_FILE_BYTES as MAX_BYTES, MAX_SIDE};
     use std::io::Read as _;
     let io = |e: std::io::Error| format!("{}: {e}", path.display());
     let mut f = crate::open_regular(path)?;
@@ -593,9 +601,9 @@ fn read_image(path: &std::path::Path) -> Result<Option<crate::FileImage>, String
     let len = f.metadata().map_err(io)?.len();
     let too_big = |len: u64| {
         format!(
-            "{}: a {} image of {}; `read` shows images of at most 5 MiB (as for images \
-             attached to a message), so it was not shown. A smaller export or a crop of it can \
-             be read.",
+            "{}: a {} image of {}; models are sent images of at most 3.5 MiB (their base64 \
+             must fit the providers' 5 MB), so it was not shown. A smaller export, a crop or a \
+             JPEG of it can be read.",
             path.display(),
             r.label,
             shown_size(len)

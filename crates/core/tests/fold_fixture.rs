@@ -846,6 +846,14 @@ fn events() -> Vec<RawEvent> {
                 note: None,
             }],
         }),
+        // X.23, last so no seq above moves: the provider refused a request
+        // carrying c2's image; its row says so (an unknown id is ignored).
+        EventKind::ImagesWithheld(ImagesWithheld {
+            turn_id: t(),
+            calls: vec!["c2".into(), "nope".into()],
+            status: 400,
+            reason: "Could not process image".into(),
+        }),
     ];
     let mut out: Vec<RawEvent> = kinds
         .into_iter()

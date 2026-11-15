@@ -97,13 +97,22 @@ async fn a_text_file_named_png_and_an_svg_are_read_as_text() {
     assert!(r.image.is_none());
 }
 
-/// Over the cap (the upload path's 5 MiB) an image is refused with a note
-/// before it is loaded: a 6 MiB one, and a 50 MB one at once.
+/// Over the cap (3.5 MiB, so the base64 fits the providers' 5 MB) an image
+/// is refused with a note before it is loaded: one byte over (3.5 MiB was
+/// fine before; 4.5 MiB was sent and refused by the provider), 6 MiB, and
+/// 50 MB at once. Exactly the cap is read.
 #[tokio::test]
 async fn an_image_over_the_cap_is_refused_before_it_is_loaded() {
     let ws = tempfile::tempdir().unwrap();
     let ctx = ToolCtx::new(ws.path());
-    for (name, len) in [("six.png", 6u64 << 20), ("fifty.png", 50_000_000)] {
+    let cap = harness_core::image::MAX_FILE_BYTES;
+    for (name, len, ok) in [
+        ("cap.png", cap, true),
+        ("over.png", cap + 1, false),
+        ("four.png", 9u64 << 19, false),
+        ("six.png", 6u64 << 20, false),
+        ("fifty.png", 50_000_000, false),
+    ] {
         let p = ws.path().join(name);
         std::fs::write(&p, png(100, 100)).unwrap();
         std::fs::OpenOptions::new()
@@ -113,8 +122,13 @@ async fn an_image_over_the_cap_is_refused_before_it_is_loaded() {
             .set_len(len)
             .unwrap();
         let r = quick(Read.run(&ctx, json!({ "path": name }))).await;
+        if ok {
+            assert!(r.ok, "{name}: {}", r.output);
+            assert_eq!(r.image.unwrap().bytes.len() as u64, cap);
+            continue;
+        }
         assert!(!r.ok, "{name}: {}", r.output);
-        assert!(r.output.contains("5 MiB"), "{name}: {}", r.output);
+        assert!(r.output.contains("3.5 MiB"), "{name}: {}", r.output);
         assert!(r.image.is_none());
     }
 }
@@ -169,9 +183,11 @@ async fn a_corrupt_or_oversized_header_is_refused_and_a_cut_body_is_sent() {
     assert_eq!(r.image.unwrap().bytes, cut);
 }
 
-/// An image read lets `write` replace the file only while it is unchanged
-/// (the read-first hash rule), and never makes it editable by `edit`
-/// (which refuses a binary).
+/// An image read returns what the agent would know of the file (its hash)
+/// but does not record it: the loop does, and only when the model was
+/// shown the image (a model without vision saw nothing, review of PR 130).
+/// So `read` alone never lets `write` replace it, nor `edit` (which refuses
+/// a binary) change it.
 #[tokio::test]
 async fn an_image_read_follows_the_read_first_rule() {
     let ws = tempfile::tempdir().unwrap();
@@ -183,6 +199,11 @@ async fn an_image_read_follows_the_read_first_rule() {
     assert!(!w.ok, "unread: {}", w.output);
     let r = Read.run(&ctx, json!({"path": "a.png"})).await;
     assert!(r.ok, "{}", r.output);
+    assert!(r.seen.is_some());
+    let w = Write
+        .run(&ctx, json!({"path": "a.png", "content": "x"}))
+        .await;
+    assert!(!w.ok, "the tool alone records nothing: {}", w.output);
     let e = crate::Edit
         .run(
             &ctx,

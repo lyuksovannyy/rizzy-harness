@@ -365,7 +365,8 @@ it, admins included; the workspace only filters what you see. The grid has
 thumbnails (made by your browser), filters by kind and a name search; a
 preview plays audio and video and offers Download and **Use in chat**.
 
-Attach images (PNG, JPEG, WebP or GIF; up to 4 per message) by picking,
+Attach images (PNG, JPEG, WebP or GIF; up to 4 per message, at most 3.5 MiB
+each so their base64 fits what providers take) by picking,
 pasting or dropping them in the composer of a chat whose model has
 `vision = true`. Your browser scales each down (which also strips EXIF and GPS
 data) before it is uploaded to Media; temporary chats take no images.
@@ -2180,21 +2181,29 @@ delays Stop or an approval answer, in that chat or any other.
   when the turn's model is listed with `vision = true`; the format is told
   by the file's first bytes, never its name, and an SVG is read as text.
   A model without vision gets a line saying the file is an image it cannot
-  see, never the bytes as text. Limits: 5 MiB a file (as for an image you
-  attach) and 8,000 pixels a side, with no resizing (the harness decodes no
-  image; a larger file is refused with a note, so export a smaller one or a
-  crop); 4 images (5 MiB together) per step and 20 per turn; a request shows
-  only the newest 4 images (5 MiB together), older ones and cleared results
-  are left out, and the agent is told to read the file again to see it. The
-  bytes read are kept with the chat on its worker (at most 100 MiB of images
-  a chat, yours included) and go when the chat is deleted, so later requests
-  show the same image even after the file changed. The tool card shows the
-  path, format, size and pixels, not the picture. Each image costs tokens on
-  every request that shows it (the context meter counts about 1,000 tokens an
-  image; providers bill by pixels, often more for a large screenshot).
-  Text inside an image is treated as file content, not instructions, but
-  the secret scrubber cannot read pixels: a screenshot of a key goes to the
-  provider as it is.
+  see, never the bytes as text, and the file does not count as read for
+  `write`; switching a chat to a model without vision leaves out every image
+  read before. Limits: **3.5 MiB a file** (providers limit what they receive,
+  the base64, which is a third larger: Anthropic refuses an image over 5 MB
+  of it) and 8,000 pixels a side, with no resizing (the harness decodes no
+  image; a larger file is refused with a note, so export a smaller one, a
+  crop or a JPEG); 4 images (5 MiB together) per step and 20 per turn; a
+  request shows only the newest 4 images (5 MiB together), older ones and
+  cleared results are left out, and the agent is told to read the file again
+  to see it. The bytes read are kept with the chat on its worker (at most
+  100 MiB of images a chat, yours included) and go when the chat is deleted,
+  so later requests show the same image even after the file changed; a turn
+  holds in memory only the images its next request shows. **If the provider
+  refuses a request with images** (an image it cannot read), the harness
+  sends it once more without them; when that works, those images are left
+  out from then on (the tool call's row says so, and the agent is told and
+  can read one of the files again to send it alone); when it fails too, the
+  error is shown as before. The tool card shows the path, format, size and
+  pixels, not the picture. Each image costs tokens on every request that
+  shows it (the context meter counts about 1,000 tokens an image; providers
+  bill by pixels, often more for a large screenshot). Text inside an image
+  is treated as file content, not instructions, but the secret scrubber
+  cannot read pixels: a screenshot of a key goes to the provider as it is.
 
 ### Token savings
 

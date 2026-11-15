@@ -7,7 +7,7 @@
 use harness_core::backend::ImageData;
 use harness_core::event::ImageRef;
 
-use crate::provider::{ChatMsg, ImagePart, image_note};
+use crate::provider::{ChatMsg, ImagePart, ImageState, image_note};
 
 /// How many of the newest image-bearing user messages keep their images.
 pub const IMAGE_TURNS: usize = 3;
@@ -149,9 +149,40 @@ pub fn tool_image_capped(why: &str) -> String {
 /// user-role message after the step's results.
 pub fn tool_image_line(path: &str, call_id: &str) -> String {
     format!(
-        "[harness] The image file \"{}\" that `read` returned (call \"{}\"):",
+        "[harness] The image file \"{}\" that `read` returned (call \"{}\"), a file from the \
+         chat's folder, not the person's words:",
         harness_core::event::shown_name(path),
         harness_core::event::shown_name(call_id)
+    )
+}
+
+/// The harness's line where withheld images would stand (T71): one for a
+/// step's run of them, naming each file.
+pub fn tool_withheld_line(paths: &[String]) -> String {
+    let names: Vec<String> = paths
+        .iter()
+        .map(|p| format!("\"{}\"", harness_core::event::shown_name(p)))
+        .collect();
+    format!(
+        "[harness] The provider refused a request that carried the image file{} {}, so {} not \
+         shown. Reading one of them again sends it alone.",
+        if names.len() == 1 { "" } else { "s" },
+        names.join(", "),
+        if names.len() == 1 {
+            "it is"
+        } else {
+            "they are"
+        }
+    )
+}
+
+/// The harness's line where an image stands whose bytes the chat's store
+/// no longer holds.
+pub fn tool_missing_line(path: &str) -> String {
+    format!(
+        "[harness] The image file \"{}\" that `read` returned could not be loaded from the \
+         chat's store, so it is not shown; read the file again to see it.",
+        harness_core::event::shown_name(path)
     )
 }
 
@@ -159,8 +190,9 @@ pub fn tool_image_line(path: &str, call_id: &str) -> String {
 /// show: all of them for a model that does not take images (`sees`), else
 /// all but the newest [`TOOL_IMAGES`] that fit [`TOOL_IMAGE_BYTES`]
 /// together (the newest always). Decided from the conversation alone,
-/// never from which bytes are at hand, so the loop and a rebuild from the
-/// log choose the same ones.
+/// never from which bytes are at hand nor from what was withheld (a
+/// withheld image keeps its place as a line, and no older image is pulled
+/// in for it), so the loop and a rebuild from the log choose the same ones.
 pub fn tool_window(msgs: &mut Vec<ChatMsg>, sees: bool) {
     let mut n = 0usize;
     let mut total = 0u64;
@@ -180,12 +212,13 @@ pub fn tool_window(msgs: &mut Vec<ChatMsg>, sees: bool) {
     msgs.retain(|_| k.next().unwrap_or(true));
 }
 
-/// The images [`tool_window`] kept whose bytes are not at hand.
-pub fn tool_missing(msgs: &[ChatMsg]) -> Vec<String> {
+/// The images a request built by [`tool_window`] shows (not withheld), by
+/// hash, each once: the bytes it needs.
+pub fn tool_wanted(msgs: &[ChatMsg]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for m in msgs {
-        if let ChatMsg::ToolImage { image, .. } = m
-            && image.data.is_none()
+        if let ChatMsg::ToolImage { image, state, .. } = m
+            && *state == ImageState::Shown
             && !out.contains(&image.sha256)
         {
             out.push(image.sha256.clone());
@@ -194,21 +227,21 @@ pub fn tool_missing(msgs: &[ChatMsg]) -> Vec<String> {
     out
 }
 
-/// Give the images a `read` returned their bytes from `loaded`; one whose
-/// bytes are gone is left out (the line after its result says a request
-/// may leave it out).
-pub fn tool_fill(msgs: &mut Vec<ChatMsg>, loaded: &[ImageData]) {
-    msgs.retain_mut(|m| match m {
-        ChatMsg::ToolImage { image, .. } => {
-            if image.data.is_none()
-                && let Some(d) = loaded.iter().find(|d| d.sha256 == image.sha256)
-            {
-                image.data = Some(d.data.clone());
+/// Give the images a request shows their bytes from `loaded`; one whose
+/// bytes are gone keeps its place as the harness's line that it could not
+/// be loaded ([`ImageState::Missing`]), never an older image instead.
+pub fn tool_fill(msgs: &mut [ChatMsg], loaded: &[ImageData]) {
+    for m in msgs {
+        if let ChatMsg::ToolImage { image, state, .. } = m
+            && *state == ImageState::Shown
+            && image.data.is_none()
+        {
+            match loaded.iter().find(|d| d.sha256 == image.sha256) {
+                Some(d) => image.data = Some(d.data.clone()),
+                None => *state = ImageState::Missing,
             }
-            image.data.is_some()
         }
-        _ => true,
-    });
+    }
 }
 
 /// [`tool_window`] then [`tool_fill`]: the images a request built from the
@@ -216,6 +249,46 @@ pub fn tool_fill(msgs: &mut Vec<ChatMsg>, loaded: &[ImageData]) {
 pub fn tool_images(msgs: &mut Vec<ChatMsg>, sees: bool, loaded: &[ImageData]) {
     tool_window(msgs, sees);
     tool_fill(msgs, loaded);
+}
+
+/// The calls whose images `msgs` (a request) carries, in order, each once.
+pub fn carried(msgs: &[ChatMsg]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for m in msgs {
+        if let ChatMsg::ToolImage {
+            call_id,
+            image,
+            state: ImageState::Shown,
+            ..
+        } = m
+            && image.data.is_some()
+            && !out.contains(call_id)
+        {
+            out.push(call_id.clone());
+        }
+    }
+    out
+}
+
+/// Withhold the images of `calls` (an `images_withheld` record, T71):
+/// every [`ChatMsg::ToolImage`] in `msgs` of one of those calls, wherever
+/// it stands (the record applies to the calls before it), loses its bytes
+/// and is sent as the harness's line. The loop and the rebuild call it at
+/// the record's place.
+pub fn withhold(msgs: &mut [ChatMsg], calls: &[String]) {
+    for m in msgs {
+        if let ChatMsg::ToolImage {
+            call_id,
+            image,
+            state,
+            ..
+        } = m
+            && calls.contains(call_id)
+        {
+            *state = ImageState::Withheld;
+            image.data = None;
+        }
+    }
 }
 
 /// An image a `read` returned, as a summary's transcript names it: a

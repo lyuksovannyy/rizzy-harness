@@ -179,6 +179,9 @@ impl TurnHost for LogHost {
 #[derive(Debug, Clone)]
 struct Seen {
     summary: bool,
+    /// Refused for an image it carried (X.23): no answer, so no request
+    /// the log rebuilds.
+    refused: bool,
     tokens: u64,
     msgs: Vec<ChatMsg>,
 }
@@ -191,6 +194,9 @@ struct Model {
     script: Script,
     done: Mutex<usize>,
     seen: Mutex<Vec<Seen>>,
+    /// Refuse (400, "Could not process image") a request that carries an
+    /// image whose file name contains this (X.23, T71).
+    refuse: Option<&'static str>,
 }
 
 impl Model {
@@ -201,6 +207,7 @@ impl Model {
             script,
             done: Mutex::new(0),
             seen: Mutex::default(),
+            refuse: None,
         })
     }
     fn main(&self) -> Vec<Seen> {
@@ -208,7 +215,7 @@ impl Model {
             .lock()
             .unwrap()
             .iter()
-            .filter(|s| !s.summary)
+            .filter(|s| !s.summary && !s.refused)
             .cloned()
             .collect()
     }
@@ -227,15 +234,29 @@ impl Provider for Model {
         let prompts = [SUMMARY_PROMPT, CODING_SUMMARY_PROMPT];
         let summary = matches!(req.messages.first(), Some(ChatMsg::System(s)) if prompts.contains(&s.as_str()));
         let tokens = estimate_tokens(&req.messages);
+        let refused = self.refuse.is_some_and(|bad| {
+            req.messages.iter().any(|m| {
+                matches!(m, ChatMsg::ToolImage { image, .. }
+                    if image.data.is_some() && image.name.contains(bad))
+            })
+        });
         let n = {
             let mut seen = self.seen.lock().unwrap();
             seen.push(Seen {
                 summary,
+                refused,
                 tokens,
                 msgs: req.messages.clone(),
             });
             seen.iter().filter(|s| s.summary).count()
         };
+        if refused {
+            return Err(ProviderError::Status {
+                status: 400,
+                body: r#"{"type":"error","error":{"type":"invalid_request_error","message":"Could not process image"}}"#.into(),
+                hint: RetryHint::default(),
+            });
+        }
         if tokens > self.window {
             return Err(ProviderError::Status {
                 status: 400,
@@ -668,7 +689,7 @@ async fn rebuild_matches_live_with_parallel_reads_finishing_out_of_order() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn rebuild_matches_live_with_image_reads() {
     let mut failures = vec![];
-    let (mut shown_any, mut cleared_image) = (false, false);
+    let (mut shown_any, mut cleared_image, mut withheld_any) = (false, false, false);
     for seed in 1..=6u64 {
         let (mut steps, queued) = random_script(seed, 120);
         let mut r = Lcg(seed * 7919);
@@ -684,9 +705,10 @@ async fn rebuild_matches_live_with_image_reads() {
         let n = steps.len();
         let steps = Arc::new(steps);
         let s2 = steps.clone();
-        let p = Model::new(
-            W,
-            Box::new(move |i| {
+        let mut model = Model {
+            window: W,
+            factor: 0,
+            script: Box::new(move |i| {
                 if i < n {
                     s2[i].clone()
                 } else {
@@ -696,7 +718,16 @@ async fn rebuild_matches_live_with_image_reads() {
                     }
                 }
             }),
-        );
+            done: Mutex::new(0),
+            seen: Mutex::default(),
+            refuse: None,
+        };
+        // Odd seeds: the provider refuses every request that carries an
+        // image of a file named `...7.rs`, so those are withheld (T71).
+        if seed % 2 == 1 {
+            model.refuse = Some("7.rs");
+        }
+        let p = Arc::new(model);
         let b = backend(p.clone());
         let sid = SessionId::new();
         let mut host = LogHost::new(sid, vec![]);
@@ -710,14 +741,24 @@ async fn rebuild_matches_live_with_image_reads() {
                 .msgs
                 .iter()
                 .filter_map(|m| match m {
-                    ChatMsg::ToolImage { image, bytes, .. } => Some((image.data.is_some(), *bytes)),
+                    ChatMsg::ToolImage {
+                        image,
+                        bytes,
+                        state,
+                        ..
+                    } => Some((image.data.is_some(), *bytes, *state)),
                     _ => None,
                 })
                 .collect();
             assert!(
-                imgs.iter().all(|(d, _)| *d),
-                "seed {seed}: an image without bytes"
+                imgs.iter()
+                    .all(|(d, _, st)| *d == (*st == harness_agent_native::ImageState::Shown)),
+                "seed {seed}: an image shown without bytes, or withheld with them"
             );
+            withheld_any |= imgs
+                .iter()
+                .any(|(_, _, st)| *st == harness_agent_native::ImageState::Withheld);
+            let imgs: Vec<(bool, u64)> = imgs.into_iter().map(|(d, b, _)| (d, b)).collect();
             assert!(
                 imgs.len() <= 4,
                 "seed {seed}: {} images in one request",
@@ -749,6 +790,7 @@ async fn rebuild_matches_live_with_image_reads() {
     }
     assert!(shown_any, "no request showed an image");
     assert!(cleared_image, "no image result was cleared");
+    assert!(withheld_any, "no image was withheld");
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
@@ -1536,6 +1578,7 @@ async fn an_over_reporting_router() {
             }),
             done: Mutex::new(0),
             seen: Mutex::default(),
+            refuse: None,
         });
         let b = backend(p.clone());
         let host = LogHost::new(SessionId::new(), vec![]);

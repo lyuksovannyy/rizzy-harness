@@ -1273,11 +1273,26 @@
       "ts_ms": 1700000000080
     },
     {
+      "kind": "images_withheld",
+      "payload": {
+        "calls": [
+          "c2",
+          "nope"
+        ],
+        "reason": "Could not process image",
+        "status": 400,
+        "turn_id": "t1"
+      },
+      "seq": 82,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000081
+    },
+    {
       "kind": "from_a_newer_node",
       "payload": {
         "anything": true
       },
-      "seq": 82,
+      "seq": 83,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
       "ts_ms": 0
     }
@@ -1317,7 +1332,7 @@
     "context_model": "openai::gpt-4o",
     "context_tokens": 800,
     "context_window": 128000,
-    "head_seq": 82,
+    "head_seq": 83,
     "items": [
       {
         "text": "fix the bug",
@@ -1381,7 +1396,7 @@
         "result": {
           "exit_code": null,
           "ok": true,
-          "output": "     1\tfn main() {}"
+          "output": "     1\tfn main() {}\n\n[image not shown to the model: the provider refused a request that carried it]"
         },
         "tool": "read",
         "type": "tool"

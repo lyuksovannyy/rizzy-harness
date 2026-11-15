@@ -146,23 +146,50 @@ fn user_parts(text: &str, images: &[ImagePart]) -> Vec<ContentPart> {
 
 /// An image a `read` returned, as the provider is sent it: the harness's
 /// line naming the file and the call (each made one line, quotation marks
-/// read as `'`), then the image. Shown only to a model that takes images
-/// (`images::tool_window`); one without bytes is left out.
+/// read as `'`), then the image; one whose bytes the store lost, the
+/// harness's line saying so. A withheld one adds nothing here: its run's
+/// names go into one line ([`crate::images::tool_withheld_line`]).
 fn tool_image_parts(m: &ChatMsg) -> Vec<ContentPart> {
-    let ChatMsg::ToolImage { call_id, image, .. } = m else {
+    let ChatMsg::ToolImage {
+        call_id,
+        image,
+        state,
+        ..
+    } = m
+    else {
         return vec![];
     };
-    let Some(data) = image.data.clone() else {
-        return vec![];
-    };
-    vec![
-        ContentPart::Text(crate::images::tool_image_line(&image.name, call_id)),
-        ContentPart::Binary(Binary::from_base64(
-            image.mime.clone(),
-            data,
-            Some(image.name.clone()),
-        )),
-    ]
+    match state {
+        ImageState::Withheld => vec![],
+        ImageState::Missing => vec![ContentPart::Text(crate::images::tool_missing_line(
+            &image.name,
+        ))],
+        ImageState::Shown => match image.data.clone() {
+            Some(data) => vec![
+                ContentPart::Text(crate::images::tool_image_line(&image.name, call_id)),
+                ContentPart::Binary(Binary::from_base64(
+                    image.mime.clone(),
+                    data,
+                    Some(image.name.clone()),
+                )),
+            ],
+            None => vec![ContentPart::Text(crate::images::tool_missing_line(
+                &image.name,
+            ))],
+        },
+    }
+}
+
+/// Add `parts` to the step's image message (the last one, when the message
+/// before was a step's image), or start it.
+fn push_image_parts(msgs: &mut Vec<ChatMessage>, open: bool, parts: Vec<ContentPart>) {
+    if open && let Some(last) = msgs.last_mut() {
+        let mut all = last.content.parts().to_vec();
+        all.extend(parts);
+        last.content = MessageContent::from_parts(all);
+    } else {
+        msgs.push(ChatMessage::user(MessageContent::from_parts(parts)));
+    }
 }
 
 pub(crate) fn to_genai(req: &ChatRequest) -> GChatRequest {
@@ -173,7 +200,14 @@ pub(crate) fn to_genai(req: &ChatRequest) -> GChatRequest {
     let mut users = Vec::new();
     // The message before was a step's image: the next one joins it.
     let mut images_open = false;
+    // The files of a step's withheld images, named once its run ends.
+    let mut withheld: Vec<String> = Vec::new();
     for m in &req.messages {
+        if !withheld.is_empty() && !matches!(m, ChatMsg::ToolImage { .. }) {
+            let line = crate::images::tool_withheld_line(&std::mem::take(&mut withheld));
+            push_image_parts(&mut msgs, images_open, vec![ContentPart::Text(line)]);
+            images_open = true;
+        }
         if matches!(
             m,
             ChatMsg::User(_) | ChatMsg::UserImages { .. } | ChatMsg::Opening(_)
@@ -237,22 +271,23 @@ pub(crate) fn to_genai(req: &ChatRequest) -> GChatRequest {
             ))),
             // A step's images (`place_notes` put them after its results):
             // one user-role message, each under the harness's line.
+            ChatMsg::ToolImage {
+                image,
+                state: ImageState::Withheld,
+                ..
+            } => {
+                withheld.push(image.name.clone());
+                continue;
+            }
             ChatMsg::ToolImage { .. } => {
-                let parts = tool_image_parts(m);
-                if parts.is_empty() {
-                    continue;
-                }
-                let joined = images_open && msgs.last().is_some();
-                if joined && let Some(last) = msgs.last_mut() {
-                    let mut all = last.content.parts().to_vec();
-                    all.extend(parts);
-                    last.content = MessageContent::from_parts(all);
-                } else {
-                    msgs.push(ChatMessage::user(MessageContent::from_parts(parts)));
-                }
+                push_image_parts(&mut msgs, images_open, tool_image_parts(m));
             }
         }
         images_open = matches!(m, ChatMsg::ToolImage { .. });
+    }
+    if !withheld.is_empty() {
+        let line = crate::images::tool_withheld_line(&withheld);
+        push_image_parts(&mut msgs, images_open, vec![ContentPart::Text(line)]);
     }
     if req.cache && msgs.len() > 1 {
         // Every message rebuilds byte for byte from the log, this turn's
@@ -807,6 +842,97 @@ mod tests {
         };
         assert_eq!(b.content_type, "image/png");
         assert!(matches!(&b.source, genai::chat::BinarySource::Base64(d) if &**d == "aGk="));
+    }
+
+    /// A step's images go as one user-role message after its results: a
+    /// shown one under the harness's line saying it is a file from the
+    /// folder, a lost one as the line that it could not be loaded, and the
+    /// withheld ones of the run as one line naming each file (T71).
+    #[test]
+    fn tool_images_shown_lost_and_withheld() {
+        let img = |c: &str, data: Option<&str>, state: ImageState| ChatMsg::ToolImage {
+            call_id: c.into(),
+            image: ImagePart {
+                sha256: c.into(),
+                mime: "image/png".into(),
+                name: format!("{c}.png"),
+                data: data.map(Into::into),
+            },
+            bytes: 3,
+            state,
+        };
+        let tool = |c: &str| ChatMsg::Tool {
+            call_id: c.into(),
+            content: "r".into(),
+        };
+        let r = to_genai(&ChatRequest {
+            model: "m".into(),
+            messages: vec![
+                user("look"),
+                ChatMsg::Assistant {
+                    text: String::new(),
+                    tool_calls: ["a", "b", "c", "d"]
+                        .iter()
+                        .map(|c| ToolCallRef {
+                            call_id: c.to_string(),
+                            tool: "read".into(),
+                            input: serde_json::json!({}),
+                        })
+                        .collect(),
+                },
+                tool("a"),
+                tool("b"),
+                tool("c"),
+                tool("d"),
+                img("a", Some("aGk="), ImageState::Shown),
+                img("b", None, ImageState::Withheld),
+                img("c", None, ImageState::Missing),
+                img("d", None, ImageState::Withheld),
+            ],
+            tools: vec![],
+            effort: None,
+            cache: false,
+            limits: None,
+            no_tool_calls: false,
+            max_tokens: None,
+        });
+        assert_eq!(r.messages.len(), 7, "one message for the step's images");
+        let parts = r.messages[6].content.parts();
+        let texts: Vec<&str> = parts
+            .iter()
+            .filter_map(|p| match p {
+                ContentPart::Text(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(parts.len(), 4, "{parts:?}");
+        assert!(matches!(&parts[1], ContentPart::Binary(_)));
+        assert!(texts[0].contains("\"a.png\"") && texts[0].contains("not the person's words"));
+        assert_eq!(texts[1], crate::images::tool_missing_line("c.png"));
+        assert_eq!(
+            texts[2],
+            crate::images::tool_withheld_line(&["b.png".into(), "d.png".into()])
+        );
+        assert!(texts[2].contains("\"b.png\", \"d.png\"") && texts[2].contains("alone"));
+        // Withheld alone: still one message, the line only.
+        let r = to_genai(&ChatRequest {
+            model: "m".into(),
+            messages: vec![
+                tool("b"),
+                img("b", None, ImageState::Withheld),
+                user("next"),
+            ],
+            tools: vec![],
+            effort: None,
+            cache: false,
+            limits: None,
+            no_tool_calls: false,
+            max_tokens: None,
+        });
+        assert_eq!(r.messages.len(), 3);
+        assert!(
+            matches!(&r.messages[1].content.parts()[..], [ContentPart::Text(t)] if t.contains("\"b.png\""))
+        );
     }
 
     fn user(t: &str) -> ChatMsg {

@@ -96,6 +96,10 @@ export function cappedUsage(u: Usage): Usage {
   return c;
 }
 
+/** `harness_core::event::IMAGE_WITHHELD_ROW`. */
+const IMAGE_WITHHELD_ROW =
+  "[image not shown to the model: the provider refused a request that carried it]";
+
 const KNOWN = new Set([
   "session_created",
   "turn_started",
@@ -131,6 +135,7 @@ const KNOWN = new Set([
   "step_limit_changed",
   "handoff_written",
   "compact_failed",
+  "images_withheld",
 ]);
 
 const CLEARS_RETRY = new Set([
@@ -324,6 +329,14 @@ export function apply(v: SessionView, e: RawEvent): void {
       if (t) {
         t.result = { ok: p.ok, output: p.output, exit_code: p.exit_code ?? null };
         if (p.sources?.length) t.result.sources = p.sources;
+      }
+      break;
+    }
+    case "images_withheld": {
+      // As the Rust view: the row says its image was not shown (X.23).
+      for (const id of p.calls ?? []) {
+        const t = lastTool(v, id);
+        if (t?.result) t.result.output += "\n\n" + IMAGE_WITHHELD_ROW;
       }
       break;
     }
