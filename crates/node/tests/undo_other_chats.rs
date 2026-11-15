@@ -340,7 +340,9 @@ async fn another_chats_edit_during_the_turn_is_not_undone_silently() {
     let turn = r.finish_waiting_turn(a, mark).await;
     assert_eq!(r.read("f.txt"), "ONE-B\ntwo\nTHREE-A\n");
     // The diff view says so before the person clicks.
-    assert_eq!(r.diff(a, &turn).await.others, vec!["f.txt".to_string()]);
+    let d = r.diff(a, &turn).await;
+    assert_eq!(d.others_wrote, vec!["f.txt".to_string()]);
+    assert!(d.others_may.is_empty(), "{:?}", d.others_may);
 
     let before = r.seen.len();
     let err = r.restore(a, &turn, false, false).await.unwrap_err();
@@ -427,7 +429,11 @@ async fn no_refusal_when_the_other_chat_only_read_or_worked_outside_the_turn() {
         ]),
     )
     .await;
-    assert!(r.diff(a, &turn).await.others.is_empty());
+    let d = r.diff(a, &turn).await;
+    assert!(
+        d.others_wrote.is_empty() && d.others_may.is_empty(),
+        "{d:?}"
+    );
     let before = r.seen.len();
     r.restore(a, &turn, false, false).await.unwrap();
     assert_eq!(r.read("f.txt"), "ONE-B\ntwo\nthree\n");
@@ -534,6 +540,196 @@ async fn a_single_chat_undoes_as_before() {
     assert_eq!(r.read("f.txt"), ORIGINAL);
 }
 
+/// Review R1 (F1): B edits during A's turn, then B's chat is deleted. Its
+/// log goes, its change stays in the folder: A's undo is still refused,
+/// through B's write tombstone, which says nothing of B.
+#[tokio::test]
+async fn a_deleted_chats_work_is_not_undone_silently() {
+    let mut r = Rig::new().await;
+    r.write("f.txt", ORIGINAL);
+    let a = r.create("a").await;
+    let b = r.create(B_TITLE).await;
+    let mark = r.seen.len();
+    r.start_waiting_turn(a).await;
+    r.turn(b, b_edits_first_line()).await;
+    let turn = r.finish_waiting_turn(a, mark).await;
+    r.n += 1;
+    let req = format!("del{}", r.n);
+    r.send(MasterToNode::Delete {
+        req_id: req.clone(),
+        session_id: b,
+    });
+    loop {
+        match r.recv().await {
+            NodeToMaster::Ack { req_id, ok, .. } if req_id == req => {
+                assert!(ok);
+                break;
+            }
+            _ => {}
+        }
+    }
+    let err = r.restore(a, &turn, false, false).await.unwrap_err();
+    assert!(
+        err.contains("deleted since") && err.contains("`f.txt`"),
+        "{err}"
+    );
+    assert!(
+        !err.contains(B_TITLE) && !err.contains(&b.to_string()),
+        "{err}"
+    );
+    let d = r.diff(a, &turn).await;
+    assert_eq!(d.others_may, vec!["f.txt".to_string()]);
+    assert_eq!(r.read("f.txt"), "ONE-B\ntwo\nTHREE-A\n");
+    r.restore(a, &turn, true, false).await.unwrap();
+    assert_eq!(r.read("f.txt"), ORIGINAL);
+}
+
+/// F1, the incognito purge: it deletes through the same path as a person's
+/// delete (`NodeRuntime::purge_incognito` calls `delete`), so a tombstone
+/// would be written; but an incognito chat cannot work in a folder at all
+/// (only chat sessions are incognito, and they have no folder and no file
+/// tools), so a purge has no file changes to leave behind. Proven here.
+#[tokio::test]
+async fn an_incognito_chat_cannot_work_in_a_folder_so_its_purge_leaves_nothing() {
+    let mut r = Rig::new().await;
+    let sid = SessionId::new();
+    r.send(MasterToNode::Create {
+        exec_mode: None,
+        no_callbacks: false,
+        profile: None,
+        incognito: true,
+        agent: None,
+        req_id: "inc".into(),
+        session_id: sid,
+        title: "t".into(),
+        cwd: r.ws.display().to_string(),
+        model: None,
+        approval_mode: Some(harness_core::policy::ApprovalMode::Auto),
+    });
+    let err = loop {
+        match r.recv().await {
+            NodeToMaster::Ack {
+                req_id, ok, error, ..
+            } if req_id == "inc" => {
+                assert!(!ok);
+                break error.unwrap_or_default();
+            }
+            _ => {}
+        }
+    };
+    assert!(err.contains("only available for chat sessions"), "{err}");
+    assert_eq!(
+        r.node
+            .as_ref()
+            .unwrap()
+            .purge_incognito(Duration::ZERO)
+            .await,
+        0
+    );
+}
+
+/// A deleted chat that only read leaves no tombstone: no refusal.
+#[tokio::test]
+async fn a_deleted_chat_that_only_read_refuses_nothing() {
+    let mut r = Rig::new().await;
+    r.write("f.txt", ORIGINAL);
+    let a = r.create("a").await;
+    let b = r.create("b").await;
+    let mark = r.seen.len();
+    r.start_waiting_turn(a).await;
+    r.turn(b, json!([{"tool": "read", "input": {"path": "f.txt"}}]))
+        .await;
+    let turn = r.finish_waiting_turn(a, mark).await;
+    r.node.as_ref().unwrap().delete(b).await.unwrap();
+    r.restore(a, &turn, false, false).await.unwrap();
+    assert_eq!(r.read("f.txt"), ORIGINAL);
+}
+
+/// Review R2 (F3): B runs a command turn that changes nothing (its tests)
+/// while A's turn edits `g.txt` with its own `edit`. B's turn's snapshots
+/// hold A's change, but A's own chain explains all of it: no refusal, and
+/// B is told nothing.
+#[tokio::test]
+async fn another_chats_command_turn_does_not_refuse_an_undo_of_own_edits() {
+    let mut r = Rig::new().await;
+    r.write("g.txt", "g\n");
+    let a = r.create("a").await;
+    let b = r.create("b").await;
+    let flag = r.dir.path().join("flag-b");
+    let wait = format!(
+        "for i in $(seq 1 600); do [ -e '{}' ] && break; sleep 0.05; done",
+        flag.display()
+    );
+    r.script(b, json!([{"tool": "bash", "input": {"command": wait}}]));
+    r.until_in(
+        b,
+        |k| matches!(k, EventKind::ToolCallStarted(c) if c.tool == "bash"),
+    )
+    .await;
+    let turn = r
+        .turn(
+            a,
+            json!([
+                {"tool": "read", "input": {"path": "g.txt"}},
+                {"tool": "edit", "input": {"path": "g.txt", "old_string": "g", "new_string": "G-A"}},
+            ]),
+        )
+        .await;
+    std::fs::write(&flag, "").unwrap();
+    r.until_in(b, |k| matches!(k, EventKind::TurnEnded(_)))
+        .await;
+    let d = r.diff(a, &turn).await;
+    assert!(
+        d.others_wrote.is_empty() && d.others_may.is_empty(),
+        "{d:?}"
+    );
+    let before = r.seen.len();
+    r.restore(a, &turn, false, false).await.unwrap();
+    assert_eq!(r.read("g.txt"), "g\n");
+    assert!(r.notes(b, before).is_empty());
+}
+
+/// F3: a chain broken by another chat's command between two of A's own
+/// edits explains nothing: still refused.
+#[tokio::test]
+async fn a_chain_broken_by_another_chats_command_is_still_refused() {
+    let mut r = Rig::new().await;
+    r.write("f.txt", ORIGINAL);
+    let a = r.create("a").await;
+    let b = r.create("b").await;
+    let wait = format!(
+        "for i in $(seq 1 600); do [ -e '{}' ] && break; sleep 0.05; done",
+        r.flag().display()
+    );
+    let mark = r.seen.len();
+    r.script(
+        a,
+        json!([
+            {"tool": "read", "input": {"path": "f.txt"}},
+            {"tool": "edit", "input": {"path": "f.txt", "old_string": "three", "new_string": "THREE-A"}},
+            {"tool": "bash", "input": {"command": wait}},
+            {"tool": "edit", "input": {"path": "f.txt", "old_string": "two", "new_string": "TWO-A"}},
+        ]),
+    );
+    r.until_in(
+        a,
+        |k| matches!(k, EventKind::ToolCallStarted(c) if c.tool == "bash"),
+    )
+    .await;
+    r.turn(
+        b,
+        json!([{"tool": "bash", "input": {"command": "sed -i 's/one/ONE-B/' f.txt"}}]),
+    )
+    .await;
+    let turn = r.finish_waiting_turn(a, mark).await;
+    assert_eq!(r.read("f.txt"), "ONE-B\nTWO-A\nTHREE-A\n");
+    let err = r.restore(a, &turn, false, false).await.unwrap_err();
+    assert!(
+        err.contains("ran commands") && err.contains("`f.txt`"),
+        "{err}"
+    );
+}
+
 /// Another chat's log of `turns` turns in `ws`, ending `age_ms` ago: per
 /// turn a prompt, 20 streamed pieces, a read, an edit and a command with
 /// their results, and checkpoints.
@@ -619,6 +815,7 @@ fn seed_other_chat(store: &Store, ws: &Path, turns: u64, age_ms: i64) {
                 seen: (tool != "bash").then(|| FileSeen {
                     path: file.clone(),
                     sha256: "0".repeat(64),
+                    base: None,
                 }),
             }));
         }

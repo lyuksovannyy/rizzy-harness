@@ -308,6 +308,7 @@ impl SessionSeen {
         FileSeen {
             path: path.display().to_string(),
             sha256: hex(&sha),
+            base: None,
         }
     }
 }

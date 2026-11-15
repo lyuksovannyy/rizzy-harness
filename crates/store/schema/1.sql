@@ -471,3 +471,13 @@ CREATE TABLE workspaces (
     settings       TEXT NOT NULL DEFAULT '{}'
 );
 
+-- table write_tombstones on write_tombstones
+CREATE TABLE write_tombstones (
+    folder  TEXT NOT NULL,
+    from_ms INTEGER NOT NULL,
+    to_ms   INTEGER NOT NULL
+);
+
+-- index write_tombstones_folder on write_tombstones
+CREATE INDEX write_tombstones_folder ON write_tombstones(folder);
+

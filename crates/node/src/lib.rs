@@ -1405,6 +1405,13 @@ impl NodeRuntime {
 
     /// Delete a session: cancel its turn, wait for it to end, drop the log.
     pub async fn delete(&self, sid: SessionId) -> Result<(), String> {
+        let folder = self.session(sid).map(|s| {
+            s.cwd()
+                .canonicalize()
+                .unwrap_or_else(|_| s.cwd().to_path_buf())
+                .to_string_lossy()
+                .into_owned()
+        });
         if let Some(s) = self.session(sid) {
             s.cancel();
             let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
@@ -1437,12 +1444,26 @@ impl NodeRuntime {
         if let Some(root) = &self.inner.cfg.policy.sandbox_tmp {
             let _ = std::fs::remove_dir_all(root.join(sid.to_string()));
         }
+        // Its file changes stay in the folder after its log goes: a write
+        // tombstone (folder and time span, no content) keeps another
+        // chat's undo refusing over them (PLAN.md T57).
+        let now = harness_core::now_ms();
         let existed = self
             .inner
             .cfg
             .store
             .call(move |s| {
-                let existed = s.delete_session(sid, false)?;
+                let writes = match folder {
+                    Some(f) => s
+                        .events_since_turn_at(sid, i64::MIN, others::KINDS)
+                        .map(|e| others::write_span(&e, now).map(|(a, b)| (f, a, b)))?,
+                    None => None,
+                };
+                let existed = s.delete_session_leaving(
+                    sid,
+                    false,
+                    writes.as_ref().map(|(f, a, b)| (f.as_str(), *a, *b)),
+                )?;
                 s.checkpoint()?;
                 Ok::<_, harness_store::StoreError>(existed)
             })

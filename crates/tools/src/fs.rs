@@ -187,9 +187,10 @@ impl Tool for Write {
         }
         let key = ctx.seen_key(&path);
         let _lock = crate::seen::lock_path(&key).await;
-        if let Err(e) = check_overwrite(ctx, &path, &key, &shown).await {
-            return ToolOutcome::err(e);
-        }
+        let base = match check_overwrite(ctx, &path, &key, &shown).await {
+            Ok(b) => b,
+            Err(e) => return ToolOutcome::err(e),
+        };
         match write_nofollow(&path, content.as_bytes()).await {
             Ok(()) => {
                 let mut o = ToolOutcome::ok(format!(
@@ -197,7 +198,9 @@ impl Tool for Write {
                     path.display(),
                     content.lines().count()
                 ));
-                o.seen = Some(ctx.seen.record(&key, content.as_bytes()));
+                let mut seen = ctx.seen.record(&key, content.as_bytes());
+                seen.base = base;
+                o.seen = Some(seen);
                 o
             }
             Err(e) => ToolOutcome::err(e),
@@ -207,17 +210,19 @@ impl Tool for Write {
 
 /// `write` over an existing file: only one the agent read in this session
 /// and that has not changed since (`edit`'s rule). A new file needs nothing.
+/// Returns what the write replaces, as `FileSeen::base` has it: `""` for no
+/// file, the hash checked here for one, `None` when not known.
 async fn check_overwrite(
     ctx: &ToolCtx,
     path: &std::path::Path,
     key: &std::path::Path,
     shown: &str,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     match tokio::fs::symlink_metadata(path).await {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Some(String::new())),
         Err(e) => return Err(format!("{}: {e}", path.display())),
         // Not a regular file: the write itself refuses it, with its reason.
-        Ok(md) if !md.file_type().is_file() => return Ok(()),
+        Ok(md) if !md.file_type().is_file() => return Ok(None),
         Ok(_) => {}
     }
     let Some(seen) = ctx.seen.get(key) else {
@@ -238,7 +243,7 @@ async fn check_overwrite(
             "nothing was written",
         ));
     }
-    Ok(())
+    Ok(Some(crate::seen::hex(&seen.sha)))
 }
 
 /// The SHA-256 of a regular file as it is now and, when it is small text,
