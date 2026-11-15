@@ -291,6 +291,7 @@ export function RoutineEditor(props: {
                     { value: "accept_edits", label: "Accept edits" },
                     { value: "ask", label: "Ask before changes" },
                     { value: "ask_all", label: "Ask before every tool" },
+                    { value: "plan", label: "Plan (change nothing)" },
                   ]}
                   onChange={(v) => setSpec({ approval_mode: v })}
                 />
