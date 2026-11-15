@@ -4,21 +4,32 @@
 // Its own lazy chunk, loaded on the first "Show changes".
 //
 // Everything here is text the agent's files hold: nothing is rendered as
-// HTML, nothing is a link, and hidden, control and unusual blank characters
-// are marked the way the approval card marks them (lib/callText). An added
-// or removed line says so by its "+" or "−" sign and, for screen readers,
-// in words, not by its colour alone.
+// HTML and nothing is a link. In names and section titles, hidden and
+// unusual characters are marked the way the approval card marks them
+// (lib/callText); in code lines only what cannot be seen is marked (control,
+// format and bidi characters, odd blanks), never indentation, and a file
+// whose lines all end in CRLF says so once instead of on every line. An
+// added or removed line says so by its "+" or "−" sign and, for screen
+// readers, in words, not by its colour alone.
+//
+// What is drawn is bounded (review D3): a file's lines exist in the page only
+// while it is open, the first OPEN_FILES files start open, and each file
+// draws LINES_SHOWN lines until "Show more" asks for the rest.
 import { PanelRightClose } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type JSX } from "react";
 import { pageApi } from "../apiPages";
 import { bytes } from "../lib/bytes";
 import { marks, type Seg } from "../lib/callText";
+import { codeOf, SHOWN_SRC } from "../md/hiddenChars";
 import { showHidden } from "../md/hidden";
 import type { DiffFile, DiffHunk, TurnDiff } from "../types";
 import "./diffPanel.css";
 
 /** Files whose lines show at first; the rest open on a click. */
-const OPEN_FILES = 30;
+export const OPEN_FILES = 30;
+/** Lines a file draws at first, and how many more each "Show more" adds. */
+export const LINES_SHOWN = 400;
+const LINES_MORE = 2000;
 
 const STATUS: Record<DiffFile["status"], { letter: string; word: string }> = {
   added: { letter: "A", word: "added" },
@@ -28,9 +39,41 @@ const STATUS: Record<DiffFile["status"], { letter: string; word: string }> = {
   type_changed: { letter: "T", word: "type changed" },
 };
 
-/** Text as it is, hidden characters as codes (never HTML: React escapes). */
+/** A name or title as it is, hidden characters as codes (never HTML). */
 export function Marked({ text }: { text: string }) {
   return <>{marks(text, "text").map((s: Seg, i) => (s.mark ? <span key={i} className="hidden-mark">{s.t}</span> : s.t))}</>;
+}
+
+const SHOWN = new RegExp(SHOWN_SRC, "gu");
+
+/** A line of code: only invisible characters become codes; spaces, tabs
+ * and indentation stay as they are (review D6). */
+function Code({ text }: { text: string }) {
+  const out: (string | JSX.Element)[] = [];
+  let last = 0;
+  for (const m of text.matchAll(SHOWN)) {
+    if (m.index > last) out.push(text.slice(last, m.index));
+    out.push(
+      <span key={m.index} className="hidden-mark">
+        {codeOf(m[0])}
+      </span>,
+    );
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) out.push(text.slice(last));
+  return <>{out}</>;
+}
+
+/** Every line of the file's hunks ends in CR (both sides use CRLF). */
+function crlfFile(f: DiffFile): boolean {
+  let n = 0;
+  for (const h of f.hunks ?? [])
+    for (const l of h.lines) {
+      if (l[0] === "\\") continue;
+      if (!l.endsWith("\r")) return false;
+      n++;
+    }
+  return n > 0;
 }
 
 const sizes = (f: DiffFile) => {
@@ -56,7 +99,8 @@ function noLines(f: DiffFile): string | null {
   }
 }
 
-function Hunk({ h }: { h: DiffHunk }) {
+/** One hunk, at most `max` of its lines. */
+function Hunk({ h, max, crlf }: { h: DiffHunk; max: number; crlf: boolean }) {
   let oldN = h.old_start;
   let newN = h.new_start;
   return (
@@ -67,9 +111,9 @@ function Hunk({ h }: { h: DiffHunk }) {
           {h.section && <Marked text={h.section} />}
         </span>
       </div>
-      {h.lines.map((line, i) => {
+      {h.lines.slice(0, max).map((line, i) => {
         const mark = line[0];
-        const text = line.slice(1);
+        let text = line.slice(1);
         if (mark === "\\")
           return (
             <div key={i} className="diff-line diff-note" role="row">
@@ -81,6 +125,7 @@ function Hunk({ h }: { h: DiffHunk }) {
               </span>
             </div>
           );
+        if (crlf && text.endsWith("\r")) text = text.slice(0, -1);
         const kind = mark === "+" ? "add" : mark === "-" ? "del" : "ctx";
         const o = kind === "add" ? "" : String(oldN++);
         const n = kind === "del" ? "" : String(newN++);
@@ -97,7 +142,7 @@ function Hunk({ h }: { h: DiffHunk }) {
             </span>
             <span role="cell" className="diff-text">
               <span className="sr-only">{kind === "add" ? `added, line ${n}: ` : kind === "del" ? `removed, line ${o}: ` : `line ${n}: `}</span>
-              <Marked text={text} />
+              <Code text={text} />
             </span>
           </div>
         );
@@ -106,11 +151,32 @@ function Hunk({ h }: { h: DiffHunk }) {
   );
 }
 
+/** A file's lines, at most `limit` of them. */
+function FileLines({ f, limit }: { f: DiffFile; limit: number }) {
+  const crlf = crlfFile(f);
+  let left = limit;
+  const parts: JSX.Element[] = [];
+  for (const [i, h] of (f.hunks ?? []).entries()) {
+    if (left <= 0) break;
+    parts.push(<Hunk key={i} h={h} max={left} crlf={crlf} />);
+    left -= h.lines.length;
+  }
+  return (
+    <>
+      {crlf && <p className="diff-why muted small">CRLF line endings (shown without the CR).</p>}
+      {parts}
+    </>
+  );
+}
+
 function FileBlock({ f, index }: { f: DiffFile; index: number }) {
   const s = STATUS[f.status];
   const why = noLines(f);
+  const [open, setOpen] = useState(index < OPEN_FILES);
+  const [limit, setLimit] = useState(LINES_SHOWN);
+  const total = (f.hunks ?? []).reduce((a, h) => a + h.lines.length, 0);
   return (
-    <details className="diff-file" id={`diff-f${index}`} open={index < OPEN_FILES}>
+    <details className="diff-file" id={`diff-f${index}`} open={open} onToggle={(e) => setOpen(e.currentTarget.open)}>
       <summary className="diff-file-head">
         <span className={`diff-badge diff-st-${f.status}`} title={s.word}>
           {s.letter}
@@ -129,12 +195,22 @@ function FileBlock({ f, index }: { f: DiffFile; index: number }) {
           {f.added > 0 && <span className="diff-plus">+{f.added}</span>} {f.removed > 0 && <span className="diff-minus">−{f.removed}</span>}
         </span>
       </summary>
-      {why && <p className="diff-why muted small">{why}</p>}
-      {f.hunks?.map((h, i) => <Hunk key={i} h={h} />)}
-      {f.cut && f.content === "text" && (
-        <p className="diff-cut small" role="note">
-          ⟨Cut: this file has more changes, or longer lines, than are shown here.⟩
-        </p>
+      {/* Mounted only while open (review D3). */}
+      {open && (
+        <>
+          {why && <p className="diff-why muted small">{why}</p>}
+          <FileLines f={f} limit={limit} />
+          {total > limit && (
+            <button type="button" className="link diff-more small" onClick={() => setLimit((n) => n + LINES_MORE)}>
+              Show {Math.min(LINES_MORE, total - limit).toLocaleString("en-US")} more lines
+            </button>
+          )}
+          {f.cut && f.content === "text" && (
+            <p className="diff-cut small" role="note">
+              ⟨Cut: this file has more changes, or longer lines, than are shown here.⟩
+            </p>
+          )}
+        </>
       )}
     </details>
   );
@@ -191,7 +267,10 @@ export default function DiffPanel(props: {
   const files = diff?.files ?? [];
   const added = files.reduce((a, f) => a + f.added, 0);
   const removed = files.reduce((a, f) => a + f.removed, 0);
-  const count = files.length + (diff?.more_files ?? 0);
+  // Counted as the turn's row counts them (review D5): a rename is two
+  // paths there, the old and the new.
+  const renamed = files.filter((f) => f.old_path !== undefined).length;
+  const count = files.length + renamed + (diff?.more_files ?? 0);
 
   return (
     <aside
@@ -207,7 +286,8 @@ export default function DiffPanel(props: {
           {diff && (
             <span className="muted">
               {" "}
-              · {count} file{count === 1 ? "" : "s"} {added > 0 && <span className="diff-plus">+{added}</span>} {removed > 0 && <span className="diff-minus">−{removed}</span>}
+              · {count} file{count === 1 ? "" : "s"}
+              {renamed > 0 ? ` (${renamed} renamed)` : ""} {added > 0 && <span className="diff-plus">+{added}</span>} {removed > 0 && <span className="diff-minus">−{removed}</span>}
             </span>
           )}
         </h2>
@@ -254,6 +334,9 @@ export default function DiffPanel(props: {
           <p className="muted small">
             Git repositories inside the folder are not compared: {diff.nested.map((n) => showHidden(n)).join(", ")}.
           </p>
+        )}
+        {files.length > OPEN_FILES && (
+          <p className="muted small">The first {OPEN_FILES} files are open; the others open on a click.</p>
         )}
         {files.length > 1 && (
           <nav aria-label="Changed files">

@@ -20,6 +20,9 @@ const WAIT: Duration = Duration::from_secs(25);
 /// Requests waiting for nodes at once, all nodes together; past this one
 /// is refused at once (a node also refuses past its own two).
 const MAX_WAITING: usize = 32;
+/// ...and at most this many for one account (review D9), so one person
+/// with a slow node cannot take every place.
+const PER_USER: usize = 4;
 
 /// The longest refusal of a node passed on, in characters.
 const MAX_ERROR: usize = 1000;
@@ -28,7 +31,15 @@ type Answer = Result<Box<TurnDiff>, String>;
 
 /// Requests waiting for their node's answer, by request id.
 #[derive(Default)]
-pub struct Waiting(std::sync::Mutex<HashMap<String, (String, oneshot::Sender<Answer>)>>);
+pub struct Waiting(std::sync::Mutex<HashMap<String, Wait>>);
+
+/// One waiting request: the node it went to, who asked, where the answer
+/// goes.
+struct Wait {
+    node: String,
+    user: String,
+    tx: oneshot::Sender<Answer>,
+}
 
 /// Why there is no diff to show, each in words for the person.
 #[derive(Debug)]
@@ -68,9 +79,11 @@ impl Drop for Entry<'_> {
 }
 
 /// What turn `turn_id` of `sid` changed (with `rewind`, it and every later
-/// turn), from the node that owns the chat.
+/// turn), from the node that owns the chat; `user` is who asks (the API
+/// token counts as one).
 pub async fn turn_diff(
     m: &Master,
+    user: &str,
     sid: SessionId,
     turn_id: String,
     rewind: bool,
@@ -86,10 +99,17 @@ pub async fn turn_diff(
     let (tx, rx) = oneshot::channel();
     {
         let mut w = lock(&m.inner.diffs.0);
-        if w.len() >= MAX_WAITING {
+        if w.len() >= MAX_WAITING || w.values().filter(|x| x.user == user).count() >= PER_USER {
             return Err(DiffError::Busy);
         }
-        w.insert(req_id.clone(), (node.clone(), tx));
+        w.insert(
+            req_id.clone(),
+            Wait {
+                node: node.clone(),
+                user: user.to_string(),
+                tx,
+            },
+        );
     }
     let _entry = Entry { m, req_id: &req_id };
     let sent = m.send_raw(
@@ -119,7 +139,7 @@ pub fn on_answer(m: &Master, node_id: &str, req_id: String, answer: Answer) {
     let tx = {
         let mut w = lock(&m.inner.diffs.0);
         match w.get(&req_id) {
-            Some((to, _)) if to == node_id => w.remove(&req_id).map(|(_, tx)| tx),
+            Some(x) if x.node == node_id => w.remove(&req_id).map(|x| x.tx),
             Some(_) => {
                 tracing::warn!(node = %node_id, "diff answer for another node's request; ignored");
                 None
@@ -135,5 +155,5 @@ pub fn on_answer(m: &Master, node_id: &str, req_id: String, answer: Answer) {
 
 /// The node's link closed: its waiting requests end now, as "away".
 pub fn node_down(m: &Master, node_id: &str) {
-    lock(&m.inner.diffs.0).retain(|_, (to, _)| to != node_id);
+    lock(&m.inner.diffs.0).retain(|_, x| x.node != node_id);
 }

@@ -53,7 +53,8 @@ async fn turn_diff(
     }
     let rewind = matches!(q.rewind.as_deref(), Some("1" | "true"));
     let node = row.node_id.clone();
-    match crate::diff::turn_diff(&m, row.session_id, turn, rewind).await {
+    let user = who.user_id.clone().unwrap_or_else(|| "(api token)".into());
+    match crate::diff::turn_diff(&m, &user, row.session_id, turn, rewind).await {
         Ok(d) => Ok(Json(*d)),
         Err(e) => Err(match e {
             DiffError::Away(_) => ApiError(
@@ -71,7 +72,9 @@ async fn turn_diff(
             ),
             DiffError::Busy => ApiError(
                 StatusCode::SERVICE_UNAVAILABLE,
-                "the server is waiting for many changes already; try again in a moment".into(),
+                "the server is already waiting for several changes (yours or others'); try again in \
+                 a moment"
+                    .into(),
             ),
             DiffError::Timeout => ApiError(
                 StatusCode::GATEWAY_TIMEOUT,

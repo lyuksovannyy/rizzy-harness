@@ -356,6 +356,148 @@ async fn a_lost_checkpoint_is_said_plainly() {
     assert!(e.starts_with("the changes cannot be shown"), "{e}");
 }
 
+/// Review D1: a cut line marks itself and the rest of the file still shows
+/// (a long Markdown or JSON line near the top hid every later change).
+#[tokio::test]
+async fn a_long_line_does_not_hide_the_rest_of_the_file() {
+    let mut body: Vec<String> = (1..=100).map(|i| format!("line {i}")).collect();
+    let t = turn(&[("a.txt", (body.join("\n") + "\n").as_bytes())]).await;
+    body[9] = "x".repeat(3000);
+    body[89] = "line ninety".into();
+    std::fs::write(t.root.join("a.txt"), body.join("\n") + "\n").unwrap();
+    let d = t.diff().await;
+    let f = file(&d, "a.txt");
+    let l = lines(f);
+    assert!(l.contains(&"+line ninety"), "{l:?}");
+    assert!(l.iter().any(|x| x.ends_with(diff::LINE_CUT)));
+    assert_eq!((f.added, f.removed), (2, 2));
+    assert_eq!(f.hunks.len(), 2);
+    assert!(f.cut);
+}
+
+/// Review D2: a secret across the line cut is scrubbed whole first.
+#[tokio::test]
+async fn a_secret_across_the_line_cut_does_not_leak_its_prefix() {
+    let secret = "sk-live-abcdef0123456789";
+    let line = "x".repeat(1990) + secret + "\n";
+    let t = turn(&[]).await;
+    std::fs::write(t.root.join("cfg"), &line).unwrap();
+    let after = snapshot(&t.repo, "refs/harness/s/t1/after", "after")
+        .await
+        .unwrap();
+    let secrets = harness_core::SecretSet::new(vec![harness_core::Secret::new(secret.to_string())]);
+    let d = turn_diff(&t.repo, &t.before, &after, &|s: &str| secrets.scrub(s))
+        .await
+        .unwrap();
+    let text = lines(file(&d, "cfg")).join("\n");
+    assert!(!text.contains("sk-live-a"), "{}", &text[text.len() - 40..]);
+}
+
+/// Review D4: a file replaced by a link is shown as a type change with
+/// both sides, not as "left out" with a false cut banner.
+#[tokio::test]
+async fn a_file_that_becomes_a_link_shows_both_sides() {
+    let t = turn(&[("f", b"hello\n"), ("keep", b"k\n")]).await;
+    std::fs::remove_file(t.root.join("f")).unwrap();
+    std::os::unix::fs::symlink("keep", t.root.join("f")).unwrap();
+    let d = t.diff().await;
+    let f = file(&d, "f");
+    assert_eq!(f.status, DiffStatus::TypeChanged);
+    assert_eq!(f.content, DiffContent::Text);
+    assert!(!f.cut && !d.cut, "{d:#?}");
+    let l = lines(f);
+    assert!(l.contains(&"-hello"), "{l:?}");
+    assert!(l.contains(&"+keep"), "{l:?}");
+    assert_eq!(f.new_mode.as_deref(), Some("120000"));
+}
+
+/// Review: the ordinary flows the reviewer walked, kept as a regression.
+#[tokio::test]
+async fn ordinary_flows() {
+    let long: String = (1..=500).map(|i| format!("row {i}\n")).collect();
+    let t = turn(&[
+        ("long.txt", long.as_bytes()),
+        ("crlf.txt", b"a\r\nb\r\nc\r\n"),
+        ("same_a.txt", b"shared\n"),
+        ("same_b.txt", b"shared\n"),
+        ("emptied.txt", b"some\n"),
+    ])
+    .await;
+    std::fs::write(
+        t.root.join("long.txt"),
+        long.replace("row 250\n", "row 250 changed\n"),
+    )
+    .unwrap();
+    std::fs::write(t.root.join("crlf.txt"), b"a\r\nB\r\nc\r\n").unwrap();
+    std::fs::write(t.root.join("same_a.txt"), b"shared\nplus\n").unwrap();
+    std::fs::write(t.root.join("same_b.txt"), b"shared\nplus\n").unwrap();
+    std::fs::write(t.root.join("emptied.txt"), b"").unwrap();
+    std::fs::write(t.root.join(".gitignore"), b"ignored.txt\n").unwrap();
+    std::fs::write(t.root.join("ignored.txt"), b"x\n").unwrap();
+    let d = t.diff().await;
+    let l = file(&d, "long.txt");
+    assert_eq!((l.hunks[0].old_start, l.hunks[0].new_start), (247, 247));
+    assert_eq!(
+        lines(file(&d, "crlf.txt")),
+        [" a\r", "-b\r", "+B\r", " c\r"]
+    );
+    let a = lines(file(&d, "same_a.txt"));
+    assert_eq!(a, [" shared", "+plus"]);
+    assert_eq!(a, lines(file(&d, "same_b.txt")));
+    assert_eq!(lines(file(&d, "emptied.txt")), ["-some"]);
+    assert!(d.files.iter().all(|f| f.path != "ignored.txt"));
+}
+
+/// Review: the folder's attributes and config run nothing in a diff.
+#[tokio::test]
+async fn repository_attributes_and_config_run_nothing() {
+    let t = turn(&[("a.txt", b"1\n")]).await;
+    let marker = t._d.path().join("RAN");
+    let m = marker.display().to_string();
+    std::fs::write(t.root.join(".gitattributes"), "* diff=evil filter=evil\n").unwrap();
+    for (k, v) in [
+        ("diff.evil.command", format!("touch {m}.cmd")),
+        ("diff.evil.textconv", format!("sh -c 'touch {m}.tc; cat'")),
+        ("filter.evil.clean", format!("sh -c 'touch {m}.clean; cat'")),
+        (
+            "filter.evil.smudge",
+            format!("sh -c 'touch {m}.smudge; cat'"),
+        ),
+        ("core.fsmonitor", format!("touch {m}.fsm")),
+        ("core.pager", format!("touch {m}.pager")),
+        ("diff.external", format!("touch {m}.ext")),
+    ] {
+        sh(&t.root, &["config", k, &v]);
+    }
+    std::fs::write(t.root.join("a.txt"), "2\n").unwrap();
+    let d = t.diff().await;
+    let ran: Vec<_> = std::fs::read_dir(t._d.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name())
+        .filter(|n| n.to_string_lossy().starts_with("RAN"))
+        .collect();
+    assert!(ran.is_empty(), "{ran:?}");
+    assert_eq!(lines(file(&d, "a.txt")), ["-1", "+2"]);
+}
+
+/// Review: a directory of 300 files renamed is 300 renames.
+#[tokio::test]
+async fn a_renamed_directory_is_renames() {
+    let files: Vec<(String, String)> = (0..300)
+        .map(|i| (format!("dir/f{i}.txt"), format!("content {i}\nmore\n")))
+        .collect();
+    let refs: Vec<(&str, &[u8])> = files
+        .iter()
+        .map(|(p, c)| (p.as_str(), c.as_bytes()))
+        .collect();
+    let t = turn(&refs).await;
+    std::fs::rename(t.root.join("dir"), t.root.join("dir2")).unwrap();
+    let d = t.diff().await;
+    assert_eq!(d.files.len(), 300);
+    assert!(d.files.iter().all(|f| f.status == DiffStatus::Renamed));
+}
+
 /// The cost on a tree of a few thousand files (ignored; numbers in
 /// `docs/undo-and-stash.md`, appendix): 3,000 files committed, a turn that
 /// edits 200 of them and adds 20.

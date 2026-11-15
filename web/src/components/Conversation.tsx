@@ -769,6 +769,8 @@ export default function Conversation(props: {
               view={view ?? null}
               away={!!node && !node.connected}
               nodeLabel={node ? (node.embedded ? "local" : node.hostname) : nodeId}
+              yielded={diffOf?.session === sessionId}
+              onReclaim={() => setDiffOf(null)}
             />
           </Suspense>
         )}

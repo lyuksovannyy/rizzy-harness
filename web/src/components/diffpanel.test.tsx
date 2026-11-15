@@ -18,7 +18,7 @@ vi.mock("../apiPages", () => ({
     restoreTurn: (...a: unknown[]) => restoreTurn(...a),
   },
 }));
-const { default: DiffPanel } = await import("./DiffPanel");
+const { default: DiffPanel, LINES_SHOWN, OPEN_FILES } = await import("./DiffPanel");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -131,7 +131,8 @@ test("cut, binary and rename rows say what they are", async () => {
   const badge = host.querySelector(".diff-file .diff-badge")!;
   expect(badge.textContent).toContain("M");
   expect(badge.textContent).toContain("modified");
-  expect(text).toContain("6 files");
+  // Counted as the row counts: a rename is its two paths (review D5).
+  expect(text).toContain("7 files (1 renamed)");
 });
 
 test("a refusal is text with a way to try again", async () => {
@@ -157,4 +158,54 @@ test("Undo from the panel, the wider view, Escape closes", async () => {
   const aside = host.querySelector("aside")!;
   await act(async () => aside.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
   expect(p.onClose).toHaveBeenCalled();
+});
+
+const fileOf = (path: string, lines: string[]): TurnDiff["files"][number] => ({
+  path,
+  status: "modified",
+  content: "text",
+  added: lines.filter((l) => l[0] === "+").length,
+  removed: lines.filter((l) => l[0] === "-").length,
+  hunks: [{ old_start: 1, old_lines: lines.length, new_start: 1, new_lines: lines.length, lines }],
+});
+
+test("a huge answer draws a bounded page; closed files have no lines; Show more adds them (review D3)", async () => {
+  const many = Array.from({ length: 5000 }, (_, i) => `+l${i}`);
+  turnDiff.mockImplementationOnce(() => Promise.resolve({ files: Array.from({ length: 60 }, (_, i) => fileOf(`f${i}`, many)) }));
+  await render();
+  const rows = host.querySelectorAll(".diff-line").length;
+  expect(rows).toBe(OPEN_FILES * LINES_SHOWN);
+  expect(host.textContent).toContain(`The first ${OPEN_FILES} files are open`);
+  // A closed file has no lines in the page.
+  const closed = host.querySelector<HTMLDetailsElement>(`#diff-f${OPEN_FILES}`)!;
+  expect(closed.open).toBe(false);
+  expect(closed.querySelectorAll(".diff-line").length).toBe(0);
+  const first = host.querySelector("#diff-f0")!;
+  const more = [...first.querySelectorAll("button")].find((b) => b.textContent?.startsWith("Show "))!;
+  expect(more.textContent).toBe("Show 2,000 more lines");
+  await act(async () => more.click());
+  expect(first.querySelectorAll(".diff-line").length).toBe(LINES_SHOWN + 2000);
+});
+
+test("code is marked only where it hides something: indentation stays, CRLF said once (review D6)", async () => {
+  turnDiff.mockImplementationOnce(() =>
+    Promise.resolve({
+      files: [
+        fileOf("crlf.txt", [" a\r", "-b\r", "+B\r"]),
+        fileOf("mixed.txt", [" a", "+lone cr\r"]),
+        fileOf("indent.py", ["+" + " ".repeat(48) + "return x", "+\tx\u202E"]),
+      ],
+    }),
+  );
+  await render();
+  const crlf = host.querySelector("#diff-f0")!;
+  expect(crlf.textContent).toContain("CRLF line endings");
+  expect(crlf.querySelectorAll(".hidden-mark").length).toBe(0);
+  const mixed = host.querySelector("#diff-f1")!;
+  expect(mixed.textContent).not.toContain("CRLF line endings");
+  expect([...mixed.querySelectorAll(".hidden-mark")].map((m) => m.textContent)).toEqual(["<U+000D>"]);
+  const indent = host.querySelector("#diff-f2")!;
+  expect(indent.textContent).toContain(" ".repeat(48) + "return x");
+  expect(indent.textContent).not.toContain("spaces⟩");
+  expect([...indent.querySelectorAll(".hidden-mark")].map((m) => m.textContent)).toEqual(["<U+202E>"]);
 });

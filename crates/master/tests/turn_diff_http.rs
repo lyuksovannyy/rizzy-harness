@@ -62,9 +62,24 @@ fn sample() -> TurnDiff {
 struct Fake {
     seen: Arc<Mutex<Vec<MasterToNode>>>,
     leave: mpsc::UnboundedSender<()>,
+    /// Send this as the node (a forged or late answer).
+    say: mpsc::UnboundedSender<NodeToMaster>,
 }
 
 impl Fake {
+    /// The request id of the latest `session.diff` this node was sent.
+    fn last_req(&self) -> Option<String> {
+        self.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find_map(|m| match m {
+                MasterToNode::Diff { req_id, .. } => Some(req_id.clone()),
+                _ => None,
+            })
+    }
+
     fn diffs(&self) -> Vec<(SessionId, String, bool)> {
         self.seen
             .lock()
@@ -105,6 +120,7 @@ fn fake(id: &str, caps: &[&str]) -> (NodeLink, Fake) {
     .unwrap();
     let seen: Arc<Mutex<Vec<MasterToNode>>> = Arc::default();
     let (leave, mut left) = mpsc::unbounded_channel::<()>();
+    let (say, mut said) = mpsc::unbounded_channel::<NodeToMaster>();
     let (node, keep) = (id.to_string(), seen.clone());
     tokio::spawn(async move {
         loop {
@@ -139,6 +155,8 @@ fn fake(id: &str, caps: &[&str]) -> (NodeLink, Fake) {
                                 },
                             });
                         }
+                        // Held: the test answers it (or not) itself.
+                        MasterToNode::Diff { turn_id, .. } if turn_id == "hold" => {}
                         MasterToNode::Diff { req_id, turn_id, .. } => {
                             let pruned = turn_id == "pruned";
                             let _ = tx.try_send(NodeToMaster::DiffResult {
@@ -153,11 +171,12 @@ fn fake(id: &str, caps: &[&str]) -> (NodeLink, Fake) {
                         let _ = tx.try_send(NodeToMaster::Ack { req_id: req_id.into(), ok: true, error: None });
                     }
                 }
+                m = said.recv() => if let Some(m) = m { let _ = tx.try_send(m); },
                 _ = left.recv() => return,
             }
         }
     });
-    (NodeLink { to_node, from_node }, Fake { seen, leave })
+    (NodeLink { to_node, from_node }, Fake { seen, leave, say })
 }
 
 struct T {
@@ -383,4 +402,130 @@ async fn nothing_to_show_is_a_sentence_never_a_500() {
     let (st, v) = req(&t, Method::GET, &diff(sid, "t1"), None, &t.alex).await;
     assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{v}");
     assert!(v["error"].as_str().unwrap().contains("away"), "{v}");
+}
+
+fn result(req_id: &str, path: &str) -> NodeToMaster {
+    let mut d = sample();
+    d.files[0].path = path.into();
+    NodeToMaster::DiffResult {
+        req_id: req_id.into(),
+        diff: Some(Box::new(d)),
+        error: None,
+    }
+}
+
+/// Review D10, the link's abuse cases: an answer from another node, for an
+/// unknown id, a duplicate and a late one are ignored; a request whose node
+/// drops its link ends as "away" at once, not at the timeout.
+#[tokio::test]
+async fn only_the_asked_node_answers_once() {
+    let t = start().await;
+    let sid = chat(&t, &t.alex, "local", None).await;
+    let base = t.base.clone();
+    let alex = t.alex.clone();
+    let get = |turn: &'static str| {
+        let (base, alex) = (base.clone(), alex.clone());
+        tokio::spawn(async move {
+            let r = reqwest::Client::new()
+                .get(format!("{base}/api/sessions/{sid}/turns/{turn}/diff"))
+                .login(&alex)
+                .same_origin()
+                .send()
+                .await
+                .unwrap();
+            let st = r.status();
+            (st, r.json::<Value>().await.unwrap_or(Value::Null))
+        })
+    };
+    let wait_req = || async {
+        for _ in 0..400 {
+            if let Some(r) = t.local.last_req() {
+                return r;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("no session.diff reached the node");
+    };
+    let pending = get("hold");
+    let req = wait_req().await;
+    // Another node answering this request, and an answer to no request.
+    t.old.say.send(result(&req, "forged-by-old")).unwrap();
+    t.local
+        .say
+        .send(result("no-such-request", "unknown"))
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !pending.is_finished(),
+        "a foreign or unknown answer ended the request"
+    );
+    // The node asked answers, then again (duplicate, late): the first wins.
+    t.local.say.send(result(&req, "the-real-one")).unwrap();
+    t.local.say.send(result(&req, "duplicate")).unwrap();
+    let (st, v) = pending.await.unwrap();
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["files"][0]["path"], "the-real-one");
+    // The link still works after the late answer.
+    let (st, _) = req_ok(&t, sid).await;
+    assert_eq!(st, StatusCode::OK);
+    // A held request ends as "away" when the link drops.
+    let before = t.local.diffs().len();
+    let pending = get("hold");
+    for _ in 0..400 {
+        if t.local.diffs().len() > before {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let at = std::time::Instant::now();
+    t.local.leave.send(()).unwrap();
+    let (st, v) = pending.await.unwrap();
+    assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("away"), "{v}");
+    assert!(at.elapsed() < Duration::from_secs(10), "{:?}", at.elapsed());
+}
+
+async fn req_ok(t: &T, sid: SessionId) -> (StatusCode, Value) {
+    req(t, Method::GET, &diff(sid, "t1"), None, &t.alex).await
+}
+
+/// Review D9: one account cannot take every waiting place.
+#[tokio::test]
+async fn one_account_has_a_few_waiting_places() {
+    let t = start().await;
+    let sid = chat(&t, &t.alex, "local", None).await;
+    let mut held = Vec::new();
+    for _ in 0..4 {
+        let (base, alex) = (t.base.clone(), t.alex.clone());
+        held.push(tokio::spawn(async move {
+            reqwest::Client::new()
+                .get(format!("{base}/api/sessions/{sid}/turns/hold/diff"))
+                .login(&alex)
+                .same_origin()
+                .send()
+                .await
+                .unwrap()
+                .status()
+        }));
+    }
+    for _ in 0..400 {
+        if t.local.diffs().len() >= 4 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(t.local.diffs().len(), 4);
+    let (st, v) = req(&t, Method::GET, &diff(sid, "t1"), None, &t.alex).await;
+    assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{v}");
+    assert_eq!(t.local.diffs().len(), 4, "the fifth was not sent");
+    // Another account still gets a place (an admin: only admins may open
+    // chats on the server's own node).
+    let bob = account(&t, "bob", "admin").await;
+    let bob_sid = chat(&t, &bob, "local", None).await;
+    let (st, v) = req(&t, Method::GET, &diff(bob_sid, "t1"), None, &bob).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    t.local.leave.send(()).unwrap();
+    for h in held {
+        assert_eq!(h.await.unwrap(), StatusCode::SERVICE_UNAVAILABLE);
+    }
 }

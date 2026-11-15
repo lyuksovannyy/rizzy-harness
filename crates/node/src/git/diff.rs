@@ -201,6 +201,12 @@ fn cut_at(s: &mut String, max: usize) {
 
 /// The patch's sections by their `(old id, new id)`, in order, each within
 /// the per-file and total line budgets (`budget` is what is left).
+///
+/// Three different stops (review D1): a line over [`LINE_BYTES`] is cut and
+/// marked, and parsing goes on; a file past [`FILE_TEXT`] keeps its first
+/// lines and is marked cut; once the answer's budget is spent, no later file
+/// gets a line. Every line and section is scrubbed whole before it is cut
+/// (review D2), so a secret across the cut never leaves half of itself.
 fn parse_patch(
     out: &[u8],
     scrub: &dyn Fn(&str) -> String,
@@ -211,6 +217,8 @@ fn parse_patch(
     let mut cur = Patch::default();
     let mut in_hunk = false;
     let mut file_bytes = 0usize;
+    // This file's line budget is spent: its later lines are skipped.
+    let mut file_full = false;
     // Lines the current hunk still has, old and new side, by its header:
     // where it ends is counted, never guessed from what a line looks like.
     let mut left = (0u32, 0u32);
@@ -227,6 +235,7 @@ fn parse_patch(
             finish(&mut key, &mut cur, &mut map);
             in_hunk = false;
             file_bytes = 0;
+            file_full = false;
             continue;
         }
         if !in_hunk {
@@ -250,24 +259,26 @@ fn parse_patch(
         // In a hunk: a header, or a line with its mark (an empty line is
         // an empty context line, if git was told to suppress the blank).
         if raw.starts_with(b"@@ -") {
-            if cur.cut || cur.omitted {
+            let head = hunk_head(&String::from_utf8_lossy(raw));
+            left = head.as_ref().map_or((0, 0), |h| (h.old_lines, h.new_lines));
+            if file_full || cur.omitted {
                 continue;
             }
             if *budget == 0 {
-                cur.omitted = true;
-                cur.hunks.clear();
-                cur.added = 0;
-                cur.removed = 0;
+                // Nothing of this file fits; if earlier hunks of it did,
+                // it is cut, else it is left out whole.
+                if cur.hunks.is_empty() {
+                    cur.omitted = true;
+                } else {
+                    cur.cut = true;
+                    file_full = true;
+                }
                 continue;
             }
-            if let Some(h) = hunk_head(&String::from_utf8_lossy(raw)) {
-                left = (h.old_lines, h.new_lines);
-                cur.hunks.push(DiffHunk {
-                    section: scrub(&h.section),
-                    ..h
-                });
-            } else {
-                left = (0, 0);
+            if let Some(h) = head {
+                let mut section = scrub(&h.section);
+                cut_at(&mut section, LINE_BYTES);
+                cur.hunks.push(DiffHunk { section, ..h });
             }
             continue;
         }
@@ -290,13 +301,14 @@ fn parse_patch(
             }
             _ => false,
         };
-        if !counted || cur.cut || cur.omitted {
+        if !counted || file_full || cur.omitted {
             continue;
         }
         let Some(h) = cur.hunks.last_mut() else {
             continue;
         };
-        let mut text = String::from_utf8_lossy(raw).into_owned();
+        // Scrubbed whole, then cut (review D2).
+        let mut text = scrub(&String::from_utf8_lossy(raw));
         if text.is_empty() {
             text.push(' ');
         }
@@ -305,16 +317,17 @@ fn parse_patch(
             text.push_str(LINE_CUT);
             cur.cut = true;
         }
-        let text = scrub(&text);
         let n = text.len() + 1;
         if n > *budget {
             // The answer is full: no later file gets a line either.
             *budget = 0;
             cur.cut = true;
+            file_full = true;
             continue;
         }
         if file_bytes + n > FILE_TEXT {
             cur.cut = true;
+            file_full = true;
             continue;
         }
         file_bytes += n;
@@ -511,7 +524,33 @@ async fn turn_diff_inner(
             };
             if content == DiffContent::Text && r.old_id != r.new_id {
                 // A twin (the same change in two files) has the same lines.
-                match patches.get(&(r.old_id.clone(), r.new_id.clone())).cloned() {
+                // A type change (a file became a link, or the reverse) is
+                // two sections in git's patch, the old side removed and the
+                // new one added: joined here (review D4).
+                let found = if r.status == 'T' {
+                    let zero = "0".repeat(r.old_id.len());
+                    let gone = patches.get(&(r.old_id.clone(), zero.clone()));
+                    let made = patches.get(&(zero, r.new_id.clone()));
+                    match (gone, made) {
+                        (None, None) => None,
+                        (g, m) => {
+                            let mut p = Patch::default();
+                            for part in [g, m].into_iter().flatten() {
+                                p.binary |= part.binary;
+                                p.omitted |= part.omitted && part.hunks.is_empty();
+                                p.cut |= part.cut;
+                                p.hunks.extend(part.hunks.iter().cloned());
+                                p.added += part.added;
+                                p.removed += part.removed;
+                            }
+                            p.omitted &= p.hunks.is_empty();
+                            Some(p)
+                        }
+                    }
+                } else {
+                    patches.get(&(r.old_id.clone(), r.new_id.clone())).cloned()
+                };
+                match found {
                     Some(p) if p.binary => f.content = DiffContent::Binary,
                     Some(p) if p.omitted => {
                         f.content = DiffContent::Omitted;
