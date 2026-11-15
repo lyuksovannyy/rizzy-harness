@@ -64,6 +64,9 @@ struct RunningTurn {
     callback: bool,
     /// Parallel answers: they take no message while they run (ST-7).
     compare: bool,
+    /// When it began; a sub-agent's turn has its parent's (B.9, T65:
+    /// what changed since then is not taken as instructions in it).
+    began: std::time::SystemTime,
 }
 
 /// The running turn as a message sent meanwhile sees it.
@@ -1271,6 +1274,7 @@ impl Session {
                 agent_id: agent.as_ref().map(|a| a.agent_id.clone()),
                 callback: false,
                 compare: !compare.is_empty(),
+                began: std::time::SystemTime::now(),
             })
         };
         if let Err(e) = claim() {
@@ -1554,6 +1558,7 @@ impl Session {
             agent_id: agent.map(|a| a.agent_id.clone()),
             callback: false,
             compare: false,
+            began: std::time::SystemTime::now(),
         })
         .ok()?;
         let (history, mut queued) = match self.begin(None, &turn_id, agent).await {
@@ -1633,6 +1638,7 @@ impl Session {
             agent_id: agent.as_ref().map(|a| a.agent_id.clone()),
             callback: true,
             compare: false,
+            began: std::time::SystemTime::now(),
         })
         .map_err(|e| {
             if e == TURN_RUNNING || e == harness_protocol::COMPACTING {
@@ -3629,13 +3635,21 @@ impl Session {
         let turn_id = new_id();
         // The parent turn's token-saving methods and its context from the
         // master; never the parent's history.
-        let (savings, context, standing) = self
+        let (savings, context, standing, began) = self
             .turn
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .as_ref()
-            .map(|t| (t.savings.clone(), t.context.clone(), t.standing.clone()))
+            .map(|t| {
+                (
+                    t.savings.clone(),
+                    t.context.clone(),
+                    t.standing.clone(),
+                    Some(t.began),
+                )
+            })
             .unwrap_or_default();
+        let parent_began = began.unwrap_or_else(std::time::SystemTime::now);
         let by_stop = Arc::new(AtomicBool::new(false));
         if let Err(e) = child.claim_turn(RunningTurn {
             turn_id: turn_id.clone(),
@@ -3648,6 +3662,7 @@ impl Session {
             agent_id: Some(agent.agent_id.clone()),
             callback: false,
             compare: false,
+            began: parent_began,
         }) {
             if let Some(i) = iso {
                 crate::git::remove_folder(&i.child).await;
@@ -3683,6 +3698,7 @@ impl Session {
             standing,
             refs: Some(refs),
             observed: Some(observed),
+            changes_since: Some(parent_began),
             ..Default::default()
         };
         let history = match child.begin(Some(&msg), &msg.turn_id, Some(&agent)).await {

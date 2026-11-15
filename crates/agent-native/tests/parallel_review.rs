@@ -1934,6 +1934,8 @@ async fn reviewer_parallel_stress_with_nested_files() {
                 _ => std::fs::write(dir.join("AGENTS.md"), format!("RULE-d{n}\n")).unwrap(),
             }
         }
+        // Older than the turn by more than the clock margin.
+        std::thread::sleep(std::time::Duration::from_millis(120));
         let steps_n = 12;
         let stop_at = (seed % 4 == 0).then(|| (seed as usize * 5) % steps_n);
         let mut steps = stress_script(seed, steps_n, stop_at);

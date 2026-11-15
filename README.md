@@ -2268,9 +2268,12 @@ folder succeeds, the instruction file (`AGENTS.md`, else `CLAUDE.md`) of each
 folder between that file and the chat's folder is sent with the next request,
 right after that step's results, outermost first, under a line of the
 harness's saying they apply to the files under their folders. So the model
-has `web/AGENTS.md` before it edits `web/src/x.ts`, at the latest in the
-request after its first read under `web/`. A file you mention with `@path`
-brings its folders' files with the message itself. Each is sent once and kept
+has `web/AGENTS.md` before its next step after the first call that touched a
+file under `web/`: when that first call is a `read`, before it edits there;
+when it is a `write` or `edit` (or an edit in the same step as the first
+read), only after that change, for the ones that follow. A file you mention with `@path`
+brings its folders' files with the message itself (with a message you send
+while the agent works: right after that message). Each is sent once and kept
 like the repository's own files: read again at the start of every message,
 replaced once when it changed, withdrawn when it is gone, and kept when old
 tool results are cleared or the turn's earlier steps are summarised. After the
@@ -2284,11 +2287,21 @@ same rules as above apply: only regular files inside the chat's folder, never
 through a link out of it, never inside `.git` or the node's data directory,
 every line indented so no file can pose as another's label, and anything that
 looks like a configured secret removed. A file that changed during the
-message (the agent wrote it, a command or you changed it) is named and not
-taken as instructions until a later message, when you have seen what the agent
-did: the same rule as for the chat folder's own file, which is read at the
-next message. Each folder is looked in once per message, so a file created
-there later counts from the next message on.
+message is named and not taken as instructions in that message: one the
+agent's own `write` or `edit` wrote, and any other whose change or
+modification time is after the message began (a command such as `echo > ...`,
+even one that sets the time back with `touch -d`: the inode's change time
+cannot be set back), with 50 ms of slack for the kernel's coarse clock (so a
+file you saved in the 50 ms before sending also waits). Not covered: a file
+system without usable change times (FAT stores none; there a command's
+backdated change counts as old). It is taken in a later turn, the same rule
+as for the chat folder's own file, which is read at the next message. A later
+turn need not be yours: a turn that reports a finished background command is
+one, and nobody started it. A sub-agent takes nothing changed since the turn
+that delegated to it began, so an agent cannot write a subfolder's file and
+delegate into that folder to have it obeyed. Each folder is looked in once
+per message, so a file created there later counts from the next message
+on.
 
 Not read: files above the repository's top (or above the folder `node.toml`
 grants), `.claude/CLAUDE.md`, `CLAUDE.local.md`, other names, and `@path`
@@ -2310,8 +2323,10 @@ tokens), sent with the first message, again only when a file changed (with a
 line saying the new files replace the earlier ones) and once after the chat is
 compacted; between those, nothing (see "What goes with each message"). A
 subfolder's file costs its size once, when the agent first works there, and
-nothing before: what was sent earlier in the request is never rewritten, so
-the provider's cache holds. Looking for them costs a few `stat`s per folder
+nothing before: loading one appends to the request, so the provider's cache
+holds. A file that changes is replaced at the next message's start, and that
+request is sent again from the step where the old copy stood (one cache
+write per change, as when a root file changes). Looking for them costs a few `stat`s per folder
 the first time a message's calls touch it.
 
 ### Your own instructions (the node's AGENTS.md)

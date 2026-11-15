@@ -1570,6 +1570,8 @@ fn nested_tree() -> (tempfile::TempDir, std::path::PathBuf) {
             }
         }
     }
+    // Older than the turn by more than the clock margin: there before it.
+    std::thread::sleep(std::time::Duration::from_millis(120));
     (d, ws)
 }
 
@@ -1701,6 +1703,7 @@ async fn rebuild_matches_live_with_nested_instruction_files() {
     let mut report = vec![];
     let mut failures = 0;
     let (mut loaded, mut folded, mut replaced, mut withdrawn) = (0, 0, 0, 0);
+    let mut summarised = 0;
     for seed in 1..=6u64 {
         let parallel = seed % 2 == 0;
         let (_d, ws) = nested_tree();
@@ -1788,6 +1791,11 @@ async fn rebuild_matches_live_with_nested_instruction_files() {
                 .filter(|c| c.folded.is_some())
                 .count();
             folded += folds;
+            // Summaries of earlier turns made inside this turn (T59).
+            summarised += log[start..]
+                .iter()
+                .filter(|e| e.kind == "history_summarized")
+                .count();
             let last = p.main().last().cloned();
             let lost: Vec<&String> = sent_rules
                 .iter()
@@ -1813,7 +1821,14 @@ async fn rebuild_matches_live_with_nested_instruction_files() {
     for l in &report {
         eprintln!("{l}");
     }
-    eprintln!("loaded {loaded}, replaced {replaced}, withdrawn {withdrawn}, folds {folded}");
+    eprintln!(
+        "loaded {loaded}, replaced {replaced}, withdrawn {withdrawn}, folds {folded}, in-turn \
+         summaries of earlier turns {summarised}"
+    );
+    assert!(
+        summarised > 0,
+        "the case happened: a summary of earlier turns inside a turn"
+    );
     assert_eq!(
         failures, 0,
         "rebuild differs from live, or a loaded file was lost"

@@ -1948,7 +1948,13 @@ impl NativeBackend {
             self.start_ctx(&ctx, host).workspace_dir().ok()
         };
         let nested_budget = nested::Budget::for_window(window_of(&model));
+        // What changed since this turn began (a sub-agent's: since the turn
+        // that delegated to it began) is not taken in it.
         let turn_began = std::time::SystemTime::now();
+        let nested_since = ctx
+            .extra
+            .changes_since
+            .map_or(turn_began, |s| s.min(turn_began));
         // Those the history holds, with their sizes as sent.
         let mut nested_live: Vec<(String, usize)> = context::nested_live(recent);
         // Folders looked in this turn: not again before the next turn (a
@@ -2055,9 +2061,14 @@ impl NativeBackend {
                         nested_live = now;
                     }
                     None => {
+                        // As after a step: no more looks this turn.
+                        if !ctx.cancel.is_cancelled() {
+                            nested_ws = None;
+                        }
                         tracing::warn!(
                             "the instruction files of subfolders were not read again this turn \
-                             (the look did not end in time); those sent stay as they were"
+                             (the look did not end in time); those sent stay as they were, and \
+                             none are looked for again this turn"
                         );
                         for (p, _) in &nested_live {
                             nested_unread.push(p.clone());
@@ -2369,6 +2380,103 @@ impl NativeBackend {
                 images::attach(&mut messages, &loaded);
             }};
         }
+        // A look in the folders above the files touched since the last one
+        // (B.9, T65), in call order: their instruction files the history
+        // does not hold yet, as a block of the harness's of its own,
+        // recorded where it stands (`context_sent`, frame `step`), so every
+        // later request rebuilds it there and nothing before it moves (T52).
+        // After a step's results and notes, and after the messages the
+        // person sent meanwhile (their mentions).
+        macro_rules! nested_look {
+            () => {{
+            // The instruction files of the subfolders this step touched
+            // (B.9, T65), in call order, after its results and notes: a
+            // block of the harness's of its own, recorded where it stands
+            // (`context_sent`, frame `step`), so every later request
+            // rebuilds it there and nothing before it moves (T52).
+            if !nested_touched.is_empty()
+                && let Some(ws) = nested_ws.clone()
+            {
+                let touched = std::mem::take(&mut nested_touched);
+                let mut skip = nested_checked.clone();
+                skip.extend(nested_live.iter().map(|(p, _)| nested::folder_of(p)));
+                let ask = nested::Ask {
+                    ws,
+                    protected: self.config.protected_dirs.clone(),
+                    file_cap: nested_budget.file,
+                    since: Some(nested_since),
+                    written: nested_written.clone(),
+                };
+                match nested::bounded(
+                    move || ask.look(&touched, &skip),
+                    &ctx.cancel,
+                    nested::READ_TIMEOUT,
+                )
+                .await
+                {
+                    Some(found) => {
+                        let mut sent: Vec<SentSection> = Vec::new();
+                        for (dir, f) in found {
+                            // One that changed during the turn is looked at
+                            // again on the next touch.
+                            if !matches!(
+                                &f,
+                                Some(nested::File {
+                                    got: nested::Got::Changed,
+                                    ..
+                                })
+                            ) {
+                                nested_checked.insert(dir);
+                            }
+                            let Some(f) = f else { continue };
+                            match nested_new(
+                                f,
+                                &mut nested_live,
+                                &mut nested_named,
+                                &nested_budget,
+                                &self.config.secrets,
+                            ) {
+                                Some(Ok((path, text))) => sent.push(SentSection {
+                                    key: context::SectionKey::Nested(path).as_str().into_owned(),
+                                    digest: context::digest(&text),
+                                    text,
+                                    note: None,
+                                }),
+                                Some(Err(note)) => sent.push(SentSection {
+                                    key: context::TURN.into(),
+                                    digest: String::new(),
+                                    text: note,
+                                    note: None,
+                                }),
+                                None => {}
+                            }
+                        }
+                        if !sent.is_empty() {
+                            let step = context::Plan {
+                                frame: ContextFrame::Step,
+                                sections: sent,
+                            };
+                            if host.emit(step.record(&ctx.turn_id)).await.is_err() {
+                                return stopped(usage);
+                            }
+                            messages.extend(step.text().map(ChatMsg::StepContext));
+                        }
+                    }
+                    None if ctx.cancel.is_cancelled() => {}
+                    // A disk that hangs once would hold every step: no
+                    // more looks this turn.
+                    None => {
+                        nested_ws = None;
+                        tracing::warn!(
+                            "the instruction files of subfolders were not looked for after this \
+                             step (the look did not end in time); none are looked for again this \
+                             turn"
+                        )
+                    }
+                }
+            }
+            }};
+        }
         // Shortening inside the turn (X.15): the line, the cut sizes and
         // the tail of the answering model's window; unknown, nothing is
         // shortened inside a turn (the reactive path below stays).
@@ -2439,7 +2547,6 @@ impl NativeBackend {
                     guard.restart();
                     for f in q.iter().flat_map(mentioned) {
                         seen_now.note_if_unknown(f);
-                        // Their folders are looked in after this step (B.9).
                         nested_touched.push(std::path::PathBuf::from(&f.path));
                     }
                     messages.extend(q.iter().map(queued_msg));
@@ -2453,6 +2560,8 @@ impl NativeBackend {
                         }
                         images::attach(&mut messages, &loaded);
                     }
+                    // Their mentions' folders, right after them (B.9).
+                    nested_look!();
                 }
                 Ok(_) => {}
                 Err(_) => return stopped(usage),
@@ -3598,91 +3707,8 @@ impl NativeBackend {
                 Err(_) => return stopped(usage),
             }
             // The instruction files of the subfolders this step touched
-            // (B.9, T65), in call order, after its results and notes: a
-            // block of the harness's of its own, recorded where it stands
-            // (`context_sent`, frame `step`), so every later request
-            // rebuilds it there and nothing before it moves (T52).
-            if !nested_touched.is_empty()
-                && let Some(ws) = nested_ws.clone()
-            {
-                let touched = std::mem::take(&mut nested_touched);
-                let mut skip = nested_checked.clone();
-                skip.extend(nested_live.iter().map(|(p, _)| nested::folder_of(p)));
-                let ask = nested::Ask {
-                    ws,
-                    protected: self.config.protected_dirs.clone(),
-                    file_cap: nested_budget.file,
-                    since: Some(turn_began),
-                    written: nested_written.clone(),
-                };
-                match nested::bounded(
-                    move || ask.look(&touched, &skip),
-                    &ctx.cancel,
-                    nested::READ_TIMEOUT,
-                )
-                .await
-                {
-                    Some(found) => {
-                        let mut sent: Vec<SentSection> = Vec::new();
-                        for (dir, f) in found {
-                            // One that changed during the turn is looked at
-                            // again on the next touch.
-                            if !matches!(
-                                &f,
-                                Some(nested::File {
-                                    got: nested::Got::Changed,
-                                    ..
-                                })
-                            ) {
-                                nested_checked.insert(dir);
-                            }
-                            let Some(f) = f else { continue };
-                            match nested_new(
-                                f,
-                                &mut nested_live,
-                                &mut nested_named,
-                                &nested_budget,
-                                &self.config.secrets,
-                            ) {
-                                Some(Ok((path, text))) => sent.push(SentSection {
-                                    key: context::SectionKey::Nested(path).as_str().into_owned(),
-                                    digest: context::digest(&text),
-                                    text,
-                                    note: None,
-                                }),
-                                Some(Err(note)) => sent.push(SentSection {
-                                    key: context::TURN.into(),
-                                    digest: String::new(),
-                                    text: note,
-                                    note: None,
-                                }),
-                                None => {}
-                            }
-                        }
-                        if !sent.is_empty() {
-                            let step = context::Plan {
-                                frame: ContextFrame::Step,
-                                sections: sent,
-                            };
-                            if host.emit(step.record(&ctx.turn_id)).await.is_err() {
-                                return stopped(usage);
-                            }
-                            messages.extend(step.text().map(ChatMsg::StepContext));
-                        }
-                    }
-                    None if ctx.cancel.is_cancelled() => {}
-                    // A disk that hangs once would hold every step: no
-                    // more looks this turn.
-                    None => {
-                        nested_ws = None;
-                        tracing::warn!(
-                            "the instruction files of subfolders were not looked for after this \
-                             step (the look did not end in time); none are looked for again this \
-                             turn"
-                        )
-                    }
-                }
-            }
+            // (B.9, T65), in call order, after its results and notes.
+            nested_look!();
             if repeat_stop {
                 // A child gets one more request, `finish` alone, whatever
                 // the step count (review SB-1).

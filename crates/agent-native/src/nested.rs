@@ -47,6 +47,27 @@ pub const TOTAL: usize = 32 * 1024;
 /// the turn), as for the node's reader.
 pub const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How much earlier than the turn's start a change still counts as made
+/// during the turn. The kernel stamps a file's times from a coarse clock
+/// (one tick: 1 to 10 ms) that can read a little behind the one the loop
+/// takes the start from; 50 ms covers a few ticks, and a file the person
+/// saved in those 50 ms before sending only waits one turn.
+pub const CLOCK_MARGIN: Duration = Duration::from_millis(50);
+
+/// Whether `m`'s inode change time (`ctime`, which no process can set) is
+/// after `since`. A file system without one (its `ctime` is 0, or before
+/// 1970) says no.
+fn changed_after(m: &std::fs::Metadata, since: SystemTime) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let (Ok(secs), Ok(nanos)) = (u64::try_from(m.ctime()), u32::try_from(m.ctime_nsec())) else {
+        return false;
+    };
+    if secs == 0 {
+        return false;
+    }
+    std::time::UNIX_EPOCH + Duration::new(secs, nanos) > since
+}
+
 /// The caps for a model whose context window is `window` tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Budget {
@@ -206,11 +227,15 @@ impl Ask {
                 continue;
             }
             // Changed during this turn: by one of its calls, or by anyone
-            // after it started (the link's own time, and the file's).
+            // after it started (the link's own times, and the file's). The
+            // inode change time too: a command can set the modification time
+            // back (`touch -d`), never the change time (review of PR 124).
             let real = at.canonicalize().ok();
             let newer = |m: &std::fs::Metadata| {
-                self.since
-                    .is_some_and(|s| m.modified().is_ok_and(|t| t > s))
+                self.since.is_some_and(|s| {
+                    let s = s.checked_sub(CLOCK_MARGIN).unwrap_or(s);
+                    m.modified().is_ok_and(|t| t > s) || changed_after(m, s)
+                })
             };
             if result.is_ok()
                 && (real.as_ref().is_some_and(|r| self.written.contains(r))
