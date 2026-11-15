@@ -338,6 +338,7 @@ async fn f5_the_guards_last_note_moves_into_a_callback_turns_opening() {
         agent: None,
         cause: Some(TurnCause::Callback(vec!["bg-1".into()])),
         environment: None, continued_by: None,
+        retry: None,
     }));
     let log: Vec<RawEvent> = kinds
         .into_iter()

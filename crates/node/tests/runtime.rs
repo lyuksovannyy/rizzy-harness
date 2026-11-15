@@ -754,6 +754,7 @@ async fn recovers_interrupted_turn_on_start() {
                 turn_id: "t1".into(),
                 environment: None,
                 continued_by: None,
+                retry: None,
             }),
             EventKind::ToolCallStarted(ToolCallStarted {
                 author: None,

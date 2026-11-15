@@ -392,6 +392,7 @@ fn open_turn(host: &LogHost, queued_seqs: Vec<u64>) {
         turn_id: "now".into(),
         environment: None,
         continued_by: None,
+        retry: None,
     }));
     if !queued_seqs.is_empty() {
         host.push(EventKind::QueuedDelivered(QueuedDelivered {
@@ -711,6 +712,7 @@ fn previous_turn(sid: SessionId) -> (Vec<RawEvent>, u64, UserMessage) {
         turn_id: "t1".into(),
         environment: None,
         continued_by: None,
+        retry: None,
     }));
     push(EventKind::UserMessage(UserMessage {
         turn_id: "t1".into(),
@@ -897,6 +899,7 @@ async fn a_callback_turns_ends_survive_an_in_turn_summary() {
         turn_id: "now".into(),
         environment: None,
         continued_by: None,
+        retry: None,
     }));
     let extra = TurnExtra {
         cause: Some(TurnCause::Callback(vec!["bg-1".into()])),
@@ -1372,6 +1375,7 @@ async fn a_note_before_a_callback_end_survives_an_in_turn_summary() {
         turn_id: "now".into(),
         environment: None,
         continued_by: None,
+        retry: None,
     }));
     let extra = TurnExtra {
         cause: Some(TurnCause::Callback(vec!["bg-1".into()])),
@@ -1850,6 +1854,7 @@ async fn reviewer_manual_summary_between_turns_rebuilds() {
                 turn_id: turn_id.clone(),
                 environment: None,
                 continued_by: None,
+                retry: None,
             }));
             host.push(EventKind::UserMessage(UserMessage {
                 turn_id: turn_id.clone(),

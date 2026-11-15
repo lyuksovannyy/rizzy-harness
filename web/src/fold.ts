@@ -227,6 +227,13 @@ export function apply(v: SessionView, e: RawEvent): void {
       if (p.cause?.callback) v.items.push({ type: "callback", turn_id: p.turn_id, bg_ids: p.cause.callback });
       // A sub-agent's follow-up from the chat that started it (T68).
       if (p.continued_by) (v.follow_ups ??= []).push(p.turn_id);
+      // A person's Retry (X.21): the failed attempt stays above it.
+      if (p.retry) {
+        const r: Extract<Item, { type: "retry" }> = { type: "retry", turn_id: p.turn_id, of: p.retry.turn_id, reason: p.retry.reason };
+        if (p.retry.failed_model != null) r.failed_model = p.retry.failed_model;
+        if (p.retry.model != null) r.model = p.retry.model;
+        v.items.push(r);
+      }
       v.running_turn = p.turn_id;
       v.running_agent = p.agent ?? null;
       break;

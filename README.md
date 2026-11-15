@@ -126,6 +126,37 @@ turn's agent and settings: one sent to another agent (the agent picker, or an
 `@mention` of another agent) is refused with the reason, so pick the agent for
 your next message instead.
 
+**Retry.** When the chat's last turn ended without an answer — "turn error"
+(the provider gave up after its own retries, an unknown model, a context the
+last resort could not shorten), "turn interrupted" (the node restarted
+mid-turn) or "turn stopped" (the node was stopped) — its line has **Retry**.
+It runs your same message again, without your typing it and without a second
+copy in the chat: the text, the attached files, the images and the `@` files
+as the message recorded them (a mentioned file is not read again; a `/skill`
+at its start loads again), with the chat's current agent, model, approval
+mode and settings and the reasoning effort the attempt ran at. The failed
+attempt stays above, marked as failed, and the agent is sent it too: a call
+that shows a result ran (a command ran, a file is written), a call with no
+result recorded may or may not have run, a denied call did not run; the
+harness tells the agent so and asks it to check the current state before
+repeating a command or an edit, then carry on from where the attempt
+stopped. Your message reaches the agent in every request of the retry: no
+summary, automatic or `/compact`, replaces the turn that holds it while it
+may still be retried (the attempt's old tool results may be shortened to a
+note instead). A message with images is retried only on a model that sees
+images. When the
+retry runs on another model than the attempt did, its line says so. The retry
+is a turn of its own: Undo on it undoes only what the retry changed, and the
+failed attempt's changes keep their own Undo. Retry is not offered after you
+pressed Stop (write what to do instead, or send the message again), after a
+turn that gave an answer (a step limit's account included), once a message or
+a turn followed, once the failed turn's changes were undone, while a turn or a
+summary runs, in a sub-agent's chat, or on a routine's own run (the routine
+retries a run its node missed by its own rules; run it again otherwise). It is
+never automatic: a failing provider is already retried inside the turn, and
+Retry is your decision after that gave up. It does not rewind the
+conversation or let you edit the message first.
+
 When a turn completes or fails in a chat you are not looking at (another chat
 is open, or the tab is hidden), the chat gets a dot in **Recent** until you
 open it, and with **Desktop notifications** on (Settings → Account →

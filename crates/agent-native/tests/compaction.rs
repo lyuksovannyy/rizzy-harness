@@ -252,6 +252,7 @@ fn history(turns: usize, tokens: usize) -> Vec<RawEvent> {
             turn_id: t.clone(),
             environment: None,
             continued_by: None,
+            retry: None,
         }));
         push(EventKind::UserMessage(UserMessage {
             turn_id: t.clone(),
@@ -977,6 +978,7 @@ async fn a_background_note_and_a_callback_opening_reach_the_summariser_quoted() 
             cause,
             environment: None,
             continued_by: None,
+            retry: None,
         })
     };
     let said = |t: &str, text: String| {
@@ -1178,6 +1180,7 @@ fn history_with_todo(kept: usize) -> Vec<RawEvent> {
         turn_id: "t1".into(),
         environment: None,
         continued_by: None,
+        retry: None,
     }));
     push(EventKind::UserMessage(UserMessage {
         turn_id: "t1".into(),
@@ -1349,6 +1352,7 @@ fn history_with_a_newer_list() -> Vec<RawEvent> {
             turn_id: "t9".into(),
             environment: None,
             continued_by: None,
+            retry: None,
         }),
         EventKind::UserMessage(UserMessage {
             turn_id: "t9".into(),

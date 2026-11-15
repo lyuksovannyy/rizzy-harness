@@ -741,6 +741,7 @@ mod tests {
                     cause: None,
                     environment: None,
                     continued_by: None,
+                    retry: None,
                 }),
             ),
             ev(

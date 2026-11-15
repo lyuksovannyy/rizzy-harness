@@ -10,6 +10,7 @@ pub mod handoff;
 pub mod policy;
 pub mod recall;
 pub mod refs;
+pub mod retry;
 pub mod savings;
 pub mod secret;
 pub mod skills;

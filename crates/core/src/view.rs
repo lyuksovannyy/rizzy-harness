@@ -140,6 +140,19 @@ pub enum Item {
         turn_id: String,
         bg_ids: Vec<String>,
     },
+    /// The person's Retry of the failed turn `of` (`turn_started.retry`,
+    /// X.21): a new turn that answers the same message, shown once above
+    /// the failed attempt. No text: the chat says what it retries.
+    Retry {
+        turn_id: String,
+        of: String,
+        reason: TurnEndReason,
+        /// The models of the failed attempt and of the retry, when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failed_model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+    },
     /// The node did not resume the agent for these ends
     /// (`callback_refused`); they wait for the person's next message.
     CallbackRefused {
@@ -367,6 +380,15 @@ impl SessionView {
                     self.items.push(Item::Callback {
                         turn_id: t.turn_id.clone(),
                         bg_ids: c.callback_ids().to_vec(),
+                    });
+                }
+                if let Some(r) = &t.retry {
+                    self.items.push(Item::Retry {
+                        turn_id: t.turn_id.clone(),
+                        of: r.turn_id.clone(),
+                        reason: r.reason,
+                        failed_model: r.failed_model.clone(),
+                        model: r.model.clone(),
                     });
                 }
                 self.running_turn = Some(t.turn_id);
@@ -769,6 +791,7 @@ mod tests {
                     turn_id: "t".into(),
                     environment: None,
                     continued_by: None,
+                    retry: None,
                 }),
             ),
             ev(
@@ -978,6 +1001,7 @@ mod tests {
                 turn_id: "t".into(),
                 environment: None,
                 continued_by: None,
+                retry: None,
             }),
             EventKind::ModelRetry(retry.clone()),
         ];
@@ -1040,6 +1064,7 @@ mod tests {
                 turn_id: "t".into(),
                 environment: None,
                 continued_by: None,
+                retry: None,
             }),
         );
         let mut v = SessionView::default();

@@ -1864,6 +1864,7 @@ impl Session {
                 cause: Some(cause.clone()),
                 environment,
                 continued_by: None,
+                retry: None,
             }))
             .await
         {
@@ -2353,6 +2354,7 @@ impl Session {
                 turn_id: turn_id.into(),
                 environment,
                 continued_by: follow_up.map(|(call, _)| call.to_string()),
+                retry: None,
             }))
             .await;
         drop(gate);
@@ -5212,6 +5214,10 @@ fn applied_count(a: &crate::git::Applied) -> String {
 /// A turn's changes as a diff (X.12); its own file.
 #[path = "session_diff.rs"]
 mod diff;
+
+/// A person's Retry of the failed last turn (X.21); its own file.
+#[path = "session_retry.rs"]
+mod retry;
 
 /// A `/compact` focus cut to `COMPACT_FOCUS_MAX_CHARS` characters, saying
 /// where (X.20).

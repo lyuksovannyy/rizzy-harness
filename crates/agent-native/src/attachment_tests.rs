@@ -158,6 +158,7 @@ fn earlier(sid: SessionId, m: UserMessage) -> Vec<RawEvent> {
                 cause: None,
                 environment: None,
                 continued_by: None,
+                retry: None,
             }),
         ),
         ev(sid, 2, EventKind::UserMessage(m.clone())),

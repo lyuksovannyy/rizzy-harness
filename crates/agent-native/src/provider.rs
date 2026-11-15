@@ -225,6 +225,45 @@ pub fn open_callback(msgs: &mut Vec<ChatMsg>, bg_ids: &[String]) {
     msgs.push(ChatMsg::Opening(text));
 }
 
+/// The notes at the end of `msgs`, taken off it in order: what a retry
+/// turn's opening (X.21) starts with ([`retry_text`]). The line saying
+/// the failed attempt's message got no answer and a background end
+/// recorded after it would otherwise join a tool result of the failed
+/// attempt or be dropped.
+pub fn take_notes(msgs: &mut Vec<ChatMsg>) -> Vec<String> {
+    let mut notes = Vec::new();
+    while let Some(ChatMsg::Note(_)) = msgs.last() {
+        if let Some(ChatMsg::Note(t)) = msgs.pop() {
+            notes.push(t);
+        }
+    }
+    notes.reverse();
+    notes
+}
+
+/// A retry turn's opening (X.21), one [`ChatMsg::Opening`]: the notes
+/// that stood before it ([`take_notes`]), then the turn's environment
+/// line, its context block and the harness's retry line
+/// ([`harness_core::event::retry_opening`]) last, as a person's opening
+/// puts their message last. Built by the loop for the turn it runs and by
+/// the rebuild at the turn's `turn_started`, from the log alone, so both
+/// are the same bytes.
+pub fn retry_text(
+    notes: &[String],
+    environment: Option<&str>,
+    block: Option<&str>,
+    retry: &harness_core::event::RetryOf,
+) -> String {
+    let own = crate::context::opening(
+        environment,
+        block,
+        &harness_core::event::retry_opening(retry),
+    );
+    let mut parts: Vec<&str> = notes.iter().map(String::as_str).collect();
+    parts.push(&own);
+    parts.join("\n\n")
+}
+
 /// The person's own text of a user message [`place_notes`] put notes in
 /// front of. The separator counts only as a line of its own after an empty
 /// line, the way `place_notes` writes it: a note's lines are the harness's

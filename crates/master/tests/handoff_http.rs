@@ -165,6 +165,7 @@ fn turn(id: &str, text: &str, _ts: i64) -> Vec<EventKind> {
             cause: None,
             environment: None,
             continued_by: None,
+            retry: None,
         }),
         EventKind::UserMessage(UserMessage {
             turn_id: id.into(),
@@ -193,6 +194,7 @@ fn work(id: &str, ask: &str) -> Vec<EventKind> {
             cause: None,
             environment: None,
             continued_by: None,
+            retry: None,
         }),
         EventKind::UserMessage(UserMessage {
             turn_id: id.into(),

@@ -149,6 +149,7 @@ fn history(sid: SessionId) -> Vec<RawEvent> {
                 cause: None,
                 environment: None,
                 continued_by: None,
+                retry: None,
             }),
         ),
         ev(
@@ -292,6 +293,7 @@ async fn the_opening_has_one_harness_header_quoted_output_and_rebuilds_the_same(
             cause: Some(TurnCause::Callback(vec!["bg-1".into()])),
             environment: None,
             continued_by: None,
+            retry: None,
         }),
     ));
     let again = place_notes(history_to_messages(&log));
@@ -447,6 +449,7 @@ async fn a_callback_turn_gets_the_instruction_files_after_its_opening() {
             cause: Some(TurnCause::Callback(vec!["bg-1".into()])),
             environment: None,
             continued_by: None,
+            retry: None,
         }),
     ));
     let sent: Vec<EventKind> = host.0.lock().unwrap().clone();
@@ -498,6 +501,7 @@ async fn a_callback_turn_gets_the_environment_line() {
             cause: Some(TurnCause::Callback(vec!["bg-1".into()])),
             environment: Some(env.into()),
             continued_by: None,
+            retry: None,
         }),
     ));
     let again = place_notes(history_to_messages(&log));

@@ -281,6 +281,7 @@ mod tests {
             cause: None,
             environment: None,
             continued_by: None,
+            retry: None,
         })
     }
 
@@ -392,6 +393,38 @@ mod tests {
                 "Last turn: used its step limit, work left (2 turns by the person)",
             ]
         );
+    }
+
+    /// A failed turn and the person's Retry of it (X.21): the message is
+    /// asked once, the retry's changes count, the last turn is the retry.
+    #[test]
+    fn a_retry_asks_nothing_new() {
+        let f = Facts::from_log(&log(vec![
+            started("t1"),
+            said("t1", "migrate the schema"),
+            after("t1", &["a.sql"]),
+            ended("t1", TurnEndReason::Error),
+            EventKind::TurnStarted(TurnStarted {
+                turn_id: "t2".into(),
+                agent: None,
+                cause: None,
+                environment: None,
+                retry: Some(RetryOf {
+                    turn_id: "t1".into(),
+                    reason: TurnEndReason::Error,
+                    error: None,
+                    failed_model: None,
+                    model: None,
+                }),
+                continued_by: None,
+            }),
+            after("t2", &["b.sql"]),
+            ended("t2", TurnEndReason::Completed),
+        ]));
+        assert_eq!(f.asked.as_deref(), Some("migrate the schema"));
+        assert_eq!(f.files, ["a.sql", "b.sql"]);
+        assert_eq!(f.ended, Some(TurnEndReason::Completed));
+        assert_eq!(f.turns, 2, "the retry is a turn the person started");
     }
 
     #[test]

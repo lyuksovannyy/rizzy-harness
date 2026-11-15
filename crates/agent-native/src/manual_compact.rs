@@ -95,7 +95,7 @@ fn old_part(recent: &[RawEvent]) -> (&[RawEvent], usize) {
         return (&[], 0);
     }
     let kept = starts[starts.len() - MANUAL_KEEP_TURNS];
-    let end = kept.min(opening_cut(recent));
+    let end = kept.min(opening_cut(recent, None));
     (&recent[..end], end)
 }
 
@@ -255,6 +255,7 @@ mod tests {
                 cause: None,
                 environment: None,
                 continued_by: None,
+                retry: None,
             }),
             EventKind::UserMessage(UserMessage {
                 turn_id: id.into(),

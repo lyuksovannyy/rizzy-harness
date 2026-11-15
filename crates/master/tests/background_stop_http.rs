@@ -581,6 +581,7 @@ async fn a_demotion_stops_the_host_chat_and_only_the_host_chat() {
                     cause: None,
                     environment: None,
                     continued_by: None,
+                    retry: None,
                 }),
             );
             running(&t, sid).await;
