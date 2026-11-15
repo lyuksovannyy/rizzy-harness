@@ -46,6 +46,10 @@ pub const CAP_BACKGROUND: &str = "background";
 /// The master resumes chats only on nodes whose hello listed it.
 pub const CAP_CALLBACK: &str = "callback";
 
+/// The node capability that announces `session.handoff` (X.16): the
+/// master asks for hand-off notes only on nodes whose hello listed it.
+pub const CAP_HANDOFF: &str = "handoff";
+
 /// The node capability that announces `session.diff` (X.12, PLAN.md T53).
 /// The master asks for a turn's changes only on nodes whose hello listed it.
 pub const CAP_DIFF: &str = "diff";
@@ -274,6 +278,14 @@ pub const CALLBACK_BUSY: &str = "nothing to resume: a turn is already running";
 /// recorded `callback_refused` in the chat's log, which is where the owner
 /// sees it; the master adds nothing of its own.
 pub const CALLBACK_REFUSED: &str = "the agent was not resumed";
+
+/// A `session.handoff` the node did not start because no note is due
+/// (nothing changed since the last one, a turn ran since the master read
+/// the log, a chat that takes none): the master drops it quietly.
+pub const HANDOFF_NOTHING: &str = "no hand-off note due";
+/// A `session.handoff` refused because a turn or another note runs: the
+/// master asks again at its next look.
+pub const HANDOFF_BUSY: &str = "no hand-off note now: the chat is busy";
 
 /// The most background ids one `session.callback` may name.
 pub const MAX_CALLBACK_IDS: usize = 64;
@@ -505,6 +517,31 @@ pub enum MasterToNode {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context: Option<Box<harness_core::backend::MasterContext>>,
     },
+    /// Write the chat's hand-off note now if one is due (X.16,
+    /// docs/handoff-notes.md; only to nodes with [`CAP_HANDOFF`]). A
+    /// request only: the node writes it only for a chat of its own that
+    /// takes notes (agentic, not a sub-agent's, not a routine's), whose log
+    /// says one is due (`harness_core::handoff::due`), with no turn
+    /// running; it acks once the writing started and records the note (or
+    /// that no model wrote one) in the chat's log. A turn that starts
+    /// meanwhile cancels it.
+    #[serde(rename = "session.handoff")]
+    Handoff {
+        req_id: String,
+        session_id: SessionId,
+        /// The small model to write it (prefixed); `None`: the chat's own.
+        /// Tried first; the chat's own model is the fallback.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        small_model: Option<String>,
+        /// Context windows the master knows (tokens), by model: the note's
+        /// input is sized to the writing model's.
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        windows: std::collections::BTreeMap<String, u64>,
+        /// Those models that take a reasoning effort: the note asks them
+        /// for the lowest, the others for none.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        low_effort: Vec<String>,
+    },
     /// The user picked one of several parallel answers.
     #[serde(rename = "session.select_variant")]
     SelectVariant {
@@ -673,6 +710,7 @@ impl MasterToNode {
             MasterToNode::Create { req_id, .. }
             | MasterToNode::Prompt { req_id, .. }
             | MasterToNode::Callback { req_id, .. }
+            | MasterToNode::Handoff { req_id, .. }
             | MasterToNode::SetAgent { req_id, .. }
             | MasterToNode::SetApprovalMode { req_id, .. }
             | MasterToNode::SetStepLimit { req_id, .. }

@@ -6,6 +6,7 @@ pub mod artifacts;
 pub mod backend;
 pub mod event;
 pub mod folder;
+pub mod handoff;
 pub mod policy;
 pub mod recall;
 pub mod refs;

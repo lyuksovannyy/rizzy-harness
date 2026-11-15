@@ -471,6 +471,29 @@ fn events() -> Vec<RawEvent> {
             bg_ids: vec!["bg-5".into()],
             reason: "3 turns in a row without you (node limit)".into(),
         }),
+        // Hand-off notes (X.16): one written, with its cost in the chat's
+        // usage; one whose models failed (the fixed part alone).
+        EventKind::HandoffWritten(HandoffWritten {
+            through_seq: 40,
+            text: Some("Status:\nThe build fails.".into()),
+            model: Some("demo::small".into()),
+            failed: vec![],
+            usage: Some(Usage {
+                input_tokens: 900,
+                output_tokens: 60,
+                ..Default::default()
+            }),
+        }),
+        EventKind::HandoffWritten(HandoffWritten {
+            through_seq: 41,
+            text: None,
+            model: None,
+            failed: vec![NoteFailure {
+                model: "demo::small".into(),
+                reason: "unknown to this node".into(),
+            }],
+            usage: None,
+        }),
         // The agent's task list: each event replaces the whole list.
         EventKind::TodoUpdated(TodoUpdated {
             turn_id: "t4".into(),

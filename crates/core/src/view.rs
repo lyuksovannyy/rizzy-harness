@@ -103,6 +103,17 @@ pub enum Item {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         requested: Option<i64>,
     },
+    /// A hand-off note was written (`handoff_written`, X.16): `text` is the
+    /// model's, shown as text; none when every model in `failed` failed.
+    Handoff {
+        through_seq: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        failed: Vec<NoteFailure>,
+    },
     /// A background command ended (`background_ended`). `tail` is program
     /// output: shown as plain text, never rendered.
     BackgroundEnded {
@@ -578,6 +589,19 @@ impl SessionView {
                 self.items.push(Item::StepLimitChanged {
                     max_steps: c.max_steps,
                     requested: c.requested,
+                });
+            }
+            EventKind::HandoffWritten(h) => {
+                // Its cost is the chat's, like a turn's (only the sums: the
+                // context size stays the last turn's).
+                if let Some(u) = &h.usage {
+                    self.usage.add(u);
+                }
+                self.items.push(Item::Handoff {
+                    through_seq: h.through_seq,
+                    text: h.text,
+                    model: h.model,
+                    failed: h.failed,
                 });
             }
             EventKind::CallbackRefused(r) => self.items.push(Item::CallbackRefused {

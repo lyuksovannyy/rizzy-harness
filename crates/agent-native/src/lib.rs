@@ -529,6 +529,10 @@ the skill `name`\"), so you can load it again; do not copy its text. ",
     transcript_data!()
 );
 
+// After the transcript macros, which its prompt uses.
+mod handoff;
+pub use handoff::HANDOFF_PROMPT;
+
 /// The labels of [`transcript`]'s parts: each stands on a line of its own,
 /// written by the harness, with the part's text quoted under it.
 const PART_SUMMARY: &str = "Earlier summary:";
@@ -1638,6 +1642,12 @@ impl AgentBackend for NativeBackend {
     fn name(&self) -> &'static str {
         "native"
     }
+    async fn write_note(
+        &self,
+        ctx: harness_core::backend::NoteCtx,
+    ) -> Option<harness_core::backend::NoteOutcome> {
+        self.note(ctx).await
+    }
     fn has_tool(&self, name: &str) -> bool {
         self.tools.iter().any(|t| t.name() == name)
     }
@@ -2408,6 +2418,7 @@ impl NativeBackend {
                 cache: sv.prompt_cache,
                 limits: Some(self.config.stream_limits),
                 no_tool_calls: wrap_up,
+                max_tokens: None,
             };
             // A passing failure is retried (bounded, with backoff) before
             // the fallbacks, but only while this attempt has shown nothing:
@@ -3326,6 +3337,7 @@ impl NativeBackend {
                     cache: ctx.extra.savings.prompt_cache,
                     limits: Some(self.config.stream_limits),
                     no_tool_calls: false,
+                    max_tokens: None,
                 };
                 let mut retries = 0;
                 let step = loop {
@@ -3617,6 +3629,7 @@ impl NativeBackend {
                 cache: false,
                 limits: Some(self.config.stream_limits),
                 no_tool_calls: false,
+                max_tokens: None,
             };
             let c = match self.complete_quietly(ctx, &req).await {
                 Ok(c) => c,
@@ -3728,6 +3741,7 @@ impl NativeBackend {
             cache: false,
             limits: Some(self.config.stream_limits),
             no_tool_calls: false,
+            max_tokens: None,
         };
         let c = match self.complete_quietly(ctx, &req).await {
             Ok(c) => c,

@@ -380,6 +380,7 @@ async fn the_default_mock_does_not_obey_program_output() {
         cache: false,
         limits: None,
         no_tool_calls: false,
+        max_tokens: None,
     };
     let mock = || mock::Mock {
         delay: std::time::Duration::from_millis(1),

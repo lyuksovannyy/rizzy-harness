@@ -136,10 +136,28 @@ pub struct EarlierChat {
     pub title: String,
     /// Its newest event's time (node clock).
     pub updated_ms: i64,
-    /// Its latest `history_summarized` text when `summary`, else its last
-    /// assistant message with text.
-    pub text: String,
-    pub summary: bool,
+    /// What a model last wrote of it, by preference: its latest hand-off
+    /// note's model part, else its latest `history_summarized` text, else
+    /// its last assistant message with text. `None` with only `facts`.
+    pub text: Option<String>,
+    pub source: EarlierSource,
+    /// The fixed part of its hand-off note, from its log
+    /// (`harness_core::handoff::Facts::lines`); empty when it has nothing
+    /// to hand off (no file changed, no task list).
+    pub facts: Vec<String>,
+    /// The note's model part was written before the chat's last turns
+    /// (the facts are current; the note may lag).
+    pub stale: bool,
+}
+
+/// Where [`EarlierChat::text`] comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EarlierSource {
+    Note,
+    Summary,
+    LastReply,
+    /// No text: the facts alone.
+    None,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -458,8 +476,8 @@ impl Store {
     }
 
     /// `owner`'s chats in `project` other than `except`, newest first, at
-    /// most `limit` of those with text (see [`EarlierChat`]; one with
-    /// neither a summary nor a reply is skipped). Never an incognito chat
+    /// most `limit` of those with something to say (see [`EarlierChat`];
+    /// one with no note, summary, reply or facts is skipped). Never an incognito chat
     /// nor a sub-agent's, and only where the link still applies (the
     /// chat's effective workspace is the project's). Filtered by owner in
     /// SQL: no other account's chat is read.
@@ -508,12 +526,43 @@ impl Store {
             if out.len() >= limit {
                 break;
             }
-            let found = match summary
-                .query_row(params![sid], |r| r.get::<_, String>(0))
-                .optional()?
-            {
-                Some(p) => text_of(&p)?.map(|t| (t, true)),
-                None => None,
+            let id: SessionId = sid
+                .parse()
+                .map_err(|_| StoreError::Corrupt(format!("session id {sid}")))?;
+            // The note's fixed part and its latest model part, from the
+            // log (X.16): kind-filtered, so a long chat's deltas and tool
+            // output are never read.
+            let log = crate::handoff::handoff_log_in(&conn, id)?;
+            let facts = harness_core::handoff::Facts::from_log(&log);
+            let facts = if facts.worth() {
+                facts.lines()
+            } else {
+                Vec::new()
+            };
+            let last_end = log
+                .iter()
+                .rev()
+                .find(|e| e.kind == "turn_ended")
+                .map_or(0, |e| e.seq);
+            let note = log.iter().rev().find_map(|e| match e.typed() {
+                Ok(harness_core::event::EventKind::HandoffWritten(h)) => {
+                    h.text.map(|t| (t, e.seq < last_end))
+                }
+                _ => None,
+            });
+            let mut stale = false;
+            let found = match note {
+                Some((t, s)) => {
+                    stale = s;
+                    Some((t, EarlierSource::Note))
+                }
+                None => match summary
+                    .query_row(params![sid], |r| r.get::<_, String>(0))
+                    .optional()?
+                {
+                    Some(p) => text_of(&p)?.map(|t| (t, EarlierSource::Summary)),
+                    None => None,
+                },
             };
             let found = match found {
                 Some(f) => Some(f),
@@ -522,24 +571,26 @@ impl Store {
                     let mut last = None;
                     while let Some(row) = rows.next()? {
                         if let Some(t) = text_of(&row.get::<_, String>(0)?)? {
-                            last = Some((t, false));
+                            last = Some((t, EarlierSource::LastReply));
                             break;
                         }
                     }
                     last
                 }
             };
-            let Some((text, is_summary)) = found else {
-                continue;
+            let (text, source) = match found {
+                Some((t, s)) => (Some(t), s),
+                None if !facts.is_empty() => (None, EarlierSource::None),
+                None => continue,
             };
             out.push(EarlierChat {
-                session_id: sid
-                    .parse()
-                    .map_err(|_| StoreError::Corrupt(format!("session id {sid}")))?,
+                session_id: id,
                 title,
                 updated_ms,
                 text,
-                summary: is_summary,
+                source,
+                facts,
+                stale,
             });
         }
         Ok(out)

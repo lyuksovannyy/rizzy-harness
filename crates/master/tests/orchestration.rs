@@ -548,3 +548,59 @@ async fn parallel_coders_get_worktrees_and_merge_back() {
     let now = std::fs::read_to_string(format!("{ws}/shared.txt")).unwrap();
     assert!(now == "one\n" || now == "two\n");
 }
+
+/// "Read-only sub-agents use the small model" (X.16): with it on and a
+/// small model set, a sub-agent whose every tool only reads (Scout, by its
+/// tool list; not Reviewer, which may `remember`) and that has no model of
+/// its own runs on the small model, its parent's model as its fallback; the
+/// child's own log says which model it ran on.
+#[tokio::test]
+async fn read_only_sub_agents_run_on_the_small_model_when_switched_on() {
+    let (m, ws, d) = setup().await;
+    let mut cfg = harness_master::config::Config::default();
+    cfg.providers[0]
+        .models
+        .push(harness_master::config::ModelConfig {
+            id: "small".into(),
+            ..Default::default()
+        });
+    cfg.savings.small_model = Some("demo::small".into());
+    cfg.savings.small_subagents = true;
+    let (rt, _) =
+        harness_master::providers::ProviderRuntime::start(cfg, d.path(), Default::default())
+            .unwrap();
+    m.set_provider_runtime(Arc::new(rt));
+    let sid = session(&m, &ws, "teamlead").await;
+    m.prompt(
+        sid,
+        "delegate: scout=look | reviewer=check".into(),
+        PromptOpts::default(),
+    )
+    .await
+    .unwrap();
+    turns_ended(&m, sid, 1).await;
+    let kids: Vec<_> = m
+        .inner_mirror()
+        .sessions()
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.parent_id.as_deref() == Some(&sid.to_string()))
+        .collect();
+    assert_eq!(kids.len(), 2);
+    for k in kids {
+        let evs = m
+            .inner_mirror()
+            .events_after(k.session_id, 0, 1_000)
+            .unwrap();
+        let created = evs.iter().find(|e| e.kind == "session_created").unwrap();
+        // Scout's tools all only read; Reviewer may also `remember`, which
+        // is not on the allow-list, so it keeps its parent's model.
+        let small = created.payload["model"] == "demo::small";
+        let scout = created.payload["agent_id"] == "scout";
+        assert_eq!(small, scout, "{evs:?}");
+    }
+    // The parent itself stays on its own model.
+    let evs = m.inner_mirror().events_after(sid, 0, 1_000).unwrap();
+    let created = evs.iter().find(|e| e.kind == "session_created").unwrap();
+    assert_ne!(created.payload["model"], "demo::small");
+}

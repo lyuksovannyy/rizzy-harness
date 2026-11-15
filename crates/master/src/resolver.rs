@@ -156,6 +156,21 @@ impl Master {
     }
 }
 
+/// The tools that only read (files, the repository's map, a command's
+/// stored output, the chat's own task list, earlier chats, skills): a
+/// sub-agent limited to these may run on the small model (X.16).
+pub const READ_ONLY_TOOLS: &[&str] = &[
+    "read",
+    "grep",
+    "glob",
+    "outline",
+    "graph_query",
+    "tool_output",
+    "todo",
+    "recall",
+    "skill",
+];
+
 impl Resolver {
     /// The server's config with this scope's chains, when the master
     /// manages its providers.
@@ -331,6 +346,28 @@ impl Resolver {
             .collect();
     }
 
+    /// The small model for sub-agent `c` (X.16): when the admin turned on
+    /// "read-only sub-agents use the small model", set a small model this
+    /// server still lists, and every tool `c` may use is one that only
+    /// reads ([`READ_ONLY_TOOLS`]). An allow-list, from the agent's own
+    /// switches, never its name: a tool added later (or `publish`,
+    /// `remember`, web tools, MCP, "all tools") is not read-only until
+    /// someone puts it on the list. The node may still narrow it.
+    fn small_for(&self, c: &AgentSpec) -> Option<String> {
+        let cfg = self.cfg.as_ref()?;
+        let s = &cfg.savings;
+        let small = s.small_model.as_ref().filter(|m| cfg.knows_model(m))?;
+        let read_only = s.small_subagents
+            && match &c.tools {
+                harness_core::agent::ToolSelection::List(l) => l
+                    .iter()
+                    .filter(|t| c.allows_tool(t))
+                    .all(|t| READ_ONLY_TOOLS.contains(&t.as_str())),
+                harness_core::agent::ToolSelection::All(_) => false,
+            };
+        read_only.then(|| small.clone())
+    }
+
     /// Resolve an agent id (or this scope's default agent) to the spec a
     /// node runs, with an optional per-message effort that replaces the
     /// agent's. Effort is dropped when no model of the chain supports it.
@@ -412,6 +449,42 @@ impl Resolver {
                 if c.model.is_some() {
                     let m = c.model.clone();
                     self.set_fallbacks(&mut c, m.as_deref());
+                } else if let Some(small) = self.small_for(&c) {
+                    // A read-only child on the small model (X.16), the
+                    // parent's chain behind it: a node that does not know
+                    // the small model, or a provider that fails, falls
+                    // back to the parent's model by the usual path, and
+                    // the child's events say which model answered.
+                    let chain: Vec<String> = std::iter::once(small.clone())
+                        .chain(model.iter().cloned())
+                        .chain(spec.fallbacks.iter().cloned())
+                        .fold(Vec::new(), |mut v, m| {
+                            if !v.contains(&m) {
+                                v.push(m);
+                            }
+                            v
+                        });
+                    c.model = Some(small.clone());
+                    c.fallbacks = chain[1..].to_vec();
+                    // A small model its provider no longer lists starts
+                    // with the fallbacks, as any model would.
+                    c.unavailable = spec.unavailable.clone();
+                    if self
+                        .cfg
+                        .as_ref()
+                        .is_some_and(|cfg| cfg.model_unavailable(&small))
+                    {
+                        c.unavailable.push(small.clone());
+                    }
+                    c.no_effort = chain
+                        .iter()
+                        .filter(|m| !self.find_model(m).is_some_and(|m| m.effort))
+                        .cloned()
+                        .collect();
+                    c.context_windows = chain
+                        .iter()
+                        .filter_map(|m| Some((m.clone(), self.find_model(m)?.context?)))
+                        .collect();
                 } else {
                     // A child without a model of its own runs on the
                     // parent's, with the parent's chain.
@@ -647,5 +720,46 @@ mod tests {
         assert_eq!(cfg.effective_default().as_deref(), Some("demo::other"));
         assert_eq!(cfg.agent_models["general"].fallbacks, ["demo::mock"]);
         assert!(!cfg.agent_models.contains_key("coder"));
+    }
+
+    /// Review of PR 117: "read-only" is an allow-list. `publish`,
+    /// `remember`, a web tool or any tool not on it keeps a sub-agent on
+    /// its parent's model; only tools that read move it to the small one.
+    #[test]
+    fn only_tools_that_read_put_a_sub_agent_on_the_small_model() {
+        let m = master();
+        let mut r = m.resolver(None);
+        let mut cfg = crate::config::Config::default();
+        cfg.providers[0].models.push(crate::config::ModelConfig {
+            id: "small".into(),
+            ..Default::default()
+        });
+        cfg.savings.small_model = Some("demo::small".into());
+        cfg.savings.small_subagents = true;
+        r.cfg = Some(cfg);
+        let spec = |tools: &str| {
+            harness_agents::parse(
+                "x",
+                &format!("---\nname: X\ntools: [{tools}]\navailable_as: [subagent]\n---\nDo.\n"),
+                false,
+            )
+            .unwrap()
+            .spec
+        };
+        for tools in [
+            "read, publish",
+            "read, remember",
+            "read, todo, publish, bash_output",
+            "read, web_fetch",
+            "read, write",
+            "read, mcp",
+        ] {
+            assert_eq!(r.small_for(&spec(tools)), None, "{tools}");
+        }
+        assert_eq!(
+            r.small_for(&spec("read, grep, glob, outline, graph_query, skill"))
+                .as_deref(),
+            Some("demo::small")
+        );
     }
 }

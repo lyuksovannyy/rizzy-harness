@@ -169,6 +169,28 @@ describe("shortened context", () => {
   });
 });
 
+describe("hand-off notes", () => {
+  test("only the latest note shows: a quiet line with the model's text as text, or why there is none", async () => {
+    await show(
+      [
+        { type: "handoff", through_seq: 4, text: "old", model: "p::small" },
+        { type: "handoff", through_seq: 9, text: "Status: <b>half</b>", model: "p::small" },
+      ],
+      sessionRow(),
+    );
+    const notes = host.querySelectorAll("[data-testid=handoff]");
+    expect(notes).toHaveLength(1);
+    const note = notes[0] as HTMLDetailsElement;
+    expect(note.querySelector("summary")!.textContent).toBe("Hand-off note for the next chat, written by p::small");
+    expect(note.querySelector("p")!.textContent).toBe("Status: <b>half</b>");
+    expect(note.querySelector("b")).toBeNull();
+    await show([{ type: "handoff", through_seq: 9, failed: [{ model: "x::gone", reason: "unknown to this node" }] }], sessionRow());
+    expect(host.querySelector("[data-testid=handoff]")!.textContent).toBe(
+      "Hand-off note: the next chat gets the facts from this chat's log only (x::gone: unknown to this node)",
+    );
+  });
+});
+
 describe("artifacts", () => {
   test("a saved file is an item; a failed save says why", async () => {
     await show(

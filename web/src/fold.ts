@@ -54,6 +54,7 @@ const KNOWN = new Set([
   "chat_allow_added",
   "chat_allow_removed",
   "step_limit_changed",
+  "handoff_written",
 ]);
 
 const CLEARS_RETRY = new Set([
@@ -154,6 +155,21 @@ export function apply(v: SessionView, e: RawEvent): void {
     case "callback_refused":
       v.items.push({ type: "callback_refused", bg_ids: p.bg_ids, reason: p.reason });
       break;
+    case "handoff_written": {
+      // Its cost is the chat's, like a turn's (the sums only).
+      if (p.usage) {
+        v.usage.input_tokens += p.usage.input_tokens;
+        v.usage.output_tokens += p.usage.output_tokens;
+        if (p.usage.cache_read_tokens) v.usage.cache_read_tokens = (v.usage.cache_read_tokens ?? 0) + p.usage.cache_read_tokens;
+        if (p.usage.cache_write_tokens) v.usage.cache_write_tokens = (v.usage.cache_write_tokens ?? 0) + p.usage.cache_write_tokens;
+      }
+      const it: Extract<Item, { type: "handoff" }> = { type: "handoff", through_seq: p.through_seq };
+      if (p.text != null) it.text = p.text;
+      if (p.model != null) it.model = p.model;
+      if (p.failed != null && p.failed.length > 0) it.failed = p.failed;
+      v.items.push(it);
+      break;
+    }
     case "user_message": {
       const item: Extract<Item, { type: "user" }> = { type: "user", turn_id: p.turn_id, text: p.text };
       const names = ((p.attachments ?? []) as { name: string }[]).map((a) => a.name);
