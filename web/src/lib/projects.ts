@@ -121,7 +121,7 @@ export const projectsApi = {
   deleteTemplate: (id: string) => call<{ ok: boolean }>("DELETE", `/api/board-templates/${id}`),
   memories: (id: string) => call<{ memories: MemoryFact[] }>("GET", `${base(id)}/memory`),
   addMemory: (id: string, text: string) => call<MemoryFact>("POST", `${base(id)}/memory`, { text }),
-  updateMemory: (id: string, fact: string, b: { text?: string; status?: "active" }) =>
+  updateMemory: (id: string, fact: string, b: { text?: string; status?: "active" | "retired" }) =>
     call<MemoryFact>("PATCH", `${base(id)}/memory/${fact}`, b),
   deleteMemory: (id: string, fact: string) => call<{ ok: boolean }>("DELETE", `${base(id)}/memory/${fact}`),
 };

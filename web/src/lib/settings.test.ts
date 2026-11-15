@@ -25,7 +25,7 @@ describe("visibleSections", () => {
   it("a member: their account and the workspace, read-only", () => {
     expect(shape(viewer({}))).toEqual({
       account: ["profile", "preferences", "memory", "password"],
-      workspace: ["overview"],
+      workspace: ["overview", "facts"],
     });
     // A guest sees the same; what a role may do only shows inside.
     expect(shape(viewer({ workspace: ws("guest", []) }))).toEqual(shape(viewer({})));
