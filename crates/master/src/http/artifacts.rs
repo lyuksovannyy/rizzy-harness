@@ -447,7 +447,9 @@ async fn update(
     artifacts::notify(
         &m,
         row.owner_id.clone(),
-        row.shared() || b.visibility.is_some(),
+        (row.shared() || b.visibility.is_some())
+            .then(|| row.workspace_id.clone())
+            .flatten(),
     );
     detail(State(m), headers, Path(id)).await
 }
@@ -478,7 +480,7 @@ async fn remove(
         })
         .await?;
     storage::unlink(&m, gone).await;
-    artifacts::notify(&m, row.owner_id.clone(), row.shared());
+    artifacts::notify(&m, row.owner_id.clone(), artifacts::shared_in(&row));
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -563,7 +565,7 @@ async fn version_update(
             .call(move |s| s.preview_set_no_thumb(&blob, no_thumb))
             .await?;
     }
-    artifacts::notify(&m, row.owner_id.clone(), row.shared());
+    artifacts::notify(&m, row.owner_id.clone(), artifacts::shared_in(&row));
     version(State(m), headers, Path((id, vid))).await
 }
 
@@ -588,7 +590,7 @@ async fn version_delete(
         })
         .await?;
     storage::unlink(&m, gone).await;
-    artifacts::notify(&m, row.owner_id.clone(), row.shared());
+    artifacts::notify(&m, row.owner_id.clone(), artifacts::shared_in(&row));
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -723,7 +725,7 @@ async fn put_thumb(
         .mirror
         .call(move |s| s.preview_put_thumb(&blob, mime, &body))
         .await?;
-    artifacts::notify(&m, row.owner_id.clone(), row.shared());
+    artifacts::notify(&m, row.owner_id.clone(), artifacts::shared_in(&row));
     Ok(Json(json!({ "ok": true })))
 }
 

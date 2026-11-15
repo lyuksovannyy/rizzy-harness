@@ -583,7 +583,8 @@ async fn run_now_starts_a_chat_in_the_team_workspace_and_reports_back() {
     assert!(session_ids(&t, &all, &alex).await.contains(&sid));
 
     // Live: alex heard of it, bob did not.
-    t.master.changed("artifacts", None);
+    t.master
+        .changed("artifacts", harness_master::Audience::Everyone);
     assert!(routine_topics(&mut a_sock).await > 0);
     assert_eq!(routine_topics(&mut b_sock).await, 0);
 

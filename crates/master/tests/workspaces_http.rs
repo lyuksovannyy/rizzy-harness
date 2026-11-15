@@ -1322,15 +1322,17 @@ async fn ui_sockets_hear_workspace_changes() {
     let s = start().await;
     let (bob, _) = user(&s, "bob", false).await;
     let (_, carol_id) = user(&s, "carol", false).await;
+    // Bob's socket: a workspace's changes reach its members (PLAN.md T58;
+    // a server admin outside it is not told, `live_audience_http`).
     let mut req = format!("ws://{}/api/ws", s.addr)
         .into_client_request()
         .unwrap();
-    req.headers_mut().insert("cookie", s.admin.parse().unwrap());
+    req.headers_mut().insert("cookie", bob.parse().unwrap());
     let origin = format!("http://{}", req.uri().authority().unwrap());
     req.headers_mut().insert("origin", origin.parse().unwrap());
     let (mut socket, _) = tokio_tungstenite::connect_async(req).await.unwrap();
     socket
-        .send(Message::Text(common::socket_login(&s.admin).into()))
+        .send(Message::Text(common::socket_login(&bob).into()))
         .await
         .unwrap();
     // An answer proves the socket listens to live updates before the change.

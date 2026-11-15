@@ -2645,16 +2645,16 @@ impl NativeBackend {
                         match harness_tools::args::check(&schema, &call.input, closed) {
                             Ok(v) => {
                                 call.input = v;
-                                // A `workdir` the tool would refuse is
-                                // refused now, before anyone is asked.
-                                match call
-                                    .input
-                                    .get("workdir")
-                                    .and_then(serde_json::Value::as_str)
-                                {
-                                    Some(w) if own.is_some() && call.tool == "bash" => {
-                                        harness_tools::bash_workdir(&self.start_ctx(&ctx, host), w)
-                                            .err()
+                                // A call its tool would refuse whatever
+                                // anyone answers (a path or `workdir` the
+                                // node puts out of reach) is refused now,
+                                // with the tool's words, before anyone is
+                                // asked (T51); the tool checks again when
+                                // it runs. A denied tool keeps its policy
+                                // refusal.
+                                match own {
+                                    Some(t) if !host.tool_denied(&call.tool) => {
+                                        t.refusal(&self.start_ctx(&ctx, host), &call.input)
                                     }
                                     _ => None,
                                 }

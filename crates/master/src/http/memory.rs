@@ -18,9 +18,11 @@ use serde_json::{Value, json};
 
 use super::{ApiError, ApiResult, require, visible_session};
 use crate::auth::Principal;
-use crate::memory::{Place, fact_place, is_own, workspace_owner};
+use crate::memory::{
+    Place, audience_of, fact_place, is_own, memory_changed, place_audience, workspace_owner,
+};
 use crate::workspaces::{Perm, access};
-use crate::{Live, Master};
+use crate::{Audience, Master};
 
 type Store = std::sync::Arc<dyn MemoryStore>;
 
@@ -153,6 +155,7 @@ async fn add(
         (None, None) => None,
         (_, ws) => Some(owner_key(&m, &who, ws).await?),
     };
+    let to = place_audience(owner.as_deref());
     let f = mem
         .add(NewFact {
             owner_id: owner,
@@ -164,7 +167,7 @@ async fn add(
         })
         .await
         .map_err(memory_err)?;
-    let _ = m.inner.live.send(Live::MemoryChanged);
+    memory_changed(&m, to);
     Ok(Json(f.map(|f| fact_json(&f)).unwrap_or(Value::Null)))
 }
 
@@ -226,6 +229,7 @@ async fn update(
 ) -> ApiResult<Json<Value>> {
     let who = require(&m, &headers).await?;
     let (mem, cur) = own_fact(&m, &who, &id).await?;
+    let before = audience_of(&m, &cur).await;
     if b.text.is_some() {
         mem.update(&id, b.text.clone(), None)
             .await
@@ -238,6 +242,7 @@ async fn update(
     };
     let Some(mut f) = mem.update(&id, None, status).await.map_err(memory_err)? else {
         // A kept drop proposal is gone: it only retired its fact.
+        memory_changed(&m, before);
         return Ok(Json(json!({ "ok": true })));
     };
     let to = match b.place.as_deref() {
@@ -278,7 +283,7 @@ async fn update(
         crate::memory::clear_meta(&m, &id).await;
         f = moved;
     }
-    let _ = m.inner.live.send(Live::MemoryChanged);
+    told(&m, before, audience_of(&m, &f).await);
     Ok(Json(fact_json(&f)))
 }
 
@@ -288,10 +293,11 @@ async fn remove(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
     let who = require(&m, &headers).await?;
-    let (mem, _) = own_fact(&m, &who, &id).await?;
+    let (mem, cur) = own_fact(&m, &who, &id).await?;
+    let to = audience_of(&m, &cur).await;
     mem.delete(&id).await.map_err(memory_err)?;
     crate::memory::clear_meta(&m, &id).await;
-    let _ = m.inner.live.send(Live::MemoryChanged);
+    memory_changed(&m, to);
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -470,7 +476,7 @@ async fn ws_add(
     if let Some(f) = &f {
         crate::memory::note_added(&m, f, who.user_id.as_deref()).await;
     }
-    let _ = m.inner.live.send(Live::MemoryChanged);
+    memory_changed(&m, Audience::Workspace(ws));
     Ok(Json(json!(f)))
 }
 
@@ -540,6 +546,7 @@ async fn ws_update(
 ) -> ApiResult<Json<Value>> {
     let who = require(&m, &headers).await?;
     let (mem, cur, right, _, _) = ws_fact(&m, &who, &id, &fact).await?;
+    let before = audience_of(&m, &cur).await;
     if right == WsRight::Own && b.status.is_some() {
         return Err(forbidden(
             "a workspace admin keeps proposals into its memory",
@@ -562,7 +569,11 @@ async fn ws_update(
         }
     }
     let f = mem.get(&fact).await.map_err(memory_err)?;
-    let _ = m.inner.live.send(Live::MemoryChanged);
+    let after = match &f {
+        Some(f) => audience_of(&m, f).await,
+        None => before.clone(),
+    };
+    told(&m, before, after);
     Ok(Json(f.map(|f| json!(f)).unwrap_or(json!({ "ok": true }))))
 }
 
@@ -578,6 +589,7 @@ async fn ws_remove(
 ) -> ApiResult<Json<Value>> {
     let who = require(&m, &headers).await?;
     let (mem, cur, _, admin, _) = ws_fact(&m, &who, &id, &fact).await?;
+    let to = audience_of(&m, &cur).await;
     match cur.status {
         Status::Proposed => {}
         Status::Retired if admin => {}
@@ -596,8 +608,16 @@ async fn ws_remove(
     mem.delete(&fact).await.map_err(memory_err)?;
     crate::memory::clear_meta(&m, &fact).await;
     crate::memory::clear_authorship(&m, &fact).await;
-    let _ = m.inner.live.send(Live::MemoryChanged);
+    memory_changed(&m, to);
     Ok(Json(json!({ "ok": true })))
+}
+
+/// Tell who saw a fact before a change and who sees it after (T58).
+fn told(m: &Master, before: Audience, after: Audience) {
+    if after != before {
+        memory_changed(m, after);
+    }
+    memory_changed(m, before);
 }
 
 #[derive(Deserialize)]
@@ -620,7 +640,7 @@ async fn ws_settings(
         return Err(forbidden("only the workspace's admins and owners set this"));
     }
     crate::memory::set_members_edit(&m, &ws, b.members_edit).await?;
-    let _ = m.inner.live.send(Live::MemoryChanged);
+    memory_changed(&m, Audience::Workspace(ws));
     Ok(Json(json!({ "members_edit": b.members_edit })))
 }
 

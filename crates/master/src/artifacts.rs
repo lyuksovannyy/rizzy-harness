@@ -132,10 +132,18 @@ pub async fn features(m: &Master, who: &Principal, scope: Option<&Access>) -> Va
     json!({ "enabled": true, "show": visible, "why": why })
 }
 
-/// Tell the UIs a list changed: the owner's sockets for a private
-/// artifact, every socket for a shared one (content-free).
-pub fn notify(m: &Master, owner: Option<String>, shared: bool) {
-    m.changed("artifacts", if shared { None } else { owner });
+/// Tell the UIs a list changed (content-free): the owner's sockets, and
+/// for an artifact shared with a workspace (`shared_in`) its members'.
+pub fn notify(m: &Master, owner: Option<String>, shared_in: Option<String>) {
+    match shared_in {
+        Some(ws) => m.changed("artifacts", crate::Audience::Workspace(ws)),
+        None => m.changed("artifacts", crate::Audience::owner(owner.as_deref())),
+    }
+}
+
+/// The workspace `row` is shared with, if it is.
+pub fn shared_in(row: &ArtifactRow) -> Option<String> {
+    row.shared().then(|| row.workspace_id.clone()).flatten()
 }
 
 /// The kind a client labels: the blob's, as one of the search types.
@@ -227,7 +235,7 @@ pub async fn on_applied(m: &Master, node_id: &str, e: &RawEvent) {
         "artifact_stage_failed" => {
             let sid = e.session_id;
             if let Ok(Some(row)) = m.inner.mirror.call(move |s| s.session(sid)).await {
-                notify(m, row.owner_id, false);
+                notify(m, row.owner_id, None);
             }
         }
         _ => {}
@@ -321,9 +329,9 @@ async fn staged(m: &Master, node_id: &str, e: &RawEvent) {
             if let Some(p) = p {
                 crate::artifact_pull::start(m, p);
             }
-            notify(m, Some(owner), false);
+            notify(m, Some(owner), None);
         }
-        Ok(Ingested::Added { .. }) => notify(m, Some(owner), false),
+        Ok(Ingested::Added { .. }) => notify(m, Some(owner), None),
         Ok(Ingested::Duplicate) => {}
         Err(err) => tracing::warn!(error = %err, "could not record a staged file"),
     }
@@ -476,7 +484,7 @@ async fn fail_node(m: &Master, node_id: &str, reason: &'static str) {
     match res {
         Ok(owners) => {
             for o in owners {
-                notify(m, o, false);
+                notify(m, o, None);
             }
         }
         Err(e) => tracing::warn!(node = %node_id, error = %e, "could not fail pending files"),
@@ -507,8 +515,9 @@ pub async fn hourly(m: &Master) -> Vec<String> {
             );
         }
     }
+    // Hourly, not when anyone acts: it tells no one about anyone.
     if swept.rows > 0 {
-        m.changed("artifacts", None);
+        m.changed("artifacts", crate::Audience::Everyone);
     }
     swept.gone
 }

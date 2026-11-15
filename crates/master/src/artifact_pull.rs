@@ -217,7 +217,7 @@ async fn finish(m: &Master, p: &Pending, outcome: Outcome) {
         Outcome::Offline => return,
         Outcome::Done { media } => {
             if media {
-                m.changed("media", p.owner_id.clone());
+                m.changed("media", crate::Audience::owner(p.owner_id.as_deref()));
             }
         }
         Outcome::Failed(why) => {
@@ -241,7 +241,7 @@ async fn finish(m: &Master, p: &Pending, outcome: Outcome) {
         .await
         .ok()
         .flatten()
-        .is_some_and(|a| a.shared());
+        .and_then(|a| crate::artifacts::shared_in(&a));
     crate::artifacts::notify(m, p.owner_id.clone(), shared);
 }
 
