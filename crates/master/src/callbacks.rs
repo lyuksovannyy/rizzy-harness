@@ -24,8 +24,9 @@
 //!   one, not a sub-agent's. A refusal starts nothing and leaves an
 //!   attention item.
 //! * **The turn** goes through `Master::prompt` with `PromptOpts.callback`
-//!   (its third caller): the chat's own agent, no text, no context, no
-//!   memory.
+//!   (its third caller): the chat's own agent, no text, no context of its
+//!   own; the standing memory sections a person's turn of that agent would
+//!   read, computed fresh (PLAN T52), with no `recall` and no `remember`.
 //! * **Afterwards** the owner's attention list holds one row per chat: its
 //!   callback turns not seen yet, or why the agent was not resumed (a kv
 //!   row per chat, `callback-attention:<sid>`, no table). The chat list
