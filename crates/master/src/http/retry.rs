@@ -189,7 +189,7 @@ mod tests {
             payload,
         };
         assert_eq!(
-            super::failed_effort(&[e.clone()], "t1").as_deref(),
+            super::failed_effort(std::slice::from_ref(&e), "t1").as_deref(),
             Some("high")
         );
         assert_eq!(super::failed_effort(&[e], "t2"), None);

@@ -2412,13 +2412,12 @@ async fn one_turn(
 fn fail_last(host: &LogHost, turn: &str) {
     // drop the final answer (the request that failed) and close as error
     let mut log = host.log.lock().unwrap();
-    if let Some(i) = log.iter().rposition(|e| e.kind == "assistant_message") {
-        if log[i].payload["tool_calls"]
+    if let Some(i) = log.iter().rposition(|e| e.kind == "assistant_message")
+        && log[i].payload["tool_calls"]
             .as_array()
             .is_none_or(|a| a.is_empty())
-        {
-            log.truncate(i);
-        }
+    {
+        log.truncate(i);
     }
     drop(log);
     host.push(EventKind::Error(ErrorEvent {
