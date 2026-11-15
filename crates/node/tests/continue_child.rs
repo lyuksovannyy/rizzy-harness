@@ -545,7 +545,6 @@ async fn a_child_continued_after_the_chat_went_to_ask_asks() {
         }
     }
     assert_eq!(r.read("b.txt").as_deref(), Some("one\n"));
-    let _ = r.dir.path();
 }
 
 /// Depth cannot be got around: a child (at the node's depth limit, 1) has

@@ -235,7 +235,7 @@ fn bytes(req: &ChatRequest) -> String {
         .iter()
         .map(|m| match m {
             ChatMsg::System(t) => format!("system:{t}"),
-            ChatMsg::User(t) | ChatMsg::Opening(t) => format!("user:{t}"),
+            ChatMsg::User(t) | ChatMsg::Opening(t) | ChatMsg::StepContext(t) => format!("user:{t}"),
             ChatMsg::UserImages { text, .. } => format!("user:{text}"),
             ChatMsg::Tool { call_id, content } => format!("tool {call_id}:{content}"),
             ChatMsg::Assistant { text, tool_calls } => format!("assistant:{text}{tool_calls:?}"),

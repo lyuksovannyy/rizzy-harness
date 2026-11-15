@@ -626,7 +626,8 @@ pub struct ContextSent {
     pub frame: ContextFrame,
     /// In the order sent. Empty: the turn's opening carries no block (a
     /// summary mid-turn made the one it had unnecessary). A later record
-    /// for the same turn replaces it.
+    /// for the same turn replaces it, except a [`ContextFrame::Step`]
+    /// record, which is a block of its own after that step's results.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sections: Vec<SentSection>,
 }
@@ -641,6 +642,13 @@ pub enum ContextFrame {
     Task,
     /// After a callback turn's opening.
     Callback,
+    /// After a step's tool results (ADOPTION_PLAN B.9, PLAN.md T65): the
+    /// instruction files of the subfolders that step's `read`, `edit` and
+    /// `write` calls touched, each a standing section of its own keyed
+    /// `instructions:<path from the working folder>`. A turn has any number
+    /// of these; each is rebuilt where it stands in the log, and none of
+    /// them is the turn's opening record.
+    Step,
 }
 
 /// One section of a [`ContextSent`] block.

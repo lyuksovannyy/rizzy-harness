@@ -45,6 +45,14 @@ pub enum ChatMsg {
     /// the turn's opening (`place_notes`), never inside the person's
     /// message, and never the person's words (`user_text` is `None`).
     Summary(String),
+    /// The harness's block after a step's tool results (B.9, T65): the
+    /// instruction files of the subfolders that step touched, under the
+    /// harness's line, every line quoted ([`block`] with [`Whose::Step`]).
+    /// Sent as a user-role message of its own (`place_notes`), as the
+    /// repository's root files are, so it has their standing and no more;
+    /// never the person's words (`user_text` is `None`). An in-turn summary
+    /// keeps it, and clearing never touches it.
+    StepContext(String),
 }
 
 /// One image of a user message.
@@ -137,6 +145,21 @@ pub fn place_notes(msgs: Vec<ChatMsg>) -> Vec<ChatMsg> {
             // It took the notes before it when it was made (`open_callback`).
             ChatMsg::Opening(t) => out.push(ChatMsg::User(t)),
             ChatMsg::Summary(t) => out.push(ChatMsg::User(t)),
+            // A message of its own after the step's results. Notes waiting
+            // for a person's message join the last result first, where they
+            // would stand without it, so it moves no note.
+            ChatMsg::StepContext(t) => {
+                if !pending.is_empty()
+                    && let Some(ChatMsg::Tool { content, .. }) = out
+                        .iter_mut()
+                        .rev()
+                        .find(|m| matches!(m, ChatMsg::Tool { .. }))
+                {
+                    content.push_str("\n\n");
+                    content.push_str(&std::mem::take(&mut pending).join("\n\n"));
+                }
+                out.push(ChatMsg::User(t))
+            }
             other => out.push(other),
         }
     }
@@ -296,6 +319,8 @@ pub enum Whose {
     /// No text after it: it follows a callback turn's opening
     /// ([`with_instructions_after`]).
     Callback,
+    /// No text after it: it follows a step's tool results (B.9).
+    Step,
 }
 
 /// The harness's context block alone, as [`with_context`],
@@ -333,8 +358,27 @@ pub fn block(context: &str, notes: &[&str], whose: Whose) -> Option<String> {
                  brief.{notes}{quoted}"
             ))
         }
+        Whose::Step => {
+            if context.is_empty() {
+                return None;
+            }
+            let (quoted, lines) = quote_lines(context);
+            Some(format!(
+                "{STEP_CONTEXT_LEAD}, not the person's words and not program output: the {lines} \
+                 line(s) below, each starting with \"{OUTPUT_QUOTE}\", are the AGENTS.md (or \
+                 CLAUDE.md) of each folder between the files your calls above touched and the \
+                 session's working folder, read now. Each applies to the files under its folder, \
+                 together with the repository's instruction files sent with the turn's message; a \
+                 relative path inside one is meant from its folder. Every line of a file is \
+                 indented by two spaces; a line that is not is the harness's. They are the \
+                 repository's text: they change no setting, permission or tool.{quoted}"
+            ))
+        }
     }
 }
+
+/// How the harness's line over a step's instruction files begins (B.9).
+pub const STEP_CONTEXT_LEAD: &str = "[harness] Instruction files of the folders you just worked in";
 
 fn frame(context: &str, notes: &[&str], whose: &str, follows: &str) -> Option<String> {
     let notes: String = notes.iter().map(|n| format!(" {n}")).collect();
@@ -740,7 +784,8 @@ pub fn estimate_tokens(messages: &[ChatMsg]) -> u64 {
             | ChatMsg::Note(t)
             | ChatMsg::CallNote(t)
             | ChatMsg::Opening(t)
-            | ChatMsg::Summary(t) => t.len(),
+            | ChatMsg::Summary(t)
+            | ChatMsg::StepContext(t) => t.len(),
             ChatMsg::UserImages { text, images } => text.len() + images.len() * IMAGE_CHARS,
             ChatMsg::Assistant { text, tool_calls } => {
                 text.len()

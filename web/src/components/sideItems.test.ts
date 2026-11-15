@@ -48,6 +48,13 @@ describe("sub-agents beside the chat", () => {
     ]);
   });
 
+  test("a follow-up in a later turn counts the earlier runs", () => {
+    const { agents } = sideItems(
+      view([delegate("c1", "write the test", CHILD), { type: "turn_end", turn_id: "t1", reason: "completed" }, { type: "user", turn_id: "t2", text: "more" }, delegate("c2", "again", CHILD, true, CHILD)]),
+    );
+    expect(agents.map((a) => [a.call_id, a.runs])).toEqual([["c2", 2]]);
+  });
+
   test("two different children stay two rows", () => {
     const { agents } = sideItems(view([delegate("c1", "a", CHILD), delegate("c2", "b", OTHER)]));
     expect(agents.map((a) => a.runs)).toEqual([1, 1]);

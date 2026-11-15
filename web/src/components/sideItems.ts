@@ -62,15 +62,19 @@ export function sideItems(view: SessionView | null | undefined, keep: ReadonlySe
   const turnRunning = view.running_turn !== null;
   const agents: AgentRow[] = [];
   const callIndex = new Map<string, number>();
+  const runsOf = new Map<string, number>();
   items.forEach((it, i) => {
     if (it.type !== "tool") return;
     callIndex.set(it.call_id, i);
     if (it.tool !== "delegate") return;
+    const output = it.result ? it.result.output : it.live_output;
+    const child = /session: ([0-9a-f-]{36})/.exec(output)?.[1] ?? null;
+    // Runs over the whole chat: a follow-up in a later turn counts the
+    // earlier ones too.
+    if (child) runsOf.set(child, (runsOf.get(child) ?? 0) + 1);
     const state = agentState(it, turnRunning);
     if (i < from && state !== "running") return;
-    const output = it.result ? it.result.output : it.live_output;
     const { head, cut } = commandHead(typeof it.input?.task === "string" ? it.input.task : "");
-    const child = /session: ([0-9a-f-]{36})/.exec(output)?.[1] ?? null;
     const row: AgentRow = {
       call_id: it.call_id,
       child,
@@ -78,11 +82,11 @@ export function sideItems(view: SessionView | null | undefined, keep: ReadonlySe
       task: head,
       cut,
       state,
-      runs: 1,
+      runs: child ? runsOf.get(child)! : 1,
     };
     // A follow-up to a child already listed takes its row's place.
     const at = child ? agents.findIndex((a) => a.child === child) : -1;
-    if (at >= 0) agents[at] = { ...row, runs: agents[at]!.runs + 1 };
+    if (at >= 0) agents[at] = row;
     else agents.push(row);
   });
   const commands: CommandRow[] = [];

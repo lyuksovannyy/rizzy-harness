@@ -144,7 +144,10 @@ fn text_of(req: &ChatRequest) -> String {
             ChatMsg::UserImages { text, .. } => text.clone(),
             ChatMsg::Tool { content, .. } => content.clone(),
             ChatMsg::Assistant { text, .. } => text.clone(),
-            ChatMsg::Note(t) | ChatMsg::CallNote(t) | ChatMsg::Summary(t) => t.clone(),
+            ChatMsg::Note(t)
+            | ChatMsg::CallNote(t)
+            | ChatMsg::Summary(t)
+            | ChatMsg::StepContext(t) => t.clone(),
         })
         .collect::<Vec<_>>()
         .join("\n")
