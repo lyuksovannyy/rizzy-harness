@@ -481,6 +481,15 @@ fn events() -> Vec<RawEvent> {
             usage: Some(Usage {
                 input_tokens: 900,
                 output_tokens: 60,
+                by_model: [(
+                    "demo::small".to_string(),
+                    ModelTokens {
+                        input_tokens: 900,
+                        output_tokens: 60,
+                        ..Default::default()
+                    },
+                )]
+                .into(),
                 ..Default::default()
             }),
         }),
@@ -594,14 +603,38 @@ fn events() -> Vec<RawEvent> {
         EventKind::TurnEnded(TurnEnded {
             turn_id: "t5".into(),
             reason: TurnEndReason::Completed,
+            // Who used which tokens (the cost estimate's input): the main
+            // model with cache reads and writes, a sub-agent on the small
+            // model, and 100 input tokens no model was stamped on.
             usage: Some(Usage {
                 input_tokens: 900,
                 output_tokens: 10,
                 context_tokens: 800,
+                cache_read_tokens: 300,
+                cache_write_tokens: 100,
                 window: Some(128_000),
                 summary_at: Some(102_400),
                 model: Some("openai::gpt-4o".into()),
-                ..Default::default()
+                by_model: [
+                    (
+                        "openai::gpt-4o".to_string(),
+                        ModelTokens {
+                            input_tokens: 600,
+                            output_tokens: 8,
+                            cache_read_tokens: 300,
+                            cache_write_tokens: 100,
+                        },
+                    ),
+                    (
+                        "demo::small".to_string(),
+                        ModelTokens {
+                            input_tokens: 200,
+                            output_tokens: 2,
+                            ..Default::default()
+                        },
+                    ),
+                ]
+                .into(),
             }),
         }),
         EventKind::TurnStarted(TurnStarted {

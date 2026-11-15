@@ -242,7 +242,7 @@ fn a_file_whose_id_is_a_new_alias_keeps_loading() {
 fn parse_fields_and_hash_changes_with_prompt() {
     let a = parse(
         "reviewer",
-        "---\nname: Reviewer\ndescription: Reviews code.\ntools: [read, grep]\nmodel: some-model\neffort: high\nbudget: standard\n---\nReview carefully.\n",
+        "---\nname: Reviewer\ndescription: Reviews code.\ntools: [read, grep]\nmodel: some-model\neffort: high\n---\nReview carefully.\n",
         false,
     )
     .unwrap();
@@ -423,8 +423,8 @@ fn features_are_read_off_the_definitions() {
 }
 
 #[test]
-fn custom_agents_get_tools_and_budget_from_their_features() {
-    use harness_core::agent::{Budget, ToolSelection};
+fn custom_agents_get_tools_from_their_features() {
+    use harness_core::agent::ToolSelection;
     let a = harness_agents::custom(
         "reviewer",
         "Reviewer",
@@ -451,7 +451,6 @@ fn custom_agents_get_tools_and_budget_from_their_features() {
             "skill"
         ]
     );
-    assert_eq!(a.spec.budget, Budget::Lean);
     assert!(a.delegates.is_empty(), "delegate is off");
     assert_eq!(a.features, features());
 
@@ -462,7 +461,6 @@ fn custom_agents_get_tools_and_budget_from_their_features() {
     };
     let b =
         harness_agents::custom("lead", "Lead", "", "Lead.", busy, vec!["coder".into()]).unwrap();
-    assert_eq!(b.spec.budget, Budget::Standard);
     assert_eq!(b.delegates, ["coder"]);
     assert!(b.spec.caps.is_some());
 
@@ -885,4 +883,18 @@ fn recall_is_its_own_switch() {
     )
     .unwrap();
     assert!(!old.features.recall);
+}
+
+/// `budget:` was parsed and never read (research 07 §6: a setting that
+/// promises something and does nothing); it is gone, and a file that still
+/// has it says so by name instead of being loaded with it ignored.
+#[test]
+fn a_budget_line_is_refused_by_name() {
+    let e = parse(
+        "old",
+        "---\nname: Old\ndescription: d\ntools: [read]\nbudget: lean\n---\nHi.\n",
+        false,
+    )
+    .unwrap_err();
+    assert!(format!("{e:#}").contains("budget"), "{e:#}");
 }

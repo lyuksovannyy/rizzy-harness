@@ -746,6 +746,12 @@
         "text": "Status:\nThe build fails.",
         "through_seq": 40,
         "usage": {
+          "by_model": {
+            "demo::small": {
+              "input_tokens": 900,
+              "output_tokens": 60
+            }
+          },
           "context_tokens": 0,
           "input_tokens": 900,
           "output_tokens": 60
@@ -957,6 +963,20 @@
         "reason": "completed",
         "turn_id": "t5",
         "usage": {
+          "by_model": {
+            "demo::small": {
+              "input_tokens": 200,
+              "output_tokens": 2
+            },
+            "openai::gpt-4o": {
+              "cache_read_tokens": 300,
+              "cache_write_tokens": 100,
+              "input_tokens": 600,
+              "output_tokens": 8
+            }
+          },
+          "cache_read_tokens": 300,
+          "cache_write_tokens": 100,
           "context_tokens": 800,
           "input_tokens": 900,
           "model": "openai::gpt-4o",
@@ -1559,8 +1579,44 @@
         "status": "pending"
       }
     ],
+    "turn_usage": {
+      "by_model": {
+        "demo::small": {
+          "input_tokens": 200,
+          "output_tokens": 2
+        },
+        "openai::gpt-4o": {
+          "cache_read_tokens": 300,
+          "cache_write_tokens": 100,
+          "input_tokens": 600,
+          "output_tokens": 8
+        }
+      },
+      "cache_read_tokens": 300,
+      "cache_write_tokens": 100,
+      "context_tokens": 800,
+      "input_tokens": 900,
+      "model": "openai::gpt-4o",
+      "output_tokens": 10,
+      "summary_at": 102400,
+      "window": 128000
+    },
     "unknown_events": 1,
     "usage": {
+      "by_model": {
+        "demo::small": {
+          "input_tokens": 1100,
+          "output_tokens": 62
+        },
+        "openai::gpt-4o": {
+          "cache_read_tokens": 300,
+          "cache_write_tokens": 100,
+          "input_tokens": 600,
+          "output_tokens": 8
+        }
+      },
+      "cache_read_tokens": 300,
+      "cache_write_tokens": 100,
       "context_tokens": 0,
       "input_tokens": 1801,
       "output_tokens": 72

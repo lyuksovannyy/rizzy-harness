@@ -17,7 +17,7 @@ import { useEffect, useMemo, useState } from "react";
 import { call } from "../api";
 import { leftText, msLeft, reasonText } from "../lib/background";
 import { showHidden, shownName } from "../md/hidden";
-import type { SessionView } from "../types";
+import type { ModelInfo, SessionView } from "../types";
 import { type AgentRow, type CommandRow, type RowState, sideItems } from "./sideItems";
 import { SubagentActivity } from "./SubagentActivity";
 import "./sidePanel.css";
@@ -63,7 +63,7 @@ function State({ state, words }: { state: RowState; words?: string }) {
   return <span className={`tool-status side-state s-${STATE_CLASS[state]}`}>{words ?? STATE_WORDS[state]}</span>;
 }
 
-function AgentItem({ row }: { row: AgentRow }) {
+function AgentItem({ row, models }: { row: AgentRow; models?: ModelInfo[] }) {
   return (
     <li className="side-row" data-kind="agent" data-call={row.call_id}>
       <div className="side-row-head">
@@ -77,7 +77,11 @@ function AgentItem({ row }: { row: AgentRow }) {
       </div>
       {row.child && (
         <div className="side-row-foot">
-          <SubagentActivity sessionId={row.child} running={row.state === "running" || row.state === "waiting"} />
+          <SubagentActivity
+            sessionId={row.child}
+            running={row.state === "running" || row.state === "waiting"}
+            models={models}
+          />
           <a className="link small" href={`#/s/${row.child}`}>
             Open its chat
           </a>
@@ -97,6 +101,8 @@ export default function SidePanel(props: {
    * the count button, whose click gives the side back (review D7). */
   yielded?: boolean;
   onReclaim?: () => void;
+  /** The model list with its prices, for each sub-agent's cost. */
+  models?: ModelInfo[];
 }) {
   const { sessionId, view, away } = props;
   const [open, setOpen] = useState(true);
@@ -221,7 +227,7 @@ export default function SidePanel(props: {
       </div>
       <ul className="side-rows">
         {agents.map((a) => (
-          <AgentItem key={a.call_id} row={a} />
+          <AgentItem key={a.call_id} row={a} models={props.models} />
         ))}
         {agents.length > 0 && commands.length > 0 && <li role="separator" className="side-sep" />}
         {commands.length > 0 && (

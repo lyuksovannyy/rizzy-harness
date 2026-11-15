@@ -9,7 +9,8 @@ import { markedText } from "../lib/callText";
 import { t } from "../lib/i18n";
 import { LiveCtx } from "../lib/liveCtx";
 import { shownName } from "../md/hidden";
-import type { Item, SessionView } from "../types";
+import { costText, estimate, pricesSet } from "../lib/cost";
+import type { Item, ModelInfo, SessionView } from "../types";
 import { compactTokens } from "./ContextMeter";
 
 type Tool = Extract<Item, { type: "tool" }>;
@@ -40,10 +41,12 @@ export interface Activity {
   last: string | null;
   running: boolean;
   waiting: boolean;
+  /** Its cost estimate's words, when the server prices models (and given). */
+  cost?: string | null;
 }
 
 /** Pure, for tests. */
-export function activityOf(v: SessionView): Activity {
+export function activityOf(v: SessionView, models?: ModelInfo[]): Activity {
   let tools = 0;
   let last: Tool | null = null;
   for (const it of v.items) {
@@ -59,6 +62,7 @@ export function activityOf(v: SessionView): Activity {
     last: last ? callWords(last) : null,
     running: v.running_turn !== null,
     waiting: v.pending_approvals.length > 0,
+    cost: models && tokens > 0 && pricesSet(models) ? (costText(estimate(v.usage, models))?.text ?? null) : null,
   };
 }
 
@@ -69,6 +73,7 @@ export function activityWords(a: Activity): string {
   if (a.waiting) parts.push(t("conv.childWaiting"));
   else if (a.last) parts.push(t(a.running ? "conv.childNow" : "conv.childLast", { what: a.last }));
   if (a.tokens !== null) parts.push(t("conv.childTokens", { n: compactTokens(a.tokens) }));
+  if (a.cost) parts.push(a.cost);
   return parts.length ? parts.join(" · ") : t("conv.childStarting");
 }
 
@@ -106,7 +111,15 @@ function settled(v: SessionView): boolean {
 /** `running`: the parent's turn is live and still waits for this child.
  * An ended child is read once: its line is computed from the replay, kept,
  * and the subscription (and the folded log it holds) let go (review 98-1). */
-export function SubagentActivity({ sessionId, running }: { sessionId: string; running: boolean }) {
+export function SubagentActivity({
+  sessionId,
+  running,
+  models,
+}: {
+  sessionId: string;
+  running: boolean;
+  models?: ModelInfo[];
+}) {
   const live = useContext(LiveCtx);
   const [frozen, setFrozen] = useState<string | null>(null);
   const [ref, wanted] = useFollow(running);
@@ -120,7 +133,7 @@ export function SubagentActivity({ sessionId, running }: { sessionId: string; ru
   useSyncExternalStore((l) => (live ? live.subscribe(l) : () => {}), version, version);
   const v = follow ? live?.view(sessionId) : undefined;
   // Nothing until its log arrives: an unknown or refused session shows no line.
-  const words = v && v.head_seq > 0 ? activityWords(activityOf(v)) : null;
+  const words = v && v.head_seq > 0 ? activityWords(activityOf(v, models)) : null;
   const loaded = !running && !!v && v.head_seq > 0;
   const head = v?.head_seq ?? 0;
   useEffect(() => {

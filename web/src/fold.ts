@@ -1,5 +1,5 @@
 // Port of crates/core/src/view.rs. The shared fixture test keeps them equal.
-import type { Item, RawEvent, SessionView, StagedArtifact, TodoItem } from "./types";
+import type { Item, RawEvent, SessionView, StagedArtifact, TodoItem, Usage } from "./types";
 
 export function emptyView(): SessionView {
   return {
@@ -20,6 +20,29 @@ export function emptyView(): SessionView {
 }
 
 export class FoldError extends Error {}
+
+/** `Usage::add` in crates/core/src/event.rs: the sums, and the per-model
+ * breakdown up to MAX_USAGE_MODELS (a model past it stays unattributed). */
+export const MAX_USAGE_MODELS = 16;
+
+function addUsage(to: Usage, u: Usage) {
+  to.input_tokens += u.input_tokens;
+  to.output_tokens += u.output_tokens;
+  if (u.cache_read_tokens) to.cache_read_tokens = (to.cache_read_tokens ?? 0) + u.cache_read_tokens;
+  if (u.cache_write_tokens) to.cache_write_tokens = (to.cache_write_tokens ?? 0) + u.cache_write_tokens;
+  for (const [model, t] of Object.entries(u.by_model ?? {})) {
+    const by = (to.by_model ??= {});
+    const mine = by[model];
+    if (mine) {
+      mine.input_tokens += t.input_tokens;
+      mine.output_tokens += t.output_tokens;
+      if (t.cache_read_tokens) mine.cache_read_tokens = (mine.cache_read_tokens ?? 0) + t.cache_read_tokens;
+      if (t.cache_write_tokens) mine.cache_write_tokens = (mine.cache_write_tokens ?? 0) + t.cache_write_tokens;
+    } else if (Object.keys(by).length < MAX_USAGE_MODELS) {
+      by[model] = { ...t };
+    }
+  }
+}
 
 const KNOWN = new Set([
   "session_created",
@@ -157,12 +180,7 @@ export function apply(v: SessionView, e: RawEvent): void {
       break;
     case "handoff_written": {
       // Its cost is the chat's, like a turn's (the sums only).
-      if (p.usage) {
-        v.usage.input_tokens += p.usage.input_tokens;
-        v.usage.output_tokens += p.usage.output_tokens;
-        if (p.usage.cache_read_tokens) v.usage.cache_read_tokens = (v.usage.cache_read_tokens ?? 0) + p.usage.cache_read_tokens;
-        if (p.usage.cache_write_tokens) v.usage.cache_write_tokens = (v.usage.cache_write_tokens ?? 0) + p.usage.cache_write_tokens;
-      }
+      if (p.usage) addUsage(v.usage, p.usage);
       const it: Extract<Item, { type: "handoff" }> = { type: "handoff", through_seq: p.through_seq };
       if (p.text != null) it.text = p.text;
       if (p.model != null) it.model = p.model;
@@ -282,10 +300,8 @@ export function apply(v: SessionView, e: RawEvent): void {
     }
     case "turn_ended":
       if (p.usage) {
-        v.usage.input_tokens += p.usage.input_tokens;
-        v.usage.output_tokens += p.usage.output_tokens;
-        if (p.usage.cache_read_tokens) v.usage.cache_read_tokens = (v.usage.cache_read_tokens ?? 0) + p.usage.cache_read_tokens;
-        if (p.usage.cache_write_tokens) v.usage.cache_write_tokens = (v.usage.cache_write_tokens ?? 0) + p.usage.cache_write_tokens;
+        addUsage(v.usage, p.usage);
+        v.turn_usage = structuredClone(p.usage);
         v.context_tokens = p.usage.context_tokens;
         if (p.usage.window != null) v.context_window = p.usage.window;
         else delete v.context_window;

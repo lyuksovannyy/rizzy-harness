@@ -336,6 +336,8 @@ export interface SessionView {
   context_model?: string;
   /** Calls allowed for the rest of the chat, by grant id; absent when none. */
   chat_allows?: Record<string, ChatAllow>;
+  /** The latest turn's own usage (`turn_ended.usage`); absent before one. */
+  turn_usage?: Usage;
 }
 
 export type RetryReason = "rate_limit" | "overloaded" | "server_error" | "network" | "no_answer";
@@ -432,6 +434,17 @@ export interface Usage {
   window?: number;
   summary_at?: number;
   model?: string;
+  /** The sums split by the model (prefixed id) that used them; tokens in no
+   * bucket are unattributed. Absent when empty (as serde writes it). */
+  by_model?: Record<string, ModelTokens>;
+}
+
+/** One model's share of a Usage (input includes cache reads and writes). */
+export interface ModelTokens {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens?: number;
+  cache_write_tokens?: number;
 }
 
 export interface UploadedAttachment {
@@ -566,6 +579,22 @@ export interface ModelInfo {
   /** The provider no longer lists it: kept so sessions and agents naming it
    * still resolve, but not offered for new picks. */
   unavailable: boolean;
+  /** What the server's admin set it to cost; absent: unpriced. */
+  price?: PriceInfo;
+}
+
+/** Per million tokens, in the server's currency; a class left out is
+ * unknown (never free). */
+export interface ModelPrice {
+  input?: number;
+  cached_input?: number;
+  cache_write?: number;
+  output?: number;
+}
+
+export interface PriceInfo extends ModelPrice {
+  /** ISO 4217, one for the whole server. */
+  currency: string;
 }
 
 export type BackdropPref = "animated" | "still" | "off";
@@ -632,6 +661,8 @@ export interface ProviderModel {
   unavailable: boolean;
   /** When it went missing (ms). */
   missing_since: number | null;
+  /** Set by the admin; absent or null: unpriced. */
+  price?: ModelPrice | null;
 }
 
 /** The server's last listing of a provider; fetched_ms null: never listed. */
@@ -670,6 +701,8 @@ export interface ProvidersState {
   agent_models: Record<string, AgentChain>;
   /** At least one non-mock provider. */
   configured: boolean;
+  /** The currency every model price is in (`[pricing]`). */
+  currency: string;
 }
 
 export type SearchKind = "chats" | "projects" | "media" | "artifacts";
