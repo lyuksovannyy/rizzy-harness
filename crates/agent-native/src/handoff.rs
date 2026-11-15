@@ -119,9 +119,7 @@ impl NativeBackend {
         let mut out = NoteOutcome::default();
         let mut usage = Usage::default();
         for (model, window) in &ctx.models {
-            let Some(input) = note_input(&ctx.history, *window) else {
-                return None;
-            };
+            let input = note_input(&ctx.history, *window)?;
             let req = ChatRequest {
                 model: model.clone(),
                 messages: vec![ChatMsg::System(HANDOFF_PROMPT.into()), ChatMsg::User(input)],

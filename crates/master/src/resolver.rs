@@ -445,7 +445,16 @@ impl Resolver {
                         });
                     c.model = Some(small.clone());
                     c.fallbacks = chain[1..].to_vec();
+                    // A small model its provider no longer lists starts
+                    // with the fallbacks, as any model would.
                     c.unavailable = spec.unavailable.clone();
+                    if self
+                        .cfg
+                        .as_ref()
+                        .is_some_and(|cfg| cfg.model_unavailable(&small))
+                    {
+                        c.unavailable.push(small.clone());
+                    }
                     c.no_effort = chain
                         .iter()
                         .filter(|m| !self.find_model(m).is_some_and(|m| m.effort))

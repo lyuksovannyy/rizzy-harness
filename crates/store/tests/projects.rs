@@ -664,7 +664,10 @@ fn earlier_chats_prefer_the_hand_off_note_and_carry_the_facts() {
             said("Done, tests pass."),
             summary.clone(),
             ended.clone(),
-            ("handoff_written", json!({"through_seq": 7, "text": "Status:\nDocs left."})),
+            (
+                "handoff_written",
+                json!({"through_seq": 7, "text": "Status:\nDocs left."}),
+            ),
         ],
     );
     let failed = chat_with(
@@ -699,7 +702,10 @@ fn earlier_chats_prefer_the_hand_off_note_and_carry_the_facts() {
             asked.clone(),
             changed.clone(),
             ended.clone(),
-            ("handoff_written", json!({"through_seq": 5, "text": "Status:\nold"})),
+            (
+                "handoff_written",
+                json!({"through_seq": 5, "text": "Status:\nold"}),
+            ),
             started.clone(),
             ended.clone(),
         ],
@@ -723,10 +729,20 @@ fn earlier_chats_prefer_the_hand_off_note_and_carry_the_facts() {
     // The note does not make the chat "last active": its turn's end does.
     assert_eq!(n.updated_ms, 106);
     assert_eq!(n.facts[0], "Asked first: add a --json flag");
-    assert!(n.facts.iter().any(|l| l == "Files changed (1): src/cli.rs"), "{:?}", n.facts);
+    assert!(
+        n.facts.iter().any(|l| l == "Files changed (1): src/cli.rs"),
+        "{:?}",
+        n.facts
+    );
     let f = by(failed);
     assert_eq!(f.source, EarlierSource::Summary);
-    assert!(f.facts.iter().any(|l| l.starts_with("Task list: 0 of 1 done")), "{:?}", f.facts);
+    assert!(
+        f.facts
+            .iter()
+            .any(|l| l.starts_with("Task list: 0 of 1 done")),
+        "{:?}",
+        f.facts
+    );
     let st = by(stale);
     assert_eq!((st.source, st.stale), (EarlierSource::Note, true));
     let fo = by(facts_only);
