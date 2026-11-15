@@ -3423,6 +3423,10 @@ fn tool_reason(tool: &str, risk: ToolRisk, input: &Value, policy: &crate::NodePo
     }
 }
 
+/// A turn's changes as a diff (X.12); its own file.
+#[path = "session_diff.rs"]
+mod diff;
+
 #[cfg(test)]
 mod tests {
     use super::*;
