@@ -344,6 +344,7 @@ async fn run(b: &NativeBackend, host: &Host, cwd: &Path, t: Turn<'_>) -> TurnOut
         agent: None,
         turn_id: t.id.into(),
         environment: None,
+        retry: None,
     }));
     if !t.callback {
         host.push(EventKind::UserMessage(UserMessage {

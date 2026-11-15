@@ -54,6 +54,11 @@ pub const CAP_HANDOFF: &str = "handoff";
 /// `/compact`, summarising the chat's history now.
 pub const CAP_COMPACT: &str = "compact";
 
+/// The node capability that announces `session.retry` (X.21): a person's
+/// Retry of the chat's failed last turn. The master offers Retry only for
+/// chats on nodes whose hello listed it.
+pub const CAP_RETRY: &str = "retry";
+
 /// The node capability that announces `session.diff` (X.12, PLAN.md T53).
 /// The master asks for a turn's changes only on nodes whose hello listed it.
 pub const CAP_DIFF: &str = "diff";
@@ -319,6 +324,11 @@ pub const COMPACT_BUSY: &str = "This chat is already being summarised.";
 pub const COMPACTING: &str = "This chat is being summarised: send your message when that is \
      done.";
 
+/// How a node's refusal of a `session.retry` begins when the turn may not
+/// be retried (not the chat's last, ended otherwise, followed by something,
+/// a turn the person did not start): the master answers 409 with it.
+pub const RETRY_REFUSED: &str = "This turn can't be retried";
+
 /// The most background ids one `session.callback` may name.
 pub const MAX_CALLBACK_IDS: usize = 64;
 
@@ -566,6 +576,27 @@ pub enum MasterToNode {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context: Option<Box<harness_core::backend::MasterContext>>,
     },
+    /// Run the chat's failed last turn again (a person's Retry, X.21; only
+    /// to nodes with [`CAP_RETRY`]). Sent only for the chat's owner. No
+    /// text, attachment, image or file: the message is the one the failed
+    /// turn answered, in the node's log. A request only: the node starts it
+    /// only if `turn_id` is its log's last turn, a person's, ended `error`,
+    /// `interrupted` or `stopped` with nothing after it, and no turn or
+    /// `/compact` runs ([`RETRY_REFUSED`], `TURN_RUNNING`, [`COMPACTING`]).
+    #[serde(rename = "session.retry")]
+    Retry {
+        req_id: String,
+        session_id: SessionId,
+        turn_id: String,
+        /// The chat's agent, resolved by the master as for a prompt.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<AgentSpec>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        savings: Option<harness_core::savings::Savings>,
+        /// The master's context for the turn, as for a prompt.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context: Option<Box<harness_core::backend::MasterContext>>,
+    },
     /// Write the chat's hand-off note now if one is due (X.16,
     /// docs/handoff-notes.md; only to nodes with [`CAP_HANDOFF`]). A
     /// request only: the node writes it only for a chat of its own that
@@ -787,6 +818,7 @@ impl MasterToNode {
             MasterToNode::Create { req_id, .. }
             | MasterToNode::Prompt { req_id, .. }
             | MasterToNode::Callback { req_id, .. }
+            | MasterToNode::Retry { req_id, .. }
             | MasterToNode::Handoff { req_id, .. }
             | MasterToNode::Compact { req_id, .. }
             | MasterToNode::SetAgent { req_id, .. }

@@ -38,6 +38,7 @@ fn starts_work(msg: &MasterToNode) -> bool {
         MasterToNode::Create { .. }
             | MasterToNode::Prompt { .. }
             | MasterToNode::Callback { .. }
+            | MasterToNode::Retry { .. }
             | MasterToNode::Handoff { .. }
             | MasterToNode::Compact { .. }
             | MasterToNode::Restore { .. }
@@ -109,6 +110,7 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::Delete { session_id, .. }
         | MasterToNode::Prompt { session_id, .. }
         | MasterToNode::Callback { session_id, .. }
+        | MasterToNode::Retry { session_id, .. }
         | MasterToNode::Handoff { session_id, .. }
         | MasterToNode::Compact { session_id, .. }
         | MasterToNode::SetAgent { session_id, .. }
@@ -618,6 +620,9 @@ impl NodeRuntime {
                 capabilities.push(harness_protocol::CAP_ARTIFACTS.into());
             }
             capabilities.push(harness_protocol::CAP_IMAGES.into());
+            // A person's Retry of a failed last turn (X.21), in chats of
+            // either profile.
+            capabilities.push(harness_protocol::CAP_RETRY.into());
             // `remember` where this node offers it: registered, and not
             // refused by its own policy (the master files nothing otherwise).
             if self.inner.cfg.backend.has_tool("remember")
@@ -1229,6 +1234,30 @@ impl NodeRuntime {
                         s.callback(bg_ids, agent, savings.unwrap_or_default(), standing)
                             .await
                     }
+                    None => Err("unknown session".into()),
+                }
+            }
+            MasterToNode::Retry {
+                session_id,
+                turn_id,
+                agent,
+                savings,
+                context,
+                ..
+            } => {
+                self.audit("session.retry", session_id).await;
+                let (context, standing) = match context {
+                    Some(c) => (c.turn, Some(c.standing)),
+                    None => (None, None),
+                };
+                let extra = harness_core::backend::TurnExtra {
+                    savings: savings.unwrap_or_default(),
+                    context,
+                    standing,
+                    ..Default::default()
+                };
+                match self.session(session_id) {
+                    Some(s) => s.retry(&turn_id, agent, extra).await,
                     None => Err("unknown session".into()),
                 }
             }

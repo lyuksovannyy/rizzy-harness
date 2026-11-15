@@ -440,6 +440,11 @@ pub struct AgentRef {
     /// from the log alone (PLAN.md T55).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub withheld: Vec<String>,
+    /// The reasoning effort the turn ran at (the message's choice, else
+    /// the agent's), when one was set: a Retry runs at the failed turn's
+    /// (X.21).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
 }
 
 /// Groups parallel answers to the same prompt (e.g. several models).
@@ -467,6 +472,87 @@ pub struct TurnStarted {
     /// (the provider's prompt cache). Written by the node only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment: Option<String>,
+    /// Set on the person's Retry of the chat's last turn, which ended
+    /// without an answer (ADOPTION_PLAN X.21, PLAN.md "Retry"): a person's
+    /// turn (`cause` is `None`) that has no `user_message` of its own. It
+    /// answers the message the failed turn answered, which stays in the
+    /// log once; the model is sent the failed attempt's steps and then
+    /// [`retry_opening`], built from this alone. Written by the node only,
+    /// after its own checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<RetryOf>,
+}
+
+/// The failed turn a Retry runs again (`turn_started.retry`), as the node
+/// read it from its own log when the retry started.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetryOf {
+    /// The turn that failed: the chat's last, ended `error`,
+    /// `interrupted` or `stopped`.
+    pub turn_id: String,
+    pub reason: TurnEndReason,
+    /// The failed turn's last `error` message, cut to
+    /// [`RETRY_ERROR_CHARS`] characters; none when it recorded none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// The model the failed turn ended on (its `turn_ended.usage.model`),
+    /// and the one the retry runs on: the chat shows both when they differ.
+    /// For the person only; the model is not told.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+/// The most characters of the failed turn's error a retry's opening quotes.
+pub const RETRY_ERROR_CHARS: usize = 600;
+
+/// The end reasons a person may retry: the turn gave no complete answer
+/// and the person did not stop it themselves (Stop is a decision: they
+/// write what to do instead). `limit` ended with an answer.
+pub fn retryable(reason: TurnEndReason) -> bool {
+    matches!(
+        reason,
+        TurnEndReason::Error | TurnEndReason::Interrupted | TurnEndReason::Stopped
+    )
+}
+
+/// How a retry's opening begins.
+pub const RETRY_LEAD: &str = "[harness] The person asked to try again.";
+
+/// The one user-role message a retry turn starts with, after the failed
+/// attempt's steps (ADOPTION_PLAN X.21). The harness's words: the person's
+/// message is the one above, sent once (no summary replaces it while a
+/// retry depends on it: `opening_cut`); the failed turn's error is quoted
+/// line by line, never a line of the harness's. It says which of the
+/// attempt's calls ran (a result: ran; none recorded: maybe; denied: not),
+/// so the model checks before it repeats a command or an edit (OpenClaw's restart resume prompt and DeepSeek's
+/// "outcome unknown" results, research round 2). Built from the event
+/// alone, so every later request rebuilds it byte for byte.
+pub fn retry_opening(r: &RetryOf) -> String {
+    let how = match r.reason {
+        TurnEndReason::Interrupted => "was cut off when the node restarted",
+        TurnEndReason::Stopped => "was cut off when the node was stopped",
+        _ => "ended with an error",
+    };
+    let mut t = format!(
+        "{RETRY_LEAD} Your previous attempt at the person's message above {how} before it \
+         finished. What is shown above from that attempt happened as shown: a tool call with a \
+         result ran, so files it wrote or edited are changed and commands it ran have had their \
+         effects; a call whose result says none was recorded may or may not have run; a call \
+         that was denied did not run. Continue from where it stopped; check the current state \
+         before you repeat a command or an edit, and do not redo work that is already done. Then \
+         answer the message."
+    );
+    if let Some(e) = r.error.as_deref().filter(|e| !e.trim().is_empty()) {
+        t.push_str("\nThe attempt ended with this error (the harness's report, quoted):");
+        for line in e.split('\n') {
+            t.push('\n');
+            t.push_str(OUTPUT_QUOTE);
+            t.push_str(&quoted_line(line.strip_suffix('\r').unwrap_or(line)));
+        }
+    }
+    t
 }
 
 /// What started a turn that no person's message started.
@@ -1928,6 +2014,7 @@ mod tests {
             name: "Coder".into(),
             prompt_hash: "abc".into(),
             withheld: vec![],
+            effort: None,
         };
         let kinds = vec![
             EventKind::SessionCreated(SessionCreated {
@@ -1949,6 +2036,7 @@ mod tests {
                 turn_id: "t".into(),
                 agent: Some(agent.clone()),
                 environment: None,
+                retry: None,
             }),
             EventKind::AssistantMessage(AssistantMessage {
                 turn_id: "t".into(),
@@ -2158,6 +2246,7 @@ mod tests {
                 agent: None,
                 turn_id: "t1".into(),
                 environment: None,
+                retry: None,
             })
         );
     }
@@ -2271,6 +2360,7 @@ mod background_note_tests {
             agent: None,
             cause: Some(TurnCause::Callback(vec!["bg-1".into(), "bg-3".into()])),
             environment: None,
+            retry: None,
         });
         let (kind, payload) = k.clone().into_parts();
         assert_eq!(
@@ -2345,6 +2435,7 @@ mod background_note_tests {
                 cause: cause
                     .map(|c| TurnCause::Callback(c.into_iter().map(String::from).collect())),
                 environment: None,
+                retry: None,
             })
         };
         let ids = |log: &[RawEvent]| -> Vec<String> {

@@ -161,6 +161,7 @@ fn append(
             agent: None,
             cause: None,
             environment: extra.environment.clone(),
+            retry: None,
         }),
         EventKind::UserMessage(UserMessage {
             turn_id: turn.into(),
@@ -897,6 +898,7 @@ async fn a_turn_that_reads_queued_messages_rebuilds_its_opening() {
             agent: None,
             cause: None,
             environment: ex.environment.clone(),
+            retry: None,
         }),
     );
     push(
@@ -1239,9 +1241,11 @@ fn started(turn: &str, agent: &str, name: &str) -> EventKind {
             name: name.into(),
             prompt_hash: "h".into(),
             withheld: vec![],
+            effort: None,
         }),
         cause: None,
         environment: None,
+        retry: None,
     })
 }
 
@@ -2068,6 +2072,7 @@ async fn rv3_callback_with(
         agent: None,
         cause: ex.cause.clone(),
         environment: None,
+        retry: None,
     })];
     kinds.extend(host.0.lock().unwrap().iter().cloned());
     kinds.push(EventKind::TurnEnded(TurnEnded {

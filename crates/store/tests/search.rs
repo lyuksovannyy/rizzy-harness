@@ -199,3 +199,43 @@ fn a_rename_changes_the_row_and_the_index() {
         "no such chat"
     );
 }
+
+/// A failed turn and the person's Retry of it (X.21): the retry writes no
+/// second message, so the index holds the message once and a search finds
+/// the chat once; the retry's `turn_started` (its error included) is not
+/// indexed.
+#[test]
+fn a_retry_indexes_its_message_once() {
+    let s = Store::open_in_memory().unwrap();
+    let sid = chat(&s, "u1", "Schema work", &[], false);
+    let evs = [
+        ("turn_started", json!({"turn_id": "t1"})),
+        (
+            "user_message",
+            json!({"turn_id": "t1", "text": "migrate the invoices table"}),
+        ),
+        (
+            "error",
+            json!({"turn_id": "t1", "message": "invoices unavailable"}),
+        ),
+        ("turn_ended", json!({"turn_id": "t1", "reason": "error"})),
+        (
+            "turn_started",
+            json!({"turn_id": "t2", "retry": {"turn_id": "t1", "reason": "error", "error": "invoices unavailable"}}),
+        ),
+        (
+            "assistant_message",
+            json!({"turn_id": "t2", "message_id": "m1", "text": "Done."}),
+        ),
+        (
+            "turn_ended",
+            json!({"turn_id": "t2", "reason": "completed"}),
+        ),
+    ];
+    for (i, (kind, p)) in evs.into_iter().enumerate() {
+        s.append("master", &ev(sid, i as u64 + 2, kind, p)).unwrap();
+    }
+    let text = s.session_search_text(sid).unwrap();
+    assert_eq!(text.matches("invoices").count(), 1, "{text}");
+    assert_eq!(s.search("\"invoices\"", None, None, 10).unwrap().len(), 1);
+}

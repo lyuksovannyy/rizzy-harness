@@ -286,6 +286,7 @@ mod tests {
                 agent: None,
                 cause: None,
                 environment: None,
+                retry: None,
             }),
             EventKind::UserMessage(UserMessage {
                 turn_id: "t1".into(),
@@ -531,15 +532,15 @@ mod tests {
             strip(crate::summary_messages(&without))
         );
         // The cut is after the last end in both (the note sits before it).
-        let cut = crate::opening_cut(&with);
+        let cut = crate::opening_cut(&with, None);
         assert_eq!(with[cut - 1].kind, "turn_ended");
-        assert_eq!(crate::opening_cut(&without), without.len());
+        assert_eq!(crate::opening_cut(&without, None), without.len());
         assert_eq!(cut, with.len());
         // And a note right after the last end: the cut stays at that end.
         let mut tail = without.clone();
         let mut n = note_after(&tail);
         tail.append(&mut n);
-        assert_eq!(crate::opening_cut(&tail), without.len());
+        assert_eq!(crate::opening_cut(&tail, None), without.len());
         assert!(harness_core::event::waiting_ends(&tail).is_empty());
     }
 

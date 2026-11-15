@@ -9,7 +9,9 @@ import type { Item } from "../types";
  * right after a turn's end starts one too (review ST-4). */
 export function turnStart(items: readonly Item[], i: number): boolean {
   const it = items[i]!;
-  return (it.type === "user" && !it.queued) || it.type === "callback" || (i > 0 && items[i - 1]!.type === "turn_end");
+  return (
+    (it.type === "user" && !it.queued) || it.type === "callback" || it.type === "retry" || (i > 0 && items[i - 1]!.type === "turn_end")
+  );
 }
 
 /** "bg-3 ended (exit 1)", from the ends the chat already holds. */

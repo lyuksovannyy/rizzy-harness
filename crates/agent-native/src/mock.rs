@@ -333,6 +333,26 @@ impl Provider for Mock {
                 stop: Default::default(),
             });
         }
+        // A person's Retry (X.21): the harness's line after the failed
+        // attempt's steps. The demo provider says it carries on and stops;
+        // it never repeats the attempt's calls.
+        if raw_user.contains(harness_core::event::RETRY_LEAD) {
+            let text = self
+                .stream_words(
+                    vec![
+                        "Picking up ".into(),
+                        "where the failed attempt stopped.".into(),
+                    ],
+                    &deltas,
+                )
+                .await;
+            return Ok(Completion {
+                text,
+                tool_calls: vec![],
+                usage,
+                stop: Default::default(),
+            });
+        }
         // Per-turn context comes first in the user message, quoted under
         // the harness's line; commands follow it, and no line of it is one.
         let (context, user) = match crate::provider::split_context(&raw_user) {
