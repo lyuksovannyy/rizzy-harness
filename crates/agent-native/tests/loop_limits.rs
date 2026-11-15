@@ -140,7 +140,8 @@ async fn max_steps_ends_the_turn_at_a_limit() {
 
 #[tokio::test]
 async fn the_defaults_are_todays_values() {
-    assert_eq!(NativeConfig::default().max_steps, 50);
+    // The owner's 1,000 (2026-11-15); a chat's own limit may be lower.
+    assert_eq!(NativeConfig::default().max_steps, 1000);
     assert_eq!(
         NativeConfig::default().bash_timeout_max,
         Duration::from_secs(3600)
@@ -148,9 +149,15 @@ async fn the_defaults_are_todays_values() {
     let dir = tempfile::tempdir().unwrap();
     let host = Host::default();
     let p = Forever::new(json!({"command": "true"}));
-    let out = backend(p.clone(), NativeConfig::default())
-        .run_turn(turn(&host, dir.path()))
-        .await;
+    let out = backend(
+        p.clone(),
+        NativeConfig {
+            max_steps: 50,
+            ..Default::default()
+        },
+    )
+    .run_turn(turn(&host, dir.path()))
+    .await;
     assert_eq!(*p.calls.lock().unwrap(), 51, "50 steps and the wrap-up");
     assert_eq!((out.reason, out.error), (TurnEndReason::Limit, None));
 }

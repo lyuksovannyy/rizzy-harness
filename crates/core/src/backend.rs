@@ -21,9 +21,26 @@ pub trait TurnHost: Send + Sync {
     /// further model request).
     async fn emit(&self, kind: EventKind) -> Result<(), LogError>;
 
+    /// The chat's step limit now (X.14): what the owner set for it, within
+    /// the node's, read before every model request so a change reaches a
+    /// running turn; a sub-agent's is at most its parent chat's. `None`:
+    /// the backend's own `max_steps`. Only the node answers it; nothing a
+    /// model, a tool or a server writes changes it.
+    fn step_limit(&self) -> Option<usize> {
+        None
+    }
+
     /// Ask whether a tool call may run. The host applies node policy first
     /// and only asks the user if policy requires it. Emits the approval events.
     async fn approve(&self, call_id: &str, tool: &str, input: &Value, risk: ToolRisk) -> Decision;
+
+    /// The person's note with the denial of `call_id`, if they wrote one;
+    /// taken once, right after `approve` returned `Deny`. The loop gives it
+    /// to the model quoted after the fixed sentence
+    /// ([`crate::event::denied_text`]).
+    fn denial_note(&self, _call_id: &str) -> Option<String> {
+        None
+    }
 
     /// Run `task` as `agent` in a new child session on this node and wait for
     /// its turn to end. `started` is called with the child's id as soon as it

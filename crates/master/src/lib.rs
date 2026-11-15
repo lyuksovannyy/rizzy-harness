@@ -11,6 +11,7 @@ pub mod avatars;
 pub mod blobs;
 mod callbacks;
 pub mod config;
+pub mod diff;
 pub mod env;
 mod favicon;
 mod http;
@@ -139,6 +140,9 @@ pub struct NodeInfo {
     /// What a new chat there gets when the person picks none
     /// (`approval-default:*`).
     pub default_approval: Option<harness_core::policy::ApprovalMode>,
+    /// Its `[limits] max_steps` (`steps-max:*`, X.14), the most a chat's
+    /// own step limit may be; `None`: a node that cannot change one.
+    pub max_steps: Option<u64>,
 }
 
 /// The approval modes in a hello's capabilities (T50): its ceiling and its
@@ -257,6 +261,8 @@ pub struct MasterInner {
     storage: OnceLock<storage::Storage>,
     /// Transfers of staged files from nodes.
     pulls: artifact_pull::Pulls,
+    /// Turn diffs waiting for their node's answer (X.12).
+    diffs: diff::Waiting,
     /// Staged-file events per node and hour.
     artifact_throttle: artifacts::Throttle,
     /// Open UI sockets by user, so a login that ends closes them.
@@ -511,13 +517,19 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::Create { .. }
         | MasterToNode::Cancel { .. }
         | MasterToNode::StopBackground { .. }
+        // Removing a grant takes power away, like a denial.
+        | MasterToNode::RevokeAllow { .. }
         // `Master::set_approval_mode` checks a raise itself: a lowering,
         // like a denial, is never refused for the owner's level.
         | MasterToNode::SetApprovalMode { .. }
+        // `Master::set_step_limit` checks a raise itself, as the mode.
+        | MasterToNode::SetStepLimit { .. }
         | MasterToNode::Delete { .. }
         | MasterToNode::Resume { .. }
         | MasterToNode::ArtifactFetch { .. }
-        | MasterToNode::ArtifactRelease { .. } => None,
+        | MasterToNode::ArtifactRelease { .. }
+        // A read of two checkpoints: no event, no work.
+        | MasterToNode::Diff { .. } => None,
     }
 }
 
@@ -601,6 +613,7 @@ impl Master {
                 routines: OnceLock::new(),
                 storage: OnceLock::new(),
                 pulls: Default::default(),
+                diffs: Default::default(),
                 artifact_throttle: Default::default(),
                 sockets: Default::default(),
                 outbound: Mutex::new(outbound::Outbound::from_env()),
@@ -1075,6 +1088,7 @@ impl Master {
                     exec_gaps: Vec::new(),
                     max_approval: None,
                     default_approval: None,
+                    max_steps: None,
                 },
                 tx: None,
                 resuming: HashSet::new(),
@@ -1087,6 +1101,11 @@ impl Master {
             entry.info.profile = profile;
             (entry.info.exec_modes, entry.info.exec_gaps) = exec_of(&capabilities);
             (entry.info.max_approval, entry.info.default_approval) = approval_of(&capabilities);
+            entry.info.max_steps = capabilities.iter().find_map(|c| {
+                c.strip_prefix(harness_protocol::CAP_STEPS_MAX_PREFIX)?
+                    .parse()
+                    .ok()
+            });
             entry.capabilities = capabilities;
             entry.tx = Some(link.to_node.clone());
             entry.resuming.clear();
@@ -1158,6 +1177,7 @@ impl Master {
                 n.tx = None;
                 // Its transfers stop; their versions wait for the next hello.
                 artifact_pull::node_down(&this, &nid);
+                diff::node_down(&this, &nid);
             }
             drop(nodes);
             let _ = this.inner.live.send(Live::NodesChanged);
@@ -1315,6 +1335,19 @@ impl Master {
                     data,
                     eof,
                     error,
+                },
+            ),
+            NodeToMaster::DiffResult {
+                req_id,
+                diff,
+                error,
+            } => diff::on_answer(
+                self,
+                node_id,
+                req_id,
+                match (diff, error) {
+                    (Some(d), None) => Ok(d),
+                    (_, e) => Err(e.unwrap_or_else(|| "the node sent no changes".into())),
                 },
             ),
         }
@@ -1883,6 +1916,13 @@ impl Master {
         // Nor does a callback turn: nobody wrote anything to recall by, and
         // program output must not steer what is remembered.
         let allowed = projects::TurnMemory {
+            // The workspace's memory reaches every member's chats there,
+            // whatever their join answer (that is about their own facts),
+            // for an agent with any memory switch on (T54).
+            workspace: !row.incognito
+                && memory::workspace_switch(self, &row, features).await
+                && !untrusted
+                && !resume,
             by_owner: by_owner && !untrusted && !resume,
             personal: personal && !untrusted && !resume,
             project: project.is_some()
@@ -1897,8 +1937,10 @@ impl Master {
         // The owner's facts, whole while they fit, each with its id
         // (`memory::turn_block`).
         let mut noted = Vec::new();
-        if allowed.personal {
-            let (block, calls) = memory::turn_block(self, &row, &text, allowed).await;
+        if allowed.personal || allowed.workspace {
+            let offers = agent.allows_tool("remember")
+                && self.node_has(&row.node_id, harness_protocol::CAP_REMEMBER);
+            let (block, calls) = memory::turn_block(self, &row, &text, allowed, offers).await;
             standing.extend(block.map(|text| harness_core::backend::StandingPart {
                 part: harness_core::backend::StandingKey::Memory,
                 text,
@@ -2133,9 +2175,77 @@ impl Master {
             ));
         }
         self.send_command(&node, |req_id| MasterToNode::SetApprovalMode {
+            lowering: !raise,
             req_id,
             session_id: sid,
             mode,
+        })
+        .await
+    }
+
+    /// A chat's own step limit as its log says (the latest
+    /// `step_limit_changed`), and its node's limit: what a raise is
+    /// measured against (X.14).
+    pub async fn step_limit_of(
+        &self,
+        sid: SessionId,
+    ) -> Result<(Option<u64>, Option<u64>), CommandError> {
+        let own = self
+            .inner
+            .mirror
+            .call(move |s| s.last_step_limit(sid))
+            .await?;
+        let node = self.owner(sid).await?;
+        let max = lock(&self.inner.nodes)
+            .get(&node)
+            .and_then(|n| n.info.max_steps);
+        Ok((own, max))
+    }
+
+    /// Change a chat's step limit on its node, which clamps it to
+    /// `1..=` its own limit and records it (X.14). `raise`: more steps than
+    /// the chat has now, so it passes the checks of every command that
+    /// makes a chat work, as a raise of the approval mode does; a lowering
+    /// passes neither. Never sent to a node that did not announce
+    /// `steps-max:*`.
+    pub async fn set_step_limit(
+        &self,
+        sid: SessionId,
+        max_steps: i64,
+        raise: bool,
+    ) -> Result<(), CommandError> {
+        let node = self.owner(sid).await?;
+        if raise {
+            let (diverged, row) = self
+                .inner
+                .mirror
+                .call(move |s| {
+                    Ok::<_, harness_store::StoreError>((s.diverged_seq(sid)?, s.session(sid)?))
+                })
+                .await?;
+            if diverged.is_some() {
+                return Err(CommandError::Rejected(DIVERGED.into()));
+            }
+            let row = row.ok_or(CommandError::UnknownSession)?;
+            if let Some(why) = workspaces::work_refusal(self, &row).await {
+                return Err(CommandError::Forbidden(why));
+            }
+        }
+        let known = lock(&self.inner.nodes)
+            .get(&node)
+            .is_some_and(|n| n.info.max_steps.is_some());
+        if !known {
+            return Err(CommandError::Rejected(
+                "this chat's node cannot change its step limit (a node older than this server, \
+                 or one that is away)"
+                    .into(),
+            ));
+        }
+        self.send_command(&node, |req_id| MasterToNode::SetStepLimit {
+            req_id,
+            session_id: sid,
+            max_steps,
+            lowering: !raise,
         })
         .await
     }
@@ -2314,18 +2424,48 @@ impl Master {
         });
     }
 
+    /// A person's answer. `note` goes only with a denial (dropped with an
+    /// allow); `allow_chat` and a note only to a node that announced
+    /// `CAP_ANSWERS` (an older node would drop the link on `allow_chat`).
     pub async fn respond_approval(
         &self,
         sid: SessionId,
         approval_id: String,
         decision: harness_core::policy::Decision,
+        note: Option<String>,
     ) -> Result<(), CommandError> {
         let node = self.owner(sid).await?;
+        let answers = self.node_has(&node, harness_protocol::CAP_ANSWERS);
+        if decision == harness_core::policy::Decision::AllowChat && !answers {
+            return Err(CommandError::Rejected(
+                "this chat's node cannot allow a call for the whole chat (a node older than \
+                 this server); allow it once or for this turn"
+                    .into(),
+            ));
+        }
+        let note = note.filter(|_| !decision.allows() && answers);
         self.send_command(&node, |req_id| MasterToNode::ApprovalRespond {
             req_id,
             session_id: sid,
             approval_id,
             decision,
+            note,
+        })
+        .await
+    }
+
+    /// Remove a call the person allowed for the rest of a chat.
+    pub async fn revoke_allow(&self, sid: SessionId, grant_id: String) -> Result<(), CommandError> {
+        let node = self.owner(sid).await?;
+        if !self.node_has(&node, harness_protocol::CAP_ANSWERS) {
+            return Err(CommandError::Rejected(
+                "this chat's node keeps no calls allowed for the chat".into(),
+            ));
+        }
+        self.send_command(&node, |req_id| MasterToNode::RevokeAllow {
+            req_id,
+            session_id: sid,
+            grant_id,
         })
         .await
     }

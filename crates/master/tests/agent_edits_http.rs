@@ -391,6 +391,43 @@ async fn custom_agents_are_made_changed_kept_and_deleted() {
     );
 }
 
+/// "MCP servers" is its own switch: saved and shown on the agent's page,
+/// and commands alone do not bring it.
+#[tokio::test]
+async fn mcp_servers_switch_is_saved_and_shown() {
+    let t = start().await;
+    let mut f = features();
+    f["commands"] = json!(true);
+    let (st, d) = call(
+        &t,
+        Method::POST,
+        "/api/agents",
+        Some(json!({"id": "ops", "name": "Ops", "prompt": "Run it.", "features": f})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{d}");
+    assert_eq!(d["features"]["mcp"], false);
+    assert!(!t.master.agents().get("ops").unwrap().spec.allows_mcp());
+    f["mcp"] = json!(true);
+    let (st, d) = call(
+        &t,
+        Method::PATCH,
+        "/api/agents/ops",
+        Some(json!({"features": f})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{d}");
+    assert_eq!(d["features"]["mcp"], true);
+    let (_, d) = call(&t, Method::GET, "/api/agents/ops", None).await;
+    assert_eq!(d["features"]["mcp"], true);
+    assert_eq!(listed(&t, "ops").await["features"]["mcp"], true);
+    let spec = t.master.agents().get("ops").unwrap().spec.clone();
+    assert!(spec.allows_mcp() && spec.allows_tool("mcp__github__list"));
+    // Built-ins show theirs.
+    assert_eq!(listed(&t, "coder").await["features"]["mcp"], true);
+    assert_eq!(listed(&t, "general").await["features"]["mcp"], false);
+}
+
 #[tokio::test]
 async fn memory_off_means_no_recall_and_no_remember() {
     let t = start().await;

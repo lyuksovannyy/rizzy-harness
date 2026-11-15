@@ -1640,6 +1640,23 @@ impl Store {
         Ok(out)
     }
 
+    /// The chat's own step limit as its log says (the latest
+    /// `step_limit_changed`'s `max_steps`, X.14); `None`: never set.
+    pub fn last_step_limit(&self, sid: SessionId) -> Result<Option<u64>> {
+        let conn = self.lock();
+        let payload: Option<String> = conn
+            .query_row(
+                "SELECT payload FROM events WHERE session_id = ?1
+                 AND kind = 'step_limit_changed' ORDER BY seq DESC LIMIT 1",
+                params![sid.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(payload
+            .and_then(|p| serde_json::from_str::<serde_json::Value>(&p).ok())
+            .and_then(|v| v.get("max_steps").and_then(|n| n.as_u64())))
+    }
+
     /// The latest `session_created` or `approval_mode_changed` of `sid`: the
     /// chat's approval mode as its log says (T50), so a lowering is never
     /// gated like a raise. One read on the primary key.
@@ -1793,6 +1810,35 @@ impl Store {
                 id.parse()
                     .map_err(|_| StoreError::Corrupt(format!("session id {id}")))?,
             );
+        }
+        Ok(out)
+    }
+
+    /// Every event of `sid` of one `kind`, ascending (a turn's diff reads
+    /// only the `checkpoint` events, X.12).
+    pub fn events_of_kind(&self, sid: SessionId, kind: &str) -> Result<Vec<RawEvent>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT seq, ts_ms, kind, payload FROM events WHERE session_id = ?1 AND kind = ?2 ORDER BY seq",
+        )?;
+        let rows = stmt.query_map(params![sid.to_string(), kind], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (seq, ts_ms, kind, payload) = row?;
+            out.push(RawEvent {
+                session_id: sid,
+                seq: seq as u64,
+                ts_ms,
+                kind,
+                payload: serde_json::from_str(&payload)?,
+            });
         }
         Ok(out)
     }

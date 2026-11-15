@@ -25,6 +25,8 @@ const ExecChoice = lazy(() => import("./ExecChoice"));
 // The approval mode's picker (T50): only for agentic chats on a node that
 // announced its modes.
 const ApprovalModePick = lazy(() => import("./ApprovalModePick"));
+// The chat's step limit (X.14), beside the approval mode: same chats.
+const StepLimitPick = lazy(() => import("./StepLimitPick"));
 
 const FOLDERS_KEY = "harness.folders";
 const EFFORTS: Effort[] = ["low", "medium", "high", "max"];
@@ -122,6 +124,9 @@ export function Composer(props: {
   /** Session: the chat's approval mode and how to change it (T50); absent:
    * not changeable here (a chat, a sub-agent's, a routine's, an old node). */
   approval?: { value: ApprovalMode; max: ApprovalMode; host: boolean; onChange: (m: ApprovalMode) => Promise<unknown> };
+  /** Session: the chat's step limit and the node's maximum (X.14); absent:
+   * not changeable here. */
+  steps?: { value: number; max: number; onChange: (n: number) => Promise<unknown> };
 }) {
   const home = props.where === "home";
   const [text, setText] = useState(() => (props.draft ? readDraft(props.draft) : ""));
@@ -627,6 +632,18 @@ export function Composer(props: {
                   setErr(null);
                   props.approval!.onChange(m).catch((x) => setErr(x instanceof Error ? x.message : String(x)));
                   ta.current?.focus();
+                }}
+              />
+            </Suspense>
+          )}
+          {!home && props.steps && !props.readOnly && (
+            <Suspense fallback={null}>
+              <StepLimitPick
+                value={props.steps.value}
+                max={props.steps.max}
+                onChange={(n) => {
+                  setErr(null);
+                  return props.steps!.onChange(n).catch((x) => setErr(x instanceof Error ? x.message : String(x)));
                 }}
               />
             </Suspense>

@@ -403,6 +403,7 @@ async fn a_stop_and_an_approval_answer_are_acknowledged_within_the_ack_timeout_o
         session_id: SessionId::new(),
         approval_id: "a1".into(),
         decision: Decision::Allow,
+        note: None,
     })
     .await;
     m.cancel("stop", sid).await;

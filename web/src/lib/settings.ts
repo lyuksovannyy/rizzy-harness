@@ -13,6 +13,7 @@ export type TabId =
   | "memory"
   | "password"
   | "overview"
+  | "facts"
   | "general"
   | "models"
   | "members"
@@ -47,7 +48,11 @@ const SECTIONS: { id: SectionId; show: Show; tabs: { id: TabId; show: Show }[] }
   {
     id: "workspace",
     show: (v) => !!v.workspace,
-    tabs: [{ id: "overview", show: always }],
+    // Its memory: every member reads it (T54).
+    tabs: [
+      { id: "overview", show: always },
+      { id: "facts", show: always },
+    ],
   },
   {
     // Personal has no settings of its own (Preferences covers it) and no other members.

@@ -38,6 +38,26 @@ impl std::fmt::Debug for CallKey {
     }
 }
 
+impl CallKey {
+    /// The digest as 64 lowercase hex characters: what a chat grant records
+    /// (`chat_allow_added.key`, PLAN.md T51). A digest, never the call's text.
+    pub fn hex(&self) -> String {
+        self.0.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// The key a recorded [`Self::hex`] names; `None` for anything else.
+    pub fn from_hex(s: &str) -> Option<CallKey> {
+        if s.len() != 64 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        let mut out = [0u8; 32];
+        for (i, o) in out.iter_mut().enumerate() {
+            *o = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).ok()?;
+        }
+        Some(CallKey(out))
+    }
+}
+
 /// The key of `tool` called with `input` in a session working in `cwd`.
 pub fn call_key(cwd: &Path, tool: &str, input: &Value) -> CallKey {
     let mut h = Sha256::new();

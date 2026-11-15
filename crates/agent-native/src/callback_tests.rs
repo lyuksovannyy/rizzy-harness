@@ -203,7 +203,7 @@ fn history(sid: SessionId) -> Vec<RawEvent> {
     ]
 }
 
-fn callback_ctx<'a>(host: &'a Host, sid: SessionId, h: Vec<RawEvent>) -> TurnCtx<'a> {
+fn callback_ctx<'a>(host: &'a dyn TurnHost, sid: SessionId, h: Vec<RawEvent>) -> TurnCtx<'a> {
     TurnCtx {
         session_id: sid,
         turn_id: "t2".into(),
@@ -495,4 +495,111 @@ async fn a_callback_turn_gets_the_environment_line() {
     ));
     let again = place_notes(history_to_messages(&log));
     assert_eq!(again.last(), Some(&ChatMsg::User(opening.clone())));
+}
+
+/// A host whose chat step limit is `limit(i)` on its `i`th reading.
+struct LimitHost {
+    events: Mutex<Vec<EventKind>>,
+    reads: std::sync::atomic::AtomicUsize,
+    limit: fn(usize) -> usize,
+}
+
+#[async_trait::async_trait]
+impl TurnHost for LimitHost {
+    fn step_limit(&self) -> Option<usize> {
+        let i = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Some((self.limit)(i))
+    }
+    async fn emit(&self, kind: EventKind) -> Result<(), harness_core::backend::LogError> {
+        self.events.lock().unwrap().push(kind);
+        Ok(())
+    }
+    async fn approve(&self, _c: &str, _t: &str, _i: &Value, _r: ToolRisk) -> Decision {
+        Decision::Allow
+    }
+}
+
+fn limit_host(limit: fn(usize) -> usize) -> LimitHost {
+    LimitHost {
+        events: Mutex::new(vec![]),
+        reads: Default::default(),
+        limit,
+    }
+}
+
+fn noop_rec(n: usize) -> Arc<Rec> {
+    // Each call another input, so the repeated-call guard stays out of it.
+    Arc::new(Rec {
+        calls: (0..n).map(|i| ("noop", json!({ "i": i }))).collect(),
+        seen: Mutex::new(vec![]),
+    })
+}
+
+/// Review F2: the owner set the chat to 1 step; a callback turn (nobody
+/// started it) takes the lower of its own cap (here 3) and the chat's.
+#[tokio::test]
+async fn a_callback_turn_takes_the_chats_lower_limit() {
+    let sid = SessionId::new();
+    let host = limit_host(|_| 1);
+    let rec = noop_rec(5);
+    let b = NativeBackend::new(rec.clone(), vec![Arc::new(Noop)], NativeConfig::default());
+    let mut c = callback_ctx(&host, sid, history(sid));
+    c.extra.max_steps = Some(3);
+    let _ = b.run_turn(c).await;
+    assert_eq!(
+        rec.seen.lock().unwrap().len(),
+        1,
+        "model calls in a chat limited to 1 step"
+    );
+}
+
+/// A person's turn of `rec` under `host`.
+fn person_ctx<'a>(host: &'a dyn TurnHost, sid: SessionId) -> TurnCtx<'a> {
+    let mut c = callback_ctx(host, sid, history(sid));
+    c.extra.cause = None;
+    c.extra.context = None;
+    c.user_text = "go".into();
+    c
+}
+
+/// Review F5: limit 10, the half-budget note rides on step 5's result; the
+/// owner then lowers it to 5 before the next request: that request is the
+/// wrap-up, and it carries the wrap-up note.
+#[tokio::test]
+async fn a_lowering_right_after_the_half_note_still_sends_the_wrap_up_note() {
+    // Readings: before each request and at each step's last result; the
+    // 10th (step 5's result) still says 10, the 11th (before request 6) 5.
+    let host = limit_host(|i| if i < 10 { 10 } else { 5 });
+    let rec = noop_rec(20);
+    let b = NativeBackend::new(rec.clone(), vec![Arc::new(Noop)], NativeConfig::default());
+    let out = b.run_turn(person_ctx(&host, SessionId::new())).await;
+    assert_eq!(out.reason, TurnEndReason::Limit);
+    let reqs = rec.seen.lock().unwrap().clone();
+    assert_eq!(reqs.len(), 6);
+    let last = reqs.last().unwrap();
+    assert!(last.no_tool_calls);
+    let text = format!("{:?}", last.messages);
+    assert!(text.contains("this is its last request"), "{text}");
+    assert!(
+        text.contains("Plan to finish"),
+        "the half note stays in the log"
+    );
+}
+
+/// Review F5: the wrap-up note went out on step 5's result, then the limit
+/// was raised: the next request offers tools again and says so.
+#[tokio::test]
+async fn a_raise_after_the_wrap_up_note_says_the_work_may_go_on() {
+    let host = limit_host(|i| if i < 10 { 5 } else { 8 });
+    let rec = noop_rec(20);
+    let b = NativeBackend::new(rec.clone(), vec![Arc::new(Noop)], NativeConfig::default());
+    let out = b.run_turn(person_ctx(&host, SessionId::new())).await;
+    assert_eq!(out.reason, TurnEndReason::Limit);
+    let reqs = rec.seen.lock().unwrap().clone();
+    let sixth = &reqs[5];
+    assert!(!sixth.no_tool_calls, "the raise gives tools back");
+    let text = format!("{:?}", sixth.messages);
+    assert!(text.contains("this is its last request"), "{text}");
+    assert!(text.contains("was raised"), "{text}");
+    assert_eq!(reqs.len(), 9, "eight steps and the wrap-up");
 }

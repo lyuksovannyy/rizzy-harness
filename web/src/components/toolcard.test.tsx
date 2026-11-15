@@ -202,9 +202,9 @@ describe("memory saves and proposals", () => {
   });
 
   test("a private detail says it stays in this workspace; a refusal says why", async () => {
-    vi.spyOn(pageApi, "memoryCall").mockResolvedValue({ state: "saved", place: "workspace", fact: fact("has asthma") });
+    vi.spyOn(pageApi, "memoryCall").mockResolvedValue({ state: "saved", place: "workspace", workspace_personal: true, fact: fact("has asthma") });
     let r = await live(remember("has asthma", proposed));
-    expect(r.host.textContent).toContain("Saved, in this workspace only: “has asthma”");
+    expect(r.host.textContent).toContain("Saved, in your Personal workspace only: “has asthma”");
     await r.done();
     vi.spyOn(pageApi, "memoryCall").mockResolvedValue({ state: "refused", reason: "memory is full (2990 of 3000 characters)" });
     r = await live(remember("likes plums", proposed));
@@ -292,7 +292,7 @@ describe("memory saves and proposals", () => {
     vi.spyOn(pageApi, "memoryCall").mockResolvedValue({ state: "pending", place: "project", keep: false, target: old, text: "uses methane" });
     r = await live(remember("uses methane", proposed));
     expect(r.host.textContent).toContain("Wants to replace: “uses kerosene” → “uses methane”");
-    expect(r.host.textContent).toContain("Only someone who manages the project");
+    expect(r.host.textContent).toContain("Waits for a project manager");
     expect([...r.host.querySelectorAll("button")].map((b) => b.textContent)).toEqual(["Dismiss"]);
     await r.done();
   });

@@ -21,7 +21,9 @@ vi.mock("../api", () => ({
   HttpError: Error,
 }));
 const cancel = vi.fn(() => Promise.resolve({ ok: true }));
-vi.mock("../apiPages", () => ({ pageApi: { cancel: () => cancel(), approve: vi.fn() } }));
+vi.mock("../apiPages", () => ({
+  pageApi: { cancel: () => cancel(), approve: vi.fn(), turnDiff: () => Promise.resolve({ files: [] }), restoreTurn: vi.fn() },
+}));
 const { default: Conversation } = await import("./Conversation");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -308,6 +310,29 @@ describe("the side panel's list", () => {
     expect(toggle.textContent).toBe("2");
     expect(toggle.getAttribute("aria-label")).toContain("2 active");
     await act(async () => toggle.click());
+    expect(strip()).not.toBeNull();
+  });
+});
+
+describe("one panel owns the right side (review D7)", () => {
+  test("while a turn's changes are open the side panel is its count button, and comes back on close", async () => {
+    const v = view({ "bg-1": { left_s: 300 } }, [{ type: "turn_end", turn_id: "t1", reason: "completed" }]);
+    v.checkpoints = { t1: { before: "a", after: "b", files: ["a.txt"], restored: false } };
+    await show(v);
+    await until(strip);
+    const open = [...host.querySelectorAll<HTMLButtonElement>(".undo button")].find((b) => b.textContent === "Show changes")!;
+    await act(async () => open.click());
+    await until(() => host.querySelector(".diff-panel"));
+    expect(strip()).toBeNull();
+    expect(host.querySelector(".side-toggle.yielded")).not.toBeNull();
+    await act(async () => host.querySelector<HTMLButtonElement>("button[aria-label='Close the changes']")!.click());
+    expect(host.querySelector(".diff-panel")).toBeNull();
+    expect(strip()).not.toBeNull();
+    // Opening it again, then the side panel's button: the side panel takes the side back.
+    await act(async () => open.click());
+    await until(() => host.querySelector(".diff-panel"));
+    await act(async () => host.querySelector<HTMLButtonElement>(".side-toggle.yielded")!.click());
+    expect(host.querySelector(".diff-panel")).toBeNull();
     expect(strip()).not.toBeNull();
   });
 });

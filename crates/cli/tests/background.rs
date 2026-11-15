@@ -1353,6 +1353,7 @@ impl Node {
             session_id: self.sid,
             approval_id: a.approval_id.clone(),
             decision: d,
+            note: None,
         });
         a
     }
