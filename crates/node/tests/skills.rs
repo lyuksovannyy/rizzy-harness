@@ -246,6 +246,7 @@ impl Node {
             text: text.into(),
             images: vec![],
             agent_named: false,
+            files: vec![],
         })
         .await;
         let by = std::time::Instant::now() + Duration::from_secs(20);

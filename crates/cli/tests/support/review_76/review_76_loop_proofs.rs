@@ -175,6 +175,7 @@ fn plain(turn: &str, text: &str) -> UserMessage {
         reply: None,
         images: vec![],
         queued: false,
+        files: vec![],
     }
 }
 

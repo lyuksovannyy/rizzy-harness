@@ -158,6 +158,7 @@ impl Link {
             text: text.into(),
             images: vec![],
             agent_named: false,
+            files: vec![],
         });
     }
 }

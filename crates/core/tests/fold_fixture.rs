@@ -104,6 +104,7 @@ fn events() -> Vec<RawEvent> {
             reply: None,
             images: vec![],
             queued: false,
+            files: vec![],
         }),
         EventKind::AssistantDelta(AssistantDelta {
             author: None,
@@ -310,6 +311,17 @@ fn events() -> Vec<RawEvent> {
                 height: 720,
             }],
             queued: false,
+            // A mentioned file (T63): the view shows its path, never its text.
+            files: vec![FileMention {
+                path: "CHANGELOG.md".into(),
+                state: MentionState::File,
+                text: "## 1.0\n".into(),
+                lines: 1,
+                shown: 1,
+                bytes: 0,
+                note: None,
+                seen: None,
+            }],
         }),
         EventKind::HistorySummarized(HistorySummarized {
             turn_id: "t2".into(),
@@ -370,6 +382,7 @@ fn events() -> Vec<RawEvent> {
             reply: None,
             images: vec![],
             queued: true,
+            files: vec![],
         }),
         EventKind::UserMessage(UserMessage {
             turn_id: "t2".into(),
@@ -378,6 +391,7 @@ fn events() -> Vec<RawEvent> {
             reply: None,
             images: vec![],
             queued: true,
+            files: vec![],
         }),
         EventKind::QueuedDelivered(QueuedDelivered {
             turn_id: "t2".into(),
@@ -410,6 +424,7 @@ fn events() -> Vec<RawEvent> {
             }),
             images: vec![],
             queued: false,
+            files: vec![],
         }),
         // A `publish` call and the file the node staged for it, then a
         // file the user saved, and one that could not be saved.

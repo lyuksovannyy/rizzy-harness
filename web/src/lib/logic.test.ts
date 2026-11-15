@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { bucket, greeting } from "./greeting";
-import { activeMention, filterAgents, insertMention, leadingMention } from "./mentions";
+import { activeMention, filterAgents, insertMention, isPathToken, leadingMention } from "./mentions";
+import { fileMentions } from "./fileMentions";
 import { agenticBlockReason, cycleMode, enabledModes } from "./modes";
 import { buildSearchUrl } from "./searchUrl";
 import { titleFrom } from "./title";
@@ -60,6 +61,31 @@ describe("mentions", () => {
     expect(leadingMention("  @coder, fix", ids)).toBe("coder");
     expect(leadingMention("@nobody hi", ids)).toBeNull();
     expect(leadingMention("email @writer", ids)).toBeNull();
+    // A path is never the agent its first word names (T63).
+    expect(leadingMention("@coder.md fix", ids)).toBeNull();
+    expect(leadingMention("@coder/main.rs fix", ids)).toBeNull();
+    expect(leadingMention("@coder", ids)).toBe("coder");
+  });
+  it("tells files from agents: a / or . makes a path (T63)", () => {
+    expect(isPathToken("coder")).toBe(false);
+    expect(isPathToken("coder.md")).toBe(true);
+    expect(isPathToken("src/")).toBe(true);
+    expect(isPathToken("./Makefile")).toBe(true);
+    // Paths are typed only where files are offered.
+    expect(activeMention("see @src/ma", 11)).toBeNull();
+    expect(activeMention("see @src/ma", 11, true)).toEqual({ start: 4, query: "src/ma" });
+    expect(activeMention("@co", 3, true)).toEqual({ start: 0, query: "co" });
+  });
+  it("finds the paths a message mentions", () => {
+    expect(fileMentions("@coder fix @src/main.rs, then @README.md. Mail me@x.org")).toEqual(["src/main.rs", "README.md"]);
+    expect(fileMentions("@docs/ and @docs/ again (@./Makefile)")).toEqual(["docs/", "./Makefile"]);
+    expect(fileMentions("@../../etc/passwd")).toEqual(["../../etc/passwd"]);
+    expect(fileMentions("@.. @. up")).toEqual(["..", "."]);
+    expect(fileMentions(Array.from({ length: 70 }, (_, i) => `@f${i}.txt`).join(" ")).length).toBe(64);
+  });
+  it("inserts a folder without the space, so its entries can follow", () => {
+    expect(insertMention("@sr", 0, 3, "src/")).toEqual({ text: "@src/", caret: 5 });
+    expect(insertMention("@src/ma x", 0, 7, "src/main.rs")).toEqual({ text: "@src/main.rs x", caret: 13 });
   });
 });
 

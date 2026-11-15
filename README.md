@@ -942,6 +942,35 @@ say-so. The same holds for an image's name, which older messages show in
 place of the image.
 To have such a link read, paste it into your message.
 
+**Mentioning a file.** In an agentic chat, type `@` and a path to hand the
+agent a file of the chat's folder with your message, as Claude Code, OpenCode
+and goose do: the agent gets its content at once, without spending a `read`
+on it. A token with a `/` or a `.` is a path (`@src/main.rs`, `@README.md`,
+`@docs/`), anything else stays an agent's handle (`@coder`); a file whose
+name is a bare word is `@./Makefile`, a folder `@coder/`. While you type, a
+"Files" list offers matching paths from the chat's folder (a search by name
+honours `.gitignore`; after a `/` it lists that folder's entries, so a folder
+you pick opens them); "No file or folder by that name" says so before you
+send. Only a token that names a file or folder the chat's folder holds is a
+mention: each one shows as a chip above the box before you send (take one off
+with its ×), and only those go with the message; `@types/node` or any other
+path that names nothing stays plain text, with no note to the agent. The
+sent message shows each mention as a chip with its path. The node reads each path under the rules the agent's own `read`
+follows: never outside the chat's folder (unless node.toml's
+`allow_outside_workspace` lets `read` go there), never the node's data
+directory, never through a link that leads out, and not at all on a node
+whose `denied_tools` holds `read`; it asks no approval, since sending the
+message is yours. A file arrives quoted line by line, like an attached file,
+with its path and line count, read when you sent the message. Caps: at most
+20 files per message (the rest are named), 64 KiB of text for all of them
+together (a file that does not fit is cut at a line, and the agent is told to
+`read` the rest from that line), a file over 256 KiB or a binary file is named
+and not shown, and a folder lists at most 200 entries. The file's text
+reaches the agent with the node's secrets scrubbed, as a `read` of it would.
+A file shown (whole, or its first lines) counts as read
+for the rule that `edit` and `write` change only files the agent has read, so
+the agent can edit it straight away. A chat without a folder offers no files.
+
 Every agentic turn is checkpointed and its file changes can be undone
 from the chat. "Show changes" on a turn's "N files changed" row opens what
 the turn changed beside the chat: each file with its added and removed lines
@@ -1211,6 +1240,11 @@ host = false                         # offer the host shell: commands as this OS
 [skills]
 repository = true                    # read the chat repository's .agents/skills and .claude/skills (see "Skills")
 roots = ["~/.agents/skills", "~/.claude/skills"]  # this machine's skill folders; every chat on the node can read them
+
+[instructions]
+# user_file = "/srv/rizzy-harness/AGENTS.md"  # the operator's instruction file; default: AGENTS.md in the node's data directory.
+                                     # Refused inside a workspace root, a [sandbox] folder or /etc, /usr, /opt (see "Your own instructions")
+                                     # It reaches EVERY chat on this node, whoever owns it (see "Your own instructions")
 ```
 
 **Execution modes.** Each agentic chat runs its commands in one mode,
@@ -2246,6 +2280,54 @@ cut or timed-out read (paths and reasons, never the text).
 tokens), sent with the first message, again only when a file changed (with a
 line saying the new files replace the earlier ones) and once after the chat is
 compacted; between those, nothing (see "What goes with each message").
+
+### Your own instructions (the node's AGENTS.md)
+
+What `~/.claude/CLAUDE.md` is to Claude Code and `~/.codex/AGENTS.md` to
+Codex: one file of your own rules ("answer in British English", "never run
+`git push`") that the node sends with every agentic chat, in front of the
+repository's files. By default it is `AGENTS.md` in the node's data directory
+(`~/.local/share/rizzy-harness/AGENTS.md` unless `--data-dir` says otherwise).
+node.toml `[instructions] user_file` names another file (absolute or under
+`~/`), but not one an agent could reach: the node refuses to start when it
+lies inside a `workspace_roots` entry (by default your home folder, so
+`~/.codex/AGENTS.md` is refused), inside a `[sandbox]` read or write folder,
+or inside `/etc`, `/usr`, `/opt` and the other folders the sandbox lets every
+command read; put it in a folder of its own such as `/srv/rizzy-harness/`.
+The path may hold no `.` or `..`; the node resolves it once at start (links
+in its folders followed, even where the file or a folder does not exist
+yet) and checks and protects where it really leads. At every message it
+resolves the path again: if it now leads elsewhere (a folder on the way
+became a link, or appeared as one), the file is not read and the agent is
+told why; restart the node to accept the new place. Wherever it lies, the
+file joins the node's protected paths: `read`, `write`,
+`edit`, `@` mentions and the folder listing refuse it in every mode, and the
+shell gets no grant on it. In the sandbox mode the shell does not see it at
+all (bubblewrap's file view holds only its grants); in the host mode this
+rests on Landlock alone (the same rules, no bubblewrap), so it holds where
+Landlock is enforced and has that mode's gaps (see "Execution modes": a
+command can ask another service of this user, over a socket, to change it
+below Linux 7.1). The node reads it only when it belongs to the node's own
+user or root and neither its group nor other users can write it (else
+another account would set every chat's instructions: it is named, not read;
+`chmod go-w` it), and warns in its log and in `doctor` when another user can
+write its folder or the file has more than one name (a hard link). No file, or an empty one:
+nothing is sent. It is read at the start of every message like the
+repository's files, in a 5-second bound of its own, cut at 16 KiB as sent
+(indentation included; or half the repository files' cap on a small context
+window) with a note, sent again
+only when it changed, withdrawn when you delete it, and kept through
+compaction. Only the regular file at that very path is read: a link there is
+not followed (name the file itself in node.toml; a link in a folder above it
+is), a folder or FIFO is named, not opened. The model is told it is the node
+operator's text, not your message, and that it changes no setting; every
+line of it (and of the repository's files) reaches the model indented by two
+spaces, so no line of a file can pose as the label of another.
+
+**On a node several people use**, this file reaches every chat on the node,
+whoever owns it: it is the operator's setting, like `[skills] roots`. Write
+there only what every user of the node should get. There are no per-user files
+yet.
 
 ## Skills
 

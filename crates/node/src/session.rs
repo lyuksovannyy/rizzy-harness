@@ -326,6 +326,9 @@ pub(crate) struct Input {
     pub reply: Option<FormReply>,
     /// Images, with their bytes (`session.prompt.images`).
     pub images: Vec<harness_protocol::ChatImage>,
+    /// Paths the person mentioned with `@path` (`session.prompt.files`),
+    /// read by [`Session::read_mentions`] (T63).
+    pub files: Vec<String>,
 }
 
 /// A sub-agent's private, node-owned folder.
@@ -1344,6 +1347,7 @@ impl Session {
         drop(queue);
         let extra = TurnExtra {
             images: msg.images.clone(),
+            files_seen: msg.files.iter().filter_map(|f| f.seen.clone()).collect(),
             queued,
             ..extra
         };
@@ -2264,7 +2268,9 @@ impl Session {
             attachments,
             reply,
             images,
+            files,
         } = input;
+        let files = self.read_mentions(files).await?;
         let images = self.keep_images(images).await?;
         let text = match &reply {
             None => text,
@@ -2281,14 +2287,117 @@ impl Session {
                 harness_core::ui::answer_text(canonical, &text)
             }
         };
-        Ok(UserMessage {
+        let msg = UserMessage {
             turn_id,
             text,
             attachments,
             reply,
             images,
             queued: false,
-        })
+            files,
+        };
+        // Scrubbed here, as the log will store it (`append` scrubs every
+        // payload): the model is sent this very message, so it never gets
+        // a node secret the log does not hold, and the next request
+        // rebuilds it byte for byte (review of PR 120, H2; PLAN.md T59).
+        let mut v = serde_json::to_value(&msg).map_err(|e| e.to_string())?;
+        self.node.cfg.secrets.scrub_value(&mut v);
+        serde_json::from_value(v).map_err(|e| e.to_string())
+    }
+
+    /// A context like a `read` call's of this session (T63): its folder
+    /// and that folder's pin, a sub-agent's own folder, the node's
+    /// protected folders and node.toml's `allow_outside_workspace`.
+    fn read_ctx(&self) -> harness_tools::ToolCtx {
+        let mut ctx = harness_tools::ToolCtx::new(self.cwd.clone());
+        ctx.pin = self.pin.clone();
+        ctx.owned = self.owned.clone();
+        ctx.protected = Arc::new(self.node.cfg.policy.protected_dirs.clone());
+        ctx.allow_outside_workspace = self.node.cfg.policy.allow_outside_workspace;
+        ctx
+    }
+
+    /// The files a message mentions (`@path`, T63), read now under the
+    /// `read` tool's rules (`harness_tools::mention`): the person's own
+    /// act, so no approval card is asked for, as none is for an attached
+    /// file; but node.toml's `denied_tools = ["read"]` holds (the node
+    /// decides) and each is then named, not read. Only in an agentic chat;
+    /// waited for at most the instruction files' bound.
+    async fn read_mentions(&self, files: Vec<String>) -> Result<Vec<FileMention>, String> {
+        use crate::instructions::{self as ins, Bounded};
+        if files.is_empty() {
+            return Ok(vec![]);
+        }
+        if self.profile != Profile::Agentic {
+            return Err("this chat has no folder, so it has no files to mention".into());
+        }
+        if files.len() > harness_protocol::MAX_PROMPT_FILES
+            || files
+                .iter()
+                .any(|f| f.len() > harness_protocol::MAX_PROMPT_FILE_BYTES)
+        {
+            return Err(format!(
+                "at most {} mentioned files per message, each path at most {} bytes",
+                harness_protocol::MAX_PROMPT_FILES,
+                harness_protocol::MAX_PROMPT_FILE_BYTES
+            ));
+        }
+        let ctx = self.read_ctx();
+        let denied = self.node.cfg.policy.denies("read");
+        match ins::bounded(
+            move || harness_tools::mention::read_all(&ctx, &files, denied),
+            &CancellationToken::new(),
+            ins::READ_TIMEOUT,
+        )
+        .await
+        {
+            // File content, scrubbed as a `read` result is.
+            Bounded::Done(mut m) => {
+                let secrets = &self.node.cfg.secrets;
+                for f in &mut m {
+                    f.text = secrets.scrub(&f.text);
+                    f.path = secrets.scrub(&f.path);
+                }
+                // A path that names nothing is the person's text, not a
+                // mention (review of PR 120): no note to the model.
+                m.retain(|f| f.state != MentionState::Missing);
+                Ok(m)
+            }
+            Bounded::TimedOut => Err(format!(
+                "the mentioned files took longer than {} s to read; send the message again, or \
+                 without them",
+                ins::READ_TIMEOUT.as_secs()
+            )),
+            Bounded::Cancelled | Bounded::Failed(_) => {
+                Err("the mentioned files could not be read".into())
+            }
+        }
+    }
+
+    /// Paths of this chat's folder for the composer's `@` completion
+    /// (T63, `harness_tools::mention::complete`): none in a chat without a
+    /// folder, none on a node that denies `read`, none in a folder that no
+    /// longer passes its checks.
+    pub(crate) async fn complete_files(&self, query: String) -> Result<Vec<String>, String> {
+        use crate::instructions::{self as ins, Bounded};
+        if self.profile != Profile::Agentic
+            || self.node.cfg.policy.denies("read")
+            || self.check_cwd_still_allowed().is_err()
+        {
+            return Ok(vec![]);
+        }
+        let ctx = self.read_ctx();
+        match ins::bounded(
+            move || harness_tools::mention::complete(&ctx, &query),
+            &CancellationToken::new(),
+            ins::READ_TIMEOUT,
+        )
+        .await
+        {
+            Bounded::Done(r) => r,
+            Bounded::TimedOut => Err("listing the folder took too long".into()),
+            Bounded::Cancelled | Bounded::Failed(_) => Err("the folder could not be listed".into()),
+        }
     }
 
     /// Free the turn slot if `turn_id` still holds it.
@@ -2404,23 +2513,45 @@ impl Session {
         let protected = policy.protected_dirs.clone();
         // The instruction files first, in a bound of their own: a slow
         // skill folder must not cost the turn its AGENTS.md (review S3).
+        // The node operator's own file (node.toml `[instructions]`) in a
+        // bound of its own, beside the repository's: a stalled one costs
+        // the turn neither the other's read (review of PR 120, H1).
         let files_protected = protected.clone();
-        let files = ins::bounded(
-            move || ins::read(&dir, &granted, &files_protected, cap),
-            cancel,
-            ins::READ_TIMEOUT,
-        )
-        .await;
-        let problems = match files {
+        let user_file = policy.instructions.located.clone();
+        let user_cap = ins::user_cap_for(window);
+        let (user, files) = tokio::join!(
+            async {
+                match user_file {
+                    Some(p) => Some(
+                        ins::bounded(
+                            move || ins::read_user(&p, user_cap),
+                            cancel,
+                            ins::READ_TIMEOUT,
+                        )
+                        .await,
+                    ),
+                    None => None,
+                }
+            },
+            ins::bounded(
+                move || ins::read(&dir, &granted, &files_protected, cap),
+                cancel,
+                ins::READ_TIMEOUT,
+            )
+        );
+        let mut problems = user
+            .map(|u| ins::with_user_file(&mut extra, u))
+            .unwrap_or_default();
+        match files {
             Bounded::Done(r) => {
                 extra.instructions = r.text;
-                r.problems
+                problems.extend(r.problems);
             }
             // Not read this turn: the files the model has stay (X.1,
             // review R3); the note goes with this turn only.
             Bounded::TimedOut => {
                 extra.instructions_unread = Some(ins::timed_out());
-                vec![format!("timed out after {} s", ins::READ_TIMEOUT.as_secs())]
+                problems.push(format!("timed out after {} s", ins::READ_TIMEOUT.as_secs()));
             }
             // The turn is stopping; the backend sees the cancel itself.
             Bounded::Cancelled => {
@@ -2431,9 +2562,8 @@ impl Session {
             Bounded::Failed(e) => {
                 tracing::warn!(session = %self.id, error = %e, "reading the instruction files failed");
                 extra.instructions_unread = Some(ins::not_read());
-                vec![]
             }
-        };
+        }
         let skill_problems = if roots.is_empty() {
             vec![]
         } else {
@@ -3535,13 +3665,17 @@ impl Session {
         }
         // A sub-agent gets its task as text, never the images, and its
         // parent turn's context, quoted like the parent's.
+        // Scrubbed as the log stores it (the parent model wrote it, maybe
+        // from tool output): the child's model gets what the log holds and
+        // its next request rebuilds byte for byte (review of PR 120).
         let msg = UserMessage {
             turn_id,
-            text: task,
+            text: self.node.cfg.secrets.scrub(&task),
             attachments: vec![],
             reply: None,
             images: vec![],
             queued: false,
+            files: vec![],
         };
         let extra = TurnExtra {
             savings,

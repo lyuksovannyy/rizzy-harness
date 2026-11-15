@@ -690,6 +690,7 @@ async fn a_delegated_sub_agent_gets_its_folder_through_the_node() {
             text: task.to_string(),
             images: vec![],
             agent_named: false,
+            files: vec![],
         })
         .unwrap();
     loop {

@@ -25,6 +25,7 @@ fn msg(text: &str) -> UserMessage {
         reply: None,
         images: vec![],
         queued: true,
+        files: vec![],
     }
 }
 

@@ -1,7 +1,7 @@
 //! Node-local policy (`node.toml`). Authoritative: nothing the master sends
 //! can loosen it (PLAN.md T5).
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use harness_core::policy::ApprovalMode;
 use serde::{Deserialize, Serialize};
@@ -44,6 +44,8 @@ pub struct NodePolicy {
     pub execution: ExecutionPolicy,
     /// Skills (`[skills]`, ADOPTION_PLAN X.2).
     pub skills: SkillsPolicy,
+    /// The node operator's instruction file (`[instructions]`, X.2).
+    pub instructions: InstructionsPolicy,
     /// MCP servers (`[mcp_servers.<name>]`, ADOPTION_PLAN X.3): stdio
     /// programs each agentic chat may start, in its own confinement, and
     /// whose tools its agent is offered. Only this file adds one.
@@ -116,31 +118,227 @@ impl SkillsPolicy {
     /// [`Self::roots`] with `~/` expanded; an entry that is neither
     /// absolute nor under `~/` (or `~/` without a home) is an error.
     pub fn roots(&self) -> Result<Vec<PathBuf>, String> {
-        let home = dirs::home_dir();
         self.roots
             .iter()
-            .map(|p| {
-                let p = match (p.strip_prefix("~"), &home) {
-                    (Ok(rest), Some(h)) => h.join(rest),
-                    (Ok(_), None) => {
-                        return Err(format!(
-                            "[skills] roots: {} uses ~ but there is no home directory",
-                            p.display()
-                        ));
-                    }
-                    (Err(_), _) => p.clone(),
-                };
-                if p.is_absolute() {
-                    Ok(p)
-                } else {
-                    Err(format!(
-                        "[skills] roots: {} must be absolute (or start with ~/)",
-                        p.display()
-                    ))
-                }
-            })
+            .map(|p| expand_home(p, "[skills] roots"))
             .collect()
     }
+}
+
+/// `p` with a leading `~/` made the node user's home; an error for a path
+/// that is neither absolute nor under `~/`, or `~/` without a home.
+fn expand_home(p: &Path, what: &str) -> Result<PathBuf, String> {
+    let p = match (p.strip_prefix("~"), dirs::home_dir()) {
+        (Ok(rest), Some(h)) => h.join(rest),
+        (Ok(_), None) => {
+            return Err(format!(
+                "{what}: {} uses ~ but there is no home directory",
+                p.display()
+            ));
+        }
+        (Err(_), _) => p.to_path_buf(),
+    };
+    if p.is_absolute() {
+        Ok(p)
+    } else {
+        Err(format!(
+            "{what}: {} must be absolute (or start with ~/)",
+            p.display()
+        ))
+    }
+}
+
+/// `[instructions]` in node.toml (ADOPTION_PLAN X.2, PLAN.md T62): the
+/// node operator's own instruction file, what `~/.claude/CLAUDE.md` and
+/// `~/.codex/AGENTS.md` are to those harnesses. Read at the start of every
+/// agentic turn on this node, in front of the repository's files, for
+/// every chat on the node, whoever owns it. Only this file sets where it
+/// is; nothing the master sends names, widens or changes it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct InstructionsPolicy {
+    /// Where the file is, absolute or under `~/`. By default `AGENTS.md`
+    /// in the node's data directory, which no agent's tool can write. A
+    /// file that does not exist adds nothing.
+    pub user_file: Option<PathBuf>,
+    /// The file read: [`Self::user_file`], or the default in the data
+    /// directory the runtime gave [`Self::locate`]. `None` (a policy built
+    /// in code and never located): no file. Never read from node.toml.
+    #[serde(skip)]
+    pub located: Option<PathBuf>,
+}
+
+impl InstructionsPolicy {
+    /// The file name the default is, in the node's data directory.
+    pub const DEFAULT_NAME: &'static str = "AGENTS.md";
+
+    /// [`Self::user_file`] with `~/` expanded. A `.` or `..` component is
+    /// refused: the path is resolved once at start and protected as such,
+    /// and `..` after a link names another folder than it seems to.
+    pub fn user_file(&self) -> Result<Option<PathBuf>, String> {
+        if let Some(p) = &self.user_file
+            && p.components()
+                .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+        {
+            return Err(format!(
+                "[instructions] user_file: {} has a `.` or `..` in it; name the file by its plain \
+                 path",
+                p.display()
+            ));
+        }
+        self.user_file
+            .as_deref()
+            .map(|p| expand_home(p, "[instructions] user_file"))
+            .transpose()
+    }
+
+    /// What is wrong with how the file at `path` (or its folder) is held,
+    /// for the node's log and `doctor`: a file the node will not read
+    /// ([`file_refusal`]: another owner, writable by others), a file with
+    /// several names, a folder another user can write. Empty when nothing
+    /// is, or nothing is there.
+    pub fn warnings(path: &Path) -> Vec<String> {
+        use std::os::unix::fs::MetadataExt;
+        let me = nix::unistd::geteuid().as_raw();
+        let mut out = Vec::new();
+        if let Ok(m) = std::fs::symlink_metadata(path) {
+            if let Some(why) = file_refusal(m.uid(), m.mode(), me) {
+                out.push(format!("{}: {why}; it is not read", path.display()));
+            }
+            if m.is_file() && m.nlink() > 1 {
+                out.push(format!(
+                    "{}: it has {} names (hard links); a change through another name changes \
+                     every chat's instructions",
+                    path.display(),
+                    m.nlink()
+                ));
+            }
+        }
+        if let Some(dir) = path.parent()
+            && let Ok(m) = std::fs::metadata(dir)
+        {
+            let others_write = m.mode() & 0o022 != 0;
+            if (m.uid() != me && m.uid() != 0) || others_write {
+                out.push(format!(
+                    "{}: another user can create or replace files in this folder, and so the \
+                     node's instruction file in it",
+                    dir.display()
+                ));
+            }
+        }
+        out
+    }
+}
+
+/// Why a file owned by `uid` with permission bits `mode` is not read as the
+/// operator's instructions on a node running as `me`: only the node's own
+/// user or root may own it (another account would steer every chat on the
+/// node, as AUDIT L7 refuses another user's data directory), and nobody
+/// else may write it: group- or other-writable is refused for every owner,
+/// root included. A group is not checked for being the node user's own:
+/// `chmod go-w` costs the operator nothing, telling groups apart is a guess.
+pub fn file_refusal(uid: u32, mode: u32, me: u32) -> Option<String> {
+    if uid != me && uid != 0 {
+        return Some(format!(
+            "it belongs to another user (uid {uid}), not to the node's user or root"
+        ));
+    }
+    (mode & 0o022 != 0).then(|| {
+        "its group or other users can write it, and so set the instructions of every chat on \
+         this node (chmod go-w)"
+            .to_string()
+    })
+}
+
+impl NodePolicy {
+    /// Find the node operator's instruction file and protect it (X.2,
+    /// PLAN.md T62): node.toml's `[instructions] user_file`, else
+    /// `AGENTS.md` in `data_dir` (the node's data directory, already
+    /// protected). Whatever its place, it joins [`Self::protected_dirs`],
+    /// so no file tool, mention, listing or sandbox grant reaches it.
+    /// A `user_file` an agent could write or the shell could read anyway is
+    /// refused, with the reason: inside a `workspace_roots` entry (every
+    /// chat's folder lies in one), inside a `[sandbox]` read or write
+    /// folder, or inside a folder the sandbox grants every command
+    /// (`/etc`, `/usr`, `/opt`...). Call after [`Self::protect`] of the
+    /// data directory and before the sandbox starts.
+    pub fn locate_instructions(&mut self, data_dir: &Path) -> Result<(), String> {
+        let data_dir = std::path::absolute(data_dir).unwrap_or_else(|_| data_dir.to_path_buf());
+        let file = match self.instructions.user_file()? {
+            None => resolve_file(&data_dir.join(InstructionsPolicy::DEFAULT_NAME)),
+            Some(p) => {
+                let real = resolve_file(&p);
+                let in_data = real.starts_with(resolve_existing(&data_dir));
+                let why = |what: String| {
+                    Err(format!(
+                        "[instructions] user_file = {}: it lies inside {what}, so an agent could \
+                         change or read it, and a text one chat wrote would become the \
+                         instructions of every chat on this node. Put it in a folder of its own \
+                         outside them (for example /srv/rizzy-harness/AGENTS.md), or leave \
+                         user_file out to use AGENTS.md in the node's data directory",
+                        p.display()
+                    ))
+                };
+                if !in_data {
+                    for r in &self.workspace_roots {
+                        let r = expand_home(r, "workspace_roots").unwrap_or_else(|_| r.clone());
+                        if real.starts_with(resolve_existing(&r)) {
+                            return why(format!("the workspace root {}", r.display()));
+                        }
+                    }
+                    for (key, list) in
+                        [("read", &self.sandbox.read), ("write", &self.sandbox.write)]
+                    {
+                        for r in list {
+                            let r = expand_home(r, "[sandbox]").unwrap_or_else(|_| r.clone());
+                            if real.starts_with(resolve_existing(&r)) {
+                                return why(format!("the [sandbox] {key} folder {}", r.display()));
+                            }
+                        }
+                    }
+                    for r in harness_tools::sandbox::SYSTEM_READ {
+                        if real.starts_with(r) || real.starts_with(resolve_existing(Path::new(r))) {
+                            return why(format!("{r}, which the sandbox lets every command read"));
+                        }
+                    }
+                }
+                real
+            }
+        };
+        self.protect(&file);
+        self.instructions.located = Some(file);
+        Ok(())
+    }
+}
+
+/// Where the file `p` lies: the deepest existing ancestor of its folder
+/// canonical (links and `..` resolved), the components below it and the
+/// file's own name appended as they are (a link at the name itself is
+/// not followed; the read refuses it). The one
+/// resolver of the operator's file (review of PR 120): the start-up
+/// refusal checks it, `protect` stores it, `located` is it, and every read
+/// resolves again and compares (`instructions::read_user`).
+pub fn resolve_file(p: &Path) -> PathBuf {
+    match (p.parent(), p.file_name()) {
+        (Some(d), Some(n)) => resolve_existing(d).join(n),
+        _ => resolve_existing(p),
+    }
+}
+
+/// [`resolve_file`]'s folders: `p`'s deepest existing ancestor canonical,
+/// the rest appended.
+pub fn resolve_existing(p: &Path) -> PathBuf {
+    let p = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+    let mut rest: Vec<&std::ffi::OsStr> = Vec::new();
+    for a in p.ancestors() {
+        if let Ok(real) = a.canonicalize() {
+            return rest.iter().rev().fold(real, |acc, c| acc.join(c));
+        }
+        if let Some(n) = a.file_name() {
+            rest.push(n);
+        }
+    }
+    p
 }
 
 /// `[execution]` in node.toml (N.10a; README "Execution modes"): which
@@ -389,6 +587,7 @@ impl Default for NodePolicy {
             sandbox: SandboxPolicy::default(),
             execution: ExecutionPolicy::default(),
             skills: SkillsPolicy::default(),
+            instructions: InstructionsPolicy::default(),
             mcp_servers: Default::default(),
             protected_dirs: Vec::new(),
             exec: Default::default(),
@@ -441,6 +640,7 @@ impl NodePolicy {
     pub fn validate(&self) -> Result<(), String> {
         harness_tools::env::compile_pass(&self.env_pass)?;
         self.skills.roots()?;
+        self.instructions.user_file()?;
         let n = self.limits.tool_stream_bytes;
         let (min, max) = (
             harness_tools::stream::MIN_STREAM_BYTES,
@@ -681,6 +881,159 @@ impl NodePolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// X.2, T62: the operator's file is `AGENTS.md` in the data directory
+    /// unless node.toml names one (absolute or under `~/`); a relative
+    /// path is refused at load; a policy never located reads no file.
+    #[test]
+    fn the_operators_instruction_file_defaults_to_the_data_directory() {
+        let mut p = NodePolicy {
+            workspace_roots: vec!["/home/u".into()],
+            ..Default::default()
+        };
+        assert_eq!(p.instructions.located, None);
+        p.locate_instructions(Path::new("/srv/harness")).unwrap();
+        assert_eq!(
+            p.instructions.located.as_deref(),
+            Some(Path::new("/srv/harness/AGENTS.md"))
+        );
+        // Protected wherever it lies.
+        assert!(
+            p.protected_dirs
+                .contains(&PathBuf::from("/srv/harness/AGENTS.md"))
+        );
+        let mut p: NodePolicy = toml::from_str(
+            "workspace_roots = [\"/home/u\"]\n[instructions]\nuser_file = \"/srv/ops/rules.md\"\n",
+        )
+        .unwrap();
+        p.validate().unwrap();
+        p.locate_instructions(Path::new("/srv/harness")).unwrap();
+        assert_eq!(
+            p.instructions.located.as_deref(),
+            Some(Path::new("/srv/ops/rules.md"))
+        );
+        assert!(
+            p.protected_dirs
+                .contains(&PathBuf::from("/srv/ops/rules.md"))
+        );
+        let bad: NodePolicy = toml::from_str("[instructions]\nuser_file = \"rules.md\"\n").unwrap();
+        let e = bad.validate().unwrap_err();
+        assert!(
+            e.contains("[instructions] user_file: rules.md must be absolute"),
+            "{e}"
+        );
+        assert!(toml::from_str::<NodePolicy>("[instructions]\nlocated = \"/x\"\n").is_err());
+    }
+
+    /// Review H1: a `user_file` an agent could write (inside a workspace
+    /// root, a `[sandbox]` folder) or every command reads (`/etc`) is
+    /// refused at start with the reason; one in the data directory is not.
+    #[test]
+    fn an_operators_file_agents_can_reach_is_refused() {
+        let at = |file: &str| {
+            let mut p: NodePolicy = toml::from_str(&format!(
+                "workspace_roots = [\"/home/u\"]\n[sandbox]\nwrite = [\"/var/cache/x\"]\n\
+                 read = [\"/opt2/tools\"]\n[instructions]\nuser_file = \"{file}\"\n"
+            ))
+            .unwrap();
+            p.locate_instructions(Path::new("/home/u/.local/share/h"))
+        };
+        for (file, why) in [
+            ("/home/u/.codex/AGENTS.md", "the workspace root /home/u"),
+            ("/home/u/proj/OPS.md", "the workspace root /home/u"),
+            (
+                "/var/cache/x/a.md",
+                "the [sandbox] write folder /var/cache/x",
+            ),
+            ("/opt2/tools/a.md", "the [sandbox] read folder /opt2/tools"),
+            (
+                "/etc/rizzy/AGENTS.md",
+                "/etc, which the sandbox lets every command read",
+            ),
+        ] {
+            let e = at(file).unwrap_err();
+            assert!(e.contains(why), "{file}: {e}");
+            assert!(e.contains("every chat on this node"), "{e}");
+        }
+        at("/home/u/.local/share/h/OPS.md").unwrap();
+        at("/srv/ops/AGENTS.md").unwrap();
+    }
+
+    /// Review of PR 120 (H1, x1-x3): the path is resolved before it is
+    /// checked and protected: a missing folder behind a link into a
+    /// workspace root is refused, a missing file behind a linked folder is
+    /// protected at its real place, and `.`/`..` are refused at load.
+    #[test]
+    fn the_operators_file_is_resolved_before_it_is_checked() {
+        let d = tempfile::tempdir().unwrap();
+        let b = d.path().canonicalize().unwrap();
+        for f in ["ws", "out/real", "data"] {
+            std::fs::create_dir_all(b.join(f)).unwrap();
+        }
+        std::os::unix::fs::symlink(b.join("ws"), b.join("out/into-ws")).unwrap();
+        std::os::unix::fs::symlink(b.join("out/real"), b.join("out/link")).unwrap();
+        let at = |file: &Path| {
+            let mut p = NodePolicy {
+                workspace_roots: vec![b.join("ws")],
+                ..Default::default()
+            };
+            p.instructions.user_file = Some(file.to_path_buf());
+            p.validate()?;
+            p.locate_instructions(&b.join("data"))?;
+            Ok::<_, String>(p)
+        };
+        let e = at(&b.join("out/into-ws/sub/AGENTS.md")).unwrap_err();
+        assert!(e.contains("inside the workspace root"), "{e}");
+        let p = at(&b.join("out/link/AGENTS.md")).unwrap();
+        let real = b.join("out/real/AGENTS.md");
+        assert_eq!(p.instructions.located.as_deref(), Some(real.as_path()));
+        assert!(p.protected_dirs.contains(&real));
+        for dots in ["out/real/../real/AGENTS.md", "out/link/../real/AGENTS.md"] {
+            let e = at(&b.join(dots)).unwrap_err();
+            assert!(e.contains("has a `.` or `..` in it"), "{e}");
+        }
+    }
+
+    /// Only the node's user and root may own the operator's file.
+    #[test]
+    fn a_foreign_owner_is_refused() {
+        assert_eq!(file_refusal(1000, 0o644, 1000), None);
+        assert_eq!(file_refusal(0, 0o644, 1000), None);
+        assert!(
+            file_refusal(1001, 0o644, 1000)
+                .unwrap()
+                .contains("another user (uid 1001)")
+        );
+        // Writable by others: refused for every owner, root included.
+        for (uid, mode) in [(1000, 0o664), (1000, 0o646), (0, 0o666), (0, 0o620)] {
+            assert!(
+                file_refusal(uid, mode, 1000)
+                    .unwrap()
+                    .contains("chmod go-w"),
+                "{uid} {mode:o}"
+            );
+        }
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("AGENTS.md");
+        std::fs::write(&f, "x").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            InstructionsPolicy::warnings(&f).is_empty(),
+            "{:?}",
+            InstructionsPolicy::warnings(&f)
+        );
+        std::fs::hard_link(&f, d.path().join("other")).unwrap();
+        let w = InstructionsPolicy::warnings(&f);
+        assert!(w.len() == 1 && w[0].contains("2 names"), "{w:?}");
+        std::fs::remove_file(d.path().join("other")).unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o666)).unwrap();
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        let w = InstructionsPolicy::warnings(&f);
+        assert_eq!(w.len(), 2, "{w:?}");
+        assert!(w[0].contains("it is not read"), "{w:?}");
+    }
 
     /// Review N2: `mcp` denies every MCP tool, `mcp__<server>` one
     /// server's; anything else stays an exact name.

@@ -261,6 +261,7 @@ mod tests {
                 attachments: vec![],
                 reply: None,
                 images: vec![],
+                files: vec![],
                 queued: false,
             }),
             EventKind::AssistantMessage(AssistantMessage {

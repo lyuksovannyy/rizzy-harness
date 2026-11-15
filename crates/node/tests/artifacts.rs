@@ -177,6 +177,7 @@ impl Node {
             reply: None,
             images: vec![],
             agent_named: false,
+            files: vec![],
         });
     }
 }

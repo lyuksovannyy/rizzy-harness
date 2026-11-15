@@ -18,6 +18,10 @@ pub enum Item {
         /// Attachment file names.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<String>,
+        /// Paths the person mentioned with `@path` (T63): shown as chips,
+        /// never their content.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        files: Vec<String>,
         /// The answer to an input block, when this message is one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reply: Option<FormReply>,
@@ -364,6 +368,7 @@ impl SessionView {
                 turn_id: m.turn_id,
                 text: m.text,
                 attachments: m.attachments.into_iter().map(|a| a.name).collect(),
+                files: m.files.into_iter().map(|f| f.path).collect(),
                 reply: m.reply,
                 images: m.images,
                 queued: m.queued.then_some(Queued { seq, read: false }),
@@ -926,6 +931,7 @@ mod tests {
                 reply,
                 images: vec![],
                 queued: false,
+                files: vec![],
             })
         };
         let evs = vec![ev(sid, 1, msg(Some(reply.clone()))), ev(sid, 2, msg(None))];

@@ -230,6 +230,8 @@ export type Item =
       turn_id: string;
       text: string;
       attachments?: string[];
+      /** Paths the person mentioned with `@path` (T63); the node read them. */
+      files?: string[];
       reply?: FormReply;
       images?: ImageRef[];
       /** Sent while a turn ran (X.5): its seq, and whether the agent has read it. */

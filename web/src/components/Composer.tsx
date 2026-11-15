@@ -1,8 +1,8 @@
-import { ArrowUp, CornerDownRight, FileText, Globe, Image, Loader2, Mic, Paperclip, Square, X } from "lucide-react";
+import { ArrowUp, AtSign, CornerDownRight, FileText, Globe, Image, Loader2, Mic, Paperclip, Square, X } from "lucide-react";
 import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { t } from "../lib/i18n";
 import { pickable } from "../lib/agents";
-import { activeMention, filterAgents, insertMention, leadingMention } from "../lib/mentions";
+import { activeMention, filterAgents, insertMention, isPathToken, leadingMention } from "../lib/mentions";
 import { cycleMode, enabledModes, MODES, type Mode } from "../lib/modes";
 import { modelLabel, offeredModels, resolveModel } from "../lib/models";
 import { radioKeys, radioTab } from "../lib/radios";
@@ -70,6 +70,8 @@ export interface Submission {
   execMode?: ExecMode;
   /** Agentic: the approval mode the person picked (T50); absent: the node's default. */
   approvalMode?: ApprovalMode;
+  /** Session, a chat with a folder: the paths its text mentions with `@path` (T63). */
+  files?: string[];
 }
 
 const MAX_ATTACHMENTS = 5;
@@ -128,6 +130,9 @@ export function Composer(props: {
   /** Session: the chat's step limit and the node's maximum (X.14); absent:
    * not changeable here. */
   steps?: { value: number; max: number; onChange: (n: number) => Promise<unknown> };
+  /** Session, the owner's chat with a folder: its id, for `@path`
+   * completion and mentions (T63). Absent: no files are offered. */
+  filesOf?: string;
   /** Session: `/compact [focus]` summarises the chat now instead of sending a message (X.20). */
   compact?: (focus: string) => Promise<unknown>;
   /** Session: a /compact runs; Stop cancels it. */
@@ -322,10 +327,68 @@ export function Composer(props: {
     engineByUrl(engines, defaultUrl, kind);
   const engineUrl = (engine ? (kind === "text" ? engine.text : engine.image) : undefined) ?? defaultUrl;
 
-  const mention = popupClosed ? null : activeMention(text, caret);
-  const suggestions: { id: string; title: string; hint: string; origin?: string | null; agent?: Agent }[] = !mention
+  const filesOf = searching ? undefined : props.filesOf;
+  const mention = popupClosed ? null : activeMention(text, caret, !!filesOf);
+  // A token with `/` or `.` names a file of the chat's folder (agents
+  // first otherwise): the node lists matches, asked once typing pauses.
+  const fileQuery = mention && filesOf && isPathToken(mention.query) ? mention.query : null;
+  const [fileHits, setFileHits] = useState<{ query: string; paths: string[] } | null>(null);
+  useEffect(() => {
+    if (fileQuery == null || !filesOf) return;
+    let live = true;
+    const timer = setTimeout(() => {
+      const done = (paths: string[]) => live && setFileHits({ query: fileQuery, paths });
+      // Lazy: only a chat with a folder loads the file part.
+      import("../lib/fileMentions")
+        .then((m) => m.listFiles(filesOf, fileQuery))
+        .then(done, () => done([]));
+    }, 150);
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
+  }, [fileQuery, filesOf]);
+  const hits = fileQuery != null && fileHits?.query === fileQuery ? fileHits.paths : null;
+  // The paths the text mentions that the folder holds, shown as chips
+  // before sending (each can be taken off): only these go with the
+  // message, so nothing reaches the model the person did not see listed.
+  const [found, setFound] = useState<string[]>([]);
+  const [dropped, setDropped] = useState<string[]>([]);
+  const known = useRef(new Map<string, { ok: boolean; at: number }>());
+  const hasPathToken = !!filesOf && /(^|[\s([{'"])@[^\s@]*[/.]/.test(text);
+  useEffect(() => {
+    if (!filesOf || !hasPathToken) {
+      setFound([]);
+      return;
+    }
+    let live = true;
+    const timer = setTimeout(() => {
+      import("../lib/fileMentions")
+        .then((m) => m.existing(filesOf, m.fileMentions(text), known.current))
+        .then((paths) => live && setFound(paths), () => {});
+    }, 300);
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
+  }, [text, filesOf, hasPathToken]);
+  const attached = found.filter((p) => !dropped.includes(p));
+  // On send, the check of the text as sent (a token typed within the
+  // debounce, a file made since): waited for at most 2 s, else the chips
+  // shown. Never a path the person took off.
+  const sendable = async (id: string, body: string): Promise<string[]> => {
+    const m = await import("../lib/fileMentions");
+    const checked = await Promise.race([
+      m.existing(id, m.fileMentions(body), known.current),
+      new Promise<null>((r) => setTimeout(() => r(null), 2000)),
+    ]);
+    return (checked ?? attached).filter((p) => !dropped.includes(p));
+  };
+  const suggestions: { id: string; title: string; hint: string; origin?: string | null; agent?: Agent; file?: boolean }[] = !mention
     ? []
-    : searching
+    : fileQuery != null
+      ? (hits ?? []).map((p) => ({ id: p, title: p, hint: "", file: true }))
+      : searching
       ? engines
           .filter((e) => e.id.startsWith(mention.query.toLowerCase()) || e.name.toLowerCase().startsWith(mention.query.toLowerCase()))
           .slice(0, 8)
@@ -413,11 +476,14 @@ export function Composer(props: {
         ...(images.length ? { images } : {}),
         ...(home && mode === "agentic" ? { execMode: exec } : {}),
         ...(home && mode === "agentic" && approvalPick ? { approvalMode: approvalPick } : {}),
+        ...(filesOf && hasPathToken ? { files: await sendable(filesOf, body) } : {}),
       });
       if (mode === "agentic") rememberFolder(cwd.trim());
       if (home) props.onLearn?.(body, mode);
       setText("");
       setFiles([]);
+      setFound([]);
+      setDropped([]);
       setPictures([]);
       setManual(false);
       // The host shell is chosen again, with its warning, for each chat.
@@ -521,8 +587,18 @@ export function Composer(props: {
 
   return (
     <div className="composer-wrap">
+      {fileQuery != null && hits?.length === 0 && (
+        <div className="mention-popup mention-none muted" role="status">
+          {t("composer.noFile")}
+        </div>
+      )}
       {popupOpen && (
-        <ul className="mention-popup" role="listbox" aria-label={searching ? "search engines" : "agents"}>
+        <ul className="mention-popup" role="listbox" aria-label={fileQuery != null ? t("composer.files") : searching ? "search engines" : "agents"}>
+          {fileQuery != null && (
+            <li role="presentation" className="option-group">
+              {t("composer.files")}
+            </li>
+          )}
           {suggestions.map((a, i) => (
             <li
               key={a.id}
@@ -536,6 +612,7 @@ export function Composer(props: {
             >
               {searching && <EngineIcon origin={a.origin ?? null} />}
               {a.agent && <AgentMark agent={a.agent} size={18} />}
+              {a.file && <FileText size={14} />}
               <b>@{a.id}</b> {searching && <span>{a.title}</span>} <span className="option-hint">{a.hint}</span>
             </li>
           ))}
@@ -563,7 +640,7 @@ export function Composer(props: {
           onKeyDown={onKeyDown}
           onPaste={(e) => takeImages(e, e.clipboardData.files)}
         />
-        {files.length + pictures.length > 0 && (
+        {files.length + pictures.length + attached.length > 0 && (
           <ul className="chips" aria-label={t("composer.attachments")}>
             {pictures.map((x) => (
               <li key={x.key} className="chip image-chip">
@@ -576,6 +653,14 @@ export function Composer(props: {
                 )}
                 {x.name}
                 <button type="button" className="link" aria-label={`${t("composer.remove")} ${x.name}`} onClick={() => setPictures((p) => p.filter((y) => y !== x))}>
+                  <X size={14} />
+                </button>
+              </li>
+            ))}
+            {attached.map((p) => (
+              <li key={`@${p}`} className="chip" title={t("composer.mentionHint")}>
+                <AtSign size={14} /> {p}
+                <button type="button" className="link" aria-label={`${t("composer.remove")} ${p}`} onClick={() => setDropped((d) => [...d, p])}>
                   <X size={14} />
                 </button>
               </li>

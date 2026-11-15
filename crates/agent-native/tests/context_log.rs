@@ -169,6 +169,7 @@ fn append(
             reply: None,
             images: vec![],
             queued: false,
+            files: vec![],
         }),
     ];
     kinds.extend(host.0.lock().unwrap().iter().cloned());
@@ -494,6 +495,114 @@ async fn a_changed_section_replaces_and_a_gone_one_is_withdrawn_once() {
     );
 }
 
+/// The node operator's file (X.2, T62) is a standing section of its own,
+/// ahead of the repository's files: sent once, replaced when it changes,
+/// withdrawn when it is gone, kept (with a note) when it could not be read,
+/// and the next turn's request rebuilds each opening byte for byte.
+#[tokio::test]
+async fn the_operators_file_is_its_own_standing_section() {
+    let p = script(1);
+    let sid = SessionId::new();
+    let mut log = Vec::new();
+    let with = |user: Option<&str>, minute| TurnExtra {
+        user_instructions: user.map(|u| format!("Instructions of this node's operator\n{u}")),
+        ..extra(Some(agents_md()), minute)
+    };
+    let (_, c1) = turn(
+        &p,
+        NativeConfig::default(),
+        &mut log,
+        sid,
+        "t1",
+        "one",
+        with(Some("Answer in French."), 1),
+    )
+    .await;
+    assert_eq!(
+        standing(&c1[0]),
+        ["user_instructions", "instructions", "skills", "memory"]
+    );
+    let b1 = block(&c1[0]);
+    assert!(
+        b1.find("Answer in French.").unwrap() < b1.find("Rule 1:").unwrap(),
+        "{b1}"
+    );
+    // Unchanged: not sent again.
+    let (r2, c2) = turn(
+        &p,
+        NativeConfig::default(),
+        &mut log,
+        sid,
+        "t2",
+        "two",
+        with(Some("Answer in French."), 2),
+    )
+    .await;
+    assert!(standing(&c2[0]).is_empty(), "{:?}", standing(&c2[0]));
+    assert!(bytes(&r2[0]).contains("Answer in French."));
+    // Changed: replaces the old copy everywhere.
+    let (r3, c3) = turn(
+        &p,
+        NativeConfig::default(),
+        &mut log,
+        sid,
+        "t3",
+        "three",
+        with(Some("Answer in German."), 3),
+    )
+    .await;
+    assert_eq!(standing(&c3[0]), ["user_instructions"]);
+    let o3 = opening(&r3[0]);
+    assert!(
+        o3.contains("The node operator's instructions below replace the ones sent earlier"),
+        "{o3}"
+    );
+    assert!(!bytes(&r3[0]).contains("Answer in French."));
+    // Not read this turn: nothing is withdrawn, a note says so.
+    let mut unread = with(None, 4);
+    unread.user_instructions_unread = Some("[the node operator's file was not read]".into());
+    let (r4, c4) = turn(
+        &p,
+        NativeConfig::default(),
+        &mut log,
+        sid,
+        "t4",
+        "four",
+        unread,
+    )
+    .await;
+    assert!(standing(&c4[0]).is_empty());
+    assert!(bytes(&r4[0]).contains("Answer in German."));
+    assert!(opening(&r4[0]).contains("was not read"));
+    // Gone: withdrawn once.
+    let (r5, c5) = turn(
+        &p,
+        NativeConfig::default(),
+        &mut log,
+        sid,
+        "t5",
+        "five",
+        with(None, 5),
+    )
+    .await;
+    assert_eq!(standing(&c5[0]), ["user_instructions"]);
+    assert!(opening(&r5[0]).contains("The node operator's instructions sent earlier in this conversation no longer apply: the node's instruction file is gone."));
+    assert!(!bytes(&r5[0]).contains("Answer in German."));
+    // The next request starts with this one's last, byte for byte.
+    let (r6, _) = turn(
+        &p,
+        NativeConfig::default(),
+        &mut log,
+        sid,
+        "t6",
+        "six",
+        with(None, 6),
+    )
+    .await;
+    let last = r5.last().unwrap();
+    assert_eq!(r6[0].messages[..last.messages.len()], last.messages[..]);
+}
+
 /// A turn the master gave no context (a callback turn, one that reads
 /// queued messages without theirs: `standing` is `None`) reads no memory
 /// (review F2): the facts are withdrawn; the project's brief and board,
@@ -771,6 +880,7 @@ async fn a_turn_that_reads_queued_messages_rebuilds_its_opening() {
         reply: None,
         images: vec![],
         queued: true,
+        files: vec![],
     };
     let seq = push(&mut log, sid, EventKind::UserMessage(queued.clone()));
     // The history a turn gets is read before its `turn_started`.
@@ -1114,6 +1224,7 @@ fn user(turn: &str, text: &str) -> EventKind {
         reply: None,
         images: vec![],
         queued: false,
+        files: vec![],
     })
 }
 

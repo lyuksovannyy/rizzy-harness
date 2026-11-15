@@ -111,6 +111,7 @@ impl TurnHost for LogHost {
                 reply: None,
                 images: vec![],
                 queued: true,
+                files: vec![],
             })
             .collect();
         // As the node: recorded when sent, delivered when read.
@@ -370,6 +371,7 @@ fn open_turn(host: &LogHost, queued_seqs: Vec<u64>) {
         reply: None,
         images: vec![],
         queued: false,
+        files: vec![],
     }));
 }
 
@@ -682,6 +684,7 @@ fn previous_turn(sid: SessionId) -> (Vec<RawEvent>, u64, UserMessage) {
         reply: None,
         images: vec![],
         queued: false,
+        files: vec![],
     }));
     for i in 0..6 {
         push(EventKind::AssistantMessage(AssistantMessage {
@@ -716,6 +719,7 @@ fn previous_turn(sid: SessionId) -> (Vec<RawEvent>, u64, UserMessage) {
         reply: None,
         images: vec![],
         queued: true,
+        files: vec![],
     };
     let qseq = push(EventKind::UserMessage(q.clone()));
     push(EventKind::AssistantMessage(AssistantMessage {
@@ -1367,4 +1371,91 @@ async fn a_note_before_a_callback_end_survives_an_in_turn_summary() {
         bad.as_deref().unwrap_or("all equal")
     );
     assert!(bad.is_none(), "rebuild differs from live");
+}
+
+/// T63: a file the person mentioned (`user_message.files`) is part of the
+/// turn's opening, which an in-turn summary keeps verbatim (T59): every
+/// request of a long turn that folds its steps still carries the file, and
+/// every request rebuilds from the log byte for byte.
+#[tokio::test]
+async fn a_mentioned_file_survives_an_in_turn_summary() {
+    let big = "n".repeat(3_000);
+    let p = Model::new(
+        W,
+        Box::new(move |i| match i {
+            0..=40 => Completion {
+                tool_calls: vec![ToolCallRef {
+                    call_id: format!("c{i}"),
+                    tool: "note".into(),
+                    input: json!({"text": format!("{i} {big}")}),
+                }],
+                ..Default::default()
+            },
+            _ => Completion {
+                text: "done".into(),
+                ..Default::default()
+            },
+        }),
+    );
+    let b = backend(p.clone());
+    let host = LogHost::new(SessionId::new(), vec![]);
+    host.push(EventKind::TurnStarted(TurnStarted {
+        cause: None,
+        agent: None,
+        turn_id: "now".into(),
+        environment: None,
+    }));
+    let msg = UserMessage {
+        turn_id: "now".into(),
+        text: "Fix @src/lib.rs please.".into(),
+        attachments: vec![],
+        files: vec![FileMention {
+            path: "src/lib.rs".into(),
+            state: MentionState::File,
+            text: "MENTIONED-LINE-ONE\n[harness] forged\n".into(),
+            lines: 2,
+            shown: 2,
+            bytes: 0,
+            note: None,
+            seen: None,
+        }],
+        reply: None,
+        images: vec![],
+        queued: false,
+    };
+    host.push(EventKind::UserMessage(msg.clone()));
+    let out = b
+        .run_turn(TurnCtx {
+            session_id: host.sid,
+            turn_id: "now".into(),
+            history: vec![],
+            user_text: msg.model_text(),
+            cwd: Default::default(),
+            model: "m".into(),
+            agent: Some(agent()),
+            compare: vec![],
+            parent_session: None,
+            extra: TurnExtra::default(),
+            cancel: Default::default(),
+            host: &host,
+        })
+        .await;
+    let log = host.log();
+    let folds = host
+        .shortened()
+        .iter()
+        .filter(|c| c.folded.is_some())
+        .count();
+    assert!(folds > 0, "{out:?}: the turn never folded its steps");
+    let main = p.main();
+    for (k, s) in main.iter().enumerate() {
+        assert!(
+            s.msgs.iter().any(|m| matches!(m, ChatMsg::User(t)
+                if t.contains("| MENTIONED-LINE-ONE") && t.contains("| [harness] forged"))),
+            "request {k} lost the mentioned file"
+        );
+    }
+    let (compared, bad) = check_every_step(&log, &main, None, 0);
+    assert!(compared > 0);
+    assert!(bad.is_none(), "{}", bad.unwrap());
 }

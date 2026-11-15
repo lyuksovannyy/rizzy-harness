@@ -30,6 +30,7 @@ const EXE: &str = env!("CARGO_BIN_EXE_rizzy-harness");
 struct Node {
     _dir: tempfile::TempDir,
     ws: PathBuf,
+    data: PathBuf,
     rt: harness_node::NodeRuntime,
     link: harness_node::NodeLink,
 }
@@ -59,13 +60,19 @@ async fn node() -> Option<Node> {
         eprintln!("SKIPPED: the sandbox mode is not offered here: {why}");
         return None;
     }
-    let policy = harness_node::NodePolicy {
+    // As the binary sets a node up: the data directory protected, the
+    // operator's instruction file located in it (X.2), and file tools
+    // allowed outside the session folder (the widest setting).
+    let mut policy = harness_node::NodePolicy {
         workspace_roots: vec![root.clone()],
         max_approval_mode: harness_core::policy::ApprovalMode::Auto,
         exec: harness_node::exec::ExecOffers::new(Ok(()), Ok(()), vec![]),
         sandbox_tmp: s.tmp_root.clone(),
+        allow_outside_workspace: true,
         ..Default::default()
     };
+    policy.protect(&data);
+    policy.locate_instructions(&data).unwrap();
     let backend = NativeBackend::new(
         Arc::new(Mock {
             delay: Duration::from_millis(1),
@@ -75,6 +82,7 @@ async fn node() -> Option<Node> {
             sandbox: s.confinement,
             host_shell: s.uncontained,
             protected_dirs: Arc::new(vec![data.clone()]),
+            allow_outside_workspace: true,
             ..Default::default()
         },
     );
@@ -106,6 +114,7 @@ async fn node() -> Option<Node> {
     Some(Node {
         _dir: dir,
         ws,
+        data,
         rt,
         link,
     })
@@ -172,6 +181,7 @@ impl Node {
                 context: None,
                 images: vec![],
                 agent_named: false,
+                files: vec![],
             })
             .unwrap();
         self.ack().await.unwrap();
@@ -273,4 +283,65 @@ async fn a_host_session_gets_no_background_command() {
         .filter_map(|e| e.ok()?.file_name().to_str()?.parse::<i32>().ok())
         .any(|p| std::fs::read(format!("/proc/{p}/cmdline")).is_ok_and(|c| c == mark.cmdline()));
     assert!(!alive, "a background command of the host session runs");
+}
+
+/// X.2, T62: the node operator's instruction file in its default place,
+/// `AGENTS.md` in the node's data directory, is out of reach of every tool
+/// in both modes, with file tools allowed outside the session folder:
+/// `write` and `edit` are refused, the shell cannot append, replace or
+/// link it. Each turn still reads it into its context (`context_sent`).
+#[tokio::test]
+async fn the_operators_file_in_the_data_directory_is_out_of_every_tools_reach() {
+    let Some(mut n) = node().await else { return };
+    let file = n.data.join("AGENTS.md");
+    let rule = "RULE: answer in French.\n";
+    std::fs::write(&file, rule).unwrap();
+    let f = file.display().to_string();
+    let shell = format!(
+        "echo PLANTED >> {f}; echo PLANTED > {f}.new && mv {f}.new {f}; \
+         ln -sf /etc/passwd {f}; rm -f {f}; echo done"
+    );
+    let script = serde_json::json!([
+        {"tool": "write", "input": {"path": f, "content": "PLANTED"}},
+        {"tool": "edit", "input": {"path": f, "old_string": "RULE", "new_string": "PLANTED"}},
+        {"tool": "bash", "input": {"command": shell}},
+    ]);
+    for mode in [ExecMode::Sandbox, ExecMode::Host] {
+        let sid = n.create(mode).await;
+        let out = n.run(sid, &format!("script: {script}")).await;
+        assert_eq!(out.len(), 3, "{mode:?}: {out:?}");
+        assert!(
+            out[0].contains("data directory"),
+            "{mode:?} write: {}",
+            out[0]
+        );
+        assert!(
+            out[1].contains("data directory"),
+            "{mode:?} edit: {}",
+            out[1]
+        );
+        assert!(out[2].contains("done"), "{mode:?} bash: {}", out[2]);
+        assert_eq!(
+            std::fs::symlink_metadata(&file).map(|m| m.is_file()).ok(),
+            Some(true),
+            "{mode:?}: the file was replaced or removed"
+        );
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), rule, "{mode:?}");
+        assert!(!n.data.join("AGENTS.md.new").exists(), "{mode:?}");
+        // The turn read it as the operator's section.
+        let log = n.rt.store().events_after(sid, 0, 10_000).unwrap();
+        let sent = log.iter().find_map(|e| match e.typed() {
+            Ok(EventKind::ContextSent(c)) => c
+                .sections
+                .into_iter()
+                .find(|s| s.key == "user_instructions"),
+            _ => None,
+        });
+        let sent = sent.unwrap_or_else(|| panic!("{mode:?}: no operator's section"));
+        assert!(
+            sent.text.contains("RULE: answer in French."),
+            "{}",
+            sent.text
+        );
+    }
 }

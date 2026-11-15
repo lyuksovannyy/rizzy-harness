@@ -199,6 +199,7 @@ impl Rig {
                 text: text.into(),
                 images: vec![],
                 agent_named: false,
+                files: vec![],
             })
             .unwrap();
         (sid, cwd)

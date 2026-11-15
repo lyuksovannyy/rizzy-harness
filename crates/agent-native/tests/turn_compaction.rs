@@ -58,6 +58,7 @@ impl TurnHost for Host {
                 reply: None,
                 images: vec![],
                 queued: true,
+                files: vec![],
             })
             .collect())
     }
@@ -442,6 +443,7 @@ fn logged(
         reply: None,
         images: vec![],
         queued: false,
+        files: vec![],
     }));
     for k in emitted {
         // A turn id the loop wrote as "now" is this turn's.

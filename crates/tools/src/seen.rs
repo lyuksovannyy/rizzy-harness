@@ -3,7 +3,8 @@
 //!
 //! `read` records the file's SHA-256; `edit` and `write` refuse a file the
 //! agent has not read, or that changed since, and record what they wrote. The event log is the authority: each such call's
-//! `tool_call_finished` carries a [`FileSeen`], and at the start of every
+//! `tool_call_finished` carries a [`FileSeen`] (and so does a file the
+//! person mentioned with `@path` in its `user_message`, PLAN.md T63), and at the start of every
 //! turn the session's table is rebuilt from the log ([`SeenStore::sync`]),
 //! so a node restart loses nothing but the snapshots below.
 //!
@@ -177,13 +178,27 @@ impl SeenStore {
     /// log names.
     pub fn sync(&self, session: SessionId, history: &[RawEvent]) {
         let mut latest: HashMap<PathBuf, (Sha, u64)> = HashMap::new();
+        let mut take = |s: &serde_json::Value, seq: u64| {
+            if let Ok(f) = serde_json::from_value::<FileSeen>(s.clone())
+                && let Some(sha) = unhex(&f.sha256)
+            {
+                latest.insert(PathBuf::from(&f.path), (sha, seq));
+            }
+        };
         for e in history {
             if e.kind == "tool_call_finished"
                 && let Some(s) = e.payload.get("seen")
-                && let Ok(f) = serde_json::from_value::<FileSeen>(s.clone())
-                && let Some(sha) = unhex(&f.sha256)
             {
-                latest.insert(PathBuf::from(&f.path), (sha, e.seq));
+                take(s, e.seq);
+            }
+            // A file the person mentioned (`@path`, T63) that the node read
+            // all of and showed, as a `read` would record it.
+            if e.kind == "user_message"
+                && let Some(files) = e.payload.get("files").and_then(|f| f.as_array())
+            {
+                for s in files.iter().filter_map(|f| f.get("seen")) {
+                    take(s, e.seq);
+                }
             }
         }
         // Keep the most recent files only.
@@ -268,6 +283,27 @@ impl SessionSeen {
             .flatten()
             .map(|s| Arc::new(s.to_string()));
         self.put(path, sha, snapshot)
+    }
+
+    /// Record what the turn's own message says the agent knows (a file
+    /// the person mentioned, T63): its hash only, keyed on its path as
+    /// given. It is newer than anything the table holds at the turn's
+    /// start. A record that does not parse is skipped.
+    pub fn note(&self, f: &FileSeen) {
+        if let Some(sha) = unhex(&f.sha256) {
+            self.put(Path::new(&f.path), sha, None);
+        }
+    }
+
+    /// [`Self::note`] for a message queued while a turn ran: only where
+    /// the table holds nothing of the file, so an older hash never
+    /// replaces a newer `read` or `write` (review of PR 120). An older
+    /// record kept means at worst "read it again", never a wrong accept;
+    /// the next turn's [`SeenStore::sync`] orders them by the log.
+    pub fn note_if_unknown(&self, f: &FileSeen) {
+        if self.get(Path::new(&f.path)).is_none() {
+            self.note(f);
+        }
     }
 
     /// [`Self::record`] for a file too large to hold: its hash only.
@@ -355,6 +391,30 @@ impl Drop for PathLock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review of PR 120: a queued message's older hash of a file does not
+    /// replace a newer record of it; the turn's own message's does.
+    #[test]
+    fn a_queued_mention_never_replaces_a_newer_record() {
+        let t = SessionSeen::default();
+        let p = Path::new("/w/a.rs");
+        let newer = t.record(p, b"written by the turn");
+        let old = FileSeen {
+            path: "/w/a.rs".into(),
+            sha256: hex(&sha256(b"as the person sent it")),
+            base: None,
+        };
+        t.note_if_unknown(&old);
+        assert_eq!(hex(&t.get(p).unwrap().sha), newer.sha256);
+        t.note(&old);
+        assert_eq!(hex(&t.get(p).unwrap().sha), old.sha256);
+        let q = Path::new("/w/b.rs");
+        t.note_if_unknown(&FileSeen {
+            path: "/w/b.rs".into(),
+            ..old.clone()
+        });
+        assert_eq!(hex(&t.get(q).unwrap().sha), old.sha256);
+    }
     use harness_core::EventKind;
     use harness_core::event::ToolCallFinished;
 

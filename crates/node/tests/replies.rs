@@ -91,6 +91,7 @@ impl Chat {
             reply,
             images: vec![],
             agent_named: false,
+            files: vec![],
         });
     }
 

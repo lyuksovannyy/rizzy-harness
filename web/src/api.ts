@@ -173,6 +173,8 @@ export const api = {
       reply?: FormReply;
       /** Media item ids. */
       images?: string[];
+      /** Paths mentioned with `@path` (T63). */
+      files?: string[];
     } = {},
   ) => call("POST", `/api/sessions/${id}/prompt`, { text, ...opts }),
   upload: async (file: File): Promise<UploadedAttachment> => {

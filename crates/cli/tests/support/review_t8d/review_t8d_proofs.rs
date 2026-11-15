@@ -323,6 +323,7 @@ no_callbacks: false,
             text,
             images: vec![],
             agent_named: false,
+            files: vec![],
         });
     }
 

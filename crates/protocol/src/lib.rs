@@ -58,6 +58,19 @@ pub const CAP_COMPACT: &str = "compact";
 /// The master asks for a turn's changes only on nodes whose hello listed it.
 pub const CAP_DIFF: &str = "diff";
 
+/// The node capability that announces `@` file mentions (PLAN.md T63):
+/// `session.prompt.files` and `session.files`. The master sends neither to
+/// a node whose hello did not list it.
+pub const CAP_FILES: &str = "files";
+
+/// The most paths one `session.prompt` may name in `files`, and the
+/// longest one, in bytes; a node reads at most its own number of them.
+pub const MAX_PROMPT_FILES: usize = 64;
+pub const MAX_PROMPT_FILE_BYTES: usize = 1024;
+
+/// The most paths one `session.files_result` carries.
+pub const MAX_FILES_RESULT: usize = 50;
+
 /// The largest serialized `session.diff_result` a node sends: a quarter of
 /// the link's frame, so one answer holds the node's ordered output back by
 /// a few seconds at most on a slow link. The node cuts what does not fit
@@ -434,6 +447,17 @@ pub enum NodeToMaster {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// The answer to `session.files` (pull only): at most
+    /// [`MAX_FILES_RESULT`] paths relative to the chat's folder (a folder
+    /// ends with `/`), or why there are none.
+    #[serde(rename = "session.files_result")]
+    FilesResult {
+        req_id: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        paths: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -511,6 +535,12 @@ pub enum MasterToNode {
         /// Images for this message; only to nodes with `CAP_IMAGES`.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<ChatImage>,
+        /// Paths of the chat's folder the person mentioned with `@path`
+        /// (PLAN.md T63; only to nodes with [`CAP_FILES`]). Names only: the
+        /// node reads each under its own `read` rules and records what it
+        /// found in the message; nothing here is file content.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        files: Vec<String>,
     },
     /// Resume an idle chat because background commands ended (a callback
     /// turn, T.8d step 3; only to nodes with `CAP_CALLBACK`). There is no
@@ -739,6 +769,16 @@ pub enum MasterToNode {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         rewind: bool,
     },
+    /// Paths of the chat's folder for the composer's `@` completion
+    /// (PLAN.md T63): answered by one `session.files_result`, never by an
+    /// ack, handled outside the node's command loop, nothing logged. Only
+    /// to nodes with [`CAP_FILES`].
+    #[serde(rename = "session.files")]
+    Files {
+        req_id: String,
+        session_id: SessionId,
+        query: String,
+    },
 }
 
 impl MasterToNode {
@@ -766,7 +806,8 @@ impl MasterToNode {
             | MasterToNode::Resume { .. }
             | MasterToNode::ArtifactFetch { .. }
             | MasterToNode::RecallResult { .. }
-            | MasterToNode::Diff { .. } => None,
+            | MasterToNode::Diff { .. }
+            | MasterToNode::Files { .. } => None,
         }
     }
 }
@@ -1014,6 +1055,7 @@ mod tests {
             reply: None,
             images: vec![img.clone()],
             agent_named: false,
+            files: vec![],
         };
         let v = serde_json::to_value(&p).unwrap();
         assert_eq!(
@@ -1041,6 +1083,7 @@ mod tests {
             reply,
             images: vec![],
             agent_named: false,
+            files: vec![],
         };
         let v = serde_json::to_value(prompt(None)).unwrap();
         assert!(v.get("reply").is_none(), "{v}");

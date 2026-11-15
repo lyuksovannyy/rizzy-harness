@@ -608,6 +608,17 @@ async fn agentic_node(
     // no file tool may touch it, whatever node.toml allows (AUDIT S1).
     let mut policy = policy;
     policy.protect(dir);
+    // The node operator's instruction file: node.toml's, else AGENTS.md
+    // in this data directory; protected wherever it lies, refused where an
+    // agent could reach it (X.2, PLAN.md T62).
+    policy
+        .locate_instructions(dir)
+        .map_err(|e| anyhow::anyhow!("node.toml: {e}"))?;
+    if let Some(f) = &policy.instructions.located {
+        for w in harness_node::InstructionsPolicy::warnings(f) {
+            tracing::warn!("the node's instruction file: {w}");
+        }
+    }
     // The shell sandbox (FIX_PLAN 2.7): resolved and self-tested once; the
     // execution modes this node offers follow from it (N.10a).
     let (sandbox, host_shell) = start_sandbox(dir, &mut policy, refuse_without_sandbox)?;
@@ -1003,10 +1014,35 @@ async fn doctor(dir: &Path) -> anyhow::Result<()> {
     );
     // The sandbox's start, once, as the node makes it (its own data
     // directory protected), and the modes it lets the node offer (N.10a).
+    // The node operator's instruction file (X.2, PLAN.md T62).
+    check(
+        "instruction file",
+        NodePolicy::load(&dir.join("node.toml"))
+            .map_err(|e| e.to_string())
+            .and_then(|mut p| {
+                p.protect(dir);
+                p.locate_instructions(dir)?;
+                let f = p.instructions.located.unwrap_or_default();
+                // A foreign owner is refused (the file is not read); the
+                // rest are warnings.
+                for w in harness_node::InstructionsPolicy::warnings(&f) {
+                    if w.contains("it is not read") {
+                        return Err(w);
+                    }
+                    println!("warn  instruction file: {w}");
+                }
+                Ok(if f.exists() {
+                    format!("{} (sent with every agentic chat)", f.display())
+                } else {
+                    format!("{} (none there; nothing is sent)", f.display())
+                })
+            }),
+    );
     let started = NodePolicy::load(&dir.join("node.toml"))
         .map_err(|e| e.to_string())
         .and_then(|mut p| {
             p.protect(dir);
+            p.locate_instructions(dir)?;
             harness_tools::sandbox::start(
                 &p.sandbox_settings()?,
                 dir,

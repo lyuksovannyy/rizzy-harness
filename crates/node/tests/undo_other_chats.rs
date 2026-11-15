@@ -164,6 +164,7 @@ impl Rig {
             text: format!("script: {steps}"),
             images: vec![],
             agent_named: false,
+            files: vec![],
         });
     }
 

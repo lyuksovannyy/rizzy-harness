@@ -258,6 +258,7 @@ fn prompt(
         context: None,
         images: vec![],
         agent_named: false,
+        files: vec![],
     }
 }
 
@@ -1396,7 +1397,11 @@ async fn review_write_grant_moves_with_a_repointed_link_after_restart() {
 }
 
 /// A grant whose input held a secret: after a restart it covers the
-/// scrubbed text, a call the person never saw.
+/// scrubbed text, a call the person never saw. Since the review of pull
+/// request 120 (H2) the person's message reaches the model scrubbed, as the
+/// log holds it: the model never gets the secret, so the call it makes, the
+/// card the person answers and the grant are all the scrubbed text; the
+/// same call later runs under that grant, before and after a restart.
 #[tokio::test]
 async fn review_scrubbed_grant_covers_the_redacted_command_after_restart() {
     let dir = tempfile::tempdir().unwrap();
@@ -1416,24 +1421,24 @@ async fn review_scrubbed_grant_covers_the_redacted_command_after_restart() {
     let sid = {
         let mut n = review_start(&db, policy(dir.path(), ApprovalMode::Auto), secrets()).await;
         let sid = n.create(&ws, Some(ApprovalMode::Ask), None, false).await;
-        assert_eq!(
-            n.turn(sid, &granted, None, |_| Decision::AllowChat)
-                .await
-                .len(),
-            1
+        let cards = n.turn(sid, &granted, None, |_| Decision::AllowChat).await;
+        assert_eq!(cards.len(), 1);
+        let asked = format!("{:?}", cards[0]);
+        assert!(!asked.contains("sk-supersecret-123"), "{asked}");
+        assert!(
+            asked.contains("[REDACTED]"),
+            "the card showed the call as made: {asked}"
         );
         let live = n.turn(sid, &redacted, None, deny).await.len();
-        eprintln!("LIVE cards for the redacted text: {live}");
-        assert_eq!(live, 1);
+        assert_eq!(live, 0, "the call the person allowed runs under its grant");
         sid
     };
     let mut n = review_start(&db, policy(dir.path(), ApprovalMode::Auto), secrets()).await;
     let after = n.turn(sid, &redacted, None, deny).await.len();
-    eprintln!(
-        "AFTER RESTART cards for the redacted text: {after}; out.txt = {:?}",
-        std::fs::read_to_string(ws.join("out.txt"))
+    assert_eq!(
+        after, 0,
+        "the grant covers what the person allowed, also after a restart"
     );
-    assert_eq!(after, 1, "the redacted command was never allowed");
 }
 
 /// Review M2: `chat_grants = false` in node.toml: no card offers "for this

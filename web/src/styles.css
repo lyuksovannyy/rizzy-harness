@@ -1441,6 +1441,15 @@ select.pill {
   cursor: pointer;
   font-size: var(--text-md);
 }
+/* `@path` (T63): the files group's heading, and the line for no match. */
+.mention-popup li.option-group {
+  cursor: default;
+  font-size: var(--text-sm);
+  color: var(--fg-2);
+  padding: 2px 10px;
+}
+.mention-popup li svg { vertical-align: -2px; margin-right: var(--space-1-5); }
+.mention-none { padding: 6px 10px; font-size: var(--text-sm); }
 
 
 /* ---------- Conversation ---------- */

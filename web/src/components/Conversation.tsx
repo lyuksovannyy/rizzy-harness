@@ -1,7 +1,7 @@
 // An open session: header, timeline, reply composer. Loaded lazily so the
 // new-tab home screen stays small.
 import "../lib/i18nPages";
-import { Download, FileText, Package, Trash2 } from "lucide-react";
+import { AtSign, Download, FileText, Package, Trash2 } from "lucide-react";
 import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api } from "../api";
 import { pageApi } from "../apiPages";
@@ -536,11 +536,16 @@ export default function Conversation(props: {
                         ) : (
                           <div className="bubble">{it.text}</div>
                         )}
-                        {it.attachments && (
+                        {(it.attachments || it.files) && (
                           <ul className="chips">
-                            {it.attachments.map((n, j) => (
+                            {it.attachments?.map((n, j) => (
                               <li key={j} className="chip">
                                 <FileText size={14} /> {n}
+                              </li>
+                            ))}
+                            {it.files?.map((p, j) => (
+                              <li key={`f${j}`} className="chip" title={t("conv.mentioned")}>
+                                <AtSign size={14} /> {p}
                               </li>
                             ))}
                           </ul>
@@ -788,6 +793,9 @@ export default function Conversation(props: {
                   }
                 : undefined
             }
+            // `@path` mentions and their completion (T63): a chat with a
+            // folder that this person may write to.
+            filesOf={meta?.profile === "agentic" && !blocked ? sessionId : undefined}
             agentState={running ? undefined : face}
             sessionModel={meta?.model}
             agenticBlocked={null}
@@ -806,6 +814,7 @@ export default function Conversation(props: {
                 ...(s.effort ? { effort: s.effort } : {}),
                 ...(s.attachments.length ? { attachments: s.attachments } : {}),
                 ...(s.images?.length ? { images: s.images } : {}),
+                ...(s.files?.length ? { files: s.files } : {}),
               });
             }}
           />

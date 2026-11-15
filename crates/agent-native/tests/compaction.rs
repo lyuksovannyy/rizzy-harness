@@ -259,6 +259,7 @@ fn history(turns: usize, tokens: usize) -> Vec<RawEvent> {
             reply: None,
             images: vec![],
             queued: false,
+            files: vec![],
         }));
         push(EventKind::AssistantMessage(AssistantMessage {
             author: None,
@@ -760,6 +761,7 @@ fn forging_history() -> (Vec<RawEvent>, String) {
         reply: None,
         images: vec![],
         queued: false,
+        files: vec![],
     }));
     events.push(EventKind::AssistantMessage(AssistantMessage {
         author: None,
@@ -983,6 +985,7 @@ async fn a_background_note_and_a_callback_opening_reach_the_summariser_quoted() 
             reply: None,
             images: vec![],
             queued: false,
+            files: vec![],
         })
     };
     let answered = |t: &str, text: &str| {
@@ -1180,6 +1183,7 @@ fn history_with_todo(kept: usize) -> Vec<RawEvent> {
         reply: None,
         images: vec![],
         queued: false,
+        files: vec![],
     }));
     push(EventKind::AssistantMessage(AssistantMessage {
         author: None,
@@ -1349,6 +1353,7 @@ fn history_with_a_newer_list() -> Vec<RawEvent> {
             reply: None,
             images: vec![],
             queued: false,
+            files: vec![],
         }),
         EventKind::AssistantMessage(AssistantMessage {
             author: None,

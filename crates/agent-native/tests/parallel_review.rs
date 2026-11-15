@@ -112,6 +112,7 @@ impl TurnHost for LogHost {
                 attachments: vec![],
                 reply: None,
                 images: vec![],
+                files: vec![],
                 queued: true,
             })
             .collect();
@@ -391,6 +392,7 @@ fn open_turn(host: &LogHost, queued_seqs: Vec<u64>) {
         attachments: vec![],
         reply: None,
         images: vec![],
+        files: vec![],
         queued: false,
     }));
 }
@@ -701,6 +703,7 @@ fn previous_turn(sid: SessionId) -> (Vec<RawEvent>, u64, UserMessage) {
         attachments: vec![],
         reply: None,
         images: vec![],
+        files: vec![],
         queued: false,
     }));
     for i in 0..6 {
@@ -735,6 +738,7 @@ fn previous_turn(sid: SessionId) -> (Vec<RawEvent>, u64, UserMessage) {
         attachments: vec![],
         reply: None,
         images: vec![],
+        files: vec![],
         queued: true,
     };
     let qseq = push(EventKind::UserMessage(q.clone()));
@@ -1835,6 +1839,7 @@ async fn reviewer_manual_summary_between_turns_rebuilds() {
                 attachments: vec![],
                 reply: None,
                 images: vec![],
+                files: vec![],
                 queued: false,
             }));
             let out = b

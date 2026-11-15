@@ -225,6 +225,7 @@ impl Node {
             text: text.into(),
             images: vec![],
             agent_named: false,
+            files: vec![],
         })
         .await;
         let by = std::time::Instant::now() + Duration::from_secs(20);
@@ -272,20 +273,20 @@ async fn the_provider_gets_the_files_in_the_context_block_and_edits_next_turn() 
     let (context, rest) = harness_agent_native::provider::split_context(&first).unwrap();
     assert_eq!(rest, "hello");
     let root = context
-        .find("==> ../AGENTS.md <==\nRun cargo fmt.")
+        .find("==> ../AGENTS.md <==\n  Run cargo fmt.")
         .expect(&context);
     let sub = context
-        .find("==> CLAUDE.md <==\nKeep sub small.")
+        .find("==> CLAUDE.md <==\n  Keep sub small.")
         .expect(&context);
     let master = context.find("Person: Ann").expect(&context);
     assert!(root < sub && sub < master, "{context}");
     // Each file line is quoted in what the provider gets.
-    assert!(first.contains("\n| Run cargo fmt.\n"), "{first}");
+    assert!(first.contains("\n|   Run cargo fmt.\n"), "{first}");
 
     std::fs::write(n.repo.join("sub/CLAUDE.md"), "Now split sub up.\n").unwrap();
     n.turn(sid, "again", None).await;
     let second = n.requests().pop().unwrap();
-    assert!(second.contains("| Now split sub up."), "{second}");
+    assert!(second.contains("|   Now split sub up."), "{second}");
     assert!(!second.contains("Keep sub small."), "{second}");
 }
 
@@ -325,11 +326,11 @@ async fn a_sub_agent_gets_the_files_too() {
         .unwrap_or_else(|| panic!("no request for the sub-agent: {:?}", n.requests()));
     let (context, _) = harness_agent_native::provider::split_context(&child).unwrap();
     assert!(
-        context.contains("==> ../AGENTS.md <==\nRun cargo fmt."),
+        context.contains("==> ../AGENTS.md <==\n  Run cargo fmt."),
         "{context}"
     );
     assert!(
-        context.contains("==> CLAUDE.md <==\nKeep sub small."),
+        context.contains("==> CLAUDE.md <==\n  Keep sub small."),
         "{context}"
     );
     // The parent turn's context from the master, after the files.
@@ -438,14 +439,14 @@ async fn a_file_changed_during_a_turn_waits_for_the_next_turn() {
     let sent = n.raw_requests();
     assert!(sent.len() >= 4, "{sent:?}");
     assert!(sent.iter().all(|r| *r == sent[0]), "{sent:?}");
-    assert!(sent[0].contains("| Keep sub small."), "{}", sent[0]);
+    assert!(sent[0].contains("|   Keep sub small."), "{}", sent[0]);
     let log = n.node.store().events_after(sid, 0, 10_000).unwrap();
     let rebuilt = harness_agent_native::history_to_messages(&log);
     let first = rebuilt.iter().find_map(|m| m.user_text()).unwrap();
     assert_eq!(first, sent[0]);
     n.turn(sid, "again", None).await;
     let next = n.raw_requests().pop().unwrap();
-    assert!(next.contains("| Now split sub up."), "{next}");
+    assert!(next.contains("|   Now split sub up."), "{next}");
     assert!(
         next.contains("The repository's instruction files below replace the ones sent earlier"),
         "{next}"
