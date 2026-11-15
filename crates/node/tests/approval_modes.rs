@@ -1552,6 +1552,71 @@ async fn a_call_the_tool_refuses_anyway_shows_no_card() {
     }
 }
 
+/// The read-first guard (PLAN.md T45) is certain before the card for an
+/// existing file this chat never read: a `write` over it, or an `edit` of
+/// it, shows no card in Ask and is refused with the guard's words (the
+/// edit's shows the lines and counts the file as read, as at run time). A
+/// new file, and a file read first, ask as before.
+#[tokio::test]
+async fn an_unread_existing_file_is_refused_before_any_card() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    std::fs::write(ws.join("old.txt"), "x\n").unwrap();
+    std::fs::write(ws.join("seen.txt"), "s\n").unwrap();
+    let mut n = start(
+        &dir.path().join("node.db"),
+        policy(dir.path(), ApprovalMode::Auto),
+    )
+    .await;
+    let sid = n.create(&ws, Some(ApprovalMode::Ask), None, false).await;
+    let asked = n
+        .turn(
+            sid,
+            &script(&[
+                ("write", json!({"path": "old.txt", "content": "e"})),
+                (
+                    "edit",
+                    json!({"path": "old.txt", "old_string": "x", "new_string": "y"}),
+                ),
+                ("write", json!({"path": "new.txt", "content": "n"})),
+                ("read", json!({"path": "seen.txt"})),
+                ("write", json!({"path": "seen.txt", "content": "w"})),
+            ]),
+            None,
+            |a| {
+                if a.tool == "read" {
+                    Decision::Allow
+                } else {
+                    Decision::Deny
+                }
+            },
+        )
+        .await;
+    assert_eq!(
+        about(&asked),
+        ["write new.txt", "write seen.txt"],
+        "{:#?}",
+        outputs(&n, sid)
+    );
+    let outs = outputs(&n, sid);
+    assert!(
+        outs[0].contains("has not been read with `read` in this session")
+            && outs[0].contains("does not count"),
+        "{}",
+        outs[0]
+    );
+    assert!(
+        outs[1].contains("has not been read with `read` in this session")
+            && outs[1].contains("send the same edit again"),
+        "{}",
+        outs[1]
+    );
+    assert_eq!(std::fs::read_to_string(ws.join("old.txt")).unwrap(), "x\n");
+    assert_eq!(std::fs::read_to_string(ws.join("seen.txt")).unwrap(), "s\n");
+    assert!(!ws.join("new.txt").exists());
+}
+
 /// On a node that lets the file tools leave the folder, the same calls
 /// are possible, so they still ask.
 #[tokio::test]
@@ -1579,6 +1644,9 @@ async fn outside_the_folder_still_asks_where_the_node_allows_it() {
                 sid,
                 &script(&[
                     ("write", json!({"path": "../out/new.txt", "content": "e"})),
+                    // Read first: an unread file is refused before any card
+                    // (the read-first guard, T45).
+                    ("read", json!({"path": abs})),
                     (
                         "edit",
                         json!({"path": abs, "old_string": "x", "new_string": "y"}),

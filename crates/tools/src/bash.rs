@@ -162,11 +162,21 @@ enum End {
     Background,
 }
 
+/// The start of both of `bash`'s descriptions. That a `cat` is not a read
+/// for the read-first guard (PLAN.md T45: in the live test of 2026-11-15
+/// edits were refused after the agent looked at a file through the shell).
+macro_rules! lead {
+    () => {
+        "Run a shell command with bash in the session workspace. Returns combined \
+         stdout/stderr and the exit code. Avoid interactive commands. To look at a file you \
+         mean to change, use `read`, not `cat` or `sed` here: `edit` and `write` accept only a \
+         file read with `read`. A command stops at its timeout (60 s when none is given)."
+    };
+}
+
 /// `bash`'s description where background commands are off (the node's
 /// `background_per_session = 0`, a sub-agent): nothing about them.
-pub const FOREGROUND_DESCRIPTION: &str = "Run a shell command with bash in the session \
-     workspace. Returns combined stdout/stderr and the exit code. Avoid interactive commands. A \
-     command stops at its timeout (60 s when none is given).";
+pub const FOREGROUND_DESCRIPTION: &str = lead!();
 
 /// `bash`'s schema where background commands are off: no `background`.
 pub fn foreground_schema(bash_timeout_max: Duration) -> Value {
@@ -230,15 +240,16 @@ impl Tool for Bash {
     }
 
     fn description(&self) -> &'static str {
-        "Run a shell command with bash in the session workspace. Returns combined stdout/stderr \
-         and the exit code. Avoid interactive commands. A command stops at its timeout (60 s when \
-         none is given). For a server, a watcher or a long build, set `background: true` with \
+        concat!(
+            lead!(),
+            " For a server, a watcher or a long build, set `background: true` with \
          `timeout_secs` (required then): if it is still running after 3 s you get its id (bg-1) \
          and its first output, and it keeps running until it exits, its timeout or bash_stop. You \
          are told when it ends, at your next step or the person's next message: do not poll. \
          Later commands cannot see it in `ps` or stop it with `kill` (each command has its own \
          process namespace); use bash_output and bash_stop. Where the node's network is off, a \
          later command cannot connect to it either."
+        )
     }
 
     fn schema(&self) -> Value {

@@ -325,3 +325,19 @@ async fn the_delegate_description_says_one_steps_children_do_not_see_each_other(
         "{d}"
     );
 }
+
+/// The read-first guard (PLAN.md T45) in the words the model gets: a file
+/// is read with `read` before it is changed, and a `cat` in `bash` does
+/// not count (the live test lost steps to edits refused after one).
+#[tokio::test]
+async fn the_file_tools_say_read_comes_first_and_cat_does_not_count() {
+    for tool in ["bash", "read", "edit", "write"] {
+        let d = described(tool).await;
+        assert!(d.contains("`read`") && d.contains("`cat`"), "{tool}: {d}");
+    }
+    assert!(described("bash").await.contains(
+        "To look at a file you mean to change, use `read`, not `cat` or `sed` here: `edit` and \
+         `write` accept only a file read with `read`."
+    ));
+    assert!(described("read").await.contains("in `bash` do not count"));
+}

@@ -3015,7 +3015,7 @@ impl NativeBackend {
                                 // refusal.
                                 match own {
                                     Some(t) if !host.tool_denied(&call.tool) => {
-                                        t.refusal(&self.start_ctx(&ctx, host), &call.input)
+                                        t.refusal(&self.refusal_ctx(&ctx, host), &call.input)
                                     }
                                     _ => None,
                                 }
@@ -3820,11 +3820,7 @@ impl NativeBackend {
             skills: ctx.extra.skills.clone(),
             seen: self.seen.session(ctx.session_id),
             recall: host.recall(),
-            read_offered: ctx.agent.as_ref().is_none_or(|a| a.allows_tool("read"))
-                && self
-                    .tools
-                    .iter()
-                    .any(|t| t.name() == "read" && t.enabled(&ctx.extra.savings)),
+            read_offered: self.read_offered(ctx),
         };
         // stdout and stderr are interleaved into one coalesced stream (as a
         // terminal shows them); the final result carries both. `coalesce`
@@ -3913,6 +3909,32 @@ impl NativeBackend {
     /// The context an MCP server of this turn's chat is started in: the
     /// confinement, folder, environment and protected folders of a tool
     /// call of the same turn (`run_tool`).
+    /// Whether this turn offers `read` (the read-first guard's refusals
+    /// point at it only then).
+    fn read_offered(&self, ctx: &TurnCtx<'_>) -> bool {
+        ctx.agent.as_ref().is_none_or(|a| a.allows_tool("read"))
+            && self
+                .tools
+                .iter()
+                .any(|t| t.name() == "read" && t.enabled(&ctx.extra.savings))
+    }
+
+    /// The context a tool's `refusal` reads before any card (T51):
+    /// [`Self::start_ctx`] with this session's table of files read (the
+    /// read-first guard, T45) and whether `read` is offered, as the call's
+    /// own run will have them.
+    fn refusal_ctx(
+        &self,
+        ctx: &TurnCtx<'_>,
+        host: &dyn harness_core::backend::TurnHost,
+    ) -> ToolCtx {
+        ToolCtx {
+            seen: self.seen.session(ctx.session_id),
+            read_offered: self.read_offered(ctx),
+            ..self.start_ctx(ctx, host)
+        }
+    }
+
     fn start_ctx(&self, ctx: &TurnCtx<'_>, host: &dyn harness_core::backend::TurnHost) -> ToolCtx {
         ToolCtx {
             workspace: ctx.cwd.clone(),
@@ -6642,7 +6664,8 @@ mod tests {
     async fn turn_allowance_for_a_file_change_is_that_change_to_that_file() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join("a")).unwrap();
-        std::fs::write(dir.path().join("a/f.txt"), "one two\n").unwrap();
+        // `a/f.txt` is made by the first write: a file that existed unread
+        // would be refused before any card (the read-first guard, T45).
         let w = |p: &str, c: &str| ("write", json!({"path": p, "content": c}));
         let e = |p: &str, o: &str, n: &str| {
             ("edit", json!({"path": p, "old_string": o, "new_string": n}))

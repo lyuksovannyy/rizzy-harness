@@ -1941,7 +1941,11 @@ delays Stop or an approval answer, in that chat or any other.
   one edit without `replace_all` (several edits or every match would change
   lines the agent was not shown), for a file `read` would show (not one it
   refuses as binary), and for an agent that may use `read`. Otherwise, or
-  when the text is not in the file, the refusal says to `read` it.
+  when the text is not in the file, the refusal says to `read` it. In
+  Ask mode such a call shows no approval card: it would be refused
+  whatever you answered, so it is refused (or answered with the lines)
+  before you are asked. The `bash`, `read`, `edit` and `write`
+  descriptions the model gets say all of this.
 - If the file changed on disk since then (you edited it, a command or a
   formatter did, another chat did), `write` is refused, and `edit` goes
   ahead only when the text it replaces lies outside the lines that
