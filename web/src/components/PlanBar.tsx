@@ -1,6 +1,7 @@
 // Plan mode (ADOPTION_PLAN X.7, README "Approval modes"): a bar above the
-// composer while the chat is in plan mode, saying so, with the choices to
-// carry the plan out. Each choice is the person's own act: it changes the
+// composer while the chat is in plan mode and no turn runs, saying so, with
+// the choices to carry the plan out; the message a choice sends is in the
+// bar's visible text (no tooltip-only words). Each choice is the person's own act: it changes the
 // chat's mode through the same route as the picker (the node clamps and
 // records it), then sends "Carry out the plan." as their message. Nothing
 // the agent writes reaches it. Its own lazy chunk: loaded on the first chat
@@ -15,7 +16,7 @@ import "./planBar.css";
 const CARRY_OUT = "Carry out the plan.";
 
 const CHOICES: { mode: ApprovalMode; label: string }[] = [
-  { mode: "auto", label: "Carry out in Auto" },
+  { mode: "auto", label: "Auto" },
   { mode: "accept_edits", label: "Accept edits" },
   { mode: "ask", label: "Ask" },
 ];
@@ -32,7 +33,8 @@ export default function PlanBar(props: {
     <div className="plan-bar" role="status">
       <ClipboardList size={14} aria-hidden />
       <span className="plan-bar-text">
-        <b>Plan mode</b>: the agent looks and plans; nothing is changed. When the plan is right:
+        <b>Plan mode</b>: the agent looks and plans; nothing is changed. When the plan is right, switch and
+        send &ldquo;{CARRY_OUT}&rdquo;:
       </span>
       {CHOICES.map((c) => {
         const why = whyNot(c.mode, props.max);

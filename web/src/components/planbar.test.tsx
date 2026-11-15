@@ -33,7 +33,9 @@ test("each choice switches the mode and sends the person's message", async () =>
   const c = mount("auto");
   expect(c.host.textContent).toContain("Plan mode");
   expect(c.host.textContent).toContain("nothing is changed");
-  expect(c.buttons().map((b) => b.textContent)).toEqual(["Carry out in Auto", "Accept edits", "Ask"]);
+  expect(c.buttons().map((b) => b.textContent)).toEqual(["Auto", "Accept edits", "Ask"]);
+  // What a choice sends is visible, not only in a tooltip.
+  expect(c.host.textContent).toContain("Carry out the plan.");
   await act(async () => c.buttons()[0]!.click());
   expect(c.calls).toEqual([["auto", "Carry out the plan."]]);
   c.unmount();

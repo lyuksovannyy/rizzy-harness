@@ -339,6 +339,9 @@ export default function Conversation(props: {
   if (view?.todo?.length) todoFor.current = sessionId;
   // The turn whose changes are open beside the chat, and the row's button
   // that opened them (focus goes back to it on close).
+  // Plan mode's bar: a send that failed after the mode changed.
+  const [carryErr, setCarryErr] = useState<string | null>(null);
+  useEffect(() => setCarryErr(null), [sessionId]);
   const [diffOf, setDiffOf] = useState<{ session: string; turn: string; rewind: boolean } | null>(null);
   const diffOpener = useRef<HTMLElement | null>(null);
   const closeDiff = () => {
@@ -764,18 +767,24 @@ export default function Conversation(props: {
               <TodoPanel key={sessionId} items={view?.todo ?? []} running={running} />
             </Suspense>
           )}
-          {meta?.approval_mode === "plan" && !meta.parent_session && !meta.no_callbacks && node?.max_approval && (
+          {meta?.approval_mode === "plan" && !running && !meta.parent_session && !meta.no_callbacks && node?.max_approval && (
             <Suspense fallback={null}>
               <PlanBar
                 max={node.max_approval}
                 onCarry={async (m, text) => {
+                  setCarryErr(null);
                   await pageApi.setApprovalMode(sessionId, m);
                   stick.current = true;
-                  await api.prompt(sessionId, text, {});
+                  // The bar is gone once the mode changed: a failed send is
+                  // said here, where it stays.
+                  await api.prompt(sessionId, text, {}).catch((x) => {
+                    setCarryErr(`The mode changed, but "${text}" was not sent: ${x instanceof Error ? x.message : String(x)}`);
+                  });
                 }}
               />
             </Suspense>
           )}
+          {carryErr && <div className="error-text">{carryErr}</div>}
           <Composer
             where="session"
             agents={props.agents}
