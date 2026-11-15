@@ -175,7 +175,7 @@ describe("an agent's page", () => {
     expect(api.agent).toHaveBeenCalledWith("coder", undefined);
     expect(host.querySelector("h1")!.textContent).toBe("Coder");
     expect(host.querySelector("pre.agent-prompt")!.textContent).toBe("You are careful.");
-    expect(switches().length).toBe(13);
+    expect(switches().length).toBe(14);
     expect(switches().every((s) => s.disabled)).toBe(true);
     expect(sw("Change files").checked).toBe(true);
     expect(button("Duplicate")).toBeDefined();
@@ -254,6 +254,27 @@ describe("an agent's page", () => {
     expect(api.updateAgent).toHaveBeenCalledWith(
       "reviewer",
       { name: "Reviewer", summary: "", prompt: "Review it.", features: { ...NEW_FEATURES, recall: true } },
+      undefined,
+    );
+  });
+
+  test("read-only commands is its own switch: off for a new agent, only for one that changes nothing else", async () => {
+    expect(NEW_FEATURES.read_only_commands).toBe(false);
+    api.agent.mockResolvedValue(detail(reviewer, { prompt: "Review it.", features: { ...NEW_FEATURES, read_files: true } }));
+    await show(admin, "reviewer");
+    expect(sw("Read-only commands").checked).toBe(false);
+    expect(sw("Read-only commands").disabled).toBe(false);
+    act(() => sw("Read-only commands").click());
+    // A switch that changes things makes it moot: it cannot bring a writable shell.
+    act(() => sw("Change files").click());
+    expect(sw("Read-only commands").disabled).toBe(true);
+    act(() => sw("Change files").click());
+    expect(sw("Read-only commands").disabled).toBe(false);
+    api.updateAgent.mockResolvedValue(detail(reviewer));
+    await act(async () => button("Save")!.click());
+    expect(api.updateAgent).toHaveBeenCalledWith(
+      "reviewer",
+      { name: "Reviewer", summary: "", prompt: "Review it.", features: { ...NEW_FEATURES, read_files: true, read_only_commands: true } },
       undefined,
     );
   });

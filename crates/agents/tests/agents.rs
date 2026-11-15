@@ -146,7 +146,18 @@ fn builtin_roster_is_exactly_the_table() {
             name: "Scout",
             category: "IT",
             runs_as: (false, true),
-            tools: &["read", "grep", "glob", "outline", "graph_query", "skill"],
+            tools: &[
+                "read",
+                "grep",
+                "glob",
+                "outline",
+                "graph_query",
+                "skill",
+                "bash",
+                "bash_output",
+                "bash_stop",
+                "tool_output",
+            ],
             user_facts: false,
             project_memory: false,
             delegates: &[],
@@ -165,6 +176,10 @@ fn builtin_roster_is_exactly_the_table() {
                 "graph_query",
                 "skill",
                 "remember",
+                "bash",
+                "bash_output",
+                "bash_stop",
+                "tool_output",
                 "recall",
             ],
             user_facts: false,
@@ -353,6 +368,7 @@ fn features() -> harness_agents::Features {
         read_files: true,
         edit_files: false,
         commands: false,
+        read_only_commands: false,
         mcp: false,
         delegate: false,
         as_agent: true,
@@ -897,4 +913,100 @@ fn a_budget_line_is_refused_by_name() {
     )
     .unwrap_err();
     assert!(format!("{e:#}").contains("budget"), "{e:#}");
+}
+
+/// The shared rule (PLAN.md T70) for every built-in, as shipped: Scout,
+/// Reviewer, Researcher, General and Smol change nothing (Scout and
+/// Reviewer's `bash` is the read-only shell; `remember` and the web tools
+/// change nothing by themselves); Coder, Writer and Team Lead do.
+#[test]
+fn every_built_in_is_judged_by_the_shared_rule() {
+    let all = builtins();
+    for (id, changes, read_only_shell) in [
+        ("general", false, false),
+        ("coder", true, false),
+        ("researcher", false, false),
+        ("writer", true, false),
+        ("teamlead", true, false),
+        ("smol", false, false),
+        ("scout", false, true),
+        ("reviewer", false, true),
+    ] {
+        let a = all.iter().find(|a| a.id == id).expect(id);
+        assert_eq!(a.spec.changes_things(|_| true), changes, "{id}");
+        assert_eq!(a.features.read_only_commands, read_only_shell, "{id}");
+        // A read-only shell is not "Run commands".
+        assert_eq!(
+            a.features.commands,
+            a.spec.tools.allows("bash") && !read_only_shell,
+            "{id}"
+        );
+    }
+    assert_eq!(all.len(), 8, "a new built-in needs a row here");
+}
+
+/// "Read-only commands" (T.7): off for a new agent; on, it adds the shell
+/// only to an agent that changes nothing else, so it can never bring a
+/// writable shell; a file agent with only reading tools and `bash` shows it.
+#[test]
+fn the_read_only_commands_switch_adds_a_shell_only_to_a_reader() {
+    use harness_agents::{Features, custom};
+    let make = |f: Features| custom("x", "X", "", "Do.", f, vec![]).unwrap();
+    let reader = Features {
+        read_files: true,
+        web: true,
+        memory: true,
+        ..features()
+    };
+    assert!(!reader.read_only_commands, "off unless turned on");
+    let off = make(reader);
+    assert!(!off.spec.allows_tool("bash") && !off.features.read_only_commands);
+    let on = make(Features {
+        read_only_commands: true,
+        ..reader
+    });
+    for t in ["bash", "bash_output", "bash_stop", "tool_output"] {
+        assert!(on.spec.allows_tool(t), "{t}");
+    }
+    assert!(on.features.read_only_commands && !on.features.commands);
+    assert!(!on.spec.changes_things(|_| true), "still read-only");
+    // With a switch that changes things, the switch adds nothing.
+    for f in [
+        Features {
+            edit_files: true,
+            read_only_commands: true,
+            ..reader
+        },
+        Features {
+            mcp: true,
+            read_only_commands: true,
+            ..reader
+        },
+    ] {
+        let a = make(f);
+        assert!(a.spec.changes_things(|_| true));
+        assert!(!a.spec.allows_tool("bash"), "{:?}", a.spec.tools);
+        assert!(a.features.read_only_commands, "kept as chosen");
+    }
+    // Commands on: the writable shell, as before.
+    let cmd = make(Features {
+        commands: true,
+        ..reader
+    });
+    assert!(cmd.spec.allows_tool("bash") && cmd.spec.changes_things(|_| true));
+    // A file agent: reading tools and `bash` show as read-only commands.
+    let file = parse(
+        "looker",
+        "---\nname: L\ntools: [read, grep, bash]\n---\nLook.\n",
+        false,
+    )
+    .unwrap();
+    assert!(file.features.read_only_commands && !file.features.commands);
+    let saved: harness_agents::edits::Custom = serde_json::from_str(
+        r#"{"name":"Old","summary":"","prompt":"p","features":{"memory":true,"web":false,
+        "read_files":true,"edit_files":false,"commands":false,"delegate":false,
+        "as_agent":true,"as_subagent":true}}"#,
+    )
+    .unwrap();
+    assert!(!saved.features.read_only_commands, "absent is off");
 }
