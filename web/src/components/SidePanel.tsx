@@ -93,6 +93,10 @@ export default function SidePanel(props: {
   /** The chat's node is known to be away (not merely not listed). */
   away: boolean;
   nodeLabel: string;
+  /** Another panel (a turn's changes) has the right side now: show only
+   * the count button, whose click gives the side back (review D7). */
+  yielded?: boolean;
+  onReclaim?: () => void;
 }) {
   const { sessionId, view, away } = props;
   const [open, setOpen] = useState(true);
@@ -124,9 +128,18 @@ export default function SidePanel(props: {
   const active = agents.filter((a) => a.state === "running" || a.state === "waiting").length + runningCmds.length;
   const label = `Running beside the chat: ${active} active, ${total} in all`;
 
-  if (!open)
+  if (!open || props.yielded)
     return (
-      <button type="button" className="side-toggle" aria-label={`Open the side panel (${label})`} title={label} onClick={() => setOpen(true)}>
+      <button
+        type="button"
+        className={props.yielded ? "side-toggle yielded" : "side-toggle"}
+        aria-label={`Open the side panel (${label})`}
+        title={label}
+        onClick={() => {
+          if (props.yielded) props.onReclaim?.();
+          setOpen(true);
+        }}
+      >
         <PanelRightOpen size={16} aria-hidden />
         <span className="side-count">{active > 0 ? active : total}</span>
       </button>

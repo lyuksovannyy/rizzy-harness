@@ -53,6 +53,9 @@ const ChatGutter = lazy(() => import("../bg/ChatGutter"));
 // Work beside the conversation (sub-agents, background commands): loaded on
 // the chat's first one.
 const SidePanel = lazy(() => import("./SidePanel"));
+// A turn's changes (X.12), beside the conversation: loaded on the first
+// "Show changes".
+const DiffPanel = lazy(() => import("./DiffPanel"));
 // Export as Markdown, loaded on its first click.
 const ExportChat = lazy(() => import("./ExportChat"));
 // Loaded on the chat's first task list (the agent's `todo` tool).
@@ -79,6 +82,9 @@ function Undo(props: {
   /** The viewer may not drive this chat here (row.blocked): the list of
    * files stays, the server would refuse an undo. */
   blocked: boolean;
+  /** Open the turn's changes beside the chat (this turn's, or with
+   * `rewind` this one's and every later one's). */
+  onShow: (rewind: boolean, from: HTMLElement) => void;
 }) {
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -107,6 +113,14 @@ function Undo(props: {
           ))}
         </ul>
       </details>
+      <button
+        type="button"
+        className="link"
+        title="See what this turn changed, line by line, beside the chat"
+        onClick={(e) => props.onShow(props.files.length === 0, e.currentTarget)}
+      >
+        Show changes
+      </button>
       {!props.restored && !props.blocked && (
         <button type="button" className="link" disabled={busy || props.running} onClick={() => void run(false, false)}>
           Undo file changes
@@ -317,6 +331,14 @@ export default function Conversation(props: {
   if (mayHaveSideItems(view)) sideFor.current = sessionId;
   const todoFor = useRef<string | null>(null);
   if (view?.todo?.length) todoFor.current = sessionId;
+  // The turn whose changes are open beside the chat, and the row's button
+  // that opened them (focus goes back to it on close).
+  const [diffOf, setDiffOf] = useState<{ session: string; turn: string; rewind: boolean } | null>(null);
+  const diffOpener = useRef<HTMLElement | null>(null);
+  const closeDiff = () => {
+    setDiffOf(null);
+    diffOpener.current?.focus();
+  };
 
   const page = (
     <section className={props.gutter ? "conversation with-gutter" : "conversation"}>
@@ -637,6 +659,10 @@ export default function Conversation(props: {
                           running={running}
                           laterChanges={laterChanges}
                           blocked={!!blocked}
+                          onShow={(rewind, from) => {
+                            diffOpener.current = from;
+                            setDiffOf({ session: sessionId, turn: it.turn_id, rewind });
+                          }}
                         />
                       ) : null;
                     return it.reason === "completed" ? (
@@ -712,6 +738,31 @@ export default function Conversation(props: {
         </div>
       </div>
         </div>
+        {diffOf?.session === sessionId &&
+          (() => {
+            const cp = view?.checkpoints[diffOf.turn];
+            const at = items.findIndex((x) => x.type === "turn_end" && x.turn_id === diffOf.turn);
+            const laterChanges = items.slice(at + 1).some((x) => {
+              if (x.type !== "turn_end") return false;
+              const c = view?.checkpoints[x.turn_id];
+              return !!c && c.files.length > 0 && !c.restored;
+            });
+            return (
+              <Suspense fallback={null}>
+                <DiffPanel
+                  key={`${sessionId}:${diffOf.turn}`}
+                  sessionId={sessionId}
+                  turnId={diffOf.turn}
+                  rewind={diffOf.rewind}
+                  laterChanges={laterChanges}
+                  canUndo={!blocked && (diffOf.rewind ? laterChanges || !!cp?.files.length : !!cp && !cp.restored && cp.files.length > 0)}
+                  running={running}
+                  onRewind={(rewind) => setDiffOf({ ...diffOf, rewind })}
+                  onClose={closeDiff}
+                />
+              </Suspense>
+            );
+          })()}
         {sideFor.current === sessionId && (
           <Suspense fallback={null}>
             <SidePanel
@@ -720,6 +771,8 @@ export default function Conversation(props: {
               view={view ?? null}
               away={!!node && !node.connected}
               nodeLabel={node ? (node.embedded ? "local" : node.hostname) : nodeId}
+              yielded={diffOf?.session === sessionId}
+              onReclaim={() => setDiffOf(null)}
             />
           </Suspense>
         )}
