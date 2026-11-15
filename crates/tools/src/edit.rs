@@ -47,7 +47,10 @@ impl Tool for Edit {
         "edit"
     }
     fn description(&self) -> &'static str {
-        "Replace text in a file you have read in this session. `old_string` must match the file \
+        "Replace text in a file you have read with the `read` tool, or written yourself, in this \
+         session (reading it with `cat`, `head` or `sed` in `bash` does not count; without \
+         `read`, only files you created or wrote here can be changed). `old_string` must match \
+         the file \
          once (copy it from `read` output, without the line-number prefix), unless \
          `replace_all` is true. When nothing matches exactly, a match on whole lines that \
          differs only in trailing whitespace, or in typographic quotes, dashes or spaces, is \
@@ -87,7 +90,7 @@ impl Tool for Edit {
         ToolRisk::Mutating
     }
     fn refusal(&self, ctx: &ToolCtx, input: &Value) -> Option<String> {
-        crate::path_refusal(ctx, input, true)
+        crate::path_refusal(ctx, input, true).or_else(|| unread_now(ctx, input))
     }
     async fn run(&self, ctx: &ToolCtx, input: Value) -> ToolOutcome {
         let shown = str_arg(&input, "path").unwrap_or_default().to_string();
@@ -674,16 +677,13 @@ const UNREAD_CONTEXT: usize = 3;
 /// binary; the call is one edit without `replace_all` (several edits, or
 /// every match, would change lines it was not shown).
 fn unread_refusal(ctx: &ToolCtx, key: &Path, shown: &str, text: &str, specs: &[Spec]) -> String {
-    if !ctx.read_offered {
-        return format!("{shown} has not been read in this session; nothing was changed.");
+    // Only what a `read` of this path would show: not where the node
+    // denies `read` or the agent lacks it (`read_offered`), not for a path
+    // `read` refuses (the node decides, review of PR 118 H1).
+    if !ctx.read_offered || ctx.resolve(shown).is_err() {
+        return plain_unread(ctx, shown);
     }
-    let plain = || {
-        format!(
-            "{shown} has not been read in this session; nothing was changed. Call `read` with \
-             path `{shown}` (the part that holds the text you are replacing is enough), then \
-             edit it."
-        )
-    };
+    let plain = || plain_unread(ctx, shown);
     let binary = text
         .as_bytes()
         .iter()
@@ -716,11 +716,83 @@ fn unread_refusal(ctx: &ToolCtx, key: &Path, shown: &str, text: &str, specs: &[S
     let end = starts.get(last).copied().unwrap_or(text.len());
     ctx.seen.record(key, text.as_bytes());
     format!(
-        "{shown} has not been read in this session, so nothing was changed. Its lines around \
+        "{shown} has not been read with `read` in this session (reading it with `cat`, `head` \
+         or `sed` in `bash` does not count), so nothing was changed. Its lines around \
          the first match of `old_string` read now (numbered as `read` numbers them):\n{}\
          This counts as reading the file as it is now: send the same edit again to make it \
          (it is refused if the file changes on disk before then).",
         show(ctx, text, start, end)
+    )
+}
+
+/// Before any card (T51): an existing file this session has never read is
+/// refused by `run` whatever anyone answers, so it is refused now. Where a
+/// `read` of it would run unasked (`ToolCtx::read_unasked`) and `run`
+/// would show the lines around the match and count the file as read as it
+/// is now, this does the same (a
+/// file of at most [`crate::seen::SNAPSHOT_MAX_FILE`] bytes of UTF-8, read
+/// without following a link). Only for a regular file the session's table
+/// has no entry for: a file read before and changed since may be read
+/// again before the call runs, a larger file or one that is not UTF-8 is
+/// left to `run`'s own words. It never allows anything: `run` checks
+/// again.
+fn unread_now(ctx: &ToolCtx, input: &Value) -> Option<String> {
+    let shown = input.get("path")?.as_str()?;
+    let path = ctx.resolve_for_write(shown).ok()?;
+    let md = std::fs::symlink_metadata(&path).ok()?;
+    if !md.file_type().is_file() || md.len() > crate::seen::SNAPSHOT_MAX_FILE as u64 {
+        return None;
+    }
+    let key = ctx.seen_key(&path);
+    if ctx.seen.get(&key).is_some() {
+        return None;
+    }
+    // Arguments `run` would refuse first: its own words then.
+    let specs = specs(input).ok()?;
+    // The lines are shown, and the file counted as read, only where a
+    // `read` of this same path would run right now with no card and no
+    // refusal (review of PR 118 H1: in Ask all, or where the node denies
+    // `read`, they were shown with no card at all). Otherwise the plain
+    // refusal, and nothing is read or recorded.
+    if !ctx.read_unasked || ctx.resolve(shown).is_err() {
+        return Some(plain_unread(ctx, shown));
+    }
+    let text = {
+        use std::io::Read as _;
+        use std::os::unix::fs::OpenOptionsExt;
+        let f = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits() | crate::open_flags())
+            .open(&path)
+            .ok()?;
+        if !f.metadata().ok()?.file_type().is_file() {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        f.take(crate::seen::SNAPSHOT_MAX_FILE as u64 + 1)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        if bytes.len() > crate::seen::SNAPSHOT_MAX_FILE {
+            return None;
+        }
+        String::from_utf8(bytes).ok()?
+    };
+    Some(unread_refusal(ctx, &key, shown, &text, &specs))
+}
+
+/// The refusal of an unread file that shows nothing of it.
+fn plain_unread(ctx: &ToolCtx, shown: &str) -> String {
+    if !ctx.read_offered {
+        return format!(
+            "{shown} has not been read with `read` in this session, and `read` is not \
+             available to this agent here, so it can change only files it created or wrote in \
+             this session; nothing was changed."
+        );
+    }
+    format!(
+        "{shown} has not been read with `read` in this session (reading it with `cat`, `head` \
+         or `sed` in `bash` does not count); nothing was changed. Call `read` with path \
+         `{shown}` (the part that holds the text you are replacing is enough), then edit it."
     )
 }
 

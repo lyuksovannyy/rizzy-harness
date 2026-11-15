@@ -51,6 +51,8 @@ impl TurnHost for Host {
             finish: None,
             error: None,
             note: None,
+            unapplied: None,
+            applied: true,
         })
     }
 }
@@ -133,6 +135,18 @@ async fn run(
     delegates: Vec<AgentSpec>,
     prompt: &str,
 ) -> (Vec<String>, usize, Vec<String>) {
+    let (_, offered, started, outs) = run_seen(extra, denied, delegates, prompt).await;
+    (offered, started, outs)
+}
+
+/// [`run`], also returning the tools of the first request as the model
+/// received them (name and description).
+async fn run_seen(
+    extra: &[&'static str],
+    denied: Vec<&'static str>,
+    delegates: Vec<AgentSpec>,
+    prompt: &str,
+) -> (Vec<(String, String)>, Vec<String>, usize, Vec<String>) {
     let mut tools = harness_tools::builtin();
     tools.extend(
         extra
@@ -191,7 +205,12 @@ async fn run(
             _ => None,
         })
         .collect();
-    (offered, host.started.load(Ordering::SeqCst), outs)
+    let seen = rec.reqs.lock().unwrap()[0]
+        .tools
+        .iter()
+        .map(|t| (t.name.clone(), t.description.clone()))
+        .collect();
+    (seen, offered, host.started.load(Ordering::SeqCst), outs)
 }
 
 fn researcher() -> AgentSpec {
@@ -281,4 +300,66 @@ async fn a_tool_the_node_denies_does_not_count() {
     assert_eq!(offered, ["scout"]);
     assert_eq!(started, 0);
     assert!(outs[0].starts_with("@shell was not started"), "{outs:?}");
+}
+
+// ---- What the model reads about its tools (live test, 2026-11-15) ----
+
+/// The description of `tool` as the model received it in a lead's turn.
+async fn described(tool: &str) -> String {
+    let (seen, ..) = run_seen(&[], vec![], vec![spec("scout", list(&["read"]))], "hello").await;
+    seen.into_iter()
+        .find(|(n, _)| n == tool)
+        .map(|(_, d)| d)
+        .unwrap_or_else(|| panic!("`{tool}` was not offered"))
+}
+
+/// Delegations of one step run at the same time on separate copies: the
+/// model is told to start only independent work together.
+#[tokio::test]
+async fn the_delegate_description_says_one_steps_children_do_not_see_each_other() {
+    let d = described(DELEGATE).await;
+    assert!(d.contains(DELEGATE_PARALLEL), "{d}");
+    assert!(d.contains("do not see each other's changes"), "{d}");
+    assert!(
+        d.contains("in a later step, after that result is back"),
+        "{d}"
+    );
+}
+
+/// The read-first guard (PLAN.md T45) in the words the model gets: a file
+/// is read with `read` before it is changed, and a `cat` in `bash` does
+/// not count (the live test lost steps to edits refused after one).
+#[tokio::test]
+async fn the_file_tools_say_read_comes_first_and_cat_does_not_count() {
+    for tool in ["bash", "read", "edit", "write"] {
+        let d = described(tool).await;
+        assert!(d.contains("`read`") && d.contains("`cat`"), "{tool}: {d}");
+    }
+    assert!(described("bash").await.contains(
+        "To look at a file you mean to change, use `read`, not `cat` or `sed` here: `edit` and \
+         `write` accept only a file read with `read`."
+    ));
+    assert!(described("read").await.contains("in `bash` do not count"));
+}
+
+/// `bash` already starts in the chat's folder (the live test: 36 calls
+/// began with `cd <that folder> &&`): the model is told so, and that
+/// `workdir` runs a command elsewhere.
+#[tokio::test]
+async fn bash_says_it_already_runs_in_the_chats_folder() {
+    let d = described("bash").await;
+    assert!(
+        d.contains(
+            "It already runs in the chat's folder: do not start it with `cd` to that folder; to \
+             run it elsewhere, set `workdir`."
+        ),
+        "{d}"
+    );
+    assert_eq!(
+        harness_tools::FOREGROUND_DESCRIPTION
+            .split(". ")
+            .nth(1)
+            .map(|s| s.starts_with("It already runs in the chat's folder")),
+        Some(true)
+    );
 }

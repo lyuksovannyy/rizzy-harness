@@ -126,6 +126,20 @@ impl Top {
         }
     }
 
+    /// Remove the directory at `rel` if it is empty. Gone, not a directory
+    /// (a link or a file there now) or not empty: left as it is.
+    pub(super) fn remove_empty_dir(&self, rel: &Path) -> Result<(), String> {
+        let Some((dir, name)) = self.parent(rel, false)? else {
+            return Ok(());
+        };
+        match nix::unistd::unlinkat(&dir, name, UnlinkatFlags::RemoveDir) {
+            Ok(()) | Err(Errno::ENOENT | Errno::ENOTDIR | Errno::ENOTEMPTY | Errno::EEXIST) => {
+                Ok(())
+            }
+            Err(e) => Err(err("could not remove the folder", rel, e)),
+        }
+    }
+
     /// Write `size` bytes read from `content` at `rel` with git's `mode`
     /// (`100644`, `100755`, or `120000` for a link whose target is the
     /// content), replacing whatever is there (a directory is removed with

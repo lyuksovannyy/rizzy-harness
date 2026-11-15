@@ -1549,6 +1549,71 @@ async fn a_call_the_tool_refuses_anyway_shows_no_card() {
     }
 }
 
+/// The read-first guard (PLAN.md T45) is certain before the card for an
+/// existing file this chat never read: a `write` over it, or an `edit` of
+/// it, shows no card in Ask and is refused with the guard's words (the
+/// edit's shows the lines and counts the file as read, as at run time). A
+/// new file, and a file read first, ask as before.
+#[tokio::test]
+async fn an_unread_existing_file_is_refused_before_any_card() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    std::fs::write(ws.join("old.txt"), "x\n").unwrap();
+    std::fs::write(ws.join("seen.txt"), "s\n").unwrap();
+    let mut n = start(
+        &dir.path().join("node.db"),
+        policy(dir.path(), ApprovalMode::Auto),
+    )
+    .await;
+    let sid = n.create(&ws, Some(ApprovalMode::Ask), None, false).await;
+    let asked = n
+        .turn(
+            sid,
+            &script(&[
+                ("write", json!({"path": "old.txt", "content": "e"})),
+                (
+                    "edit",
+                    json!({"path": "old.txt", "old_string": "x", "new_string": "y"}),
+                ),
+                ("write", json!({"path": "new.txt", "content": "n"})),
+                ("read", json!({"path": "seen.txt"})),
+                ("write", json!({"path": "seen.txt", "content": "w"})),
+            ]),
+            None,
+            |a| {
+                if a.tool == "read" {
+                    Decision::Allow
+                } else {
+                    Decision::Deny
+                }
+            },
+        )
+        .await;
+    assert_eq!(
+        about(&asked),
+        ["write new.txt", "write seen.txt"],
+        "{:#?}",
+        outputs(&n, sid)
+    );
+    let outs = outputs(&n, sid);
+    assert!(
+        outs[0].contains("has not been read with `read` in this session")
+            && outs[0].contains("does not count"),
+        "{}",
+        outs[0]
+    );
+    assert!(
+        outs[1].contains("has not been read with `read` in this session")
+            && outs[1].contains("send the same edit again"),
+        "{}",
+        outs[1]
+    );
+    assert_eq!(std::fs::read_to_string(ws.join("old.txt")).unwrap(), "x\n");
+    assert_eq!(std::fs::read_to_string(ws.join("seen.txt")).unwrap(), "s\n");
+    assert!(!ws.join("new.txt").exists());
+}
+
 /// On a node that lets the file tools leave the folder, the same calls
 /// are possible, so they still ask.
 #[tokio::test]
@@ -1576,6 +1641,9 @@ async fn outside_the_folder_still_asks_where_the_node_allows_it() {
                 sid,
                 &script(&[
                     ("write", json!({"path": "../out/new.txt", "content": "e"})),
+                    // Read first: an unread file is refused before any card
+                    // (the read-first guard, T45).
+                    ("read", json!({"path": abs})),
                     (
                         "edit",
                         json!({"path": abs, "old_string": "x", "new_string": "y"}),
@@ -1695,4 +1763,225 @@ async fn review_a_loop_on_a_refused_path_is_still_cut() {
     }
     assert_eq!(started, finished);
     assert!(started < 12, "the guard cut the loop: {started} calls");
+}
+
+// ---- Review of PR 118 (H1): the early `edit` refusal shows a file only
+// where a `read` of it would run unasked ----
+
+/// Ask all: every call needs a card, `read` included. With the `read`
+/// card denied, an `edit` of the unread file is refused before any card
+/// with the plain words: none of the file's lines, and the file is not
+/// counted as read (the same edit again is refused the same way).
+#[tokio::test]
+async fn ask_all_edit_precheck_shows_no_file_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    std::fs::write(
+        ws.join("creds.env"),
+        "A=1\nB=2\nAPI_TOKEN=hunter2-not-approved\nC=3\nD=4\n",
+    )
+    .unwrap();
+    let mut n = start(
+        &dir.path().join("node.db"),
+        policy(dir.path(), ApprovalMode::Auto),
+    )
+    .await;
+    let sid = n.create(&ws, Some(ApprovalMode::AskAll), None, false).await;
+    let edit = (
+        "edit",
+        json!({"path": "creds.env", "old_string": "API_TOKEN", "new_string": "x"}),
+    );
+    let asked = n
+        .turn(
+            sid,
+            &script(&[
+                ("read", json!({"path": "creds.env"})),
+                edit.clone(),
+                ("bash", json!({"command": "true"})),
+                edit,
+            ]),
+            None,
+            deny,
+        )
+        .await;
+    let outs = outputs(&n, sid);
+    assert_eq!(about(&asked), ["read creds.env", "bash true"], "{outs:#?}");
+    for o in [&outs[1], &outs[3]] {
+        assert!(!o.contains("hunter2"), "{o}");
+        assert!(
+            o.contains("has not been read with `read`") && o.contains("Call `read`"),
+            "{o}"
+        );
+    }
+}
+
+/// The node denies `read` (`denied_tools`): no path shows the file's
+/// lines, neither the early refusal (Ask, and Auto) nor the run-time one
+/// after the edit runs (a file over the early refusal's 512 KiB, left to
+/// run time).
+#[tokio::test]
+async fn a_node_that_denies_read_never_shows_lines_for_an_unread_edit() {
+    for mode in [ApprovalMode::Ask, ApprovalMode::Auto] {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        std::fs::create_dir(&ws).unwrap();
+        std::fs::write(ws.join("s.txt"), "1\n2\nSECRET-LINE\n4\n").unwrap();
+        let big = format!("BIG-SECRET\n{}", "filler line\n".repeat(50_000));
+        std::fs::write(ws.join("big.txt"), &big).unwrap();
+        let mut n = start(
+            &dir.path().join("node.db"),
+            NodePolicy {
+                denied_tools: vec!["read".into()],
+                ..policy(dir.path(), ApprovalMode::Auto)
+            },
+        )
+        .await;
+        let sid = n.create(&ws, Some(mode), None, false).await;
+        n.turn(
+            sid,
+            &script(&[
+                ("read", json!({"path": "s.txt"})),
+                (
+                    "edit",
+                    json!({"path": "s.txt", "old_string": "SECRET", "new_string": "x"}),
+                ),
+                (
+                    "edit",
+                    json!({"path": "big.txt", "old_string": "BIG-SECRET", "new_string": "x"}),
+                ),
+            ]),
+            None,
+            |_| Decision::Allow,
+        )
+        .await;
+        let outs = outputs(&n, sid);
+        assert!(!outs[1].contains("SECRET-LINE"), "{mode:?}: {}", outs[1]);
+        assert!(!outs[2].contains("BIG-SECRET"), "{mode:?}: {}", outs[2]);
+        assert!(
+            outs[1].contains("not available to this agent"),
+            "{}",
+            outs[1]
+        );
+        assert!(
+            outs[2].contains("not available to this agent"),
+            "{}",
+            outs[2]
+        );
+        assert_eq!(
+            std::fs::read_to_string(ws.join("s.txt")).unwrap(),
+            "1\n2\nSECRET-LINE\n4\n"
+        );
+        assert_eq!(std::fs::read_to_string(ws.join("big.txt")).unwrap(), big);
+    }
+}
+
+/// Auto: an `edit` of an unread file still heals in one step: its answer
+/// shows the lines and counts the file as read, and the same edit again
+/// goes through.
+#[tokio::test]
+async fn auto_still_heals_an_unread_edit_in_one_step() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    std::fs::write(ws.join("f.txt"), "one\ntwo\n").unwrap();
+    let mut n = start(
+        &dir.path().join("node.db"),
+        policy(dir.path(), ApprovalMode::Auto),
+    )
+    .await;
+    let sid = n.create(&ws, Some(ApprovalMode::Auto), None, false).await;
+    let edit = (
+        "edit",
+        json!({"path": "f.txt", "old_string": "two", "new_string": "TWO"}),
+    );
+    n.turn(sid, &script(&[edit.clone(), edit]), None, |_| {
+        Decision::Allow
+    })
+    .await;
+    let outs = outputs(&n, sid);
+    assert!(
+        outs[0].contains("two") && outs[0].contains("send the same edit again"),
+        "{}",
+        outs[0]
+    );
+    assert_eq!(
+        std::fs::read_to_string(ws.join("f.txt")).unwrap(),
+        "one\nTWO\n"
+    );
+}
+
+/// Twelve identical writes over an unread file: refused before any card
+/// each time, and the repeated-call guard still ends the turn.
+#[tokio::test]
+async fn twelve_identical_writes_over_an_unread_file_are_cut_by_the_guard() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir(&ws).unwrap();
+    std::fs::write(ws.join("old.txt"), "x\n").unwrap();
+    let mut n = start(
+        &dir.path().join("node.db"),
+        policy(dir.path(), ApprovalMode::Auto),
+    )
+    .await;
+    let sid = n.create(&ws, Some(ApprovalMode::Ask), None, false).await;
+    let calls: Vec<(&str, Value)> = (0..12)
+        .map(|_| ("write", json!({"path": "old.txt", "content": "e"})))
+        .collect();
+    let asked = n.turn(sid, &script(&calls), None, deny).await;
+    let outs = outputs(&n, sid);
+    assert!(asked.is_empty());
+    assert!(
+        outs.len() < 12,
+        "the guard ended the turn before all 12 ran"
+    );
+    assert!(outs.iter().any(|o| o.starts_with("Not run:")), "{outs:#?}");
+    assert_eq!(std::fs::read_to_string(ws.join("old.txt")).unwrap(), "x\n");
+}
+
+/// No false refusal: a file made by an earlier call, and a file read under
+/// another spelling, reach the card and run.
+#[tokio::test]
+async fn no_false_refusal_for_a_file_made_earlier_or_read_under_another_spelling() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    std::fs::create_dir_all(ws.join("sub")).unwrap();
+    std::fs::write(ws.join("sub/r.txt"), "r\n").unwrap();
+    let mut n = start(
+        &dir.path().join("node.db"),
+        policy(dir.path(), ApprovalMode::Auto),
+    )
+    .await;
+    let sid = n.create(&ws, Some(ApprovalMode::Ask), None, false).await;
+    let asked = n
+        .turn(
+            sid,
+            &script(&[
+                ("write", json!({"path": "made.txt", "content": "abc\n"})),
+                (
+                    "edit",
+                    json!({"path": "made.txt", "old_string": "abc", "new_string": "xyz"}),
+                ),
+                ("read", json!({"path": "./sub/../sub/r.txt"})),
+                (
+                    "edit",
+                    json!({"path": "sub/r.txt", "old_string": "r", "new_string": "R"}),
+                ),
+            ]),
+            None,
+            |_| Decision::Allow,
+        )
+        .await;
+    assert_eq!(
+        about(&asked),
+        ["write made.txt", "edit made.txt", "edit sub/r.txt"]
+    );
+    assert_eq!(
+        std::fs::read_to_string(ws.join("made.txt")).unwrap(),
+        "xyz\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(ws.join("sub/r.txt")).unwrap(),
+        "R\n"
+    );
 }

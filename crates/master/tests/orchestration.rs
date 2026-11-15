@@ -545,6 +545,25 @@ async fn parallel_coders_get_worktrees_and_merge_back() {
         1,
         "{outs:#?}"
     );
+    // The card follows the outcome: the refused child's delegate result is
+    // not ok, the applied one is.
+    let delegates: Vec<(bool, bool)> = evs
+        .iter()
+        .filter(|e| e.kind == "tool_call_finished")
+        .skip(2)
+        .map(|e| {
+            let out = e.payload["output"].as_str().unwrap();
+            (
+                out.contains("NOT applied"),
+                e.payload["ok"].as_bool().expect("ok"),
+            )
+        })
+        .collect();
+    assert_eq!(delegates.len(), 2, "{delegates:?}");
+    assert!(
+        delegates.iter().all(|(refused, ok)| ok != refused),
+        "{delegates:?}"
+    );
     let now = std::fs::read_to_string(format!("{ws}/shared.txt")).unwrap();
     assert!(now == "one\n" || now == "two\n");
 }

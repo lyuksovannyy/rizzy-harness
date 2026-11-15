@@ -162,7 +162,8 @@ pub(crate) fn line(now: &jiff::Zoned, repo: &Looked) -> String {
     };
     format!(
         "{ENVIRONMENT_LEAD}: the node's clock reads {clock}; OS: {}; the `bash` tool runs \
-         commands with bash; {git}.",
+         commands with bash, already in the working folder (no `cd` to it needed; `workdir` \
+         runs one elsewhere); {git}.",
         os_name()
     )
 }
@@ -274,8 +275,9 @@ mod tests {
         assert!(l.contains(std::env::consts::OS), "{l}");
         assert!(
             l.ends_with(
-                "the `bash` tool runs commands with bash; the working folder is in a git \
-                 repository, on branch \"main\"."
+                "the `bash` tool runs commands with bash, already in the working folder (no \
+                 `cd` to it needed; `workdir` runs one elsewhere); the working folder is in a \
+                 git repository, on branch \"main\"."
             ),
             "{l}"
         );

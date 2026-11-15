@@ -60,6 +60,15 @@ pub trait TurnHost: Send + Sync {
         Err("delegation is not available here".into())
     }
 
+    /// Whether a call of `tool` at `risk` would run right now with no
+    /// card and no policy refusal (the node's denials and the chat's
+    /// approval mode, nothing else): `edit`'s early answer shows a file's
+    /// lines only where a `read` of it would run unasked (T45, T51). No
+    /// side effect; `false`, the default, is the safe answer.
+    fn runs_unasked(&self, _tool: &str, _risk: ToolRisk) -> bool {
+        false
+    }
+
     /// Whether this node's policy denies `tool` outright (`denied_tools`).
     /// A sub-agent whose declared tools are all denied or unregistered here
     /// is not offered as a delegate.
@@ -190,6 +199,13 @@ pub struct DelegateOutcome {
     /// The harness's own note after the report: what became of the child's
     /// changes, or why it stopped.
     pub note: Option<String>,
+    /// The child's changes against its base when they were not applied to
+    /// the folder (plain lines; quoted when rendered for the parent).
+    pub unapplied: Option<String>,
+    /// Its changes are in the folder (always, for a child that could not
+    /// change files). `false`: the `delegate` result is not ok and ends
+    /// with what the parent must do about them.
+    pub applied: bool,
 }
 
 pub struct TurnCtx<'a> {
