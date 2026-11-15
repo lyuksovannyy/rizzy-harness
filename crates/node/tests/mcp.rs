@@ -207,6 +207,7 @@ impl Node {
                             session_id: sid,
                             approval_id: a.approval_id,
                             decision: Decision::Allow,
+                            note: None,
                         })
                         .unwrap();
                 }

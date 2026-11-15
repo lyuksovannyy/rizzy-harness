@@ -66,6 +66,8 @@ const TodoPanel = lazy(() => import("./TodoPanel"));
 function mayHaveSideItems(view: SessionView | undefined): boolean {
   if (!view) return false;
   if (view.background && Object.keys(view.background).length > 0) return true;
+  // Calls allowed for the rest of the chat are listed there too (T51).
+  if (view.chat_allows && Object.keys(view.chat_allows).length > 0) return true;
   return view.items.some((it) => it.type === "tool" && it.tool === "delegate");
 }
 
@@ -630,6 +632,15 @@ export default function Conversation(props: {
                         {it.requested ? ` (asked for ${MODE_NAMES[it.requested]}; this node allows no more)` : ""}
                       </div>
                     );
+                  case "step_limit_changed":
+                    return (
+                      <div key={i} className="divider">
+                        Step limit: {it.max_steps}
+                        {it.requested != null
+                          ? ` (asked for ${it.requested}; this node allows 1 to ${node?.max_steps ?? "its own limit"})`
+                          : ""}
+                      </div>
+                    );
                   case "summary":
                     // Only the latest summary is what the model sees now.
                     return view.items.findLastIndex((x) => x.type === "summary") !== i ? null : (
@@ -712,6 +723,18 @@ export default function Conversation(props: {
                     max: node.max_approval,
                     host: meta.exec_mode === "host",
                     onChange: (m) => pageApi.setApprovalMode(sessionId, m),
+                  }
+                : undefined
+            }
+            steps={
+              // As the approval mode: the owner's own agentic chat, on a
+              // node that can change it (X.14).
+              meta?.profile === "agentic" && !meta.parent_session && !meta.no_callbacks && node?.max_steps
+                ? {
+                    // The limit in force: the chat's, within the node's now.
+                    value: Math.min(view?.max_steps ?? node.max_steps, node.max_steps),
+                    max: node.max_steps,
+                    onChange: (n) => pageApi.setStepLimit(sessionId, n),
                   }
                 : undefined
             }

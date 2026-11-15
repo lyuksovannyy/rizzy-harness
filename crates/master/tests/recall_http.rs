@@ -778,3 +778,130 @@ async fn a_long_asking_chat_does_not_crowd_out_the_others() {
         [a.to_string()]
     );
 }
+
+async fn user_id(t: &T, c: &str) -> String {
+    let (_, me) = req(t, Method::GET, "/api/me", None, c).await;
+    me["user"]["user_id"].as_str().unwrap().to_string()
+}
+
+async fn personal_ws(t: &T, c: &str) -> String {
+    let (_, v) = req(t, Method::GET, "/api/workspaces", None, c).await;
+    v["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["personal"] == true)
+        .unwrap()["workspace_id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+fn memory_texts(hits: &[RecallHit]) -> Vec<String> {
+    let mut v: Vec<String> = hits
+        .iter()
+        .filter(|h| h.kind == HitKind::Memory)
+        .map(|h| h.excerpt.clone())
+        .collect();
+    v.sort();
+    v
+}
+
+/// Review R4: memory comes from exactly the places the turn reads
+/// (`memory::turn_places`): a team member gets the team's shared memory,
+/// never a colleague's own facts or Personal workspace, nor their own
+/// facts after answering "no"; a Personal chat gets the person's own facts
+/// and their private-details place; retired facts and waiting proposals
+/// never come back.
+#[tokio::test]
+async fn memory_comes_from_the_places_the_turn_reads() {
+    use harness_memory::{FactKind, NewFact, Status};
+    let t = start().await;
+    let [alex, bob] = users(&t).await;
+    let (alex_id, bob_id) = (user_id(&t, &alex).await, user_id(&t, &bob).await);
+    let (alex_home, bob_home) = (personal_ws(&t, &alex).await, personal_ws(&t, &bob).await);
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        "/api/workspaces",
+        Some(json!({"name": "team"})),
+        &alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let team = v["workspace_id"].as_str().unwrap().to_string();
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        &format!("/api/workspaces/{team}/members"),
+        Some(json!({"username": "bob", "role": "member"})),
+        &alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    // Bob keeps his own facts out of the team.
+    let (st, v) = req(
+        &t,
+        Method::PUT,
+        &format!("/api/workspaces/{team}/memory"),
+        Some(json!({"use_memory": false})),
+        &bob,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let mem = t.master.memory().unwrap();
+    for (owner, text, status) in [
+        (
+            format!("workspace:{team}"),
+            "heron team shared",
+            Status::Active,
+        ),
+        (
+            format!("workspace:{team}"),
+            "heron team retired",
+            Status::Retired,
+        ),
+        (
+            format!("workspace:{team}"),
+            "heron team proposal",
+            Status::Proposed,
+        ),
+        (alex_id.clone(), "heron alex own", Status::Active),
+        (
+            format!("workspace:{alex_home}"),
+            "heron alex private",
+            Status::Active,
+        ),
+        (bob_id.clone(), "heron bob own", Status::Active),
+        (bob_id.clone(), "heron bob proposal", Status::Proposed),
+        (
+            format!("workspace:{bob_home}"),
+            "heron bob private",
+            Status::Active,
+        ),
+    ] {
+        mem.add(NewFact {
+            owner_id: Some(owner),
+            text: text.into(),
+            kind: FactKind::Fact,
+            status,
+            source_session: None,
+            dedupe_key: None,
+        })
+        .await
+        .unwrap();
+    }
+    let bobs = chat(&t, &bob, json!({"workspace_id": team})).await;
+    running_turn(&t, bobs, "t1").await;
+    let hits = t.chat.recall(bobs, "heron").await.unwrap();
+    assert_eq!(memory_texts(&hits), ["heron team shared"], "{hits:?}");
+
+    let home = chat(&t, &alex, json!({})).await;
+    running_turn(&t, home, "t2").await;
+    let hits = t.chat.recall(home, "heron").await.unwrap();
+    assert_eq!(
+        memory_texts(&hits),
+        ["heron alex own", "heron alex private"],
+        "{hits:?}"
+    );
+}

@@ -1028,7 +1028,7 @@ async fn the_master_refuses_direct_callers_too() {
     assert!(matches!(r, Err(CommandError::Forbidden(_))), "{r:?}");
     let r = s
         .master
-        .respond_approval(id, approval, harness_core::policy::Decision::Allow)
+        .respond_approval(id, approval, harness_core::policy::Decision::Allow, None)
         .await;
     assert!(matches!(r, Err(CommandError::Forbidden(_))), "{r:?}");
     let r = s.master.set_agent(id, "coder").await;

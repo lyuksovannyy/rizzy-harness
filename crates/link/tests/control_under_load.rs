@@ -379,6 +379,7 @@ async fn scenario() -> Measured {
             session_id: SessionId::new(),
             approval_id: "a1".into(),
             decision: Decision::Allow,
+            note: None,
         })
         .await
         .unwrap();

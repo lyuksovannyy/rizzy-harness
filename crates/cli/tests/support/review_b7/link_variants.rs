@@ -252,6 +252,7 @@ async fn scenario(k: Knobs) -> Measured {
         session_id: SessionId::new(),
         approval_id: "a1".into(),
         decision: Decision::Allow,
+        note: None,
     };
     let t0 = Instant::now();
     let before = fillers.load(Ordering::SeqCst);

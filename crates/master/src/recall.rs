@@ -336,10 +336,16 @@ pub async fn answer(
     // The asking turn, from the log; a sub-agent's parent turn too (its
     // task came from there).
     let own = turn_may_search(m, &row, true).await?;
-    let counted = match row.parent_id {
-        Some(_) => turn_may_search(m, &top, false).await?.turn_id,
-        None => own.turn_id,
+    let parent = match row.parent_id {
+        Some(_) => Some(turn_may_search(m, &top, false).await?),
+        None => None,
     };
+    let counted = parent.as_ref().unwrap_or(&own).turn_id.clone();
+    // The agents whose memory switches bound what the search reads: the
+    // asking turn's, and a sub-agent's parent turn's.
+    let agents: Vec<Option<String>> = std::iter::once(own.agent_id.clone())
+        .chain(parent.map(|p| p.agent_id))
+        .collect();
     let query = harness_core::text::clean_line(&q.query, MAX_QUERY_CHARS);
     let terms = terms(&query);
     // Refused before it is counted.
@@ -366,7 +372,7 @@ pub async fn answer(
     };
     // The memory store matches words its own way.
     let facts = match q.scope.memory() {
-        true => facts(m, &row, &top, &query, limit).await,
+        true => facts(m, &row, &top, &agents, &query, limit).await,
         false => Vec::new(),
     };
     // Both kinds take turns, best first, so neither crowds the other out.
@@ -434,39 +440,69 @@ async fn chats(
     }
 }
 
-/// Facts from the places the turn reads anyway: the owner's (where their
-/// join answer and the agent's memory allow), the project's (in a project
-/// chat with project memory on).
+/// Facts from exactly the places the asking turn reads
+/// (`memory::turn_places`, the function `turn_block` uses), decided for the
+/// turn's agent (and a sub-agent's parent's) with `memory::turn_allowed`,
+/// the rule `Master::prompt` uses: the owner's own facts where their join
+/// answer and the agent allow, the workspace's memory, the project's.
+/// Never an unset owner; active facts only.
 async fn facts(
     m: &Master,
     row: &SessionRow,
     top: &SessionRow,
+    agents: &[Option<String>],
     query: &str,
     limit: usize,
 ) -> Vec<RecallHit> {
     let Some(mem) = m.memory() else {
         return Vec::new();
     };
-    let allowed = projects::turn_memory(m, row).await;
-    let mut owners: Vec<Option<String>> = Vec::new();
-    if allowed.personal {
-        owners.extend(memory::places(top));
+    let project = projects::project_of(m, row).await;
+    let r = m.resolver_for(top.workspace_id.as_deref()).await;
+    let mut allowed: Option<projects::TurnMemory> = None;
+    for id in agents {
+        // An agent the master does not know reads nothing (fail closed).
+        let Some(f) = id
+            .as_deref()
+            .and_then(|id| r.agents().get(id))
+            .map(|a| a.features)
+        else {
+            return Vec::new();
+        };
+        let t = memory::turn_allowed(m, top, Some(f), project.is_some(), false).await;
+        allowed = Some(match allowed {
+            None => t,
+            Some(a) => projects::TurnMemory {
+                personal: a.personal && t.personal,
+                workspace: a.workspace && t.workspace,
+                project: a.project && t.project,
+                by_owner: false,
+            },
+        });
     }
-    if allowed.project
-        && let Some(p) = projects::project_of(m, row).await
-    {
-        owners.push(Some(projects::memory_owner(&p.project_id)));
-    }
+    let Some(allowed) = allowed else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
-    for o in owners {
-        match mem.recall(o.as_deref(), query, limit).await {
-            Ok(fs) => out.extend(fs.into_iter().map(|f| RecallHit {
-                kind: HitKind::Memory,
-                id: f.id,
-                title: String::new(),
-                when_ms: f.updated_ms,
-                excerpt: f.text,
-            })),
+    for place in memory::turn_places(top, allowed, project.as_ref()) {
+        let owner = match place {
+            memory::TurnPlace::Personal(Some(o))
+            | memory::TurnPlace::Workspace(o)
+            | memory::TurnPlace::Project(o) => o,
+            memory::TurnPlace::Personal(None) => continue,
+        };
+        match mem.recall(Some(&owner), query, limit).await {
+            Ok(fs) => out.extend(
+                fs.into_iter()
+                    .filter(|f| f.status == harness_memory::Status::Active)
+                    .map(|f| RecallHit {
+                        kind: HitKind::Memory,
+                        id: f.id,
+                        title: String::new(),
+                        when_ms: f.updated_ms,
+                        excerpt: f.text,
+                    }),
+            ),
             Err(e) => tracing::warn!(error = %e, "recall: memory search failed"),
         }
     }

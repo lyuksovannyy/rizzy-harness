@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import { pageApi } from "../../apiPages";
 import { t } from "../../lib/i18n";
 import { modelLabel } from "../../lib/models";
+import { settingsHash } from "../../lib/routes";
 import { roleSummary } from "../../lib/workspaceAdmin";
 import { workspaceName } from "../../lib/workspaces";
 import type { WorkspaceDetail, WorkspaceMember } from "../../types";
@@ -20,6 +21,15 @@ export function WorkspaceOverview(props: WorkspacePanelProps) {
   const [members, setMembers] = useState<WorkspaceMember[] | null>(null);
   const [err, setErr] = useState<{ at: Where; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
+  // Proposals into the workspace's memory waiting for the viewer's Keep
+  // (T54): counted here, kept on the Memory tab.
+  const [waiting, setWaiting] = useState(0);
+  useEffect(() => {
+    pageApi
+      .workspaceFacts(id)
+      .then((f) => setWaiting(f.can_edit ? f.waiting : 0))
+      .catch(() => setWaiting(0));
+  }, [id]);
   // Again when the member count or the viewer's role changes (someone joined,
   // left or was moved, here or by another admin).
   useEffect(() => {
@@ -80,6 +90,14 @@ export function WorkspaceOverview(props: WorkspacePanelProps) {
         {errorAt("load")}
       </div>
 
+      {waiting > 0 && (
+        <div className="card row">
+          <span className="grow">
+            {waiting === 1 ? "1 change waits" : `${waiting} changes wait`} for your Keep in this workspace's memory.
+          </span>
+          <a href={settingsHash("workspace", "facts")}>Review</a>
+        </div>
+      )}
       <div className="card stack">
         <h3>New chats</h3>
         <dl className="ws-facts">
