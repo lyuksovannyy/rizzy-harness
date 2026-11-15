@@ -742,6 +742,7 @@ async fn a_turn_the_process_died_in_is_retried_after_the_restart() {
                 cause: None,
                 environment: None,
                 retry: None,
+                continued_by: None,
             }),
             EventKind::UserMessage(
                 serde_json::from_value(
@@ -869,6 +870,7 @@ async fn a_crash_with_a_running_call_and_a_waiting_card_is_retried_truthfully() 
                 cause: None,
                 environment: None,
                 retry: None,
+                continued_by: None,
             }),
             EventKind::UserMessage(
                 serde_json::from_value(json!({"turn_id": "died", "text": "deploy it"})).unwrap(),

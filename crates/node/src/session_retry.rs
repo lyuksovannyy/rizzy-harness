@@ -129,6 +129,7 @@ impl Session {
                 cause: None,
                 environment,
                 retry: Some(retry.clone()),
+                continued_by: None,
             }))
             .await;
         drop(gate);

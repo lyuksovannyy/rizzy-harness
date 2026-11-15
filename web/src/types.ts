@@ -344,6 +344,9 @@ export interface SessionView {
   chat_allows?: Record<string, ChatAllow>;
   /** The latest turn's own usage (`turn_ended.usage`); absent before one. */
   turn_usage?: Usage;
+  /** A sub-agent's turns that were follow-ups from its parent chat
+   * (`turn_started.continued_by`, T68); absent when none. */
+  follow_ups?: string[];
 }
 
 export type RetryReason = "rate_limit" | "overloaded" | "server_error" | "network" | "no_answer";

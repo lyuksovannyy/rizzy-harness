@@ -229,7 +229,7 @@ export function ToolCard({
 
   const output = item.result ? item.result.output : item.live_output;
   // A delegated sub-task runs in its own session: link to it.
-  const child = item.tool === "delegate" ? /session: ([0-9a-f-]{36})/.exec(output)?.[1] : undefined;
+  const child = item.tool === "delegate" ? /^session: ([0-9a-f-]{36})(?:\n|$)/.exec(output)?.[1] : undefined;
   const reported = item.tool === "delegate" && item.result ? childStatus(item.result.output) : undefined;
 
   const Icon = item.tool === "web_search" ? Search : Globe;

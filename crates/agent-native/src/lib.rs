@@ -298,6 +298,23 @@ impl harness_core::backend::TurnHost for Logged<'_> {
             .await
     }
 
+    // Not forwarding it would refuse every follow-up as "not available".
+    async fn continue_child(
+        &self,
+        child: harness_core::SessionId,
+        agent: harness_core::agent::AgentSpec,
+        task: String,
+        call_id: String,
+        refs: SharedRefs,
+        observed: Arc<Vec<String>>,
+        cancel: tokio_util::sync::CancellationToken,
+        started: Box<dyn FnOnce(harness_core::SessionId) + Send>,
+    ) -> Result<harness_core::backend::DelegateOutcome, String> {
+        self.host
+            .continue_child(child, agent, task, call_id, refs, observed, cancel, started)
+            .await
+    }
+
     fn artifacts(&self) -> Option<Arc<dyn harness_core::artifacts::ArtifactSink>> {
         self.host.artifacts()
     }
@@ -464,6 +481,13 @@ pub const DELEGATE_PARALLEL: &str = "Several calls in one step run at the same t
      copy of the folder; one that only reads works in this folder): in one step delegate only \
      independent work (different files, or reading only); delegate work that builds on another \
      sub-agent's result in a later step, after that result is back.";
+
+/// What the `delegate` description says of follow-ups (PLAN.md T68).
+pub const DELEGATE_FOLLOW_UP: &str = "A finished sub-agent keeps its conversation: to ask it \
+     more about its own work (a fix to what it wrote, a question about what it found), call \
+     `delegate` again with `session` set to the id its result began with and the follow-up as \
+     `task`, instead of briefing a new one that would read everything again. It keeps its \
+     conversation, not its files: it works on the folder as it is now.";
 
 /// `finish`, offered in a sub-agent's turn only (handled by the loop).
 fn finish_spec() -> ToolSpec {
@@ -1009,8 +1033,8 @@ impl NativeBackend {
                     "Hand a self-contained sub-task to a specialist, who works in its own session \
                      on the same machine with this turn's project context (not this conversation) \
                      and returns a status (done, partial or failed) with its own report, which \
-                     nobody has checked. Available: {}. {DELEGATE_PARALLEL} Limits per turn: {} \
-                     sub-agents, {} tokens.",
+                     nobody has checked. Available: {}. {DELEGATE_PARALLEL} {DELEGATE_FOLLOW_UP} \
+                     Limits per turn: {} sub-agents, {} tokens (a follow-up counts as one).",
                     roster.join(", "),
                     caps.max_subagents,
                     caps.max_tokens
@@ -1022,7 +1046,8 @@ impl NativeBackend {
                             "type": "string",
                             "enum": offered.iter().map(|d| d.agent_id.clone()).collect::<Vec<_>>()
                         },
-                        "task": { "type": "string", "description": "Everything the specialist needs to know" }
+                        "task": { "type": "string", "description": "Everything the specialist needs to know; for a follow-up, the next message to it" },
+                        "session": { "type": "string", "description": "Only for a follow-up: the id a finished delegate result of this chat began with (`session: <id>`); `agent` must be that sub-agent's" }
                     },
                     "required": ["agent", "task"]
                 }),
@@ -1224,23 +1249,72 @@ impl NativeBackend {
         if let Some(why) = self.delegate_gap(spec, &ctx.extra.savings, host) {
             return (ToolOutcome::err(why), none);
         }
-        // Plan mode (X.7): a child that can write is not started; one that
+        // Plan mode (X.7): a child that can write is not started (nor
+        // given a follow-up: above the `session` branch, T68); one that
         // only reads is, and inherits the mode (the node's ceiling).
         if is_plan(host) && self.writes(spec, host) {
             return (ToolOutcome::err(plan_no_writer(Some(&spec.agent_id))), none);
         }
+        // A follow-up names the child by the id its result began with; the
+        // node decides whether it is this session's (T68).
+        // Present but not an id (a number, an object, an empty string) is
+        // refused: the model asked for a follow-up, and a new child in its
+        // place would not be what it asked for. `null` is absent.
+        let follow_up = match call.input.get("session") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(v) => {
+                let id = v.as_str().map(str::trim).unwrap_or("");
+                match id.parse::<harness_core::SessionId>() {
+                    Ok(sid) => Some(sid),
+                    Err(_) => {
+                        let shown = match v.as_str() {
+                            Some(t) => t.chars().take(80).collect::<String>(),
+                            None => v.to_string().chars().take(80).collect::<String>(),
+                        };
+                        return (
+                            ToolOutcome::err(format!(
+                                "`session` must be the id a delegate result began with \
+                                 (`session: <id>`), not `{shown}`; leave it out to start a new \
+                                 sub-agent"
+                            )),
+                            none,
+                        );
+                    }
+                }
+            }
+        };
         let (tx, mut rx) = mpsc::unbounded_channel();
         let started: Box<dyn FnOnce(harness_core::SessionId) + Send> = Box::new(move |sid| {
             let _ = tx.send(sid);
         });
-        let run = host.delegate(
-            spec.clone(),
-            task,
-            refs.clone(),
-            observed.clone(),
-            ctx.cancel.child_token(),
-            started,
-        );
+        let run = async {
+            match follow_up {
+                Some(child) => {
+                    host.continue_child(
+                        child,
+                        spec.clone(),
+                        task,
+                        call.call_id.clone(),
+                        refs.clone(),
+                        observed.clone(),
+                        ctx.cancel.child_token(),
+                        started,
+                    )
+                    .await
+                }
+                None => {
+                    host.delegate(
+                        spec.clone(),
+                        task,
+                        refs.clone(),
+                        observed.clone(),
+                        ctx.cancel.child_token(),
+                        started,
+                    )
+                    .await
+                }
+            }
+        };
         let call_id = call.call_id.clone();
         // Link to the child as soon as it exists, while it still works.
         let link = async {
@@ -3507,6 +3581,7 @@ impl NativeBackend {
             if !delegations.is_empty() {
                 let caps = agent.and_then(|a| a.caps).unwrap_or_default();
                 let mut admitted = Vec::new();
+                let mut followed: HashSet<String> = HashSet::new();
                 for call in delegations {
                     if host
                         .emit(EventKind::ToolCallStarted(ToolCallStarted {
@@ -3521,7 +3596,28 @@ impl NativeBackend {
                     {
                         return stopped(usage);
                     }
-                    let mut refusal = if subagents >= caps.max_subagents {
+                    // One message at a time to a sub-agent (T68): a
+                    // second follow-up to the same one in this step is
+                    // refused here (the node refuses it too).
+                    let named = call
+                        .input
+                        .get("session")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string);
+                    let twice = named.as_ref().is_some_and(|n| !followed.insert(n.clone()));
+                    let mut refusal = if twice {
+                        Some(format!(
+                            "this step already sends a follow-up to `{}`: one message at a time \
+                             to a sub-agent; send the next one after its result is back",
+                            named
+                                .unwrap_or_default()
+                                .chars()
+                                .take(80)
+                                .collect::<String>()
+                        ))
+                    } else if subagents >= caps.max_subagents {
                         Some(format!(
                             "cap reached: at most {} sub-agents per turn",
                             caps.max_subagents
@@ -6834,6 +6930,7 @@ mod tests {
                 agent: None,
                 turn_id: t.clone(),
                 environment: None,
+                continued_by: None,
                 retry: None,
             }),
             &mut out,

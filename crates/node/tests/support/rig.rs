@@ -19,6 +19,13 @@ use harness_protocol::{MasterToNode, NodeToMaster};
 use harness_store::{Durability, Store};
 
 pub struct Rig {
+    /// Every model request of every session of the node, in order.
+    pub requests: Requests,
+    /// The lead agent's caps in [`Rig::lead_turn`] (`None`: the defaults).
+    pub lead_caps: Option<harness_core::agent::DelegateCaps>,
+    /// More sub-agents the lead may delegate to, or the rig's own with
+    /// other tools (a later one of the same id replaces the rig's).
+    pub delegates: Vec<harness_core::agent::AgentSpec>,
     pub dir: tempfile::TempDir,
     pub ws: PathBuf,
     _node: NodeRuntime,
@@ -46,6 +53,34 @@ pub struct Restore {
     pub folder_after: BTreeMap<String, Vec<u8>>,
 }
 
+/// The model requests a [`Recording`] provider saw.
+pub type Requests = Arc<std::sync::Mutex<Vec<harness_agent_native::provider::ChatRequest>>>;
+
+/// The scripted agent, keeping every request it is sent.
+pub struct Recording {
+    inner: Mock,
+    seen: Requests,
+}
+
+#[async_trait::async_trait]
+impl harness_agent_native::provider::Provider for Recording {
+    fn name(&self) -> &'static str {
+        "mock"
+    }
+
+    async fn complete(
+        &self,
+        req: &harness_agent_native::provider::ChatRequest,
+        deltas: tokio::sync::mpsc::UnboundedSender<String>,
+    ) -> Result<
+        harness_agent_native::provider::Completion,
+        harness_agent_native::provider::ProviderError,
+    > {
+        self.seen.lock().unwrap().push(req.clone());
+        self.inner.complete(req, deltas).await
+    }
+}
+
 /// The environment a scripted agent's shell command puts in front of its
 /// own git calls (the agent's shell inherits the node's environment).
 pub const AGENT_GIT: &str = "export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
@@ -59,10 +94,27 @@ impl Rig {
 
     /// A rig whose node keeps `keep` checkpoints.
     pub async fn with_keep(keep: usize) -> Self {
+        Self::build(keep, NativeConfig::default()).await
+    }
+
+    /// A rig whose agents summarise their history past `tokens`.
+    pub async fn summarizing(tokens: usize) -> Self {
+        Self::build(
+            NodePolicy::default().checkpoints_keep,
+            NativeConfig {
+                summarize_after_tokens: Some(tokens),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    async fn build(keep: usize, native: NativeConfig) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let ws = dir.path().join("ws");
         std::fs::create_dir(&ws).unwrap();
         let store = Store::open(&dir.path().join("node.db"), Durability::Full).unwrap();
+        let requests: Requests = Arc::default();
         let cfg = NodeConfig {
             node_id: "local".into(),
             hostname: "test".into(),
@@ -70,15 +122,24 @@ impl Rig {
                 workspace_roots: vec![dir.path().into()],
                 max_approval_mode: harness_core::policy::ApprovalMode::Auto,
                 checkpoints_keep: keep,
+                // Never the developer's own skills (`~/.agents/skills`):
+                // they would be in every turn's context.
+                skills: harness_node::SkillsPolicy {
+                    roots: vec![],
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             store,
             backend: Arc::new(NativeBackend::new(
-                Arc::new(Mock {
-                    delay: Duration::from_millis(5),
+                Arc::new(Recording {
+                    inner: Mock {
+                        delay: Duration::from_millis(5),
+                    },
+                    seen: requests.clone(),
                 }),
                 harness_tools::builtin(),
-                NativeConfig::default(),
+                native,
             )),
             default_model: "mock".into(),
             secrets: harness_core::SecretSet::new(vec![]),
@@ -95,6 +156,9 @@ impl Rig {
             other => panic!("expected hello, got {other:?}"),
         };
         let mut rig = Self {
+            requests,
+            lead_caps: None,
+            delegates: vec![],
             dir,
             ws,
             _node: node,
@@ -207,15 +271,28 @@ impl Rig {
     }
 
     /// One turn of a lead agent that may delegate to `dev` (a `bash` and
-    /// `write` sub-agent: one that changes files, so its shell writes), running the scripted `text` (`delegate: dev=... | ...`);
+    /// `write` sub-agent: one that changes files, so its shell writes), `look` (reads only: `read`, `grep`) and `editor` (`read`
+    /// and `edit`), running the scripted `text` (`delegate: dev=... | ...`);
     /// waits for the lead's turn to end and returns it with the outputs of
     /// its `delegate` calls.
     pub async fn lead_turn(&mut self, text: &str) -> (Turn, Vec<String>) {
-        let spec = |id: &str, delegates| harness_core::agent::AgentSpec {
+        self.lead_turn_in(self.sid, text).await
+    }
+
+    /// An agent spec of the rig: `id` with `tools` and `delegates`; its
+    /// system prompt names it (`You are @id.`).
+    pub fn spec(
+        id: &str,
+        tools: &[&str],
+        delegates: Vec<harness_core::agent::AgentSpec>,
+    ) -> harness_core::agent::AgentSpec {
+        harness_core::agent::AgentSpec {
             agent_id: id.into(),
             name: id.into(),
-            system_prompt: "work".into(),
-            tools: harness_core::agent::ToolSelection::List(vec!["bash".into(), "write".into()]),
+            system_prompt: format!("You are @{id}."),
+            tools: harness_core::agent::ToolSelection::List(
+                tools.iter().map(|t| t.to_string()).collect(),
+            ),
             model: None,
             fallbacks: vec![],
             unavailable: vec![],
@@ -227,18 +304,62 @@ impl Rig {
             deny_tools: vec![],
             delegates,
             caps: None,
-        };
+        }
+    }
+
+    /// The lead agent [`Rig::lead_turn`] runs.
+    pub fn lead(&self) -> harness_core::agent::AgentSpec {
+        let mut lead = Self::spec(
+            "lead",
+            &["bash", "write"],
+            vec![
+                Self::spec("dev", &["bash", "write"], vec![]),
+                Self::spec("look", &["read", "grep"], vec![]),
+                Self::spec("editor", &["read", "edit"], vec![]),
+            ],
+        );
+        lead.caps = self.lead_caps;
+        for d in &self.delegates {
+            lead.delegates.retain(|x| x.agent_id != d.agent_id);
+            lead.delegates.push(d.clone());
+        }
+        lead
+    }
+
+    /// Another agentic chat on the node, in the rig's folder, in Auto.
+    pub async fn new_chat(&mut self) -> SessionId {
+        let sid = SessionId::new();
+        self.send(MasterToNode::Create {
+            exec_mode: None,
+            no_callbacks: false,
+            profile: None,
+            incognito: false,
+            agent: None,
+            req_id: format!("c-{sid}"),
+            session_id: sid,
+            title: "t".into(),
+            cwd: self.ws.display().to_string(),
+            model: None,
+            approval_mode: Some(harness_core::policy::ApprovalMode::Auto),
+        });
+        self.until(|k| matches!(k, EventKind::SessionCreated(_)))
+            .await;
+        sid
+    }
+
+    /// [`Rig::lead_turn`] in the chat `sid`.
+    pub async fn lead_turn_in(&mut self, sid: SessionId, text: &str) -> (Turn, Vec<String>) {
         let mark = self.seen.len();
         self.n += 1;
         self.send(MasterToNode::Prompt {
             savings: None,
             context: None,
             reply: None,
-            agent: Some(spec("lead", vec![spec("dev", vec![])])),
+            agent: Some(self.lead()),
             attachments: vec![],
             compare: vec![],
             req_id: format!("p{}", self.n),
-            session_id: self.sid,
+            session_id: sid,
             text: text.into(),
             images: vec![],
             agent_named: false,
@@ -246,13 +367,13 @@ impl Rig {
         });
         loop {
             self.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
-            if self.seen.last().is_some_and(|e| e.session_id == self.sid) {
+            if self.seen.last().is_some_and(|e| e.session_id == sid) {
                 break;
             }
         }
         let mine: Vec<EventKind> = self.seen[mark..]
             .iter()
-            .filter(|e| e.session_id == self.sid)
+            .filter(|e| e.session_id == sid)
             .filter_map(|e| e.typed().ok())
             .collect();
         let calls: Vec<String> = mine

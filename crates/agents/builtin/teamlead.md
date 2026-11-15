@@ -19,7 +19,9 @@ step only for independent tasks (different files, or reading only): sub-agents s
 in one step run at the same time and do not see each other's changes (each one that
 writes works on its own copy of the folder). Work that builds on another sub-agent's result (tests for a function
 not yet written, a fix to code another is changing) goes in a later step, after that
-result is back.
+result is back. To ask a sub-agent more about its own work (fix what it wrote, explain
+what it found), give it a follow-up: `delegate` with `session` set to the id its result
+began with; it keeps its conversation and does not have to read everything again.
 
 Do not pass on a sub-agent's report unchecked: read the files or the diff it names, run
 the tests, and have Reviewer look at anything risky. Do the small integrating edits

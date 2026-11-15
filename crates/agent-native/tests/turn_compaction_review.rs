@@ -377,6 +377,7 @@ fn open_turn(host: &LogHost, queued_seqs: Vec<u64>) {
         agent: None,
         turn_id: "now".into(),
         environment: None,
+        continued_by: None,
         retry: None,
     }));
     if !queued_seqs.is_empty() {
@@ -747,6 +748,7 @@ fn previous_turn(sid: SessionId) -> (Vec<RawEvent>, u64, UserMessage) {
         agent: None,
         turn_id: "t1".into(),
         environment: None,
+        continued_by: None,
         retry: None,
     }));
     push(EventKind::UserMessage(UserMessage {
@@ -935,6 +937,7 @@ async fn a_callback_turns_ends_survive_an_in_turn_summary() {
         agent: None,
         turn_id: "now".into(),
         environment: None,
+        continued_by: None,
         retry: None,
     }));
     let extra = TurnExtra {
@@ -1049,6 +1052,7 @@ async fn a_retry_after_a_failed_turn_rebuilds_at_every_step() {
         turn_id: "now".into(),
         environment: Some("[harness] Environment: test".into()),
         retry: Some(retry.clone()),
+        continued_by: None,
     }));
     let out = b
         .run_turn(TurnCtx {
@@ -1573,6 +1577,7 @@ async fn a_note_before_a_callback_end_survives_an_in_turn_summary() {
         agent: None,
         turn_id: "now".into(),
         environment: None,
+        continued_by: None,
         retry: None,
     }));
     let extra = TurnExtra {
@@ -1634,6 +1639,7 @@ async fn a_mentioned_file_survives_an_in_turn_summary() {
         agent: None,
         turn_id: "now".into(),
         environment: None,
+        continued_by: None,
         retry: None,
     }));
     let msg = UserMessage {
@@ -1729,6 +1735,7 @@ async fn rebuild_matches_live_after_leaving_plan_mode() {
             agent: None,
             turn_id: turn.into(),
             environment: None,
+            continued_by: None,
             retry: None,
         }));
         host.push(EventKind::UserMessage(UserMessage {
@@ -1981,6 +1988,7 @@ async fn nested_turn(
         agent: None,
         turn_id: turn_id.into(),
         environment: None,
+        continued_by: None,
         retry: None,
     }));
     host.push(EventKind::UserMessage(UserMessage {
@@ -2257,6 +2265,7 @@ async fn run_retry_as(
         turn_id: turn.into(),
         environment: None,
         retry: Some(retry_of(of)),
+        continued_by: None,
     }));
     b.run_turn(TurnCtx {
         session_id: host.sid,
@@ -2376,6 +2385,7 @@ async fn a_retry_after_compact_keeps_the_message() {
             turn_id: "t2".into(),
             environment: None,
             retry: Some(retry_of("t1")),
+            continued_by: None,
         }),
         EventKind::Error(ErrorEvent {
             turn_id: Some("t2".into()),
@@ -2623,6 +2633,7 @@ async fn retry_chains_rebuild_and_keep_the_message() {
             turn_id: "t1".into(),
             environment: None,
             retry: None,
+            continued_by: None,
         }));
         host.push(EventKind::UserMessage(UserMessage {
             turn_id: "t1".into(),
@@ -2690,6 +2701,7 @@ async fn retry_chains_rebuild_and_keep_the_message() {
                 turn_id: id.clone(),
                 environment: None,
                 retry: Some(ro.clone()),
+                continued_by: None,
             }));
             let last = d == depth - 1;
             let steps = 1 + r.pick(12) as usize;
@@ -2739,6 +2751,7 @@ async fn retry_chains_rebuild_and_keep_the_message() {
             turn_id: "cb".into(),
             environment: None,
             retry: None,
+            continued_by: None,
         }));
         let (n, bad, _) = one_turn(
             &host,
@@ -2761,6 +2774,7 @@ async fn retry_chains_rebuild_and_keep_the_message() {
             turn_id: "n1".into(),
             environment: None,
             retry: None,
+            continued_by: None,
         }));
         host.push(EventKind::UserMessage(UserMessage {
             turn_id: "n1".into(),
@@ -2830,6 +2844,7 @@ fn a_retry_is_told_which_calls_ran() {
             turn_id: "t1".into(),
             environment: None,
             retry: None,
+            continued_by: None,
         }),
     );
     push(
@@ -2922,6 +2937,7 @@ fn a_retry_is_told_which_calls_ran() {
             turn_id: "t2".into(),
             environment: None,
             retry: Some(r),
+            continued_by: None,
         }),
     );
     let msgs = rebuild(&log, &Rebuild::default());

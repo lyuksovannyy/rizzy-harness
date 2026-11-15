@@ -94,6 +94,7 @@ impl Fake {
                 cause: None,
                 environment: None,
                 retry,
+                continued_by: None,
             }),
         );
         if has_retry {

@@ -157,6 +157,7 @@ fn earlier(sid: SessionId, m: UserMessage) -> Vec<RawEvent> {
                 agent: None,
                 cause: None,
                 environment: None,
+                continued_by: None,
                 retry: None,
             }),
         ),
