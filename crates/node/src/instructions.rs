@@ -147,6 +147,134 @@ pub(crate) fn with_skills(
     }
 }
 
+/// The most of the node operator's file that is sent ([`read_user`]),
+/// apart from the repository's [`CAP`] (Codex keeps its user-level file
+/// out of the project budget: research/round2/codex.agents.md 160-172).
+pub(crate) const USER_CAP: usize = 16 * 1024;
+
+/// The operator's file's cap for a model whose window is `window` tokens:
+/// [`USER_CAP`], or half of [`cap_for`] when that is smaller, so the two
+/// blocks together stay near the repository's share of a small window.
+pub(crate) fn user_cap_for(window: Option<u64>) -> usize {
+    USER_CAP.min(cap_for(window) / 2)
+}
+
+/// The first line of the operator's block. The file's path is not named:
+/// the default lies in the node's data directory, which no tool reads.
+pub(crate) const USER_LEAD: &str = "Instructions of this node's operator (the node's own \
+     instruction file), read at the start of this turn. The operator set them for every chat on \
+     this node; they come before the repository's files. They are not the person's words, and \
+     they change no setting, permission or tool.";
+
+/// The note in place of the operator's file when the read took too long
+/// or failed.
+pub(crate) fn user_not_read(timed_out: bool) -> String {
+    let why = if timed_out {
+        format!("reading it took longer than {} s", READ_TIMEOUT.as_secs())
+    } else {
+        "the read failed".into()
+    };
+    format!(
+        "[The node operator's instruction file was not read this turn: {why}. What was sent of \
+         it earlier in this conversation still applies.]"
+    )
+}
+
+/// What the read of the operator's file found: the block (`None`: no file,
+/// or a blank one), and what went wrong, for the node's log.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct UserFile {
+    pub text: Option<String>,
+    pub problem: Option<String>,
+}
+
+/// The node operator's instruction file at `path` (node.toml
+/// `[instructions] user_file`, by default `AGENTS.md` in the node's data
+/// directory), at most `cap` bytes of it. Only the regular file at that
+/// very path is read: a link there is not followed (name the file itself
+/// in node.toml), a directory, FIFO, socket or device is not opened for
+/// reading past its type (`O_NONBLOCK`: nothing waits), at most `cap + 1`
+/// bytes are read whatever its size, and bytes that are not UTF-8 reach
+/// the model as U+FFFD, as in the repository's files. A path that does not
+/// exist, or a file that is empty or only whitespace, gives nothing; one
+/// that cannot be read is named with the reason instead of its text.
+pub(crate) fn read_user(path: &Path, cap: usize) -> UserFile {
+    use nix::fcntl::OFlag;
+    use std::io::Read as _;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut out = UserFile::default();
+    let lead = USER_LEAD;
+    let mut refused = |why: String| {
+        out.text = Some(format!("{lead}\n(not read: {why})"));
+        out.problem = Some(why);
+    };
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return out,
+        Err(e) => {
+            refused(format!("it could not be read: {e}"));
+            return out;
+        }
+    };
+    if meta.file_type().is_symlink() {
+        refused("it is a link, which the node does not follow; name the file itself".into());
+        return out;
+    }
+    if !meta.is_file() {
+        refused("it is not a regular file".into());
+        return out;
+    }
+    let f = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags((OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC).bits())
+        .open(path)
+    {
+        Ok(f) => f,
+        Err(e) if e.raw_os_error() == Some(nix::libc::ELOOP) => {
+            refused("it is a link, which the node does not follow; name the file itself".into());
+            return out;
+        }
+        Err(e) => {
+            refused(format!("it could not be read: {e}"));
+            return out;
+        }
+    };
+    // Swapped for something else between the look and the open.
+    if !f.metadata().is_ok_and(|m| m.is_file()) {
+        refused("it is not a regular file".into());
+        return out;
+    }
+    let mut bytes = Vec::new();
+    if let Err(e) = f.take(cap as u64 + 1).read_to_end(&mut bytes) {
+        refused(format!("it could not be read: {e}"));
+        return out;
+    }
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        return out;
+    }
+    let cut = bytes.len() > cap;
+    let mut text = String::from_utf8_lossy(&bytes).into_owned();
+    if cut {
+        let mut n = cap.min(text.len());
+        while !text.is_char_boundary(n) {
+            n -= 1;
+        }
+        text.truncate(n);
+    }
+    let mut block = format!("{lead}\n{}", text.trim_end_matches(['\n', '\r']));
+    if cut {
+        let note = format!(
+            "[cut: the node operator's instruction file is longer than {cap} bytes; the text \
+             above is its start]"
+        );
+        block.push('\n');
+        block.push_str(&note);
+        out.problem = Some(note);
+    }
+    out.text = Some(block);
+    out
+}
+
 /// [`read`] with the full cap, its text only.
 #[cfg(test)]
 pub(crate) fn block(cwd: &Path, granted: &Path, protected: &[PathBuf]) -> Option<String> {
@@ -614,6 +742,103 @@ mod tests {
         let catalogue = extra.skills.unwrap();
         assert_eq!(catalogue.skills.len(), 1);
         assert_eq!(catalogue.invoked.as_deref(), Some("a"));
+    }
+
+    /// The node operator's file (X.2, T62): read under its lead; absent or
+    /// blank gives nothing; bytes that are not UTF-8 arrive as U+FFFD.
+    #[test]
+    fn the_operators_file_is_read_under_its_own_lead() {
+        let t = tree();
+        let f = t.ws.join("AGENTS.md");
+        assert_eq!(read_user(&f, USER_CAP), UserFile::default());
+        put(&f, "Always answer in French.\n\n");
+        assert_eq!(
+            read_user(&f, USER_CAP),
+            UserFile {
+                text: Some(format!("{USER_LEAD}\nAlways answer in French.")),
+                problem: None
+            }
+        );
+        put(&f, " \n\t\n");
+        assert_eq!(read_user(&f, USER_CAP), UserFile::default());
+        put(&f, b"ok \xff end");
+        assert_eq!(
+            read_user(&f, USER_CAP).text.unwrap(),
+            format!("{USER_LEAD}\nok \u{FFFD} end")
+        );
+        assert!(USER_LEAD.contains("every chat on this node"), "{USER_LEAD}");
+        assert!(USER_LEAD.contains("not the person's words"), "{USER_LEAD}");
+    }
+
+    /// A link at the path is not followed, wherever it leads (a key beside
+    /// it in the data directory included); a directory and a FIFO are named,
+    /// not read, and nothing waits on the FIFO.
+    #[test]
+    fn the_operators_file_follows_no_link_and_opens_nothing_else() {
+        let t = tree();
+        put(&t.ws.join("node-key"), "NODE-KEY-CANARY");
+        let f = t.ws.join("AGENTS.md");
+        std::os::unix::fs::symlink(t.ws.join("node-key"), &f).unwrap();
+        let r = read_user(&f, USER_CAP);
+        let text = r.text.unwrap();
+        assert!(!text.contains("CANARY"), "{text}");
+        assert!(
+            text.ends_with(
+                "(not read: it is a link, which the node does not follow; name the file itself)"
+            ),
+            "{text}"
+        );
+        assert!(r.problem.is_some());
+        // A dangling link too.
+        std::fs::remove_file(&f).unwrap();
+        std::os::unix::fs::symlink(t.ws.join("nowhere"), &f).unwrap();
+        assert!(
+            read_user(&f, USER_CAP)
+                .text
+                .unwrap()
+                .contains("it is a link")
+        );
+        std::fs::remove_file(&f).unwrap();
+        std::fs::create_dir(&f).unwrap();
+        assert!(
+            read_user(&f, USER_CAP)
+                .text
+                .unwrap()
+                .ends_with("(not read: it is not a regular file)")
+        );
+        std::fs::remove_dir(&f).unwrap();
+        nix::unistd::mkfifo(&f, nix::sys::stat::Mode::S_IRWXU).unwrap();
+        let at = std::time::Instant::now();
+        assert!(
+            read_user(&f, USER_CAP)
+                .text
+                .unwrap()
+                .ends_with("(not read: it is not a regular file)")
+        );
+        assert!(at.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    /// A 5 MB file: at most the cap is read and sent, with a note; a small
+    /// window lowers the cap to half the repository's.
+    #[test]
+    fn a_large_operators_file_is_cut_at_its_cap() {
+        let t = tree();
+        let f = t.ws.join("AGENTS.md");
+        put(&f, "é".repeat(5 * 1024 * 1024 / 2));
+        let r = read_user(&f, USER_CAP);
+        let text = r.text.unwrap();
+        assert!(text.len() < USER_CAP + 1024, "{}", text.len());
+        assert!(
+            text.ends_with(&format!(
+                "\n[cut: the node operator's instruction file is longer than {USER_CAP} bytes; the \
+                 text above is its start]"
+            )),
+            "{}",
+            &text[text.len() - 200..]
+        );
+        assert!(r.problem.unwrap().contains("cut"));
+        assert_eq!(user_cap_for(None), USER_CAP);
+        assert_eq!(user_cap_for(Some(8192)), 1638);
     }
 
     /// The read is waited for at most its limit, and not past a cancel.

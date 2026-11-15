@@ -1108,6 +1108,10 @@ host = false                         # offer the host shell: commands as this OS
 [skills]
 repository = true                    # read the chat repository's .agents/skills and .claude/skills (see "Skills")
 roots = ["~/.agents/skills", "~/.claude/skills"]  # this machine's skill folders; every chat on the node can read them
+
+[instructions]
+# user_file = "~/.codex/AGENTS.md"   # the operator's instruction file; default: AGENTS.md in the node's data directory.
+                                     # It reaches EVERY chat on this node, whoever owns it (see "Your own instructions")
 ```
 
 **Execution modes.** Each agentic chat runs its commands in one mode,
@@ -2134,6 +2138,30 @@ cut or timed-out read (paths and reasons, never the text).
 tokens), sent with the first message, again only when a file changed (with a
 line saying the new files replace the earlier ones) and once after the chat is
 compacted; between those, nothing (see "What goes with each message").
+
+### Your own instructions (the node's AGENTS.md)
+
+What `~/.claude/CLAUDE.md` is to Claude Code and `~/.codex/AGENTS.md` to
+Codex: one file of your own rules ("answer in British English", "never run
+`git push`") that the node sends with every agentic chat, in front of the
+repository's files. By default it is `AGENTS.md` in the node's data directory
+(`~/.local/share/rizzy-harness/AGENTS.md` unless `--data-dir` says otherwise),
+which no agent's tool can read or change, in either execution mode; node.toml
+`[instructions] user_file` names another file (absolute or under `~/`; a file
+an agent can write is then one it can rewrite). No file, or an empty one: nothing
+is sent. It is read at the start of every message like the repository's files,
+cut at 16 KiB (or half the repository files' cap on a small context window)
+with a note, sent again only when it changed, withdrawn when you delete it,
+and kept through compaction. Only the regular file at that very path is read:
+a link there is not followed (name the file itself in node.toml), a folder or
+FIFO is named, not opened, and a read that takes over 5 seconds is given up
+with a note. The model is told it is the node operator's text, not your
+message, and that it changes no setting.
+
+**On a node several people use**, this file reaches every chat on the node,
+whoever owns it: it is the operator's setting, like `[skills] roots`. Write
+there only what every user of the node should get. There are no per-user files
+yet.
 
 ## Skills
 

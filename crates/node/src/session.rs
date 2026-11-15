@@ -2187,32 +2187,54 @@ impl Session {
         let protected = policy.protected_dirs.clone();
         // The instruction files first, in a bound of their own: a slow
         // skill folder must not cost the turn its AGENTS.md (review S3).
+        // The node operator's own file first (node.toml `[instructions]`),
+        // read in the same bound: it is on this machine's disk too.
         let files_protected = protected.clone();
+        let user_file = policy.instructions.located.clone();
+        let has_user_file = user_file.is_some();
+        let user_cap = ins::user_cap_for(window);
         let files = ins::bounded(
-            move || ins::read(&dir, &granted, &files_protected, cap),
+            move || {
+                let user = user_file.map(|p| ins::read_user(&p, user_cap));
+                (user, ins::read(&dir, &granted, &files_protected, cap))
+            },
             cancel,
             ins::READ_TIMEOUT,
         )
         .await;
         let problems = match files {
-            Bounded::Done(r) => {
+            Bounded::Done((user, r)) => {
+                let mut problems = r.problems;
+                if let Some(u) = user {
+                    extra.user_instructions = u.text;
+                    problems.extend(u.problem.map(|p| format!("the node's own file: {p}")));
+                }
                 extra.instructions = r.text;
-                r.problems
+                problems
             }
             // Not read this turn: the files the model has stay (X.1,
             // review R3); the note goes with this turn only.
             Bounded::TimedOut => {
+                if has_user_file {
+                    extra.user_instructions_unread = Some(ins::user_not_read(true));
+                }
                 extra.instructions_unread = Some(ins::timed_out());
                 vec![format!("timed out after {} s", ins::READ_TIMEOUT.as_secs())]
             }
             // The turn is stopping; the backend sees the cancel itself.
             Bounded::Cancelled => {
+                if has_user_file {
+                    extra.user_instructions_unread = Some(ins::user_not_read(false));
+                }
                 extra.instructions_unread = Some(ins::not_read());
                 extra.skills_unread = Some(ins::SKILLS_NOT_READ.into());
                 return extra;
             }
             Bounded::Failed(e) => {
                 tracing::warn!(session = %self.id, error = %e, "reading the instruction files failed");
+                if has_user_file {
+                    extra.user_instructions_unread = Some(ins::user_not_read(false));
+                }
                 extra.instructions_unread = Some(ins::not_read());
                 vec![]
             }

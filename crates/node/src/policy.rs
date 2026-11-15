@@ -44,6 +44,8 @@ pub struct NodePolicy {
     pub execution: ExecutionPolicy,
     /// Skills (`[skills]`, ADOPTION_PLAN X.2).
     pub skills: SkillsPolicy,
+    /// The node operator's instruction file (`[instructions]`, X.2).
+    pub instructions: InstructionsPolicy,
     /// MCP servers (`[mcp_servers.<name>]`, ADOPTION_PLAN X.3): stdio
     /// programs each agentic chat may start, in its own confinement, and
     /// whose tools its agent is offered. Only this file adds one.
@@ -116,30 +118,81 @@ impl SkillsPolicy {
     /// [`Self::roots`] with `~/` expanded; an entry that is neither
     /// absolute nor under `~/` (or `~/` without a home) is an error.
     pub fn roots(&self) -> Result<Vec<PathBuf>, String> {
-        let home = dirs::home_dir();
         self.roots
             .iter()
-            .map(|p| {
-                let p = match (p.strip_prefix("~"), &home) {
-                    (Ok(rest), Some(h)) => h.join(rest),
-                    (Ok(_), None) => {
-                        return Err(format!(
-                            "[skills] roots: {} uses ~ but there is no home directory",
-                            p.display()
-                        ));
-                    }
-                    (Err(_), _) => p.clone(),
-                };
-                if p.is_absolute() {
-                    Ok(p)
-                } else {
-                    Err(format!(
-                        "[skills] roots: {} must be absolute (or start with ~/)",
-                        p.display()
-                    ))
-                }
-            })
+            .map(|p| expand_home(p, "[skills] roots"))
             .collect()
+    }
+}
+
+/// `p` with a leading `~/` made the node user's home; an error for a path
+/// that is neither absolute nor under `~/`, or `~/` without a home.
+fn expand_home(p: &Path, what: &str) -> Result<PathBuf, String> {
+    let p = match (p.strip_prefix("~"), dirs::home_dir()) {
+        (Ok(rest), Some(h)) => h.join(rest),
+        (Ok(_), None) => {
+            return Err(format!(
+                "{what}: {} uses ~ but there is no home directory",
+                p.display()
+            ));
+        }
+        (Err(_), _) => p.to_path_buf(),
+    };
+    if p.is_absolute() {
+        Ok(p)
+    } else {
+        Err(format!(
+            "{what}: {} must be absolute (or start with ~/)",
+            p.display()
+        ))
+    }
+}
+
+/// `[instructions]` in node.toml (ADOPTION_PLAN X.2, PLAN.md T61): the
+/// node operator's own instruction file, what `~/.claude/CLAUDE.md` and
+/// `~/.codex/AGENTS.md` are to those harnesses. Read at the start of every
+/// agentic turn on this node, in front of the repository's files, for
+/// every chat on the node, whoever owns it. Only this file sets where it
+/// is; nothing the master sends names, widens or changes it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct InstructionsPolicy {
+    /// Where the file is, absolute or under `~/`. By default `AGENTS.md`
+    /// in the node's data directory, which no agent's tool can write. A
+    /// file that does not exist adds nothing.
+    pub user_file: Option<PathBuf>,
+    /// The file read: [`Self::user_file`], or the default in the data
+    /// directory the runtime gave [`Self::locate`]. `None` (a policy built
+    /// in code and never located): no file. Never read from node.toml.
+    #[serde(skip)]
+    pub located: Option<PathBuf>,
+}
+
+impl InstructionsPolicy {
+    /// The file name the default is, in the node's data directory.
+    pub const DEFAULT_NAME: &'static str = "AGENTS.md";
+
+    /// [`Self::user_file`] with `~/` expanded.
+    pub fn user_file(&self) -> Result<Option<PathBuf>, String> {
+        self.user_file
+            .as_deref()
+            .map(|p| expand_home(p, "[instructions] user_file"))
+            .transpose()
+    }
+
+    /// Set [`Self::located`]: the configured file, else `AGENTS.md` in
+    /// `data_dir` (the node's data directory). A setting that does not
+    /// check out (refused when node.toml was loaded) reads no file.
+    pub fn locate(&mut self, data_dir: &Path) {
+        self.located = match self.user_file() {
+            Ok(Some(p)) => Some(p),
+            Ok(None) => Some(
+                std::path::absolute(data_dir)
+                    .unwrap_or_else(|_| data_dir.to_path_buf())
+                    .join(Self::DEFAULT_NAME),
+            ),
+            Err(_) => None,
+        };
     }
 }
 
@@ -389,6 +442,7 @@ impl Default for NodePolicy {
             sandbox: SandboxPolicy::default(),
             execution: ExecutionPolicy::default(),
             skills: SkillsPolicy::default(),
+            instructions: InstructionsPolicy::default(),
             mcp_servers: Default::default(),
             protected_dirs: Vec::new(),
             exec: Default::default(),
@@ -441,6 +495,7 @@ impl NodePolicy {
     pub fn validate(&self) -> Result<(), String> {
         harness_tools::env::compile_pass(&self.env_pass)?;
         self.skills.roots()?;
+        self.instructions.user_file()?;
         let n = self.limits.tool_stream_bytes;
         let (min, max) = (
             harness_tools::stream::MIN_STREAM_BYTES,
@@ -681,6 +736,41 @@ impl NodePolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// X.2, T62: the operator's file is `AGENTS.md` in the data directory
+    /// unless node.toml names one (absolute or under `~/`); a relative
+    /// path is refused at load; a policy never located reads no file.
+    #[test]
+    fn the_operators_instruction_file_defaults_to_the_data_directory() {
+        let mut p = NodePolicy::default();
+        assert_eq!(p.instructions.located, None);
+        p.instructions.locate(Path::new("/srv/harness"));
+        assert_eq!(
+            p.instructions.located.as_deref(),
+            Some(Path::new("/srv/harness/AGENTS.md"))
+        );
+        let mut p: NodePolicy =
+            toml::from_str("[instructions]\nuser_file = \"/etc/rules.md\"\n").unwrap();
+        p.validate().unwrap();
+        p.instructions.locate(Path::new("/srv/harness"));
+        assert_eq!(
+            p.instructions.located.as_deref(),
+            Some(Path::new("/etc/rules.md"))
+        );
+        if let Some(home) = dirs::home_dir() {
+            let mut p: NodePolicy =
+                toml::from_str("[instructions]\nuser_file = \"~/.codex/AGENTS.md\"\n").unwrap();
+            p.instructions.locate(Path::new("/srv/harness"));
+            assert_eq!(p.instructions.located, Some(home.join(".codex/AGENTS.md")));
+        }
+        let bad: NodePolicy = toml::from_str("[instructions]\nuser_file = \"rules.md\"\n").unwrap();
+        let e = bad.validate().unwrap_err();
+        assert!(
+            e.contains("[instructions] user_file: rules.md must be absolute"),
+            "{e}"
+        );
+        assert!(toml::from_str::<NodePolicy>("[instructions]\nlocated = \"/x\"\n").is_err());
+    }
 
     /// Review N2: `mcp` denies every MCP tool, `mcp__<server>` one
     /// server's; anything else stays an exact name.

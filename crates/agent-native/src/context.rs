@@ -56,6 +56,8 @@ pub const TURN: &str = "turn";
 /// A standing section.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SectionKey {
+    /// The node operator's instruction file.
+    UserInstructions,
     Instructions,
     Skills,
     /// The master's parts ([`StandingKey`]).
@@ -65,6 +67,7 @@ pub enum SectionKey {
 impl SectionKey {
     pub fn as_str(self) -> &'static str {
         match self {
+            SectionKey::UserInstructions => "user_instructions",
             SectionKey::Instructions => "instructions",
             SectionKey::Skills => "skills",
             SectionKey::Master(k) => match k {
@@ -84,10 +87,14 @@ impl SectionKey {
     }
 
     pub fn parse(s: &str) -> Option<Self> {
-        [SectionKey::Instructions, SectionKey::Skills]
-            .into_iter()
-            .chain(StandingKey::ALL.map(SectionKey::Master))
-            .find(|k| k.as_str() == s)
+        [
+            SectionKey::UserInstructions,
+            SectionKey::Instructions,
+            SectionKey::Skills,
+        ]
+        .into_iter()
+        .chain(StandingKey::ALL.map(SectionKey::Master))
+        .find(|k| k.as_str() == s)
     }
 
     /// What the section is, for the harness's sentences: `None` for one
@@ -96,6 +103,7 @@ impl SectionKey {
     fn what(self) -> Option<(&'static str, bool)> {
         // (noun phrase, plural)
         Some(match self {
+            SectionKey::UserInstructions => ("The node operator's instructions", true),
             SectionKey::Instructions => ("The repository's instruction files", true),
             SectionKey::Skills => ("The list of skills", false),
             SectionKey::Master(k) => match k {
@@ -132,6 +140,7 @@ impl SectionKey {
         let (what, many) = self.what()?;
         let verb = if many { "apply" } else { "applies" };
         let why = match self {
+            SectionKey::UserInstructions => ": the node's instruction file is gone",
             SectionKey::Instructions => ": none were found for this turn",
             SectionKey::Skills => ": no skills are offered now",
             SectionKey::Master(StandingKey::Memory | StandingKey::Workspace) => {
@@ -186,6 +195,10 @@ impl Sections {
             known: unread.is_none(),
         };
         let mut standing = vec![
+            Standing {
+                key: SectionKey::UserInstructions,
+                ..read(&extra.user_instructions, &extra.user_instructions_unread)
+            },
             read(&extra.instructions, &extra.instructions_unread),
             Standing {
                 key: SectionKey::Skills,
@@ -226,6 +239,7 @@ impl Sections {
         // the model reads right before the message.
         let notes = (!mcp_notes.is_empty()).then(|| mcp_notes.join("\n"));
         let per_turn = [
+            extra.user_instructions_unread.as_deref(),
             extra.instructions_unread.as_deref(),
             extra.skills_unread.as_deref(),
             extra.skill_asked.as_deref(),

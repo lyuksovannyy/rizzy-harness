@@ -608,6 +608,9 @@ async fn agentic_node(
     // no file tool may touch it, whatever node.toml allows (AUDIT S1).
     let mut policy = policy;
     policy.protect(dir);
+    // The node operator's instruction file: node.toml's, else AGENTS.md
+    // in this data directory, where no agent's tool can write it (X.2).
+    policy.instructions.locate(dir);
     // The shell sandbox (FIX_PLAN 2.7): resolved and self-tested once; the
     // execution modes this node offers follow from it (N.10a).
     let (sandbox, host_shell) = start_sandbox(dir, &mut policy, refuse_without_sandbox)?;

@@ -242,6 +242,15 @@ pub struct TurnExtra {
     /// sent when it differs from what the model last got of it since the
     /// last summary, with a line saying it replaces that.
     pub instructions: Option<String>,
+    /// The node operator's instruction file (node.toml `[instructions]
+    /// user_file`), read by the node at the start of this turn. Set only
+    /// by the node, never from the protocol. A standing section of its own,
+    /// in front of `instructions`.
+    pub user_instructions: Option<String>,
+    /// Set when the operator's file could not be read this turn: the note
+    /// for the model, this turn only; what was sent of the file stays.
+    /// Set only by the node.
+    pub user_instructions_unread: Option<String>,
     /// The list of skills the node found for this turn (`crate::skills`,
     /// rendered), a standing section like `instructions`. Set only by the
     /// node.
