@@ -276,12 +276,12 @@ const X17_KB = 1.4; // the measure is a few hundredths over 399.3
 // records the measure.
 const X19_X20_KB = 0.6;
 
-// Plan mode (ADOPTION_PLAN X.7, feat/plan-mode): measured 400.0 with it, at
-// this budget, so the next branch would fail on it: its bar is a lazy chunk
-// (0.8 KB JS, 0.3 KB CSS) loaded on the first chat in plan mode, the picker's
-// fifth choice and the conversation's lines about 0.2. The line (+1.0)
-// records it; the first load did not grow (103.2).
-const X7_KB = 1.0;
+// Plan mode (ADOPTION_PLAN X.7, feat/plan-mode): measured 400.1 against
+// origin/main's 399.0 the same day (486bd15, built side by side): its bar
+// is a lazy chunk loaded on the first chat in plan mode, plus the picker's
+// fifth choice and the conversation's lines. The first load did not grow
+// (103.2).
+const X7_KB = 1.1;
 
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
 const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB + EXPORT_KB + MEMDEF_KB + VISIBILITY_KB + T50_KB + LOOP_KB + DIFF_KB + T51_KB + WSMEM_KB + STEPS_KB + AGENT_SWITCHES_KB + T57_KB + X15_KB + X16_KB + COST_KB + X17_KB + X19_X20_KB + X7_KB) * 100) / 10) / 10;
