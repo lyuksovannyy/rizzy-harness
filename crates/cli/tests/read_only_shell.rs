@@ -698,9 +698,25 @@ async fn a_folder_under_tmp_keeps_landlock_as_the_second_layer() {
          s.sendall(b'WRITE-VIA-SOCKET');print('connected')\"",
     )
     .await;
-    assert!(!out.output.contains("connected\n"), "{}", out.output);
-    assert!(out.output.contains("PermissionError"), "{}", out.output);
-    assert!(listener.accept().is_err(), "the host received a connection");
+    // Landlock refuses the connect from ABI 9 on. Below it (the CI
+    // runner's kernel) nothing does: the stated residual; where the tmpfs
+    // goes is then checked by this test's second half and, for every
+    // kernel, by harness-tools'
+    // `the_read_only_temp_folder_is_never_above_or_beneath_a_grant`.
+    let abi = f
+        .plain()
+        .probe(&f.data.join("sandbox-tmp/probe"), &f.data)
+        .map_or(0, |s| harness_tools::sandbox::effective_abi(&s));
+    if abi >= harness_tools::sandbox::ABI_PATHNAME_SOCKETS {
+        assert!(!out.output.contains("connected\n"), "{}", out.output);
+        assert!(out.output.contains("PermissionError"), "{}", out.output);
+        assert!(listener.accept().is_err(), "the host received a connection");
+    } else {
+        eprintln!(
+            "Landlock ABI {abi}, below 9: pathname sockets are not refused here: {}",
+            out.output
+        );
+    }
     let out = bash(
         &ro,
         "echo $TMPDIR $CARGO_TARGET_DIR; echo t > \"$TMPDIR/t\" && cat \"$TMPDIR/t\"; \

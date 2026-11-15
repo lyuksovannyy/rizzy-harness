@@ -3095,6 +3095,42 @@ mod tests {
             .collect()
     }
 
+    /// Review of PR 131, M1, on any kernel (the socket test in
+    /// `cli/tests/read_only_shell.rs` needs Landlock ABI 9 to see it): the
+    /// read-only shell's tmpfs, and so Landlock's one write rule, never
+    /// lies above, at or beneath anything granted.
+    #[test]
+    fn the_read_only_temp_folder_is_never_above_or_beneath_a_grant() {
+        let sb = Sandbox::new("/bin/true".into(), &Settings::default(), None, &[]).unwrap();
+        let at = |rw: &[&str], ro: &[&str]| {
+            let g = |l: &[&str]| -> Vec<Grant> {
+                l.iter().map(|p| Grant::system(Path::new(p))).collect()
+            };
+            sb.read_only_tmp_dir(&g(rw), &g(ro))
+        };
+        assert_eq!(at(&[], &["/home/u/proj"]).unwrap(), Path::new("/tmp"));
+        // `/tmpfoo` is a sibling of `/tmp`, not beneath it.
+        assert_eq!(at(&[], &["/tmpfoo/proj"]).unwrap(), Path::new("/tmp"));
+        for under in ["/tmp/clone/proj", "/tmp"] {
+            assert_eq!(at(&[], &[under]).unwrap(), Path::new("/.harness-tmp"));
+            assert_eq!(at(&[under], &[]).unwrap(), Path::new("/.harness-tmp"));
+        }
+        // Something granted above both (the root) or beneath both: refused.
+        assert!(at(&[], &["/"]).is_err());
+        assert!(at(&[], &["/tmp/a", "/.harness-tmp/b"]).is_err());
+        // node.toml's own entries count as grants.
+        let s = Settings {
+            read: vec!["/tmp".into()],
+            ..Default::default()
+        };
+        if let Ok(sb) = Sandbox::new("/bin/true".into(), &s, None, &[]) {
+            assert_eq!(
+                sb.read_only_tmp_dir(&[], &[]).unwrap(),
+                Path::new("/.harness-tmp")
+            );
+        }
+    }
+
     /// The `<expect>` the wrapper is given for `path`, if it is granted.
     fn expect_of(args: &[String], path: &Path) -> Option<String> {
         let p = path.to_string_lossy();
