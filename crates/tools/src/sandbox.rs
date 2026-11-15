@@ -142,6 +142,9 @@ pub struct Settings {
     /// `None`: the first `bwrap` on `PATH` the node's user cannot replace,
     /// looked up at start.
     pub bwrap: Option<PathBuf>,
+    /// The read-only shell's `/tmp` in bytes (`[sandbox] read_only_tmp_mib`);
+    /// `0`: [`crate::contain::READ_ONLY_TMP_BYTES`].
+    pub read_only_tmp: u64,
 }
 
 /// A working sandbox: the wrapper binary and the node-wide rules.
@@ -155,6 +158,8 @@ pub struct Sandbox {
     extra_write: Vec<Extra>,
     network: Network,
     best_effort: bool,
+    /// The read-only shell's `/tmp`, in bytes (node.toml).
+    read_only_tmp: u64,
     /// Per-session temp directories live under it (inside the data dir).
     tmp_root: Option<PathBuf>,
     protected: Vec<PathBuf>,
@@ -496,6 +501,10 @@ impl Sandbox {
                 .collect(),
             network: settings.network,
             best_effort: settings.mode == Mode::BestEffort,
+            read_only_tmp: match settings.read_only_tmp {
+                0 => crate::contain::READ_ONLY_TMP_BYTES,
+                n => n,
+            },
             tmp_root,
             protected: protected.to_vec(),
             contain: std::sync::OnceLock::new(),
@@ -516,6 +525,7 @@ impl Sandbox {
             extra_write: self.extra_write.clone(),
             network: self.network,
             best_effort: self.best_effort,
+            read_only_tmp: self.read_only_tmp,
             tmp_root: self.tmp_root.clone(),
             protected: self.protected.clone(),
             contain: std::sync::OnceLock::new(),
@@ -726,7 +736,7 @@ impl Sandbox {
                 mark.as_ref(),
                 self.network == Network::Off && self.network_namespace(b),
                 &view(&all_rw, &all_ro),
-                read_only.then_some(crate::contain::READ_ONLY_TMP_BYTES),
+                read_only.then_some(self.read_only_tmp),
             ),
             None => self.own_program(),
         };
@@ -1052,7 +1062,8 @@ pub struct Grants {
     /// The read-only shell (ADOPTION_PLAN T.7, X.7; docs/read-only-shell.md):
     /// every grant read-only, the session's folder and node.toml's `write`
     /// entries included, and nothing writable but a `/tmp` of the command's
-    /// own ([`crate::contain::READ_ONLY_TMP_BYTES`], gone when it ends).
+    /// own (node.toml's size, [`crate::contain::READ_ONLY_TMP_BYTES`] by
+    /// default; gone when it ends).
     /// Only ever contained (bubblewrap's read-only binds, Landlock inside
     /// as a second layer): where this confinement cannot contain it the
     /// command is refused ([`Confinement::read_only_shell`]), never run
@@ -1068,8 +1079,14 @@ pub const READ_ONLY_TMP: &str = "/tmp";
 
 /// The environment a read-only shell adds: git reads without taking the
 /// index lock or refreshing the index (`git status` would otherwise try to
-/// write `.git/index` and fail on the read-only folder).
-pub const READ_ONLY_ENV: &[(&str, &str)] = &[("GIT_OPTIONAL_LOCKS", "0")];
+/// write `.git/index` and fail on the read-only folder), and cargo builds
+/// into the shell's own `/tmp` (with it, `cargo test` runs on read-only
+/// `~/.cargo` and `~/.rustup`: measured, docs/read-only-shell.md
+/// "Toolchains"). Set after the node's `env_pass`, so they win.
+pub const READ_ONLY_ENV: &[(&str, &str)] = &[
+    ("GIT_OPTIONAL_LOCKS", "0"),
+    ("CARGO_TARGET_DIR", "/tmp/cargo-target"),
+];
 
 impl Confinement {
     /// The marker of this confinement's contained commands (T.8e): the
@@ -1103,6 +1120,15 @@ impl Confinement {
     /// ([`Grants::read_only`]): `Err` says why not, in words for the model
     /// and the person. Only a contained shell with a bubblewrap that sizes
     /// a tmpfs can; Landlock alone is never offered as read-only.
+    /// The read-only shell's `/tmp` size here, in bytes (node.toml's, or
+    /// the default where this confinement has no sandbox).
+    pub fn read_only_tmp(&self) -> u64 {
+        match self {
+            Self::Confined { sandbox, .. } => sandbox.read_only_tmp,
+            _ => crate::contain::READ_ONLY_TMP_BYTES,
+        }
+    }
+
     pub fn read_only_shell(&self) -> Result<(), String> {
         match self {
             Self::Refused(why) => Err(format!("this node has no contained shell for it ({why})")),

@@ -1038,11 +1038,12 @@ impl NativeBackend {
         self.config.sandbox.read_only_shell()
     }
 
-    /// `bash`'s description, with what the read-only shell means added
-    /// where it runs there.
+    /// `bash`'s description, with what the read-only shell means (and its
+    /// size on this node) added where it runs there.
     fn shell_text(&self, description: &str, read_only: bool) -> String {
         if read_only {
-            format!("{description} {}", harness_tools::READ_ONLY_NOTE)
+            let size = self.config.sandbox.read_only_tmp();
+            format!("{description} {}", harness_tools::read_only_note(size))
         } else {
             description.to_string()
         }

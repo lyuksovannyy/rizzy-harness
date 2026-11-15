@@ -159,12 +159,13 @@ pub fn binds_of(bwrap: &Path) -> (Binds, Option<String>) {
     (binds, version)
 }
 
-/// The size of a read-only shell's `/tmp` (T.7): a tmpfs in the command's
-/// own mount namespace, so a command that fills it takes up to this much
-/// memory (charged where the node's own processes are: commands have no
-/// cgroup of their own), never the node's disk, and it is gone when the
-/// command ends.
-pub const READ_ONLY_TMP_BYTES: u64 = 256 * 1024 * 1024;
+/// The default size of a read-only shell's `/tmp` (T.7; node.toml
+/// `[sandbox] read_only_tmp_mib`): a tmpfs in the command's own mount
+/// namespace, so a command that fills it takes up to this much memory
+/// (charged where the node's own processes are: commands have no cgroup of
+/// their own, and no memory limit either), never the node's disk, and it
+/// is gone when the command ends. 1 GiB so a test build fits (PLAN.md T70).
+pub const READ_ONLY_TMP_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// Whether `bwrap --help` lists `--size` (sizing a tmpfs). Asked once per
 /// path; `false` when it cannot be read.
@@ -258,7 +259,7 @@ impl Contain {
     }
 
     /// Whether a read-only shell (T.7) can be contained by this
-    /// bubblewrap: its `/tmp` is a tmpfs of [`READ_ONLY_TMP_BYTES`], so it
+    /// bubblewrap: its `/tmp` is a sized tmpfs, so it
     /// needs `--size`. Asked of bubblewrap the first time it is needed
     /// (the start's probes run it no more often than before).
     pub fn sizes_tmpfs(&self) -> bool {

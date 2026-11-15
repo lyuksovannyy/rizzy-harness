@@ -81,9 +81,13 @@ impl Fixture {
     }
 
     fn plain(&self) -> Sandbox {
+        self.plain_with(self.settings())
+    }
+
+    fn plain_with(&self, settings: Settings) -> Sandbox {
         Sandbox::new(
             PathBuf::from(EXE),
-            &self.settings(),
+            &settings,
             Some(self.data.join("sandbox-tmp")),
             std::slice::from_ref(&self.data),
         )
@@ -92,7 +96,11 @@ impl Fixture {
 
     /// The contained sandbox, or `None` where it cannot run here.
     fn sandbox(&self) -> Option<Arc<Sandbox>> {
-        let sb = self.plain();
+        self.sandbox_with(self.settings())
+    }
+
+    fn sandbox_with(&self, settings: Settings) -> Option<Arc<Sandbox>> {
+        let sb = self.plain_with(settings);
         if let Err(e) = sb.probe(&self.data.join("sandbox-tmp/probe"), &self.data) {
             assert!(!bwrap::required(), "Landlock does not work here: {e}");
             eprintln!("SKIPPED: Landlock does not work here: {e}");
@@ -131,6 +139,10 @@ async fn bash(ctx: &ToolCtx, cmd: &str) -> ToolOutcome {
 /// this bubblewrap has none: then the shell must be refused, never run.
 async fn ready(f: &Fixture) -> Option<Arc<Sandbox>> {
     let sb = f.sandbox()?;
+    ready_with(f, sb).await
+}
+
+async fn ready_with(f: &Fixture, sb: Arc<Sandbox>) -> Option<Arc<Sandbox>> {
     if let Err(why) = confined(sb.clone()).read_only_shell() {
         let out = bash(&f.ctx(confined(sb), true), "touch refused-here").await;
         assert!(!out.ok, "{}", out.output);
@@ -293,15 +305,23 @@ async fn reading_still_works() {
     assert!(!f.ws.join(".git/index.lock").exists());
 }
 
-/// Filling the temp folder stops at its size (a tmpfs of
-/// `READ_ONLY_TMP_BYTES` in the command's own namespace), and nothing of it
-/// lands on the node's disk.
+/// Filling the temp folder stops at its size (a tmpfs of node.toml's
+/// `read_only_tmp_mib`, here 64, in the command's own namespace), and
+/// nothing of it lands on the node's disk.
 #[tokio::test]
 async fn the_temp_folder_is_bounded() {
     let f = fixture();
-    let Some(sb) = ready(&f).await else { return };
+    let Some(sb) = f.sandbox_with(Settings {
+        read_only_tmp: 64 * 1024 * 1024,
+        ..f.settings()
+    }) else {
+        return;
+    };
+    let Some(sb) = ready_with(&f, sb).await else {
+        return;
+    };
     let ro = f.ctx(confined(sb), true);
-    let mib = harness_tools::contain::READ_ONLY_TMP_BYTES / (1024 * 1024) + 16;
+    let mib = 64 + 16;
     let out = bash(
         &ro,
         &format!("head -c {mib}M /dev/zero > \"$TMPDIR/big\"; echo rc=$?; df -k /tmp | tail -n1"),
@@ -557,4 +577,94 @@ async fn the_shared_proc_form_holds_through_landlock() {
     .with_containment(Contain::new(bwrap, Form::SharedProc));
     let why = confined(Arc::new(best)).read_only_shell().unwrap_err();
     assert!(why.contains("/proc"), "{why}");
+}
+
+/// A test run in the read-only shell (PLAN.md T70): `cargo test` of a
+/// crate in the folder builds into the shell's own `/tmp`
+/// (`CARGO_TARGET_DIR` is set there) with the toolchain folders granted
+/// read, and leaves the folder as it was. The toolchain is the one running
+/// this test (`CARGO`, `RUSTC` beside it); its folder is granted read, as
+/// node.toml's `[sandbox] read` would.
+#[tokio::test]
+async fn cargo_test_runs_in_the_read_only_shell() {
+    let f = fixture();
+    let cargo = PathBuf::from(std::env::var("CARGO").expect("run under cargo"));
+    let cargo = cargo.canonicalize().unwrap();
+    let bin = cargo.parent().unwrap().to_path_buf();
+    // The toolchain's root (`.../bin/cargo` -> `...`), and the cargo home
+    // when there is one (its config and registry).
+    let mut read = vec![bin.parent().unwrap().to_path_buf()];
+    let home = std::env::var_os("CARGO_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")))
+        .filter(|p| p.is_dir());
+    read.extend(home.clone());
+    let Some(sb) = f.sandbox_with(Settings {
+        read,
+        ..f.settings()
+    }) else {
+        return;
+    };
+    let Some(sb) = ready_with(&f, sb).await else {
+        return;
+    };
+    let krate = f.ws.join("krate");
+    std::fs::create_dir_all(krate.join("src")).unwrap();
+    std::fs::write(
+        krate.join("Cargo.toml"),
+        "[package]\nname = \"krate\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        krate.join("src/lib.rs"),
+        "pub fn two() -> u8 { 2 }\n#[test]\nfn adds() { assert_eq!(two(), 2); }\n",
+    )
+    .unwrap();
+    // The lock file, as a repository has it (cargo writes one otherwise).
+    let ok = std::process::Command::new(&cargo)
+        .args(["generate-lockfile", "--offline"])
+        .current_dir(&krate)
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "cargo generate-lockfile");
+    let before: Vec<_> = walkdir(&f.ws);
+    let mut ctx = f.ctx(confined(sb), true);
+    ctx.env = harness_tools::ToolEnv::new(
+        &["PATH".to_string(), "HOME".to_string()],
+        Vec::<String>::new(),
+    )
+    .unwrap();
+    let cmd = format!(
+        "export PATH={bin}:$PATH; {home} cd krate && cargo test --offline 2>&1 | tail -n 20; \
+         ls target 2>&1 | head -n 1",
+        bin = bin.display(),
+        home = home
+            .map(|h| format!("export CARGO_HOME={};", h.display()))
+            .unwrap_or_default(),
+    );
+    let out = bash(&ctx, &cmd).await;
+    assert!(out.output.contains("test adds ... ok"), "{}", out.output);
+    assert!(
+        out.output.contains("No such file"),
+        "a target/ in the folder: {}",
+        out.output
+    );
+    assert_eq!(walkdir(&f.ws), before, "the folder changed");
+}
+
+fn walkdir(p: &Path) -> Vec<PathBuf> {
+    let mut out = vec![];
+    let mut stack = vec![p.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap().flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                stack.push(path.clone());
+            }
+            out.push(path);
+        }
+    }
+    out.sort();
+    out
 }
