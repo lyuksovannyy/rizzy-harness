@@ -2940,14 +2940,16 @@ gets a fresh copy of the folder as it is now (your changes and other
 sub-agents' since included), at the same place, merged back when it ends as
 before; one that only reads works in the folder itself, as before. Its message
 starts with a line of the harness's saying so and telling it to read a file
-again before it edits it or relies on it, and editing a file that changed since
-it read it is refused until it reads it again. If its earlier changes were not
-applied, the line says they are not in its copy. A follow-up counts against
+again before it edits it or relies on it. The usual rules for files it read
+hold: a `write` over a file that changed since it read it is refused until it
+reads it again; an `edit` is refused where the lines it edits changed, and
+otherwise runs with a note that the file changed. If its earlier changes were
+not applied, or applied only in part, the line says so. A follow-up counts against
 the turn's sub-agent and token limits like a new one; a sub-agent has at most
 8 runs; only the chat or sub-agent that started it can send it one (another
 chat's, a sub-agent's own sub-agent's, an unknown or a deleted id is refused
 with a sentence); one that is still working takes no second message; and it
-runs with what a new sub-agent of the same agent would get now, under your
+runs with what a new sub-agent of the same agent would get now, at most your
 chat's approval mode as it is now. Its chat marks each follow-up, and the side
 panel lists the sub-agent once with its number of runs.
 

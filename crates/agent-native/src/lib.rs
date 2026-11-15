@@ -1049,24 +1049,31 @@ impl NativeBackend {
         }
         // A follow-up names the child by the id its result began with; the
         // node decides whether it is this session's (T68).
+        // Present but not an id (a number, an object, an empty string) is
+        // refused: the model asked for a follow-up, and a new child in its
+        // place would not be what it asked for. `null` is absent.
         let follow_up = match call.input.get("session") {
             None | Some(serde_json::Value::Null) => None,
-            Some(v) => match v.as_str().map(str::trim).filter(|s| !s.is_empty()) {
-                None => None,
-                Some(id) => match id.parse::<harness_core::SessionId>() {
+            Some(v) => {
+                let id = v.as_str().map(str::trim).unwrap_or("");
+                match id.parse::<harness_core::SessionId>() {
                     Ok(sid) => Some(sid),
                     Err(_) => {
+                        let shown = match v.as_str() {
+                            Some(t) => t.chars().take(80).collect::<String>(),
+                            None => v.to_string().chars().take(80).collect::<String>(),
+                        };
                         return (
                             ToolOutcome::err(format!(
                                 "`session` must be the id a delegate result began with \
-                                 (`session: <id>`), not `{}`",
-                                id.chars().take(80).collect::<String>()
+                                 (`session: <id>`), not `{shown}`; leave it out to start a new \
+                                 sub-agent"
                             )),
                             none,
                         );
                     }
-                },
-            },
+                }
+            }
         };
         let (tx, mut rx) = mpsc::unbounded_channel();
         let started: Box<dyn FnOnce(harness_core::SessionId) + Send> = Box::new(move |sid| {
@@ -3306,7 +3313,11 @@ impl NativeBackend {
                         Some(format!(
                             "this step already sends a follow-up to `{}`: one message at a time \
                              to a sub-agent; send the next one after its result is back",
-                            named.unwrap_or_default()
+                            named
+                                .unwrap_or_default()
+                                .chars()
+                                .take(80)
+                                .collect::<String>()
                         ))
                     } else if subagents >= caps.max_subagents {
                         Some(format!(

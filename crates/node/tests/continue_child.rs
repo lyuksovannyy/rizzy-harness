@@ -9,7 +9,7 @@ mod support;
 
 use harness_agent_native::provider::ChatMsg;
 use harness_core::event::*;
-use harness_core::subagent::{FOLLOW_UP_READS, MAX_CHILD_RUNS, follow_up_writes};
+use harness_core::subagent::{FOLLOW_UP_READS, Landed, MAX_CHILD_RUNS, follow_up_writes};
 use harness_core::{RawEvent, SessionId};
 use harness_protocol::MasterToNode;
 use serde_json::json;
@@ -386,7 +386,10 @@ async fn a_writing_childs_follow_up_works_in_a_fresh_copy_and_merges_back() {
                 .filter(|t| t.contains("echo two"))
         })
         .expect("the follow-up's request");
-    assert!(opening.contains(&follow_up_writes(true)), "{opening}");
+    assert!(
+        opening.contains(&follow_up_writes(Landed::All)),
+        "{opening}"
+    );
     // What it saw in its fresh copy was the parent's version.
     let evs = events_of(&r, child);
     assert!(
@@ -428,7 +431,10 @@ async fn a_child_whose_changes_were_not_applied_sees_the_folder_without_them() {
                 .filter(|t| t.ends_with("run: cat a.txt"))
         })
         .expect("the follow-up's request");
-    assert!(opening.contains(&follow_up_writes(false)), "{opening}");
+    assert!(
+        opening.contains(&follow_up_writes(Landed::None)),
+        "{opening}"
+    );
     let evs = events_of(&r, child);
     let seen_now = evs.iter().rev().find_map(|k| match k {
         EventKind::ToolCallFinished(f) => Some(f.output.clone()),
@@ -440,10 +446,10 @@ async fn a_child_whose_changes_were_not_applied_sees_the_folder_without_them() {
     );
 }
 
-/// The read-first table (T45) never lets a continued child edit a file of
-/// its fresh copy on the strength of a read of a different version: the
-/// table is by content, so a file the parent changed since must be read
-/// again, and one that did not change is still known.
+/// The read-first table (T45) holds for a continued child: an `edit` of
+/// lines the parent changed since the child read the file is refused (the
+/// child must read it again), and a file that did not change is still
+/// known.
 #[tokio::test]
 async fn a_continued_childs_edit_needs_a_new_read_of_a_changed_file() {
     let mut r = rig().await;
@@ -656,5 +662,314 @@ async fn the_parents_turn_counts_a_follow_up_once() {
         parent.input_tokens,
         own + child.input_tokens,
         "{parent:?} {child:?}"
+    );
+}
+
+// ---- From the independent review of pull request 127 (r-child3) ----
+
+fn last_output(r: &Rig, sid: SessionId) -> String {
+    events_of(r, sid)
+        .iter()
+        .rev()
+        .find_map(|k| match k {
+            EventKind::ToolCallFinished(f) => Some(f.output.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+fn sessions_dir(r: &Rig) -> std::path::PathBuf {
+    r.dir.path().join("sessions")
+}
+
+/// Nothing of a writer's first copy survives into its follow-up's copy: an
+/// ignored file, a link out of the copy, a branch and a hook written into
+/// its own `.git`, and the directory itself (a new inode). The folder is
+/// gone between runs.
+#[tokio::test]
+async fn nothing_of_the_first_copy_survives_into_the_follow_up() {
+    let mut r = rig().await;
+    r.write(".gitignore", "*.log\n");
+    r.git(&["add", "."]);
+    r.git(&["commit", "-qm", "ignore logs"]);
+    let outside = r.dir.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    let cmd = format!(
+        "stat -c INODE=%i . && echo s > secret.log && ln -s {} link.log && \
+         echo x > .git/refs/heads/evil && mkdir -p .git/hooks && \
+         echo h > .git/hooks/post-checkout && echo planted",
+        outside.display()
+    );
+    let (_, outs) = r
+        .lead_turn(&delegate(&[
+            json!({"agent": "dev", "task": format!("run: {cmd}")}),
+        ]))
+        .await;
+    let child = child_of(&outs[0]);
+    let first = last_output(&r, child);
+    assert!(first.contains("planted"), "{first}");
+    assert!(!sessions_dir(&r).join(child.to_string()).exists());
+    let probe = "stat -c INODE=%i . ; for p in secret.log link.log .git/refs/heads/evil \
+                 .git/hooks/post-checkout; do if test -e $p || test -L $p; then \
+                 echo SURVIVED:$p; fi; done; echo probed";
+    let (_, outs) = r
+        .lead_turn(&delegate(&[json!({
+            "agent": "dev", "session": child.to_string(), "task": format!("run: {probe}")
+        })]))
+        .await;
+    assert_eq!(child_of(&outs[0]), child, "{outs:#?}");
+    let second = last_output(&r, child);
+    assert!(second.contains("probed"), "{second}");
+    assert!(!second.contains("SURVIVED"), "{second}");
+    let ino = |s: &str| {
+        s.lines()
+            .find_map(|l| l.trim().strip_prefix("INODE=").map(str::to_string))
+    };
+    assert_ne!(ino(&first), ino(&second), "the same directory was reused");
+    assert!(!sessions_dir(&r).join(child.to_string()).exists());
+}
+
+/// A copy the node could not remove (the child made a folder it cannot
+/// delete) blocks the follow-up: refused as "not continued", nothing runs
+/// in the old copy.
+#[tokio::test]
+async fn an_unremovable_copy_fails_closed() {
+    let mut r = rig().await;
+    r.write(".gitignore", "*.log\n");
+    r.git(&["add", "."]);
+    r.git(&["commit", "-qm", "ignore logs"]);
+    let (_, outs) = r
+        .lead_turn(&delegate(&[json!({
+            "agent": "dev",
+            "task": "run: mkdir keep.log && touch keep.log/f && chmod 500 keep.log && echo made"
+        })]))
+        .await;
+    let child = child_of(&outs[0]);
+    let left = sessions_dir(&r).join(child.to_string());
+    let stuck = left.exists();
+    let (_, outs) = r
+        .lead_turn(&delegate(&[json!({
+            "agent": "dev", "session": child.to_string(), "task": "run: echo ran"
+        })]))
+        .await;
+    let _ = std::process::Command::new("chmod")
+        .args(["-R", "u+w"])
+        .arg(&left)
+        .status();
+    if stuck {
+        assert!(!outs[0].starts_with("session: "), "{outs:#?}");
+        assert!(outs[0].contains("was not continued"), "{outs:#?}");
+        assert_eq!(turns(&events_of(&r, child)).len(), 1, "the follow-up ran");
+    }
+}
+
+/// The refusal is the same sentence (but for the id) for an unknown id and
+/// for another chat's child, and it is one sentence with no runs of
+/// spaces (the line continuations of every refusal in `run_continue`).
+#[tokio::test]
+async fn no_oracle_between_unknown_and_foreign_and_no_runs_of_spaces() {
+    let mut r = rig().await;
+    let other = r.new_chat().await;
+    let (_, outs) = r
+        .lead_turn_in(
+            other,
+            &delegate(&[json!({"agent": "look", "task": "read: a.txt"})]),
+        )
+        .await;
+    let foreign = child_of(&outs[0]);
+    let mine = {
+        let (_, outs) = r
+            .lead_turn(&delegate(&[
+                json!({"agent": "look", "task": "read: a.txt"}),
+            ]))
+            .await;
+        child_of(&outs[0])
+    };
+    let unknown = SessionId::new();
+    let mut got = vec![];
+    for id in [foreign, unknown] {
+        let (_, outs) = r
+            .lead_turn(&delegate(&[json!({
+                "agent": "look", "session": id.to_string(), "task": "x"
+            })]))
+            .await;
+        got.push(outs[0].replace(&id.to_string(), "<id>"));
+    }
+    assert_eq!(got[0], got[1]);
+    // Another refusal of `run_continue` (the wrong agent).
+    let (_, outs) = r
+        .lead_turn(&delegate(&[json!({
+            "agent": "dev", "session": mine.to_string(), "task": "x"
+        })]))
+        .await;
+    got.push(outs[0].clone());
+    for g in &got {
+        assert!(!g.contains("   "), "a run of spaces: {g:?}");
+    }
+}
+
+/// The read-first table is the snapshot rule of T45: an `edit` of lines
+/// that did not change since the child read the file runs without a new
+/// read, though the parent changed another line of it.
+#[tokio::test]
+async fn an_edit_of_unchanged_lines_of_a_changed_file_runs_without_a_read() {
+    let mut r = rig().await;
+    r.write("c.txt", "line one\nline two\n");
+    r.git(&["add", "."]);
+    r.git(&["commit", "-qm", "c"]);
+    let (_, outs) = r
+        .lead_turn(&delegate(&[json!({
+            "agent": "editor",
+            "task": format!("script: {}", json!([{"tool": "read", "input": {"path": "c.txt"}}]))
+        })]))
+        .await;
+    let child = child_of(&outs[0]);
+    r.write("c.txt", "LINE ONE BY PARENT\nline two\n");
+    let (_, outs) = r
+        .lead_turn(&delegate(&[json!({
+            "agent": "editor", "session": child.to_string(),
+            "task": format!("script: {}", json!([{"tool": "edit", "input": {
+                "path": "c.txt", "old_string": "line two", "new_string": "LINE TWO BY CHILD"}}]))
+        })]))
+        .await;
+    assert_eq!(child_of(&outs[0]), child, "{outs:#?}");
+    assert_eq!(
+        r.read("c.txt").as_deref(),
+        Some("LINE ONE BY PARENT\nLINE TWO BY CHILD\n")
+    );
+}
+
+/// A `session` that is present but not an id (a number, an object, an
+/// empty string) is refused: no new child starts in place of the follow-up
+/// the model asked for.
+#[tokio::test]
+async fn a_session_that_is_not_an_id_is_refused_and_starts_nothing() {
+    let mut r = rig().await;
+    let (_, outs) = r
+        .lead_turn(&delegate(&[
+            json!({"agent": "look", "task": "read: a.txt"}),
+        ]))
+        .await;
+    let _ = child_of(&outs[0]);
+    let made = |r: &Rig| {
+        r.seen
+            .iter()
+            .filter(|e| e.kind == "session_created")
+            .count()
+    };
+    let before = made(&r);
+    for bad in [json!(12345), json!({"id": "x"}), json!(""), json!("   ")] {
+        let (_, outs) = r
+            .lead_turn(&delegate(&[json!({
+                "agent": "look", "session": bad, "task": "read: a.txt"
+            })]))
+            .await;
+        assert!(
+            outs[0].contains("`session` must be the id"),
+            "{bad}: {outs:#?}"
+        );
+    }
+    assert_eq!(made(&r), before, "a new child was made");
+}
+
+/// A child started in a turn the person has since undone is still this
+/// chat's child (its conversation is in the log; undo restores files) and
+/// is continued, in the folder as the undo left it.
+#[tokio::test]
+async fn a_child_of_an_undone_turn_is_continued() {
+    let mut r = rig().await;
+    let (turn, outs) = r
+        .lead_turn(&delegate(&[
+            json!({"agent": "dev", "task": "run: echo one > b.txt"}),
+        ]))
+        .await;
+    let child = child_of(&outs[0]);
+    assert_eq!(r.read("b.txt").as_deref(), Some("one\n"));
+    let undo = r
+        .restore(turn.id.as_deref().expect("a checkpoint"), false)
+        .await;
+    assert_eq!(undo.result, Ok(()));
+    assert!(r.read("b.txt").is_none());
+    let (_, outs) = r
+        .lead_turn(&delegate(&[json!({
+            "agent": "dev", "session": child.to_string(), "task": "run: ls b.txt || echo no-b"
+        })]))
+        .await;
+    assert_eq!(child_of(&outs[0]), child);
+    assert!(last_output(&r, child).contains("no-b"));
+}
+
+/// The child's requests rebuild byte for byte from its log when its
+/// history was summarised between two of its runs (T59): the request of
+/// its last run is the summary in the system message plus the rebuild of
+/// what the summary does not cover.
+#[tokio::test]
+async fn a_follow_up_rebuilds_after_a_summary_inside_the_child() {
+    let mut r = Rig::summarizing(400).await;
+    r.git(&["init", "-q"]);
+    // Large enough that three runs' reads are over the line.
+    r.write(
+        "a.txt",
+        &format!("{A}{}", "filler line of the synthetic file\n".repeat(60)),
+    );
+    r.git(&["add", "."]);
+    r.git(&["commit", "-qm", "init"]);
+    let (_, outs) = r
+        .lead_turn(&delegate(&[
+            json!({"agent": "look", "task": "read: a.txt"}),
+        ]))
+        .await;
+    let child = child_of(&outs[0]);
+    // The summary is written at the start of the fourth run; the fifth is
+    // sent from it and the log after it.
+    for task in ["read: a.txt", "read: a.txt", "What did it say?", "And now?"] {
+        let (_, outs) = r
+            .lead_turn(&delegate(&[json!({
+                "agent": "look", "session": child.to_string(), "task": task
+            })]))
+            .await;
+        assert_eq!(child_of(&outs[0]), child, "{outs:#?}");
+    }
+    let log = raw_of(&r, child);
+    let last_start = log.iter().rposition(|e| e.kind == "turn_started").unwrap();
+    assert!(
+        log[..last_start]
+            .iter()
+            .any(|e| e.kind == "history_summarized"),
+        "no summary in an earlier run"
+    );
+    // The request goes by the latest summary (the last run may write one
+    // of its own at its start).
+    let summary = log
+        .iter()
+        .rev()
+        .find_map(|e| match e.typed() {
+            Ok(EventKind::HistorySummarized(h)) => Some(h),
+            _ => None,
+        })
+        .unwrap_or_else(|| {
+            let kinds: Vec<&str> = r.seen.iter().map(|e| e.kind.as_str()).collect();
+            panic!("the child's history was not summarised before its last run: {kinds:?}")
+        });
+    let reqs = requests_of(&r, "look");
+    let sent = reqs.last().unwrap();
+    match &sent[0] {
+        ChatMsg::System(s) => assert!(s.contains(&summary.text), "{s}"),
+        other => panic!("{other:?}"),
+    }
+    let recent: Vec<RawEvent> = log
+        .iter()
+        .filter(|e| e.seq > summary.through_seq)
+        .cloned()
+        .collect();
+    let rebuilt = harness_agent_native::history_to_messages(&recent);
+    assert!(
+        rebuilt.len() >= sent.len() - 1,
+        "{rebuilt:#?}\nvs\n{sent:#?}"
+    );
+    assert_eq!(
+        &rebuilt[..sent.len() - 1],
+        &sent[1..],
+        "the request does not rebuild"
     );
 }

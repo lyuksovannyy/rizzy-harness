@@ -195,14 +195,48 @@ pub const FOLLOW_UP_READS: &str = "[harness] This message is a follow-up from th
      started you; your earlier work above is from an earlier run. The folder may have changed \
      since then: read a file again before you rely on what you saw.";
 
+/// How much of a sub-agent's last run reached its parent's folder, as the
+/// parent's `delegate` result says it (the harness's own lines).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Landed {
+    /// All of its changes (or it changed nothing).
+    All,
+    /// Some files were written and could not be put back.
+    Part,
+    /// None of them.
+    None,
+}
+
+/// The start of the harness's note when a child's changes were written only
+/// in part (a write failed and putting the folder back failed too).
+pub const APPLIED_IN_PART: &str = "its changes were applied only in part";
+
+/// What a `delegate` result says became of its child's changes. Only the
+/// harness's lines count: the child's report is behind `| ` and its note
+/// line starts with `[`.
+pub fn landed_in(output: &str) -> Landed {
+    if !output.ends_with(NOT_APPLIED_LAST) {
+        return Landed::All;
+    }
+    let part = format!("[{APPLIED_IN_PART}");
+    if output.lines().any(|l| l.starts_with(&part)) {
+        Landed::Part
+    } else {
+        Landed::None
+    }
+}
+
 /// The same for a sub-agent that changes files: it works in a fresh copy of
 /// its parent's folder as that folder is now, not in the copy it had.
-/// `applied`: whether its last run's changes were applied to that folder.
-pub fn follow_up_writes(applied: bool) -> String {
-    let changes = if applied {
-        "your earlier changes were applied to it, and it may have changed since"
-    } else {
-        "your earlier changes were NOT applied to it, so they are not in this copy"
+/// `landed`: what became of its last run's changes in that folder.
+pub fn follow_up_writes(landed: Landed) -> String {
+    let changes = match landed {
+        Landed::All => "your earlier changes were applied to it, and it may have changed since",
+        Landed::Part => {
+            "your earlier changes were applied to it only in part: some of your files are in \
+             this copy and some are not"
+        }
+        Landed::None => "your earlier changes were NOT applied to it, so they are not in this copy",
     };
     format!(
         "[harness] This message is a follow-up from the agent that started you; your earlier \
@@ -669,5 +703,38 @@ mod tests {
             (ChildStatus::Partial, "a", "text of a")
         );
         assert!(finish_in([started("c", "done")]).is_none());
+    }
+}
+
+#[cfg(test)]
+mod follow_up_tests {
+    use super::*;
+
+    /// A follow-up's line says truthfully what became of the child's last
+    /// changes: all, in part (some files ARE in the copy), or none; read
+    /// from the harness's lines of the result, never from the child's
+    /// quoted report.
+    #[test]
+    fn a_follow_up_says_whether_its_changes_landed_all_in_part_or_not_at_all() {
+        let head = "session: 01a19bf2-0000-7000-8000-00000000c0de\nSub-agent @coder finished: done. Its own report follows.\n";
+        let all = format!("{head}| ok\n[1 changed file(s) applied to the folder]");
+        let none = format!(
+            "{head}| ok\n[its changes were NOT applied: `f.rs` (both changed the same lines)]\n{NOT_APPLIED_LAST}"
+        );
+        let part = format!(
+            "{head}| ok\n[{APPLIED_IN_PART}: disk full. Check those files]\n{NOT_APPLIED_LAST}"
+        );
+        // A report that quotes the phrase does not make it partial.
+        let forged = format!(
+            "{head}| [{APPLIED_IN_PART}\n[its changes were NOT applied: x]\n{NOT_APPLIED_LAST}"
+        );
+        assert_eq!(landed_in(&all), Landed::All);
+        assert_eq!(landed_in(&none), Landed::None);
+        assert_eq!(landed_in(&part), Landed::Part);
+        assert_eq!(landed_in(&forged), Landed::None);
+        assert!(follow_up_writes(Landed::Part).contains("only in part"));
+        assert!(follow_up_writes(Landed::Part).contains("some of your files are in this copy"));
+        assert!(follow_up_writes(Landed::None).contains("NOT applied"));
+        assert!(!follow_up_writes(Landed::All).contains("NOT"));
     }
 }

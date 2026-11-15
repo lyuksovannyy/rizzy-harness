@@ -91,6 +91,22 @@ impl Rig {
 
     /// A rig whose node keeps `keep` checkpoints.
     pub async fn with_keep(keep: usize) -> Self {
+        Self::build(keep, NativeConfig::default()).await
+    }
+
+    /// A rig whose agents summarise their history past `tokens`.
+    pub async fn summarizing(tokens: usize) -> Self {
+        Self::build(
+            NodePolicy::default().checkpoints_keep,
+            NativeConfig {
+                summarize_after_tokens: Some(tokens),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    async fn build(keep: usize, native: NativeConfig) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let ws = dir.path().join("ws");
         std::fs::create_dir(&ws).unwrap();
@@ -103,6 +119,12 @@ impl Rig {
                 workspace_roots: vec![dir.path().into()],
                 max_approval_mode: harness_core::policy::ApprovalMode::Auto,
                 checkpoints_keep: keep,
+                // Never the developer's own skills (`~/.agents/skills`):
+                // they would be in every turn's context.
+                skills: harness_node::SkillsPolicy {
+                    roots: vec![],
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             store,
@@ -114,7 +136,7 @@ impl Rig {
                     seen: requests.clone(),
                 }),
                 harness_tools::builtin(),
-                NativeConfig::default(),
+                native,
             )),
             default_model: "mock".into(),
             secrets: harness_core::SecretSet::new(vec![]),

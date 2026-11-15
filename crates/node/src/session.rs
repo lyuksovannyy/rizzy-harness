@@ -3881,7 +3881,7 @@ impl Session {
         cancel: CancellationToken,
         started: Box<dyn FnOnce(SessionId) + Send>,
     ) -> Result<harness_core::backend::DelegateOutcome, String> {
-        use harness_core::subagent::{MAX_CHILD_RUNS, NOT_APPLIED_LAST};
+        use harness_core::subagent::MAX_CHILD_RUNS;
         if self.node.is_stopping() {
             return Err(harness_protocol::NODE_STOPPING.into());
         }
@@ -3889,7 +3889,9 @@ impl Session {
         // model learns nothing about sessions that are not its own.
         let not_yours = || {
             format!(
-                "`{child_id}` is not a sub-agent this chat started (a sub-agent can be given a                  follow-up only by the chat or sub-agent that started it, by the id its                  `delegate` result began with). Start a new one instead."
+                "`{child_id}` is not a sub-agent this chat started (a sub-agent can be given a \
+                 follow-up only by the chat or sub-agent that started it, by the id its \
+                 `delegate` result began with). Start a new one instead."
             )
         };
         let Some(child) = self.node.session(child_id) else {
@@ -3928,7 +3930,7 @@ impl Session {
         let Some(last) = last else {
             return Err(not_yours());
         };
-        let applied_before = !last.ends_with(NOT_APPLIED_LAST);
+        let landed_before = harness_core::subagent::landed_in(&last);
         let theirs = self
             .node
             .cfg
@@ -3945,7 +3947,8 @@ impl Session {
         };
         if started_as != agent.agent_id {
             return Err(format!(
-                "`{child_id}` is @{started_as}, not @{}: name @{started_as} to give it a                  follow-up, or start a new @{} without `session`.",
+                "`{child_id}` is @{started_as}, not @{}: name @{started_as} to give it a \
+                 follow-up, or start a new @{} without `session`.",
                 agent.agent_id, agent.agent_id
             ));
         }
@@ -3955,7 +3958,8 @@ impl Session {
             .count();
         if runs >= MAX_CHILD_RUNS {
             return Err(format!(
-                "@{started_as} `{child_id}` has had {runs} runs, the most one sub-agent may have                  ({MAX_CHILD_RUNS}). Start a new one with a complete brief."
+                "@{started_as} `{child_id}` has had {runs} runs, the most one sub-agent may have \
+                 ({MAX_CHILD_RUNS}). Start a new one with a complete brief."
             ));
         }
         let here = self.checked_folder()?;
@@ -3970,7 +3974,8 @@ impl Session {
         let writes = self.can_change_files(&agent);
         if wrote != writes {
             return Err(format!(
-                "@{started_as} `{child_id}` cannot be given a follow-up: its agent {} files now                  and it {} when it was started. Start a new one instead.",
+                "@{started_as} `{child_id}` cannot be given a follow-up: its agent {} files now \
+                 and it {} when it was started. Start a new one instead.",
                 if writes {
                     "can change"
                 } else {
@@ -4017,7 +4022,8 @@ impl Session {
             .is_err()
         {
             return Err(format!(
-                "@{started_as} `{child_id}` is still working: one message at a time. Wait for                  its result, or start a new one."
+                "@{started_as} `{child_id}` is still working: one message at a time. Wait for \
+                 its result, or start a new one."
             ));
         }
         let iso = if wrote {
@@ -4027,13 +4033,15 @@ impl Session {
                     crate::git::remove_folder(&i.child).await;
                     child.release(&turn_id);
                     return Err(format!(
-                        "@{started_as} `{child_id}` cannot be given a follow-up: this folder is                          not where it was when the sub-agent started. Start a new one."
+                        "@{started_as} `{child_id}` cannot be given a follow-up: this folder is \
+                         not where it was when the sub-agent started. Start a new one."
                     ));
                 }
                 Ok(None) => None,
                 Err(e) => {
                     child.release(&turn_id);
-                    return Err(e);
+                    // `isolate` speaks of a new child.
+                    return Err(e.replacen("was not started", "was not continued", 1));
                 }
             }
         } else {
@@ -4049,7 +4057,8 @@ impl Session {
         if cwd != child.cwd {
             child.release(&turn_id);
             return Err(format!(
-                "@{started_as} `{child_id}` cannot be given a follow-up: this folder is not                  where it was when the sub-agent started. Start a new one."
+                "@{started_as} `{child_id}` cannot be given a follow-up: this folder is not \
+                 where it was when the sub-agent started. Start a new one."
             ));
         }
         *child.pin_cell.lock().unwrap_or_else(|p| p.into_inner()) = pin_of(child.profile, &cwd);
@@ -4063,7 +4072,7 @@ impl Session {
         }
         started(child_id);
         let note = if wrote {
-            harness_core::subagent::follow_up_writes(applied_before)
+            harness_core::subagent::follow_up_writes(landed_before)
         } else {
             harness_core::subagent::FOLLOW_UP_READS.to_string()
         };
@@ -4287,7 +4296,7 @@ impl Session {
                         } else if e.nothing_written() {
                             format!("its changes were NOT applied: {}", e.text())
                         } else {
-                            format!("its changes were applied only in part: {}", e.text())
+                            format!("{}: {}", harness_core::subagent::APPLIED_IN_PART, e.text())
                         };
                         let written = if e.nothing_written() {
                             "Nothing of this sub-agent's work was written"

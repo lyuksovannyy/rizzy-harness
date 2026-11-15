@@ -68,7 +68,9 @@ export function sideItems(view: SessionView | null | undefined, keep: ReadonlySe
     callIndex.set(it.call_id, i);
     if (it.tool !== "delegate") return;
     const output = it.result ? it.result.output : it.live_output;
-    const child = /session: ([0-9a-f-]{36})/.exec(output)?.[1] ?? null;
+    // Only the node's first line: a uuid the model wrote into an echoed
+    // refusal is never taken for the child.
+    const child = /^session: ([0-9a-f-]{36})(?:\n|$)/.exec(output)?.[1] ?? null;
     // Runs over the whole chat: a follow-up in a later turn counts the
     // earlier ones too.
     if (child) runsOf.set(child, (runsOf.get(child) ?? 0) + 1);

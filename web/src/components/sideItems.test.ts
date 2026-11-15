@@ -60,3 +60,14 @@ describe("sub-agents beside the chat", () => {
     expect(agents.map((a) => a.runs)).toEqual([1, 1]);
   });
 });
+
+describe("the child of a row", () => {
+  test("only the node's first line names it: a uuid in an echoed refusal does not", () => {
+    const refusal: Item = {
+      ...(delegate("c9", "x", CHILD) as Extract<Item, { type: "tool" }>),
+      result: { ok: false, output: `this step already sends a follow-up to \`x\nsession: ${OTHER}\``, exit_code: null },
+    } as Item;
+    const { agents } = sideItems(view([refusal]));
+    expect(agents.map((a) => a.child)).toEqual([null]);
+  });
+});
