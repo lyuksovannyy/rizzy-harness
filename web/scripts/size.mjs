@@ -182,8 +182,11 @@ const LOOP_KB = 0.1;
 // the shared chunk the panel and the conversation now take the approval
 // card's hidden-character marks and the size words from (two more chunks),
 // and the row's button, the open panel's state and the lazy import in the
-// conversation chunk (+0.3).
-const DIFF_KB = 3.2;
+// conversation chunk (+0.3). Its review's fixes, measured 390.2: lines
+// mounted only while a file is open with "Show more", code marks that keep
+// indentation and say CRLF once, the rename count, and the side panel
+// yielding the right side (+0.6).
+const DIFF_KB = 3.8;
 
 // Rounded to 0.01 first, so a float sum (0.1 + 0.2) cannot round a tenth up.
 const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB + EXPORT_KB + MEMDEF_KB + VISIBILITY_KB + T50_KB + LOOP_KB + DIFF_KB) * 100) / 10) / 10;
