@@ -36,10 +36,20 @@ async fn upload(base: &str, name: &str, body: &[u8]) -> (u16, Value) {
     (st, r.json().await.unwrap_or(Value::Null))
 }
 
+/// How long the stuck reader runs before it is killed: long enough that
+/// "answered while it ran" and "answered after it was killed" cannot be
+/// mistaken for each other on a loaded machine.
+const STUCK_FOR: Duration = Duration::from_secs(5);
+
 /// A PDF reader that never finishes (the supervision of a looping parser:
 /// a real parser-looping PDF is not something we can craft reliably) is
-/// killed at its timeout; meanwhile the server answers other requests at
-/// once. Without a reader at all, a PDF is refused, never parsed here.
+/// killed at its timeout; meanwhile the server answers other requests.
+/// Without a reader at all, a PDF is refused, never parsed here.
+///
+/// "Meanwhile" is shown by order, not by a stopwatch: the other request is
+/// answered while the reader still holds its slot and the upload still
+/// waits, so a server the reader stalled would answer only after the
+/// timeout and fail here however fast the machine is.
 #[tokio::test]
 async fn a_stuck_pdf_reader_is_killed_and_the_server_stays_responsive() {
     let (master, base) = start().await;
@@ -55,12 +65,18 @@ async fn a_stuck_pdf_reader_is_killed_and_the_server_stays_responsive() {
             "/bin/sh".into(),
             vec!["-c".into(), "while :; do :; done".into()],
         )
-        .with_limits(Duration::from_millis(1500), Duration::from_secs(1)),
+        .with_limits(STUCK_FOR, Duration::from_secs(1)),
     );
+    let reader = master.pdf_reader().unwrap();
     let b2 = base.clone();
     let stuck = tokio::spawn(async move { upload(&b2, "a.pdf", b"%PDF-1.4\n").await });
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let t = Instant::now();
+    // The reader is running once it holds a slot.
+    let by = Instant::now() + Duration::from_secs(30);
+    while reader.free_slots() == harness_master::pdf::CONCURRENT {
+        assert!(Instant::now() < by, "the reader never started");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let started = Instant::now();
     let r = reqwest::Client::new()
         .get(format!("{base}/api/features"))
         .bearer_auth("tok")
@@ -68,10 +84,10 @@ async fn a_stuck_pdf_reader_is_killed_and_the_server_stays_responsive() {
         .await
         .unwrap();
     assert_eq!(r.status(), 200);
+    let answered = started.elapsed();
     assert!(
-        t.elapsed() < Duration::from_millis(500),
-        "{:?}",
-        t.elapsed()
+        reader.free_slots() < harness_master::pdf::CONCURRENT && !stuck.is_finished(),
+        "answered only after the stuck reader was killed ({answered:?})"
     );
     let (st, v) = stuck.await.unwrap();
     assert_eq!(st, 422, "{v}");

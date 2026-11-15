@@ -4,7 +4,7 @@
 // No browser prompt() is ever involved.
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 import type { Me, User } from "../types";
 
 const PW = "k3m9q-x7vt2-ab4cd-0ze8h";
@@ -31,6 +31,13 @@ vi.mock("../apiPages", () => ({ pageApi: api }));
 const { Users } = await import("./Users");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+// The host warning is a lazy chunk whose first load (a module transform)
+// took over a second on a loaded runner, past the 500 ms the test polled:
+// load it once here, under the hook's own limit.
+beforeAll(async () => {
+  await import("./HostWarning");
+}, 30_000);
 
 const me: Me = { user_id: "a", username: "alex", role: "admin", exec_ceiling: "host" as const, must_change_password: false };
 const writeText = vi.fn().mockResolvedValue(undefined);
@@ -126,8 +133,11 @@ describe("the account's level (N.10a part 2)", () => {
       Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")!.set!.call(el, value);
       el.dispatchEvent(new Event("change", { bubbles: true }));
     });
+  // The warning is a lazy chunk (loaded once in `beforeAll`): wait for its
+  // render under a deadline, not for 50 polls.
   const warning = async () => {
-    for (let i = 0; i < 50 && !document.querySelector("dialog.host-warning"); i++) {
+    const by = Date.now() + 4000;
+    while (!document.querySelector("dialog.host-warning") && Date.now() < by) {
       await act(async () => new Promise((r) => setTimeout(r, 10)));
     }
     return document.querySelector<HTMLDialogElement>("dialog.host-warning");

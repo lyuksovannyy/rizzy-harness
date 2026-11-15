@@ -36,6 +36,10 @@ use tokio::sync::mpsc;
 
 const TOKEN: &str = "api-secret";
 const MIN: i64 = 60_000;
+/// How long a wait for a state below polls before it gives up: only for a
+/// hung test, never a measure (it was 500 polls, about 5 s, which a loaded
+/// runner outlasted).
+const HUNG: Duration = Duration::from_secs(60);
 
 enum Do {
     Append(SessionId, Box<EventKind>, i64),
@@ -392,7 +396,8 @@ fn ended(bg: &str, reason: BackgroundReason, delivered: bool) -> EventKind {
 }
 
 async fn mirrored(t: &T, sid: SessionId, n: usize) {
-    for _ in 0..500 {
+    let by = std::time::Instant::now() + HUNG;
+    while std::time::Instant::now() < by {
         let (_, v) = req(
             &t.base,
             Method::GET,
@@ -411,7 +416,8 @@ async fn mirrored(t: &T, sid: SessionId, n: usize) {
 
 /// `who`'s attention row of `sid`, once there is one.
 async fn attention_of(base: &str, who: &str, sid: SessionId) -> Value {
-    for _ in 0..500 {
+    let by = std::time::Instant::now() + HUNG;
+    while std::time::Instant::now() < by {
         let (_, v) = req(base, Method::GET, "/api/attention", None, who).await;
         if let Some(i) = v["items"]
             .as_array()
@@ -438,7 +444,8 @@ async fn rows_of(base: &str, who: &str, sid: SessionId) -> Vec<Value> {
 }
 
 async fn until_callbacks(node: &Fake, n: usize) -> Vec<(SessionId, Vec<String>)> {
-    for _ in 0..500 {
+    let by = std::time::Instant::now() + HUNG;
+    while std::time::Instant::now() < by {
         let c = node.callbacks();
         if c.len() >= n {
             return c;
@@ -563,7 +570,8 @@ async fn an_end_older_than_60_minutes_starts_nothing() {
     let old = harness_core::now_ms() - 61 * MIN;
     n1.append_at(sid, started("bg-1"), old);
     n1.append_at(sid, ended("bg-1", BackgroundReason::Exited, false), old);
-    for _ in 0..500 {
+    let by = std::time::Instant::now() + HUNG;
+    while std::time::Instant::now() < by {
         if m1.inner_mirror().head_seq(sid).unwrap() >= 3 {
             break;
         }
@@ -587,7 +595,8 @@ async fn an_end_older_than_60_minutes_starts_nothing() {
     m2.start_callbacks();
     let key = format!("callback-attention:{sid}");
     let mut mark = None;
-    for _ in 0..500 {
+    let by = std::time::Instant::now() + HUNG;
+    while std::time::Instant::now() < by {
         mark = m2.inner_mirror().kv_get(&key).unwrap();
         if mark.is_some() {
             break;
@@ -707,7 +716,8 @@ async fn admission_is_what_the_owner_could_do_now() {
             } if *session_id == sid)
         })
     };
-    for _ in 0..500 {
+    let by = std::time::Instant::now() + HUNG;
+    while std::time::Instant::now() < by {
         if stopped() {
             break;
         }
@@ -870,7 +880,8 @@ async fn a_restarted_master_asks_once_and_loses_nothing() {
     // Both turns are in the log (the fake ran them); then b gets a new end
     // its node cannot take yet.
     for sid in [a, b] {
-        for _ in 0..500 {
+        let by = std::time::Instant::now() + HUNG;
+        while std::time::Instant::now() < by {
             if m2
                 .inner_mirror()
                 .events_after(sid, 0, 100)
@@ -887,7 +898,8 @@ async fn a_restarted_master_asks_once_and_loses_nothing() {
     n2.append(b, started("bg-2"));
     n2.append(b, ended("bg-2", BackgroundReason::Exited, false));
     until_callbacks(&n2, 3).await;
-    for _ in 0..500 {
+    let by = std::time::Instant::now() + HUNG;
+    while std::time::Instant::now() < by {
         if m2.inner_mirror().head_seq(b).unwrap() >= 7 {
             break;
         }
@@ -1083,7 +1095,8 @@ async fn a_callback_turns_remember_is_never_filed_and_the_persons_turn_keeps_its
                "input": {"text": "steered-after-restart"}}),
     );
     n2.raw(sid, "error", json!({"message": "barrier"}));
-    for _ in 0..500 {
+    let by = std::time::Instant::now() + HUNG;
+    while std::time::Instant::now() < by {
         if m2.inner_mirror().head_seq(sid).unwrap() >= head + 2 {
             break;
         }
@@ -1105,7 +1118,8 @@ async fn a_callback_turns_remember_is_never_filed_and_the_persons_turn_keeps_its
                "input": {"text": "control-after-restart"}}),
     );
     n2.raw(sid, "error", json!({"message": "barrier"}));
-    for _ in 0..500 {
+    let by = std::time::Instant::now() + HUNG;
+    while std::time::Instant::now() < by {
         if m2.inner_mirror().head_seq(sid).unwrap() >= head + 5 {
             break;
         }
@@ -1212,7 +1226,8 @@ async fn a_busy_or_away_node_is_asked_again_and_one_without_the_capability_never
         (sid, vec!["bg-1".to_string()]),
         "asked again once it was back"
     );
-    for _ in 0..500 {
+    let by = std::time::Instant::now() + HUNG;
+    while std::time::Instant::now() < by {
         if rows_of(&t.base, &t.alex, sid)
             .await
             .iter()
@@ -1228,7 +1243,8 @@ async fn a_busy_or_away_node_is_asked_again_and_one_without_the_capability_never
     t.node.append(sid, started("bg-2"));
     t.node
         .append_then_leave(sid, ended("bg-2", BackgroundReason::Exited, false));
-    for _ in 0..500 {
+    let by = std::time::Instant::now() + HUNG;
+    while std::time::Instant::now() < by {
         if t.master.inner_mirror().head_seq(sid).unwrap() >= head + 2 {
             break;
         }

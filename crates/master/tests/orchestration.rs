@@ -117,8 +117,10 @@ async fn session(m: &Master, ws: &str, agent: &str) -> SessionId {
     sid
 }
 
+/// The log once `n` turns have ended; the deadline only fails a hung test.
 async fn turns_ended(m: &Master, sid: SessionId, n: usize) -> Vec<RawEvent> {
-    for _ in 0..500 {
+    let by = std::time::Instant::now() + Duration::from_secs(90);
+    while std::time::Instant::now() < by {
         let evs = m.inner_mirror().events_after(sid, 0, 100_000).unwrap();
         if evs.iter().filter(|e| e.kind == "turn_ended").count() >= n {
             return evs;
@@ -128,6 +130,32 @@ async fn turns_ended(m: &Master, sid: SessionId, n: usize) -> Vec<RawEvent> {
     panic!("turn did not end");
 }
 
+/// The child session of `parent`, once its turn has started and not ended.
+async fn child_running(m: &Master, parent: SessionId) -> SessionId {
+    let by = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let kid = m
+            .inner_mirror()
+            .sessions()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.parent_id.as_deref() == Some(&parent.to_string()));
+        if let Some(kid) = kid {
+            let evs = m
+                .inner_mirror()
+                .events_after(kid.session_id, 0, 10_000)
+                .unwrap();
+            let has = |k: &str| evs.iter().any(|e| e.kind == k);
+            if has("turn_started") {
+                assert!(!has("turn_ended"), "the child ended before the cancel");
+                return kid.session_id;
+            }
+        }
+        assert!(std::time::Instant::now() < by, "the child never started");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 fn outputs(evs: &[RawEvent]) -> Vec<String> {
     evs.iter()
         .filter(|e| e.kind == "tool_call_finished")
@@ -135,9 +163,65 @@ fn outputs(evs: &[RawEvent]) -> Vec<String> {
         .collect()
 }
 
+/// Holds each sub-agent's first model call until all `n` sub-agents have
+/// made theirs, then lets them all go: the children overlap because the
+/// test proves they ran at once, not because the mock happened to be slow
+/// enough. If they ran one after another, the first would wait here alone
+/// until `HOLD` and the overlap assertion would fail.
+struct Gate {
+    inner: Mock,
+    /// The sub-agents' tasks, as the mock reads them (their own words).
+    tasks: Vec<&'static str>,
+    barrier: tokio::sync::Barrier,
+}
+
+/// Only to fail a test whose children never all start; never reached when
+/// they run in parallel.
+const HOLD: Duration = Duration::from_secs(60);
+
+#[async_trait::async_trait]
+impl harness_agent_native::provider::Provider for Gate {
+    fn name(&self) -> &'static str {
+        "gate"
+    }
+    async fn complete(
+        &self,
+        req: &harness_agent_native::provider::ChatRequest,
+        deltas: tokio::sync::mpsc::UnboundedSender<String>,
+    ) -> Result<
+        harness_agent_native::provider::Completion,
+        harness_agent_native::provider::ProviderError,
+    > {
+        use harness_agent_native::provider::ChatMsg;
+        let first = !req
+            .messages
+            .iter()
+            .any(|m| matches!(m, ChatMsg::Assistant { .. }));
+        let said = req
+            .messages
+            .iter()
+            .rev()
+            .find_map(ChatMsg::user_text)
+            .map(|t| harness_core::event::own_words(t).trim().to_string());
+        if first && said.is_some_and(|s| self.tasks.contains(&s.as_str())) {
+            let _ = tokio::time::timeout(HOLD, self.barrier.wait()).await;
+        }
+        self.inner.complete(req, deltas).await
+    }
+}
+
 #[tokio::test]
 async fn teamlead_delegates_in_parallel_within_caps() {
-    let (m, ws, _d) = setup().await;
+    // The four sub-agents that start (the fifth is past the cap).
+    let tasks = vec!["slow: 20", "draft notes", "delegate: scout=nested"];
+    let (m, ws, _d) = setup_with(Arc::new(Gate {
+        inner: Mock {
+            delay: Duration::from_millis(10),
+        },
+        tasks,
+        barrier: tokio::sync::Barrier::new(4),
+    }))
+    .await;
     // Coder and Writer can change files: they need a repository for their
     // worktrees, or they are not started.
     git(&ws, &["init", "-q"]);
@@ -364,19 +448,14 @@ async fn cancelling_the_parent_cancels_children() {
     )
     .await
     .unwrap();
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    // Cancel once the child's turn runs (its `slow: 500` streams for 5 s),
+    // not after a guess at how long it takes to start.
+    let kid = child_running(&m, sid).await;
     m.cancel(sid).await.unwrap();
     let evs = turns_ended(&m, sid, 1).await;
     let end = evs.iter().rev().find(|e| e.kind == "turn_ended").unwrap();
     assert_eq!(end.payload["reason"], "cancelled");
-    let kid = m
-        .inner_mirror()
-        .sessions()
-        .unwrap()
-        .into_iter()
-        .find(|r| r.parent_id.as_deref() == Some(&sid.to_string()))
-        .unwrap();
-    let kevs = turns_ended(&m, kid.session_id, 1).await;
+    let kevs = turns_ended(&m, kid, 1).await;
     let kend = kevs.iter().rev().find(|e| e.kind == "turn_ended").unwrap();
     assert_eq!(kend.payload["reason"], "cancelled");
 }

@@ -378,16 +378,32 @@ fn capped() -> RetryPolicy {
     }
 }
 
+/// For the two tests below: a cap far above anything a loaded machine adds
+/// to a turn, still under the `Retry-After` of 300 s. A wait clamped to it
+/// (the old behaviour) would take at least 20 s and announce itself first
+/// (`model_retry`), so "not waited" is the absence of that event and an
+/// end well before the cap, not a sub-second stopwatch.
+fn capped_wide() -> RetryPolicy {
+    RetryPolicy {
+        retries: 3,
+        base: Duration::from_millis(1),
+        max: Duration::from_secs(20),
+    }
+}
+
 #[tokio::test]
 async fn a_retry_after_over_the_cap_is_not_retried_and_names_the_wait() {
     for status in [429, 503] {
         let (base, hits) = serve_status(status, vec![("retry-after", "300")]).await;
-        let b = http_backend(&base, capped());
+        let policy = capped_wide();
+        let b = http_backend(&base, policy);
+        let host = Host::default();
         let t = Instant::now();
-        let out = run(&b, &Host::default(), "loc::m", agent(&[])).await;
+        let out = run(&b, &host, "loc::m", agent(&[])).await;
         assert_eq!(out.reason, TurnEndReason::Error, "{status}");
         assert_eq!(*hits.lock().unwrap(), 1, "{status}: sent again too early");
-        assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
+        assert!(host.retries().is_empty(), "{status}: a wait was planned");
+        assert!(t.elapsed() < policy.max, "{:?}", t.elapsed());
         let msg = out.error.unwrap();
         assert!(msg.contains("5 minutes"), "{msg}");
         assert!(msg.contains("loc::m"), "{msg}");
@@ -399,13 +415,15 @@ async fn a_retry_after_over_the_cap_is_not_retried_and_names_the_wait() {
 async fn a_retry_after_over_the_cap_goes_to_the_fallback_at_once() {
     for status in [429, 503] {
         let p = Scripted::new(vec![("m", vec![Reply::FailAfter(status, 300)])]);
-        let b = backend(p.clone(), capped());
+        let policy = capped_wide();
+        let b = backend(p.clone(), policy);
         let host = Host::default();
         let t = Instant::now();
         let out = run(&b, &host, "m", agent(&["fb"])).await;
         assert_eq!(out.reason, TurnEndReason::Completed, "{:?}", out.error);
         assert_eq!(p.calls(), ["m", "fb"], "{status}");
-        assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
+        assert!(host.retries().is_empty(), "{status}: a wait was planned");
+        assert!(t.elapsed() < policy.max, "{:?}", t.elapsed());
         assert_eq!(host.answer().as_deref(), Some("answer from fb"));
         assert_eq!(host.fallbacks(), 1);
     }

@@ -1430,7 +1430,8 @@ async fn the_default_node_takes_a_background_start_and_0_refuses_it() {
 }
 
 /// T8D-1 (the review's `finding_1` turned round): twelve starts in one
-/// turn, never more than two at once, keep at most the stated bound,
+/// turn, never more than two at once (each start waits for the end of the
+/// one two before it), keep at most the stated bound,
 /// `per_node × (output_kb + 32 KiB)`, measured; the older ones say their
 /// output is no longer kept.
 #[tokio::test(flavor = "multi_thread")]
@@ -1452,18 +1453,33 @@ async fn many_starts_in_a_turn_keep_at_most_the_stated_bound() {
     let _one = memory_lock().await;
     n.turn(json!([fg("true")])).await;
     let before = rss_kib();
+    // Each command outlives the next start's first wait (3 s), so two run at
+    // once. Before start k (from the third), `bash_stop` of start k-2 is a
+    // barrier the schedule owns: it returns once that command has ended
+    // and given its slot back ("had already ended" when it ended by
+    // itself, as it does unless the machine is slow), so no start depends
+    // on a start or an end coming on time.
     let cmd = "head -c 4500000 /dev/zero | tr '\\0' x; sleep 3.4";
-    n.turn(Value::Array((0..12).map(|_| bg(cmd, 30)).collect()))
-        .await;
-    let refused: Vec<String> = n
-        .results()
-        .into_iter()
-        .filter(|r| !r.contains("running in the background"))
+    let mut calls = vec![];
+    for k in 1..=12 {
+        if k >= 3 {
+            calls.push(json!({"tool": "bash_stop", "input": {"id": format!("bg-{}", k - 2)}}));
+        }
+        calls.push(bg(cmd, 30));
+    }
+    n.turn(Value::Array(calls)).await;
+    let results = n.results();
+    let started = results
+        .iter()
+        .filter(|r| r.contains("running in the background"))
+        .count();
+    let refused: Vec<&String> = results
+        .iter()
+        .filter(|r| r.contains("not started"))
         .collect();
-    assert_eq!(
-        refused.len(),
-        1,
-        "only the warm-up is not a start: {refused:?}"
+    assert!(
+        started == 12 && refused.is_empty(),
+        "{started} of 12 started; refused: {refused:?}"
     );
     // Every end, whether it came during the turn or after it.
     while n.ends().len() < 12 {
