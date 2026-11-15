@@ -78,3 +78,26 @@ fn real_path(f: &std::fs::File, path: &Path) -> std::io::Result<PathBuf> {
     }
     path.canonicalize()
 }
+
+/// `text` with every line indented by two spaces (review of PR 120): an
+/// instruction block's own lines (a lead, a `==> path <==` label, a note)
+/// never are, so nothing in a file can pose as another file's label or a
+/// harness line, though all of them stand in one quoted block. Every line
+/// break a reader may show as one counts (`\r`, U+2028...), as in quoting;
+/// `\r\n` is one break.
+pub fn indent_lines(text: &str) -> String {
+    const BREAKS: [char; 7] = ['\n', '\r', '\x0b', '\x0c', '\u{85}', '\u{2028}', '\u{2029}'];
+    let mut out = String::with_capacity(text.len() + text.len() / 16 + 2);
+    out.push_str("  ");
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        out.push(c);
+        if BREAKS.contains(&c) {
+            if c == '\r' && chars.peek() == Some(&'\n') {
+                out.push(chars.next().unwrap());
+            }
+            out.push_str("  ");
+        }
+    }
+    out
+}

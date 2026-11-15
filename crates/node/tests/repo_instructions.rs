@@ -208,6 +208,17 @@ impl Node {
         text: &str,
         agent: Option<harness_core::agent::AgentSpec>,
     ) {
+        self.turn_with(sid, text, agent, vec![]).await
+    }
+
+    /// [`Self::turn`] with the paths the person mentioned (`@path`, T63).
+    async fn turn_with(
+        &mut self,
+        sid: SessionId,
+        text: &str,
+        agent: Option<harness_core::agent::AgentSpec>,
+        files: Vec<String>,
+    ) {
         let before = self.ended(sid);
         self.send(MasterToNode::Prompt {
             savings: None,
@@ -225,7 +236,7 @@ impl Node {
             text: text.into(),
             images: vec![],
             agent_named: false,
-            files: vec![],
+            files,
         })
         .await;
         let by = std::time::Instant::now() + Duration::from_secs(20);
@@ -451,4 +462,79 @@ async fn a_file_changed_during_a_turn_waits_for_the_next_turn() {
         next.contains("The repository's instruction files below replace the ones sent earlier"),
         "{next}"
     );
+}
+
+/// The instruction file of a subfolder (B.9, T65) through the node: a
+/// sub-agent's `read` of a file under `sub/` brings `sub/CLAUDE.md` into
+/// the sub-agent's next request, after that read's result, in a block of
+/// the harness's; the parent, which touched nothing there, never gets it.
+#[tokio::test]
+async fn a_sub_agent_gets_the_files_of_the_subfolders_it_touches() {
+    let mut n = start().await;
+    let repo = n.repo.clone();
+    let sid = n.create(&repo).await;
+    let spec = |id: &str, delegates| harness_core::agent::AgentSpec {
+        agent_id: id.into(),
+        name: id.into(),
+        system_prompt: "work".into(),
+        tools: harness_core::agent::ToolSelection::List(vec!["read".into()]),
+        model: None,
+        fallbacks: vec![],
+        unavailable: vec![],
+        no_effort: vec![],
+        context_windows: Default::default(),
+        effort: None,
+        ui: Default::default(),
+        prompt_hash: "h".into(),
+        deny_tools: vec![],
+        delegates,
+        caps: None,
+    };
+    let scout = spec("scout", vec![]);
+    let lead = spec("lead", vec![scout]);
+    n.turn(sid, "delegate: scout=read: sub/keep.txt", Some(lead))
+        .await;
+    let lead_line = harness_agent_native::provider::STEP_CONTEXT_LEAD;
+    let blocks: Vec<String> = n
+        .raw_requests()
+        .into_iter()
+        .filter(|r| r.starts_with(lead_line))
+        .collect();
+    assert_eq!(blocks.len(), 1, "{:?}", n.raw_requests());
+    assert!(
+        blocks[0].contains("| ==> \"sub/CLAUDE.md\" <==\n|   Keep sub small."),
+        "{}",
+        blocks[0]
+    );
+    // The parent's own requests: its opening, the delegate's result.
+    let parent_log = n.node.store().events_after(sid, 0, 10_000).unwrap();
+    assert!(
+        !parent_log.iter().any(
+            |e| e.kind == "context_sent" && e.payload.to_string().contains("instructions:sub/")
+        ),
+        "the parent loaded nothing"
+    );
+}
+
+/// A file the person mentions (`@sub/keep.txt`, T63) brings its folder's
+/// instruction file into the turn's opening block, from the first request.
+#[tokio::test]
+async fn a_mention_brings_its_folders_file_into_the_opening() {
+    let mut n = start().await;
+    let repo = n.repo.clone();
+    let sid = n.create(&repo).await;
+    n.turn_with(
+        sid,
+        "look at @sub/keep.txt",
+        None,
+        vec!["sub/keep.txt".into()],
+    )
+    .await;
+    let first = n.requests()[0].clone();
+    let (context, rest) = harness_agent_native::provider::split_context(&first).unwrap();
+    assert!(
+        context.contains("==> \"sub/CLAUDE.md\" <==\n  Keep sub small."),
+        "{context}"
+    );
+    assert!(rest.starts_with("look at @sub/keep.txt"), "{rest}");
 }

@@ -225,10 +225,26 @@ impl Provider for Mock {
         req: &ChatRequest,
         deltas: mpsc::UnboundedSender<String>,
     ) -> Result<Completion, ProviderError> {
+        let input_tokens = estimate_tokens(&req.messages);
+        // A step's instruction files (B.9) are the harness's text after the
+        // step's results, not a message to answer: the demo model reads
+        // past them, as it reads past notes.
+        let req = &ChatRequest {
+            messages: req
+                .messages
+                .iter()
+                .filter(|m| {
+                    !matches!(m, ChatMsg::User(t) | ChatMsg::StepContext(t)
+                        if t.starts_with(crate::provider::STEP_CONTEXT_LEAD))
+                })
+                .cloned()
+                .collect(),
+            ..req.clone()
+        };
         let usage = Some(Usage {
             cache_read_tokens: 0,
             cache_write_tokens: 0,
-            input_tokens: estimate_tokens(&req.messages),
+            input_tokens,
             output_tokens: 1,
             context_tokens: 0,
             ..Default::default()
@@ -395,7 +411,10 @@ impl Provider for Mock {
         let last_real = req.messages.iter().rev().find(|m| {
             !matches!(
                 m,
-                ChatMsg::Note(_) | ChatMsg::CallNote(_) | ChatMsg::Summary(_)
+                ChatMsg::Note(_)
+                    | ChatMsg::CallNote(_)
+                    | ChatMsg::Summary(_)
+                    | ChatMsg::StepContext(_)
             )
         });
         if let Some(ChatMsg::Tool { content, .. }) = last_real {
