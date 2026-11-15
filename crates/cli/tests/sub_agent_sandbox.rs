@@ -535,10 +535,19 @@ impl harness_agent_native::Provider for Script {
         let user = harness_agent_native::provider::without_environment(
             req.messages[since].user_text().unwrap_or(""),
         );
+        // The script is the first JSON array of `[tool, input]` pairs in
+        // the message: text the node adds around the person's words (the
+        // context block lists the machine's own skills, whose descriptions
+        // may hold a `[`) is not mistaken for it.
         let calls: Vec<(String, serde_json::Value)> = user
-            .find('[')
-            .zip(user.rfind(']'))
-            .and_then(|(a, b)| serde_json::from_str(&user[a..=b]).ok())
+            .match_indices('[')
+            .find_map(|(a, _)| {
+                serde_json::Deserializer::from_str(&user[a..])
+                    .into_iter::<Vec<(String, serde_json::Value)>>()
+                    .next()?
+                    .ok()
+                    .filter(|calls| !calls.is_empty())
+            })
             .unwrap_or_default();
         let done = req.messages[since + 1..]
             .iter()
@@ -611,6 +620,8 @@ async fn a_delegated_sub_agent_gets_its_folder_through_the_node() {
         ..Default::default()
     };
     policy.protect(&f.data);
+    // Not about the machine's own skills (`~/.agents/skills`).
+    policy.skills.roots.clear();
     let backend = harness_agent_native::NativeBackend::new(
         Arc::new(Script),
         harness_tools::builtin(),

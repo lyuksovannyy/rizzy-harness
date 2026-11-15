@@ -42,6 +42,11 @@ fn config_native(
     provider: Arc<dyn harness_agent_native::Provider>,
     native: NativeConfig,
 ) -> NodeConfig {
+    // No test here is about the machine's own skills: without this the
+    // node lists whatever lies in the developer's `~/.agents/skills` and
+    // `~/.claude/skills` in every turn's context.
+    let mut policy = policy;
+    policy.skills.roots.clear();
     NodeConfig {
         node_id: "local".into(),
         hostname: "test".into(),
@@ -2014,10 +2019,19 @@ impl harness_agent_native::Provider for Script {
         let user = harness_agent_native::provider::without_environment(
             req.messages[since].user_text().unwrap_or(""),
         );
+        // The script is the first JSON array of `[tool, input]` pairs in
+        // the message: text the node adds around the person's words (the
+        // context block lists the machine's own skills, whose descriptions
+        // may hold a `[`) is not mistaken for it.
         let calls: Vec<(String, serde_json::Value)> = user
-            .find('[')
-            .zip(user.rfind(']'))
-            .and_then(|(a, b)| serde_json::from_str(&user[a..=b]).ok())
+            .match_indices('[')
+            .find_map(|(a, _)| {
+                serde_json::Deserializer::from_str(&user[a..])
+                    .into_iter::<Vec<(String, serde_json::Value)>>()
+                    .next()?
+                    .ok()
+                    .filter(|calls| !calls.is_empty())
+            })
             .unwrap_or_default();
         let done = req.messages[since + 1..]
             .iter()
