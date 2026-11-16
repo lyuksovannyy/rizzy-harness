@@ -375,6 +375,7 @@ async fn chat(t: &T, who: &str, workspace: Option<&str>) -> SessionId {
 
 fn started(bg: &str) -> EventKind {
     EventKind::BackgroundStarted(BackgroundStarted {
+        child: None,
         bg_id: bg.into(),
         call_id: format!("call-{bg}"),
         turn_id: "t1".into(),
@@ -385,6 +386,7 @@ fn started(bg: &str) -> EventKind {
 
 fn ended(bg: &str, reason: BackgroundReason, delivered: bool) -> EventKind {
     EventKind::BackgroundEnded(BackgroundEnded {
+        child: None,
         bg_id: bg.into(),
         reason,
         exit_code: Some(1),

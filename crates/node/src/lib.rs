@@ -309,6 +309,27 @@ pub mod testing {
 
     static QUEUED_HOLD: Holds = std::sync::Mutex::new(Vec::new());
 
+    static FAIL_END: std::sync::Mutex<Vec<harness_core::SessionId>> =
+        std::sync::Mutex::new(Vec::new());
+
+    /// The next background end session `sid` records between turns is
+    /// refused by its log once, as a full disk would (X.24 review F4): the
+    /// end stays queued, built, for the next try.
+    pub fn fail_next_end_append(sid: harness_core::SessionId) {
+        FAIL_END.lock().unwrap().push(sid);
+    }
+
+    pub(crate) fn take_fail_end(sid: harness_core::SessionId) -> bool {
+        let mut all = FAIL_END.lock().unwrap();
+        match all.iter().position(|s| *s == sid) {
+            Some(i) => {
+                all.remove(i);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Arm a hold for session `sid`'s next start of a turn for the messages
     /// sent while the last one ran: after the ended turn freed the slot and
     /// before the next one claims it (X.20 review M1, a `/compact` in that
@@ -1655,6 +1676,9 @@ impl NodeRuntime {
                 BACKGROUND_STOP_WAIT,
             )
             .await;
+            // Background sub-agents' ends not recorded: their folders go
+            // unmerged (X.24).
+            s.drop_child_ends().await;
             // And its MCP servers (X.3).
             if !s.close_mcp(harness_tools::mcp::STOP_WAIT).await {
                 tracing::warn!(session = %sid, "an MCP server of a deleted session did not end in time");

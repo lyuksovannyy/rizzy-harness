@@ -70,3 +70,37 @@ describe("the child of a row", () => {
     expect(agents.map((a) => a.child)).toEqual([null]);
   });
 });
+
+// X.24: a sub-agent started in the background is the row of its
+// `delegate` call, running (with its entry, which Stop ends) until its end,
+// then its result's status; it stays listed from an earlier turn while it
+// runs, and never shows among the background commands.
+describe("a background sub-agent", () => {
+  const started = (call_id: string): Item =>
+    ({
+      ...(delegate(call_id, "long work", CHILD) as Extract<Item, { type: "tool" }>),
+      input: { agent: "coder", task: "long work", background: true },
+      result: { ok: true, output: `session: ${CHILD}\nSub-agent @coder started in the background as bg-1.`, exit_code: null },
+    }) as Item;
+  const bg = (ended: boolean) => ({ "bg-1": { call_id: "c1", ends_by_ms: 1, timeout_s: 1800, ended, child: { session: CHILD, agent_id: "coder" } } });
+
+  test("runs until its end, from an earlier turn too, and is no command", () => {
+    const v = view([started("c1"), { type: "turn_end", turn_id: "t1", reason: "completed" }, { type: "user", turn_id: "t2", text: "more" }]);
+    v.background = bg(false);
+    const { agents, commands } = sideItems(v);
+    expect(agents.map((a) => [a.call_id, a.state, a.bg_id])).toEqual([["c1", "running", "bg-1"]]);
+    expect(commands).toEqual([]);
+  });
+
+  test("then shows its result's status, or stopped", () => {
+    for (const [reason, tail, want] of [
+      ["finished", `session: ${CHILD}\nSub-agent @coder finished: partial. Its own report follows.\n| ok`, "partial"],
+      ["stopped_by_user", `session: ${CHILD}\nSub-agent @coder finished: failed.`, "stopped"],
+    ] as const) {
+      const v = view([started("c1"), { type: "background_ended", bg_id: "bg-1", reason, exit_code: null, ran_ms: 5, tail, agent: "coder" }]);
+      v.background = bg(true);
+      const { agents } = sideItems(v);
+      expect(agents.map((a) => [a.state, a.bg_id])).toEqual([[want, undefined]]);
+    }
+  });
+});

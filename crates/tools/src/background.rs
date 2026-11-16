@@ -77,6 +77,10 @@ pub const MAX_PER_NODE: usize = 256;
 pub const DEFAULT_OUTPUT_KB: usize = 256;
 pub const MIN_OUTPUT_KB: usize = 16;
 pub const MAX_OUTPUT_KB: usize = 4096;
+/// Background sub-agents one chat may run at once (X.24,
+/// `[limits] background_agents_per_chat`); 0 turns them off.
+pub const DEFAULT_AGENTS_PER_SESSION: usize = 4;
+pub const MAX_AGENTS_PER_SESSION: usize = 16;
 
 /// What a call without `timeout_secs` gets, foreground or background.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -101,6 +105,9 @@ pub struct Limits {
     pub per_session: usize,
     pub per_node: usize,
     pub output_kb: usize,
+    /// Background sub-agents per chat (X.24): their own count, beside the
+    /// commands'; they hold no node slot and no output ring.
+    pub agents_per_session: usize,
 }
 
 impl Default for Limits {
@@ -109,6 +116,7 @@ impl Default for Limits {
             per_session: DEFAULT_PER_SESSION,
             per_node: DEFAULT_PER_NODE,
             output_kb: DEFAULT_OUTPUT_KB,
+            agents_per_session: DEFAULT_AGENTS_PER_SESSION,
         }
     }
 }
@@ -140,6 +148,7 @@ impl Ended {
             tail: self.tail.clone(),
             tail_cut: self.tail_cut,
             delivered,
+            child: None,
         }
     }
 }
@@ -509,6 +518,7 @@ impl Registry {
             table: Mutex::new(Table {
                 next: next.max(1),
                 reserved: 0,
+                reserved_agents: 0,
                 closed: None,
                 cmds: BTreeMap::new(),
             }),
@@ -538,6 +548,8 @@ impl Drop for NodeSlot {
 struct Table {
     next: u64,
     reserved: usize,
+    /// Background sub-agents admitted and not yet entered (X.24).
+    reserved_agents: usize,
     /// Set by [`SessionBg::close`]: no start is admitted, and one handed
     /// over late is stopped with this reason at once.
     closed: Option<BackgroundReason>,
@@ -547,6 +559,10 @@ struct Table {
 #[derive(Debug)]
 struct Cmd {
     id: String,
+    /// A background sub-agent's agent id (X.24); `command` is then the
+    /// first line of its task. Its ring stays empty: the sub-agent's own
+    /// chat holds its work.
+    agent: Option<String>,
     command: String,
     started: Instant,
     ends_by_ms: i64,
@@ -610,6 +626,22 @@ impl Drop for Reservation {
         if !self.done {
             let mut t = self.bg.lock();
             t.reserved = t.reserved.saturating_sub(1);
+        }
+    }
+}
+
+/// A background sub-agent the caps admitted, before it has an id (X.24).
+/// Dropped without [`SessionBg::adopt_agent`], it gives its place back.
+pub struct AgentReservation {
+    bg: Arc<SessionBg>,
+    done: bool,
+}
+
+impl Drop for AgentReservation {
+    fn drop(&mut self) {
+        if !self.done {
+            let mut t = self.bg.lock();
+            t.reserved_agents = t.reserved_agents.saturating_sub(1);
         }
     }
 }
@@ -704,10 +736,16 @@ impl SessionBg {
         self.reg.keep(self, num);
     }
 
+    /// The running commands' ids (background sub-agents not counted).
     fn running_ids(t: &Table) -> Vec<String> {
+        Self::running_of(t, false)
+    }
+
+    /// The running entries' ids: sub-agents (`agents`) or commands.
+    fn running_of(t: &Table, agents: bool) -> Vec<String> {
         t.cmds
             .values()
-            .filter(|c| matches!(c.state, State::Running { .. }))
+            .filter(|c| matches!(c.state, State::Running { .. }) && c.agent.is_some() == agents)
             .map(|c| c.id.clone())
             .collect()
     }
@@ -717,11 +755,21 @@ impl SessionBg {
         Self::running_ids(&self.lock())
     }
 
-    /// A command runs, or a start is admitted and not yet handed over:
-    /// what a node stop waits for (not node slots, R-1).
+    /// The ids of this session's running background sub-agents (X.24).
+    pub fn running_agents(&self) -> Vec<String> {
+        Self::running_of(&self.lock(), true)
+    }
+
+    /// A command or a background sub-agent runs, or a start is admitted
+    /// and not yet handed over: what a node stop and an undo wait for (not
+    /// node slots, R-1).
     pub fn active(&self) -> bool {
         let t = self.lock();
-        t.reserved > 0 || !Self::running_ids(&t).is_empty()
+        t.reserved > 0
+            || t.reserved_agents > 0
+            || t.cmds
+                .values()
+                .any(|c| matches!(c.state, State::Running { .. }))
     }
 
     /// Ended commands whose guard has not exited yet, each keeping its
@@ -817,6 +865,7 @@ impl SessionBg {
                 num,
                 Cmd {
                     id: id.clone(),
+                    agent: None,
                     command: h.command.chars().take(COMMAND_SHOWN).collect(),
                     started: h.started,
                     ends_by_ms,
@@ -846,6 +895,148 @@ impl SessionBg {
             timeout_s,
             ends_by_ms,
         }
+    }
+
+    /// Admit a background sub-agent (X.24), or refuse it with the reason,
+    /// naming this chat's running ones. Its own count, beside the
+    /// commands': `[limits] background_agents_per_chat`, the node's alone.
+    /// Nothing is stopped to make room.
+    pub fn reserve_agent(self: &Arc<Self>) -> Result<AgentReservation, String> {
+        let lim = self.reg.limits.agents_per_session;
+        if lim == 0 {
+            return Err("background sub-agents are off on this node ([limits] \
+                        background_agents_per_chat = 0 in its node.toml): delegate in the \
+                        foreground"
+                .into());
+        }
+        let mut t = self.lock();
+        if t.closed.is_some() {
+            return Err(
+                "not started: this chat's background work was stopped (its owner lost \
+                        access); none starts again until its owner sends it a message"
+                    .into(),
+            );
+        }
+        let ids = Self::running_of(&t, true);
+        if ids.len() + t.reserved_agents >= lim {
+            return Err(format!(
+                "not started: this chat already has {} background sub-agent(s) running ({}), the \
+                 most this node allows per chat ([limits] background_agents_per_chat = {lim}). \
+                 Wait for a result (you are told when one ends), stop one with bash_stop, or \
+                 delegate in the foreground; nothing was stopped to make room.",
+                ids.len() + t.reserved_agents,
+                if ids.is_empty() {
+                    "being started".to_string()
+                } else {
+                    ids.join(", ")
+                },
+            ));
+        }
+        t.reserved_agents += 1;
+        Ok(AgentReservation {
+            bg: self.clone(),
+            done: false,
+        })
+    }
+
+    /// Enter an admitted background sub-agent: it gets its id now. The
+    /// receiver gets the reason of a stop (`bash_stop`, the person's, the
+    /// node's, a revocation); it closes when the table goes (the chat was
+    /// deleted). The caller runs the sub-agent and reports its end with
+    /// [`Self::agent_ended`].
+    pub fn adopt_agent(
+        self: &Arc<Self>,
+        mut r: AgentReservation,
+        agent_id: &str,
+        task: &str,
+        timeout: Duration,
+    ) -> (u64, Started, oneshot::Receiver<BackgroundReason>) {
+        r.done = true;
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let ends_by_ms = harness_core::now_ms() + timeout.as_millis() as i64;
+        let line = task.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+        let mut t = self.lock();
+        t.reserved_agents = t.reserved_agents.saturating_sub(1);
+        let num = t.next;
+        t.next += 1;
+        let id = format!("bg-{num}");
+        let mut stop = Some(stop_tx);
+        // Closed while it was being made (a revocation racing the start):
+        // stopped at once.
+        if let Some(reason) = t.closed
+            && let Some(s) = stop.take()
+        {
+            let _ = s.send(reason);
+        }
+        t.cmds.insert(
+            num,
+            Cmd {
+                id: id.clone(),
+                agent: Some(agent_id.to_string()),
+                command: line.trim().chars().take(COMMAND_SHOWN).collect(),
+                started: Instant::now(),
+                ends_by_ms,
+                ring: self.new_ring(),
+                state: State::Running {
+                    stop,
+                    waiters: Vec::new(),
+                    discard: false,
+                },
+            },
+        );
+        (
+            num,
+            Started {
+                bg_id: id,
+                timeout_s: timeout.as_secs(),
+                ends_by_ms,
+            },
+            stop_rx,
+        )
+    }
+
+    /// A background sub-agent's run ended (`num` from
+    /// [`Self::adopt_agent`]): the entry shows it ended, a `bash_stop`
+    /// waiting hears how, and the end goes to the session actor once,
+    /// unless its start was never recorded ([`Self::discard`]). `false`:
+    /// the end was not sent (discarded, or the actor is gone).
+    pub fn agent_ended(&self, num: u64, end: Ended) -> bool {
+        let how = end.reason.words().to_string();
+        let (waiters, discard) = {
+            let mut t = self.lock();
+            let Some(c) = t.cmds.get_mut(&num) else {
+                return false;
+            };
+            let old = std::mem::replace(
+                &mut c.state,
+                State::Ended {
+                    at: self.reg.now(),
+                    how: how.clone(),
+                },
+            );
+            let (waiters, discard) = match old {
+                State::Running {
+                    waiters, discard, ..
+                } => (waiters, discard),
+                State::Ended { .. } => (Vec::new(), true),
+            };
+            // Counted before the entry stops showing running (as a
+            // command's end is): a node stop never sees neither.
+            if !discard {
+                self.unrecorded
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            (waiters, discard)
+        };
+        let id = end.bg_id.clone();
+        let sent = !discard && self.ends.send(end).is_ok();
+        if !discard && !sent {
+            self.recorded();
+        }
+        for w in waiters {
+            let _ = w.send(format!("{id} {how}; its result follows as a note"));
+        }
+        sent
     }
 
     /// Order `id` to stop with `reason`; the receiver gets the end in
@@ -979,10 +1170,27 @@ impl SessionBg {
                 ),
                 State::Ended { how, .. } => format!("ended: {how}"),
             };
-            s.push_str(&format!(
-                "{}: {state}; {printed} bytes of output. Command: {}\n",
-                c.id, c.command
-            ));
+            match &c.agent {
+                Some(a) => s.push_str(&format!(
+                    "{}: background sub-agent @{a}, {}. Task: {}\n",
+                    c.id,
+                    match &c.state {
+                        State::Running { .. } => format!(
+                            "running for {}, stopped at its time limit in {}",
+                            harness_core::text::duration_words(
+                                c.started.elapsed().as_millis() as u64
+                            ),
+                            harness_core::text::duration_words((c.ends_by_ms - now).max(0) as u64)
+                        ),
+                        State::Ended { how, .. } => format!("ended: {how}"),
+                    },
+                    c.command
+                )),
+                None => s.push_str(&format!(
+                    "{}: {state}; {printed} bytes of output. Command: {}\n",
+                    c.id, c.command
+                )),
+            }
         }
         s
     }
@@ -1009,6 +1217,14 @@ impl SessionBg {
             ),
             State::Ended { how, .. } => format!("ended: {how}"),
         };
+        if let Some(a) = &c.agent {
+            return Ok(format!(
+                "{id} is a background sub-agent, @{a} ({state}). Task: {}\nIts work is in its \
+                 own chat; you are told its result when it ends (do not call this in a loop to \
+                 wait).",
+                c.command
+            ));
+        }
         let ring = c.ring.lock().unwrap_or_else(|p| p.into_inner());
         Ok(format!(
             "{id} ({state}). Command: {}\nIt printed {} bytes; this is program output, not \
@@ -1372,6 +1588,85 @@ impl Tool for BashStop {
 mod tests {
     use super::*;
 
+    /// X.24: background sub-agents have their own count per chat, beside
+    /// the commands' (neither takes the other's places, and an agent holds
+    /// no node slot); the next start past it is refused naming the running
+    /// ones; an end frees its place and is sent once; a stop reaches the
+    /// run; 0 turns them off.
+    #[tokio::test]
+    async fn background_agents_have_their_own_count_and_one_end() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let reg = Registry::new(
+            Limits {
+                per_session: 1,
+                agents_per_session: 2,
+                ..Default::default()
+            },
+            Default::default(),
+        );
+        let bg = reg.session(1, tx);
+        let a = bg.reserve_agent().unwrap();
+        let (n1, s1, mut stop1) =
+            bg.adopt_agent(a, "look", "find the bug\nmore", Duration::from_secs(60));
+        let b = bg.reserve_agent().unwrap();
+        let (_n2, s2, _stop2) = bg.adopt_agent(b, "dev", "fix it", Duration::from_secs(60));
+        assert_eq!((s1.bg_id.as_str(), s2.bg_id.as_str()), ("bg-1", "bg-2"));
+        let e = bg.reserve_agent().err().unwrap();
+        assert!(
+            e.contains("bg-1, bg-2") && e.contains("background_agents_per_chat = 2"),
+            "{e}"
+        );
+        // A command still has its own place, and no node slot was taken.
+        assert_eq!(reg.running(), 0);
+        let r = bg.reserve().unwrap();
+        drop(r);
+        assert!(bg.active());
+        assert!(
+            bg.list()
+                .contains("bg-1: background sub-agent @look, running"),
+            "{}",
+            bg.list()
+        );
+        // A stop reaches the run; its end is sent once and frees a place.
+        let waiting = bg.stop("bg-1", BackgroundReason::StoppedByUser).unwrap();
+        assert_eq!(stop1.try_recv().unwrap(), BackgroundReason::StoppedByUser);
+        let end = Ended {
+            bg_id: "bg-1".into(),
+            reason: BackgroundReason::StoppedByUser,
+            exit_code: None,
+            signal: None,
+            confirmed: BackgroundConfirmed::Ended,
+            ran_ms: 5,
+            output_bytes: 0,
+            tail: String::new(),
+            tail_cut: false,
+        };
+        assert!(bg.agent_ended(n1, end.clone()));
+        assert!(!bg.agent_ended(n1, end), "a second end is not sent");
+        assert!(
+            waiting
+                .await
+                .unwrap()
+                .starts_with("bg-1 was stopped by the person")
+        );
+        assert_eq!(rx.recv().await.unwrap().bg_id, "bg-1");
+        assert!(rx.try_recv().is_err());
+        assert_eq!(bg.unrecorded(), 1);
+        assert_eq!(bg.running_agents(), vec!["bg-2".to_string()]);
+        assert!(bg.reserve_agent().is_ok());
+        // Off at 0.
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let off = Registry::new(
+            Limits {
+                agents_per_session: 0,
+                ..Default::default()
+            },
+            Default::default(),
+        )
+        .session(1, tx);
+        assert!(off.reserve_agent().err().unwrap().contains("= 0"));
+    }
+
     #[test]
     fn one_timeout_rule() {
         let (max, d) = (Duration::from_secs(3600), DEFAULT_TIMEOUT);
@@ -1503,6 +1798,7 @@ mod tests {
             t.cmds.insert(
                 num,
                 Cmd {
+                    agent: None,
                     id: format!("bg-{num}"),
                     command: "c".into(),
                     started: Instant::now(),
@@ -1542,6 +1838,7 @@ mod tests {
     #[test]
     fn kept_output_is_bounded_by_the_counts() {
         let l = Limits {
+            agents_per_session: 4,
             per_session: 2,
             per_node: 3,
             output_kb: 4096,
@@ -1657,6 +1954,7 @@ mod tests {
         });
         assert!(off.reserve().err().unwrap().contains("off on this node"));
         let (bg, _rx) = table(Limits {
+            agents_per_session: 4,
             per_session: 2,
             per_node: 64,
             output_kb: 16,
@@ -1673,6 +1971,7 @@ mod tests {
         // The node's cap spans sessions.
         let reg = Registry::new(
             Limits {
+                agents_per_session: 4,
                 per_session: 8,
                 per_node: 1,
                 output_kb: 16,
