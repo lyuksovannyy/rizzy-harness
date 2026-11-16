@@ -158,7 +158,7 @@ Retry is your decision after that gave up. It does not rewind the
 conversation or let you edit the message first.
 
 When a turn completes or fails in a chat you are not looking at (another chat
-is open, or the tab is hidden), the chat gets a dot in **Recent** until you
+is open, or the tab is hidden), the chat gets a dot in the sidebar until you
 open it, and with **Desktop notifications** on (Settings → Account →
 Preferences) the browser says "A chat finished: number N in your recent
 chats", never the chat's title. A sub-agent's chat, a turn the harness
@@ -273,7 +273,18 @@ and leaves their approvals deny-only; your other chats go on.
 Top to bottom: **New chat**, **Agents**, then **Routines**, **Media** and
 **Artifacts** (each shown once you can use it in this workspace; Routines
 carries a dot while results wait unseen), **Connections** (a placeholder for
-later), then the **Projects** and **Recent** sections and your account.
+later), then **Projects**, your other chats, and your account. Search and
+Collapse sit together at the top right.
+
+Each project is a box with its chats inside; its **+** opens the project to
+start a chat there, and its arrow folds it (the **Projects** arrow folds them
+all; this browser remembers both). Chats in no project follow below the
+projects. A chat that handed work to sub-agents shows their sessions nested
+under it; click one to read it. An agent chat (one that works in a folder on a
+node) has a small square with a cloud on its right: hover it, or tab to the
+row, to see which node it runs on. Each node keeps its own colour, the same for
+everyone.
+
 Collapsed, the sidebar is a rail of icons; on a phone it is a drawer.
 
 **Search** (the magnifier, **Ctrl K** / **⌘ K**, or **/** outside a text
@@ -346,7 +357,7 @@ A routine starts a chat for you on a schedule or when a webhook is called:
 when it runs. Schedules are cron (5 fields), every N minutes, or once, in your
 time zone; a routine has either up to 8 schedules or exactly one webhook.
 **Run now** works any time. Each run is a new chat titled `<routine> · <date
-time>`; it shows in Recent while it runs, waits or has an unseen result, and the
+time>`; it shows in the sidebar while it runs, waits or has an unseen result, and the
 result shows on Home with a notification (each routine says whether to notify
 always, on failures or never). The Runs tab lists every run with its trigger,
 status, duration, tokens and the first sentence of its answer.

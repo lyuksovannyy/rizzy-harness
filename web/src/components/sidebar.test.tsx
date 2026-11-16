@@ -1,8 +1,9 @@
 // @vitest-environment happy-dom
 // The sidebar: the areas in order and only when the viewer has them, the
 // open page marked, rows that are real links, the unseen dot, Connections
-// as a disabled placeholder, the Projects and Recent sections, the footer's
-// account button with its tier line, the collapsed rail, and the account
+// as a disabled placeholder, the chat rows' dots (sidebartree.test.tsx has
+// Projects, the tree and the node badge), the footer's account button with
+// its tier line, the collapsed rail, and the account
 // menu's chunk loaded on intent.
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -199,27 +200,6 @@ describe("sidebar", () => {
     expect(q("input")).toBeNull();
   });
 
-  test("Projects and Recent: empty texts, the newest five projects first, then the rest on request", async () => {
-    await render();
-    expect(all(".section-toggle").map((b) => b.textContent)).toEqual(["Projects", "Recent"]);
-    expect(host.textContent).toContain("No projects yet");
-    expect(host.textContent).toContain("No chats yet.");
-    expect(q('[aria-label="New project"]')).toBeNull();
-
-    const p = await render({ projects: [1, 2, 3, 4, 5, 6, 7].map(project), canCreateProject: true, sessions: [chat("a", { project_id: "p1" }), chat("b")] });
-    const rows = () => all(".section-body a.session-item[href^='#/p/']").map((a) => a.textContent);
-    expect(rows()).toEqual(["Project 7", "Project 6", "Project 5", "Project 4", "Project 3"]);
-    act(() => byText("button", "Show 2 more").click());
-    expect(rows()).toHaveLength(7);
-    act(() => byText("button", "Show fewer").click());
-    expect(rows()).toHaveLength(5);
-    act(() => q<HTMLButtonElement>('[aria-label="New project"]')!.click());
-    expect(p.onNavigate).toHaveBeenLastCalledWith({ kind: "project", id: "new" });
-    // A chat in a project carries its mark.
-    const marks = all("a.session-item[href^='#/s/']").map((a) => !!a.querySelector(".chat-project"));
-    expect(marks).toEqual([true, false]);
-  });
-
   test("a chat with a background command running says so; a running turn's dot wins", async () => {
     await render({ sessions: [chat("a", { background: 2 }), chat("b", { background: 1, running: true }), chat("c")] });
     const dots = all("a.session-item[href^='#/s/']").map((a) => [...a.querySelectorAll(".dot")].map((d) => d.className));
@@ -235,20 +215,6 @@ describe("sidebar", () => {
     const dots = all("a.session-item[href^='#/s/']").map((a) => [...a.querySelectorAll(".dot")].map((d) => d.className));
     expect(dots).toEqual([["dot unseen"], ["dot running"], [], []]);
     expect(q(".dot.unseen")!.getAttribute("aria-label")).toBe("Finished; not seen yet");
-  });
-
-  test("a section closes and stays closed", async () => {
-    await render({ sessions: [chat("a")] });
-    const recent = byText(".section-toggle", "Recent");
-    expect(recent.getAttribute("aria-expanded")).toBe("true");
-    act(() => recent.click());
-    expect(recent.getAttribute("aria-expanded")).toBe("false");
-    expect(q("a[href^='#/s/']")).toBeNull();
-    expect(JSON.parse(localStorage.getItem("harness.sidebarSections")!)).toEqual({ projects: true, recent: false });
-    act(() => root.unmount());
-    root = createRoot(host);
-    await render({ sessions: [chat("a")] });
-    expect(byText(".section-toggle", "Recent").getAttribute("aria-expanded")).toBe("false");
   });
 
   test("the account button: the name, the tier line and a menu, no gear or Log out link", async () => {
@@ -279,7 +245,7 @@ describe("sidebar", () => {
       ["Connections", "Coming later"],
       ["Alex — Acme · Admin", "Alex — Acme · Admin"],
     ]);
-    // No Projects or Recent in the rail.
+    // No Projects or chats in the rail.
     expect(q(".section-toggle")).toBeNull();
     expect(q("a[href^='#/s/']")).toBeNull();
     expect(q(".rail-avatar .workspace-badge")!.textContent).toBe("A");
