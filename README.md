@@ -102,23 +102,32 @@ the UI with no API key. Try `run: ls -la`, `read: README.md` or `slow: 50`.
 
 **Sending a message, and waiting for the model.** Send puts your message in
 the chat at once, before the server has answered: from the home screen it
-shows above the box while the chat is made, then in the new chat. It is marked
-"Sending…" until the chat's log holds it, and then is the log's message (never
-both). From the same moment a line where the answer will appear says "<agent>
+shows above the box while the chat is made, then in the new chat, with its
+attachments and images. It is marked "Sending…" until the server has taken it,
+and is replaced by the log's message when that arrives (never both). Until the
+server has it, the message also stays in the chat's draft, ahead of anything
+you type meanwhile, so a reload or a closed chat does not lose it. From the same moment a line where the answer will appear says "<agent>
 is waiting for the model…"; after 5 seconds it also shows, quietly, how many
 seconds the model has said nothing, so a slow provider does not look like a
 hang. Screen readers hear that line once, not the count. When the first words
 arrive it says "<agent> is answering…" (or "is working…" while a tool runs, and
-"is waiting for the model…" again before the next model request). The wait is
-counted from the chat's log, so a reload or another tab shows the same
-number. Stop is there from the moment the turn starts. If the provider fails
+"is waiting for the model…" again before the next model request); a message you
+send while it works does not change that line. The count runs on this tab's
+clock from when the tab saw the latest event, so a computer clock that is off
+cannot make it wrong; a reload or a tab opened later starts it again from 0.
+Screen readers hear "is waiting for the model" once per turn and "is waiting
+for you" when an approval comes, not every step. Stop is there from the moment the turn starts. If the provider fails
 for a passing reason the line under it says why and when the next try is
 ("rate limit. Trying again in 3 s (attempt 2 of 3)"); a provider that sends
 nothing is cut off after `[limits] model_first_byte_timeout_s` (600 s by
 default; the server's own Ask chats always use 600 s) and the turn ends with
-the reason and **Retry**. A message the server refuses goes back into the box
-with the reason; the first message of a new chat stays in that chat marked
-"Not sent", and its text is in the reply box.
+the reason and **Retry**. A message the server refuses in an open chat goes
+back into the box, with its attachments, and the reason under it. The first
+message of a new chat, refused after the chat opened, stays in that chat marked
+"Not sent: <reason>" with **Retry** (send it again, with its attachments and
+images) and **Edit** (put it into the reply box, ahead of anything typed
+since); the chat also puts it into its reply box when it opens, and keeps it
+in the draft until it is sent.
 
 **Writing while the agent works.** The reply box stays open while a turn
 runs: Enter (or Send, next to Stop) sends the message at once, and a line under
@@ -322,7 +331,8 @@ What you type and have not sent stays in this browser as a draft of that
 chat, for your account only. Logging out (or a login that ended) clears every
 draft in the browser, with your recent folders and test events; deleting a
 chat deletes its draft, here or on another device; incognito chats keep no
-draft.
+draft. In an incognito chat a message being sent, or one the server refused,
+lives only in that tab's memory (the bubble and the box): a reload loses it.
 
 ## Routines
 

@@ -3477,8 +3477,11 @@ button.swatch:hover:not(:disabled) {
 /* Sent from this tab and not in the log yet, or refused (lib/outbox); on
    home, above the box while the chat is made. No animation: the text says it. */
 .msg.user.sending,
+.msg.user.sent,
 .msg.user.failed { flex-wrap: wrap; }
 .msg.user.sending .bubble { opacity: 0.75; }
+.msg.user.failed .bubble { opacity: 0.6; }
+.msg.user .sent-failed .link { font-size: inherit; }
 .composer-wrap > .msg.user.sending { margin-bottom: var(--space-3); }
 /* How long the model has been silent (TurnStatus): quiet, not read out. */
 .thinking .waited {

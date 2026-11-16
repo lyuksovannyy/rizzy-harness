@@ -1,7 +1,7 @@
 // An open session: header, timeline, reply composer. Loaded lazily so the
 // new-tab home screen stays small.
 import "../lib/i18nPages";
-import { AtSign, Download, FileText, Package, Trash2 } from "lucide-react";
+import { AtSign, Download, FileText, Image as ImageIcon, Package, Trash2 } from "lucide-react";
 import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { api } from "../api";
 import { pageApi } from "../apiPages";
@@ -32,7 +32,7 @@ import { showHidden, shownName } from "../md/hidden";
 import type { History } from "../bg/topics";
 import type { Agent, ApprovalMode, Item, ModelInfo, NodeInfo, RoutineMark, SessionRow, SessionView } from "../types";
 import { inputBlock, inputState, progressSignature, progressSlots, type ProgressSlots } from "../ui/blocks";
-import { Composer } from "./Composer";
+import { Composer, type ComposerHandle, type Submission } from "./Composer";
 import { AgentMark, agentAlert } from "./AgentAvatar";
 import { ChatArtifactsCtx, SaveAsArtifact, SavedItem, stagedKeys, useChatArtifacts } from "./ChatArtifacts";
 import { BubbleImages } from "./ChatImages";
@@ -46,7 +46,7 @@ import { compactTokens, ContextMeter } from "./ContextMeter";
 import { CostMeter } from "./CostMeter";
 import { RetryNote } from "./RetryNote";
 import { TurnStatus, turnState } from "./TurnStatus";
-import { outbox } from "../lib/outbox";
+import { type Outgoing, outbox } from "../lib/outbox";
 import { LiveCtx } from "../lib/liveCtx";
 import { repliedBlock, ReplyBubble } from "./ReplyBubble";
 import { ToolCard, WebGroupCard } from "./ToolCard";
@@ -351,8 +351,51 @@ export default function Conversation(props: {
   const face = useAvatarState(view);
   // This tab's messages the log does not hold yet (lib/outbox).
   useSyncExternalStore(outbox.subscribe, outbox.version);
-  const people = items.reduce((n, it) => n + (it.type === "user" ? 1 : 0), 0);
-  const sending = outbox.unsent(sessionId, people);
+  const users = items.flatMap((it) => (it.type === "user" ? [it.text] : []));
+  const sending = outbox.unsent(sessionId, users);
+  const held = sending.filter((o) => o.failed);
+  useEffect(() => outbox.prune(sessionId, users));
+  const box = useRef<ComposerHandle | null>(null);
+  const alive = useRef(true);
+  useEffect(() => () => void (alive.current = false), []);
+  // A refused message whose own box is gone (a new chat's first one): its
+  // text, attachments and images go into this box, ahead of what is typed,
+  // once; the bubble stays, with Retry and Edit.
+  const putBack = useRef(new Set<number>());
+  useEffect(() => {
+    for (const o of held) if (!putBack.current.has(o.id)) putBack.current.add(o.id), put(o, false);
+  }, [held.map((o) => o.id).join()]);
+  const put = (o: Outgoing, take: boolean) => {
+    const b = box.current;
+    const files = o.s?.uploads ?? [];
+    const pics = o.s?.pictures ?? [];
+    b?.setText((c) => (take ? c.replace(o.text, "").trim() : c.includes(o.text) ? c : c ? `${o.text}\n${c}` : o.text));
+    b?.setFiles((f) => [...(take ? [] : files), ...f.filter((x) => !files.some((y) => y.attachment_id === x.attachment_id))]);
+    b?.setPictures((p) => [...(take ? [] : pics), ...p.filter((x) => !pics.some((y) => y.key === x.key))]);
+  };
+  // One send: shown at once; the log's message replaces it (lib/outbox).
+  // `again`: a Retry, whose refusal is shown on its bubble, not in the box.
+  const send = async (s: Submission, again = false) => {
+    stick.current = true;
+    const o = outbox.add(sessionId, s.text, users.length, s);
+    try {
+      await api.prompt(sessionId, s.text, {
+        ...(s.effort ? { effort: s.effort } : {}),
+        ...(s.attachments.length ? { attachments: s.attachments } : {}),
+        ...(s.images?.length ? { images: s.images } : {}),
+        ...(s.files?.length ? { files: s.files } : {}),
+        ...(s.compareWith ? { compare: [s.model, s.compareWith] } : {}),
+      });
+      outbox.accept(o);
+      // Sent from a box that is gone: the draft kept it until now.
+      if (!alive.current && keepsDraft) writeDraft(sessionId, readDraft(sessionId).replace(s.text, "").trim());
+    } catch (x) {
+      // The reply box takes the text back and says why; the draft kept it
+      // all along, for a box that is gone (another chat opened meanwhile).
+      outbox.drop(sessionId, o, again ? (x instanceof Error ? x.message : String(x)) : undefined);
+      if (!again) throw x;
+    }
+  };
   const answering = view?.running_agent?.agent_id ?? activeAgent;
   const facing = props.agents.find((a) => a.id === answering);
   const sessionAgent = props.agents.find((a) => a.id === activeAgent);
@@ -807,17 +850,63 @@ export default function Conversation(props: {
                 }
               })
             )}
-            {sending.map((o, i) => (
-              <div key={`out${i}`} className={`msg user ${o.failed ? "failed" : "sending"}`}>
+            {sending.map((o) => (
+              <div key={`out${o.id}`} className={`msg user ${o.failed ? "failed" : o.ok ? "sent" : "sending"}`}>
                 <div className="bubble">{o.text}</div>
-                <div className={`queued-mark ${o.failed ? "error-text" : "muted"}`}>
-                  {o.failed ? t("conv.notSent", { why: o.failed }) : t("conv.sending")}
-                </div>
+                {!!(o.s?.uploads?.length || o.s?.files?.length || o.s?.pictures?.length) && (
+                  <ul className="chips">
+                    {o.s?.uploads?.map((f) => (
+                      <li key={f.attachment_id} className="chip">
+                        <FileText size={14} /> {f.name}
+                      </li>
+                    ))}
+                    {o.s?.files?.map((p) => (
+                      <li key={`f${p}`} className="chip">
+                        <AtSign size={14} /> {p}
+                      </li>
+                    ))}
+                    {o.s?.pictures?.map((p) => (
+                      <li key={p.key} className="chip">
+                        <ImageIcon size={14} /> {p.name}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {o.failed ? (
+                  <div className="queued-mark sent-failed">
+                    <span className="error-text">{t("conv.notSent", { why: o.failed })}</span>{" "}
+                    <button
+                      type="button"
+                      className="link"
+                      onClick={() => {
+                        outbox.forget(sessionId, o);
+                        put(o, true);
+                        void send(o.s ?? ({ text: o.text, attachments: [] } as unknown as Submission), true);
+                      }}
+                    >
+                      {t("conv.retrySend")}
+                    </button>
+                    {" · "}
+                    <button
+                      type="button"
+                      className="link"
+                      onClick={() => {
+                        put(o, false);
+                        outbox.forget(sessionId, o);
+                      }}
+                    >
+                      {t("conv.editSend")}
+                    </button>
+                  </div>
+                ) : (
+                  !o.ok && <div className="queued-mark muted">{t("conv.sending")}</div>
+                )}
               </div>
             ))}
             <TurnStatus
               state={turnState(view, sending.some((o) => !o.failed))}
-              since={running ? (view?.last_ms ?? 0) : (sending[0]?.sent ?? 0)}
+              wait={`${view?.head_seq ?? 0}:${sending.length}`}
+              turn={view?.running_turn ?? (sending.some((o) => !o.failed) ? "sending" : null)}
               name={agentName(answering)}
               mark={facing && <AgentMark agent={facing} state={face} size={22} />}
             />
@@ -902,26 +991,9 @@ export default function Conversation(props: {
             onStop={() => void pageApi.cancel(sessionId)}
             compact={summarise.start}
             images={features?.media.vision_images ? { workspace: workspaceId, left: CHAT_IMAGES - imagesUsed } : null}
-            onSubmit={async (s) => {
-              stick.current = true;
-              // Shown at once; the log's message replaces it (lib/outbox).
-              const o = outbox.add(sessionId, s.text, people);
-              try {
-                await api.prompt(sessionId, s.text, {
-                  ...(s.effort ? { effort: s.effort } : {}),
-                  ...(s.attachments.length ? { attachments: s.attachments } : {}),
-                  ...(s.images?.length ? { images: s.images } : {}),
-                  ...(s.files?.length ? { files: s.files } : {}),
-                });
-              } catch (x) {
-                // The reply box takes the text back and says why; kept as the
-                // chat's draft too, for a box that is gone (another chat
-                // opened meanwhile).
-                outbox.drop(sessionId, o);
-                if (keepsDraft && !readDraft(sessionId)) writeDraft(sessionId, s.text);
-                throw x;
-              }
-            }}
+            handle={box}
+            held={held.map((o) => o.text).join("\n")}
+            onSubmit={(s) => send(s)}
           />
         </div>
       </div>

@@ -167,7 +167,6 @@ export class Live {
         }
         try {
           apply(v, e);
-          v.last_ms = e.ts_ms;
         } catch (err) {
           if (!(err instanceof FoldError)) throw err;
           console.error(err);

@@ -32,7 +32,7 @@ export async function startChat(
     ...(agentic && s.execMode ? { exec_mode: s.execMode } : {}),
     ...(agentic && s.approvalMode ? { approval_mode: s.approvalMode } : {}),
   });
-  const o = outbox.add(session_id, s.text, 0);
+  const o = outbox.add(session_id, s.text, 0, s);
   open(session_id);
   try {
     await api.prompt(session_id, s.text, {
@@ -41,11 +41,16 @@ export async function startChat(
       ...(s.compareWith ? { compare: [s.model, s.compareWith] } : {}),
       ...(s.images?.length ? { images: s.images } : {}),
     });
+    outbox.accept(o);
   } catch (x) {
     // The box it was typed in is gone with the home screen: the new chat
-    // shows the message as not sent, with why, and its reply box has the
-    // text (an incognito chat keeps no draft; the bubble still shows it).
-    outbox.drop(session_id, o, x instanceof Error ? x.message : String(x));
+    // keeps the message, marked not sent with why, with Retry and Edit, and
+    // puts it (with its attachments and images) into its own reply box. The
+    // draft first, so a box that reads it then has it; an incognito chat
+    // keeps no draft, only the bubble and the box. Thrown on, so the home
+    // box learns nothing from a message that did not go.
     if (!s.incognito) keep(session_id, s.text);
+    outbox.drop(session_id, o, x instanceof Error ? x.message : String(x));
+    throw x;
   }
 }

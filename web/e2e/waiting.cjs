@@ -4,7 +4,10 @@
 // chat), marked "Sending…" until the log has it, then once; the chat says it
 // waits for the model from the click on, counts the seconds after 5, and
 // tells the wait from the answer; a reload shows the same wait; a refused
-// message goes back to the box with why. The browser's own POSTs are held
+// message goes back to the box with why; a reload while the message is sent
+// finds it in the box; a second tab's message does not hide this tab's; a
+// new chat's first message refused after the chat opened stays, marked, with
+// Edit and Retry. The browser's own POSTs are held
 // 1.5 s, so "at once" is before the server has the message.
 // Usage: node web/e2e/waiting.cjs <path-to-harness-binary> [work-dir] [port]
 const { chromium } = require('playwright');
@@ -128,6 +131,68 @@ function recorder() {
     check((await bubbles('refused').count()) === 0, 'no row stays');
     await p.screenshot({ path: `${S}/waiting-5-refused.png` });
     log('refused: back in the box with why');
+    await box.fill('');
+
+    // 4. A reload while the POST is held: the draft kept the message.
+    await p.unroute('**/api/sessions/*/prompt');
+    await p.route('**/api/sessions/*/prompt', async (r) => { await sleep(3000); await r.abort().catch(() => {}); });
+    await sendText('kept over a reload');
+    await sleep(300);
+    check((await box.inputValue()) === '', 'the box is empty while it is sent');
+    await p.reload();
+    await p.waitForSelector('.conversation .composer textarea');
+    await sleep(500);
+    check((await box.inputValue()) === 'kept over a reload', `a reload mid-send finds it in the box (${await box.inputValue()})`);
+    await box.fill('');
+    log('reload mid-send: the message is in the box');
+
+    // 5. Two tabs: tab B's message lands while tab A's is held; A's bubble stays.
+    await p.unroute('**/api/sessions/*/prompt');
+    await p.route('**/api/sessions/*/prompt', async (r) => { await sleep(3000); await r.continue(); });
+    const tabB = await ctx.newPage();
+    await tabB.goto(p.url());
+    await tabB.waitForSelector('.conversation .composer textarea');
+    await sendText('from tab A');
+    await tabB.locator('.composer textarea').fill('from tab B');
+    await tabB.click('.composer button.send:not(.stop)');
+    await p.waitForSelector('.msg.user .bubble:text-is("from tab B")', { timeout: 10000 });
+    check((await bubbles('from tab A').count()) === 1, "tab A's message stays while B's lands");
+    await p.screenshot({ path: `${S}/waiting-6-two-tabs.png` });
+    await p.waitForSelector('.conversation .msg.user.sending', { state: 'detached', timeout: 15000 });
+    check((await bubbles('from tab A').count()) === 1 && (await bubbles('from tab B').count()) === 1, 'each once');
+    await tabB.close();
+    await p.waitForSelector('[data-testid="turn-status"]', { state: 'detached', timeout: 150000 });
+    log('two tabs: each message once, none hidden');
+
+    // 6. Home: the first message refused after the chat opened, then Edit; again, then Retry.
+    const homeRefused = async (text) => {
+      await p.unroute('**/api/sessions/*/prompt');
+      await p.route('**/api/sessions/*/prompt', async (r) => { await sleep(1500); await r.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'the node is not connected' }) }); });
+      await p.click('aside.sidebar a:has-text("New chat")');
+      await p.waitForSelector('h1.greeting');
+      await p.click('.mode-switch button:has-text("Ask")');
+      await sendText(text);
+      await p.waitForSelector('.msg.user.failed', { timeout: 10000 });
+      check((await p.locator('.msg.user.failed').innerText()).includes('Not sent: the node is not connected.'), 'marked not sent, with why');
+      check((await box.inputValue()) === text, 'and its text is in the box');
+    };
+    await homeRefused('home refused, then Edit');
+    await p.screenshot({ path: `${S}/waiting-7-home-refused.png` });
+    await box.fill('typed since');
+    await p.click('.msg.user.failed button:text-is("Edit")');
+    check((await p.locator('.msg.user.failed').count()) === 0, 'Edit: the bubble goes');
+    check((await box.inputValue()) === 'home refused, then Edit\ntyped since', `Edit: ahead of what was typed (${await box.inputValue()})`);
+    await p.screenshot({ path: `${S}/waiting-8-after-edit.png` });
+    await box.fill('');
+    await homeRefused('home refused, then Retry');
+    await p.unroute('**/api/sessions/*/prompt');
+    await p.click('.msg.user.failed button:text-is("Retry")');
+    await p.waitForSelector('.msg.user.failed', { state: 'detached', timeout: 5000 });
+    check((await box.inputValue()) === '', 'Retry: out of the box');
+    await p.waitForSelector('.conversation .msg.user.sending', { state: 'detached', timeout: 15000 });
+    check((await bubbles('home refused, then Retry').count()) === 1, 'Retry: sent, once');
+    await p.screenshot({ path: `${S}/waiting-9-after-retry.png` });
+    log('home refusal: Edit and Retry');
 
     check(errors.length === 0, 'page errors: ' + errors.join('; '));
     log('screenshots in', S);

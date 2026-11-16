@@ -70,8 +70,8 @@ const earlier: Item[] = [
   { type: "assistant", turn_id: "t1", message_id: "m1", text: "A tower with a light.", done: true, author: null, variant: null } as Item,
   { type: "turn_end", turn_id: "t1", reason: "completed" } as Item,
 ];
-const running = (items: Item[], last_ms = Date.now()) =>
-  view(items, { running_turn: "t2", running_agent: { agent_id: "general", name: "Assistant", prompt_hash: "" }, last_ms });
+const running = (items: Item[], head_seq = 5) =>
+  view(items, { running_turn: "t2", running_agent: { agent_id: "general", name: "Assistant", prompt_hash: "" }, head_seq });
 
 let host: HTMLElement;
 let root: Root;
@@ -80,6 +80,7 @@ const live = { watch: vi.fn(), unwatch: vi.fn(), view: () => current, onTopic: v
 beforeEach(() => {
   prompt.mockReset();
   localStorage.clear();
+  (outbox as { reset?: () => void }).reset?.();
   host = document.createElement("div");
   document.body.append(host);
   root = createRoot(host);
@@ -170,12 +171,76 @@ describe("a message in an open chat", () => {
   });
 });
 
+describe("after the server took it", () => {
+  test("no longer marked Sending… while the log's message is on its way (a slow socket); still one bubble", async () => {
+    prompt.mockResolvedValue({ ok: true });
+    await show(view(earlier));
+    type("taken");
+    await send();
+    const mine = bubbles("taken");
+    expect(mine).toHaveLength(1);
+    expect(mine[0]!.classList.contains("sending")).toBe(false);
+    expect(mine[0]!.textContent).not.toContain("Sending…");
+    await show(running([...earlier, { type: "user", turn_id: "t2", text: "taken" }], 6));
+    expect(bubbles("taken")).toHaveLength(1);
+  });
+});
+
+describe("a new chat's first message, refused after the chat opened", () => {
+  const files = [{ attachment_id: "a1", name: "notes.txt", mime: "text/plain", chars: 5, truncated: false }];
+  const pictures = [{ key: "k1", name: "pier.png", size: 10, media_id: "m1" }];
+  const sub = { text: "hello from home", mode: "ask", agentId: "", model: "slow::slow", effort: null, nodeId: "", cwd: "", incognito: false, attachments: ["a1"], images: ["m1"], compareWith: null, uploads: files, pictures } as never;
+  async function refused() {
+    const o = outbox.add(SID, "hello from home", 0, sub);
+    await show(view([]));
+    await act(async () => outbox.drop(SID, o, "the node is not connected"));
+    await show(view([]));
+  }
+  const failed = () => host.querySelector(".msg.user.failed");
+  const button = (label: string) => [...failed()!.querySelectorAll("button")].find((b) => b.textContent === label)!;
+
+  test("the bubble says why and claims nothing else; the box has its text, attachment and image", async () => {
+    await refused();
+    expect(failed()?.textContent).toContain("Not sent: the node is not connected.");
+    expect(failed()?.textContent).not.toContain("reply box");
+    expect([...failed()!.querySelectorAll(".chip")].map((c) => c.textContent?.trim())).toEqual(["notes.txt", "pier.png"]);
+    expect(box().value).toBe("hello from home");
+    expect([...host.querySelectorAll(".composer .chip")].map((c) => c.textContent?.trim())).toContain("notes.txt");
+  });
+
+  test("Retry sends it again with its attachment and image, and takes it out of the box", async () => {
+    await refused();
+    prompt.mockResolvedValue({ ok: true });
+    await act(async () => button("Retry").click());
+    expect(prompt).toHaveBeenCalledWith(SID, "hello from home", expect.objectContaining({ attachments: ["a1"], images: ["m1"] }));
+    expect(failed()).toBeNull();
+    expect(box().value).toBe("");
+    expect(bubbles("hello from home")).toHaveLength(1);
+  });
+
+  test("Retry refused again: the bubble comes back with the new reason", async () => {
+    await refused();
+    prompt.mockRejectedValue(new Error("still down"));
+    await act(async () => button("Retry").click());
+    expect(failed()?.textContent).toContain("Not sent: still down.");
+  });
+
+  test("Edit puts it into the box ahead of what was typed since, and the bubble goes", async () => {
+    await refused();
+    type("and one more thing");
+    await act(async () => button("Edit").click());
+    expect(failed()).toBeNull();
+    expect(box().value).toBe("hello from home\nand one more thing");
+  });
+});
+
 describe("the waiting line", () => {
   test("tells the wait from the answer, and counts the seconds of a long wait without reading them out", async () => {
-    await show(running([...earlier, { type: "user", turn_id: "t2", text: "and the pier?" }], Date.now() - 2_000));
+    vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+    await show(running([...earlier, { type: "user", turn_id: "t2", text: "and the pier?" }]));
     expect(status()?.textContent).toBe("Assistant is waiting for the model…");
-    // A long wait: the count shows, outside the announced text.
-    await show(running([...earlier, { type: "user", turn_id: "t2", text: "and the pier?" }], Date.now() - 12_000));
+    // A long wait, counted on this tab's clock from when it saw the event.
+    await act(async () => vi.advanceTimersByTime(12_000));
     const count = status()?.querySelector(".waited");
     expect(count?.textContent).toBe("12 s");
     // Screen readers hear the words, from a region that was there before
@@ -188,11 +253,30 @@ describe("the waiting line", () => {
         ...earlier,
         { type: "user", turn_id: "t2", text: "and the pier?" },
         { type: "assistant", turn_id: "t2", message_id: "m2", text: "The pier", done: false, author: null, variant: null } as Item,
-      ]),
+      ], 6),
     );
     expect(status()?.textContent).toBe("Assistant is answering…");
     expect(status()?.querySelector(".waited")).toBeNull();
-    expect(host.querySelector('[role="status"].sr-only')?.textContent).toBe("");
+    // Not said again within the turn: the region keeps what it said.
+    expect(host.querySelector('[role="status"].sr-only')?.textContent).toBe("Assistant is waiting for the model…");
+  });
+
+  test("a new event starts the count again; an approval is said once, the steps between are not", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+    const said = () => host.querySelector('[role="status"].sr-only')?.textContent;
+    const tool = (result: unknown) =>
+      ({ type: "tool", turn_id: "t2", call_id: "c1", tool: "shell", input: {}, author: null, live_output: "", approval: null, result }) as unknown as Item;
+    const asked = [...earlier, { type: "user", turn_id: "t2", text: "go" } as Item];
+    await show(running(asked, 6));
+    await act(async () => vi.advanceTimersByTime(9_000));
+    expect(status()?.querySelector(".waited")?.textContent).toBe("9 s");
+    await show(running([...asked, tool(null)], 7));
+    expect(status()?.textContent).toBe("Assistant is working…");
+    await show(running([...asked, tool({ ok: true, output: "", exit_code: 0 })], 8));
+    expect(status()?.querySelector(".waited")).toBeNull();
+    expect(said()).toBe("Assistant is waiting for the model…");
+    await show({ ...running([...asked, tool(null)], 9), pending_approvals: ["a1"] });
+    expect(said()).toBe("Assistant is waiting for you");
   });
 
   test("a turn whose message the log does not hold yet is a wait, not the last turn's answer", async () => {
@@ -246,25 +330,35 @@ describe("the first message from home", () => {
       prompt: () => Promise.reject(new Error("the node is not connected")),
     } as never;
     const s = { text: "hello?", mode: "ask", agentId: "", model: "", effort: null, nodeId: "", cwd: "", incognito: false, attachments: [], compareWith: null } as never;
-    await startChat(s, { workspace: "w1" }, (id) => opened.push(id), fake, (c, t) => kept.push([c, t]));
+    // Thrown on: the home box must not learn from it or clear its images.
+    await expect(startChat(s, { workspace: "w1" }, (id) => opened.push(id), fake, (c, t) => kept.push([c, t]))).rejects.toThrow("the node is not connected");
     expect(opened).toEqual(["33333333-3333-3333-3333-333333333333"]);
     expect(kept).toEqual([["33333333-3333-3333-3333-333333333333", "hello?"]]);
-    const left = outbox.unsent("33333333-3333-3333-3333-333333333333", 0);
+    const left = outbox.unsent("33333333-3333-3333-3333-333333333333", []);
     expect(left).toHaveLength(1);
     expect(left[0]!.failed).toBe("the node is not connected");
   });
 });
 
 describe("outbox", () => {
-  test("matched by place: two messages with the same words show twice until the log holds both, then never", () => {
-    const a = outbox.add("c", "again", 3);
+  test("matched by words from its place: the same words twice show twice until the log holds both", () => {
+    const log = ["a", "b", "c"];
     outbox.add("c", "again", 3);
-    expect(outbox.unsent("c", 3)).toHaveLength(2);
-    expect(outbox.unsent("c", 4)).toHaveLength(1);
-    expect(outbox.unsent("c", 5)).toHaveLength(0);
-    // Gone for good: an older log does not bring them back.
-    expect(outbox.unsent("c", 3)).toHaveLength(0);
-    void a;
+    outbox.add("c", "again", 3);
+    expect(outbox.unsent("c", log)).toHaveLength(2);
+    expect(outbox.unsent("c", [...log, "again"])).toHaveLength(1);
+    expect(outbox.unsent("c", [...log, "again", "again"])).toHaveLength(0);
+    // An earlier message with the same words is not it.
+    expect(outbox.unsent("c", ["again", "b", "c"])).toHaveLength(2);
+  });
+
+  test("taken by the server and its words changed in the log: gone once more messages landed than are waiting", () => {
+    const o = outbox.add("e", "@writer hi", 1);
+    expect(outbox.unsent("e", ["x", "from another tab", "hi"])).toHaveLength(1);
+    outbox.accept(o);
+    // One landed: another tab's or this one, so it stays; two: one is it.
+    expect(outbox.unsent("e", ["x", "from another tab"])).toHaveLength(1);
+    expect(outbox.unsent("e", ["x", "from another tab", "hi"])).toHaveLength(0);
   });
 
   test("a refused message frees its place for the next one", () => {
@@ -273,7 +367,7 @@ describe("outbox", () => {
     expect(b.at).toBe(1);
     outbox.drop("d", a);
     expect(b.at).toBe(0);
-    expect(outbox.unsent("d", 0).map((o) => o.text)).toEqual(["second"]);
-    expect(outbox.unsent("d", 1)).toHaveLength(0);
+    expect(outbox.unsent("d", []).map((o) => o.text)).toEqual(["second"]);
+    expect(outbox.unsent("d", ["second"])).toHaveLength(0);
   });
 });
