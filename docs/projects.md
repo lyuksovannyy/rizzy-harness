@@ -427,7 +427,9 @@ rules (T5).
 5. **"Share the workspace memory"**: read direction (project chats also recall workspace
    facts; my reading), or also publish confirmed project facts to the workspace?
 6. **Recents**: project chats stay in Recents with a small project mark (phase 1), or move out
-   of Recents into their project, as ChatGPT does?
+   of Recents into their project, as ChatGPT does? Answered by the owner's sidebar sketch of
+   2026-11-16: they move into their project's box in the sidebar, and Recent became the chats in
+   no project, below the projects (docs/sidebar-search.md, "The sidebar").
 7. **Personal memory in project chats**: always (subject to the member's workspace switch,
    which leaves project memory on; see "Memory"), or should a project be able to turn
    personal recall off (e.g. client work)?
@@ -491,8 +493,10 @@ Where projects meet the **workspaces** code on `main`:
    another of the user's workspaces switches there and stays on it, as a chat link does. A
    switch from the sidebar while on a project page goes home (`keepsRoute` keeps chats only).
    `shell.test.tsx`'s `../api` mock gained `call`, which `lib/projects.ts` uses. The sidebar's
-   Projects section is one component, `ProjectNav` (with `ChatProjectMark` for the Recents
-   mark), so a sidebar redesign can move it whole; `Sidebar.tsx` only places it.
+   Projects section is one component, `ProjectNav`, so a sidebar redesign can move it whole;
+   `Sidebar.tsx` only places it. (Since 2026-11-16 `ProjectNav`'s `SidebarLists` holds the
+   whole scroll region: the project boxes with their chats, the chats in no project and the
+   sub-agent tree; the Recents mark is gone with Recents.)
 8. Bundle: `TOTAL_KB` 321 (see "Phases").
 9. `web/src/api.ts`: `call` is exported (used by `lib/projects.ts`); `createSession` takes
    `project_id`; `SessionRow.project_id` is optional in `types.ts`.
