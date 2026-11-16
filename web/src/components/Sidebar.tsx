@@ -1,18 +1,16 @@
 // The sidebar (docs/sidebar-search.md): a header with Search and Collapse,
-// the areas the viewer can use here, Projects and Recent in one scroll
-// region, and the account button. Collapsed (`rail`) it is a column of
+// the areas the viewer can use here, Projects and the chats in one scroll
+// region (ProjectNav.tsx), and the account button. Collapsed (`rail`) it is a column of
 // icons. Every row is a link; the account menu is a lazy chunk.
 import {
   Bot,
   CalendarClock,
-  ChevronRight,
   Images,
   Loader2,
   Menu,
   Package,
   PanelLeftClose,
   Plug,
-  Plus,
   Search,
   SquarePen,
   WifiOff,
@@ -27,28 +25,12 @@ import { accountLine, workspaceName } from "../lib/workspaces";
 import type { Features, Me, NodeInfo, SessionRow, WorkspaceList } from "../types";
 import type { MenuView } from "./AccountMenu";
 import { NavLink } from "./NavLink";
-import { NodeBadge } from "./NodeBadge";
-import { ChatProjectMark, ProjectRows } from "./ProjectNav";
-import { shownName } from "../md/hiddenChars";
+import { SidebarLists } from "./ProjectNav";
 
 // Imported ahead of the first click (pointer, focus or touch on the
 // button), so opening the menu never waits on the network.
 const loadMenu = () => import("./AccountMenu");
 const AccountMenu = lazy(loadMenu);
-
-const SECTIONS_KEY = "harness.sidebarSections";
-type SectionId = "projects" | "recent";
-type Sections = Record<SectionId, boolean>;
-
-/** Which sections are open; both until the user closes one. */
-function readSections(): Sections {
-  try {
-    const v = JSON.parse(localStorage.getItem(SECTIONS_KEY) ?? "{}") as Partial<Sections>;
-    return { projects: v.projects !== false, recent: v.recent !== false };
-  } catch {
-    return { projects: true, recent: true };
-  }
-}
 
 export interface SidebarProps {
   route: Route;
@@ -56,7 +38,7 @@ export interface SidebarProps {
   me: Me;
   /** The name the user goes by (preferences), else the username. */
   displayName: string;
-  /** Recent: the workspace's listed chats, newest first. */
+  /** The workspace's chats, newest first, sub-agents' included (incognito ones are left out here). */
   sessions: SessionRow[];
   nodes: NodeInfo[];
   conn: ConnState;
@@ -148,53 +130,14 @@ function Connections({ rail }: { rail?: boolean }) {
   );
 }
 
-function Section(props: {
-  label: string;
-  open: boolean;
-  onToggle: () => void;
-  action?: ReactNode;
-  children: ReactNode;
-}) {
-  const body = useId();
-  return (
-    <section className="side-section">
-      <div className="section-label section-row">
-        <button type="button" className="section-toggle grow" aria-expanded={props.open} aria-controls={body} onClick={props.onToggle}>
-          {/* Turned down by CSS while open. */}
-          <ChevronRight size={12} />
-          <span>{props.label}</span>
-        </button>
-        {props.action}
-      </div>
-      {props.open && (
-        <div id={body} className="section-body">
-          {props.children}
-        </div>
-      )}
-    </section>
-  );
-}
-
 export function Sidebar(props: SidebarProps) {
   const { me, route, onNavigate } = props;
-  const [sections, setSections] = useState(readSections);
   const [menu, setMenu] = useState<MenuView | null>(null);
   const account = useRef<HTMLButtonElement>(null);
   const menuId = useId();
-  const nodeById = new Map(props.nodes.map((n) => [n.node_id, n]));
   const tier = accountLine(me, me.workspace);
   const team = me.workspace && !me.workspace.personal ? me.workspace : null;
 
-  const toggle = (id: SectionId) =>
-    setSections((s) => {
-      const next = { ...s, [id]: !s[id] };
-      try {
-        localStorage.setItem(SECTIONS_KEY, JSON.stringify(next));
-      } catch {
-        /* storage unavailable */
-      }
-      return next;
-    });
   const preloadMenu = () => void loadMenu().catch(() => {});
   // Stable: the open menu listens for outside clicks with it.
   const setView = useCallback((v: MenuView | null, refocus = false) => {
@@ -310,7 +253,6 @@ export function Sidebar(props: SidebarProps) {
     );
   }
 
-  const selectedChat = route.kind === "session" ? route.id : null;
   return (
     <aside className="sidebar" aria-label="Sidebar">
       <div className="sidebar-head">
@@ -322,61 +264,26 @@ export function Sidebar(props: SidebarProps) {
           </span>
         )}
         <span className="spacer" />
-        {searchButton}
-        <button type="button" className="icon" aria-label={t("nav.collapse")} title={t("nav.collapse")} onClick={props.onCollapse}>
-          <PanelLeftClose size={18} />
-        </button>
+        {/* One two-part control (the sketch of 2026-11-16). */}
+        <div className="head-pair" role="group">
+          {searchButton}
+          <button type="button" className="icon" aria-label={t("nav.collapse")} title={t("nav.collapse")} onClick={props.onCollapse}>
+            <PanelLeftClose size={18} />
+          </button>
+        </div>
       </div>
       <nav aria-label="Main" className="sidebar-nav">
         {areaLinks}
         <Connections />
       </nav>
-      <div className="sidebar-scroll">
-        <Section
-          label={t("nav.projects")}
-          open={sections.projects}
-          onToggle={() => toggle("projects")}
-          action={
-            props.canCreateProject && (
-              <button
-                type="button"
-                className="icon small"
-                aria-label={t("nav.newProject")}
-                title={t("nav.newProject")}
-                onClick={() => onNavigate({ kind: "project", id: "new" })}
-              >
-                <Plus size={14} />
-              </button>
-            )
-          }
-        >
-          <ProjectRows projects={props.projects} selected={route.kind === "project" ? route.id : null} onNavigate={onNavigate} />
-        </Section>
-        <Section label={t("nav.recents")} open={sections.recent} onToggle={() => toggle("recent")}>
-          {props.sessions.length === 0 && <div className="muted pad small">{t("nav.noChats")}</div>}
-          {props.sessions.map((s) => (
-            <NavLink
-              key={s.session_id}
-              to={{ kind: "session", id: s.session_id }}
-              current={s.session_id === selectedChat}
-              onNavigate={onNavigate}
-              className="session-item"
-              title={shownName(s.title)}
-            >
-              {s.running && <span className="dot running" title="running" />}
-              {!s.running && !!s.background && (
-                <span className="dot background" title={`${s.background} background command(s) running`} />
-              )}
-              {!s.running && s.unread && s.session_id !== selectedChat && (
-                <span className="dot unseen" title={t("nav.unread")} aria-label={t("nav.unread")} role="img" />
-              )}
-              <span className="ellipsis grow">{shownName(s.title) || t("session.untitled")}</span>
-              <ChatProjectMark id={s.project_id} projects={props.projects} />
-              {s.profile === "agentic" && <NodeBadge node={nodeById.get(s.node_id)} nodeId={s.node_id} />}
-            </NavLink>
-          ))}
-        </Section>
-      </div>
+      <SidebarLists
+        route={route}
+        onNavigate={onNavigate}
+        sessions={props.sessions}
+        nodes={props.nodes}
+        projects={props.projects}
+        canCreateProject={props.canCreateProject}
+      />
       <div className="sidebar-foot">{accountButton}</div>
       {menuPopup}
     </aside>

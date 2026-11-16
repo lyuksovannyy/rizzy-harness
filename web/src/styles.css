@@ -4431,7 +4431,7 @@ input.add-line {
 /* Two blocks, one per owner, so parallel additions merge cleanly: each adds
    rules only inside its own block. */
 /* ── shell (I3) ── */
-/* The sidebar (docs/sidebar-search.md): the areas, then Projects and Recent
+/* The sidebar (docs/sidebar-search.md): the areas, then Projects and the chats
    scrolling together, then the account button. Rows are links. */
 .sidebar a.nav-item,
 .sidebar a.session-item {
@@ -4505,6 +4505,124 @@ input.add-line {
 .show-more {
   align-self: flex-start;
   padding: 4px 10px;
+}
+/* The header's Search | Collapse: one rounded control in two parts. */
+.head-pair {
+  display: inline-flex;
+  border: 1px solid var(--line);
+  border-radius: var(--r-full);
+}
+.head-pair button.icon {
+  width: 30px;
+  height: 28px;
+}
+.head-pair button.icon:first-child {
+  border-radius: var(--r-full) 0 0 var(--r-full);
+  border-right: 1px solid var(--line);
+}
+.head-pair button.icon:last-child {
+  border-radius: 0 var(--r-full) var(--r-full) 0;
+}
+/* Projects and the chats (ProjectNav.tsx): plain lists, a box per project. */
+.sidebar-scroll ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.sidebar-scroll li {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.project-box {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 2px 2px 4px;
+  margin: 4px 0;
+}
+.project-box > .section-row {
+  padding: 0;
+  gap: 2px;
+}
+.project-box > .section-row > .section-toggle {
+  padding: 0 2px 0 6px;
+  color: var(--fg-2);
+  align-self: stretch;
+}
+.project-box > .section-row > a.session-item {
+  width: auto;
+  min-width: 0;
+  padding-left: 6px;
+}
+.project-box .session-item {
+  padding-left: 12px;
+}
+.sidebar-scroll > ul.chats {
+  margin-top: var(--space-2);
+}
+/* Sub-agent chats: an elbow from the parent to each row. */
+ul.chats.sub {
+  margin-left: 18px;
+}
+ul.chats.sub > li {
+  position: relative;
+  padding-left: 12px;
+}
+ul.chats.sub > li::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: -1px;
+  width: 9px;
+  height: 16px;
+  border-left: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  border-bottom-left-radius: 4px;
+}
+ul.chats.sub > li:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 15px;
+  bottom: -1px;
+  border-left: 1px solid var(--line);
+}
+ul.chats.sub .session-item {
+  font-size: var(--text-sm);
+  min-height: 26px;
+}
+/* An agentic chat's node: its colour (nodeHue), its name on hover (title)
+   and, for the keyboard, beside the badge while the row has focus. */
+.node-mark {
+  position: relative;
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  color: var(--node);
+  background: color-mix(in srgb, var(--node) 18%, transparent);
+  border: 1px solid color-mix(in srgb, var(--node) 45%, transparent);
+}
+.node-mark.off {
+  opacity: 0.55;
+}
+.session-item:focus-visible .node-mark::after {
+  content: attr(aria-label);
+  position: absolute;
+  right: calc(100% + 4px);
+  white-space: nowrap;
+  padding: 1px 6px;
+  border-radius: 5px;
+  font-size: var(--text-2xs);
+  font-weight: var(--w-book);
+  background: var(--surface);
+  color: var(--fg);
+  border: 1px solid var(--line);
 }
 /* The account button: the avatar, the name and the tier line. */
 .nav-item.account {

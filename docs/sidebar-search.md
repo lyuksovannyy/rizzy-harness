@@ -9,21 +9,46 @@ own provider (`media::search`, `artifacts::search`).
 
 `<aside class="sidebar" aria-label="Sidebar">`, top to bottom:
 
-1. **Header**: the app name, the connection icon (only when something is wrong), **Search**
-   (`Search` icon, name "Search", title "Search (Ctrl K)", `aria-keyshortcuts="Control+K Meta+K"`)
-   and **Collapse**. The workspace switcher left the header; workspaces live in the account menu.
+1. **Header**: the app name, the connection icon (only when something is wrong), and one
+   two-part control (`.head-pair`, `role="group"`): **Search** (`Search` icon, name "Search",
+   title "Search (Ctrl K)", `aria-keyshortcuts="Control+K Meta+K"`) and **Collapse**. The
+   workspace switcher left the header; workspaces live in the account menu.
 2. **`<nav aria-label="Main">`**: New chat, Agents, then Routines, Media and Artifacts, each only
    while `features.<area>.show` is true for this viewer in this workspace, then **Connections**, a
    `<button aria-disabled="true">` with a "Later" tag and the title "Coming later" (no route, no
    chunk, no code). Routines carries a dot while routine results wait unseen in this workspace;
    its accessible name then says how many ("Routines, 2 new results"). Shell sums the `unseen` of
    this workspace's `result` and `failed` rows from `GET /api/attention` (`routines`).
-3. **One scroll region** with two disclosure sections, open or closed as the user left them
-   (localStorage `harness.sidebarSections`, read and written inside try/catch):
-   - **Projects**: the five most recently changed, then "Show N more"; "+" when the viewer may
-     create one; "No projects yet" when there are none.
-   - **Recent**: the workspace's chats as before (running dot, title, project mark, node badge for
-     agentic chats); "No chats yet." when empty. Routine run chats arrive filtered by the server.
+3. **One scroll region** (`ProjectNav.tsx`, the owner's sketch of 2026-11-16), built from
+   `GET /api/sessions` as it is (no API change):
+   - **Projects**, a disclosure (chevron) with "+" (New project) when the viewer may create one,
+     "No projects yet" when there are none. Each project is a box (`li.project-box`): its own
+     chevron (named by the project, `aria-expanded`), its icon and name (a link to its page), and
+     "+" ("New session in <project>"), which opens the project's page, whose composer starts a
+     chat filed in it (the existing way to make one). Inside, its chats, newest first: the first
+     five, then "Show N more"; "No chats yet." when it has none. The five most recently changed
+     projects show, then "Show N more".
+   - Below, without a header, the chats in no listed project, newest first, all of them (as
+     Recent was); "No chats yet." when there are no chats at all.
+   - A sub-agent's session (`parent_id` set) nests under its parent's row as a tree (`ul.sub`,
+     an elbow line drawn in CSS): the newest three, then "Show N more". It opens like any chat
+     (`#/s/<id>`; the chat links back to its parent). It shows the running dot while its turn
+     runs. A sub-agent whose parent is not in the list (another workspace, deleted) is not shown.
+     The list is the caller's own chats only (`sessions_of(owner)`), and a sub-agent's session
+     belongs to its parent's owner (the store's `claim_session`), so a second member or an admin
+     never sees another person's children. Incognito chats stay out, as before.
+   - Open and closed is this browser's: localStorage `harness.sidebarSections`, a map of
+     `projects` and project ids to `false` when closed, read and written inside try/catch.
+   - **Node badge**: a chat whose `profile` is `agentic` (it runs tools in a folder on a node,
+     as opposed to a plain chat) carries a small square with a cloud at the row's right edge.
+     Its colour is the node's: one of the seven coloured accent presets (`--ac-<preset>-2`, which
+     the light and dark themes each define), picked by a 31-multiplier string hash of the node id
+     (`nodeHue`), so the same node has the same colour for every user, after a reload, with no
+     stored setting. Colour is never the only signal: the badge is `role="img"` with the label
+     "Runs on <hostname>" (", offline" and dimmed when the node is not connected; "local" for the
+     embedded node), the same text as its `title` on hover, and, while the row has keyboard
+     focus, beside the badge (CSS `::after`). Titles, project names and hostnames are text
+     (React escapes them; hidden characters are shown, W-3).
 4. **Footer**: the account button.
 
 Every row is an `<a href>`: a plain click calls Shell's `navigate`, a modified or middle click and
