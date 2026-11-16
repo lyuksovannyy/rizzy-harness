@@ -299,6 +299,19 @@ const X21_KB = 0.5;
 // here.
 const SIDEBAR_KB = 1.6;
 
+// What main was over its record after pull requests 130 (images through
+// `read`) and 131 (read-only agents' shell), which recorded no line: 401.9
+// measured against 401.6 on 2026-11-16. Recorded under the owner's standing
+// yes of 2026-11-16 for soft lines (never the first-load ceiling).
+const X23_T70_KB = 0.3;
+
+// Background sub-agents (X.24, PR 134): the side panel's rows, Stop all and
+// states (a lazy chunk), the agent page's switch and the fold's two cases.
+// Measured 403.9 against origin/main's 403.5 the same day (2e0a60c): +0.4,
+// recorded as 0.5 because the measure is a few hundredths over 403.9. The
+// first load is 103.9.
+const X24_KB = 0.5;
+
 // X.25 (PLAN.md T73), measured 403.65 (initial 103.87) against 403.46
 // (initial 103.83) on main with pull request 132 (2e0a60c): the fold puts a
 // step's thinking in as it is recorded (first load, +0.04) and the lazy
@@ -306,7 +319,7 @@ const SIDEBAR_KB = 1.6;
 // recorded total, which this line also covers.
 const X25_KB = 0.5;
 
-const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB + EXPORT_KB + MEMDEF_KB + VISIBILITY_KB + T50_KB + LOOP_KB + DIFF_KB + T51_KB + WSMEM_KB + STEPS_KB + AGENT_SWITCHES_KB + T57_KB + X15_KB + X16_KB + COST_KB + X17_KB + X19_X20_KB + X21_KB + X7_KB + SIDEBAR_KB + X25_KB) * 100) / 10) / 10;
+const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB + EXPORT_KB + MEMDEF_KB + VISIBILITY_KB + T50_KB + LOOP_KB + DIFF_KB + T51_KB + WSMEM_KB + STEPS_KB + AGENT_SWITCHES_KB + T57_KB + X15_KB + X16_KB + COST_KB + X17_KB + X19_X20_KB + X21_KB + X7_KB + SIDEBAR_KB + X23_T70_KB + X24_KB + X25_KB) * 100) / 10) / 10;
 // Raised from 103 to 106 once the Phase A pages merged (103.7 measured: the
 // new sidebar, account button and routine-result rows are on the first
 // screen), then lowered to 104 at Phase B (102.3 measured) once the login

@@ -865,6 +865,7 @@ async fn a_callback_turns_ends_survive_an_in_turn_summary() {
         sid,
         next + 1,
         EventKind::BackgroundEnded(BackgroundEnded {
+            child: None,
             bg_id: "bg-1".into(),
             reason: BackgroundReason::Exited,
             exit_code: Some(1),
@@ -1340,6 +1341,7 @@ async fn a_note_before_a_callback_end_survives_an_in_turn_summary() {
         sid,
         next + 2,
         EventKind::BackgroundEnded(BackgroundEnded {
+            child: None,
             bg_id: "bg-1".into(),
             reason: BackgroundReason::Exited,
             exit_code: Some(1),

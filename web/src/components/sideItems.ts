@@ -22,6 +22,8 @@ export interface AgentRow {
   /** Its runs listed here: a follow-up (`delegate` with `session`, T68)
    * is the same sub-agent again, one row with its latest call. */
   runs: number;
+  /** Running in the background (X.24): its entry, which Stop ends. */
+  bg_id?: string;
 }
 
 export interface CommandRow extends BgRow {
@@ -74,7 +76,17 @@ export function sideItems(view: SessionView | null | undefined, keep: ReadonlySe
     // Runs over the whole chat: a follow-up in a later turn counts the
     // earlier ones too.
     if (child) runsOf.set(child, (runsOf.get(child) ?? 0) + 1);
-    const state = agentState(it, turnRunning);
+    let state = agentState(it, turnRunning);
+    // In the background (X.24): running until its end, then its result's.
+    const bg = Object.entries(view.background ?? {}).find(([, b]) => b.child && b.call_id === it.call_id);
+    if (bg) {
+      const end = bg[1].ended ? items.findLast((x) => x.type === "background_ended" && x.bg_id === bg[0]) : undefined;
+      state = !bg[1].ended
+        ? "running"
+        : end?.type === "background_ended" && end.reason === "finished"
+          ? (childStatus(end.tail) ?? "done")
+          : "stopped";
+    }
     if (i < from && state !== "running") return;
     const { head, cut } = commandHead(typeof it.input?.task === "string" ? it.input.task : "");
     const row: AgentRow = {
@@ -86,6 +98,7 @@ export function sideItems(view: SessionView | null | undefined, keep: ReadonlySe
       state,
       runs: child ? runsOf.get(child)! : 1,
     };
+    if (bg && !bg[1].ended) row.bg_id = bg[0];
     // A follow-up to a child already listed takes its row's place.
     const at = child ? agents.findIndex((a) => a.child === child) : -1;
     if (at >= 0) agents[at] = row;
@@ -93,6 +106,8 @@ export function sideItems(view: SessionView | null | undefined, keep: ReadonlySe
   });
   const commands: CommandRow[] = [];
   for (const [bg_id, b] of Object.entries(view.background ?? {})) {
+    // A background sub-agent is the row of its `delegate` call (X.24).
+    if (b.child) continue;
     const ended = endOf(view, bg_id);
     const at = callIndex.get(b.call_id) ?? -1;
     if (ended && at < from && !keep.has(bg_id)) continue;

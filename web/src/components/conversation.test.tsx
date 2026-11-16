@@ -179,15 +179,15 @@ describe("thinking", () => {
         {
           type: "thinking",
           message_id: "m1",
-          blocks: [
+                    blocks: [
             { type: "signed", text: "Check <b>main.rs</b> first." },
             { type: "redacted" },
             { type: "signed", text: " \n" },
             { type: "redacted" },
           ],
         },
-        { type: "thinking", message_id: "m2", blocks: [{ type: "redacted" }] },
-        { type: "thinking", message_id: "m3", blocks: [{ type: "signed", text: "" }] },
+        { type: "thinking", message_id: "m", blocks: [{ type: "redacted" }] },
+        { type: "thinking", message_id: "m", blocks: [{ type: "signed", text: "" }] },
       ],
       sessionRow(),
     );
@@ -203,7 +203,7 @@ describe("thinking", () => {
 
   test("a long text shows its first 64 KiB until asked for all of it", async () => {
     const long = "x".repeat(SHOWN_CHARS + 500);
-    await show([{ type: "thinking", message_id: "m1", blocks: [{ type: "text", text: long }] }], sessionRow());
+    await show([{ type: "thinking", message_id: "m", blocks: [{ type: "text", text: long }] }], sessionRow());
     const row = host.querySelector<HTMLDetailsElement>("[data-testid=thinking]")!;
     expect(row.querySelector("p")!.textContent).toHaveLength(SHOWN_CHARS);
     await act(async () => row.querySelector("button")!.click());

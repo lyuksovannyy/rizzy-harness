@@ -25,7 +25,8 @@
 //!   request; the last message has every step done and calls nothing
 //! * `script: [{"tool": .., "input": ..}, ..]` -> one call per step, in order
 //!   (step k = the k-th tool result since the message), then a summary of
-//!   the last result
+//!   the last result; a step written as an array of calls is those calls in
+//!   one step
 //! * a callback turn's opening -> `Noted: the command ended.` (it never acts
 //!   on program output; wrapped in [`Obedient`], `mock_obeys_output = true`
 //!   in config.toml, tests only, it takes the opening's first quoted line of
@@ -420,14 +421,32 @@ impl Provider for Mock {
                 .iter()
                 .filter(|m| matches!(m, ChatMsg::Tool { .. }))
                 .count();
-            if let Some(step) = steps.get(done) {
+            // A step that is an array is several calls in one step; the
+            // next step starts after all of their results.
+            let mut at = 0;
+            let mut next = None;
+            for step in &steps {
+                if at == done {
+                    next = Some(step);
+                    break;
+                }
+                at += step.as_array().map_or(1, |a| a.len().max(1));
+            }
+            if let Some(step) = next {
+                let calls = match step.as_array() {
+                    Some(a) => a.clone(),
+                    None => vec![step.clone()],
+                };
                 return Ok(Completion {
                     text: String::new(),
-                    tool_calls: vec![ToolCallRef {
-                        call_id: harness_core::new_id(),
-                        tool: step["tool"].as_str().unwrap_or("bash").into(),
-                        input: step["input"].clone(),
-                    }],
+                    tool_calls: calls
+                        .iter()
+                        .map(|c| ToolCallRef {
+                            call_id: harness_core::new_id(),
+                            tool: c["tool"].as_str().unwrap_or("bash").into(),
+                            input: c["input"].clone(),
+                        })
+                        .collect(),
                     usage,
                     stop: Default::default(),
                     thinking: None,

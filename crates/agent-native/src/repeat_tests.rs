@@ -151,6 +151,7 @@ impl TurnHost for Host {
 
 fn ended(bg_id: &str) -> BackgroundEnded {
     BackgroundEnded {
+        child: None,
         bg_id: bg_id.into(),
         reason: BackgroundReason::Exited,
         exit_code: Some(0),

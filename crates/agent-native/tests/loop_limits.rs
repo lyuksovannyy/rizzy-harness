@@ -194,6 +194,7 @@ async fn an_agent_definition_cannot_run_more_steps_than_the_node_allows() {
         deny_tools: vec![],
         delegates: vec![],
         caps: Some(harness_core::agent::DelegateCaps {
+            background: false,
             max_subagents: u32::MAX,
             max_tokens: u64::MAX,
         }),
