@@ -1,4 +1,4 @@
-// X.24 end to end: switching a chat's agent. While a turn runs the agent
+// X.28 end to end: switching a chat's agent. While a turn runs the agent
 // picker is disabled (the node would refuse the change); Stop ends the turn
 // and the picker is back. Picking agents writes nothing to the chat; the
 // next message shows "Switched to <agent> · <model>" above it, once.
