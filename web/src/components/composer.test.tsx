@@ -506,3 +506,63 @@ describe("/compact", () => {
     act(() => root.unmount());
   });
 });
+
+describe("the agent picker while the agent works", () => {
+  const agent = (id: string, name: string) => ({
+    id,
+    name,
+    description: "",
+    builtin: true,
+    default_model: null,
+    main_model: null,
+    fallbacks: [],
+    unavailable: [],
+    avatar: { shape: "circle", eyes: "round", accent: "blue" },
+  });
+  test("disabled while a turn runs or a pick waits, enabled once it ended", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    const picked: string[] = [];
+    const render = (running: boolean, picking = false) =>
+      act(() =>
+        root.render(
+          <Composer
+            where="session"
+            agents={[agent("general", "General"), agent("writer", "Writer")] as never}
+            models={[]}
+            workers={[]}
+            agentId="general"
+            onAgentChange={(id) => picked.push(id)}
+            picking={picking}
+            agenticBlocked={null}
+            running={running}
+            onStop={() => {}}
+            onSubmit={async () => {}}
+          />,
+        ),
+      );
+    const button = () => host.querySelector<HTMLButtonElement>('.agent-pick button[aria-label^="agent:"]')!;
+    const pill = () => host.querySelector<HTMLElement>(".agent-pick")!;
+    const pick = async (name: string) => {
+      act(() => button().click());
+      const option = [...host.querySelectorAll<HTMLLIElement>('.agent-pick [role="option"]')].find((o) => o.textContent === name);
+      await act(async () => option?.click());
+    };
+    render(true);
+    expect(button().disabled).toBe(true);
+    expect(pill().title).toBe("Stop the agent to pick another");
+    await pick("Writer");
+    expect(picked).toEqual([]);
+    // The turn ended (or was stopped): the picker is back.
+    render(false);
+    expect(button().disabled).toBe(false);
+    await pick("Writer");
+    expect(picked).toEqual(["writer"]);
+    // A pick waiting for the server's answer holds the picker.
+    render(false, true);
+    expect(button().disabled).toBe(true);
+    act(() => root.unmount());
+    host.remove();
+  });
+});

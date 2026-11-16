@@ -326,7 +326,8 @@
           "agent_id": "coder",
           "name": "Coder",
           "prompt_hash": "h1"
-        }
+        },
+        "model": "demo::mock"
       },
       "seq": 22,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
@@ -1370,7 +1371,6 @@
     }
   ],
   "expected": {
-    "active_agent": "coder",
     "background": {
       "bg-1": {
         "call_id": "c1",
@@ -1585,6 +1585,7 @@
           "name": "Coder",
           "prompt_hash": "h1"
         },
+        "model": "demo::mock",
         "type": "agent_changed"
       },
       {

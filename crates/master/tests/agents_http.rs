@@ -196,7 +196,8 @@ async fn chat_sessions_agents_and_mentions() {
     let (_, row) = call(&t, "GET", &format!("/api/sessions/{sid}"), None).await;
     assert_eq!(row["agent_id"], "general");
 
-    // Switching the session agent records agent_changed and sticks.
+    // Switching the session agent sticks in the row; the log records it
+    // only at the next message (below).
     let (st, _) = call(
         &t,
         "POST",
@@ -205,7 +206,6 @@ async fn chat_sessions_agents_and_mentions() {
     )
     .await;
     assert_eq!(st, StatusCode::OK);
-    events_until(&t, &sid, |e| e.iter().any(|x| x.kind == "agent_changed")).await;
     let (_, row) = call(&t, "GET", &format!("/api/sessions/{sid}"), None).await;
     assert_eq!(row["agent_id"], "reviewer");
 
@@ -231,6 +231,14 @@ async fn chat_sessions_agents_and_mentions() {
         _ => None,
     });
     assert_eq!(last_agent.as_deref(), Some("reviewer"));
+    let switched: Vec<_> = evs
+        .iter()
+        .filter_map(|e| match e.typed() {
+            Ok(EventKind::AgentChanged(a)) => Some(a.agent.agent_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(switched, ["reviewer"]);
 
     // Agentic sessions go to the worker node.
     let (st, v) = call(
