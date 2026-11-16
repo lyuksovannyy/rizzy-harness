@@ -600,6 +600,35 @@ async fn pictures_are_served_only_to_who_may_see_them() {
         StatusCode::NOT_FOUND
     );
 
+    // An <img> sends the cookie and a link minted for that URL (P-1): it
+    // works; the cookie alone does not.
+    let url = format!("{avatar}?v={first}");
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        "/api/links",
+        Some(json!({"urls": [url]})),
+        &alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let link = v["links"][&url]
+        .as_str()
+        .expect("a link for the avatar")
+        .to_string();
+    let cookie_only = |path: String| {
+        reqwest::Client::new()
+            .get(format!("{}{path}", t.base))
+            .header("cookie", alex.as_str())
+            .header("sec-fetch-dest", "image")
+            .send()
+    };
+    assert_eq!(cookie_only(link).await.unwrap().status(), StatusCode::OK);
+    assert_eq!(
+        cookie_only(url).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+
     // Bob joins alex's team: he sees the avatar, never the banner; the
     // members list carries its version.
     let (st, w) = req(

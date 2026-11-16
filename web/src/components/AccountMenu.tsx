@@ -5,7 +5,7 @@
 // screen or a touch pointer. A new workspace is named in a small dialog: a
 // text field may not live inside a menu.
 import "../lib/i18nPages";
-import { Building2, Check, ChevronLeft, ChevronRight, LogOut, Plus, Settings, Sparkles, UserRound } from "lucide-react";
+import { Building2, Check, ChevronLeft, ChevronRight, LogOut, Plus, Settings, UserRound, WandSparkles } from "lucide-react";
 import { type FormEvent, type KeyboardEvent, type ReactNode, type RefObject, useEffect, useRef, useState } from "react";
 import { pageApi } from "../apiPages";
 import { t } from "../lib/i18n";
@@ -14,7 +14,7 @@ import { workspaceName } from "../lib/workspaces";
 import { type Side, useAnchored } from "../md/anchored";
 import type { Me, WorkspaceList, WorkspaceSummary } from "../types";
 import { NavLink } from "./NavLink";
-import { UserAvatar } from "./profile/UserAvatar";
+import { LinkedImg } from "./Linked";
 
 /** What shows: the menu, or the dialog naming a new workspace. */
 export type MenuView = "menu" | "new";
@@ -234,7 +234,15 @@ function Menu(props: AccountMenuProps) {
       onPointerEnter={() => hoverHead(true)}
       onPointerLeave={() => hoverHead(false)}
     >
-      <UserAvatar userId={me.user_id} version={avatar} name={props.displayName} />
+      {/* As profile/UserAvatar does; inlined so this chunk adds no shared
+          chunk to the first load's preload map. */}
+      <span className="avatar" aria-hidden="true">
+        {me.user_id && avatar ? (
+          <LinkedImg url={`/api/users/${encodeURIComponent(me.user_id)}/avatar?v=${encodeURIComponent(avatar)}`} alt="" className="avatar-img" />
+        ) : (
+          props.displayName.slice(0, 1).toUpperCase()
+        )}
+      </span>
       <span className="account-lines grow">
         <span className="ellipsis">{props.displayName}</span>
         <span className="ellipsis muted small">{props.tier}</span>
@@ -265,7 +273,7 @@ function Menu(props: AccountMenuProps) {
                 <UserRound size={14} aria-hidden="true" /> {TEXT.profile}
               </NavLink>
               <NavLink to={{ kind: "settings", section: "account", tab: "personalisation" }} onNavigate={go} role="menuitem" className="menu-item">
-                <Sparkles size={14} aria-hidden="true" /> {TEXT.personalisation}
+                <WandSparkles size={14} aria-hidden="true" /> {TEXT.personalisation}
               </NavLink>
               <NavLink to={{ kind: "settings", section: "workspace" }} onNavigate={go} role="menuitem" className="menu-item">
                 <Building2 size={14} aria-hidden="true" /> {t("workspace.settings")}

@@ -6,7 +6,6 @@ import type { Agent, ModelInfo, NodeInfo, Notice, Prefs, AttentionItem, RoutineA
 import type { Mode } from "../lib/modes";
 import { Composer, type Submission } from "./Composer";
 import type { HostRight } from "../lib/execModes";
-import { Attention } from "./Attention";
 import { Similar, type SimilarHandle } from "./Similar";
 import type { History } from "../bg/topics";
 import { readBackdropMirror } from "../lib/appearance";
@@ -18,6 +17,9 @@ import { useNewChatAgent, type AgentDefaults } from "../lib/agentDefaults";
 const Backdrop = lazy(() => import("../bg/Backdrop"));
 // Problems are rare (a model its provider dropped): their code loads when there is one.
 const Notices = lazy(() => import("./Notices").then((m) => ({ default: m.Notices })));
+// What waits for the person (chats, routine results): loaded when there is
+// some (it renders nothing otherwise), off the first load.
+const Attention = lazy(() => import("./Attention").then((m) => ({ default: m.Attention })));
 
 /** How long a mode the bar picked must hold before the background follows. */
 const AUTO_SETTLE_MS = 700;
@@ -141,13 +143,15 @@ export function Home(props: {
           onOpen={props.onOpen}
           onCount={setSimilarCount}
         />
-        {similarCount === 0 && (
-          <Attention
-            items={props.attention ?? []}
-            routines={props.routines}
-            onOpen={props.onOpen}
-            timeZone={props.timeZone}
-          />
+        {similarCount === 0 && (!!props.attention?.length || !!props.routines?.length) && (
+          <Suspense fallback={null}>
+            <Attention
+              items={props.attention ?? []}
+              routines={props.routines}
+              onOpen={props.onOpen}
+              timeZone={props.timeZone}
+            />
+          </Suspense>
         )}
         {!!props.toReview && (
           <a className="review-link small" href={MEMORY_HASH}>

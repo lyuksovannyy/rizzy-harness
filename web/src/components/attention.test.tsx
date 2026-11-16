@@ -149,9 +149,11 @@ describe("Home", () => {
     />
   );
 
-  test("shows the routine results under the bar, and hides them for similar chats", () => {
+  test("shows the routine results under the bar, and hides them for similar chats", async () => {
     similarCount = 0;
     const m = mount(home([row()]));
+    // The list is its own chunk, loaded when something waits.
+    await act(async () => vi.dynamicImportSettled());
     expect(labels(m.host)).toEqual(["Morning briefing · Finished3m ago"]);
     similarCount = 2;
     m.render(home([row()]));
