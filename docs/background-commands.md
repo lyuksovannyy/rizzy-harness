@@ -1033,3 +1033,129 @@ says so now.
 **Not done:** the start call's card states (§12); a per-workspace share of the budget; any
 notification beyond the attention row (no browser notification for a callback turn).
 
+
+## 14. Background sub-agents (ADOPTION_PLAN X.24, PLAN.md T72)
+
+`delegate` gains `background: true`. Before, a `delegate` call held its parent's turn until the
+child ended. Claude Code (`run_in_background` on its agent tool, `TaskOutput`/`TaskStop` shared
+with background shells), OpenCode (`background` on `subagent`, a synthetic message that wakes the
+parent, `research/round2/synth/09-subagents-models-retry.md` §2), Codex (spawn, then a mailbox
+read at the next turn boundary or `wait_agent`), DeepSeek and Hermes (results that re-enter later
+as a message) let the lead go on and hear the result when it is ready. This is the smallest form
+of that which reuses what background commands already have.
+
+**One argument, no new tool.** `delegate { agent, task, session?, background? }`. The call
+returns at once: `session: <child>` (the same first line a foreground result has, so the card, the
+side panel and a later follow-up find the child the same way), then "started in the background as
+bg-<n>" and when its time limit stops it at the latest. The child is the same child session a
+foreground call makes (`Session::start_child` / `start_continue`, split out of `run_child` and
+`run_continue`): its own folder when it changes files, the parent's folder when it only reads,
+`no_callbacks`, the parent's mode as its ceiling at every call, the parent's execution mode. Only
+who waits differs: a task spawned by the node (`session/bg_agents.rs`, `run_in_background`) owns
+its run, with a cancel token of its own (the parent's turn ends without it).
+
+**One table, one end path.** The child is an entry of its chat's background table
+(`SessionBg::reserve_agent`, `adopt_agent`, `agent_ended`), numbered `bg-<n>` with the commands.
+So everything that ends or lists a background command ends and lists it, with no second path:
+`bash_output` (list), `bash_stop`, the person's Stop and Stop all (`/background/{bg}/stop`, the
+same handler), the revocation sweep (`close`), the chat's deletion (`stop_all_within`), the node's
+stop (`stop_background_now`, and the stop waits for `active()` and unrecorded ends), and an undo's
+refusal while one runs (`background_active`). It takes no node slot and no output ring (its work
+is in its own chat); its own count is `[limits] background_agents_per_chat` (4, 0 turns it off),
+apart from the commands'. Its end goes to the session actor as a command's does (`Ended`, once,
+`unrecorded` counted before the entry stops running), and is recorded by the session, the log's
+one writer, as `background_ended { reason, child }`: at a step boundary of a running turn
+(`delivered`), or between turns, then a callback turn by §4.4 and PR 116's rules
+(`waiting_ends`, `calls_back`, `CALLBACK_BUSY`), with no change to the master.
+
+**Merge-back at delivery.** The node merges a writer child's folder back when it records the end
+(`Session::end_event`, which calls the foreground's `child_outcome`: the same three-way merge, the
+same notes, the same `NOT_APPLIED_LAST`, the folder removed, the result kept in the checkpoint
+store when it does not apply), never in the middle of a parent step: at the step boundary no tool
+of the parent runs; between turns the bg gate keeps a turn's start out. What the parent and other
+children changed meanwhile is what the merge is for; a change on the same lines is not applied and
+the result carries its diff. The built end is kept until the log takes it (`ChildEnd::Ready`), so a
+failed append is not merged twice.
+
+**The result** is `subagent::render`'s, as a foreground `delegate` returns it (`session:` line,
+the harness's status line, the report behind `| `, cut at 24,000 characters, the merge note and
+diff), stored in `background_ended.child.result` so the model's note (`BackgroundEnded::model_note`)
+is built from the log alone: the same bytes at the step, in a callback turn's opening and in every
+rebuilt request (T59). Its usage is in `child.usage`; both folds add it to the chat's usage. Its
+citation labels are its own (a fresh `RefBook`): the note says they name none of the chat's
+sources.
+
+**Reasons.** `finished` (new: the child's turn ended by itself, done, failed or at a cap) and
+`timed_out` call back; `stopped_by_agent`, `stopped_by_user`, `access_revoked`, `node_stopping`
+and `node_restarted` do not (as for commands). Unlike a command's, a child's note is written for
+every reason, `stopped_by_agent` included: its result and merge are news after `bash_stop` too.
+
+**Bounds, the node's only.** Per chat `background_agents_per_chat` running (4; the next start is
+refused naming the running ids and the key; nothing is stopped); per child the node's step cap,
+`background_agent_timeout_s` of wall clock (1,800 s by default, 60 to 3,600: the master's running
+window assumes at most an hour, as for commands), and a token cap: its share of the turn's sub-agent budget, reserved from it when it starts (review
+F3). Each background start takes an equal share of what the budget has left over the turn's
+sub-agent places still free (what is left ÷ the free places of `max_subagents`, its own included),
+so the caps a turn grants never add up to more than
+its budget (`max_subagent_tokens`, 200,000 by default), and a start whose share would be 0 is
+refused with the reason; a share not used is not given back, and the start text names it. The cap
+is `TurnExtra::max_tokens`, checked before each request like the step cap: the request at or past
+it offers `finish` alone, so a child can overshoot its share by that one request (its context and
+its answer, as for the step cap). It counts as one of the turn's
+`max_subagents`. Depth one: `bound_delegation` clears the switch below the top, and a sub-agent's
+turn, a callback turn and a routine's chat (`no_callbacks`: nobody would read the result) are
+refused with the reason; a `host` chat has no background table and is refused too. The agent's own
+switch is `DelegateCaps::background` (frontmatter `background_subagents`, the Agents page's
+"Background sub-agents"; on only for the built-in Senior Teamlead); with the switch off or the key
+at 0 `delegate` offers no `background`, and a forged one is refused before any child exists. The
+master can turn it off for an agent, never raise the node's count.
+
+**Cost of a prompt-injected lead.** Per person's message: at most `max_subagents` children (a
+callback turn cannot delegate, so no chain), each bounded by steps, tokens and wall clock, at most
+`background_agents_per_chat` at once, and their ends spend the same `callback_turns` budget as
+commands. With the defaults: 4 children whose token caps add up to at most the turn's 200,000 (each
+may pass its share by one request) and 30 minutes each, then at most 3 callback turns of 20 steps. Worse than a foreground child only in
+that the person may have left; the side panel lists them with Stop.
+
+**Approvals.** A background child asks as a foreground child does: its card is in its own chat
+("Open its chat" on its side panel row, whose activity line, which follows the child's own chat,
+says "waiting for an approval"), answered by the
+chat's owner only. Nothing answers it because nobody watches; the card waits at most until the
+child's wall clock stops it (then it is denied as cancelled). `auto` runs it without cards, as it
+runs a foreground child; plan mode starts only readers, made in plan mode for life (T67/T70). The
+research's recommendation (§6.1.3) is to reject a background child's cards outright; we keep the
+card because the person can answer it and the wait is bounded and visible, and say so here.
+
+**Lifecycle.**
+
+| Event | The background sub-agent | Recorded | Callback |
+|---|---|---|---|
+| Its turn ends (done, failed, a cap) | merged back at delivery | `finished` with its result | Yes |
+| Its wall-clock limit | cancelled, then as above | `timed_out` | Yes |
+| `bash_stop` | cancelled, then merged | `stopped_by_agent` (a note at the next step) | No |
+| The person's Stop, Stop all | cancelled, then merged | `stopped_by_user` | No |
+| The chat's Stop | keeps running (R11, as a command) | none | n/a |
+| The chat deleted | cancelled; its folder removed unmerged | none (the log goes) | No |
+| The owner loses access | cancelled, then merged; no start until they write | `access_revoked` | No |
+| The node stops | cancelled, then merged within the stop's bound | `node_stopping` | No |
+| The node dies | its guards die with it; its folder is removed at the next start | `node_restarted`, once, at the start, no result | No |
+| The master is away at its end | recorded on the node; replays at the next hello | as usual | Only within 60 min (§4.4) |
+
+After a restart its own turn is closed `interrupted` (its own log) and the note says how to go on:
+`delegate` with `session` keeps its conversation, not its files. A follow-up to a child that still
+runs, or whose end is not recorded yet, is refused (`undelivered_child`): its folder is not touched
+before its merge.
+
+**Undo.** A merge delivered at a step boundary of a running turn is part of that turn: its
+checkpoint holds it, and Undo of the turn undoes it. A merge delivered between turns lands in no
+turn's checkpoint (review): Undo never reverts it; the person reverts those files by hand, or with
+git.
+
+**Not done.** A "wait" tool (ending the turn and being called back is the wait; Codex's
+`wait_agent` is for a lead that cannot end its turn); steering a running child (Codex
+`send_input` while it runs, Hermes `steer`); a node-wide count of background children; moving a
+running foreground child into the background (OpenCode, Claude Code's Ctrl+B); deleting a
+sub-agent's own chat with its parent's (foreground children keep theirs too); a node-wide count of
+background children, and any line about them in `doctor`; a crash between a writer's merge and the
+append of its end (the restart's note then says nothing of it was merged while the merge is in the
+folder; the foreground path has the same window).

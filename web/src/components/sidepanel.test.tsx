@@ -339,3 +339,68 @@ describe("one panel owns the right side (review D7)", () => {
     expect(strip()).not.toBeNull();
   });
 });
+
+// X.24 review F6: background sub-agents get what commands have: Stop all
+// (two or more, with or without commands), "stopping…" and a refusal on the
+// row, a note instead of the button while the node is away, and the line
+// that they keep running after the turn's Stop.
+describe("background sub-agents in the side panel", () => {
+  const KIDS = ["44444444-4444-4444-4444-444444444444", "55555555-5555-5555-5555-555555555555"];
+  function kids(ended = false): SessionView {
+    const v = view({});
+    v.items.push({ type: "user", turn_id: "t2", text: "go" });
+    KIDS.forEach((kid, i) => {
+      const call_id = `k${i}`;
+      v.items.push({
+        type: "tool",
+        call_id,
+        author: null,
+        tool: "delegate",
+        input: { agent: "scout", task: `look ${i}`, background: true },
+        live_output: "",
+        result: { ok: true, output: `session: ${kid}\nSub-agent @scout started in the background as bg-${i + 1}.`, exit_code: null },
+        approval: null,
+      });
+      (v.background ??= {})[`bg-${i + 1}`] = { call_id, ends_by_ms: NOW + 600_000, timeout_s: 1800, ended, child: { session: kid, agent_id: "scout" } };
+    });
+    return v;
+  }
+  const agentRow = (i: number) => host.querySelectorAll<HTMLElement>('.side-row[data-kind="agent"]')[i]!;
+
+  test("two run, no commands: their head says they keep running, and Stop all stops them once", async () => {
+    await show(kids());
+    await until(strip);
+    expect(host.querySelector('[data-kind="bg-agents-head"]')!.textContent).toContain("keep running when the turn stops");
+    expect(host.querySelector('[data-kind="commands-head"]')).toBeNull();
+    await act(async () => button("Stop all")!.click());
+    expect(call).toHaveBeenCalledTimes(1);
+    expect(call).toHaveBeenCalledWith("POST", `/api/sessions/${SID}/background/stop`);
+    expect(agentRow(0).textContent).toContain("stopping…");
+    expect(agentRow(1).textContent).toContain("stopping…");
+  });
+
+  test("a refused stop says why on the row", async () => {
+    call.mockImplementation(() => Promise.reject(new Error("no background command bg-1 in this chat")));
+    await show(kids());
+    await until(strip);
+    await act(async () => button("Stop bg-1")!.click());
+    expect(call).toHaveBeenCalledWith("POST", `/api/sessions/${SID}/background/bg-1/stop`);
+    expect(agentRow(0).querySelector(".error-text")!.textContent).toBe("no background command bg-1 in this chat");
+    expect(button("Stop bg-1")!.disabled).toBe(false);
+  });
+
+  test("the node away: a note on the row, no Stop to press", async () => {
+    await show(kids(), [node(false)]);
+    await until(strip);
+    expect(agentRow(0).textContent).toContain("The node is away");
+    expect(button("Stop bg-1")).toBeUndefined();
+    expect(button("Stop all")!.disabled).toBe(true);
+  });
+
+  test("ended: no head, no Stop", async () => {
+    await show(kids(true));
+    await until(strip);
+    expect(host.querySelector('[data-kind="bg-agents-head"]')).toBeNull();
+    expect(button("Stop bg-1")).toBeUndefined();
+  });
+});
