@@ -1288,12 +1288,12 @@ impl NodeRuntime {
                     None => Err("unknown session".into()),
                 }
             }
-            MasterToNode::SetAgent {
-                session_id, agent, ..
-            } => {
+            // Nothing is written: the master keeps the pick; refused while
+            // the chat works.
+            MasterToNode::SetAgent { session_id, .. } => {
                 self.audit("session.set_agent", session_id).await;
                 match self.session(session_id) {
-                    Some(s) => s.set_agent(agent).await,
+                    Some(s) => s.set_agent(),
                     None => Err("unknown session".into()),
                 }
             }

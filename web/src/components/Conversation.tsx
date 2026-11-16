@@ -331,7 +331,8 @@ export default function Conversation(props: {
   const nodeId = meta?.node_id ?? props.row?.node_id ?? "";
   const node = props.nodes.find((n) => n.node_id === nodeId);
   const agentic = (meta?.profile ?? props.row?.profile) === "agentic";
-  const activeAgent = view?.active_agent ?? props.row?.agent_id ?? "general";
+  // The chat's agent: the person's pick (its row), which the next message runs.
+  const activeAgent = props.row?.agent_id ?? meta?.agent_id ?? "general";
   const agentName = (id: string | null | undefined) =>
     props.agents.find((a) => a.id === id)?.name ?? id ?? "";
   const incognito = !!(meta?.incognito ?? props.row?.incognito);
@@ -682,7 +683,8 @@ export default function Conversation(props: {
                   case "agent_changed":
                     return (
                       <div key={i} className="divider">
-                        {it.agent.name}
+                        Switched to {it.agent.name}
+                        {it.model ? ` · ${it.model}` : ""}
                       </div>
                     );
                   case "approval_mode_changed":
@@ -849,7 +851,7 @@ export default function Conversation(props: {
             models={props.models}
             workers={[]}
             agentId={activeAgent}
-            onAgentChange={(id) => void pageApi.setAgent(sessionId, id)}
+            onAgentChange={(id) => pageApi.setAgent(sessionId, id)}
             approval={
               // The owner's own agentic chat on a node that can change it;
               // a sub-agent's follows its parent, a routine's its routine.

@@ -29,7 +29,6 @@ const view = (items: Item[]): SessionView =>
     running_turn: null,
     pending_approvals: [],
     unknown_events: 0,
-    active_agent: null,
     running_agent: null,
     variant_selection: {},
     usage: { input_tokens: 0, output_tokens: 0, context_tokens: 0 },

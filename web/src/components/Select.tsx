@@ -21,6 +21,8 @@ export function Select(props: {
   compact?: boolean;
   /** Each option's hint on its own line under the label. */
   stacked?: boolean;
+  /** Not changeable now. */
+  disabled?: boolean;
 }) {
   const id = useId();
   const [open, setOpen] = useState(false);
@@ -50,6 +52,7 @@ export function Select(props: {
         aria-expanded={open}
         aria-controls={`${id}-list`}
         aria-label={`${props.label}: ${current?.label ?? "none"}`}
+        disabled={props.disabled}
         onClick={() => setOpen((v) => !v)}
         onKeyDown={(e) => {
           if (!open && (e.key === "ArrowDown" || e.key === "Enter" || e.key === " ")) {
@@ -75,7 +78,7 @@ export function Select(props: {
         {current?.hint && !props.compact && <span className="option-hint">{current.hint}</span>}
         <ChevronDown size={14} />
       </button>
-      {open && (
+      {open && !props.disabled && (
         <ul className="select-list" role="listbox" id={`${id}-list`} aria-label={props.label}>
           {props.options.map((o, i) => (
             <li

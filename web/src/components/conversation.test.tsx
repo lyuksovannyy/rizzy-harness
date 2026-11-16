@@ -48,7 +48,6 @@ const view = (items: Item[], profile: "chat" | "agentic" = "agentic"): SessionVi
     running_turn: null,
     pending_approvals: [],
     unknown_events: 0,
-    active_agent: "general",
     running_agent: null,
     variant_selection: {},
     usage: { input_tokens: 0, output_tokens: 0 },
@@ -167,6 +166,20 @@ describe("shortened context", () => {
     );
     expect(folded.querySelector("p")!.textContent).toBe("Read <b>main.rs</b>");
     expect(folded.querySelector("b")).toBeNull();
+  });
+});
+
+describe("agent switches", () => {
+  test("the notice names the agent and its model, from the record; the picker shows the chat's pick", async () => {
+    await show(
+      [{ type: "agent_changed", agent: { agent_id: "writer", name: "Writer", prompt_hash: "h" }, model: "demo::big" }],
+      sessionRow({ agent_id: "researcher" }),
+    );
+    const lines = [...host.querySelectorAll(".divider")].map((d) => d.textContent ?? "");
+    expect(lines).toContain("Switched to Writer · demo::big");
+    // The row (the person's pick since) wins over the fold's last switch.
+    // (No agent list here: the header names the agent by its id.)
+    expect(host.textContent).toContain("researcher");
   });
 });
 

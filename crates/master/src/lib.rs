@@ -2335,7 +2335,11 @@ impl Master {
         .await
     }
 
-    /// Change the session's active agent for future turns.
+    /// Change the agent the chat runs from its next message. The chat's
+    /// state, not its history: the node is asked first (it refuses while
+    /// the chat works, `AGENT_WORKING`), then the pick goes into the row,
+    /// which every later prompt, retry and callback resolves its agent
+    /// from. The node records the switch when a turn runs it.
     pub async fn set_agent(&self, sid: SessionId, agent_id: &str) -> Result<(), CommandError> {
         let row = self
             .inner
@@ -2348,12 +2352,20 @@ impl Master {
             .resolver_for(row.workspace_id.as_deref())
             .await
             .agent_spec_with(Some(agent_id), session_model.as_deref(), None)?;
+        // Stored as the resolved id (an alias names the agent it is).
+        let id = agent.agent_id.clone();
         self.send_command(&row.node_id, |req_id| MasterToNode::SetAgent {
             req_id,
             session_id: sid,
             agent,
         })
-        .await
+        .await?;
+        self.inner
+            .mirror
+            .call(move |s| s.set_session_agent(sid, &id))
+            .await?;
+        self.nudge(Live::SessionsChanged(Audience::Chat(sid)));
+        Ok(())
     }
 
     /// Change a chat's approval mode on its node (T50), which clamps it

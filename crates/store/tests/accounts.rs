@@ -202,16 +202,21 @@ fn session_row_tracks_agent_and_profile() {
     let r = &s.sessions().unwrap()[0];
     assert_eq!(r.agent_id.as_deref(), Some("general"));
     assert_eq!(r.profile.as_deref(), Some("chat"));
+    // The person's pick goes into the row; a turn's `agent_changed` (the
+    // record of a switch that ran) moves nothing: the row has one writer.
+    assert!(s.set_session_agent(sid, "writer").unwrap());
+    assert_eq!(s.sessions().unwrap()[0].agent_id.as_deref(), Some("writer"));
     s.append(
         "master",
         &ev(
             2,
             "agent_changed",
-            json!({"agent": {"agent_id": "writer", "name": "Writer", "prompt_hash": "h"}}),
+            json!({"agent": {"agent_id": "coder", "name": "Coder", "prompt_hash": "h"}}),
         ),
     )
     .unwrap();
     assert_eq!(s.sessions().unwrap()[0].agent_id.as_deref(), Some("writer"));
+    assert!(!s.set_session_agent(SessionId::new(), "writer").unwrap());
 }
 
 #[test]

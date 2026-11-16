@@ -60,7 +60,6 @@ function view(bg: Record<string, { ended?: boolean; left_s?: number; timeout_s?:
     running_turn: null,
     pending_approvals: [],
     unknown_events: 0,
-    active_agent: "general",
     running_agent: null,
     variant_selection: {},
     usage: { input_tokens: 0, output_tokens: 0, context_tokens: 0 },

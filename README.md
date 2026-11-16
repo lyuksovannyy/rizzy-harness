@@ -2989,6 +2989,18 @@ naming the setting. An agent with file tools may be the chats' default: in a
 chat it simply has no file or command tools (a call to one gets "unknown
 tool").
 
+**Switching a chat's agent.** The agent picker in a chat's reply bar changes
+the agent (and so the model) your next message goes to. Picking adds nothing
+to the chat: try A, then B, then C, then B again and send nothing, and the
+chat is as it was. When you send the next message, or Retry, under another
+agent or model than the chat last ran, a line "Switched to <agent> · <model>"
+appears above that message, once. An `@mention`, a fallback model that
+answered once and a turn that resumed after a background command are no
+switch. While the agent works (a turn runs or is being stopped, a resumed
+turn, a retry, a `/compact`) the picker is disabled: Stop it, or wait for the
+turn to end, and the picker is back. The node refuses a change sent anyway
+("The agent is working…").
+
 "Your facts" are the memories in Settings → Account; an agent without them
 neither recalls nor proposes them. Scout and Reviewer are read-only by their
 tool list: every tool they may call changes nothing (one allow-list the master,

@@ -131,8 +131,12 @@ rewritten after the layout mockup (foundations, UI shell and bar first, onboardi
   loser's alias dropped and logged, so existing data keeps loading.
 * The same agents serve chat and agentic sessions; tools the runtime lacks are unavailable.
   Node policy still wins: an agent's tool list is a request, not a permission.
-* Switching agent mid-session is allowed (`agent_changed` event; history carries over; the
-  prompt cache resets). One agent answers per turn; an `@mention` routes that turn to the named
+* Switching agent mid-session is allowed between turns (history carries over; the prompt
+  cache resets). The pick is the chat's state, kept in the master's session row, never an
+  event; the node refuses `session.set_agent` while the chat works (its turn slot is held, or
+  a `/compact` runs) and records the switch as `agent_changed { agent, model }` right before
+  the `turn_started` of the person's next turn under the chat's own agent whose agent or
+  model differs from the last recorded one (`session_created`, else the last `agent_changed`). One agent answers per turn; an `@mention` routes that turn to the named
   agent (mention popup lists agents; the selector shows the override). Several agents in one
   turn only through an orchestrator.
 * Event fields: `author` (agent id) on assistant/tool events; agent snapshot (name + prompt

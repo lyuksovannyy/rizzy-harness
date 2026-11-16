@@ -135,7 +135,8 @@ pub struct SessionRow {
     /// The user who created the session; `None` when created with the API
     /// token or directly on a node.
     pub owner_id: Option<String>,
-    /// The session's active agent (from `session_created` / `agent_changed`).
+    /// The agent the chat runs from its next message: `session_created`'s,
+    /// then the person's pick (`Store::set_session_agent`, master only).
     pub agent_id: Option<String>,
     /// `chat` or `agentic`; `None` until `session_created` has been mirrored.
     pub profile: Option<String>,
@@ -939,17 +940,6 @@ impl Store {
                     )?;
                 }
             }
-            "agent_changed" => {
-                let agent = e
-                    .payload
-                    .pointer("/agent/agent_id")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-                tx.execute(
-                    "UPDATE sessions SET agent_id = ?2 WHERE session_id = ?1",
-                    params![sid, agent],
-                )?;
-            }
             "turn_started" => {
                 let callback = e.payload.get("cause").is_some_and(|c| !c.is_null());
                 tx.execute(
@@ -1029,6 +1019,17 @@ impl Store {
             params![sid, title, body],
         )?;
         Ok(())
+    }
+
+    /// The agent chat `sid` runs from its next message: the person's pick,
+    /// kept in its row (the log records the switch only when a turn runs
+    /// it, as `agent_changed`). `false` when there is no such chat.
+    pub fn set_session_agent(&self, sid: SessionId, agent_id: &str) -> Result<bool> {
+        let n = self.lock().execute(
+            "UPDATE sessions SET agent_id = ?2 WHERE session_id = ?1",
+            params![sid.to_string(), agent_id],
+        )?;
+        Ok(n > 0)
     }
 
     /// Rename chat `sid`: its row's title (every list, search hit and page

@@ -87,7 +87,8 @@ export function Composer(props: {
   workers: NodeInfo[];
   /** Selected agent (home: the choice for the new chat; session: the session's agent). */
   agentId: string;
-  onAgentChange: (id: string) => void;
+  /** Session: refused while the agent works; the refusal is said here. */
+  onAgentChange: (id: string) => unknown;
   /** Session: what the selected agent is doing, for its avatar on the pill. */
   agentState?: AvatarState;
   /** Session model (session view), for the effort control. */
@@ -397,6 +398,8 @@ export function Composer(props: {
   const popupOpen = suggestions.length > 0;
   const pickedAgent = props.agents.find((a) => a.id === props.agentId);
   const pickedAlert = pickedAgent ? agentAlert(pickedAgent) : null;
+  // A chat's agent changes between turns only (the node refuses it otherwise).
+  const stillWorking = !home && !!(props.running || props.compacting || busy);
   const effortModel = home ? model : props.sessionModel;
   const effortOk = resolveModel(props.models, effortModel)?.effort ?? false;
   // Images: not in search or a temporary chat; every model answering must
@@ -714,11 +717,14 @@ export function Composer(props: {
           {mode !== "search" && props.agents.length > 0 && (
             <span
               className={`agent-pick${pickedAlert ? " bad" : ""}`}
-              title={override ? `@${override} ${t("composer.forMessage")}` : (pickedAlert ?? undefined)}
+              title={
+                override ? `@${override} ${t("composer.forMessage")}` : stillWorking ? "Stop the agent to pick another" : (pickedAlert ?? undefined)
+              }
             >
               <Select
                 compact
                 label="agent"
+                disabled={stillWorking}
                 value={props.agentId}
                 options={pickable(props.agents, props.agentId).map((a) => ({
                   value: a.id,
@@ -727,7 +733,13 @@ export function Composer(props: {
                   icon: <AgentMark agent={a} size={18} state={a.id === props.agentId ? props.agentState : undefined} />,
                 }))}
                 onChange={(id) => {
-                  props.onAgentChange(id);
+                  setErr(null);
+                  const done = Promise.resolve(props.onAgentChange(id)).catch((x) => setErr(x instanceof Error ? x.message : String(x)));
+                  // A chat's: one pick at a time, the next waits for this one's answer (the last pick is the chat's).
+                  if (!home) {
+                    setBusy(true);
+                    void done.finally(() => setBusy(false));
+                  }
                   ta.current?.focus();
                 }}
               />
