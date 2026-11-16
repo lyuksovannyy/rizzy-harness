@@ -96,8 +96,10 @@ let PAGE = null;
     await p.waitForSelector('.tool >> text=@reviewer: check the notes');
     await p.waitForFunction(() => document.querySelectorAll('.tool.tool-ok').length >= 2);
     await p.screenshot({ path: `${S}/p8-2-teamlead.png` });
-    const recents = await p.innerText('.sidebar');
-    check(!recents.includes('@scout:'), 'sub-agent sessions stay out of Recents');
+    // The sub-agents' sessions nest under the parent's row, not at the top level.
+    await p.waitForFunction(() => [...document.querySelectorAll('.sidebar ul.chats.sub a.session-item')].some((a) => a.textContent.includes('@scout:')));
+    const top = await p.$$eval('.sidebar-scroll > ul.chats > li > a', (a) => a.map((x) => x.textContent));
+    check(!top.some((t) => t.includes('@scout:')), 'sub-agent sessions are not top-level rows');
     await p.click('.tool:has-text("@reviewer: check") .child-link');
     await p.waitForSelector('text=Back to the main session');
     await p.waitForSelector('text=You said: check the notes');

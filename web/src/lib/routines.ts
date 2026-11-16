@@ -158,7 +158,7 @@ export const routinesApi = {
 export function ranNow(res: { run_id?: string; skipped?: string }): string {
   if (res.skipped === "overlap") return "Skipped: a run is still going.";
   if (res.skipped) return "Skipped: a limit was reached.";
-  return "Started. Its chat appears in Recent.";
+  return "Started. Its chat appears in the sidebar.";
 }
 
 // ── Webhooks ──

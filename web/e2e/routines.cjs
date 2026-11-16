@@ -75,7 +75,7 @@ let PAGE = null;
 
     // Run now: its chat waits for the approval.
     await p.click('.agents-head button:has-text("Run now")');
-    await p.waitForSelector('text=Started. Its chat appears in Recent.');
+    await p.waitForSelector('text=Started. Its chat appears in the sidebar.');
     await home();
     const waiting = '.attention button:has-text("Echo check")';
     await p.waitForSelector(waiting, { timeout: 20000 });

@@ -7,7 +7,6 @@ import type { Mode } from "../lib/modes";
 import { Composer, type Submission } from "./Composer";
 import type { HostRight } from "../lib/execModes";
 import { Attention } from "./Attention";
-import { Notices } from "./Notices";
 import { Similar, type SimilarHandle } from "./Similar";
 import type { History } from "../bg/topics";
 import { readBackdropMirror } from "../lib/appearance";
@@ -17,6 +16,8 @@ import { useNewChatAgent, type AgentDefaults } from "../lib/agentDefaults";
 
 // The mode backgrounds load on their own, and not at all when turned off.
 const Backdrop = lazy(() => import("../bg/Backdrop"));
+// Problems are rare (a model its provider dropped): their code loads when there is one.
+const Notices = lazy(() => import("./Notices").then((m) => ({ default: m.Notices })));
 
 /** How long a mode the bar picked must hold before the background follows. */
 const AUTO_SETTLE_MS = 700;
@@ -127,7 +128,11 @@ export function Home(props: {
               : undefined
           }
         />
-        <Notices notices={props.notices ?? []} agents={props.agents} />
+        {!!props.notices?.length && (
+          <Suspense fallback={null}>
+            <Notices notices={props.notices} agents={props.agents} />
+          </Suspense>
+        )}
         <Similar
           ref={similar}
           text={typed.text}
