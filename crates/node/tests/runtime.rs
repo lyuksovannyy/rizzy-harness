@@ -931,6 +931,8 @@ async fn git_checkpoints_and_undo() {
                 // Not the developer's ~/.gitconfig (a global `commit.gpgsign`
                 // or `core.hooksPath` failed or ran things in these commits).
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                // Nor the global ignore file (`~/.config/git/ignore`).
+                .env("XDG_CONFIG_HOME", "/nonexistent")
                 .env("GIT_CONFIG_NOSYSTEM", "1")
                 .status()
                 .unwrap()
@@ -1014,6 +1016,8 @@ async fn hostile_repo_config_does_not_run_on_checkpoint_or_undo() {
                 // Not the developer's ~/.gitconfig (a global `commit.gpgsign`
                 // or `core.hooksPath` failed or ran things in these commits).
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                // Nor the global ignore file (`~/.config/git/ignore`).
+                .env("XDG_CONFIG_HOME", "/nonexistent")
                 .env("GIT_CONFIG_NOSYSTEM", "1")
                 .status()
                 .unwrap()
@@ -1455,6 +1459,8 @@ async fn a_sub_agent_whose_log_failed_changes_nothing_in_the_folder() {
                 // Not the developer's ~/.gitconfig (a global `commit.gpgsign`
                 // or `core.hooksPath` failed or ran things in these commits).
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                // Nor the global ignore file (`~/.config/git/ignore`).
+                .env("XDG_CONFIG_HOME", "/nonexistent")
                 .env("GIT_CONFIG_NOSYSTEM", "1")
                 .status()
                 .unwrap()
@@ -1538,6 +1544,8 @@ fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
         // Not the developer's ~/.gitconfig (a global `commit.gpgsign`
         // or `core.hooksPath` failed or ran things in these commits).
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        // Nor the global ignore file (`~/.config/git/ignore`).
+        .env("XDG_CONFIG_HOME", "/nonexistent")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .unwrap();
@@ -2268,6 +2276,8 @@ fn run_git(dir: &std::path::Path, args: &[&str]) -> String {
         // Not the developer's ~/.gitconfig (a global `commit.gpgsign`
         // or `core.hooksPath` failed or ran things in these commits).
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        // Nor the global ignore file (`~/.config/git/ignore`).
+        .env("XDG_CONFIG_HOME", "/nonexistent")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .unwrap();

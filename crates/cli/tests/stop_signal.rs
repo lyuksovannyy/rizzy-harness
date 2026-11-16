@@ -164,6 +164,12 @@ fn spawn(data: &Path, args: &[&str], envs: &[(&str, &str)], ready: &str) -> Proc
         .env("HARNESS_LOG", "info")
         .env("NO_COLOR", "1")
         .env_remove("HARNESS_JOIN_TOKEN")
+        // The node's checkpoints honour the user's global git ignore file
+        // (by design); a developer's `~/.config/git/ignore` matching the
+        // test's files made the slow checkpoint instant and
+        // `a_stop_past_its_bound_exits_1_naming_the_sessions` exit 0.
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("XDG_CONFIG_HOME", "/nonexistent")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

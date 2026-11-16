@@ -47,6 +47,8 @@ fn fixture() -> Fixture {
             .args(args)
             .current_dir(&ws)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            // Nor the global ignore file (`~/.config/git/ignore`).
+            .env("XDG_CONFIG_HOME", "/nonexistent")
             .output()
             .unwrap()
             .status
