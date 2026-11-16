@@ -650,7 +650,9 @@ models are still always listed with `effort = false` (risk R8 in `PLAN.md`):
 the harness now keeps and sends back Claude's thinking, but the request that
 turns it on with an effort has not been checked against the real API yet,
 so do not set it by hand either. Models that think on their own (newer
-Claude models, DeepSeek) do so without it.
+Claude models) do so without it; an OpenAI-compatible model that thinks only
+when asked (DeepSeek through a router, Magistral) needs `effort = true` on
+the model and an `effort` on the provider.
 
 **Thinking.** When a model thinks before it answers, the chat shows one
 collapsed "Thinking" row before that step; click it to read what the
