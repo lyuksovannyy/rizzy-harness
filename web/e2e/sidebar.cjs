@@ -73,7 +73,9 @@ let PAGE = null;
 
     // The scene: oldest first, so the newest lands on top.
     const web = await project('Website relaunch');
-    await chat({ profile: 'chat', title: 'Copy for the landing page', project_id: web });
+    // Seven chats: the oldest is behind the project's "Show 2 more".
+    const oldest = await chat({ profile: 'chat', title: 'Copy for the landing page', project_id: web });
+    for (const t of ['Hero image', 'Pricing table', 'Footer links', 'Font pairing', 'Launch checklist']) await chat({ profile: 'chat', title: t, project_id: web });
     await chat({ profile: 'chat', title: 'Colour ideas', project_id: web });
     const cli = await project('CLI tool with a rather long name that has to be cut short');
     await chat({ profile: 'agentic', cwd: `${S}/ws`, title: 'Fix the argument parser in the CLI so flags work', agent_id: 'coder', project_id: cli });
@@ -127,33 +129,41 @@ let PAGE = null;
           else await p.locator('aside.sidebar').screenshot({ path: file });
           shots.push(file);
         };
-        await shot(`${OUT}/sidebar-${size}-${theme}.png`);
+        await shot(`${OUT}/v2-sidebar-${size}-${theme}.png`);
         if (size === 'desktop') {
           // Keyboard focus on the badge's row shows the node's name.
           await p.focus('.sidebar a.session-item:has-text("Review the notes")');
           await p.keyboard.press('Shift+Tab');
           await p.keyboard.press('Tab');
           await sleep(250);
-          await shot(`${OUT}/sidebar-${size}-${theme}-focus.png`);
+          await shot(`${OUT}/v2-sidebar-${size}-${theme}-focus.png`);
         }
       }
     }
 
-    // Collapse one project and the section; both survive a reload.
+    // The open chat behind the project's cap: shown in its place, the count true.
     await p.setViewportSize({ width: 1280, height: 860 });
-    await p.goto(`${URL_}#/`);
+    await p.goto(`${URL_}#/s/${oldest}`);
     await p.reload();
     await p.waitForSelector('.project-box');
-    await p.click('.project-box button[aria-label="Website relaunch"]');
+    const box = `li.project-box:has(a[href="#/p/${web}"])`;
+    await p.waitForSelector(`${box} a.session-item[aria-current="page"]:has-text("Copy for the landing page")`);
+    check((await p.locator(`${box} button.show-more`).innerText()) === 'Show 1 more', 'the cap counts what it hides');
+    await p.locator('aside.sidebar').screenshot({ path: `${OUT}/v2-open-chat-behind-cap.png` });
+
+    // Closed, the project stays closed, and its header says the open chat is inside; both survive a reload.
+    await p.click(`${box} button[aria-label="Collapse Website relaunch"]`);
     await p.reload();
     await p.waitForSelector('.project-box');
-    check((await p.getAttribute('.project-box button[aria-label="Website relaunch"]', 'aria-expanded')) === 'false', 'a closed project stays closed');
-    await p.locator('aside.sidebar').screenshot({ path: `${OUT}/sidebar-desktop-dark-project-closed.png` });
+    check((await p.getAttribute(`${box} .section-toggle`, 'aria-expanded')) === 'false', 'a closed project stays closed');
+    check((await p.locator(`${box} .dot.here`).getAttribute('aria-label')) === 'The open chat is in here', 'the closed header marks the open chat');
+    await p.locator('aside.sidebar').screenshot({ path: `${OUT}/v2-closed-project-holds-open-chat.png` });
     await p.click('.sidebar-scroll .section-toggle:has-text("Projects")');
     await p.reload();
     await p.waitForSelector('.sidebar-scroll');
     check((await p.locator('.project-box').count()) === 0, 'a closed section stays closed');
-    await p.locator('aside.sidebar').screenshot({ path: `${OUT}/sidebar-desktop-dark-section-closed.png` });
+    check((await p.locator('.side-section > .section-row .dot.here').count()) === 1, 'the closed section marks the open chat');
+    await p.locator('aside.sidebar').screenshot({ path: `${OUT}/v2-closed-section-holds-open-chat.png` });
 
     // Collapsed to the rail: the header's second part still works both ways.
     await p.click('.head-pair button[aria-label="Collapse sidebar"]');
@@ -162,7 +172,7 @@ let PAGE = null;
     await p.waitForSelector('aside.sidebar:not(.rail) .head-pair');
 
     check(errors.length === 0, 'page errors: ' + errors.join('; '));
-    log(`${shots.length + 2} screenshots in`, OUT);
+    log(`${shots.length + 3} screenshots in`, OUT);
     await b.close();
   } catch (e) {
     if (PAGE) await PAGE.screenshot({ path: `${OUT}/sidebar-fail.png` }).catch(() => {});

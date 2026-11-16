@@ -1,9 +1,10 @@
 // The sidebar's scroll region (docs/sidebar-search.md, the owner's sketch of
 // 2026-11-16): Projects as boxed groups that hold their chats, then the chats
 // in no project; a sub-agent's chat nests under its parent. Collapse state is
-// this browser's (localStorage, inside try/catch).
+// this browser's (localStorage, inside try/catch). The open chat is never lost:
+// a cap shows it in its place, and a closed group's header carries its mark.
 import { ChevronRight, Cloud, Plus } from "lucide-react";
-import { type ReactNode, useId, useState } from "react";
+import { type ReactNode, useId, useMemo, useState } from "react";
 import { ACCENTS } from "../lib/appearance";
 import { t } from "../lib/i18n";
 import { ProjectIcon } from "../lib/projectIcons";
@@ -35,14 +36,16 @@ export function nodeHue(id: string): string {
   return `var(--ac-${ACCENTS[(h >>> 0) % (ACCENTS.length - 1)]}-2)`;
 }
 
-/** The first `cap` rows, then the rest on request. */
-function Capped<T>(props: { items: T[]; cap: number; row: (x: T) => ReactNode }) {
+/** The first `cap` rows and any row `keep` asks for (the open chat, its
+ * parents, its project) in its place; the rest on request. */
+function Capped<T>(props: { items: T[]; cap: number; keep: (x: T) => boolean; row: (x: T) => ReactNode }) {
   const [all, setAll] = useState(false);
-  const more = props.items.length - props.cap;
+  const first = props.items.filter((x, i) => i < props.cap || props.keep(x));
+  const more = props.items.length - first.length;
   return (
     <>
-      {(all ? props.items : props.items.slice(0, props.cap)).map(props.row)}
-      {more > 0 && (
+      {(all ? props.items : first).map(props.row)}
+      {(more > 0 || all) && (
         <li>
           <button type="button" className="link small show-more" onClick={() => setAll((v) => !v)}>
             {all ? t("nav.showFewer") : t("nav.showMore", { n: String(more) })}
@@ -57,6 +60,8 @@ interface Ctx {
   kids: Map<string, SessionRow[]>;
   nodes: Map<string, NodeInfo>;
   selected: string | null;
+  /** The open chat and its parents. */
+  path: Set<string>;
   onNavigate: (r: Route) => void;
 }
 
@@ -91,9 +96,34 @@ function Chat({ s, c }: { s: SessionRow; c: Ctx }) {
 
 function Chats({ list, c, cap = Infinity, sub }: { list: SessionRow[]; c: Ctx; cap?: number; sub?: boolean }) {
   return (
-    <ul className={sub ? "chats sub" : "chats"}>
-      <Capped items={list} cap={cap} row={(s) => <Chat key={s.session_id} s={s} c={c} />} />
+    // `role`: Safari drops a styled list's semantics.
+    <ul role="list" className={sub ? "chats sub" : "chats"}>
+      <Capped items={list} cap={cap} keep={(s) => c.path.has(s.session_id)} row={(s) => <Chat key={s.session_id} s={s} c={c} />} />
     </ul>
+  );
+}
+
+/** What a closed group's header says about the chats inside it (sub-agents
+ * included): the open chat is there, one runs, one finished unseen. */
+function Marks({ list, c }: { list: SessionRow[]; c: Ctx }) {
+  let here = false;
+  let run = false;
+  let unseen = false;
+  const walk = (xs: SessionRow[]) => {
+    for (const s of xs) {
+      here ||= c.path.has(s.session_id);
+      run ||= s.running;
+      unseen ||= !!s.unread && !s.running && s.session_id !== c.selected;
+      walk(c.kids.get(s.session_id) ?? []);
+    }
+  };
+  walk(list);
+  const dot = (cls: string, label: string) => <span className={`dot ${cls}`} role="img" aria-label={label} title={label} />;
+  return (
+    <>
+      {here && dot("here", t("nav.holdsOpen"))}
+      {run ? dot("running", t("nav.holdsRunning")) : unseen && dot("unseen", t("nav.unread"))}
+    </>
   );
 }
 
@@ -119,22 +149,33 @@ function Plus14(props: { label: string; onClick: () => void }) {
 function Box(props: { p: ProjectSummary; chats: SessionRow[]; open: boolean; onToggle: () => void; route: Route; c: Ctx }) {
   const { p, c } = props;
   const body = useId();
+  // Another member may have named it: hidden characters show (W-3).
+  const name = shownName(p.name);
+  const here = !props.open && props.chats.some((s) => c.path.has(s.session_id));
   return (
     <li className="project-box">
       <div className="section-row">
-        <Toggle open={props.open} body={body} label={p.name} onToggle={props.onToggle} />
+        <Toggle open={props.open} body={body} label={t(props.open ? "nav.collapseX" : "nav.expandX", { name })} onToggle={props.onToggle} />
         <NavLink
           to={{ kind: "project", id: p.project_id }}
           current={props.route.kind === "project" && props.route.id === p.project_id}
           onNavigate={c.onNavigate}
-          className="session-item grow"
-          title={p.description || p.name}
+          className={`session-item grow${here ? " active" : ""}`}
+          title={shownName(p.description) || name}
         >
           <ProjectIcon icon={p.icon} accent={p.accent} />
-          <span className="ellipsis grow">{p.name}</span>
+          <span className="ellipsis grow">{name}</span>
+          {!props.open && <Marks list={props.chats} c={c} />}
         </NavLink>
-        {/* A project's chat starts on its page (its composer files it there). */}
-        <Plus14 label={t("nav.newIn", { name: p.name })} onClick={() => c.onNavigate({ kind: "project", id: p.project_id })} />
+        {/* A project's chat starts on its page (its composer files it there);
+            on that page already, the composer takes the focus. */}
+        <Plus14
+          label={t("nav.newIn", { name })}
+          onClick={() => {
+            c.onNavigate({ kind: "project", id: p.project_id });
+            setTimeout(() => document.querySelector<HTMLElement>(".project-page .composer textarea")?.focus());
+          }}
+        />
       </div>
       {props.open && (
         <div id={body}>{props.chats.length ? <Chats list={props.chats} c={c} cap={5} /> : <div className="muted pad small">{t("nav.noChats")}</div>}</div>
@@ -165,44 +206,61 @@ export function SidebarLists(props: {
       return next;
     });
 
-  const rows = props.sessions.filter((s) => !s.incognito);
-  const ids = new Set(rows.map((s) => s.session_id));
-  const kids = new Map<string, SessionRow[]>();
-  for (const s of rows) if (s.parent_id && ids.has(s.parent_id)) kids.set(s.parent_id, [...(kids.get(s.parent_id) ?? []), s]);
-  // Top level: chats without a parent; a sub-agent whose parent is not listed stays hidden.
-  const top = rows.filter((s) => !s.parent_id);
-  const projects = [...props.projects].sort((a, b) => b.updated_ms - a.updated_ms);
-  const listed = new Set(projects.map((p) => p.project_id));
-  const loose = top.filter((s) => !s.project_id || !listed.has(s.project_id));
-  const c: Ctx = {
-    kids,
-    nodes: new Map(props.nodes.map((n) => [n.node_id, n])),
-    selected: props.route.kind === "session" ? props.route.id : null,
-    onNavigate: props.onNavigate,
-  };
+  const tree = useMemo(() => {
+    const rows = props.sessions.filter((s) => !s.incognito);
+    const byId = new Map(rows.map((s) => [s.session_id, s]));
+    const kids = new Map<string, SessionRow[]>();
+    for (const s of rows) {
+      if (!s.parent_id || !byId.has(s.parent_id)) continue;
+      const list = kids.get(s.parent_id);
+      if (list) list.push(s);
+      else kids.set(s.parent_id, [s]);
+    }
+    // Top level: chats without a parent; a sub-agent whose parent is not listed stays hidden.
+    const top = rows.filter((s) => !s.parent_id);
+    const projects = [...props.projects].sort((a, b) => b.updated_ms - a.updated_ms);
+    const inProject = new Map<string, SessionRow[]>(projects.map((p) => [p.project_id, []]));
+    const loose: SessionRow[] = [];
+    for (const s of top) (s.project_id ? inProject.get(s.project_id) : undefined)?.push(s) ?? loose.push(s);
+    return { byId, kids, projects, inProject, loose, none: top.length === 0 };
+  }, [props.sessions, props.projects]);
+
+  const selected = props.route.kind === "session" ? props.route.id : null;
+  // The open chat and its parents, up to a top-level chat; nothing for a
+  // chat the sidebar does not list (incognito, or a parent missing or in a cycle).
+  const path = new Set<string>();
+  for (let s = selected ? tree.byId.get(selected) : undefined; s && !path.has(s.session_id); s = s.parent_id ? tree.byId.get(s.parent_id) : undefined) {
+    path.add(s.session_id);
+    if (!s.parent_id) break;
+  }
+  const c: Ctx = { kids: tree.kids, nodes: new Map(props.nodes.map((n) => [n.node_id, n])), selected, path, onNavigate: props.onNavigate };
   const sectionOpen = open.projects !== false;
+  const projectChats = sectionOpen ? [] : [...tree.inProject.values()].flat();
+  const sectionHere = projectChats.some((s) => path.has(s.session_id));
 
   return (
     <div className="sidebar-scroll">
       <section className="side-section">
-        <div className="section-label section-row">
+        <div className={`section-label section-row${sectionHere ? " active" : ""}`}>
           <Toggle open={sectionOpen} body={body} onToggle={() => toggle("projects")}>
             <span>{t("nav.projects")}</span>
           </Toggle>
+          {!sectionOpen && <Marks list={projectChats} c={c} />}
           <span className="grow" />
           {props.canCreateProject && <Plus14 label={t("nav.newProject")} onClick={() => props.onNavigate({ kind: "project", id: "new" })} />}
         </div>
         {sectionOpen && (
-          <ul id={body} className="projects">
-            {projects.length === 0 && <li className="muted pad small">{t("nav.noProjects")}</li>}
+          <ul id={body} role="list" className="projects">
+            {tree.projects.length === 0 && <li className="muted pad small">{t("nav.noProjects")}</li>}
             <Capped
-              items={projects}
+              items={tree.projects}
               cap={5}
+              keep={(p) => tree.inProject.get(p.project_id)!.some((s) => path.has(s.session_id))}
               row={(p) => (
                 <Box
                   key={p.project_id}
                   p={p}
-                  chats={top.filter((s) => s.project_id === p.project_id)}
+                  chats={tree.inProject.get(p.project_id)!}
                   open={open[p.project_id] !== false}
                   onToggle={() => toggle(p.project_id)}
                   route={props.route}
@@ -213,8 +271,8 @@ export function SidebarLists(props: {
           </ul>
         )}
       </section>
-      {top.length === 0 && <div className="muted pad small">{t("nav.noChats")}</div>}
-      <Chats list={loose} c={c} />
+      {tree.none && <div className="muted pad small">{t("nav.noChats")}</div>}
+      <Chats list={tree.loose} c={c} />
     </div>
   );
 }

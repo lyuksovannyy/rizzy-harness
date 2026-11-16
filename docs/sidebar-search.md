@@ -31,12 +31,25 @@ own provider (`media::search`, `artifacts::search`).
    - Below, without a header, the chats in no listed project, newest first, all of them (as
      Recent was); "No chats yet." when there are no chats at all.
    - A sub-agent's session (`parent_id` set) nests under its parent's row as a tree (`ul.sub`,
-     an elbow line drawn in CSS): the newest three, then "Show N more". It opens like any chat
+     an elbow drawn in CSS from under the parent's row, in `--fg-3` at 75%, by estimate 3:1 or more on the
+     sidebar in both themes; decorative, the indent says it too): the newest three, then "Show N more". It opens like any chat
      (`#/s/<id>`; the chat links back to its parent). It shows the running dot while its turn
      runs. A sub-agent whose parent is not in the list (another workspace, deleted) is not shown.
      The list is the caller's own chats only (`sessions_of(owner)`), and a sub-agent's session
      belongs to its parent's owner (the store's `claim_session`), so a second member or an admin
      never sees another person's children. Incognito chats stay out, as before.
+   - **The open chat is never lost.** A cap ("Show N more" on a project's chats, on the projects
+     and on a parent's sub-agents) always shows the open chat, its parents and its project in
+     their place, and its count is what it still hides. A project or the Projects section the
+     person closed stays closed; its header then carries what is inside: the open chat (the
+     row's current fill and a ring, "The open chat is in here"), and the running dot ("A chat in
+     here is running") or else the unseen dot ("Finished; not seen yet"), sub-agents included.
+     Not listed, so not shown: an incognito chat, and a sub-agent whose parent is not listed or
+     sits in a cycle.
+   - Chevrons are named by what they do: "Collapse <project>" / "Expand <project>". Project
+     names, like titles and hostnames, show hidden characters as codes (W-3), in the text, the
+     labels and the titles. The project "+" also focuses the project page's composer when that
+     page is already open. The lists carry `role="list"` (Safari drops a styled list's role).
    - Open and closed is this browser's: localStorage `harness.sidebarSections`, a map of
      `projects` and project ids to `false` when closed, read and written inside try/catch.
    - **Node badge**: a chat whose `profile` is `agentic` (it runs tools in a folder on a node,
@@ -47,7 +60,8 @@ own provider (`media::search`, `artifacts::search`).
      stored setting. Colour is never the only signal: the badge is `role="img"` with the label
      "Runs on <hostname>" (", offline" and dimmed when the node is not connected; "local" for the
      embedded node), the same text as its `title` on hover, and, while the row has keyboard
-     focus, beside the badge (CSS `::after`). Titles, project names and hostnames are text
+     focus, beside the badge (CSS `::after`, at most 8.5em wide with an ellipsis, so the title's
+     start stays readable). Titles, project names and hostnames are text
      (React escapes them; hidden characters are shown, W-3).
 4. **Footer**: the account button.
 

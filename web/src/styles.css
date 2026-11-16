@@ -4563,9 +4563,12 @@ input.add-line {
 .sidebar-scroll > ul.chats {
   margin-top: var(--space-2);
 }
-/* Sub-agent chats: an elbow from the parent to each row. */
+/* Sub-agent chats: an elbow hanging from under the parent's row to each
+   child (decorative: the indent says it too). The tone is, by estimate, 3:1 or more on
+   the sidebar in both themes. */
 ul.chats.sub {
-  margin-left: 18px;
+  --elbow: color-mix(in srgb, var(--fg-3) 75%, transparent);
+  margin-left: 14px;
 }
 ul.chats.sub > li {
   position: relative;
@@ -4575,20 +4578,20 @@ ul.chats.sub > li::before {
   content: "";
   position: absolute;
   left: 0;
-  top: -1px;
+  top: -4px;
   width: 9px;
-  height: 16px;
-  border-left: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
+  height: 17px;
+  border-left: 1px solid var(--elbow);
+  border-bottom: 1px solid var(--elbow);
   border-bottom-left-radius: 4px;
 }
 ul.chats.sub > li:not(:last-child)::after {
   content: "";
   position: absolute;
   left: 0;
-  top: 15px;
+  top: 12px;
   bottom: -1px;
-  border-left: 1px solid var(--line);
+  border-left: 1px solid var(--elbow);
 }
 ul.chats.sub .session-item {
   font-size: var(--text-sm);
@@ -4615,6 +4618,11 @@ ul.chats.sub .session-item {
   content: attr(aria-label);
   position: absolute;
   right: calc(100% + 4px);
+  /* Bounded, so the title's start stays readable; the title and label
+     carry the whole name. */
+  max-width: 8.5em;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
   padding: 1px 6px;
   border-radius: 5px;
@@ -4623,6 +4631,18 @@ ul.chats.sub .session-item {
   background: var(--surface);
   color: var(--fg);
   border: 1px solid var(--line);
+}
+/* A closed group's header: the open chat is inside (a ring and the row's
+   current fill), one runs, one finished unseen. */
+.dot.here {
+  border: 2px solid var(--fg-2);
+}
+.sidebar-scroll .section-row.active {
+  background: var(--fill-2);
+  border-radius: 7px;
+}
+.sidebar-scroll .section-row > .dot {
+  margin: 0 var(--space-1);
 }
 /* The account button: the avatar, the name and the tier line. */
 .nav-item.account {
