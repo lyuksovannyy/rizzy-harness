@@ -1654,6 +1654,9 @@ impl NodeRuntime {
                 BACKGROUND_STOP_WAIT,
             )
             .await;
+            // Background sub-agents' ends not recorded: their folders go
+            // unmerged (X.24).
+            s.drop_child_ends().await;
             // And its MCP servers (X.3).
             if !s.close_mcp(harness_tools::mcp::STOP_WAIT).await {
                 tracing::warn!(session = %sid, "an MCP server of a deleted session did not end in time");

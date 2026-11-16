@@ -37,7 +37,8 @@ export function runningBackground(view: SessionView | null | undefined): BgRow[]
   if (!view?.background) return [];
   const rows: BgRow[] = [];
   for (const [bg_id, b] of Object.entries(view.background)) {
-    if (b.ended) continue;
+    // A background sub-agent is listed with the sub-agents (X.24).
+    if (b.ended || b.child) continue;
     let command: unknown;
     for (let i = view.items.length - 1; i >= 0; i--) {
       const it = view.items[i]!;
@@ -94,6 +95,7 @@ export function reasonText(reason: string, exit_code: number | null): string {
     access_revoked: "stopped: the owner lost access",
     node_stopping: "stopped with its node",
     node_restarted: "ended with its node",
+    finished: "finished",
   };
   const w = words[reason] ?? reason.replace(/_/g, " ");
   return exit_code != null && reason === "exited" ? `${w} with code ${exit_code}` : w;

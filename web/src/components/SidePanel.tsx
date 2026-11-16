@@ -63,7 +63,7 @@ function State({ state, words }: { state: RowState; words?: string }) {
   return <span className={`tool-status side-state s-${STATE_CLASS[state]}`}>{words ?? STATE_WORDS[state]}</span>;
 }
 
-function AgentItem({ row, models }: { row: AgentRow; models?: ModelInfo[] }) {
+function AgentItem({ row, models, stop }: { row: AgentRow; models?: ModelInfo[]; stop?: (bg: string) => void }) {
   return (
     <li className="side-row" data-kind="agent" data-call={row.call_id}>
       <div className="side-row-head">
@@ -86,6 +86,12 @@ function AgentItem({ row, models }: { row: AgentRow; models?: ModelInfo[] }) {
           <a className="link small" href={`#/s/${row.child}`}>
             Open its chat
           </a>
+          {/* In the background (X.24): Stop ends it, as a command's Stop. */}
+          {row.bg_id && stop && (
+            <button type="button" className="danger small" aria-label={`Stop ${row.bg_id}`} onClick={() => stop(row.bg_id!)}>
+              Stop
+            </button>
+          )}
         </div>
       )}
     </li>
@@ -228,7 +234,7 @@ export default function SidePanel(props: {
       </div>
       <ul className="side-rows">
         {agents.map((a) => (
-          <AgentItem key={a.call_id} row={a} models={props.models} />
+          <AgentItem key={a.call_id} row={a} models={props.models} stop={away ? undefined : (id) => void stop([id], false)} />
         ))}
         {agents.length > 0 && commands.length > 0 && <li role="separator" className="side-sep" />}
         {commands.length > 0 && (

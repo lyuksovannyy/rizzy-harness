@@ -1,5 +1,5 @@
 // Port of crates/core/src/view.rs. The shared fixture test keeps them equal.
-import type { Item, ModelTokens, RawEvent, SessionView, StagedArtifact, TodoItem, Usage } from "./types";
+import type { BackgroundState, Item, ModelTokens, RawEvent, SessionView, StagedArtifact, TodoItem, Usage } from "./types";
 
 export function emptyView(): SessionView {
   return {
@@ -461,20 +461,29 @@ export function apply(v: SessionView, e: RawEvent): void {
       else v.items.push({ type: "artifact", staged: staged(p) });
       break;
     }
-    case "background_started":
-      (v.background ??= {})[p.bg_id] = { call_id: p.call_id, ends_by_ms: p.ends_by_ms, timeout_s: p.timeout_s, ended: false };
+    case "background_started": {
+      const b: BackgroundState = { call_id: p.call_id, ends_by_ms: p.ends_by_ms, timeout_s: p.timeout_s, ended: false };
+      // A background sub-agent (X.24), not a command.
+      if (p.child) b.child = p.child;
+      (v.background ??= {})[p.bg_id] = b;
       break;
+    }
     case "background_ended": {
       const b = v.background?.[p.bg_id];
       if (b) b.ended = true;
-      v.items.push({
+      const c = p.child;
+      // Its cost is the chat's, as a foreground sub-agent's is its turn's.
+      if (c?.usage) addUsage(v.usage, c.usage);
+      const it: Extract<Item, { type: "background_ended" }> = {
         type: "background_ended",
         bg_id: p.bg_id,
         reason: p.reason,
         exit_code: p.exit_code ?? null,
         ran_ms: p.ran_ms,
-        tail: p.tail ?? "",
-      });
+        tail: (c ? c.result : p.tail) ?? "",
+      };
+      if (c) it.agent = c.agent_id;
+      v.items.push(it);
       break;
     }
     case "chat_allow_added":

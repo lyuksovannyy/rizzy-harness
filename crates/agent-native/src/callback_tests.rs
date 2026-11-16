@@ -191,6 +191,7 @@ fn history(sid: SessionId) -> Vec<RawEvent> {
             sid,
             5,
             EventKind::BackgroundEnded(BackgroundEnded {
+                child: None,
                 bg_id: "bg-1".into(),
                 reason: BackgroundReason::Exited,
                 exit_code: Some(1),
