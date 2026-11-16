@@ -3474,6 +3474,17 @@ button.swatch:hover:not(:disabled) {
   text-decoration: underline dotted;
   cursor: help;
 }
+/* Sent from this tab and not in the log yet, or refused (lib/outbox); on
+   home, above the box while the chat is made. No animation: the text says it. */
+.msg.user.sending,
+.msg.user.failed { flex-wrap: wrap; }
+.msg.user.sending .bubble { opacity: 0.75; }
+.composer-wrap > .msg.user.sending { margin-bottom: var(--space-3); }
+/* How long the model has been silent (TurnStatus): quiet, not read out. */
+.thinking .waited {
+  color: var(--fg-2);
+  font-variant-numeric: tabular-nums;
+}
 /* A model call waits to be sent again: under the working line, counting down. */
 .retry-note {
   color: var(--fg-2);

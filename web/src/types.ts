@@ -312,6 +312,9 @@ export type ToolItem = Extract<Item, { type: "tool" }>;
 export interface SessionView {
   session_id: string | null;
   head_seq: number;
+  /** The newest event's time (`ts_ms`): set by live.ts, not the fold, so the
+   * Rust view has no such field. What a wait is counted from. */
+  last_ms?: number;
   meta: SessionCreated | null;
   items: Item[];
   running_turn: string | null;

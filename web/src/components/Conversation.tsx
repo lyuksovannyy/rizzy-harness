@@ -2,13 +2,13 @@
 // new-tab home screen stays small.
 import "../lib/i18nPages";
 import { AtSign, Download, FileText, Package, Trash2 } from "lucide-react";
-import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { api } from "../api";
 import { pageApi } from "../apiPages";
 import { endWords, turnStart } from "../lib/callback";
 import { useCompact } from "../lib/compact";
 import { canRetry } from "../lib/retry";
-import { dropDraft } from "../lib/drafts";
+import { dropDraft, readDraft, writeDraft } from "../lib/drafts";
 import { useFeatures } from "../lib/features";
 import { t } from "../lib/i18n";
 import { fallbackNote } from "../lib/modelPlan";
@@ -45,6 +45,8 @@ import { ExecBadge } from "./ExecBadge";
 import { compactTokens, ContextMeter } from "./ContextMeter";
 import { CostMeter } from "./CostMeter";
 import { RetryNote } from "./RetryNote";
+import { TurnStatus, turnState } from "./TurnStatus";
+import { outbox } from "../lib/outbox";
 import { LiveCtx } from "../lib/liveCtx";
 import { repliedBlock, ReplyBubble } from "./ReplyBubble";
 import { ToolCard, WebGroupCard } from "./ToolCard";
@@ -347,6 +349,10 @@ export default function Conversation(props: {
   // The face of whoever answers now; the header's agent shows it unless an
   // @mention has another agent answering.
   const face = useAvatarState(view);
+  // This tab's messages the log does not hold yet (lib/outbox).
+  useSyncExternalStore(outbox.subscribe, outbox.version);
+  const people = items.reduce((n, it) => n + (it.type === "user" ? 1 : 0), 0);
+  const sending = outbox.unsent(sessionId, people);
   const answering = view?.running_agent?.agent_id ?? activeAgent;
   const facing = props.agents.find((a) => a.id === answering);
   const sessionAgent = props.agents.find((a) => a.id === activeAgent);
@@ -801,13 +807,20 @@ export default function Conversation(props: {
                 }
               })
             )}
-            {running && view?.running_agent && (
-              <div className="thinking">
-                {facing && <AgentMark agent={facing} state={face} size={22} />}
-                {agentName(view.running_agent.agent_id)}{" "}
-                {face === "unsure" ? "is waiting for you" : face === "working" ? "is working…" : "is thinking…"}
+            {sending.map((o, i) => (
+              <div key={`out${i}`} className={`msg user ${o.failed ? "failed" : "sending"}`}>
+                <div className="bubble">{o.text}</div>
+                <div className={`queued-mark ${o.failed ? "error-text" : "muted"}`}>
+                  {o.failed ? t("conv.notSent", { why: o.failed }) : t("conv.sending")}
+                </div>
               </div>
-            )}
+            ))}
+            <TurnStatus
+              state={turnState(view, sending.some((o) => !o.failed))}
+              since={running ? (view?.last_ms ?? 0) : (sending[0]?.sent ?? 0)}
+              name={agentName(answering)}
+              mark={facing && <AgentMark agent={facing} state={face} size={22} />}
+            />
             {running && view?.retry && <RetryNote retry={view.retry} />}
             {summarise.compacting && !running && (
               <div className="thinking" data-testid="compacting">
@@ -891,12 +904,23 @@ export default function Conversation(props: {
             images={features?.media.vision_images ? { workspace: workspaceId, left: CHAT_IMAGES - imagesUsed } : null}
             onSubmit={async (s) => {
               stick.current = true;
-              await api.prompt(sessionId, s.text, {
-                ...(s.effort ? { effort: s.effort } : {}),
-                ...(s.attachments.length ? { attachments: s.attachments } : {}),
-                ...(s.images?.length ? { images: s.images } : {}),
-                ...(s.files?.length ? { files: s.files } : {}),
-              });
+              // Shown at once; the log's message replaces it (lib/outbox).
+              const o = outbox.add(sessionId, s.text, people);
+              try {
+                await api.prompt(sessionId, s.text, {
+                  ...(s.effort ? { effort: s.effort } : {}),
+                  ...(s.attachments.length ? { attachments: s.attachments } : {}),
+                  ...(s.images?.length ? { images: s.images } : {}),
+                  ...(s.files?.length ? { files: s.files } : {}),
+                });
+              } catch (x) {
+                // The reply box takes the text back and says why; kept as the
+                // chat's draft too, for a box that is gone (another chat
+                // opened meanwhile).
+                outbox.drop(sessionId, o);
+                if (keepsDraft && !readDraft(sessionId)) writeDraft(sessionId, s.text);
+                throw x;
+              }
             }}
           />
         </div>

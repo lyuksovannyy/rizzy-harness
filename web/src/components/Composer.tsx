@@ -191,7 +191,8 @@ export function Composer(props: {
   const [caret, setCaret] = useState(0);
   const [pick, setPick] = useState(0);
   const [popupClosed, setPopupClosed] = useState(false);
-  const [busy, setBusy] = useState(false);
+  // While a message is sent: its text.
+  const [busy, setBusy] = useState<string | boolean>(false);
   const [incognito, setIncognito] = useState(false);
   const [compareWith, setCompareWith] = useState<string | null>(null);
   const [searchKind, setSearchKind] = useState<SearchKind>("text");
@@ -458,7 +459,10 @@ export function Composer(props: {
       setErr(`${blind ? `${modelLabel(blind, props.models)} can't read images` : "A temporary chat takes no images"}; remove them to send.`);
       return;
     }
-    setBusy(true);
+    // The text leaves the box at once, for the chat (or, from home, the line
+    // above the box) to show as sent; a refusal puts it back.
+    setBusy(body);
+    setText("");
     setErr(null);
     try {
       await props.onSubmit({
@@ -480,7 +484,6 @@ export function Composer(props: {
       });
       if (mode === "agentic") rememberFolder(cwd.trim());
       if (home) props.onLearn?.(body, mode);
-      setText("");
       setFiles([]);
       setFound([]);
       setDropped([]);
@@ -490,6 +493,7 @@ export function Composer(props: {
       setHostFor(null);
       setApprovalFor(null);
     } catch (x) {
+      setText((c) => (c.trim() ? `${body}\n${c}` : body));
       setErr(x instanceof Error ? x.message : String(x));
     } finally {
       setBusy(false);
@@ -587,6 +591,12 @@ export function Composer(props: {
 
   return (
     <div className="composer-wrap">
+      {home && !searching && typeof busy == "string" && (
+        <div className="msg user sending">
+          <div className="bubble">{busy}</div>
+          <div className="queued-mark muted">Sending…</div>
+        </div>
+      )}
       {fileQuery != null && hits?.length === 0 && (
         <div className="mention-popup mention-none muted" role="status">
           {t("composer.noFile")}
@@ -923,7 +933,7 @@ export function Composer(props: {
               type="button"
               className="send"
               onClick={() => void submit()}
-              disabled={busy || uploading > 0 || sendingImages || !text.trim() || !!props.readOnly}
+              disabled={!!busy || uploading > 0 || sendingImages || !text.trim() || !!props.readOnly}
               aria-label={t("composer.send")}
             >
               <ArrowUp size={18} />

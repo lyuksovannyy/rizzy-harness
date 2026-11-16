@@ -100,6 +100,26 @@ automation that only needs one user's access, and do not copy it if no script ne
 Without configuration the built-in **mock** provider is used, so you can try
 the UI with no API key. Try `run: ls -la`, `read: README.md` or `slow: 50`.
 
+**Sending a message, and waiting for the model.** Send puts your message in
+the chat at once, before the server has answered: from the home screen it
+shows above the box while the chat is made, then in the new chat. It is marked
+"Sending…" until the chat's log holds it, and then is the log's message (never
+both). From the same moment a line where the answer will appear says "<agent>
+is waiting for the model…"; after 5 seconds it also shows, quietly, how many
+seconds the model has said nothing, so a slow provider does not look like a
+hang. Screen readers hear that line once, not the count. When the first words
+arrive it says "<agent> is answering…" (or "is working…" while a tool runs, and
+"is waiting for the model…" again before the next model request). The wait is
+counted from the chat's log, so a reload or another tab shows the same
+number. Stop is there from the moment the turn starts. If the provider fails
+for a passing reason the line under it says why and when the next try is
+("rate limit. Trying again in 3 s (attempt 2 of 3)"); a provider that sends
+nothing is cut off after `[limits] model_first_byte_timeout_s` (600 s by
+default; the server's own Ask chats always use 600 s) and the turn ends with
+the reason and **Retry**. A message the server refuses goes back into the box
+with the reason; the first message of a new chat stays in that chat marked
+"Not sent", and its text is in the reply box.
+
 **Writing while the agent works.** The reply box stays open while a turn
 runs: Enter (or Send, next to Stop) sends the message at once, and a line under
 the box says what happens to it ("Read after the current step. Stop
