@@ -1015,6 +1015,7 @@ async fn a_background_note_and_a_callback_opening_reach_the_summariser_quoted() 
     };
     let exited = |bg: &str| {
         EventKind::BackgroundEnded(BackgroundEnded {
+            child: None,
             bg_id: bg.into(),
             reason: BackgroundReason::Exited,
             exit_code: Some(1),

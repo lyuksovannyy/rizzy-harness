@@ -290,7 +290,10 @@ export type Item =
       reason: string;
       exit_code: number | null;
       ran_ms: number;
+      /** A background sub-agent's result instead (X.24): its report quoted, model text. */
       tail: string;
+      /** Set for a background sub-agent: its agent's id. */
+      agent?: string;
     }
   /** A turn the harness started because these background commands ended while the chat was idle. */
   | { type: "callback"; turn_id: string; bg_ids: string[] }
@@ -377,6 +380,8 @@ export interface BackgroundState {
   /** The timeout it runs under: what is left can never be more. */
   timeout_s: number;
   ended: boolean;
+  /** A background sub-agent (X.24), not a command. */
+  child?: { session: string; agent_id: string };
 }
 
 export interface CheckpointState {
@@ -509,6 +514,8 @@ export interface AgentFeatures {
   delegate: boolean;
   /** The person's reply style and personal instructions (Settings → Personalisation); on unless turned off. */
   personalisation: boolean;
+  /** Starts sub-agents that run in the background (X.24); its own switch. */
+  background_subagents: boolean;
   /** In the agent picker and @mentions. */
   as_agent: boolean;
   /** May be handed sub-tasks. */

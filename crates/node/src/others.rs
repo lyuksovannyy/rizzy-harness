@@ -770,6 +770,7 @@ mod tests {
     fn bg(seq: u64, ts: i64, started: bool) -> RawEvent {
         let k = if started {
             EventKind::BackgroundStarted(BackgroundStarted {
+                child: None,
                 bg_id: "bg-1".into(),
                 call_id: "c".into(),
                 turn_id: "t".into(),
@@ -778,6 +779,7 @@ mod tests {
             })
         } else {
             EventKind::BackgroundEnded(BackgroundEnded {
+                child: None,
                 bg_id: "bg-1".into(),
                 reason: BackgroundReason::Exited,
                 exit_code: Some(0),

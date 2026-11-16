@@ -194,6 +194,13 @@ pub struct DelegateCaps {
     pub max_subagents: u32,
     /// Tokens (input + output) all sub-agents of one turn may use together.
     pub max_tokens: u64,
+    /// May start sub-agents that run in the background (`delegate` with
+    /// `background: true`, ADOPTION_PLAN X.24): the agent's own switch,
+    /// off unless its definition turns it on. The node clears it where
+    /// `[limits] background_agents_per_chat = 0`, and for every sub-agent
+    /// (a background sub-agent's depth is one).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub background: bool,
 }
 
 impl Default for DelegateCaps {
@@ -201,6 +208,7 @@ impl Default for DelegateCaps {
         Self {
             max_subagents: 4,
             max_tokens: 200_000,
+            background: false,
         }
     }
 }

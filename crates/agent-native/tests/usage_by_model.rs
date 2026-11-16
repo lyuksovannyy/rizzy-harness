@@ -556,6 +556,7 @@ async fn a_callback_turn_lands_under_its_model() {
     h.extend(log(
         t.sid,
         vec![EventKind::BackgroundEnded(BackgroundEnded {
+            child: None,
             bg_id: "bg-1".into(),
             reason: BackgroundReason::Exited,
             exit_code: Some(0),

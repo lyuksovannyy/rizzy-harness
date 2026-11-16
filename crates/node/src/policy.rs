@@ -491,6 +491,14 @@ pub struct LimitsPolicy {
     /// KiB of output kept in memory per background command (its first and
     /// last part); never written to disk.
     pub background_output_kb: usize,
+    /// Sub-agents one chat may run in the background at once (`delegate`
+    /// with `background: true`, ADOPTION_PLAN X.24); 0 turns them off on
+    /// this node. Counted apart from background commands. The master's
+    /// agent spec can only turn them off for an agent, never raise this.
+    pub background_agents_per_chat: usize,
+    /// The longest a background sub-agent may run, in seconds: at this
+    /// wall-clock limit it is stopped and reports what it has.
+    pub background_agent_timeout_s: u64,
     /// Callback turns a chat may run in a row without a person's message
     /// (T.8d step 3): turns the harness starts because background commands
     /// ended while the chat was idle. Only a person's message refills it;
@@ -525,6 +533,13 @@ pub const DEFAULT_CALLBACK_MAX_STEPS: usize = 20;
 pub const DEFAULT_HANDOFF_PER_HOUR: usize = 4;
 pub const MAX_HANDOFF_PER_HOUR: usize = 60;
 
+/// `[limits] background_agent_timeout_s` by default, and its range: at
+/// most an hour, as a background command (the master's running window,
+/// `callbacks::RUNNING_WINDOW_MS`, assumes it).
+pub const DEFAULT_AGENT_TIMEOUT_S: u64 = 1800;
+pub const MIN_AGENT_TIMEOUT_S: u64 = 60;
+pub const MAX_AGENT_TIMEOUT_S: u64 = 3600;
+
 /// The most `[limits] max_subagents` and `max_delegation_depth` may say.
 pub const MAX_SUBAGENTS: u32 = 32;
 pub const MAX_DELEGATION_DEPTH: u32 = 4;
@@ -544,6 +559,8 @@ impl Default for LimitsPolicy {
             background_per_session: harness_tools::background::DEFAULT_PER_SESSION,
             background_per_node: harness_tools::background::DEFAULT_PER_NODE,
             background_output_kb: harness_tools::background::DEFAULT_OUTPUT_KB,
+            background_agents_per_chat: harness_tools::background::DEFAULT_AGENTS_PER_SESSION,
+            background_agent_timeout_s: DEFAULT_AGENT_TIMEOUT_S,
             callback_turns: DEFAULT_CALLBACK_TURNS,
             callback_max_steps: DEFAULT_CALLBACK_MAX_STEPS,
             handoff_notes_per_hour: DEFAULT_HANDOFF_PER_HOUR,
@@ -558,7 +575,13 @@ impl LimitsPolicy {
             per_session: self.background_per_session,
             per_node: self.background_per_node,
             output_kb: self.background_output_kb,
+            agents_per_session: self.background_agents_per_chat,
         }
+    }
+
+    /// A background sub-agent's wall-clock limit.
+    pub fn agent_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.background_agent_timeout_s)
     }
 
     /// A callback turn's step cap: `callback_max_steps`, never above
@@ -584,6 +607,9 @@ impl LimitsPolicy {
         }
         let mut caps = agent.caps.unwrap_or_default();
         caps.max_subagents = caps.max_subagents.min(self.max_subagents);
+        // Background sub-agents (X.24): off on this node at 0, and never
+        // below the top: a sub-agent starts none.
+        caps.background &= depth == 0 && self.background_agents_per_chat > 0;
         agent.caps = Some(caps);
         for d in &mut agent.delegates {
             self.bound_at(d, depth + 1);
@@ -741,6 +767,12 @@ impl NodePolicy {
                 bg::MAX_OUTPUT_KB,
             ),
             (
+                "background_agents_per_chat",
+                self.limits.background_agents_per_chat,
+                0,
+                bg::MAX_AGENTS_PER_SESSION,
+            ),
+            (
                 "callback_turns",
                 self.limits.callback_turns,
                 0,
@@ -764,6 +796,13 @@ impl NodePolicy {
                     "[limits] {key} = {n}: must be between {min} and {max}"
                 ));
             }
+        }
+        let n = self.limits.background_agent_timeout_s;
+        if !(MIN_AGENT_TIMEOUT_S..=MAX_AGENT_TIMEOUT_S).contains(&n) {
+            return Err(format!(
+                "[limits] background_agent_timeout_s = {n}: must be between \
+                 {MIN_AGENT_TIMEOUT_S} and {MAX_AGENT_TIMEOUT_S}"
+            ));
         }
         self.sandbox_settings()?;
         harness_tools::mcp::validate(&self.mcp_servers)?;
@@ -1158,6 +1197,7 @@ tool_timeout_sec = 120
         };
         let caps = |n| {
             Some(DelegateCaps {
+                background: false,
                 max_subagents: n,
                 max_tokens: 1,
             })
@@ -1233,6 +1273,68 @@ tool_timeout_sec = 120
             let e = p.validate().unwrap_err();
             assert!(e.contains(bad.split(' ').next().unwrap()), "{bad}: {e}");
         }
+    }
+
+    /// X.24: background sub-agents are node.toml's, 4 a chat and 30 min
+    /// each by default, checked; 0 turns them off, and the agent spec's
+    /// switch is cleared then, and below the top always (depth one): the
+    /// master's spec cannot turn them on where the node says no.
+    #[test]
+    fn background_agents_limits_and_the_specs_switch() {
+        let d = NodePolicy::default().limits;
+        assert_eq!(
+            (d.background_agents_per_chat, d.background_agent_timeout_s),
+            (4, 1800)
+        );
+        assert_eq!(d.background().agents_per_session, 4);
+        for bad in [
+            "background_agents_per_chat = 17",
+            "background_agent_timeout_s = 59",
+            "background_agent_timeout_s = 3601",
+        ] {
+            let p: NodePolicy = toml::from_str(&format!("[limits]\n{bad}\n")).unwrap();
+            let e = p.validate().unwrap_err();
+            assert!(e.contains(bad.split(' ').next().unwrap()), "{bad}: {e}");
+        }
+        let caps = Some(harness_core::agent::DelegateCaps {
+            background: true,
+            ..Default::default()
+        });
+        let mut child = harness_core::agent::AgentSpec {
+            agent_id: "c".into(),
+            name: "c".into(),
+            system_prompt: "p".into(),
+            tools: harness_core::agent::ToolSelection::List(vec![]),
+            model: None,
+            fallbacks: vec![],
+            unavailable: vec![],
+            no_effort: vec![],
+            vision: vec![],
+            context_windows: Default::default(),
+            effort: None,
+            ui: Default::default(),
+            no_personalisation: false,
+            prompt_hash: "h".into(),
+            deny_tools: vec![],
+            delegates: vec![],
+            caps,
+        };
+        let mut top = child.clone();
+        child.caps = caps;
+        top.delegates = vec![child];
+        let mut limits = LimitsPolicy {
+            max_delegation_depth: 2,
+            ..Default::default()
+        };
+        let b = limits.bound_delegation(top.clone());
+        assert!(b.caps.unwrap().background, "the top keeps its switch");
+        assert!(
+            !b.delegates[0].caps.unwrap().background,
+            "never below the top"
+        );
+        limits.background_agents_per_chat = 0;
+        let b = limits.bound_delegation(top);
+        assert!(!b.caps.unwrap().background, "0 turns it off");
     }
 
     /// T.8d step 3: the callback bounds are node.toml's, 3 turns of 20

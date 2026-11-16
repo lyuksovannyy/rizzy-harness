@@ -120,3 +120,60 @@ async fn a_child_gets_personalisation_only_when_its_own_switch_is_on() {
         "the follow-up extends the last request"
     );
 }
+
+/// A background sub-agent (X.24) takes its snapshot of the parent turn's
+/// standing sections through the same rule: with its switch off it never
+/// gets the `personal` section, with it on it does.
+#[tokio::test]
+async fn a_background_child_follows_its_own_switch() {
+    let mut r = Rig::new().await;
+    r.git(&["init", "-q"]);
+    r.write("a.txt", "alpha\n");
+    r.git(&["add", "."]);
+    r.git(&["commit", "-qm", "init"]);
+    let mut quiet = Rig::spec("quiet", &["read", "grep"], vec![]);
+    quiet.no_personalisation = true;
+    r.delegates.push(quiet);
+    r.lead_caps = Some(harness_core::agent::DelegateCaps {
+        max_subagents: 4,
+        max_tokens: 200_000,
+        background: true,
+    });
+    r.lead_context = Some(MasterContext {
+        turn: Some("Context: the user's name is Ann.".into()),
+        standing: vec![StandingPart {
+            part: StandingKey::Personal,
+            text: format!("How the person wants replies to sound: {MARK}"),
+        }],
+        unattended: false,
+    });
+    let (_, outs) = r
+        .lead_turn(&delegate(&[
+            json!({"agent": "look", "task": "read: a.txt", "background": true}),
+            json!({"agent": "quiet", "task": "read: a.txt", "background": true}),
+        ]))
+        .await;
+    assert_eq!(outs.len(), 2, "{outs:#?}");
+    assert!(
+        outs.iter()
+            .all(|o| !o.contains("cannot") && !o.contains("no background")),
+        "both started in the background: {outs:#?}"
+    );
+    // Both children end (their ends are recorded in the lead's chat).
+    let ended = |r: &Rig| {
+        r.seen
+            .iter()
+            .filter(|e| e.kind == "background_ended")
+            .count()
+    };
+    while ended(&r) < 2 {
+        r.until(|k| matches!(k, harness_core::event::EventKind::BackgroundEnded(_)))
+            .await;
+    }
+    assert!(holds_mark(&requests_of(&r, "look")), "look's switch is on");
+    assert!(!requests_of(&r, "quiet").is_empty(), "quiet ran");
+    assert!(
+        !holds_mark(&requests_of(&r, "quiet")),
+        "quiet's switch is off"
+    );
+}

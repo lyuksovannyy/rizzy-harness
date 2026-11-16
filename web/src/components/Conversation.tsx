@@ -673,6 +673,7 @@ export default function Conversation(props: {
                     return (
                       <details key={i} className="divider">
                         <summary>
+                          {it.agent ? `@${it.agent} ` : ""}
                           {it.bg_id} ended ({it.reason.replace(/_/g, " ")}
                           {it.exit_code != null ? `, code ${it.exit_code}` : ""}) after {Math.round(it.ran_ms / 1000)} s
                         </summary>

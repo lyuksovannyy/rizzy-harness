@@ -361,6 +361,7 @@ fn user_dir_overrides_and_extends_and_skips_bad_files() {
 
 fn features() -> harness_agents::Features {
     harness_agents::Features {
+        background_subagents: false,
         memory: true,
         project_memory: true,
         personalisation: true,
@@ -1050,4 +1051,41 @@ fn the_teamlead_knows_it_can_follow_up_a_sub_agent() {
     let p = &lead.spec.system_prompt;
     assert_eq!(p.matches("follow-up").count(), 1, "{p}");
     assert!(p.contains("`session`"), "{p}");
+}
+
+/// X.24: "Background sub-agents" is its own switch: the built-in Team
+/// Lead has it (its prompt says when to use it), every other built-in and
+/// a new custom agent does not; on a custom agent it reaches the spec only
+/// with "Launch sub-agents", and it is kept as chosen when that is off.
+#[test]
+fn background_sub_agents_are_their_own_switch() {
+    let (set, _) = AgentSet::load(std::path::Path::new("/nonexistent"));
+    for a in set.list() {
+        let on = a.spec.caps.is_some_and(|c| c.background);
+        assert_eq!(on, a.id == "teamlead", "{}", a.id);
+        assert_eq!(a.features.background_subagents, on, "{}", a.id);
+    }
+    let lead = set.get("teamlead").unwrap();
+    assert!(lead.spec.system_prompt.contains("`background: true`"));
+    let make = |delegate: bool, background: bool| {
+        harness_agents::custom(
+            "helper",
+            "Helper",
+            "Helps.",
+            "Help.",
+            harness_agents::Features {
+                delegate,
+                background_subagents: background,
+                ..features()
+            },
+            vec!["coder".into()],
+        )
+        .unwrap()
+    };
+    assert!(!make(true, false).spec.caps.unwrap().background);
+    let on = make(true, true);
+    assert!(on.spec.caps.unwrap().background && on.features.background_subagents);
+    assert_ne!(on.spec.prompt_hash, make(true, false).spec.prompt_hash);
+    let off = make(false, true);
+    assert!(off.spec.caps.is_none() && off.features.background_subagents);
 }

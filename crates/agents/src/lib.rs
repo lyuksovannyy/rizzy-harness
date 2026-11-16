@@ -15,6 +15,7 @@
 //! delegates: [coder, scout]                       # may hand sub-tasks to these
 //! max_subagents: 4                                # per turn (default 4)
 //! max_subagent_tokens: 200000                     # per turn, all sub-agents
+//! background_subagents: false                     # delegate in the background (default false)
 //! memory: true                                    # recall and `remember` (default true)
 //! project_memory: true                            # a project's facts, the same (default true)
 //! personalisation: true                           # the person's reply style and instructions (default true)
@@ -141,6 +142,9 @@ struct Frontmatter {
     max_subagents: Option<u32>,
     #[serde(default)]
     max_subagent_tokens: Option<u64>,
+    /// May start sub-agents in the background (ADOPTION_PLAN X.24).
+    #[serde(default)]
+    background_subagents: bool,
     #[serde(default = "yes")]
     memory: bool,
     #[serde(default = "yes")]
@@ -253,6 +257,11 @@ pub struct Features {
     pub mcp: bool,
     /// Hand sub-tasks to the agents available as sub-agents.
     pub delegate: bool,
+    /// Start sub-agents that run in the background (`delegate` with
+    /// `background: true`, ADOPTION_PLAN X.24): its own switch, off when
+    /// absent; it does something only with `delegate` on.
+    #[serde(default)]
+    pub background_subagents: bool,
     /// In the agent picker and `@mentions`.
     pub as_agent: bool,
     /// May be handed sub-tasks.
@@ -399,6 +408,7 @@ pub fn custom(
         delegates: if features.delegate { delegates } else { vec![] },
         max_subagents: None,
         max_subagent_tokens: None,
+        background_subagents: features.background_subagents && features.delegate,
         memory: features.memory,
         project_memory: features.project_memory,
         personalisation: features.personalisation,
@@ -408,6 +418,7 @@ pub fn custom(
     // Kept as chosen: with no sub-agent to call it has no `delegate` tool,
     // but the switch stays on.
     agent.features.delegate = features.delegate;
+    agent.features.background_subagents = features.background_subagents;
     // Kept as chosen too: with a switch on that changes things it adds no
     // shell, but turning that one off again brings it back.
     agent.features.read_only_commands = features.read_only_commands;
@@ -452,6 +463,10 @@ fn build(id: &str, fm: Frontmatter, body: &str, origin: Origin) -> Result<Agent,
     if !fm.personalisation {
         h.update(b"no-personalisation\0");
     }
+    // Only when on, for the same reason.
+    if fm.background_subagents {
+        h.update(b"background-subagents\0");
+    }
     let prompt_hash = hex::encode(h.finalize())[..16].to_string();
     for d in &fm.delegates {
         if !valid_id(d) || d == id {
@@ -466,6 +481,7 @@ fn build(id: &str, fm: Frontmatter, body: &str, origin: Origin) -> Result<Agent,
         harness_core::agent::DelegateCaps {
             max_subagents: fm.max_subagents.unwrap_or(d.max_subagents).clamp(1, 16),
             max_tokens: fm.max_subagent_tokens.unwrap_or(d.max_tokens),
+            background: fm.background_subagents,
         }
     });
     let any = |tools: &[&str]| tools.iter().any(|t| fm.tools.allows(t));
@@ -488,6 +504,7 @@ fn build(id: &str, fm: Frontmatter, body: &str, origin: Origin) -> Result<Agent,
         read_only_commands: read_only_shell,
         mcp: mcp_listed(&fm.tools),
         delegate: !fm.delegates.is_empty(),
+        background_subagents: fm.background_subagents && !fm.delegates.is_empty(),
         as_agent: fm.available_as.contains(&Use::Agent),
         as_subagent: fm.available_as.contains(&Use::Subagent),
     };

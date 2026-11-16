@@ -451,6 +451,7 @@ fn events() -> Vec<RawEvent> {
         }),
         // T.8d: one background command ends, one still runs.
         EventKind::BackgroundStarted(BackgroundStarted {
+            child: None,
             bg_id: "bg-1".into(),
             call_id: "c1".into(),
             turn_id: t(),
@@ -458,6 +459,7 @@ fn events() -> Vec<RawEvent> {
             ends_by_ms: 1_700_000_600_000,
         }),
         EventKind::BackgroundStarted(BackgroundStarted {
+            child: None,
             bg_id: "bg-2".into(),
             call_id: "c1".into(),
             turn_id: t(),
@@ -465,6 +467,7 @@ fn events() -> Vec<RawEvent> {
             ends_by_ms: 1_700_000_060_000,
         }),
         EventKind::BackgroundEnded(BackgroundEnded {
+            child: None,
             bg_id: "bg-1".into(),
             reason: BackgroundReason::Exited,
             exit_code: Some(1),
@@ -479,6 +482,7 @@ fn events() -> Vec<RawEvent> {
         // T.8d step 3: an end while idle resumes the agent (a callback
         // turn, no user message), and a later one is not resumed.
         EventKind::BackgroundEnded(BackgroundEnded {
+            child: None,
             bg_id: "bg-2".into(),
             reason: BackgroundReason::Exited,
             exit_code: Some(1),
@@ -514,6 +518,49 @@ fn events() -> Vec<RawEvent> {
         EventKind::CallbackRefused(CallbackRefused {
             bg_ids: vec!["bg-5".into()],
             reason: "3 turns in a row without you (node limit)".into(),
+        }),
+        // X.24: a background sub-agent ends with its result and its cost
+        // (the chat's usage counts it); another still runs.
+        EventKind::BackgroundStarted(BackgroundStarted {
+            bg_id: "bg-6".into(),
+            call_id: "c1".into(),
+            turn_id: t(),
+            timeout_s: 1800,
+            ends_by_ms: 1_700_001_800_000,
+            child: Some(BackgroundChild {
+                session: "01a19bf2-0000-7000-8000-0000000000c6".parse().unwrap(),
+                agent_id: "coder".into(),
+            }),
+        }),
+        EventKind::BackgroundStarted(BackgroundStarted {
+            bg_id: "bg-7".into(),
+            call_id: "c1".into(),
+            turn_id: t(),
+            timeout_s: 1800,
+            ends_by_ms: 1_700_001_800_000,
+            child: Some(BackgroundChild {
+                session: "01a19bf2-0000-7000-8000-0000000000c7".parse().unwrap(),
+                agent_id: "scout".into(),
+            }),
+        }),
+        EventKind::BackgroundEnded(BackgroundEnded {
+            bg_id: "bg-6".into(),
+            reason: BackgroundReason::Finished,
+            exit_code: None,
+            signal: None,
+            confirmed: BackgroundConfirmed::Ended,
+            ran_ms: 61_000,
+            output_bytes: 0,
+            tail: String::new(),
+            tail_cut: false,
+            delivered: true,
+            child: Some(Box::new(ChildEnded {
+                session: "01a19bf2-0000-7000-8000-0000000000c6".parse().unwrap(),
+                agent_id: "coder".into(),
+                result: "session: 01a19bf2-0000-7000-8000-0000000000c6\nSub-agent @coder finished: done.\n| <b>not html</b>".into(),
+                ok: true,
+                usage: Some(forged(&["m-a", "m-b"], 100)),
+            })),
         }),
         // Hand-off notes (X.16): one written, with its cost in the chat's
         // usage; one whose models failed (the fixed part alone).
