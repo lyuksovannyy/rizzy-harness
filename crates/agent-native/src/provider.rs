@@ -939,6 +939,15 @@ pub fn thinking_dropped(
     })
 }
 
+/// Whether a step's thinking holds a signed or redacted block: what the
+/// in-turn tier may leave out. Plain reasoning text stays: a host that
+/// follows DeepSeek's documented rule wants every step's back.
+pub fn holds_signed(t: &harness_core::event::Thinking) -> bool {
+    t.blocks
+        .iter()
+        .any(|b| !matches!(b, harness_core::event::ThinkingBlock::Text { .. }))
+}
+
 /// A step's thinking as a request may carry it: a marker once `unsent`.
 pub fn sendable_thinking(
     t: harness_core::event::Thinking,

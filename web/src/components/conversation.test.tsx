@@ -225,9 +225,6 @@ describe("thinking", () => {
     test(`malformed thinking from a node (${name}) neither breaks the fold nor the page`, async () => {
       const v = emptyView();
       apply(v, { session_id: SID, seq: 1, ts_ms: 0, kind: "assistant_message", payload: { turn_id: "t", message_id: "m1", text: "hi", tool_calls: [], thinking } } as never);
-      for (const it of v.items) {
-        if (it.type === "thinking") for (const b of it.blocks) expect(typeof b.type).toBe("string");
-      }
       await show(v.items, sessionRow());
       expect(host.textContent).toContain("hi");
     });

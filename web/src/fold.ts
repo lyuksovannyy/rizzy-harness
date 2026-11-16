@@ -290,13 +290,9 @@ export function apply(v: SessionView, e: RawEvent): void {
     case "assistant_message": {
       const a = lastAssistant(v, p.message_id);
       // Its thinking, a row before what the step said (X.25), as the Rust view.
-      // Only each block's kind and text, whatever the node sent (a null, a number: dropped).
-      if (p.thinking && typeof p.thinking === "object") {
-        const blocks = (Array.isArray(p.thinking.blocks) ? p.thinking.blocks : [])
-          .filter((b: any) => b && typeof b === "object" && typeof b.type === "string")
-          .map((b: any) => (typeof b.text === "string" ? { type: b.type, text: b.text } : { type: b.type }));
-        v.items.splice(a ? v.items.indexOf(a) : v.items.length, 0, { type: "thinking", message_id: p.message_id, blocks });
-      }
+      // The blocks as the server sent them (kind and text only, `for_browser`);
+      // the row checks each one, so a malformed one breaks nothing.
+      if (p.thinking) v.items.splice(a ? v.items.indexOf(a) : v.items.length, 0, { type: "thinking", message_id: p.message_id, blocks: Array.isArray(p.thinking.blocks) ? p.thinking.blocks : [] });
       if (a) {
         a.text = p.text;
         a.done = true;

@@ -966,3 +966,168 @@ async fn r4_refusal_on_a_later_turns_first_request_after_restart_then_retry() {
         r.iter().skip(4).filter(|q| carries(q)).count()
     );
 }
+
+/// One turn on `spec` (the review's `run` with a window).
+async fn turn_with(
+    b: &NativeBackend,
+    host: &Host,
+    ws: &std::path::Path,
+    spec: AgentSpec,
+    turn_id: &str,
+    text: &str,
+) -> TurnOutcome {
+    let history = host.log();
+    host.push(EventKind::TurnStarted(TurnStarted {
+        continued_by: None,
+        retry: None,
+        cause: None,
+        agent: None,
+        turn_id: turn_id.into(),
+        environment: None,
+    }));
+    host.push(EventKind::UserMessage(UserMessage {
+        turn_id: turn_id.into(),
+        text: text.into(),
+        attachments: vec![],
+        reply: None,
+        images: vec![],
+        queued: false,
+        files: vec![],
+    }));
+    let out = b
+        .run_turn(TurnCtx {
+            session_id: host.sid,
+            turn_id: turn_id.into(),
+            history,
+            user_text: text.into(),
+            cwd: ws.to_path_buf(),
+            model: "m".into(),
+            agent: Some(spec),
+            compare: vec![],
+            parent_session: None,
+            extra: TurnExtra::default(),
+            cancel: Default::default(),
+            host,
+        })
+        .await;
+    host.push(EventKind::TurnEnded(TurnEnded {
+        turn_id: turn_id.into(),
+        reason: out.reason,
+        usage: out.usage.clone(),
+    }));
+    out
+}
+
+/// Re-check of PR 137: `/compact` after the tier left thinking out. The
+/// summary covers the turn the tier's record names, so nothing is left out
+/// by it any more (that turn is gone from the requests), and the next turn
+/// rebuilds from the log and is answered.
+#[tokio::test]
+async fn compact_after_the_tier_left_thinking_out() {
+    use harness_core::backend::{CompactCtx, CompactOutcome};
+    let ws = tempfile::tempdir().unwrap();
+    for n in 0..30 {
+        std::fs::write(ws.path().join(format!("f{n}.txt")), format!("hello {n}\n")).unwrap();
+    }
+    let main = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let p = Model::new(Box::new(move |req, _| {
+        if req.tools.is_empty() {
+            return Ok(Completion {
+                text: "summary".into(),
+                ..Default::default()
+            });
+        }
+        let n = main.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut c = if n < 20 {
+            read(&format!("c{n}"), &format!("f{n}.txt"), "")
+        } else {
+            answer("done", "")
+        };
+        c.thinking = Some(Thinking {
+            model: "m".into(),
+            blocks: vec![ThinkingBlock::Signed {
+                text: format!("why {n}"),
+                signature: "s".repeat(60_000),
+            }],
+            prefix: "p".into(),
+            unsent: false,
+        });
+        Ok(c)
+    }));
+    let host = Host::default();
+    let b = backend(p.clone(), &[]);
+    let mut spec = agent(false);
+    spec.context_windows.insert("m".into(), 200_000);
+    let o = turn_with(&b, &host, ws.path(), spec.clone(), "t1", "go").await;
+    assert_eq!(o.reason, TurnEndReason::Completed, "{:?}", o.error);
+    assert!(
+        host.kinds("context_shortened")
+            .iter()
+            .any(|c| c.get("thinking").is_some()),
+        "the tier did not act"
+    );
+    // A later turn, so the summary has a turn before the last message.
+    let o = turn_with(&b, &host, ws.path(), spec.clone(), "t2", "ok?").await;
+    assert_eq!(o.reason, TurnEndReason::Completed, "{:?}", o.error);
+    let done = b
+        .compact_now(CompactCtx {
+            session_id: host.sid,
+            history: host.log(),
+            model: "m".into(),
+            window: Some(200_000),
+            focus: None,
+            cancel: Default::default(),
+        })
+        .await;
+    let Some(CompactOutcome::Done {
+        through_seq, text, ..
+    }) = done
+    else {
+        panic!("no summary: {done:?}")
+    };
+    host.push(EventKind::HistorySummarized(HistorySummarized {
+        turn_id: String::new(),
+        through_seq,
+        text,
+        manual: true,
+        focus: None,
+        usage: None,
+        tokens_after: None,
+    }));
+    let before = p.requests().len();
+    let o = turn_with(&b, &host, ws.path(), spec, "t3", "and now?").await;
+    assert_eq!(o.reason, TurnEndReason::Completed, "{:?}", o.error);
+    // The next turn's request: none of t1's steps (summarised), so none
+    // of their thinking, and it rebuilds from the log.
+    let r = p.requests();
+    let next = &r[before];
+    let sent = format!("{:?}", next.messages);
+    for n in 0..20 {
+        assert!(
+            !sent.contains(&format!("why {n}\"")),
+            "step {n}'s thinking was sent"
+        );
+    }
+    let log = host.log();
+    let cut = log
+        .iter()
+        .rposition(|e| e.kind == "assistant_message")
+        .unwrap();
+    let (_, recent) = harness_agent_native::split_summary(&log[..cut]);
+    let mut m = vec![ChatMsg::System("x".into())];
+    m.extend(harness_agent_native::rebuild(
+        recent,
+        &harness_agent_native::Rebuild {
+            blocks: true,
+            agent: Some("dev"),
+            ..Default::default()
+        },
+    ));
+    let got = harness_agent_native::place_notes(m).split_off(1);
+    let w: Vec<String> = next.messages[1..]
+        .iter()
+        .map(|m| format!("{m:?}"))
+        .collect();
+    let a: Vec<String> = got.iter().map(|m| format!("{m:?}")).collect();
+    assert_eq!(a, w, "the next turn differs from the log");
+}

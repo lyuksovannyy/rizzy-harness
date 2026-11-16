@@ -752,3 +752,99 @@ async fn the_events_endpoint_sends_no_signature_or_redacted_data() {
         assert!(!all.contains(opaque), "{opaque} reached the browser");
     }
 }
+
+/// X.25, re-check of PR 137: the live fan-out strips too.
+mod live_socket {
+    use super::*;
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+    fn opaque_step(id: &str) -> EventKind {
+        EventKind::AssistantMessage(AssistantMessage {
+            turn_id: "t1".into(),
+            message_id: id.into(),
+            text: "hi".into(),
+            tool_calls: vec![],
+            author: None,
+            variant: None,
+            blocks: vec![],
+            thinking: Some(Thinking {
+                model: "demo::mock".into(),
+                blocks: vec![
+                    ThinkingBlock::Signed {
+                        text: "readable".into(),
+                        signature: "SIGNATURE-OPAQUE".into(),
+                    },
+                    ThinkingBlock::Redacted {
+                        data: "REDACTED-OPAQUE".into(),
+                    },
+                ],
+                prefix: "PREFIX-HASH".into(),
+                unsent: false,
+            }),
+        })
+    }
+
+    /// The live fan-out (an event arriving after the subscribe): the frame
+    /// carries the thinking's text, never its signature, redacted data or
+    /// prefix.
+    #[tokio::test]
+    async fn a_live_websocket_event_carries_no_opaque_thinking() {
+        let t = start().await;
+        let a = pchat(&t, &t.alex).await;
+        mirrored(&t, a, 1).await;
+        let head = events(&t, a).await.len() as u64;
+        let addr = t.base.trim_start_matches("http://");
+        let mut r = format!("ws://{addr}/api/ws").into_client_request().unwrap();
+        r.headers_mut().insert("cookie", t.alex.parse().unwrap());
+        r.headers_mut().insert("origin", t.base.parse().unwrap());
+        let (mut s, _) = tokio_tungstenite::connect_async(r).await.unwrap();
+        s.send(Message::Text(common::socket_login(&t.alex).into()))
+            .await
+            .unwrap();
+        s.send(Message::Text(
+            json!({"type": "subscribe", "session_id": a, "after_seq": head})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+        // Wait for "replayed": the subscription is live.
+        loop {
+            let m = tokio::time::timeout(Duration::from_secs(5), s.next())
+                .await
+                .expect("quiet")
+                .unwrap()
+                .unwrap();
+            if let Message::Text(txt) = m {
+                let v: Value = serde_json::from_str(&txt).unwrap();
+                if v["type"] == "replayed" {
+                    break;
+                }
+            }
+        }
+        t.node
+            .append_at(a, opaque_step("m1"), harness_core::now_ms());
+        let got = loop {
+            let m = tokio::time::timeout(Duration::from_secs(5), s.next())
+                .await
+                .expect("no live event")
+                .unwrap()
+                .unwrap();
+            if let Message::Text(txt) = m {
+                let v: Value = serde_json::from_str(&txt).unwrap();
+                if v["type"] == "event" && v["event"]["kind"] == "assistant_message" {
+                    break txt.to_string();
+                }
+            }
+        };
+        assert!(got.contains("readable"), "{got}");
+        for opaque in ["SIGNATURE-OPAQUE", "REDACTED-OPAQUE", "PREFIX-HASH"] {
+            assert!(
+                !got.contains(opaque),
+                "{opaque} reached the browser LIVE: {got}"
+            );
+        }
+    }
+}

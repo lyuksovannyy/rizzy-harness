@@ -338,8 +338,9 @@ fn layout(msgs: &[ChatMsg], spans: &[Span], st: &State) -> Layout {
     }
 }
 
-/// The model messages whose thinking `st` leaves out: every one before the
-/// point's turn, and its turn's first `steps`.
+/// The model messages whose signed thinking `st` leaves out: every one
+/// before the point's turn, and its turn's first `steps` (plain reasoning
+/// text in them stays).
 fn unthought(msgs: &[ChatMsg], spans: &[Span], st: &State) -> Vec<bool> {
     let n = msgs.len();
     let mut out = vec![false; n];
@@ -377,7 +378,7 @@ pub fn drop_thinking(msgs: &mut [ChatMsg], spans: &[Span], st: &State) {
                 && let ChatMsg::Assistant {
                     thinking: Some(t), ..
                 } = m
-                && !t.blocks.is_empty()
+                && crate::provider::holds_signed(t)
             {
                 *t = crate::provider::thinking_dropped(t);
             }
@@ -385,8 +386,12 @@ pub fn drop_thinking(msgs: &mut [ChatMsg], spans: &[Span], st: &State) {
     }
 }
 
-/// The point that leaves out the thinking of every step before `tail` that
-/// still has some, oldest first (X.25, T73). `None` when there is none.
+/// The point that leaves out the signed thinking of every step before
+/// `tail` that still has some, oldest first (X.25, T73). Plain reasoning
+/// text is never left out here: a host that follows DeepSeek's documented
+/// rule ("must be fully passed back") would refuse every later request; it
+/// stays bounded by `Thinking::MAX_BYTES` and goes with its step when the
+/// older tiers fold steps. `None` when there is none.
 pub fn plan_unthink(
     msgs: &[ChatMsg],
     spans: &[Span],
@@ -396,7 +401,7 @@ pub fn plan_unthink(
     let l = unthought(msgs, spans, st);
     let i = (0..tail.min(msgs.len())).rev().find(|&i| {
         !l[i]
-            && matches!(&msgs[i], ChatMsg::Assistant { thinking: Some(t), .. } if !t.blocks.is_empty())
+            && matches!(&msgs[i], ChatMsg::Assistant { thinking: Some(t), .. } if crate::provider::holds_signed(t))
     })?;
     let k = spans.iter().rposition(|s| s.start <= i)?;
     let steps = (spans[k].start..=i)
@@ -463,7 +468,7 @@ pub fn apply(msgs: &[ChatMsg], spans: &[Span], st: &State, how: How) -> Vec<Chat
                 tool_calls,
                 thinking: Some(t),
             } = m
-            && !t.blocks.is_empty()
+            && crate::provider::holds_signed(t)
         {
             out.push(ChatMsg::Assistant {
                 text: text.clone(),

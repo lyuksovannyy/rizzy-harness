@@ -53,6 +53,16 @@ impl RawEvent {
     pub fn typed(&self) -> Result<EventKind, serde_json::Error> {
         EventKind::from_parts(&self.kind, self.payload.clone())
     }
+
+    /// The event as a browser is sent it: a copy, with what only the
+    /// provider reads back taken out ([`for_browser`]). The one way the
+    /// master writes an event into an HTTP or websocket response; the
+    /// event itself (the mirror, the live channel's readers) is untouched.
+    pub fn for_browser(&self) -> Value {
+        let mut e = self.clone();
+        for_browser(&e.kind, &mut e.payload);
+        serde_json::to_value(e).expect("an event always serializes")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

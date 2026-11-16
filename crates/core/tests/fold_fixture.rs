@@ -994,7 +994,11 @@ fn events() -> Vec<RawEvent> {
 fn fixture_is_current() {
     let evs = events();
     let expected = SessionView::fold(&evs).unwrap();
-    let doc = json!({ "events": evs, "expected": expected });
+    // The events as a browser is sent them (X.25: no signature, redacted
+    // data or prefix; `RawEvent::for_browser`); the view is the same either
+    // way, and the TypeScript fold reads only what a browser gets.
+    let sent: Vec<serde_json::Value> = evs.iter().map(RawEvent::for_browser).collect();
+    let doc = json!({ "events": sent, "expected": expected });
     let text = serde_json::to_string_pretty(&doc).unwrap() + "\n";
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../web/src/__fixtures__/session.json");

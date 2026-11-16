@@ -671,12 +671,13 @@ read and never sent back, and then no later signed block of that model is
 either. Signatures and redacted data stay on the server: your browser gets
 the readable text only, and the row shows the first 64 KiB of it until you
 ask for all. If a provider refuses a request, the harness sends it again
-without the thinking, then without the images, then without both, and
-remembers only what was refused; when the thinking was refused it sends
+without the thinking, then without the images, then without both (up to
+three requests that may be wasted), and remembers only what was refused; when the thinking was refused it sends
 that model's thinking in that chat no more, and the chat goes on. Thinking
 counts toward the context-window meter; when a long turn fills the window
-the oldest steps' thinking is left out first (the chat notes "older steps'
-thinking left out"), and it goes with its steps when they are summarised.
+the oldest steps' signed Claude thinking is left out first (the chat notes
+"older steps' thinking left out"); plain reasoning text stays, and all of
+it goes with its steps when they are summarised.
 
 Local Ollama: preset `ollama`, `base_url = "http://localhost:11434/v1"`, no key.
 

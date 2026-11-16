@@ -35,7 +35,7 @@ use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use futures::{SinkExt, StreamExt};
-use harness_core::SessionId;
+use harness_core::{RawEvent, SessionId};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::broadcast::error::RecvError;
@@ -394,6 +394,14 @@ impl Out {
     async fn send(&mut self, v: serde_json::Value) -> bool {
         self.msg(Message::Text(v.to_string().into())).await
     }
+
+    /// An event of the log, as a browser is sent it (X.25, T73: a copy
+    /// without what only the provider reads back). Every event frame goes
+    /// through here.
+    async fn event(&mut self, e: &RawEvent) -> bool {
+        self.send(json!({"type": "event", "event": e.for_browser()}))
+            .await
+    }
 }
 
 /// Is the socket's login still good? Read only: the expiry does not move.
@@ -438,11 +446,9 @@ async fn catch_up(m: &Master, out: &mut Out, sid: SessionId, last: &mut u64) -> 
             }
         };
         let n = page.len();
-        for mut e in page {
+        for e in page {
             *last = e.seq;
-            // No signature or redacted data reaches a browser (X.25, T73).
-            harness_core::event::for_browser(&e.kind, &mut e.payload);
-            if !out.send(json!({"type": "event", "event": e})).await {
+            if !out.event(&e).await {
                 return false;
             }
         }
@@ -600,7 +606,7 @@ async fn run(
                     Ok(Live::Event(e)) => match subs.get_mut(&e.session_id) {
                         Some(last) if e.seq == *last + 1 => {
                             *last = e.seq;
-                            out.send(json!({"type": "event", "event": e})).await
+                            out.event(&e).await
                         }
                         Some(last) if e.seq > *last + 1 => {
                             catch_up(&m, &mut out, e.session_id, last).await
