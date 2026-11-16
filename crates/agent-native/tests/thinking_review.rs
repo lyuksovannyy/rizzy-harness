@@ -403,19 +403,21 @@ async fn r2b_the_same_provider_with_clean_reasoning_goes_on() {
     assert_eq!(o.reason, TurnEndReason::Completed, "{:?}", o.error);
 }
 
-/// R5. 40 steps each with 1.5 MiB of reasoning text: each step keeps at
-/// most `Thinking::MAX_BYTES` (cut plain text, still sent), and with a
-/// window the in-turn shortening leaves out the oldest steps' thinking, so
-/// no request (and what the loop holds for it) grows past the window.
-/// Returns the most thinking bytes any request carried, the log's bytes and
-/// the shortening records that left thinking out.
-async fn r5_with(window: Option<u64>) -> (usize, usize, usize) {
+/// R5. 40 steps each with 1.5 MiB of reasoning text (`signed`: also a
+/// signed block of 100 KB): each step keeps at most `Thinking::MAX_BYTES`
+/// (cut plain text, still sent), and with a window the in-turn shortening
+/// (the thinking tier for signed blocks, folds for plain text) keeps every
+/// request, and what the loop holds for it, under the window.
+/// Returns the largest request (estimated tokens), the log's bytes and the
+/// shortenings (signed: those that left thinking out).
+async fn r5_with(window: Option<u64>, signed: bool) -> (usize, usize, usize) {
     let ws = tempfile::tempdir().unwrap();
     for n in 0..40 {
         std::fs::write(ws.path().join(format!("f{n}.txt")), format!("hello {n}\n")).unwrap();
     }
     let big: Arc<String> = Arc::new("r".repeat(3 << 19));
     let b2 = big.clone();
+    let main = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let p = Model::new(Box::new(move |req, n| {
         // Summaries and other side requests: plain text.
         if req.tools.is_empty() {
@@ -424,13 +426,11 @@ async fn r5_with(window: Option<u64>) -> (usize, usize, usize) {
                 ..Default::default()
             });
         }
-        let steps = req
-            .messages
-            .iter()
-            .filter(|m| matches!(m, ChatMsg::Tool { .. }))
-            .count();
+        // The turn's step, counted by the requests answered (a fold takes
+        // earlier results out of the request, so they cannot be counted).
+        let steps = main.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let _ = n;
-        Ok(if steps < 40 {
+        let mut c = if steps < 40 {
             read(
                 &format!("c{steps}"),
                 &format!("f{steps}.txt"),
@@ -438,7 +438,20 @@ async fn r5_with(window: Option<u64>) -> (usize, usize, usize) {
             )
         } else {
             answer("done", "end")
-        })
+        };
+        if signed {
+            c.thinking = Some(Thinking {
+                model: "m".into(),
+                blocks: vec![ThinkingBlock::Signed {
+                    text: format!("why {steps}"),
+                    // A large but normal signature (100 KB): kept and sent.
+                    signature: format!("{steps}{}", &b2[..100_000]),
+                }],
+                prefix: "p".into(),
+                unsent: false,
+            });
+        }
+        Ok(c)
     }));
     let host = Host::default();
     let b = backend(p.clone(), &[]);
@@ -511,29 +524,44 @@ async fn r5_with(window: Option<u64>) -> (usize, usize, usize) {
     let max_held = r.iter().map(held).max().unwrap_or_default();
     eprintln!("max thinking bytes in any request: {max_held}");
     assert_eq!(o.reason, TurnEndReason::Completed, "{:?}", o.error);
-    let left_out = host
-        .kinds("context_shortened")
+    let shortened = host.kinds("context_shortened");
+    let left_out = shortened
         .iter()
         .filter(|c| c.get("thinking").is_some())
         .count();
-    (max_held, log_bytes, left_out)
+    let max_est = r
+        .iter()
+        .map(|q| harness_agent_native::estimate_tokens(&q.messages))
+        .max()
+        .unwrap_or_default();
+    let _ = max_held;
+    (
+        max_est as usize,
+        log_bytes,
+        if signed { left_out } else { shortened.len() },
+    )
 }
 
 #[tokio::test]
 async fn r5_large_thinking_is_bounded_across_forty_steps() {
     use harness_core::event::Thinking as T;
-    // No window: nothing is left out, but each step keeps at most the bound.
-    let (_, log, _) = r5_with(None).await;
-    assert!(log < 41 * (T::MAX_BYTES + 4096), "log {log}");
-    // A 200k window: the oldest steps' thinking is left out, recorded, and
-    // no request carries more than fits the window (4 characters a token).
-    let (held, log, left_out) = r5_with(Some(200_000)).await;
-    assert!(left_out > 0, "no shortening left thinking out");
-    assert!(
-        held < 200_000 * 4,
-        "a request carried {held} bytes of thinking"
-    );
-    assert!(log < 41 * (T::MAX_BYTES + 4096), "log {log}");
+    for signed in [false, true] {
+        // No window: nothing is shortened, but each step keeps at most the
+        // bound.
+        let (_, log, _) = r5_with(None, signed).await;
+        assert!(log < 41 * (T::MAX_BYTES + 4096), "log {log}");
+        // A 200k window: signed thinking is left out by its tier, oldest
+        // first, and recorded; plain reasoning goes whole with its steps
+        // when they are folded; either way no request carries more than
+        // fits the window (4 characters a token).
+        let (tokens, log, cuts) = r5_with(Some(200_000), signed).await;
+        assert!(cuts > 0, "signed {signed}: nothing was shortened");
+        assert!(
+            tokens < 200_000,
+            "signed {signed}: a request was {tokens} tokens"
+        );
+        assert!(log < 41 * (T::MAX_BYTES + 4096), "log {log}");
+    }
 }
 
 // ---- Anthropic on the wire: a gap in the kept blocks ----------------------
