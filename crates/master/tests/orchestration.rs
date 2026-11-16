@@ -163,16 +163,21 @@ fn outputs(evs: &[RawEvent]) -> Vec<String> {
         .collect()
 }
 
-/// Holds each sub-agent's first model call until all `n` sub-agents have
-/// made theirs, then lets them all go: the children overlap because the
-/// test proves they ran at once, not because the mock happened to be slow
-/// enough. If they ran one after another, the first would wait here alone
-/// until `HOLD` and the overlap assertion would fail.
+/// Holds the first model call of each sub-agent whose task is in `tasks`
+/// until `need` different ones (told apart by their system prompt and
+/// task) have made theirs, then lets them all go: those children overlap
+/// because the test made them wait for each other, not because the mock
+/// happened to be slow enough. If they ran one after another, the first
+/// would wait here alone until `HOLD` and the overlap assertion would fail.
+/// (A barrier counted calls, not children: on CI a fast child got through
+/// it and ended before a child that makes a worktree had started.)
 struct Gate {
     inner: Mock,
     /// The sub-agents' tasks, as the mock reads them (their own words).
     tasks: Vec<&'static str>,
-    barrier: tokio::sync::Barrier,
+    need: usize,
+    arrived: std::sync::Mutex<std::collections::HashSet<String>>,
+    all_in: tokio::sync::Notify,
 }
 
 /// Only to fail a test whose children never all start; never reached when
@@ -197,14 +202,49 @@ impl harness_agent_native::provider::Provider for Gate {
             .messages
             .iter()
             .any(|m| matches!(m, ChatMsg::Assistant { .. }));
+        // The task: the message's last paragraph, after the turn's context
+        // and the environment line. Read as the whole message, the words
+        // were the harness's, matched no task, and the gate held nobody
+        // since that line came in (2026-11-14): the overlap was left to
+        // timing, and on CI a fast child ended before another started.
         let said = req
             .messages
             .iter()
             .rev()
             .find_map(ChatMsg::user_text)
-            .map(|t| harness_core::event::own_words(t).trim().to_string());
-        if first && said.is_some_and(|s| self.tasks.contains(&s.as_str())) {
-            let _ = tokio::time::timeout(HOLD, self.barrier.wait()).await;
+            .map(|t| {
+                let t = harness_agent_native::provider::split_context(t).map_or(t, |(_, u)| u);
+                let t = t.rsplit("\n\n").next().unwrap_or(t);
+                harness_core::event::own_words(t).trim().to_string()
+            });
+        if first && let Some(said) = said.filter(|s| self.tasks.contains(&s.as_str())) {
+            let system: String = req
+                .messages
+                .iter()
+                .filter_map(|m| match m {
+                    ChatMsg::System(t) => Some(t.as_str()),
+                    _ => None,
+                })
+                .collect();
+            let full = {
+                let mut a = self.arrived.lock().unwrap();
+                a.insert(format!("{system}\n{said}"));
+                a.len() >= self.need
+            };
+            if full {
+                self.all_in.notify_waiters();
+            } else {
+                let _ = tokio::time::timeout(HOLD, async {
+                    loop {
+                        let wake = self.all_in.notified();
+                        if self.arrived.lock().unwrap().len() >= self.need {
+                            return;
+                        }
+                        wake.await;
+                    }
+                })
+                .await;
+            }
         }
         self.inner.complete(req, deltas).await
     }
@@ -212,14 +252,18 @@ impl harness_agent_native::provider::Provider for Gate {
 
 #[tokio::test]
 async fn teamlead_delegates_in_parallel_within_caps() {
-    // The four sub-agents that start (the fifth is past the cap).
-    let tasks = vec!["slow: 20", "draft notes", "delegate: scout=nested"];
+    // The coder's and the scout's `slow: 20` wait for each other: one step's
+    // delegations run at once, not one after another. (All four children
+    // overlapping depended on how long a worktree takes to make: the one
+    // that only answers "unknown tool `delegate`" could end first.)
     let (m, ws, _d) = setup_with(Arc::new(Gate {
         inner: Mock {
             delay: Duration::from_millis(10),
         },
-        tasks,
-        barrier: tokio::sync::Barrier::new(4),
+        tasks: vec!["slow: 20"],
+        need: 2,
+        arrived: Default::default(),
+        all_in: tokio::sync::Notify::new(),
     }))
     .await;
     // Coder and Writer can change files: they need a repository for their
@@ -268,12 +312,15 @@ async fn teamlead_delegates_in_parallel_within_caps() {
         .collect();
     assert_eq!(kids.len(), 4);
     assert!(kids.iter().all(|k| k.owner_id.as_deref() == Some("alex")));
+    // The two `slow: 20` children, the ones the gate holds.
     let span = |id: SessionId| {
         let e = m.inner_mirror().events_after(id, 0, 10_000).unwrap();
+        let slow = e.iter().any(|x| x.payload.to_string().contains("slow: 20"));
         let t = |k: &str| e.iter().find(|x| x.kind == k).unwrap().ts_ms;
-        (t("turn_started"), t("turn_ended"))
+        slow.then(|| (t("turn_started"), t("turn_ended")))
     };
-    let spans: Vec<(i64, i64)> = kids.iter().map(|k| span(k.session_id)).collect();
+    let spans: Vec<(i64, i64)> = kids.iter().filter_map(|k| span(k.session_id)).collect();
+    assert_eq!(spans.len(), 2, "{spans:?}");
     let latest_start = spans.iter().map(|s| s.0).max().unwrap();
     let earliest_end = spans.iter().map(|s| s.1).min().unwrap();
     assert!(
