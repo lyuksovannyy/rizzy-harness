@@ -915,6 +915,7 @@ fn the_watchers_read_of_a_long_last_turn_is_its_ends_only() {
         sid,
         503,
         EventKind::BackgroundEnded(BackgroundEnded {
+            child: None,
             bg_id: "bg-1".into(),
             reason: BackgroundReason::Exited,
             exit_code: Some(0),
@@ -971,6 +972,7 @@ fn the_watchers_read_starts_after_the_persons_turn_not_a_callback_turn() {
             sid,
             seq,
             EventKind::BackgroundEnded(BackgroundEnded {
+                child: None,
                 bg_id: id.into(),
                 reason: BackgroundReason::Exited,
                 exit_code: Some(0),

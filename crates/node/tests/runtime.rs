@@ -3737,6 +3737,7 @@ async fn node_limits_clamp_the_masters_delegation_caps_and_depth() {
         ],
     );
     lead.caps = Some(DelegateCaps {
+        background: false,
         max_subagents: 10,
         max_tokens: 1_000_000,
     });
