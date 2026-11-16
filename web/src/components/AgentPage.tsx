@@ -72,6 +72,11 @@ export const FEATURE_GROUPS: { title: string; items: Feature[] }[] = [
       },
       { key: "mcp", label: "MCP servers", hint: "Uses the tools of the MCP servers the node runs for the chat" },
       { key: "delegate", label: "Launch sub-agents", hint: "Hands sub-tasks to the agents available as sub-agents" },
+      {
+        key: "background_subagents",
+        label: "Background sub-agents",
+        hint: "With Launch sub-agents: may start one that works on while it goes on or ends its turn, and is called back with its result",
+      },
       { key: null, label: "Manage workspace", hint: "Changes workspace settings and members" },
     ],
   },
@@ -89,6 +94,7 @@ export const NEW_FEATURES: AgentFeatures = {
   read_only_commands: false,
   mcp: false,
   delegate: false,
+  background_subagents: false,
   as_agent: true,
   as_subagent: true,
 };

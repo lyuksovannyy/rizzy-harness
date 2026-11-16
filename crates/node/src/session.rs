@@ -171,6 +171,10 @@ pub(crate) struct Session {
     bg_flush: Arc<tokio::sync::Notify>,
     /// The last try to record a queued end failed (T8D-6).
     bg_failed: AtomicBool,
+    /// Background sub-agents (X.24) whose run ended and whose end is not
+    /// recorded yet, by `bg-<n>`: the merge-back and the result wait for
+    /// the end's delivery (a step boundary, or between turns).
+    bg_children: Mutex<HashMap<String, ChildEnd>>,
     /// Held while an end is checked against the turn slot and recorded,
     /// and while a turn reads its history and records `turn_started`: no
     /// end lands between a turn's read and its start (review S3-4).
@@ -352,6 +356,22 @@ struct Isolation {
     cwd: PathBuf,
 }
 
+/// A child session with its turn started and not run yet
+/// ([`Session::start_child`], [`Session::start_continue`]).
+struct Prepared {
+    child: Arc<Session>,
+    iso: Option<Isolation>,
+    msg: UserMessage,
+    history: Vec<RawEvent>,
+    agent: AgentSpec,
+    extra: TurnExtra,
+    cancel: CancellationToken,
+    by_stop: Arc<AtomicBool>,
+}
+
+mod bg_agents;
+use bg_agents::ChildEnd;
+
 /// One chat's approval mode (read by its sub-agents through the node's
 /// session table, `Session::current_mode`).
 /// The reason recorded with a card denied because the chat entered plan
@@ -427,6 +447,7 @@ impl Session {
             bg_queue: Mutex::new(Vec::new()),
             bg_flush: Arc::default(),
             bg_failed: AtomicBool::new(false),
+            bg_children: Mutex::default(),
             bg_gate: tokio::sync::Mutex::new(()),
             queue: tokio::sync::Mutex::new(()),
             pending: Mutex::new(Vec::new()),
@@ -551,6 +572,7 @@ impl Session {
             bg_queue: Mutex::new(Vec::new()),
             bg_flush: Arc::default(),
             bg_failed: AtomicBool::new(false),
+            bg_children: Mutex::default(),
             bg_gate: tokio::sync::Mutex::new(()),
             queue: tokio::sync::Mutex::new(()),
             // Sent while a turn ran that a restart cut: the next turn reads
@@ -626,6 +648,8 @@ impl Session {
     async fn on_background_end(&self, e: harness_tools::background::Ended) {
         let Some(bg) = &self.bg else { return };
         if e.reason == BackgroundReason::SessionDeleted {
+            // A background sub-agent's folder goes too, unmerged (X.24).
+            self.drop_child_end(&e.bg_id).await;
             bg.recorded();
             return;
         }
@@ -664,15 +688,24 @@ impl Session {
     async fn record_background(&self, ends: Vec<harness_tools::background::Ended>) {
         let Some(bg) = &self.bg else { return };
         for e in ends {
-            match self
-                .append(EventKind::BackgroundEnded(e.event(false)))
-                .await
-            {
+            // A background sub-agent's end is merged and built here (X.24).
+            let ev = self.end_event(&e, false).await;
+            #[cfg(feature = "testing")]
+            let refused = crate::testing::take_fail_end(self.id);
+            #[cfg(not(feature = "testing"))]
+            let refused = false;
+            let appended = if refused {
+                Err(StoreError::Corrupt("refused by a test".into()))
+            } else {
+                self.append(EventKind::BackgroundEnded(ev.clone())).await
+            };
+            match appended {
                 Ok(_) => {
                     bg.recorded();
                     self.bg_failed.store(false, Ordering::SeqCst);
                 }
                 Err(err) => {
+                    self.keep_child_end(ev);
                     self.bg_failed.store(true, Ordering::SeqCst);
                     tracing::error!(session = %self.id, error = %err, bg = %e.bg_id, "could not record a background command's end; kept for the next try");
                     self.bg_queue
@@ -707,7 +740,23 @@ impl Session {
             return;
         };
         for bg_id in view.running_background() {
+            // A background sub-agent's end says so (X.24): its result never
+            // came, its folder is gone, and it can be continued.
+            let child = view
+                .background
+                .get(&bg_id)
+                .and_then(|b| b.child.clone())
+                .map(|c| {
+                    Box::new(ChildEnded {
+                        session: c.session,
+                        agent_id: c.agent_id,
+                        result: String::new(),
+                        ok: false,
+                        usage: None,
+                    })
+                });
             let ended = BackgroundEnded {
+                child,
                 bg_id,
                 reason: BackgroundReason::NodeRestarted,
                 exit_code: None,
@@ -1332,16 +1381,6 @@ impl Session {
         real.starts_with(&ws) && real != ws
     }
 
-    /// Record a change of the session's active agent.
-    pub(crate) async fn set_agent(&self, agent: AgentSpec) -> Result<(), String> {
-        self.append(EventKind::AgentChanged(AgentChanged {
-            agent: agent.agent_ref(),
-        }))
-        .await
-        .map(|_| ())
-        .map_err(|e| e.to_string())
-    }
-
     /// `agent_named`: the person chose the agent for this message (the
     /// picker or an @mention), as the master resolved it.
     pub(crate) async fn prompt(
@@ -1365,6 +1404,9 @@ impl Session {
         if self.incognito && !input.images.is_empty() {
             return Err("images can't go into an incognito chat".into());
         }
+        // Named for this message: an @mention, a routine's explicit agent,
+        // or the asker an answer goes to (`switch_of` decides the rest).
+        let named = agent_named || input.reply.is_some();
         self.check_cwd_still_allowed()?;
         // The owner prompts the chat: it may start background commands
         // again after a revocation closed its table (the master admits the
@@ -1460,7 +1502,10 @@ impl Session {
         };
         // Recorded before the prompt is answered, so a log that cannot be
         // written refuses the prompt itself and the sender sees why.
-        let (history, queued) = match self.begin(Some(&msg), &turn_id, agent.as_ref()).await {
+        let (history, queued) = match self
+            .begin(Some(&msg), &turn_id, agent.as_ref(), named)
+            .await
+        {
             Ok(h) => h,
             Err(e) => {
                 self.release(&turn_id);
@@ -1680,7 +1725,7 @@ impl Session {
             began: std::time::SystemTime::now(),
         })
         .ok()?;
-        let (history, mut queued) = match self.begin(None, &turn_id, agent).await {
+        let (history, mut queued) = match self.begin(None, &turn_id, agent, true).await {
             Ok(h) => h,
             Err(e) => {
                 tracing::warn!(session = %self.id, error = %e, "could not start a turn for the messages sent while the last one ran");
@@ -1857,6 +1902,16 @@ impl Session {
             .unwrap_or_else(|p| p.into_inner())
             .clear();
         let environment = self.environment_line(&turn_id).await;
+        // A pick no message followed yet: this turn is the first to run
+        // under it, so the switch is noted here, above it, and the log
+        // reads in order (the master sends the chat's agent).
+        if let Some(switch) = self.switch_of(&history, agent.as_ref(), false)
+            && let Err(e) = self.emit(EventKind::AgentChanged(switch)).await
+        {
+            drop(gate);
+            self.release(&turn_id);
+            return Err(e.to_string());
+        }
         if let Err(e) = self
             .emit(EventKind::TurnStarted(TurnStarted {
                 turn_id: turn_id.clone(),
@@ -2285,13 +2340,17 @@ impl Session {
     /// turn that only reads queued messages: with none unread, nothing is
     /// recorded and it is refused. When an append fails nothing has run,
     /// and whatever was written is closed. A person's turn holds `queue`.
+    /// `named`: the turn's agent was named for it rather than being the
+    /// chat's own (`switch_of`, which records a switch of agent or model
+    /// first, `agent_changed`, only for the chat's own).
     async fn begin(
         &self,
         msg: Option<&UserMessage>,
         turn_id: &str,
         agent: Option<&AgentSpec>,
+        named: bool,
     ) -> Result<(Vec<RawEvent>, Vec<UserMessage>), String> {
-        self.begin_with(msg, turn_id, agent, None).await
+        self.begin_with(msg, turn_id, agent, None, named).await
     }
 
     /// [`Self::begin`] for a sub-agent's follow-up (T68): `follow_up` is the
@@ -2305,6 +2364,7 @@ impl Session {
         turn_id: &str,
         agent: Option<&AgentSpec>,
         follow_up: Option<(&str, &str)>,
+        named: bool,
     ) -> Result<(Vec<RawEvent>, Vec<UserMessage>), String> {
         // The mode in force recorded first, if the log says another.
         self.record_clamp().await;
@@ -2346,6 +2406,13 @@ impl Session {
             *self.turn_env.lock().unwrap_or_else(|p| p.into_inner()) =
                 Some((turn_id.to_string(), both.clone()));
             environment = Some(both);
+        }
+        // The switch, above the turn and its message (not in `history`:
+        // the model is never sent it).
+        if let Some(switch) = self.switch_of(&history, agent, named)
+            && let Err(e) = self.emit(EventKind::AgentChanged(switch)).await
+        {
+            return Err(e.to_string());
         }
         let started = self
             .emit(EventKind::TurnStarted(TurnStarted {
@@ -3728,6 +3795,48 @@ impl Session {
         cancel: CancellationToken,
         started: Box<dyn FnOnce(SessionId) + Send>,
     ) -> Result<harness_core::backend::DelegateOutcome, String> {
+        let p = self
+            .start_child(agent, task, refs, observed, cancel, started, None)
+            .await?;
+        Ok(self.run_prepared(p).await)
+    }
+
+    /// Run a prepared child's turn and give its outcome (merged back).
+    async fn run_prepared(&self, p: Prepared) -> harness_core::backend::DelegateOutcome {
+        let turn_id = p.msg.turn_id.clone();
+        let (reason, usage) = p
+            .child
+            .clone()
+            .run_turn(
+                p.msg.turn_id.clone(),
+                p.msg.model_text(),
+                p.history,
+                Some(p.agent),
+                vec![],
+                p.extra,
+                p.cancel,
+                p.by_stop,
+            )
+            .await;
+        self.child_outcome(&p.child, p.iso, &turn_id, reason, usage)
+            .await
+    }
+
+    /// Make a new child session for a delegated sub-task, its folder (a
+    /// writer's own) and its first turn's start, ready to run
+    /// ([`Self::run_prepared`], or in the background, X.24). `max_tokens`:
+    /// its own token cap, for a background child.
+    #[allow(clippy::too_many_arguments)]
+    async fn start_child(
+        &self,
+        agent: AgentSpec,
+        task: String,
+        refs: SharedRefs,
+        observed: Arc<Vec<String>>,
+        cancel: CancellationToken,
+        started: Box<dyn FnOnce(SessionId) + Send>,
+        max_tokens: Option<u64>,
+    ) -> Result<Prepared, String> {
         // No new sub-agent while the node stops (its parent is cancelled
         // already; this is the window before the parent sees it).
         if self.node.is_stopping() {
@@ -3850,9 +3959,13 @@ impl Session {
             refs: Some(refs),
             observed: Some(observed),
             changes_since: Some(parent_began),
+            max_tokens,
             ..Default::default()
         };
-        let history = match child.begin(Some(&msg), &msg.turn_id, Some(&agent)).await {
+        let history = match child
+            .begin(Some(&msg), &msg.turn_id, Some(&agent), true)
+            .await
+        {
             Ok((h, _)) => h,
             Err(e) => {
                 child.release(&msg.turn_id);
@@ -3862,22 +3975,16 @@ impl Session {
                 return Err(e);
             }
         };
-        let (reason, usage) = child
-            .clone()
-            .run_turn(
-                msg.turn_id.clone(),
-                msg.model_text(),
-                history,
-                Some(agent),
-                vec![],
-                extra,
-                cancel,
-                by_stop,
-            )
-            .await;
-        Ok(self
-            .child_outcome(&child, iso, &msg.turn_id, reason, usage)
-            .await)
+        Ok(Prepared {
+            child,
+            iso,
+            msg,
+            history,
+            agent,
+            extra,
+            cancel,
+            by_stop,
+        })
     }
 
     /// What a sub-agent's turn `turn_id` (its first or a follow-up) gives
@@ -3988,6 +4095,29 @@ impl Session {
         cancel: CancellationToken,
         started: Box<dyn FnOnce(SessionId) + Send>,
     ) -> Result<harness_core::backend::DelegateOutcome, String> {
+        let p = self
+            .start_continue(
+                child_id, agent, task, call_id, refs, observed, cancel, started, None,
+            )
+            .await?;
+        Ok(self.run_prepared(p).await)
+    }
+
+    /// [`Self::run_continue`]'s checks and the follow-up's start, ready to
+    /// run, in the foreground or in the background (X.24).
+    #[allow(clippy::too_many_arguments)]
+    async fn start_continue(
+        &self,
+        child_id: SessionId,
+        agent: AgentSpec,
+        task: String,
+        call_id: String,
+        refs: SharedRefs,
+        observed: Arc<Vec<String>>,
+        cancel: CancellationToken,
+        started: Box<dyn FnOnce(SessionId) + Send>,
+        max_tokens: Option<u64>,
+    ) -> Result<Prepared, String> {
         use harness_core::subagent::MAX_CHILD_RUNS;
         if self.node.is_stopping() {
             return Err(harness_protocol::NODE_STOPPING.into());
@@ -4021,6 +4151,11 @@ impl Session {
         let head = format!("session: {child_id}\n");
         let mut delegate_calls = std::collections::HashSet::new();
         let mut last: Option<String> = None;
+        // A background run of it (X.24): its entry while it runs, and what
+        // its end said of its changes (none landed when the node restarted
+        // before the end was delivered).
+        let mut running_as: Option<String> = None;
+        let mut landed_bg: Option<harness_core::subagent::Landed> = None;
         for e in &mine {
             match e.typed() {
                 Ok(EventKind::ToolCallStarted(c)) if c.tool == "delegate" => {
@@ -4030,6 +4165,24 @@ impl Session {
                     if delegate_calls.contains(&f.call_id) && f.output.starts_with(&head) =>
                 {
                     last = Some(f.output);
+                    landed_bg = None;
+                }
+                Ok(EventKind::BackgroundStarted(b))
+                    if b.child.as_ref().is_some_and(|c| c.session == child_id) =>
+                {
+                    running_as = Some(b.bg_id);
+                }
+                Ok(EventKind::BackgroundEnded(b))
+                    if b.child.as_ref().is_some_and(|c| c.session == child_id) =>
+                {
+                    running_as = None;
+                    landed_bg = b.child.map(|c| {
+                        if c.result.is_empty() {
+                            harness_core::subagent::Landed::None
+                        } else {
+                            harness_core::subagent::landed_in(&c.result)
+                        }
+                    });
                 }
                 _ => {}
             }
@@ -4037,7 +4190,18 @@ impl Session {
         let Some(last) = last else {
             return Err(not_yours());
         };
-        let landed_before = harness_core::subagent::landed_in(&last);
+        // Still running in the background, or ended with its result (and
+        // a writer's merge) not delivered yet: one run at a time, and its
+        // folder is not touched before its merge.
+        if let Some(bg_id) = running_as.or_else(|| self.undelivered_child(child_id)) {
+            return Err(format!(
+                "@{} `{child_id}` is still running in the background as {bg_id} (or its result is \
+                 on its way): one run at a time. You are told its result when it ends; give it \
+                 the follow-up then, or stop it with bash_stop.",
+                agent.agent_id
+            ));
+        }
+        let landed_before = landed_bg.unwrap_or_else(|| harness_core::subagent::landed_in(&last));
         let theirs = self
             .node
             .cfg
@@ -4209,6 +4373,7 @@ impl Session {
             refs: Some(refs),
             observed: Some(observed),
             changes_since: Some(parent_began),
+            max_tokens,
             ..Default::default()
         };
         let history = match child
@@ -4217,6 +4382,7 @@ impl Session {
                 &msg.turn_id,
                 Some(&agent),
                 Some((call_id.as_str(), note.as_str())),
+                true,
             )
             .await
         {
@@ -4229,22 +4395,16 @@ impl Session {
                 return Err(e);
             }
         };
-        let (reason, usage) = child
-            .clone()
-            .run_turn(
-                msg.turn_id.clone(),
-                msg.model_text(),
-                history,
-                Some(agent),
-                vec![],
-                extra,
-                cancel,
-                by_stop,
-            )
-            .await;
-        Ok(self
-            .child_outcome(&child, iso, &msg.turn_id, reason, usage)
-            .await)
+        Ok(Prepared {
+            child,
+            iso,
+            msg,
+            history,
+            agent,
+            extra,
+            cancel,
+            by_stop,
+        })
     }
 
     /// Whether a sub-agent can change files here, so it needs a folder of
@@ -4639,6 +4799,23 @@ impl TurnHost for Session {
             .await
     }
 
+    fn background_agents(&self) -> Result<(), String> {
+        self.may_start_background()
+    }
+
+    async fn delegate_background(
+        &self,
+        agent: AgentSpec,
+        task: String,
+        follow_up: Option<SessionId>,
+        call_id: String,
+        observed: Arc<Vec<String>>,
+        max_tokens: u64,
+    ) -> Result<harness_core::backend::BackgroundDelegated, String> {
+        self.start_background(agent, task, follow_up, call_id, observed, max_tokens)
+            .await
+    }
+
     async fn keep_image(&self, image: harness_core::backend::KeptImage) -> Result<(), String> {
         if self.incognito {
             return Err("images can't go into an incognito chat".into());
@@ -4793,10 +4970,12 @@ impl TurnHost for Session {
         let mut rest = queued.into_iter();
         while let Some(e) = rest.next() {
             // What is appended is scrubbed; so is what goes to the model
-            // (T8D-2).
-            let mut ev = e.event(true);
+            // (T8D-2). A background sub-agent's end is merged and built
+            // here, at the step boundary (X.24).
+            let mut ev = self.end_event(&e, true).await;
             ev.tail = self.node.cfg.secrets.scrub(&ev.tail);
             if let Err(err) = Session::emit(self, EventKind::BackgroundEnded(ev.clone())).await {
+                self.keep_child_end(ev);
                 // The turn ends; these are recorded after it.
                 let mut q = self.bg_queue.lock().unwrap_or_else(|p| p.into_inner());
                 q.push(e);
@@ -5248,6 +5427,11 @@ mod diff;
 /// A person's Retry of the failed last turn (X.21); its own file.
 #[path = "session_retry.rs"]
 mod retry;
+
+/// The chat's agent switch: refused while it works, recorded at the next
+/// turn; its own file.
+#[path = "session_agent.rs"]
+mod agent;
 
 /// A `/compact` focus cut to `COMPACT_FOCUS_MAX_CHARS` characters, saying
 /// where (X.20).

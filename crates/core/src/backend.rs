@@ -82,6 +82,36 @@ pub trait TurnHost: Send + Sync {
         Err("following up a sub-agent is not available here".into())
     }
 
+    /// Whether this turn may start sub-agents in the background (X.24,
+    /// PLAN.md T72), or why not, in words for the model: only the node
+    /// answers (a chat that is not a sub-agent's, takes callback turns and
+    /// has a background table; `[limits] background_agents_per_chat` above
+    /// 0). The loop also needs the agent's own switch
+    /// ([`crate::agent::DelegateCaps::background`]).
+    fn background_agents(&self) -> Result<(), String> {
+        Err("background sub-agents are not available here".into())
+    }
+
+    /// Start `task` as `agent` (or, with `follow_up`, the next message to
+    /// that sub-agent of this chat) in the background, and return at once:
+    /// the child runs on after this turn ends, under its own step cap,
+    /// `max_tokens` and the node's wall-clock limit, and its end reaches
+    /// this chat as a `background_ended` with its result, at a step
+    /// boundary or as a callback turn (X.24). `call_id` is the `delegate`
+    /// call. The node decides everything it admits.
+    #[allow(clippy::too_many_arguments)]
+    async fn delegate_background(
+        &self,
+        _agent: crate::agent::AgentSpec,
+        _task: String,
+        _follow_up: Option<crate::SessionId>,
+        _call_id: String,
+        _observed: std::sync::Arc<Vec<String>>,
+        _max_tokens: u64,
+    ) -> Result<BackgroundDelegated, String> {
+        Err("background sub-agents are not available here".into())
+    }
+
     /// Whether a call of `tool` at `risk` would run right now with no
     /// card and no policy refusal (the node's denials and the chat's
     /// approval mode, nothing else): `edit`'s early answer shows a file's
@@ -229,6 +259,17 @@ pub struct KeptImage {
     /// The path as the call named it (the store's `name` column).
     pub name: String,
     pub bytes: Vec<u8>,
+}
+
+/// A background sub-agent the node started ([`TurnHost::delegate_background`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackgroundDelegated {
+    pub child: crate::SessionId,
+    /// `bg-<n>`, from the chat's background table.
+    pub bg_id: String,
+    /// Its wall-clock limit.
+    pub timeout_s: u64,
+    pub ends_by_ms: i64,
 }
 
 /// How a delegated sub-task ended.
@@ -389,6 +430,13 @@ pub struct TurnExtra {
     /// (ADOPTION_PLAN B.9, PLAN.md T65). `None`: this turn's own start. Set
     /// only by the node.
     pub changes_since: Option<std::time::SystemTime>,
+    /// A sub-agent's own token cap (input and output together, X.24): a
+    /// background sub-agent's turn gets its share of its parent turn's
+    /// sub-agent budget, reserved from it when it started. Checked before
+    /// each request, like the step cap: the request at or past it is the
+    /// last (`finish` alone), so it can overshoot by that one request. Set
+    /// only by the node.
+    pub max_tokens: Option<u64>,
 }
 
 /// The master's context for one person's message (sent with

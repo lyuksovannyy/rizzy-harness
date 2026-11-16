@@ -474,6 +474,7 @@ async fn full_tables_refuse_and_name_the_ids() {
     let Some(sb) = f.sandbox() else { return };
     let reg = Registry::new(
         Limits {
+            agents_per_session: 4,
             per_session: 2,
             per_node: 3,
             output_kb: 16,
@@ -1506,6 +1507,7 @@ async fn many_starts_in_a_turn_keep_at_most_the_stated_bound() {
     let r = n.results();
     let (first, last) = (&r[r.len() - 2], &r[r.len() - 1]);
     let bound = harness_tools::background::kept_bound(Limits {
+        agents_per_session: 4,
         per_session: 2,
         per_node: 2,
         output_kb: 4096,

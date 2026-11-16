@@ -313,7 +313,6 @@ async fn built_in_mentions_and_aliases() {
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
-    events_until(&t, &sid, |e| e.iter().any(|x| x.kind == "agent_changed")).await;
     let row = get(&t, &format!("/api/sessions/{sid}")).await;
     assert_eq!(row["agent_id"], "researcher");
 }

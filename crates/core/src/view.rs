@@ -98,8 +98,11 @@ pub enum Item {
         turn_id: String,
         reason: TurnEndReason,
     },
+    /// The chat switched agent or model at the message after it.
     AgentChanged {
         agent: AgentRef,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
     },
     /// The owner changed the chat's approval mode (`approval_mode_changed`).
     ApprovalModeChanged {
@@ -131,7 +134,12 @@ pub enum Item {
         reason: BackgroundReason,
         exit_code: Option<i32>,
         ran_ms: u64,
+        /// A command's last output; a background sub-agent's result
+        /// (X.24: its report quoted, model text), shown as plain text too.
         tail: String,
+        /// Set for a background sub-agent: its agent's id.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<String>,
     },
     /// A turn the harness started because background commands ended while
     /// the chat was idle (`turn_started.cause`): where a person's message
@@ -230,8 +238,6 @@ pub struct SessionView {
     pub pending_approvals: Vec<String>,
     /// Count of events with kinds this build does not understand.
     pub unknown_events: u64,
-    /// The session's selected agent (selector), if any.
-    pub active_agent: Option<String>,
     /// The agent running the current turn (may differ via @mention).
     pub running_agent: Option<AgentRef>,
     /// Parallel-answer group -> chosen message id.
@@ -290,6 +296,9 @@ pub struct BackgroundState {
     /// The timeout it runs under: what is left can never be more.
     pub timeout_s: u64,
     pub ended: bool,
+    /// A background sub-agent (X.24), not a command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child: Option<crate::event::BackgroundChild>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -369,7 +378,6 @@ impl SessionView {
         }
         match k {
             EventKind::SessionCreated(m) => {
-                self.active_agent = m.agent_id.clone();
                 self.meta = Some(m);
             }
             EventKind::TurnStarted(t) => {
@@ -576,8 +584,10 @@ impl SessionView {
             }
             EventKind::Error(e) => self.items.push(Item::Error { message: e.message }),
             EventKind::AgentChanged(a) => {
-                self.active_agent = Some(a.agent.agent_id.clone());
-                self.items.push(Item::AgentChanged { agent: a.agent });
+                self.items.push(Item::AgentChanged {
+                    agent: a.agent,
+                    model: a.model,
+                });
             }
             EventKind::VariantSelected(v) => {
                 self.variant_selection.insert(v.group, v.message_id);
@@ -635,6 +645,7 @@ impl SessionView {
                         ends_by_ms: b.ends_by_ms,
                         timeout_s: b.timeout_s,
                         ended: false,
+                        child: b.child,
                     },
                 );
             }
@@ -691,12 +702,24 @@ impl SessionView {
                 if let Some(st) = self.background.get_mut(&b.bg_id) {
                     st.ended = true;
                 }
+                let (tail, agent) = match b.child {
+                    Some(c) => {
+                        // Its cost is the chat's, as a foreground
+                        // sub-agent's is its parent turn's.
+                        if let Some(u) = &c.usage {
+                            self.usage.add(u);
+                        }
+                        (c.result, Some(c.agent_id))
+                    }
+                    None => (b.tail, None),
+                };
                 self.items.push(Item::BackgroundEnded {
                     bg_id: b.bg_id,
                     reason: b.reason,
                     exit_code: b.exit_code,
                     ran_ms: b.ran_ms,
-                    tail: b.tail,
+                    tail,
+                    agent,
                 });
             }
         }

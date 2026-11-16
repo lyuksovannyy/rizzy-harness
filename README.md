@@ -1314,6 +1314,8 @@ max_delegation_depth = 1             # 1: the turn's agent may delegate, its sub
 background_per_session = 8           # background commands one chat may run at once; 0: off (0 .. 32)
 background_per_node = 64             # background commands this node runs at once, all chats (0 .. 256)
 background_output_kb = 256           # output kept in memory per background command (16 .. 4096)
+background_agents_per_chat = 4       # sub-agents one chat may run in the background at once; 0: off (0 .. 16)
+background_agent_timeout_s = 1800    # wall-clock limit of one background sub-agent (60 .. 3600)
 callback_turns = 3                   # turns the agent may run in a row without you when commands end; 0: off (0 .. 20)
 callback_max_steps = 20              # model calls one such turn may make, never above max_steps or the chat's own limit (1 .. 10000)
 handoff_notes_per_hour = 4           # hand-off notes this node writes per chat per hour; 0: off, the server asks for none (0 .. 60)
@@ -3000,6 +3002,21 @@ naming the setting. An agent with file tools may be the chats' default: in a
 chat it simply has no file or command tools (a call to one gets "unknown
 tool").
 
+**Switching a chat's agent.** The agent picker in a chat's reply bar changes
+the agent (and so the model) the chat runs from now on. Picking adds nothing
+to the chat: try A, then B, then C, then B again and send nothing, and the
+chat is as it was. The first turn that then runs under another agent or
+model than the chat last ran — your next message, a Retry of a turn under
+the chat's own agent, or a turn that resumes the agent after a background
+command ended — gets a line "Switched to <agent> · <model>" above it, once.
+An `@mention` (also its Retry), an answer to an agent's question and a
+fallback model that answered once are no switch. While the agent works (a
+turn runs or is being stopped, a resumed turn, a retry, a `/compact`) the
+picker is disabled: Stop it, or wait for the turn to end, and the picker is
+back. The node refuses a change sent anyway ("The agent is working…"). A
+pick shows at once; the picker waits for the server's answer before the next
+one, and goes back with the reason if it was refused.
+
 "Your facts" are the memories in Settings → Account; an agent without them
 neither recalls nor proposes them. Scout and Reviewer are read-only by their
 tool list: every tool they may call changes nothing (one allow-list the master,
@@ -3091,17 +3108,60 @@ chat's approval mode as it is now (in plan mode a sub-agent that changes files
 is not given one, and one started in plan mode stays in it). Its chat marks each follow-up, and the side
 panel lists the sub-agent once with its number of runs.
 
+**Background sub-agents.** An agent with the **Background sub-agents** switch
+(off for every agent but the built-in Senior Teamlead; it needs **Launch
+sub-agents** too) may call `delegate` with `background: true`. The call
+returns at once with the sub-agent's id and `bg-<n>`; the sub-agent is the
+same kind of sub-agent as any (its own copy of the folder when it can change
+files, your folder when it only reads; plan mode starts only readers, which
+stay in plan mode), but the agent goes on with other work or ends its turn
+instead of waiting. When the sub-agent ends, its result reaches the agent
+once, as a foreground result reads: at the agent's next step if a turn is
+running, else as a callback turn (see "Unattended turns": the same bounds
+and rules, "Started by bg-2 ended (finished), not by you"). A sub-agent that
+changes files is merged back into your folder **when its result is
+delivered**, with the same three-way merge as a foreground one: what you or
+the agent changed meanwhile stays, and a change that meets one of theirs on
+the same lines is not applied; the result then says so and carries its diff,
+and the sub-agent's snapshot stays in the node's checkpoint store. The side
+panel lists it with the turn's sub-agents, under a line saying it keeps
+running when the turn stops, running until it ends, with **Stop** (and
+**Stop all** with two or more in the background; a note instead while the
+node is away); the agent lists running ones with `bash_output` and stops one with
+`bash_stop { id }`. Limits are node.toml's: `background_agents_per_chat` (4)
+running at once per chat (a fifth start is refused, naming the running
+ones; 0 turns them off), `background_agent_timeout_s` (30 min) of wall clock
+each, the node's step limit, and a token cap: its share of the turn's
+sub-agent budget, taken from that budget when it starts (each background
+start gets an equal share of what is left over the turn's free sub-agent
+places, so the caps a turn hands out never add up to more than the budget;
+one whose share would be 0 is refused). A child can pass its share by its last request, as a step can
+pass the step limit. They count against the turn's sub-agents.
+A sub-agent cannot start one, nor can a callback turn or a routine's chat
+(nobody would read the result), nor a `host` chat. A card it waits on shows
+in its chat ("Open its chat"), and its side panel row's activity line says
+"waiting for an approval"; it waits at most
+until its time limit; it is never answered because nobody watches. **The
+chat's Stop does not stop it**, as with background commands: its own Stop,
+Stop all, `bash_stop`, the chat's deletion (its folder goes, unmerged), its
+owner losing access and the node stopping do. If the node restarts while one
+runs, the chat records that once, without a callback turn: its turn was cut
+off, and changes it had made in its own copy are gone; the agent can give it
+a follow-up (`session`), which keeps its conversation. One that is still
+running, or whose result is on its way, takes no follow-up.
+
 **Agents** in the sidebar lists every agent. Server admins can make agents there
 (name, handle, summary, instructions and feature switches: memory, project
 memory, earlier chats and memory search, web search, files, commands, MCP
-servers, sub-agents, and whether it is offered as an agent,
+servers, sub-agents, background sub-agents, and whether it is offered as an agent,
 a sub-agent or both), change them, delete them, and change any agent's look.
 Built-in agents and agent files keep their name, handle, instructions and
 features: only their summary and **additional instructions** (added after
 their own) change there, and **Duplicate** makes an editable copy. **Write
 from instructions** asks the default model for a summary. An agent file can
 set `memory: false` (no recall, no `remember`), `project_memory: false` (no
-project facts in project chats), `available_as: [agent]` or
+project facts in project chats), `background_subagents: true` (see
+"Background sub-agents"), `available_as: [agent]` or
 `[subagent]` (default both), `aliases: [h, ...]` (more handles) and
 `category: IT` (the picker's group, default General). Ids and aliases are one
 namespace: making or changing an agent with a handle another agent has is

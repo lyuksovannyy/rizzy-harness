@@ -324,6 +324,13 @@ pub struct MasterInner {
     /// Tests: how long a level change waits between its guards and its
     /// write, in ms (0 in use), so a test can make two changes overlap.
     pub(crate) level_write_delay_ms: std::sync::atomic::AtomicU64,
+    /// Tests: how long a prompt waits after reading the chat's row, in ms
+    /// (0 in use), so a pick can be made to land inside its dispatch.
+    pub(crate) dispatch_delay_ms: std::sync::atomic::AtomicU64,
+    /// One dispatch at a time per chat: a prompt, retry or callback from
+    /// its row read to the node's answer, and an agent pick from asking
+    /// the node to writing the row (see `Master::chat_lock`).
+    chat_locks: Mutex<HashMap<SessionId, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 /// What the UI asks for when starting a session.
@@ -691,6 +698,8 @@ impl Master {
                 callbacks: Default::default(),
                 handoffs: Default::default(),
                 level_write_delay_ms: Default::default(),
+                dispatch_delay_ms: Default::default(),
+                chat_locks: Mutex::default(),
                 agents: Mutex::new(agent_edits::Agents::new(
                     harness_agents::AgentSet::from_agents(
                         harness_agents::builtins(),
@@ -762,6 +771,15 @@ impl Master {
     pub fn set_level_write_delay(&self, d: Duration) {
         self.inner
             .level_write_delay_ms
+            .store(d.as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Tests: make every prompt wait `d` right after it read the chat's
+    /// row, so a pick can be made to land inside its dispatch.
+    #[doc(hidden)]
+    pub fn set_dispatch_delay(&self, d: Duration) {
+        self.inner
+            .dispatch_delay_ms
             .store(d.as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
     }
 
@@ -1992,12 +2010,23 @@ impl Master {
                 "a callback turn carries no message, attachment, image or context".into(),
             ));
         }
+        // One dispatch per chat at a time, from the row read (which agent
+        // runs) to the node's answer: a pick cannot land in between and be
+        // overwritten by this turn's `agent_changed` (review of PR 135, F1).
+        let _dispatch = self.chat_lock(sid).await;
         let row = self
             .inner
             .mirror
             .call(move |s| s.session(sid))
             .await?
             .ok_or(CommandError::UnknownSession)?;
+        let ms = self
+            .inner
+            .dispatch_delay_ms
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if ms > 0 {
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+        }
         // Agents, models and chains as the chat's workspace sets them.
         let r = self.resolver_for(row.workspace_id.as_deref()).await;
         if let Some(c) = compare.iter().find(|c| r.find_model(c).is_none()) {
@@ -2236,6 +2265,7 @@ impl Master {
                 agent: Some(agent),
                 savings,
                 context,
+                agent_named: picked,
             },
             None => MasterToNode::Prompt {
                 req_id: String::new(),
@@ -2335,8 +2365,29 @@ impl Master {
         .await
     }
 
-    /// Change the session's active agent for future turns.
+    /// The chat's dispatch lock: one prompt, retry, callback or agent pick
+    /// of chat `sid` at a time, held from reading the row to the node's
+    /// answer (the acceptance point: `send_command` returning, acked or
+    /// refused, or failed by `ACK_TIMEOUT` when the node is slow or gone),
+    /// never for a turn. Locks no one holds are dropped here.
+    async fn chat_lock(&self, sid: SessionId) -> tokio::sync::OwnedMutexGuard<()> {
+        let m = {
+            let mut locks = lock(&self.inner.chat_locks);
+            locks.retain(|_, l| Arc::strong_count(l) > 1);
+            locks.entry(sid).or_default().clone()
+        };
+        m.lock_owned().await
+    }
+
+    /// Change the agent the chat runs from its next message. The chat's
+    /// state, not its history: the node is asked first (it refuses while
+    /// the chat works, `AGENT_WORKING`), then the pick goes into the row,
+    /// which every later prompt, retry and callback resolves its agent
+    /// from. The node records the switch when a turn runs it.
     pub async fn set_agent(&self, sid: SessionId, agent_id: &str) -> Result<(), CommandError> {
+        // After any dispatch in flight: its turn has then started (the node
+        // refuses this while it runs) or was refused.
+        let _dispatch = self.chat_lock(sid).await;
         let row = self
             .inner
             .mirror
@@ -2348,12 +2399,20 @@ impl Master {
             .resolver_for(row.workspace_id.as_deref())
             .await
             .agent_spec_with(Some(agent_id), session_model.as_deref(), None)?;
+        // Stored as the resolved id (an alias names the agent it is).
+        let id = agent.agent_id.clone();
         self.send_command(&row.node_id, |req_id| MasterToNode::SetAgent {
             req_id,
             session_id: sid,
             agent,
         })
-        .await
+        .await?;
+        self.inner
+            .mirror
+            .call(move |s| s.set_session_agent(sid, &id))
+            .await?;
+        self.nudge(Live::SessionsChanged(Audience::Chat(sid)));
+        Ok(())
     }
 
     /// Change a chat's approval mode on its node (T50), which clamps it

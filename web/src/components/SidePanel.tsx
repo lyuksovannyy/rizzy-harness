@@ -63,7 +63,17 @@ function State({ state, words }: { state: RowState; words?: string }) {
   return <span className={`tool-status side-state s-${STATE_CLASS[state]}`}>{words ?? STATE_WORDS[state]}</span>;
 }
 
-function AgentItem({ row, models }: { row: AgentRow; models?: ModelInfo[] }) {
+/** A background sub-agent's Stop (X.24), as a command's: "stopping…" until
+ * its end shows, the refusal on the row, and no button while the node is
+ * away (a note instead). */
+interface BgStop {
+  away: boolean;
+  click?: Click;
+  busy: boolean;
+  stop: (bg: string) => void;
+}
+
+function AgentItem({ row, models, bg }: { row: AgentRow; models?: ModelInfo[]; bg?: BgStop }) {
   return (
     <li className="side-row" data-kind="agent" data-call={row.call_id}>
       <div className="side-row-head">
@@ -86,6 +96,21 @@ function AgentItem({ row, models }: { row: AgentRow; models?: ModelInfo[] }) {
           <a className="link small" href={`#/s/${row.child}`}>
             Open its chat
           </a>
+          {/* In the background (X.24): Stop ends it, as a command's Stop. */}
+          {row.bg_id && bg && !bg.away && (
+            <button type="button" className="danger small" aria-label={`Stop ${row.bg_id}`} disabled={bg.busy} onClick={() => bg.stop(row.bg_id!)}>
+              {bg.click?.state === "stopping" && !bg.busy ? "Stop again" : bg.busy ? "stopping…" : "Stop"}
+            </button>
+          )}
+        </div>
+      )}
+      {row.bg_id && bg && (bg.away || bg.click?.state === "failed") && (
+        <div className="small muted" role="status">
+          {bg.click?.state === "failed" ? (
+            <span className="error-text">{showHidden(bg.click.error)}</span>
+          ) : (
+            "The node is away, so a stop cannot reach it: it ends with that node or at its time limit."
+          )}
         </div>
       )}
     </li>
@@ -173,7 +198,14 @@ export default function SidePanel(props: {
     const c = clicks[id];
     return c?.state === "stopping" && now - c.at < RETRY_AFTER_MS;
   };
-  const stoppable = runningCmds.filter((r) => !busy(r.bg_id));
+  // Background sub-agents (X.24) are stopped with the commands.
+  const runningKids = agents.filter((a) => a.bg_id);
+  const allIds = [...runningCmds.map((r) => r.bg_id), ...runningKids.map((a) => a.bg_id!)];
+  const stopAll = (
+    <button type="button" className="danger small" disabled={away || allIds.every(busy)} onClick={() => void stop(allIds, true)}>
+      Stop all
+    </button>
+  );
 
   const command = (r: CommandRow) => {
     const c = clicks[r.bg_id];
@@ -227,8 +259,21 @@ export default function SidePanel(props: {
         </button>
       </div>
       <ul className="side-rows">
+        {runningKids.length > 0 && (
+          <li className="side-group small" data-kind="bg-agents-head">
+            <span>
+              Sub-agents in the background <span className="muted">· keep running when the turn stops</span>
+            </span>
+            {commands.length === 0 && allIds.length >= 2 && stopAll}
+          </li>
+        )}
         {agents.map((a) => (
-          <AgentItem key={a.call_id} row={a} models={props.models} />
+          <AgentItem
+            key={a.call_id}
+            row={a}
+            models={props.models}
+            bg={a.bg_id ? { away, click: clicks[a.bg_id], busy: busy(a.bg_id), stop: (id) => void stop([id], false) } : undefined}
+          />
         ))}
         {agents.length > 0 && commands.length > 0 && <li role="separator" className="side-sep" />}
         {commands.length > 0 && (
@@ -236,16 +281,7 @@ export default function SidePanel(props: {
             <span>
               Background commands <span className="muted">· keep running when the turn stops</span>
             </span>
-            {runningCmds.length >= 2 && (
-              <button
-                type="button"
-                className="danger small"
-                disabled={away || stoppable.length === 0}
-                onClick={() => void stop(runningCmds.map((r) => r.bg_id), true)}
-              >
-                Stop all
-              </button>
-            )}
+            {allIds.length >= 2 && stopAll}
           </li>
         )}
         {commands.length > 0 && away && (

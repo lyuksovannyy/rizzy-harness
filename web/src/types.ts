@@ -261,7 +261,8 @@ export type Item =
     }
   | { type: "error"; message: string }
   | { type: "turn_end"; turn_id: string; reason: TurnEndReason }
-  | { type: "agent_changed"; agent: AgentRef }
+  /** The chat ran another agent or model from the message after it. */
+  | { type: "agent_changed"; agent: AgentRef; model?: string }
   /** The owner changed the approval mode; `requested` when the node gave less. */
   | { type: "approval_mode_changed"; mode: ApprovalMode; requested?: ApprovalMode }
   | { type: "step_limit_changed"; max_steps: number; requested?: number }
@@ -290,7 +291,10 @@ export type Item =
       reason: string;
       exit_code: number | null;
       ran_ms: number;
+      /** A background sub-agent's result instead (X.24): its report quoted, model text. */
       tail: string;
+      /** Set for a background sub-agent: its agent's id. */
+      agent?: string;
     }
   /** A turn the harness started because these background commands ended while the chat was idle. */
   | { type: "callback"; turn_id: string; bg_ids: string[] }
@@ -317,7 +321,6 @@ export interface SessionView {
   running_turn: string | null;
   pending_approvals: string[];
   unknown_events: number;
-  active_agent: string | null;
   running_agent: AgentRef | null;
   variant_selection: Record<string, string>;
   usage: Usage;
@@ -377,6 +380,8 @@ export interface BackgroundState {
   /** The timeout it runs under: what is left can never be more. */
   timeout_s: number;
   ended: boolean;
+  /** A background sub-agent (X.24), not a command. */
+  child?: { session: string; agent_id: string };
 }
 
 export interface CheckpointState {
@@ -507,6 +512,8 @@ export interface AgentFeatures {
   mcp: boolean;
   /** Hands sub-tasks to the agents available as sub-agents. */
   delegate: boolean;
+  /** Starts sub-agents that run in the background (X.24); its own switch. */
+  background_subagents: boolean;
   /** In the agent picker and @mentions. */
   as_agent: boolean;
   /** May be handed sub-tasks. */
