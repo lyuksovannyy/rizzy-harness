@@ -105,9 +105,15 @@ let PAGE = null;
     log('notice:', said);
 
     // The pick is the chat's state: it survives a reload, and a message
-    // from a second tab runs it, with the notice on that message.
+    // from a second tab runs it, with the notice on that message. (After
+    // the turn ended: a pick during it is refused.)
+    await p.waitForSelector('.composer button.send.stop', { state: 'detached', timeout: 15000 });
     await pick('Researcher');
-    await p.waitForFunction(() => document.querySelector('.agent-pick button.select-button')?.getAttribute('aria-label') === 'agent: Researcher', null, { timeout: 10000 });
+    // Shown at once; taken once the picker is free again (the server answered).
+    await p.waitForFunction(() => {
+      const b = document.querySelector('.agent-pick button.select-button');
+      return b?.getAttribute('aria-label') === 'agent: Researcher' && !b.disabled;
+    }, null, { timeout: 10000 });
     await p.reload();
     await p.waitForSelector('.conversation');
     await p.waitForFunction(() => document.querySelector('.agent-pick button.select-button')?.getAttribute('aria-label') === 'agent: Researcher', null, { timeout: 10000 });
