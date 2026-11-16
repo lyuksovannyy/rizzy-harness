@@ -32,7 +32,15 @@ use harness_store::{Durability, Store};
 use tokio::sync::mpsc;
 
 /// `sleep 966e-4` is 0.0966 s (the review's marker number).
-const QUIET: &str = "run: while :; do echo tick; date +%s%N > beat; sleep 966e-4; done";
+fn quiet() -> String {
+    // While this test process lives (a SIGKILL of the test reparents the
+    // loop and it ends), 15 minutes at most.
+    format!(
+        "run: while read -r _ _ _ p _ </proc/$$/stat && [ \"$p\" = {} ] && [ $SECONDS -lt 900 ]; \
+         do echo tick; date +%s%N > beat; sleep 966e-4; done",
+        std::process::id()
+    )
+}
 const FLOOD: &str = "run: yes 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const FLOODERS: usize = 12;
 
@@ -250,7 +258,7 @@ struct Run {
 /// The quiet session, streaming and writing `beat`.
 async fn quiet_running() -> Run {
     let rig = Rig::new().await;
-    let quiet = rig.start("quiet", QUIET, true).await;
+    let quiet = rig.start("quiet", &quiet(), true).await;
     let sid = quiet.0;
     rig.wait("the quiet session to stream", Duration::from_secs(30), |s| {
         s.deltas.get(&sid).copied().unwrap_or(0) > 0

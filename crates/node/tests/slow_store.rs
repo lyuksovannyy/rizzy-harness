@@ -20,7 +20,23 @@ use harness_store::{Durability, Store};
 use tokio::sync::mpsc;
 
 /// No output, one write of `beat` every 0.0962 s.
-const SILENT: &str = "run: while :; do date +%s%N > beat; sleep 962e-4; done";
+fn silent() -> String {
+    while_test_lives("date +%s%N > beat; sleep 962e-4")
+}
+/// `run: ` a loop of `body` that runs while this test process lives and 15
+/// minutes at most. The command is the test's child (in-process node, no
+/// containment), so a SIGKILL of the test, which no drop guard survives,
+/// reparents it and the loop ends within one round; before this, a loop
+/// orphaned that way was found writing 22.5 hours later. A loop that writes
+/// output already dies of SIGPIPE when the test does; a silent one did not.
+fn while_test_lives(body: &str) -> String {
+    format!(
+        "run: while read -r _ _ _ p _ </proc/$$/stat && [ \"$p\" = {} ] && [ $SECONDS -lt 900 ]; \
+         do {body}; done",
+        std::process::id()
+    )
+}
+
 /// `crates/node/src/lib.rs` `MAX_LANES` (private there).
 const MAX_LANES: usize = 256;
 
@@ -208,7 +224,7 @@ fn alive() -> usize {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_stop_does_not_wait_for_a_slow_store() {
     let node = Node::new().await;
-    let (sid, dir) = node.start("watched", SILENT).await;
+    let (sid, dir) = node.start("watched", &silent()).await;
     let end = Instant::now() + Duration::from_secs(30);
     while !beating(&dir).await {
         assert!(Instant::now() < end, "the watched command never ran");

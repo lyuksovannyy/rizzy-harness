@@ -22,7 +22,15 @@ use harness_protocol::{MasterToNode, NodeToMaster};
 use harness_store::{Durability, Store};
 use tokio::sync::mpsc;
 
-const SILENT: &str = "run: while :; do date +%s%N > beat; sleep 978e-4; done";
+fn silent() -> String {
+    // While this test process lives (a SIGKILL of the test reparents the
+    // loop and it ends), 15 minutes at most.
+    format!(
+        "run: while read -r _ _ _ p _ </proc/$$/stat && [ \"$p\" = {} ] && [ $SECONDS -lt 900 ]; \
+         do date +%s%N > beat; sleep 978e-4; done",
+        std::process::id()
+    )
+}
 const FLOOD: &str = "run: yes 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const STALLED: u64 = u64::MAX;
 
@@ -298,7 +306,7 @@ fn alive() -> usize {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_stop_does_not_wait_for_the_store_when_64_audit_lines_are_pending() {
     let node = Node::new().await;
-    let (sid, dir) = node.start("watched", SILENT, true).await;
+    let (sid, dir) = node.start("watched", &silent(), true).await;
     let end = Instant::now() + Duration::from_secs(30);
     while !beating(&dir).await {
         assert!(Instant::now() < end, "the watched command never ran");

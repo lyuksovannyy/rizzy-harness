@@ -63,7 +63,16 @@ async fn a_stuck_pdf_reader_is_killed_and_the_server_stays_responsive() {
     master.set_pdf_reader(
         PdfReader::with_command(
             "/bin/sh".into(),
-            vec!["-c".into(), "while :; do :; done".into()],
+            // Busy for ever while this test lives: a SIGKILL of the test
+            // (no drop guard runs) reparents it and the loop ends.
+            vec![
+                "-c".into(),
+                format!(
+                    "while read -r _ _ _ p _ </proc/$$/stat && [ \"$p\" = {} ]; do :; done",
+                    std::process::id()
+                )
+                .into(),
+            ],
         )
         .with_limits(STUCK_FOR, Duration::from_secs(1)),
     );

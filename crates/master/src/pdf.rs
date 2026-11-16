@@ -336,9 +336,13 @@ mod tests {
     async fn a_looping_helper_is_killed_with_its_group() {
         let dir = tempfile::tempdir().unwrap();
         let pidfile = dir.path().join("pid");
+        // Spins while this test lives: a SIGKILL of the test reparents it
+        // and the loop ends (no drop guard runs then).
         let r = sh(&format!(
-            "sleep 300 & echo $! > {}; while :; do :; done",
-            pidfile.display()
+            "sleep 300 & echo $! > {}; \
+             while read -r _ _ _ p _ </proc/$$/stat && [ \"$p\" = {} ]; do :; done",
+            pidfile.display(),
+            std::process::id()
         ))
         .with_limits(Duration::from_millis(700), Duration::from_secs(1));
         let t = std::time::Instant::now();
