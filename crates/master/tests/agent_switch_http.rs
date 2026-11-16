@@ -25,7 +25,7 @@ struct T {
     base: String,
     alex: String,
     db: std::path::PathBuf,
-    _master: Master,
+    master: Master,
     _node: NodeRuntime,
     _dir: tempfile::TempDir,
 }
@@ -92,7 +92,7 @@ async fn start() -> T {
         base,
         alex,
         db,
-        _master: master,
+        master,
         _node: node,
         _dir: dir,
     }
@@ -305,4 +305,92 @@ async fn only_the_owner_may_switch_not_even_an_admin() {
         assert_eq!(v["error"], "unknown session", "{name}");
     }
     assert_eq!(row_agent(&t, &sid).await, "general");
+}
+
+/// The agent of every turn as `turn_started` names it, and of every switch.
+fn agents_of(evs: &[RawEvent]) -> (Vec<String>, Vec<String>) {
+    let of = |kind: &str| {
+        evs.iter()
+            .filter(|e| e.kind == kind)
+            .map(|e| {
+                e.payload["agent"]["agent_id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+    };
+    (of("turn_started"), of("agent_changed"))
+}
+
+/// Review of PR 135 (F1): a pick that lands while a prompt is being
+/// dispatched (after the prompt read the row, before the node took it)
+/// is never lost: it waits for the dispatch (one per chat at a time), then
+/// the node answers it. The row and the log agree throughout, and every
+/// turn runs under the agent its `turn_started` names.
+#[tokio::test]
+async fn a_pick_racing_a_prompt_is_never_lost() {
+    let t = start().await;
+    let sid = chat(&t).await;
+    prompt(&t, &sid, "hello").await;
+    events_until(&t, &sid, |e| ended(e) == 1).await;
+    // A pending pick (no message yet): the row says writer, the log general.
+    let (st, v) = pick(&t, &sid, "writer", &t.alex).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+
+    // The prompt reads the row (writer), then waits; the pick of the
+    // researcher comes in meanwhile.
+    t.master.set_dispatch_delay(Duration::from_millis(800));
+    let sent = {
+        let base = t.base.clone();
+        let alex = t.alex.clone();
+        let sid = sid.clone();
+        tokio::spawn(async move {
+            let r = reqwest::Client::new()
+                .post(format!("{base}/api/sessions/{sid}/prompt"))
+                .json(&json!({ "text": "two" }))
+                .login(&alex)
+                .same_origin()
+                .send()
+                .await
+                .unwrap();
+            r.status()
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let (picked, v) = pick(&t, &sid, "researcher", &t.alex).await;
+    assert_eq!(sent.await.unwrap(), StatusCode::OK);
+    t.master.set_dispatch_delay(Duration::ZERO);
+    let evs = events_until(&t, &sid, |e| ended(e) == 2).await;
+    let (turns, switches) = agents_of(&evs);
+    // The prompt ran what it read: the writer, noted once.
+    assert_eq!(turns, ["general", "writer"], "{evs:#?}");
+    assert_eq!(switches, ["writer"]);
+    // The pick was refused (the turn was still running) or kept: never
+    // accepted and then overwritten by the turn's switch.
+    let row = row_agent(&t, &sid).await;
+    match picked {
+        StatusCode::OK => assert_eq!(row, "researcher", "an accepted pick was lost"),
+        StatusCode::CONFLICT => assert_eq!(row, "writer", "{v}"),
+        other => panic!("{other}: {v}"),
+    }
+}
+
+/// The other order: the pick first, then the prompt, which runs it.
+#[tokio::test]
+async fn a_pick_before_a_prompt_runs_at_it() {
+    let t = start().await;
+    let sid = chat(&t).await;
+    prompt(&t, &sid, "hello").await;
+    events_until(&t, &sid, |e| ended(e) == 1).await;
+    let (st, v) = pick(&t, &sid, "writer", &t.alex).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    t.master.set_dispatch_delay(Duration::from_millis(300));
+    prompt(&t, &sid, "two").await;
+    t.master.set_dispatch_delay(Duration::ZERO);
+    let evs = events_until(&t, &sid, |e| ended(e) == 2).await;
+    let (turns, switches) = agents_of(&evs);
+    assert_eq!(turns, ["general", "writer"]);
+    assert_eq!(switches, ["writer"]);
+    assert_eq!(row_agent(&t, &sid).await, "writer");
 }

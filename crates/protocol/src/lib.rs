@@ -601,6 +601,10 @@ pub enum MasterToNode {
         /// The master's context for the turn, as for a prompt.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context: Option<Box<harness_core::backend::MasterContext>>,
+        /// The retried message named its agent (a leading @mention), as
+        /// `session.prompt`'s: the retry is then no switch of the chat's.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        agent_named: bool,
     },
     /// Write the chat's hand-off note now if one is due (X.16,
     /// docs/handoff-notes.md; only to nodes with [`CAP_HANDOFF`]). A

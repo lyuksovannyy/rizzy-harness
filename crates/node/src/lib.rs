@@ -1243,6 +1243,7 @@ impl NodeRuntime {
                 agent,
                 savings,
                 context,
+                agent_named,
                 ..
             } => {
                 self.audit("session.retry", session_id).await;
@@ -1257,7 +1258,7 @@ impl NodeRuntime {
                     ..Default::default()
                 };
                 match self.session(session_id) {
-                    Some(s) => s.retry(&turn_id, agent, extra).await,
+                    Some(s) => s.retry(&turn_id, agent, agent_named, extra).await,
                     None => Err("unknown session".into()),
                 }
             }

@@ -13,10 +13,11 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { Live } from "../live";
 import type { Features, Item, RoutineMark, SessionRow, SessionView } from "../types";
 
+const prompted = vi.fn((..._a: unknown[]) => Promise.resolve({ ok: true }));
 const call = vi.fn((..._a: unknown[]) => Promise.resolve({ ok: true }));
 const features = vi.fn<(scope: unknown) => Promise<Features>>();
 vi.mock("../api", () => ({
-  api: { features: (s: unknown) => features(s), prompt: vi.fn() },
+  api: { features: (s: unknown) => features(s), prompt: (...a: unknown[]) => prompted(...a) },
   call: (...a: unknown[]) => call(...a),
   HttpError: Error,
 }));
@@ -27,6 +28,7 @@ vi.mock("../apiPages", () => ({
     turnDiff: vi.fn(() => Promise.resolve({ files: [] })),
     restoreTurn: vi.fn(() => Promise.resolve({ ok: true })),
     retryTurn: vi.fn(() => Promise.resolve({ ok: true })),
+    setAgent: vi.fn(),
   },
 }));
 const artifactsApi = { forSession: vi.fn(() => Promise.resolve([])), save: vi.fn(() => Promise.resolve({ requested: true })) };
@@ -180,6 +182,54 @@ describe("agent switches", () => {
     // The row (the person's pick since) wins over the fold's last switch.
     // (No agent list here: the header names the agent by its id.)
     expect(host.textContent).toContain("researcher");
+  });
+});
+
+describe("picking the chat's agent", () => {
+  const agent = (id: string, name: string) => ({
+    id,
+    name,
+    description: "",
+    builtin: true,
+    default_model: null,
+    main_model: null,
+    fallbacks: [],
+    unavailable: [],
+    avatar: { shape: "circle", eyes: "round", accent: "blue" },
+  });
+  test("shown at once, held until the server answers, a message still goes; a refusal is said and undone", async () => {
+    current = view([]);
+    const agents = [agent("general", "General"), agent("writer", "Writer")] as never;
+    await act(async () => root.render(<Conversation live={live} sessionId={SID} row={sessionRow()} nodes={[]} agents={agents} models={[]} />));
+    const button = () => host.querySelector<HTMLButtonElement>('.agent-pick button[aria-label^="agent:"]')!;
+    const pick = async (name: string) => {
+      act(() => button().click());
+      const option = [...host.querySelectorAll<HTMLLIElement>('.agent-pick [role="option"]')].find((o) => o.textContent === name);
+      await act(async () => option?.click());
+    };
+    let answer!: (v: unknown) => void;
+    vi.mocked(api.setAgent).mockImplementationOnce(() => new Promise((r) => (answer = r)));
+    await pick("Writer");
+    expect(api.setAgent).toHaveBeenCalledWith(SID, "writer");
+    expect(button().getAttribute("aria-label")).toBe("agent: Writer");
+    expect(button().disabled).toBe(true);
+    // Enter still sends: the server orders the message and the pick.
+    const textarea = host.querySelector("textarea")!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(textarea, "meanwhile");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+    expect(prompted).toHaveBeenCalledWith(SID, "meanwhile", {});
+    await act(async () => answer({ ok: true }));
+    // Taken: enabled, and no flicker back while the row catches up.
+    expect(button().disabled).toBe(false);
+    expect(button().getAttribute("aria-label")).toBe("agent: Writer");
+    // A refusal is said and the picker goes back to the chat's agent.
+    vi.mocked(api.setAgent).mockImplementationOnce(() => Promise.reject(new Error("The agent is working: stop it.")));
+    await pick("General");
+    expect(host.textContent).toContain("The agent is working: stop it.");
+    expect(button().getAttribute("aria-label")).toBe("agent: General");
   });
 });
 

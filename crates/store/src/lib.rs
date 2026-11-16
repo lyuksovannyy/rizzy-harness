@@ -136,7 +136,8 @@ pub struct SessionRow {
     /// token or directly on a node.
     pub owner_id: Option<String>,
     /// The agent the chat runs from its next message: `session_created`'s,
-    /// then the person's pick (`Store::set_session_agent`, master only).
+    /// then the person's pick (`Store::set_session_agent`, master only) or
+    /// the last switch that ran (`agent_changed`), whichever came last.
     pub agent_id: Option<String>,
     /// `chat` or `agentic`; `None` until `session_created` has been mirrored.
     pub profile: Option<String>,
@@ -940,6 +941,19 @@ impl Store {
                     )?;
                 }
             }
+            // A switch that ran: the agent the master sent for that turn.
+            // A mirror rebuilt from the node's log ends on the last one.
+            "agent_changed" => {
+                let agent = e
+                    .payload
+                    .pointer("/agent/agent_id")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                tx.execute(
+                    "UPDATE sessions SET agent_id = ?2 WHERE session_id = ?1",
+                    params![sid, agent],
+                )?;
+            }
             "turn_started" => {
                 let callback = e.payload.get("cause").is_some_and(|c| !c.is_null());
                 tx.execute(
@@ -1023,7 +1037,9 @@ impl Store {
 
     /// The agent chat `sid` runs from its next message: the person's pick,
     /// kept in its row (the log records the switch only when a turn runs
-    /// it, as `agent_changed`). `false` when there is no such chat.
+    /// it, as `agent_changed`, which moves the row too). A pick no turn ran
+    /// yet is not in the log: a mirror rebuilt from the node's log does
+    /// not have it. `false` when there is no such chat.
     pub fn set_session_agent(&self, sid: SessionId, agent_id: &str) -> Result<bool> {
         let n = self.lock().execute(
             "UPDATE sessions SET agent_id = ?2 WHERE session_id = ?1",

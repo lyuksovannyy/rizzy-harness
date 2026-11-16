@@ -459,6 +459,7 @@ async fn retry_after_a_switch_runs_the_new_agent_and_notes_it_once() {
         agent: Some(b.clone()),
         savings: None,
         context: None,
+        agent_named: false,
     });
     n.until_end(sid).await;
     let switches = n.switches(sid);
@@ -507,4 +508,88 @@ async fn a_request_after_a_switch_equals_its_rebuild() {
         next.messages,
         last.messages
     );
+}
+
+/// Review of PR 135 (F2): a Retry of a failed @mention turn runs the
+/// mentioned agent again (the master resolves the message's `@x` and says
+/// so, `agent_named`); nobody picked an agent, so nothing is recorded, at
+/// the retry or at the next plain message.
+#[tokio::test]
+async fn a_retry_of_a_mention_turn_writes_no_switch() {
+    let mut n = start().await;
+    let a = agent("a", "mock-a");
+    let x = agent("x", "fail");
+    let sid = n.create(&a).await;
+    n.turn(sid, &a, false, "first").await;
+    n.prompt(sid, &x, true, "@x look");
+    let failed = n.until_started(sid).await;
+    assert_eq!(n.until_end(sid).await, TurnEndReason::Error);
+    let req_id = n.req();
+    n.send(MasterToNode::Retry {
+        req_id,
+        session_id: sid,
+        turn_id: failed,
+        agent: Some(x.clone()),
+        savings: None,
+        context: None,
+        agent_named: true,
+    });
+    n.until_end(sid).await;
+    n.turn(sid, &a, false, "back to my chat").await;
+    let switches = n.switches(sid);
+    assert!(switches.is_empty(), "no pick was made, yet: {switches:#?}");
+}
+
+/// A chat created on a model of its own whose agent names its model: the
+/// first message under that agent is no switch (the node keeps the
+/// agent's model as the chat's).
+#[tokio::test]
+async fn a_chat_created_on_a_chosen_model_shows_no_notice_at_its_first_message() {
+    let mut n = start().await;
+    let a = agent("a", "mock-a");
+    let sid = SessionId::new();
+    let req_id = n.req();
+    n.send(MasterToNode::Create {
+        req_id: req_id.clone(),
+        session_id: sid,
+        title: "t".into(),
+        cwd: n.dir.path().display().to_string(),
+        model: Some("chosen-at-home".into()),
+        approval_mode: Some(ApprovalMode::Auto),
+        profile: None,
+        agent: Some(a.clone()),
+        incognito: false,
+        no_callbacks: false,
+        exec_mode: None,
+    });
+    n.ack(&req_id).await.unwrap();
+    n.turn(sid, &a, false, "first").await;
+    let switches = n.switches(sid);
+    assert!(switches.is_empty(), "{switches:#?}");
+}
+
+/// A sub-agent's chat has no picker and takes no pick: the node refuses
+/// it (the person cannot prompt it either; its parent's turn drives it).
+#[tokio::test]
+async fn a_sub_agents_chat_takes_no_pick() {
+    let mut n = start().await;
+    let mut lead = agent("lead", "mock");
+    lead.delegates = vec![agent("look", "mock")];
+    let sid = n.create(&lead).await;
+    n.prompt(sid, &lead, false, "delegate: look=hello");
+    // The child's `session_created` names the parent.
+    let child = loop {
+        if let NodeToMaster::Event { event } = n.next().await
+            && let Ok(EventKind::SessionCreated(c)) = event.typed()
+            && c.parent_session == Some(sid)
+        {
+            break event.session_id;
+        }
+    };
+    n.until_end(sid).await;
+    let e = n
+        .set_agent(child, &agent("b", "mock-b"))
+        .await
+        .expect_err("a sub-agent's chat takes no pick");
+    assert!(e.contains("sub-agent"), "{e}");
 }

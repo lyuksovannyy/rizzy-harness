@@ -1,4 +1,4 @@
-// X.28 end to end: switching a chat's agent. While a turn runs the agent
+// X.28 end to end (with the review of PR 135's cases): switching a chat's agent. While a turn runs the agent
 // picker is disabled (the node would refuse the change); Stop ends the turn
 // and the picker is back. Picking agents writes nothing to the chat; the
 // next message shows "Switched to <agent> · <model>" above it, once.
@@ -103,6 +103,46 @@ let PAGE = null;
     check(at > 0 && evs[at + 1].kind === 'turn_started' && evs[at + 2].kind === 'user_message' && evs[at + 2].payload.text === 'hello', 'recorded right before the message\'s turn');
     await p.screenshot({ path: `${S}/switch-2-notice.png` });
     log('notice:', said);
+
+    // The pick is the chat's state: it survives a reload, and a message
+    // from a second tab runs it, with the notice on that message.
+    await pick('Researcher');
+    await p.waitForFunction(() => document.querySelector('.agent-pick button.select-button')?.getAttribute('aria-label') === 'agent: Researcher', null, { timeout: 10000 });
+    await p.reload();
+    await p.waitForSelector('.conversation');
+    await p.waitForFunction(() => document.querySelector('.agent-pick button.select-button')?.getAttribute('aria-label') === 'agent: Researcher', null, { timeout: 10000 });
+    log('the pick survives a reload');
+    const p2 = await ctx.newPage();
+    p2.on('pageerror', (e) => errors.push(e.message));
+    await p2.goto(`${URL_}#/s/${sid}`);
+    await p2.waitForSelector('.conversation');
+    await p2.locator('.composer textarea').fill('from tab two');
+    await p2.locator('.composer textarea').press('Enter');
+    await p2.waitForSelector('.msg.assistant:has-text("You said: from tab two")', { timeout: 30000 });
+    let evs2 = await events();
+    let sw = evs2.filter((e) => e.kind === 'agent_changed').map((e) => e.payload.agent.agent_id);
+    check(JSON.stringify(sw) === JSON.stringify(['writer', 'researcher']), `two notices so far: ${sw}`);
+    const at2 = evs2.findIndex((e) => e.kind === 'agent_changed' && e.payload.agent.agent_id === 'researcher');
+    check(evs2[at2 + 2].payload.text === 'from tab two', 'the notice sits on tab two\'s message');
+    await p.waitForFunction(() => document.querySelectorAll('.divider').length >= 2, null, { timeout: 10000 });
+    check((await p.locator('.divider', { hasText: 'Switched to Researcher' }).count()) === 1, 'tab one shows the notice once');
+    await p2.close();
+    log('pick in tab one, message from tab two: one notice');
+
+    // A message sent while a turn runs (X.5) keeps the picker disabled
+    // and the server refusing until the turn that reads it ended; that
+    // turn is no switch.
+    await say('slow: 2500');
+    await p.waitForSelector('.msg.assistant.streaming', { timeout: 10000 });
+    await say('queued one');
+    check(await picker.isDisabled(), 'disabled while a queued message waits');
+    const st2 = await p.evaluate(async (id) => (await fetch(`/api/sessions/${id}/agent`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ agent_id: 'writer' }) })).status, sid);
+    check(st2 === 409, `refused while queued work runs (${st2})`);
+    await p.waitForFunction(() => !document.querySelector('.agent-pick button.select-button')?.disabled, null, { timeout: 60000 });
+    evs2 = await events();
+    sw = evs2.filter((e) => e.kind === 'agent_changed').map((e) => e.payload.agent.agent_id);
+    check(sw.length === 2, `no notice from the queued turn: ${sw}`);
+    log('queued message: disabled, 409, enabled after, no extra notice');
 
     check(errors.length === 0, 'page errors: ' + errors.join('; '));
     log('screenshots in', S);

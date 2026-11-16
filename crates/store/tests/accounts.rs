@@ -202,8 +202,8 @@ fn session_row_tracks_agent_and_profile() {
     let r = &s.sessions().unwrap()[0];
     assert_eq!(r.agent_id.as_deref(), Some("general"));
     assert_eq!(r.profile.as_deref(), Some("chat"));
-    // The person's pick goes into the row; a turn's `agent_changed` (the
-    // record of a switch that ran) moves nothing: the row has one writer.
+    // The person's pick goes into the row; a switch that ran (the node's
+    // `agent_changed`, the agent the master sent for that turn) too.
     assert!(s.set_session_agent(sid, "writer").unwrap());
     assert_eq!(s.sessions().unwrap()[0].agent_id.as_deref(), Some("writer"));
     s.append(
@@ -215,8 +215,58 @@ fn session_row_tracks_agent_and_profile() {
         ),
     )
     .unwrap();
-    assert_eq!(s.sessions().unwrap()[0].agent_id.as_deref(), Some("writer"));
+    assert_eq!(s.sessions().unwrap()[0].agent_id.as_deref(), Some("coder"));
     assert!(!s.set_session_agent(SessionId::new(), "writer").unwrap());
+}
+
+/// Review of PR 135 (F1): a mirror rebuilt from a node's log (a master
+/// restored from an older backup, a fresh master the node re-sends its
+/// log to) ends on the log's last switch, else the creation agent. A
+/// pick no message followed is master state, not in the log: a full
+/// re-sync from the node does not bring it back (PLAN.md, the stated
+/// residual).
+#[test]
+fn a_mirror_replayed_from_the_log_ends_on_its_last_switch() {
+    let sid = SessionId::new();
+    let ev = |seq: u64, kind: &str, payload: serde_json::Value| RawEvent {
+        session_id: sid,
+        seq,
+        ts_ms: seq as i64,
+        kind: kind.into(),
+        payload,
+    };
+    let created = ev(
+        1,
+        "session_created",
+        json!({"title": "t", "cwd": "", "model": "m", "backend": "native", "node_id": "master", "profile": "chat", "agent_id": "general", "approval_mode": "ask"}),
+    );
+    let switched = ev(
+        2,
+        "agent_changed",
+        json!({"agent": {"agent_id": "writer", "name": "Writer", "prompt_hash": "h"}, "model": "m"}),
+    );
+    // Replayed into a fresh mirror: the last switch.
+    let s = Store::open_in_memory().unwrap();
+    for e in [&created, &switched] {
+        s.append("master", e).unwrap();
+    }
+    assert_eq!(s.sessions().unwrap()[0].agent_id.as_deref(), Some("writer"));
+    // No switch in the log: the creation agent.
+    let s = Store::open_in_memory().unwrap();
+    s.append("master", &created).unwrap();
+    assert_eq!(
+        s.sessions().unwrap()[0].agent_id.as_deref(),
+        Some("general")
+    );
+    // A pending pick (no message after it) lives in the old mirror only.
+    assert!(s.set_session_agent(sid, "researcher").unwrap());
+    let fresh = Store::open_in_memory().unwrap();
+    fresh.append("master", &created).unwrap();
+    assert_eq!(
+        fresh.sessions().unwrap()[0].agent_id.as_deref(),
+        Some("general"),
+        "a full re-sync from the node does not know the pending pick"
+    );
 }
 
 #[test]

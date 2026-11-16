@@ -134,9 +134,19 @@ rewritten after the layout mockup (foundations, UI shell and bar first, onboardi
 * Switching agent mid-session is allowed between turns (history carries over; the prompt
   cache resets). The pick is the chat's state, kept in the master's session row, never an
   event; the node refuses `session.set_agent` while the chat works (its turn slot is held, or
-  a `/compact` runs) and records the switch as `agent_changed { agent, model }` right before
-  the `turn_started` of the person's next turn under the chat's own agent whose agent or
-  model differs from the last recorded one (`session_created`, else the last `agent_changed`). One agent answers per turn; an `@mention` routes that turn to the named
+  a `/compact` runs, or the chat is a sub-agent's) and records the switch as
+  `agent_changed { agent, model }` right before the `turn_started` of the first turn under the
+  chat's own agent (a message, a Retry, a callback turn; not one whose agent was named for it:
+  an `@mention` and its Retry, an answer's asker, a routine's explicit agent, a queued
+  message's inherited agent) whose agent or model differs from the last recorded one
+  (`session_created`, else the last `agent_changed`). The mirror moves the row on
+  `agent_changed` too, so a mirror rebuilt from the node's log ends on the last switch. The
+  master runs one dispatch per chat at a time (`Master::chat_lock`): a prompt, retry or
+  callback from its row read to the node's answer, and a pick from asking the node to writing
+  the row; held at most until the node answers or `ACK_TIMEOUT` (15 s) fails the request,
+  never for a turn. Residual: a pick no turn ran yet is master state only; it survives a
+  master restart (the row is on disk), not the loss of the master's database (a mirror
+  rebuilt from the node's log ends on the last switch that ran). One agent answers per turn; an `@mention` routes that turn to the named
   agent (mention popup lists agents; the selector shows the override). Several agents in one
   turn only through an orchestrator.
 * Event fields: `author` (agent id) on assistant/tool events; agent snapshot (name + prompt

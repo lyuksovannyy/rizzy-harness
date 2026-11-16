@@ -3001,16 +3001,19 @@ chat it simply has no file or command tools (a call to one gets "unknown
 tool").
 
 **Switching a chat's agent.** The agent picker in a chat's reply bar changes
-the agent (and so the model) your next message goes to. Picking adds nothing
+the agent (and so the model) the chat runs from now on. Picking adds nothing
 to the chat: try A, then B, then C, then B again and send nothing, and the
-chat is as it was. When you send the next message, or Retry, under another
-agent or model than the chat last ran, a line "Switched to <agent> · <model>"
-appears above that message, once. An `@mention`, a fallback model that
-answered once and a turn that resumed after a background command are no
-switch. While the agent works (a turn runs or is being stopped, a resumed
-turn, a retry, a `/compact`) the picker is disabled: Stop it, or wait for the
-turn to end, and the picker is back. The node refuses a change sent anyway
-("The agent is working…").
+chat is as it was. The first turn that then runs under another agent or
+model than the chat last ran — your next message, a Retry of a turn under
+the chat's own agent, or a turn that resumes the agent after a background
+command ended — gets a line "Switched to <agent> · <model>" above it, once.
+An `@mention` (also its Retry), an answer to an agent's question and a
+fallback model that answered once are no switch. While the agent works (a
+turn runs or is being stopped, a resumed turn, a retry, a `/compact`) the
+picker is disabled: Stop it, or wait for the turn to end, and the picker is
+back. The node refuses a change sent anyway ("The agent is working…"). A
+pick shows at once; the picker waits for the server's answer before the next
+one, and goes back with the reason if it was refused.
 
 "Your facts" are the memories in Settings → Account; an agent without them
 neither recalls nor proposes them. Scout and Reviewer are read-only by their

@@ -519,14 +519,12 @@ describe("the agent picker while the agent works", () => {
     unavailable: [],
     avatar: { shape: "circle", eyes: "round", accent: "blue" },
   });
-  test("disabled while a turn runs, enabled once it ended; a refusal is said", async () => {
+  test("disabled while a turn runs or a pick waits, enabled once it ended", async () => {
     const host = document.createElement("div");
     document.body.append(host);
     const root = createRoot(host);
     const picked: string[] = [];
-    let refuse = false;
-    let hold: Promise<void> | null = null;
-    const render = (running: boolean) =>
+    const render = (running: boolean, picking = false) =>
       act(() =>
         root.render(
           <Composer
@@ -535,11 +533,8 @@ describe("the agent picker while the agent works", () => {
             models={[]}
             workers={[]}
             agentId="general"
-            onAgentChange={async (id) => {
-              picked.push(id);
-              if (hold) await hold;
-              if (refuse) throw new Error("The agent is working: stop it or wait for it to finish, then pick another agent.");
-            }}
+            onAgentChange={(id) => picked.push(id)}
+            picking={picking}
             agenticBlocked={null}
             running={running}
             onStop={() => {}}
@@ -564,18 +559,9 @@ describe("the agent picker while the agent works", () => {
     expect(button().disabled).toBe(false);
     await pick("Writer");
     expect(picked).toEqual(["writer"]);
-    // A pick waits for the server's answer before the next one (the last pick wins).
-    let release!: () => void;
-    hold = new Promise((r) => (release = r));
-    await pick("Writer");
+    // A pick waiting for the server's answer holds the picker.
+    render(false, true);
     expect(button().disabled).toBe(true);
-    await act(async () => release());
-    hold = null;
-    expect(button().disabled).toBe(false);
-    // The node's refusal (a turn that started meanwhile) is shown.
-    refuse = true;
-    await pick("Writer");
-    expect(host.textContent).toContain("The agent is working");
     act(() => root.unmount());
     host.remove();
   });

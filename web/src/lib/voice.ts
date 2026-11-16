@@ -12,11 +12,15 @@ export async function record(on: { transcribing: () => void; done: (said: string
   r.onstop = async () => {
     stream.getTracks().forEach((t) => t.stop());
     on.transcribing();
+    // `done` once, outside the try: a throw in it is not a failed transcription.
+    let said: string | null = null;
+    let error: string | undefined;
     try {
-      on.done(await api.transcribe(new Blob(chunks, { type: r.mimeType || "audio/webm" })));
+      said = await api.transcribe(new Blob(chunks, { type: r.mimeType || "audio/webm" }));
     } catch (x) {
-      on.done(null, x instanceof Error ? x.message : String(x));
+      error = x instanceof Error ? x.message : String(x);
     }
+    on.done(said, error);
   };
   r.start();
   return r;

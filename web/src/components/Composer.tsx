@@ -87,8 +87,9 @@ export function Composer(props: {
   workers: NodeInfo[];
   /** Selected agent (home: the choice for the new chat; session: the session's agent). */
   agentId: string;
-  /** Session: refused while the agent works; the refusal is said here. */
-  onAgentChange: (id: string) => unknown;
+  onAgentChange: (id: string) => void;
+  /** Session: a pick waits for the server's answer (the picker is held). */
+  picking?: boolean;
   /** Session: what the selected agent is doing, for its avatar on the pill. */
   agentState?: AvatarState;
   /** Session model (session view), for the effort control. */
@@ -211,7 +212,11 @@ export function Composer(props: {
     }
     setErr(null);
     try {
-      const { record } = await import("../lib/voice");
+      // A chunk that does not load (an update since, the network): said
+      // like the microphone's other errors.
+      const { record } = await import("../lib/voice").catch(() => {
+        throw Error("could not load; reload the page");
+      });
       recorder.current = await record({
         transcribing: () => setRec("transcribing"),
         done: (said, error) => {
@@ -390,7 +395,7 @@ export function Composer(props: {
   const pickedAgent = props.agents.find((a) => a.id === props.agentId);
   const pickedAlert = pickedAgent ? agentAlert(pickedAgent) : null;
   // A chat's agent changes between turns only (the node refuses it otherwise).
-  const stillWorking = !home && !!(props.running || props.compacting || busy);
+  const stillWorking = !home && !!(props.running || props.compacting || props.picking);
   const effortModel = home ? model : props.sessionModel;
   const effortOk = resolveModel(props.models, effortModel)?.effort ?? false;
   // Images: not in search or a temporary chat; every model answering must
@@ -724,13 +729,7 @@ export function Composer(props: {
                   icon: <AgentMark agent={a} size={18} state={a.id === props.agentId ? props.agentState : undefined} />,
                 }))}
                 onChange={(id) => {
-                  setErr(null);
-                  const done = Promise.resolve(props.onAgentChange(id)).catch((x) => setErr(x instanceof Error ? x.message : String(x)));
-                  // A chat's: one pick at a time, the next waits for this one's answer (the last pick is the chat's).
-                  if (!home) {
-                    setBusy(true);
-                    void done.finally(() => setBusy(false));
-                  }
+                  props.onAgentChange(id);
                   ta.current?.focus();
                 }}
               />

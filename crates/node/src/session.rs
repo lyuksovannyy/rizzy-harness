@@ -1355,9 +1355,9 @@ impl Session {
         if self.incognito && !input.images.is_empty() {
             return Err("images can't go into an incognito chat".into());
         }
-        // A turn of the chat's own agent (no @mention, no routine's pick,
-        // not an answer to an agent's question): it records a switch.
-        let own_agent = !agent_named && input.reply.is_none() && self.parent_session.is_none();
+        // Named for this message: an @mention, a routine's explicit agent,
+        // or the asker an answer goes to (`switch_of` decides the rest).
+        let named = agent_named || input.reply.is_some();
         self.check_cwd_still_allowed()?;
         // The owner prompts the chat: it may start background commands
         // again after a revocation closed its table (the master admits the
@@ -1454,7 +1454,7 @@ impl Session {
         // Recorded before the prompt is answered, so a log that cannot be
         // written refuses the prompt itself and the sender sees why.
         let (history, queued) = match self
-            .begin(Some(&msg), &turn_id, agent.as_ref(), own_agent)
+            .begin(Some(&msg), &turn_id, agent.as_ref(), named)
             .await
         {
             Ok(h) => h,
@@ -1676,7 +1676,7 @@ impl Session {
             began: std::time::SystemTime::now(),
         })
         .ok()?;
-        let (history, mut queued) = match self.begin(None, &turn_id, agent, false).await {
+        let (history, mut queued) = match self.begin(None, &turn_id, agent, true).await {
             Ok(h) => h,
             Err(e) => {
                 tracing::warn!(session = %self.id, error = %e, "could not start a turn for the messages sent while the last one ran");
@@ -1853,6 +1853,16 @@ impl Session {
             .unwrap_or_else(|p| p.into_inner())
             .clear();
         let environment = self.environment_line(&turn_id).await;
+        // A pick no message followed yet: this turn is the first to run
+        // under it, so the switch is noted here, above it, and the log
+        // reads in order (the master sends the chat's agent).
+        if let Some(switch) = self.switch_of(&history, agent.as_ref(), false)
+            && let Err(e) = self.emit(EventKind::AgentChanged(switch)).await
+        {
+            drop(gate);
+            self.release(&turn_id);
+            return Err(e.to_string());
+        }
         if let Err(e) = self
             .emit(EventKind::TurnStarted(TurnStarted {
                 turn_id: turn_id.clone(),
@@ -2281,16 +2291,17 @@ impl Session {
     /// turn that only reads queued messages: with none unread, nothing is
     /// recorded and it is refused. When an append fails nothing has run,
     /// and whatever was written is closed. A person's turn holds `queue`.
-    /// `own_agent`: a person's turn under the chat's own agent, which
-    /// records a switch of agent or model first (`agent_changed`).
+    /// `named`: the turn's agent was named for it rather than being the
+    /// chat's own (`switch_of`, which records a switch of agent or model
+    /// first, `agent_changed`, only for the chat's own).
     async fn begin(
         &self,
         msg: Option<&UserMessage>,
         turn_id: &str,
         agent: Option<&AgentSpec>,
-        own_agent: bool,
+        named: bool,
     ) -> Result<(Vec<RawEvent>, Vec<UserMessage>), String> {
-        self.begin_with(msg, turn_id, agent, None, own_agent).await
+        self.begin_with(msg, turn_id, agent, None, named).await
     }
 
     /// [`Self::begin`] for a sub-agent's follow-up (T68): `follow_up` is the
@@ -2304,7 +2315,7 @@ impl Session {
         turn_id: &str,
         agent: Option<&AgentSpec>,
         follow_up: Option<(&str, &str)>,
-        own_agent: bool,
+        named: bool,
     ) -> Result<(Vec<RawEvent>, Vec<UserMessage>), String> {
         // The mode in force recorded first, if the log says another.
         self.record_clamp().await;
@@ -2349,7 +2360,7 @@ impl Session {
         }
         // The switch, above the turn and its message (not in `history`:
         // the model is never sent it).
-        if let Some(switch) = self.switch_of(&history, agent).filter(|_| own_agent)
+        if let Some(switch) = self.switch_of(&history, agent, named)
             && let Err(e) = self.emit(EventKind::AgentChanged(switch)).await
         {
             return Err(e.to_string());
@@ -3860,7 +3871,7 @@ impl Session {
             ..Default::default()
         };
         let history = match child
-            .begin(Some(&msg), &msg.turn_id, Some(&agent), false)
+            .begin(Some(&msg), &msg.turn_id, Some(&agent), true)
             .await
         {
             Ok((h, _)) => h,
@@ -4227,7 +4238,7 @@ impl Session {
                 &msg.turn_id,
                 Some(&agent),
                 Some((call_id.as_str(), note.as_str())),
-                false,
+                true,
             )
             .await
         {
