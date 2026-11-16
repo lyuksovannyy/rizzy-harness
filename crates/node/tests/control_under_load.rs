@@ -21,14 +21,21 @@
 //! the out queue being full; how fast a real node fills it does (review
 //! B7-R4).
 //!
-//! How a stop is seen: the command writes `beat` every 0.1 s, and a look
-//! (`beating`) watches it for 0.4 s. "No write seen" means a look found
-//! none, so the command had stopped by then or within about 0.1 s before;
-//! the times are the test's clock at the start of that look, not when the
-//! command stopped (re-check B7-D4).
+//! How a stop is seen: the command writes its shell's pid to `pid` and
+//! then `beat` every 0.1 s; it has ended when that process is gone (or a
+//! zombie), looked at every 10 ms. (Until 2026-11-16 a 0.4 s look for a new
+//! `beat` stood for "running": on a loaded machine one round of the loop,
+//! a `date` and a `sleep`, took longer, and a running command was seen as
+//! stopped: "the command stopped by itself", 1 of 10 runs at load 38.)
 //!
-//! The tests run one at a time (`SERIAL`): each runs up to thirteen shells
-//! and times a Stop to a second.
+//! What a stop must do is shown by order and by what the node records, not
+//! by a clock of the test's: the command ends while the uplink still takes
+//! nothing (before A.21 it ran until the uplink moved), and its tool result
+//! is the bash tool's own cancel (`[cancelled: process group killed]`), not
+//! the agent loop's abandonment at `TOOL_CANCEL_GRACE` (a fix that only
+//! ends the command at the grace, re-check B7-D2). Times are printed.
+//!
+//! The tests run one at a time (`SERIAL`): each runs up to thirteen shells.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -36,7 +43,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use harness_agent_native::{NativeBackend, NativeConfig, TOOL_CANCEL_GRACE, mock::Mock};
+use harness_agent_native::{NativeBackend, NativeConfig, mock::Mock};
 use harness_core::SessionId;
 use harness_core::event::*;
 use harness_core::policy::{ApprovalMode, Decision};
@@ -53,21 +60,42 @@ const URGENT_QUEUE: usize = 64;
 /// (`URGENT_BURST`, private there).
 const URGENT_BURST: usize = 8;
 /// One line of output and one write of `beat` every 0.0961 s.
-const TALKING: &str = "run: while :; do echo tick; date +%s%N > beat; sleep 961e-4; done";
+fn talking() -> String {
+    while_test_lives("echo tick; date +%s%N > beat; sleep 961e-4")
+}
 /// No output, one write of `beat` every 0.0961 s.
-const SILENT: &str = "run: while :; do date +%s%N > beat; sleep 961e-4; done";
+fn silent() -> String {
+    while_test_lives("date +%s%N > beat; sleep 961e-4")
+}
+/// `run: ` a loop of `body` that runs while this test process lives and 15
+/// minutes at most. The command is the test's child (in-process node, no
+/// containment), so a SIGKILL of the test, which no drop guard survives,
+/// reparents it and the loop ends within one round; before this, a loop
+/// orphaned that way was found writing 22.5 hours later. A loop that writes
+/// output already dies of SIGPIPE when the test does; a silent one did not.
+fn while_test_lives(body: &str) -> String {
+    format!(
+        "run: echo $$ > pid; while read -r _ _ _ p _ </proc/$$/stat && [ \"$p\" = {} ] && [ $SECONDS -lt 900 ]; \
+         do {body}; done",
+        std::process::id()
+    )
+}
+
 const FLOOD: &str = "run: yes 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 /// B.7's twelve streaming sessions (re-check B7-D1: 14 appends ahead).
 const FLOODERS: usize = 12;
+/// The appends ahead of the watched session's next one with `FLOODERS`
+/// streaming (re-check B7-D1).
+const APPENDS_AHEAD: usize = 14;
 /// Enough to keep the out queue full.
 const FEW: usize = 4;
 /// The uplink takes nothing.
 const STALLED: u64 = u64::MAX;
-/// How long after a Stop the command may still run: the agent loop's grace
-/// for a cancelled tool, and a second for the kill and this test's look.
-fn bound() -> Duration {
-    TOOL_CANCEL_GRACE + Duration::from_secs(1)
-}
+/// How long a test waits, with the uplink taking nothing, for a command to
+/// end: a limit on waiting only (a loaded machine took 196 s for one of
+/// these tests), not a bound the node promises. What it catches does not
+/// end at all: before A.21 the command ran until the uplink moved.
+const STALL_LIMIT: Duration = Duration::from_secs(60);
 
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -78,6 +106,8 @@ struct Seen {
     errors: HashMap<String, String>,
     deltas: HashMap<SessionId, usize>,
     ended: HashMap<SessionId, Instant>,
+    /// The last tool result of each session.
+    results: HashMap<SessionId, String>,
     /// Every message read, in order: `ack <req_id>` or `<kind> <session>`.
     log: Vec<String>,
 }
@@ -169,6 +199,9 @@ impl Node {
                             }
                             Ok(EventKind::TurnEnded(_)) => {
                                 s.ended.insert(sid, at);
+                            }
+                            Ok(EventKind::ToolCallFinished(f)) => {
+                                s.results.insert(sid, f.output);
                             }
                             _ => {}
                         }
@@ -320,38 +353,46 @@ async fn full(node: &NodeRuntime, n: usize) {
     }
 }
 
-/// Whether the command still writes `beat` (looks for 0.4 s).
-async fn beating(dir: &Path) -> bool {
-    let read = || std::fs::read_to_string(dir.join("beat")).unwrap_or_default();
-    let a = read();
-    for _ in 0..8 {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let b = read();
-        if !b.is_empty() && b != a {
-            return true;
-        }
-    }
-    false
+/// Whether the command in `dir` runs: the shell whose pid it wrote is alive
+/// and not a zombie (the node reaps it when the tool ends).
+fn beating(dir: &Path) -> bool {
+    let Some(pid) = std::fs::read_to_string(dir.join("pid"))
+        .ok()
+        .and_then(|p| p.trim().parse::<u32>().ok())
+    else {
+        return false;
+    };
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        stat.rsplit(')')
+            .next()
+            .and_then(|r| r.trim_start().chars().next())
+            .is_some_and(|c| !matches!(c, 'Z' | 'X' | 'x'))
+    })
 }
 
-/// When, after `from`, a look first saw no write, looking until `within`
-/// has passed since `from`: the start of that 0.4 s look (the command
-/// stopped by its end), not when the command stopped.
+/// How long after `from` the command was first seen gone, looking every
+/// 10 ms until `within` has passed since `from`.
 async fn stopped_after(dir: &Path, from: Instant, within: Duration) -> Option<Duration> {
     while from.elapsed() < within {
-        let at = from.elapsed();
-        if !beating(dir).await {
-            return Some(at);
+        if !beating(dir) {
+            return Some(from.elapsed());
         }
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
     None
+}
+
+/// The bash tool's own result for a cancel: it saw the Stop (not the agent
+/// loop's abandonment at the grace).
+fn cancelled_by_the_tool(result: &str) -> bool {
+    result.contains("[cancelled") && !result.contains("abandoned")
 }
 
 /// A session running `cmd`, seen writing `beat` (and, if it talks, seen
 /// streaming) while the uplink still reads.
 async fn running(node: &Node, cmd: &str) -> (SessionId, PathBuf) {
     let (sid, dir) = node.start("watched", cmd, true).await;
-    if cmd == TALKING {
+    if cmd == talking() {
         node.wait(
             "the watched session to stream",
             Duration::from_secs(30),
@@ -359,9 +400,10 @@ async fn running(node: &Node, cmd: &str) -> (SessionId, PathBuf) {
         )
         .await;
     }
-    let end = Instant::now() + Duration::from_secs(30);
-    while !beating(&dir).await {
+    let end = Instant::now() + Duration::from_secs(60);
+    while !(beating(&dir) && dir.join("beat").exists()) {
         assert!(Instant::now() < end, "the watched command never ran");
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
     (sid, dir)
 }
@@ -369,29 +411,32 @@ async fn running(node: &Node, cmd: &str) -> (SessionId, PathBuf) {
 /// What one run measured after the Stop.
 #[derive(Debug)]
 struct Stop {
-    /// When a look first saw no write, while the uplink took nothing.
+    /// When the command was seen gone, while the uplink took nothing.
     stalled: Option<Duration>,
     /// How long the uplink took nothing after the Stop.
     stall: Duration,
-    /// When a look first saw no write, after the uplink read again.
+    /// When the command was seen gone, after the uplink read again.
     after_read: Option<Duration>,
     ack: Duration,
     turn_ended: Duration,
+    /// The watched call's tool result.
+    result: String,
 }
 
 /// Fill the out queue, send `before` if any and then a Stop for the watched
-/// session running `cmd`, and look for `bound()`.
+/// session running `cmd`, and look for up to `STALL_LIMIT` with the uplink
+/// taking nothing.
 async fn stop_while_full(cmd: &str, before: Option<MasterToNode>) -> Stop {
     let mut node = Node::new().await;
     let (sid, dir) = running(&node, cmd).await;
-    node.fill(FLOODERS, (cmd == TALKING).then_some(sid)).await;
-    assert!(beating(&dir).await, "the command stopped by itself");
+    node.fill(FLOODERS, (cmd == talking()).then_some(sid)).await;
+    assert!(beating(&dir), "the command stopped by itself");
     let t0 = Instant::now();
     if let Some(m) = before {
         node.send(m).await;
     }
     node.cancel("stop", sid).await;
-    let stalled = stopped_after(&dir, t0, bound()).await;
+    let stalled = stopped_after(&dir, t0, STALL_LIMIT).await;
     let stall = t0.elapsed();
     node.pace(0);
     let t1 = Instant::now();
@@ -407,9 +452,13 @@ async fn stop_while_full(cmd: &str, before: Option<MasterToNode>) -> Stop {
         s.ended.contains_key(&sid)
     })
     .await;
-    let (ack, turn_ended) = {
+    let (ack, turn_ended, result) = {
         let s = node.seen.lock().unwrap();
-        (s.acks["stop"] - t0, s.ended[&sid] - t0)
+        (
+            s.acks["stop"] - t0,
+            s.ended[&sid] - t0,
+            s.results.get(&sid).cloned().unwrap_or_default(),
+        )
     };
     node.tidy(Some(sid)).await;
     let m = Stop {
@@ -418,12 +467,18 @@ async fn stop_while_full(cmd: &str, before: Option<MasterToNode>) -> Stop {
         after_read,
         ack,
         turn_ended,
+        result,
     };
     eprintln!(
-        "A.21 real node, Stop with the out queue full: no write seen from {:?} after the Stop \
-         while the uplink took nothing for {:?}; from {:?} after the uplink read again; \
-         ack {:?} and turn_ended {:?} after the Stop",
-        m.stalled, m.stall, m.after_read, m.ack, m.turn_ended
+        "A.21 real node, Stop with the out queue full: gone {:?} after the Stop while the \
+         uplink took nothing for {:?}; {:?} after the uplink read again; ack {:?} and \
+         turn_ended {:?} after the Stop; result {:?}",
+        m.stalled,
+        m.stall,
+        m.after_read,
+        m.ack,
+        m.turn_ended,
+        m.result.lines().last()
     );
     m
 }
@@ -440,11 +495,11 @@ fn approval_answer(req: &str) -> MasterToNode {
     }
 }
 
-/// Stopped within a second of the Stop, as the control asks: a fix that
-/// only ends the command at the grace (recorded as abandoned, re-check
-/// B7-D2) does not pass.
+/// Ended by the Stop itself while the uplink took nothing: a fix that only
+/// ends the command at the grace (recorded as abandoned, re-check B7-D2),
+/// or one that ends it only once the uplink moves, does not pass.
 fn promptly(m: &Stop) -> bool {
-    m.stalled.is_some_and(|d| d < Duration::from_secs(1))
+    m.stalled.is_some() && cancelled_by_the_tool(&m.result)
 }
 
 /// The control: a command that writes nothing is not held by the full out
@@ -452,7 +507,7 @@ fn promptly(m: &Stop) -> bool {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_stop_ends_a_silent_command_while_the_uplink_takes_nothing() {
     let _one = SERIAL.lock().await;
-    let m = stop_while_full(SILENT, None).await;
+    let m = stop_while_full(&silent(), None).await;
     assert!(promptly(&m), "{m:?}");
 }
 
@@ -466,7 +521,7 @@ async fn a_stop_ends_a_silent_command_while_the_uplink_takes_nothing() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_stop_ends_a_streaming_command_while_the_uplink_takes_nothing() {
     let _one = SERIAL.lock().await;
-    let m = stop_while_full(TALKING, None).await;
+    let m = stop_while_full(&talking(), None).await;
     assert!(promptly(&m), "{m:?}");
 }
 
@@ -480,7 +535,7 @@ async fn a_stop_ends_a_streaming_command_while_the_uplink_takes_nothing() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_stop_after_an_approval_answer_ends_a_silent_command_while_the_uplink_takes_nothing() {
     let _one = SERIAL.lock().await;
-    let m = stop_while_full(SILENT, Some(approval_answer("approval"))).await;
+    let m = stop_while_full(&silent(), Some(approval_answer("approval"))).await;
     assert!(promptly(&m), "{m:?}");
 }
 
@@ -493,8 +548,8 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Re-check B7-D1: a call's timeout ends a command that streams output while
 /// the out queue is full. No Stop; the uplink takes nothing from the fill
-/// until the look, `TIMEOUT` and `bound()` after the command was seen
-/// running (so after its call started).
+/// until the command is gone (looked for up to `TIMEOUT` and `STALL_LIMIT`
+/// after it was seen running), and its result is the call's timeout.
 ///
 /// `FEW` flooders, not B.7's twelve: what is shown is that the call's timer
 /// runs while its output's append waits for room, which needs the queue
@@ -508,36 +563,81 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_timeout_ends_a_streaming_command_while_the_uplink_takes_nothing() {
     let _one = SERIAL.lock().await;
+    // The fill must end before the call's timer does, or the run shows
+    // nothing (the timer fires while no append waits). How long the fill
+    // takes is this machine's (17 s to 26 s, once 43.7 s at load 59): a run
+    // whose fill came too late is not a result, and the next one gives the
+    // call twice the time.
+    for timeout in [TIMEOUT, 2 * TIMEOUT, 4 * TIMEOUT] {
+        if timeout_while_full(timeout).await {
+            return;
+        }
+    }
+    panic!(
+        "the out queue never filled before the call's timeout, up to {:?}",
+        4 * TIMEOUT
+    );
+}
+
+/// One run of the test above with the node's ceiling at `timeout`; false
+/// when the queue filled too late for it to show anything.
+async fn timeout_while_full(timeout: Duration) -> bool {
     // As `node run` passes the ceiling to the agent loop.
     let mut node = Node::with(|p, n| {
-        p.limits.bash_timeout_max_s = TIMEOUT.as_secs();
-        n.bash_timeout_max = TIMEOUT;
+        p.limits.bash_timeout_max_s = timeout.as_secs();
+        n.bash_timeout_max = timeout;
     })
     .await;
-    let (sid, dir) = running(&node, TALKING).await;
+    let (sid, dir) = running(&node, &talking()).await;
     let ran = Instant::now();
     node.fill(FEW, Some(sid)).await;
     let filled = ran.elapsed();
+    if filled + Duration::from_secs(2) >= timeout {
+        eprintln!(
+            "A.21 real node, a {timeout:?} timeout: the out queue filled {filled:?} after the \
+             command ran, too late to show anything; again with a longer one"
+        );
+        node.cancel("tidy-watched", sid).await;
+        node.tidy(Some(sid)).await;
+        return false;
+    }
+    assert!(beating(&dir), "the command stopped by itself");
+    // Ended while the uplink still takes nothing (before A.21 it ran until
+    // the uplink moved), and by the call's timer.
+    let ended = stopped_after(&dir, ran, timeout + STALL_LIMIT).await;
     assert!(
-        filled + Duration::from_secs(2) < TIMEOUT,
-        "the out queue filled {filled:?} after the command ran: too late to test its timeout"
+        ended.is_some(),
+        "still running {:?} after the call started",
+        timeout + STALL_LIMIT
     );
-    assert!(beating(&dir).await, "the command stopped by itself");
-    tokio::time::sleep((TIMEOUT + bound()).saturating_sub(ran.elapsed())).await;
-    let still = beating(&dir).await;
-    let at = ran.elapsed();
     node.tidy(Some(sid)).await;
+    let result = node
+        .seen
+        .lock()
+        .unwrap()
+        .results
+        .get(&sid)
+        .cloned()
+        .unwrap_or_default();
     eprintln!(
-        "A.21 real node, a {TIMEOUT:?} timeout with the out queue full (full {filled:?} after \
-         the command ran): still writing {at:?} after it ran: {still}"
+        "A.21 real node, a {timeout:?} timeout with the out queue full (full {filled:?} after \
+         the command ran): gone {ended:?} after it ran; result {:?}",
+        result.lines().last()
     );
-    assert!(!still, "still writing {at:?} after the call started");
+    assert!(
+        result.contains(&format!("[timed out after {}s", timeout.as_secs())),
+        "not ended by its timeout: {result}"
+    );
+    true
 }
 
 /// B7-D1, the case the B.7 tests did not cover: an uplink that still moves,
 /// one message every 200 ms, while twelve other sessions stream. Another
-/// session's Stop ends its command within a second and its ack arrives
-/// within two: one session's output does not hold another's Stop.
+/// session's Stop ends its command, by the tool's own cancel, before the
+/// uplink has taken one message per append ahead of it, and its ack comes
+/// before that many messages too: one session's output does not hold
+/// another's Stop. (Counted in messages: it was "within a second" and
+/// "within two", which the 200 ms pace and the node stretch under load.)
 ///
 /// Fails before A.21: the stopped command runs until the uplink has taken
 /// one message for every append waiting ahead of it (14 messages, 2.8 s at
@@ -547,28 +647,56 @@ async fn a_timeout_ends_a_streaming_command_while_the_uplink_takes_nothing() {
 async fn one_sessions_output_does_not_hold_another_sessions_stop_on_a_trickling_uplink() {
     let _one = SERIAL.lock().await;
     let mut node = Node::new().await;
-    let (sid, dir) = running(&node, TALKING).await;
+    let (sid, dir) = running(&node, &talking()).await;
     node.fill(FLOODERS, Some(sid)).await;
-    assert!(beating(&dir).await, "the command stopped by itself");
+    assert!(beating(&dir), "the command stopped by itself");
     node.pace(200);
     let t0 = Instant::now();
+    let from = node.seen.lock().unwrap().log.len();
     node.cancel("stop", sid).await;
-    let stopped = stopped_after(&dir, t0, bound()).await;
+    let stopped = stopped_after(&dir, t0, STALL_LIMIT).await;
+    let taken_by_end = node.seen.lock().unwrap().log.len() - from;
     node.wait("the stop's ack", Duration::from_secs(120), |s| {
         s.acks.contains_key("stop")
     })
     .await;
-    let ack = node.seen.lock().unwrap().acks["stop"] - t0;
+    let (ack, ack_at) = {
+        let s = node.seen.lock().unwrap();
+        let at = s.log[from..].iter().position(|l| l == "ack stop");
+        (s.acks["stop"] - t0, at)
+    };
     node.tidy(Some(sid)).await;
+    let result = node
+        .seen
+        .lock()
+        .unwrap()
+        .results
+        .get(&sid)
+        .cloned()
+        .unwrap_or_default();
     eprintln!(
-        "A.21 real node, Stop on an uplink taking a message every 200 ms: no write seen from \
-         {stopped:?} after the Stop, ack after {ack:?}"
+        "A.21 real node, Stop on an uplink taking a message every 200 ms: gone {stopped:?} \
+         after the Stop, {taken_by_end} messages taken by then; ack after {ack:?}, message \
+         {ack_at:?} after the Stop; result {:?}",
+        result.lines().last()
+    );
+    // Counted in messages the uplink took, not seconds (the pace stretches
+    // with the machine's load): before A.21 the command ran until one
+    // message per append ahead of it had gone (`APPENDS_AHEAD`), and the
+    // ack waited behind the whole queue (256).
+    assert!(
+        stopped.is_some(),
+        "still running {STALL_LIMIT:?} after the Stop"
     );
     assert!(
-        stopped.is_some_and(|d| d < Duration::from_secs(1)),
-        "still writing: {stopped:?}"
+        taken_by_end < APPENDS_AHEAD,
+        "the command ran until {taken_by_end} messages had gone ({stopped:?})"
     );
-    assert!(ack < Duration::from_secs(2), "the stop's ack took {ack:?}");
+    assert!(cancelled_by_the_tool(&result), "{result}");
+    assert!(
+        ack_at.is_some_and(|i| i < APPENDS_AHEAD),
+        "the stop's ack was message {ack_at:?} after the Stop ({ack:?})"
+    );
 }
 
 /// The acks of the inline commands (a cancel and a `stop_background` here)
