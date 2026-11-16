@@ -177,6 +177,10 @@ async fn scenario() {
                 .env("GIT_AUTHOR_EMAIL", "t@t")
                 .env("GIT_COMMITTER_NAME", "t")
                 .env("GIT_COMMITTER_EMAIL", "t@t")
+                // Not the developer's ~/.gitconfig (a global `commit.gpgsign`
+                // or `core.hooksPath` failed or ran things in these commits).
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
                 .status()
                 .unwrap()
                 .success()
