@@ -288,23 +288,9 @@ export function apply(v: SessionView, e: RawEvent): void {
       break;
     }
     case "assistant_message": {
-      // Its thinking, before what the step said (X.25), as the Rust view.
-      if (p.thinking && Array.isArray(p.thinking.blocks)) {
-        const text: string[] = [];
-        let redacted = 0;
-        for (const b of p.thinking.blocks) {
-          if (b.type === "redacted") redacted++;
-          else if ((b.type === "signed" || b.type === "text") && typeof b.text === "string" && /[^\p{White_Space}]/u.test(b.text)) text.push(b.text);
-        }
-        if (text.length || redacted) {
-          const item: Extract<Item, { type: "thinking" }> = { type: "thinking", message_id: p.message_id, text: text.join("\n\n") };
-          if (redacted) item.redacted = redacted;
-          const at = v.items.findLastIndex((i) => i.type === "assistant" && i.message_id === p.message_id);
-          if (at >= 0) v.items.splice(at, 0, item);
-          else v.items.push(item);
-        }
-      }
       const a = lastAssistant(v, p.message_id);
+      // Its thinking, a row before what the step said (X.25), as the Rust view.
+      if (p.thinking) v.items.splice(a ? v.items.indexOf(a) : v.items.length, 0, { type: "thinking", message_id: p.message_id, thinking: p.thinking });
       if (a) {
         a.text = p.text;
         a.done = true;

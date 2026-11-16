@@ -239,7 +239,7 @@ describe("list", () => {
     const [a, b] = [...host.querySelectorAll<HTMLLIElement>(".routine-item")];
     await act(async () => [...a!.querySelectorAll("button")].find((x) => x.textContent === "Run now")!.click());
     expect(routinesApi.run).toHaveBeenCalledWith("r1");
-    expect(a!.querySelector('[role="status"]')!.textContent).toBe("Started. Its chat appears in Recent.");
+    expect(a!.querySelector('[role="status"]')!.textContent).toBe("Started. Its chat appears in the sidebar.");
     await act(async () => a!.querySelector<HTMLInputElement>("input.switch")!.click());
     expect(routinesApi.update).toHaveBeenCalledWith("r1", { enabled: false });
     act(() => [...a!.querySelectorAll("button")].find((x) => x.textContent === "Open latest result")!.click());

@@ -174,8 +174,20 @@ describe("thinking", () => {
   test("one collapsed row per step, the model's text as text, a redacted part as one line", async () => {
     await show(
       [
-        { type: "thinking", message_id: "m1", text: "Check <b>main.rs</b> first.", redacted: 2 },
-        { type: "thinking", message_id: "m2", text: "", redacted: 1 },
+        {
+          type: "thinking",
+          message_id: "m1",
+          thinking: {
+            blocks: [
+              { type: "signed", text: "Check <b>main.rs</b> first.", signature: "S" },
+              { type: "redacted", data: "R" },
+              { type: "signed", text: " \n", signature: "S" },
+              { type: "redacted", data: "R" },
+            ],
+          },
+        },
+        { type: "thinking", message_id: "m2", thinking: { blocks: [{ type: "redacted", data: "R" }] } },
+        { type: "thinking", message_id: "m3", thinking: { blocks: [{ type: "signed", text: "", signature: "S" }] } },
       ],
       sessionRow(),
     );
@@ -187,6 +199,7 @@ describe("thinking", () => {
     expect(ps).toEqual(["Check <b>main.rs</b> first.", "2 part(s) redacted by the provider: not readable."]);
     expect(rows[0]!.querySelector("b")).toBeNull();
     expect(rows[1]!.querySelectorAll("p")).toHaveLength(1);
+    // Nothing readable (an omitted summary): no row.
   });
 });
 

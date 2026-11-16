@@ -248,11 +248,10 @@ export type Item =
       blocks?: UiBlock[];
     }
   | {
-      /** A step's thinking (X.25): its readable text; how many blocks were redacted. */
+      /** A step's thinking (X.25), as recorded; the chat shows its readable text. */
       type: "thinking";
       message_id: string;
-      text: string;
-      redacted?: number;
+      thinking: { blocks?: { type: string; text?: string; signature?: string; data?: string }[] };
     }
   | {
       type: "tool";

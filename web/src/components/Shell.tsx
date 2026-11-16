@@ -590,7 +590,7 @@ export function Shell(props: {
         onNavigate={navigate}
         me={me}
         displayName={prefs?.display_name || me.username}
-        sessions={listed}
+        sessions={sessions}
         nodes={nodes}
         conn={live.state}
         workspaces={workspaces}

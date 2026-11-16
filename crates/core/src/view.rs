@@ -68,14 +68,12 @@ pub enum Item {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         blocks: Vec<UiBlock>,
     },
-    /// A step's thinking (`assistant_message.thinking`, X.25): its
-    /// readable text and how many blocks were redacted. Shown collapsed,
-    /// as text; never when the step's thinking has neither.
+    /// A step's thinking (`assistant_message.thinking`, X.25), as
+    /// recorded, before what the step said. The chat shows it collapsed,
+    /// as text (`Thinking::shown`); nothing when nothing is readable.
     Thinking {
         message_id: String,
-        text: String,
-        #[serde(default, skip_serializing_if = "is_none_redacted")]
-        redacted: u32,
+        thinking: Thinking,
     },
     Tool {
         call_id: String,
@@ -318,10 +316,6 @@ pub struct CheckpointState {
     pub excluded_more: u64,
 }
 
-fn is_none_redacted(n: &u32) -> bool {
-    *n == 0
-}
-
 fn is_zero(n: &u64) -> bool {
     *n == 0
 }
@@ -449,20 +443,16 @@ impl SessionView {
             EventKind::AssistantMessage(m) => {
                 // Its thinking, before what the step said (X.25).
                 if let Some(t) = &m.thinking {
-                    let (text, redacted) = t.shown();
-                    if !text.is_empty() || redacted > 0 {
-                        let item = Item::Thinking {
-                            message_id: m.message_id.clone(),
-                            text,
-                            redacted,
-                        };
-                        let at = self.items.iter().rposition(|i| {
-                            matches!(i, Item::Assistant { message_id, .. } if *message_id == m.message_id)
-                        });
-                        match at {
-                            Some(i) => self.items.insert(i, item),
-                            None => self.items.push(item),
-                        }
+                    let item = Item::Thinking {
+                        message_id: m.message_id.clone(),
+                        thinking: t.clone(),
+                    };
+                    let at = self.items.iter().rposition(|i| {
+                        matches!(i, Item::Assistant { message_id, .. } if *message_id == m.message_id)
+                    });
+                    match at {
+                        Some(i) => self.items.insert(i, item),
+                        None => self.items.push(item),
                     }
                 }
                 let found = self.items.iter_mut().rev().find(|i| {

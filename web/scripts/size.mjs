@@ -290,13 +290,23 @@ const X7_KB = 1.1;
 // review's merge; 0.5 is what the feature adds on top of the line before it.
 const X21_KB = 0.5;
 
-// X.25 (PLAN.md T73), measured 402.2 (initial 103.7) against 401.9
-// (initial 103.5) on main with pull request 130, which was already 0.3 over
-// the recorded total: the thinking row of the fold (first load, +0.2) and
-// its collapsed row in the conversation and its strings (lazy, +0.1).
-const X25_KB = 0.6;
+// The sidebar to the owner's sketch of 2026-11-16 (PR 132): boxed projects
+// with their chats, sub-agent chats as a tree, the node badge, the marks on
+// closed groups, and Home's notices as their own chunk. Measured 403.5
+// against origin/main's 401.9 the same day (f24aa00), so +1.6; the first
+// load is 103.8. The owner approved recording this line on 2026-11-16. What
+// main was already over its record (401.9 against 401.6) is not recorded
+// here.
+const SIDEBAR_KB = 1.6;
 
-const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB + EXPORT_KB + MEMDEF_KB + VISIBILITY_KB + T50_KB + LOOP_KB + DIFF_KB + T51_KB + WSMEM_KB + STEPS_KB + AGENT_SWITCHES_KB + T57_KB + X15_KB + X16_KB + COST_KB + X17_KB + X19_X20_KB + X21_KB + X7_KB + X25_KB) * 100) / 10) / 10;
+// X.25 (PLAN.md T73), measured 403.65 (initial 103.87) against 403.46
+// (initial 103.83) on main with pull request 132 (2e0a60c): the fold puts a
+// step's thinking in as it is recorded (first load, +0.04) and the lazy
+// conversation row reads it (+0.15). Main was already 0.26 over its
+// recorded total, which this line also covers.
+const X25_KB = 0.5;
+
+const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB + EXPORT_KB + MEMDEF_KB + VISIBILITY_KB + T50_KB + LOOP_KB + DIFF_KB + T51_KB + WSMEM_KB + STEPS_KB + AGENT_SWITCHES_KB + T57_KB + X15_KB + X16_KB + COST_KB + X17_KB + X19_X20_KB + X21_KB + X7_KB + SIDEBAR_KB + X25_KB) * 100) / 10) / 10;
 // Raised from 103 to 106 once the Phase A pages merged (103.7 measured: the
 // new sidebar, account button and routine-result rows are on the first
 // screen), then lowered to 104 at Phase B (102.3 measured) once the login

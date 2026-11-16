@@ -725,16 +725,23 @@ export default function Conversation(props: {
                         })}
                       </div>
                     );
-                  case "thinking":
+                  case "thinking": {
                     // The model's thinking for one step (X.25), collapsed;
-                    // the model's text: shown as text.
-                    return (
+                    // the model's text: shown as text (`Thinking::shown`).
+                    const blocks = Array.isArray(it.thinking?.blocks) ? it.thinking.blocks : [];
+                    const text = blocks
+                      .filter((b) => b.type !== "redacted" && typeof b.text === "string" && /[^\p{White_Space}]/u.test(b.text))
+                      .map((b) => b.text)
+                      .join("\n\n");
+                    const redacted = blocks.filter((b) => b.type === "redacted").length;
+                    return text || redacted ? (
                       <details key={i} className="divider summary" data-testid="thinking">
                         <summary>{t("conv.thinking")}</summary>
-                        {it.text && <p>{it.text}</p>}
-                        {!!it.redacted && <p>{t("conv.thinkingRedacted", { n: String(it.redacted) })}</p>}
+                        {text && <p>{text}</p>}
+                        {!!redacted && <p>{t("conv.thinkingRedacted", { n: String(redacted) })}</p>}
                       </details>
-                    );
+                    ) : null;
+                  }
                   case "shortened": {
                     const what = [
                       it.cleared ? t("conv.shortCleared") : "",

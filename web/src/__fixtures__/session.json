@@ -1946,8 +1946,26 @@
       },
       {
         "message_id": "m-th1",
-        "redacted": 1,
-        "text": "The <script>tests</script> first.",
+        "thinking": {
+          "blocks": [
+            {
+              "signature": "c2lnbmVk",
+              "text": "The <script>tests</script> first.",
+              "type": "signed"
+            },
+            {
+              "data": "b3BhcXVl",
+              "type": "redacted"
+            },
+            {
+              "signature": "ZW1wdHk=",
+              "text": "",
+              "type": "signed"
+            }
+          ],
+          "model": "anthropic::claude-x",
+          "prefix": "abababababababababababababababababababababababababababababababab"
+        },
         "type": "thinking"
       },
       {
@@ -1960,7 +1978,30 @@
       },
       {
         "message_id": "m-th2",
-        "text": "Plain reasoning.",
+        "thinking": {
+          "blocks": [
+            {
+              "text": "Plain reasoning.",
+              "type": "text"
+            }
+          ],
+          "model": "deepseek::chat",
+          "unsent": true
+        },
+        "type": "thinking"
+      },
+      {
+        "message_id": "m-th3",
+        "thinking": {
+          "blocks": [
+            {
+              "signature": "c2ln",
+              "text": "  ",
+              "type": "signed"
+            }
+          ],
+          "model": "anthropic::claude-x"
+        },
         "type": "thinking"
       },
       {
