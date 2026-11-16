@@ -586,6 +586,7 @@ fn spec(
         fallbacks: vec![],
         unavailable: vec![],
         no_effort: vec![],
+        vision: vec![],
         context_windows: Default::default(),
         effort: None,
         ui: Default::default(),

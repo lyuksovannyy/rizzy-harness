@@ -19,6 +19,8 @@ pub mod env;
 pub mod filter;
 mod fs;
 pub mod graphify;
+#[cfg(test)]
+mod image_read_tests;
 pub mod inside;
 pub mod mcp;
 pub mod mention;
@@ -553,6 +555,36 @@ pub struct ToolOutcome {
     /// text (a command could print the same words). The repeated-call
     /// guard's second rule does not count it.
     pub denied: bool,
+    /// The image a `read` of an image file found (X.23): the loop decides
+    /// whether the model gets it (its model takes images, the caps), keeps
+    /// the bytes with the chat and records only a reference. Never part of
+    /// `output`.
+    pub image: Option<FileImage>,
+}
+
+/// An image file as `read` found it: its bytes as read (at most
+/// [`harness_core::image::MAX_BYTES`]), checked by their magic number and
+/// header, never decoded.
+#[derive(Clone, PartialEq, Eq)]
+pub struct FileImage {
+    pub mime: &'static str,
+    /// Hex SHA-256 of `bytes`.
+    pub sha256: String,
+    pub width: u32,
+    pub height: u32,
+    pub bytes: Vec<u8>,
+}
+
+impl std::fmt::Debug for FileImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileImage")
+            .field("mime", &self.mime)
+            .field("sha256", &self.sha256)
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("bytes", &self.bytes.len())
+            .finish()
+    }
 }
 
 impl ToolOutcome {

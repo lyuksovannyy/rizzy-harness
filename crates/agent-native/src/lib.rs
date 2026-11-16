@@ -50,7 +50,7 @@ use manual_compact::{MODEL_FAILED, Manual, NOT_SMALLER, STOPPED, TOO_LARGE, TOO_
 use tokio::sync::mpsc;
 
 pub use provider::{
-    ChatMsg, ChatRequest, Completion, Effort, ImagePart, NOTES_THEN_MESSAGE, Provider,
+    ChatMsg, ChatRequest, Completion, Effort, ImagePart, ImageState, NOTES_THEN_MESSAGE, Provider,
     ProviderError, RetryHint, StopReason, StreamLimits, ToolSpec, escape_leads, estimate_tokens,
     place_notes, without_notes,
 };
@@ -342,6 +342,12 @@ impl harness_core::backend::TurnHost for Logged<'_> {
 
     async fn images(&self, sha256: &[String]) -> Vec<harness_core::backend::ImageData> {
         self.host.images(sha256).await
+    }
+
+    // Not forwarding it would keep no image a `read` returned (the
+    // trait's default refuses): the model would never see one.
+    async fn keep_image(&self, image: harness_core::backend::KeptImage) -> Result<(), String> {
+        self.host.keep_image(image).await
     }
 
     fn background(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
@@ -912,6 +918,12 @@ fn transcript_of(
             // summary keeps them verbatim after it.
             ChatMsg::StepContext(_) => {}
             ChatMsg::System(_) => {}
+            // A summary is text: the summariser is told an image was read.
+            ChatMsg::ToolImage { .. } => {
+                if let Some(t) = images::tool_image_text(m) {
+                    out.push_str(&format!("{t}\n\n"));
+                }
+            }
         }
     }
     if let Some(items) = todo {
@@ -1492,6 +1504,30 @@ fn unanswered_note(reason: TurnEndReason) -> String {
     )
 }
 
+/// The path a call named (`path`), as the line over its image shows it.
+fn image_name(input: &serde_json::Value) -> String {
+    input
+        .get("path")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// The message after a `read` result that returned an image (X.23).
+fn tool_image_msg(call_id: String, name: String, i: &harness_core::event::ToolImage) -> ChatMsg {
+    ChatMsg::ToolImage {
+        call_id,
+        image: provider::ImagePart {
+            sha256: i.sha256.clone(),
+            mime: i.mime.clone(),
+            name,
+            data: None,
+        },
+        bytes: i.bytes,
+        state: provider::ImageState::Shown,
+    }
+}
+
 /// The provider conversation from a session log, as `how` says, with what
 /// the log shortened (`context_shortened`, X.15) applied.
 pub fn rebuild(history: &[RawEvent], how: &Rebuild<'_>) -> Vec<ChatMsg> {
@@ -1581,6 +1617,8 @@ pub fn rebuild_spans(
     };
     let mut out = Vec::new();
     let mut open: Vec<String> = Vec::new();
+    // The path each open call named, for the line over its image.
+    let mut paths: std::collections::HashMap<String, String> = Default::default();
     // Queued messages by seq: sent while a turn ran, read where their
     // `queued_delivered` stands (X.5).
     let mut queued: std::collections::HashMap<u64, UserMessage> = Default::default();
@@ -1667,6 +1705,11 @@ pub fn rebuild_spans(
                     *answered = true;
                 }
                 open = m.tool_calls.iter().map(|c| c.call_id.clone()).collect();
+                paths = m
+                    .tool_calls
+                    .iter()
+                    .map(|c| (c.call_id.clone(), image_name(&c.input)))
+                    .collect();
                 if !m.text.is_empty() || !m.tool_calls.is_empty() {
                     // Another agent's answer says whose it is (only in a
                     // chat more than one agent answers in).
@@ -1690,11 +1733,15 @@ pub fn rebuild_spans(
             EventKind::ToolCallFinished(f) => {
                 if let Some(pos) = open.iter().position(|c| *c == f.call_id) {
                     open.remove(pos);
+                    let name = paths.get(&f.call_id).cloned().unwrap_or_default();
                     out.push(ChatMsg::Tool {
-                        call_id: f.call_id,
+                        call_id: f.call_id.clone(),
                         content: f.output,
                     });
                     out.extend(f.note.map(ChatMsg::CallNote));
+                    // Its image, by reference: the bytes come from the
+                    // chat's store when a request shows it (X.23).
+                    out.extend(f.image.map(|i| tool_image_msg(f.call_id, name, &i)));
                 }
             }
             // A step's instruction files (B.9), where the log has them:
@@ -1707,6 +1754,10 @@ pub fn rebuild_spans(
                     out.push(ChatMsg::StepContext(b));
                 }
             }
+            // The provider refused a request that carried these calls'
+            // images (T71): from here on they are withheld, as the loop
+            // withheld them in the request that was answered.
+            EventKind::ImagesWithheld(w) => images::withhold(&mut out, &w.calls),
             // Where the log has it: after a step's results, or between
             // turns; the same text the loop added when it arrived.
             EventKind::BackgroundEnded(b) => {
@@ -2180,6 +2231,8 @@ impl NativeBackend {
         let mut chain = std::collections::VecDeque::from(model_chain(&ctx.model, agent));
         let mut model = chain.pop_front().unwrap_or_else(|| ctx.model.clone());
         let window_of = |m: &str| agent.and_then(|a| a.context_windows.get(m).copied());
+        // Whether a model of the chain takes images (X.23).
+        let sees = |m: &str| agent.is_some_and(|a| a.vision.iter().any(|v| v == m));
         // Compaction is keyed to the answering model's window, unless a
         // trigger is configured (0 = never summarise).
         let configured = self.config.summarize_after_tokens;
@@ -2679,6 +2732,11 @@ impl NativeBackend {
         // again once per turn; a second refusal ends the turn.
         // Messages in a row whose tool calls were cut by the output limit.
         let mut cut_steps = 0;
+        // The bytes of the images `read` returned that the last request
+        // showed (at most its window's, X.23).
+        let mut img_cache: Vec<harness_core::backend::ImageData> = Vec::new();
+        // Images `read` returned this turn (X.23, `images::TURN_IMAGES`).
+        let mut turn_images = 0usize;
         // Same call, same result (T.1): this turn's only, never the model's.
         let mut guard = repeat::RepeatGuard::default();
         let mut repeat_stop = false;
@@ -2969,6 +3027,8 @@ impl NativeBackend {
                     if let Some(k) = keep {
                         mask::mask_old_outputs(&mut m, k);
                     }
+                    // The images the request would show (X.23).
+                    images::tool_window(&mut m, sees(&model));
                     // The provider's correction, bounded both ways: real
                     // tokenizers stay within about 0.6 to 1.6 times our
                     // four characters a token (code, other languages), so
@@ -3150,7 +3210,25 @@ impl NativeBackend {
             if mask_all {
                 mask::mask_all_outputs(&mut sent);
             }
-            let req = ChatRequest {
+            // The images `read` returned that this request shows, with
+            // their bytes from the chat's store where the loop no longer
+            // holds them (X.23): chosen from the conversation alone, so a
+            // rebuild from the log shows the same ones.
+            // The cache holds the bytes of the images this request shows
+            // and nothing else: an image is loaded once while it stays in
+            // the window, and dropped when it leaves (review of PR 130).
+            images::tool_window(&mut sent, sees(&model));
+            let wanted = images::tool_wanted(&sent);
+            img_cache.retain(|d| wanted.contains(&d.sha256));
+            let missing: Vec<String> = wanted
+                .into_iter()
+                .filter(|s| !img_cache.iter().any(|d| d.sha256 == *s))
+                .collect();
+            if !missing.is_empty() {
+                img_cache.extend(host.images(&missing).await);
+            }
+            images::tool_fill(&mut sent, &img_cache);
+            let mut req = ChatRequest {
                 model: model.clone(),
                 messages: provider::place_notes(sent),
                 tools: if last.is_some() {
@@ -3169,6 +3247,9 @@ impl NativeBackend {
             // the fallbacks, but only while this attempt has shown nothing:
             // a partial answer is never repeated.
             let mut retries = 0;
+            // A refusal that may be the images: the calls withheld for the
+            // one resend, the original error and request (T71).
+            let mut resent: Option<(Vec<String>, ProviderError, ChatRequest)> = None;
             let (step, emitted) = loop {
                 let (tx, rx) = mpsc::unbounded_channel();
                 let turn_id = ctx.turn_id.clone();
@@ -3212,9 +3293,48 @@ impl NativeBackend {
                     }
                     continue;
                 }
+                // The provider refused a request that carried images `read`
+                // returned, for its content (T71): it is sent once more with
+                // every one of them withheld. If that is answered, the
+                // images were the cause and the record below keeps them out
+                // of every later request; if it fails too, they were not,
+                // and the original error stands as it was.
+                if resent.is_none()
+                    && let (Step::Done(Err(e)), false) = &r
+                    && e.may_be_the_images()
+                {
+                    let calls = images::carried(&req.messages);
+                    if !calls.is_empty() {
+                        let (Step::Done(Err(e)), _) = r else {
+                            unreachable!("matched above")
+                        };
+                        tracing::warn!(
+                            model = %model,
+                            error = %e.log_line(),
+                            images = calls.len(),
+                            "the provider refused a request with images; sending it without them"
+                        );
+                        let mut again = req.clone();
+                        images::withhold(&mut again.messages, &calls);
+                        let first = std::mem::replace(&mut req, again);
+                        resent = Some((calls, e, first));
+                        continue;
+                    }
+                }
+                if let (Step::Done(Err(_)), false) = &r
+                    && let Some((_, e, first)) = resent.take()
+                {
+                    req = first;
+                    break (Step::Done(Err(e)), false);
+                }
                 break r;
             };
             started |= emitted;
+            // The resend was answered: record which calls' images it went
+            // without, before that answer (T71).
+            let withheld = resent
+                .filter(|_| matches!(step, Step::Done(Ok(_))))
+                .map(|(calls, e, _)| (calls, e));
             let completion = match step {
                 Step::Cancelled => {
                     return TurnOutcome {
@@ -3360,6 +3480,20 @@ impl NativeBackend {
             {
                 return stopped(usage);
             }
+            if let Some((calls, e)) = withheld {
+                if host
+                    .emit(EventKind::ImagesWithheld(self.withheld_record(
+                        &ctx.turn_id,
+                        calls.clone(),
+                        &e,
+                    )))
+                    .await
+                    .is_err()
+                {
+                    return stopped(usage);
+                }
+                images::withhold(&mut messages, &calls);
+            }
             started = true;
             if let Some(u) = &completion.usage {
                 usage.add(u);
@@ -3424,6 +3558,7 @@ impl NativeBackend {
                         .is_err()
                         || host
                             .emit(EventKind::ToolCallFinished(ToolCallFinished {
+                                image: None,
                                 seen: None,
                                 call_id: call.call_id.clone(),
                                 ok: false,
@@ -3519,6 +3654,7 @@ impl NativeBackend {
                     .is_err()
                     || host
                         .emit(EventKind::ToolCallFinished(ToolCallFinished {
+                            image: None,
                             seen: None,
                             call_id: call.call_id.clone(),
                             ok: verdict.is_ok(),
@@ -3568,6 +3704,7 @@ impl NativeBackend {
                         .is_err()
                         || host
                             .emit(EventKind::ToolCallFinished(ToolCallFinished {
+                                image: None,
                                 seen: None,
                                 call_id: call.call_id,
                                 ok: false,
@@ -3692,6 +3829,7 @@ impl NativeBackend {
                         Some(r) => {
                             if host
                                 .emit(EventKind::ToolCallFinished(ToolCallFinished {
+                                    image: None,
                                     seen: None,
                                     call_id: call.call_id.clone(),
                                     ok: false,
@@ -3741,6 +3879,7 @@ impl NativeBackend {
                     let output = self.config.secrets.scrub(&outcome.output);
                     if host
                         .emit(EventKind::ToolCallFinished(ToolCallFinished {
+                            image: None,
                             seen: None,
                             call_id: call.call_id.clone(),
                             ok: outcome.ok,
@@ -3769,6 +3908,9 @@ impl NativeBackend {
                 }
             }
             let n_calls = calls.len();
+            // Images `read` returned this step, and their bytes: a step's
+            // images are all shown in the next request (X.23).
+            let mut step_images = (0usize, 0u64);
             // Every call validated and judged first, in call order: pure
             // (the schema, the tool's declared risk, the node's policy
             // answers), nothing logged, nothing asked.
@@ -3996,6 +4138,36 @@ impl NativeBackend {
                         ),
                     };
                     cancelled |= ctx.cancel.is_cancelled();
+                    let mut outcome = outcome;
+                    // An image the call returned: kept with the chat and
+                    // referenced, or a line saying why the model gets none.
+                    let (image, image_note, image_msg) = match outcome.image.take() {
+                        Some(img) if outcome.ok => {
+                            self.take_image(
+                                host,
+                                agent,
+                                &model,
+                                call,
+                                img,
+                                &mut step_images,
+                                &mut turn_images,
+                            )
+                            .await
+                        }
+                        _ => (None, None, None),
+                    };
+                    // An image file the model was not shown (no vision, a
+                    // cap, not kept) was not read by it: `write` must not
+                    // count it as seen (review of PR 130).
+                    if image_note.is_some() && image.is_none() {
+                        outcome.seen = None;
+                    } else if image.is_some()
+                        && let Some(f) = &outcome.seen
+                    {
+                        // Shown: now it counts as read (`read` left this to
+                        // the loop for an image file).
+                        seen_now.note(f);
+                    }
                     let output = self.config.secrets.scrub(&outcome.output);
                     let note = refused.or_else(|| {
                         // A change by the shared rule: `bash` in the
@@ -4019,6 +4191,10 @@ impl NativeBackend {
                     // The step's last result carries the next request's note
                     // (half the budget, or the wrap-up), so the log has it; the
                     // limit read again now (review F5).
+                    let note = match (image_note, note) {
+                        (Some(a), Some(b)) => Some(format!("{a}\n\n{b}")),
+                        (a, b) => a.or(b),
+                    };
                     let note = match (i + 1 == n_calls)
                         .then(|| step_note(person, steps, cap_now()))
                         .flatten()
@@ -4087,6 +4263,7 @@ impl NativeBackend {
                             truncated: outcome.truncated,
                             sources: self.scrub_sources(outcome.sources),
                             note: note.clone(),
+                            image,
                         }))
                         .await
                         .is_err()
@@ -4111,6 +4288,7 @@ impl NativeBackend {
                     });
                     // After the result's escaped text, as the log rebuilds it.
                     messages.extend(note.map(ChatMsg::CallNote));
+                    messages.extend(image_msg);
                 }
                 // A Stop ends the turn after the group: every call of a
                 // batch has its result, the ones that never started too.
@@ -4168,6 +4346,121 @@ impl NativeBackend {
 }
 
 impl NativeBackend {
+    /// What becomes of an image a `read` returned (X.23, PLAN.md T71): for
+    /// a model that takes images and within the caps (per step, per turn)
+    /// its bytes are kept with the chat (`TurnHost::keep_image`), and
+    /// the result records a reference and the harness's line, the loop's
+    /// conversation the image itself; otherwise only a line saying why it
+    /// was not shown. Never bytes in the log.
+    #[allow(clippy::too_many_arguments)]
+    async fn take_image(
+        &self,
+        host: &dyn harness_core::backend::TurnHost,
+        agent: Option<&harness_core::agent::AgentSpec>,
+        model: &str,
+        call: &ToolCallRef,
+        img: harness_tools::FileImage,
+        step: &mut (usize, u64),
+        turn: &mut usize,
+    ) -> (
+        Option<harness_core::event::ToolImage>,
+        Option<String>,
+        Option<ChatMsg>,
+    ) {
+        let sees = agent.is_some_and(|a| a.vision.iter().any(|m| m == model));
+        if !sees {
+            return (None, Some(images::tool_image_unseen(model)), None);
+        }
+        let len = img.bytes.len() as u64;
+        let capped = if *turn >= images::TURN_IMAGES {
+            Some(format!(
+                "at most {} images are shown in one turn.",
+                images::TURN_IMAGES
+            ))
+        } else if step.0 >= images::TOOL_IMAGES || step.1 + len > images::TOOL_IMAGE_BYTES {
+            Some(format!(
+                "at most {} images (5 MiB together) are shown per step. Read it in a later step.",
+                images::TOOL_IMAGES
+            ))
+        } else {
+            None
+        };
+        if let Some(why) = capped {
+            return (None, Some(images::tool_image_capped(&why)), None);
+        }
+        let name = image_name(&call.input);
+        let r = harness_core::event::ToolImage {
+            sha256: img.sha256.clone(),
+            mime: img.mime.to_string(),
+            width: img.width,
+            height: img.height,
+            bytes: len,
+        };
+        let kept = host
+            .keep_image(harness_core::backend::KeptImage {
+                sha256: img.sha256,
+                mime: img.mime.to_string(),
+                name: name.clone(),
+                bytes: img.bytes,
+            })
+            .await;
+        if let Err(e) = kept {
+            let why = format!(
+                "the chat could not keep it ({}).",
+                self.config.secrets.scrub(&e)
+            );
+            return (None, Some(images::tool_image_capped(&why)), None);
+        }
+        *turn += 1;
+        step.0 += 1;
+        step.1 += len;
+        // Without its bytes: a request loads those of the images it shows
+        // from the store, so the turn holds only its window's (review of
+        // PR 130, item 1).
+        let msg = tool_image_msg(call.call_id.clone(), name, &r);
+        (
+            Some(r),
+            Some(images::TOOL_IMAGE_SENT.to_string()),
+            Some(msg),
+        )
+    }
+
+    /// The record of images withheld after the provider refused a request
+    /// that carried them (T71): the calls, the status, and the provider's
+    /// words made one line, scrubbed of the node's secrets and cut short.
+    fn withheld_record(
+        &self,
+        turn_id: &str,
+        calls: Vec<String>,
+        e: &ProviderError,
+    ) -> harness_core::event::ImagesWithheld {
+        let status = match e {
+            ProviderError::Status { status, .. } => *status,
+            _ => 0,
+        };
+        let said = e.provider_text().unwrap_or_default();
+        let one_line: String = self
+            .config
+            .secrets
+            .scrub(&said)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut reason: String = one_line
+            .chars()
+            .take(harness_core::event::ImagesWithheld::MAX_REASON)
+            .collect();
+        if reason.len() < one_line.len() {
+            reason.push('…');
+        }
+        harness_core::event::ImagesWithheld {
+            turn_id: turn_id.to_string(),
+            calls,
+            status,
+            reason,
+        }
+    }
+
     /// The repository map for this turn's working folder, if enabled. Built
     /// once per folder and kept for an hour: it sits in the system prompt,
     /// so rebuilding it every turn would defeat the prompt cache.
@@ -4227,7 +4520,10 @@ impl NativeBackend {
     ) -> TurnOutcome {
         let host = ctx.host;
         let runs = ctx.compare.iter().enumerate().map(|(i, model)| {
-            let messages = messages.clone();
+            let mut messages = messages.clone();
+            // Parallel answers are text turns: no image a `read` returned
+            // earlier is sent again (X.23).
+            images::tool_window(&mut messages, false);
             let author = author.clone();
             async move {
                 let message_id = new_id();
@@ -5204,6 +5500,7 @@ mod tests {
             fallbacks: vec![],
             unavailable: vec![],
             no_effort: vec![],
+            vision: vec![],
             context_windows: Default::default(),
             effort: None,
             ui: Default::default(),
@@ -5714,6 +6011,7 @@ mod tests {
         let sid = SessionId::new();
         let earlier = |seq: u64, id: &str, url: &str| {
             let (kind, payload) = EventKind::ToolCallFinished(ToolCallFinished {
+                image: None,
                 seen: None,
                 call_id: format!("old{seq}"),
                 ok: true,
@@ -6469,6 +6767,7 @@ mod tests {
             ..scout()
         };
         let (kind, payload) = EventKind::ToolCallFinished(ToolCallFinished {
+            image: None,
             seen: None,
             call_id: "old".into(),
             ok: true,
@@ -7655,6 +7954,7 @@ mod tests {
                     blocks: vec![],
                 }),
                 EventKind::ToolCallFinished(ToolCallFinished {
+                    image: None,
                     seen: None,
                     call_id: id.into(),
                     ok,
@@ -8195,6 +8495,50 @@ mod place_notes_tests {
                 "after {br:?}"
             );
         }
+    }
+
+    /// A step's images go after all of its results and the notes that join
+    /// them (a tool message may not follow a user-role one), before the
+    /// step's instruction files; the summariser is told, never shown.
+    #[test]
+    fn a_steps_images_follow_its_results_and_a_summary_is_told() {
+        let img = |c: &str| ChatMsg::ToolImage {
+            call_id: c.into(),
+            image: provider::ImagePart {
+                sha256: "s".into(),
+                mime: "image/png".into(),
+                name: format!("{c}.png"),
+                data: None,
+            },
+            bytes: 10,
+            state: provider::ImageState::Shown,
+        };
+        let tool = |c: &str| ChatMsg::Tool {
+            call_id: c.into(),
+            content: "r".into(),
+        };
+        let out = place_notes(vec![
+            tool("c1"),
+            ChatMsg::CallNote("[harness] sent".into()),
+            img("c1"),
+            tool("c2"),
+            ChatMsg::Note("[harness] bg ended".into()),
+            ChatMsg::StepContext("[harness] files".into()),
+        ]);
+        let shape: Vec<&str> = out
+            .iter()
+            .map(|m| match m {
+                ChatMsg::Tool { .. } => "T",
+                ChatMsg::ToolImage { .. } => "I",
+                ChatMsg::User(_) => "U",
+                _ => "?",
+            })
+            .collect();
+        assert_eq!(shape, ["T", "T", "I", "U"]);
+        assert!(matches!(&out[1], ChatMsg::Tool { content, .. } if content.ends_with("bg ended")));
+        let t = transcript_of(None, &[tool("c1"), img("c1")], None, 100);
+        assert!(t.contains("shown the image file \"c1.png\""), "{t}");
+        assert!(!t.contains("image/png"));
     }
 
     #[test]

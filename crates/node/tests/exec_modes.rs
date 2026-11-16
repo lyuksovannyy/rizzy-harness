@@ -634,6 +634,7 @@ async fn a_sub_agents_mode_is_its_parents() {
         fallbacks: vec![],
         unavailable: vec![],
         no_effort: vec![],
+        vision: vec![],
         context_windows: Default::default(),
         effort: None,
         ui: Default::default(),

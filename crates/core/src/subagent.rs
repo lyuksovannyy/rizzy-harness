@@ -679,6 +679,7 @@ mod tests {
         };
         let finished = |id: &str, ok: bool| {
             EventKind::ToolCallFinished(ToolCallFinished {
+                image: None,
                 seen: None,
                 call_id: id.into(),
                 ok,

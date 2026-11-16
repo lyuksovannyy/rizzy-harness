@@ -428,6 +428,7 @@ async fn r6_a_sub_agents_task_is_scrubbed_like_a_message() {
         fallbacks: vec![],
         unavailable: vec![],
         no_effort: vec![],
+        vision: vec![],
         context_windows: Default::default(),
         effort: None,
         ui: Default::default(),

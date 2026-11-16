@@ -58,6 +58,29 @@ describe("fold", () => {
     expect("todo" in v).toBe(false);
   });
 
+  it("ignores a withheld-images record whose calls are not a list", () => {
+    const ev = (seq: number, kind: string, payload: object): RawEvent =>
+      ({ session_id: "s", seq, ts_ms: 0, kind, payload }) as RawEvent;
+    const base = () =>
+      fold([
+        ev(1, "turn_started", { turn_id: "t" }),
+        ev(2, "user_message", { turn_id: "t", text: "go" }),
+        ev(3, "tool_call_started", { turn_id: "t", call_id: "c", tool: "read", input: {} }),
+        ev(4, "tool_call_finished", { call_id: "c", ok: true, output: "x", truncated: false }),
+      ]);
+    const output = (v: ReturnType<typeof base>) => JSON.stringify(v.items);
+    const plain = output(base());
+    // A node's malformed event must not break the chat's page.
+    for (const calls of ["c", 7, { a: 1 }, null]) {
+      const v = base();
+      apply(v, ev(5, "images_withheld", { turn_id: "t", calls, status: 400 }));
+      expect(output(v)).toBe(plain);
+    }
+    const v = base();
+    apply(v, ev(5, "images_withheld", { turn_id: "t", calls: ["nope", "c"], status: 400 }));
+    expect(output(v)).not.toBe(plain);
+  });
+
   it("rejects duplicates and gaps", () => {
     const events = fixture.events as RawEvent[];
     const v = emptyView();

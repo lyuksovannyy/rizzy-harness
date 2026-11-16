@@ -93,6 +93,7 @@ pub enum EventKind {
     StepLimitChanged(StepLimitChanged),
     HandoffWritten(HandoffWritten),
     CompactFailed(CompactFailed),
+    ImagesWithheld(ImagesWithheld),
 }
 
 impl EventKind {
@@ -150,6 +151,7 @@ impl EventKind {
             EventKind::StepLimitChanged(_) => "step_limit_changed",
             EventKind::HandoffWritten(_) => "handoff_written",
             EventKind::CompactFailed(_) => "compact_failed",
+            EventKind::ImagesWithheld(_) => "images_withheld",
         }
     }
 }
@@ -1377,6 +1379,60 @@ pub struct ToolCallFinished {
     /// node's loop writes it, from what `read`, `write` or `edit` did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seen: Option<FileSeen>,
+    /// The image a `read` of an image file returned to the model (X.23,
+    /// PLAN.md T71): a reference only. The bytes the call read are kept
+    /// with the chat on the node (`session_images`, keyed by this hash), so
+    /// every later request shows the same bytes whatever happens to the
+    /// file. Only the node's loop writes it, and only for a model that
+    /// takes images.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<ToolImage>,
+}
+
+/// The provider refused a request that carried images `read` returned,
+/// and the same request without them was answered (X.23, PLAN.md T71):
+/// from here on, the images of these calls are withheld. Keyed by call,
+/// not by image: which of the request's images the provider refused is not
+/// known, so all of them go, and a later `read` of one of the files is a
+/// new call, shown again (alone). It applies to the calls before it in the
+/// log (a provider that numbers calls per message reuses ids). Only the
+/// node's loop records it, before the answer that request got, so every
+/// later request rebuilds without them. Shown in the call's row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImagesWithheld {
+    pub turn_id: String,
+    /// The `read` calls whose images the refused request carried.
+    pub calls: Vec<String>,
+    /// The provider's HTTP status.
+    pub status: u16,
+    /// The provider's own words, made one line, scrubbed of the node's
+    /// secrets and cut to [`ImagesWithheld::MAX_REASON`] characters. For the
+    /// person; the model is not sent it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
+}
+
+impl ImagesWithheld {
+    pub const MAX_REASON: usize = 200;
+}
+
+/// What a tool call's row says after its image was withheld (both folds
+/// add it to the result's output, after an empty line).
+pub const IMAGE_WITHHELD_ROW: &str =
+    "[image not shown to the model: the provider refused a request that carried it]";
+
+/// An image a tool call returned (`tool_call_finished.image`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolImage {
+    /// Hex SHA-256 of the bytes; the node keys its copy by it.
+    pub sha256: String,
+    /// `image/png`, `image/jpeg`, `image/webp` or `image/gif`.
+    pub mime: String,
+    /// From the file's header.
+    pub width: u32,
+    pub height: u32,
+    /// The file's size: what the per-request bound counts.
+    pub bytes: u64,
 }
 
 /// A file as a file tool left the agent knowing it: `read` showed it (all
@@ -2098,6 +2154,7 @@ mod tests {
     #[test]
     fn sources_roundtrip() {
         let k = EventKind::ToolCallFinished(ToolCallFinished {
+            image: None,
             seen: None,
             call_id: "c".into(),
             ok: true,

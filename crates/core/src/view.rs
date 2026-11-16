@@ -495,6 +495,18 @@ impl SessionView {
                     });
                 }
             }
+            // The row says its image was not shown (X.23, T71).
+            EventKind::ImagesWithheld(w) => {
+                for c in &w.calls {
+                    if let Some(Item::Tool {
+                        result: Some(r), ..
+                    }) = self.tool_mut(c)
+                    {
+                        r.output.push_str("\n\n");
+                        r.output.push_str(crate::event::IMAGE_WITHHELD_ROW);
+                    }
+                }
+            }
             EventKind::ApprovalRequested(a) => {
                 self.pending_approvals.push(a.approval_id.clone());
                 if let Some(Item::Tool { approval, .. }) = self.tool_mut(&a.call_id) {
@@ -878,6 +890,7 @@ mod tests {
                 sid,
                 2,
                 EventKind::ToolCallFinished(ToolCallFinished {
+                    image: None,
                     seen: None,
                     call_id: "c".into(),
                     ok: true,

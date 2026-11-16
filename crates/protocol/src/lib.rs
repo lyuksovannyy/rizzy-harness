@@ -347,7 +347,7 @@ pub enum StopBackgroundBy {
 /// At most this many images go with one message...
 pub const MAX_IMAGES: usize = 4;
 /// ...and at most this many bytes of them together (before base64).
-pub const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
+pub const MAX_IMAGE_BYTES: u64 = harness_core::image::MAX_BYTES;
 /// The largest serialized `session.prompt` the master sends: the link's
 /// frame is 8 MiB, and images, attachments, the agent spec and the context
 /// together could pass it otherwise.

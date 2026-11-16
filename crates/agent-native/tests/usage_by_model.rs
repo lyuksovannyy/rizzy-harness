@@ -296,6 +296,7 @@ fn spec(id: &str, model: Option<&str>, tools: &[&str], fallbacks: &[&str]) -> Ag
         fallbacks: fallbacks.iter().map(|s| s.to_string()).collect(),
         unavailable: vec![],
         no_effort: vec![],
+        vision: vec![],
         context_windows: [("p::noter".to_string(), 32_768u64)].into(),
         effort: None,
         ui: Default::default(),

@@ -50,6 +50,23 @@ impl Store {
         Ok(())
     }
 
+    /// How many bytes of images chat `sid` keeps, and whether it already
+    /// keeps `sha256` (then keeping it again costs nothing).
+    pub fn session_images_held(&self, sid: &str, sha256: &str) -> Result<(u64, bool)> {
+        let conn = self.lock();
+        let total: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(length(bytes)), 0) FROM session_images WHERE session_id = ?1",
+            params![sid],
+            |r| r.get(0),
+        )?;
+        let has: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM session_images WHERE session_id = ?1 AND sha256 = ?2",
+            params![sid, sha256],
+            |r| r.get(0),
+        )?;
+        Ok((total.max(0) as u64, has > 0))
+    }
+
     /// Chat `sid`'s images among `sha256` (missing ones are left out).
     pub fn session_images(&self, sid: &str, sha256: &[String]) -> Result<Vec<SessionImage>> {
         let conn = self.lock();

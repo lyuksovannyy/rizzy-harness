@@ -185,6 +185,7 @@ async fn an_agent_definition_cannot_run_more_steps_than_the_node_allows() {
         fallbacks: vec![],
         unavailable: vec![],
         no_effort: vec![],
+        vision: vec![],
         context_windows: Default::default(),
         effort: None,
         ui: Default::default(),

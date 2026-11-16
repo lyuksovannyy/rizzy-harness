@@ -83,6 +83,7 @@ mod tests {
 
     fn finished(seq: u64, sources: &[(&str, &str)]) -> RawEvent {
         let (kind, payload) = EventKind::ToolCallFinished(ToolCallFinished {
+            image: None,
             seen: None,
             call_id: format!("c{seq}"),
             ok: true,

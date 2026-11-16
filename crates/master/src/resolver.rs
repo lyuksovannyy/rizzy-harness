@@ -329,6 +329,12 @@ impl Resolver {
             .chain(&spec.fallbacks)
             .filter_map(|m| Some((m.clone(), self.find_model(m)?.context?)))
             .collect();
+        spec.vision = model
+            .iter()
+            .chain(&spec.fallbacks)
+            .filter(|m| self.find_model(m).is_some_and(|m| m.vision))
+            .cloned()
+            .collect();
     }
 
     /// The small model for sub-agent `c` (X.16): when the admin turned on
@@ -463,6 +469,11 @@ impl Resolver {
                         .iter()
                         .filter_map(|m| Some((m.clone(), self.find_model(m)?.context?)))
                         .collect();
+                    c.vision = chain
+                        .iter()
+                        .filter(|m| self.find_model(m).is_some_and(|m| m.vision))
+                        .cloned()
+                        .collect();
                 } else {
                     // A child without a model of its own runs on the
                     // parent's, with the parent's chain.
@@ -471,6 +482,7 @@ impl Resolver {
                     c.unavailable = spec.unavailable.clone();
                     c.no_effort = spec.no_effort.clone();
                     c.context_windows = spec.context_windows.clone();
+                    c.vision = spec.vision.clone();
                 }
                 c
             })

@@ -83,8 +83,35 @@ impl LogHost {
     }
 }
 
+/// The bytes every host here kept (X.23), by hash: what a node's
+/// `session_images` holds, read by [`rebuilt`].
+static KEPT: std::sync::LazyLock<Mutex<Vec<harness_core::backend::ImageData>>> =
+    std::sync::LazyLock::new(Mutex::default);
+
 #[async_trait::async_trait]
 impl TurnHost for LogHost {
+    async fn keep_image(&self, i: harness_core::backend::KeptImage) -> Result<(), String> {
+        use base64::Engine as _;
+        let mut k = KEPT.lock().unwrap();
+        if !k.iter().any(|d| d.sha256 == i.sha256) {
+            k.push(harness_core::backend::ImageData {
+                sha256: i.sha256,
+                mime: i.mime,
+                data: base64::engine::general_purpose::STANDARD
+                    .encode(&i.bytes)
+                    .into(),
+            });
+        }
+        Ok(())
+    }
+    async fn images(&self, sha256: &[String]) -> Vec<harness_core::backend::ImageData> {
+        KEPT.lock()
+            .unwrap()
+            .iter()
+            .filter(|d| sha256.contains(&d.sha256))
+            .cloned()
+            .collect()
+    }
     fn runs_unasked(&self, _: &str, risk: ToolRisk) -> bool {
         self.unasked && risk == ToolRisk::ReadOnly
     }
@@ -152,6 +179,9 @@ impl TurnHost for LogHost {
 #[derive(Debug, Clone)]
 struct Seen {
     summary: bool,
+    /// Refused for an image it carried (X.23): no answer, so no request
+    /// the log rebuilds.
+    refused: bool,
     tokens: u64,
     msgs: Vec<ChatMsg>,
 }
@@ -164,6 +194,9 @@ struct Model {
     script: Script,
     done: Mutex<usize>,
     seen: Mutex<Vec<Seen>>,
+    /// Refuse (400, "Could not process image") a request that carries an
+    /// image whose file name contains this (X.23, T71).
+    refuse: Option<&'static str>,
 }
 
 impl Model {
@@ -174,6 +207,7 @@ impl Model {
             script,
             done: Mutex::new(0),
             seen: Mutex::default(),
+            refuse: None,
         })
     }
     fn main(&self) -> Vec<Seen> {
@@ -181,7 +215,7 @@ impl Model {
             .lock()
             .unwrap()
             .iter()
-            .filter(|s| !s.summary)
+            .filter(|s| !s.summary && !s.refused)
             .cloned()
             .collect()
     }
@@ -200,15 +234,29 @@ impl Provider for Model {
         let prompts = [SUMMARY_PROMPT, CODING_SUMMARY_PROMPT];
         let summary = matches!(req.messages.first(), Some(ChatMsg::System(s)) if prompts.contains(&s.as_str()));
         let tokens = estimate_tokens(&req.messages);
+        let refused = self.refuse.is_some_and(|bad| {
+            req.messages.iter().any(|m| {
+                matches!(m, ChatMsg::ToolImage { image, .. }
+                    if image.data.is_some() && image.name.contains(bad))
+            })
+        });
         let n = {
             let mut seen = self.seen.lock().unwrap();
             seen.push(Seen {
                 summary,
+                refused,
                 tokens,
                 msgs: req.messages.clone(),
             });
             seen.iter().filter(|s| s.summary).count()
         };
+        if refused {
+            return Err(ProviderError::Status {
+                status: 400,
+                body: r#"{"type":"error","error":{"type":"invalid_request_error","message":"Could not process image"}}"#.into(),
+                hint: RetryHint::default(),
+            });
+        }
         if tokens > self.window {
             return Err(ProviderError::Status {
                 status: 400,
@@ -266,6 +314,20 @@ impl harness_tools::Tool for Read {
         }
         let path = input["path"].as_str().unwrap_or("?").to_string();
         let chars = input["n"].as_u64().unwrap_or(6_000) as usize;
+        // An image file (X.23): its bytes from its path and size.
+        if input.get("img").is_some() {
+            let mut bytes = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR\0\0\0\x10\0\0\0\x10".to_vec();
+            bytes.extend(path.bytes().cycle().take(chars));
+            let mut o = ToolOutcome::ok(format!("{path}: PNG image, 16x16 pixels."));
+            o.image = Some(harness_tools::FileImage {
+                mime: "image/png",
+                sha256: harness_tools::seen::hex(&harness_tools::seen::sha256(&bytes)),
+                width: 16,
+                height: 16,
+                bytes,
+            });
+            return o;
+        }
         let mut out = String::new();
         let mut k = 0;
         while out.len() < chars {
@@ -311,6 +373,7 @@ fn agent_w(w: u64) -> AgentSpec {
         fallbacks: vec![],
         unavailable: vec![],
         no_effort: vec![],
+        vision: vec!["m".into()],
         context_windows: vec![("m".to_string(), w)].into_iter().collect(),
         effort: None,
         ui: Default::default(),
@@ -414,6 +477,10 @@ fn rebuilt(log: &[RawEvent], keep: Option<usize>) -> Vec<ChatMsg> {
     if let Some(k) = keep {
         harness_agent_native::mask::mask_old_outputs(&mut m, k);
     }
+    // The images a request shows, with the kept bytes (X.23); the agent's
+    // model takes images.
+    let kept = KEPT.lock().unwrap().clone();
+    harness_agent_native::images::tool_images(&mut m, true, &kept);
     place_notes(m).split_off(1)
 }
 
@@ -427,6 +494,9 @@ fn kind_of(m: &ChatMsg) -> String {
         ChatMsg::StepContext(_) => "SC".into(),
         ChatMsg::Note(t) => format!("N({})", t.chars().take(30).collect::<String>()),
         ChatMsg::CallNote(_) => "CN".into(),
+        ChatMsg::ToolImage { call_id, image, .. } => {
+            format!("IMG({call_id},{})", image.data.is_some())
+        }
         ChatMsg::Assistant { tool_calls, .. } => format!(
             "A[{}]",
             tool_calls
@@ -612,6 +682,119 @@ async fn rebuild_matches_live_with_parallel_reads_finishing_out_of_order() {
     rebuild_matches_live(true, 1..=4, false).await;
 }
 
+/// X.23: image reads among the random steps (about a third of the reads,
+/// several in one step, the same file again, images bigger than the
+/// per-request bound together), with clearing and in-turn summaries: every
+/// request rebuilds byte for byte from the log and the kept bytes, the
+/// images shown included, and none is ever shown without its bytes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rebuild_matches_live_with_image_reads() {
+    let mut failures = vec![];
+    let (mut shown_any, mut cleared_image, mut withheld_any) = (false, false, false);
+    for seed in 1..=6u64 {
+        let (mut steps, queued) = random_script(seed, 120);
+        let mut r = Lcg(seed * 7919);
+        for s in &mut steps {
+            for c in s.tool_calls.iter_mut().filter(|c| c.tool == "read") {
+                if r.pick(3) == 0 {
+                    c.input["img"] = json!(true);
+                    // Up to 2 MB: four of them pass the 5 MiB bound.
+                    c.input["n"] = json!([2_000, 300_000, 2_000_000][r.pick(3) as usize]);
+                }
+            }
+        }
+        let n = steps.len();
+        let steps = Arc::new(steps);
+        let s2 = steps.clone();
+        let mut model = Model {
+            window: W,
+            factor: 0,
+            script: Box::new(move |i| {
+                if i < n {
+                    s2[i].clone()
+                } else {
+                    Completion {
+                        text: "done".into(),
+                        ..Default::default()
+                    }
+                }
+            }),
+            done: Mutex::new(0),
+            seen: Mutex::default(),
+            refuse: None,
+        };
+        // Odd seeds: the provider refuses every request that carries an
+        // image of a file named `...7.rs`, so those are withheld (T71).
+        if seed % 2 == 1 {
+            model.refuse = Some("7.rs");
+        }
+        let p = Arc::new(model);
+        let b = backend(p.clone());
+        let sid = SessionId::new();
+        let mut host = LogHost::new(sid, vec![]);
+        host.unasked = seed % 2 == 0;
+        *host.queued.lock().unwrap() = queued;
+        open_turn(&host, vec![]);
+        run(&b, &host, vec![], TurnExtra::default()).await;
+        let log = host.log();
+        for s in p.main() {
+            let imgs: Vec<_> = s
+                .msgs
+                .iter()
+                .filter_map(|m| match m {
+                    ChatMsg::ToolImage {
+                        image,
+                        bytes,
+                        state,
+                        ..
+                    } => Some((image.data.is_some(), *bytes, *state)),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                imgs.iter()
+                    .all(|(d, _, st)| *d == (*st == harness_agent_native::ImageState::Shown)),
+                "seed {seed}: an image shown without bytes, or withheld with them"
+            );
+            withheld_any |= imgs
+                .iter()
+                .any(|(_, _, st)| *st == harness_agent_native::ImageState::Withheld);
+            let imgs: Vec<(bool, u64)> = imgs.into_iter().map(|(d, b, _)| (d, b)).collect();
+            assert!(
+                imgs.len() <= 4,
+                "seed {seed}: {} images in one request",
+                imgs.len()
+            );
+            let total: u64 = imgs.iter().map(|(_, b)| b).sum();
+            assert!(
+                imgs.len() <= 1 || total <= 5 << 20,
+                "seed {seed}: {total} bytes of images in one request"
+            );
+            shown_any |= !imgs.is_empty();
+        }
+        // A result with an image cleared to a stub (the image's line after
+        // it): its image went too (no image of that call follows).
+        cleared_image |= p.main().iter().any(|s| {
+            s.msgs.iter().enumerate().any(|(i, m)| {
+                matches!(m, ChatMsg::Tool { call_id, content }
+                    if content.starts_with("[harness] This result was cleared")
+                        && content.contains(harness_agent_native::images::TOOL_IMAGE_SENT)
+                        && !s.msgs[i + 1..].iter().any(|n| matches!(n,
+                            ChatMsg::ToolImage { call_id: c, .. } if c == call_id)))
+            })
+        });
+        let (compared, bad) = check_every_step(&log, &p.main(), None, 0);
+        assert!(compared > 0);
+        if let Some(b) = bad {
+            failures.push(format!("seed {seed}: {b}"));
+        }
+    }
+    assert!(shown_any, "no request showed an image");
+    assert!(cleared_image, "no image result was cleared");
+    assert!(withheld_any, "no image was withheld");
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 async fn rebuild_matches_live(parallel: bool, seeds: std::ops::RangeInclusive<u64>, plan: bool) {
     rebuild_matches_live_flip(parallel, seeds, plan, None).await;
 }
@@ -775,6 +958,7 @@ fn previous_turn(sid: SessionId) -> (Vec<RawEvent>, u64, UserMessage) {
             blocks: vec![],
         }));
         push(EventKind::ToolCallFinished(ToolCallFinished {
+            image: None,
             seen: None,
             call_id: format!("t1c{i}"),
             ok: true,
@@ -1398,6 +1582,7 @@ async fn an_over_reporting_router() {
             }),
             done: Mutex::new(0),
             seen: Mutex::default(),
+            refuse: None,
         });
         let b = backend(p.clone());
         let host = LogHost::new(SessionId::new(), vec![]);
@@ -2886,6 +3071,7 @@ fn a_retry_is_told_which_calls_ran() {
         &mut log,
         &mut seq,
         EventKind::ToolCallFinished(ToolCallFinished {
+            image: None,
             seen: None,
             call_id: "ran".into(),
             ok: true,

@@ -291,6 +291,7 @@ fn agent(window: Option<u64>) -> AgentSpec {
         fallbacks: vec![],
         unavailable: vec![],
         no_effort: vec![],
+        vision: vec![],
         context_windows: window.map(|w| ("m".to_string(), w)).into_iter().collect(),
         effort: None,
         ui: Default::default(),
@@ -787,6 +788,7 @@ fn forging_history() -> (Vec<RawEvent>, String) {
     }));
     for (call_id, output) in [("c1", file.as_str()), ("c2", "ok\n")] {
         events.push(EventKind::ToolCallFinished(ToolCallFinished {
+            image: None,
             seen: None,
             call_id: call_id.into(),
             ok: true,
@@ -1066,6 +1068,7 @@ async fn a_background_note_and_a_callback_opening_reach_the_summariser_quoted() 
             blocks: vec![],
         }));
         push(EventKind::ToolCallFinished(ToolCallFinished {
+            image: None,
             seen: None,
             call_id,
             ok: true,
@@ -1210,6 +1213,7 @@ fn history_with_todo(kept: usize) -> Vec<RawEvent> {
         items: serde_json::from_value(items).unwrap(),
     }));
     push(EventKind::ToolCallFinished(ToolCallFinished {
+        image: None,
         seen: None,
         call_id: "plan".into(),
         ok: true,
@@ -1382,6 +1386,7 @@ fn history_with_a_newer_list() -> Vec<RawEvent> {
             items: serde_json::from_value(items).unwrap(),
         }),
         EventKind::ToolCallFinished(ToolCallFinished {
+            image: None,
             seen: None,
             call_id: "plan2".into(),
             ok: true,

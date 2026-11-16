@@ -53,6 +53,40 @@ pub enum ChatMsg {
     /// never the person's words (`user_text` is `None`). An in-turn summary
     /// keeps it, and clearing never touches it.
     StepContext(String),
+    /// The image a `read` of an image file returned (X.23, PLAN.md T71),
+    /// right after that call's result (and its note) in the conversation.
+    /// Tool results carry text only (genai's `ToolResponse`, OpenAI's tool
+    /// role), so [`place_notes`] moves a step's images after all of its
+    /// results, and the provider gets them as one user-role message of the
+    /// harness's, each under a line naming its file and call. Never the
+    /// person's words (`user_text` is `None`). `images::tool_window`
+    /// decides which ones a request shows; the rest are left out.
+    ToolImage {
+        call_id: String,
+        /// `name` is the path as the call named it. `data` is `None` in
+        /// the loop's conversation: a request is given the bytes of the
+        /// images it shows (`images::tool_fill`), so a turn holds no more
+        /// than its window's.
+        image: ImagePart,
+        /// The file's size, for the per-request bound.
+        bytes: u64,
+        /// Sent as the image, or as the harness's line saying why not.
+        state: ImageState,
+    },
+}
+
+/// How an image `read` returned is sent ([`ChatMsg::ToolImage`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ImageState {
+    /// The image itself, under the harness's line naming it.
+    #[default]
+    Shown,
+    /// The provider refused a request that carried it
+    /// (`images_withheld`, T71): the harness's line names it instead.
+    Withheld,
+    /// The chat's store no longer holds its bytes: the harness's line says
+    /// it could not be loaded.
+    Missing,
 }
 
 /// One image of a user message.
@@ -102,8 +136,23 @@ pub fn place_notes(msgs: Vec<ChatMsg>) -> Vec<ChatMsg> {
         t.push_str(text);
         t
     };
+    // A step's images, held until its results (and the notes that join
+    // them) end: a tool-role message may not follow a user-role one.
+    let mut held: Vec<ChatMsg> = Vec::new();
     for m in msgs {
+        if !held.is_empty()
+            && !matches!(
+                m,
+                ChatMsg::Tool { .. }
+                    | ChatMsg::CallNote(_)
+                    | ChatMsg::ToolImage { .. }
+                    | ChatMsg::Note(_)
+            )
+        {
+            out.append(&mut held);
+        }
         match m {
+            ChatMsg::ToolImage { .. } => held.push(m),
             ChatMsg::Note(t) => {
                 if pending.is_empty()
                     && let Some(ChatMsg::Tool { content, .. }) = out.last_mut()
@@ -172,6 +221,7 @@ pub fn place_notes(msgs: Vec<ChatMsg>) -> Vec<ChatMsg> {
         content.push_str("\n\n");
         content.push_str(&pending.join("\n\n"));
     }
+    out.append(&mut held);
     out
 }
 
@@ -705,6 +755,22 @@ impl ProviderError {
                     || msg.contains("input token count")))
     }
 
+    /// A refusal that may be the request's images (X.23, T71): a client
+    /// error about the request's content (400, 413, 422) that is not a
+    /// context overflow and not an unknown model. Never authentication or
+    /// permission (401, 403), a missing model (404), a rate limit (429) or
+    /// a server's failure (5xx), and never a broken connection or stream.
+    pub fn may_be_the_images(&self) -> bool {
+        matches!(
+            self,
+            ProviderError::Status {
+                status: 400 | 413 | 422,
+                ..
+            }
+        ) && !self.is_context_overflow()
+            && !self.unknown_model()
+    }
+
     /// The provider answered that it does not know the model: a 404, or an
     /// error coded `model_not_found` at any status. A setting to fix, so
     /// the message points at where the model is set. Only the status and
@@ -810,7 +876,7 @@ pub trait Provider: Send + Sync {
 
 /// What one image counts for in `estimate_tokens`, in characters (about a
 /// thousand tokens, near what providers bill for a downsized photo).
-const IMAGE_CHARS: usize = 4000;
+pub const IMAGE_CHARS: usize = 4000;
 
 /// Rough token count (4 characters per token). Used to decide when to
 /// summarise and by the mock provider; real usage comes from the provider.
@@ -834,6 +900,13 @@ pub fn estimate_tokens(messages: &[ChatMsg]) -> u64 {
                         .sum::<usize>()
             }
             ChatMsg::Tool { content, .. } => content.len(),
+            ChatMsg::ToolImage { image, state, .. } => {
+                image.name.len()
+                    + match state {
+                        ImageState::Shown => IMAGE_CHARS,
+                        _ => 200,
+                    }
+            }
         })
         .sum();
     (chars / 4) as u64 + 1

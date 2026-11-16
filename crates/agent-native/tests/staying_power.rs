@@ -148,6 +148,7 @@ fn text_of(req: &ChatRequest) -> String {
             | ChatMsg::CallNote(t)
             | ChatMsg::Summary(t)
             | ChatMsg::StepContext(t) => t.clone(),
+            ChatMsg::ToolImage { image, .. } => image.name.clone(),
         })
         .collect::<Vec<_>>()
         .join("\n")

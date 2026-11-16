@@ -4639,6 +4639,40 @@ impl TurnHost for Session {
             .await
     }
 
+    async fn keep_image(&self, image: harness_core::backend::KeptImage) -> Result<(), String> {
+        if self.incognito {
+            return Err("images can't go into an incognito chat".into());
+        }
+        let sid = self.id.to_string();
+        self.node
+            .cfg
+            .store
+            .call(move |s| {
+                let (held, has) = s.session_images_held(&sid, &image.sha256)?;
+                if !has && held + image.bytes.len() as u64 > crate::images::CHAT_IMAGE_BYTES {
+                    return Ok(Err(format!(
+                        "the chat keeps at most {} MiB of images",
+                        crate::images::CHAT_IMAGE_BYTES >> 20
+                    )));
+                }
+                s.session_images_put(
+                    &sid,
+                    &[harness_store::session_images::SessionImage {
+                        sha256: image.sha256,
+                        mime: image.mime,
+                        name: image.name,
+                        bytes: image.bytes,
+                    }],
+                )?;
+                Ok::<_, harness_store::StoreError>(Ok(()))
+            })
+            .await
+            .map_err(|e| {
+                tracing::warn!(session = %self.id, error = %e, "could not keep an image");
+                "it could not be stored".to_string()
+            })?
+    }
+
     async fn continue_child(
         &self,
         child: SessionId,

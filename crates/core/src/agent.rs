@@ -150,6 +150,12 @@ pub struct AgentSpec {
     /// reasoning effort: a request to one of these goes without `effort`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub no_effort: Vec<String>,
+    /// Models of the chain (the turn's own and the fallbacks) that take
+    /// images (`vision` in the master's model list; unlisted counts as no):
+    /// only a request to one of these carries an image a `read` returned
+    /// (X.23). Empty: none does.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vision: Vec<String>,
     /// Context windows (tokens) of the chain's models, where the master
     /// knows them from the provider's listing or the admin. Compaction is
     /// keyed to these; a model missing here falls back to the configured

@@ -431,6 +431,7 @@ mod tests {
 
     fn finished(seen: FileSeen) -> EventKind {
         EventKind::ToolCallFinished(ToolCallFinished {
+            image: None,
             seen: Some(seen),
             call_id: "c".into(),
             ok: true,
