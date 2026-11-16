@@ -180,6 +180,12 @@ pub struct AgentSpec {
     /// Limits on delegation per turn, shown to the user.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caps: Option<DelegateCaps>,
+    /// The agent's "Personalisation" switch is off (PLAN.md T74): it gets
+    /// no `personal` standing section. The master leaves it out of its own
+    /// turns; the node drops it from what a sub-agent inherits from its
+    /// parent's turn. Absent: on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_personalisation: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

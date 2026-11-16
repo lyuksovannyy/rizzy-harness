@@ -135,7 +135,14 @@ describe("Profile", () => {
     Object.defineProperty(banner, "files", { value: [new File(["<svg/>"], "x.svg", { type: "image/svg+xml" })], configurable: true });
     await act(async () => banner.dispatchEvent(new Event("change", { bubbles: true })));
     expect(host.querySelector('[role="alert"]')!.textContent).toBe("Banner: Pick a PNG, JPEG or WebP picture.");
+    // Saved at once, and the page says so.
+    expect(host.querySelector(".profile-pictures-hint")!.textContent).toContain("saved as soon as you pick it");
+    // Remove asks first; No keeps it.
     pageApi.removeProfileImage.mockResolvedValue({ avatar: null });
+    vi.stubGlobal("confirm", () => false);
+    await act(async () => button("Remove avatar")!.click());
+    expect(pageApi.removeProfileImage).not.toHaveBeenCalled();
+    vi.stubGlobal("confirm", () => true);
     await act(async () => button("Remove avatar")!.click());
     expect(pageApi.removeProfileImage).toHaveBeenCalledWith("avatar");
     expect(button("Add avatar")).toBeDefined();
@@ -146,6 +153,15 @@ describe("Profile", () => {
     expect(frame("banner", 3000, 3000)).toEqual({ sx: 0, sy: 1000, sw: 3000, sh: 1000, dw: 1500, dh: 500 });
     // A small one is not blown up.
     expect(frame("avatar", 100, 100)).toMatchObject({ dw: 100, dh: 100 });
+  });
+
+  test("a picture that fails to load falls back to the initial", async () => {
+    pageApi.profileImages.mockResolvedValue({ avatar: "gone", banner: null });
+    await profile();
+    const img = button("Change avatar")!.querySelector("img")!;
+    await act(async () => img.dispatchEvent(new Event("error")));
+    expect(button("Change avatar")!.querySelector("img")).toBeNull();
+    expect(button("Change avatar")!.textContent).toBe("A");
   });
 
   test("a name with markup is text", async () => {

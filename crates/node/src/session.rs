@@ -3795,7 +3795,7 @@ impl Session {
                 (
                     t.savings.clone(),
                     t.context.clone(),
-                    t.standing.clone(),
+                    inherited(t.standing.as_ref(), &agent),
                     Some(t.began),
                 )
             })
@@ -4113,7 +4113,7 @@ impl Session {
                 (
                     t.savings.clone(),
                     t.context.clone(),
-                    t.standing.clone(),
+                    inherited(t.standing.as_ref(), &agent),
                     Some(t.began),
                 )
             })
@@ -5259,6 +5259,26 @@ fn cut_focus(f: &str) -> String {
     let mut out: String = f.chars().take(max).collect();
     out.push_str(&format!(" [cut at {max} characters]"));
     out
+}
+
+/// What a sub-agent (new or continued, T68) inherits of its parent turn's
+/// standing parts: all of them, but the person's Personalisation only when
+/// the child's own switch is on (PLAN.md T74). A background child gets the
+/// same snapshot and must go through this too.
+fn inherited(
+    standing: Option<&Vec<harness_core::backend::StandingPart>>,
+    child: &AgentSpec,
+) -> Option<Vec<harness_core::backend::StandingPart>> {
+    standing.map(|parts| {
+        parts
+            .iter()
+            .filter(|p| {
+                !(child.no_personalisation
+                    && p.part == harness_core::backend::StandingKey::Personal)
+            })
+            .cloned()
+            .collect()
+    })
 }
 
 #[cfg(test)]

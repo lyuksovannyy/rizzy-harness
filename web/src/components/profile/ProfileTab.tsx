@@ -45,7 +45,15 @@ function Picture(props: {
   const input = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const label = props.slot === "avatar" ? "avatar" : "banner";
-  const url = props.version && props.me.user_id ? `/api/users/${encodeURIComponent(props.me.user_id)}/${props.slot}?v=${props.version}` : null;
+  const shown =
+    props.version && props.me.user_id
+      ? props.slot === "avatar"
+        ? avatarUrl(props.me.user_id, props.version)
+        : `/api/users/${encodeURIComponent(props.me.user_id)}/banner?v=${encodeURIComponent(props.version)}`
+      : null;
+  // One that fails to load shows what an empty slot shows.
+  const [failed, setFailed] = useState<string | null>(null);
+  const url = shown && failed !== shown ? shown : null;
   const pick = async (file: File | undefined) => {
     if (!file) return;
     setBusy(true);
@@ -60,6 +68,7 @@ function Picture(props: {
     }
   };
   const remove = async () => {
+    if (!confirm(`Remove your ${label}? It is deleted now.`)) return;
     props.onError(null);
     try {
       props.onChanged(await pageApi.removeProfileImage(props.slot));
@@ -78,7 +87,7 @@ function Picture(props: {
         onClick={() => input.current?.click()}
       >
         {url ? (
-          <LinkedImg url={props.slot === "avatar" ? avatarUrl(props.me.user_id!, props.version!) : url} alt="" />
+          <LinkedImg url={url} alt="" onError={() => setFailed(url)} />
         ) : props.slot === "avatar" ? (
           <span className="profile-initial">{props.initial}</span>
         ) : (
@@ -152,6 +161,7 @@ export default function ProfileTab(props: { me: Me; prefs: Prefs; models: ModelI
         <Picture slot="banner" me={props.me} version={images.banner} initial="" onChanged={changed} onError={setPictureErr} />
         <Picture slot="avatar" me={props.me} version={images.avatar} initial={name.slice(0, 1).toUpperCase()} onChanged={changed} onError={setPictureErr} />
       </div>
+      <p className="muted small profile-pictures-hint">Click the banner or the avatar to choose a picture; it is saved as soon as you pick it.</p>
       {pictureErr && (
         <div className="error-text" role="alert">
           {pictureErr}

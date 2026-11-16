@@ -3,8 +3,11 @@
 //! Personalisation, and their profile pictures.
 //!
 //! Pictures are PNG, JPEG or WebP by their first bytes (never by a name or
-//! a declared type; never SVG or GIF), within a byte cap and pixel bounds
-//! read from the header (no image is decoded here, T17), stored in the blob
+//! a declared type; never SVG or GIF), still (no APNG or animated WebP),
+//! with no metadata (EXIF, XMP, IPTC, PNG text: an API upload is not
+//! re-encoded by the browser), within a byte cap and pixel bounds read from
+//! every header (`harness_core::image::still`, no image is decoded here,
+//! T17), stored in the blob
 //! store as the account's (encrypted, counted against its storage, gone
 //! with it). The browser shrinks them first; these checks hold whatever
 //! it sends. An avatar is served to its owner and to the people who share
@@ -75,8 +78,16 @@ pub fn check_image(slot: Slot, b: &[u8]) -> Result<(&'static str, &'static str, 
     let r = harness_core::image::raster(b)
         .filter(|r| FORMATS.contains(&r.format))
         .ok_or_else(|| "Only PNG, JPEG and WebP pictures can be used.".to_string())?;
-    let (w, h) = harness_core::image::dimensions(b, r.format)
-        .ok_or_else(|| format!("This {} file cannot be read.", r.label))?;
+    // The whole file is walked (no pixel decoded): no metadata, one frame,
+    // every header's size within the bounds.
+    use harness_core::image::NotStill;
+    let (w, h) = harness_core::image::still(b, r.format).map_err(|e| match e {
+        NotStill::Metadata => "This picture carries camera or location data. Save it without \
+                               metadata, or pick it here in the browser, which removes it."
+            .to_string(),
+        NotStill::Animated => "Only still pictures can be used, not animated ones.".to_string(),
+        NotStill::Malformed => format!("This {} file cannot be read.", r.label),
+    })?;
     let (mw, mh) = slot.max_px();
     if w > mw || h > mh {
         return Err(format!(

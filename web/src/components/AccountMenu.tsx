@@ -238,7 +238,13 @@ function Menu(props: AccountMenuProps) {
           chunk to the first load's preload map. */}
       <span className="avatar" aria-hidden="true">
         {me.user_id && avatar ? (
-          <LinkedImg url={`/api/users/${encodeURIComponent(me.user_id)}/avatar?v=${encodeURIComponent(avatar)}`} alt="" className="avatar-img" />
+          <LinkedImg
+            url={`/api/users/${encodeURIComponent(me.user_id)}/avatar?v=${encodeURIComponent(avatar)}`}
+            alt=""
+            className="avatar-img"
+            // One that fails to load leaves the initial.
+            onError={() => setAvatar(null)}
+          />
         ) : (
           props.displayName.slice(0, 1).toUpperCase()
         )}

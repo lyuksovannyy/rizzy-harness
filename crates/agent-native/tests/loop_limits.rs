@@ -189,6 +189,7 @@ async fn an_agent_definition_cannot_run_more_steps_than_the_node_allows() {
         context_windows: Default::default(),
         effort: None,
         ui: Default::default(),
+        no_personalisation: false,
         prompt_hash: "h".into(),
         deny_tools: vec![],
         delegates: vec![],

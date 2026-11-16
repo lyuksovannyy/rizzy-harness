@@ -309,18 +309,23 @@ notes: [docs/sidebar-search.md](docs/sidebar-search.md).
 **Profile** (Settings → Account → Profile): a banner and an avatar (click one
 to choose a PNG, JPEG or WebP; the browser crops it, the avatar to a square of
 at most 256 px and the banner to 3:1 at most 1500 × 500, and re-encodes it,
-so no camera data goes along; each has a remove button), your name, country,
+so no camera or location data goes along; each has a remove button, which
+asks first), your name, country,
 city and time zone, and **About you**, one paragraph of at most 280
 characters. **Save** saves the fields together; a picture is saved as soon
 as you pick it. The avatar shows in the account menu and in members lists to
 the people who share a workspace with you; the banner only to you. The
-sidebar's account button keeps your initial.
+sidebar's account button keeps your initial. The server checks every
+picture itself, however it was sent: a still PNG, JPEG or WebP within the
+sizes above, with no metadata (EXIF, XMP, IPTC or PNG text: a picture
+uploaded straight through the API with camera or location data is refused,
+not cleaned; pick it here, or save it without metadata), never animated.
 
 **What the model gets:** with every message, one line of the server's names
 you (your name, else your username), your time zone (in a plain chat also
 your local time), your city and country if you gave them, and About you, in
-quotation marks as your words. Nobody else sees About you: not other members,
-not admins.
+‹ › marks as your words (not in a turn started by a webhook). Nobody else
+sees About you: not other members, not admins.
 
 **Personalisation** (Settings → Account → Personalisation) sets how every
 agent replies to you in your own chats: **Base style and tone** (Default,
@@ -333,16 +338,21 @@ they change no setting, permission or tool, and the agent's own instructions
 still apply. A **Memory** row links to your memories.
 
 - It reaches only your own chats, never another person's, and not a turn
-  started by a webhook (untrusted). Sub-agents get it with their parent's
-  turn, as they get the rest of its context. A routine runs as its owner.
+  started by a webhook (untrusted). A sub-agent gets it with its parent's
+  turn when its own switch is on. A routine runs as its owner.
 - An agent whose **Personalisation** switch is off (on its page in Agents)
   gets neither the sentences nor the instructions; your name, place and
-  time zone still come.
+  time zone still come. Built-in agents always get it (their switch is shown
+  on and cannot be changed; Duplicate makes an agent whose switch you can
+  turn off).
 - It is sent once and again only when you change it: a change applies from
   your next message, and costs that message one rewrite of the provider's
   prompt cache from the chat's first message on. What each turn was sent is
-  in the chat's log (`context_sent`), scrubbed of secrets like everything
-  there.
+  in the chat's log (`context_sent`). Only the secrets the node knows are
+  scrubbed from it: an API key you paste into your instructions is stored in
+  your settings, sent to the provider and kept in the log, as if you had
+  typed it in a message. Line separators (U+2028, U+2029) and control
+  characters other than line breaks and tabs are refused.
 
 What you type and have not sent stays in this browser as a draft of that
 chat, for your account only. Logging out (or a login that ended) clears every

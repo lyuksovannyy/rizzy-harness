@@ -26,6 +26,8 @@ pub struct Rig {
     /// More sub-agents the lead may delegate to, or the rig's own with
     /// other tools (a later one of the same id replaces the rig's).
     pub delegates: Vec<harness_core::agent::AgentSpec>,
+    /// The master's context [`Rig::lead_turn`] sends (`None`: none).
+    pub lead_context: Option<harness_core::backend::MasterContext>,
     pub dir: tempfile::TempDir,
     pub ws: PathBuf,
     _node: NodeRuntime,
@@ -159,6 +161,7 @@ impl Rig {
             requests,
             lead_caps: None,
             delegates: vec![],
+            lead_context: None,
             dir,
             ws,
             _node: node,
@@ -301,6 +304,7 @@ impl Rig {
             context_windows: Default::default(),
             effort: None,
             ui: Default::default(),
+            no_personalisation: false,
             prompt_hash: "h".into(),
             deny_tools: vec![],
             delegates,
@@ -354,7 +358,7 @@ impl Rig {
         self.n += 1;
         self.send(MasterToNode::Prompt {
             savings: None,
-            context: None,
+            context: self.lead_context.clone().map(Box::new),
             reply: None,
             agent: Some(self.lead()),
             attachments: vec![],

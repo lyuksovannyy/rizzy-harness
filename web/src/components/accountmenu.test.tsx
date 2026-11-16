@@ -279,5 +279,9 @@ describe("account menu", () => {
     expect(img.dataset.url).toBe("/api/users/u1/avatar?v=abc123");
     expect(head.textContent).toContain("<img src=x onerror=alert(1)>");
     expect(head.querySelectorAll("img")).toHaveLength(1);
+    // A picture that fails to load leaves the initial.
+    await act(async () => img.dispatchEvent(new Event("error")));
+    expect(head.querySelector("img")).toBeNull();
+    expect(head.querySelector(".avatar")!.textContent).toBe("<");
   });
 });
