@@ -272,6 +272,8 @@ async fn cancel_ends_the_wait_at_once() {
         base: Duration::from_secs(30),
         max: Duration::from_secs(60),
     };
+    // The shortest wait this policy can draw ("equal jitter": half fixed).
+    let shortest = slow.base / 2;
     let b = backend(p.clone(), slow);
     let host = Host::default();
     let cancel = CancellationToken::new();
@@ -283,7 +285,9 @@ async fn cancel_ends_the_wait_at_once() {
     let t = Instant::now();
     let out = run_with(&b, &host, "m", agent(&[]), cancel).await;
     assert_eq!(out.reason, TurnEndReason::Cancelled);
-    assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+    // Before any wait could have ended: the cancel cut it (it was "under
+    // 5 s", which took 5.85 s on a loaded machine).
+    assert!(t.elapsed() < shortest, "{:?}", t.elapsed());
     assert_eq!(p.calls(), ["m"]);
 }
 

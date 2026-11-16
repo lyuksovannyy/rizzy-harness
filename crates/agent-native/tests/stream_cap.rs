@@ -133,10 +133,24 @@ async fn cancel_during_a_flood_returns_promptly() {
     });
     let b = backend(1 << 20, Duration::from_secs(600));
     let started = Instant::now();
-    let out = tokio::time::timeout(Duration::from_secs(10), b.run_turn(c))
+    // A limit on waiting, not the claim: "promptly" is that the bash tool
+    // saw the cancel itself and returned, not that the agent loop abandoned
+    // it at `TOOL_CANCEL_GRACE` (it was "under 4 s", which a loaded machine
+    // passed). The time is printed.
+    let out = tokio::time::timeout(Duration::from_secs(60), b.run_turn(c))
         .await
         .expect("cancel hung during a flood");
-    assert!(started.elapsed() < Duration::from_secs(4));
+    let result = host.finished().output;
+    eprintln!(
+        "cancel during a flood: turn ended {:?} after it started; {:?}",
+        started.elapsed(),
+        result.lines().last()
+    );
+    assert!(
+        result.contains("[cancelled") && !result.contains("abandoned"),
+        "not ended by the tool's own cancel: {}",
+        &result[result.len().saturating_sub(300)..]
+    );
     assert_eq!(out.reason, TurnEndReason::Cancelled);
     assert!(host.deltas().concat().len() <= (1 << 20) + TRUNCATED_MARKER.len());
 }
