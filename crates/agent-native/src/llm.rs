@@ -12,7 +12,7 @@ use genai::chat::{
 use genai::resolver::{AuthData, Endpoint, ServiceTargetResolver};
 use genai::{Client, ModelIden, ServiceTarget};
 use harness_core::Secret;
-use harness_core::event::{ToolCallRef, Usage};
+use harness_core::event::{Thinking, ThinkingBlock, ToolCallRef, Usage};
 use tokio::sync::mpsc;
 
 use crate::provider::*;
@@ -192,7 +192,137 @@ fn push_image_parts(msgs: &mut Vec<ChatMessage>, open: bool, parts: Vec<ContentP
     }
 }
 
+#[cfg(test)]
 pub(crate) fn to_genai(req: &ChatRequest) -> GChatRequest {
+    convert(req, None).request
+}
+
+/// A request as genai is given it, with what the thinking rule decided.
+pub(crate) struct Converted {
+    pub request: GChatRequest,
+    /// [`Prefix`] of everything the request sends: what a signed block the
+    /// answer brings records as its `prefix`.
+    pub prefix: String,
+    /// Whether any earlier step's thinking is sent back.
+    pub replayed: bool,
+}
+
+/// The running SHA-256 of what a request sends, in order: the tools (name,
+/// description, schema), then each message's role and content as genai is
+/// given them. Cache markers are left out: they move every request and are
+/// not content the model reads (Anthropic's prefix check leaves them out
+/// too). A signed block is sent back only where this is what it was when
+/// the block was made (X.25, T73).
+struct Prefix {
+    hash: sha2::Sha256,
+    fed: usize,
+}
+
+impl Prefix {
+    fn new(tools: &[ToolSpec]) -> Self {
+        use sha2::Digest;
+        let mut hash = sha2::Sha256::new();
+        for t in tools {
+            let one = serde_json::json!([t.name, t.description, t.schema]).to_string();
+            hash.update((one.len() as u64).to_le_bytes());
+            hash.update(one.as_bytes());
+        }
+        hash.update(b"messages");
+        Self { hash, fed: 0 }
+    }
+
+    /// Take in the messages of `msgs` not yet taken. Called only where
+    /// none of them changes any more.
+    fn feed(&mut self, msgs: &[ChatMessage]) {
+        use sha2::Digest;
+        for m in &msgs[self.fed..] {
+            let one = serde_json::to_string(&(&m.role, &m.content)).unwrap_or_default();
+            self.hash.update((one.len() as u64).to_le_bytes());
+            self.hash.update(one.as_bytes());
+        }
+        self.fed = msgs.len();
+    }
+
+    fn hex(&self) -> String {
+        use sha2::Digest;
+        self.hash
+            .clone()
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+}
+
+/// The parts a step's recorded thinking adds in front of its message, by
+/// the rule of the API the request goes to (X.25, T73), or none:
+/// - Anthropic: every `thinking` and `redacted_thinking` block, exactly as
+///   it came, in its order, only while everything before the step is what
+///   the request that made them sent (`prefix`). The provider requires
+///   them inside a tool loop and recommends them across turns; it strips
+///   what a model does not keep, and refuses a changed block or one whose
+///   prefix changed. Leaving them out is allowed ("omit prior turns'
+///   thinking, but not a block between two that you keep"): a block after
+///   a left-out one has a changed prefix here, so it is left out too.
+/// - OpenAI-compatible: the plain reasoning text as `reasoning_content`
+///   (DeepSeek: required back in every later request once tools are in
+///   the request, ignored without them).
+/// - No request ever sends back a step's thinking of another model: the
+///   router passes only the request's own model's ([`ModelRouter`]).
+fn thinking_parts(
+    t: &harness_core::event::Thinking,
+    kind: ApiKind,
+    prefix: &Prefix,
+) -> Vec<ContentPart> {
+    use harness_core::event::ThinkingBlock;
+    if t.unsent {
+        return vec![];
+    }
+    match kind {
+        ApiKind::Anthropic => {
+            if t.prefix.is_empty() || t.prefix != prefix.hex() {
+                return vec![];
+            }
+            let mut parts = Vec::new();
+            for b in &t.blocks {
+                match b {
+                    ThinkingBlock::Signed { text, signature } => {
+                        parts.push(ContentPart::ThoughtSignature(signature.clone()));
+                        parts.push(ContentPart::ReasoningContent(text.clone()));
+                    }
+                    ThinkingBlock::Redacted { data } => {
+                        parts.push(ContentPart::Custom(genai::chat::CustomPart {
+                            model_iden: None,
+                            data: serde_json::json!({"type": "redacted_thinking", "data": data}),
+                        }));
+                    }
+                    // Not Anthropic's: never sent there.
+                    ThinkingBlock::Text { .. } => return vec![],
+                }
+            }
+            parts
+        }
+        ApiKind::Openai => {
+            let mut text = Vec::new();
+            for b in &t.blocks {
+                match b {
+                    ThinkingBlock::Text { text: x } => text.push(x.as_str()),
+                    _ => return vec![],
+                }
+            }
+            if text.is_empty() {
+                return vec![];
+            }
+            vec![ContentPart::ReasoningContent(text.join("\n"))]
+        }
+    }
+}
+
+/// [`to_genai`] for a provider of `kind`: earlier steps' thinking is sent
+/// back by that API's rule ([`thinking_parts`]); `None` sends none.
+pub(crate) fn convert(req: &ChatRequest, kind: Option<ApiKind>) -> Converted {
+    let mut prefix = Prefix::new(&req.tools);
+    let mut replayed = false;
     let mut msgs = Vec::new();
     let mut system_seen = false;
     // Where each user message (the person's, or a callback turn's
@@ -240,8 +370,19 @@ pub(crate) fn to_genai(req: &ChatRequest) -> GChatRequest {
             ChatMsg::UserImages { text, images } => msgs.push(ChatMessage::user(
                 MessageContent::from_parts(user_parts(text, images)),
             )),
-            ChatMsg::Assistant { text, tool_calls } => {
+            ChatMsg::Assistant {
+                text,
+                tool_calls,
+                thinking,
+            } => {
                 let mut parts = Vec::new();
+                if let (Some(t), Some(kind)) = (thinking, kind) {
+                    // Everything before this message is final here.
+                    prefix.feed(&msgs);
+                    let lead = thinking_parts(t, kind, &prefix);
+                    replayed |= !lead.is_empty();
+                    parts.extend(lead);
+                }
                 if !text.is_empty() {
                     parts.push(ContentPart::Text(text.clone()));
                 }
@@ -321,6 +462,7 @@ pub(crate) fn to_genai(req: &ChatRequest) -> GChatRequest {
             }
         }
     }
+    prefix.feed(&msgs);
     let mut r = GChatRequest::new(msgs);
     if !req.tools.is_empty() {
         r = r.with_tools(
@@ -334,7 +476,11 @@ pub(crate) fn to_genai(req: &ChatRequest) -> GChatRequest {
                 .collect::<Vec<_>>(),
         );
     }
-    r
+    Converted {
+        request: r,
+        prefix: prefix.hex(),
+        replayed,
+    }
 }
 
 /// Where a converted request has cache markers (tests).
@@ -469,8 +615,34 @@ pub fn stop_reason(kind: ApiKind, raw: Option<&str>) -> StopReason {
     }
 }
 
+/// Whether every thinking block of an Anthropic answer came before its
+/// text and tool calls (`order`: the blocks' types as the stream opened
+/// them). genai sends a message's thinking blocks first, so only such an
+/// answer is sent back as it came; one with a block after the text or a
+/// tool call (a progress update before a second parallel call) is not
+/// (X.25).
+pub(crate) fn leads(order: &[String]) -> bool {
+    let thinking = |t: &str| matches!(t, "thinking" | "redacted_thinking");
+    match order.iter().position(|t| !thinking(t)) {
+        Some(first) => !order[first..].iter().any(|t| thinking(t)),
+        None => true,
+    }
+}
+
 #[async_trait::async_trait]
 impl Provider for LlmProvider {
+    fn replays_thinking(&self, req: &ChatRequest) -> bool {
+        req.messages.iter().any(|m| {
+            matches!(
+                m,
+                ChatMsg::Assistant {
+                    thinking: Some(_),
+                    ..
+                }
+            )
+        }) && convert(req, Some(self.kind)).replayed
+    }
+
     fn name(&self) -> &'static str {
         match self.kind {
             ApiKind::Openai => "openai-compatible",
@@ -483,10 +655,35 @@ impl Provider for LlmProvider {
         req: &ChatRequest,
         deltas: mpsc::UnboundedSender<String>,
     ) -> Result<Completion, ProviderError> {
+        // The thinking the answer brings is captured to be recorded with
+        // its step (X.25); capturing changes nothing genai sends here (it
+        // adds Anthropic's `display` only with an effort, which Anthropic
+        // models are not sent: PLAN.md R8).
         let mut opts = ChatOptions::default()
             .with_capture_content(true)
             .with_capture_tool_calls(true)
-            .with_capture_usage(true);
+            .with_capture_usage(true)
+            .with_capture_reasoning_content(true);
+        // The type of each content block, in the order the stream opens
+        // them: genai's capture keeps the thinking blocks' order but not
+        // where they stood among the text and the tool calls.
+        let order: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        if self.kind == ApiKind::Anthropic {
+            let seen = order.clone();
+            opts = opts.with_raw_frame_fn(move |_, frame| {
+                if frame.event == Some("content_block_start")
+                    && let Some(v) = frame.json()
+                    && let Some(t) = v.pointer("/content_block/type").and_then(|t| t.as_str())
+                {
+                    let mut seen = seen.lock().unwrap_or_else(|e| e.into_inner());
+                    // Bounded: a hostile stream opening blocks forever
+                    // grows nothing past this.
+                    if seen.len() < 4096 {
+                        seen.push(t.to_string());
+                    }
+                }
+            });
+        }
         if let Some(e) = req.effort {
             opts = opts.with_reasoning_effort(effort(e));
         }
@@ -509,9 +706,11 @@ impl Provider for LlmProvider {
         let limits = req.limits;
         let fail =
             |e: genai::Error| header_timeout(&e, limits).unwrap_or_else(|| provider_error(e));
+        let converted = convert(req, Some(self.kind));
+        let prefix = converted.prefix;
         let mut stream = self
             .client
-            .exec_chat_stream(&req.model, to_genai(req), Some(&opts))
+            .exec_chat_stream(&req.model, converted.request, Some(&opts))
             .await
             .map_err(fail)?
             .stream;
@@ -562,16 +761,66 @@ impl Provider for LlmProvider {
                             ..Default::default()
                         });
                     }
+                    let mut blocks = Vec::new();
                     if let Some(content) = end.captured_content {
-                        for part in content.into_parts() {
-                            if let ContentPart::ToolCall(tc) = part {
-                                out.tool_calls.push(ToolCallRef {
+                        let mut parts = content.into_parts().into_iter().peekable();
+                        while let Some(part) = parts.next() {
+                            match part {
+                                ContentPart::ToolCall(tc) => out.tool_calls.push(ToolCallRef {
                                     call_id: tc.call_id,
                                     tool: tc.fn_name,
                                     input: tc.fn_arguments,
-                                });
+                                }),
+                                // genai's capture: a signature, then its text.
+                                ContentPart::ThoughtSignature(signature)
+                                    if self.kind == ApiKind::Anthropic =>
+                                {
+                                    let text = match parts.peek() {
+                                        Some(ContentPart::ReasoningContent(_)) => {
+                                            match parts.next() {
+                                                Some(ContentPart::ReasoningContent(t)) => t,
+                                                _ => String::new(),
+                                            }
+                                        }
+                                        _ => String::new(),
+                                    };
+                                    blocks.push(ThinkingBlock::Signed { text, signature });
+                                }
+                                ContentPart::Custom(c)
+                                    if self.kind == ApiKind::Anthropic
+                                        && c.data.get("type").and_then(|t| t.as_str())
+                                            == Some("redacted_thinking") =>
+                                {
+                                    let data = c
+                                        .data
+                                        .get("data")
+                                        .and_then(|d| d.as_str())
+                                        .unwrap_or_default()
+                                        .to_string();
+                                    blocks.push(ThinkingBlock::Redacted { data });
+                                }
+                                _ => {}
                             }
                         }
+                    }
+                    if self.kind == ApiKind::Openai
+                        && let Some(r) = end.captured_reasoning_content
+                        && !r.is_empty()
+                    {
+                        blocks.push(ThinkingBlock::Text { text: r });
+                    }
+                    if !blocks.is_empty() {
+                        let order = order.lock().unwrap_or_else(|e| e.into_inner());
+                        out.thinking = Some(Thinking {
+                            model: req.model.clone(),
+                            prefix: if self.kind == ApiKind::Anthropic {
+                                prefix.clone()
+                            } else {
+                                String::new()
+                            },
+                            unsent: !leads(&order),
+                            blocks,
+                        });
                     }
                 }
                 _ => {}
@@ -619,6 +868,10 @@ impl Provider for SwappableProvider {
         let p = self.current();
         p.complete(req, deltas).await
     }
+
+    fn replays_thinking(&self, req: &ChatRequest) -> bool {
+        self.current().replays_thinking(req)
+    }
 }
 
 /// Separates a provider prefix from the provider's own model id
@@ -629,6 +882,23 @@ pub const MODEL_SEP: &str = "::";
 /// with no provider prefix (which names no model).
 pub fn split_model(id: &str) -> Option<(&str, &str)> {
     id.split_once(MODEL_SEP)
+}
+
+/// `req` for the route's provider: the raw model id, and only the
+/// request's own model's thinking (X.25, T73): thinking from another
+/// model, or another provider, is never sent; a signed block is valid only
+/// for the model that made it, whatever the provider would accept.
+fn own_thinking(req: &ChatRequest, raw: &str) -> ChatRequest {
+    let mut sent = req.clone();
+    sent.model = raw.to_string();
+    for m in &mut sent.messages {
+        if let ChatMsg::Assistant { thinking, .. } = m
+            && thinking.as_ref().is_some_and(|t| t.model != req.model)
+        {
+            *thinking = None;
+        }
+    }
+    sent
 }
 
 /// One provider behind a [`ModelRouter`], under its prefix.
@@ -670,15 +940,25 @@ impl Provider for ModelRouter {
         }
     }
 
+    fn replays_thinking(&self, req: &ChatRequest) -> bool {
+        match self.resolve(&req.model) {
+            Ok((route, raw)) => route.provider.replays_thinking(&own_thinking(req, raw)),
+            Err(_) => false,
+        }
+    }
+
     async fn complete(
         &self,
         req: &ChatRequest,
         deltas: mpsc::UnboundedSender<String>,
     ) -> Result<Completion, ProviderError> {
         let (route, raw) = self.resolve(&req.model)?;
-        let mut sent = req.clone();
-        sent.model = raw.to_string();
+        let sent = own_thinking(req, raw);
         let mut c = route.provider.complete(&sent, deltas).await?;
+        // The thinking is the prefixed model's, as usage is.
+        if let Some(t) = c.thinking.as_mut() {
+            t.model = req.model.clone();
+        }
         // Who used these tokens: the prefixed model asked for, whatever
         // the provider claims. Every model call of a turn, a fallback, a
         // summary, a sub-agent or a hand-off note passes here, so the
@@ -782,6 +1062,7 @@ mod tests {
                         tool: "bash".into(),
                         input: json!({"command": "ls"}),
                     }],
+                    thinking: None,
                 },
                 ChatMsg::Tool {
                     call_id: "c1".into(),
@@ -879,6 +1160,7 @@ mod tests {
                             input: serde_json::json!({}),
                         })
                         .collect(),
+                    thinking: None,
                 },
                 tool("a"),
                 tool("b"),
@@ -942,6 +1224,7 @@ mod tests {
         ChatMsg::Assistant {
             text: t.into(),
             tool_calls: vec![],
+            thinking: None,
         }
     }
     fn called(id: &str) -> [ChatMsg; 2] {
@@ -953,6 +1236,7 @@ mod tests {
                     tool: "bash".into(),
                     input: json!({"command": "ls"}),
                 }],
+                thinking: None,
             },
             ChatMsg::Tool {
                 call_id: id.into(),
@@ -1060,6 +1344,305 @@ mod tests {
             assert_eq!(at.first(), Some(&0), "{n}: {at:?}");
             assert_eq!(at.last(), Some(&(r.messages.len() - 1)), "{n}: {at:?}");
         }
+    }
+
+    use harness_core::event::{Thinking, ThinkingBlock};
+    use std::sync::Arc;
+
+    fn req_of(messages: Vec<ChatMsg>) -> ChatRequest {
+        ChatRequest {
+            model: "m".into(),
+            messages,
+            tools: vec![ToolSpec {
+                name: "bash".into(),
+                description: "d".into(),
+                schema: json!({"type": "object"}),
+            }],
+            effort: None,
+            cache: true,
+            limits: None,
+            no_tool_calls: false,
+            max_tokens: None,
+        }
+    }
+
+    fn signed(text: &str, sig: &str) -> ThinkingBlock {
+        ThinkingBlock::Signed {
+            text: text.into(),
+            signature: sig.into(),
+        }
+    }
+
+    /// A step that called `bash` as `id`, with `thinking`, then its result.
+    fn step(id: &str, thinking: Option<Thinking>) -> [ChatMsg; 2] {
+        [
+            ChatMsg::Assistant {
+                text: String::new(),
+                tool_calls: vec![ToolCallRef {
+                    call_id: id.into(),
+                    tool: "bash".into(),
+                    input: json!({"command": "ls"}),
+                }],
+                thinking: thinking.map(Arc::new),
+            },
+            ChatMsg::Tool {
+                call_id: id.into(),
+                content: "out".into(),
+            },
+        ]
+    }
+
+    fn kinds(m: &ChatMessage) -> Vec<String> {
+        m.content
+            .parts()
+            .iter()
+            .map(|p| match p {
+                ContentPart::ThoughtSignature(s) => format!("sig:{s}"),
+                ContentPart::ReasoningContent(t) => format!("text:{t}"),
+                ContentPart::Custom(c) => format!("custom:{}", c.data),
+                ContentPart::ToolCall(c) => format!("call:{}", c.call_id),
+                ContentPart::Text(t) => format!("said:{t}"),
+                other => format!("{other:?}"),
+            })
+            .collect()
+    }
+
+    /// X.25, Anthropic: a step's blocks go back exactly as they came, in
+    /// their order (a redacted one in its place), in front of its tool
+    /// call, while everything before the step is what the request that
+    /// made them sent; a later step's too, its prefix holding the first
+    /// step's blocks. A block whose prefix changed is not sent, and then
+    /// neither is any block after it (never one between two that are).
+    #[test]
+    fn anthropic_sends_signed_blocks_back_while_their_prefix_holds() {
+        let base = vec![ChatMsg::System("s".into()), user("look")];
+        let p1 = convert(&req_of(base.clone()), Some(ApiKind::Anthropic)).prefix;
+        let t1 = Thinking {
+            model: "m".into(),
+            blocks: vec![
+                signed("first", "S1"),
+                ThinkingBlock::Redacted { data: "R".into() },
+                signed("", "S2"),
+            ],
+            prefix: p1,
+            unsent: false,
+        };
+        let mut two = base.clone();
+        two.extend(step("c1", Some(t1.clone())));
+        let c = convert(&req_of(two.clone()), Some(ApiKind::Anthropic));
+        assert!(c.replayed);
+        assert_eq!(
+            kinds(&c.request.messages[2]),
+            vec![
+                "sig:S1",
+                "text:first",
+                r#"custom:{"type":"redacted_thinking","data":"R"}"#,
+                "sig:S2",
+                "text:",
+                "call:c1"
+            ]
+        );
+        let t2 = Thinking {
+            model: "m".into(),
+            blocks: vec![signed("second", "S3")],
+            prefix: c.prefix,
+            unsent: false,
+        };
+        let mut three = two.clone();
+        three.extend(step("c2", Some(t2.clone())));
+        three.push(user("next"));
+        let c = convert(&req_of(three.clone()), Some(ApiKind::Anthropic));
+        assert_eq!(kinds(&c.request.messages[2])[0], "sig:S1");
+        assert_eq!(
+            kinds(&c.request.messages[4])[..2],
+            ["sig:S3", "text:second"]
+        );
+        // The first result changed (cleared): the first step's blocks
+        // stand before it and stay; the second's prefix changed.
+        let mut cleared = three.clone();
+        cleared[3] = ChatMsg::Tool {
+            call_id: "c1".into(),
+            content: "[cleared]".into(),
+        };
+        let c = convert(&req_of(cleared), Some(ApiKind::Anthropic));
+        assert_eq!(kinds(&c.request.messages[2])[0], "sig:S1");
+        assert_eq!(kinds(&c.request.messages[4]), vec!["call:c2"]);
+        // The person's first message changed: no block is sent at all,
+        // the second step's not either (its prefix held the first's).
+        let mut changed = three.clone();
+        changed[1] = user("look again");
+        let c = convert(&req_of(changed), Some(ApiKind::Anthropic));
+        assert!(!c.replayed);
+        assert_eq!(kinds(&c.request.messages[2]), vec!["call:c1"]);
+        assert_eq!(kinds(&c.request.messages[4]), vec!["call:c2"]);
+        // The tools changed: none either.
+        let mut r = req_of(three.clone());
+        r.tools[0].description = "other".into();
+        assert!(!convert(&r, Some(ApiKind::Anthropic)).replayed);
+        // A cache marker that moved is not a change.
+        let mut r = req_of(three);
+        r.cache = false;
+        assert!(convert(&r, Some(ApiKind::Anthropic)).replayed);
+    }
+
+    /// X.25: an `unsent` step's thinking never goes; plain reasoning goes
+    /// to an OpenAI-compatible API as `reasoning_content` whatever changed
+    /// before it, and never to Anthropic; signed blocks never to OpenAI.
+    #[test]
+    fn each_api_gets_only_its_own_kind_of_thinking() {
+        let base = vec![ChatMsg::System("s".into()), user("look")];
+        let p = convert(&req_of(base.clone()), Some(ApiKind::Anthropic)).prefix;
+        let with = |t: Thinking| {
+            let mut m = base.clone();
+            m.extend(step("c1", Some(t)));
+            req_of(m)
+        };
+        let mut t = Thinking {
+            model: "m".into(),
+            blocks: vec![signed("a", "S")],
+            prefix: p,
+            unsent: true,
+        };
+        assert!(!convert(&with(t.clone()), Some(ApiKind::Anthropic)).replayed);
+        t.unsent = false;
+        assert!(convert(&with(t.clone()), Some(ApiKind::Anthropic)).replayed);
+        assert!(!convert(&with(t.clone()), Some(ApiKind::Openai)).replayed);
+        assert!(!convert(&with(t), None).replayed, "to_genai sends none");
+        let plain = Thinking {
+            model: "m".into(),
+            blocks: vec![ThinkingBlock::Text { text: "why".into() }],
+            prefix: String::new(),
+            unsent: false,
+        };
+        let c = convert(&with(plain.clone()), Some(ApiKind::Openai));
+        assert!(c.replayed);
+        assert_eq!(kinds(&c.request.messages[2]), vec!["text:why", "call:c1"]);
+        assert!(!convert(&with(plain), Some(ApiKind::Anthropic)).replayed);
+    }
+
+    /// A request without thinking converts exactly as before the thinking
+    /// rule existed, for either API (the wire form is pinned in
+    /// `tests/thinking_http.rs`).
+    #[test]
+    fn a_request_without_thinking_is_unchanged() {
+        let mut m = vec![ChatMsg::System("s".into()), user("look")];
+        m.extend(step("c1", None));
+        m.push(said("done"));
+        let r = req_of(m);
+        let plain = serde_json::to_string(&to_genai(&r)).unwrap();
+        for k in [ApiKind::Anthropic, ApiKind::Openai] {
+            let c = convert(&r, Some(k));
+            assert!(!c.replayed);
+            assert_eq!(serde_json::to_string(&c.request).unwrap(), plain);
+        }
+    }
+
+    /// genai sends a message's thinking blocks first: an answer with one
+    /// after its text or a tool call cannot be sent back as it came.
+    #[test]
+    fn thinking_after_text_or_a_call_is_out_of_order() {
+        let o = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(leads(&o(&[])));
+        assert!(leads(&o(&[
+            "thinking",
+            "redacted_thinking",
+            "text",
+            "tool_use"
+        ])));
+        assert!(leads(&o(&["text", "tool_use", "tool_use"])));
+        assert!(!leads(&o(&[
+            "thinking", "tool_use", "thinking", "tool_use"
+        ])));
+        assert!(!leads(&o(&["text", "thinking"])));
+    }
+
+    /// Answers with the thinking of the request it got (as a trace), and
+    /// thinking of its own under the raw model id.
+    struct Echo(Arc<std::sync::Mutex<Vec<Vec<String>>>>);
+
+    #[async_trait::async_trait]
+    impl Provider for Echo {
+        fn name(&self) -> &'static str {
+            "echo"
+        }
+        async fn complete(
+            &self,
+            req: &ChatRequest,
+            _deltas: mpsc::UnboundedSender<String>,
+        ) -> Result<Completion, ProviderError> {
+            self.0.lock().unwrap().push(
+                req.messages
+                    .iter()
+                    .filter_map(|m| match m {
+                        ChatMsg::Assistant {
+                            thinking: Some(t), ..
+                        } => Some(t.model.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+            );
+            Ok(Completion {
+                thinking: Some(Thinking {
+                    model: req.model.clone(),
+                    blocks: vec![ThinkingBlock::Text { text: "t".into() }],
+                    prefix: String::new(),
+                    unsent: false,
+                }),
+                ..Default::default()
+            })
+        }
+        fn replays_thinking(&self, req: &ChatRequest) -> bool {
+            req.messages.iter().any(|m| {
+                matches!(
+                    m,
+                    ChatMsg::Assistant {
+                        thinking: Some(_),
+                        ..
+                    }
+                )
+            })
+        }
+    }
+
+    /// X.25, T73: thinking from another model, the same provider's or
+    /// another's, never reaches a request; the answer's thinking carries
+    /// the prefixed model.
+    #[tokio::test]
+    async fn the_router_sends_only_the_models_own_thinking() {
+        let seen: Arc<std::sync::Mutex<Vec<Vec<String>>>> = Default::default();
+        let r = ModelRouter::new(vec![
+            Route {
+                prefix: "a".into(),
+                provider: Arc::new(Echo(seen.clone())),
+            },
+            Route {
+                prefix: "b".into(),
+                provider: Arc::new(Echo(seen.clone())),
+            },
+        ]);
+        let t = |model: &str| Thinking {
+            model: model.into(),
+            blocks: vec![ThinkingBlock::Text { text: "x".into() }],
+            prefix: String::new(),
+            unsent: false,
+        };
+        let mut m = vec![user("u")];
+        m.extend(step("c1", Some(t("a::one"))));
+        m.extend(step("c2", Some(t("a::two"))));
+        m.extend(step("c3", Some(t("b::one"))));
+        let mut req = req_of(m);
+        req.model = "a::one".into();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let c = r.complete(&req, tx.clone()).await.unwrap();
+        assert_eq!(c.thinking.unwrap().model, "a::one");
+        assert!(r.replays_thinking(&req));
+        req.model = "b::two".into();
+        assert!(!r.replays_thinking(&req), "b::two wrote none of it");
+        r.complete(&req, tx).await.unwrap();
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![vec!["a::one".to_string()], vec![]]
+        );
     }
 
     /// Answers with its own name and the model id it was sent.

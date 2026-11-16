@@ -445,6 +445,7 @@ fn history(sid: SessionId, turns: usize, chars: usize) -> Vec<RawEvent> {
             text: "ok".into(),
             tool_calls: vec![],
             blocks: vec![],
+            thinking: None,
         }));
         kinds.push(EventKind::TurnEnded(TurnEnded {
             turn_id,

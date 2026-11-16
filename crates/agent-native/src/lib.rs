@@ -880,7 +880,11 @@ fn transcript_of(
                 let t = images::as_text(m).unwrap_or_default();
                 quoted_part(&mut out, PART_USER, &t);
             }
-            ChatMsg::Assistant { text, tool_calls } => {
+            // Never its thinking: a summary or a hand-off note is of
+            // what was said and done (X.25).
+            ChatMsg::Assistant {
+                text, tool_calls, ..
+            } => {
                 if !text.is_empty() {
                     quoted_part(&mut out, PART_ASSISTANT, text);
                 }
@@ -1414,6 +1418,60 @@ fn parse_effort(s: &str) -> Option<Effort> {
     }
 }
 
+/// A step's thinking as the log may keep it (X.25, T73). The scrubber runs
+/// over every part, the opaque ones too: a block it changes is kept
+/// scrubbed and marked `unsent`, since the provider refuses a changed block
+/// and the log may hold no secret. Over [`Thinking::MAX_BYTES`] (a broken or
+/// hostile provider) the first blocks' text is kept for the person, cut to
+/// [`Thinking::SHOWN_BYTES`] in all, the opaque parts are dropped, and it is
+/// `unsent`.
+pub(crate) fn bound_thinking(t: &mut harness_core::event::Thinking, secrets: &SecretSet) {
+    use harness_core::event::{Thinking, ThinkingBlock};
+    let mut changed = false;
+    let mut scrub = |v: &mut String| {
+        let clean = secrets.scrub(v);
+        if clean != *v {
+            changed = true;
+            *v = clean;
+        }
+    };
+    for b in &mut t.blocks {
+        match b {
+            ThinkingBlock::Signed { text, signature } => {
+                scrub(text);
+                scrub(signature);
+            }
+            ThinkingBlock::Redacted { data } => scrub(data),
+            ThinkingBlock::Text { text } => scrub(text),
+        }
+    }
+    t.unsent |= changed;
+    if t.bytes() > Thinking::MAX_BYTES {
+        t.unsent = true;
+        t.prefix.clear();
+        let mut left = Thinking::SHOWN_BYTES;
+        let mut cut = |text: &mut String| {
+            let mut at = text.len().min(left);
+            while !text.is_char_boundary(at) {
+                at -= 1;
+            }
+            text.truncate(at);
+            left -= at;
+        };
+        t.blocks.truncate(16);
+        for b in &mut t.blocks {
+            match b {
+                ThinkingBlock::Signed { text, signature } => {
+                    cut(text);
+                    signature.clear();
+                }
+                ThinkingBlock::Redacted { data } => data.clear(),
+                ThinkingBlock::Text { text } => cut(text),
+            }
+        }
+    }
+}
+
 /// Rebuild the provider conversation from a session log. Tool calls that never
 /// got a result (interrupted turns) get a synthetic one so the transcript stays
 /// valid for providers that require every call to be answered.
@@ -1713,6 +1771,8 @@ pub fn rebuild_spans(
                 if !m.text.is_empty() || !m.tool_calls.is_empty() {
                     // Another agent's answer says whose it is (only in a
                     // chat more than one agent answers in).
+                    let foreign =
+                        matches!((&m.author, how.agent), (Some(a), Some(now)) if a != now);
                     let text = match (&m.author, how.agent) {
                         (Some(a), Some(now)) if a != now => {
                             let line = other_agent_line(names.get(a).unwrap_or(a));
@@ -1724,9 +1784,17 @@ pub fn rebuild_spans(
                         }
                         _ => m.text,
                     };
+                    // The step's thinking goes back only to its own agent's
+                    // requests, never into the summariser's transcript, and
+                    // not once it may not be sent (X.25).
+                    let thinking = m
+                        .thinking
+                        .filter(|t| !t.unsent && !foreign && !how.transcript)
+                        .map(std::sync::Arc::new);
                     out.push(ChatMsg::Assistant {
                         text,
                         tool_calls: m.tool_calls,
+                        thinking,
                     });
                 }
             }
@@ -1758,6 +1826,10 @@ pub fn rebuild_spans(
             // images (T71): from here on they are withheld, as the loop
             // withheld them in the request that was answered.
             EventKind::ImagesWithheld(w) => images::withhold(&mut out, &w.calls),
+            // The provider refused a request that sent back this model's
+            // thinking (T73): none of it before here is sent again, as the
+            // loop left it out of the request that was answered.
+            EventKind::ThinkingWithheld(w) => provider::withhold_thinking(&mut out, Some(&w.model)),
             // Where the log has it: after a step's results, or between
             // turns; the same text the loop added when it arrived.
             EventKind::BackgroundEnded(b) => {
@@ -2254,6 +2326,17 @@ impl NativeBackend {
         }
         // Failed or useless summaries this turn; two stop further attempts.
         let mut compact_failures = 0u32;
+        // The models whose thinking a provider refused in this chat (T73):
+        // a later step of theirs is recorded `unsent`, as the log says.
+        let mut refused_thinking: HashSet<String> = ctx
+            .history
+            .iter()
+            .filter(|e| e.kind == "thinking_withheld")
+            .filter_map(|e| match e.typed() {
+                Ok(EventKind::ThinkingWithheld(w)) => Some(w.model),
+                _ => None,
+            })
+            .collect();
         let estimate = |events: &[RawEvent]| {
             let mut m = history_to_messages(events);
             if let Some(k) = keep {
@@ -3250,6 +3333,9 @@ impl NativeBackend {
             // A refusal that may be the images: the calls withheld for the
             // one resend, the original error and request (T71).
             let mut resent: Option<(Vec<String>, ProviderError, ChatRequest)> = None;
+            // A refusal that may be the thinking sent back: the original
+            // error and request (X.25, T73).
+            let mut unthought: Option<(ProviderError, ChatRequest)> = None;
             let (step, emitted) = loop {
                 let (tx, rx) = mpsc::unbounded_channel();
                 let turn_id = ctx.turn_id.clone();
@@ -3293,6 +3379,35 @@ impl NativeBackend {
                     }
                     continue;
                 }
+                // The provider refused a request that sent back the model's
+                // earlier thinking, for its content (T73): it is sent once
+                // more without any. If that is answered, the record below
+                // keeps this model's thinking out of every later request;
+                // if it fails too, the images may still be tried, and if
+                // nothing helps the original error stands. Anthropic allows
+                // the blocks to be left out ("omit prior turns' thinking,
+                // but not a block between two that you keep"; in a tool
+                // loop adaptive thinking needs none), so the chat goes on.
+                if unthought.is_none()
+                    && resent.is_none()
+                    && let (Step::Done(Err(e)), false) = &r
+                    && e.may_be_the_images()
+                    && self.provider.replays_thinking(&req)
+                {
+                    let (Step::Done(Err(e)), _) = r else {
+                        unreachable!("matched above")
+                    };
+                    tracing::warn!(
+                        model = %model,
+                        error = %e.log_line(),
+                        "the provider refused a request that sent back thinking; sending it without"
+                    );
+                    let mut again = req.clone();
+                    provider::withhold_thinking(&mut again.messages, None);
+                    let first = std::mem::replace(&mut req, again);
+                    unthought = Some((e, first));
+                    continue;
+                }
                 // The provider refused a request that carried images `read`
                 // returned, for its content (T71): it is sent once more with
                 // every one of them withheld. If that is answered, the
@@ -3322,8 +3437,12 @@ impl NativeBackend {
                     }
                 }
                 if let (Step::Done(Err(_)), false) = &r
-                    && let Some((_, e, first)) = resent.take()
+                    && (resent.is_some() || unthought.is_some())
                 {
+                    let (e, first) = match (unthought.take(), resent.take()) {
+                        (Some((e, first)), _) | (None, Some((_, e, first))) => (e, first),
+                        (None, None) => unreachable!("checked above"),
+                    };
                     req = first;
                     break (Step::Done(Err(e)), false);
                 }
@@ -3335,7 +3454,10 @@ impl NativeBackend {
             let withheld = resent
                 .filter(|_| matches!(step, Step::Done(Ok(_))))
                 .map(|(calls, e, _)| (calls, e));
-            let completion = match step {
+            let unthought = unthought
+                .filter(|_| matches!(step, Step::Done(Ok(_))))
+                .map(|(e, _)| e);
+            let mut completion = match step {
                 Step::Cancelled => {
                     return TurnOutcome {
                         reason: TurnEndReason::Cancelled,
@@ -3480,6 +3602,25 @@ impl NativeBackend {
             {
                 return stopped(usage);
             }
+            if let Some(e) = unthought {
+                let r = self.withheld_record(&ctx.turn_id, vec![], &e);
+                if host
+                    .emit(EventKind::ThinkingWithheld(
+                        harness_core::event::ThinkingWithheld {
+                            turn_id: r.turn_id,
+                            model: model.clone(),
+                            status: r.status,
+                            reason: r.reason,
+                        },
+                    ))
+                    .await
+                    .is_err()
+                {
+                    return stopped(usage);
+                }
+                provider::withhold_thinking(&mut messages, Some(&model));
+                refused_thinking.insert(model.clone());
+            }
             if let Some((calls, e)) = withheld {
                 if host
                     .emit(EventKind::ImagesWithheld(self.withheld_record(
@@ -3502,27 +3643,37 @@ impl NativeBackend {
                     calib = u.input_tokens as i64 - provider::estimate_tokens(&req.messages) as i64;
                 }
             }
-            if host
-                .emit(self.assistant_message(
-                    AssistantMessage {
-                        author: author.clone(),
-                        variant: None,
-                        turn_id: ctx.turn_id.clone(),
-                        message_id,
-                        text: completion.text.clone(),
-                        tool_calls: completion.tool_calls.clone(),
-                        blocks: vec![],
-                    },
-                    ui,
-                ))
-                .await
-                .is_err()
-            {
+            // The step's thinking, as the log keeps it (scrubbed, bounded)
+            // and as every later request is built from (X.25).
+            let thinking = completion.thinking.take().map(|mut t| {
+                t.model = model.clone();
+                t.unsent |= refused_thinking.contains(&model);
+                t
+            });
+            let ev = self.assistant_message(
+                AssistantMessage {
+                    author: author.clone(),
+                    variant: None,
+                    turn_id: ctx.turn_id.clone(),
+                    message_id,
+                    text: completion.text.clone(),
+                    tool_calls: completion.tool_calls.clone(),
+                    blocks: vec![],
+                    thinking,
+                },
+                ui,
+            );
+            let thinking = match &ev {
+                EventKind::AssistantMessage(m) => m.thinking.clone(),
+                _ => None,
+            };
+            if host.emit(ev).await.is_err() {
                 return stopped(usage);
             }
             messages.push(ChatMsg::Assistant {
                 text: completion.text,
                 tool_calls: completion.tool_calls.clone(),
+                thinking: thinking.filter(|t| !t.unsent).map(Arc::new),
             });
             if completion.tool_calls.is_empty() {
                 // On a child's last step, an answer without `finish` ends
@@ -4501,6 +4652,9 @@ impl NativeBackend {
         ui: harness_core::agent::UiLevel,
     ) -> EventKind {
         m.text = self.config.secrets.scrub(&m.text);
+        if let Some(t) = m.thinking.as_mut() {
+            bound_thinking(t, &self.config.secrets);
+        }
         m.blocks = harness_core::ui::extract(&m.text, ui);
         if !m.tool_calls.is_empty() {
             harness_core::ui::calls_tools(&mut m.blocks);
@@ -4596,6 +4750,9 @@ impl NativeBackend {
                                 text: c.text,
                                 tool_calls: vec![],
                                 blocks: vec![],
+                                // Parallel answers are text turns no later
+                                // request continues: not kept (X.25).
+                                thinking: None,
                             },
                             ui,
                         ))
@@ -5671,6 +5828,7 @@ mod tests {
             }],
             usage: None,
             stop,
+            thinking: None,
         }
     }
 
@@ -5863,6 +6021,7 @@ mod tests {
                 tool_calls: vec![],
                 usage: None,
                 stop: Default::default(),
+                thinking: None,
             };
             if matches!(req.messages.last(), Some(ChatMsg::Tool { .. })) {
                 return Ok(done);
@@ -5889,6 +6048,7 @@ mod tests {
                 }],
                 usage: None,
                 stop: Default::default(),
+                thinking: None,
             })
         }
     }
@@ -6219,6 +6379,7 @@ mod tests {
                 tool_calls: calls,
                 usage: None,
                 stop: Default::default(),
+                thinking: None,
             })
         }
     }
@@ -6638,6 +6799,7 @@ mod tests {
                         .collect(),
                     usage: None,
                     stop: Default::default(),
+                    thinking: None,
                 })
             }
         }
@@ -6977,6 +7139,7 @@ mod tests {
                     .collect(),
                 usage: None,
                 stop: Default::default(),
+                thinking: None,
             })
         }
     }
@@ -7190,6 +7353,7 @@ mod tests {
                         input: json!({}),
                     }],
                     blocks: vec![],
+                    thinking: None,
                 }),
             ),
             mk(
@@ -7278,6 +7442,7 @@ mod tests {
                 text: format!("answer {n}"),
                 tool_calls: vec![],
                 blocks: vec![],
+                thinking: None,
             }),
             &mut out,
         );
@@ -7812,6 +7977,7 @@ mod tests {
                 tool_calls,
                 usage: None,
                 stop: Default::default(),
+                thinking: None,
             })
         }
     }
@@ -7952,6 +8118,7 @@ mod tests {
                     author: None,
                     variant: None,
                     blocks: vec![],
+                    thinking: None,
                 }),
                 EventKind::ToolCallFinished(ToolCallFinished {
                     image: None,
@@ -8384,6 +8551,7 @@ mod background_tests {
             ChatMsg::Assistant {
                 text: "ok".into(),
                 tool_calls: vec![],
+                thinking: None,
             },
             ChatMsg::User("now".into()),
         ];
@@ -8443,6 +8611,7 @@ mod place_notes_tests {
             ChatMsg::Assistant {
                 text: String::new(),
                 tool_calls: vec![],
+                thinking: None,
             },
             ChatMsg::Tool {
                 call_id: "c1".into(),
@@ -8452,6 +8621,7 @@ mod place_notes_tests {
             ChatMsg::Assistant {
                 text: "done".into(),
                 tool_calls: vec![],
+                thinking: None,
             },
             ChatMsg::Note("[harness] idle one".into()),
             ChatMsg::Note("[harness] idle two".into()),

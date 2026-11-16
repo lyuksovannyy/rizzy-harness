@@ -126,6 +126,20 @@ steps, a summary about every 100 steps). Never on two steps in a row. Both bound
 tests (`shortening_is_rare_and_never_on_consecutive_steps`,
 `mask_and_clearing_at_128k`).
 
+## Thinking (X.25, PLAN.md T73)
+
+A step's thinking rides on its assistant message, so clearing never
+touches it and a fold removes it with its step. Anthropic's signed blocks
+are sent back only while everything a request sends before them is what
+the request that produced them sent (`llm::Prefix`, the hash recorded as
+`thinking.prefix`): clearing a result, a fold or an image leaving the
+window therefore stops the blocks after that point and keeps the ones
+before it, which is the order Anthropic's prefix check allows (leave out
+the newest, never one in between). Plain reasoning text (DeepSeek) is sent
+whatever changed. The rebuild applies the same, so a request still
+rebuilds byte for byte (`turn_compaction_review.rs`
+`rebuild_matches_live_with_thinking`).
+
 ## Live check (2026-11-15, the owner's router, synthetic repository)
 
 Thirty synthetic files of 6,000 characters, a 32k window set on the model, the task

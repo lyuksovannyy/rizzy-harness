@@ -103,6 +103,7 @@ mod tests {
                 text: "hi".into(),
                 tool_calls: vec![],
                 blocks: vec![],
+                thinking: None,
             }),
         );
         let ended = |context_tokens| {

@@ -568,6 +568,7 @@ async fn anthropic_prompt_cache_markers_and_usage() {
     req.messages.push(ChatMsg::Assistant {
         text: "pong".into(),
         tool_calls: vec![],
+        thinking: None,
     });
     req.messages.push(ChatMsg::User("again".into()));
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -795,6 +796,7 @@ async fn a_cut_call_in_the_history_is_sent_as_an_object() {
             tool: "write".into(),
             input: json!(r#"{"path":"a.txt","content":"FRAGMENT"#),
         }],
+        thinking: None,
     });
     req.messages.push(ChatMsg::Tool {
         call_id: "toolu_1".into(),

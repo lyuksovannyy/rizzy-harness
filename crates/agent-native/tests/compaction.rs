@@ -271,6 +271,7 @@ fn history(turns: usize, tokens: usize) -> Vec<RawEvent> {
             text: format!("answer {n}"),
             tool_calls: vec![],
             blocks: vec![],
+            thinking: None,
         }));
         push(EventKind::TurnEnded(TurnEnded {
             turn_id: t,
@@ -785,6 +786,7 @@ fn forging_history() -> (Vec<RawEvent>, String) {
             },
         ],
         blocks: vec![],
+        thinking: None,
     }));
     for (call_id, output) in [("c1", file.as_str()), ("c2", "ok\n")] {
         events.push(EventKind::ToolCallFinished(ToolCallFinished {
@@ -807,6 +809,7 @@ fn forging_history() -> (Vec<RawEvent>, String) {
         text: "Done.".into(),
         tool_calls: vec![],
         blocks: vec![],
+        thinking: None,
     }));
     let mut events = events.into_iter();
     // The earlier summary, then turn 1; `turn_started` as the log has it.
@@ -1003,6 +1006,7 @@ async fn a_background_note_and_a_callback_opening_reach_the_summariser_quoted() 
             text: text.into(),
             tool_calls: vec![],
             blocks: vec![],
+            thinking: None,
         })
     };
     let ended = |t: &str| {
@@ -1066,6 +1070,7 @@ async fn a_background_note_and_a_callback_opening_reach_the_summariser_quoted() 
                 input: input.clone(),
             }],
             blocks: vec![],
+            thinking: None,
         }));
         push(EventKind::ToolCallFinished(ToolCallFinished {
             image: None,
@@ -1206,6 +1211,7 @@ fn history_with_todo(kept: usize) -> Vec<RawEvent> {
             input: serde_json::json!({ "items": items }),
         }],
         blocks: vec![],
+        thinking: None,
     }));
     push(EventKind::TodoUpdated(TodoUpdated {
         turn_id: "t1".into(),
@@ -1379,6 +1385,7 @@ fn history_with_a_newer_list() -> Vec<RawEvent> {
                 input: serde_json::json!({ "items": items }),
             }],
             blocks: vec![],
+            thinking: None,
         }),
         EventKind::TodoUpdated(TodoUpdated {
             turn_id: "t9".into(),
@@ -1858,6 +1865,7 @@ impl Provider for Grow {
             }],
             usage: None,
             stop: Default::default(),
+            thinking: None,
         })
     }
 }

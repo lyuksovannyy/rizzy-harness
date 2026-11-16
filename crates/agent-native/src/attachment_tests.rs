@@ -75,6 +75,7 @@ impl Provider for Rec {
             tool_calls,
             usage: None,
             stop: Default::default(),
+            thinking: None,
         })
     }
 }
@@ -173,6 +174,7 @@ fn earlier(sid: SessionId, m: UserMessage) -> Vec<RawEvent> {
                 blocks: vec![],
                 author: None,
                 variant: None,
+                thinking: None,
             }),
         ),
         ev(

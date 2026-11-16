@@ -498,7 +498,9 @@ pub fn tail_start(msgs: &[ChatMsg], tail: u64) -> Option<usize> {
                 results += tokens(weight(msgs, i));
                 any = true;
             }
-            ChatMsg::Assistant { text, tool_calls } if !tool_calls.is_empty() && any => {
+            ChatMsg::Assistant {
+                text, tool_calls, ..
+            } if !tool_calls.is_empty() && any => {
                 // The step's own message counts too: its arguments can be
                 // what is large (a `write`).
                 results += tokens(
@@ -623,6 +625,7 @@ mod tests {
                     tool: tool.into(),
                     input,
                 }],
+                thinking: None,
             },
             ChatMsg::Tool {
                 call_id: format!("c{i}"),

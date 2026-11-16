@@ -562,8 +562,10 @@ impl ProviderConfig {
     }
 }
 
-/// Whether `m` of `p` takes a reasoning effort. Never for Anthropic until
-/// signed thinking blocks are replayed (PLAN.md R8), whatever the file says.
+/// Whether `m` of `p` takes a reasoning effort. Never for Anthropic,
+/// whatever the file says: signed thinking blocks are replayed since X.25,
+/// but a request that turns thinking on has not been checked against the
+/// real API (PLAN.md R8).
 pub fn effort_allowed(p: &ProviderConfig, m: &ModelConfig) -> bool {
     p.kind != ProviderKind::Anthropic && m.effort == Some(true)
 }

@@ -94,6 +94,7 @@ pub enum EventKind {
     HandoffWritten(HandoffWritten),
     CompactFailed(CompactFailed),
     ImagesWithheld(ImagesWithheld),
+    ThinkingWithheld(ThinkingWithheld),
 }
 
 impl EventKind {
@@ -152,6 +153,7 @@ impl EventKind {
             EventKind::HandoffWritten(_) => "handoff_written",
             EventKind::CompactFailed(_) => "compact_failed",
             EventKind::ImagesWithheld(_) => "images_withheld",
+            EventKind::ThinkingWithheld(_) => "thinking_withheld",
         }
     }
 }
@@ -1270,6 +1272,112 @@ pub struct AssistantMessage {
     /// `ui::extract`. The UI renders these specs, never the model's JSON.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocks: Vec<UiBlock>,
+    /// The model's thinking for this step (X.25, PLAN.md T73), as the
+    /// provider sent it, so a later request can send it back the way that
+    /// provider needs (`llm::to_genai`). Scrubbed like the text: a block
+    /// the scrubber would change is kept scrubbed and never sent back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<Thinking>,
+}
+
+/// One step's thinking (`assistant_message.thinking`, X.25, T73).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Thinking {
+    /// The model that wrote it, as the loop named it (`prefix::id`):
+    /// only a request to that same model is sent it back.
+    pub model: String,
+    /// In the order the provider sent them.
+    pub blocks: Vec<ThinkingBlock>,
+    /// Signed blocks only: hex SHA-256 of everything the request that
+    /// produced them sent (tools and messages as sent, cache markers left
+    /// out). A later request sends them back only while everything before
+    /// them is still the same (Anthropic's prefix check: a block whose
+    /// prefix changed is refused, or read against content that changed).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub prefix: String,
+    /// Never sent back: the scrubber changed a block, the blocks were
+    /// larger than [`Thinking::MAX_BYTES`], the provider put a block after
+    /// the step's text or tool calls (an order genai cannot send), or the
+    /// provider refused this model's thinking earlier in the chat.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unsent: bool,
+}
+
+impl Thinking {
+    /// The most bytes a step's blocks keep (text, signatures, redacted
+    /// data). Over it, the text is cut to [`Thinking::SHOWN_BYTES`] for
+    /// the person, the opaque parts dropped, and nothing is sent back: an
+    /// event must stay under the store's 4 MiB.
+    pub const MAX_BYTES: usize = 2 << 20;
+    /// What an oversized step keeps of its text, for the person.
+    pub const SHOWN_BYTES: usize = 64 << 10;
+
+    /// The blocks' bytes, as [`Thinking::MAX_BYTES`] counts them.
+    pub fn bytes(&self) -> usize {
+        self.blocks.iter().map(ThinkingBlock::bytes).sum()
+    }
+
+    /// What the person is shown: the readable text, blocks joined by an
+    /// empty line, and how many blocks were redacted.
+    pub fn shown(&self) -> (String, u32) {
+        let mut text: Vec<&str> = Vec::new();
+        let mut redacted = 0u32;
+        for b in &self.blocks {
+            match b {
+                ThinkingBlock::Signed { text: t, .. } | ThinkingBlock::Text { text: t } => {
+                    // `char::is_whitespace` is Unicode White_Space, as
+                    // the TypeScript fold's `\p{White_Space}`.
+                    if t.chars().any(|c| !c.is_whitespace()) {
+                        text.push(t);
+                    }
+                }
+                ThinkingBlock::Redacted { .. } => redacted += 1,
+            }
+        }
+        (text.join("\n\n"), redacted)
+    }
+}
+
+/// One block of a step's thinking.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ThinkingBlock {
+    /// Anthropic `thinking`: the summary text (empty where the model
+    /// omits it) and its `signature`, the provider's encrypted copy of the
+    /// full reasoning: opaque, never read, sent back unchanged.
+    Signed { text: String, signature: String },
+    /// Anthropic `redacted_thinking`: opaque `data`, no readable text.
+    Redacted { data: String },
+    /// Plain reasoning text (OpenAI-compatible `reasoning_content`).
+    Text { text: String },
+}
+
+impl ThinkingBlock {
+    pub fn bytes(&self) -> usize {
+        match self {
+            ThinkingBlock::Signed { text, signature } => text.len() + signature.len(),
+            ThinkingBlock::Redacted { data } => data.len(),
+            ThinkingBlock::Text { text } => text.len(),
+        }
+    }
+}
+
+/// The provider refused a request that sent back thinking, and the same
+/// request without any was answered (X.25, T73): the thinking of `model`
+/// before this point in the log is never sent again, and every later step
+/// of that model in this chat records `unsent`. Recorded only by the
+/// node's loop, before the answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ThinkingWithheld {
+    pub turn_id: String,
+    /// The model whose thinking was refused (`prefix::id`).
+    pub model: String,
+    /// The provider's HTTP status.
+    pub status: u16,
+    /// The provider's own words, one line, scrubbed, cut to
+    /// [`ImagesWithheld::MAX_REASON`] characters. For the person.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
 }
 
 /// One `ui:<type>` fence of an assistant message. `ordinal` (its index
@@ -2093,6 +2201,7 @@ mod tests {
                     model: None,
                 }),
                 blocks: vec![],
+                thinking: None,
             }),
             EventKind::AgentChanged(AgentChanged { agent }),
             EventKind::ApprovalModeChanged(ApprovalModeChanged {
@@ -2200,6 +2309,7 @@ mod tests {
                 author: None,
                 variant: None,
                 blocks,
+                thinking: None,
             })
         };
         let (_, payload) = msg(vec![]).into_parts();

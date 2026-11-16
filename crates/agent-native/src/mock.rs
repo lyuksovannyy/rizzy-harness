@@ -267,6 +267,7 @@ impl Provider for Mock {
                 tool_calls: vec![],
                 usage,
                 stop: Default::default(),
+                thinking: None,
             });
         }
         if let Some(ChatMsg::System(p)) = req.messages.first()
@@ -293,6 +294,7 @@ impl Provider for Mock {
                 tool_calls: vec![],
                 usage,
                 stop: Default::default(),
+                thinking: None,
             });
         }
         let raw_user = req
@@ -317,6 +319,7 @@ impl Provider for Mock {
                 tool_calls: vec![],
                 usage,
                 stop: Default::default(),
+                thinking: None,
             });
         }
         // A callback turn's opening (the harness's frame, then the ended
@@ -332,6 +335,7 @@ impl Provider for Mock {
                 tool_calls: vec![],
                 usage,
                 stop: Default::default(),
+                thinking: None,
             });
         }
         // A person's Retry (X.21): the harness's line after the failed
@@ -352,6 +356,7 @@ impl Provider for Mock {
                 tool_calls: vec![],
                 usage,
                 stop: Default::default(),
+                thinking: None,
             });
         }
         // Per-turn context comes first in the user message, quoted under
@@ -400,6 +405,7 @@ impl Provider for Mock {
                 tool_calls,
                 usage,
                 stop: Default::default(),
+                thinking: None,
             });
         }
         if let Some(script) = user.strip_prefix("script:") {
@@ -424,6 +430,7 @@ impl Provider for Mock {
                     }],
                     usage,
                     stop: Default::default(),
+                    thinking: None,
                 });
             }
         }
@@ -454,6 +461,7 @@ impl Provider for Mock {
                 tool_calls: vec![],
                 usage,
                 stop: Default::default(),
+                thinking: None,
             });
         }
         let call = |tool: &str, input| Completion {
@@ -465,6 +473,7 @@ impl Provider for Mock {
             }],
             usage: usage.clone(),
             stop: Default::default(),
+            thinking: None,
         };
         if let Some(cmd) = user.strip_prefix("run:") {
             return Ok(call("bash", json!({"command": cmd.trim()})));
@@ -498,6 +507,7 @@ impl Provider for Mock {
                 tool_calls: calls,
                 usage,
                 stop: Default::default(),
+                thinking: None,
             });
         }
         if user.trim().starts_with("memory?") {
@@ -531,6 +541,7 @@ impl Provider for Mock {
                 tool_calls: vec![],
                 usage,
                 stop: Default::default(),
+                thinking: None,
             });
         }
         if let Some(t) = user.strip_prefix("remember project:") {
@@ -565,6 +576,7 @@ impl Provider for Mock {
                 tool_calls: vec![],
                 usage,
                 stop: Default::default(),
+                thinking: None,
             });
         }
         if user.strip_prefix("rich:").map(str::trim) == Some("demo") {
@@ -575,6 +587,7 @@ impl Provider for Mock {
                 tool_calls: vec![],
                 usage,
                 stop: Default::default(),
+                thinking: None,
             });
         }
         // `@writer ui: choices` asks as Writer: the master leaves the mention
@@ -594,6 +607,7 @@ impl Provider for Mock {
                 tool_calls: vec![],
                 usage,
                 stop: Default::default(),
+                thinking: None,
             });
         }
         // `mock-*` models (parallel answers in tests) tag their replies.
@@ -611,6 +625,7 @@ impl Provider for Mock {
             tool_calls: vec![],
             usage,
             stop: Default::default(),
+            thinking: None,
         })
     }
 }

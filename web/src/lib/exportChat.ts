@@ -118,6 +118,9 @@ export function chatMarkdown(view: SessionView, title: string, opts: ExportOptio
       case "shortened":
         out.push("_The context sent to the model was shortened here._", "");
         break;
+      // The model's thinking stays out of an export, as out of search.
+      case "thinking":
+        break;
       case "error":
         out.push(`> Error: ${oneLine(it.message, 500)}`, "");
         break;

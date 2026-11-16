@@ -725,6 +725,16 @@ export default function Conversation(props: {
                         })}
                       </div>
                     );
+                  case "thinking":
+                    // The model's thinking for one step (X.25), collapsed;
+                    // the model's text: shown as text.
+                    return (
+                      <details key={i} className="divider summary" data-testid="thinking">
+                        <summary>{t("conv.thinking")}</summary>
+                        {it.text && <p>{it.text}</p>}
+                        {!!it.redacted && <p>{t("conv.thinkingRedacted", { n: String(it.redacted) })}</p>}
+                      </details>
+                    );
                   case "shortened": {
                     const what = [
                       it.cleared ? t("conv.shortCleared") : "",

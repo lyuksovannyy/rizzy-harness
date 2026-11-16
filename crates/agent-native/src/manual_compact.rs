@@ -274,6 +274,7 @@ mod tests {
                 author: None,
                 variant: None,
                 blocks: vec![],
+                thinking: None,
             }),
             EventKind::TurnEnded(TurnEnded {
                 turn_id: id.into(),

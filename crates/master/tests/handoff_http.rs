@@ -235,6 +235,7 @@ fn work(id: &str, ask: &str) -> Vec<EventKind> {
             text: "Done, tests pass.".into(),
             tool_calls: vec![],
             blocks: vec![],
+            thinking: None,
         }),
         EventKind::TurnEnded(TurnEnded {
             turn_id: id.into(),

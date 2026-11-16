@@ -635,9 +635,29 @@ global default or their own default.
 
 `effort = "low" | "medium" | "high" | "max"` on a provider is its default
 reasoning effort, only sent to its models with `effort = true`. Anthropic
-models are always listed with `effort = false`: extended thinking combined
-with tool calls is not supported until risk R8 in `PLAN.md` is fixed, so do
-not set it by hand either.
+models are still always listed with `effort = false` (risk R8 in `PLAN.md`):
+the harness now keeps and sends back Claude's thinking, but the request that
+turns it on with an effort has not been checked against the real API yet,
+so do not set it by hand either. Models that think on their own (newer
+Claude models, DeepSeek) do so without it.
+
+**Thinking.** When a model thinks before it answers, the chat shows one
+collapsed "Thinking" row before that step; click it to read what the
+provider sent (Claude sends a summary, or nothing, depending on the model;
+a part the provider redacted shows as one line saying so). It is the
+model's text, shown as text. The harness keeps each step's thinking in the
+chat's log and sends it back to the same model on the next requests, the
+way that provider needs it: Claude's signed blocks exactly as they came
+(needed to go on after a tool call), DeepSeek's `reasoning_content`.
+Thinking is never sent to another model, another provider, a summary or a
+hand-off note, and is not in search, the Markdown export or `recall`.
+Thinking the secret scrubber had to change, or more than 2 MiB of it in one
+step, is kept (scrubbed, cut) for you to read and never sent back. If a
+provider refuses a request because of the thinking sent back, the harness
+sends it once more without, and from then on sends that model's thinking
+in that chat no more; the chat goes on. Thinking counts toward the
+context-window meter and is dropped with its step when older steps are
+summarised.
 
 Local Ollama: preset `ollama`, `base_url = "http://localhost:11434/v1"`, no key.
 

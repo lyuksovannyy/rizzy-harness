@@ -84,6 +84,7 @@ mod tests {
                     tool: "read".into(),
                     input: serde_json::json!({"path": format!("f{i}.rs")}),
                 }],
+                thinking: None,
             });
             v.push(ChatMsg::Tool {
                 call_id: format!("c{i}"),

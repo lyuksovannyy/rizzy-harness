@@ -17,6 +17,10 @@ pub enum ChatMsg {
     Assistant {
         text: String,
         tool_calls: Vec<ToolCallRef>,
+        /// The step's thinking (X.25), as recorded: sent back only to the
+        /// model that wrote it, under that provider's rule
+        /// (`llm::to_genai`). `None` once it may not be sent again.
+        thinking: Option<std::sync::Arc<harness_core::event::Thinking>>,
     },
     Tool {
         call_id: String,
@@ -596,6 +600,9 @@ pub struct Completion {
     pub usage: Option<Usage>,
     /// Why the model stopped.
     pub stop: StopReason,
+    /// The step's thinking, as the provider sent it (X.25). Its `model`
+    /// is the request's (the router stamps the prefixed id).
+    pub thinking: Option<harness_core::event::Thinking>,
 }
 
 /// Why a model stopped writing, normalised from each provider's own value
@@ -872,6 +879,45 @@ pub trait Provider: Send + Sync {
         req: &ChatRequest,
         deltas: mpsc::UnboundedSender<String>,
     ) -> Result<Completion, ProviderError>;
+
+    /// Whether `req`, as this provider would send it, sends back any of
+    /// the model's earlier thinking (X.25): the loop's one resend without
+    /// it after a refusal (T73) is only worth a request when it does.
+    fn replays_thinking(&self, _req: &ChatRequest) -> bool {
+        false
+    }
+}
+
+/// Take every step's thinking of `model` out of `msgs` (`None`: of every
+/// model): the provider refused a request that sent it back
+/// (`thinking_withheld`, T73). The loop and the rebuild both call it at
+/// that point, so the requests after it are the same.
+pub fn withhold_thinking(msgs: &mut [ChatMsg], model: Option<&str>) {
+    for m in msgs {
+        if let ChatMsg::Assistant { thinking, .. } = m
+            && thinking
+                .as_ref()
+                .is_some_and(|t| model.is_none_or(|w| t.model == w))
+        {
+            *thinking = None;
+        }
+    }
+}
+
+/// What a step's thinking counts for in [`estimate_tokens`], in
+/// characters: its text, or what its signature encrypts (the full
+/// reasoning, base64: about 3 bytes per 4 characters) when that is more,
+/// since a provider bills the full reasoning it reads back.
+fn thinking_chars(t: &harness_core::event::Thinking) -> usize {
+    use harness_core::event::ThinkingBlock;
+    t.blocks
+        .iter()
+        .map(|b| match b {
+            ThinkingBlock::Signed { text, signature } => text.len().max(signature.len() * 3 / 4),
+            ThinkingBlock::Redacted { data } => data.len() * 3 / 4,
+            ThinkingBlock::Text { text } => text.len(),
+        })
+        .sum()
 }
 
 /// What one image counts for in `estimate_tokens`, in characters (about a
@@ -892,12 +938,17 @@ pub fn estimate_tokens(messages: &[ChatMsg]) -> u64 {
             | ChatMsg::Summary(t)
             | ChatMsg::StepContext(t) => t.len(),
             ChatMsg::UserImages { text, images } => text.len() + images.len() * IMAGE_CHARS,
-            ChatMsg::Assistant { text, tool_calls } => {
+            ChatMsg::Assistant {
+                text,
+                tool_calls,
+                thinking,
+            } => {
                 text.len()
                     + tool_calls
                         .iter()
                         .map(|c| c.input.to_string().len() + c.tool.len())
                         .sum::<usize>()
+                    + thinking.as_deref().map_or(0, thinking_chars)
             }
             ChatMsg::Tool { content, .. } => content.len(),
             ChatMsg::ToolImage { image, state, .. } => {

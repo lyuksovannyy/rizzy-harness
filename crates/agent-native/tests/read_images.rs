@@ -471,6 +471,7 @@ fn a_summary_is_told_and_clearing_drops_the_image() {
             text: String::new(),
             tool_calls: vec![call(i)],
             blocks: vec![],
+            thinking: None,
         }));
         host.push(EventKind::ToolCallFinished(ToolCallFinished {
             call_id: format!("c{i}"),

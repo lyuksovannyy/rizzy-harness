@@ -3340,3 +3340,24 @@ impl Store {
         )? > 0)
     }
 }
+
+#[cfg(test)]
+mod index_tests {
+    /// X.25: a step's thinking is never in the search index, only what
+    /// the step said.
+    #[test]
+    fn thinking_is_not_indexed() {
+        let p = serde_json::json!({
+            "turn_id": "t", "message_id": "m", "text": "visible answer",
+            "thinking": {"model": "a::b", "blocks": [
+                {"type": "text", "text": "hidden reasoning"},
+                {"type": "signed", "text": "hidden summary", "signature": "S"}
+            ]}
+        });
+        let (col, text) = super::index_text("assistant_message", &p).unwrap();
+        assert_eq!((col, text.as_str()), ("body", "visible answer"));
+        let only = serde_json::json!({"turn_id": "t", "message_id": "m", "text": "",
+            "thinking": {"model": "a::b", "blocks": [{"type": "text", "text": "x"}]}});
+        assert!(super::index_text("assistant_message", &only).is_none());
+    }
+}

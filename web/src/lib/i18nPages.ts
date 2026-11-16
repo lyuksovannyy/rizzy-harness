@@ -32,6 +32,8 @@ export const pages = {
   "conv.handoffFixed": "Hand-off note: the next chat gets the facts from this chat's log only ({why})",
   "conv.shortened": "Context shortened for the model ({what}): about {before} to {after} tokens. Everything stays shown here.",
   "conv.shortCleared": "older tool results cleared",
+  "conv.thinking": "Thinking",
+  "conv.thinkingRedacted": "{n} part(s) redacted by the provider: not readable.",
   "conv.shortSteps": "{n} steps summarised",
   "conv.tokens": "tokens",
   "cost.about": "≈ {money}",

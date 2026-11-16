@@ -55,6 +55,7 @@ impl harness_agent_native::Provider for Spy {
                 }],
                 usage: None,
                 stop: Default::default(),
+                thinking: None,
             });
         }
         self.0.complete(req, deltas).await

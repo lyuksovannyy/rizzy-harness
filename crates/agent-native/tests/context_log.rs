@@ -239,7 +239,9 @@ fn bytes(req: &ChatRequest) -> String {
             ChatMsg::User(t) | ChatMsg::Opening(t) | ChatMsg::StepContext(t) => format!("user:{t}"),
             ChatMsg::UserImages { text, .. } => format!("user:{text}"),
             ChatMsg::Tool { call_id, content } => format!("tool {call_id}:{content}"),
-            ChatMsg::Assistant { text, tool_calls } => format!("assistant:{text}{tool_calls:?}"),
+            ChatMsg::Assistant {
+                text, tool_calls, ..
+            } => format!("assistant:{text}{tool_calls:?}"),
             ChatMsg::Note(t) | ChatMsg::CallNote(t) | ChatMsg::Summary(t) => format!("note:{t}"),
             ChatMsg::ToolImage { call_id, image, .. } => {
                 format!("image {call_id}:{}", image.sha256)
@@ -1261,6 +1263,7 @@ fn said(turn: &str, author: &str, text: &str) -> EventKind {
         author: Some(author.into()),
         variant: None,
         blocks: vec![],
+        thinking: None,
     })
 }
 
