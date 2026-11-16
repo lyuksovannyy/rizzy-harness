@@ -211,25 +211,16 @@ export function Composer(props: {
     }
     setErr(null);
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const r = new MediaRecorder(stream);
-      const chunks: Blob[] = [];
-      r.ondataavailable = (e) => chunks.push(e.data);
-      r.onstop = async () => {
-        stream.getTracks().forEach((t) => t.stop());
-        setRec("transcribing");
-        try {
-          const said = await api.transcribe(new Blob(chunks, { type: r.mimeType || "audio/webm" }));
+      const { record } = await import("../lib/voice");
+      recorder.current = await record({
+        transcribing: () => setRec("transcribing"),
+        done: (said, error) => {
           if (said) setText((t) => (t.trim() ? `${t.trimEnd()} ${said}` : said));
-          ta.current?.focus();
-        } catch (x) {
-          setErr(x instanceof Error ? x.message : String(x));
-        } finally {
+          if (error) setErr(error);
+          else ta.current?.focus();
           setRec("idle");
-        }
-      };
-      recorder.current = r;
-      r.start();
+        },
+      });
       setRec("recording");
     } catch (x) {
       setErr(`microphone: ${x instanceof Error ? x.message : String(x)}`);
