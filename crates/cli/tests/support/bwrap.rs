@@ -13,6 +13,26 @@ pub fn required() -> bool {
     std::env::var_os("HARNESS_REQUIRE_BWRAP").is_some_and(|v| v == "1")
 }
 
+/// Whether this machine's bubblewrap can bind the way `binds` asks: binds
+/// by descriptor need 0.10.0 or newer (`harness_tools::contain::binds_of`).
+/// A test that forces [`harness_tools::contain::Binds::Fd`] skips, with a
+/// printed reason, on an older one, even with `HARNESS_REQUIRE_BWRAP=1`:
+/// the node never asks that bubblewrap for them (it binds by path, which
+/// the same tests check with `Binds::Path`).
+#[allow(dead_code)]
+pub fn can_bind(bwrap: &Path, binds: harness_tools::contain::Binds) -> bool {
+    use harness_tools::contain::{Binds, binds_of};
+    let (have, version) = binds_of(bwrap);
+    if binds == Binds::Fd && have != Binds::Fd {
+        eprintln!(
+            "SKIPPED (binds by descriptor): {} is {version:?}; --bind-fd needs bubblewrap 0.10.0",
+            bwrap.display()
+        );
+        return false;
+    }
+    true
+}
+
 /// `sb` with the full containment, as the node sets it up, or `sb` back (and
 /// a printed reason) where bubblewrap cannot contain a command here.
 /// (Both sides carry the sandbox back; a test helper, called once.)

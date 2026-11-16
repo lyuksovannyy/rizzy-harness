@@ -118,6 +118,9 @@ impl Fixture {
         self.sandbox()?;
         let sb = self.plain(&Settings::default());
         let bwrap = harness_tools::contain::find_bwrap().unwrap();
+        if !bwrap::can_bind(&bwrap, binds) {
+            return None;
+        }
         let c = Contain::new(bwrap, form).with_binds(binds);
         if let Err(e) = sb.probe_containment(&c, &self.data.join("sandbox-tmp/probe-as")) {
             assert!(

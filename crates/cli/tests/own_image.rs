@@ -101,6 +101,9 @@ impl Fixture {
                 return None;
             }
         };
+        if !bwrap::can_bind(&bw, binds) {
+            return None;
+        }
         // With the network off the command gets a network namespace of its
         // own (the default of `Contain`, T.8b).
         let c = Contain::new(bw, form).with_binds(binds);
@@ -242,7 +245,7 @@ async fn nothing_of_the_image_reaches_the_command() {
         let f = fixture(false);
         let exe = f.binary(&f.root.join("bin/rizzy-harness"));
         let Some(sb) = f.contained(&exe, Form::Full, binds, Network::On) else {
-            return;
+            continue;
         };
         let ctx = f.ctx(Arc::new(sb), "s1");
         let m = std::fs::metadata(&exe).unwrap();
@@ -568,7 +571,7 @@ async fn a_binary_the_node_cannot_read_runs_only_as_its_image() {
         let exe = f.binary(&f.root.join("bin/rizzy-harness"));
         std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o311)).unwrap();
         let Some(sb) = f.contained(&exe, Form::Full, binds, Network::On) else {
-            return;
+            continue;
         };
         let ctx = f.ctx(Arc::new(sb), "s1");
         let r = run(&ctx, "echo first").await;
@@ -708,7 +711,11 @@ async fn a_node_keeps_its_checkpoints_after_a_rebuild_and_a_deletion() {
 async fn at_mode_000_the_messages_name_the_nodes_binary() {
     let f = fixture(false);
     let exe = f.binary(&f.root.join("bin/rizzy-harness"));
-    let Some(sb) = f.contained(&exe, Form::Full, Binds::Fd, Network::On) else {
+    // The binds this bubblewrap has (by descriptor from 0.10.0): the
+    // messages do not depend on them.
+    let binds = harness_tools::contain::find_bwrap()
+        .map_or(Binds::Path, |b| harness_tools::contain::binds_of(&b).0);
+    let Some(sb) = f.contained(&exe, Form::Full, binds, Network::On) else {
         return;
     };
     let sb = Arc::new(sb);
