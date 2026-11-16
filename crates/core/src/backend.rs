@@ -431,9 +431,10 @@ pub struct TurnExtra {
     /// only by the node.
     pub changes_since: Option<std::time::SystemTime>,
     /// A sub-agent's own token cap (input and output together, X.24): a
-    /// background sub-agent's turn gets what remained of its parent turn's
-    /// sub-agent budget when it started. Checked before each request, like
-    /// the step cap: the request at or past it is the last (`finish`). Set
+    /// background sub-agent's turn gets its share of its parent turn's
+    /// sub-agent budget, reserved from it when it started. Checked before
+    /// each request, like the step cap: the request at or past it is the
+    /// last (`finish` alone), so it can overshoot by that one request. Set
     /// only by the node.
     pub max_tokens: Option<u64>,
 }

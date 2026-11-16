@@ -690,7 +690,16 @@ impl Session {
         for e in ends {
             // A background sub-agent's end is merged and built here (X.24).
             let ev = self.end_event(&e, false).await;
-            match self.append(EventKind::BackgroundEnded(ev.clone())).await {
+            #[cfg(feature = "testing")]
+            let refused = crate::testing::take_fail_end(self.id);
+            #[cfg(not(feature = "testing"))]
+            let refused = false;
+            let appended = if refused {
+                Err(StoreError::Corrupt("refused by a test".into()))
+            } else {
+                self.append(EventKind::BackgroundEnded(ev.clone())).await
+            };
+            match appended {
                 Ok(_) => {
                     bg.recorded();
                     self.bg_failed.store(false, Ordering::SeqCst);

@@ -56,7 +56,12 @@ function tokensOf(t: ModelTokens): ModelTokens {
   return c;
 }
 
+const isObj = (x: unknown): boolean => !!x && typeof x == "object" && !Array.isArray(x);
+const str = (x: unknown) => (typeof x == "string" ? x : "");
+
 function addUsage(to: Usage, u: Usage) {
+  // A node's payload is not type-checked on the way (review F7).
+  if (!isObj(u)) return;
   to.input_tokens += u.input_tokens;
   to.output_tokens += u.output_tokens;
   if (u.cache_read_tokens) to.cache_read_tokens = (to.cache_read_tokens ?? 0) + u.cache_read_tokens;
@@ -64,6 +69,7 @@ function addUsage(to: Usage, u: Usage) {
   const from = u.by_model ?? {};
   for (const model of sortedKeys(from)) {
     const t = own(from, model)!;
+    if (!isObj(t)) continue;
     const by = (to.by_model ??= {});
     const mine = own(by, model);
     if (mine) {
@@ -464,14 +470,16 @@ export function apply(v: SessionView, e: RawEvent): void {
     case "background_started": {
       const b: BackgroundState = { call_id: p.call_id, ends_by_ms: p.ends_by_ms, timeout_s: p.timeout_s, ended: false };
       // A background sub-agent (X.24), not a command.
-      if (p.child) b.child = p.child;
+      // Only as an object, with strings (review F7: a node's payload is untyped).
+      const c = p.child;
+      if (isObj(c)) b.child = { session: str(c.session), agent_id: str(c.agent_id) };
       (v.background ??= {})[p.bg_id] = b;
       break;
     }
     case "background_ended": {
       const b = v.background?.[p.bg_id];
       if (b) b.ended = true;
-      const c = p.child;
+      const c = isObj(p.child) ? p.child : null;
       // Its cost is the chat's, as a foreground sub-agent's is its turn's.
       if (c?.usage) addUsage(v.usage, c.usage);
       const it: Extract<Item, { type: "background_ended" }> = {
@@ -480,9 +488,9 @@ export function apply(v: SessionView, e: RawEvent): void {
         reason: p.reason,
         exit_code: p.exit_code ?? null,
         ran_ms: p.ran_ms,
-        tail: (c ? c.result : p.tail) ?? "",
+        tail: c ? str(c.result) : (p.tail ?? ""),
       };
-      if (c) it.agent = c.agent_id;
+      if (c) it.agent = str(c.agent_id);
       v.items.push(it);
       break;
     }

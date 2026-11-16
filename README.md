@@ -3109,16 +3109,23 @@ delivered**, with the same three-way merge as a foreground one: what you or
 the agent changed meanwhile stays, and a change that meets one of theirs on
 the same lines is not applied; the result then says so and carries its diff,
 and the sub-agent's snapshot stays in the node's checkpoint store. The side
-panel lists it with the turn's sub-agents, running until it ends, with
-**Stop**; the agent lists running ones with `bash_output` and stops one with
+panel lists it with the turn's sub-agents, under a line saying it keeps
+running when the turn stops, running until it ends, with **Stop** (and
+**Stop all** with two or more in the background; a note instead while the
+node is away); the agent lists running ones with `bash_output` and stops one with
 `bash_stop { id }`. Limits are node.toml's: `background_agents_per_chat` (4)
 running at once per chat (a fifth start is refused, naming the running
 ones; 0 turns them off), `background_agent_timeout_s` (30 min) of wall clock
-each, the node's step limit, and a token cap of what the turn's sub-agent
-budget had left when it started; they count against the turn's sub-agents.
+each, the node's step limit, and a token cap: its share of the turn's
+sub-agent budget, taken from that budget when it starts (each background
+start gets an equal share of what is left over the turn's free sub-agent
+places, so the caps a turn hands out never add up to more than the budget;
+one whose share would be 0 is refused). A child can pass its share by its last request, as a step can
+pass the step limit. They count against the turn's sub-agents.
 A sub-agent cannot start one, nor can a callback turn or a routine's chat
 (nobody would read the result), nor a `host` chat. A card it waits on shows
-in its chat ("Open its chat") and on its side panel row, and waits at most
+in its chat ("Open its chat"), and its side panel row's activity line says
+"waiting for an approval"; it waits at most
 until its time limit; it is never answered because nobody watches. **The
 chat's Stop does not stop it**, as with background commands: its own Stop,
 Stop all, `bash_stop`, the chat's deletion (its folder goes, unmerged), its

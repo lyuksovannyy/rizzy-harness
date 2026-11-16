@@ -1093,9 +1093,15 @@ every reason, `stopped_by_agent` included: its result and merge are news after `
 **Bounds, the node's only.** Per chat `background_agents_per_chat` running (4; the next start is
 refused naming the running ids and the key; nothing is stopped); per child the node's step cap,
 `background_agent_timeout_s` of wall clock (1,800 s by default, 60 to 3,600: the master's running
-window assumes at most an hour, as for commands), and a token cap of what the turn's sub-agent
-budget had left when it started (`TurnExtra::max_tokens`, checked before each request like the
-step cap: the request at or past it offers `finish` alone). It counts as one of the turn's
+window assumes at most an hour, as for commands), and a token cap: its share of the turn's sub-agent budget, reserved from it when it starts (review
+F3). Each background start takes an equal share of what the budget has left over the turn's
+sub-agent places still free (what is left ÷ the free places of `max_subagents`, its own included),
+so the caps a turn grants never add up to more than
+its budget (`max_subagent_tokens`, 200,000 by default), and a start whose share would be 0 is
+refused with the reason; a share not used is not given back, and the start text names it. The cap
+is `TurnExtra::max_tokens`, checked before each request like the step cap: the request at or past
+it offers `finish` alone, so a child can overshoot its share by that one request (its context and
+its answer, as for the step cap). It counts as one of the turn's
 `max_subagents`. Depth one: `bound_delegation` clears the switch below the top, and a sub-agent's
 turn, a callback turn and a routine's chat (`no_callbacks`: nobody would read the result) are
 refused with the reason; a `host` chat has no background table and is refused too. The agent's own
@@ -1107,12 +1113,13 @@ master can turn it off for an agent, never raise the node's count.
 **Cost of a prompt-injected lead.** Per person's message: at most `max_subagents` children (a
 callback turn cannot delegate, so no chain), each bounded by steps, tokens and wall clock, at most
 `background_agents_per_chat` at once, and their ends spend the same `callback_turns` budget as
-commands. With the defaults: 4 children of at most 200,000 tokens (less what the turn used) and
-30 minutes each, then at most 3 callback turns of 20 steps. Worse than a foreground child only in
+commands. With the defaults: 4 children whose token caps add up to at most the turn's 200,000 (each
+may pass its share by one request) and 30 minutes each, then at most 3 callback turns of 20 steps. Worse than a foreground child only in
 that the person may have left; the side panel lists them with Stop.
 
 **Approvals.** A background child asks as a foreground child does: its card is in its own chat
-("Open its chat" on its side panel row, which says "waiting for an approval"), answered by the
+("Open its chat" on its side panel row, whose activity line, which follows the child's own chat,
+says "waiting for an approval"), answered by the
 chat's owner only. Nothing answers it because nobody watches; the card waits at most until the
 child's wall clock stops it (then it is denied as cancelled). `auto` runs it without cards, as it
 runs a foreground child; plan mode starts only readers, made in plan mode for life (T67/T70). The
@@ -1139,8 +1146,16 @@ After a restart its own turn is closed `interrupted` (its own log) and the note 
 runs, or whose end is not recorded yet, is refused (`undelivered_child`): its folder is not touched
 before its merge.
 
+**Undo.** A merge delivered at a step boundary of a running turn is part of that turn: its
+checkpoint holds it, and Undo of the turn undoes it. A merge delivered between turns lands in no
+turn's checkpoint (review): Undo never reverts it; the person reverts those files by hand, or with
+git.
+
 **Not done.** A "wait" tool (ending the turn and being called back is the wait; Codex's
 `wait_agent` is for a lead that cannot end its turn); steering a running child (Codex
 `send_input` while it runs, Hermes `steer`); a node-wide count of background children; moving a
 running foreground child into the background (OpenCode, Claude Code's Ctrl+B); deleting a
-sub-agent's own chat with its parent's (foreground children keep theirs too).
+sub-agent's own chat with its parent's (foreground children keep theirs too); a node-wide count of
+background children, and any line about them in `doctor`; a crash between a writer's merge and the
+append of its end (the restart's note then says nothing of it was merged while the merge is in the
+folder; the foreground path has the same window).

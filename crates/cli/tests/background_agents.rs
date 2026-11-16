@@ -70,7 +70,9 @@ fn lead(background: bool) -> Value {
                {"agent_id": "look", "name": "Look", "system_prompt": "You are @look.",
                 "tools": ["read", "bash"], "prompt_hash": "h2"},
                {"agent_id": "dev", "name": "Dev", "system_prompt": "You are @dev.",
-                "tools": ["read", "write"], "prompt_hash": "h3"}]})
+                "tools": ["read", "write"], "prompt_hash": "h3"},
+               {"agent_id": "dev2", "name": "Dev2", "system_prompt": "You are @dev2.",
+                "tools": ["read", "write", "bash"], "prompt_hash": "h4"}]})
 }
 
 fn bg_delegate(agent: &str, task: &str) -> Value {
@@ -178,7 +180,11 @@ async fn node_with(edit: impl FnOnce(&mut harness_node::NodePolicy)) -> Option<N
         ..Default::default()
     };
     edit(&mut policy);
-    policy.validate().unwrap();
+    // A test's own short wall clock (below node.toml's 60 s floor, which
+    // `validate` keeps for every real configuration).
+    if policy.limits.background_agent_timeout_s >= 60 {
+        policy.validate().unwrap();
+    }
     let requests: Arc<std::sync::Mutex<Vec<harness_agent_native::ChatRequest>>> = Arc::default();
     let backend = NativeBackend::new(
         Arc::new(Spy(
@@ -435,36 +441,33 @@ impl Node {
         self.git(&["commit", "-qm", "init"]);
     }
 
-    /// Sub-agents' own folders the node still holds.
+    /// Sub-agents' own folders the node still holds:
+    /// `<data>/sessions/<child>/files` (review F5: this looked in
+    /// `checkpoints` before and could never find one).
     fn child_folders(&self) -> Vec<PathBuf> {
-        let mut out = Vec::new();
-        for e in walk(&self.data.join("checkpoints")) {
-            if e.ends_with("files")
-                && e.parent()
-                    .is_some_and(|p| p.parent().is_some_and(|q| q.ends_with("sessions")))
-            {
-                out.push(e);
-            }
-        }
-        out
+        std::fs::read_dir(self.data.join("sessions"))
+            .map(|rd| {
+                rd.flatten()
+                    .map(|e| e.path().join("files"))
+                    .filter(|p| p.exists())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
-}
 
-fn walk(dir: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return out;
-    };
-    for e in rd.flatten() {
-        let p = e.path();
-        if e.file_type().is_ok_and(|t| t.is_dir()) {
-            out.push(p.clone());
-            if !p.ends_with("files") && !p.extension().is_some_and(|x| x == "git") {
-                out.extend(walk(&p));
-            }
+    /// Until no sub-agent's own folder is left (their removal follows the
+    /// end), at most 30 s.
+    async fn no_child_folders(&self) {
+        let by = Instant::now() + Duration::from_secs(30);
+        while !self.child_folders().is_empty() {
+            assert!(
+                Instant::now() < by,
+                "left behind: {:?}",
+                self.child_folders()
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
-    out
 }
 
 fn texts(m: &[harness_agent_native::ChatMsg]) -> Vec<String> {
@@ -747,6 +750,7 @@ async fn without_the_switch_or_the_nodes_yes_nothing_is_offered_and_a_forged_sta
 #[tokio::test(flavor = "multi_thread")]
 async fn stops_and_a_delete_end_them_and_leave_nothing_running() {
     let Some(mut n) = node().await else { return };
+    n.repo();
     let sid = n.create("auto").await;
     n.prompt(sid, &[bg_delegate("look", "run: sleep 977301")]);
     n.turns_ended(sid, 1).await;
@@ -788,14 +792,24 @@ async fn stops_and_a_delete_end_them_and_leave_nothing_running() {
     assert_eq!(end.reason, BackgroundReason::StoppedByAgent);
     assert!(end.model_note().unwrap().contains("was stopped by you"));
     gone("sleep 977302", "bash_stop").await;
-    // The chat's deletion.
-    n.prompt(sid, &[bg_delegate("look", "run: sleep 977303")]);
+    // The chat's deletion, with a writer that has its own folder.
+    n.prompt(sid, &[bg_delegate("dev2", "run: sleep 977303")]);
     n.turns_ended(sid, 3).await;
     appears("sleep 977303").await;
+    let child = n.child(sid, 2);
+    assert_eq!(
+        n.child_folders(),
+        vec![
+            n.data
+                .join("sessions")
+                .join(child.to_string())
+                .join("files")
+        ]
+    );
     n.send(json!({"type": "session.delete", "req_id": "d1", "session_id": sid}));
     gone("sleep 977303", "the chat's deletion").await;
     n.drain().await;
-    assert!(n.child_folders().is_empty(), "{:?}", n.child_folders());
+    n.no_child_folders().await;
 }
 
 /// A child that changes files works in its own copy and its changes are
@@ -860,7 +874,7 @@ async fn a_writers_changes_merge_back_at_delivery_and_a_conflict_is_reported() {
         std::fs::read_to_string(n.ws.join("a.txt")).unwrap(),
         "alpha-lead\n"
     );
-    assert!(n.child_folders().is_empty(), "{:?}", n.child_folders());
+    n.no_child_folders().await;
 }
 
 /// Plan mode: a child that can write is not started in the background
@@ -921,6 +935,248 @@ async fn a_follow_up_while_it_runs_is_refused_and_after_its_end_reaches_it() {
         out[2].starts_with(&format!("session: {child}\nSub-agent @look finished: done")),
         "{out:?}"
     );
+}
+
+/// The token caps a turn grants its background sub-agents (review F3, the
+/// reviewer's R4 turned around): each start takes an equal share of what the
+/// turn's sub-agent budget had left when its step began, reserved at once,
+/// so the caps granted in a turn never add up to more than the budget; a
+/// start with nothing left is refused with the reason, and no child is made.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_caps_granted_in_a_turn_never_exceed_its_token_budget() {
+    let Some(mut n) = node().await else { return };
+    std::fs::write(n.ws.join("a.txt"), "alpha\n").unwrap();
+    let sid = n.create("auto").await;
+    let mut tight = lead(true);
+    tight["caps"]["max_tokens"] = json!(60);
+    let reads = format!(
+        "script: {}",
+        json!([
+            {"tool": "read", "input": {"path": "a.txt"}},
+            {"tool": "read", "input": {"path": "a.txt"}},
+            {"tool": "read", "input": {"path": "a.txt"}}
+        ])
+    );
+    n.prompt_as(
+        sid,
+        tight,
+        &[
+            bg_delegate("look", &reads),
+            bg_delegate("look", &reads),
+            bash("sleep 3"),
+            bg_delegate("look", &reads),
+            bash("true"),
+        ],
+    );
+    n.turns_ended(sid, 1).await;
+    let out = n.outputs(sid, "delegate");
+    assert_eq!(out.len(), 3, "{out:#?}");
+    let granted: Vec<u64> = out
+        .iter()
+        .filter_map(|o| {
+            o.split("or at ")
+                .nth(1)?
+                .split(" tokens")
+                .next()?
+                .parse()
+                .ok()
+        })
+        .collect();
+    // 60 over 4 places, 45 over 3, 30 over 2.
+    assert_eq!(granted, vec![15, 15, 15], "{out:#?}");
+    assert!(granted.iter().sum::<u64>() <= 60);
+    for id in ["bg-1", "bg-2", "bg-3"] {
+        let e = n.ended(sid, id).await;
+        let r = &e.child.as_ref().unwrap().result;
+        assert!(
+            r.contains("share of its parent turn's sub-agent budget (15)"),
+            "{r}"
+        );
+    }
+    // A budget too small to share: refused, nothing made.
+    let mut tiny = lead(true);
+    tiny["caps"]["max_tokens"] = json!(3);
+    n.prompt_as(sid, tiny, &[bg_delegate("look", &reads)]);
+    n.turns_ended(sid, 2).await;
+    let out = n.outputs(sid, "delegate");
+    assert!(
+        out[3].contains("[harness] not started") && out[3].contains("token budget (3 of 3)"),
+        "{out:#?}"
+    );
+    assert_eq!(
+        n.starts(sid).len(),
+        3,
+        "a child was made for the refused start"
+    );
+}
+
+/// A background start beside a foreground sub-agent of the same step is in
+/// the log (its row, its Stop) while the foreground one still works (review
+/// F1: it was logged only after every delegation of the step returned).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_background_start_is_logged_while_a_foreground_one_of_its_step_runs() {
+    let Some(mut n) = node().await else { return };
+    let sid = n.create("auto").await;
+    // One step: the foreground call first, the background one beside it.
+    n.prompt(
+        sid,
+        &[json!([
+            {"tool": "delegate", "input": {"agent": "look", "task": format!("run: {}", held("release", "echo fg"))}},
+            bg_delegate("look", &format!("run: {}", held("go", "echo bg"))),
+        ])],
+    );
+    let seen = tokio::time::timeout(
+        Duration::from_secs(60),
+        n.until(move |e, k| e.session_id == sid && matches!(k, EventKind::BackgroundStarted(_))),
+    )
+    .await;
+    // Whatever happened, the foreground one is let go.
+    std::fs::write(n.ws.join("release"), "").unwrap();
+    assert!(
+        seen.is_ok(),
+        "no background_started while the foreground sub-agent ran"
+    );
+    let evs = n.of(sid);
+    let at = evs
+        .iter()
+        .position(|k| matches!(k, EventKind::BackgroundStarted(_)))
+        .unwrap();
+    assert!(
+        !evs[..at]
+            .iter()
+            .any(|k| matches!(k, EventKind::ToolCallFinished(_))),
+        "the start came after a delegate result: {evs:#?}"
+    );
+    // The side panel's row: the fold has it running.
+    let raw: Vec<RawEvent> = n
+        .seen
+        .iter()
+        .filter(|e| e.session_id == sid)
+        .cloned()
+        .collect();
+    let v = harness_core::view::SessionView::fold(&raw).unwrap();
+    assert!(
+        v.background
+            .get("bg-1")
+            .is_some_and(|b| b.child.is_some() && !b.ended)
+    );
+    n.turns_ended(sid, 1).await;
+    std::fs::write(n.ws.join("go"), "").unwrap();
+    n.ended(sid, "bg-1").await;
+}
+
+/// The end of a writer child whose append the log refuses once (review F4):
+/// its merge ran once, the end is kept built and recorded once at the next
+/// try (the person's next turn reads it at its step), carrying the result;
+/// nothing is merged a second time.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_end_the_log_refuses_once_is_merged_once_and_recorded_once() {
+    let Some(mut n) = node().await else { return };
+    n.repo();
+    let sid = n.create("auto").await;
+    harness_node::testing::fail_next_end_append(sid);
+    // Held until the lead's turn is over, so its end is recorded between
+    // turns (where the refusal is injected), not at a step of that turn.
+    let child_task = format!(
+        "script: {}",
+        json!([
+            bash(&held("go", "true")),
+            {"tool": "read", "input": {"path": "a.txt"}},
+            write("a.txt", "alpha-child\n")
+        ])
+    );
+    n.prompt(sid, &[bg_delegate("dev2", &child_task)]);
+    n.turns_ended(sid, 1).await;
+    let child = n.child(sid, 0);
+    // Its own copy of the folder has no `go`: written there.
+    let own = n
+        .data
+        .join("sessions")
+        .join(child.to_string())
+        .join("files");
+    let by = Instant::now() + Duration::from_secs(60);
+    while !own.exists() {
+        assert!(Instant::now() < by, "no own folder");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    std::fs::write(own.join("go"), "").unwrap();
+    n.turns_ended(child, 1).await;
+    // Merged (into the folder) although the end is not in the log.
+    let by = Instant::now() + Duration::from_secs(30);
+    while std::fs::read_to_string(n.ws.join("a.txt")).unwrap() != "alpha-child\n" {
+        assert!(Instant::now() < by, "never merged");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    n.drain().await;
+    assert!(n.ends(sid).is_empty(), "the refused end is in the log");
+    // The person changes the file after the merge: a second merge would
+    // meet it (and report it).
+    std::fs::write(n.ws.join("a.txt"), "alpha-person\n").unwrap();
+    n.prompt(sid, &[bash("true"), bash("true")]);
+    n.turns_ended(sid, 2).await;
+    n.drain().await;
+    let ends = n.ends(sid);
+    assert_eq!(ends.len(), 1, "{ends:#?}");
+    let c = ends[0]
+        .child
+        .as_ref()
+        .expect("the kept end lost its result");
+    assert!(c.ok, "{}", c.result);
+    assert!(!c.result.contains("NOT applied"), "{}", c.result);
+    assert_eq!(
+        std::fs::read_to_string(n.ws.join("a.txt")).unwrap(),
+        "alpha-person\n",
+        "merged a second time"
+    );
+    n.no_child_folders().await;
+}
+
+/// The wall-clock limit (the reviewer's R3), with a short limit set on the
+/// policy the test builds (node.toml's floor is 60 s: `validate` refuses
+/// less, and nothing over the protocol sets it): the child's running
+/// command is killed, its end is `timed_out` and calls back; a card the
+/// child waits on is resolved, and nothing is merged without a yes.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_wall_clock_limit_ends_the_child_its_command_and_its_card() {
+    let Some(mut n) = node_with(|p| p.limits.background_agent_timeout_s = 10).await else {
+        return;
+    };
+    let sid = n.create("auto").await;
+    n.prompt(sid, &[bg_delegate("look", "run: sleep 977531")]);
+    n.turns_ended(sid, 1).await;
+    appears("sleep 977531").await;
+    let end = n.ended(sid, "bg-1").await;
+    assert_eq!(end.reason, BackgroundReason::TimedOut);
+    assert!(end.calls_back());
+    gone("sleep 977531", "the wall clock").await;
+    // A card: an `ask` chat whose writer child wants to write.
+    n.repo();
+    let sid2 = n.create("ask").await;
+    n.prompt(
+        sid2,
+        &[bg_delegate(
+            "dev2",
+            &format!("script: {}", json!([write("z.txt", "z\n")])),
+        )],
+    );
+    n.turns_ended(sid2, 1).await;
+    let child = n.child(sid2, 0);
+    n.until(move |e, k| e.session_id == child && matches!(k, EventKind::ApprovalRequested(_)))
+        .await;
+    let end = n.ended(sid2, "bg-1").await;
+    assert_eq!(end.reason, BackgroundReason::TimedOut, "{end:?}");
+    n.drain().await;
+    let raw: Vec<RawEvent> = n
+        .seen
+        .iter()
+        .filter(|e| e.session_id == child)
+        .cloned()
+        .collect();
+    let v = harness_core::view::SessionView::fold(&raw).unwrap();
+    assert!(v.pending_approvals.is_empty(), "{:?}", v.pending_approvals);
+    assert!(v.running_turn.is_none());
+    assert!(!n.ws.join("z.txt").exists(), "merged without the yes");
+    n.no_child_folders().await;
 }
 
 // ---- the real binary: a `kill -9` mid-child, the master's callback ----

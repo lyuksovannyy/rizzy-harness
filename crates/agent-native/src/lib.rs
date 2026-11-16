@@ -535,16 +535,26 @@ const DELEGATE_BACKGROUND_ARG: &str = "Run it in the background: the call return
 
 /// The result of a background `delegate` start (X.24): the node's first
 /// line names the child, as a foreground result's does.
-fn background_started_text(d: &harness_core::backend::BackgroundDelegated, agent: &str) -> String {
+fn background_started_text(
+    d: &harness_core::backend::BackgroundDelegated,
+    agent: &str,
+    tokens: u64,
+) -> String {
     format!(
         "session: {}\nSub-agent @{agent} started in the background as {}. It works on its own; \
          you are told its result when it ends (at your next step, or in a turn the harness starts \
-         for it), at the latest after {} when its time limit stops it. Do not wait or poll for \
-         it: go on with other work or end your turn.",
+         for it), at the latest after {} when its time limit stops it, or at {tokens} tokens (its \
+         share of this turn's sub-agent budget, taken from it now). Do not wait or poll for it: \
+         go on with other work or end your turn.",
         d.child,
         d.bg_id,
         harness_core::text::duration_words(d.timeout_s * 1000),
     )
+}
+
+/// A `delegate` call that asks to run in the background (X.24).
+fn wants_background(input: &serde_json::Value) -> bool {
+    input.get("background").and_then(|v| v.as_bool()) == Some(true)
 }
 
 /// `finish`, offered in a sub-agent's turn only (handled by the loop).
@@ -1310,11 +1320,11 @@ impl NativeBackend {
         call: &ToolCallRef,
         refs: &SharedRefs,
         observed: &Arc<Vec<String>>,
-        budget_left: u64,
-    ) -> (ToolOutcome, Usage, Option<BackgroundStarted>) {
+        grant: u64,
+    ) -> (ToolOutcome, Usage, bool) {
         let none = Usage::default();
         let Some(agent) = ctx.agent.as_ref() else {
-            return (ToolOutcome::err("delegation needs an agent"), none, None);
+            return (ToolOutcome::err("delegation needs an agent"), none, false);
         };
         let target = call
             .input
@@ -1334,19 +1344,19 @@ impl NativeBackend {
                     "`{target}` is not an agent this one can delegate to"
                 )),
                 none,
-                None,
+                false,
             );
         };
         if task.is_empty() {
             return (
                 ToolOutcome::err("`task` must describe the sub-task"),
                 none,
-                None,
+                false,
             );
         }
         // Before any child session exists.
         if let Some(why) = self.delegate_gap(spec, &ctx.extra.savings, host) {
-            return (ToolOutcome::err(why), none, None);
+            return (ToolOutcome::err(why), none, false);
         }
         // A follow-up names the child by the id its result began with; the
         // node decides whether it is this session's (T68).
@@ -1371,7 +1381,7 @@ impl NativeBackend {
                                  sub-agent"
                             )),
                             none,
-                            None,
+                            false,
                         );
                     }
                 }
@@ -1389,7 +1399,7 @@ impl NativeBackend {
                 ),
                 None => plan_no_writer(Some(&spec.agent_id)),
             };
-            return (ToolOutcome::err(why), none, None);
+            return (ToolOutcome::err(why), none, false);
         }
         // In the background (X.24): only where offered (this agent's switch,
         // a person's turn of a chat, the node's yes); a forged argument is
@@ -1401,7 +1411,7 @@ impl NativeBackend {
                 return (
                     ToolOutcome::err("`background` must be true or false"),
                     none,
-                    None,
+                    false,
                 );
             }
         };
@@ -1427,7 +1437,7 @@ impl NativeBackend {
                 return (
                     ToolOutcome::err(format!("[harness] not started: {why}")),
                     none,
-                    None,
+                    false,
                 );
             }
             return match host
@@ -1437,16 +1447,19 @@ impl NativeBackend {
                     follow_up,
                     call.call_id.clone(),
                     observed.clone(),
-                    budget_left,
+                    grant,
                 )
                 .await
             {
-                Err(e) => (ToolOutcome::err(e), none, None),
-                Ok(d) => (
-                    ToolOutcome::ok(background_started_text(&d, &spec.agent_id)),
-                    none,
-                    Some(BackgroundStarted {
-                        bg_id: d.bg_id,
+                Err(e) => (ToolOutcome::err(e), none, false),
+                Ok(d) => {
+                    // Logged now, not after the step's other delegations
+                    // (review F1): its row and its Stop exist while a
+                    // foreground sub-agent of the same step still works, and
+                    // a restart finds it. One the log does not take is
+                    // stopped and its end never recorded; the turn ends.
+                    let started = BackgroundStarted {
+                        bg_id: d.bg_id.clone(),
                         call_id: call.call_id.clone(),
                         turn_id: ctx.turn_id.clone(),
                         timeout_s: d.timeout_s,
@@ -1455,8 +1468,29 @@ impl NativeBackend {
                             session: d.child,
                             agent_id: spec.agent_id.clone(),
                         }),
-                    }),
-                ),
+                    };
+                    if host
+                        .emit(EventKind::BackgroundStarted(started))
+                        .await
+                        .is_err()
+                    {
+                        if let harness_tools::background::Access::On(bg) =
+                            background_access(ctx, host)
+                        {
+                            bg.discard(&d.bg_id);
+                        }
+                        return (
+                            ToolOutcome::err("the session log could not be written"),
+                            none,
+                            false,
+                        );
+                    }
+                    (
+                        ToolOutcome::ok(background_started_text(&d, &spec.agent_id, grant)),
+                        none,
+                        true,
+                    )
+                }
             };
         }
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -1507,7 +1541,7 @@ impl NativeBackend {
         };
         let (res, ()) = tokio::join!(run, link);
         match res {
-            Err(e) => (ToolOutcome::err(e), none, None),
+            Err(e) => (ToolOutcome::err(e), none, false),
             Ok(o) => {
                 use harness_core::subagent::{ChildResult, ChildStatus, render, status_of};
                 let status = status_of(o.finish.as_ref(), o.reason);
@@ -1539,7 +1573,7 @@ impl NativeBackend {
                         ..Default::default()
                     },
                     o.usage.unwrap_or_default(),
-                    None,
+                    false,
                 )
             }
         }
@@ -3113,8 +3147,7 @@ impl NativeBackend {
                 } else if child && ctx.extra.max_tokens.is_some_and(|cap| spent >= cap) {
                     last = Some(format!(
                         "stopped after {spent} tokens: a background sub-agent may use no more \
-                         than what its parent turn's sub-agent budget had left when it started \
-                         ({})",
+                         than its share of its parent turn's sub-agent budget ({})",
                         ctx.extra.max_tokens.unwrap_or_default()
                     ));
                     messages.push(ChatMsg::Note(harness_core::subagent::LAST_STEP_NOTE.into()));
@@ -3902,6 +3935,18 @@ impl NativeBackend {
                 let caps = agent.and_then(|a| a.caps).unwrap_or_default();
                 let mut admitted = Vec::new();
                 let mut followed: HashSet<String> = HashSet::new();
+                // Background sub-agents' token caps (X.24, review F3): each
+                // background start takes an equal share of what this turn's
+                // sub-agent budget has left over the turn's sub-agent places
+                // still free (left ÷ free places, itself included), reserved
+                // at once: the shares granted in a turn never add up to more
+                // than its budget, in one step or many.
+                let share_now = |sub_tokens: u64, subagents: u32| {
+                    caps.max_tokens.saturating_sub(sub_tokens)
+                        / u64::from(caps.max_subagents.saturating_sub(subagents).max(1))
+                };
+                let mut grants: std::collections::HashMap<String, u64> =
+                    std::collections::HashMap::new();
                 for call in delegations {
                     if host
                         .emit(EventKind::ToolCallStarted(ToolCallStarted {
@@ -3941,6 +3986,15 @@ impl NativeBackend {
                         Some(format!(
                             "cap reached: at most {} sub-agents per turn",
                             caps.max_subagents
+                        ))
+                    } else if wants_background(&call.input) && share_now(sub_tokens, subagents) == 0
+                    {
+                        Some(format!(
+                            "[harness] not started: what is left of this turn's sub-agent token \
+                             budget ({} of {}) is too little to share with a background \
+                             sub-agent; delegate in the foreground or finish with what you have",
+                            caps.max_tokens.saturating_sub(sub_tokens),
+                            caps.max_tokens
                         ))
                     } else if sub_tokens >= caps.max_tokens {
                         Some(format!(
@@ -4010,6 +4064,12 @@ impl NativeBackend {
                             });
                         }
                         None => {
+                            if wants_background(&call.input) {
+                                // Reserved now; given back if it does not start.
+                                let share = share_now(sub_tokens, subagents);
+                                sub_tokens += share;
+                                grants.insert(call.call_id.clone(), share);
+                            }
                             subagents += 1;
                             admitted.push(call);
                         }
@@ -4023,29 +4083,18 @@ impl NativeBackend {
                     Some((user_idx, &own_words)),
                     child,
                 ));
-                // A background sub-agent's own token cap (X.24): what this
-                // turn's sub-agent budget has left now.
-                let budget_left = caps.max_tokens.saturating_sub(sub_tokens);
-                let results = futures::future::join_all(
-                    admitted
-                        .iter()
-                        .map(|c| self.run_delegate(&ctx, host, c, &refs, &inherited, budget_left)),
-                )
+                let results = futures::future::join_all(admitted.iter().map(|c| {
+                    let grant = grants.get(&c.call_id).copied().unwrap_or(0);
+                    self.run_delegate(&ctx, host, c, &refs, &inherited, grant)
+                }))
                 .await;
-                for (call, (outcome, u, bg_start)) in admitted.into_iter().zip(results) {
-                    // In the log before the call's result, as a background
-                    // command's start is; one the log does not take is
-                    // stopped and its end never recorded.
-                    if let Some(b) = bg_start {
-                        let bg_id = b.bg_id.clone();
-                        if host.emit(EventKind::BackgroundStarted(b)).await.is_err() {
-                            if let harness_tools::background::Access::On(bg) =
-                                background_access(&ctx, host)
-                            {
-                                bg.discard(&bg_id);
-                            }
-                            return stopped(usage);
-                        }
+                // A background start's `background_started` was logged by
+                // `run_delegate` as soon as the child existed (review F1); a
+                // failed append there ends the turn at the next emit below.
+                for (call, (outcome, u, bg_started)) in admitted.into_iter().zip(results) {
+                    // A reservation for a start that did not happen goes back.
+                    if !bg_started {
+                        sub_tokens -= grants.get(&call.call_id).copied().unwrap_or(0);
                     }
                     sub_tokens += u.input_tokens + u.output_tokens;
                     usage.add(&u);
