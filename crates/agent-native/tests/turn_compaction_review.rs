@@ -855,8 +855,8 @@ fn think(steps: &mut [Completion], seed: u64) {
 /// What `think` puts in some steps, which the scrubber takes out.
 const SECRET: &str = "sk-thinking-secret-0001";
 
-/// Some request carried thinking; none carried a step's that may not be
-/// sent (scrubbed); no secret reached the log.
+/// Some request carried thinking; none carried an unsent step's blocks or
+/// a scrubbed signed block; no secret reached the log.
 fn thinking_checks(seed: u64, log: &[RawEvent], main: &[Seen]) {
     let sent = main.iter().any(|s| {
         s.msgs.iter().any(|m| {
@@ -885,11 +885,21 @@ fn thinking_checks(seed: u64, log: &[RawEvent], main: &[Seen]) {
                 thinking: Some(t), ..
             } = m
             {
-                assert!(!t.unsent, "seed {seed}: unsent thinking in a request");
+                // An unsent step is a marker: no bytes of it travel.
                 assert!(
-                    !serde_json::to_string(&**t).unwrap().contains("[REDACTED]"),
-                    "seed {seed}: scrubbed thinking in a request"
+                    !t.unsent || t.blocks.is_empty(),
+                    "seed {seed}: unsent thinking in a request"
                 );
+                // Scrubbed plain text is still sent (scrubbed); a scrubbed
+                // signed block never is.
+                for b in &t.blocks {
+                    if let ThinkingBlock::Signed { text, signature } = b {
+                        assert!(
+                            !text.contains("[REDACTED]") && !signature.contains("[REDACTED]"),
+                            "seed {seed}: a scrubbed signed block in a request"
+                        );
+                    }
+                }
             }
         }
     }
@@ -904,6 +914,8 @@ async fn rebuild_matches_live_flip(
 ) {
     let mut report = vec![];
     let mut failures = 0;
+    // Shortenings that left thinking out, over every seed (X.25).
+    let mut thinking_cuts = 0;
     for seed in seeds {
         for keep in [None, Some(8usize)] {
             let (mut steps, queued) = random_script(seed, 120);
@@ -1001,6 +1013,11 @@ async fn rebuild_matches_live_flip(
             let (compared, bad) = check_every_step(&log, &p.main(), None, start);
             if thinking {
                 thinking_checks(seed, &log, &p.main());
+                thinking_cuts += host
+                    .shortened()
+                    .iter()
+                    .filter(|c| c.thinking.is_some())
+                    .count();
             }
             let overflow = p.main().iter().filter(|s| s.tokens > W).count();
             report.push(format!(
@@ -1021,6 +1038,9 @@ async fn rebuild_matches_live_flip(
         eprintln!("{l}");
     }
     assert_eq!(failures, 0, "rebuild differs from live");
+    if thinking {
+        assert!(thinking_cuts > 0, "no shortening left thinking out");
+    }
 }
 
 /// Item 1/2: a message the person sent before this turn and this turn

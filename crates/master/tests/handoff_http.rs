@@ -706,3 +706,49 @@ async fn a_node_that_never_answers_holds_up_one_timeout_per_sweep() {
     );
     assert!(took < Duration::from_secs(25), "{took:?}");
 }
+
+/// X.25, review of PR 137: a step's signatures and redacted data stay in
+/// the mirror (the provider needs them back) and never reach a browser:
+/// the events endpoint sends the thinking's kind and text only.
+#[tokio::test]
+async fn the_events_endpoint_sends_no_signature_or_redacted_data() {
+    let t = start().await;
+    let a = pchat(&t, &t.alex).await;
+    mirrored(&t, a, 1).await;
+    let thinking = Thinking {
+        model: "demo::mock".into(),
+        blocks: vec![
+            ThinkingBlock::Signed {
+                text: "readable".into(),
+                signature: "SIGNATURE-OPAQUE".into(),
+            },
+            ThinkingBlock::Redacted {
+                data: "REDACTED-OPAQUE".into(),
+            },
+        ],
+        prefix: "PREFIX-HASH".into(),
+        unsent: false,
+    };
+    play(
+        &t,
+        a,
+        vec![EventKind::AssistantMessage(AssistantMessage {
+            turn_id: "t1".into(),
+            message_id: "m1".into(),
+            text: "hi".into(),
+            tool_calls: vec![],
+            author: None,
+            variant: None,
+            blocks: vec![],
+            thinking: Some(thinking),
+        })],
+        0,
+    )
+    .await;
+    let evs = events(&t, a).await;
+    let all = serde_json::to_string(&evs).unwrap();
+    assert!(all.contains("readable"), "{all}");
+    for opaque in ["SIGNATURE-OPAQUE", "REDACTED-OPAQUE", "PREFIX-HASH"] {
+        assert!(!all.contains(opaque), "{opaque} reached the browser");
+    }
+}

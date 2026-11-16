@@ -1056,11 +1056,15 @@ async fn events(
     let who = require(&m, &headers).await?;
     let sid = visible_session(&m, &who, &id).await?.session_id;
     let limit = q.limit.unwrap_or(1000).min(5000);
-    let evs = m
+    let mut evs = m
         .inner
         .mirror
         .call(move |s| s.events_after(sid, q.after, limit))
         .await?;
+    // No signature or redacted data reaches a browser (X.25, T73).
+    for e in &mut evs {
+        harness_core::event::for_browser(&e.kind, &mut e.payload);
+    }
     Ok(Json(json!({ "events": evs })))
 }
 

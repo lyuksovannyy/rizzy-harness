@@ -19,7 +19,11 @@ pub enum ChatMsg {
         tool_calls: Vec<ToolCallRef>,
         /// The step's thinking (X.25), as recorded: sent back only to the
         /// model that wrote it, under that provider's rule
-        /// (`llm::to_genai`). `None` once it may not be sent again.
+        /// (`llm::to_genai`). Once it may not be sent it is a marker
+        /// ([`thinking_marker`]: no blocks, `unsent`), which keeps the
+        /// gap: no later signed block of that model is sent after it
+        /// ([`settle_thinking`]). `None`: the step had none, or it is
+        /// another agent's or for a transcript.
         thinking: Option<std::sync::Arc<harness_core::event::Thinking>>,
     },
     Tool {
@@ -895,11 +899,90 @@ pub trait Provider: Send + Sync {
 pub fn withhold_thinking(msgs: &mut [ChatMsg], model: Option<&str>) {
     for m in msgs {
         if let ChatMsg::Assistant { thinking, .. } = m
-            && thinking
-                .as_ref()
-                .is_some_and(|t| model.is_none_or(|w| t.model == w))
+            && let Some(t) = thinking.as_ref()
+            && model.is_none_or(|w| t.model == w)
+            && !t.blocks.is_empty()
         {
-            *thinking = None;
+            *thinking = Some(thinking_dropped(t));
+        }
+    }
+}
+
+/// What stands for a step's thinking that is not sent: its model, no
+/// blocks, `unsent`. Holds no bytes of it (the loop's memory is bounded by
+/// what the requests send), and keeps the gap ([`settle_thinking`]).
+pub fn thinking_marker(
+    t: &harness_core::event::Thinking,
+) -> std::sync::Arc<harness_core::event::Thinking> {
+    std::sync::Arc::new(harness_core::event::Thinking {
+        model: t.model.clone(),
+        blocks: vec![],
+        prefix: String::new(),
+        unsent: true,
+    })
+}
+
+/// What stands for a step's thinking that was sendable and is left out
+/// now (in-turn shortening, a refusal): no blocks, and not `unsent`, so it
+/// starts no gap. The blocks after it need none: one made while this one
+/// was sent recorded it in its prefix, which no longer holds, so the
+/// request builder leaves it out too; one made after it was left out is
+/// valid and is sent.
+pub fn thinking_dropped(
+    t: &harness_core::event::Thinking,
+) -> std::sync::Arc<harness_core::event::Thinking> {
+    std::sync::Arc::new(harness_core::event::Thinking {
+        model: t.model.clone(),
+        blocks: vec![],
+        prefix: String::new(),
+        unsent: false,
+    })
+}
+
+/// A step's thinking as a request may carry it: a marker once `unsent`.
+pub fn sendable_thinking(
+    t: harness_core::event::Thinking,
+) -> std::sync::Arc<harness_core::event::Thinking> {
+    if t.unsent {
+        thinking_marker(&t)
+    } else {
+        std::sync::Arc::new(t)
+    }
+}
+
+/// The gap rule (X.25, T73): once a step's thinking of a model was never
+/// sent (recorded `unsent`: out of order, scrubbed, oversized, refused),
+/// no later step's signed or redacted blocks of that model are sent either
+/// (Anthropic: "omit prior turns' thinking, but not a block between two
+/// that you keep"; the provider made the left-out blocks, and a later
+/// block may count on them). Plain reasoning text has no such rule and
+/// stays. A step's thinking left out later ([`thinking_dropped`]) starts
+/// no gap: the prefix check covers the blocks after it exactly. Turns them
+/// into markers, so neither the request nor the estimate nor the loop's
+/// memory carries them. The loop and the rebuild both call it on the
+/// whole conversation, before shortening.
+pub fn settle_thinking(msgs: &mut [ChatMsg]) {
+    use harness_core::event::ThinkingBlock;
+    let mut gapped: Vec<String> = Vec::new();
+    for m in msgs {
+        let ChatMsg::Assistant {
+            thinking: Some(t), ..
+        } = m
+        else {
+            continue;
+        };
+        if t.unsent {
+            if !gapped.contains(&t.model) {
+                gapped.push(t.model.clone());
+            }
+            continue;
+        }
+        let signed = t
+            .blocks
+            .iter()
+            .any(|b| !matches!(b, ThinkingBlock::Text { .. }));
+        if signed && gapped.contains(&t.model) {
+            *t = thinking_marker(t);
         }
     }
 }
@@ -908,7 +991,7 @@ pub fn withhold_thinking(msgs: &mut [ChatMsg], model: Option<&str>) {
 /// characters: its text, or what its signature encrypts (the full
 /// reasoning, base64: about 3 bytes per 4 characters) when that is more,
 /// since a provider bills the full reasoning it reads back.
-fn thinking_chars(t: &harness_core::event::Thinking) -> usize {
+pub(crate) fn thinking_chars(t: &harness_core::event::Thinking) -> usize {
     use harness_core::event::ThinkingBlock;
     t.blocks
         .iter()

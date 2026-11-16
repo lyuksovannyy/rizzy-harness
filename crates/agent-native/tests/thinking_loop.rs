@@ -90,9 +90,9 @@ fn carries(req: &ChatRequest) -> bool {
         matches!(
             m,
             ChatMsg::Assistant {
-                thinking: Some(_),
+                thinking: Some(t),
                 ..
-            }
+            } if !t.blocks.is_empty()
         )
     })
 }
@@ -303,7 +303,7 @@ fn thinking_of(req: &ChatRequest) -> Vec<String> {
         .filter_map(|m| match m {
             ChatMsg::Assistant {
                 thinking: Some(t), ..
-            } => Some(t.shown().0),
+            } if !t.blocks.is_empty() => Some(t.shown().0),
             _ => None,
         })
         .collect()
@@ -473,10 +473,10 @@ async fn a_refusal_that_is_not_the_thinking_ends_the_turn_and_retry_recovers() {
     rebuilds_at_every_step(&host.log(), &answered);
 }
 
-/// The scrubber changes a step's thinking: kept scrubbed for the person,
-/// never sent back; the step after it, clean, is.
+/// The scrubber changes a step's plain reasoning: kept and sent back
+/// scrubbed (plain text is not verified); the secret never leaves.
 #[tokio::test]
-async fn scrubbed_thinking_is_kept_but_never_sent() {
+async fn scrubbed_plain_thinking_is_sent_back_scrubbed() {
     let ws = workspace();
     let secret = "sk-live-0123456789abcdef";
     let p = Model::new(Box::new(move |_, n| {
@@ -504,13 +504,72 @@ async fn scrubbed_thinking_is_kept_but_never_sent() {
         msgs[0]["thinking"]["blocks"][0]["text"],
         "the key is [REDACTED]"
     );
-    assert_eq!(msgs[0]["thinking"]["unsent"], true);
+    assert!(msgs[0]["thinking"].get("unsent").is_none());
     let r = p.requests();
     assert!(
         !format!("{r:?}").contains(secret),
         "the secret was sent back"
     );
-    assert_eq!(thinking_of(&r[2]), vec!["clean"]);
+    assert_eq!(thinking_of(&r[2]), vec!["the key is [REDACTED]", "clean"]);
+    rebuilds_at_every_step(&host.log(), &r);
+}
+
+/// The scrubber changes a step's signed block: kept scrubbed for the
+/// person and never sent (the provider refuses a changed block), and no
+/// later signed block is sent either (the gap rule).
+#[tokio::test]
+async fn a_scrubbed_signed_block_is_never_sent_nor_any_after_it() {
+    let ws = workspace();
+    let secret = "sk-live-0123456789abcdef";
+    let signed = |text: &str| {
+        Some(Thinking {
+            model: "set by the loop".into(),
+            blocks: vec![ThinkingBlock::Signed {
+                text: text.into(),
+                signature: "SIG".into(),
+            }],
+            prefix: "p".into(),
+            unsent: false,
+        })
+    };
+    let p = Model::new(Box::new(move |_, n| {
+        let mut c = match n {
+            0 => read("a", ""),
+            1 => read("b", ""),
+            2 => read("c", ""),
+            _ => answer("done", ""),
+        };
+        c.thinking = match n {
+            0 => signed("first"),
+            1 => signed(&format!("the key is {secret}")),
+            _ => signed("later"),
+        };
+        Ok(c)
+    }));
+    let host = Host::default();
+    let b = backend(p.clone(), &[secret]);
+    let chat = Chat {
+        b: &b,
+        host: &host,
+        ws: ws.path(),
+        agent: agent(&[]),
+        model: "m",
+    };
+    assert_eq!(
+        chat.run("t1", "go", None).await.reason,
+        TurnEndReason::Completed
+    );
+    let msgs = host.kinds("assistant_message");
+    assert_eq!(msgs[1]["thinking"]["unsent"], true);
+    assert_eq!(
+        msgs[1]["thinking"]["blocks"][0]["text"],
+        "the key is [REDACTED]"
+    );
+    let r = p.requests();
+    assert!(!format!("{r:?}").contains(secret));
+    // Request 3 holds step 1's blocks only: step 2's are a marker, and
+    // step 3's come after the gap.
+    assert_eq!(thinking_of(&r[3]), vec!["first"]);
     rebuilds_at_every_step(&host.log(), &r);
 }
 

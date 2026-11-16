@@ -37,6 +37,7 @@ import { AgentMark, agentAlert } from "./AgentAvatar";
 import { ChatArtifactsCtx, SaveAsArtifact, SavedItem, stagedKeys, useChatArtifacts } from "./ChatArtifacts";
 import { BubbleImages } from "./ChatImages";
 import { ChatTitle } from "./ChatTitle";
+import { ThinkingRow } from "./ThinkingRow";
 import { DeleteChat } from "./DeleteChat";
 import { useAvatarState } from "./avatarState";
 import { Markdown } from "./Markdown";
@@ -725,27 +726,13 @@ export default function Conversation(props: {
                         })}
                       </div>
                     );
-                  case "thinking": {
-                    // The model's thinking for one step (X.25), collapsed;
-                    // the model's text: shown as text (`Thinking::shown`).
-                    const blocks = Array.isArray(it.thinking?.blocks) ? it.thinking.blocks : [];
-                    const text = blocks
-                      .filter((b) => b.type !== "redacted" && typeof b.text === "string" && /[^\p{White_Space}]/u.test(b.text))
-                      .map((b) => b.text)
-                      .join("\n\n");
-                    const redacted = blocks.filter((b) => b.type === "redacted").length;
-                    return text || redacted ? (
-                      <details key={i} className="divider summary" data-testid="thinking">
-                        <summary>{t("conv.thinking")}</summary>
-                        {text && <p>{text}</p>}
-                        {!!redacted && <p>{t("conv.thinkingRedacted", { n: String(redacted) })}</p>}
-                      </details>
-                    ) : null;
-                  }
+                  case "thinking":
+                    return <ThinkingRow key={i} it={it} />;
                   case "shortened": {
                     const what = [
                       it.cleared ? t("conv.shortCleared") : "",
                       it.steps ? t("conv.shortSteps", { n: String(it.steps) }) : "",
+                      it.thinking ? t("conv.shortThinking") : "",
                     ]
                       .filter(Boolean)
                       .join(", ");

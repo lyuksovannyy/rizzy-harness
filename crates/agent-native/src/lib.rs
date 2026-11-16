@@ -1418,36 +1418,82 @@ fn parse_effort(s: &str) -> Option<Effort> {
     }
 }
 
+/// What a resend after a refusal leaves out of the refused request (T71,
+/// T73): the thinking it sends back, the images of these calls.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Resend {
+    pub thinking: bool,
+    pub images: Vec<String>,
+}
+
+impl Resend {
+    /// The resends to try, in order, for a request that sends back
+    /// thinking (`thinking`) and carries the images of `images`: without
+    /// the thinking, without the images, without both; only those that
+    /// leave out something it holds.
+    pub fn order(thinking: bool, images: Vec<String>) -> Vec<Resend> {
+        let mut out = Vec::new();
+        if thinking {
+            out.push(Resend {
+                thinking: true,
+                images: vec![],
+            });
+        }
+        if !images.is_empty() {
+            out.push(Resend {
+                thinking: false,
+                images: images.clone(),
+            });
+            if thinking {
+                out.push(Resend {
+                    thinking: true,
+                    images,
+                });
+            }
+        }
+        out
+    }
+}
+
 /// A step's thinking as the log may keep it (X.25, T73). The scrubber runs
-/// over every part, the opaque ones too: a block it changes is kept
-/// scrubbed and marked `unsent`, since the provider refuses a changed block
-/// and the log may hold no secret. Over [`Thinking::MAX_BYTES`] (a broken or
-/// hostile provider) the first blocks' text is kept for the person, cut to
-/// [`Thinking::SHOWN_BYTES`] in all, the opaque parts are dropped, and it is
-/// `unsent`.
+/// over every part, the opaque ones too, since the log may hold no secret.
+/// A signed or redacted block it changes is kept scrubbed and the step is
+/// `unsent` (the provider refuses a changed block). Plain reasoning text it
+/// changes is still sent, scrubbed: nobody verifies plain text, and a host
+/// that wants every step's reasoning back (DeepSeek's documented rule)
+/// would refuse every later request without it (review of PR 137, r2).
+/// Over [`Thinking::MAX_BYTES`] the first blocks' text is kept, cut to
+/// [`Thinking::SHOWN_BYTES`] in all, the opaque parts are dropped, and a
+/// step with signed blocks is `unsent`; cut plain text is still sent.
 pub(crate) fn bound_thinking(t: &mut harness_core::event::Thinking, secrets: &SecretSet) {
     use harness_core::event::{Thinking, ThinkingBlock};
-    let mut changed = false;
-    let mut scrub = |v: &mut String| {
+    let mut opaque_changed = false;
+    let scrub = |v: &mut String| {
         let clean = secrets.scrub(v);
-        if clean != *v {
-            changed = true;
+        let changed = clean != *v;
+        if changed {
             *v = clean;
         }
+        changed
     };
     for b in &mut t.blocks {
         match b {
             ThinkingBlock::Signed { text, signature } => {
-                scrub(text);
-                scrub(signature);
+                opaque_changed |= scrub(text) | scrub(signature);
             }
-            ThinkingBlock::Redacted { data } => scrub(data),
-            ThinkingBlock::Text { text } => scrub(text),
+            ThinkingBlock::Redacted { data } => opaque_changed |= scrub(data),
+            ThinkingBlock::Text { text } => {
+                scrub(text);
+            }
         }
     }
-    t.unsent |= changed;
+    let signed = t
+        .blocks
+        .iter()
+        .any(|b| !matches!(b, ThinkingBlock::Text { .. }));
+    t.unsent |= opaque_changed;
     if t.bytes() > Thinking::MAX_BYTES {
-        t.unsent = true;
+        t.unsent |= signed;
         t.prefix.clear();
         let mut left = Thinking::SHOWN_BYTES;
         let mut cut = |text: &mut String| {
@@ -1785,12 +1831,12 @@ pub fn rebuild_spans(
                         _ => m.text,
                     };
                     // The step's thinking goes back only to its own agent's
-                    // requests, never into the summariser's transcript, and
-                    // not once it may not be sent (X.25).
+                    // requests, never into the summariser's transcript; one
+                    // that may not be sent is a marker (X.25).
                     let thinking = m
                         .thinking
-                        .filter(|t| !t.unsent && !foreign && !how.transcript)
-                        .map(std::sync::Arc::new);
+                        .filter(|_| !foreign && !how.transcript)
+                        .map(provider::sendable_thinking);
                     out.push(ChatMsg::Assistant {
                         text,
                         tool_calls: m.tool_calls,
@@ -1916,6 +1962,8 @@ pub fn rebuild_spans(
         left.sort_by_key(|(seq, _)| *seq);
         out.extend(left.iter().map(|(_, m)| queued_msg(m)));
     }
+    // No signed block after one that is not sent (X.25).
+    provider::settle_thinking(&mut out);
     (out, spans)
 }
 
@@ -3128,15 +3176,33 @@ impl NativeBackend {
                     let old = shortening.clone();
                     let mut new = shortening.clone();
                     let mut cleared = None;
+                    // Tier 0 (X.25, T73): the thinking of every step before
+                    // the tail, oldest first: the providers allow leaving out
+                    // the oldest blocks, and no model call is needed. A
+                    // signed block after one left out is not sent either
+                    // (the gap rule), which the size counts.
+                    let mut unthought = None;
+                    if let Some(tail) = shorten::tail_start(&messages, lim.tail)
+                        && let Some(point) = shorten::plan_unthink(&messages, &all, &new, tail)
+                    {
+                        let mut with = new.clone();
+                        with.thinking = Some(point.clone());
+                        if size(&with, &messages, &all) < before {
+                            new = with;
+                            unthought = Some(point);
+                        }
+                    }
+                    let now0 = size(&new, &messages, &all);
                     // Tier 1: the oldest results before the tail, until the
                     // request is at the target; only for a cut worth it.
-                    if let Some(tail) = shorten::tail_start(&messages, lim.tail)
+                    if now0 > lim.target
+                        && let Some(tail) = shorten::tail_start(&messages, lim.tail)
                         && let Some((point, saved)) = shorten::plan_clear(
                             &messages,
                             &all,
                             &new,
                             tail,
-                            before.saturating_sub(lim.target),
+                            now0.saturating_sub(lim.target),
                         )
                         && saved >= lim.min_cut
                     {
@@ -3250,12 +3316,13 @@ impl NativeBackend {
                         }
                     }
                     let after = size(&new, &messages, &all);
-                    if cleared.is_some() || folded.is_some() {
+                    if cleared.is_some() || folded.is_some() || unthought.is_some() {
                         if host
                             .emit(EventKind::ContextShortened(ContextShortened {
                                 turn_id: ctx.turn_id.clone(),
                                 cleared,
                                 folded,
+                                thinking: unthought,
                                 tokens_before: before,
                                 tokens_after: after,
                             }))
@@ -3281,6 +3348,8 @@ impl NativeBackend {
                     }
                 }
             }
+            // What no request sends any more is not kept either (X.25).
+            shorten::drop_thinking(&mut messages, &with_turn(&spans, turn_idx), &shortening);
             let mut sent = shorten::apply(
                 &messages,
                 &with_turn(&spans, turn_idx),
@@ -3330,12 +3399,13 @@ impl NativeBackend {
             // the fallbacks, but only while this attempt has shown nothing:
             // a partial answer is never repeated.
             let mut retries = 0;
-            // A refusal that may be the images: the calls withheld for the
-            // one resend, the original error and request (T71).
-            let mut resent: Option<(Vec<String>, ProviderError, ChatRequest)> = None;
-            // A refusal that may be the thinking sent back: the original
-            // error and request (X.25, T73).
-            let mut unthought: Option<(ProviderError, ChatRequest)> = None;
+            // A refusal that may be what the request sends back (X.25, T73)
+            // or the images `read` returned (T71): the refused request and
+            // its error, the resends tried, and what the one in flight
+            // leaves out.
+            let mut refused: Option<(ProviderError, ChatRequest)> = None;
+            let mut tried: Vec<Resend> = Vec::new();
+            let mut left_out: Option<Resend> = None;
             let (step, emitted) = loop {
                 let (tx, rx) = mpsc::unbounded_channel();
                 let turn_id = ctx.turn_id.clone();
@@ -3379,84 +3449,81 @@ impl NativeBackend {
                     }
                     continue;
                 }
-                // The provider refused a request that sent back the model's
-                // earlier thinking, for its content (T73): it is sent once
-                // more without any. If that is answered, the record below
-                // keeps this model's thinking out of every later request;
-                // if it fails too, the images may still be tried, and if
-                // nothing helps the original error stands. Anthropic allows
-                // the blocks to be left out ("omit prior turns' thinking,
-                // but not a block between two that you keep"; in a tool
-                // loop adaptive thinking needs none), so the chat goes on.
-                if unthought.is_none()
-                    && resent.is_none()
-                    && let (Step::Done(Err(e)), false) = &r
-                    && e.may_be_the_images()
-                    && self.provider.replays_thinking(&req)
+                // The provider refused the request for its content (400,
+                // 413, 422; not an overflow, not an unknown model). What it
+                // sends back of the model's thinking (T73) or the images
+                // `read` returned (T71) may be the cause: it is sent again,
+                // each time built from the refused request, without the
+                // thinking, then without the images, then without both, as
+                // far as it holds them (at most three resends). The first
+                // answered says what was refused, and only that is recorded
+                // below; if none is, the original error stands as it was.
+                // Anthropic allows thinking to be left out ("omit prior
+                // turns' thinking, but not a block between two that you
+                // keep"), so the chat goes on.
+                if let (Step::Done(Err(e)), false) = &r
+                    && (refused.is_some() || e.may_be_the_images())
                 {
                     let (Step::Done(Err(e)), _) = r else {
                         unreachable!("matched above")
                     };
-                    tracing::warn!(
-                        model = %model,
-                        error = %e.log_line(),
-                        "the provider refused a request that sent back thinking; sending it without"
-                    );
-                    let mut again = req.clone();
-                    provider::withhold_thinking(&mut again.messages, None);
-                    let first = std::mem::replace(&mut req, again);
-                    unthought = Some((e, first));
-                    continue;
-                }
-                // The provider refused a request that carried images `read`
-                // returned, for its content (T71): it is sent once more with
-                // every one of them withheld. If that is answered, the
-                // images were the cause and the record below keeps them out
-                // of every later request; if it fails too, they were not,
-                // and the original error stands as it was.
-                if resent.is_none()
-                    && let (Step::Done(Err(e)), false) = &r
-                    && e.may_be_the_images()
-                {
-                    let calls = images::carried(&req.messages);
-                    if !calls.is_empty() {
-                        let (Step::Done(Err(e)), _) = r else {
-                            unreachable!("matched above")
-                        };
-                        tracing::warn!(
-                            model = %model,
-                            error = %e.log_line(),
-                            images = calls.len(),
-                            "the provider refused a request with images; sending it without them"
-                        );
-                        let mut again = req.clone();
-                        images::withhold(&mut again.messages, &calls);
-                        let first = std::mem::replace(&mut req, again);
-                        resent = Some((calls, e, first));
-                        continue;
+                    let qualifies = e.may_be_the_images();
+                    let (orig_e, orig) = refused.get_or_insert_with(|| (e, req.clone()));
+                    let next = qualifies
+                        .then(|| {
+                            Resend::order(
+                                self.provider.replays_thinking(orig),
+                                images::carried(&orig.messages),
+                            )
+                            .into_iter()
+                            .find(|o| !tried.contains(o))
+                        })
+                        .flatten();
+                    match next {
+                        Some(o) => {
+                            tracing::warn!(
+                                model = %model,
+                                error = %orig_e.log_line(),
+                                thinking = o.thinking,
+                                images = o.images.len(),
+                                "the provider refused the request; sending it without what may be the cause"
+                            );
+                            let mut again = orig.clone();
+                            if o.thinking {
+                                provider::withhold_thinking(&mut again.messages, None);
+                            }
+                            if !o.images.is_empty() {
+                                images::withhold(&mut again.messages, &o.images);
+                            }
+                            req = again;
+                            tried.push(o.clone());
+                            left_out = Some(o);
+                            continue;
+                        }
+                        None => {
+                            let (e, first) = refused.take().expect("set above");
+                            req = first;
+                            left_out = None;
+                            break (Step::Done(Err(e)), false);
+                        }
                     }
-                }
-                if let (Step::Done(Err(_)), false) = &r
-                    && (resent.is_some() || unthought.is_some())
-                {
-                    let (e, first) = match (unthought.take(), resent.take()) {
-                        (Some((e, first)), _) | (None, Some((_, e, first))) => (e, first),
-                        (None, None) => unreachable!("checked above"),
-                    };
-                    req = first;
-                    break (Step::Done(Err(e)), false);
                 }
                 break r;
             };
             started |= emitted;
-            // The resend was answered: record which calls' images it went
-            // without, before that answer (T71).
-            let withheld = resent
+            // A resend was answered: record what it went without, and only
+            // that, before that answer (T71, T73).
+            let answered_without = left_out
                 .filter(|_| matches!(step, Step::Done(Ok(_))))
-                .map(|(calls, e, _)| (calls, e));
-            let unthought = unthought
-                .filter(|_| matches!(step, Step::Done(Ok(_))))
-                .map(|(e, _)| e);
+                .zip(refused.map(|(e, _)| e));
+            let unthought = answered_without
+                .as_ref()
+                .filter(|(o, _)| o.thinking)
+                .map(|(_, e)| e);
+            let withheld = answered_without
+                .as_ref()
+                .filter(|(o, _)| !o.images.is_empty())
+                .map(|(o, e)| (o.images.clone(), e));
             let mut completion = match step {
                 Step::Cancelled => {
                     return TurnOutcome {
@@ -3603,7 +3670,7 @@ impl NativeBackend {
                 return stopped(usage);
             }
             if let Some(e) = unthought {
-                let r = self.withheld_record(&ctx.turn_id, vec![], &e);
+                let r = self.withheld_record(&ctx.turn_id, vec![], e);
                 if host
                     .emit(EventKind::ThinkingWithheld(
                         harness_core::event::ThinkingWithheld {
@@ -3626,7 +3693,7 @@ impl NativeBackend {
                     .emit(EventKind::ImagesWithheld(self.withheld_record(
                         &ctx.turn_id,
                         calls.clone(),
-                        &e,
+                        e,
                     )))
                     .await
                     .is_err()
@@ -3673,8 +3740,9 @@ impl NativeBackend {
             messages.push(ChatMsg::Assistant {
                 text: completion.text,
                 tool_calls: completion.tool_calls.clone(),
-                thinking: thinking.filter(|t| !t.unsent).map(Arc::new),
+                thinking: thinking.map(provider::sendable_thinking),
             });
+            provider::settle_thinking(&mut messages);
             if completion.tool_calls.is_empty() {
                 // On a child's last step, an answer without `finish` ends
                 // the turn as the step cap or the guard would have.

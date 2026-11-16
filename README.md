@@ -664,13 +664,19 @@ way that provider needs it: Claude's signed blocks exactly as they came
 (needed to go on after a tool call), DeepSeek's `reasoning_content`.
 Thinking is never sent to another model, another provider, a summary or a
 hand-off note, and is not in search, the Markdown export or `recall`.
-Thinking the secret scrubber had to change, or more than 2 MiB of it in one
-step, is kept (scrubbed, cut) for you to read and never sent back. If a
-provider refuses a request because of the thinking sent back, the harness
-sends it once more without, and from then on sends that model's thinking
-in that chat no more; the chat goes on. Thinking counts toward the
-context-window meter and is dropped with its step when older steps are
-summarised.
+A step keeps at most 256 KiB of thinking. Plain reasoning text the
+secret scrubber changed, or cut to that size, is sent back scrubbed or cut;
+Claude's signed blocks that had to be changed or cut are kept for you to
+read and never sent back, and then no later signed block of that model is
+either. Signatures and redacted data stay on the server: your browser gets
+the readable text only, and the row shows the first 64 KiB of it until you
+ask for all. If a provider refuses a request, the harness sends it again
+without the thinking, then without the images, then without both, and
+remembers only what was refused; when the thinking was refused it sends
+that model's thinking in that chat no more, and the chat goes on. Thinking
+counts toward the context-window meter; when a long turn fills the window
+the oldest steps' thinking is left out first (the chat notes "older steps'
+thinking left out"), and it goes with its steps when they are summarised.
 
 Local Ollama: preset `ollama`, `base_url = "http://localhost:11434/v1"`, no key.
 

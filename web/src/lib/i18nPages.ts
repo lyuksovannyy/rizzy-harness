@@ -33,6 +33,8 @@ export const pages = {
   "conv.shortened": "Context shortened for the model ({what}): about {before} to {after} tokens. Everything stays shown here.",
   "conv.shortCleared": "older tool results cleared",
   "conv.thinking": "Thinking",
+  "conv.thinkingAll": "Show all of it",
+  "conv.shortThinking": "older steps' thinking left out",
   "conv.thinkingRedacted": "{n} part(s) redacted by the provider: not readable.",
   "conv.shortSteps": "{n} steps summarised",
   "conv.tokens": "tokens",

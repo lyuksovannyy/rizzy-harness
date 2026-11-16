@@ -833,6 +833,7 @@ fn events() -> Vec<RawEvent> {
                 text: "Read <b>main.rs</b>; the bug is in parse.".into(),
                 todo: None,
             }),
+            thinking: None,
             tokens_before: 31_000,
             tokens_after: 9_000,
         }),
@@ -914,6 +915,18 @@ fn events() -> Vec<RawEvent> {
                 prefix: String::new(),
                 unsent: false,
             }),
+        }),
+        // The oldest steps' thinking left out of the requests: a line says so.
+        EventKind::ContextShortened(ContextShortened {
+            turn_id: t(),
+            cleared: None,
+            folded: None,
+            thinking: Some(Unthought {
+                turn_id: t(),
+                steps: 2,
+            }),
+            tokens_before: 190_000,
+            tokens_after: 60_000,
         }),
         // A refused replay: recorded for the requests, shows nothing.
         EventKind::ThinkingWithheld(ThinkingWithheld {

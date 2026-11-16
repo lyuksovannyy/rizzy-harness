@@ -9,6 +9,30 @@ use serde_json::Value;
 use crate::event::*;
 use crate::policy::Decision;
 
+/// One block of a step's thinking as the view keeps it: its kind
+/// (`signed`, `redacted`, `text`) and its readable text.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ThoughtBlock {
+    #[serde(rename = "type")]
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+impl ThoughtBlock {
+    fn of(b: &ThinkingBlock) -> Self {
+        let (kind, text) = match b {
+            ThinkingBlock::Signed { text, .. } => ("signed", Some(text.clone())),
+            ThinkingBlock::Redacted { .. } => ("redacted", None),
+            ThinkingBlock::Text { text } => ("text", Some(text.clone())),
+        };
+        Self {
+            kind: kind.into(),
+            text,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Item {
@@ -55,6 +79,9 @@ pub enum Item {
         steps: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         text: Option<String>,
+        /// The oldest steps' thinking left out (X.25).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        thinking: bool,
         tokens_before: u64,
         tokens_after: u64,
     },
@@ -68,12 +95,13 @@ pub enum Item {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         blocks: Vec<UiBlock>,
     },
-    /// A step's thinking (`assistant_message.thinking`, X.25), as
-    /// recorded, before what the step said. The chat shows it collapsed,
-    /// as text (`Thinking::shown`); nothing when nothing is readable.
+    /// A step's thinking (`assistant_message.thinking`, X.25), before
+    /// what the step said: each block's kind and readable text only (no
+    /// signature, no redacted data: `event::for_browser`). The chat shows
+    /// it collapsed, as text; nothing when nothing is readable.
     Thinking {
         message_id: String,
-        thinking: Thinking,
+        blocks: Vec<ThoughtBlock>,
     },
     Tool {
         call_id: String,
@@ -445,7 +473,7 @@ impl SessionView {
                 if let Some(t) = &m.thinking {
                     let item = Item::Thinking {
                         message_id: m.message_id.clone(),
-                        thinking: t.clone(),
+                        blocks: t.blocks.iter().map(ThoughtBlock::of).collect(),
                     };
                     let at = self.items.iter().rposition(|i| {
                         matches!(i, Item::Assistant { message_id, .. } if *message_id == m.message_id)
@@ -631,6 +659,7 @@ impl SessionView {
                 cleared: c.cleared.is_some(),
                 steps: c.folded.as_ref().map(|f| f.steps),
                 text: c.folded.map(|f| f.text),
+                thinking: c.thinking.is_some(),
                 tokens_before: c.tokens_before,
                 tokens_after: c.tokens_after,
             }),

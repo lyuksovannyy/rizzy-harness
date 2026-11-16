@@ -1147,6 +1147,10 @@ pub struct ContextShortened {
     /// [`Folded`]. The latest of a turn is in force for that turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folded: Option<Folded>,
+    /// The thinking of the oldest steps not sent from here on (X.25, T73):
+    /// see [`Unthought`]. Cumulative: the latest event's is in force.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<Unthought>,
     /// The request's estimated size before and after (tokens), for the UI.
     pub tokens_before: u64,
     pub tokens_after: u64,
@@ -1162,6 +1166,17 @@ pub struct ContextShortened {
 pub struct Cleared {
     pub turn_id: String,
     pub results: u32,
+}
+
+/// Where in-turn shortening leaves out thinking (X.25, T73): every step's
+/// of the conversation's turns before `turn_id`, and of the first `steps`
+/// steps of `turn_id`. The oldest go first: the providers allow leaving
+/// out the oldest blocks, and a signed block after one left out is not
+/// sent either (its run is broken), so what is left is the newest steps'.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Unthought {
+    pub turn_id: String,
+    pub steps: u32,
 }
 
 /// The first `steps` steps (model messages and what followed each) of the
@@ -1305,11 +1320,15 @@ pub struct Thinking {
 
 impl Thinking {
     /// The most bytes a step's blocks keep (text, signatures, redacted
-    /// data). Over it, the text is cut to [`Thinking::SHOWN_BYTES`] for
-    /// the person, the opaque parts dropped, and nothing is sent back: an
-    /// event must stay under the store's 4 MiB.
-    pub const MAX_BYTES: usize = 2 << 20;
-    /// What an oversized step keeps of its text, for the person.
+    /// data): 256 KiB. A Claude step's signature is commonly 10 to 100 KB
+    /// (it encrypts the full reasoning), plain reasoning of a long step a
+    /// few tens of KB; megabytes are a broken or hostile provider. Over it,
+    /// the text is cut to [`Thinking::SHOWN_BYTES`], the opaque parts are
+    /// dropped and the signed blocks are never sent back (cut plain text
+    /// still is). The log grows by at most this much a step: 256 MB per
+    /// 1,000 steps in the worst case.
+    pub const MAX_BYTES: usize = 256 << 10;
+    /// What an oversized step keeps of its text.
     pub const SHOWN_BYTES: usize = 64 << 10;
 
     /// The blocks' bytes, as [`Thinking::MAX_BYTES`] counts them.
@@ -1358,6 +1377,26 @@ impl ThinkingBlock {
             ThinkingBlock::Signed { text, signature } => text.len() + signature.len(),
             ThinkingBlock::Redacted { data } => data.len(),
             ThinkingBlock::Text { text } => text.len(),
+        }
+    }
+}
+
+/// An event's payload as the browser is sent it (X.25, T73): a step's
+/// thinking without its signatures, redacted data and prefix, which only
+/// the provider reads back (the node's log and the master's mirror keep
+/// them). Every path that sends events to a browser calls it.
+pub fn for_browser(kind: &str, payload: &mut Value) {
+    if kind != "assistant_message" {
+        return;
+    }
+    let Some(t) = payload.get_mut("thinking").and_then(Value::as_object_mut) else {
+        return;
+    };
+    t.remove("prefix");
+    if let Some(blocks) = t.get_mut("blocks").and_then(Value::as_array_mut) {
+        for b in blocks.iter_mut().filter_map(Value::as_object_mut) {
+            b.remove("signature");
+            b.remove("data");
         }
     }
 }
@@ -2239,6 +2278,7 @@ mod tests {
                     text: "s".into(),
                     todo: None,
                 }),
+                thinking: None,
                 tokens_before: 9,
                 tokens_after: 4,
             }),
@@ -2816,5 +2856,61 @@ mod attachment_frame_tests {
         // No attachment: the person's text, unchanged.
         empty.attachments.clear();
         assert_eq!(empty.model_text(), "Summarise the attached notes.");
+    }
+}
+
+#[cfg(test)]
+mod browser_tests {
+    use super::*;
+
+    /// X.25: what a browser is sent of a step's thinking: each block's
+    /// kind and text, no signature, redacted data or prefix; other events
+    /// and other fields untouched.
+    #[test]
+    fn for_browser_strips_the_opaque_parts_only() {
+        let (kind, mut payload) = EventKind::AssistantMessage(AssistantMessage {
+            turn_id: "t".into(),
+            message_id: "m".into(),
+            text: "said".into(),
+            tool_calls: vec![],
+            author: None,
+            variant: None,
+            blocks: vec![],
+            thinking: Some(Thinking {
+                model: "a::b".into(),
+                blocks: vec![
+                    ThinkingBlock::Signed {
+                        text: "why".into(),
+                        signature: "SIG".into(),
+                    },
+                    ThinkingBlock::Redacted {
+                        data: "DATA".into(),
+                    },
+                    ThinkingBlock::Text {
+                        text: "plain".into(),
+                    },
+                ],
+                prefix: "HASH".into(),
+                unsent: false,
+            }),
+        })
+        .into_parts();
+        for_browser(&kind, &mut payload);
+        assert_eq!(
+            payload["thinking"],
+            serde_json::json!({"model": "a::b", "blocks": [
+                {"type": "signed", "text": "why"},
+                {"type": "redacted"},
+                {"type": "text", "text": "plain"},
+            ]})
+        );
+        assert_eq!(payload["text"], "said");
+        // Malformed or other events: left as they are.
+        let mut odd = serde_json::json!({"thinking": 5, "signature": "S"});
+        for_browser("assistant_message", &mut odd);
+        assert_eq!(odd, serde_json::json!({"thinking": 5, "signature": "S"}));
+        let mut other = serde_json::json!({"thinking": {"blocks": [{"signature": "S"}]}});
+        for_browser("tool_call_finished", &mut other);
+        assert_eq!(other["thinking"]["blocks"][0]["signature"], "S");
     }
 }

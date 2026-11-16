@@ -321,7 +321,34 @@ fn thinking_parts(
 /// [`to_genai`] for a provider of `kind`: earlier steps' thinking is sent
 /// back by that API's rule ([`thinking_parts`]); `None` sends none.
 pub(crate) fn convert(req: &ChatRequest, kind: Option<ApiKind>) -> Converted {
+    // The hash is needed only where a signed block may be sent back.
+    let hash = kind == Some(ApiKind::Anthropic) && signed_thinking(req);
+    convert_with(req, kind, hash)
+}
+
+/// [`Prefix`] of everything `req` sends to Anthropic: what a signed block
+/// its answer brings records. Computed only when one came back.
+pub(crate) fn request_prefix(req: &ChatRequest) -> String {
+    convert_with(req, Some(ApiKind::Anthropic), true).prefix
+}
+
+/// Whether `req` holds a signed or redacted block that may be sent.
+fn signed_thinking(req: &ChatRequest) -> bool {
+    use harness_core::event::ThinkingBlock;
+    req.messages.iter().any(|m| {
+        matches!(m, ChatMsg::Assistant { thinking: Some(t), .. }
+            if t.blocks.iter().any(|b| !matches!(b, ThinkingBlock::Text { .. })))
+    })
+}
+
+fn convert_with(req: &ChatRequest, kind: Option<ApiKind>, hash: bool) -> Converted {
     let mut prefix = Prefix::new(&req.tools);
+    // A step's blocks were never sent (`unsent`): no signed block after it
+    // is (the gap rule, [`crate::provider::settle_thinking`], kept here for
+    // a conversation not settled). A block whose prefix changed needs no
+    // gap: every block after it that it was sent with has a changed
+    // prefix too, and one made after it was left out is valid.
+    let mut gap = false;
     let mut replayed = false;
     let mut msgs = Vec::new();
     let mut system_seen = false;
@@ -377,9 +404,20 @@ pub(crate) fn convert(req: &ChatRequest, kind: Option<ApiKind>) -> Converted {
             } => {
                 let mut parts = Vec::new();
                 if let (Some(t), Some(kind)) = (thinking, kind) {
-                    // Everything before this message is final here.
-                    prefix.feed(&msgs);
-                    let lead = thinking_parts(t, kind, &prefix);
+                    let signed = t
+                        .blocks
+                        .iter()
+                        .any(|b| !matches!(b, harness_core::event::ThinkingBlock::Text { .. }));
+                    let lead = if kind == ApiKind::Anthropic && signed && gap {
+                        vec![]
+                    } else {
+                        // Everything before this message is final here.
+                        if hash {
+                            prefix.feed(&msgs);
+                        }
+                        thinking_parts(t, kind, &prefix)
+                    };
+                    gap |= t.unsent;
                     replayed |= !lead.is_empty();
                     parts.extend(lead);
                 }
@@ -462,7 +500,9 @@ pub(crate) fn convert(req: &ChatRequest, kind: Option<ApiKind>) -> Converted {
             }
         }
     }
-    prefix.feed(&msgs);
+    if hash {
+        prefix.feed(&msgs);
+    }
     let mut r = GChatRequest::new(msgs);
     if !req.tools.is_empty() {
         r = r.with_tools(
@@ -707,7 +747,6 @@ impl Provider for LlmProvider {
         let fail =
             |e: genai::Error| header_timeout(&e, limits).unwrap_or_else(|| provider_error(e));
         let converted = convert(req, Some(self.kind));
-        let prefix = converted.prefix;
         let mut stream = self
             .client
             .exec_chat_stream(&req.model, converted.request, Some(&opts))
@@ -814,7 +853,7 @@ impl Provider for LlmProvider {
                         out.thinking = Some(Thinking {
                             model: req.model.clone(),
                             prefix: if self.kind == ApiKind::Anthropic {
-                                prefix.clone()
+                                request_prefix(req)
                             } else {
                                 String::new()
                             },
@@ -1416,7 +1455,7 @@ mod tests {
     #[test]
     fn anthropic_sends_signed_blocks_back_while_their_prefix_holds() {
         let base = vec![ChatMsg::System("s".into()), user("look")];
-        let p1 = convert(&req_of(base.clone()), Some(ApiKind::Anthropic)).prefix;
+        let p1 = request_prefix(&req_of(base.clone()));
         let t1 = Thinking {
             model: "m".into(),
             blocks: vec![
@@ -1485,13 +1524,62 @@ mod tests {
         assert!(convert(&r, Some(ApiKind::Anthropic)).replayed);
     }
 
+    /// Review of PR 137: a step's thinking left out later (in-turn
+    /// shortening) starts no gap: a block made after it was left out is
+    /// valid and sent; one recorded `unsent` (never sent) starts one.
+    #[test]
+    fn only_a_never_sent_step_starts_a_gap() {
+        let base = vec![ChatMsg::System("s".into()), user("look")];
+        let t1 = Thinking {
+            model: "m".into(),
+            blocks: vec![signed("first", "S1")],
+            prefix: request_prefix(&req_of(base.clone())),
+            unsent: false,
+        };
+        let dropped = Thinking {
+            model: "m".into(),
+            blocks: vec![],
+            prefix: String::new(),
+            unsent: false,
+        };
+        let mut two = base.clone();
+        two.extend(step("c1", Some(dropped)));
+        let t2 = Thinking {
+            model: "m".into(),
+            blocks: vec![signed("second", "S2")],
+            prefix: request_prefix(&req_of(two.clone())),
+            unsent: false,
+        };
+        let mut three = two.clone();
+        three.extend(step("c2", Some(t2.clone())));
+        three.push(user("next"));
+        let c = convert(&req_of(three), Some(ApiKind::Anthropic));
+        assert_eq!(kinds(&c.request.messages[2]), vec!["call:c1"]);
+        assert_eq!(
+            kinds(&c.request.messages[4])[..2],
+            ["sig:S2", "text:second"]
+        );
+        // The same with the first step never sent: no block after it.
+        let never = Thinking { unsent: true, ..t1 };
+        let mut two = base.clone();
+        two.extend(step("c1", Some(never)));
+        let t2 = Thinking {
+            prefix: request_prefix(&req_of(two.clone())),
+            ..t2
+        };
+        let mut three = two;
+        three.extend(step("c2", Some(t2)));
+        let c = convert(&req_of(three), Some(ApiKind::Anthropic));
+        assert!(!c.replayed, "a block after a never-sent step was sent");
+    }
+
     /// X.25: an `unsent` step's thinking never goes; plain reasoning goes
     /// to an OpenAI-compatible API as `reasoning_content` whatever changed
     /// before it, and never to Anthropic; signed blocks never to OpenAI.
     #[test]
     fn each_api_gets_only_its_own_kind_of_thinking() {
         let base = vec![ChatMsg::System("s".into()), user("look")];
-        let p = convert(&req_of(base.clone()), Some(ApiKind::Anthropic)).prefix;
+        let p = request_prefix(&req_of(base.clone()));
         let with = |t: Thinking| {
             let mut m = base.clone();
             m.extend(step("c1", Some(t)));

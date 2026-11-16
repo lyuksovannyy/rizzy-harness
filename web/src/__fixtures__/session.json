@@ -1337,6 +1337,21 @@
       "ts_ms": 1700000000082
     },
     {
+      "kind": "context_shortened",
+      "payload": {
+        "thinking": {
+          "steps": 2,
+          "turn_id": "t1"
+        },
+        "tokens_after": 60000,
+        "tokens_before": 190000,
+        "turn_id": "t1"
+      },
+      "seq": 84,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+      "ts_ms": 1700000000083
+    },
+    {
       "kind": "thinking_withheld",
       "payload": {
         "model": "anthropic::claude-x",
@@ -1344,9 +1359,9 @@
         "status": 400,
         "turn_id": "t1"
       },
-      "seq": 84,
+      "seq": 85,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000083
+      "ts_ms": 1700000000084
     },
     {
       "kind": "model_retry",
@@ -1359,9 +1374,9 @@
         "turn_id": "t6",
         "wait_ms": 4000
       },
-      "seq": 85,
+      "seq": 86,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000084
+      "ts_ms": 1700000000085
     },
     {
       "kind": "context_sent",
@@ -1376,9 +1391,9 @@
         ],
         "turn_id": "t6"
       },
-      "seq": 86,
+      "seq": 87,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000085
+      "ts_ms": 1700000000086
     },
     {
       "kind": "images_withheld",
@@ -1391,16 +1406,16 @@
         "status": 400,
         "turn_id": "t1"
       },
-      "seq": 87,
+      "seq": 88,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
-      "ts_ms": 1700000000086
+      "ts_ms": 1700000000087
     },
     {
       "kind": "from_a_newer_node",
       "payload": {
         "anything": true
       },
-      "seq": 88,
+      "seq": 89,
       "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
       "ts_ms": 0
     }
@@ -1443,7 +1458,7 @@
     "follow_ups": [
       "t6"
     ],
-    "head_seq": 88,
+    "head_seq": 89,
     "items": [
       {
         "text": "fix the bug",
@@ -1945,27 +1960,20 @@
         "type": "shortened"
       },
       {
+        "blocks": [
+          {
+            "text": "The <script>tests</script> first.",
+            "type": "signed"
+          },
+          {
+            "type": "redacted"
+          },
+          {
+            "text": "",
+            "type": "signed"
+          }
+        ],
         "message_id": "m-th1",
-        "thinking": {
-          "blocks": [
-            {
-              "signature": "c2lnbmVk",
-              "text": "The <script>tests</script> first.",
-              "type": "signed"
-            },
-            {
-              "data": "b3BhcXVl",
-              "type": "redacted"
-            },
-            {
-              "signature": "ZW1wdHk=",
-              "text": "",
-              "type": "signed"
-            }
-          ],
-          "model": "anthropic::claude-x",
-          "prefix": "abababababababababababababababababababababababababababababababab"
-        },
         "type": "thinking"
       },
       {
@@ -1977,31 +1985,23 @@
         "variant": null
       },
       {
+        "blocks": [
+          {
+            "text": "Plain reasoning.",
+            "type": "text"
+          }
+        ],
         "message_id": "m-th2",
-        "thinking": {
-          "blocks": [
-            {
-              "text": "Plain reasoning.",
-              "type": "text"
-            }
-          ],
-          "model": "deepseek::chat",
-          "unsent": true
-        },
         "type": "thinking"
       },
       {
+        "blocks": [
+          {
+            "text": "  ",
+            "type": "signed"
+          }
+        ],
         "message_id": "m-th3",
-        "thinking": {
-          "blocks": [
-            {
-              "signature": "c2ln",
-              "text": "  ",
-              "type": "signed"
-            }
-          ],
-          "model": "anthropic::claude-x"
-        },
         "type": "thinking"
       },
       {
@@ -2011,6 +2011,14 @@
         "text": "Done.",
         "type": "assistant",
         "variant": null
+      },
+      {
+        "cleared": false,
+        "thinking": true,
+        "tokens_after": 60000,
+        "tokens_before": 190000,
+        "turn_id": "t1",
+        "type": "shortened"
       }
     ],
     "max_steps": 1000,

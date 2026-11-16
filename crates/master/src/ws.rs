@@ -438,8 +438,10 @@ async fn catch_up(m: &Master, out: &mut Out, sid: SessionId, last: &mut u64) -> 
             }
         };
         let n = page.len();
-        for e in page {
+        for mut e in page {
             *last = e.seq;
+            // No signature or redacted data reaches a browser (X.25, T73).
+            harness_core::event::for_browser(&e.kind, &mut e.payload);
             if !out.send(json!({"type": "event", "event": e})).await {
                 return false;
             }
