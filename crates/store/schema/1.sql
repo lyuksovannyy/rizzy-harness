@@ -238,6 +238,18 @@ CREATE TABLE nodes (
     revoked_ms INTEGER
 );
 
+-- table profile_images on profile_images
+CREATE TABLE profile_images (
+    user_id    TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    slot       TEXT NOT NULL CHECK (slot IN ('avatar', 'banner')),
+    blob_id    TEXT NOT NULL REFERENCES blobs(blob_id) ON DELETE CASCADE,
+    updated_ms INTEGER NOT NULL,
+    PRIMARY KEY (user_id, slot)
+);
+
+-- index profile_images_blob on profile_images
+CREATE INDEX profile_images_blob ON profile_images(blob_id);
+
 -- table projects on projects
 CREATE TABLE projects (
     project_id   TEXT PRIMARY KEY,

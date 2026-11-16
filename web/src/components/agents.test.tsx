@@ -175,7 +175,7 @@ describe("an agent's page", () => {
     expect(api.agent).toHaveBeenCalledWith("coder", undefined);
     expect(host.querySelector("h1")!.textContent).toBe("Coder");
     expect(host.querySelector("pre.agent-prompt")!.textContent).toBe("You are careful.");
-    expect(switches().length).toBe(14);
+    expect(switches().length).toBe(15);
     expect(switches().every((s) => s.disabled)).toBe(true);
     expect(sw("Change files").checked).toBe(true);
     expect(button("Duplicate")).toBeDefined();
@@ -219,6 +219,29 @@ describe("an agent's page", () => {
     api.deleteAgent.mockResolvedValue({ ok: true });
     await act(async () => button("Delete Reviewer")!.click());
     expect(onOpen).toHaveBeenCalledWith(null);
+  });
+
+  test("Personalisation is its own switch: on for a new agent, saved when turned off", async () => {
+    expect(NEW_FEATURES.personalisation).toBe(true);
+    api.agent.mockResolvedValue(detail(coder));
+    await show(admin, "coder");
+    // A built-in shows its own and keeps it.
+    expect(sw("Personalisation").checked).toBe(true);
+    expect(sw("Personalisation").disabled).toBe(true);
+    api.agent.mockResolvedValue(detail(reviewer, { prompt: "Review it.", features: NEW_FEATURES }));
+    await show(admin, "reviewer");
+    expect(sw("Personalisation").checked).toBe(true);
+    act(() => sw("Personalisation").click());
+    api.updateAgent.mockResolvedValue(detail(reviewer));
+    await act(async () => button("Save")!.click());
+    expect(api.updateAgent).toHaveBeenCalledWith(
+      "reviewer",
+      { name: "Reviewer", summary: "", prompt: "Review it.", features: { ...NEW_FEATURES, personalisation: false } },
+      undefined,
+    );
+    // Without permission it is shown, not changed.
+    await show(member, "reviewer");
+    expect(sw("Personalisation").disabled).toBe(true);
   });
 
   test("MCP servers is its own switch: off for a new agent, saved when turned on", async () => {

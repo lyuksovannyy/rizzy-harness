@@ -1,0 +1,180 @@
+// Settings → Profile (README "Profile"): a banner and an avatar, each
+// changed by clicking it (made small here, saved at once, removable), then
+// the name, the place and time zone, and a short line about the person,
+// saved together with Save. The server checks every field; its message goes
+// under the field it names.
+import { ImagePlus, Trash2 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import "./profile.css";
+import { pageApi } from "../../apiPages";
+import { savablePrefs } from "../../lib/modelPlan";
+import type { Me, ModelInfo, Prefs, ProfileImages } from "../../types";
+import { chars, MAX_DESCRIPTION, type ProfileField, ProfileFields } from "../forms";
+import { LinkedImg } from "../Linked";
+import { type Slot, shrinkPicture } from "./pictures";
+import { avatarUrl } from "./UserAvatar";
+
+const FIELDS: ProfileField[] = ["display_name", "timezone", "country", "city", "description"];
+
+/** The field a server message is about: it starts with the field's name. */
+export function fieldOf(message: string): ProfileField | null {
+  return FIELDS.find((f) => message.startsWith(`${f} `)) ?? null;
+}
+
+/** What the browser can say before sending. */
+function localErrors(p: Prefs): Partial<Record<ProfileField, string>> {
+  const out: Partial<Record<ProfileField, string>> = {};
+  const about = (p.description ?? "").trim();
+  if (chars(about) > MAX_DESCRIPTION) out.description = `At most ${MAX_DESCRIPTION} characters (${chars(about)} now).`;
+  for (const k of ["display_name", "country", "city"] as const) {
+    if (chars((p[k] ?? "").trim()) > 64) out[k] = "At most 64 characters.";
+  }
+  return out;
+}
+
+const message = (x: unknown) => (x instanceof Error ? x.message : String(x));
+
+function Picture(props: {
+  slot: Slot;
+  me: Me;
+  version: string | null;
+  initial: string;
+  onChanged: (v: ProfileImages) => void;
+  onError: (e: string | null) => void;
+}) {
+  const input = useRef<HTMLInputElement>(null);
+  const [busy, setBusy] = useState(false);
+  const label = props.slot === "avatar" ? "avatar" : "banner";
+  const url = props.version && props.me.user_id ? `/api/users/${encodeURIComponent(props.me.user_id)}/${props.slot}?v=${props.version}` : null;
+  const pick = async (file: File | undefined) => {
+    if (!file) return;
+    setBusy(true);
+    props.onError(null);
+    try {
+      props.onChanged(await pageApi.setProfileImage(props.slot, await shrinkPicture(props.slot, file)));
+    } catch (x) {
+      props.onError(`${props.slot === "avatar" ? "Avatar" : "Banner"}: ${message(x)}`);
+    } finally {
+      setBusy(false);
+      if (input.current) input.current.value = "";
+    }
+  };
+  const remove = async () => {
+    props.onError(null);
+    try {
+      props.onChanged(await pageApi.removeProfileImage(props.slot));
+    } catch (x) {
+      props.onError(message(x));
+    }
+  };
+  return (
+    <div className={`profile-${props.slot}`}>
+      <button
+        type="button"
+        className={`profile-${props.slot}-pick`}
+        aria-label={props.version ? `Change ${label}` : `Add ${label}`}
+        title={props.version ? `Change ${label}` : `Add ${label}`}
+        disabled={busy || !props.me.user_id}
+        onClick={() => input.current?.click()}
+      >
+        {url ? (
+          <LinkedImg url={props.slot === "avatar" ? avatarUrl(props.me.user_id!, props.version!) : url} alt="" />
+        ) : props.slot === "avatar" ? (
+          <span className="profile-initial">{props.initial}</span>
+        ) : (
+          <span className="profile-banner-empty muted small">
+            <ImagePlus size={16} aria-hidden="true" /> Add a banner
+          </span>
+        )}
+      </button>
+      <input
+        ref={input}
+        type="file"
+        hidden
+        accept="image/png,image/jpeg,image/webp"
+        aria-label={`Choose ${label}`}
+        onChange={(e) => void pick(e.target.files?.[0])}
+      />
+      {props.version && (
+        <button type="button" className={`icon profile-remove profile-remove-${props.slot}`} aria-label={`Remove ${label}`} title={`Remove ${label}`} onClick={() => void remove()}>
+          <Trash2 size={14} />
+        </button>
+      )}
+    </div>
+  );
+}
+
+export default function ProfileTab(props: { me: Me; prefs: Prefs; models: ModelInfo[]; onSaved: (p: Prefs) => void }) {
+  const [p, setP] = useState<Prefs>(props.prefs);
+  const [errors, setErrors] = useState<Partial<Record<ProfileField, string>>>({});
+  const [err, setErr] = useState<string | null>(null);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [images, setImages] = useState<ProfileImages>({ avatar: null, banner: null });
+  const [pictureErr, setPictureErr] = useState<string | null>(null);
+  useEffect(() => setP(props.prefs), [props.prefs]);
+  useEffect(() => {
+    if (!props.me.user_id) return;
+    pageApi.profileImages().then(setImages, () => {});
+  }, [props.me.user_id]);
+  const name = (p.display_name || props.me.username).trim();
+  const save = async () => {
+    setMsg(null);
+    setErr(null);
+    const local = localErrors(p);
+    setErrors(local);
+    if (Object.keys(local).length > 0) return;
+    setBusy(true);
+    try {
+      const body = { ...savablePrefs(p, props.models), description: (p.description ?? "").trim() || null };
+      const saved = await pageApi.saveSettings(body);
+      props.onSaved(saved);
+      setMsg("Saved.");
+    } catch (x) {
+      const m = message(x);
+      const f = fieldOf(m);
+      if (f) setErrors({ [f]: m.slice(f.length + 1).replace(/^must/, "Must") });
+      else setErr(m);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const changed = (v: ProfileImages) => setImages((old) => ({ ...old, ...v }));
+  return (
+    <form
+      className="card stack profile-card"
+      onSubmit={(e) => {
+        e.preventDefault();
+        void save();
+      }}
+    >
+      <div className="profile-head">
+        <Picture slot="banner" me={props.me} version={images.banner} initial="" onChanged={changed} onError={setPictureErr} />
+        <Picture slot="avatar" me={props.me} version={images.avatar} initial={name.slice(0, 1).toUpperCase()} onChanged={changed} onError={setPictureErr} />
+      </div>
+      {pictureErr && (
+        <div className="error-text" role="alert">
+          {pictureErr}
+        </div>
+      )}
+      {!props.me.user_id && <div className="muted small">The API token has no pictures.</div>}
+      <ProfileFields
+        prefs={p}
+        onChange={(n) => {
+          setP(n);
+          setMsg(null);
+        }}
+        username={props.me.username}
+        withDescription
+        errors={errors}
+      />
+      {err && <div className="error-text">{err}</div>}
+      <div className="row end">
+        {msg && <span className="muted">{msg}</span>}
+        <button className="primary" disabled={busy}>
+          Save
+        </button>
+      </div>
+    </form>
+  );
+}

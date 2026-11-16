@@ -49,6 +49,16 @@ export const FEATURE_GROUPS: { title: string; items: Feature[] }[] = [
     ],
   },
   {
+    title: "Personalisation",
+    items: [
+      {
+        key: "personalisation",
+        label: "Personalisation",
+        hint: "Each person's reply style and personal instructions from Settings → Personalisation, in their own chats",
+      },
+    ],
+  },
+  {
     title: "Web",
     items: [{ key: "web", label: "Web search", hint: "Searches the web and reads pages" }],
   },
@@ -81,6 +91,7 @@ export const FEATURE_GROUPS: { title: string; items: Feature[] }[] = [
 export const NEW_FEATURES: AgentFeatures = {
   memory: true,
   project_memory: true,
+  personalisation: true,
   recall: false,
   web: true,
   read_files: false,

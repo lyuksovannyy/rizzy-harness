@@ -363,6 +363,7 @@ fn features() -> harness_agents::Features {
     harness_agents::Features {
         memory: true,
         project_memory: true,
+        personalisation: true,
         recall: false,
         web: true,
         read_files: true,
@@ -374,6 +375,35 @@ fn features() -> harness_agents::Features {
         as_agent: true,
         as_subagent: true,
     }
+}
+
+/// The Personalisation switch (PLAN.md T74): on unless a definition says
+/// off; off changes the hash, on leaves earlier agents' hashes as they were;
+/// a page agent keeps what was chosen; every built-in has it on.
+#[test]
+fn personalisation_is_on_unless_turned_off() {
+    let defined = |extra: &str| {
+        parse(
+            "notes",
+            &format!("---\nname: N\ntools: [read]\n{extra}---\nhi\n"),
+            false,
+        )
+        .unwrap()
+    };
+    let (plain, on, off) = (
+        defined(""),
+        defined("personalisation: true\n"),
+        defined("personalisation: false\n"),
+    );
+    assert!(plain.features.personalisation && !off.features.personalisation);
+    assert_eq!(plain.spec.prompt_hash, on.spec.prompt_hash);
+    assert_ne!(plain.spec.prompt_hash, off.spec.prompt_hash);
+    assert!(builtins().iter().all(|a| a.features.personalisation));
+    // Stored switches from before it parse with it on.
+    let mut v = serde_json::to_value(features()).unwrap();
+    v.as_object_mut().unwrap().remove("personalisation");
+    let old: harness_agents::Features = serde_json::from_value(v).unwrap();
+    assert!(old.personalisation);
 }
 
 #[test]

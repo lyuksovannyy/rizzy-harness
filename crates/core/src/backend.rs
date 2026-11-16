@@ -435,6 +435,11 @@ pub struct StandingPart {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StandingKey {
+    /// The chat owner's Personalisation (PLAN.md T74): the reply style they
+    /// chose and their personal instructions, in their own words
+    /// (`prefs::Personalisation::section`). Not memory: a turn without the
+    /// master's context keeps it.
+    Personal,
     /// The chat owner's own facts (`memory::turn_block`).
     Memory,
     /// Older own facts this message recalls.
@@ -463,7 +468,8 @@ pub enum StandingKey {
 
 impl StandingKey {
     /// Every key, in the order the block sends them.
-    pub const ALL: [StandingKey; 11] = [
+    pub const ALL: [StandingKey; 12] = [
+        StandingKey::Personal,
         StandingKey::Memory,
         StandingKey::MemoryRecall,
         StandingKey::Workspace,
@@ -482,7 +488,10 @@ impl StandingKey {
     pub fn is_memory(self) -> bool {
         !matches!(
             self,
-            StandingKey::Remember | StandingKey::Project | StandingKey::Board
+            StandingKey::Personal
+                | StandingKey::Remember
+                | StandingKey::Project
+                | StandingKey::Board
         )
     }
 }

@@ -17,6 +17,7 @@
 //! max_subagent_tokens: 200000                     # per turn, all sub-agents
 //! memory: true                                    # recall and `remember` (default true)
 //! project_memory: true                            # a project's facts, the same (default true)
+//! personalisation: true                           # the person's reply style and instructions (default true)
 //! available_as: [agent, subagent]                 # default both
 //! ---
 //! System prompt in markdown...
@@ -144,6 +145,8 @@ struct Frontmatter {
     memory: bool,
     #[serde(default = "yes")]
     project_memory: bool,
+    #[serde(default = "yes")]
+    personalisation: bool,
     #[serde(default = "both")]
     available_as: Vec<Use>,
 }
@@ -217,6 +220,12 @@ pub struct Features {
     /// instructions and board reach every agent: they are its brief.
     #[serde(default = "yes")]
     pub project_memory: bool,
+    /// The person's Personalisation (Settings → Personalisation, PLAN.md
+    /// T74): the reply style they chose and their personal instructions,
+    /// in their own chats with this agent. Off: neither (the name, place
+    /// and time zone still come). On when absent.
+    #[serde(default = "yes")]
+    pub personalisation: bool,
     /// `recall`: searches the person's own earlier chats and memory
     /// (PLAN.md T55). Its own switch, off when absent.
     #[serde(default)]
@@ -392,6 +401,7 @@ pub fn custom(
         max_subagent_tokens: None,
         memory: features.memory,
         project_memory: features.project_memory,
+        personalisation: features.personalisation,
         available_as,
     };
     let mut agent = build(id, fm, prompt, Origin::Custom)?;
@@ -439,6 +449,9 @@ fn build(id: &str, fm: Frontmatter, body: &str, origin: Origin) -> Result<Agent,
     if !fm.project_memory {
         h.update(b"no-project-memory\0");
     }
+    if !fm.personalisation {
+        h.update(b"no-personalisation\0");
+    }
     let prompt_hash = hex::encode(h.finalize())[..16].to_string();
     for d in &fm.delegates {
         if !valid_id(d) || d == id {
@@ -466,6 +479,7 @@ fn build(id: &str, fm: Frontmatter, body: &str, origin: Origin) -> Result<Agent,
     let features = Features {
         memory: fm.memory,
         project_memory: fm.project_memory,
+        personalisation: fm.personalisation,
         recall: fm.tools.allows(RECALL_TOOL),
         web: any(WEB_TOOLS),
         read_files: any(READ_TOOLS),

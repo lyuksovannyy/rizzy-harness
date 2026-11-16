@@ -2269,3 +2269,95 @@ async fn a_callback_after_memory_was_switched_off_holds_no_fact() {
     }
     assert!(all.contains("PROJECT-BRIEF") && all.contains("REMEMBER-ABOUT"));
 }
+
+/// The person's Personalisation (PLAN.md T74) is a standing section like
+/// the others: sent once, not again while it is the same, replaced when
+/// they change it (one cache write; the earlier copy leaves the history,
+/// T52), kept by a turn the master gave no context (it is not memory), and
+/// withdrawn when the master stops sending it. Every next request holds
+/// the last one byte for byte (T59).
+#[tokio::test]
+async fn personalisation_is_a_standing_section() {
+    let p = script(0);
+    let sid = SessionId::new();
+    let mut log = Vec::new();
+    let with = |text: Option<&str>, minute| {
+        let mut ex = extra(None, minute);
+        if let Some(t) = text {
+            ex.standing.as_mut().unwrap().push(StandingPart {
+                part: StandingKey::Personal,
+                text: t.into(),
+            });
+        }
+        ex
+    };
+    let cfg = NativeConfig::default;
+    let (r1, c1) = turn(
+        &p,
+        cfg(),
+        &mut log,
+        sid,
+        "t1",
+        "one",
+        with(Some("BE-BRIEF"), 1),
+    )
+    .await;
+    assert!(standing(&c1[0]).contains(&"personal"));
+    let (r2, c2) = turn(
+        &p,
+        cfg(),
+        &mut log,
+        sid,
+        "t2",
+        "two",
+        with(Some("BE-BRIEF"), 2),
+    )
+    .await;
+    assert!(!standing(&c2[0]).contains(&"personal"));
+    let last = r1.last().unwrap();
+    assert_eq!(r2[0].messages[..last.messages.len()], last.messages[..]);
+    // Changed: sent again with the harness's sentence; the old copy is
+    // gone from the rebuilt history.
+    let (r3, c3) = turn(
+        &p,
+        cfg(),
+        &mut log,
+        sid,
+        "t3",
+        "three",
+        with(Some("BE-WARM"), 3),
+    )
+    .await;
+    assert!(standing(&c3[0]).contains(&"personal"));
+    let all = bytes(&r3[0]);
+    assert!(
+        all.contains("BE-WARM") && !all.contains("BE-BRIEF"),
+        "{all}"
+    );
+    assert!(
+        all.contains(
+            "The person's reply style and instructions below replace the ones sent earlier"
+        ),
+        "{all}"
+    );
+    // No context from the master: kept.
+    let mut none = extra(None, 4);
+    none.standing = None;
+    none.context = None;
+    let (r4, c4) = turn(&p, cfg(), &mut log, sid, "t4", "four", none).await;
+    assert!(!standing(&c4[0]).contains(&"personal"));
+    assert!(bytes(&r4[0]).contains("BE-WARM"));
+    // Turned off (or cleared): withdrawn.
+    let (r5, c5) = turn(&p, cfg(), &mut log, sid, "t5", "five", with(None, 5)).await;
+    assert!(standing(&c5[0]).contains(&"personal"));
+    let all = bytes(&r5[0]);
+    assert!(!all.contains("BE-WARM"), "{all}");
+    let rebuilt = history_to_messages(&log);
+    assert!(
+        rebuilt
+            .iter()
+            .filter_map(|m| m.user_text())
+            .all(|t| !t.contains("BE-WARM")),
+        "the rebuild still holds the withdrawn section"
+    );
+}

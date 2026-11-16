@@ -2,7 +2,7 @@
 // Memory, the workspace panels, the chat's own controls, the login form).
 // They are split from api.ts so the first load does not carry them: that
 // file keeps what the home screen, the sidebar and the composer call.
-import { call, type Scope, scoped } from "./api";
+import { call, HttpError, keyed, type Scope, scoped, seen } from "./api";
 import type {
   ApprovalMode,
   ExecLevel,
@@ -25,8 +25,10 @@ import type {
   ModelListing,
   ModelTestResult,
   NewAgent,
+  Personalisation,
   Prefs,
   Preset,
+  ProfileImages,
   ProviderKind,
   ProviderModel,
   ProvidersState,
@@ -143,6 +145,23 @@ export const pageApi = {
   demoProvider: () => call<ProvidersState>("POST", "/api/admin/providers/demo"),
   savePricing: (currency: string) => call<{ currency: string }>("PUT", "/api/admin/pricing", { currency }),
   saveSettings: (p: Prefs) => call<Prefs>("PUT", "/api/me/settings", p),
+  /** Personalisation alone; the rest stays as stored. */
+  savePersonalisation: (p: Personalisation) => call<Prefs>("PUT", "/api/me/settings/personalisation", p),
+  profileImages: () => call<ProfileImages>("GET", "/api/me/profile-images"),
+  /** A picture's bytes (already made small in the browser): its new version. */
+  setProfileImage: async (slot: "avatar" | "banner", file: Blob): Promise<ProfileImages> => {
+    const res = await fetch(`/api/me/${slot}`, { method: "PUT", credentials: "same-origin", headers: keyed({ "content-type": file.type }), body: file });
+    let data: unknown = null;
+    try {
+      data = await res.json();
+    } catch {
+      /* non-JSON */
+    }
+    seen(res.status, data);
+    if (!res.ok) throw new HttpError(res.status, (data as { error?: string } | null)?.error ?? `${res.status} ${res.statusText}`);
+    return data as ProfileImages;
+  },
+  removeProfileImage: (slot: "avatar" | "banner") => call<ProfileImages>("DELETE", `/api/me/${slot}`),
   addMemory: (text: string, kind: FactKind = "fact") =>
     call<MemoryFact>("POST", "/api/memory", { text, kind }),
   updateMemory: (

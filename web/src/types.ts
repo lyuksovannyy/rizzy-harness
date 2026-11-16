@@ -507,6 +507,8 @@ export interface AgentFeatures {
   mcp: boolean;
   /** Hands sub-tasks to the agents available as sub-agents. */
   delegate: boolean;
+  /** The person's reply style and personal instructions (Settings → Personalisation); on unless turned off. */
+  personalisation: boolean;
   /** In the agent picker and @mentions. */
   as_agent: boolean;
   /** May be handed sub-tasks. */
@@ -630,6 +632,30 @@ export interface Prefs {
   /** A still, fainter background beside chats on wide screens. */
   backdrop_chats?: boolean;
   onboarded?: boolean;
+  /** About the person (Profile), at most 280 characters; given to the model, shown to nobody else. */
+  description?: string | null;
+  /** Settings → Personalisation; saved by its own call (savePersonalisation), never by saveSettings. */
+  personalisation?: Personalisation;
+}
+
+export type ReplyStyle = "default" | "friendly" | "professional" | "direct" | "concise";
+export type ReplyLevel = "default" | "more" | "less";
+
+/** How agents reply to the person and their personal instructions (PLAN.md T74). */
+export interface Personalisation {
+  style?: ReplyStyle;
+  warmth?: ReplyLevel;
+  enthusiasm?: ReplyLevel;
+  emoji?: ReplyLevel;
+  headings?: ReplyLevel;
+  /** At most 1,024 characters. */
+  instructions?: string | null;
+}
+
+/** Versions of the person's pictures (null: none). */
+export interface ProfileImages {
+  avatar: string | null;
+  banner: string | null;
 }
 
 export type ProviderKind = "openai" | "anthropic" | "mock";
@@ -890,6 +916,8 @@ export interface WorkspaceMember {
   user_id: string;
   username: string;
   display_name: string | null;
+  /** Their avatar's version (`/api/users/{id}/avatar?v=`), or none. */
+  avatar?: string | null;
   role: WorkspaceRole;
   joined_ms: number;
   /** Their level here as set (an owner's is always `host`). Only to those

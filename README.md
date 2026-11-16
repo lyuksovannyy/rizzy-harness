@@ -241,14 +241,18 @@ Workspaces). The last member leaving a workspace deletes it.
 
 Settings has four sections:
 
-- **Account**: your profile, appearance, search engines, default agents (one
-  for chats, one for Agentic chats) and model, your memories, your password.
+- **Account**: your Profile, Personalisation (how agents reply to you; see
+  below), appearance, search engines, default agents (one for chats, one for
+  Agentic chats) and model, your memories, your password.
 - **Workspace** (everyone in it): its name, your role, who is in it, the
   defaults it gives, and whether your facts (your memories) are used in its
   chats: always in Personal; in a team workspace you are asked when you join
   it (its creator too). Until you answer, the answer is no; you can change it
-  here at any time (see **Memory.** further down); and the workspace's
-  memory (Memory tab), which every member reads.
+  here at any time (see **Memory.** further down); the workspace's
+  memory (Memory tab), which every member reads; and its agents (Agents tab:
+  the list the Agents page shows, with this workspace's models; every agent
+  belongs to the whole server, so only server admins get its edit and delete
+  buttons there, as on the Agents page).
 - **Workspace admin** (admins and owners; not for Personal): its name, default
   agents (chats and Agentic), the model each agent uses there (the Assistant's, `general`, is the
   workspace's default model), members and roles, deleting it.
@@ -281,11 +285,53 @@ a row, Enter opens it, Esc closes the panel. Search covers only the workspace yo
 only your own chats, for admins too. Routine run chats are found by a search
 but are not listed while the box is empty.
 
-The **account menu** has your Profile, Settings, Log out and the
+The **account menu** opens from your name: its first row opens the
 **Workspaces** submenu (Personal first, then your team workspaces with your
-role, **+ New workspace…** and Workspace settings). It is a keyboard menu:
-Enter or ↓ opens it, → opens Workspaces, Esc goes back. Design notes:
-[docs/sidebar-search.md](docs/sidebar-search.md).
+role, and **+ New workspace…**); then **Profile**, **Personalisation** and
+**Workspace settings**; and at the foot **Settings** and **Log out** side by
+side. It is a keyboard menu: Enter or ↓ opens it, ↑/↓ move, → opens
+Workspaces (and ←/→ go between Settings and Log out), Esc goes back. Design
+notes: [docs/sidebar-search.md](docs/sidebar-search.md).
+
+### Profile and Personalisation
+
+**Profile** (Settings → Account → Profile): a banner and an avatar (click one
+to choose a PNG, JPEG or WebP; the browser crops it, the avatar to a square of
+at most 256 px and the banner to 3:1 at most 1500 × 500, and re-encodes it,
+so no camera data goes along; each has a remove button), your name, country,
+city and time zone, and **About you**, one paragraph of at most 280
+characters. **Save** saves the fields together; a picture is saved as soon
+as you pick it. The avatar shows in the account menu and in members lists to
+the people who share a workspace with you; the banner only to you. The
+sidebar's account button keeps your initial.
+
+**What the model gets:** with every message, one line of the server's names
+you (your name, else your username), your time zone (in a plain chat also
+your local time), your city and country if you gave them, and About you, in
+quotation marks as your words. Nobody else sees About you: not other members,
+not admins.
+
+**Personalisation** (Settings → Account → Personalisation) sets how every
+agent replies to you in your own chats: **Base style and tone** (Default,
+Friendly, Professional, Direct, Concise) and **Warmth**, **Enthusiasm**,
+**Emoji**, **Headings and lists** (Default, More, Less). Default adds
+nothing; every other choice adds one short fixed sentence the server owns.
+**Personal instructions** (at most 1,024 characters) are given to the agent
+as your own words, after a line of the harness's that says whose they are;
+they change no setting, permission or tool, and the agent's own instructions
+still apply. A **Memory** row links to your memories.
+
+- It reaches only your own chats, never another person's, and not a turn
+  started by a webhook (untrusted). Sub-agents get it with their parent's
+  turn, as they get the rest of its context. A routine runs as its owner.
+- An agent whose **Personalisation** switch is off (on its page in Agents)
+  gets neither the sentences nor the instructions; your name, place and
+  time zone still come.
+- It is sent once and again only when you change it: a change applies from
+  your next message, and costs that message one rewrite of the provider's
+  prompt cache from the chat's first message on. What each turn was sent is
+  in the chat's log (`context_sent`), scrubbed of secrets like everything
+  there.
 
 What you type and have not sent stays in this browser as a draft of that
 chat, for your account only. Logging out (or a login that ended) clears every
