@@ -176,11 +176,15 @@ async fn start() -> T {
     let addr = listener.local_addr().unwrap();
     let claim_path = dir.path().join("claim-code");
     std::fs::write(&claim_path, "CLAIM").unwrap();
-    let auth = Auth::new(Secret::new("api-secret".into()), vec![addr.to_string()], false)
-        .with_claim(Claim {
-            code: Secret::new("CLAIM".into()),
-            path: claim_path,
-        });
+    let auth = Auth::new(
+        Secret::new("api-secret".into()),
+        vec![addr.to_string()],
+        false,
+    )
+    .with_claim(Claim {
+        code: Secret::new("CLAIM".into()),
+        path: claim_path,
+    });
     let master = Master::new(Store::open_in_memory().unwrap(), auth);
     let (l, local) = fake("local", &[CAP_PROJECTS]);
     master.add_link(l, true).await.unwrap();
@@ -210,7 +214,13 @@ async fn start() -> T {
     }
 }
 
-async fn req(t: &T, method: Method, path: &str, body: Option<Value>, c: &str) -> (StatusCode, Value) {
+async fn req(
+    t: &T,
+    method: Method,
+    path: &str,
+    body: Option<Value>,
+    c: &str,
+) -> (StatusCode, Value) {
     let mut rb = reqwest::Client::new().request(method, format!("{}{path}", t.base));
     if let Some(b) = body {
         rb = rb.json(&b);
@@ -303,14 +313,34 @@ async fn no_folder_no_project() {
     let mut t = start().await;
     t.local.refuse.store(true, Ordering::SeqCst);
     let mk = |node: &str| json!({"name": "Half", "folder_on": node});
-    let (st, v) = req(&t, Method::POST, "/api/projects", Some(mk("local")), &t.alex).await;
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        "/api/projects",
+        Some(mk("local")),
+        &t.alex,
+    )
+    .await;
     assert_eq!(st, StatusCode::CONFLICT, "{v}");
     assert!(v["error"].as_str().unwrap().contains("last hour"), "{v}");
     let (st, v) = req(&t, Method::POST, "/api/projects", Some(mk("old")), &t.alex).await;
     assert_eq!(st, StatusCode::CONFLICT, "{v}");
-    assert!(v["error"].as_str().unwrap().contains("makes no project folders"), "{v}");
+    assert!(
+        v["error"]
+            .as_str()
+            .unwrap()
+            .contains("makes no project folders"),
+        "{v}"
+    );
     assert!(t.old.names().is_empty(), "an old node is asked nothing");
-    let (st, v) = req(&t, Method::POST, "/api/projects", Some(mk("nowhere")), &t.alex).await;
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        "/api/projects",
+        Some(mk("nowhere")),
+        &t.alex,
+    )
+    .await;
     assert_eq!(st, StatusCode::NOT_FOUND, "{v}");
     // Away: the link closes.
     drop(t.remote.leave.take());
@@ -320,9 +350,19 @@ async fn no_folder_no_project() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    let (st, v) = req(&t, Method::POST, "/api/projects", Some(mk("remote")), &t.alex).await;
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        "/api/projects",
+        Some(mk("remote")),
+        &t.alex,
+    )
+    .await;
     assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{v}");
-    assert!(projects(&t, &t.alex, None).await.is_empty(), "a half-made project");
+    assert!(
+        projects(&t, &t.alex, None).await.is_empty(),
+        "a half-made project"
+    );
 }
 
 /// Who may: a member whose role cannot change projects gets what it gets
@@ -336,7 +376,14 @@ async fn only_those_who_may_change_projects_and_use_the_node() {
     let bob = account(&t, "bob", "member", "host").await;
     let carol = account(&t, "carol", "admin", "host").await;
     let dana = account(&t, "dana", "member", "none").await;
-    let (st, v) = req(&t, Method::POST, "/api/workspaces", Some(json!({"name": "team"})), &t.alex).await;
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        "/api/workspaces",
+        Some(json!({"name": "team"})),
+        &t.alex,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{v}");
     let team = v["workspace_id"].as_str().unwrap().to_string();
     let (st, v) = req(
@@ -398,9 +445,23 @@ async fn only_those_who_may_change_projects_and_use_the_node() {
     assert_eq!(st, StatusCode::OK, "{v}");
     let pid = v["project_id"].as_str().unwrap().to_string();
     let give = format!("/api/projects/{pid}/folder");
-    let (st, _) = req(&t, Method::POST, &give, Some(json!({"node_id": "remote"})), &carol).await;
+    let (st, _) = req(
+        &t,
+        Method::POST,
+        &give,
+        Some(json!({"node_id": "remote"})),
+        &carol,
+    )
+    .await;
     assert_eq!(st, StatusCode::NOT_FOUND);
-    let (st, _) = req(&t, Method::POST, &give, Some(json!({"node_id": "remote"})), &bob).await;
+    let (st, _) = req(
+        &t,
+        Method::POST,
+        &give,
+        Some(json!({"node_id": "remote"})),
+        &bob,
+    )
+    .await;
     assert_eq!(st, StatusCode::FORBIDDEN);
     assert_eq!(t.remote.names(), ["Bobs"]);
 }
@@ -410,15 +471,36 @@ async fn only_those_who_may_change_projects_and_use_the_node() {
 #[tokio::test]
 async fn a_project_without_a_folder_gets_one_once() {
     let t = start().await;
-    let (st, v) = req(&t, Method::POST, "/api/projects", Some(json!({"name": "Late"})), &t.alex).await;
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        "/api/projects",
+        Some(json!({"name": "Late"})),
+        &t.alex,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(v["settings"]["cwd"], Value::Null);
     let give = format!("/api/projects/{}/folder", v["project_id"].as_str().unwrap());
-    let (st, v) = req(&t, Method::POST, &give, Some(json!({"node_id": "local"})), &t.alex).await;
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        &give,
+        Some(json!({"node_id": "local"})),
+        &t.alex,
+    )
+    .await;
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(v["settings"]["cwd"], folder_of("local", "Late").as_str());
     assert_eq!(v["settings"]["node_id"], "local");
-    let (st, v) = req(&t, Method::POST, &give, Some(json!({"node_id": "remote"})), &t.alex).await;
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        &give,
+        Some(json!({"node_id": "remote"})),
+        &t.alex,
+    )
+    .await;
     assert_eq!(st, StatusCode::CONFLICT, "{v}");
     assert!(t.remote.names().is_empty());
     // A path field is not part of the request.

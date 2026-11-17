@@ -230,6 +230,24 @@ describe("the Project button", () => {
     c.unmount();
   });
 
+  test("the backdrop and Escape close it, and it stays closed; the button's name is its own", async () => {
+    const c = mount([node()]);
+    let d = await c.open();
+    // A click on the dialog itself is the backdrop.
+    await act(async () => d.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    await tick();
+    expect(document.querySelector("dialog.project-picker")).toBeNull();
+    d = await c.open();
+    await act(async () => d.dispatchEvent(new Event("cancel", { cancelable: true })));
+    await tick();
+    expect(document.querySelector("dialog.project-picker")).toBeNull();
+    // The dialog is not inside the label that names the button.
+    d = await c.open();
+    expect(d.closest("label")).toBeNull();
+    expect(c.host.querySelector(".project-pick")!.closest("label")!.textContent).toBe("ProjectNo project");
+    c.unmount();
+  });
+
   test("From a repository is Later; a role that cannot create projects and a node without project folders say so", async () => {
     let c = mount([node()]);
     let d = await c.open();

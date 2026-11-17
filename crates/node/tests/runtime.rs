@@ -4188,7 +4188,12 @@ async fn a_new_project_folder_takes_a_writing_sub_agent() {
             .await
             .expect("no answer")
             .expect("link closed");
-        if let NodeToMaster::ProjectCreated { req_id, path, error } = msg {
+        if let NodeToMaster::ProjectCreated {
+            req_id,
+            path,
+            error,
+        } = msg
+        {
             assert_eq!(req_id, "pc");
             break std::path::PathBuf::from(path.unwrap_or_else(|| panic!("{error:?}")));
         }

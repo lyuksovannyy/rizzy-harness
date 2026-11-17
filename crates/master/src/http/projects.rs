@@ -294,7 +294,12 @@ async fn create(
         Some(node) => {
             folder::may_make_on(&m, &who, &a, node)?;
             let w = ws.clone();
-            let n = m.inner.mirror.call(move |s| s.projects(Some(&w))).await?.len();
+            let n = m
+                .inner
+                .mirror
+                .call(move |s| s.projects(Some(&w)))
+                .await?
+                .len();
             if n >= p::MAX_PROJECTS {
                 return Err(ApiError(
                     StatusCode::CONFLICT,

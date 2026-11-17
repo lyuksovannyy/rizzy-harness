@@ -295,15 +295,25 @@ async fn a_new_project_folder_runs_sessions_in_both_modes() {
     let folder = n.new_project("Both Modes").await;
     assert!(folder.join(".git").is_dir());
     n.ws = folder.clone();
-    for (mode, file) in [(ExecMode::Sandbox, "in-sandbox"), (ExecMode::Host, "in-host")] {
+    for (mode, file) in [
+        (ExecMode::Sandbox, "in-sandbox"),
+        (ExecMode::Host, "in-host"),
+    ] {
         let sid = n.create(mode).await;
         let out = n
-            .run(sid, &format!("run: echo pid=$$ > {file}; git log --oneline | wc -l"))
+            .run(
+                sid,
+                &format!("run: echo pid=$$ > {file}; git log --oneline | wc -l"),
+            )
             .await
             .join("\n");
         assert!(folder.join(file).is_file(), "{mode:?}: {out}");
         let pid = std::fs::read_to_string(folder.join(file)).unwrap();
-        assert_eq!(pid.trim() == "pid=2", mode == ExecMode::Sandbox, "{mode:?}: {pid}");
+        assert_eq!(
+            pid.trim() == "pid=2",
+            mode == ExecMode::Sandbox,
+            "{mode:?}: {pid}"
+        );
     }
 }
 

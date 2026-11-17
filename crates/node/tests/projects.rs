@@ -91,7 +91,11 @@ impl Node {
                 .expect("no answer")
                 .expect("link closed");
             match msg {
-                NodeToMaster::ProjectCreated { req_id, path, error } => {
+                NodeToMaster::ProjectCreated {
+                    req_id,
+                    path,
+                    error,
+                } => {
                     assert_eq!(req_id, "r");
                     return match (path, error) {
                         (Some(p), None) => Ok(p),
@@ -144,7 +148,10 @@ async fn a_node_that_did_not_offer_it_refuses() {
     ] {
         let mut n = start(key, per_hour, profile).await;
         if profile == Profile::Agentic {
-            assert!(!n.caps.contains(&CAP_PROJECTS.to_string()), "{key:?} {per_hour}");
+            assert!(
+                !n.caps.contains(&CAP_PROJECTS.to_string()),
+                "{key:?} {per_hour}"
+            );
         }
         let e = n.create("x").await.unwrap_err();
         assert!(e.contains("makes no project folders"), "{e}");

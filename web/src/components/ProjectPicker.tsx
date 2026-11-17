@@ -59,24 +59,27 @@ export default function ProjectButton(props: Props) {
   useEffect(() => {
     const last = recentFolders()[0];
     if (!props.cwd && !p && last) props.onPick({ nodeId: "", cwd: last, project: null });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  // The dialog stays outside the label: a click in it must not reach the
+  // button the label names, and the button's name is the label's text.
   return (
-    <label>
-      Project
-      <button
-        type="button"
-        className="pill project-pick"
-        aria-haspopup="dialog"
-        title={props.cwd || undefined}
-        onClick={() => setOpen(true)}
-      >
-        {p && <ProjectIcon icon={p.icon} accent={p.accent} size={14} />}
-        {p ? p.name : props.cwd.trim() ? lastPart(props.cwd) : "No project"}
-        <ChevronDown size={14} aria-hidden />
-      </button>
+    <>
+      <label>
+        Project
+        <button
+          type="button"
+          className="pill project-pick"
+          aria-haspopup="dialog"
+          title={props.cwd || undefined}
+          onClick={() => setOpen(true)}
+        >
+          {p && <ProjectIcon icon={p.icon} accent={p.accent} size={14} />}
+          {p ? p.name : props.cwd.trim() ? lastPart(props.cwd) : "No project"}
+          <ChevronDown size={14} aria-hidden />
+        </button>
+      </label>
       {open && <ProjectPicker {...props} onClose={() => setOpen(false)} />}
-    </label>
+    </>
   );
 }
 

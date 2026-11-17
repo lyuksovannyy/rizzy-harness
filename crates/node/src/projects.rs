@@ -152,10 +152,9 @@ pub(crate) async fn create(
     let names: Vec<String> = (0..TRIES)
         .map(|_| format!("{base}-{}", make_suffix()))
         .collect();
-    let (top, child, path) =
-        tokio::task::spawn_blocking(move || make_folder(&p, &dir, &names))
-            .await
-            .map_err(|e| format!("making the folder: {e}"))??;
+    let (top, child, path) = tokio::task::spawn_blocking(move || make_folder(&p, &dir, &names))
+        .await
+        .map_err(|e| format!("making the folder: {e}"))??;
     let proc_path = PathBuf::from(format!("/proc/self/fd/{}", child.as_raw_fd()));
     let made_repo = crate::git::init_project(&proc_path).await;
     let checked = made_repo.and_then(|()| check_made(policy, &child, &path));
@@ -224,7 +223,9 @@ fn make_folder(
         match nix::sys::stat::mkdirat(&top, n.as_str(), Mode::from_bits_truncate(0o755)) {
             Ok(()) => {
                 let child = nix::fcntl::openat(&top, n.as_str(), dir_flags(), Mode::empty())
-                    .map_err(|e| format!("opening the new folder {n}: {}", std::io::Error::from(e)))?;
+                    .map_err(|e| {
+                        format!("opening the new folder {n}: {}", std::io::Error::from(e))
+                    })?;
                 return Ok((top, child, real.join(n)));
             }
             // Taken, by anything: a folder, a file, a link. Never reused.
@@ -378,8 +379,14 @@ mod tests {
             create(&self.policy, &self.made, name, &suffix).await
         }
         async fn make_with(&self, name: &str, next: &[&str]) -> Result<PathBuf, String> {
-            let left = std::sync::Mutex::new(next.iter().map(|s| s.to_string()).collect::<VecDeque<_>>());
-            let f = move || left.lock().unwrap().pop_front().unwrap_or_else(|| "zzzz".into());
+            let left =
+                std::sync::Mutex::new(next.iter().map(|s| s.to_string()).collect::<VecDeque<_>>());
+            let f = move || {
+                left.lock()
+                    .unwrap()
+                    .pop_front()
+                    .unwrap_or_else(|| "zzzz".into())
+            };
             create(&self.policy, &self.made, name, &f).await
         }
     }
@@ -393,7 +400,11 @@ mod tests {
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .output()
             .unwrap();
-        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
@@ -424,7 +435,10 @@ mod tests {
             "no template hooks"
         );
         assert_eq!(r.policy.check_cwd(&p.to_string_lossy()).unwrap(), p);
-        let entries: Vec<_> = std::fs::read_dir(&p).unwrap().map(|e| e.unwrap().file_name()).collect();
+        let entries: Vec<_> = std::fs::read_dir(&p)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
         assert_eq!(entries, vec![std::ffi::OsString::from(".git")]);
     }
 
@@ -448,11 +462,15 @@ mod tests {
             "\u{2024}\u{2024}\u{2215}x",
             "x/../../../../tmp/evil",
         ] {
-            let p = r.make(name).await.unwrap_or_else(|e| panic!("{name:?}: {e}"));
+            let p = r
+                .make(name)
+                .await
+                .unwrap_or_else(|e| panic!("{name:?}: {e}"));
             assert_eq!(p.parent(), Some(r.projects.as_path()), "{name:?}");
             let n = p.file_name().unwrap().to_str().unwrap();
             assert!(
-                n.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
+                n.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
                 "{name:?} gave {n:?}"
             );
             assert!(!n.starts_with('-') && !n.starts_with('.'));
@@ -464,7 +482,10 @@ mod tests {
         assert!(blank.contains("needs a name"), "{blank}");
         // Nothing was made beside the projects folder or in the data
         // directory.
-        let beside: Vec<_> = std::fs::read_dir(&r.ws).unwrap().map(|e| e.unwrap().file_name()).collect();
+        let beside: Vec<_> = std::fs::read_dir(&r.ws)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
         assert_eq!(beside, vec![std::ffi::OsString::from("projects")]);
         assert_eq!(std::fs::read_dir(&r.data).unwrap().count(), 0);
     }
@@ -475,7 +496,11 @@ mod tests {
     async fn a_projects_folder_replaced_by_a_link_is_refused() {
         for to in ["data", "/"] {
             let r = rig();
-            let target = if to == "data" { r.data.clone() } else { PathBuf::from("/") };
+            let target = if to == "data" {
+                r.data.clone()
+            } else {
+                PathBuf::from("/")
+            };
             std::os::unix::fs::symlink(&target, &r.projects).unwrap();
             let e = r.make("x").await.unwrap_err();
             assert!(e.contains("projects folder"), "{to}: {e}");
@@ -503,11 +528,26 @@ mod tests {
         std::os::unix::fs::symlink(&elsewhere, r.projects.join("x-aaaa")).unwrap();
         std::fs::create_dir(r.projects.join("x-bbbb")).unwrap();
         std::fs::write(r.projects.join("x-cccc"), "file").unwrap();
-        let p = r.make_with("x", &["aaaa", "bbbb", "cccc", "dddd"]).await.unwrap();
+        let p = r
+            .make_with("x", &["aaaa", "bbbb", "cccc", "dddd"])
+            .await
+            .unwrap();
         assert_eq!(p, r.projects.join("x-dddd"));
-        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0, "the link was not followed");
-        assert_eq!(std::fs::read_dir(r.projects.join("x-bbbb")).unwrap().count(), 0);
-        assert_eq!(std::fs::read_to_string(r.projects.join("x-cccc")).unwrap(), "file");
+        assert_eq!(
+            std::fs::read_dir(&elsewhere).unwrap().count(),
+            0,
+            "the link was not followed"
+        );
+        assert_eq!(
+            std::fs::read_dir(r.projects.join("x-bbbb"))
+                .unwrap()
+                .count(),
+            0
+        );
+        assert_eq!(
+            std::fs::read_to_string(r.projects.join("x-cccc")).unwrap(),
+            "file"
+        );
         // Every try taken: refused, nothing overwritten.
         let e = r.make_with("x", &["aaaa"; 8]).await.unwrap_err();
         assert!(e.contains("taken"), "{e}");
@@ -530,7 +570,10 @@ mod tests {
         );
         let mut got = vec![a.unwrap(), b.unwrap()];
         got.sort();
-        assert_eq!(got, vec![r.projects.join("same-abcd"), r.projects.join("same-efgh")]);
+        assert_eq!(
+            got,
+            vec![r.projects.join("same-abcd"), r.projects.join("same-efgh")]
+        );
     }
 
     /// `[limits] projects_per_hour`, and a node without a projects folder.
@@ -572,7 +615,11 @@ mod tests {
         crate::git::use_test_git(None);
         let e = res.unwrap_err();
         assert!(e.contains("repository failed"), "{e}");
-        assert_eq!(std::fs::read_dir(&r.projects).unwrap().count(), 0, "removed again");
+        assert_eq!(
+            std::fs::read_dir(&r.projects).unwrap().count(),
+            0,
+            "removed again"
+        );
     }
 
     #[test]
@@ -600,7 +647,10 @@ mod tests {
         d.projects.dir = None;
         d.workspace_roots = vec![r.ws.clone()];
         if dirs::home_dir().is_some_and(|h| !h.starts_with(&r.ws)) {
-            let (w, located) = d.locate_projects().map(|w| (w, d.projects.located.clone())).unwrap();
+            let (w, located) = d
+                .locate_projects()
+                .map(|w| (w, d.projects.located.clone()))
+                .unwrap();
             assert!(w.unwrap().contains("off"));
             assert_eq!(located, None);
         }

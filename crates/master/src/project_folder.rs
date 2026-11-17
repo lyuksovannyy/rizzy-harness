@@ -151,7 +151,11 @@ pub fn on_answer(m: &Master, node_id: &str, req_id: String, answer: Answer) {
                 Ok(p)
             }
             Ok(_) => Err("the node answered with an unusable path".to_string()),
-            Err(e) => Err(e.chars().filter(|c| !c.is_control()).take(MAX_ERROR).collect()),
+            Err(e) => Err(e
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(MAX_ERROR)
+                .collect()),
         };
         let _ = tx.send(answer);
     }
