@@ -1391,7 +1391,11 @@ directory, be inside it, or contain it: with the default data directory
 `grep`, `glob`, `outline`) never reach into the data directory, even with
 `allow_outside_workspace = true` or through a symlink. The shell runs in a
 sandbox that cannot open it either (see "The shell sandbox" below); its
-output is still scrubbed of the API token and known keys. When the model asks for several `read`, `grep`, `glob` or `outline`
+output is still scrubbed of the API token and known keys. Streamed text (a
+model's answer, a command's output) shows as it is written: only text that
+could begin a known key is held back until the next piece shows whether it
+does (a few bytes, or after something that starts like a long key, up to
+that key's length). When the model asks for several `read`, `grep`, `glob` or `outline`
 calls in one step and none needs a card, they run at the same time (at most
 8 at once); their results still appear, and reach the model, in the order it
 asked. Every other call, `bash` included, runs alone in its place.

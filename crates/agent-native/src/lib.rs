@@ -6305,6 +6305,80 @@ mod tests {
         }
     }
 
+    /// T75: a slow answer shows piece by piece while a long key is known
+    /// (the old hold kept the last 63 bytes back: nothing showed until the
+    /// answer was 64 bytes long), and the key split across three slow
+    /// pieces never shows. After each piece the stream waits until what
+    /// was shown settles, then records it.
+    #[tokio::test]
+    async fn a_slow_answer_shows_piece_by_piece_and_a_split_key_never() {
+        const KEY: &str = "4f1c9e2ab7d03c58e6f19a2b4c7d8e0f1a2b3c4d5e6f708192a3b4c5d6e7f809";
+        let host = RecHost::new(Decision::Allow);
+        let shown = || -> String {
+            host.events
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|e| match e {
+                    EventKind::AssistantDelta(d) => Some(d.text.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let pieces = [
+            "Hello, ",
+            "the key is ",
+            &KEY[..20],
+            &KEY[20..50],
+            &KEY[50..],
+            " and done.",
+        ];
+        let (tx, rx) = mpsc::unbounded_channel::<String>();
+        let seen = std::sync::Mutex::new(Vec::new());
+        let fut = async {
+            for (i, piece) in pieces.into_iter().enumerate() {
+                tx.send(piece.to_string()).unwrap();
+                // Long enough for the flush tick, then until it shows (or
+                // 3 s: the old code never shows it).
+                tokio::time::sleep(FLUSH_INTERVAL * 3).await;
+                let before = seen.lock().unwrap().last().cloned().unwrap_or_default();
+                let until = tokio::time::Instant::now() + Duration::from_secs(3);
+                while !(2..4).contains(&i)
+                    && shown() == before
+                    && tokio::time::Instant::now() < until
+                {
+                    tokio::time::sleep(FLUSH_INTERVAL).await;
+                }
+                seen.lock().unwrap().push(shown());
+            }
+        };
+        let secrets = SecretSet::new(vec![harness_core::Secret::new(KEY.into())]);
+        let never = tokio_util::sync::CancellationToken::new();
+        coalesce(fut, rx, &never, &host, &secrets, |text| {
+            EventKind::AssistantDelta(AssistantDelta {
+                author: Default::default(),
+                variant: None,
+                turn_id: "t".into(),
+                message_id: "m".into(),
+                text,
+            })
+        })
+        .await;
+        let seen = seen.into_inner().unwrap();
+        assert_eq!(
+            seen,
+            [
+                "Hello, ",
+                "Hello, the key is ",
+                "Hello, the key is ",
+                "Hello, the key is ",
+                "Hello, the key is [REDACTED]",
+                "Hello, the key is [REDACTED] and done.",
+            ]
+        );
+        assert_eq!(shown(), "Hello, the key is [REDACTED] and done.");
+    }
+
     /// `run: <cmd>` calls bash, `out: <id>` calls tool_output; after a tool
     /// result it stops.
     struct Scripted;
