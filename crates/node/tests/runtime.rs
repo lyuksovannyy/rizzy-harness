@@ -2193,6 +2193,7 @@ impl harness_agent_native::Provider for Script {
             tool_calls,
             usage: None,
             stop: Default::default(),
+            thinking: None,
         })
     }
 }

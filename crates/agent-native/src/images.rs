@@ -345,6 +345,7 @@ mod tests {
             msgs.push(ChatMsg::Assistant {
                 text: "ok".into(),
                 tool_calls: vec![],
+                thinking: None,
             });
         }
         msgs.push(user_msg("no image".into(), &[]));

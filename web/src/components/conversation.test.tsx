@@ -7,6 +7,8 @@
 // "removed from Media"), the bar's images, and deleting the chat with or
 // without the Media files that came from it.
 import { act } from "react";
+import { apply, emptyView } from "../fold";
+import { SHOWN_CHARS } from "./ThinkingRow";
 import { linked } from "../lib/links.setup";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -172,6 +174,65 @@ describe("shortened context", () => {
     expect(folded.querySelector("p")!.textContent).toBe("Read <b>main.rs</b>");
     expect(folded.querySelector("b")).toBeNull();
   });
+});
+
+describe("thinking", () => {
+  test("one collapsed row per step, the model's text as text, a redacted part as one line", async () => {
+    await show(
+      [
+        {
+          type: "thinking",
+          message_id: "m1",
+                    blocks: [
+            { type: "signed", text: "Check <b>main.rs</b> first." },
+            { type: "redacted" },
+            { type: "signed", text: " \n" },
+            { type: "redacted" },
+          ],
+        },
+        { type: "thinking", message_id: "m", blocks: [{ type: "redacted" }] },
+        { type: "thinking", message_id: "m", blocks: [{ type: "signed", text: "" }] },
+      ],
+      sessionRow(),
+    );
+    const rows = [...host.querySelectorAll<HTMLDetailsElement>("[data-testid=thinking]")];
+    expect(rows).toHaveLength(2);
+    expect(rows.every((r) => !r.open)).toBe(true);
+    expect(rows[0]!.querySelector("summary")!.textContent).toBe("Thinking");
+    const ps = [...rows[0]!.querySelectorAll("p")].map((p) => p.textContent);
+    expect(ps).toEqual(["Check <b>main.rs</b> first.", "2 part(s) redacted by the provider: not readable."]);
+    expect(rows[0]!.querySelector("b")).toBeNull();
+    expect(rows[1]!.querySelectorAll("p")).toHaveLength(1);
+  });
+
+  test("a long text shows its first 64 KiB until asked for all of it", async () => {
+    const long = "x".repeat(SHOWN_CHARS + 500);
+    await show([{ type: "thinking", message_id: "m", blocks: [{ type: "text", text: long }] }], sessionRow());
+    const row = host.querySelector<HTMLDetailsElement>("[data-testid=thinking]")!;
+    expect(row.querySelector("p")!.textContent).toHaveLength(SHOWN_CHARS);
+    await act(async () => row.querySelector("button")!.click());
+    expect(row.querySelector("p")!.textContent).toHaveLength(SHOWN_CHARS + 500);
+    expect(row.querySelector("button")).toBeNull();
+  });
+
+  // Review of PR 137: a node's malformed thinking crashed the chat page.
+  const malformed: [string, unknown][] = [
+    ["a number", 5],
+    ["a string", "x"],
+    ["blocks not an array", { blocks: "x" }],
+    ["a text that is a number", { blocks: [{ type: "signed", text: 7, signature: "S" }] }],
+    ["a null block", { blocks: [null] }],
+    ["a number block", { blocks: [3] }],
+    ["a block without a type", { blocks: [{ text: "t" }, { type: "text", text: "kept" }] }],
+  ];
+  for (const [name, thinking] of malformed) {
+    test(`malformed thinking from a node (${name}) neither breaks the fold nor the page`, async () => {
+      const v = emptyView();
+      apply(v, { session_id: SID, seq: 1, ts_ms: 0, kind: "assistant_message", payload: { turn_id: "t", message_id: "m1", text: "hi", tool_calls: [], thinking } } as never);
+      await show(v.items, sessionRow());
+      expect(host.textContent).toContain("hi");
+    });
+  }
 });
 
 describe("agent switches", () => {

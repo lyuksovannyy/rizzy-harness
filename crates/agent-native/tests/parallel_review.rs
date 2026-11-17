@@ -739,6 +739,7 @@ fn previous_turn(sid: SessionId) -> (Vec<RawEvent>, u64, UserMessage) {
                 input: json!({"path": format!("old{i}.rs")}),
             }],
             blocks: vec![],
+            thinking: None,
         }));
         push(EventKind::ToolCallFinished(ToolCallFinished {
             image: None,
@@ -771,6 +772,7 @@ fn previous_turn(sid: SessionId) -> (Vec<RawEvent>, u64, UserMessage) {
         text: "done before".into(),
         tool_calls: vec![],
         blocks: vec![],
+        thinking: None,
     }));
     push(EventKind::TurnEnded(TurnEnded {
         turn_id: "t1".into(),

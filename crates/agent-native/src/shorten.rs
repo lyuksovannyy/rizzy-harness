@@ -29,7 +29,7 @@ use std::collections::HashMap;
 
 use harness_core::RawEvent;
 use harness_core::event::{
-    Cleared, ContextShortened, EventKind, Folded, OUTPUT_QUOTE, quoted_line,
+    Cleared, ContextShortened, EventKind, Folded, OUTPUT_QUOTE, Unthought, quoted_line,
 };
 use serde_json::Value;
 
@@ -105,6 +105,8 @@ pub struct Span {
 pub struct State {
     pub cleared: Option<Cleared>,
     pub folds: HashMap<String, Folded>,
+    /// Where the oldest steps' thinking is left out (X.25, T73).
+    pub thinking: Option<Unthought>,
 }
 
 impl State {
@@ -115,6 +117,9 @@ impl State {
         }
         if let Some(f) = &c.folded {
             self.folds.insert(c.turn_id.clone(), f.clone());
+        }
+        if let Some(t) = &c.thinking {
+            self.thinking = Some(t.clone());
         }
     }
 
@@ -130,7 +135,7 @@ impl State {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.cleared.is_none() && self.folds.is_empty()
+        self.cleared.is_none() && self.folds.is_empty() && self.thinking.is_none()
     }
 }
 
@@ -277,6 +282,8 @@ struct Layout {
     skip: Vec<bool>,
     /// The fold note an opening carries.
     note_at: HashMap<usize, String>,
+    /// A model message whose thinking is left out.
+    unthought: Vec<bool>,
 }
 
 fn layout(msgs: &[ChatMsg], spans: &[Span], st: &State) -> Layout {
@@ -327,7 +334,83 @@ fn layout(msgs: &[ChatMsg], spans: &[Span], st: &State) -> Layout {
         cleared,
         skip,
         note_at,
+        unthought: unthought(msgs, spans, st),
     }
+}
+
+/// The model messages whose signed thinking `st` leaves out: every one
+/// before the point's turn, and its turn's first `steps` (plain reasoning
+/// text in them stays).
+fn unthought(msgs: &[ChatMsg], spans: &[Span], st: &State) -> Vec<bool> {
+    let n = msgs.len();
+    let mut out = vec![false; n];
+    let Some(t) = &st.thinking else {
+        return out;
+    };
+    let Some(k) = spans.iter().position(|s| s.turn_id == t.turn_id) else {
+        return out;
+    };
+    let start = spans[k].start.min(n);
+    for (i, m) in msgs.iter().enumerate().take(start) {
+        out[i] = matches!(m, ChatMsg::Assistant { .. });
+    }
+    let mut seen = 0u32;
+    for i in start..end_of(spans, k, n) {
+        if matches!(msgs[i], ChatMsg::Assistant { .. }) {
+            if seen >= t.steps {
+                break;
+            }
+            seen += 1;
+            out[i] = true;
+        }
+    }
+    out
+}
+
+/// Leave out the thinking `st` leaves out, in place. The loop calls it on what it keeps, so it holds no thinking a
+/// request no longer sends (its memory is bounded by the request's, as
+/// T71's image cache is).
+pub fn drop_thinking(msgs: &mut [ChatMsg], spans: &[Span], st: &State) {
+    if st.thinking.is_some() {
+        let u = unthought(msgs, spans, st);
+        for (m, gone) in msgs.iter_mut().zip(u) {
+            if gone
+                && let ChatMsg::Assistant {
+                    thinking: Some(t), ..
+                } = m
+                && crate::provider::holds_signed(t)
+            {
+                *t = crate::provider::thinking_dropped(t);
+            }
+        }
+    }
+}
+
+/// The point that leaves out the signed thinking of every step before
+/// `tail` that still has some, oldest first (X.25, T73). Plain reasoning
+/// text is never left out here: a host that follows DeepSeek's documented
+/// rule ("must be fully passed back") would refuse every later request; it
+/// stays bounded by `Thinking::MAX_BYTES` and goes with its step when the
+/// older tiers fold steps. `None` when there is none.
+pub fn plan_unthink(
+    msgs: &[ChatMsg],
+    spans: &[Span],
+    st: &State,
+    tail: usize,
+) -> Option<Unthought> {
+    let l = unthought(msgs, spans, st);
+    let i = (0..tail.min(msgs.len())).rev().find(|&i| {
+        !l[i]
+            && matches!(&msgs[i], ChatMsg::Assistant { thinking: Some(t), .. } if crate::provider::holds_signed(t))
+    })?;
+    let k = spans.iter().rposition(|s| s.start <= i)?;
+    let steps = (spans[k].start..=i)
+        .filter(|&j| matches!(msgs[j], ChatMsg::Assistant { .. }))
+        .count() as u32;
+    Some(Unthought {
+        turn_id: spans[k].turn_id.clone(),
+        steps,
+    })
 }
 
 /// Where a fold of a turn's first `steps` steps lies in `start..end`: the
@@ -377,6 +460,21 @@ pub fn apply(msgs: &[ChatMsg], spans: &[Span], st: &State, how: How) -> Vec<Chat
         if let ChatMsg::ToolImage { call_id, .. } = m
             && gone.contains(call_id)
         {
+            continue;
+        }
+        if l.unthought[i]
+            && let ChatMsg::Assistant {
+                text,
+                tool_calls,
+                thinking: Some(t),
+            } = m
+            && crate::provider::holds_signed(t)
+        {
+            out.push(ChatMsg::Assistant {
+                text: text.clone(),
+                tool_calls: tool_calls.clone(),
+                thinking: Some(crate::provider::thinking_dropped(t)),
+            });
             continue;
         }
         if how.stubs
@@ -498,15 +596,22 @@ pub fn tail_start(msgs: &[ChatMsg], tail: u64) -> Option<usize> {
                 results += tokens(weight(msgs, i));
                 any = true;
             }
-            ChatMsg::Assistant { text, tool_calls } if !tool_calls.is_empty() && any => {
+            ChatMsg::Assistant {
+                text,
+                tool_calls,
+                thinking,
+            } if !tool_calls.is_empty() && any => {
                 // The step's own message counts too: its arguments can be
-                // what is large (a `write`).
+                // what is large (a `write`), and so can its thinking.
                 results += tokens(
                     text.len()
                         + tool_calls
                             .iter()
                             .map(|c| c.tool.len() + c.input.to_string().len())
-                            .sum::<usize>(),
+                            .sum::<usize>()
+                        + thinking
+                            .as_deref()
+                            .map_or(0, crate::provider::thinking_chars),
                 );
                 if start.is_some() && sum + results > tail {
                     break;
@@ -623,6 +728,7 @@ mod tests {
                     tool: tool.into(),
                     input,
                 }],
+                thinking: None,
             },
             ChatMsg::Tool {
                 call_id: format!("c{i}"),

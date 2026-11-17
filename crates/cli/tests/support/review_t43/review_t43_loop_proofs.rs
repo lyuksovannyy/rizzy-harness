@@ -299,6 +299,7 @@ fn history(sid: SessionId, image_name: &str) -> Vec<RawEvent> {
             text: format!("answer {n}"),
             tool_calls: vec![],
             blocks: vec![],
+            thinking: None,
         }));
         push(EventKind::TurnEnded(TurnEnded {
             turn_id: t,

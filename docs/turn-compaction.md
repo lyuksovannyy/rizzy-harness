@@ -126,6 +126,26 @@ steps, a summary about every 100 steps). Never on two steps in a row. Both bound
 tests (`shortening_is_rare_and_never_on_consecutive_steps`,
 `mask_and_clearing_at_128k`).
 
+## Thinking (X.25, PLAN.md T73)
+
+A step's thinking rides on its assistant message. It counts toward the
+estimate and the protected tail, and when a request is over the line a
+tier before clearing leaves out the signed thinking (Anthropic's blocks)
+of every step before the tail, oldest first (`context_shortened.thinking`,
+no model call); plain reasoning text is never left out by it (a host that
+follows DeepSeek's rule wants every step's back), and a fold removes all of
+a step's thinking with its step. Anthropic's signed blocks are sent back only
+while everything a request sends before them is what the request that
+produced them sent (`llm::Prefix`, the hash recorded as
+`thinking.prefix`): clearing a result, a fold, leaving out older
+thinking or an image leaving the window stops the blocks made before that
+change and keeps the ones made after it. A step whose blocks were never
+sent (`unsent`) stops every later signed block of its model (the gap
+rule, `provider::settle_thinking`). Plain reasoning text (DeepSeek) is
+sent whatever changed, as long as its step is sent. The loop keeps no thinking a request no longer
+sends. The rebuild applies the same, so a request still rebuilds byte for
+byte (`turn_compaction_review.rs` `rebuild_matches_live_with_thinking`).
+
 ## Live check (2026-11-15, the owner's router, synthetic repository)
 
 Thirty synthetic files of 6,000 characters, a 32k window set on the model, the task

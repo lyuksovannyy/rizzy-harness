@@ -17,6 +17,14 @@ pub enum ChatMsg {
     Assistant {
         text: String,
         tool_calls: Vec<ToolCallRef>,
+        /// The step's thinking (X.25), as recorded: sent back only to the
+        /// model that wrote it, under that provider's rule
+        /// (`llm::to_genai`). Once it may not be sent it is a marker
+        /// ([`thinking_marker`]: no blocks, `unsent`), which keeps the
+        /// gap: no later signed block of that model is sent after it
+        /// ([`settle_thinking`]). `None`: the step had none, or it is
+        /// another agent's or for a transcript.
+        thinking: Option<std::sync::Arc<harness_core::event::Thinking>>,
     },
     Tool {
         call_id: String,
@@ -596,6 +604,9 @@ pub struct Completion {
     pub usage: Option<Usage>,
     /// Why the model stopped.
     pub stop: StopReason,
+    /// The step's thinking, as the provider sent it (X.25). Its `model`
+    /// is the request's (the router stamps the prefixed id).
+    pub thinking: Option<harness_core::event::Thinking>,
 }
 
 /// Why a model stopped writing, normalised from each provider's own value
@@ -872,6 +883,133 @@ pub trait Provider: Send + Sync {
         req: &ChatRequest,
         deltas: mpsc::UnboundedSender<String>,
     ) -> Result<Completion, ProviderError>;
+
+    /// Whether `req`, as this provider would send it, sends back any of
+    /// the model's earlier thinking (X.25): the loop's one resend without
+    /// it after a refusal (T73) is only worth a request when it does.
+    fn replays_thinking(&self, _req: &ChatRequest) -> bool {
+        false
+    }
+}
+
+/// Take every step's thinking of `model` out of `msgs` (`None`: of every
+/// model): the provider refused a request that sent it back
+/// (`thinking_withheld`, T73). The loop and the rebuild both call it at
+/// that point, so the requests after it are the same.
+pub fn withhold_thinking(msgs: &mut [ChatMsg], model: Option<&str>) {
+    for m in msgs {
+        if let ChatMsg::Assistant { thinking, .. } = m
+            && let Some(t) = thinking.as_ref()
+            && model.is_none_or(|w| t.model == w)
+            && !t.blocks.is_empty()
+        {
+            *thinking = Some(thinking_dropped(t));
+        }
+    }
+}
+
+/// What stands for a step's thinking that is not sent: its model, no
+/// blocks, `unsent`. Holds no bytes of it (the loop's memory is bounded by
+/// what the requests send), and keeps the gap ([`settle_thinking`]).
+pub fn thinking_marker(
+    t: &harness_core::event::Thinking,
+) -> std::sync::Arc<harness_core::event::Thinking> {
+    std::sync::Arc::new(harness_core::event::Thinking {
+        model: t.model.clone(),
+        blocks: vec![],
+        prefix: String::new(),
+        unsent: true,
+    })
+}
+
+/// What stands for a step's thinking that was sendable and is left out
+/// now (in-turn shortening, a refusal): no blocks, and not `unsent`, so it
+/// starts no gap. The blocks after it need none: one made while this one
+/// was sent recorded it in its prefix, which no longer holds, so the
+/// request builder leaves it out too; one made after it was left out is
+/// valid and is sent.
+pub fn thinking_dropped(
+    t: &harness_core::event::Thinking,
+) -> std::sync::Arc<harness_core::event::Thinking> {
+    std::sync::Arc::new(harness_core::event::Thinking {
+        model: t.model.clone(),
+        blocks: vec![],
+        prefix: String::new(),
+        unsent: false,
+    })
+}
+
+/// Whether a step's thinking holds a signed or redacted block: what the
+/// in-turn tier may leave out. Plain reasoning text stays: a host that
+/// follows DeepSeek's documented rule wants every step's back.
+pub fn holds_signed(t: &harness_core::event::Thinking) -> bool {
+    t.blocks
+        .iter()
+        .any(|b| !matches!(b, harness_core::event::ThinkingBlock::Text { .. }))
+}
+
+/// A step's thinking as a request may carry it: a marker once `unsent`.
+pub fn sendable_thinking(
+    t: harness_core::event::Thinking,
+) -> std::sync::Arc<harness_core::event::Thinking> {
+    if t.unsent {
+        thinking_marker(&t)
+    } else {
+        std::sync::Arc::new(t)
+    }
+}
+
+/// The gap rule (X.25, T73): once a step's thinking of a model was never
+/// sent (recorded `unsent`: out of order, scrubbed, oversized, refused),
+/// no later step's signed or redacted blocks of that model are sent either
+/// (Anthropic: "omit prior turns' thinking, but not a block between two
+/// that you keep"; the provider made the left-out blocks, and a later
+/// block may count on them). Plain reasoning text has no such rule and
+/// stays. A step's thinking left out later ([`thinking_dropped`]) starts
+/// no gap: the prefix check covers the blocks after it exactly. Turns them
+/// into markers, so neither the request nor the estimate nor the loop's
+/// memory carries them. The loop and the rebuild both call it on the
+/// whole conversation, before shortening.
+pub fn settle_thinking(msgs: &mut [ChatMsg]) {
+    use harness_core::event::ThinkingBlock;
+    let mut gapped: Vec<String> = Vec::new();
+    for m in msgs {
+        let ChatMsg::Assistant {
+            thinking: Some(t), ..
+        } = m
+        else {
+            continue;
+        };
+        if t.unsent {
+            if !gapped.contains(&t.model) {
+                gapped.push(t.model.clone());
+            }
+            continue;
+        }
+        let signed = t
+            .blocks
+            .iter()
+            .any(|b| !matches!(b, ThinkingBlock::Text { .. }));
+        if signed && gapped.contains(&t.model) {
+            *t = thinking_marker(t);
+        }
+    }
+}
+
+/// What a step's thinking counts for in [`estimate_tokens`], in
+/// characters: its text, or what its signature encrypts (the full
+/// reasoning, base64: about 3 bytes per 4 characters) when that is more,
+/// since a provider bills the full reasoning it reads back.
+pub(crate) fn thinking_chars(t: &harness_core::event::Thinking) -> usize {
+    use harness_core::event::ThinkingBlock;
+    t.blocks
+        .iter()
+        .map(|b| match b {
+            ThinkingBlock::Signed { text, signature } => text.len().max(signature.len() * 3 / 4),
+            ThinkingBlock::Redacted { data } => data.len() * 3 / 4,
+            ThinkingBlock::Text { text } => text.len(),
+        })
+        .sum()
 }
 
 /// What one image counts for in `estimate_tokens`, in characters (about a
@@ -892,12 +1030,17 @@ pub fn estimate_tokens(messages: &[ChatMsg]) -> u64 {
             | ChatMsg::Summary(t)
             | ChatMsg::StepContext(t) => t.len(),
             ChatMsg::UserImages { text, images } => text.len() + images.len() * IMAGE_CHARS,
-            ChatMsg::Assistant { text, tool_calls } => {
+            ChatMsg::Assistant {
+                text,
+                tool_calls,
+                thinking,
+            } => {
                 text.len()
                     + tool_calls
                         .iter()
                         .map(|c| c.input.to_string().len() + c.tool.len())
                         .sum::<usize>()
+                    + thinking.as_deref().map_or(0, thinking_chars)
             }
             ChatMsg::Tool { content, .. } => content.len(),
             ChatMsg::ToolImage { image, state, .. } => {

@@ -98,6 +98,7 @@ fn answer(text: &str) -> Completion {
         tool_calls: vec![],
         usage: None,
         stop: Default::default(),
+        thinking: None,
     }
 }
 
@@ -111,6 +112,7 @@ fn call(tool: &str, input: Value) -> Completion {
         }],
         usage: None,
         stop: Default::default(),
+        thinking: None,
     }
 }
 

@@ -1040,6 +1040,11 @@ async fn events(
         .mirror
         .call(move |s| s.events_after(sid, q.after, limit))
         .await?;
+    // No signature or redacted data reaches a browser (X.25, T73).
+    let evs: Vec<serde_json::Value> = evs
+        .iter()
+        .map(harness_core::RawEvent::for_browser)
+        .collect();
     Ok(Json(json!({ "events": evs })))
 }
 

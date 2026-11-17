@@ -666,6 +666,7 @@ mod tests {
                 author: None,
                 variant: None,
                 blocks: vec![],
+                thinking: None,
             })
         };
         let started = |id: &str, status: &str| {

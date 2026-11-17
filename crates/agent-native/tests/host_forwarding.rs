@@ -87,6 +87,7 @@ impl Provider for Script {
                 tool_calls: vec![],
                 usage: None,
                 stop: Default::default(),
+                thinking: None,
             });
         }
         if let Some(f) = self.before.lock().unwrap().take() {
@@ -105,6 +106,7 @@ impl Provider for Script {
                 .collect(),
             usage: None,
             stop: Default::default(),
+            thinking: None,
         })
     }
 }

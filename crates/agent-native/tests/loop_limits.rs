@@ -77,6 +77,7 @@ impl Provider for Forever {
             }],
             usage: None,
             stop: Default::default(),
+            thinking: None,
         })
     }
 }

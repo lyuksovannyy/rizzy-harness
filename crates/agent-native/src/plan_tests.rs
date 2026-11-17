@@ -184,6 +184,7 @@ impl Provider for Rec {
             tool_calls,
             usage: None,
             stop: Default::default(),
+            thinking: None,
         })
     }
 }

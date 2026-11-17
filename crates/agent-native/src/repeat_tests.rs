@@ -216,6 +216,7 @@ impl Provider for Rec {
             tool_calls,
             usage: None,
             stop: Default::default(),
+            thinking: None,
         })
     }
 }
@@ -625,6 +626,7 @@ async fn a_new_turn_starts_a_new_count() {
                 blocks: vec![],
                 author: None,
                 variant: None,
+                thinking: None,
             }),
         ));
         h.push(ev(
