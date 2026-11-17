@@ -158,7 +158,9 @@ rewritten after the layout mockup (foundations, UI shell and bar first, onboardi
   Scheduled, Plugins and Explore cut.
 * Sidebar since 2026-11-08: New chat, Agents, **Routines** (was "Scheduled"), **Media** (was
   "Images") and **Artifacts** (was "Library"), each shown per viewer and workspace; Plugins
-  stay cut, as a disabled **Connections** entry ("Later"); Projects and Recent sections; the
+  stay cut, as a disabled **Connections** entry ("Later"; since 2026-11-17 planned as a
+  **Plugins** screen per workspace, a list of skills and connectors, ADOPTION_PLAN X.34);
+  Projects and Recent sections; the
   account menu in the footer, which also holds the workspaces; search in a panel (Ctrl K)
   instead of the inline box.
 * Home: localized, time-of-day greeting with the user's name (strings in i18n catalogs from day one).
@@ -908,6 +910,23 @@ Numbers T15 and T31 were never used; rows are never renumbered.
     without decoding) and the ELF/PE/Mach-O checks in `sniff.rs`. Each is a few dozen lines
     over bounded input and avoids pulling in a decoder; the header readers have a fuzz test,
     the range parser table and random-range tests.
+* **Services the master answers (2026-11-17, an invariant reworded with the owner's yes).**
+  The rule was "the master never runs tools". The Gate 3 review could not confirm it as
+  worded (`docs/security-review/2026-11-gate3.md`: the chat runtime's web and memory tools
+  run in the server's process), and `recall` (X.13) already works another way: the node's
+  tool files a typed query over the link and the master answers from the session alone.
+  The rule now says what is meant: **the master runs no shell, no file tool and no program
+  the model names; it may answer typed requests to a fixed list of built-in services, each
+  a per-agent switch.** What a service must keep: the request names no user, workspace,
+  project or chat (the master takes them from the session); the tool stays a node tool
+  (its schema, risk class and approval are the node's, and a node may deny it in
+  `node.toml`); the answer is bounded and is data for the model, never an instruction to
+  the node; the tool result is appended by the session's own node (one writer). Built:
+  `recall` (X.13) and the task board (X.32, T78: `board` and `board_edit`). Planned:
+  connectors to online accounts (X.35). Where a
+  connector runs is decided by where its data lives: a repository, files or a local network
+  mean the node (forge accounts X.27, `node.toml` servers, project servers X.36); an online
+  account means the master, so its token never reaches a node.
 
 ## 6. Licences of references
 
