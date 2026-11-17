@@ -749,7 +749,7 @@ async fn launch(m: Master, a: Admitted) {
     );
     let context = format!(
         "{}\n\n{note}",
-        prefs.model_context(
+        prefs.clone().for_turn(rendered.untrusted).model_context(
             &a.owner.username,
             ts(now),
             a.spec.profile == harness_core::event::Profile::Chat

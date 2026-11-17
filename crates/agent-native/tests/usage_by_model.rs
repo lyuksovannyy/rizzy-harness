@@ -300,6 +300,7 @@ fn spec(id: &str, model: Option<&str>, tools: &[&str], fallbacks: &[&str]) -> Ag
         context_windows: [("p::noter".to_string(), 32_768u64)].into(),
         effort: None,
         ui: Default::default(),
+        no_personalisation: false,
         prompt_hash: "h".into(),
         deny_tools: vec![],
         delegates: vec![],

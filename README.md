@@ -100,6 +100,35 @@ automation that only needs one user's access, and do not copy it if no script ne
 Without configuration the built-in **mock** provider is used, so you can try
 the UI with no API key. Try `run: ls -la`, `read: README.md` or `slow: 50`.
 
+**Sending a message, and waiting for the model.** Send puts your message in
+the chat at once, before the server has answered: from the home screen it
+shows above the box while the chat is made, then in the new chat, with its
+attachments and images. It is marked "Sending…" until the server has taken it,
+and is replaced by the log's message when that arrives (never both). Until the
+server has it, the message also stays in the chat's draft, ahead of anything
+you type meanwhile, so a reload or a closed chat does not lose it. From the same moment a line where the answer will appear says "<agent>
+is waiting for the model…"; after 5 seconds it also shows, quietly, how many
+seconds the model has said nothing, so a slow provider does not look like a
+hang. Screen readers hear that line once, not the count. When the first words
+arrive it says "<agent> is answering…" (or "is working…" while a tool runs, and
+"is waiting for the model…" again before the next model request); a message you
+send while it works does not change that line. The count runs on this tab's
+clock from when the tab saw the latest event, so a computer clock that is off
+cannot make it wrong; a reload or a tab opened later starts it again from 0.
+Screen readers hear "is waiting for the model" once per turn and "is waiting
+for you" when an approval comes, not every step. Stop is there from the moment the turn starts. If the provider fails
+for a passing reason the line under it says why and when the next try is
+("rate limit. Trying again in 3 s (attempt 2 of 3)"); a provider that sends
+nothing is cut off after `[limits] model_first_byte_timeout_s` (600 s by
+default; the server's own Ask chats always use 600 s) and the turn ends with
+the reason and **Retry**. A message the server refuses in an open chat goes
+back into the box, with its attachments, and the reason under it. The first
+message of a new chat, refused after the chat opened, stays in that chat marked
+"Not sent: <reason>" with **Retry** (send it again, with its attachments and
+images) and **Edit** (put it into the reply box, ahead of anything typed
+since); the chat also puts it into its reply box when it opens, and keeps it
+in the draft until it is sent.
+
 **Writing while the agent works.** The reply box stays open while a turn
 runs: Enter (or Send, next to Stop) sends the message at once, and a line under
 the box says what happens to it ("Read after the current step. Stop
@@ -241,14 +270,18 @@ Workspaces). The last member leaving a workspace deletes it.
 
 Settings has four sections:
 
-- **Account**: your profile, appearance, search engines, default agents (one
-  for chats, one for Agentic chats) and model, your memories, your password.
+- **Account**: your Profile, Personalisation (how agents reply to you; see
+  below), appearance, search engines, default agents (one for chats, one for
+  Agentic chats) and model, your memories, your password.
 - **Workspace** (everyone in it): its name, your role, who is in it, the
   defaults it gives, and whether your facts (your memories) are used in its
   chats: always in Personal; in a team workspace you are asked when you join
   it (its creator too). Until you answer, the answer is no; you can change it
-  here at any time (see **Memory.** further down); and the workspace's
-  memory (Memory tab), which every member reads.
+  here at any time (see **Memory.** further down); the workspace's
+  memory (Memory tab), which every member reads; and its agents (Agents tab:
+  the list the Agents page shows, with this workspace's models; every agent
+  belongs to the whole server, so only server admins get its edit and delete
+  buttons there, as on the Agents page).
 - **Workspace admin** (admins and owners; not for Personal): its name, default
   agents (chats and Agentic), the model each agent uses there (the Assistant's, `general`, is the
   workspace's default model), members and roles, deleting it.
@@ -292,17 +325,70 @@ a row, Enter opens it, Esc closes the panel. Search covers only the workspace yo
 only your own chats, for admins too. Routine run chats are found by a search
 but are not listed while the box is empty.
 
-The **account menu** has your Profile, Settings, Log out and the
+The **account menu** opens from your name: its first row opens the
 **Workspaces** submenu (Personal first, then your team workspaces with your
-role, **+ New workspace…** and Workspace settings). It is a keyboard menu:
-Enter or ↓ opens it, → opens Workspaces, Esc goes back. Design notes:
-[docs/sidebar-search.md](docs/sidebar-search.md).
+role, and **+ New workspace…**); then **Profile**, **Personalisation** and
+**Workspace settings**; and at the foot **Settings** and **Log out** side by
+side. It is a keyboard menu: Enter or ↓ opens it, ↑/↓ move, → opens
+Workspaces (and ←/→ go between Settings and Log out), Esc goes back. Design
+notes: [docs/sidebar-search.md](docs/sidebar-search.md).
+
+### Profile and Personalisation
+
+**Profile** (Settings → Account → Profile): a banner and an avatar (click one
+to choose a PNG, JPEG or WebP; the browser crops it, the avatar to a square of
+at most 256 px and the banner to 3:1 at most 1500 × 500, and re-encodes it,
+so no camera or location data goes along; each has a remove button, which
+asks first), your name, country,
+city and time zone, and **About you**, one paragraph of at most 280
+characters. **Save** saves the fields together; a picture is saved as soon
+as you pick it. The avatar shows in the account menu and in members lists to
+the people who share a workspace with you; the banner only to you. The
+sidebar's account button keeps your initial. The server checks every
+picture itself, however it was sent: a still PNG, JPEG or WebP within the
+sizes above, with no metadata (EXIF, XMP, IPTC or PNG text: a picture
+uploaded straight through the API with camera or location data is refused,
+not cleaned; pick it here, or save it without metadata), never animated.
+
+**What the model gets:** with every message, one line of the server's names
+you (your name, else your username), your time zone (in a plain chat also
+your local time), your city and country if you gave them, and About you, in
+‹ › marks as your words (not in a turn started by a webhook). Nobody else
+sees About you: not other members, not admins.
+
+**Personalisation** (Settings → Account → Personalisation) sets how every
+agent replies to you in your own chats: **Base style and tone** (Default,
+Friendly, Professional, Direct, Concise) and **Warmth**, **Enthusiasm**,
+**Emoji**, **Headings and lists** (Default, More, Less). Default adds
+nothing; every other choice adds one short fixed sentence the server owns.
+**Personal instructions** (at most 1,024 characters) are given to the agent
+as your own words, after a line of the harness's that says whose they are;
+they change no setting, permission or tool, and the agent's own instructions
+still apply. A **Memory** row links to your memories.
+
+- It reaches only your own chats, never another person's, and not a turn
+  started by a webhook (untrusted). A sub-agent gets it with its parent's
+  turn when its own switch is on. A routine runs as its owner.
+- An agent whose **Personalisation** switch is off (on its page in Agents)
+  gets neither the sentences nor the instructions; your name, place and
+  time zone still come. Built-in agents always get it (their switch is shown
+  on and cannot be changed; Duplicate makes an agent whose switch you can
+  turn off).
+- It is sent once and again only when you change it: a change applies from
+  your next message, and costs that message one rewrite of the provider's
+  prompt cache from the chat's first message on. What each turn was sent is
+  in the chat's log (`context_sent`). Only the secrets the node knows are
+  scrubbed from it: an API key you paste into your instructions is stored in
+  your settings, sent to the provider and kept in the log, as if you had
+  typed it in a message. Line separators (U+2028, U+2029) and control
+  characters other than line breaks and tabs are refused.
 
 What you type and have not sent stays in this browser as a draft of that
 chat, for your account only. Logging out (or a login that ended) clears every
 draft in the browser, with your recent folders and test events; deleting a
 chat deletes its draft, here or on another device; incognito chats keep no
-draft.
+draft. In an incognito chat a message being sent, or one the server refused,
+lives only in that tab's memory (the bubble and the box): a reload loses it.
 
 ## Routines
 
@@ -3013,9 +3099,13 @@ An `@mention` (also its Retry), an answer to an agent's question and a
 fallback model that answered once are no switch. While the agent works (a
 turn runs or is being stopped, a resumed turn, a retry, a `/compact`) the
 picker is disabled: Stop it, or wait for the turn to end, and the picker is
-back. The node refuses a change sent anyway ("The agent is working…"). A
-pick shows at once; the picker waits for the server's answer before the next
-one, and goes back with the reason if it was refused.
+back. The node refuses a change sent anyway ("The agent is working…"). It is
+also disabled from the moment you send a message until the chat holds it (or
+the server refused it), so a message goes to the agent the picker showed when
+you sent it. A pick shows at once; the picker waits for the server's answer
+before the next one, and goes back with the reason if it was refused. A pick
+on its way does not hold back Send: the server takes the pick and the
+message in the order you made them.
 
 "Your facts" are the memories in Settings → Account; an agent without them
 neither recalls nor proposes them. Scout and Reviewer are read-only by their

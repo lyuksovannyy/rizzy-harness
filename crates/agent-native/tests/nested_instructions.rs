@@ -303,6 +303,7 @@ fn agent(window: u64) -> AgentSpec {
         context_windows: vec![("m".to_string(), window)].into_iter().collect(),
         effort: None,
         ui: Default::default(),
+        no_personalisation: false,
         prompt_hash: "h".into(),
         deny_tools: vec![],
         delegates: vec![],

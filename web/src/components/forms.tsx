@@ -19,7 +19,23 @@ import { EngineIcon } from "./EngineIcon";
 import { Select, type SelectOption } from "./Select";
 import type { Prefs } from "../types";
 
-export function ProfileFields(props: { prefs: Prefs; onChange: (p: Prefs) => void; username: string }) {
+/** A Profile field the server checks; its message shows under the field. */
+export type ProfileField = "display_name" | "timezone" | "country" | "city" | "description";
+
+/** The longest description, in characters (the server's `MAX_DESCRIPTION`). */
+export const MAX_DESCRIPTION = 280;
+
+/** Characters as the server counts them (code points, not UTF-16 units). */
+export const chars = (s: string) => [...s].length;
+
+export function ProfileFields(props: {
+  prefs: Prefs;
+  onChange: (p: Prefs) => void;
+  username: string;
+  /** Settings' Profile: the description too (onboarding asks less). */
+  withDescription?: boolean;
+  errors?: Partial<Record<ProfileField, string>>;
+}) {
   const { prefs, onChange } = props;
   const id = useId();
   const [cities, setCities] = useState<[string, string][] | null>(null);
@@ -32,6 +48,13 @@ export function ProfileFields(props: { prefs: Prefs; onChange: (p: Prefs) => voi
     tz.trim() && !tzBad && tz.trim() !== device
       ? [{ label: `Reset to this device's time zone (${device})`, icon: <RotateCcw size={14} />, onClick: () => set("timezone", device) }]
       : [];
+  const err = (k: ProfileField) =>
+    props.errors?.[k] && (
+      <span className="field-hint error-text" id={`${id}-${k}-err`}>
+        {props.errors[k]}
+      </span>
+    );
+  const about = prefs.description ?? "";
   return (
     <div className="form stack">
       <div className="field">
@@ -42,35 +65,13 @@ export function ProfileFields(props: { prefs: Prefs; onChange: (p: Prefs) => voi
           id={`${id}-name`}
           value={prefs.display_name ?? ""}
           placeholder={props.username}
+          maxLength={64}
+          aria-invalid={!!props.errors?.display_name}
           onChange={(e) => set("display_name", e.target.value)}
         />
-        <span className="field-hint">What the assistant calls you.</span>
+        {err("display_name") || <span className="field-hint">What the assistant calls you.</span>}
       </div>
-      <div className="field">
-        <label className="field-label" htmlFor={`${id}-tz`}>
-          Time zone <Optional />
-        </label>
-        <Combobox
-          id={`${id}-tz`}
-          label="Time zone"
-          value={tz}
-          onChange={(v) => set("timezone", v)}
-          suggest={suggestTimeZones}
-          placeholder="e.g. Europe/Riga"
-          invalid={tzBad}
-          actions={tzActions}
-        />
-        {tzBad && <span className="field-hint error-text">Pick a time zone from the list.</span>}
-        {!tz && (
-          <span className="field-hint">
-            Empty: the AI is not told your local time.{" "}
-            <button type="button" className="link" onClick={() => set("timezone", device)}>
-              Use this device's ({device})
-            </button>
-          </span>
-        )}
-      </div>
-      <div className="row">
+      <div className="row wrap profile-place">
         <div className="field grow">
           <label className="field-label" htmlFor={`${id}-country`}>
             Country <Optional />
@@ -83,6 +84,7 @@ export function ProfileFields(props: { prefs: Prefs; onChange: (p: Prefs) => voi
             suggest={suggestCountries}
             icon={cc ? countryFlag(cc) : undefined}
           />
+          {err("country")}
         </div>
         <div className="field grow">
           <label className="field-label" htmlFor={`${id}-city`}>
@@ -105,8 +107,54 @@ export function ProfileFields(props: { prefs: Prefs; onChange: (p: Prefs) => voi
               </>
             }
           />
+          {err("city")}
+        </div>
+        <div className="field grow">
+          <label className="field-label" htmlFor={`${id}-tz`}>
+            Time zone <Optional />
+          </label>
+          <Combobox
+            id={`${id}-tz`}
+            label="Time zone"
+            value={tz}
+            onChange={(v) => set("timezone", v)}
+            suggest={suggestTimeZones}
+            placeholder="e.g. Europe/Riga"
+            invalid={tzBad}
+            actions={tzActions}
+          />
+          {tzBad && <span className="field-hint error-text">Pick a time zone from the list.</span>}
+          {!tzBad && err("timezone")}
+          {!tz && (
+            <span className="field-hint">
+              Empty: the AI is not told your local time.{" "}
+              <button type="button" className="link" onClick={() => set("timezone", device)}>
+                Use this device's ({device})
+              </button>
+            </span>
+          )}
         </div>
       </div>
+      {props.withDescription && (
+        <div className="field">
+          <label className="field-label" htmlFor={`${id}-about`}>
+            About you <Optional />
+          </label>
+          <textarea
+            id={`${id}-about`}
+            rows={4}
+            value={about}
+            aria-invalid={!!props.errors?.description || chars(about) > MAX_DESCRIPTION}
+            // One paragraph: a line break is taken as a space.
+            onChange={(e) => set("description", e.target.value.replace(/[\r\n]+/g, " "))}
+          />
+          {err("description")}
+          <span className={`field-hint ${chars(about) > MAX_DESCRIPTION ? "error-text" : ""}`}>
+            {chars(about)} / {MAX_DESCRIPTION}. A line about you the assistant gets with every message, like your name and place. Nobody else
+            sees it.
+          </span>
+        </div>
+      )}
     </div>
   );
 }

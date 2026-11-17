@@ -2103,6 +2103,16 @@ impl Master {
         let mut standing: Vec<harness_core::backend::StandingPart> = Vec::new();
         // The agent's memory switches (on the Agents page).
         let features = r.agents().get(&agent.agent_id).map(|a| a.features);
+        // The chat owner's Personalisation (PLAN.md T74): the owner's
+        // settings whoever sends (a routine runs as its owner), never in an
+        // untrusted turn, not for an agent whose switch is off. A standing
+        // part: sent again only when it changes.
+        let personal = if untrusted {
+            None
+        } else {
+            prefs::personal_part(self, row.owner_id.as_deref(), features).await
+        };
+        standing.extend(personal.clone());
         // A project chat always gets the project's brief and board; its
         // facts, and `remember` for them, unless the agent's project memory
         // is off. The owner's personal-memory switch leaves them in.
@@ -2229,7 +2239,8 @@ impl Master {
         if resume {
             // The standing sections only: no message to recall by, no
             // `remember` to describe (`unattended`).
-            let standing = self.callback_standing(&row, reads, project.as_ref()).await;
+            let mut standing = self.callback_standing(&row, reads, project.as_ref()).await;
+            standing.extend(personal);
             let mut msg = MasterToNode::Callback {
                 req_id: String::new(),
                 session_id: sid,

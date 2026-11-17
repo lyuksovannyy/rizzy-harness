@@ -99,16 +99,22 @@ the button, so the first click never waits. It is a top-layer popover (`md/ancho
 gained `side: "right"` for the rail avatar and the submenu, and re-places itself when its content
 changes size):
 
-1. a header row (`menuitem`, `aria-haspopup="menu"`): avatar, name, tier line and a chevron; its
-   accessible name carries `@username`. It opens **Workspaces**. There is no separate identity
-   line;
-2. Profile (`#/settings/account/profile`), Settings (`#/settings/account/preferences`);
-3. Log out.
+1. a header row (`menuitem`, `aria-haspopup="menu"`): avatar (the person's picture once
+   `/api/me/profile-images` answers, else the initial; the footer button keeps the initial, since
+   the links code is not on the first load), name, tier line and a chevron; its accessible name
+   carries `@username`. It opens **Workspaces**. There is no separate identity line;
+2. Profile (`#/settings/account/profile`), Personalisation
+   (`#/settings/account/personalisation`), Workspace settings (`#/settings/workspace`), each with
+   its icon (2026-11-16, the owner's sketch: Workspace settings moved here out of the flyout,
+   shown as before, in every workspace);
+3. one row (`role="none"`) with Settings (`#/settings/account/preferences`) on the left and Log
+   out on the right in `--bad`, the destructive colour; ←/→ go between the two, ↑/↓ go on through
+   the menu as before.
 
 **Workspaces**: the Personal workspace first, labelled with the display name and hinted
 "Personal", then team workspaces A–Z with their role and badge letter, each a `menuitemradio`
-with the active one checked; then "+ New workspace…" when the server lets the user create one,
-and Workspace settings. A failed switch shows an inline `role="alert"` row and the menu stays
+with the active one checked; then "+ New workspace…" when the server lets the user create one.
+A failed switch shows an inline `role="alert"` row and the menu stays
 open. A new workspace is named in a small native `<dialog>` (a text field may not live inside a
 menu); once created, Shell switches to it.
 

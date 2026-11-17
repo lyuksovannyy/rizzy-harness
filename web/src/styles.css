@@ -3474,6 +3474,20 @@ button.swatch:hover:not(:disabled) {
   text-decoration: underline dotted;
   cursor: help;
 }
+/* Sent from this tab and not in the log yet, or refused (lib/outbox); on
+   home, above the box while the chat is made. No animation: the text says it. */
+.msg.user.sending,
+.msg.user.sent,
+.msg.user.failed { flex-wrap: wrap; }
+.msg.user.sending .bubble { opacity: 0.75; }
+.msg.user.failed .bubble { opacity: 0.6; }
+.msg.user .sent-failed .link { font-size: inherit; }
+.composer-wrap > .msg.user.sending { margin-bottom: var(--space-3); }
+/* How long the model has been silent (TurnStatus): quiet, not read out. */
+.thinking .waited {
+  color: var(--fg-2);
+  font-variant-numeric: tabular-nums;
+}
 /* A model call waits to be sent again: under the working line, counting down. */
 .retry-note {
   color: var(--fg-2);
@@ -4717,6 +4731,17 @@ a.icon.rail-item.active {
   height: 20px;
   font-size: var(--text-xs);
 }
+.member-who .avatar {
+  display: inline-grid;
+  margin-right: var(--space-1-5);
+  vertical-align: middle;
+}
+.avatar-img {
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  object-fit: cover;
+}
 /* The account menu and its Workspaces submenu: top-layer popovers placed by
    md/anchored.ts. */
 .account-menu {
@@ -4757,6 +4782,16 @@ a.icon.rail-item.active {
   height: 1px;
   margin: 4px 6px;
   background: var(--sep);
+}
+/* Settings and Log out, side by side at the account menu's foot. */
+.menu-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px;
+}
+.menu-item.danger,
+.menu-item.danger svg {
+  color: var(--bad);
 }
 .menu-error {
   padding: 4px 10px;

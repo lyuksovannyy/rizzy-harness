@@ -1,0 +1,111 @@
+/* Settings → Profile and Personalisation (ProfileTab, PersonalisationTab):
+   lazy, with their chunks. Rizzy Glass tokens only. */
+
+/* The banner across the card's top, the avatar overlapping its lower left. */
+.profile-head {
+  position: relative;
+  margin-bottom: 44px;
+}
+.profile-banner {
+  position: relative;
+}
+.profile-banner-pick {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  aspect-ratio: 3 / 1;
+  max-height: 200px;
+  padding: 0;
+  overflow: hidden;
+  border: 1px dashed var(--line);
+  border-radius: var(--r-lg);
+  background: var(--bg-3);
+  cursor: pointer;
+}
+.profile-banner-pick img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.profile-banner-empty {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1-5);
+}
+.profile-avatar {
+  position: absolute;
+  left: var(--space-4);
+  bottom: -40px;
+}
+.profile-avatar-pick {
+  display: grid;
+  place-items: center;
+  width: 88px;
+  height: 88px;
+  padding: 0;
+  overflow: hidden;
+  border: 3px solid var(--bg-2);
+  border-radius: var(--r-full);
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 32px;
+  font-weight: var(--w-semibold);
+  cursor: pointer;
+}
+.profile-avatar-pick img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.profile-banner-pick:focus-visible,
+.profile-avatar-pick:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.profile-remove {
+  position: absolute;
+  background: var(--bg-2);
+}
+.profile-remove-banner {
+  top: var(--space-2);
+  right: var(--space-2);
+}
+.profile-remove-avatar {
+  right: -6px;
+  bottom: -6px;
+}
+.profile-place > .field {
+  min-width: 160px;
+  flex: 1 1 0;
+}
+
+/* Personalisation's rows: a title and a line on the left, the control on
+   the right; stacked on a narrow screen. */
+.setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--sep);
+}
+.setting-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.setting-title {
+  font-weight: var(--w-medium);
+}
+.setting-control {
+  flex: none;
+}
+.setting-control select {
+  min-width: 150px;
+}
+@media (max-width: 560px) {
+  .setting-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}

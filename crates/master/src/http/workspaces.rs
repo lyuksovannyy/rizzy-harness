@@ -162,6 +162,9 @@ pub(super) async fn member_json(m: &Master, r: &MemberRow, with_levels: bool) ->
         "user_id": r.user_id,
         "username": r.username,
         "display_name": prefs.display_name,
+        // Its version, for `/api/users/{id}/avatar?v=` (members see each
+        // other's: PLAN.md T74).
+        "avatar": super::profile::image_version(m, &r.user_id, super::profile::Slot::Avatar).await,
         "role": r.role_id,
         "joined_ms": r.joined_ms,
     });

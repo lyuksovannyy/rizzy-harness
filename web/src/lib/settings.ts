@@ -9,11 +9,13 @@ import { can } from "./workspaces";
 export type SectionId = "account" | "workspace" | "workspace-admin" | "server";
 export type TabId =
   | "profile"
+  | "personalisation"
   | "preferences"
   | "memory"
   | "password"
   | "overview"
   | "facts"
+  | "agents"
   | "general"
   | "models"
   | "members"
@@ -39,6 +41,8 @@ const SECTIONS: { id: SectionId; show: Show; tabs: { id: TabId; show: Show }[] }
     show: always,
     tabs: [
       { id: "profile", show: always },
+      // How agents reply to them and their personal instructions (T74).
+      { id: "personalisation", show: always },
       { id: "preferences", show: always },
       { id: "memory", show: always },
       // The API token has no password to change.
@@ -48,10 +52,13 @@ const SECTIONS: { id: SectionId; show: Show; tabs: { id: TabId; show: Show }[] }
   {
     id: "workspace",
     show: (v) => !!v.workspace,
-    // Its memory: every member reads it (T54).
+    // Its memory: every member reads it (T54). Its agents: the ones the
+    // Agents page lists here (every agent is the server's today), with the
+    // actions the viewer has there.
     tabs: [
       { id: "overview", show: always },
       { id: "facts", show: always },
+      { id: "agents", show: always },
     ],
   },
   {

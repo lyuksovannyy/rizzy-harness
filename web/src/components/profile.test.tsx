@@ -22,7 +22,9 @@ function render(timezone: string | null) {
       <ProfileFields prefs={{ timezone } as Prefs} onChange={(p) => (latest = p)} username="alex" />,
     ),
   );
-  const input = host.querySelector<HTMLInputElement>('input[role="combobox"]')!;
+  // The time zone's field, by its label (Country and City come first).
+  const id = [...host.querySelectorAll<HTMLLabelElement>("label.field-label")].find((l) => l.textContent?.startsWith("Time zone"))!.htmlFor;
+  const input = document.getElementById(id) as HTMLInputElement;
   return {
     input,
     reset: host.querySelector<HTMLButtonElement>('button[aria-label^="Reset to this device"]'),
