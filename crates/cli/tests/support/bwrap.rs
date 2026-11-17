@@ -26,13 +26,40 @@ pub fn required() -> bool {
 /// test is red.
 #[allow(dead_code)]
 pub fn can_bind(bwrap: &Path, binds: harness_tools::contain::Binds) -> bool {
-    use harness_tools::contain::{Binds, binds_of};
-    let (have, version) = binds_of(bwrap);
+    let (have, version) = harness_tools::contain::binds_of(bwrap);
+    match bind_decision(binds, have, version.as_deref(), required()) {
+        Bind::Run => true,
+        Bind::Skip(why) => {
+            eprintln!("SKIPPED (binds by descriptor): {}: {why}", bwrap.display());
+            false
+        }
+        Bind::Fail(why) => panic!("HARNESS_REQUIRE_BWRAP=1: {}: {why}", bwrap.display()),
+    }
+}
+
+/// What [`can_bind`] does with a bubblewrap whose `--version` printed
+/// `version` and that offers `have`.
+#[allow(dead_code)]
+#[derive(Debug, PartialEq)]
+pub enum Bind {
+    Run,
+    Skip(String),
+    Fail(String),
+}
+
+#[allow(dead_code)]
+pub fn bind_decision(
+    binds: harness_tools::contain::Binds,
+    have: harness_tools::contain::Binds,
+    version: Option<&str>,
+    required: bool,
+) -> Bind {
+    use harness_tools::contain::Binds;
     if binds != Binds::Fd || have == Binds::Fd {
-        return true;
+        return Bind::Run;
     }
     // `bubblewrap 0.9.0`: the first word that starts with a digit.
-    let parsed = version.as_deref().and_then(|v| {
+    let parsed = version.and_then(|v| {
         let num = v
             .split_whitespace()
             .find(|w| w.starts_with(|c: char| c.is_ascii_digit()))?;
@@ -49,25 +76,12 @@ pub fn can_bind(bwrap: &Path, binds: harness_tools::contain::Binds) -> bool {
     });
     match parsed {
         Some(v) if v < (0, 10) => {
-            eprintln!(
-                "SKIPPED (binds by descriptor): {} is {version:?}; --bind-fd needs bubblewrap 0.10.0",
-                bwrap.display()
-            );
-            false
+            Bind::Skip(format!("{version:?}; --bind-fd needs bubblewrap 0.10.0"))
         }
-        _ => {
-            assert!(
-                !required(),
-                "HARNESS_REQUIRE_BWRAP=1 but the version of {} cannot be read ({version:?}): \
-                 the binds by descriptor would go untested",
-                bwrap.display()
-            );
-            eprintln!(
-                "SKIPPED (binds by descriptor): the version of {} cannot be read ({version:?})",
-                bwrap.display()
-            );
-            false
-        }
+        _ if required => Bind::Fail(format!(
+            "its version cannot be read ({version:?}): the binds by descriptor would go untested"
+        )),
+        _ => Bind::Skip(format!("its version cannot be read ({version:?})")),
     }
 }
 

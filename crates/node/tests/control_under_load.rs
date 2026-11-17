@@ -421,8 +421,10 @@ fn rounds(dir: &Path) -> usize {
 /// by itself). Counted in rounds of the loop (about 0.1 s each on an idle
 /// machine), not in seconds: load slows the loop as it slows the node, so the
 /// count does not grow with load, while a Stop that takes a second more on an
-/// idle machine adds about ten. Measured (2026-11-17): 0 to 1 idle and loaded;
-/// 38 to 40 with the bash tool made to wait 4 s after its cancel.
+/// idle machine adds about ten. Measured (2026-11-17, every Stop test, 3 runs
+/// idle and 20 at load 18 to 24): 0, twice 1; with the bash tool made to wait 4
+/// s after its cancel, 41, and 22 for the loop that prints (its output waits
+/// for the full queue).
 const STOP_ROUNDS: usize = 5;
 
 /// What one run measured after the Stop.
