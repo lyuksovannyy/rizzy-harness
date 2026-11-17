@@ -61,11 +61,11 @@ const URGENT_QUEUE: usize = 64;
 const URGENT_BURST: usize = 8;
 /// One line of output and one write of `beat` every 0.0961 s.
 fn talking() -> String {
-    while_test_lives("echo tick; date +%s%N > beat; sleep 961e-4")
+    while_test_lives("echo tick; date +%s%N > beat; echo >> rounds; sleep 961e-4")
 }
 /// No output, one write of `beat` every 0.0961 s.
 fn silent() -> String {
-    while_test_lives("date +%s%N > beat; sleep 961e-4")
+    while_test_lives("date +%s%N > beat; echo >> rounds; sleep 961e-4")
 }
 /// `run: ` a loop of `body` that runs while this test process lives and 15
 /// minutes at most. The command is the test's child (in-process node, no
@@ -408,6 +408,23 @@ async fn running(node: &Node, cmd: &str) -> (SessionId, PathBuf) {
     (sid, dir)
 }
 
+/// Rounds the watched loop has run: it appends one line to `rounds` each.
+fn rounds(dir: &Path) -> usize {
+    std::fs::read(dir.join("rounds")).map_or(0, |b| b.iter().filter(|c| **c == b'\n').count())
+}
+
+/// The most rounds the watched loop may run between the Stop's arrival and its
+/// shell's end. What it protects: a Stop ends the command at once, within a
+/// fraction of a second (PLAN.md, "Flow control", the Stop's target: the bash
+/// tool kills the command's group when it sees the cancel; the agent loop's
+/// `TOOL_CANCEL_GRACE`, 5 s, is only the worst case, a tool that does not end
+/// by itself). Counted in rounds of the loop (about 0.1 s each on an idle
+/// machine), not in seconds: load slows the loop as it slows the node, so the
+/// count does not grow with load, while a Stop that takes a second more on an
+/// idle machine adds about ten. Measured (2026-11-17): 0 to 1 idle and loaded;
+/// 38 to 40 with the bash tool made to wait 4 s after its cancel.
+const STOP_ROUNDS: usize = 5;
+
 /// What one run measured after the Stop.
 #[derive(Debug)]
 struct Stop {
@@ -421,6 +438,8 @@ struct Stop {
     turn_ended: Duration,
     /// The watched call's tool result.
     result: String,
+    /// Rounds the loop ran between the Stop's arrival and its end.
+    rounds: usize,
 }
 
 /// Fill the out queue, send `before` if any and then a Stop for the watched
@@ -436,7 +455,9 @@ async fn stop_while_full(cmd: &str, before: Option<MasterToNode>) -> Stop {
         node.send(m).await;
     }
     node.cancel("stop", sid).await;
+    let r0 = rounds(&dir);
     let stalled = stopped_after(&dir, t0, STALL_LIMIT).await;
+    let ran = rounds(&dir) - r0;
     let stall = t0.elapsed();
     node.pace(0);
     let t1 = Instant::now();
@@ -468,17 +489,19 @@ async fn stop_while_full(cmd: &str, before: Option<MasterToNode>) -> Stop {
         ack,
         turn_ended,
         result,
+        rounds: ran,
     };
     eprintln!(
         "A.21 real node, Stop with the out queue full: gone {:?} after the Stop while the \
          uplink took nothing for {:?}; {:?} after the uplink read again; ack {:?} and \
-         turn_ended {:?} after the Stop; result {:?}",
+         turn_ended {:?} after the Stop; result {:?}; {} rounds after the Stop",
         m.stalled,
         m.stall,
         m.after_read,
         m.ack,
         m.turn_ended,
-        m.result.lines().last()
+        m.result.lines().last(),
+        m.rounds
     );
     m
 }
@@ -499,7 +522,7 @@ fn approval_answer(req: &str) -> MasterToNode {
 /// ends the command at the grace (recorded as abandoned, re-check B7-D2),
 /// or one that ends it only once the uplink moves, does not pass.
 fn promptly(m: &Stop) -> bool {
-    m.stalled.is_some() && cancelled_by_the_tool(&m.result)
+    m.stalled.is_some() && cancelled_by_the_tool(&m.result) && m.rounds <= STOP_ROUNDS
 }
 
 /// The control: a command that writes nothing is not held by the full out
@@ -654,7 +677,9 @@ async fn one_sessions_output_does_not_hold_another_sessions_stop_on_a_trickling_
     let t0 = Instant::now();
     let from = node.seen.lock().unwrap().log.len();
     node.cancel("stop", sid).await;
+    let r0 = rounds(&dir);
     let stopped = stopped_after(&dir, t0, STALL_LIMIT).await;
+    let ran = rounds(&dir) - r0;
     let taken_by_end = node.seen.lock().unwrap().log.len() - from;
     node.wait("the stop's ack", Duration::from_secs(120), |s| {
         s.acks.contains_key("stop")
@@ -676,8 +701,8 @@ async fn one_sessions_output_does_not_hold_another_sessions_stop_on_a_trickling_
         .unwrap_or_default();
     eprintln!(
         "A.21 real node, Stop on an uplink taking a message every 200 ms: gone {stopped:?} \
-         after the Stop, {taken_by_end} messages taken by then; ack after {ack:?}, message \
-         {ack_at:?} after the Stop; result {:?}",
+         after the Stop, {taken_by_end} messages taken by then; {ran} rounds after the Stop; \
+         ack after {ack:?}, message {ack_at:?} after the Stop; result {:?}",
         result.lines().last()
     );
     // Counted in messages the uplink took, not seconds (the pace stretches
@@ -693,6 +718,10 @@ async fn one_sessions_output_does_not_hold_another_sessions_stop_on_a_trickling_
         "the command ran until {taken_by_end} messages had gone ({stopped:?})"
     );
     assert!(cancelled_by_the_tool(&result), "{result}");
+    assert!(
+        ran <= STOP_ROUNDS,
+        "the loop ran {ran} rounds after the Stop ({stopped:?})"
+    );
     assert!(
         ack_at.is_some_and(|i| i < APPENDS_AHEAD),
         "the stop's ack was message {ack_at:?} after the Stop ({ack:?})"

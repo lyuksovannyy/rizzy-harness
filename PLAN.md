@@ -638,7 +638,13 @@ acks of the commands the node answers inline (cancel, approval answer,
 `stop_background`) go ahead of that queue and never wait (at most 64 kept,
 past that dropped), and the node's socket holds at most 128 KiB unsent
 (`TCP_NOTSENT_LOWAT`), so a Stop is acknowledged within about a second on a
-full 256 KiB/s uplink (A.21, T9). Frames are at most 8 MiB (`MAX_FRAME`,
+full 256 KiB/s uplink (A.21, T9). **The Stop's target:** the command ends at
+once, within a fraction of a second of the node reading the Stop, however
+full the uplink is: the `bash` tool kills the command's process group (or
+its guard's namespace) when it sees the cancel; the agent loop's
+`TOOL_CANCEL_GRACE` (5 s) is only the worst case, a tool that does not end
+by itself (`node/tests/control_under_load.rs` `STOP_ROUNDS` holds a Stop to
+it, counted in the command's own loop rounds so load cannot flip it). Frames are at most 8 MiB (`MAX_FRAME`,
 refused from the header); `session.snapshot` batches are at most 500 events
 and 512 KiB. Idle detection counts only time spent waiting on the peer, so a busy
 link is not declared dead. The node gives up on a TCP connect after 10 s and

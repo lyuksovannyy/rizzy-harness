@@ -15,7 +15,7 @@
 //! The owner's target: the Stop and the approval answer acknowledged within
 //! the master's `ACK_TIMEOUT` (15 s), past which Stop answers 504. The test
 //! also holds them to what the node's socket may hold ahead of them: at most
-//! `ACK_BOUND_BYTES` carried from the node between the Stop and each ack,
+//! `ack_bound_bytes()` carried from the node between the Stop and each ack,
 //! which fails without the socket's cap on unsent bytes (review A21-4). That
 //! bound is counted in bytes, not seconds: the proxy's pace makes one the
 //! other on an idle machine (3 s at 256 KiB/s), but under load the node's
@@ -52,16 +52,24 @@ const RATE_KIB: usize = 256;
 /// `crates/master/src/lib.rs` `ACK_TIMEOUT` (private there): the owner's
 /// target.
 const ACK_TIMEOUT: Duration = Duration::from_secs(15);
+/// The proxy's read chunk (`pace`).
+const PROXY_CHUNK: usize = 16 * 1024;
 /// What the test holds the node to: at most this many bytes carried from
-/// the node between the Stop and its ack. 3 s at `RATE_KIB` (the bound this
-/// was in seconds): well above what goes ahead with the socket's cap on
-/// unsent bytes (`harness_link::UNSENT_LIMIT`, 128 KiB, the proxy's 64 KiB
-/// window and its 16 KiB chunk; 0.5 s to 1.0 s at this pace, review A21-4),
-/// well below what goes ahead without it (8.9 s here).
-const ACK_BOUND_BYTES: u64 = (3 * RATE_KIB as u64) << 10;
+/// the node between the Stop and its ack. What can be ahead of the ack is
+/// what the node's socket holds unsent (`harness_link::UNSENT_LIMIT`, the
+/// product's cap, A21-4), what is in flight to the proxy (its receive
+/// window, `PROXY_BUF`) and the chunk the proxy is pacing (`PROXY_CHUNK`):
+/// 208 KiB today. Measured 216 to 301 KiB with the cap (the TLS and
+/// WebSocket framing and what the node writes while it handles the Stop),
+/// 2,658 to 2,671 KiB without it. The margin is one more `UNSENT_LIMIT`,
+/// so the bound moves with the product's cap: 336 KiB today.
+fn ack_bound_bytes() -> u64 {
+    let unsent = u64::from(harness_link::UNSENT_LIMIT);
+    unsent + u64::from(PROXY_BUF) + PROXY_CHUNK as u64 + unsent
+}
 /// One line of output and one write of `beat` every 0.0961 s.
 fn talking() -> String {
-    while_test_lives("echo tick; date +%s%N > beat; sleep 961e-4")
+    while_test_lives("echo tick; date +%s%N > beat; echo >> rounds; sleep 961e-4")
 }
 /// `run: ` a loop of `body` that runs while this test process lives and 15
 /// minutes at most. The command is the test's child (in-process node, no
@@ -127,7 +135,7 @@ async fn pace(
     rate: usize,
     hold: Option<Arc<AtomicBool>>,
 ) {
-    let mut buf = vec![0u8; 16 * 1024];
+    let mut buf = vec![0u8; PROXY_CHUNK];
     let mut next = Instant::now();
     loop {
         while hold.as_ref().is_some_and(|h| h.load(Ordering::SeqCst)) {
@@ -343,6 +351,23 @@ async fn node(dir: &Path) -> NodeRuntime {
     .unwrap()
 }
 
+/// Rounds the watched loop has run: it appends one line to `rounds` each.
+fn rounds(dir: &Path) -> usize {
+    std::fs::read(dir.join("rounds")).map_or(0, |b| b.iter().filter(|c| **c == b'\n').count())
+}
+
+/// The most rounds the watched loop may run between the Stop's arrival and its
+/// shell's end. What it protects: a Stop ends the command at once, within a
+/// fraction of a second (PLAN.md, "Flow control", the Stop's target: the bash
+/// tool kills the command's group when it sees the cancel; the agent loop's
+/// `TOOL_CANCEL_GRACE`, 5 s, is only the worst case, a tool that does not end
+/// by itself). Counted in rounds of the loop (about 0.1 s each on an idle
+/// machine), not in seconds: load slows the loop as it slows the node, so the
+/// count does not grow with load, while a Stop that takes a second more on an
+/// idle machine adds about ten. Measured (2026-11-17): 0 to 1 idle and loaded;
+/// 38 to 40 with the bash tool made to wait 4 s after its cancel.
+const STOP_ROUNDS: usize = 5;
+
 /// Whether the command in `dir` runs: the shell whose pid it wrote is alive
 /// and not a zombie. (A 0.4 s look for a new `beat` stood for this until
 /// 2026-11-16; on a loaded machine one round of the loop took longer.)
@@ -476,9 +501,11 @@ async fn a_stop_and_an_approval_answer_are_acknowledged_within_the_ack_timeout_o
     })
     .await;
     m.cancel("stop", sid).await;
+    let r0 = rounds(&beat);
     // A limit on waiting, not a bound: the Stop's effect is checked below
     // by what the tool recorded.
     let stopped = stopped_after(&beat, t0, Duration::from_secs(60)).await;
+    let ran = rounds(&beat) - r0;
     m.wait("both acks", Duration::from_secs(120), |s| {
         s.acks.contains_key("stop") && s.acks.contains_key("approval")
     })
@@ -523,6 +550,11 @@ async fn a_stop_and_an_approval_answer_are_acknowledged_within_the_ack_timeout_o
         .cloned()
         .unwrap_or_default();
     assert!(stopped.is_some(), "still running 60 s after the Stop");
+    eprintln!("A.21 over the link: {ran} rounds after the Stop");
+    assert!(
+        ran <= STOP_ROUNDS,
+        "the loop ran {ran} rounds after the Stop ({stopped:?})"
+    );
     assert!(
         result.contains("[cancelled") && !result.contains("abandoned"),
         "not ended by the Stop's cancel ({stopped:?}): {result}"
@@ -533,8 +565,9 @@ async fn a_stop_and_an_approval_answer_are_acknowledged_within_the_ack_timeout_o
         approval < ACK_TIMEOUT,
         "the approval answer's ack took {approval:?}"
     );
-    // The socket's cap, in what went ahead (scaled for `A21_RATE_KIB`).
-    let bound = ACK_BOUND_BYTES * rate() as u64 / (RATE_KIB as u64 * 1024);
+    // The socket's cap, in what went ahead (bytes: the rate does not
+    // change what can be ahead of the ack).
+    let bound = ack_bound_bytes();
     assert!(
         ack_bytes < bound,
         "{} KiB went ahead of the Stop's ack ({ack:?})",
