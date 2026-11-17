@@ -11,6 +11,8 @@ fn sh(dir: &Path, args: &[&str]) -> String {
         .arg(dir)
         .args(args)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        // Nor the global ignore file (`~/.config/git/ignore`).
+        .env("XDG_CONFIG_HOME", "/nonexistent")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_AUTHOR_NAME", "t")
         .env("GIT_AUTHOR_EMAIL", "t@t")
@@ -54,6 +56,7 @@ fn layout() -> Layout {
         ceiling: Some(home.clone()),
         protected: vec![top.join("data")],
         sandbox: None,
+        ..Default::default()
     };
     Layout {
         base: top.join("data/checkpoints"),

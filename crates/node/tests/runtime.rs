@@ -928,6 +928,12 @@ async fn git_checkpoints_and_undo() {
                 .env("GIT_AUTHOR_EMAIL", "t@t")
                 .env("GIT_COMMITTER_NAME", "t")
                 .env("GIT_COMMITTER_EMAIL", "t@t")
+                // Not the developer's ~/.gitconfig (a global `commit.gpgsign`
+                // or `core.hooksPath` failed or ran things in these commits).
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                // Nor the global ignore file (`~/.config/git/ignore`).
+                .env("XDG_CONFIG_HOME", "/nonexistent")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
                 .status()
                 .unwrap()
                 .success()
@@ -1007,6 +1013,12 @@ async fn hostile_repo_config_does_not_run_on_checkpoint_or_undo() {
                 .env("GIT_AUTHOR_EMAIL", "t@t")
                 .env("GIT_COMMITTER_NAME", "t")
                 .env("GIT_COMMITTER_EMAIL", "t@t")
+                // Not the developer's ~/.gitconfig (a global `commit.gpgsign`
+                // or `core.hooksPath` failed or ran things in these commits).
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                // Nor the global ignore file (`~/.config/git/ignore`).
+                .env("XDG_CONFIG_HOME", "/nonexistent")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
                 .status()
                 .unwrap()
                 .success()
@@ -1445,6 +1457,12 @@ async fn a_sub_agent_whose_log_failed_changes_nothing_in_the_folder() {
                 .env("GIT_AUTHOR_EMAIL", "t@t")
                 .env("GIT_COMMITTER_NAME", "t")
                 .env("GIT_COMMITTER_EMAIL", "t@t")
+                // Not the developer's ~/.gitconfig (a global `commit.gpgsign`
+                // or `core.hooksPath` failed or ran things in these commits).
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                // Nor the global ignore file (`~/.config/git/ignore`).
+                .env("XDG_CONFIG_HOME", "/nonexistent")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
                 .status()
                 .unwrap()
                 .success()
@@ -1524,6 +1542,12 @@ fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
         .env("GIT_AUTHOR_EMAIL", "t@t")
         .env("GIT_COMMITTER_NAME", "t")
         .env("GIT_COMMITTER_EMAIL", "t@t")
+        // Not the developer's ~/.gitconfig (a global `commit.gpgsign`
+        // or `core.hooksPath` failed or ran things in these commits).
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        // Nor the global ignore file (`~/.config/git/ignore`).
+        .env("XDG_CONFIG_HOME", "/nonexistent")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .unwrap();
     assert!(out.status.success(), "git {args:?}: {out:?}");
@@ -2251,6 +2275,12 @@ fn run_git(dir: &std::path::Path, args: &[&str]) -> String {
         .env("GIT_AUTHOR_EMAIL", "t@t")
         .env("GIT_COMMITTER_NAME", "t")
         .env("GIT_COMMITTER_EMAIL", "t@t")
+        // Not the developer's ~/.gitconfig (a global `commit.gpgsign`
+        // or `core.hooksPath` failed or ran things in these commits).
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        // Nor the global ignore file (`~/.config/git/ignore`).
+        .env("XDG_CONFIG_HOME", "/nonexistent")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .unwrap();
     assert!(out.status.success(), "git {args:?}: {out:?}");

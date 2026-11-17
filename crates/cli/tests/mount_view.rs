@@ -118,6 +118,9 @@ impl Fixture {
         self.sandbox()?;
         let sb = self.plain(&Settings::default());
         let bwrap = harness_tools::contain::find_bwrap().unwrap();
+        if !bwrap::can_bind(&bwrap, binds) {
+            return None;
+        }
         let c = Contain::new(bwrap, form).with_binds(binds);
         if let Err(e) = sb.probe_containment(&c, &self.data.join("sandbox-tmp/probe-as")) {
             assert!(
@@ -964,4 +967,24 @@ fn copy_exe(from: impl AsRef<std::path::Path>, to: &std::path::Path) {
         .status()
         .expect("cp");
     assert!(st.success(), "cp to {}", to.display());
+}
+
+/// The descriptor-bind case skips only on a bubblewrap that says it is
+/// older than 0.10; a version that cannot be read fails it where
+/// bubblewrap is required (CI), so a green run there means it ran.
+#[test]
+fn the_descriptor_bind_case_skips_only_on_an_old_bubblewrap() {
+    use bwrap::{Bind, bind_decision};
+    let d =
+        |version: Option<&str>, required| bind_decision(Binds::Fd, Binds::Path, version, required);
+    assert_eq!(bind_decision(Binds::Fd, Binds::Fd, None, true), Bind::Run);
+    assert_eq!(
+        bind_decision(Binds::Path, Binds::Path, None, true),
+        Bind::Run
+    );
+    assert!(matches!(d(Some("bubblewrap 0.9.0"), true), Bind::Skip(_)));
+    assert!(matches!(d(Some("bubblewrap 0.8.0"), false), Bind::Skip(_)));
+    assert!(matches!(d(Some("bubblewrap unknown"), true), Bind::Fail(_)));
+    assert!(matches!(d(None, true), Bind::Fail(_)));
+    assert!(matches!(d(None, false), Bind::Skip(_)));
 }

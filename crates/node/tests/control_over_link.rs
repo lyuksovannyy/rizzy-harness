@@ -14,8 +14,13 @@
 //!
 //! The owner's target: the Stop and the approval answer acknowledged within
 //! the master's `ACK_TIMEOUT` (15 s), past which Stop answers 504. The test
-//! holds them to 3 s (`ACK_BOUND`), which fails without the socket's cap on
-//! unsent bytes (review A21-4).
+//! also holds them to what the node's socket may hold ahead of them: at most
+//! `ack_bound_bytes()` carried from the node between the Stop and each ack,
+//! which fails without the socket's cap on unsent bytes (review A21-4). That
+//! bound is counted in bytes, not seconds: the proxy's pace makes one the
+//! other on an idle machine (3 s at 256 KiB/s), but under load the node's
+//! threads take longer to write the ack while no more bytes go ahead of it
+//! (3.86 s once, load average 11).
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -24,7 +29,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use harness_agent_native::{NativeBackend, NativeConfig, TOOL_CANCEL_GRACE, mock::Mock};
+use harness_agent_native::{NativeBackend, NativeConfig, mock::Mock};
 use harness_core::SessionId;
 use harness_core::event::{EventKind, Profile};
 use harness_core::policy::{ApprovalMode, Decision};
@@ -47,12 +52,39 @@ const RATE_KIB: usize = 256;
 /// `crates/master/src/lib.rs` `ACK_TIMEOUT` (private there): the owner's
 /// target.
 const ACK_TIMEOUT: Duration = Duration::from_secs(15);
-/// What the test holds the node to: well under the target, so it fails
-/// without the socket's cap on unsent bytes (8.9 s here without it, 0.5 s
-/// to 1.0 s with it; review A21-4).
-const ACK_BOUND: Duration = Duration::from_secs(3);
+/// The proxy's read chunk (`pace`).
+const PROXY_CHUNK: usize = 16 * 1024;
+/// What the test holds the node to: at most this many bytes carried from
+/// the node between the Stop and its ack. What can be ahead of the ack is
+/// what the node's socket holds unsent (`harness_link::UNSENT_LIMIT`, the
+/// product's cap, A21-4), what is in flight to the proxy (its receive
+/// window, `PROXY_BUF`) and the chunk the proxy is pacing (`PROXY_CHUNK`):
+/// 208 KiB today. Measured 216 to 301 KiB with the cap (the TLS and
+/// WebSocket framing and what the node writes while it handles the Stop),
+/// 2,658 to 2,694 KiB without it. The margin is one more `UNSENT_LIMIT`,
+/// so the bound moves with the product's cap: 336 KiB today.
+fn ack_bound_bytes() -> u64 {
+    let unsent = u64::from(harness_link::UNSENT_LIMIT);
+    unsent + u64::from(PROXY_BUF) + PROXY_CHUNK as u64 + unsent
+}
 /// One line of output and one write of `beat` every 0.0961 s.
-const TALKING: &str = "run: while :; do echo tick; date +%s%N > beat; sleep 961e-4; done";
+fn talking() -> String {
+    while_test_lives("echo tick; date +%s%N > beat; echo >> rounds; sleep 961e-4")
+}
+/// `run: ` a loop of `body` that runs while this test process lives and 15
+/// minutes at most. The command is the test's child (in-process node, no
+/// containment), so a SIGKILL of the test, which no drop guard survives,
+/// reparents it and the loop ends within one round; before this, a loop
+/// orphaned that way was found writing 22.5 hours later. A loop that writes
+/// output already dies of SIGPIPE when the test does; a silent one did not.
+fn while_test_lives(body: &str) -> String {
+    format!(
+        "run: echo $$ > pid; while read -r _ _ _ p _ </proc/$$/stat && [ \"$p\" = {} ] && [ $SECONDS -lt 900 ]; \
+         do {body}; done",
+        std::process::id()
+    )
+}
+
 const FLOOD: &str = "run: yes 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 /// Twelve, each cut at 1 MiB: enough to fill B.7's 6 MiB (the old queue
 /// and this machine's loopback send buffer) and keep it full.
@@ -92,15 +124,18 @@ async fn throttled(target: SocketAddr, rate: usize, hold: Arc<AtomicBool>) -> St
     url
 }
 
+/// Bytes the proxy has carried from the node to the master.
+static UPLINK_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// A token bucket with no saved-up burst; it reads nothing while `hold`
-/// is set.
+/// is set. What it carries from the node is counted in [`UPLINK_BYTES`].
 async fn pace(
     mut r: OwnedReadHalf,
     mut w: OwnedWriteHalf,
     rate: usize,
     hold: Option<Arc<AtomicBool>>,
 ) {
-    let mut buf = vec![0u8; 16 * 1024];
+    let mut buf = vec![0u8; PROXY_CHUNK];
     let mut next = Instant::now();
     loop {
         while hold.as_ref().is_some_and(|h| h.load(Ordering::SeqCst)) {
@@ -113,6 +148,9 @@ async fn pace(
         if w.write_all(&buf[..n]).await.is_err() {
             return;
         }
+        if hold.is_some() {
+            UPLINK_BYTES.fetch_add(n as u64, Ordering::SeqCst);
+        }
         next = next.max(Instant::now()) + Duration::from_secs_f64(n as f64 / rate as f64);
         tokio::time::sleep_until(next).await;
     }
@@ -122,8 +160,12 @@ async fn pace(
 struct Seen {
     hello: bool,
     acks: HashMap<String, Instant>,
+    /// [`UPLINK_BYTES`] when each ack was read.
+    ack_bytes: HashMap<String, u64>,
     deltas: HashMap<SessionId, usize>,
     ended: HashMap<SessionId, Instant>,
+    /// The last tool result of each session.
+    results: HashMap<SessionId, String>,
     /// Messages read since the start.
     read: usize,
     /// The master's end of the link closed.
@@ -249,6 +291,8 @@ async fn master(
             match m {
                 NodeToMaster::Hello { .. } => s.hello = true,
                 NodeToMaster::Ack { req_id, .. } => {
+                    s.ack_bytes
+                        .insert(req_id.clone(), UPLINK_BYTES.load(Ordering::SeqCst));
                     s.acks.insert(req_id, at);
                 }
                 NodeToMaster::Event { event } => match event.typed() {
@@ -257,6 +301,9 @@ async fn master(
                     }
                     Ok(EventKind::TurnEnded(_)) => {
                         s.ended.insert(event.session_id, at);
+                    }
+                    Ok(EventKind::ToolCallFinished(f)) => {
+                        s.results.insert(event.session_id, f.output);
                     }
                     _ => {}
                 },
@@ -304,27 +351,51 @@ async fn node(dir: &Path) -> NodeRuntime {
     .unwrap()
 }
 
-/// Whether the command still writes `beat` (looks for 0.4 s).
-async fn beating(dir: &Path) -> bool {
-    let read = || std::fs::read_to_string(dir.join("beat")).unwrap_or_default();
-    let a = read();
-    for _ in 0..8 {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let b = read();
-        if !b.is_empty() && b != a {
-            return true;
-        }
-    }
-    false
+/// Rounds the watched loop has run: it appends one line to `rounds` each.
+fn rounds(dir: &Path) -> usize {
+    std::fs::read(dir.join("rounds")).map_or(0, |b| b.iter().filter(|c| **c == b'\n').count())
 }
 
-/// When, after `from`, a look first saw no write (the start of that look).
+/// The most rounds the watched loop may run between the Stop's arrival and its
+/// shell's end. What it protects: a Stop ends the command at once, within a
+/// fraction of a second (PLAN.md, "Flow control", the Stop's target: the bash
+/// tool kills the command's group when it sees the cancel; the agent loop's
+/// `TOOL_CANCEL_GRACE`, 5 s, is only the worst case, a tool that does not end
+/// by itself). Counted in rounds of the loop (about 0.1 s each on an idle
+/// machine), not in seconds: load slows the loop as it slows the node, so the
+/// count does not grow with load, while a Stop that takes a second more on an
+/// idle machine adds about ten. Measured (2026-11-17, every Stop test, 3 runs
+/// idle and 20 at load 18 to 24): 0, twice 1; with the bash tool made to wait 4
+/// s after its cancel, 41, and 22 for the loop that prints (its output waits
+/// for the full queue).
+const STOP_ROUNDS: usize = 5;
+
+/// Whether the command in `dir` runs: the shell whose pid it wrote is alive
+/// and not a zombie. (A 0.4 s look for a new `beat` stood for this until
+/// 2026-11-16; on a loaded machine one round of the loop took longer.)
+fn beating(dir: &Path) -> bool {
+    let Some(pid) = std::fs::read_to_string(dir.join("pid"))
+        .ok()
+        .and_then(|p| p.trim().parse::<u32>().ok())
+    else {
+        return false;
+    };
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        stat.rsplit(')')
+            .next()
+            .and_then(|r| r.trim_start().chars().next())
+            .is_some_and(|c| !matches!(c, 'Z' | 'X' | 'x'))
+    })
+}
+
+/// How long after `from` the command was first seen gone, looking every
+/// 10 ms until `within` has passed since `from`.
 async fn stopped_after(dir: &Path, from: Instant, within: Duration) -> Option<Duration> {
     while from.elapsed() < within {
-        let at = from.elapsed();
-        if !beating(dir).await {
-            return Some(at);
+        if !beating(dir) {
+            return Some(from.elapsed());
         }
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
     None
 }
@@ -396,7 +467,7 @@ async fn a_stop_and_an_approval_answer_are_acknowledged_within_the_ack_timeout_o
         .await;
     eprintln!("A.21 over the link: connected");
 
-    let (sid, beat) = m.start(&ws, "watched", TALKING).await;
+    let (sid, beat) = m.start(&ws, "watched", &talking()).await;
     m.wait(
         "the watched session to stream",
         Duration::from_secs(30),
@@ -418,10 +489,11 @@ async fn a_stop_and_an_approval_answer_are_acknowledged_within_the_ack_timeout_o
     full(&rt, &m).await;
     let filled = filling.elapsed();
     eprintln!("A.21 over the link: held back {filled:?} after the flood started");
-    assert!(beating(&beat).await, "the command stopped by itself");
+    assert!(beating(&beat), "the command stopped by itself");
     m.hold.store(false, Ordering::SeqCst);
 
     let (read0, t0) = (m.seen.lock().unwrap().read, Instant::now());
+    let bytes0 = UPLINK_BYTES.load(Ordering::SeqCst);
     m.send(MasterToNode::ApprovalRespond {
         req_id: "approval".into(),
         session_id: SessionId::new(),
@@ -431,7 +503,11 @@ async fn a_stop_and_an_approval_answer_are_acknowledged_within_the_ack_timeout_o
     })
     .await;
     m.cancel("stop", sid).await;
-    let stopped = stopped_after(&beat, t0, TOOL_CANCEL_GRACE + Duration::from_secs(1)).await;
+    let r0 = rounds(&beat);
+    // A limit on waiting, not a bound: the Stop's effect is checked below
+    // by what the tool recorded.
+    let stopped = stopped_after(&beat, t0, Duration::from_secs(60)).await;
+    let ran = rounds(&beat) - r0;
     m.wait("both acks", Duration::from_secs(120), |s| {
         s.acks.contains_key("stop") && s.acks.contains_key("approval")
     })
@@ -440,6 +516,13 @@ async fn a_stop_and_an_approval_answer_are_acknowledged_within_the_ack_timeout_o
     let (ack, approval, ahead) = {
         let s = m.seen.lock().unwrap();
         (s.acks["stop"] - t0, s.acks["approval"] - t0, s.read - read0)
+    };
+    let (ack_bytes, approval_bytes) = {
+        let s = m.seen.lock().unwrap();
+        (
+            s.ack_bytes["stop"] - bytes0,
+            s.ack_bytes["approval"] - bytes0,
+        )
     };
 
     for (i, f) in floods.iter().enumerate() {
@@ -451,21 +534,50 @@ async fn a_stop_and_an_approval_answer_are_acknowledged_within_the_ack_timeout_o
     .await;
     stop.cancel();
     eprintln!(
-        "A.21 over the link at {} KiB/s (full {filled:?} after the flood started): no write seen \
-         from {stopped:?} after the Stop; the Stop's ack after {ack:?}, the approval answer's \
-         after {approval:?}; {ahead} messages read meanwhile",
-        rate() >> 10
+        "A.21 over the link at {} KiB/s (full {filled:?} after the flood started): gone \
+         {stopped:?} after the Stop; the Stop's ack after {ack:?} and {} KiB, the approval \
+         answer's after {approval:?} and {} KiB; {ahead} messages read meanwhile",
+        rate() >> 10,
+        ack_bytes >> 10,
+        approval_bytes >> 10
+    );
+    // Ended by the bash tool's own cancel, not abandoned at
+    // `TOOL_CANCEL_GRACE` (it was "within 1 s", a clock of this machine).
+    let result = m
+        .seen
+        .lock()
+        .unwrap()
+        .results
+        .get(&sid)
+        .cloned()
+        .unwrap_or_default();
+    assert!(stopped.is_some(), "still running 60 s after the Stop");
+    eprintln!("A.21 over the link: {ran} rounds after the Stop");
+    assert!(
+        ran <= STOP_ROUNDS,
+        "the loop ran {ran} rounds after the Stop ({stopped:?})"
     );
     assert!(
-        stopped.is_some_and(|d| d < Duration::from_secs(1)),
-        "still writing: {stopped:?}"
+        result.contains("[cancelled") && !result.contains("abandoned"),
+        "not ended by the Stop's cancel ({stopped:?}): {result}"
     );
+    // The owner's target, in the master's own clock (its 504).
+    assert!(ack < ACK_TIMEOUT, "the Stop's ack took {ack:?}");
     assert!(
-        ack < ACK_TIMEOUT.min(ACK_BOUND),
-        "the Stop's ack took {ack:?}"
-    );
-    assert!(
-        approval < ACK_TIMEOUT.min(ACK_BOUND),
+        approval < ACK_TIMEOUT,
         "the approval answer's ack took {approval:?}"
+    );
+    // The socket's cap, in what went ahead (bytes: the rate does not
+    // change what can be ahead of the ack).
+    let bound = ack_bound_bytes();
+    assert!(
+        ack_bytes < bound,
+        "{} KiB went ahead of the Stop's ack ({ack:?})",
+        ack_bytes >> 10
+    );
+    assert!(
+        approval_bytes < bound,
+        "{} KiB went ahead of the approval answer's ack ({approval:?})",
+        approval_bytes >> 10
     );
 }

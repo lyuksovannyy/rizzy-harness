@@ -540,6 +540,8 @@ impl Rig {
             .env("PATH", std::env::var_os("PATH").unwrap())
             .env("HOME", self.dir.path())
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            // Nor the global ignore file (`~/.config/git/ignore`).
+            .env("XDG_CONFIG_HOME", "/nonexistent")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_TERMINAL_PROMPT", "0")
             .env("GIT_AUTHOR_NAME", "user")

@@ -13,6 +13,78 @@ pub fn required() -> bool {
     std::env::var_os("HARNESS_REQUIRE_BWRAP").is_some_and(|v| v == "1")
 }
 
+/// Whether this machine's bubblewrap can bind the way `binds` asks: binds
+/// by descriptor need 0.10.0 or newer (`harness_tools::contain::binds_of`).
+/// A test that forces [`harness_tools::contain::Binds::Fd`] skips, with a
+/// printed reason, only where `bwrap --version` names a version below
+/// 0.10: the node never asks that bubblewrap for them (it binds by path,
+/// which the same tests check with `Binds::Path`). A version that cannot
+/// be read fails the test under `HARNESS_REQUIRE_BWRAP=1` instead of
+/// skipping it; with 0.10 or newer this returns true, and the callers'
+/// own checks fail a forced-descriptor case whose probe fails (the full
+/// form under `HARNESS_REQUIRE_BWRAP=1`), so on CI the case runs or the
+/// test is red.
+#[allow(dead_code)]
+pub fn can_bind(bwrap: &Path, binds: harness_tools::contain::Binds) -> bool {
+    let (have, version) = harness_tools::contain::binds_of(bwrap);
+    match bind_decision(binds, have, version.as_deref(), required()) {
+        Bind::Run => true,
+        Bind::Skip(why) => {
+            eprintln!("SKIPPED (binds by descriptor): {}: {why}", bwrap.display());
+            false
+        }
+        Bind::Fail(why) => panic!("HARNESS_REQUIRE_BWRAP=1: {}: {why}", bwrap.display()),
+    }
+}
+
+/// What [`can_bind`] does with a bubblewrap whose `--version` printed
+/// `version` and that offers `have`.
+#[allow(dead_code)]
+#[derive(Debug, PartialEq)]
+pub enum Bind {
+    Run,
+    Skip(String),
+    Fail(String),
+}
+
+#[allow(dead_code)]
+pub fn bind_decision(
+    binds: harness_tools::contain::Binds,
+    have: harness_tools::contain::Binds,
+    version: Option<&str>,
+    required: bool,
+) -> Bind {
+    use harness_tools::contain::Binds;
+    if binds != Binds::Fd || have == Binds::Fd {
+        return Bind::Run;
+    }
+    // `bubblewrap 0.9.0`: the first word that starts with a digit.
+    let parsed = version.and_then(|v| {
+        let num = v
+            .split_whitespace()
+            .find(|w| w.starts_with(|c: char| c.is_ascii_digit()))?;
+        let mut it = num.split('.');
+        let major: u32 = it.next()?.parse().ok()?;
+        let minor: u32 = it
+            .next()?
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>()
+            .parse()
+            .ok()?;
+        Some((major, minor))
+    });
+    match parsed {
+        Some(v) if v < (0, 10) => {
+            Bind::Skip(format!("{version:?}; --bind-fd needs bubblewrap 0.10.0"))
+        }
+        _ if required => Bind::Fail(format!(
+            "its version cannot be read ({version:?}): the binds by descriptor would go untested"
+        )),
+        _ => Bind::Skip(format!("its version cannot be read ({version:?})")),
+    }
+}
+
 /// `sb` with the full containment, as the node sets it up, or `sb` back (and
 /// a printed reason) where bubblewrap cannot contain a command here.
 /// (Both sides carry the sandbox back; a test helper, called once.)

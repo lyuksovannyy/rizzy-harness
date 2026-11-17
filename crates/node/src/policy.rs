@@ -42,7 +42,9 @@ pub struct NodePolicy {
     /// ceiling. What it offers is decided at start, from this and its own
     /// self-test ([`Self::exec`]).
     pub execution: ExecutionPolicy,
-    /// Skills (`[skills]`, ADOPTION_PLAN X.2).
+    /// Skills (`[skills]`, ADOPTION_PLAN X.2). Left out of node.toml (or
+    /// no node.toml): [`SkillsPolicy::node_toml`], the owner's home roots.
+    #[serde(default = "SkillsPolicy::node_toml")]
     pub skills: SkillsPolicy,
     /// The node operator's instruction file (`[instructions]`, X.2).
     pub instructions: InstructionsPolicy,
@@ -56,6 +58,13 @@ pub struct NodePolicy {
     /// read from node.toml. Canonical paths.
     #[serde(skip)]
     pub protected_dirs: Vec<PathBuf>,
+    /// Where the node finds the user's global git ignore file, which its
+    /// checkpoints follow: this process's `HOME`, `XDG_CONFIG_HOME` and
+    /// `GIT_CONFIG_GLOBAL`, set by [`NodePolicy::load`] and
+    /// [`NodePolicy::node_toml_default`]; none in a policy built in code
+    /// (test rigs), as with [`SkillsPolicy`]. Never read from node.toml.
+    #[serde(skip)]
+    pub user_git: crate::git::UserGitEnv,
     /// The execution modes this node offers, set by the runtime at start
     /// from its self-test and [`Self::execution`] (N.10a): every agentic
     /// create chooses inside it, and every turn, callback, restore and
@@ -108,22 +117,49 @@ pub struct SkillsPolicy {
     /// `.claude/skills` from its top down to the session folder).
     pub repository: bool,
     /// The node owner's skill folders, absolute or under `~/` (the node
-    /// user's home). By default `~/.agents/skills` and `~/.claude/skills`,
-    /// where other harnesses keep personal skills. Every session on this
-    /// node can read the skills in them.
+    /// user's home). In node.toml by default `~/.agents/skills` and
+    /// `~/.claude/skills` ([`Self::HOME_ROOTS`]), where other harnesses keep
+    /// personal skills. Every session on this node can read the skills in
+    /// them.
+    #[serde(default = "SkillsPolicy::home_roots")]
     pub roots: Vec<PathBuf>,
 }
 
+/// Built in code: no root. A policy a program makes for itself reads
+/// nothing of the home folder unless it says so, as a policy built in code
+/// reads no instruction file until it is located
+/// ([`InstructionsPolicy::located`]); every test rig builds its policy this
+/// way, so a developer's own skills never change what a test's agent is
+/// offered. What a node reads by default is node.toml's default,
+/// [`Self::node_toml`]: [`NodePolicy::load`] and the master's chat runtime
+/// use it.
 impl Default for SkillsPolicy {
     fn default() -> Self {
         Self {
             repository: true,
-            roots: vec!["~/.agents/skills".into(), "~/.claude/skills".into()],
+            roots: Vec::new(),
         }
     }
 }
 
 impl SkillsPolicy {
+    /// node.toml's default `roots`.
+    pub const HOME_ROOTS: [&'static str; 2] = ["~/.agents/skills", "~/.claude/skills"];
+
+    /// [`Self::HOME_ROOTS`] as paths (serde's default for `roots`).
+    pub fn home_roots() -> Vec<PathBuf> {
+        Self::HOME_ROOTS.iter().map(PathBuf::from).collect()
+    }
+
+    /// `[skills]` as node.toml has it when it says nothing: the repository's
+    /// skills and the owner's home roots.
+    pub fn node_toml() -> Self {
+        Self {
+            repository: true,
+            roots: Self::home_roots(),
+        }
+    }
+
     /// [`Self::roots`] with `~/` expanded; an entry that is neither
     /// absolute nor under `~/` (or `~/` without a home) is an error.
     pub fn roots(&self) -> Result<Vec<PathBuf>, String> {
@@ -636,6 +672,7 @@ impl Default for NodePolicy {
             instructions: InstructionsPolicy::default(),
             mcp_servers: Default::default(),
             protected_dirs: Vec::new(),
+            user_git: Default::default(),
             exec: Default::default(),
             sandbox_tmp: None,
         }
@@ -670,15 +707,27 @@ impl NodePolicy {
         })
     }
 
-    /// Load `node.toml`; a missing file means defaults.
+    /// What an empty node.toml means: [`Self::default`] with node.toml's
+    /// skill roots ([`SkillsPolicy::node_toml`]). The policy of a node with
+    /// no node.toml, and of the master's chat runtime.
+    pub fn node_toml_default() -> Self {
+        Self {
+            skills: SkillsPolicy::node_toml(),
+            user_git: crate::git::UserGitEnv::from_process(),
+            ..Self::default()
+        }
+    }
+
+    /// Load `node.toml`; a missing file means [`Self::node_toml_default`].
     pub fn load(path: &Path) -> Result<Self, PolicyError> {
-        let p: Self = match std::fs::read_to_string(path) {
+        let mut p: Self = match std::fs::read_to_string(path) {
             Ok(s) => toml::from_str(&s).map_err(|e| PolicyError::Parse(path.into(), e))?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::node_toml_default(),
             Err(e) => return Err(PolicyError::Io(path.into(), e)),
         };
         p.validate()
             .map_err(|e| PolicyError::Invalid(path.into(), e))?;
+        p.user_git = crate::git::UserGitEnv::from_process();
         Ok(p)
     }
 
@@ -1248,6 +1297,47 @@ tool_timeout_sec = 120
         p.limits.max_subagents = 0;
         p.limits.max_delegation_depth = MAX_DELEGATION_DEPTH + 1;
         assert!(p.validate().unwrap_err().contains("max_delegation_depth"));
+    }
+
+    /// A policy built in code reads no skill folder of the home (every test
+    /// rig builds one: a developer's `~/.agents/skills` changed what tests
+    /// offered the agent, 2026-11-15); node.toml's default still names the
+    /// owner's two home roots, whether `[skills]` is missing, says nothing of
+    /// `roots`, or there is no node.toml at all.
+    #[test]
+    fn code_built_policies_have_no_home_skill_roots_and_node_toml_keeps_them() {
+        assert!(NodePolicy::default().skills.roots.is_empty());
+        assert!(NodePolicy::default().skills.repository);
+        let home = vec![
+            PathBuf::from("~/.agents/skills"),
+            PathBuf::from("~/.claude/skills"),
+        ];
+        let empty: NodePolicy = toml::from_str("").unwrap();
+        assert_eq!(empty.skills.roots, home);
+        assert!(empty.skills.repository);
+        let partial: NodePolicy = toml::from_str("[skills]\nrepository = false\n").unwrap();
+        assert_eq!(partial.skills.roots, home);
+        assert!(!partial.skills.repository);
+        let none: NodePolicy = toml::from_str("[skills]\nroots = []\n").unwrap();
+        assert!(none.skills.roots.is_empty());
+        let dir = tempfile::tempdir().unwrap();
+        let missing = NodePolicy::load(&dir.path().join("node.toml")).unwrap();
+        assert_eq!(missing.skills.roots, home);
+        assert_eq!(NodePolicy::node_toml_default().skills, empty.skills);
+        // The same for where the user's global git ignore file is found:
+        // a node reads it from its process, a policy built in code has none.
+        let none = format!("{:?}", crate::git::UserGitEnv::default());
+        let process = format!("{:?}", crate::git::UserGitEnv::from_process());
+        assert_eq!(format!("{:?}", NodePolicy::default().user_git), none);
+        assert_eq!(format!("{:?}", missing.user_git), process);
+        assert_eq!(
+            format!("{:?}", NodePolicy::node_toml_default().user_git),
+            process
+        );
+        std::fs::write(dir.path().join("node.toml"), "").unwrap();
+        let file = NodePolicy::load(&dir.path().join("node.toml")).unwrap();
+        assert_eq!(format!("{:?}", file.user_git), process);
+        assert!(process.contains("home: Some"), "{process}");
     }
 
     /// T.8d: the background bounds are node.toml's, with the owner's

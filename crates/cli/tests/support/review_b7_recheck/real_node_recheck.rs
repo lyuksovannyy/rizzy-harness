@@ -21,7 +21,15 @@ use harness_store::{Durability, Store};
 use tokio::sync::mpsc;
 
 const OUT_QUEUE: usize = 256;
-const TALKING: &str = "run: while :; do echo tick; date +%s%N > beat; sleep 966e-4; done";
+fn talking() -> String {
+    // While this test process lives (a SIGKILL of the test reparents the
+    // loop and it ends), 15 minutes at most.
+    format!(
+        "run: while read -r _ _ _ p _ </proc/$$/stat && [ \"$p\" = {} ] && [ $SECONDS -lt 900 ]; \
+         do echo tick; date +%s%N > beat; sleep 966e-4; done",
+        std::process::id()
+    )
+}
 const FLOOD: &str = "run: yes 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const FLOODERS: usize = 12;
 
@@ -294,7 +302,7 @@ fn now_ns() -> u128 {
 }
 
 async fn running(node: &Node) -> (SessionId, PathBuf) {
-    let (sid, dir) = node.start("watched", TALKING, true).await;
+    let (sid, dir) = node.start("watched", &talking(), true).await;
     node.wait("the watched session to stream", Duration::from_secs(30), |s| {
         s.deltas.get(&sid).is_some_and(|d| d.0 > 0)
     })

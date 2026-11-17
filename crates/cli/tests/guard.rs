@@ -214,6 +214,16 @@ impl Drop for Cleanup {
     }
 }
 
+/// How long a test waits for what it started to be gone. Not a bound the
+/// guard promises (it kills within `REPEAT`, 20 ms, of its kill order and
+/// repeats), but a limit on waiting: on a loaded machine the guard, a large
+/// debug binary on a slow disk, can take seconds to start or to be
+/// scheduled, and 2 s made `a_kill_of_the_node_just_after_a_spawn_leaves_nothing`
+/// fail under load. What these tests catch never ends: before the guard, a
+/// namespace that outlived its node ran its `sleep` (decades long) until
+/// killed.
+const GONE_LIMIT: Duration = Duration::from_secs(30);
+
 /// Wait up to `within` for [`left`] to find nothing; what it still finds.
 fn gone_within(needle: &Path, secs: &[Mark], within: Duration) -> Vec<i32> {
     let by = Instant::now() + within;
@@ -262,6 +272,7 @@ fn a_kill_of_the_node_just_after_a_spawn_leaves_nothing() {
         return;
     }
     let mut survivors = Vec::new();
+    let mut slowest = Duration::ZERO;
     for attempt in 0..tries {
         let ws = f.ws.join(format!("try-{attempt}"));
         std::fs::create_dir_all(&ws).unwrap();
@@ -285,19 +296,24 @@ fn a_kill_of_the_node_just_after_a_spawn_leaves_nothing() {
         }
         helper.kill().unwrap(); // SIGKILL
         let _ = helper.wait();
-        let l = gone_within(&ws, &[SECS], Duration::from_secs(2));
+        let t = Instant::now();
+        let l = gone_within(&ws, &[SECS], GONE_LIMIT);
+        slowest = slowest.max(t.elapsed());
         if !l.is_empty() {
+            // One is the finding; waiting `GONE_LIMIT` for each of the
+            // others would only make a broken guard slow to report.
             survivors.push((attempt, describe(&l)));
+            break;
         }
     }
     eprintln!(
-        "kill -9 of the node 0 to 1 ms after a spawn: {} of {tries} namespaces left running",
+        "kill -9 of the node 0 to 1 ms after a spawn: {} of {tries} namespaces left running; \
+         the slowest to be gone took {slowest:?}",
         survivors.len()
     );
     assert!(
         survivors.is_empty(),
-        "{} of {tries} namespaces survived the node: {:?}",
-        survivors.len(),
+        "a namespace survived the node {GONE_LIMIT:?} after its kill: {:?}",
         survivors.first()
     );
 }
@@ -577,7 +593,7 @@ async fn a_process_the_kernel_cannot_kill_yet_is_reported_still_alive() {
         "the report came after the loop abandons the tool: {took:?}"
     );
     tokio::task::block_in_place(|| stall.release());
-    let l = gone_within(&f.ws, &[], Duration::from_secs(2));
+    let l = gone_within(&f.ws, &[], GONE_LIMIT);
     assert!(!alive(cat), "the reader outlived its release");
     assert!(l.is_empty(), "left after the release:\n{}", describe(&l));
 }
@@ -654,13 +670,13 @@ async fn a_kill_of_the_guard_alone_ends_the_namespace() {
     let l = tokio::task::spawn_blocking({
         let ws = f.ws.clone();
         let secs = secs.clone();
-        move || gone_within(&ws, &secs, Duration::from_secs(2))
+        move || gone_within(&ws, &secs, GONE_LIMIT)
     })
     .await
     .unwrap();
     assert!(
         l.is_empty(),
-        "left 2 s after the guard's kill:\n{}",
+        "left {GONE_LIMIT:?} after the guard's kill:\n{}",
         describe(&l)
     );
     let r = tokio::time::timeout(Duration::from_secs(5), h)
@@ -1023,7 +1039,7 @@ fn a_node_killed_while_a_child_waits_before_exec_leaves_nothing() {
     let t = Instant::now();
     node.kill().unwrap(); // SIGKILL
     let _ = node.wait();
-    let l = gone_within(&f.ws, &[SECS], Duration::from_secs(2));
+    let l = gone_within(&f.ws, &[SECS], GONE_LIMIT);
     eprintln!(
         "node SIGKILLed with a child stuck before exec: {} after {:?}",
         if l.is_empty() { "nothing left" } else { "LEFT" },
@@ -1032,7 +1048,7 @@ fn a_node_killed_while_a_child_waits_before_exec_leaves_nothing() {
     stall.release();
     assert!(
         l.is_empty(),
-        "still running 2 s after the node died:\n{}",
+        "still running {GONE_LIMIT:?} after the node died:\n{}",
         describe(&l)
     );
 }
@@ -1068,6 +1084,18 @@ fn guard_argv(
 /// shell gives `&`); `@NODE@` in it becomes the shell's pid. The command
 /// line is in a script file, so the shell's own command line carries no
 /// mark (a process that does is killed by the sweep, by design).
+/// Whether `child` exited within `within` (reaped if so).
+fn exited_within(child: &mut std::process::Child, within: Duration) -> bool {
+    let by = Instant::now() + within;
+    while Instant::now() < by {
+        if child.try_wait().is_ok_and(|s| s.is_some()) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    false
+}
+
 fn under_shell(
     dir: &Path,
     argv: &[std::ffi::OsString],
@@ -1139,7 +1167,14 @@ async fn a_restarted_node_ends_a_guard_whose_node_died() {
     );
     assert!(!sleeps(SECS).is_empty(), "the sweep ended it");
     drop(held);
-    let _ = sh.wait();
+    // The shell waits for its guard: a guard that ignores the closed
+    // channel would hold this test for ever, so it is bounded.
+    let ended = exited_within(&mut sh, GONE_LIMIT);
+    assert!(
+        ended,
+        "the guard was still running {GONE_LIMIT:?} after its channel closed:\n{}",
+        describe(&left(&f.ws, &[SECS]))
+    );
     let by = Instant::now() + Duration::from_secs(3);
     while (alive(unknown) || !sleeps(SECS).is_empty()) && Instant::now() < by {
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1170,7 +1205,7 @@ async fn a_restarted_node_ends_a_guard_whose_node_died() {
     );
     tokio::task::block_in_place(|| stall.release());
     drop(held);
-    let l = gone_within(&f.ws, &[], Duration::from_secs(3));
+    let l = gone_within(&f.ws, &[], GONE_LIMIT);
     assert!(l.is_empty(), "left after the release:\n{}", describe(&l));
 }
 
@@ -1392,7 +1427,7 @@ async fn a_guard_that_does_not_answer_is_reported_within_the_loops_grace() {
     );
     assert!(r.output.contains("not confirmed"), "{}", r.output);
     assert!(!r.output.contains("[cancelled"), "{}", r.output);
-    let l = gone_within(&f.ws, &[SECS], Duration::from_secs(3));
+    let l = gone_within(&f.ws, &[SECS], GONE_LIMIT);
     assert!(l.is_empty(), "left:\n{}", describe(&l));
 }
 
@@ -1431,7 +1466,7 @@ async fn the_sweep_does_not_call_a_stuck_leftover_ended() {
     eprintln!("second start: {second:?}");
     assert!(second.is_empty(), "{second:?}");
     tokio::task::block_in_place(|| stall.release());
-    let l = gone_within(&f.ws, &[], Duration::from_secs(2));
+    let l = gone_within(&f.ws, &[], GONE_LIMIT);
     assert!(l.is_empty(), "left after the release:\n{}", describe(&l));
     let third = sweep(root).await;
     assert!(third.is_empty(), "{third:?}");

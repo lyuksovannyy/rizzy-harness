@@ -5,12 +5,20 @@
 // the node offers it; the chat's grants listed beside it with Remove.
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import type { Item, SessionView } from "../types";
 import { ToolCard } from "./ToolCard";
 import { emptyView } from "../fold";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+// The side panel is a lazy chunk; building it on first import took past the
+// 5 s test limit at load average 41. Load it once here, under the hook's own
+// limit, so the test's time is the render's.
+let SidePanel: typeof import("./SidePanel").default;
+beforeAll(async () => {
+  ({ default: SidePanel } = await import("./SidePanel"));
+}, 30_000);
 
 const approve = vi.fn(async (..._a: unknown[]) => ({}));
 vi.mock("../apiPages", () => ({ pageApi: { approve: (...a: unknown[]) => approve(...a) } }));
@@ -96,7 +104,6 @@ describe("allow for this chat", () => {
   });
 
   test("the side panel lists the chat's grants with Remove", async () => {
-    const { default: SidePanel } = await import("./SidePanel");
     const view: SessionView = {
       ...emptyView(),
       chat_allows: {

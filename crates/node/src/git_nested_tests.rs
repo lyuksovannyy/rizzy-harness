@@ -30,6 +30,8 @@ fn sh(dir: &Path, args: &[&str]) -> String {
         .args(args)
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        // Nor the global ignore file (`~/.config/git/ignore`).
+        .env("XDG_CONFIG_HOME", "/nonexistent")
         .env("GIT_AUTHOR_NAME", "t")
         .env("GIT_AUTHOR_EMAIL", "t@t")
         .env("GIT_COMMITTER_NAME", "t")

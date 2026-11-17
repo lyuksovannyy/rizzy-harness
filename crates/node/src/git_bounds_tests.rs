@@ -16,6 +16,8 @@ fn sh(dir: &Path, args: &[&str]) {
         .arg(dir)
         .args(args)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        // Nor the global ignore file (`~/.config/git/ignore`).
+        .env("XDG_CONFIG_HOME", "/nonexistent")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_AUTHOR_NAME", "t")
         .env("GIT_AUTHOR_EMAIL", "t@t")
@@ -158,6 +160,7 @@ async fn a_repository_above_the_workspace_root_is_not_used() {
         ceiling: Some(sub.clone()),
         protected: vec![],
         sandbox: None,
+        ..Default::default()
     };
     let repo = checkpoint_repo(&sub, Some(&h.base), &bounds)
         .await
@@ -175,6 +178,7 @@ async fn a_repository_above_the_workspace_root_is_not_used() {
         ceiling: Some(h.home.clone()),
         protected: vec![],
         sandbox: None,
+        ..Default::default()
     };
     let repo = checkpoint_repo(&sub, Some(&h.base), &bounds)
         .await
@@ -198,6 +202,7 @@ async fn a_repository_that_holds_the_data_directory_is_not_the_root() {
         ceiling: Some(h.home.clone()),
         protected: vec![data.clone()],
         sandbox: None,
+        ..Default::default()
     };
     let repo = checkpoint_repo(&notes, Some(&h.base), &bounds)
         .await

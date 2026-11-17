@@ -629,6 +629,12 @@ async fn a_sub_agent_never_runs_above_its_parent() {
             .env("GIT_AUTHOR_EMAIL", "t@t")
             .env("GIT_COMMITTER_NAME", "t")
             .env("GIT_COMMITTER_EMAIL", "t@t")
+            // Not the developer's ~/.gitconfig (a global `commit.gpgsign`
+            // or `core.hooksPath` failed or ran things in these commits).
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            // Nor the global ignore file (`~/.config/git/ignore`).
+            .env("XDG_CONFIG_HOME", "/nonexistent")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
             .status()
             .unwrap()
             .success();
@@ -2518,6 +2524,12 @@ async fn a_writer_sub_agent_mid_turn_follows_its_parent_into_plan_mode() {
             .env("GIT_AUTHOR_EMAIL", "t@t")
             .env("GIT_COMMITTER_NAME", "t")
             .env("GIT_COMMITTER_EMAIL", "t@t")
+            // Not the developer's ~/.gitconfig (a global `commit.gpgsign`
+            // or `core.hooksPath` failed or ran things in these commits).
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            // Nor the global ignore file (`~/.config/git/ignore`).
+            .env("XDG_CONFIG_HOME", "/nonexistent")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
             .status()
             .unwrap()
             .success();
@@ -2630,6 +2642,12 @@ async fn a_writer_childs_changes_are_kept_out_of_a_folder_now_in_plan_mode() {
             .env("GIT_AUTHOR_EMAIL", "t@t")
             .env("GIT_COMMITTER_NAME", "t")
             .env("GIT_COMMITTER_EMAIL", "t@t")
+            // Not the developer's ~/.gitconfig (a global `commit.gpgsign`
+            // or `core.hooksPath` failed or ran things in these commits).
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            // Nor the global ignore file (`~/.config/git/ignore`).
+            .env("XDG_CONFIG_HOME", "/nonexistent")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
             .status()
             .unwrap()
             .success();

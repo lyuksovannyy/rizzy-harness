@@ -268,24 +268,41 @@ async fn shutdown_lets_an_in_flight_request_finish_then_stops() {
             "done"
         }),
     );
-    let srv = start(app, cfg()).await;
+    // A grace far longer than the request: a server that waits it out
+    // instead of stopping once the request is answered is told apart by
+    // order of magnitude, not by a few hundred milliseconds (the 800 ms
+    // grace against 790 ms took 837 ms on a loaded machine).
+    const GRACE: Duration = Duration::from_secs(60);
+    let srv = start(
+        app,
+        ServeConfig {
+            shutdown_grace: GRACE,
+            ..cfg()
+        },
+    )
+    .await;
     let addr = srv.addr;
     let mut s = TcpStream::connect(addr).await.unwrap();
     s.write_all(b"GET /slow HTTP/1.1\r\nhost: x\r\n\r\n")
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let took = srv.stop().await;
+    let t = Instant::now();
+    let Server { stop, done, .. } = srv;
+    let _ = stop.unwrap().send(());
+    tokio::time::timeout(GRACE / 2, done)
+        .await
+        .expect("waited for the whole grace")
+        .unwrap()
+        .unwrap();
+    let took = t.elapsed();
     let mut out = String::new();
     s.read_to_string(&mut out).await.unwrap();
     assert!(
         out.starts_with("HTTP/1.1 200") && out.ends_with("done"),
         "{out}"
     );
-    assert!(
-        took < Duration::from_millis(790),
-        "no need to wait the whole grace: {took:?}"
-    );
+    eprintln!("stopped {took:?} after the order, with a {GRACE:?} grace");
     // The listener is gone: nobody new is accepted.
     assert!(TcpStream::connect(addr).await.is_err());
 }

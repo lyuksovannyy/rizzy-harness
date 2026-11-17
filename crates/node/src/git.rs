@@ -510,6 +510,9 @@ pub struct Bounds {
     /// The sandbox the node's git for this folder runs in (R1b-2); `None`
     /// where the node has none.
     pub sandbox: Option<std::sync::Arc<harness_tools::sandbox::Sandbox>>,
+    /// Where the user's global ignore file is found (the node's
+    /// [`crate::NodePolicy::user_git`]); none by default.
+    pub user_git: UserGitEnv,
 }
 
 impl Bounds {
@@ -557,7 +560,7 @@ pub async fn checkpoint_repo(
         cwd,
         shadow_base,
         bounds,
-        &UserGitEnv::from_process(),
+        &bounds.user_git,
         Shadow::Checkpoints,
     )
     .await
@@ -592,16 +595,21 @@ enum Shadow {
 }
 
 /// Where the user's own git settings live: only used to find their global
-/// ignore file (tests point these at temporary files).
+/// ignore file. A node reads them from its process
+/// ([`UserGitEnv::from_process`], in [`crate::NodePolicy::load`]); the
+/// default, a policy built in code (every test rig), has none, so a
+/// developer's `~/.config/git/ignore` does not change what tests'
+/// checkpoints hold (tests point these at temporary files).
 #[derive(Debug, Clone, Default)]
-struct UserGitEnv {
+pub struct UserGitEnv {
     home: Option<PathBuf>,
     xdg_config_home: Option<PathBuf>,
     global_config: Option<PathBuf>,
 }
 
 impl UserGitEnv {
-    fn from_process() -> Self {
+    /// `HOME`, `XDG_CONFIG_HOME` and `GIT_CONFIG_GLOBAL` of this process.
+    pub fn from_process() -> Self {
         let var = |k| {
             std::env::var_os(k)
                 .filter(|v| !v.is_empty())
@@ -2537,7 +2545,7 @@ pub async fn sub_repo(
         cwd,
         shadow_base,
         bounds,
-        &UserGitEnv::from_process(),
+        &bounds.user_git,
         Shadow::SubAgents,
     )
     .await?
@@ -2810,6 +2818,8 @@ mod tests {
             .arg(dir)
             .args(args)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            // Nor the global ignore file (`~/.config/git/ignore`).
+            .env("XDG_CONFIG_HOME", "/nonexistent")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_AUTHOR_NAME", "t")
             .env("GIT_AUTHOR_EMAIL", "t@t")
@@ -3331,6 +3341,8 @@ mod tests {
             .arg(&wt.path)
             .args(["status", "--porcelain"])
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            // Nor the global ignore file (`~/.config/git/ignore`).
+            .env("XDG_CONFIG_HOME", "/nonexistent")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .output()
             .unwrap();

@@ -366,7 +366,8 @@ async fn serve(
     let chat = NodeRuntime::start(NodeConfig {
         node_id: "master".into(),
         hostname: hostname(),
-        policy: NodePolicy::default(),
+        // As a node with no node.toml (the owner's home skill roots).
+        policy: NodePolicy::node_toml_default(),
         store: Store::open(&dir.join("chat.db"), Durability::Full)?,
         backend: Arc::new(chat_backend),
         default_model: fallback_model(&cfg),

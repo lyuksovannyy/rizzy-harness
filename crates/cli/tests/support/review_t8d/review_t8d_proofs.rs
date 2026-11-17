@@ -1725,6 +1725,8 @@ async fn a_sub_agent_cannot_start_list_read_or_stop() {
             .args(args)
             .current_dir(&n.ws)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            // Nor the global ignore file (`~/.config/git/ignore`).
+            .env("XDG_CONFIG_HOME", "/nonexistent")
             .output()
             .unwrap();
         assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
