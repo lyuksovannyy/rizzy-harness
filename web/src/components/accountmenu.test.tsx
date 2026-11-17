@@ -11,7 +11,9 @@ import type { Me, WorkspaceList, WorkspaceSummary } from "../types";
 import type { SidebarProps } from "./Sidebar";
 
 const createWorkspace = vi.fn();
-vi.mock("../apiPages", () => ({ pageApi: { createWorkspace } }));
+const profileImages = vi.fn();
+vi.mock("../apiPages", () => ({ pageApi: { createWorkspace, profileImages } }));
+vi.mock("./Linked", () => ({ LinkedImg: ({ url, ...img }: { url: string; alt?: string; className?: string }) => <img {...img} data-url={url} /> }));
 const { Sidebar } = await import("./Sidebar");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -50,6 +52,7 @@ const realMatchMedia = window.matchMedia;
 beforeEach(() => {
   media(false);
   createWorkspace.mockReset();
+  profileImages.mockReset().mockResolvedValue({ avatar: null, banner: null });
   host = document.createElement("div");
   document.body.append(host);
   root = createRoot(host);
@@ -96,6 +99,7 @@ const menus = () => [...document.querySelectorAll<HTMLElement>('[role="menu"]')]
 const menu = (label: string) => menus().find((m) => m.getAttribute("aria-label") === label);
 const items = (m: HTMLElement | undefined) => [...(m?.querySelectorAll<HTMLElement>('[role^="menuitem"]') ?? [])];
 const texts = (m: HTMLElement | undefined) => items(m).map((i) => i.textContent?.trim());
+const MAIN = ["AAlexPersonal · User", "Profile", "Personalisation", "Workspace settings", "Settings", "Log out"];
 const key = async (k: string, el: Element = document.activeElement!) =>
   act(async () => void el.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, cancelable: true })));
 async function open(how: "click" | "ArrowDown" = "click") {
@@ -113,7 +117,7 @@ describe("account menu", () => {
       expect(button().getAttribute("aria-expanded")).toBe("true");
       const m = menu("Account")!;
       expect(button().getAttribute("aria-controls")).toBe(m.id);
-      expect(items(m).map((i) => i.textContent)).toEqual(["AAlexPersonal · User", "Profile", "Settings", "Log out"]);
+      expect(texts(m)).toEqual(MAIN);
       expect(document.activeElement).toBe(items(m)[0]);
       await key(close);
       expect(menus()).toHaveLength(0);
@@ -127,7 +131,7 @@ describe("account menu", () => {
     await render();
     await open();
     const m = menu("Account")!;
-    const [head, , , logout] = items(m);
+    const [head, , , , , logout] = items(m);
     await key("ArrowUp");
     expect(document.activeElement).toBe(logout);
     await key("ArrowDown");
@@ -148,7 +152,8 @@ describe("account menu", () => {
     expect(radios.map((r) => r.textContent)).toEqual(["AAlexPersonal", "AacmeAdmin", "ZZetaMember"]);
     expect(radios.map((r) => r.getAttribute("aria-checked"))).toEqual(["false", "true", "false"]);
     expect(document.activeElement).toBe(radios[1]);
-    expect(texts(sub).slice(3)).toEqual(["New workspace…", "Workspace settings"]);
+    // Workspace settings moved to the main menu.
+    expect(texts(sub).slice(3)).toEqual(["New workspace…"]);
     await key("ArrowLeft");
     expect(menu("Workspaces")).toBeUndefined();
     expect(document.activeElement).toBe(items(menu("Account"))[0]);
@@ -218,15 +223,65 @@ describe("account menu", () => {
     expect(document.activeElement).toBe(items(menu("Account"))[0]);
   });
 
-  test("Profile and Settings open the account's settings; Log out logs out", async () => {
+  test("Profile, Personalisation, Workspace settings and Settings open their pages; Log out logs out", async () => {
     const p = await render();
     await open();
-    await act(async () => items(menu("Account"))[1]!.click());
-    expect(p.onNavigate).toHaveBeenLastCalledWith({ kind: "settings", section: "account", tab: "profile" });
-    expect(menus()).toHaveLength(0);
-    await open();
-    expect(items(menu("Account"))[2]!.getAttribute("href")).toBe("#/settings/account/preferences");
-    await act(async () => items(menu("Account"))[3]!.click());
+    const routes = [
+      { kind: "settings", section: "account", tab: "profile" },
+      { kind: "settings", section: "account", tab: "personalisation" },
+      { kind: "settings", section: "workspace" },
+    ];
+    for (const [i, r] of routes.entries()) {
+      await act(async () => items(menu("Account"))[i + 1]!.click());
+      expect(p.onNavigate).toHaveBeenLastCalledWith(r);
+      expect(menus()).toHaveLength(0);
+      await open();
+    }
+    expect(items(menu("Account"))[4]!.getAttribute("href")).toBe("#/settings/account/preferences");
+    await act(async () => items(menu("Account"))[5]!.click());
     expect(p.onLogout).toHaveBeenCalled();
+  });
+
+  test("each item has its icon; Settings and Log out share the last row, Log out in the destructive colour", async () => {
+    await render();
+    await open();
+    const m = menu("Account")!;
+    for (const i of items(m).slice(1)) expect(i.querySelector("svg[aria-hidden='true']")).not.toBeNull();
+    const row = m.querySelector<HTMLElement>(".menu-split")!;
+    expect(row.getAttribute("role")).toBe("none");
+    expect(texts(row as HTMLElement)).toEqual(["Settings", "Log out"]);
+    expect(items(row)[1]!.classList.contains("danger")).toBe(true);
+    // ←/→ go between the two; ↓ from Log out wraps to the header row.
+    items(row)[0]!.focus();
+    await key("ArrowRight");
+    expect(document.activeElement).toBe(items(row)[1]);
+    await key("ArrowLeft");
+    expect(document.activeElement).toBe(items(row)[0]);
+    await key("ArrowDown");
+    expect(document.activeElement).toBe(items(row)[1]);
+    await key("ArrowDown");
+    expect(document.activeElement).toBe(items(m)[0]);
+  });
+
+  test("Workspace settings shows in a team workspace too, where it did before", async () => {
+    await render({ me: me(acme) });
+    await open();
+    expect(texts(menu("Account"))).toEqual(MAIN.map((x, i) => (i === 0 ? "AAlexacme · Admin" : x)));
+  });
+
+  test("the header row shows the avatar once it is known; a name with markup stays text", async () => {
+    profileImages.mockResolvedValue({ avatar: "abc123", banner: null });
+    await render({ displayName: "<img src=x onerror=alert(1)>" });
+    await open();
+    await act(async () => {});
+    const head = items(menu("Account"))[0]!;
+    const img = head.querySelector("img")!;
+    expect(img.dataset.url).toBe("/api/users/u1/avatar?v=abc123");
+    expect(head.textContent).toContain("<img src=x onerror=alert(1)>");
+    expect(head.querySelectorAll("img")).toHaveLength(1);
+    // A picture that fails to load leaves the initial.
+    await act(async () => img.dispatchEvent(new Event("error")));
+    expect(head.querySelector("img")).toBeNull();
+    expect(head.querySelector(".avatar")!.textContent).toBe("<");
   });
 });

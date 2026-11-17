@@ -16,6 +16,7 @@ pub mod blobs;
 mod handoff;
 pub mod media;
 pub mod migrate;
+pub mod profile_images;
 mod projects;
 pub mod routines;
 pub mod session_images;
@@ -508,6 +509,7 @@ pub const MIGRATIONS: &[migrate::Migration] = &[&[
     artifacts::SCHEMA,
     routines::SCHEMA,
     session_images::SCHEMA,
+    profile_images::SCHEMA,
 ]];
 
 /// A session's effective workspace: its `session_workspaces` row while the
@@ -2612,6 +2614,12 @@ impl Store {
         )?;
         // What the cascade below cannot reach (the account's FTS rows).
         blobs::on_user_deleted(&tx, user_id)?;
+        // Their settings (profile, description, personal instructions):
+        // the kv table has no foreign key to cascade from.
+        tx.execute(
+            "DELETE FROM kv WHERE k = ?1",
+            params![format!("settings:{user_id}")],
+        )?;
         tx.execute("DELETE FROM users WHERE user_id = ?1", params![user_id])?;
         tx.commit()?;
         Ok(())

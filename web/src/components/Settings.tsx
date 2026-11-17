@@ -2,7 +2,7 @@
 // decides who sees which tab). One panel is mounted at a time, so leaving a
 // tab drops what it did not save (AppearanceFields reverts its preview).
 import "../lib/i18nPages";
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { pageApi } from "../apiPages";
 import { t } from "../lib/i18n";
 import { routeHash, settingsHash } from "../lib/routes";
@@ -13,7 +13,7 @@ import { modelLabel, offeredModels, resolveModel } from "../lib/models";
 import { savablePrefs } from "../lib/modelPlan";
 import { AgentMark, agentAlert } from "./AgentAvatar";
 import { AppearanceFields } from "./Appearance";
-import { ProfileFields, SearchEngineFields } from "./forms";
+import { SearchEngineFields } from "./forms";
 import { ProvidersSettings } from "./ProviderForm";
 import { enableNotify, notifyEnabled, notifySupported } from "../lib/notify";
 import { MemoryCfgForm, MemoryPage } from "./Memory";
@@ -29,6 +29,12 @@ import { WorkspaceMembers } from "./workspace/WorkspaceMembers";
 import { WorkspaceModels } from "./workspace/WorkspaceModels";
 import { WorkspaceMemory } from "./workspace/WorkspaceMemory";
 import { WorkspaceOverview } from "./workspace/WorkspaceOverview";
+
+// Their own chunks: Profile's pictures, Personalisation, and the workspace's
+// agents (the Agents page's list).
+const ProfileTab = lazy(() => import("./profile/ProfileTab"));
+const PersonalisationTab = lazy(() => import("./profile/PersonalisationTab"));
+const WorkspaceAgents = lazy(() => import("./workspace/WorkspaceAgents"));
 
 function NotifyToggle() {
   const [on, setOn] = useState(notifyEnabled());
@@ -187,12 +193,12 @@ export default function Settings(props: {
             </button>
           ))}
         </div>
-        {!prefs && (tab === "profile" || tab === "preferences") && <div className="muted">Loading…</div>}
-        {prefs && tab === "profile" && (
-          <PrefsEditor initial={prefs} models={props.models} onSaved={props.onPrefs}>
-            {(p, set) => <ProfileFields prefs={p} onChange={set} username={props.me.username} />}
-          </PrefsEditor>
-        )}
+        {!prefs && (tab === "profile" || tab === "personalisation" || tab === "preferences") && <div className="muted">Loading…</div>}
+        <Suspense fallback={<div className="muted">Loading…</div>}>
+          {prefs && tab === "profile" && <ProfileTab me={props.me} prefs={prefs} models={props.models} onSaved={props.onPrefs} />}
+          {prefs && tab === "personalisation" && <PersonalisationTab prefs={prefs} onSaved={props.onPrefs} />}
+          {wsProps && tab === "agents" && <WorkspaceAgents {...wsProps} />}
+        </Suspense>
         {prefs && tab === "preferences" && (
           <PrefsEditor initial={prefs} models={props.models} onSaved={props.onPrefs}>
             {(p, set) => (

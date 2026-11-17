@@ -24,8 +24,8 @@ const shape = (v: Pick<Me, "user_id" | "role" | "workspace">) =>
 describe("visibleSections", () => {
   it("a member: their account and the workspace, read-only", () => {
     expect(shape(viewer({}))).toEqual({
-      account: ["profile", "preferences", "memory", "password"],
-      workspace: ["overview", "facts"],
+      account: ["profile", "personalisation", "preferences", "memory", "password"],
+      workspace: ["overview", "facts", "agents"],
     });
     // A guest sees the same; what a role may do only shows inside.
     expect(shape(viewer({ workspace: ws("guest", []) }))).toEqual(shape(viewer({})));
@@ -57,7 +57,7 @@ describe("visibleSections", () => {
 
   it("the API token: no password, no workspace", () => {
     expect(shape(viewer({ user_id: null, role: "admin", workspace: null }))).toEqual({
-      account: ["profile", "preferences", "memory"],
+      account: ["profile", "personalisation", "preferences", "memory"],
       server: ["providers", "recall", "savings", "nodes", "users", "workspaces", "storage"],
     });
   });

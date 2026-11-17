@@ -145,6 +145,21 @@ read-only.
   instructions, a board and its own facts. The switch is `Features.project_memory` (frontmatter
   `project_memory`, default true). `remember` comes with either memory switch; the master offers
   it per turn only for what the turn may write and checks each call's scope when it files it.
+- **Personalisation** (its own group): whether the agent gets each person's Personalisation
+  (Settings → Personalisation, PLAN.md T74) in their own chats: the fixed sentences of their reply
+  choices and their personal instructions, one standing section of the context block
+  (`personal`). `Features.personalisation`, frontmatter `personalisation`, **on by default** for
+  every agent (built-ins included; off changes the agent's prompt hash, on leaves earlier hashes as
+  they were). Off means neither the sentences nor the instructions, because an agent with a strict
+  output format is disturbed as much by "use emoji" as by free text; the settings line (name,
+  place, time zone, About you) is not this switch's. It is the agent's setting, like the others:
+  only those who may edit agents change it (today the server's admins). Built-in agents always
+  have it on (their switches are read-only; Duplicate makes an editable copy). It travels in the
+  agent's spec (`AgentSpec::no_personalisation`, absent = on): the master leaves the section out
+  of an off agent's own turns, and the node drops it from what a sub-agent inherits of its parent
+  turn when the child's switch is off, for a new child and a continued one (T68). Workspace settings →
+  Agents lists the same agents and opens the same pages, so the switch is reachable from there
+  too.
 
 ## Storage
 

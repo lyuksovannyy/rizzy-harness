@@ -13,6 +13,7 @@ import { canGive, canManage, PERM_LABEL, PERMS, ROLES, rolePerms } from "../../l
 import type { ExecLevel, WorkspaceMember, WorkspaceRole } from "../../types";
 import { atMost, LEVEL_LABEL, LevelSelect } from "../LevelSelect";
 import { message, type WorkspacePanelProps } from "./panel";
+import { UserAvatar } from "../profile/UserAvatar";
 
 /** The highest level someone may grant here: their own effective level,
  * and below host unless they are an owner (N.10a part 2). */
@@ -108,7 +109,8 @@ export function WorkspaceMembers(props: WorkspacePanelProps) {
               const who = m.display_name || m.username;
               return (
                 <tr key={m.user_id}>
-                  <td>
+                  <td className="member-who">
+                    <UserAvatar userId={m.user_id} version={m.avatar} name={who} className="small-avatar" />
                     {who}
                     {m.display_name && <span className="muted small"> @{m.username}</span>}
                     {self && <span className="muted"> (you)</span>}

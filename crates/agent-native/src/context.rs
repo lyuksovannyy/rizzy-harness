@@ -80,6 +80,7 @@ impl SectionKey {
             SectionKey::Nested(p) => return format!("{NESTED_PREFIX}{p}").into(),
             SectionKey::Skills => "skills",
             SectionKey::Master(k) => match k {
+                StandingKey::Personal => "personal",
                 StandingKey::Memory => "memory",
                 StandingKey::MemoryRecall => "memory_recall",
                 StandingKey::Workspace => "workspace",
@@ -127,6 +128,7 @@ impl SectionKey {
             }
             SectionKey::Skills => ("The list of skills", false),
             SectionKey::Master(k) => match k {
+                StandingKey::Personal => ("The person's reply style and instructions", true),
                 StandingKey::Memory => ("What you remember about the person", false),
                 StandingKey::Workspace => ("The workspace's memory", false),
                 StandingKey::Remember => ("What `remember` does in this chat", false),

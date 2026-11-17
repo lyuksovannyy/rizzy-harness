@@ -4731,6 +4731,17 @@ a.icon.rail-item.active {
   height: 20px;
   font-size: var(--text-xs);
 }
+.member-who .avatar {
+  display: inline-grid;
+  margin-right: var(--space-1-5);
+  vertical-align: middle;
+}
+.avatar-img {
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  object-fit: cover;
+}
 /* The account menu and its Workspaces submenu: top-layer popovers placed by
    md/anchored.ts. */
 .account-menu {
@@ -4771,6 +4782,16 @@ a.icon.rail-item.active {
   height: 1px;
   margin: 4px 6px;
   background: var(--sep);
+}
+/* Settings and Log out, side by side at the account menu's foot. */
+.menu-split {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px;
+}
+.menu-item.danger,
+.menu-item.danger svg {
+  color: var(--bad);
 }
 .menu-error {
   padding: 4px 10px;
