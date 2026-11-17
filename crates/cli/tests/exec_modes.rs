@@ -73,6 +73,9 @@ async fn node() -> Option<Node> {
     };
     policy.protect(&data);
     policy.locate_instructions(&data).unwrap();
+    // New projects' folders (X.26, T77) beside the session folder.
+    policy.projects.dir = Some(root.join("home/projects"));
+    policy.locate_projects().unwrap();
     let backend = NativeBackend::new(
         Arc::new(Mock {
             delay: Duration::from_millis(1),
@@ -133,6 +136,26 @@ impl Node {
                 } else {
                     Err(error.unwrap_or_default())
                 };
+            }
+        }
+    }
+
+    /// A new project's folder, made by the node (`project.create`).
+    async fn new_project(&mut self, name: &str) -> PathBuf {
+        self.link
+            .to_node
+            .try_send(MasterToNode::ProjectCreate {
+                req_id: "pc".into(),
+                name: name.into(),
+            })
+            .unwrap();
+        loop {
+            let m = tokio::time::timeout(Duration::from_secs(20), self.link.from_node.recv())
+                .await
+                .expect("timed out")
+                .expect("link closed");
+            if let NodeToMaster::ProjectCreated { path, error, .. } = m {
+                return PathBuf::from(path.unwrap_or_else(|| panic!("{error:?}")));
             }
         }
     }
@@ -260,6 +283,27 @@ async fn a_host_sessions_command_runs_outside_bubblewrap_and_a_sandbox_sessions_
         );
         let uid = nix::unistd::getuid();
         assert!(out.contains(&format!("uid={uid}")), "round {round}: {out}");
+    }
+}
+
+/// X.26, T77: the folder a node makes for a new project takes a session
+/// in either mode: the folder passes the node's checks, and a command
+/// writes there (contained in the sandbox mode, not in the host mode).
+#[tokio::test]
+async fn a_new_project_folder_runs_sessions_in_both_modes() {
+    let Some(mut n) = node().await else { return };
+    let folder = n.new_project("Both Modes").await;
+    assert!(folder.join(".git").is_dir());
+    n.ws = folder.clone();
+    for (mode, file) in [(ExecMode::Sandbox, "in-sandbox"), (ExecMode::Host, "in-host")] {
+        let sid = n.create(mode).await;
+        let out = n
+            .run(sid, &format!("run: echo pid=$$ > {file}; git log --oneline | wc -l"))
+            .await
+            .join("\n");
+        assert!(folder.join(file).is_file(), "{mode:?}: {out}");
+        let pid = std::fs::read_to_string(folder.join(file)).unwrap();
+        assert_eq!(pid.trim() == "pid=2", mode == ExecMode::Sandbox, "{mode:?}: {pid}");
     }
 }
 

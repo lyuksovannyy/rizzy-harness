@@ -29,6 +29,7 @@ pub mod pdf;
 pub mod prefs;
 pub mod presets;
 pub mod pricing;
+pub mod project_folder;
 pub mod projects;
 pub mod providers;
 pub mod recall;
@@ -187,6 +188,10 @@ pub struct NodeInfo {
     /// Its `[limits] max_steps` (`steps-max:*`, X.14), the most a chat's
     /// own step limit may be; `None`: a node that cannot change one.
     pub max_steps: Option<u64>,
+    /// Whether it makes new projects' folders (`projects`, X.26): what the
+    /// UI offers; the node refuses whatever this says when its node.toml
+    /// does not allow it.
+    pub projects: bool,
 }
 
 /// The approval modes in a hello's capabilities (T50): its ceiling and its
@@ -311,6 +316,8 @@ pub struct MasterInner {
     diffs: diff::Waiting,
     /// `@` completions waiting for their node's answer (T63).
     files: files::Waiting,
+    /// New project folders waiting for their node's answer (X.26, T77).
+    project_folders: project_folder::Waiting,
     /// Staged-file events per node and hour.
     artifact_throttle: artifacts::Throttle,
     /// Open UI sockets by user, so a login that ends closes them.
@@ -605,7 +612,9 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         // A read of two checkpoints: no event, no work.
         | MasterToNode::Diff { .. }
         // A listing of names for the composer: no event.
-        | MasterToNode::Files { .. } => None,
+        | MasterToNode::Files { .. }
+        // A new project's folder: no session at all.
+        | MasterToNode::ProjectCreate { .. } => None,
     }
 }
 
@@ -692,6 +701,7 @@ impl Master {
                 pulls: Default::default(),
                 diffs: Default::default(),
                 files: Default::default(),
+                project_folders: Default::default(),
                 artifact_throttle: Default::default(),
                 sockets: Default::default(),
                 outbound: Mutex::new(outbound::Outbound::from_env()),
@@ -1197,6 +1207,7 @@ impl Master {
                     max_approval: None,
                     default_approval: None,
                     max_steps: None,
+                    projects: false,
                 },
                 tx: None,
                 resuming: HashSet::new(),
@@ -1214,6 +1225,9 @@ impl Master {
                     .parse()
                     .ok()
             });
+            entry.info.projects = capabilities
+                .iter()
+                .any(|c| c == harness_protocol::CAP_PROJECTS);
             entry.capabilities = capabilities;
             entry.tx = Some(link.to_node.clone());
             entry.resuming.clear();
@@ -1287,6 +1301,7 @@ impl Master {
                 artifact_pull::node_down(&this, &nid);
                 diff::node_down(&this, &nid);
                 files::node_down(&this, &nid);
+                project_folder::node_down(&this, &nid);
             }
             drop(nodes);
             let _ = this.inner.live.send(Live::NodesChanged);
@@ -1490,6 +1505,19 @@ impl Master {
                 match error {
                     None => Ok(paths),
                     Some(e) => Err(e),
+                },
+            ),
+            NodeToMaster::ProjectCreated {
+                req_id,
+                path,
+                error,
+            } => project_folder::on_answer(
+                self,
+                node_id,
+                req_id,
+                match (path, error) {
+                    (Some(p), None) => Ok(p),
+                    (_, e) => Err(e.unwrap_or_else(|| "the node made no folder".into())),
                 },
             ),
         }

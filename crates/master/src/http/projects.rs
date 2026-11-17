@@ -23,8 +23,11 @@ use crate::projects::{self as p, ProjectSettings};
 use crate::workspaces::{Access, WsError};
 use crate::{Audience, Live, Master};
 
+mod folder;
+
 pub(super) fn routes() -> Router<Master> {
     Router::new()
+        .merge(folder::routes())
         .route("/api/projects", get(list).post(create))
         .route(
             "/api/projects/{id}",
@@ -159,7 +162,12 @@ async fn own_chats(m: &Master, who: &Principal) -> ApiResult<HashMap<String, usi
 }
 
 fn summary(r: &ProjectRow, chats: usize) -> Value {
+    // Its node and folder, for the start screen's Project popup (X.26):
+    // every member sees them already in the project's settings.
+    let s = ProjectSettings::read(&r.settings);
     json!({
+        "node_id": s.node_id,
+        "cwd": s.cwd,
         "project_id": r.project_id,
         "workspace_id": r.workspace_id,
         "name": r.name,
@@ -241,6 +249,12 @@ struct CreateProject {
     /// Users default to their current workspace; the API token must pass one.
     #[serde(default)]
     workspace_id: Option<String>,
+    /// Make the project's folder on this node (X.26, T77): the node makes
+    /// a new git repository from the project's name, and the project's
+    /// `node_id` and `cwd` settings name it. The project exists only once
+    /// the folder does: a node that refuses, or is away, leaves nothing.
+    #[serde(default)]
+    folder_on: Option<String>,
 }
 
 async fn create(
@@ -266,17 +280,39 @@ async fn create(
         &ws,
     )
     .await?;
+    let name = p::clean_required("name", &b.name, p::NAME_MAX).map_err(bad)?;
+    let description =
+        p::clean("description", &b.description, p::DESCRIPTION_MAX, false).map_err(bad)?;
+    let instructions =
+        p::clean("instructions", &b.instructions, p::INSTRUCTIONS_MAX, true).map_err(bad)?;
+    // The folder first, once every other check passed (here and the
+    // workspace's project limit): a refusal leaves no project; a store
+    // failure after it leaves an empty repository on the node, nothing on
+    // the master.
+    let settings = match b.folder_on.as_deref() {
+        None => ProjectSettings::default(),
+        Some(node) => {
+            folder::may_make_on(&m, &who, &a, node)?;
+            let w = ws.clone();
+            let n = m.inner.mirror.call(move |s| s.projects(Some(&w))).await?.len();
+            if n >= p::MAX_PROJECTS {
+                return Err(ApiError(
+                    StatusCode::CONFLICT,
+                    format!("a workspace has at most {} projects", p::MAX_PROJECTS),
+                ));
+            }
+            folder::make_on(&m, &who, node, &name, ProjectSettings::default()).await?
+        }
+    };
     let new = NewProject {
         project_id: harness_core::new_id(),
         workspace_id: ws,
-        name: p::clean_required("name", &b.name, p::NAME_MAX).map_err(bad)?,
-        description: p::clean("description", &b.description, p::DESCRIPTION_MAX, false)
-            .map_err(bad)?,
+        name,
+        description,
         icon,
         accent,
-        instructions: p::clean("instructions", &b.instructions, p::INSTRUCTIONS_MAX, true)
-            .map_err(bad)?,
-        settings: serde_json::to_string(&ProjectSettings::default())
+        instructions,
+        settings: serde_json::to_string(&settings)
             .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
         created_by: who.user_id.clone(),
         columns,
