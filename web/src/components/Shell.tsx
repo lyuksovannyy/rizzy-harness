@@ -1,6 +1,6 @@
 import { Menu } from "lucide-react";
 import { APP_TITLE } from "../lib/brand";
-import { pruneDrafts } from "../lib/drafts";
+import { pruneDrafts, writeDraft } from "../lib/drafts";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { api, HttpError } from "../api";
 import { Live } from "../live";
@@ -10,7 +10,6 @@ import { agenticBlockReason, type Mode } from "../lib/modes";
 import { parseRoute, type Route, routeHash } from "../lib/routes";
 import { afterChange, followRoute, keepsRoute, switchRoute, workspaceName } from "../lib/workspaces";
 import { buildSearchUrl } from "../lib/searchUrl";
-import { titleFrom } from "../lib/title";
 import { applyAppearance, writeBackdropMirror } from "../lib/appearance";
 import { newlyWaiting, notifyEnabled, waitingWords } from "../lib/notify";
 import { useFinishedSignal } from "../lib/finished";
@@ -476,28 +475,17 @@ export function Shell(props: {
       location.href = buildSearchUrl(q.url, q.query);
       return;
     }
-    const agentic = s.mode === "agentic";
-    const { session_id } = await api.createSession({
-      profile: agentic ? "agentic" : "chat",
-      title: titleFrom(s.text),
-      agent_id: s.agentId,
-      model: s.model || undefined,
-      node_id: agentic ? s.nodeId : undefined,
-      cwd: agentic ? s.cwd : undefined,
-      ...(s.incognito ? { incognito: true } : {}),
-      ...(workspaceId ? { workspace_id: workspaceId } : {}),
-      ...(projectId ? { project_id: projectId } : {}),
-      ...(agentic && s.execMode ? { exec_mode: s.execMode } : {}),
-      ...(agentic && s.approvalMode ? { approval_mode: s.approvalMode } : {}),
-    });
-    refreshSessions();
-    go({ kind: "session", id: session_id });
-    await api.prompt(session_id, s.text, {
-      ...(s.effort ? { effort: s.effort } : {}),
-      ...(s.attachments.length ? { attachments: s.attachments } : {}),
-      ...(s.compareWith ? { compare: [s.model, s.compareWith] } : {}),
-      ...(s.images?.length ? { images: s.images } : {}),
-    });
+    const { startChat } = await import("../lib/startChat");
+    await startChat(
+      s,
+      { workspace: workspaceId, project: projectId },
+      (id) => {
+        refreshSessions();
+        go({ kind: "session", id });
+      },
+      api,
+      writeDraft,
+    );
   };
 
   const agenticAllowed = agenticBlocked === null;

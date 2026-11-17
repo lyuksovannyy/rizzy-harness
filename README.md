@@ -100,6 +100,35 @@ automation that only needs one user's access, and do not copy it if no script ne
 Without configuration the built-in **mock** provider is used, so you can try
 the UI with no API key. Try `run: ls -la`, `read: README.md` or `slow: 50`.
 
+**Sending a message, and waiting for the model.** Send puts your message in
+the chat at once, before the server has answered: from the home screen it
+shows above the box while the chat is made, then in the new chat, with its
+attachments and images. It is marked "Sending…" until the server has taken it,
+and is replaced by the log's message when that arrives (never both). Until the
+server has it, the message also stays in the chat's draft, ahead of anything
+you type meanwhile, so a reload or a closed chat does not lose it. From the same moment a line where the answer will appear says "<agent>
+is waiting for the model…"; after 5 seconds it also shows, quietly, how many
+seconds the model has said nothing, so a slow provider does not look like a
+hang. Screen readers hear that line once, not the count. When the first words
+arrive it says "<agent> is answering…" (or "is working…" while a tool runs, and
+"is waiting for the model…" again before the next model request); a message you
+send while it works does not change that line. The count runs on this tab's
+clock from when the tab saw the latest event, so a computer clock that is off
+cannot make it wrong; a reload or a tab opened later starts it again from 0.
+Screen readers hear "is waiting for the model" once per turn and "is waiting
+for you" when an approval comes, not every step. Stop is there from the moment the turn starts. If the provider fails
+for a passing reason the line under it says why and when the next try is
+("rate limit. Trying again in 3 s (attempt 2 of 3)"); a provider that sends
+nothing is cut off after `[limits] model_first_byte_timeout_s` (600 s by
+default; the server's own Ask chats always use 600 s) and the turn ends with
+the reason and **Retry**. A message the server refuses in an open chat goes
+back into the box, with its attachments, and the reason under it. The first
+message of a new chat, refused after the chat opened, stays in that chat marked
+"Not sent: <reason>" with **Retry** (send it again, with its attachments and
+images) and **Edit** (put it into the reply box, ahead of anything typed
+since); the chat also puts it into its reply box when it opens, and keeps it
+in the draft until it is sent.
+
 **Writing while the agent works.** The reply box stays open while a turn
 runs: Enter (or Send, next to Stop) sends the message at once, and a line under
 the box says what happens to it ("Read after the current step. Stop
@@ -302,7 +331,8 @@ What you type and have not sent stays in this browser as a draft of that
 chat, for your account only. Logging out (or a login that ended) clears every
 draft in the browser, with your recent folders and test events; deleting a
 chat deletes its draft, here or on another device; incognito chats keep no
-draft.
+draft. In an incognito chat a message being sent, or one the server refused,
+lives only in that tab's memory (the bubble and the box): a reload loses it.
 
 ## Routines
 
@@ -3013,9 +3043,13 @@ An `@mention` (also its Retry), an answer to an agent's question and a
 fallback model that answered once are no switch. While the agent works (a
 turn runs or is being stopped, a resumed turn, a retry, a `/compact`) the
 picker is disabled: Stop it, or wait for the turn to end, and the picker is
-back. The node refuses a change sent anyway ("The agent is working…"). A
-pick shows at once; the picker waits for the server's answer before the next
-one, and goes back with the reason if it was refused.
+back. The node refuses a change sent anyway ("The agent is working…"). It is
+also disabled from the moment you send a message until the chat holds it (or
+the server refused it), so a message goes to the agent the picker showed when
+you sent it. A pick shows at once; the picker waits for the server's answer
+before the next one, and goes back with the reason if it was refused. A pick
+on its way does not hold back Send: the server takes the pick and the
+message in the order you made them.
 
 "Your facts" are the memories in Settings → Account; an agent without them
 neither recalls nor proposes them. Scout and Reviewer are read-only by their
