@@ -26,6 +26,7 @@ mod links;
 mod media;
 mod memory;
 mod pricing;
+mod profile;
 mod projects;
 mod providers;
 mod retry;
@@ -60,7 +61,6 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
             "/api/me/workspace",
             axum::routing::put(workspaces::set_active),
         )
-        .route("/api/me/settings", get(get_settings).put(put_settings))
         .route(
             "/api/me/classifier",
             get(get_classifier).put(put_classifier),
@@ -228,6 +228,7 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
         .merge(retry::routes())
         .merge(storage::routes())
         .merge(links::routes())
+        .merge(profile::routes())
         .merge(sessions::routes())
         // Matched routes only (the embedded UI files are not handlers); which
         // routes get which limit is the table in `limits.rs`.
@@ -665,28 +666,6 @@ async fn change_password(
     auth::set_password(&m, &uid, b.new, false).await?;
     // Every session was revoked; give this browser a fresh one.
     session_response(&m, &uid).await
-}
-
-async fn get_settings(
-    State(m): State<Master>,
-    headers: HeaderMap,
-) -> ApiResult<Json<crate::prefs::Prefs>> {
-    let who = require(&m, &headers).await?;
-    Ok(Json(
-        crate::prefs::Prefs::load(&m, who.user_id.as_deref()).await,
-    ))
-}
-
-async fn put_settings(
-    State(m): State<Master>,
-    headers: HeaderMap,
-    Json(p): Json<crate::prefs::Prefs>,
-) -> ApiResult<Json<crate::prefs::Prefs>> {
-    let who = require(&m, &headers).await?;
-    p.validate(&m)
-        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?;
-    p.save(&m, who.user_id.as_deref()).await?;
-    Ok(Json(p))
 }
 
 #[derive(Deserialize)]
@@ -1340,6 +1319,7 @@ async fn prompt(
                 context: Some(
                     crate::prefs::Prefs::load(&m, who.user_id.as_deref())
                         .await
+                        .for_turn(flags.untrusted)
                         .model_context(
                             &who.username,
                             jiff::Timestamp::now(),

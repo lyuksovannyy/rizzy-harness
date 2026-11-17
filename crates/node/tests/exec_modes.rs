@@ -638,6 +638,7 @@ async fn a_sub_agents_mode_is_its_parents() {
         context_windows: Default::default(),
         effort: None,
         ui: Default::default(),
+        no_personalisation: false,
         prompt_hash: "h".into(),
         deny_tools: vec![],
         delegates,

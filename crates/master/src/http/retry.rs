@@ -130,6 +130,7 @@ async fn retry(
             context: Some(
                 crate::prefs::Prefs::load(&m, who.user_id.as_deref())
                     .await
+                    .for_turn(flags.untrusted)
                     .model_context(
                         &who.username,
                         jiff::Timestamp::now(),

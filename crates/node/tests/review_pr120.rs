@@ -432,6 +432,7 @@ async fn r6_a_sub_agents_task_is_scrubbed_like_a_message() {
         context_windows: Default::default(),
         effort: None,
         ui: Default::default(),
+        no_personalisation: false,
         prompt_hash: "h".into(),
         deny_tools: vec![],
         delegates,

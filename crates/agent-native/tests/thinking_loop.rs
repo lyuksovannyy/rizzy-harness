@@ -185,6 +185,7 @@ fn agent(fallbacks: &[&str]) -> AgentSpec {
         deny_tools: vec![],
         delegates: vec![],
         caps: None,
+        no_personalisation: false,
     }
 }
 

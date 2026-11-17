@@ -212,6 +212,7 @@ fn agent(vision: bool) -> AgentSpec {
         deny_tools: vec![],
         delegates: vec![],
         caps: None,
+        no_personalisation: false,
     }
 }
 

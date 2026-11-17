@@ -1,10 +1,11 @@
 // The account menu (docs/sidebar-search.md), a lazy chunk the sidebar loads
-// on intent: the account's header row (opens Workspaces), Profile, Settings
-// and Log out. Workspaces is a submenu beside it, or drilled in place on a
-// narrow screen or a touch pointer. A new workspace is named in a small
-// dialog: a text field may not live inside a menu.
+// on intent: the account's header row (opens Workspaces), Profile,
+// Personalisation and Workspace settings, then Settings and Log out side by
+// side. Workspaces is a submenu beside it, or drilled in place on a narrow
+// screen or a touch pointer. A new workspace is named in a small dialog: a
+// text field may not live inside a menu.
 import "../lib/i18nPages";
-import { Check, ChevronLeft, ChevronRight, Plus } from "lucide-react";
+import { Building2, Check, ChevronLeft, ChevronRight, LogOut, Plus, Settings, UserRound, WandSparkles } from "lucide-react";
 import { type FormEvent, type KeyboardEvent, type ReactNode, type RefObject, useEffect, useRef, useState } from "react";
 import { pageApi } from "../apiPages";
 import { t } from "../lib/i18n";
@@ -13,6 +14,7 @@ import { workspaceName } from "../lib/workspaces";
 import { type Side, useAnchored } from "../md/anchored";
 import type { Me, WorkspaceList, WorkspaceSummary } from "../types";
 import { NavLink } from "./NavLink";
+import { LinkedImg } from "./Linked";
 
 /** What shows: the menu, or the dialog naming a new workspace. */
 export type MenuView = "menu" | "new";
@@ -35,7 +37,7 @@ export interface AccountMenuProps {
 }
 
 // The menu's own words live in its chunk, not in the first load's catalog.
-const TEXT = { menu: "Account", profile: "Profile", settings: "Settings", workspaces: "Workspaces", back: "Back" };
+const TEXT = { menu: "Account", profile: "Profile", personalisation: "Personalisation", settings: "Settings", workspaces: "Workspaces", back: "Back" };
 
 /** Hover opens the submenu after this long (fine pointers only). */
 const HOVER_MS = 120;
@@ -78,11 +80,22 @@ function Menu(props: AccountMenuProps) {
   const box = useRef<HTMLDivElement>(null);
   const sub = useRef<HTMLDivElement>(null);
   const head = useRef<HTMLDivElement>(null);
+  const split = useRef<HTMLDivElement>(null);
   const hover = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [drill] = useState(drills);
   // The submenu; `focus` moves focus into it (keys) rather than only showing it (hover).
   const [open, setOpen] = useState<{ focus: boolean } | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  // The header row shows the avatar once it is known (the first load's
+  // account button keeps the initial: no links code there).
+  const [avatar, setAvatar] = useState<string | null>(null);
+  useEffect(() => {
+    if (!me.user_id) return;
+    pageApi.profileImages().then(
+      (r) => setAvatar(r.avatar),
+      () => {},
+    );
+  }, [me.user_id]);
   useAnchored(box, props.anchor, props.side);
 
   // Opening focuses the first item (APG menu button).
@@ -131,6 +144,11 @@ function Menu(props: AccountMenuProps) {
     } else if (!inSub && e.key === "ArrowRight" && document.activeElement === head.current) {
       e.preventDefault();
       setOpen({ focus: true });
+    } else if (!inSub && (e.key === "ArrowRight" || e.key === "ArrowLeft") && split.current?.contains(document.activeElement)) {
+      // Settings and Log out sit side by side: ←/→ go between them.
+      e.preventDefault();
+      const pair = items(split.current);
+      pair[(pair.indexOf(document.activeElement as HTMLElement) + 1) % pair.length]?.focus();
     } else {
       moveFocus(e, inSub && !drill ? sub.current : box.current);
     }
@@ -194,9 +212,6 @@ function Menu(props: AccountMenuProps) {
           <Plus size={14} /> {t("workspace.new")}
         </button>
       )}
-      <NavLink to={{ kind: "settings", section: "workspace" }} onNavigate={go} role="menuitem" className="menu-item">
-        {t("workspace.settings")}
-      </NavLink>
     </>
   );
 
@@ -219,8 +234,20 @@ function Menu(props: AccountMenuProps) {
       onPointerEnter={() => hoverHead(true)}
       onPointerLeave={() => hoverHead(false)}
     >
+      {/* As profile/UserAvatar does; inlined so this chunk adds no shared
+          chunk to the first load's preload map. */}
       <span className="avatar" aria-hidden="true">
-        {props.displayName.slice(0, 1).toUpperCase()}
+        {me.user_id && avatar ? (
+          <LinkedImg
+            url={`/api/users/${encodeURIComponent(me.user_id)}/avatar?v=${encodeURIComponent(avatar)}`}
+            alt=""
+            className="avatar-img"
+            // One that fails to load leaves the initial.
+            onError={() => setAvatar(null)}
+          />
+        ) : (
+          props.displayName.slice(0, 1).toUpperCase()
+        )}
       </span>
       <span className="account-lines grow">
         <span className="ellipsis">{props.displayName}</span>
@@ -249,15 +276,23 @@ function Menu(props: AccountMenuProps) {
             <div role="separator" className="menu-sep" />
             <div onPointerEnter={leaveSub}>
               <NavLink to={{ kind: "settings", section: "account", tab: "profile" }} onNavigate={go} role="menuitem" className="menu-item">
-                {TEXT.profile}
+                <UserRound size={14} aria-hidden="true" /> {TEXT.profile}
               </NavLink>
-              <NavLink to={{ kind: "settings", section: "account", tab: "preferences" }} onNavigate={go} role="menuitem" className="menu-item">
-                {TEXT.settings}
+              <NavLink to={{ kind: "settings", section: "account", tab: "personalisation" }} onNavigate={go} role="menuitem" className="menu-item">
+                <WandSparkles size={14} aria-hidden="true" /> {TEXT.personalisation}
+              </NavLink>
+              <NavLink to={{ kind: "settings", section: "workspace" }} onNavigate={go} role="menuitem" className="menu-item">
+                <Building2 size={14} aria-hidden="true" /> {t("workspace.settings")}
               </NavLink>
               <div role="separator" className="menu-sep" />
-              <button type="button" role="menuitem" className="menu-item" onClick={props.onLogout}>
-                {t("nav.logout")}
-              </button>
+              <div ref={split} role="none" className="menu-split">
+                <NavLink to={{ kind: "settings", section: "account", tab: "preferences" }} onNavigate={go} role="menuitem" className="menu-item">
+                  <Settings size={14} aria-hidden="true" /> {TEXT.settings}
+                </NavLink>
+                <button type="button" role="menuitem" className="menu-item danger" onClick={props.onLogout}>
+                  <LogOut size={14} aria-hidden="true" /> {t("nav.logout")}
+                </button>
+              </div>
             </div>
           </>
         )}

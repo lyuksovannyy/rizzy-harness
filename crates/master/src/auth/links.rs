@@ -44,6 +44,8 @@ pub fn linkable(path: &str) -> bool {
         ["", "api", "media", m, "content" | "thumb"] => id(m),
         // A search engine's icon (R2-1); its `url` is in the signed query.
         ["", "api", "favicon"] => true,
+        // A person's profile picture (T74; the handler checks who may see it).
+        ["", "api", "users", u, "avatar" | "banner"] => id(u),
         ["", "api", "artifacts", a, "latest", "download"] => id(a),
         [
             "",
@@ -235,6 +237,8 @@ mod tests {
             "/api/artifacts/a1/versions/v1/preview",
             "/api/artifacts/a1/versions/v1/thumb",
             "/api/favicon?url=x",
+            "/api/users/u-1/avatar?v=abc",
+            "/api/users/u1/banner",
         ] {
             assert!(s.mint(&me, ok, 0).is_some(), "{ok}");
         }
@@ -242,6 +246,9 @@ mod tests {
             "/api/sessions/s1/events",
             "/api/sessions/s1/approvals/a1",
             "/api/media/m1",
+            "/api/users/u1",
+            "/api/users/u1/avatar/x",
+            "/api/users/u1/password",
             "/api/media/../m1/content",
             "/api/media/m1/content/x",
             "/api/favicon/x",

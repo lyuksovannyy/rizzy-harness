@@ -165,6 +165,221 @@ fn webp(b: &[u8]) -> Option<(u32, u32)> {
     }
 }
 
+/// Why [`still`] refused a picture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotStill {
+    /// It carries metadata: EXIF or XMP (camera, time, location), IPTC, or
+    /// PNG text chunks.
+    Metadata,
+    /// More than one frame: an APNG, an animated WebP.
+    Animated,
+    /// Its structure cannot be walked to the end: cut, a length past the
+    /// end, bytes after its end, more than one frame header or image chunk.
+    Malformed,
+}
+
+/// The size of a still PNG, JPEG or WebP (`format` as [`Raster::format`])
+/// that carries no metadata, by walking its whole structure without
+/// decoding a pixel (PLAN.md T74). The size is the largest every header in
+/// the file claims (a WebP's canvas and its bitstream), so a later header
+/// cannot hide a larger picture. Every length is checked against the
+/// bytes there are, nothing is allocated from a declared size, and every
+/// step moves forward, so a hostile file ends the walk in at most
+/// `b.len()` steps.
+pub fn still(b: &[u8], format: &str) -> Result<(u32, u32), NotStill> {
+    let (w, h) = match format {
+        "png" => png_walk(b)?,
+        "jpeg" => jpeg_walk(b)?,
+        "webp" => webp_walk(b)?,
+        _ => return Err(NotStill::Malformed),
+    };
+    if w == 0 || h == 0 {
+        return Err(NotStill::Malformed);
+    }
+    Ok((w, h))
+}
+
+fn png_walk(b: &[u8]) -> Result<(u32, u32), NotStill> {
+    use NotStill::*;
+    let size = png(b).ok_or(Malformed)?;
+    let mut at = 8usize;
+    let mut first = true;
+    loop {
+        let len = be32(b, at).ok_or(Malformed)? as usize;
+        let kind = b.get(at + 4..at + 8).ok_or(Malformed)?;
+        // Length, type, data, CRC: all of it must be there.
+        let next = at
+            .checked_add(12)
+            .and_then(|n| n.checked_add(len))
+            .filter(|n| *n <= b.len())
+            .ok_or(Malformed)?;
+        if first != (kind == b"IHDR") {
+            return Err(Malformed);
+        }
+        first = false;
+        match kind {
+            b"eXIf" | b"tEXt" | b"iTXt" | b"zTXt" => return Err(Metadata),
+            b"acTL" | b"fcTL" | b"fdAT" => return Err(Animated),
+            b"IEND" => {
+                // Nothing may follow the end (a page or script appended).
+                return if next == b.len() {
+                    Ok(size)
+                } else {
+                    Err(Malformed)
+                };
+            }
+            _ => {}
+        }
+        at = next;
+    }
+}
+
+fn jpeg_walk(b: &[u8]) -> Result<(u32, u32), NotStill> {
+    use NotStill::*;
+    if !b.starts_with(&[0xFF, 0xD8]) {
+        return Err(Malformed);
+    }
+    let mut size = None;
+    let mut at = 2usize;
+    loop {
+        if *b.get(at).ok_or(Malformed)? != 0xFF {
+            return Err(Malformed);
+        }
+        // Fill bytes before a marker.
+        while *b.get(at).ok_or(Malformed)? == 0xFF {
+            at += 1;
+        }
+        let marker = b[at];
+        at += 1;
+        match marker {
+            0xD9 => {
+                // End of image: nothing may follow.
+                return match size {
+                    Some(s) if at == b.len() => Ok(s),
+                    _ => Err(Malformed),
+                };
+            }
+            0x01 | 0xD0..=0xD7 => continue,
+            0x00 | 0xD8 => return Err(Malformed),
+            _ => {}
+        }
+        let len = usize::from(be16(b, at).ok_or(Malformed)?);
+        if len < 2 {
+            return Err(Malformed);
+        }
+        let end = at
+            .checked_add(len)
+            .filter(|e| *e <= b.len())
+            .ok_or(Malformed)?;
+        match marker {
+            // APP1 is EXIF or XMP; APP13 is Photoshop's IPTC.
+            0xE1 | 0xED => return Err(Metadata),
+            0xC0..=0xCF if !matches!(marker, 0xC4 | 0xC8 | 0xCC) => {
+                // One frame header only: a second could claim another size.
+                if size.is_some() {
+                    return Err(Malformed);
+                }
+                let h = be16(b, at + 3).ok_or(Malformed)?;
+                let w = be16(b, at + 5).ok_or(Malformed)?;
+                size = Some((u32::from(w), u32::from(h)));
+            }
+            _ => {}
+        }
+        at = end;
+        if marker == 0xDA {
+            // Entropy-coded data up to the next marker that is not a
+            // stuffed zero or a restart.
+            loop {
+                if *b.get(at).ok_or(Malformed)? == 0xFF {
+                    match *b.get(at + 1).ok_or(Malformed)? {
+                        0x00 | 0xD0..=0xD7 => at += 2,
+                        0xFF => at += 1,
+                        _ => break,
+                    }
+                } else {
+                    at += 1;
+                }
+            }
+        }
+    }
+}
+
+fn webp_walk(b: &[u8]) -> Result<(u32, u32), NotStill> {
+    use NotStill::*;
+    if !b.starts_with(b"RIFF") || b.get(8..12) != Some(b"WEBP") {
+        return Err(Malformed);
+    }
+    let riff = le32(b, 4).ok_or(Malformed)? as usize;
+    // The RIFF size covers everything after its own field, exactly.
+    if riff.checked_add(8) != Some(b.len()) {
+        return Err(Malformed);
+    }
+    let (mut w, mut h) = (0u32, 0u32);
+    let mut images = 0;
+    let mut at = 12usize;
+    let mut first = true;
+    while at < b.len() {
+        let kind = b.get(at..at + 4).ok_or(Malformed)?;
+        let len = le32(b, at + 4).ok_or(Malformed)? as usize;
+        let data = at + 8;
+        let end = data
+            .checked_add(len)
+            .filter(|e| *e <= b.len())
+            .ok_or(Malformed)?;
+        let chunk = &b[data..end];
+        let mut grow = |cw: u32, ch: u32| {
+            w = w.max(cw);
+            h = h.max(ch);
+        };
+        match kind {
+            b"VP8X" => {
+                if !first {
+                    return Err(Malformed);
+                }
+                let flags = *chunk.first().ok_or(Malformed)?;
+                if flags & 0x02 != 0 {
+                    return Err(Animated);
+                }
+                if flags & 0x0C != 0 {
+                    return Err(Metadata);
+                }
+                grow(
+                    le24(chunk, 4).ok_or(Malformed)? + 1,
+                    le24(chunk, 7).ok_or(Malformed)? + 1,
+                );
+            }
+            b"VP8 " => {
+                if chunk.get(3..6) != Some(&[0x9D, 0x01, 0x2A][..]) {
+                    return Err(Malformed);
+                }
+                images += 1;
+                grow(
+                    u32::from(le16(chunk, 6).ok_or(Malformed)? & 0x3FFF),
+                    u32::from(le16(chunk, 8).ok_or(Malformed)? & 0x3FFF),
+                );
+            }
+            b"VP8L" => {
+                if chunk.first() != Some(&0x2F) {
+                    return Err(Malformed);
+                }
+                let bits = le32(chunk, 1).ok_or(Malformed)?;
+                images += 1;
+                grow((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1);
+            }
+            b"EXIF" | b"XMP " => return Err(Metadata),
+            b"ANIM" | b"ANMF" => return Err(Animated),
+            _ => {}
+        }
+        first = false;
+        // Chunks are padded to an even length.
+        at = end + (len & 1);
+    }
+    if images != 1 || at != b.len() {
+        return Err(Malformed);
+    }
+    Ok((w, h))
+}
+
 fn be16(b: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_be_bytes(
         b.get(at..at.checked_add(2)?)?.try_into().ok()?,
@@ -197,6 +412,190 @@ fn le32(b: &[u8], at: usize) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A PNG of `w` × `h` with `extra` chunks (type, data) before its end.
+    pub(super) fn tiny_png(w: u32, h: u32, extra: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
+        let mut b = b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut chunk = |kind: &[u8; 4], data: &[u8]| {
+            b.extend((data.len() as u32).to_be_bytes());
+            b.extend(kind);
+            b.extend(data);
+            b.extend([0u8; 4]);
+        };
+        let mut ihdr = w.to_be_bytes().to_vec();
+        ihdr.extend(h.to_be_bytes());
+        ihdr.extend([8, 6, 0, 0, 0]);
+        chunk(b"IHDR", &ihdr);
+        for (k, d) in extra {
+            chunk(k, d);
+        }
+        chunk(b"IDAT", &[0; 4]);
+        chunk(b"IEND", &[]);
+        b
+    }
+
+    /// A JPEG with `segments` (marker, data) and one frame header per `sofs`.
+    pub(super) fn tiny_jpeg(sofs: &[(u8, u16, u16)], segments: &[(u8, &[u8])]) -> Vec<u8> {
+        let mut b = vec![0xFF, 0xD8, 0xFF, 0xE0, 0, 16];
+        b.extend(b"JFIF\0\x01\x01\0\0\x01\0\x01\0\0");
+        for (m, d) in segments {
+            b.extend([0xFF, *m]);
+            b.extend(((d.len() + 2) as u16).to_be_bytes());
+            b.extend(*d);
+        }
+        for (m, w, h) in sofs {
+            b.extend([0xFF, *m, 0x00, 0x11, 0x08]);
+            b.extend(h.to_be_bytes());
+            b.extend(w.to_be_bytes());
+            b.extend([3, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1]);
+        }
+        b.extend([0xFF, 0xDA, 0, 12, 3, 1, 0, 2, 0x11, 3, 0x11, 0, 0x3F, 0]);
+        b.extend([0x12, 0xFF, 0x00, 0x34, 0xFF, 0xD0, 0x56]);
+        b.extend([0xFF, 0xD9]);
+        b
+    }
+
+    /// A WebP: a VP8X header with `vp8x` (flags, canvas) when given, a VP8
+    /// bitstream of `inner`, and `extra` chunks.
+    pub(super) fn tiny_webp(
+        vp8x: Option<(u8, (u32, u32))>,
+        inner: (u16, u16),
+        extra: &[(&[u8; 4], &[u8])],
+    ) -> Vec<u8> {
+        let mut body = b"WEBP".to_vec();
+        let mut chunk = |kind: &[u8; 4], data: &[u8]| {
+            body.extend(kind);
+            body.extend((data.len() as u32).to_le_bytes());
+            body.extend(data);
+            if data.len() % 2 == 1 {
+                body.push(0);
+            }
+        };
+        if let Some((flags, (w, h))) = vp8x {
+            let mut d = vec![flags, 0, 0, 0];
+            d.extend(&(w - 1).to_le_bytes()[..3]);
+            d.extend(&(h - 1).to_le_bytes()[..3]);
+            chunk(b"VP8X", &d);
+        }
+        for (k, d) in extra {
+            chunk(k, d);
+        }
+        let mut v = vec![0, 0, 0, 0x9D, 0x01, 0x2A];
+        v.extend(inner.0.to_le_bytes());
+        v.extend(inner.1.to_le_bytes());
+        chunk(b"VP8 ", &v);
+        let mut b = b"RIFF".to_vec();
+        b.extend((body.len() as u32).to_le_bytes());
+        b.extend(body);
+        b
+    }
+
+    /// Metadata, animation and a second size are refused; what a browser's
+    /// canvas writes (plain chunks) is not (PLAN.md T74).
+    #[test]
+    fn still_refuses_metadata_animation_and_hidden_sizes() {
+        use NotStill::*;
+        assert_eq!(
+            still(
+                &tiny_png(64, 32, &[(b"iCCP", b"x"), (b"pHYs", &[0; 9])]),
+                "png"
+            ),
+            Ok((64, 32))
+        );
+        for (k, why) in [
+            (b"eXIf", Metadata),
+            (b"tEXt", Metadata),
+            (b"iTXt", Metadata),
+            (b"zTXt", Metadata),
+            (b"acTL", Animated),
+        ] {
+            assert_eq!(
+                still(&tiny_png(8, 8, &[(k, b"GPS")]), "png"),
+                Err(why),
+                "{k:?}"
+            );
+        }
+        let mut after = tiny_png(8, 8, &[]);
+        after.extend(b"<html><script>alert(1)</script>");
+        assert_eq!(still(&after, "png"), Err(Malformed));
+
+        assert_eq!(
+            still(
+                &tiny_jpeg(&[(0xC2, 300, 200)], &[(0xE2, b"ICC"), (0xEE, b"Adobe")]),
+                "jpeg"
+            ),
+            Ok((300, 200))
+        );
+        let gps = b"Exif\0\0MM\0*\0\0\0\x08GPSLatitude=56.9496N";
+        assert_eq!(
+            still(&tiny_jpeg(&[(0xC0, 16, 16)], &[(0xE1, gps)]), "jpeg"),
+            Err(Metadata)
+        );
+        assert_eq!(
+            still(
+                &tiny_jpeg(
+                    &[(0xC0, 16, 16)],
+                    &[(0xE1, b"http://ns.adobe.com/xap/1.0/\0<x/>")]
+                ),
+                "jpeg"
+            ),
+            Err(Metadata)
+        );
+        assert_eq!(
+            still(
+                &tiny_jpeg(&[(0xC0, 16, 16)], &[(0xED, b"Photoshop 3.0")]),
+                "jpeg"
+            ),
+            Err(Metadata)
+        );
+        assert_eq!(
+            still(
+                &tiny_jpeg(&[(0xC0, 16, 16), (0xC2, 65_000, 65_000)], &[]),
+                "jpeg"
+            ),
+            Err(Malformed)
+        );
+        let mut after = tiny_jpeg(&[(0xC0, 16, 16)], &[]);
+        after.extend(b"<html>");
+        assert_eq!(still(&after, "jpeg"), Err(Malformed));
+
+        assert_eq!(
+            still(&tiny_webp(Some((0x10, (100, 50))), (100, 50), &[]), "webp"),
+            Ok((100, 50))
+        );
+        // A small canvas over a large bitstream: the larger size counts.
+        assert_eq!(
+            still(&tiny_webp(Some((0, (100, 100))), (5000, 5000), &[]), "webp"),
+            Ok((5000, 5000))
+        );
+        assert_eq!(
+            still(&tiny_webp(Some((0x02, (64, 64))), (64, 64), &[]), "webp"),
+            Err(Animated)
+        );
+        assert_eq!(
+            still(&tiny_webp(None, (64, 64), &[(b"ANIM", &[0; 6])]), "webp"),
+            Err(Animated)
+        );
+        assert_eq!(
+            still(&tiny_webp(Some((0x08, (64, 64))), (64, 64), &[]), "webp"),
+            Err(Metadata)
+        );
+        assert_eq!(
+            still(&tiny_webp(None, (64, 64), &[(b"EXIF", b"GPS")]), "webp"),
+            Err(Metadata)
+        );
+        assert_eq!(
+            still(&tiny_webp(None, (64, 64), &[(b"XMP ", b"<x/>")]), "webp"),
+            Err(Metadata)
+        );
+        let mut two = tiny_webp(None, (64, 64), &[]);
+        let extra = two[12..].to_vec();
+        two.extend(extra);
+        let n = (two.len() - 8) as u32;
+        two[4..8].copy_from_slice(&n.to_le_bytes());
+        assert_eq!(still(&two, "webp"), Err(Malformed), "two bitstreams");
+        assert_eq!(still(&tiny_png(8, 8, &[]), "gif"), Err(Malformed));
+    }
 
     /// The cap is on what the provider receives: the largest file's base64
     /// is under Anthropic's 5 MiB per image, with room to spare.
@@ -263,6 +662,33 @@ mod tests {
             }
         }
         assert_eq!(dimensions(&[0xFF, 0xD8, 0xFF, 0xDA], "jpeg"), None);
+        // The full walks: the same hostile bytes, and a valid start cut at
+        // every length, end without a panic or a hang.
+        let mut r = 0x9E37_79B9_7F4A_7C15u64;
+        for (format, good) in [
+            ("png", tiny_png(16, 16, &[])),
+            ("jpeg", tiny_jpeg(&[(0xC0, 16, 16)], &[])),
+            ("webp", tiny_webp(None, (16, 16), &[])),
+        ] {
+            assert_eq!(still(&good, format), Ok((16, 16)), "{format}");
+            for cut in 0..good.len() {
+                assert!(
+                    still(&good[..cut], format).is_err(),
+                    "{format} cut at {cut}"
+                );
+            }
+            for _ in 0..2000 {
+                let mut b = good.clone();
+                for _ in 0..4 {
+                    r ^= r << 13;
+                    r ^= r >> 7;
+                    r ^= r << 17;
+                    let i = (r as usize) % b.len();
+                    b[i] = (r >> 32) as u8;
+                }
+                let _ = still(&b, format);
+            }
+        }
         assert_eq!(dimensions(b"GIF89a\0\0\x01\0", "gif"), None);
     }
 }
