@@ -956,6 +956,15 @@ mod tests {
             .unwrap()
             .set_modified(hour_ago)
             .unwrap();
+        // Written before the collection starts, `young` stands for what a
+        // snapshot writes while it runs: its time is set past any start this
+        // collection can have. (Left as written, it was older than the start
+        // whenever making the store due took more than the 1 s margin, as
+        // on a loaded machine: "a young object was pruned".)
+        std::fs::File::open(path(&young))
+            .unwrap()
+            .set_modified(SystemTime::now() + Duration::from_secs(600))
+            .unwrap();
         make_due(&repo).await;
         assert!(maybe_gc(&repo).await);
         let has = |id: String| {

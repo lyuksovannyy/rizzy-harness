@@ -422,6 +422,8 @@ impl Node {
             ])
             .args(args)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            // Nor the global ignore file (`~/.config/git/ignore`).
+            .env("XDG_CONFIG_HOME", "/nonexistent")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_AUTHOR_NAME", "user")
             .env("GIT_AUTHOR_EMAIL", "user@example.com")
