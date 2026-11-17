@@ -1434,10 +1434,10 @@ background_agent_timeout_s = 1800    # wall-clock limit of one background sub-ag
 callback_turns = 3                   # turns the agent may run in a row without you when commands end; 0: off (0 .. 20)
 callback_max_steps = 20              # model calls one such turn may make, never above max_steps or the chat's own limit (1 .. 10000)
 handoff_notes_per_hour = 4           # hand-off notes this node writes per chat per hour; 0: off, the server asks for none (0 .. 60)
-projects_per_hour = 20               # new project folders this node makes per hour, all requests together; 0: off (0 .. 200)
+projects_per_hour = 20               # new project folders this node makes per hour (only those made count; in memory); 0: off (0 .. 200)
 
 [projects]
-dir = "~/rizzy-projects"             # where "New project" makes folders (see "Projects"); inside workspace_roots; "" turns it off
+dir = "~/rizzy-projects"             # where "New project" makes folders (see "Projects"); inside workspace_roots, its parent existing, on the data directory's file system; "" turns it off
 
 [sandbox]
 mode = "required"                    # required | best-effort | off
@@ -2484,8 +2484,12 @@ it offers the host shell and you may use it). The button opens a popup:
   Only those who may manage the workspace's projects see it; a node whose
   `node.toml` turns it off (`dir = ""`), or whose projects folder breaks a rule
   (outside `workspace_roots`, in or over its data directory: the node does not
-  start when node.toml names such a folder), says so instead. A node makes at
-  most `[limits] projects_per_hour` (20) folders an hour.
+  start when node.toml names such a folder; its parent folder must exist, and it
+  must be on the same file system as the node's data directory), says so
+  instead. The repository is built in the node's own data directory and moved
+  in under a name nothing holds, so a chat cannot steer it elsewhere. A node
+  makes at most `[limits] projects_per_hour` (20) folders an hour (only those
+  made count; a restart starts the count again).
 - **Existing folder**: the path field you had before, with your recent folders,
   for a chat in a checkout you already have (no project).
 - **From a repository**: later (cloning from GitHub, GitLab, Gitea or Forgejo).

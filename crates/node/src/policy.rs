@@ -554,6 +554,25 @@ impl NodePolicy {
                 data.display()
             ));
         }
+        // The move in never replaces: the file system must offer that
+        // (some network file systems do not).
+        let (a, b) = (staging.join("probe-a"), staging.join("probe-b"));
+        std::fs::create_dir(&a).map_err(|e| format!("cannot write {}: {e}", staging.display()))?;
+        let moved = nix::fcntl::renameat2(
+            nix::fcntl::AT_FDCWD,
+            &a,
+            nix::fcntl::AT_FDCWD,
+            &b,
+            nix::fcntl::RenameFlags::RENAME_NOREPLACE,
+        );
+        let _ = std::fs::remove_dir(&a);
+        let _ = std::fs::remove_dir(&b);
+        if let Err(e) = moved {
+            return Err(format!(
+                "lies on a file system that cannot move a folder without replacing what is \
+                 there ({e}); a new project is moved in that way"
+            ));
+        }
         Ok(Located {
             dir: real,
             parent_id,

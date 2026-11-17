@@ -74,6 +74,20 @@ node" field) opens a popup with:
   without a project; the node bounds it by `workspace_roots` as before.
 - **From a repository**, marked *Later* (X.27).
 
+**How the node makes it** (PLAN.md T77): the repository is built in the node's own staging folder
+(`<data>/projects-staging`, which no chat can see) and moved into the projects folder with a
+rename that never replaces anything already at the name, so a chat that can write in the
+projects folder cannot steer the node's git into another repository. The projects folder's
+parent must exist, and it must be on the same file system as the node's data directory. A node
+makes at most `[limits] projects_per_hour` folders an hour (only folders made count; the count is
+in memory, so a restart starts it again).
+
+**Folders no project keeps.** "Create its folder" claims the project first: a second request at
+the same time is refused before any node is asked. A folder can still be left without a project
+when its node answers after the server's 30-second wait (the answer names the node and the
+folder name's first part), or when saving the project fails after the folder exists (the answer
+names the node and the path). Remove it on the node, or open it with *Existing folder*.
+
 **One folder per project** (decision 6): every chat of the project works in that folder, as chats
 in one folder do today (they share its uncommitted files; checkpoints and undo work per chat as
 in any folder). The folder stays the node's: deleting the project leaves it; a folder deleted on
