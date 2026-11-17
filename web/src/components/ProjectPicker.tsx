@@ -5,7 +5,7 @@
 // free path, which the node bounds by its workspace_roots). "From a
 // repository" comes later (X.27). Its own lazy chunk, loaded with the
 // agentic row (the composer is first-load code).
-import { GitBranch, Search } from "lucide-react";
+import { ChevronDown, GitBranch, Search } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { LIMITS, type ProjectList, type ProjectSummary, projectsApi } from "../lib/projects";
 import { ProjectIcon } from "../lib/projectIcons";
@@ -73,6 +73,7 @@ export default function ProjectButton(props: Props) {
       >
         {p && <ProjectIcon icon={p.icon} accent={p.accent} size={14} />}
         {p ? p.name : props.cwd.trim() ? lastPart(props.cwd) : "No project"}
+        <ChevronDown size={14} aria-hidden />
       </button>
       {open && <ProjectPicker {...props} onClose={() => setOpen(false)} />}
     </label>

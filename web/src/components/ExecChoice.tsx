@@ -24,7 +24,7 @@ export function ExecChoice(props: {
     return (
       <label>
         Commands
-        <span className="pill exec-only" aria-label="How this chat's commands run">
+        <span className="exec-only" aria-label="How this chat's commands run">
           {props.offered.includes("sandbox") ? MODE_LABEL.sandbox : "no sandbox on this node"}
         </span>
       </label>

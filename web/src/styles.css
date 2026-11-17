@@ -5320,3 +5320,15 @@ button.pp-row:hover:not(:disabled),
   flex: 1 1 16em;
   min-width: 0;
 }
+/* The Project button in the agentic row, and the mode where it is not a choice. */
+.project-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  max-width: 22em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.exec-only {
+  color: var(--fg);
+}
