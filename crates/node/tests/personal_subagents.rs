@@ -177,3 +177,58 @@ async fn a_background_child_follows_its_own_switch() {
         "quiet's switch is off"
     );
 }
+
+/// The built-in Scout as the master resolves it (owner, 2026-11-17,
+/// ADOPTION_PLAN X.31: its own definition turns Personalisation off): a
+/// lead that has the person's Personalisation delegates to it, and Scout's
+/// requests never hold the section while the lead's do; the settings line
+/// still reaches it.
+#[tokio::test]
+async fn the_builtin_scout_never_gets_personalisation_from_its_lead() {
+    let mut r = Rig::new().await;
+    r.git(&["init", "-q"]);
+    r.write("a.txt", "alpha\n");
+    r.git(&["add", "."]);
+    r.git(&["commit", "-qm", "init"]);
+    let scout = harness_agents::builtins()
+        .into_iter()
+        .find(|a| a.id == "scout")
+        .unwrap()
+        .spec;
+    assert!(scout.no_personalisation, "Scout's definition turns it off");
+    let marker = scout.system_prompt.lines().next().unwrap().to_string();
+    r.delegates.push(scout);
+    r.lead_context = Some(MasterContext {
+        turn: Some("Context: the user's name is Ann.".into()),
+        standing: vec![StandingPart {
+            part: StandingKey::Personal,
+            text: format!("How the person wants replies to sound: {MARK}"),
+        }],
+        unattended: false,
+    });
+    let (_, outs) = r
+        .lead_turn(&delegate(&[
+            json!({"agent": "scout", "task": "read: a.txt"}),
+        ]))
+        .await;
+    assert_eq!(outs.len(), 1, "{outs:#?}");
+    let scouts: Vec<Vec<ChatMsg>> = r
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|q| matches!(q.messages.first(), Some(ChatMsg::System(s)) if s.contains(&marker)))
+        .map(|q| q.messages.clone())
+        .collect();
+    assert!(!scouts.is_empty(), "Scout ran: {outs:#?}");
+    assert!(holds_mark(&requests_of(&r, "lead")), "the lead's own turn");
+    assert!(!holds_mark(&scouts), "Scout's switch is off");
+    assert!(
+        scouts
+            .iter()
+            .flatten()
+            .filter_map(|m| m.user_text())
+            .any(|t| t.contains("the user's name is Ann")),
+        "the settings line still comes"
+    );
+}

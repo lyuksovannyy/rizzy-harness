@@ -5,6 +5,7 @@ category: IT
 tools: [read, grep, glob, outline, graph_query, skill, bash, bash_output, bash_stop, tool_output]
 ui: rich
 memory: false
+personalisation: false
 project_memory: false
 available_as: [subagent]
 ---

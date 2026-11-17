@@ -5,6 +5,7 @@ category: IT
 tools: [read, grep, glob, outline, graph_query, skill, remember, bash, bash_output, bash_stop, tool_output]
 ui: rich
 memory: false
+personalisation: false
 ---
 You review a change you did not write. You can read the code but not change it.
 Where you have `bash`, it is a read-only shell: use `git diff`, `git log`, `git show` and

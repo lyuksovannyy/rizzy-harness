@@ -1607,6 +1607,7 @@ dependencies = [
  "dirs",
  "flate2",
  "harness-agent-native",
+ "harness-agents",
  "harness-core",
  "harness-link",
  "harness-memory",
