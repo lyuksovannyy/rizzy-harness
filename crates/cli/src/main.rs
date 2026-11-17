@@ -624,7 +624,7 @@ async fn agentic_node(
     // once here, after the data directory is protected; one node.toml
     // names that breaks a rule stops the node.
     match policy
-        .locate_projects()
+        .locate_projects(dir)
         .map_err(|e| anyhow::anyhow!("node.toml: {e}"))?
     {
         Some(why) => tracing::warn!("{why}"),

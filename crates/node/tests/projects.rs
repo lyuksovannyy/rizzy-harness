@@ -40,7 +40,7 @@ async fn start(dir_key: Option<&str>, per_hour: usize, profile: Profile) -> Node
         None => projects.clone(),
     });
     policy.protect(&data);
-    policy.locate_projects().unwrap();
+    policy.locate_projects(&data).unwrap();
     let cfg = NodeConfig {
         node_id: "n".into(),
         hostname: "test".into(),

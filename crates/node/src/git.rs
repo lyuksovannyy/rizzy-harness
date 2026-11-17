@@ -49,9 +49,9 @@ mod merge;
 mod upkeep;
 mod user_repo;
 
-pub(crate) use init::init_project;
 #[cfg(test)]
 pub(crate) use init::{FIRST_COMMIT, use_test_git};
+pub(crate) use init::{check_first_commit, init_project};
 
 /// Where checkpoints for one working folder are stored.
 #[derive(Debug, Clone, PartialEq, Eq)]

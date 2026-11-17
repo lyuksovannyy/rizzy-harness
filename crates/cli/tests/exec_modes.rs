@@ -75,7 +75,7 @@ async fn node() -> Option<Node> {
     policy.locate_instructions(&data).unwrap();
     // New projects' folders (X.26, T77) beside the session folder.
     policy.projects.dir = Some(root.join("home/projects"));
-    policy.locate_projects().unwrap();
+    policy.locate_projects(&data).unwrap();
     let backend = NativeBackend::new(
         Arc::new(Mock {
             delay: Duration::from_millis(1),

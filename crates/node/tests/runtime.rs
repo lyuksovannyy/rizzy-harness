@@ -4175,7 +4175,8 @@ async fn a_new_project_folder_takes_a_writing_sub_agent() {
     let mut h = Harness::new(|root| {
         let mut p = auto_policy(root);
         p.projects.dir = Some(root.join("ws/projects"));
-        p.locate_projects().unwrap();
+        std::fs::create_dir_all(root.join("data")).unwrap();
+        p.locate_projects(&root.join("data")).unwrap();
         p
     })
     .await;

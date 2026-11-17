@@ -4,29 +4,39 @@
 //! The node makes the folder's name from it, `<slug>-<4 random
 //! characters>`, inside the one folder its node.toml names
 //! (`[projects] dir`, checked at start: inside `workspace_roots`, clear of
-//! the data directory), makes it a git repository with one empty commit,
-//! and answers with the folder's path.
+//! the data directory, its parent existing, on the data directory's file
+//! system), and answers with the folder's path.
+//!
+//! **git never runs where anything but the node can write.** A session
+//! that can write in the projects folder could otherwise put a `.git`
+//! file (`gitdir: <another repository>`) into the new folder between its
+//! making and `git init`, and the node's git would initialise and commit
+//! into that other repository (PR 143 review). So the repository is built
+//! in `<data>/projects-staging/<random>` (mode 0700, protected: no session
+//! has it in view), checked there (a real `.git` folder, no `commondir`,
+//! one commit by the node's identity, nothing else in the folder), and
+//! only then moved into the projects folder under its final name with
+//! `renameat2(RENAME_NOREPLACE)`, which fails when anything (a folder, a
+//! file, a link) holds the name: a taken name gets new characters. After
+//! the move the entry is checked again from the open projects folder.
 //!
 //! Nothing here resolves a path the master chose, and nothing follows a
-//! link placed in the way: the projects folder is opened once without
-//! following a link at its name and compared with what was checked; the
-//! new folder is made relative to that open folder with `mkdirat`, which
-//! fails when anything (a folder, a file, a link) holds the name, and is
-//! then opened without following a link; git starts in that open folder
-//! (`/proc/self/fd/<n>`), not at a name. On any failure after the folder
-//! was made, it is removed again, and only when it holds nothing but the
-//! `.git` this call made.
+//! link placed in the way: the projects folder's parent is opened without
+//! following a link at its name and compared (device and inode) with what
+//! was recorded at start; the projects folder is made (only its last
+//! component) and opened relative to it, also without following, and
+//! compared with its identity at start when it existed then.
 
 use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::os::fd::{AsRawFd, OwnedFd};
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use harness_core::folder::Identity;
 use nix::errno::Errno;
 use nix::fcntl::{AtFlags, OFlag};
-use nix::sys::stat::Mode;
+use nix::sys::stat::{Mode, SFlag};
 
 use crate::policy::NodePolicy;
 
@@ -93,13 +103,13 @@ pub fn suffix() -> String {
 }
 
 /// How many folders were made in the last hour, to bound a master that
-/// asks in a loop (`[limits] projects_per_hour`).
+/// asks in a loop (`[limits] projects_per_hour`). Only folders made count;
+/// the count lives in memory (a restart starts it again).
 #[derive(Default)]
 pub(crate) struct Made(std::sync::Mutex<VecDeque<Instant>>);
 
 impl Made {
-    /// Take one place in the hour's allowance, or say why there is none.
-    fn take(&self, per_hour: usize) -> Result<(), String> {
+    fn recent(&self) -> std::sync::MutexGuard<'_, VecDeque<Instant>> {
         let mut q = self.0.lock().unwrap_or_else(|p| p.into_inner());
         let now = Instant::now();
         while q
@@ -108,14 +118,23 @@ impl Made {
         {
             q.pop_front();
         }
-        if q.len() >= per_hour {
+        q
+    }
+
+    /// Whether the hour's allowance has room, or why not.
+    fn room(&self, per_hour: usize) -> Result<(), String> {
+        if self.recent().len() >= per_hour {
             return Err(format!(
                 "this node has made {per_hour} project folders in the last hour, its limit \
                  ([limits] projects_per_hour in its node.toml); try again later"
             ));
         }
-        q.push_back(now);
         Ok(())
+    }
+
+    /// One folder made.
+    fn record(&self) {
+        self.recent().push_back(Instant::now());
     }
 }
 
@@ -131,7 +150,9 @@ pub(crate) async fn create(
     name: &str,
     make_suffix: &(dyn Fn() -> String + Sync),
 ) -> Result<PathBuf, String> {
-    let Some(dir) = policy.projects.located.clone() else {
+    let pp = &policy.projects;
+    let (Some(dir), Some(_), Some(_)) = (pp.located.clone(), pp.parent_id, pp.staging.clone())
+    else {
         return Err(OFF.into());
     };
     if policy.limits.projects_per_hour == 0 {
@@ -146,124 +167,245 @@ pub(crate) async fn create(
     if name.trim().is_empty() {
         return Err("a project needs a name".into());
     }
-    made.take(policy.limits.projects_per_hour)?;
+    made.room(policy.limits.projects_per_hour)?;
     let base = slug(name);
-    let p = policy.clone();
     let names: Vec<String> = (0..TRIES)
         .map(|_| format!("{base}-{}", make_suffix()))
         .collect();
-    let (top, child, path) = tokio::task::spawn_blocking(move || make_folder(&p, &dir, &names))
-        .await
-        .map_err(|e| format!("making the folder: {e}"))??;
-    let proc_path = PathBuf::from(format!("/proc/self/fd/{}", child.as_raw_fd()));
-    let made_repo = crate::git::init_project(&proc_path).await;
-    let checked = made_repo.and_then(|()| check_made(policy, &child, &path));
-    match checked {
-        Ok(()) => Ok(path),
-        Err(e) => {
-            let name = path.file_name().map(OsStr::to_os_string);
-            tokio::task::spawn_blocking(move || {
-                if let Some(n) = name {
-                    remove_made(&top, &child, &n);
-                }
-            })
+    // The projects folder first, then the build folder: a projects folder
+    // swapped while the repository is built is still the one opened here.
+    let p = policy.clone();
+    let (top, build) = tokio::task::spawn_blocking(move || {
+        let top = open_projects(&p, &dir)?;
+        let build = Build::new(&p)?;
+        Ok::<_, String>((top, build))
+    })
+    .await
+    .map_err(|e| format!("making the folder: {e}"))??;
+    let built = async {
+        let at = build.proc_path();
+        crate::git::init_project(&at).await?;
+        crate::git::check_first_commit(&at).await?;
+        build.check()
+    }
+    .await;
+    if let Err(e) = built {
+        tokio::task::spawn_blocking(move || build.discard())
             .await
             .ok();
-            Err(format!("making the project's repository failed: {e}"))
-        }
+        return Err(format!("making the project's repository failed: {e}"));
     }
+    let p = policy.clone();
+    let path = tokio::task::spawn_blocking(move || build.move_into(&p, &top, &names))
+        .await
+        .map_err(|e| format!("moving the folder: {e}"))??;
+    made.record();
+    Ok(path)
 }
 
 fn dir_flags() -> OFlag {
     OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC
 }
 
-fn same(a: &nix::sys::stat::FileStat, b: &std::fs::Metadata) -> bool {
-    a.st_dev == b.dev() && a.st_ino == b.ino()
+fn id_of(st: &nix::sys::stat::FileStat) -> Identity {
+    Identity {
+        dev: st.st_dev,
+        ino: st.st_ino,
+    }
 }
 
-/// Open the projects folder `dir` (making it first if it is missing), check
-/// it is still the folder the rules allow, and make the first free name of
-/// `names` in it. The open projects folder, the open new folder and its
-/// path.
-fn make_folder(
-    policy: &NodePolicy,
-    dir: &Path,
-    names: &[String],
-) -> Result<(OwnedFd, OwnedFd, PathBuf), String> {
-    let io = |what: &str, e: std::io::Error| format!("{what} {}: {e}", dir.display());
-    if std::fs::symlink_metadata(dir).is_err() {
-        std::fs::create_dir_all(dir).map_err(|e| io("cannot make the projects folder", e))?;
-    }
-    // Its name must not be a link now (it was not one at start: `located`
-    // is resolved), and must still be the folder found there by path.
-    let top = nix::fcntl::open(dir, dir_flags(), Mode::empty()).map_err(|e| {
-        io(
-            "the projects folder cannot be opened as a plain folder (a link put in its place is \
-             not followed)",
-            e.into(),
-        )
-    })?;
-    let real = dir
-        .canonicalize()
-        .map_err(|e| io("the projects folder", e))?;
-    let meta = std::fs::metadata(&real).map_err(|e| io("the projects folder", e))?;
-    let st = nix::sys::stat::fstat(&top).map_err(|e| io("the projects folder", e.into()))?;
-    if real != dir || !same(&st, &meta) {
-        return Err(format!(
-            "the projects folder {} was moved or replaced since the node started; restart the \
-             node to check it again",
+fn io(what: &str, p: &Path, e: Errno) -> String {
+    format!("{what} {}: {}", p.display(), std::io::Error::from(e))
+}
+
+/// Open the projects folder `dir`: its parent without following a link at
+/// its name, compared with the parent recorded at start; the folder made
+/// there if missing (its last component only: nothing is made through a
+/// link in a missing parent) and opened without following, compared with
+/// the folder recorded at start when it existed then. The rules are
+/// checked again on its path.
+fn open_projects(policy: &NodePolicy, dir: &Path) -> Result<OwnedFd, String> {
+    let pp = &policy.projects;
+    let (Some(parent), Some(name)) = (dir.parent(), dir.file_name()) else {
+        return Err(OFF.into());
+    };
+    let moved = || {
+        format!(
+            "the projects folder {} or its parent was moved or replaced since the node \
+             started; restart the node to check it again",
             dir.display()
-        ));
+        )
+    };
+    let up = nix::fcntl::open(parent, dir_flags(), Mode::empty()).map_err(|_| moved())?;
+    let st = nix::sys::stat::fstat(&up).map_err(|e| io("the projects folder", dir, e))?;
+    if Some(id_of(&st)) != pp.parent_id {
+        return Err(moved());
     }
-    if let Some(why) = policy.projects_refusal(&real) {
+    match nix::sys::stat::mkdirat(&up, name, Mode::from_bits_truncate(0o755)) {
+        Ok(()) | Err(Errno::EEXIST) => {}
+        Err(e) => return Err(io("cannot make the projects folder", dir, e)),
+    }
+    let top = nix::fcntl::openat(&up, name, dir_flags(), Mode::empty()).map_err(|_| moved())?;
+    let st = nix::sys::stat::fstat(&top).map_err(|e| io("the projects folder", dir, e))?;
+    if pp.dir_id.is_some_and(|want| want != id_of(&st)) {
+        return Err(moved());
+    }
+    if let Some(why) = policy.projects_refusal(dir) {
         return Err(format!("the projects folder {}: {why}", dir.display()));
     }
-    for n in names {
-        match nix::sys::stat::mkdirat(&top, n.as_str(), Mode::from_bits_truncate(0o755)) {
-            Ok(()) => {
-                let child = nix::fcntl::openat(&top, n.as_str(), dir_flags(), Mode::empty())
-                    .map_err(|e| {
-                        format!("opening the new folder {n}: {}", std::io::Error::from(e))
-                    })?;
-                return Ok((top, child, real.join(n)));
-            }
-            // Taken, by anything: a folder, a file, a link. Never reused.
-            Err(Errno::EEXIST) => continue,
-            Err(e) => {
-                return Err(format!(
-                    "cannot make a folder in {}: {}",
-                    dir.display(),
-                    std::io::Error::from(e)
-                ));
+    Ok(top)
+}
+
+/// A new project's folder while it is built: `<staging>/<name>`, made
+/// 0700 by the node in its own data directory and held open.
+struct Build {
+    staging: OwnedFd,
+    name: String,
+    fd: OwnedFd,
+    path: PathBuf,
+}
+
+impl Build {
+    fn new(policy: &NodePolicy) -> Result<Self, String> {
+        let Some(at) = policy.projects.staging.clone() else {
+            return Err(OFF.into());
+        };
+        let staging = nix::fcntl::open(&at, dir_flags(), Mode::empty())
+            .map_err(|e| io("the node's staging folder", &at, e))?;
+        let mut b = [0u8; 8];
+        getrandom::fill(&mut b).expect("OS randomness");
+        let name = format!("build-{}", hex::encode(b));
+        nix::sys::stat::mkdirat(&staging, name.as_str(), Mode::from_bits_truncate(0o700))
+            .map_err(|e| io("cannot make a folder in", &at, e))?;
+        let fd = nix::fcntl::openat(&staging, name.as_str(), dir_flags(), Mode::empty())
+            .map_err(|e| io("cannot open a folder in", &at, e))?;
+        Ok(Self {
+            path: at.join(&name),
+            staging,
+            name,
+            fd,
+        })
+    }
+
+    /// The folder for a child process: exactly the one held open.
+    fn proc_path(&self) -> PathBuf {
+        PathBuf::from(format!("/proc/self/fd/{}", self.fd.as_raw_fd()))
+    }
+
+    /// The folder holds `.git` and nothing else; `.git` is a real folder,
+    /// not a git file, and names no other repository (`commondir`).
+    fn check(&self) -> Result<(), String> {
+        let entries: Vec<_> = std::fs::read_dir(self.proc_path())
+            .map_err(|e| e.to_string())?
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name())
+            .collect();
+        if entries != [std::ffi::OsString::from(".git")] {
+            return Err(format!("the new folder holds {entries:?}"));
+        }
+        let st = nix::sys::stat::fstatat(&self.fd, ".git", AtFlags::AT_SYMLINK_NOFOLLOW)
+            .map_err(|e| format!(".git: {}", std::io::Error::from(e)))?;
+        if SFlag::from_bits_truncate(st.st_mode) & SFlag::S_IFMT != SFlag::S_IFDIR {
+            return Err(".git is not a folder".into());
+        }
+        if nix::sys::stat::fstatat(&self.fd, ".git/commondir", AtFlags::AT_SYMLINK_NOFOLLOW).is_ok()
+        {
+            return Err(".git names another repository (commondir)".into());
+        }
+        Ok(())
+    }
+
+    /// Remove the build folder (in the node's own staging folder: nothing
+    /// else writes there).
+    fn discard(self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+
+    /// Move the built folder into the projects folder `top` under the
+    /// first of `names` that nothing holds, never replacing what is there;
+    /// then check, from `top`, that the name holds this very folder with
+    /// its real `.git`, and that a session may run at its path. Its path.
+    fn move_into(
+        self,
+        policy: &NodePolicy,
+        top: &OwnedFd,
+        names: &[String],
+    ) -> Result<PathBuf, String> {
+        let dir = policy.projects.located.clone().ok_or(OFF)?;
+        // The person's folder gets ordinary permissions, as `mkdir` gives.
+        let _ = nix::sys::stat::fchmod(&self.fd, Mode::from_bits_truncate(0o755));
+        let mut placed = None;
+        for n in names {
+            match nix::fcntl::renameat2(
+                &self.staging,
+                self.name.as_str(),
+                top,
+                n.as_str(),
+                nix::fcntl::RenameFlags::RENAME_NOREPLACE,
+            ) {
+                Ok(()) => {
+                    placed = Some(n.clone());
+                    break;
+                }
+                // Taken, by anything: a folder, a file, a link. Never
+                // replaced, never followed.
+                Err(Errno::EEXIST) => continue,
+                Err(Errno::EXDEV) => {
+                    self.discard();
+                    return Err(format!(
+                        "the projects folder {} is not on the node's data directory's file \
+                         system any more; restart the node",
+                        dir.display()
+                    ));
+                }
+                Err(e) => {
+                    self.discard();
+                    return Err(io("cannot move the new folder into", &dir, e));
+                }
             }
         }
+        let Some(n) = placed else {
+            self.discard();
+            return Err(format!(
+                "every name tried in {} was taken; try again",
+                dir.display()
+            ));
+        };
+        let path = dir.join(&n);
+        let checked = (|| {
+            let made = nix::sys::stat::fstat(&self.fd).map_err(|e| e.to_string())?;
+            let now = nix::sys::stat::fstatat(top, n.as_str(), AtFlags::AT_SYMLINK_NOFOLLOW)
+                .map_err(|e| e.to_string())?;
+            if id_of(&now) != id_of(&made) {
+                return Err(format!(
+                    "{} was replaced as it was moved in",
+                    path.display()
+                ));
+            }
+            let git = nix::sys::stat::fstatat(&self.fd, ".git", AtFlags::AT_SYMLINK_NOFOLLOW)
+                .map_err(|e| format!(".git: {}", std::io::Error::from(e)))?;
+            if SFlag::from_bits_truncate(git.st_mode) & SFlag::S_IFMT != SFlag::S_IFDIR {
+                return Err(".git is not a folder".into());
+            }
+            let real = policy.check_cwd(&path.to_string_lossy())?;
+            if real != path || Identity::of(&real).ok() != Some(id_of(&made)) {
+                return Err(format!(
+                    "{} does not lead to the folder made (the projects folder was moved or \
+                     replaced)",
+                    path.display()
+                ));
+            }
+            Ok(())
+        })();
+        if let Err(e) = checked {
+            remove_made(top, &self.fd, OsStr::new(&n));
+            return Err(format!("making the project's folder failed: {e}"));
+        }
+        Ok(path)
     }
-    Err(format!(
-        "every name tried in {} was taken; try again",
-        dir.display()
-    ))
 }
 
-/// After git: the folder at `path` is still the one made (no link or
-/// other folder put at its name), holds a `.git` folder, and a session may
-/// run there (`check_cwd`).
-fn check_made(policy: &NodePolicy, child: &OwnedFd, path: &Path) -> Result<(), String> {
-    let st = nix::sys::stat::fstat(child).map_err(|e| e.to_string())?;
-    let meta = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
-    if !meta.is_dir() || !same(&st, &meta) {
-        return Err(format!("{} was replaced while it was made", path.display()));
-    }
-    nix::sys::stat::fstatat(child, ".git", AtFlags::AT_SYMLINK_NOFOLLOW)
-        .map_err(|e| format!("no .git: {}", std::io::Error::from(e)))?;
-    let real = policy.check_cwd(&path.to_string_lossy())?;
-    if real != path {
-        return Err(format!("{} resolves elsewhere", path.display()));
-    }
-    Ok(())
-}
-
-/// Remove the folder this call made, `name` in `top`: only when it is
+/// Remove the folder this call moved in, `name` in `top`: only when it is
 /// still the one made and holds nothing but `.git` (removed with it);
 /// otherwise it is left as it is and logged.
 fn remove_made(top: &OwnedFd, child: &OwnedFd, name: &OsStr) {
@@ -275,7 +417,7 @@ fn remove_made(top: &OwnedFd, child: &OwnedFd, name: &OsStr) {
     if entries.iter().any(|e| e != ".git") {
         tracing::warn!(
             folder = ?name,
-            "a new project folder whose repository failed holds more than .git; left in place"
+            "a new project folder that failed its checks holds more than .git; left in place"
         );
         return;
     }
@@ -289,7 +431,7 @@ fn remove_made(top: &OwnedFd, child: &OwnedFd, name: &OsStr) {
     ) else {
         return;
     };
-    if now.st_dev == made.st_dev && now.st_ino == made.st_ino {
+    if id_of(&now) == id_of(&made) {
         let _ = nix::unistd::unlinkat(top, name, nix::unistd::UnlinkatFlags::RemoveDir);
     }
 }
@@ -297,6 +439,7 @@ fn remove_made(top: &OwnedFd, child: &OwnedFd, name: &OsStr) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::policy::ProjectsPolicy;
 
     #[test]
     fn slugs_keep_ascii_letters_and_digits_only() {
@@ -362,7 +505,7 @@ mod tests {
         };
         policy.projects.dir = Some(projects.clone());
         policy.protect(&data);
-        assert_eq!(policy.locate_projects().unwrap(), None);
+        assert_eq!(policy.locate_projects(&data).unwrap(), None);
         assert_eq!(policy.projects.located.as_deref(), Some(projects.as_path()));
         Rig {
             _tmp: tmp,
@@ -375,6 +518,16 @@ mod tests {
     }
 
     impl Rig {
+        /// The data directory holds the staging folder only, and it is empty.
+        fn data_holds_nothing_made(&self) {
+            let names: Vec<_> = std::fs::read_dir(&self.data)
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect();
+            assert_eq!(names, [std::ffi::OsString::from(ProjectsPolicy::STAGING)]);
+            let staging = self.data.join(ProjectsPolicy::STAGING);
+            assert_eq!(std::fs::read_dir(staging).unwrap().count(), 0);
+        }
         async fn make(&self, name: &str) -> Result<PathBuf, String> {
             create(&self.policy, &self.made, name, &suffix).await
         }
@@ -487,7 +640,7 @@ mod tests {
             .map(|e| e.unwrap().file_name())
             .collect();
         assert_eq!(beside, vec![std::ffi::OsString::from("projects")]);
-        assert_eq!(std::fs::read_dir(&r.data).unwrap().count(), 0);
+        r.data_holds_nothing_made();
     }
 
     /// The projects folder replaced by a link after start (to the data
@@ -505,7 +658,7 @@ mod tests {
             let e = r.make("x").await.unwrap_err();
             assert!(e.contains("projects folder"), "{to}: {e}");
             if to == "data" {
-                assert_eq!(std::fs::read_dir(&r.data).unwrap().count(), 0);
+                r.data_holds_nothing_made();
             }
         }
         // And a real folder moved away for another one: refused too.
@@ -587,7 +740,7 @@ mod tests {
         assert!(e.contains("projects_per_hour"), "{e}");
         let mut off = rig();
         off.policy.projects.dir = Some(PathBuf::new());
-        off.policy.locate_projects().unwrap();
+        off.policy.locate_projects(&off.data).unwrap();
         assert_eq!(off.make("a").await.unwrap_err(), OFF);
         assert!(!off.projects.exists());
         off.policy = NodePolicy::default();
@@ -618,8 +771,9 @@ mod tests {
         assert_eq!(
             std::fs::read_dir(&r.projects).unwrap().count(),
             0,
-            "removed again"
+            "nothing moved in"
         );
+        r.data_holds_nothing_made();
     }
 
     #[test]
@@ -628,7 +782,8 @@ mod tests {
         let at = |dir: Option<PathBuf>| {
             let mut p = r.policy.clone();
             p.projects.dir = dir;
-            p.locate_projects().map(|w| (w, p.projects.located.clone()))
+            p.locate_projects(&r.data)
+                .map(|w| (w, p.projects.located.clone()))
         };
         // Named, outside the roots, in or over the data directory, with
         // `..`: the node does not start.
@@ -638,7 +793,7 @@ mod tests {
         let mut over = r.policy.clone();
         over.workspace_roots = vec![r.ws.parent().unwrap().to_path_buf()];
         over.projects.dir = Some(r.ws.parent().unwrap().to_path_buf());
-        assert!(over.locate_projects().unwrap_err().contains("data"));
+        assert!(over.locate_projects(&r.data).unwrap_err().contains("data"));
         assert!(at(Some(r.ws.join("a/../b"))).unwrap_err().contains(".."));
         // Off.
         assert_eq!(at(Some(PathBuf::new())).unwrap(), (None, None));
@@ -648,7 +803,7 @@ mod tests {
         d.workspace_roots = vec![r.ws.clone()];
         if dirs::home_dir().is_some_and(|h| !h.starts_with(&r.ws)) {
             let (w, located) = d
-                .locate_projects()
+                .locate_projects(&r.data)
                 .map(|w| (w, d.projects.located.clone()))
                 .unwrap();
             assert!(w.unwrap().contains("off"));
@@ -656,12 +811,291 @@ mod tests {
         }
     }
 
+    /// A git program for this test thread: `commit` first runs `before`
+    /// (a shell snippet, in the folder git was started in), then the real
+    /// git does everything.
+    fn fake_git(r: &Rig, before: &str) -> PathBuf {
+        let bin = r.ws.parent().unwrap().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let fake = bin.join("git");
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nfor a in \"$@\"; do [ \"$a\" = commit ] && {{ {before}; }}; done\nexec git \"$@\"\n"
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        fake
+    }
+
+    /// A repository outside the workspace roots with one commit.
+    fn victim(r: &Rig) -> PathBuf {
+        let v = r.ws.parent().unwrap().join("victim");
+        std::fs::create_dir_all(&v).unwrap();
+        let g = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&v)
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_AUTHOR_NAME", "v")
+                .env("GIT_AUTHOR_EMAIL", "v@v")
+                .env("GIT_COMMITTER_NAME", "v")
+                .env("GIT_COMMITTER_EMAIL", "v@v")
+                .status()
+                .unwrap()
+                .success();
+            assert!(ok);
+        };
+        g(&["init", "-q", "-b", "trunk"]);
+        g(&["commit", "-q", "--allow-empty", "-m", "victim"]);
+        v
+    }
+
+    /// PR 143 review, turned around: an adversary that can write in the
+    /// projects folder (a sandboxed chat opened on it or on a folder that
+    /// holds it) polls it and writes `.git` = `gitdir: <victim>/.git` into
+    /// every new entry the moment it appears. Before the fix it won 20 of
+    /// 20 and the node's git committed into the victim. Now git runs in the
+    /// node's staging folder and a folder arrives in the projects folder
+    /// with its real `.git` already in place: 200 of 200, the victim keeps
+    /// its one commit, every folder made has a `.git` folder of its own.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_gitfile_planted_in_a_new_folder_never_redirects_the_nodes_git() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let mut r = rig();
+        r.policy.limits.projects_per_hour = 200;
+        std::fs::create_dir_all(&r.projects).unwrap();
+        let victim = victim(&r);
+        let stop = Arc::new(AtomicBool::new(false));
+        let (s2, dir, vgit) = (stop.clone(), r.projects.clone(), victim.join(".git"));
+        let attacker = std::thread::spawn(move || {
+            let mut seen = std::collections::HashSet::new();
+            let mut planted = 0usize;
+            while !s2.load(Ordering::Relaxed) {
+                if let Ok(rd) = std::fs::read_dir(&dir) {
+                    for e in rd.flatten() {
+                        if seen.insert(e.file_name()) {
+                            let g = dir.join(e.file_name()).join(".git");
+                            if std::fs::write(&g, format!("gitdir: {}\n", vgit.display())).is_ok() {
+                                planted += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            planted
+        });
+        let mut made = Vec::new();
+        for i in 0..200 {
+            made.push(r.make(&format!("Race {i}")).await.unwrap());
+        }
+        stop.store(true, Ordering::Relaxed);
+        let planted = attacker.join().unwrap();
+        assert_eq!(planted, 0, "a gitfile was written into a new folder");
+        assert_eq!(git(&victim, &["rev-list", "--count", "HEAD"]), "1");
+        for p in &made {
+            assert!(std::fs::symlink_metadata(p.join(".git")).unwrap().is_dir());
+            assert_eq!(git(p, &["rev-list", "--count", "HEAD"]), "1");
+        }
+        r.data_holds_nothing_made();
+    }
+
+    /// Planted at the final names while the repository is built (the
+    /// commit step plants them): a link to another repository, a folder
+    /// with a repository of its own, a gitfile. None is replaced, followed
+    /// or committed into; the folder lands under the next free name.
+    #[tokio::test]
+    async fn plants_at_the_final_name_during_the_build_are_never_replaced() {
+        let r = rig();
+        std::fs::create_dir_all(&r.projects).unwrap();
+        let victim = victim(&r);
+        let p = r.projects.display().to_string();
+        let v = victim.display().to_string();
+        let fake = fake_git(
+            &r,
+            &format!(
+                "ln -s {v} {p}/x-aaaa; mkdir {p}/x-bbbb && git -C {p}/x-bbbb init -q; \
+                 printf 'gitdir: {v}/.git\\n' > {p}/x-cccc"
+            ),
+        );
+        crate::git::use_test_git(Some(fake));
+        let res = r.make_with("x", &["aaaa", "bbbb", "cccc", "dddd"]).await;
+        crate::git::use_test_git(None);
+        assert_eq!(res.unwrap(), r.projects.join("x-dddd"));
+        assert!(
+            std::fs::symlink_metadata(r.projects.join("x-aaaa"))
+                .unwrap()
+                .is_symlink()
+        );
+        assert_eq!(git(&victim, &["rev-list", "--count", "HEAD"]), "1");
+        let own = std::process::Command::new("git")
+            .arg("-C")
+            .arg(r.projects.join("x-bbbb"))
+            .args(["rev-list", "--count", "HEAD"])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(!own.status.success(), "the planted repository got a commit");
+        assert!(
+            std::fs::read_to_string(r.projects.join("x-cccc"))
+                .unwrap()
+                .starts_with("gitdir:"),
+            "the gitfile was replaced"
+        );
+        assert_eq!(
+            git(&r.projects.join("x-dddd"), &["rev-list", "--count", "HEAD"]),
+            "1"
+        );
+        r.data_holds_nothing_made();
+    }
+
+    /// The projects folder itself swapped while the repository is built
+    /// (moved away, a link to another folder put at its name): the folder
+    /// is moved into the folder opened before (wherever it went now), its
+    /// path no longer leads to it, so it is removed again and the request
+    /// refused; nothing reaches the link's target.
+    #[tokio::test]
+    async fn a_projects_folder_swapped_during_the_build_gets_nothing() {
+        let r = rig();
+        std::fs::create_dir_all(&r.projects).unwrap();
+        let elsewhere = r.ws.join("elsewhere");
+        let old = r.ws.join("old");
+        std::fs::create_dir(&elsewhere).unwrap();
+        let fake = fake_git(
+            &r,
+            &format!(
+                "mv {p} {o} && ln -s {e} {p}",
+                p = r.projects.display(),
+                o = old.display(),
+                e = elsewhere.display()
+            ),
+        );
+        crate::git::use_test_git(Some(fake));
+        let res = r.make("Swap").await;
+        crate::git::use_test_git(None);
+        let e = res.unwrap_err();
+        assert!(e.contains("making the project's folder failed"), "{e}");
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+        assert_eq!(std::fs::read_dir(&old).unwrap().count(), 0, "removed again");
+        r.data_holds_nothing_made();
+    }
+
+    /// PR 143 review, turned around: missing folders on the way to the
+    /// projects folder are never made, so a link planted at one is never
+    /// followed. A missing parent stops the node at start (named) or turns
+    /// the default off; a parent replaced by a link after start is refused.
+    #[tokio::test]
+    async fn missing_parents_are_never_made_through_a_planted_link() {
+        let r = rig();
+        let outside = r.ws.parent().unwrap().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        // At start: a link at the first missing component.
+        std::os::unix::fs::symlink(&outside, r.ws.join("a")).unwrap();
+        let mut p = r.policy.clone();
+        p.projects.dir = Some(r.ws.join("a/b/projects"));
+        assert!(p.locate_projects(&r.data).is_err());
+        // Without a link: the missing parent is named, not made.
+        p.projects.dir = Some(r.ws.join("c/projects"));
+        assert!(
+            p.locate_projects(&r.data)
+                .unwrap_err()
+                .contains("make it first")
+        );
+        assert!(!r.ws.join("c").exists());
+        // After start: the parent exists, then becomes a link outside.
+        std::fs::create_dir(r.ws.join("p")).unwrap();
+        p.projects.dir = Some(r.ws.join("p/projects"));
+        p.locate_projects(&r.data).unwrap();
+        std::fs::rename(r.ws.join("p"), r.ws.join("p-away")).unwrap();
+        std::os::unix::fs::symlink(&outside, r.ws.join("p")).unwrap();
+        let e = create(&p, &r.made, "x", &suffix).await.unwrap_err();
+        assert!(e.contains("moved or replaced"), "{e}");
+        assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+        assert!(!r.ws.join("p-away/projects").exists());
+    }
+
+    /// PR 143 review: a commit step that fails after planting a file next
+    /// to `.git`. The build folder is the node's own, in staging: it goes
+    /// whole, and nothing reaches the projects folder.
+    #[tokio::test]
+    async fn a_failed_build_leaves_nothing_anywhere() {
+        let r = rig();
+        let fake = fake_git(&r, "echo keep > planted; exit 1");
+        crate::git::use_test_git(Some(fake));
+        let res = r.make("Keep").await;
+        crate::git::use_test_git(None);
+        assert!(res.unwrap_err().contains("repository failed"));
+        assert_eq!(std::fs::read_dir(&r.projects).unwrap().count(), 0);
+        r.data_holds_nothing_made();
+    }
+
+    /// A projects folder the node cannot write (a full or read-only disk, a
+    /// chat that ran `chmod 555` on it): refused, nothing made, the build
+    /// folder gone, and the failed try does not count against the hour.
+    #[tokio::test]
+    async fn a_read_only_projects_folder_refuses_and_counts_nothing() {
+        let r = rig();
+        std::fs::create_dir_all(&r.projects).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&r.projects, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let e = r.make("x").await.unwrap_err();
+        std::fs::set_permissions(&r.projects, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(e.contains("cannot move"), "{e}");
+        assert_eq!(std::fs::read_dir(&r.projects).unwrap().count(), 0);
+        r.data_holds_nothing_made();
+        assert_eq!(r.made.recent().len(), 0);
+    }
+
+    /// PR 143 review: slugs of hostile Unicode and punctuation, and of every
+    /// ASCII byte alone and around letters.
+    #[test]
+    fn slugs_of_hostile_names() {
+        for (n, want) in [
+            ("İstanbul", "stanbul"),
+            ("ſecret", "ecret"),
+            ("\u{212A}elvin", "elvin"),
+            ("ＡＢＣ", EMPTY_SLUG),
+            ("-rf", "rf"),
+            ("--template=x", "template-x"),
+            ("con", "con"),
+            ("\u{202E}evil", "evil"),
+            ("a\u{0301}", "a"),
+        ] {
+            assert_eq!(slug(n), want, "{n:?}");
+        }
+        for b in 0u8..128 {
+            let c = b as char;
+            for n in [c.to_string(), format!("{c}a{c}"), format!("a{c}b")] {
+                let s = slug(&n);
+                assert!(!s.is_empty() && s.len() <= SLUG_MAX);
+                assert!(
+                    !s.starts_with(['-', '.']) && !s.ends_with('-'),
+                    "{n:?} -> {s}"
+                );
+                assert!(
+                    s.bytes()
+                        .all(|x| x.is_ascii_lowercase() || x.is_ascii_digit() || x == b'-'),
+                    "{n:?} -> {s}"
+                );
+                assert!(!s.contains("--"), "{n:?} -> {s}");
+            }
+        }
+        assert_eq!(slug(&"😀".repeat(64)), EMPTY_SLUG);
+        assert!(slug(&"ab ".repeat(85)).len() <= SLUG_MAX);
+    }
+
     #[test]
     fn the_hourly_allowance_is_counted() {
         let m = Made::default();
         for _ in 0..3 {
-            m.take(3).unwrap();
+            m.room(3).unwrap();
+            m.record();
         }
-        assert!(m.take(3).unwrap_err().contains("projects_per_hour"));
+        assert!(m.room(3).unwrap_err().contains("projects_per_hour"));
     }
 }

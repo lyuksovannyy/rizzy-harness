@@ -400,20 +400,37 @@ pub struct ProjectsPolicy {
     /// Absolute or under `~/`. Left out: [`Self::DEFAULT_DIR`]; `""` turns
     /// making project folders off on this node. It must lie inside a
     /// `workspace_roots` entry (so a session can then run in what is made
-    /// there, under the one rule every session folder follows), and must
-    /// not be, hold or lie inside the node's data directory. Made on first
-    /// use with the node user's ordinary permissions.
+    /// there, under the one rule every session folder follows), must not
+    /// be, hold or lie inside the node's data directory, its parent folder
+    /// must exist, and it must be on the same file system as the data
+    /// directory (a new project is built there and moved in). The folder
+    /// itself is made on first use with the node user's ordinary
+    /// permissions.
     pub dir: Option<PathBuf>,
     /// The folder as checked at start ([`NodePolicy::locate_projects`]):
-    /// its deepest existing ancestor canonical, the rest appended. `None`:
-    /// this node makes no project folders. Never read from node.toml.
+    /// its parent canonical, its own name appended. `None`: this node makes
+    /// no project folders. Never read from node.toml.
     #[serde(skip)]
     pub located: Option<PathBuf>,
+    /// What the folder's parent was at start (device and inode), and the
+    /// folder's own when it existed then: every creation compares the
+    /// descriptors it opens with them. Never read from node.toml.
+    #[serde(skip)]
+    pub parent_id: Option<harness_core::folder::Identity>,
+    #[serde(skip)]
+    pub dir_id: Option<harness_core::folder::Identity>,
+    /// `<data>/projects-staging`, where a new project's repository is built
+    /// before it is moved in (protected: no session ever has it in view).
+    /// Emptied at start. Never read from node.toml.
+    #[serde(skip)]
+    pub staging: Option<PathBuf>,
 }
 
 impl ProjectsPolicy {
     /// The folder when node.toml does not name one.
     pub const DEFAULT_DIR: &'static str = "~/rizzy-projects";
+    /// The staging folder's name in the node's data directory.
+    pub const STAGING: &'static str = "projects-staging";
 
     /// The folder node.toml asks for, `~/` expanded: `Ok(None)` when it is
     /// turned off (`dir = ""`), the default when left out. A `.` or `..`
@@ -440,36 +457,109 @@ impl ProjectsPolicy {
     }
 }
 
+/// What [`NodePolicy::locate_projects`] found: the folder, the identities
+/// it recorded, the staging folder.
+struct Located {
+    dir: PathBuf,
+    parent_id: harness_core::folder::Identity,
+    dir_id: Option<harness_core::folder::Identity>,
+    staging: PathBuf,
+}
+
 impl NodePolicy {
     /// Decide where this node makes new projects' folders (T77) and set
-    /// [`ProjectsPolicy::located`]. Call after [`Self::protect`] of the
-    /// data directory. The folder must lie inside a `workspace_roots`
-    /// entry and must not be, hold or lie inside a protected folder (the
-    /// data directory, the sub-agents' folders, the operator's instruction
-    /// file). One named in node.toml that breaks a rule is an error (the
-    /// node does not start); the default that breaks one only turns the
-    /// feature off, with the reason returned for the log, so a node whose
-    /// roots leave out the home folder starts as before.
-    pub fn locate_projects(&mut self) -> Result<Option<String>, String> {
+    /// [`ProjectsPolicy::located`], the identities and the staging folder.
+    /// Call after [`Self::protect`] of `data_dir`, the node's data
+    /// directory. The folder must lie inside a `workspace_roots` entry, must
+    /// not be, hold or lie inside a protected folder (the data directory,
+    /// the sub-agents' folders, the operator's instruction file), its parent
+    /// must exist and it must not be a link, and it must be on the data
+    /// directory's file system. One named in node.toml that breaks a rule is
+    /// an error (the node does not start); the default that breaks one only
+    /// turns the feature off, with the reason returned for the log, so a
+    /// node whose roots leave out the home folder starts as before. The
+    /// staging folder `<data>/projects-staging` is made (0700), emptied (a
+    /// project half-made when the node was killed goes) and protected.
+    pub fn locate_projects(&mut self, data_dir: &Path) -> Result<Option<String>, String> {
         self.projects.located = None;
+        self.projects.parent_id = None;
+        self.projects.dir_id = None;
+        self.projects.staging = None;
         let explicit = self.projects.dir.is_some();
         let Some(dir) = self.projects.configured()? else {
             return Ok(None);
         };
-        let real = resolve_existing(&dir);
-        let refusal = self.projects_refusal(&real);
-        match refusal {
-            None => {
-                self.projects.located = Some(real);
+        match self.locate_at(&dir, data_dir) {
+            Ok(l) => {
+                self.protect(&l.staging);
+                self.projects.located = Some(l.dir);
+                self.projects.parent_id = Some(l.parent_id);
+                self.projects.dir_id = l.dir_id;
+                self.projects.staging = Some(l.staging);
                 Ok(None)
             }
-            Some(why) if explicit => Err(format!("[projects] dir = {}: {why}", dir.display())),
-            Some(why) => Ok(Some(format!(
+            Err(why) if explicit => Err(format!("[projects] dir = {}: {why}", dir.display())),
+            Err(why) => Ok(Some(format!(
                 "new project folders are off: the default {} {why}; set [projects] dir in \
                  node.toml to a folder inside workspace_roots, or dir = \"\" to say so",
                 ProjectsPolicy::DEFAULT_DIR
             ))),
         }
+    }
+
+    fn locate_at(&self, dir: &Path, data_dir: &Path) -> Result<Located, String> {
+        use harness_core::folder::Identity;
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+        let (Some(parent), Some(name)) = (dir.parent(), dir.file_name()) else {
+            return Err("names no folder".into());
+        };
+        let parent = parent.canonicalize().map_err(|e| {
+            format!(
+                "its parent folder {} cannot be used ({e}); make it first",
+                parent.display()
+            )
+        })?;
+        let real = parent.join(name);
+        let dir_id = match std::fs::symlink_metadata(&real) {
+            Ok(m) if m.is_dir() => Some(Identity {
+                dev: m.dev(),
+                ino: m.ino(),
+            }),
+            Ok(_) => return Err("is a link or a file, not a folder".into()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.to_string()),
+        };
+        if let Some(why) = self.projects_refusal(&real) {
+            return Err(why);
+        }
+        let parent_id = Identity::of(&parent)?;
+        let data = std::path::absolute(data_dir).map_err(|e| e.to_string())?;
+        let staging = data.join(ProjectsPolicy::STAGING);
+        match std::fs::symlink_metadata(&staging) {
+            Ok(m) if m.is_dir() => std::fs::remove_dir_all(&staging),
+            Ok(_) => std::fs::remove_file(&staging),
+            Err(_) => Ok(()),
+        }
+        .map_err(|e| format!("cannot empty {}: {e}", staging.display()))?;
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&staging)
+            .map_err(|e| format!("cannot make {}: {e}", staging.display()))?;
+        let fs_of = |p: &Path| std::fs::metadata(p).map(|m| m.dev()).ok();
+        let here = if dir_id.is_some() { &real } else { &parent };
+        if fs_of(&staging) != fs_of(here) {
+            return Err(format!(
+                "is not on the same file system as the node's data directory {}; a new \
+                 project is built there and moved in, which needs one file system",
+                data.display()
+            ));
+        }
+        Ok(Located {
+            dir: real,
+            parent_id,
+            dir_id,
+            staging,
+        })
     }
 
     /// Why `dir` (resolved) cannot hold new projects' folders, or `None`.
