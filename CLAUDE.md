@@ -119,8 +119,13 @@ Breaking one of these needs the owner's explicit yes and an update to
 
 - **The node decides.** `node.toml` on the node is the authority for what may
   run there. Nothing received over the protocol or over HTTP widens it.
-- **The master never runs tools.** The agent loop and its tools run on the
-  node that owns the session.
+- **The master runs no shell, no file tool and no program the model names.**
+  The agent loop and its tools run on the node that owns the session (the
+  chat runtime and the embedded node are node code inside the server's
+  process). A tool whose data lives on the master (recall, memory, the task
+  board, a connector to an online account) files a typed request over the
+  link; the master answers from a fixed list of built-in services, takes
+  the scope from the session alone, and each service is a per-agent switch.
 - **One writer per session.** Events are appended only by the owning node's
   session actor, with contiguous `seq`. The UI is a fold over the log.
 - **Chats are private to their owner,** in every workspace, for admins too.
