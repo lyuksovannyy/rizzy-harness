@@ -149,12 +149,17 @@ read-only.
   (Settings → Personalisation, PLAN.md T74) in their own chats: the fixed sentences of their reply
   choices and their personal instructions, one standing section of the context block
   (`personal`). `Features.personalisation`, frontmatter `personalisation`, **on by default** for
-  every agent (built-ins included; off changes the agent's prompt hash, on leaves earlier hashes as
-  they were). Off means neither the sentences nor the instructions, because an agent with a strict
+  every agent (off changes the agent's prompt hash, on leaves earlier hashes as they were). Off means neither the sentences nor the instructions, because an agent with a strict
   output format is disturbed as much by "use emoji" as by free text; the settings line (name,
   place, time zone, About you) is not this switch's. It is the agent's setting, like the others:
-  only those who may edit agents change it (today the server's admins). Built-in agents always
-  have it on (their switches are read-only; Duplicate makes an editable copy). It travels in the
+  only those who may edit agents change it (today the server's admins). Each built-in
+  agent's own definition says (owner, 2026-11-17: "decided by agent, scout dont, others maybe,
+  default one - yes"; ADOPTION_PLAN X.31): **Scout off, Reviewer off** (both report to a lead in a
+  strict form, the agents a format-changing instruction disturbs most); **Assistant (`general`,
+  the default agent), Software Developer (`coder`), Researcher, Senior Teamlead (`teamlead`),
+  Writer and Smol on**. The page shows each built-in's true value, read-only like its other
+  switches (Duplicate makes an editable copy). Scout is a sub-agent only, so its value matters
+  when a lead delegates to it. It travels in the
   agent's spec (`AgentSpec::no_personalisation`, absent = on): the master leaves the section out
   of an off agent's own turns, and the node drops it from what a sub-agent inherits of its parent
   turn when the child's switch is off, for a new child and a continued one (T68). Workspace settings →

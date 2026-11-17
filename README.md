@@ -372,9 +372,11 @@ still apply. A **Memory** row links to your memories.
   turn when its own switch is on. A routine runs as its owner.
 - An agent whose **Personalisation** switch is off (on its page in Agents)
   gets neither the sentences nor the instructions; your name, place and
-  time zone still come. Built-in agents always get it (their switch is shown
-  on and cannot be changed; Duplicate makes an agent whose switch you can
-  turn off).
+  time zone still come. Each built-in agent's definition sets it: Scout and
+  Reviewer do not get it (they report to a lead in a strict form); Assistant
+  (the default agent) and every other built-in do. Their switch is shown as
+  it is and cannot be changed (Duplicate makes an agent whose switch you can
+  change).
 - It is sent once and again only when you change it: a change applies from
   your next message, and costs that message one rewrite of the provider's
   prompt cache from the chat's first message on. What each turn was sent is
