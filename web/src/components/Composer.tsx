@@ -1,5 +1,5 @@
 import { ArrowUp, AtSign, CornerDownRight, FileText, Globe, Image, Loader2, Mic, Paperclip, Square, X } from "lucide-react";
-import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { type Dispatch, lazy, type SetStateAction, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { t } from "../lib/i18n";
 import { pickable } from "../lib/agents";
 import { activeMention, filterAgents, insertMention, isPathToken, leadingMention } from "../lib/mentions";
@@ -72,6 +72,17 @@ export interface Submission {
   approvalMode?: ApprovalMode;
   /** Session, a chat with a folder: the paths its text mentions with `@path` (T63). */
   files?: string[];
+  /** The box's attachments and images as they were, to put back (lib/outbox). */
+  uploads?: UploadedAttachment[];
+  pictures?: Picture[];
+}
+
+/** What the chat may do to the box: put a refused message back, take a
+ * retried one out (Conversation, lib/outbox). */
+export interface ComposerHandle {
+  setText: Dispatch<SetStateAction<string>>;
+  setFiles: Dispatch<SetStateAction<UploadedAttachment[]>>;
+  setPictures: Dispatch<SetStateAction<Picture[]>>;
 }
 
 const MAX_ATTACHMENTS = 5;
@@ -102,6 +113,10 @@ export function Composer(props: {
   running?: boolean;
   /** The chat whose unsent text this box keeps (lib/drafts); none: kept nowhere. */
   draft?: string;
+  /** Messages of this chat not in its log and not in the box (refused ones):
+   * the draft keeps them ahead of the box's text. */
+  held?: string;
+  handle?: { current: ComposerHandle | null };
   onSubmit: (s: Submission) => Promise<void>;
   onStop?: () => void;
   /** Home: the classifier's guess for this text (null = no opinion). */
@@ -193,7 +208,8 @@ export function Composer(props: {
   const [caret, setCaret] = useState(0);
   const [pick, setPick] = useState(0);
   const [popupClosed, setPopupClosed] = useState(false);
-  const [busy, setBusy] = useState(false);
+  // While a message is sent: its text.
+  const [busy, setBusy] = useState<string | boolean>(false);
   const [incognito, setIncognito] = useState(false);
   const [compareWith, setCompareWith] = useState<string | null>(null);
   const [searchKind, setSearchKind] = useState<SearchKind>("text");
@@ -202,6 +218,7 @@ export function Composer(props: {
   const [uploading, setUploading] = useState(0);
   const fileInput = useRef<HTMLInputElement>(null);
   const [pictures, setPictures] = useState<Picture[]>([]);
+  if (props.handle) props.handle.current = { setText, setFiles, setPictures };
   const [rec, setRec] = useState<"idle" | "recording" | "transcribing">("idle");
   const recorder = useRef<MediaRecorder | null>(null);
 
@@ -298,9 +315,13 @@ export function Composer(props: {
     const k = (draft.current = props.draft);
     if (k) setText((t) => t || readDraft(k));
   }, [props.draft]);
+  // Until the server has it, the message being sent stays in the draft
+  // ahead of what is typed since, as do refused ones (`held`): a reload or a
+  // closed chat loses none of them.
   useEffect(() => {
-    if (draft.current) writeDraft(draft.current, text);
-  }, [text]);
+    if (draft.current)
+      writeDraft(draft.current, [busy !== true && busy, props.held, text].filter((x) => x && !(x != text && text.includes(x))).join("\n"));
+  }, [text, busy, props.held]);
   useEffect(() => {
     ta.current?.focus();
   }, []);
@@ -457,7 +478,10 @@ export function Composer(props: {
       setErr(`${blind ? `${modelLabel(blind, props.models)} can't read images` : "A temporary chat takes no images"}; remove them to send.`);
       return;
     }
-    setBusy(true);
+    // The text leaves the box at once, for the chat (or, from home, the line
+    // above the box) to show as sent; a refusal puts it back.
+    setBusy(body);
+    setText("");
     setErr(null);
     try {
       await props.onSubmit({
@@ -473,13 +497,14 @@ export function Composer(props: {
         compareWith: home && mode === "ask" && compareWith && compareWith !== model ? compareWith : null,
         search: searching ? { url: engineUrl, query: typedEngine ? typedEngine.query.trim() || body : body } : undefined,
         ...(images.length ? { images } : {}),
+        uploads: files,
+        pictures,
         ...(home && mode === "agentic" ? { execMode: exec } : {}),
         ...(home && mode === "agentic" && approvalPick ? { approvalMode: approvalPick } : {}),
         ...(filesOf && hasPathToken ? { files: await sendable(filesOf, body) } : {}),
       });
       if (mode === "agentic") rememberFolder(cwd.trim());
       if (home) props.onLearn?.(body, mode);
-      setText("");
       setFiles([]);
       setFound([]);
       setDropped([]);
@@ -489,6 +514,7 @@ export function Composer(props: {
       setHostFor(null);
       setApprovalFor(null);
     } catch (x) {
+      setText((c) => (c.trim() ? `${body}\n${c}` : body));
       setErr(x instanceof Error ? x.message : String(x));
     } finally {
       setBusy(false);
@@ -586,6 +612,12 @@ export function Composer(props: {
 
   return (
     <div className="composer-wrap">
+      {home && !searching && busy !== true && busy && (
+        <div className="msg user sending">
+          <div className="bubble">{busy}</div>
+          <div className="queued-mark muted">Sending…</div>
+        </div>
+      )}
       {fileQuery != null && hits?.length === 0 && (
         <div className="mention-popup mention-none muted" role="status">
           {t("composer.noFile")}
@@ -925,7 +957,7 @@ export function Composer(props: {
               type="button"
               className="send"
               onClick={() => void submit()}
-              disabled={busy || uploading > 0 || sendingImages || !text.trim() || !!props.readOnly}
+              disabled={!!busy || uploading > 0 || sendingImages || !text.trim() || !!props.readOnly}
               aria-label={t("composer.send")}
             >
               <ArrowUp size={18} />

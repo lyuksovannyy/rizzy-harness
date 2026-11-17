@@ -37,6 +37,7 @@ const mediaApi = { list: vi.fn(), get: vi.fn() };
 vi.mock("../lib/media", async (original) => ({ ...(await original<typeof import("../lib/media")>()), mediaApi }));
 const { pageApi: api } = await import("../apiPages");
 const { default: Conversation } = await import("./Conversation");
+const { outbox } = await import("../lib/outbox");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -101,6 +102,8 @@ let root: Root;
 let current: SessionView;
 const live = { watch: vi.fn(), unwatch: vi.fn(), view: () => current, onTopic: vi.fn(() => () => {}) } as unknown as Live;
 beforeEach(() => {
+  // Messages sent in one test are not on their way in the next.
+  outbox.reset();
   call.mockClear();
   features.mockReset();
   features.mockResolvedValue(FEATURES(true));
@@ -222,7 +225,12 @@ describe("picking the chat's agent", () => {
     await act(async () => textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
     expect(prompted).toHaveBeenCalledWith(SID, "meanwhile", {});
     await act(async () => answer({ ok: true }));
-    // Taken: enabled, and no flicker back while the row catches up.
+    // Taken, but the message is still on its way: held until the chat has it
+    // (lib/outbox), then enabled, with no flicker back to the old agent.
+    expect(button().disabled).toBe(true);
+    expect(button().getAttribute("aria-label")).toBe("agent: Writer");
+    current = view([{ type: "user", turn_id: "t1", text: "meanwhile" }]);
+    await act(async () => root.render(<Conversation live={live} sessionId={SID} row={sessionRow()} nodes={[]} agents={agents} models={[]} />));
     expect(button().disabled).toBe(false);
     expect(button().getAttribute("aria-label")).toBe("agent: Writer");
     // A refusal is said and the picker goes back to the chat's agent.
