@@ -320,6 +320,11 @@ pub const COMPACT_PENDING: &str = "A message of yours is waiting to be read: sen
      again after its answer (or send a message to have it read).";
 /// A `session.compact` refused because another one runs in the chat.
 pub const COMPACT_BUSY: &str = "This chat is already being summarised.";
+/// A `session.set_agent` refused while the chat works: a turn of any kind
+/// runs (also one being stopped, a callback turn, a retry) or a `/compact`.
+/// The master answers 409 with it.
+pub const AGENT_WORKING: &str = "The agent is working: stop it or wait for it to finish, then \
+     pick another agent.";
 /// A prompt or callback refused while the chat is being summarised.
 pub const COMPACTING: &str = "This chat is being summarised: send your message when that is \
      done.";
@@ -596,6 +601,10 @@ pub enum MasterToNode {
         /// The master's context for the turn, as for a prompt.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context: Option<Box<harness_core::backend::MasterContext>>,
+        /// The retried message named its agent (a leading @mention), as
+        /// `session.prompt`'s: the retry is then no switch of the chat's.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        agent_named: bool,
     },
     /// Write the chat's hand-off note now if one is due (X.16,
     /// docs/handoff-notes.md; only to nodes with [`CAP_HANDOFF`]). A
@@ -648,7 +657,10 @@ pub enum MasterToNode {
         group: String,
         message_id: String,
     },
-    /// Change the session's active agent (records `agent_changed`).
+    /// The person picked another agent for the chat. The node writes
+    /// nothing (the master keeps the pick in the chat's row and sends the
+    /// agent with the next message, whose turn records `agent_changed`);
+    /// it refuses the change while the chat works ([`AGENT_WORKING`]).
     #[serde(rename = "session.set_agent")]
     SetAgent {
         req_id: String,

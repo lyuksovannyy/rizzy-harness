@@ -15,10 +15,11 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { Live } from "../live";
 import type { Features, Item, RoutineMark, SessionRow, SessionView } from "../types";
 
+const prompted = vi.fn((..._a: unknown[]) => Promise.resolve({ ok: true }));
 const call = vi.fn((..._a: unknown[]) => Promise.resolve({ ok: true }));
 const features = vi.fn<(scope: unknown) => Promise<Features>>();
 vi.mock("../api", () => ({
-  api: { features: (s: unknown) => features(s), prompt: vi.fn() },
+  api: { features: (s: unknown) => features(s), prompt: (...a: unknown[]) => prompted(...a) },
   call: (...a: unknown[]) => call(...a),
   HttpError: Error,
 }));
@@ -29,6 +30,7 @@ vi.mock("../apiPages", () => ({
     turnDiff: vi.fn(() => Promise.resolve({ files: [] })),
     restoreTurn: vi.fn(() => Promise.resolve({ ok: true })),
     retryTurn: vi.fn(() => Promise.resolve({ ok: true })),
+    setAgent: vi.fn(),
   },
 }));
 const artifactsApi = { forSession: vi.fn(() => Promise.resolve([])), save: vi.fn(() => Promise.resolve({ requested: true })) };
@@ -37,6 +39,7 @@ const mediaApi = { list: vi.fn(), get: vi.fn() };
 vi.mock("../lib/media", async (original) => ({ ...(await original<typeof import("../lib/media")>()), mediaApi }));
 const { pageApi: api } = await import("../apiPages");
 const { default: Conversation } = await import("./Conversation");
+const { outbox } = await import("../lib/outbox");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -50,7 +53,6 @@ const view = (items: Item[], profile: "chat" | "agentic" = "agentic"): SessionVi
     running_turn: null,
     pending_approvals: [],
     unknown_events: 0,
-    active_agent: "general",
     running_agent: null,
     variant_selection: {},
     usage: { input_tokens: 0, output_tokens: 0 },
@@ -102,6 +104,8 @@ let root: Root;
 let current: SessionView;
 const live = { watch: vi.fn(), unwatch: vi.fn(), view: () => current, onTopic: vi.fn(() => () => {}) } as unknown as Live;
 beforeEach(() => {
+  // Messages sent in one test are not on their way in the next.
+  outbox.reset();
   call.mockClear();
   features.mockReset();
   features.mockResolvedValue(FEATURES(true));
@@ -229,6 +233,73 @@ describe("thinking", () => {
       expect(host.textContent).toContain("hi");
     });
   }
+});
+
+describe("agent switches", () => {
+  test("the notice names the agent and its model, from the record; the picker shows the chat's pick", async () => {
+    await show(
+      [{ type: "agent_changed", agent: { agent_id: "writer", name: "Writer", prompt_hash: "h" }, model: "demo::big" }],
+      sessionRow({ agent_id: "researcher" }),
+    );
+    const lines = [...host.querySelectorAll(".divider")].map((d) => d.textContent ?? "");
+    expect(lines).toContain("Switched to Writer · demo::big");
+    // The row (the person's pick since) wins over the fold's last switch.
+    // (No agent list here: the header names the agent by its id.)
+    expect(host.textContent).toContain("researcher");
+  });
+});
+
+describe("picking the chat's agent", () => {
+  const agent = (id: string, name: string) => ({
+    id,
+    name,
+    description: "",
+    builtin: true,
+    default_model: null,
+    main_model: null,
+    fallbacks: [],
+    unavailable: [],
+    avatar: { shape: "circle", eyes: "round", accent: "blue" },
+  });
+  test("shown at once, held until the server answers, a message still goes; a refusal is said and undone", async () => {
+    current = view([]);
+    const agents = [agent("general", "General"), agent("writer", "Writer")] as never;
+    await act(async () => root.render(<Conversation live={live} sessionId={SID} row={sessionRow()} nodes={[]} agents={agents} models={[]} />));
+    const button = () => host.querySelector<HTMLButtonElement>('.agent-pick button[aria-label^="agent:"]')!;
+    const pick = async (name: string) => {
+      act(() => button().click());
+      const option = [...host.querySelectorAll<HTMLLIElement>('.agent-pick [role="option"]')].find((o) => o.textContent === name);
+      await act(async () => option?.click());
+    };
+    let answer!: (v: unknown) => void;
+    vi.mocked(api.setAgent).mockImplementationOnce(() => new Promise((r) => (answer = r)));
+    await pick("Writer");
+    expect(api.setAgent).toHaveBeenCalledWith(SID, "writer");
+    expect(button().getAttribute("aria-label")).toBe("agent: Writer");
+    expect(button().disabled).toBe(true);
+    // Enter still sends: the server orders the message and the pick.
+    const textarea = host.querySelector("textarea")!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(textarea, "meanwhile");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })));
+    expect(prompted).toHaveBeenCalledWith(SID, "meanwhile", {});
+    await act(async () => answer({ ok: true }));
+    // Taken, but the message is still on its way: held until the chat has it
+    // (lib/outbox), then enabled, with no flicker back to the old agent.
+    expect(button().disabled).toBe(true);
+    expect(button().getAttribute("aria-label")).toBe("agent: Writer");
+    current = view([{ type: "user", turn_id: "t1", text: "meanwhile" }]);
+    await act(async () => root.render(<Conversation live={live} sessionId={SID} row={sessionRow()} nodes={[]} agents={agents} models={[]} />));
+    expect(button().disabled).toBe(false);
+    expect(button().getAttribute("aria-label")).toBe("agent: Writer");
+    // A refusal is said and the picker goes back to the chat's agent.
+    vi.mocked(api.setAgent).mockImplementationOnce(() => Promise.reject(new Error("The agent is working: stop it.")));
+    await pick("General");
+    expect(host.textContent).toContain("The agent is working: stop it.");
+    expect(button().getAttribute("aria-label")).toBe("agent: General");
+  });
 });
 
 describe("hand-off notes", () => {

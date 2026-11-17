@@ -273,6 +273,7 @@ fn events() -> Vec<RawEvent> {
                 withheld: vec![],
                 effort: None,
             },
+            model: Some("demo::mock".into()),
         }),
         EventKind::TurnStarted(TurnStarted {
             cause: None,

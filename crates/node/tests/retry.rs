@@ -356,6 +356,7 @@ fn retry(link: &NodeLink, sid: SessionId, req_id: &str, turn: &str) {
             agent: None,
             savings: None,
             context: None,
+            agent_named: false,
         })
         .unwrap();
 }

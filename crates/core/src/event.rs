@@ -2025,11 +2025,18 @@ pub struct StepLimitChanged {
     pub requested: Option<i64>,
 }
 
-/// The session's active agent changed (selector, not an @mention: a mention
-/// only affects one turn and is recorded in that turn's `TurnStarted`).
+/// The chat now runs another agent or model than its last recorded one
+/// (`session_created`, else the latest `agent_changed`). Written by the
+/// node only, right before the `turn_started` of the person's next turn
+/// under the chat's own agent (a message or a Retry), never at the pick:
+/// picking writes nothing. An @mention, an answer to a question, a
+/// callback turn and a fallback model are no switch.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentChanged {
     pub agent: AgentRef,
+    /// The model the turn runs on (the agent's, or the chat's chosen one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 /// The user picked one of several parallel answers to continue from.
@@ -2335,7 +2342,10 @@ mod tests {
                 blocks: vec![],
                 thinking: None,
             }),
-            EventKind::AgentChanged(AgentChanged { agent }),
+            EventKind::AgentChanged(AgentChanged {
+                agent,
+                model: Some("m".into()),
+            }),
             EventKind::ApprovalModeChanged(ApprovalModeChanged {
                 mode: crate::policy::ApprovalMode::AcceptEdits,
                 requested: Some(crate::policy::ApprovalMode::Auto),

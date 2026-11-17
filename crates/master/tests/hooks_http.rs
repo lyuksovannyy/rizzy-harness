@@ -99,9 +99,8 @@ async fn rt(root: &Path, id: &str, profile: Profile) -> NodeRuntime {
 type Seen = Arc<Mutex<Vec<MasterToNode>>>;
 
 /// A chat node that runs nothing: it records every command and acks it,
-/// mirrors a `session_created` for each chat it is asked to create and an
-/// `agent_changed` for each agent switch, and sends whatever else a test
-/// makes it say (`emit`).
+/// mirrors a `session_created` for each chat it is asked to create, and
+/// sends whatever else a test makes it say (`emit`).
 #[derive(Clone)]
 struct Fake {
     seen: Seen,
@@ -193,18 +192,11 @@ fn fake_chat_node() -> (NodeLink, Fake) {
     let node = fake.clone();
     tokio::spawn(async move {
         while let Some(msg) = commands.recv().await {
-            match &msg {
-                MasterToNode::Create {
-                    session_id, title, ..
-                } => node.created(*session_id, title, None),
-                MasterToNode::SetAgent {
-                    session_id, agent, ..
-                } => node.emit(
-                    *session_id,
-                    "agent_changed",
-                    json!({"agent": agent.agent_ref()}),
-                ),
-                _ => {}
+            if let MasterToNode::Create {
+                session_id, title, ..
+            } = &msg
+            {
+                node.created(*session_id, title, None);
             }
             let req_id = msg.req_id().map(str::to_string);
             node.seen.lock().unwrap().push(msg);
