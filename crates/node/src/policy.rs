@@ -52,6 +52,9 @@ pub struct NodePolicy {
     /// programs each agentic chat may start, in its own confinement, and
     /// whose tools its agent is offered. Only this file adds one.
     pub mcp_servers: std::collections::BTreeMap<String, harness_tools::mcp::ServerConfig>,
+    /// Where the node makes new projects' folders on request (`[projects]`,
+    /// ADOPTION_PLAN X.26, PLAN.md T77).
+    pub projects: ProjectsPolicy,
     /// Folders no session may include and no file tool may touch, in every
     /// mode: the runtime's own data directory (keys, the API token,
     /// databases). Set by the runtime with [`NodePolicy::protect`], never
@@ -386,6 +389,116 @@ pub fn resolve_existing(p: &Path) -> PathBuf {
     p
 }
 
+/// `[projects]` in node.toml (ADOPTION_PLAN X.26, PLAN.md T77): the one
+/// folder in which this node makes a new project's folder when the master
+/// asks (`project.create`). The master sends a display name only; the node
+/// makes the folder's name and never a path the master chose. Only this
+/// file sets the folder.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProjectsPolicy {
+    /// Absolute or under `~/`. Left out: [`Self::DEFAULT_DIR`]; `""` turns
+    /// making project folders off on this node. It must lie inside a
+    /// `workspace_roots` entry (so a session can then run in what is made
+    /// there, under the one rule every session folder follows), and must
+    /// not be, hold or lie inside the node's data directory. Made on first
+    /// use with the node user's ordinary permissions.
+    pub dir: Option<PathBuf>,
+    /// The folder as checked at start ([`NodePolicy::locate_projects`]):
+    /// its deepest existing ancestor canonical, the rest appended. `None`:
+    /// this node makes no project folders. Never read from node.toml.
+    #[serde(skip)]
+    pub located: Option<PathBuf>,
+}
+
+impl ProjectsPolicy {
+    /// The folder when node.toml does not name one.
+    pub const DEFAULT_DIR: &'static str = "~/rizzy-projects";
+
+    /// The folder node.toml asks for, `~/` expanded: `Ok(None)` when it is
+    /// turned off (`dir = ""`), the default when left out. A `.` or `..`
+    /// component is refused, as for `[instructions] user_file`: the folder
+    /// is resolved once at start and judged as such.
+    pub fn configured(&self) -> Result<Option<PathBuf>, String> {
+        let p = match &self.dir {
+            Some(p) if p.as_os_str().is_empty() => return Ok(None),
+            Some(p) => p.clone(),
+            // The default needs a home folder; a service user without one
+            // makes no project folders unless node.toml names one.
+            None if dirs::home_dir().is_none() => return Ok(None),
+            None => PathBuf::from(Self::DEFAULT_DIR),
+        };
+        if p.components()
+            .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+        {
+            return Err(format!(
+                "[projects] dir: {} has a `.` or `..` in it; name the folder by its plain path",
+                p.display()
+            ));
+        }
+        expand_home(&p, "[projects] dir").map(Some)
+    }
+}
+
+impl NodePolicy {
+    /// Decide where this node makes new projects' folders (T77) and set
+    /// [`ProjectsPolicy::located`]. Call after [`Self::protect`] of the
+    /// data directory. The folder must lie inside a `workspace_roots`
+    /// entry and must not be, hold or lie inside a protected folder (the
+    /// data directory, the sub-agents' folders, the operator's instruction
+    /// file). One named in node.toml that breaks a rule is an error (the
+    /// node does not start); the default that breaks one only turns the
+    /// feature off, with the reason returned for the log, so a node whose
+    /// roots leave out the home folder starts as before.
+    pub fn locate_projects(&mut self) -> Result<Option<String>, String> {
+        self.projects.located = None;
+        let explicit = self.projects.dir.is_some();
+        let Some(dir) = self.projects.configured()? else {
+            return Ok(None);
+        };
+        let real = resolve_existing(&dir);
+        let refusal = self.projects_refusal(&real);
+        match refusal {
+            None => {
+                self.projects.located = Some(real);
+                Ok(None)
+            }
+            Some(why) if explicit => Err(format!("[projects] dir = {}: {why}", dir.display())),
+            Some(why) => Ok(Some(format!(
+                "new project folders are off: the default {} {why}; set [projects] dir in \
+                 node.toml to a folder inside workspace_roots, or dir = \"\" to say so",
+                ProjectsPolicy::DEFAULT_DIR
+            ))),
+        }
+    }
+
+    /// Why `dir` (resolved) cannot hold new projects' folders, or `None`.
+    pub(crate) fn projects_refusal(&self, dir: &Path) -> Option<String> {
+        for d in &self.protected_dirs {
+            let now = d.canonicalize().unwrap_or_else(|_| d.clone());
+            for d in [d, &now] {
+                if dir.starts_with(d) || d.starts_with(dir) {
+                    return Some(format!(
+                        "is, holds or lies inside the harness's own data {}; choose a folder \
+                         outside it",
+                        d.display()
+                    ));
+                }
+            }
+        }
+        let inside = self
+            .workspace_roots
+            .iter()
+            .filter_map(|r| r.canonicalize().ok())
+            .any(|r| dir.starts_with(&r));
+        (!inside).then(|| {
+            "lies outside the folders this node allows (workspace_roots in node.toml), so no \
+             chat could run in a folder made there"
+                .to_string()
+        })
+    }
+}
+
 /// `[execution]` in node.toml (N.10a; README "Execution modes"): which
 /// execution modes this node may offer, its ceiling. Nothing the master
 /// sends can widen it.
@@ -550,6 +663,9 @@ pub struct LimitsPolicy {
     /// The bound also stops a master that asks and cancels in a loop: a
     /// cancelled note leaves no event, so the chat stays due.
     pub handoff_notes_per_hour: usize,
+    /// New project folders this node makes per hour (`project.create`,
+    /// T77), all requests together; 0 turns making them off.
+    pub projects_per_hour: usize,
 }
 
 /// `max_approval_mode` when node.toml does not say: `auto`, so the owner's
@@ -568,6 +684,9 @@ pub const DEFAULT_CALLBACK_MAX_STEPS: usize = 20;
 /// again), and the most it may say.
 pub const DEFAULT_HANDOFF_PER_HOUR: usize = 4;
 pub const MAX_HANDOFF_PER_HOUR: usize = 60;
+/// `[limits] projects_per_hour` by default, and the most it may say.
+pub const DEFAULT_PROJECTS_PER_HOUR: usize = 20;
+pub const MAX_PROJECTS_PER_HOUR: usize = 200;
 
 /// `[limits] background_agent_timeout_s` by default, and its range: at
 /// most an hour, as a background command (the master's running window,
@@ -600,6 +719,7 @@ impl Default for LimitsPolicy {
             callback_turns: DEFAULT_CALLBACK_TURNS,
             callback_max_steps: DEFAULT_CALLBACK_MAX_STEPS,
             handoff_notes_per_hour: DEFAULT_HANDOFF_PER_HOUR,
+            projects_per_hour: DEFAULT_PROJECTS_PER_HOUR,
         }
     }
 }
@@ -671,6 +791,7 @@ impl Default for NodePolicy {
             skills: SkillsPolicy::default(),
             instructions: InstructionsPolicy::default(),
             mcp_servers: Default::default(),
+            projects: ProjectsPolicy::default(),
             protected_dirs: Vec::new(),
             user_git: Default::default(),
             exec: Default::default(),
@@ -736,6 +857,7 @@ impl NodePolicy {
         harness_tools::env::compile_pass(&self.env_pass)?;
         self.skills.roots()?;
         self.instructions.user_file()?;
+        self.projects.configured()?;
         let n = self.limits.tool_stream_bytes;
         let (min, max) = (
             harness_tools::stream::MIN_STREAM_BYTES,
@@ -832,6 +954,12 @@ impl NodePolicy {
                 self.limits.handoff_notes_per_hour,
                 0,
                 MAX_HANDOFF_PER_HOUR,
+            ),
+            (
+                "projects_per_hour",
+                self.limits.projects_per_hour,
+                0,
+                MAX_PROJECTS_PER_HOUR,
             ),
             (
                 "callback_max_steps",

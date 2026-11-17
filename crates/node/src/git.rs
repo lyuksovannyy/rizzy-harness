@@ -44,9 +44,14 @@ use tokio::process::Command;
 
 mod at;
 mod diff;
+mod init;
 mod merge;
 mod upkeep;
 mod user_repo;
+
+pub(crate) use init::init_project;
+#[cfg(test)]
+pub(crate) use init::{FIRST_COMMIT, use_test_git};
 
 /// Where checkpoints for one working folder are stored.
 #[derive(Debug, Clone, PartialEq, Eq)]

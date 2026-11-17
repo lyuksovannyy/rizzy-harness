@@ -1606,6 +1606,7 @@ dependencies = [
  "base64 0.23.1",
  "dirs",
  "flate2",
+ "getrandom 0.4.3",
  "harness-agent-native",
  "harness-core",
  "harness-link",

@@ -16,6 +16,7 @@ async-trait.workspace = true
 base64.workspace = true
 dirs.workspace = true
 flate2.workspace = true
+getrandom.workspace = true
 harness-core.workspace = true
 harness-protocol.workspace = true
 harness-store.workspace = true

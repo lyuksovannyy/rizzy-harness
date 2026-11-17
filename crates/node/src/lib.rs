@@ -11,6 +11,7 @@ mod instructions;
 mod others;
 mod outbox;
 pub mod policy;
+pub mod projects;
 mod recall;
 mod session;
 
@@ -126,7 +127,8 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::ArtifactFetch { .. }
         | MasterToNode::RecallResult { .. }
         | MasterToNode::Diff { .. }
-        | MasterToNode::Files { .. } => None,
+        | MasterToNode::Files { .. }
+        | MasterToNode::ProjectCreate { .. } => None,
     }
 }
 
@@ -198,6 +200,10 @@ pub(crate) struct Inner {
     diffs: Arc<tokio::sync::Semaphore>,
     /// Room for `@` completions being walked (T63), as many as diffs.
     file_lists: Arc<tokio::sync::Semaphore>,
+    /// New project folders made in the last hour (T77), and room for the
+    /// ones being made (one at a time).
+    projects_made: projects::Made,
+    project_slots: Arc<tokio::sync::Semaphore>,
 }
 
 impl Inner {
@@ -526,6 +532,8 @@ impl NodeRuntime {
             recalls: Default::default(),
             diffs: Arc::new(tokio::sync::Semaphore::new(DIFF_AT_ONCE)),
             file_lists: Arc::new(tokio::sync::Semaphore::new(DIFF_AT_ONCE)),
+            projects_made: Default::default(),
+            project_slots: Arc::new(tokio::sync::Semaphore::new(1)),
         });
         for row in rows {
             let s = Session::load(inner.clone(), row.session_id).await?;
@@ -687,6 +695,13 @@ impl NodeRuntime {
                 capabilities.push(harness_protocol::CAP_DIFF.into());
                 // `@` file mentions and their completion (T63).
                 capabilities.push(harness_protocol::CAP_FILES.into());
+                // New project folders (X.26, T77): only where node.toml's
+                // projects folder passed its checks at start. Never the path.
+                if self.inner.cfg.policy.projects.located.is_some()
+                    && self.inner.cfg.policy.limits.projects_per_hour > 0
+                {
+                    capabilities.push(harness_protocol::CAP_PROJECTS.into());
+                }
                 // Hand-off notes (X.16): the master asks once a chat idles.
                 // Off is silent, as for callbacks: with
                 // `handoff_notes_per_hour = 0` the master asks nothing.
@@ -756,6 +771,11 @@ impl NodeRuntime {
                         session_id,
                         query,
                     } => this.files(req_id, session_id, query),
+                    // A new project's folder (T77): no session, its own
+                    // task, answered by one `project.created`.
+                    MasterToNode::ProjectCreate { req_id, name } => {
+                        this.create_project(req_id, name)
+                    }
                     // Answered here, at once: they must not wait behind a
                     // slow restore or delete (AUDIT S10), nor behind the
                     // output queued for the master (A.21): their acks go
@@ -999,6 +1019,56 @@ impl NodeRuntime {
                 Err(e) => NodeToMaster::FilesResult {
                     req_id,
                     paths: vec![],
+                    error: Some(e),
+                },
+            };
+            inner.publish_wait(msg).await;
+        });
+    }
+
+    /// Answer `project.create` (X.26, PLAN.md T77) from a task of its own;
+    /// never acked: `project.created` is the answer. Only an agentic node
+    /// whose node.toml names a usable projects folder makes one; one at a
+    /// time, and at most `[limits] projects_per_hour`. The node's audit
+    /// line has the outcome and the folder made (on this node's own log).
+    fn create_project(&self, req_id: String, name: String) {
+        let refuse = |error: String| NodeToMaster::ProjectCreated {
+            req_id: req_id.clone(),
+            path: None,
+            error: Some(error),
+        };
+        if self.inner.cfg.profile != harness_core::event::Profile::Agentic {
+            return self.inner.publish(refuse(projects::OFF.into()));
+        }
+        let Ok(permit) = self.inner.project_slots.clone().try_acquire_owned() else {
+            return self.inner.publish(refuse(
+                "this node is making another project's folder; try again".into(),
+            ));
+        };
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            let res = projects::create(
+                &inner.cfg.policy,
+                &inner.projects_made,
+                &name,
+                &projects::suffix,
+            )
+            .await;
+            let detail = match &res {
+                Ok(p) => serde_json::json!({ "ok": true, "folder": p }),
+                Err(_) => serde_json::json!({ "ok": false }),
+            };
+            inner.audit_log.record("project.create", detail.to_string());
+            let msg = match res {
+                Ok(p) => NodeToMaster::ProjectCreated {
+                    req_id,
+                    path: Some(p.to_string_lossy().into_owned()),
+                    error: None,
+                },
+                Err(e) => NodeToMaster::ProjectCreated {
+                    req_id,
+                    path: None,
                     error: Some(e),
                 },
             };
@@ -1432,6 +1502,10 @@ impl NodeRuntime {
                 query,
             } => {
                 self.files(req_id, session_id, query);
+                Ok(())
+            }
+            MasterToNode::ProjectCreate { req_id, name } => {
+                self.create_project(req_id, name);
                 Ok(())
             }
         };

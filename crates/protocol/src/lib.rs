@@ -68,6 +68,16 @@ pub const CAP_DIFF: &str = "diff";
 /// a node whose hello did not list it.
 pub const CAP_FILES: &str = "files";
 
+/// The node capability that announces `project.create` (ADOPTION_PLAN
+/// X.26, PLAN.md T77): its node.toml names a projects folder in which it
+/// makes a new project's folder on request. Never the folder's path: the
+/// master learns a path only from a `project.created` answer.
+pub const CAP_PROJECTS: &str = "projects";
+
+/// The longest display name a `project.create` may carry, in bytes; a node
+/// refuses a longer one (the master's project names are far shorter).
+pub const MAX_PROJECT_NAME: usize = 256;
+
 /// The most paths one `session.prompt` may name in `files`, and the
 /// longest one, in bytes; a node reads at most its own number of them.
 pub const MAX_PROMPT_FILES: usize = 64;
@@ -473,6 +483,17 @@ pub enum NodeToMaster {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// The answer to `project.create` (pull only: never sent unasked): the
+    /// absolute path of the folder the node made, or why it made none, in
+    /// words for the person.
+    #[serde(rename = "project.created")]
+    ProjectCreated {
+        req_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -822,6 +843,15 @@ pub enum MasterToNode {
         session_id: SessionId,
         query: String,
     },
+    /// Make a new project's folder (ADOPTION_PLAN X.26, PLAN.md T77): a
+    /// display name and nothing else. The node makes the folder's name
+    /// from it (`<slug>-<4 random characters>`) inside the projects folder
+    /// its node.toml names, makes it a git repository with one empty
+    /// commit, and answers with one `project.created`, never an ack. No
+    /// field names a place: a path sent beside it is an unknown field and
+    /// has no effect. Only to nodes with [`CAP_PROJECTS`].
+    #[serde(rename = "project.create")]
+    ProjectCreate { req_id: String, name: String },
 }
 
 impl MasterToNode {
@@ -851,7 +881,8 @@ impl MasterToNode {
             | MasterToNode::ArtifactFetch { .. }
             | MasterToNode::RecallResult { .. }
             | MasterToNode::Diff { .. }
-            | MasterToNode::Files { .. } => None,
+            | MasterToNode::Files { .. }
+            | MasterToNode::ProjectCreate { .. } => None,
         }
     }
 }
@@ -860,6 +891,41 @@ impl MasterToNode {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// `project.create` carries a display name only (T77): its wire shape,
+    /// never acked, and a place sent beside the name (`path`, `dir`, `cwd`)
+    /// is dropped by the parse, so it cannot reach the node's handler.
+    #[test]
+    fn project_create_carries_a_name_only() {
+        let m = MasterToNode::ProjectCreate {
+            req_id: "r".into(),
+            name: "Project Name Example".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&m).unwrap(),
+            json!({"type": "project.create", "req_id": "r", "name": "Project Name Example"})
+        );
+        assert_eq!(m.req_id(), None, "answered by project.created, never acked");
+        let hostile = json!({"type": "project.create", "req_id": "r", "name": "x",
+                             "path": "/etc", "dir": "/", "cwd": "/root"});
+        assert_eq!(
+            serde_json::from_value::<MasterToNode>(hostile).unwrap(),
+            MasterToNode::ProjectCreate {
+                req_id: "r".into(),
+                name: "x".into()
+            }
+        );
+        let a = NodeToMaster::ProjectCreated {
+            req_id: "r".into(),
+            path: Some("/home/me/rizzy-projects/x-ab1c".into()),
+            error: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&a).unwrap(),
+            json!({"type": "project.created", "req_id": "r",
+                   "path": "/home/me/rizzy-projects/x-ab1c"})
+        );
+    }
 
     /// `recall.request` carries words only: a field naming a user, a
     /// workspace or a chat does not parse, so a node cannot widen the scope
