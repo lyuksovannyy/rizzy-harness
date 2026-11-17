@@ -218,9 +218,13 @@ struct Server {
 }
 
 fn serve(data: &Path, extra: &[&str]) -> Server {
+    serve_with(data, extra, &[])
+}
+
+fn serve_with(data: &Path, extra: &[&str], envs: &[(&str, &str)]) -> Server {
     let mut args = vec!["serve", "--bind", "127.0.0.1:0"];
     args.extend_from_slice(extra);
-    let proc = spawn(data, &args, &[], "listening on http://");
+    let proc = spawn(data, &args, envs, "listening on http://");
     let addr = proc
         .out
         .iter()
@@ -1240,4 +1244,85 @@ async fn an_unusable_stop_wait_is_refused_not_a_dead_stop() {
     assert!(!log.contains("panicked"), "{log}");
     let s2 = serve(&data, &[]);
     assert_eq!(end_reason(&s2.events(&sid).await), "stopped");
+}
+
+// ---- the node's checkpoints follow the user's global git ignore ----
+
+/// Every path of every snapshot in the checkpoint stores under `data`.
+fn snapshotted(data: &Path) -> Vec<String> {
+    let mut stores = Vec::new();
+    let mut stack = vec![data.join("checkpoints")];
+    while let Some(d) = stack.pop() {
+        if d.join("HEAD").is_file() && d.join("objects").is_dir() {
+            stores.push(d);
+            continue;
+        }
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            if e.file_type().is_ok_and(|t| t.is_dir()) {
+                stack.push(e.path());
+            }
+        }
+    }
+    let git = |store: &Path, args: &[&str]| {
+        let o = Command::new("git")
+            .arg("--git-dir")
+            .arg(store)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&o.stdout).into_owned()
+    };
+    let mut paths = Vec::new();
+    for store in &stores {
+        for id in git(store, &["for-each-ref", "--format=%(objectname)"]).lines() {
+            paths.extend(
+                git(store, &["ls-tree", "-r", "--name-only", id])
+                    .lines()
+                    .map(str::to_string),
+            );
+        }
+    }
+    paths
+}
+
+/// The shipped binary's node still finds the user's global ignore file
+/// from its own environment (`NodePolicy::load` takes `HOME`,
+/// `XDG_CONFIG_HOME` and `GIT_CONFIG_GLOBAL` from the process; `node run`
+/// loads its policy the same way), so a file the user ignores globally is
+/// not in its checkpoints. Test rigs build their policy in code and get
+/// none of it (`policy::tests::code_built_policies_have_no_home_skill_roots_and_node_toml_keeps_them`).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_served_node_follows_the_users_global_git_ignore() {
+    let (dir, data, ws) = setup();
+    let xdg = dir.path().join("xdg");
+    std::fs::create_dir_all(xdg.join("git")).unwrap();
+    std::fs::write(xdg.join("git/ignore"), "globally-ignored.txt\n").unwrap();
+    let s = serve_with(&data, &[], &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())]);
+    let sid = s.session(&ws, "auto", None).await;
+    s.post(
+        &format!("/api/sessions/{sid}/prompt"),
+        json!({"text": "run: echo a > kept.txt; echo b > globally-ignored.txt"}),
+    )
+    .await;
+    s.wait_for(&sid, "turn_ended").await;
+    // The after-turn checkpoint is written after the turn's tool call.
+    let by = Instant::now() + WITHIN;
+    let paths = loop {
+        let p = snapshotted(&data);
+        if p.iter().any(|p| p.ends_with("kept.txt")) || Instant::now() >= by {
+            break p;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert!(
+        paths.iter().any(|p| p.ends_with("kept.txt")),
+        "no checkpoint holds kept.txt: {paths:?}\n{}",
+        s.proc.log()
+    );
+    assert!(
+        !paths.iter().any(|p| p.ends_with("globally-ignored.txt")),
+        "a globally ignored file was checkpointed: {paths:?}"
+    );
 }

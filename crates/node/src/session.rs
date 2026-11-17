@@ -1121,6 +1121,7 @@ impl Session {
             ceiling: policy.root_of(dir).ok(),
             protected: policy.protected_dirs.clone(),
             sandbox: self.node.cfg.git_sandbox.clone(),
+            user_git: policy.user_git.clone(),
         }
     }
 

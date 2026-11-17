@@ -605,6 +605,8 @@ mod tests {
             .env("PATH", std::env::var_os("PATH").unwrap())
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            // Nor the global ignore file (`~/.config/git/ignore`).
+            .env("XDG_CONFIG_HOME", "/nonexistent")
             .env("GIT_AUTHOR_NAME", "t")
             .env("GIT_AUTHOR_EMAIL", "t@t")
             .env("GIT_COMMITTER_NAME", "t")
@@ -628,6 +630,8 @@ mod tests {
             .env("PATH", std::env::var_os("PATH").unwrap())
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            // Nor the global ignore file (`~/.config/git/ignore`).
+            .env("XDG_CONFIG_HOME", "/nonexistent")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .spawn()
@@ -956,16 +960,17 @@ mod tests {
             .unwrap()
             .set_modified(hour_ago)
             .unwrap();
-        // Written before the collection starts, `young` stands for what a
-        // snapshot writes while it runs: its time is set past any start this
-        // collection can have. (Left as written, it was older than the start
-        // whenever making the store due took more than the 1 s margin, as
-        // on a loaded machine: "a young object was pruned".)
+        // `young` stands for what a snapshot writes while the collection
+        // runs: its time is set just before the collection starts, after
+        // the store is made due (set before that, it was older than the
+        // start whenever making the store due took more than the 1 s
+        // margin, as on a loaded machine: "a young object was pruned").
+        // A cutoff even a few seconds late prunes it.
+        make_due(&repo).await;
         std::fs::File::open(path(&young))
             .unwrap()
-            .set_modified(SystemTime::now() + Duration::from_secs(600))
+            .set_modified(SystemTime::now())
             .unwrap();
-        make_due(&repo).await;
         assert!(maybe_gc(&repo).await);
         let has = |id: String| {
             let repo = repo.clone();

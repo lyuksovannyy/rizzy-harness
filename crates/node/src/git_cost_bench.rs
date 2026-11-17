@@ -455,6 +455,8 @@ fn git_user(dir: &Path, args: &[&str]) {
         .arg(dir)
         .args(args)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        // Nor the global ignore file (`~/.config/git/ignore`).
+        .env("XDG_CONFIG_HOME", "/nonexistent")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_AUTHOR_NAME", "b3")
         .env("GIT_AUTHOR_EMAIL", "b3@localhost")
