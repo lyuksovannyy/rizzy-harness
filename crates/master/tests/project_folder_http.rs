@@ -29,6 +29,8 @@ use tokio::sync::mpsc;
 struct Fake {
     seen: Arc<Mutex<Vec<MasterToNode>>>,
     refuse: Arc<AtomicBool>,
+    /// Never answers `project.create` while set (a node that times out).
+    mute: Arc<AtomicBool>,
     leave: Option<mpsc::UnboundedSender<()>>,
 }
 
@@ -88,8 +90,9 @@ fn fake(id: &str, caps: &[&str]) -> (NodeLink, Fake) {
     .unwrap();
     let seen: Arc<Mutex<Vec<MasterToNode>>> = Arc::default();
     let refuse = Arc::new(AtomicBool::new(false));
+    let mute = Arc::new(AtomicBool::new(false));
     let (leave, mut left) = mpsc::unbounded_channel::<()>();
-    let (node, keep, no) = (id.to_string(), seen.clone(), refuse.clone());
+    let (node, keep, no, quiet) = (id.to_string(), seen.clone(), refuse.clone(), mute.clone());
     tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -123,6 +126,7 @@ fn fake(id: &str, caps: &[&str]) -> (NodeLink, Fake) {
                                 },
                             });
                         }
+                        MasterToNode::ProjectCreate { .. } if quiet.load(Ordering::SeqCst) => {}
                         MasterToNode::ProjectCreate { req_id, name } => {
                             let _ = tx.try_send(if no.load(Ordering::SeqCst) {
                                 NodeToMaster::ProjectCreated {
@@ -153,6 +157,7 @@ fn fake(id: &str, caps: &[&str]) -> (NodeLink, Fake) {
         Fake {
             seen,
             refuse,
+            mute,
             leave: Some(leave),
         },
     )
@@ -513,4 +518,72 @@ async fn a_project_without_a_folder_gets_one_once() {
     )
     .await;
     assert!(st.is_client_error(), "{st}");
+}
+
+/// Review of PR 143, turned around: two "Create its folder" at once for
+/// one project, on two nodes. Before, both got 200 and both nodes made a
+/// folder (the project kept one). Now exactly one node is asked: the other
+/// request is refused before any node is.
+#[tokio::test]
+async fn two_gives_at_once_ask_one_node() {
+    let t = start().await;
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        "/api/projects",
+        Some(json!({"name": "Twice"})),
+        &t.alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let give = format!("/api/projects/{}/folder", v["project_id"].as_str().unwrap());
+    let (a, b) = tokio::join!(
+        req(
+            &t,
+            Method::POST,
+            &give,
+            Some(json!({"node_id": "local"})),
+            &t.alex
+        ),
+        req(
+            &t,
+            Method::POST,
+            &give,
+            Some(json!({"node_id": "remote"})),
+            &t.alex
+        ),
+    );
+    let ok = [&a, &b].iter().filter(|r| r.0 == StatusCode::OK).count();
+    assert_eq!(ok, 1, "{a:?} {b:?}");
+    let other = if a.0 == StatusCode::OK { &b } else { &a };
+    assert_eq!(other.0, StatusCode::CONFLICT, "{other:?}");
+    assert_eq!(
+        t.local.names().len() + t.remote.names().len(),
+        1,
+        "exactly one folder made"
+    );
+}
+
+/// A node that does not answer in time: no project, and the answer names
+/// the node and the folder name it may still make, for the person to
+/// remove (the node is not told to stop: that is the residual in T77).
+#[tokio::test]
+async fn a_node_that_times_out_is_named_with_the_folder_it_may_make() {
+    let t = start().await;
+    t.master
+        .set_project_folder_wait(std::time::Duration::from_millis(300));
+    t.remote.mute.store(true, Ordering::SeqCst);
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        "/api/projects",
+        Some(json!({"name": "Slow One", "folder_on": "remote"})),
+        &t.alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{v}");
+    let e = v["error"].as_str().unwrap();
+    assert!(e.contains("node remote") && e.contains("slow-one-"), "{e}");
+    assert_eq!(t.remote.names(), ["Slow One"]);
+    assert!(projects(&t, &t.alex, None).await.is_empty());
 }

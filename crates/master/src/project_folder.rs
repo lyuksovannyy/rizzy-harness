@@ -7,7 +7,8 @@
 //! started there. Who may ask is the caller's check
 //! (`http/projects.rs`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use harness_protocol::{CAP_PROJECTS, MasterToNode};
@@ -28,9 +29,60 @@ pub const MAX_PATH: usize = 1024;
 
 type Answer = Result<String, String>;
 
-/// Requests waiting for their node's answer, by request id.
+/// Requests waiting for their node's answer, by request id; the projects
+/// a folder is being made for now (one request per project at a time);
+/// the wait (tests shorten it).
 #[derive(Default)]
-pub struct Waiting(std::sync::Mutex<HashMap<String, Wait>>);
+pub struct Waiting {
+    pending: std::sync::Mutex<HashMap<String, Wait>>,
+    claims: std::sync::Mutex<HashSet<String>>,
+    wait_ms: AtomicU64,
+}
+
+impl Waiting {
+    fn wait(&self) -> Duration {
+        match self.wait_ms.load(Ordering::Relaxed) {
+            0 => WAIT,
+            ms => Duration::from_millis(ms),
+        }
+    }
+}
+
+impl Master {
+    /// Tests: how long a new folder is waited for (0: the default, 30 s).
+    #[doc(hidden)]
+    pub fn set_project_folder_wait(&self, d: Duration) {
+        self.inner
+            .project_folders
+            .wait_ms
+            .store(d.as_millis() as u64, Ordering::Relaxed);
+    }
+}
+
+/// A project a folder is being made for: held from before the node is
+/// asked until the project's settings are written, so a second request
+/// for the same project is refused before any node is asked (review of
+/// PR 143: two at once each made a folder and the project kept one).
+pub struct Claim {
+    m: Master,
+    project: String,
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        lock(&self.m.inner.project_folders.claims).remove(&self.project);
+    }
+}
+
+/// Claim `project` for one folder request, or `None` while another holds it.
+pub fn claim(m: &Master, project: &str) -> Option<Claim> {
+    lock(&m.inner.project_folders.claims)
+        .insert(project.to_string())
+        .then(|| Claim {
+            m: m.clone(),
+            project: project.to_string(),
+        })
+}
 
 struct Wait {
     node: String,
@@ -47,7 +99,9 @@ pub enum FolderError {
     /// is older).
     NotOffered(String),
     Busy,
-    Timeout(String),
+    /// No answer in time: the node may still make the folder. The node,
+    /// and the folder name's first part (the slug of the name).
+    Timeout(String, String),
     Refused(String),
 }
 
@@ -64,7 +118,12 @@ impl std::fmt::Display for FolderError {
                  dir), or it is an older version. Choose an existing folder instead"
             ),
             FolderError::Busy => write!(f, "too many folders are being made; try again"),
-            FolderError::Timeout(n) => write!(f, "node {n} did not answer in time; try again"),
+            FolderError::Timeout(n, slug) => write!(
+                f,
+                "node {n} did not answer in time; it may still make the folder: if a folder \
+                 named {slug}-… appears in its projects folder, remove it, or open it with \
+                 Existing folder"
+            ),
             FolderError::Refused(why) => write!(f, "{why}"),
         }
     }
@@ -77,7 +136,7 @@ struct Entry<'a> {
 
 impl Drop for Entry<'_> {
     fn drop(&mut self) {
-        lock(&self.m.inner.project_folders.0).remove(self.req_id);
+        lock(&self.m.inner.project_folders.pending).remove(self.req_id);
     }
 }
 
@@ -93,7 +152,7 @@ pub async fn make(m: &Master, user: &str, node: &str, name: &str) -> Result<Stri
     let req_id = harness_core::new_id();
     let (tx, rx) = oneshot::channel();
     {
-        let mut w = lock(&m.inner.project_folders.0);
+        let mut w = lock(&m.inner.project_folders.pending);
         if w.len() >= MAX_WAITING || w.values().filter(|x| x.user == user).count() >= PER_USER {
             return Err(FolderError::Busy);
         }
@@ -117,11 +176,14 @@ pub async fn make(m: &Master, user: &str, node: &str, name: &str) -> Result<Stri
     if !sent {
         return Err(FolderError::Away(node.to_string()));
     }
-    match tokio::time::timeout(WAIT, rx).await {
+    match tokio::time::timeout(m.inner.project_folders.wait(), rx).await {
         Ok(Ok(Ok(p))) => Ok(p),
         Ok(Ok(Err(e))) => Err(FolderError::Refused(e)),
         Ok(Err(_)) => Err(FolderError::Away(node.to_string())),
-        Err(_) => Err(FolderError::Timeout(node.to_string())),
+        Err(_) => Err(FolderError::Timeout(
+            node.to_string(),
+            harness_node::projects::slug(name),
+        )),
     }
 }
 
@@ -131,14 +193,25 @@ pub async fn make(m: &Master, user: &str, node: &str, name: &str) -> Result<Stri
 /// a refusal: the node said nothing usable.
 pub fn on_answer(m: &Master, node_id: &str, req_id: String, answer: Answer) {
     let tx = {
-        let mut w = lock(&m.inner.project_folders.0);
+        let mut w = lock(&m.inner.project_folders.pending);
         match w.get(&req_id) {
             Some(x) if x.node == node_id => w.remove(&req_id).map(|x| x.tx),
             Some(_) => {
                 tracing::warn!(node = %node_id, "project folder answer for another node's request; ignored");
                 None
             }
-            None => None,
+            None => {
+                // Its request timed out (the person was told the node may
+                // still make it): the master's own log says where it is.
+                if let Ok(p) = &answer {
+                    tracing::warn!(
+                        node = %node_id,
+                        folder = %p.chars().take(MAX_PATH).collect::<String>().escape_debug(),
+                        "a project folder was made after its request gave up; no project names it"
+                    );
+                }
+                None
+            }
         }
     };
     if let Some(tx) = tx {
@@ -163,5 +236,5 @@ pub fn on_answer(m: &Master, node_id: &str, req_id: String, answer: Answer) {
 
 /// The node's link closed: its waiting requests end now, as "away".
 pub fn node_down(m: &Master, node_id: &str) {
-    lock(&m.inner.project_folders.0).retain(|_, x| x.node != node_id);
+    lock(&m.inner.project_folders.pending).retain(|_, x| x.node != node_id);
 }

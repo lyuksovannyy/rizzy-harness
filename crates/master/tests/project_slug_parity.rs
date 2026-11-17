@@ -64,8 +64,7 @@ fn the_preview_fixture_is_the_real_path() {
         .into_iter()
         .filter_map(|n| {
             // A name the master refuses makes no folder: no preview to check.
-            let clean =
-                harness_master::projects::clean_required("name", &n, usize::MAX).ok()?;
+            let clean = harness_master::projects::clean_required("name", &n, usize::MAX).ok()?;
             Some((n, harness_node::projects::slug(&clean)))
         })
         .collect();

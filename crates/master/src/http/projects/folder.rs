@@ -21,6 +21,16 @@ use crate::projects::ProjectSettings;
 use crate::workspaces::{self as ws, Access};
 use crate::{Audience, Master};
 
+/// The project `id` as stored now.
+async fn current(m: &Master, id: &str) -> ApiResult<harness_store::ProjectRow> {
+    let pid = id.to_string();
+    m.inner
+        .mirror
+        .call(move |s| s.project(&pid))
+        .await?
+        .ok_or_else(|| not_found("project"))
+}
+
 pub(super) fn routes() -> Router<Master> {
     Router::new().route("/api/projects/{id}/folder", post(give_folder))
 }
@@ -58,7 +68,7 @@ pub(super) async fn make_on(
         .await
         .map_err(|e| {
             let code = match e {
-                FolderError::Away(_) | FolderError::Timeout(_) => StatusCode::SERVICE_UNAVAILABLE,
+                FolderError::Away(_) | FolderError::Timeout(..) => StatusCode::SERVICE_UNAVAILABLE,
                 FolderError::Busy => StatusCode::TOO_MANY_REQUESTS,
                 FolderError::NotOffered(_) | FolderError::Refused(_) => StatusCode::CONFLICT,
             };
@@ -67,6 +77,22 @@ pub(super) async fn make_on(
     settings.node_id = Some(node.to_string());
     settings.cwd = Some(path);
     Ok(settings)
+}
+
+/// `e` said with the folder `settings` name, when it names one: it was
+/// made on its node and no project keeps it, so the person can remove it.
+pub(super) fn orphaned(settings: &ProjectSettings, e: ApiError) -> ApiError {
+    match (&settings.node_id, &settings.cwd) {
+        (Some(node), Some(path)) => ApiError(
+            e.0,
+            format!(
+                "{}; the folder {path} was made on node {node} but no project names it: \
+                 remove it, or open it with Existing folder",
+                e.1
+            ),
+        ),
+        _ => e,
+    }
 }
 
 #[derive(Deserialize)]
@@ -86,29 +112,72 @@ async fn give_folder(
 ) -> ApiResult<Json<Value>> {
     let (who, row) = managed(&m, &headers, &id).await?;
     let a = member_of(&m, &who, &row.workspace_id, "project").await?;
-    let settings = ProjectSettings::read(&row.settings);
-    if settings.cwd.is_some() {
+    // One request per project at a time, before any node is asked; then
+    // the project as it is now (another request may have given it one).
+    let Some(claim) = project_folder::claim(&m, &row.project_id) else {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "a folder is being made for this project already".into(),
+        ));
+    };
+    let has_folder =
+        |row: &harness_store::ProjectRow| ProjectSettings::read(&row.settings).cwd.is_some();
+    let row = current(&m, &row.project_id).await?;
+    if has_folder(&row) {
         return Err(ApiError(
             StatusCode::CONFLICT,
             "this project has a folder already; change it in the project's settings".into(),
         ));
     }
     may_make_on(&m, &who, &a, &b.node_id)?;
-    let settings = make_on(&m, &who, &b.node_id, &row.name, settings).await?;
-    let patch = ProjectPatch {
-        settings: Some(
-            serde_json::to_string(&settings)
-                .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
-        ),
-        ..Default::default()
+    // The folder and the write in a task of its own, holding the claim: a
+    // client that goes away does not stop it between the two.
+    let task = {
+        let (m, who) = (m.clone(), who.clone());
+        async move {
+            let _claim = claim;
+            let made = make_on(
+                &m,
+                &who,
+                &b.node_id,
+                &row.name,
+                ProjectSettings::read(&row.settings),
+            )
+            .await?;
+            // Changed meanwhile by hand (PATCH settings): kept, and the new
+            // folder named for the person to remove.
+            let now = current(&m, &row.project_id).await?;
+            if has_folder(&now) {
+                return Err(orphaned(
+                    &made,
+                    ApiError(
+                        StatusCode::CONFLICT,
+                        "the project was given a folder meanwhile".into(),
+                    ),
+                ));
+            }
+            let mut settings = ProjectSettings::read(&now.settings);
+            settings.node_id = made.node_id.clone();
+            settings.cwd = made.cwd.clone();
+            let patch = ProjectPatch {
+                settings: Some(
+                    serde_json::to_string(&settings)
+                        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+                ),
+                ..Default::default()
+            };
+            let pid = now.project_id.clone();
+            m.inner
+                .mirror
+                .call(move |s| s.update_project(&pid, &patch))
+                .await
+                .map_err(|e| orphaned(&made, e.into()))?
+                .ok_or_else(|| orphaned(&made, not_found("project")))
+        }
     };
-    let pid = row.project_id.clone();
-    let row = m
-        .inner
-        .mirror
-        .call(move |s| s.update_project(&pid, &patch))
-        .await?
-        .ok_or_else(|| not_found("project"))?;
+    let row = tokio::spawn(task)
+        .await
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
     changed(&m, Audience::Workspace(row.workspace_id.clone()));
     Ok(Json(detail_json(&m, &who, &a, &row).await?))
 }

@@ -286,30 +286,24 @@ async fn create(
     let instructions =
         p::clean("instructions", &b.instructions, p::INSTRUCTIONS_MAX, true).map_err(bad)?;
     // The folder first, once every other check passed (here and the
-    // workspace's project limit): a refusal leaves no project; a store
-    // failure after it leaves an empty repository on the node, nothing on
-    // the master.
-    let settings = match b.folder_on.as_deref() {
-        None => ProjectSettings::default(),
-        Some(node) => {
-            folder::may_make_on(&m, &who, &a, node)?;
-            let w = ws.clone();
-            let n = m
-                .inner
-                .mirror
-                .call(move |s| s.projects(Some(&w)))
-                .await?
-                .len();
-            if n >= p::MAX_PROJECTS {
-                return Err(ApiError(
-                    StatusCode::CONFLICT,
-                    format!("a workspace has at most {} projects", p::MAX_PROJECTS),
-                ));
-            }
-            folder::make_on(&m, &who, node, &name, ProjectSettings::default()).await?
+    // workspace's project limit): a refusal leaves no project.
+    if let Some(node) = b.folder_on.as_deref() {
+        folder::may_make_on(&m, &who, &a, node)?;
+        let w = ws.clone();
+        let n = m
+            .inner
+            .mirror
+            .call(move |s| s.projects(Some(&w)))
+            .await?
+            .len();
+        if n >= p::MAX_PROJECTS {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                format!("a workspace has at most {} projects", p::MAX_PROJECTS),
+            ));
         }
-    };
-    let new = NewProject {
+    }
+    let mut new = NewProject {
         project_id: harness_core::new_id(),
         workspace_id: ws,
         name,
@@ -317,17 +311,35 @@ async fn create(
         icon,
         accent,
         instructions,
-        settings: serde_json::to_string(&settings)
-            .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?,
+        settings: String::new(),
         created_by: who.user_id.clone(),
         columns,
     };
-    let row = m
-        .inner
-        .mirror
-        .call(move |s| s.create_project(&new, p::MAX_PROJECTS))
+    // The folder and the row in a task of its own: a client that goes
+    // away does not stop it between the two (the node would have made a
+    // folder no project names). A store failure after the folder exists
+    // names the folder, for the person to remove.
+    let task = {
+        let (m, who, node) = (m.clone(), who.clone(), b.folder_on.clone());
+        async move {
+            let settings = match &node {
+                None => ProjectSettings::default(),
+                Some(node) => {
+                    folder::make_on(&m, &who, node, &new.name, ProjectSettings::default()).await?
+                }
+            };
+            new.settings = serde_json::to_string(&settings)
+                .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            m.inner
+                .mirror
+                .call(move |s| s.create_project(&new, p::MAX_PROJECTS))
+                .await
+                .map_err(|e| folder::orphaned(&settings, store_err(e)))
+        }
+    };
+    let row = tokio::spawn(task)
         .await
-        .map_err(store_err)?;
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
     changed(&m, Audience::Workspace(row.workspace_id.clone()));
     Ok(Json(detail_json(&m, &who, &a, &row).await?))
 }
