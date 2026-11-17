@@ -1787,6 +1787,41 @@ mod tests {
         );
     }
 
+    /// T75: with a long key known, a command's output is readable as it is
+    /// printed (the old hold kept its last 63 bytes back), the key printed
+    /// in three pieces never is, and the ring counts only what it stored.
+    #[test]
+    fn output_is_readable_as_printed_and_a_split_key_never() {
+        const KEY: &str = "4f1c9e2ab7d03c58e6f19a2b4c7d8e0f1a2b3c4d5e6f708192a3b4c5d6e7f809";
+        let mut r = Ring::new(64 * 1024, secrets(&[KEY]));
+        let mut seen = Vec::new();
+        for piece in [
+            "building...\n",
+            "token: ",
+            &KEY[..20],
+            &KEY[20..50],
+            &KEY[50..],
+            "\nok\n",
+        ] {
+            r.push(piece);
+            seen.push((r.text(), r.seen));
+        }
+        r.finish();
+        let shown = |t: &str| (t.to_string(), t.len() as u64);
+        assert_eq!(
+            seen,
+            [
+                shown("building...\n"),
+                shown("building...\ntoken: "),
+                shown("building...\ntoken: "),
+                shown("building...\ntoken: "),
+                shown("building...\ntoken: [REDACTED]"),
+                shown("building...\ntoken: [REDACTED]\nok\n"),
+            ]
+        );
+        assert_eq!(r.text(), "building...\ntoken: [REDACTED]\nok\n");
+    }
+
     /// An ended entry, as a finished command leaves it.
     fn ended(bg: &Arc<SessionBg>, bytes: usize) -> u64 {
         let ring = bg.new_ring();
