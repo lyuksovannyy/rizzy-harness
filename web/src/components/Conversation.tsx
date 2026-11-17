@@ -333,7 +333,8 @@ export default function Conversation(props: {
   const nodeId = meta?.node_id ?? props.row?.node_id ?? "";
   const node = props.nodes.find((n) => n.node_id === nodeId);
   const agentic = (meta?.profile ?? props.row?.profile) === "agentic";
-  const activeAgent = view?.active_agent ?? props.row?.agent_id ?? "general";
+  // The chat's agent: the person's pick (its row), which the next message runs.
+  const activeAgent = props.row?.agent_id ?? meta?.agent_id ?? "general";
   const agentName = (id: string | null | undefined) =>
     props.agents.find((a) => a.id === id)?.name ?? id ?? "";
   const incognito = !!(meta?.incognito ?? props.row?.incognito);
@@ -424,6 +425,14 @@ export default function Conversation(props: {
   // that opened them (focus goes back to it on close).
   // Plan mode's bar: a send that failed after the mode changed.
   const [carryErr, setCarryErr] = useState<string | null>(null);
+  // The person's pick: shown at once and held (the picker disabled) until
+  // the server answered, one at a time so the last pick wins; dropped on a
+  // refusal (said under the bar) or once the chat's row names an agent.
+  const [agentPick, setAgentPick] = useState<[string, boolean] | null>(null);
+  const [pickErr, setPickErr] = useState<string | null>(null);
+  const rowAgent = props.row?.agent_id;
+  useEffect(() => setAgentPick(null), [rowAgent, sessionId]);
+  useEffect(() => setPickErr(null), [sessionId]);
   useEffect(() => setCarryErr(null), [sessionId]);
   const [diffOf, setDiffOf] = useState<{ session: string; turn: string; rewind: boolean } | null>(null);
   const diffOpener = useRef<HTMLElement | null>(null);
@@ -732,7 +741,8 @@ export default function Conversation(props: {
                   case "agent_changed":
                     return (
                       <div key={i} className="divider">
-                        {it.agent.name}
+                        Switched to {it.agent.name}
+                        {it.model ? ` · ${it.model}` : ""}
                       </div>
                     );
                   case "approval_mode_changed":
@@ -946,13 +956,25 @@ export default function Conversation(props: {
             </Suspense>
           )}
           {carryErr && <div className="error-text">{carryErr}</div>}
+          {pickErr && <div className="error-text">{pickErr}</div>}
           <Composer
             where="session"
             agents={props.agents}
             models={props.models}
             workers={[]}
-            agentId={activeAgent}
-            onAgentChange={(id) => void pageApi.setAgent(sessionId, id)}
+            agentId={agentPick?.[0] ?? activeAgent}
+            picking={!!agentPick?.[1]}
+            onAgentChange={(id) => {
+              setPickErr(null);
+              setAgentPick([id, true]);
+              pageApi.setAgent(sessionId, id).then(
+                () => setAgentPick((p) => p && [p[0], false]),
+                (x) => {
+                  setAgentPick(null);
+                  setPickErr(x instanceof Error ? x.message : String(x));
+                },
+              );
+            }}
             approval={
               // The owner's own agentic chat on a node that can change it;
               // a sub-agent's follows its parent, a routine's its routine.
