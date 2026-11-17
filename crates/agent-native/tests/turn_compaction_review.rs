@@ -386,6 +386,15 @@ fn agent_w(w: u64) -> AgentSpec {
 }
 
 fn backend(p: Arc<dyn Provider>) -> NativeBackend {
+    backend_with(p, |_| {})
+}
+
+fn backend_with(p: Arc<dyn Provider>, set: impl FnOnce(&mut NativeConfig)) -> NativeBackend {
+    let mut cfg = NativeConfig {
+        coding_summary: true,
+        ..Default::default()
+    };
+    set(&mut cfg);
     NativeBackend::new(
         p,
         vec![
@@ -393,10 +402,7 @@ fn backend(p: Arc<dyn Provider>) -> NativeBackend {
             Arc::new(Note),
             Arc::new(harness_tools::todo::Todo),
         ],
-        NativeConfig {
-            coding_summary: true,
-            ..Default::default()
-        },
+        cfg,
     )
 }
 
@@ -671,7 +677,7 @@ async fn rebuild_matches_live_in_plan_mode() {
 #[tokio::test]
 async fn rebuild_matches_live_when_plan_mode_changes_mid_turn() {
     for (plan, after) in [(false, 3), (true, 3), (true, 10)] {
-        rebuild_matches_live_flip(false, 4..=5, plan, Some(after)).await;
+        rebuild_matches_live_flip(false, 4..=5, plan, Some(after), false).await;
     }
 }
 
@@ -797,7 +803,107 @@ async fn rebuild_matches_live_with_image_reads() {
 }
 
 async fn rebuild_matches_live(parallel: bool, seeds: std::ops::RangeInclusive<u64>, plan: bool) {
-    rebuild_matches_live_flip(parallel, seeds, plan, None).await;
+    rebuild_matches_live_flip(parallel, seeds, plan, None, false).await;
+}
+
+/// X.25: the model thinks in some steps (plain reasoning, signed blocks,
+/// a redacted one, large ones, one with a secret the scrubber takes out):
+/// every request still rebuilds byte for byte from the log, the thinking
+/// included, across clearing, in-turn folds and summaries.
+#[tokio::test]
+async fn rebuild_matches_live_with_thinking() {
+    rebuild_matches_live_flip(false, 1..=6, false, None, true).await;
+}
+
+/// The same with parallel reads finishing out of order.
+#[tokio::test]
+async fn rebuild_matches_live_with_thinking_and_parallel_reads() {
+    rebuild_matches_live_flip(true, 1..=3, false, None, true).await;
+}
+
+/// Thinking for some of `steps`, chosen by `seed` alone (the script's own
+/// draws do not move).
+fn think(steps: &mut [Completion], seed: u64) {
+    let mut r = Lcg(seed ^ 0x7417_4b1e);
+    for (i, s) in steps.iter_mut().enumerate() {
+        let blocks = match r.pick(5) {
+            0 => vec![ThinkingBlock::Text {
+                text: format!("plain {i} {}", "p".repeat(r.pick(4_000) as usize)),
+            }],
+            1 => vec![
+                ThinkingBlock::Signed {
+                    text: format!("signed {i}"),
+                    signature: "s".repeat(200 + r.pick(8_000) as usize),
+                },
+                ThinkingBlock::Redacted {
+                    data: format!("r{i}"),
+                },
+            ],
+            2 => vec![ThinkingBlock::Text {
+                text: format!("uses {SECRET} at {i}"),
+            }],
+            _ => continue,
+        };
+        s.thinking = Some(Thinking {
+            model: "anything".into(),
+            blocks,
+            prefix: format!("{i:064}"),
+            unsent: false,
+        });
+    }
+}
+
+/// What `think` puts in some steps, which the scrubber takes out.
+const SECRET: &str = "sk-thinking-secret-0001";
+
+/// Some request carried thinking; none carried an unsent step's blocks or
+/// a scrubbed signed block; no secret reached the log.
+fn thinking_checks(seed: u64, log: &[RawEvent], main: &[Seen]) {
+    let sent = main.iter().any(|s| {
+        s.msgs.iter().any(|m| {
+            matches!(
+                m,
+                ChatMsg::Assistant {
+                    thinking: Some(_),
+                    ..
+                }
+            )
+        })
+    });
+    assert!(sent, "seed {seed}: no request carried thinking");
+    let text = serde_json::to_string(log).unwrap();
+    assert!(
+        !text.contains(SECRET),
+        "seed {seed}: a secret reached the log"
+    );
+    assert!(
+        text.contains("[REDACTED]"),
+        "seed {seed}: no thinking was scrubbed"
+    );
+    for s in main {
+        for m in &s.msgs {
+            if let ChatMsg::Assistant {
+                thinking: Some(t), ..
+            } = m
+            {
+                // An unsent step is a marker: no bytes of it travel.
+                assert!(
+                    !t.unsent || t.blocks.is_empty(),
+                    "seed {seed}: unsent thinking in a request"
+                );
+                // Scrubbed plain text is still sent (scrubbed); a scrubbed
+                // signed block never is.
+                for b in &t.blocks {
+                    if let ThinkingBlock::Signed { text, signature } = b {
+                        assert!(
+                            !text.contains("[REDACTED]") && !signature.contains("[REDACTED]"),
+                            "seed {seed}: a scrubbed signed block in a request"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 async fn rebuild_matches_live_flip(
@@ -805,12 +911,18 @@ async fn rebuild_matches_live_flip(
     seeds: std::ops::RangeInclusive<u64>,
     plan: bool,
     flip_after: Option<usize>,
+    thinking: bool,
 ) {
     let mut report = vec![];
     let mut failures = 0;
+    // Shortenings that left thinking out, over every seed (X.25).
+    let mut thinking_cuts = 0;
     for seed in seeds {
         for keep in [None, Some(8usize)] {
             let (mut steps, queued) = random_script(seed, 120);
+            if thinking {
+                think(&mut steps, seed);
+            }
             if parallel {
                 for s in &mut steps {
                     let n = s.tool_calls.len() as u64;
@@ -837,7 +949,15 @@ async fn rebuild_matches_live_flip(
                     }
                 }),
             );
-            let b = backend(p.clone());
+            let b = if thinking {
+                backend_with(p.clone(), |c| {
+                    c.secrets = harness_core::SecretSet::new(vec![harness_core::Secret::new(
+                        SECRET.to_string(),
+                    )])
+                })
+            } else {
+                backend(p.clone())
+            };
             let sid = SessionId::new();
             // Even seeds open after an earlier turn whose queued message this
             // turn reads at its start (review H1); odd ones open a new chat.
@@ -892,6 +1012,14 @@ async fn rebuild_matches_live_flip(
             // With a known window the count mask does not act (review M1),
             // whatever the setting: the log rebuilds without it.
             let (compared, bad) = check_every_step(&log, &p.main(), None, start);
+            if thinking {
+                thinking_checks(seed, &log, &p.main());
+                thinking_cuts += host
+                    .shortened()
+                    .iter()
+                    .filter(|c| c.thinking.is_some())
+                    .count();
+            }
             let overflow = p.main().iter().filter(|s| s.tokens > W).count();
             report.push(format!(
                 "seed {seed} keep {keep:?}: {:?}, {} requests, {} shortened ({} folds), {} overflows, compared {compared}, {}",
@@ -911,6 +1039,9 @@ async fn rebuild_matches_live_flip(
         eprintln!("{l}");
     }
     assert_eq!(failures, 0, "rebuild differs from live");
+    if thinking {
+        assert!(thinking_cuts > 0, "no shortening left thinking out");
+    }
 }
 
 /// Item 1/2: a message the person sent before this turn and this turn
@@ -957,6 +1088,7 @@ fn previous_turn(sid: SessionId) -> (Vec<RawEvent>, u64, UserMessage) {
                 input: json!({"path": format!("old{i}.rs")}),
             }],
             blocks: vec![],
+            thinking: None,
         }));
         push(EventKind::ToolCallFinished(ToolCallFinished {
             image: None,
@@ -989,6 +1121,7 @@ fn previous_turn(sid: SessionId) -> (Vec<RawEvent>, u64, UserMessage) {
         text: "done before".into(),
         tool_calls: vec![],
         blocks: vec![],
+        thinking: None,
     }));
     push(EventKind::TurnEnded(TurnEnded {
         turn_id: "t1".into(),
@@ -3179,6 +3312,7 @@ fn a_retry_is_told_which_calls_ran() {
                 call("card", "rm -rf build"),
             ],
             blocks: vec![],
+            thinking: None,
         }),
     );
     push(

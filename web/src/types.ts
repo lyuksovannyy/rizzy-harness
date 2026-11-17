@@ -248,6 +248,12 @@ export type Item =
       blocks?: UiBlock[];
     }
   | {
+      /** A step's thinking (X.25): each block's kind and readable text (never a signature). */
+      type: "thinking";
+      message_id: string;
+      blocks: { type: string; text?: string }[];
+    }
+  | {
       type: "tool";
       call_id: string;
       author: string | null;
@@ -275,6 +281,7 @@ export type Item =
       cleared: boolean;
       steps?: number;
       text?: string;
+      thinking?: boolean;
       tokens_before: number;
       tokens_after: number;
     }

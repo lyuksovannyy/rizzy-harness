@@ -111,7 +111,9 @@ impl Seen {
                 | ChatMsg::Summary(t)
                 | ChatMsg::StepContext(t) => t.clone(),
                 ChatMsg::UserImages { text, .. } => text.clone(),
-                ChatMsg::Assistant { text, tool_calls } => format!(
+                ChatMsg::Assistant {
+                    text, tool_calls, ..
+                } => format!(
                     "{text}\n{}",
                     tool_calls
                         .iter()
@@ -868,6 +870,7 @@ fn huge_turn(sid: SessionId, from: u64, turn: &str, steps: usize, chars: usize) 
                 input: json!({"path": format!("src/{turn}{i}.rs")}),
             }],
             blocks: vec![],
+            thinking: None,
         }));
         emitted.push(EventKind::ToolCallFinished(ToolCallFinished {
             image: None,
@@ -889,6 +892,7 @@ fn huge_turn(sid: SessionId, from: u64, turn: &str, steps: usize, chars: usize) 
         text: "found it".into(),
         tool_calls: vec![],
         blocks: vec![],
+        thinking: None,
     }));
     logged(sid, from, turn, "look", emitted)
 }

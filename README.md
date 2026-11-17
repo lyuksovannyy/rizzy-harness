@@ -732,9 +732,38 @@ global default or their own default.
 
 `effort = "low" | "medium" | "high" | "max"` on a provider is its default
 reasoning effort, only sent to its models with `effort = true`. Anthropic
-models are always listed with `effort = false`: extended thinking combined
-with tool calls is not supported until risk R8 in `PLAN.md` is fixed, so do
-not set it by hand either.
+models are still always listed with `effort = false` (risk R8 in `PLAN.md`):
+the harness now keeps and sends back Claude's thinking, but the request that
+turns it on with an effort has not been checked against the real API yet,
+so do not set it by hand either. Models that think on their own (newer
+Claude models) do so without it; an OpenAI-compatible model that thinks only
+when asked (DeepSeek through a router, Magistral) needs `effort = true` on
+the model and an `effort` on the provider.
+
+**Thinking.** When a model thinks before it answers, the chat shows one
+collapsed "Thinking" row before that step; click it to read what the
+provider sent (Claude sends a summary, or nothing, depending on the model;
+a part the provider redacted shows as one line saying so). It is the
+model's text, shown as text. The harness keeps each step's thinking in the
+chat's log and sends it back to the same model on the next requests, the
+way that provider needs it: Claude's signed blocks exactly as they came
+(needed to go on after a tool call), DeepSeek's `reasoning_content`.
+Thinking is never sent to another model, another provider, a summary or a
+hand-off note, and is not in search, the Markdown export or `recall`.
+A step keeps at most 256 KiB of thinking. Plain reasoning text the
+secret scrubber changed, or cut to that size, is sent back scrubbed or cut;
+Claude's signed blocks that had to be changed or cut are kept for you to
+read and never sent back, and then no later signed block of that model is
+either. Signatures and redacted data stay on the server: your browser gets
+the readable text only, and the row shows the first 64 KiB of it until you
+ask for all. If a provider refuses a request, the harness sends it again
+without the thinking, then without the images, then without both (up to
+three requests that may be wasted), and remembers only what was refused; when the thinking was refused it sends
+that model's thinking in that chat no more, and the chat goes on. Thinking
+counts toward the context-window meter; when a long turn fills the window
+the oldest steps' signed Claude thinking is left out first (the chat notes
+"older steps' thinking left out"); plain reasoning text stays, and all of
+it goes with its steps when they are summarised.
 
 Local Ollama: preset `ollama`, `base_url = "http://localhost:11434/v1"`, no key.
 

@@ -133,6 +133,7 @@ fn events() -> Vec<RawEvent> {
                 input: json!({"command": "cargo test"}),
             }],
             blocks: harness_core::ui::extract(&STREAMED.concat(), UiLevel::Rich),
+            thinking: None,
         }),
         EventKind::ToolCallStarted(ToolCallStarted {
             author: None,
@@ -223,6 +224,7 @@ fn events() -> Vec<RawEvent> {
             text: BLOCKS_TEXT.into(),
             tool_calls: vec![],
             blocks: harness_core::ui::extract(BLOCKS_TEXT, UiLevel::Rich),
+            thinking: None,
         }),
         EventKind::ToolCallStarted(ToolCallStarted {
             author: None,
@@ -360,6 +362,7 @@ fn events() -> Vec<RawEvent> {
                 index: 0,
                 model: None,
             }),
+            thinking: None,
         }),
         EventKind::AssistantMessage(AssistantMessage {
             turn_id: "t2".into(),
@@ -373,6 +376,7 @@ fn events() -> Vec<RawEvent> {
                 index: 1,
                 model: None,
             }),
+            thinking: None,
         }),
         EventKind::ToolCallStarted(ToolCallStarted {
             turn_id: "t2".into(),
@@ -510,6 +514,7 @@ fn events() -> Vec<RawEvent> {
             text: "The build failed.".into(),
             tool_calls: vec![],
             blocks: vec![],
+            thinking: None,
         }),
         EventKind::TurnEnded(TurnEnded {
             turn_id: "t4".into(),
@@ -726,6 +731,7 @@ fn events() -> Vec<RawEvent> {
             text: "Back.".into(),
             tool_calls: vec![],
             blocks: vec![],
+            thinking: None,
         }),
         // Model ids come from the node, so a forged event is folded like
         // any other: prototype names are plain buckets ("constructor" is
@@ -849,6 +855,7 @@ fn events() -> Vec<RawEvent> {
             text: "Migrated.".into(),
             tool_calls: vec![],
             blocks: vec![],
+            thinking: None,
         }),
         EventKind::TurnEnded(TurnEnded {
             turn_id: "t8".into(),
@@ -874,8 +881,107 @@ fn events() -> Vec<RawEvent> {
                 text: "Read <b>main.rs</b>; the bug is in parse.".into(),
                 todo: None,
             }),
+            thinking: None,
             tokens_before: 31_000,
             tokens_after: 9_000,
+        }),
+        // X.25, before the waiting retry (an answer ends a wait): a step's thinking is one row
+        // before what the step said, also when the text streamed first;
+        // only the readable text shows, a redacted block is counted, and
+        // the opaque parts never reach the view.
+        EventKind::AssistantDelta(AssistantDelta {
+            author: None,
+            variant: None,
+            turn_id: t(),
+            message_id: "m-th1".into(),
+            text: "Checking ".into(),
+        }),
+        EventKind::AssistantMessage(AssistantMessage {
+            author: None,
+            variant: None,
+            turn_id: t(),
+            message_id: "m-th1".into(),
+            text: "Checking <b>now</b>.".into(),
+            tool_calls: vec![ToolCallRef {
+                call_id: "c-th1".into(),
+                tool: "bash".into(),
+                input: json!({"command": "ls"}),
+            }],
+            blocks: vec![],
+            thinking: Some(Thinking {
+                model: "anthropic::claude-x".into(),
+                blocks: vec![
+                    ThinkingBlock::Signed {
+                        text: "The <script>tests</script> first.".into(),
+                        signature: "c2lnbmVk".into(),
+                    },
+                    ThinkingBlock::Redacted {
+                        data: "b3BhcXVl".into(),
+                    },
+                    ThinkingBlock::Signed {
+                        text: String::new(),
+                        signature: "ZW1wdHk=".into(),
+                    },
+                ],
+                prefix: "ab".repeat(32),
+                unsent: false,
+            }),
+        }),
+        // A step that only calls a tool, with plain reasoning text.
+        EventKind::AssistantMessage(AssistantMessage {
+            author: None,
+            variant: None,
+            turn_id: t(),
+            message_id: "m-th2".into(),
+            text: String::new(),
+            tool_calls: vec![],
+            blocks: vec![],
+            thinking: Some(Thinking {
+                model: "deepseek::chat".into(),
+                blocks: vec![ThinkingBlock::Text {
+                    text: "Plain reasoning.".into(),
+                }],
+                prefix: String::new(),
+                unsent: true,
+            }),
+        }),
+        // Thinking with nothing readable (omitted display): no row.
+        EventKind::AssistantMessage(AssistantMessage {
+            author: None,
+            variant: None,
+            turn_id: t(),
+            message_id: "m-th3".into(),
+            text: "Done.".into(),
+            tool_calls: vec![],
+            blocks: vec![],
+            thinking: Some(Thinking {
+                model: "anthropic::claude-x".into(),
+                blocks: vec![ThinkingBlock::Signed {
+                    text: "  ".into(),
+                    signature: "c2ln".into(),
+                }],
+                prefix: String::new(),
+                unsent: false,
+            }),
+        }),
+        // The oldest steps' thinking left out of the requests: a line says so.
+        EventKind::ContextShortened(ContextShortened {
+            turn_id: t(),
+            cleared: None,
+            folded: None,
+            thinking: Some(Unthought {
+                turn_id: t(),
+                steps: 2,
+            }),
+            tokens_before: 190_000,
+            tokens_after: 60_000,
+        }),
+        // A refused replay: recorded for the requests, shows nothing.
+        EventKind::ThinkingWithheld(ThinkingWithheld {
+            turn_id: t(),
+            model: "anthropic::claude-x".into(),
+            status: 400,
+            reason: "thinking blocks cannot be modified".into(),
         }),
         EventKind::ModelRetry(ModelRetry {
             turn_id: "t6".into(),
@@ -936,7 +1042,11 @@ fn events() -> Vec<RawEvent> {
 fn fixture_is_current() {
     let evs = events();
     let expected = SessionView::fold(&evs).unwrap();
-    let doc = json!({ "events": evs, "expected": expected });
+    // The events as a browser is sent them (X.25: no signature, redacted
+    // data or prefix; `RawEvent::for_browser`); the view is the same either
+    // way, and the TypeScript fold reads only what a browser gets.
+    let sent: Vec<serde_json::Value> = evs.iter().map(RawEvent::for_browser).collect();
+    let doc = json!({ "events": sent, "expected": expected });
     let text = serde_json::to_string_pretty(&doc).unwrap() + "\n";
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../web/src/__fixtures__/session.json");

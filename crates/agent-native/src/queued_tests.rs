@@ -125,6 +125,7 @@ impl Provider for Seq {
             tool_calls,
             usage: None,
             stop: Default::default(),
+            thinking: None,
         })
     }
 }
@@ -378,6 +379,7 @@ async fn compaction_keeps_a_message_read_by_the_next_turn_once() {
             blocks: vec![],
             author: None,
             variant: None,
+            thinking: None,
         }),
         // Seq 4: sent after the last step.
         EventKind::UserMessage(UserMessage {
@@ -409,6 +411,7 @@ async fn compaction_keeps_a_message_read_by_the_next_turn_once() {
             blocks: vec![],
             author: None,
             variant: None,
+            thinking: None,
         }),
         EventKind::TurnEnded(TurnEnded {
             turn_id: "t2".into(),

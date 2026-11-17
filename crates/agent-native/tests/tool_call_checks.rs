@@ -97,6 +97,7 @@ impl Provider for Once {
             }],
             usage: None,
             stop: Default::default(),
+            thinking: None,
         })
     }
 }
@@ -289,6 +290,7 @@ impl Provider for Again {
             }],
             usage: None,
             stop: Default::default(),
+            thinking: None,
         })
     }
 }

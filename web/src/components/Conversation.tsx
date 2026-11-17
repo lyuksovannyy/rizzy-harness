@@ -37,6 +37,7 @@ import { AgentMark, agentAlert } from "./AgentAvatar";
 import { ChatArtifactsCtx, SaveAsArtifact, SavedItem, stagedKeys, useChatArtifacts } from "./ChatArtifacts";
 import { BubbleImages } from "./ChatImages";
 import { ChatTitle } from "./ChatTitle";
+import { ThinkingRow } from "./ThinkingRow";
 import { DeleteChat } from "./DeleteChat";
 import { useAvatarState } from "./avatarState";
 import { Markdown } from "./Markdown";
@@ -785,10 +786,13 @@ export default function Conversation(props: {
                         })}
                       </div>
                     );
+                  case "thinking":
+                    return <ThinkingRow key={i} it={it} />;
                   case "shortened": {
                     const what = [
                       it.cleared ? t("conv.shortCleared") : "",
                       it.steps ? t("conv.shortSteps", { n: String(it.steps) }) : "",
+                      it.thinking ? t("conv.shortThinking") : "",
                     ]
                       .filter(Boolean)
                       .join(", ");

@@ -101,6 +101,7 @@ fn bash_call(n: usize) -> Completion {
         }],
         usage: None,
         stop: Default::default(),
+        thinking: None,
     }
 }
 
@@ -253,6 +254,7 @@ async fn a_call_on_the_last_step_is_not_run() {
                 }],
                 usage: None,
                 stop: Default::default(),
+                thinking: None,
             }
         }
     });
@@ -345,6 +347,7 @@ fn a_call_cut_off_by_a_restart_reads_as_unknown() {
                     input: json!({"command": "./deploy.sh"}),
                 }],
                 blocks: vec![],
+                thinking: None,
             }),
         ),
     ];

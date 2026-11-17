@@ -126,6 +126,7 @@ mod tests {
                 model: None,
             }),
             blocks: super::super::extract(ASK, UiLevel::Rich),
+            thinking: None,
         })
     }
 

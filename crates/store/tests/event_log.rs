@@ -363,6 +363,7 @@ fn a_shown_input_block_needs_attention() {
                 author: None,
                 variant: None,
                 blocks,
+                thinking: None,
             }),
             EventKind::TurnEnded(TurnEnded {
                 turn_id: "t1".into(),
@@ -404,6 +405,7 @@ fn an_open_message_names_the_agent_that_wrote_it() {
                 author: author.map(Into::into),
                 variant: None,
                 blocks: vec![],
+                thinking: None,
             }),
         )
     };
@@ -1061,6 +1063,7 @@ fn a_finished_turn_is_unread_until_seen() {
                 author: None,
                 variant: None,
                 blocks: vec![],
+                thinking: None,
             }),
             EventKind::TurnEnded(TurnEnded {
                 turn_id: format!("t{from}"),

@@ -235,6 +235,7 @@ mod tests {
                     ..Default::default()
                 }),
                 stop: Default::default(),
+                thinking: None,
             })
         }
     }
@@ -310,6 +311,7 @@ mod tests {
                     input: serde_json::json!({"path": "README.md"}),
                 }],
                 blocks: vec![],
+                thinking: None,
             }),
             EventKind::ToolCallFinished(ToolCallFinished {
                 image: None,
