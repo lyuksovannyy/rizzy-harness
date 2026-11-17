@@ -84,7 +84,12 @@ export const pageApi = {
   /** `media` also deletes the caller's Media items that came from the chat. */
   deleteSession: (id: string, opts: { media?: boolean } = {}) =>
     call<{ ok: boolean }>("DELETE", `/api/sessions/${id}${opts.media ? "?media=1" : ""}`),
-  setAgent: (id: string, agent_id: string) => call("POST", `/api/sessions/${id}/agent`, { agent_id }),
+  // Bounded: a pick that gets no answer frees the picker with a reason
+  // (the server answers within its own timeouts; this is for a lost one).
+  setAgent: (id: string, agent_id: string) =>
+    call("POST", `/api/sessions/${id}/agent`, { agent_id }, AbortSignal.timeout(30_000)).catch((e) => {
+      throw e instanceof DOMException && e.name === "TimeoutError" ? new Error("The server did not answer the agent change; try again.") : e;
+    }),
   /** The node clamps it and records it; the chat shows the result (T50). */
   setApprovalMode: (id: string, mode: ApprovalMode) =>
     call<{ ok: boolean }>("POST", `/api/sessions/${id}/approval-mode`, { mode }),

@@ -1381,16 +1381,6 @@ impl Session {
         real.starts_with(&ws) && real != ws
     }
 
-    /// Record a change of the session's active agent.
-    pub(crate) async fn set_agent(&self, agent: AgentSpec) -> Result<(), String> {
-        self.append(EventKind::AgentChanged(AgentChanged {
-            agent: agent.agent_ref(),
-        }))
-        .await
-        .map(|_| ())
-        .map_err(|e| e.to_string())
-    }
-
     /// `agent_named`: the person chose the agent for this message (the
     /// picker or an @mention), as the master resolved it.
     pub(crate) async fn prompt(
@@ -1414,6 +1404,9 @@ impl Session {
         if self.incognito && !input.images.is_empty() {
             return Err("images can't go into an incognito chat".into());
         }
+        // Named for this message: an @mention, a routine's explicit agent,
+        // or the asker an answer goes to (`switch_of` decides the rest).
+        let named = agent_named || input.reply.is_some();
         self.check_cwd_still_allowed()?;
         // The owner prompts the chat: it may start background commands
         // again after a revocation closed its table (the master admits the
@@ -1509,7 +1502,10 @@ impl Session {
         };
         // Recorded before the prompt is answered, so a log that cannot be
         // written refuses the prompt itself and the sender sees why.
-        let (history, queued) = match self.begin(Some(&msg), &turn_id, agent.as_ref()).await {
+        let (history, queued) = match self
+            .begin(Some(&msg), &turn_id, agent.as_ref(), named)
+            .await
+        {
             Ok(h) => h,
             Err(e) => {
                 self.release(&turn_id);
@@ -1729,7 +1725,7 @@ impl Session {
             began: std::time::SystemTime::now(),
         })
         .ok()?;
-        let (history, mut queued) = match self.begin(None, &turn_id, agent).await {
+        let (history, mut queued) = match self.begin(None, &turn_id, agent, true).await {
             Ok(h) => h,
             Err(e) => {
                 tracing::warn!(session = %self.id, error = %e, "could not start a turn for the messages sent while the last one ran");
@@ -1906,6 +1902,16 @@ impl Session {
             .unwrap_or_else(|p| p.into_inner())
             .clear();
         let environment = self.environment_line(&turn_id).await;
+        // A pick no message followed yet: this turn is the first to run
+        // under it, so the switch is noted here, above it, and the log
+        // reads in order (the master sends the chat's agent).
+        if let Some(switch) = self.switch_of(&history, agent.as_ref(), false)
+            && let Err(e) = self.emit(EventKind::AgentChanged(switch)).await
+        {
+            drop(gate);
+            self.release(&turn_id);
+            return Err(e.to_string());
+        }
         if let Err(e) = self
             .emit(EventKind::TurnStarted(TurnStarted {
                 turn_id: turn_id.clone(),
@@ -2334,13 +2340,17 @@ impl Session {
     /// turn that only reads queued messages: with none unread, nothing is
     /// recorded and it is refused. When an append fails nothing has run,
     /// and whatever was written is closed. A person's turn holds `queue`.
+    /// `named`: the turn's agent was named for it rather than being the
+    /// chat's own (`switch_of`, which records a switch of agent or model
+    /// first, `agent_changed`, only for the chat's own).
     async fn begin(
         &self,
         msg: Option<&UserMessage>,
         turn_id: &str,
         agent: Option<&AgentSpec>,
+        named: bool,
     ) -> Result<(Vec<RawEvent>, Vec<UserMessage>), String> {
-        self.begin_with(msg, turn_id, agent, None).await
+        self.begin_with(msg, turn_id, agent, None, named).await
     }
 
     /// [`Self::begin`] for a sub-agent's follow-up (T68): `follow_up` is the
@@ -2354,6 +2364,7 @@ impl Session {
         turn_id: &str,
         agent: Option<&AgentSpec>,
         follow_up: Option<(&str, &str)>,
+        named: bool,
     ) -> Result<(Vec<RawEvent>, Vec<UserMessage>), String> {
         // The mode in force recorded first, if the log says another.
         self.record_clamp().await;
@@ -2395,6 +2406,13 @@ impl Session {
             *self.turn_env.lock().unwrap_or_else(|p| p.into_inner()) =
                 Some((turn_id.to_string(), both.clone()));
             environment = Some(both);
+        }
+        // The switch, above the turn and its message (not in `history`:
+        // the model is never sent it).
+        if let Some(switch) = self.switch_of(&history, agent, named)
+            && let Err(e) = self.emit(EventKind::AgentChanged(switch)).await
+        {
+            return Err(e.to_string());
         }
         let started = self
             .emit(EventKind::TurnStarted(TurnStarted {
@@ -3944,7 +3962,10 @@ impl Session {
             max_tokens,
             ..Default::default()
         };
-        let history = match child.begin(Some(&msg), &msg.turn_id, Some(&agent)).await {
+        let history = match child
+            .begin(Some(&msg), &msg.turn_id, Some(&agent), true)
+            .await
+        {
             Ok((h, _)) => h,
             Err(e) => {
                 child.release(&msg.turn_id);
@@ -4361,6 +4382,7 @@ impl Session {
                 &msg.turn_id,
                 Some(&agent),
                 Some((call_id.as_str(), note.as_str())),
+                true,
             )
             .await
         {
@@ -5405,6 +5427,11 @@ mod diff;
 /// A person's Retry of the failed last turn (X.21); its own file.
 #[path = "session_retry.rs"]
 mod retry;
+
+/// The chat's agent switch: refused while it works, recorded at the next
+/// turn; its own file.
+#[path = "session_agent.rs"]
+mod agent;
 
 /// A `/compact` focus cut to `COMPACT_FOCUS_MAX_CHARS` characters, saying
 /// where (X.20).

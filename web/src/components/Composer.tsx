@@ -88,6 +88,8 @@ export function Composer(props: {
   /** Selected agent (home: the choice for the new chat; session: the session's agent). */
   agentId: string;
   onAgentChange: (id: string) => void;
+  /** Session: a pick waits for the server's answer (the picker is held). */
+  picking?: boolean;
   /** Session: what the selected agent is doing, for its avatar on the pill. */
   agentState?: AvatarState;
   /** Session model (session view), for the effort control. */
@@ -210,25 +212,20 @@ export function Composer(props: {
     }
     setErr(null);
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const r = new MediaRecorder(stream);
-      const chunks: Blob[] = [];
-      r.ondataavailable = (e) => chunks.push(e.data);
-      r.onstop = async () => {
-        stream.getTracks().forEach((t) => t.stop());
-        setRec("transcribing");
-        try {
-          const said = await api.transcribe(new Blob(chunks, { type: r.mimeType || "audio/webm" }));
+      // A chunk that does not load (an update since, the network): said
+      // like the microphone's other errors.
+      const { record } = await import("../lib/voice").catch(() => {
+        throw Error("could not load; reload the page");
+      });
+      recorder.current = await record({
+        transcribing: () => setRec("transcribing"),
+        done: (said, error) => {
           if (said) setText((t) => (t.trim() ? `${t.trimEnd()} ${said}` : said));
-          ta.current?.focus();
-        } catch (x) {
-          setErr(x instanceof Error ? x.message : String(x));
-        } finally {
+          if (error) setErr(error);
+          else ta.current?.focus();
           setRec("idle");
-        }
-      };
-      recorder.current = r;
-      r.start();
+        },
+      });
       setRec("recording");
     } catch (x) {
       setErr(`microphone: ${x instanceof Error ? x.message : String(x)}`);
@@ -397,6 +394,8 @@ export function Composer(props: {
   const popupOpen = suggestions.length > 0;
   const pickedAgent = props.agents.find((a) => a.id === props.agentId);
   const pickedAlert = pickedAgent ? agentAlert(pickedAgent) : null;
+  // A chat's agent changes between turns only (the node refuses it otherwise).
+  const stillWorking = !home && !!(props.running || props.compacting || props.picking);
   const effortModel = home ? model : props.sessionModel;
   const effortOk = resolveModel(props.models, effortModel)?.effort ?? false;
   // Images: not in search or a temporary chat; every model answering must
@@ -714,11 +713,14 @@ export function Composer(props: {
           {mode !== "search" && props.agents.length > 0 && (
             <span
               className={`agent-pick${pickedAlert ? " bad" : ""}`}
-              title={override ? `@${override} ${t("composer.forMessage")}` : (pickedAlert ?? undefined)}
+              title={
+                override ? `@${override} ${t("composer.forMessage")}` : stillWorking ? "Stop the agent to pick another" : (pickedAlert ?? undefined)
+              }
             >
               <Select
                 compact
                 label="agent"
+                disabled={stillWorking}
                 value={props.agentId}
                 options={pickable(props.agents, props.agentId).map((a) => ({
                   value: a.id,

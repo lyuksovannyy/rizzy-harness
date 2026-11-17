@@ -941,3 +941,76 @@ async fn a_callback_turn_names_every_end_that_waits_when_it_starts() {
         ]
     );
 }
+
+/// An agent of the chat as the master sends it: `id` on `model`, all tools.
+fn chat_agent(id: &str, model: &str) -> Value {
+    json!({"agent_id": id, "name": format!("Agent {id}"), "system_prompt": format!("You are {id}."),
+        "tools": "all", "model": model, "prompt_hash": format!("h-{id}")})
+}
+
+/// Review of PR 135: an agent picked with no message after it is first run
+/// by a callback turn (the master sends the chat's agent, now the pick):
+/// the switch is noted there, right before that turn, once; the person's
+/// next message under it adds none. The log reads in order.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_callback_turn_after_a_pick_notes_the_switch_once() {
+    let Some(mut n) = node().await else { return };
+    let sid = SessionId::new();
+    n.create(sid, json!({"agent": chat_agent("a", "mock-a")}));
+    std::fs::write(n.ws.join("out.txt"), "done\n").unwrap();
+    n.n += 1;
+    n.send(
+        json!({"type": "session.prompt", "req_id": format!("p{}", n.n), "session_id": sid,
+        "text": format!("script: {}", json!([bg(&held("out.txt"), 120)])),
+        "agent": chat_agent("a", "mock-a")}),
+    );
+    n.started(sid, "bg-1").await;
+    n.turn_ended(sid).await;
+    // The pick: nothing in the log.
+    n.n += 1;
+    let req = format!("s{}", n.n);
+    n.send(
+        json!({"type": "session.set_agent", "req_id": req, "session_id": sid,
+        "agent": chat_agent("b", "mock-b")}),
+    );
+    loop {
+        if let harness_protocol::NodeToMaster::Ack { req_id, ok, error } = n.next().await
+            && req_id == req
+        {
+            assert!(ok, "{error:?}");
+            break;
+        }
+    }
+    std::fs::write(n.ws.join("go"), "").unwrap();
+    n.ended(sid, "bg-1").await;
+    n.n += 1;
+    n.send(
+        json!({"type": "session.callback", "req_id": format!("cb{}", n.n), "session_id": sid,
+        "bg_ids": ["bg-1"], "agent": chat_agent("b", "mock-b")}),
+    );
+    n.turn_ended(sid).await;
+    n.n += 1;
+    n.send(
+        json!({"type": "session.prompt", "req_id": format!("p{}", n.n), "session_id": sid,
+        "text": "hello", "agent": chat_agent("b", "mock-b")}),
+    );
+    n.turn_ended(sid).await;
+    let evs = n.of(sid);
+    let switches: Vec<(usize, &AgentChanged)> = evs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, k)| match k {
+            EventKind::AgentChanged(a) => Some((i, a)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(switches.len(), 1, "{evs:#?}");
+    let (at, a) = switches[0];
+    assert_eq!(a.agent.agent_id, "b");
+    assert_eq!(a.model.as_deref(), Some("mock-b"));
+    assert!(
+        matches!(&evs[at + 1], EventKind::TurnStarted(TurnStarted { cause: Some(_), agent: Some(r), .. }) if r.agent_id == "b"),
+        "right before the callback turn: {:#?}",
+        &evs[at..]
+    );
+}

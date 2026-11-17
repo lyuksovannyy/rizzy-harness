@@ -35,6 +35,7 @@ impl Session {
         self: &Arc<Self>,
         failed: &str,
         agent: Option<AgentSpec>,
+        agent_named: bool,
         extra: TurnExtra,
     ) -> Result<(), String> {
         if self.parent_session.is_some() {
@@ -122,6 +123,15 @@ impl Session {
             .unwrap_or_else(|p| p.into_inner())
             .clear();
         let environment = self.environment_line(&turn_id).await;
+        // A switch since the failed turn, above the retry: it runs under
+        // the agent the chat has now (T69).
+        if let Some(switch) = self.switch_of(&history, agent.as_ref(), agent_named)
+            && let Err(e) = self.emit(EventKind::AgentChanged(switch)).await
+        {
+            drop(gate);
+            self.release(&turn_id);
+            return Err(e.to_string());
+        }
         let started = self
             .emit(EventKind::TurnStarted(TurnStarted {
                 turn_id: turn_id.clone(),

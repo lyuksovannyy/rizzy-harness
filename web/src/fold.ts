@@ -10,7 +10,6 @@ export function emptyView(): SessionView {
     running_turn: null,
     pending_approvals: [],
     unknown_events: 0,
-    active_agent: null,
     running_agent: null,
     variant_selection: {},
     usage: { input_tokens: 0, output_tokens: 0, context_tokens: 0 },
@@ -230,7 +229,6 @@ export function apply(v: SessionView, e: RawEvent): void {
       if (p.no_callbacks) meta!.no_callbacks = true;
       if (p.exec_mode != null) meta!.exec_mode = p.exec_mode;
       v.meta = meta;
-      v.active_agent = p.agent_id ?? null;
       break;
     }
     case "turn_started":
@@ -404,8 +402,7 @@ export function apply(v: SessionView, e: RawEvent): void {
       v.items.push({ type: "error", message: p.message });
       break;
     case "agent_changed":
-      v.active_agent = p.agent.agent_id;
-      v.items.push({ type: "agent_changed", agent: p.agent });
+      v.items.push({ type: "agent_changed", agent: p.agent, model: p.model });
       break;
     case "approval_mode_changed": {
       if (v.meta) v.meta.approval_mode = p.mode;
