@@ -300,8 +300,8 @@ No prompt is edited now.
 
 Owner, 2026-11-17, asked whether Undo should say that a file the person's global git ignore
 covers is never checkpointed, or whether checkpoints should stop following that file: "should
-ignore". Since then every git process of the node runs with `core.excludesFile=/dev/null` and
-no global config (as before), and nothing copies the global file into the shadow any more
+ignore". Since then every git call on a shadow store runs with `core.excludesFile=/dev/null`, and
+every git process of the node with no global config (as before), and nothing copies the global file into the shadow any more
 (`git.rs` lost `global_excludes`, `UserGitEnv`, `NodePolicy::user_git` and `Bounds::user_git`).
 
 | Rule | Applies to checkpoints, the between-turns copy, stashes, sub-agents? |

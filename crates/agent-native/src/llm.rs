@@ -605,13 +605,19 @@ fn provider_error(e: genai::Error) -> ProviderError {
     }
 }
 
-/// What a call that went silent reads as (both keys named, so the person
-/// knows which one to raise).
-fn silent(what: &str, after: std::time::Duration) -> ProviderError {
+/// What a call that went silent reads as (the keys named, so the person
+/// knows which one to raise). An Ask chat's key governs only the wait for
+/// the first byte, so it is named only there (`first`): its idle gap is
+/// fixed.
+fn silent(what: &str, after: std::time::Duration, first: bool) -> ProviderError {
+    let ask = if first {
+        "; for Ask chats `[chat] model_first_byte_timeout_s` in config.toml"
+    } else {
+        ""
+    };
     ProviderError::Silent(format!(
         "the provider {what} for {} s (`[limits] model_first_byte_timeout_s` and \
-         `model_idle_timeout_s` in node.toml; for Ask chats `[chat] \
-         model_first_byte_timeout_s` in config.toml)",
+         `model_idle_timeout_s` in node.toml{ask})",
         after.as_secs()
     ))
 }
@@ -625,6 +631,7 @@ fn header_timeout(e: &genai::Error, limits: Option<StreamLimits>) -> Option<Prov
         genai::webc::StreamTimeout::Headers => Some(silent(
             "did not answer",
             limits.map_or_else(Default::default, |l| l.first_byte),
+            true,
         )),
         genai::webc::StreamTimeout::Read => None,
     }
@@ -770,7 +777,7 @@ impl Provider for LlmProvider {
                     };
                     match tokio::time::timeout(wait, stream.next()).await {
                         Ok(n) => n,
-                        Err(_) => return Err(silent(what, wait)),
+                        Err(_) => return Err(silent(what, wait, !answered)),
                     }
                 }
             };
@@ -1013,6 +1020,30 @@ impl Provider for ModelRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Ask chat's key governs only the wait for the first byte (review
+    /// of PR 142): a silence after the answer began must not send its
+    /// reader to a key that does not change it.
+    #[test]
+    fn a_silent_provider_names_the_ask_key_only_for_the_first_byte() {
+        let text = |e: ProviderError| match e {
+            ProviderError::Silent(t) => t,
+            other => panic!("{other:?}"),
+        };
+        let wait = std::time::Duration::from_secs(10);
+        let first = text(silent("sent nothing", wait, true));
+        assert!(
+            first.contains("`[chat] model_first_byte_timeout_s` in config.toml"),
+            "{first}"
+        );
+        assert!(first.contains("in node.toml"), "{first}");
+        let idle = text(silent("sent nothing more", wait, false));
+        assert!(!idle.contains("[chat]"), "{idle}");
+        assert!(
+            idle.contains("`model_idle_timeout_s` in node.toml"),
+            "{idle}"
+        );
+    }
     use serde_json::json;
 
     /// Each provider's documented values, and what is not documented.
