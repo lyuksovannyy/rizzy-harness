@@ -1608,6 +1608,7 @@ dependencies = [
  "flate2",
  "getrandom 0.4.3",
  "harness-agent-native",
+ "harness-agents",
  "harness-core",
  "harness-link",
  "harness-memory",

@@ -26,7 +26,7 @@ use harness_protocol::{MasterToNode, NODE_STOPPING, NodeToMaster, PROTOCOL_VERSI
 use harness_store::Store;
 use tokio::sync::mpsc;
 
-pub use git::{SNAPSHOT_TIMEOUT, UserGitEnv};
+pub use git::SNAPSHOT_TIMEOUT;
 pub use outbox::Backlog;
 pub use policy::{InstructionsPolicy, NodePolicy, SkillsPolicy};
 use session::Session;
@@ -380,7 +380,6 @@ pub mod testing {
             ceiling: None,
             protected: protected.to_vec(),
             sandbox,
-            ..Default::default()
         }
     }
 

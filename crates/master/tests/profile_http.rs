@@ -484,6 +484,61 @@ async fn personalisation_reaches_only_the_owners_chats_framed() {
     assert!(personal(&last_prompt(&t).0).is_none());
 }
 
+/// Which built-in agents take the person's Personalisation is each
+/// definition's own (owner, 2026-11-17, ADOPTION_PLAN X.31): a chat with
+/// Reviewer gets no section, one with Assistant (the default agent) does;
+/// the agent pages show each built-in's true value. Scout is a sub-agent
+/// only, so no chat runs with it directly (the node's side of a Scout child
+/// is `crates/node/tests/personal_subagents.rs`).
+#[tokio::test]
+async fn builtin_agents_take_personalisation_as_their_definition_says() {
+    let t = start().await;
+    let [(alex, _), _, _] = users(&t).await;
+    let (st, v) = req(
+        &t,
+        Method::PUT,
+        "/api/me/settings/personalisation",
+        Some(json!({"instructions": "Answer in metric units.", "style": "direct"})),
+        &alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    for (id, on) in [
+        ("general", true),
+        ("reviewer", false),
+        ("scout", false),
+        ("coder", true),
+    ] {
+        let (st, v) = req(&t, Method::GET, &format!("/api/agents/{id}"), None, &alex).await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert_eq!(v["features"]["personalisation"], on, "{id}: {v}");
+    }
+    let sid = chat(&t, &alex).await;
+    for (id, on) in [("general", true), ("reviewer", false)] {
+        let (st, v) = req(
+            &t,
+            Method::POST,
+            &format!("/api/sessions/{sid}/prompt"),
+            Some(json!({"text": "hi", "agent_id": id})),
+            &alex,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{id}: {v}");
+        let (standing, _) = last_prompt(&t);
+        assert_eq!(personal(&standing).is_some(), on, "{id}: {standing:?}");
+    }
+    // Scout is no chat's agent.
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        &format!("/api/sessions/{sid}/prompt"),
+        Some(json!({"text": "hi", "agent_id": "scout"})),
+        &alex,
+    )
+    .await;
+    assert_ne!(st, StatusCode::OK, "{v}");
+}
+
 /// A PNG's signature and IHDR, enough for the header checks.
 /// A PNG of `w` × `h` the walk accepts: IHDR, IDAT, IEND (no pixels are
 /// decoded, so the data need not be a real image), plus `extra` chunks

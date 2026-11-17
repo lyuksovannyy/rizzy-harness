@@ -380,7 +380,7 @@ fn features() -> harness_agents::Features {
 
 /// The Personalisation switch (PLAN.md T74): on unless a definition says
 /// off; off changes the hash, on leaves earlier agents' hashes as they were;
-/// a page agent keeps what was chosen; every built-in has it on.
+/// a page agent keeps what was chosen; each built-in has its own value.
 #[test]
 fn personalisation_is_on_unless_turned_off() {
     let defined = |extra: &str| {
@@ -399,7 +399,36 @@ fn personalisation_is_on_unless_turned_off() {
     assert!(plain.features.personalisation && !off.features.personalisation);
     assert_eq!(plain.spec.prompt_hash, on.spec.prompt_hash);
     assert_ne!(plain.spec.prompt_hash, off.spec.prompt_hash);
-    assert!(builtins().iter().all(|a| a.features.personalisation));
+    // Each built-in's own definition says (owner, 2026-11-17, ADOPTION_PLAN
+    // X.31): Scout and Reviewer report to a lead in a strict form, off; the
+    // default agent (Assistant) and every other built-in, on.
+    let mut table: Vec<(String, bool)> = builtins()
+        .iter()
+        .map(|a| (a.id.clone(), a.features.personalisation))
+        .collect();
+    table.sort();
+    let want: Vec<(String, bool)> = [
+        ("coder", true),
+        ("general", true),
+        ("researcher", true),
+        ("reviewer", false),
+        ("scout", false),
+        ("smol", true),
+        ("teamlead", true),
+        ("writer", true),
+    ]
+    .iter()
+    .map(|(id, on)| (id.to_string(), *on))
+    .collect();
+    assert_eq!(table, want);
+    // Off travels to the node in the spec.
+    for a in builtins() {
+        assert_eq!(
+            a.spec.no_personalisation, !a.features.personalisation,
+            "{}",
+            a.id
+        );
+    }
     // Stored switches from before it parse with it on.
     let mut v = serde_json::to_value(features()).unwrap();
     v.as_object_mut().unwrap().remove("personalisation");

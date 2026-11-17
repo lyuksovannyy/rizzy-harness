@@ -61,13 +61,6 @@ pub struct NodePolicy {
     /// read from node.toml. Canonical paths.
     #[serde(skip)]
     pub protected_dirs: Vec<PathBuf>,
-    /// Where the node finds the user's global git ignore file, which its
-    /// checkpoints follow: this process's `HOME`, `XDG_CONFIG_HOME` and
-    /// `GIT_CONFIG_GLOBAL`, set by [`NodePolicy::load`] and
-    /// [`NodePolicy::node_toml_default`]; none in a policy built in code
-    /// (test rigs), as with [`SkillsPolicy`]. Never read from node.toml.
-    #[serde(skip)]
-    pub user_git: crate::git::UserGitEnv,
     /// The execution modes this node offers, set by the runtime at start
     /// from its self-test and [`Self::execution`] (N.10a): every agentic
     /// create chooses inside it, and every turn, callback, restore and
@@ -902,7 +895,6 @@ impl Default for NodePolicy {
             mcp_servers: Default::default(),
             projects: ProjectsPolicy::default(),
             protected_dirs: Vec::new(),
-            user_git: Default::default(),
             exec: Default::default(),
             sandbox_tmp: None,
         }
@@ -943,21 +935,19 @@ impl NodePolicy {
     pub fn node_toml_default() -> Self {
         Self {
             skills: SkillsPolicy::node_toml(),
-            user_git: crate::git::UserGitEnv::from_process(),
             ..Self::default()
         }
     }
 
     /// Load `node.toml`; a missing file means [`Self::node_toml_default`].
     pub fn load(path: &Path) -> Result<Self, PolicyError> {
-        let mut p: Self = match std::fs::read_to_string(path) {
+        let p: Self = match std::fs::read_to_string(path) {
             Ok(s) => toml::from_str(&s).map_err(|e| PolicyError::Parse(path.into(), e))?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Self::node_toml_default(),
             Err(e) => return Err(PolicyError::Io(path.into(), e)),
         };
         p.validate()
             .map_err(|e| PolicyError::Invalid(path.into(), e))?;
-        p.user_git = crate::git::UserGitEnv::from_process();
         Ok(p)
     }
 
@@ -1561,20 +1551,6 @@ tool_timeout_sec = 120
         let missing = NodePolicy::load(&dir.path().join("node.toml")).unwrap();
         assert_eq!(missing.skills.roots, home);
         assert_eq!(NodePolicy::node_toml_default().skills, empty.skills);
-        // The same for where the user's global git ignore file is found:
-        // a node reads it from its process, a policy built in code has none.
-        let none = format!("{:?}", crate::git::UserGitEnv::default());
-        let process = format!("{:?}", crate::git::UserGitEnv::from_process());
-        assert_eq!(format!("{:?}", NodePolicy::default().user_git), none);
-        assert_eq!(format!("{:?}", missing.user_git), process);
-        assert_eq!(
-            format!("{:?}", NodePolicy::node_toml_default().user_git),
-            process
-        );
-        std::fs::write(dir.path().join("node.toml"), "").unwrap();
-        let file = NodePolicy::load(&dir.path().join("node.toml")).unwrap();
-        assert_eq!(format!("{:?}", file.user_git), process);
-        assert!(process.contains("home: Some"), "{process}");
     }
 
     /// T.8d: the background bounds are node.toml's, with the owner's

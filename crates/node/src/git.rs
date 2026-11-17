@@ -14,7 +14,8 @@
 //! is as an object store borrowed read-only through the shadow's
 //! `objects/info/alternates`, at a path our code computed, and only when it
 //! chains to no other store; files already committed are then not stored
-//! twice. `.git/info/exclude` is copied so the same files are ignored. Only
+//! twice. `.git/info/exclude` is copied so the same files are ignored; the
+//! user's global ignore file is not followed (ADOPTION_PLAN X.31). Only
 //! the latest N checkpoints are kept. A git repository nested in the folder
 //! is left out of every checkpoint and never touched by an undo (see
 //! `stage_without_nested`).
@@ -374,8 +375,11 @@ fn command_std(repo: &Repo, index: Option<&Path>) -> std::process::Command {
             // filters stay off even on a git without GIT_ATTR_SOURCE
             // (they have no definition in the config in force).
             c.arg("-c").arg("core.attributesFile=/dev/null");
-            // The user's global ignore patterns are copied into the shadow's
-            // info/exclude (see `repo_for`); git's own lookup stays off.
+            // The user's global ignore file is not followed (owner,
+            // 2026-11-17, ADOPTION_PLAN X.31): a file only it names is
+            // checkpointed and undone like any other. The repository's
+            // `.gitignore` files apply (git reads them from the work tree)
+            // and its `.git/info/exclude` is copied into the shadow's.
             c.arg("-c").arg("core.excludesFile=/dev/null");
             c.env("GIT_ATTR_SOURCE", repo.empty_tree);
             // Paths in and out are relative to the folder's top, and `.`
@@ -515,9 +519,6 @@ pub struct Bounds {
     /// The sandbox the node's git for this folder runs in (R1b-2); `None`
     /// where the node has none.
     pub sandbox: Option<std::sync::Arc<harness_tools::sandbox::Sandbox>>,
-    /// Where the user's global ignore file is found (the node's
-    /// [`crate::NodePolicy::user_git`]); none by default.
-    pub user_git: UserGitEnv,
 }
 
 impl Bounds {
@@ -561,15 +562,9 @@ pub async fn checkpoint_repo(
     shadow_base: Option<&Path>,
     bounds: &Bounds,
 ) -> Result<Option<Repo>, String> {
-    repo_for_with(
-        cwd,
-        shadow_base,
-        bounds,
-        &bounds.user_git,
-        Shadow::Checkpoints,
-    )
-    .await
-    .map(|r| r.map(|(repo, _)| repo))
+    repo_for_with(cwd, shadow_base, bounds, Shadow::Checkpoints)
+        .await
+        .map(|r| r.map(|(repo, _)| repo))
 }
 
 /// [`checkpoint_repo`] without bounds (tests).
@@ -599,110 +594,6 @@ enum Shadow {
     SubAgents,
 }
 
-/// Where the user's own git settings live: only used to find their global
-/// ignore file. A node reads them from its process
-/// ([`UserGitEnv::from_process`], in [`crate::NodePolicy::load`]); the
-/// default, a policy built in code (every test rig), has none, so a
-/// developer's `~/.config/git/ignore` does not change what tests'
-/// checkpoints hold (tests point these at temporary files).
-#[derive(Debug, Clone, Default)]
-pub struct UserGitEnv {
-    home: Option<PathBuf>,
-    xdg_config_home: Option<PathBuf>,
-    global_config: Option<PathBuf>,
-}
-
-impl UserGitEnv {
-    /// `HOME`, `XDG_CONFIG_HOME` and `GIT_CONFIG_GLOBAL` of this process.
-    pub fn from_process() -> Self {
-        let var = |k| {
-            std::env::var_os(k)
-                .filter(|v| !v.is_empty())
-                .map(PathBuf::from)
-        };
-        Self {
-            home: var("HOME"),
-            xdg_config_home: var("XDG_CONFIG_HOME"),
-            global_config: var("GIT_CONFIG_GLOBAL"),
-        }
-    }
-}
-
-/// An ignore file's contents, treated as data: only a regular file of at
-/// most 1 MiB is read; anything else counts as empty.
-async fn read_ignore_file(path: &Path) -> Vec<u8> {
-    let small = tokio::fs::metadata(path)
-        .await
-        .is_ok_and(|m| m.is_file() && m.len() <= 1 << 20);
-    if small {
-        tokio::fs::read(path).await.unwrap_or_default()
-    } else {
-        Vec::new()
-    }
-}
-
-/// Where the user's global ignore file is, as git finds it:
-/// `core.excludesFile` from the user's global config, else
-/// `$XDG_CONFIG_HOME/git/ignore`, else `~/.config/git/ignore`. This is the
-/// only call that sees the user's global config; `git config --get` runs
-/// nothing, and it runs with the shadow `shadow` as its git directory, so
-/// no repository config of the user's is read (an `includeIf "gitdir:…"`
-/// there matches the shadow's path, not the folder's). A relative path is
-/// taken relative to the folder `root`, as git does.
-async fn global_excludes_path(root: &Path, shadow: &Path, env: &UserGitEnv) -> Option<PathBuf> {
-    let mut c = hardened(Path::new("git"));
-    c.env_remove("GIT_CONFIG_GLOBAL").env_remove("HOME");
-    if let Some(g) = &env.global_config {
-        c.env("GIT_CONFIG_GLOBAL", g);
-    }
-    if let Some(h) = &env.home {
-        c.env("HOME", h);
-    }
-    if let Some(x) = &env.xdg_config_home {
-        c.env("XDG_CONFIG_HOME", x);
-    }
-    c.arg("--git-dir").arg(shadow).args([
-        "config",
-        "--global",
-        "--includes",
-        "--type=path",
-        "--get",
-        "core.excludesFile",
-    ]);
-    c.current_dir(shadow);
-    if let Ok(out) = exec(c, None, GIT_TIMEOUT).await
-        && out.status.success()
-    {
-        let v = String::from_utf8_lossy(&out.stdout)
-            .trim_end_matches('\n')
-            .to_string();
-        if !v.is_empty() {
-            return Some(root.join(v));
-        }
-    }
-    match (&env.xdg_config_home, &env.home) {
-        (Some(x), _) => Some(x.join("git/ignore")),
-        (None, Some(h)) => Some(h.join(".config/git/ignore")),
-        (None, None) => None,
-    }
-}
-
-/// The patterns of the user's global ignore file, ready to append to the
-/// shadow's `info/exclude` (starts on a new line).
-async fn global_excludes(root: &Path, shadow: &Path, env: &UserGitEnv) -> Vec<u8> {
-    let Some(path) = global_excludes_path(root, shadow, env).await else {
-        return Vec::new();
-    };
-    let text = read_ignore_file(&path).await;
-    if text.is_empty() {
-        return text;
-    }
-    let mut v = b"\n# global ignore file\n".to_vec();
-    v.extend(text);
-    v.push(b'\n');
-    v
-}
-
 /// Serializes making a shadow repository (the check for `HEAD` and the
 /// `git init` after it).
 static MAKE_SHADOW: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -711,7 +602,6 @@ async fn repo_for_with(
     cwd: &Path,
     shadow_base: Option<&Path>,
     bounds: &Bounds,
-    user: &UserGitEnv,
     kind: Shadow,
 ) -> Result<Option<(Repo, user_repo::Found)>, String> {
     // Absolute: git runs in the folder's top, so a relative data directory
@@ -799,8 +689,9 @@ async fn repo_for_with(
             None
         }
     };
-    // Ignore patterns are data; copy them so the same files are skipped.
-    let mut exclude = match &info {
+    // The repository's own ignore patterns are data; copy them so the same
+    // files are skipped. The user's global ignore file is not (X.31).
+    let exclude = match &info {
         Some(i) => match &i.exclude {
             Some(p) => {
                 // In the session's `.git`: no link followed, bounded.
@@ -815,7 +706,6 @@ async fn repo_for_with(
         },
         None => SHADOW_EXCLUDES.as_bytes().to_vec(),
     };
-    exclude.extend(global_excludes(&root, &dir, user).await);
     write_if_changed(&dir.join("info/exclude"), &exclude).await;
     let root_id = Identity::of(&root)?;
     let shadow_id = Identity::of(&dir).ok();
@@ -2546,15 +2436,7 @@ pub async fn sub_repo(
     if shadow_base.is_none() {
         return Err("this node keeps no checkpoint store, which sub-agent folders need".into());
     }
-    match repo_for_with(
-        cwd,
-        shadow_base,
-        bounds,
-        &bounds.user_git,
-        Shadow::SubAgents,
-    )
-    .await?
-    {
+    match repo_for_with(cwd, shadow_base, bounds, Shadow::SubAgents).await? {
         Some((repo, user_repo::Found::Repo(user))) if repo.is_shadow() => {
             if user.head.is_some() && user.objects.is_none() {
                 return Err(format!(
@@ -3079,6 +2961,12 @@ mod tests {
         std::fs::write(h.repo.join("local.log"), "log\n").unwrap();
         let index_before = std::fs::read(h.repo.join(".git/index")).unwrap();
         let repo = repo_for(&h.repo, Some(&h.base)).await.unwrap();
+        // The repository's `info/exclude` is the shadow's, as it is: no
+        // global ignore file is added (X.31).
+        assert_eq!(
+            std::fs::read(repo.shadow.as_ref().unwrap().join("info/exclude")).unwrap(),
+            b"local.log\n"
+        );
         let before = snapshot(&repo, "refs/harness/s/t/before", "before")
             .await
             .unwrap();
@@ -3509,126 +3397,6 @@ mod tests {
         }
     }
 
-    /// A user environment whose global git config (a temp file) names a
-    /// global ignore file with `*.swp` and `.idea/`.
-    fn user_env(dir: &Path) -> UserGitEnv {
-        let home = dir.join("home");
-        std::fs::create_dir_all(&home).unwrap();
-        std::fs::write(home.join("my-ignore"), "*.swp\n.idea/\n").unwrap();
-        let cfg = dir.join("global.gitconfig");
-        std::fs::write(&cfg, "[core]\n\texcludesFile = ~/my-ignore\n").unwrap();
-        UserGitEnv {
-            home: Some(home),
-            xdg_config_home: None,
-            global_config: Some(cfg),
-        }
-    }
-
-    /// The checkpoint repository of `cwd` under `base`, for the user
-    /// environment `env`, without bounds.
-    async fn with_env(cwd: &Path, base: &Path, env: &UserGitEnv) -> Repo {
-        repo_for_with(
-            cwd,
-            Some(base),
-            &Bounds::default(),
-            env,
-            Shadow::Checkpoints,
-        )
-        .await
-        .unwrap()
-        .unwrap()
-        .0
-    }
-
-    async fn tree_files(repo: &Repo, sha: &str) -> Vec<String> {
-        run(repo, &["ls-tree", "-r", "--name-only", sha], None)
-            .await
-            .unwrap()
-            .lines()
-            .map(str::to_string)
-            .collect()
-    }
-
-    /// Files ignored only by the user's global ignore file are neither
-    /// captured nor touched by undo, as before checkpoints moved out.
-    #[tokio::test]
-    async fn global_ignore_file_is_honoured() {
-        let h = Hostile::new();
-        let env = user_env(h.marks.parent().unwrap());
-        std::fs::write(h.repo.join("old.swp"), "v1\n").unwrap();
-        let repo = with_env(&h.repo, &h.base, &env).await;
-        let before = snapshot(&repo, "refs/harness/s/t/before", "b")
-            .await
-            .unwrap();
-        // (1) not in the checkpoint tree
-        let files = tree_files(&repo, &before).await;
-        assert!(!files.iter().any(|f| f.ends_with(".swp")), "{files:?}");
-        std::fs::write(h.repo.join("a.txt"), "two\n").unwrap();
-        std::fs::write(h.repo.join("old.swp"), "v2\n").unwrap();
-        std::fs::write(h.repo.join("new.swp"), "fresh\n").unwrap();
-        std::fs::create_dir_all(h.repo.join(".idea")).unwrap();
-        std::fs::write(h.repo.join(".idea/ws.xml"), "x\n").unwrap();
-        let after = snapshot(&repo, "refs/harness/s/t/after", "a")
-            .await
-            .unwrap();
-        assert_eq!(
-            changed(&repo, &before, &after).await.unwrap(),
-            [('M', "a.txt".to_string())]
-        );
-        restore(&repo, &before, &after, false).await.unwrap();
-        assert_eq!(
-            std::fs::read_to_string(h.repo.join("a.txt")).unwrap(),
-            "one\n"
-        );
-        // (2) created after the checkpoint: survives undo
-        assert_eq!(
-            std::fs::read_to_string(h.repo.join("new.swp")).unwrap(),
-            "fresh\n"
-        );
-        assert!(h.repo.join(".idea/ws.xml").exists());
-        // (3) modified after the checkpoint: not rolled back
-        assert_eq!(
-            std::fs::read_to_string(h.repo.join("old.swp")).unwrap(),
-            "v2\n"
-        );
-    }
-
-    /// Without `core.excludesFile`, git's default location applies
-    /// (`$XDG_CONFIG_HOME/git/ignore`), for plain folders too; an oversized
-    /// or non-regular ignore file is skipped.
-    #[tokio::test]
-    async fn default_global_ignore_location_is_honoured() {
-        let d = tempfile::tempdir().unwrap();
-        let xdg = d.path().join("xdg");
-        std::fs::create_dir_all(xdg.join("git")).unwrap();
-        std::fs::write(xdg.join("git/ignore"), "*.swp\n").unwrap();
-        let cfg = d.path().join("empty.gitconfig");
-        std::fs::write(&cfg, "").unwrap();
-        let env = UserGitEnv {
-            home: Some(d.path().join("nohome")),
-            xdg_config_home: Some(xdg.clone()),
-            global_config: Some(cfg),
-        };
-        let ws = d.path().join("ws");
-        std::fs::create_dir_all(&ws).unwrap();
-        std::fs::write(ws.join("a.txt"), "a\n").unwrap();
-        std::fs::write(ws.join("x.swp"), "s\n").unwrap();
-        let base = d.path().join("cp");
-        let repo = with_env(&ws, &base, &env).await;
-        let sha = snapshot(&repo, "refs/harness/s/t/before", "b")
-            .await
-            .unwrap();
-        assert_eq!(tree_files(&repo, &sha).await, ["a.txt"]);
-        // A directory where the ignore file should be: skipped, no error.
-        std::fs::remove_file(xdg.join("git/ignore")).unwrap();
-        std::fs::create_dir_all(xdg.join("git/ignore")).unwrap();
-        let repo = with_env(&ws, &base, &env).await;
-        let sha = snapshot(&repo, "refs/harness/s/t2/before", "b")
-            .await
-            .unwrap();
-        assert_eq!(tree_files(&repo, &sha).await, ["a.txt", "x.swp"]);
-    }
-
     /// Timing only: `cargo test -p harness-node --lib bench_checkpoint -- --ignored --nocapture`.
     #[tokio::test]
     #[ignore]
@@ -3755,3 +3523,9 @@ mod restore_memory_tests;
 #[cfg(test)]
 #[path = "git_diff_tests.rs"]
 mod diff_tests;
+
+/// What a folder only the user's global ignore file named costs (X.31).
+/// Ignored benchmark; lives in its own file.
+#[cfg(test)]
+#[path = "git_ignore_bench.rs"]
+mod ignore_bench;
