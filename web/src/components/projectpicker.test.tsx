@@ -11,6 +11,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
 import { projectSlug } from "../lib/projectSlug";
+import fixture from "../lib/projectSlug.fixture.json";
 import type { NodeInfo } from "../types";
 import { Composer, type Submission } from "./Composer";
 
@@ -274,19 +275,11 @@ describe("the Project button", () => {
 });
 
 describe("the folder name preview", () => {
-  test("follows the node's rule", () => {
-    for (const [name, want] of [
-      ["Project Name Example", "project-name-example"],
-      ["../x", "x"],
-      ["..", "project"],
-      ["/etc/passwd", "etc-passwd"],
-      ["a\u0000b\nc", "a-b-c"],
-      ["a／b∕c", "a-b-c"],
-      ["Café Ünïcode", "caf-n-code"],
-      ["", "project"],
-    ] as [string, string][]) {
-      expect(projectSlug(name)).toBe(want);
+  test("is what the master's cleaning and the node's slug make of the name", () => {
+    // Pairs written by the real path (crates/master/tests/project_slug_parity.rs).
+    for (const [name, want] of fixture as [string, string][]) {
+      expect([name, projectSlug(name)]).toEqual([name, want]);
     }
-    expect(projectSlug("x".repeat(10_000)).length).toBe(48);
+    expect(fixture.length).toBeGreaterThan(30);
   });
 });
