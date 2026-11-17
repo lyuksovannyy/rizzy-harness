@@ -255,6 +255,8 @@ async fn no_write_reaches_the_folder() {
     let git_out = std::process::Command::new("git")
         .args(["branch", "--list"])
         .current_dir(&f.ws)
+        // Not the developer's ~/.gitconfig (`color.branch = always`).
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .output()
         .unwrap();
     assert_eq!(String::from_utf8_lossy(&git_out.stdout).trim(), "* main");

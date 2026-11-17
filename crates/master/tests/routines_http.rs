@@ -1249,6 +1249,8 @@ async fn agentic_runs_wait_for_approval_and_time_out() {
         std::process::Command::new("git")
             .args(["init", "-q"])
             .current_dir(&t.root)
+            // Not the developer's ~/.gitconfig (an `init.templateDir`).
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .status()
             .unwrap()
             .success()
