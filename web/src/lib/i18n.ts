@@ -43,7 +43,7 @@ const en = {
   "composer.send": "Send",
   "composer.stop": "Stop",
   "composer.node": "Node",
-  "composer.folder": "Folder on that node",
+  "composer.folder": "Choose a project first.",
   "composer.forMessage": "for this message",
   "composer.attach": "Attach files",
   "composer.attachHint": "Attach documents (text, code, Markdown, CSV, JSON, PDF; up to 5)",

@@ -8,7 +8,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { createOwner, keywordsOnly, keyed } = require('./onboard.cjs');
+const { createOwner, keywordsOnly, keyed, pickFolder } = require('./onboard.cjs');
 const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2esl-'));
 fs.mkdirSync(`${S}/data`, { recursive: true });
@@ -77,7 +77,7 @@ async function setLimit(p, n) {
     await p.click('button:text-is("Finish")');
     await p.waitForSelector('h1.greeting');
     await p.click('.mode-switch button:has-text("Agentic")');
-    await p.fill('.composer input.mono', `${S}/ws`);
+    await pickFolder(p, `${S}/ws`);
     const local = await p.evaluate(async () => (await (await fetch('/api/nodes')).json()).nodes.find((n) => n.node_id === 'local'));
     log('node max_steps', local.max_steps);
     check(local.max_steps === 1000, `the node's limit is 1000: ${local.max_steps}`);

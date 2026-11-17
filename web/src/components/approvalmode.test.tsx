@@ -17,6 +17,7 @@ import { fold } from "../fold";
 // load it once here, under the hook's own limit.
 beforeAll(async () => {
   await import("./ApprovalModePick");
+  await import("./ProjectPicker");
 }, 30_000);
 
 const node = (over: Partial<NodeInfo> = {}): NodeInfo => ({
@@ -52,6 +53,8 @@ function options(host: HTMLElement) {
 }
 
 function mountHome(workers: NodeInfo[]) {
+  // The latest folder a chat used: the Project button starts at it (X.26).
+  localStorage.setItem("harness.folders", '["/home/me/proj"]');
   const sent: Submission[] = [];
   const host = document.createElement("div");
   document.body.append(host);
@@ -79,8 +82,11 @@ function mountHome(workers: NodeInfo[]) {
       el.dispatchEvent(new Event("input", { bubbles: true }));
     });
   set(host.querySelector("textarea")!, "fix the build");
-  set(host.querySelector<HTMLInputElement>("input.mono")!, "/home/me/proj");
-  const send = () => act(async () => host.querySelector<HTMLButtonElement>("button.send")!.click());
+  const send = async () => {
+    const by = Date.now() + 4000;
+    while (host.querySelector(".project-pick")?.textContent !== "proj" && Date.now() < by) await tick();
+    await act(async () => host.querySelector<HTMLButtonElement>("button.send")!.click());
+  };
   return { host, sent, send, unmount: () => act(() => root.unmount()) };
 }
 

@@ -20,6 +20,7 @@ import { Composer, type Submission } from "./Composer";
 beforeAll(async () => {
   await import("./ExecChoice");
   await import("./HostWarning");
+  await import("./ProjectPicker");
 }, 30_000);
 
 /** `q()` once it finds something, polled for at most `ms`; `null` after. */
@@ -42,6 +43,8 @@ const node = (over: Partial<NodeInfo> = {}): NodeInfo => ({
 });
 
 function mount(workers: NodeInfo[], hostRight: { level: ExecLevel } = { level: "host" }) {
+  // The latest folder a chat used: the Project button starts at it (X.26).
+  localStorage.setItem("harness.folders", '["/home/me/proj"]');
   const sent: Submission[] = [];
   const host = document.createElement("div");
   document.body.append(host);
@@ -72,7 +75,6 @@ function mount(workers: NodeInfo[], hostRight: { level: ExecLevel } = { level: "
       el.dispatchEvent(new Event(el instanceof HTMLSelectElement ? "change" : "input", { bubbles: true }));
     });
   set(host.querySelector("textarea")!, "fix the build");
-  set(host.querySelector<HTMLInputElement>("input.mono")!, "/home/me/proj");
   const select = () => host.querySelector<HTMLSelectElement>('select[aria-label="How this chat\'s commands run"]');
   // The choice is its own lazy chunk: wait for it.
   const loaded = () => until(select);
@@ -82,6 +84,7 @@ function mount(workers: NodeInfo[], hostRight: { level: ExecLevel } = { level: "
   const button = (d: Element, label: string) =>
     act(() => [...d.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent === label)!.click());
   const send = async () => {
+    await until(() => host.querySelector(".project-pick")?.textContent === "proj" || null);
     await act(async () => host.querySelector<HTMLButtonElement>("button.send")!.click());
   };
   return { host, sent, set, select, loaded, absent, dialog, button, send, rerender, unmount: () => act(() => root.unmount()) };

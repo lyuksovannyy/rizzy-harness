@@ -35,6 +35,8 @@ let host: HTMLElement;
 let root: Root;
 let sent: Submission[];
 beforeEach(() => {
+  // The latest folder a chat used: the Project button starts at it (X.26).
+  localStorage.setItem("harness.folders", '["/home/me/proj"]');
   sent = [];
   host = document.createElement("div");
   document.body.append(host);
@@ -78,6 +80,9 @@ function set(el: HTMLInputElement | HTMLTextAreaElement, value: string) {
   });
 }
 async function send(text: string) {
+  const by = Date.now() + 4000;
+  while (host.querySelector(".project-pick")?.textContent !== "proj" && Date.now() < by)
+    await act(async () => new Promise((r) => setTimeout(r, 10)));
   set(host.querySelector("textarea")!, text);
   await act(async () => host.querySelector<HTMLButtonElement>("button.send")!.click());
 }
@@ -92,7 +97,6 @@ describe("the new chat's agent", () => {
     expect(picker().getAttribute("aria-label")).toBe("agent: Assistant");
     act(() => modeButton("Agentic").click());
     expect(picker().getAttribute("aria-label")).toBe("agent: Software Developer");
-    set(host.querySelector<HTMLInputElement>("input.mono")!, "/home/me/proj");
     await send("fix the build");
     expect(sent.at(-1)).toMatchObject({ mode: "agentic", agentId: "coder" });
     act(() => modeButton("Ask").click());
@@ -104,7 +108,6 @@ describe("the new chat's agent", () => {
     pick("Writer");
     act(() => modeButton("Agentic").click());
     expect(picker().getAttribute("aria-label")).toBe("agent: Writer");
-    set(host.querySelector<HTMLInputElement>("input.mono")!, "/home/me/proj");
     await send("draft the notes");
     expect(sent.at(-1)).toMatchObject({ mode: "agentic", agentId: "writer" });
   });

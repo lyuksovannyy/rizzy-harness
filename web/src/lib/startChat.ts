@@ -11,6 +11,19 @@ import type { Submission } from "../components/Composer";
 import { outbox } from "./outbox";
 import { titleFrom } from "./title";
 
+/** Remember `f` first among the folders new chats were started in (at
+ * most 8, this browser only; the Project popup offers them, sign-out
+ * clears them with the drafts). */
+function rememberFolder(f: string) {
+  const key = "harness.folders";
+  try {
+    const old = JSON.parse(localStorage.getItem(key) ?? "[]") as string[];
+    localStorage.setItem(key, JSON.stringify([f, ...old.filter((x) => x !== f)].slice(0, 8)));
+  } catch {
+    /* storage unavailable */
+  }
+}
+
 export async function startChat(
   s: Submission,
   where: { workspace: string | null; project?: string },
@@ -28,10 +41,13 @@ export async function startChat(
     cwd: agentic ? s.cwd : undefined,
     ...(s.incognito ? { incognito: true } : {}),
     ...(where.workspace ? { workspace_id: where.workspace } : {}),
-    ...(where.project ? { project_id: where.project } : {}),
+    // The project page's, or the one picked in the Project popup (X.26).
+    ...((where.project ?? (agentic && s.projectId)) ? { project_id: where.project ?? s.projectId } : {}),
     ...(agentic && s.execMode ? { exec_mode: s.execMode } : {}),
     ...(agentic && s.approvalMode ? { approval_mode: s.approvalMode } : {}),
   });
+  // A folder typed or picked as such (not a project's) is offered again.
+  if (agentic && !s.projectId) rememberFolder(s.cwd);
   const o = outbox.add(session_id, s.text, 0, s);
   open(session_id);
   try {

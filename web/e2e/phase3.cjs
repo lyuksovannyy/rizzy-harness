@@ -6,7 +6,7 @@ const fs = require('fs');
 // Needs Playwright with Chromium. Exits non-zero on the first failure.
 const path = require('path');
 const os = require('os');
-const { claimCode, createOwner, keywordsOnly, pickAgent } = require('./onboard.cjs');
+const { claimCode, createOwner, keywordsOnly, pickAgent, pickFolder } = require('./onboard.cjs');
 const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2e-'));
 fs.mkdirSync(`${S}/p3/data`, { recursive: true });
@@ -61,7 +61,7 @@ let srv = null;
   await p.focus('.composer textarea');
   await p.keyboard.press('Tab');
   log('mode after Tab:', await p.innerText('.mode-switch button[aria-checked=true]'));
-  await p.fill('.agentic-row input', `${S}/p3/proj`);
+  await pickFolder(p, `${S}/p3/proj`);
   await pickAgent(p);
   await p.fill('.composer textarea', 'run: ls');
   await p.keyboard.press('Enter');
