@@ -1048,7 +1048,7 @@ fn a_node_killed_while_a_child_waits_before_exec_leaves_nothing() {
     stall.release();
     assert!(
         l.is_empty(),
-        "still running 2 s after the node died:\n{}",
+        "still running {GONE_LIMIT:?} after the node died:\n{}",
         describe(&l)
     );
 }
@@ -1084,6 +1084,18 @@ fn guard_argv(
 /// shell gives `&`); `@NODE@` in it becomes the shell's pid. The command
 /// line is in a script file, so the shell's own command line carries no
 /// mark (a process that does is killed by the sweep, by design).
+/// Whether `child` exited within `within` (reaped if so).
+fn exited_within(child: &mut std::process::Child, within: Duration) -> bool {
+    let by = Instant::now() + within;
+    while Instant::now() < by {
+        if child.try_wait().is_ok_and(|s| s.is_some()) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    false
+}
+
 fn under_shell(
     dir: &Path,
     argv: &[std::ffi::OsString],
@@ -1155,7 +1167,14 @@ async fn a_restarted_node_ends_a_guard_whose_node_died() {
     );
     assert!(!sleeps(SECS).is_empty(), "the sweep ended it");
     drop(held);
-    let _ = sh.wait();
+    // The shell waits for its guard: a guard that ignores the closed
+    // channel would hold this test for ever, so it is bounded.
+    let ended = exited_within(&mut sh, GONE_LIMIT);
+    assert!(
+        ended,
+        "the guard was still running {GONE_LIMIT:?} after its channel closed:\n{}",
+        describe(&left(&f.ws, &[SECS]))
+    );
     let by = Instant::now() + Duration::from_secs(3);
     while (alive(unknown) || !sleeps(SECS).is_empty()) && Instant::now() < by {
         tokio::time::sleep(Duration::from_millis(10)).await;

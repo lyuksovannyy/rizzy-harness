@@ -253,9 +253,13 @@ impl harness_agent_native::provider::Provider for Gate {
 #[tokio::test]
 async fn teamlead_delegates_in_parallel_within_caps() {
     // The coder's and the scout's `slow: 20` wait for each other: one step's
-    // delegations run at once, not one after another. (All four children
-    // overlapping depended on how long a worktree takes to make: the one
-    // that only answers "unknown tool `delegate`" could end first.)
+    // delegations run at once, not one after another. Two held children
+    // are enough for that: run one after another, the first waits alone
+    // and the two never overlap. The cap is shown apart from it: four of
+    // the five start, the fifth is refused ("cap reached: at most 4").
+    // (This asserted that all four overlap, which depended on how long a
+    // worktree takes to make: the child that only answers "unknown tool
+    // `delegate`" could end before a writer's worktree was ready.)
     let (m, ws, _d) = setup_with(Arc::new(Gate {
         inner: Mock {
             delay: Duration::from_millis(10),

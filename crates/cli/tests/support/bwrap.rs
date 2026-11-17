@@ -16,21 +16,59 @@ pub fn required() -> bool {
 /// Whether this machine's bubblewrap can bind the way `binds` asks: binds
 /// by descriptor need 0.10.0 or newer (`harness_tools::contain::binds_of`).
 /// A test that forces [`harness_tools::contain::Binds::Fd`] skips, with a
-/// printed reason, on an older one, even with `HARNESS_REQUIRE_BWRAP=1`:
-/// the node never asks that bubblewrap for them (it binds by path, which
-/// the same tests check with `Binds::Path`).
+/// printed reason, only where `bwrap --version` names a version below
+/// 0.10: the node never asks that bubblewrap for them (it binds by path,
+/// which the same tests check with `Binds::Path`). A version that cannot
+/// be read fails the test under `HARNESS_REQUIRE_BWRAP=1` instead of
+/// skipping it; with 0.10 or newer this returns true, and the callers'
+/// own checks fail a forced-descriptor case whose probe fails (the full
+/// form under `HARNESS_REQUIRE_BWRAP=1`), so on CI the case runs or the
+/// test is red.
 #[allow(dead_code)]
 pub fn can_bind(bwrap: &Path, binds: harness_tools::contain::Binds) -> bool {
     use harness_tools::contain::{Binds, binds_of};
     let (have, version) = binds_of(bwrap);
-    if binds == Binds::Fd && have != Binds::Fd {
-        eprintln!(
-            "SKIPPED (binds by descriptor): {} is {version:?}; --bind-fd needs bubblewrap 0.10.0",
-            bwrap.display()
-        );
-        return false;
+    if binds != Binds::Fd || have == Binds::Fd {
+        return true;
     }
-    true
+    // `bubblewrap 0.9.0`: the first word that starts with a digit.
+    let parsed = version.as_deref().and_then(|v| {
+        let num = v
+            .split_whitespace()
+            .find(|w| w.starts_with(|c: char| c.is_ascii_digit()))?;
+        let mut it = num.split('.');
+        let major: u32 = it.next()?.parse().ok()?;
+        let minor: u32 = it
+            .next()?
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>()
+            .parse()
+            .ok()?;
+        Some((major, minor))
+    });
+    match parsed {
+        Some(v) if v < (0, 10) => {
+            eprintln!(
+                "SKIPPED (binds by descriptor): {} is {version:?}; --bind-fd needs bubblewrap 0.10.0",
+                bwrap.display()
+            );
+            false
+        }
+        _ => {
+            assert!(
+                !required(),
+                "HARNESS_REQUIRE_BWRAP=1 but the version of {} cannot be read ({version:?}): \
+                 the binds by descriptor would go untested",
+                bwrap.display()
+            );
+            eprintln!(
+                "SKIPPED (binds by descriptor): the version of {} cannot be read ({version:?})",
+                bwrap.display()
+            );
+            false
+        }
+    }
 }
 
 /// `sb` with the full containment, as the node sets it up, or `sb` back (and
