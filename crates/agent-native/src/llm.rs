@@ -610,7 +610,8 @@ fn provider_error(e: genai::Error) -> ProviderError {
 fn silent(what: &str, after: std::time::Duration) -> ProviderError {
     ProviderError::Silent(format!(
         "the provider {what} for {} s (`[limits] model_first_byte_timeout_s` and \
-         `model_idle_timeout_s` in node.toml)",
+         `model_idle_timeout_s` in node.toml; for Ask chats `[chat] \
+         model_first_byte_timeout_s` in config.toml)",
         after.as_secs()
     ))
 }

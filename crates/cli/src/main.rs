@@ -360,6 +360,12 @@ async fn serve(
             summarize_after_tokens: cfg.chat.summarize_after_tokens,
             // The generic summary, not the coding one.
             coding_summary: false,
+            // `[chat] model_first_byte_timeout_s` (X.31); the gap between
+            // events keeps its default.
+            stream_limits: harness_agent_native::StreamLimits {
+                first_byte: cfg.chat.first_byte_timeout(),
+                ..Default::default()
+            },
             ..Default::default()
         },
     );

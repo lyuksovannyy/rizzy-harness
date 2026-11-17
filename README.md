@@ -120,7 +120,8 @@ for you" when an approval comes, not every step. Stop is there from the moment t
 for a passing reason the line under it says why and when the next try is
 ("rate limit. Trying again in 3 s (attempt 2 of 3)"); a provider that sends
 nothing is cut off after `[limits] model_first_byte_timeout_s` (600 s by
-default; the server's own Ask chats always use 600 s) and the turn ends with
+default; the server's own Ask chats use `[chat] model_first_byte_timeout_s`
+in config.toml, also 600 s by default) and the turn ends with
 the reason and **Retry**. A message the server refuses in an open chat goes
 back into the box, with its attachments, and the reason under it. The first
 message of a new chat, refused after the chat opened, stays in that chat marked
@@ -793,6 +794,8 @@ Chats and web tools (restart after changing):
 incognito_ttl_minutes = 1440         # incognito chats deleted after this idle time
 # summarize_after_tokens = 24000     # unset: the model's context window less a reserve
                                      # (24000 when the window is unknown); 0 = never
+model_first_byte_timeout_s = 600     # Ask chats: wait for a model's first answer (10 .. 3600;
+                                     # out of range: the server does not start)
 
 [web]
 search = "searxng"                   # none | searxng | brave
@@ -2037,7 +2040,10 @@ a local server may read the prompt before it answers), and
 `model_idle_timeout_s` (default 300, Codex's value) the gaps after it
 (keep-alive pings count); both 10 to 3600. Such a call is tried once more,
 never after part of its answer was shown, then another model of the agent's
-answers or the turn ends with an error naming both keys. A `bash` call runs for
+answers or the turn ends with an error naming both keys. Ask chats run on
+the server, not a node: their first-answer wait is `[chat]
+model_first_byte_timeout_s` in config.toml (same default and range); their
+gap after it is the fixed 300 s. A `bash` call runs for
 the `timeout_secs` it states, at least 5 s and at most `[limits]
 bash_timeout_max_s` seconds (default 3600, 1 to 3600, which wins over the
 5 s floor if set lower); **a call that states none stops after 60 s** (it was

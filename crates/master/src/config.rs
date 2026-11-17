@@ -424,6 +424,11 @@ pub struct ChatConfig {
     /// unknown.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summarize_after_tokens: Option<usize>,
+    /// Seconds an Ask chat waits for the model's first answer before the
+    /// call fails as silent (and is retried once): the node's
+    /// `[limits] model_first_byte_timeout_s` for the master's own chat
+    /// runtime, same default and range (ADOPTION_PLAN X.31).
+    pub model_first_byte_timeout_s: u64,
 }
 
 impl Default for ChatConfig {
@@ -431,6 +436,7 @@ impl Default for ChatConfig {
         Self {
             incognito_ttl_minutes: 24 * 60,
             summarize_after_tokens: None,
+            model_first_byte_timeout_s: harness_core::policy::DEFAULT_MODEL_FIRST_BYTE_S,
         }
     }
 }
@@ -438,6 +444,11 @@ impl Default for ChatConfig {
 impl ChatConfig {
     pub fn incognito_ttl(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.incognito_ttl_minutes.max(1) * 60)
+    }
+
+    /// How long an Ask chat's model call may wait for its first answer.
+    pub fn first_byte_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.model_first_byte_timeout_s)
     }
 }
 
@@ -744,6 +755,14 @@ impl Config {
             }
             _ => {}
         }
+        let n = self.chat.model_first_byte_timeout_s;
+        let (min, max) = (
+            harness_core::policy::MIN_MODEL_IDLE_S,
+            harness_core::policy::MAX_MODEL_IDLE_S,
+        );
+        if !(min..=max).contains(&n) {
+            bail!("[chat] model_first_byte_timeout_s = {n}: must be between {min} and {max}");
+        }
         Ok(())
     }
 
@@ -904,6 +923,46 @@ mod tests {
         "[[providers]]\nid = \"ds\"\nname = \"DeepSeek\"\npreset = \"custom_openai\"\n",
         "kind = \"openai\"\nmodels = [{ id = \"deepseek-chat\" }]\n",
     );
+
+    /// `[chat] model_first_byte_timeout_s` (ADOPTION_PLAN X.31): Ask chats'
+    /// wait for a model's first answer, the node's key and bounds; 600 s
+    /// when absent; out of range refused with the key and the range.
+    #[test]
+    fn chat_first_byte_timeout_is_read_and_checked() {
+        let mock = "[[providers]]\nid = \"demo\"\nname = \"Demo\"\npreset = \"demo\"\nkind = \"mock\"\nmodels = [{ id = \"mock\" }]\n";
+        let c: Config = toml::from_str(mock).unwrap();
+        assert_eq!(c.chat.model_first_byte_timeout_s, 600);
+        c.validate().unwrap();
+        for (n, ok) in [
+            (10, true),
+            (45, true),
+            (3600, true),
+            (9, false),
+            (3601, false),
+        ] {
+            let c: Config =
+                toml::from_str(&format!("{mock}[chat]\nmodel_first_byte_timeout_s = {n}\n"))
+                    .unwrap();
+            assert_eq!(c.chat.model_first_byte_timeout_s, n);
+            match c.validate() {
+                Ok(()) => assert!(ok, "{n} accepted"),
+                Err(e) => {
+                    assert!(!ok, "{n}: {e}");
+                    assert_eq!(
+                        e.to_string(),
+                        format!(
+                            "[chat] model_first_byte_timeout_s = {n}: must be between 10 and 3600"
+                        )
+                    );
+                }
+            }
+        }
+        // Written back as read (Settings saves the whole file).
+        let c: Config =
+            toml::from_str(&format!("{mock}[chat]\nmodel_first_byte_timeout_s = 45\n")).unwrap();
+        let again: Config = toml::from_str(&toml::to_string(&c).unwrap()).unwrap();
+        assert_eq!(again.chat.model_first_byte_timeout_s, 45);
+    }
 
     #[test]
     fn parses_and_validates() {
