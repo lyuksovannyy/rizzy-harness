@@ -31,13 +31,21 @@ const FINAL = {
   spinning: 0,
 };
 
+/** A new agentic chat in Ask: new chats start in Auto since 1ccfceb1, and
+ * these checks need the first command to wait for approval. */
+async function askChat(t) {
+  await t.newChat('Agentic');
+  await t.p.click('.approval-pick .select-button');
+  await t.p.click('.approval-pick li:has(.option-label:text-is("Ask"))');
+}
+
 module.exports = async function progress(t) {
   const { p, S } = t;
 
   // The mock moves one block id on over three messages, each but the last
   // calling bash. While the first call waits for approval, the first block
   // is the live card: its active step spins, unless motion is reduced.
-  await t.newChat('Agentic');
+  await askChat(t);
   await t.type('progress: 3');
   const allow = p.locator(ALLOW);
   await allow.waitFor();
@@ -62,7 +70,7 @@ module.exports = async function progress(t) {
 
   // A turn stopped while a step runs: nothing will move the card on, so its
   // active step has stopped, nothing spins, and the header says why.
-  await t.newChat('Agentic');
+  await askChat(t);
   await t.type('progress: 2');
   await p.locator(ALLOW).waitFor();
   await p.locator('.ui-card .ui-progress .ui-step-active .spin').waitFor();
@@ -90,7 +98,7 @@ module.exports = async function progress(t) {
   // A turn stopped while the next progress message streams: that message
   // never reached Rust, so its fence has no block. It is a harness note,
   // not half a JSON body as code, live and after a reload.
-  await t.newChat('Agentic');
+  await askChat(t);
   await t.type('progress: 3');
   await p.locator(ALLOW).click();
   await p.locator('.msg.assistant.streaming .ui-skeleton').waitFor();

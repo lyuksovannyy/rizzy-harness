@@ -89,7 +89,11 @@ let srv = null;
 
   // Switch session agent
   // Scout runs only as a sub-agent since the roster (9c32186); Reviewer can lead.
+  // Since PR 135 the switch is recorded with the next message, not at the
+  // pick: the divider comes before that message's turn.
   await pickAgent(p, 'Reviewer');
+  await p.fill('.composer textarea', 'review it');
+  await p.keyboard.press('Enter');
   await p.waitForSelector('.divider:has-text("Reviewer")');
   log('agent switch recorded');
   await p.screenshot({ path: `${S}/p3-4-conversation.png` });

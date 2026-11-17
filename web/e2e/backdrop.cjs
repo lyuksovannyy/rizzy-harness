@@ -108,13 +108,15 @@ async function savePrefs(p, pick) {
     await sleep(300);
     const [border, accent] = await p.evaluate(() => {
       const probe = document.createElement('i');
-      probe.style.color = 'var(--accent)';
+      // Rizzy Glass (2f1041d6): the focus ring's token, the accent's own
+      // foreground shade.
+      probe.style.color = 'var(--focus)';
       document.body.append(probe);
       const a = getComputedStyle(probe).color;
       probe.remove();
       return [getComputedStyle(document.querySelector('.composer')).borderTopColor, a];
     });
-    check(border === accent, `the focused composer's border is the accent (${border} vs ${accent})`);
+    check(border === accent, `the focused composer's border is the focus colour (${border} vs ${accent})`);
     check(wallFetches.filter((u) => u === '/wall/queries.txt').length === 1, 'queries fetched once: ' + wallFetches);
     log(`ask: ${first.length} lines, none under the column; fetched ${wallFetches.join(', ')}`);
     await p.screenshot({ path: `${S}/bg-ask-dark.png` });
