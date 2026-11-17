@@ -8,7 +8,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { claimCode, createOwner, keywordsOnly, keyed, pickAgent } = require('./onboard.cjs');
+const { claimCode, createOwner, keywordsOnly, keyed, pickAgent, pickFolder } = require('./onboard.cjs');
 const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2e9-'));
 const D = `${S}/data`, R = `${S}/repo`;
@@ -97,7 +97,7 @@ const whisper = http.createServer((req, res) => {
     await p.waitForSelector('h1.greeting');
     await p.fill('.composer textarea', 'run: echo changed > a.txt; echo new > b.txt');
     await p.click('.mode-switch button:has-text("Agentic")');
-    await p.fill('.agentic-row input', R);
+    await pickFolder(p, R);
     // The default Assistant has no bash since the roster (9c32186).
     await pickAgent(p);
     await p.click('.composer .send');

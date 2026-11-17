@@ -252,7 +252,9 @@ member's level, offering only levels the person setting it may grant;
 granting `host` in either place shows the host warning (`HostWarning`,
 grant variant: the same risks) before anything is saved, and cancelling
 saves nothing. The new-chat choice offers `host` only at the `host` level
-(`mayPickHost`); at `none` or `container` the composer says why agent
+(`mayPickHost`); elsewhere the start screen's agentic row still names the
+mode, as a label ("Commands sandbox", the owner's decision 8 of 2026-11-17,
+ADOPTION_PLAN X.26); at `none` or `container` the composer says why agent
 chats are off, naming which level and who sets it.
 
 **What the node knows:** nothing of levels. It knows its own ceiling and

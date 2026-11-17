@@ -65,4 +65,13 @@ async function pickAgent(p, name = 'Software Developer') {
   await p.waitForSelector(`.composer button.select-button[aria-label="agent: ${name}"]`);
 }
 
-module.exports = { claimCode, createOwner, keywordsOnly, keyed, pickAgent };
+/** The start screen's agentic row (X.26): choose `folder` as an existing
+ * folder through the Project button's popup (what the folder field was). */
+async function pickFolder(p, folder) {
+  await p.click('.agentic-row .project-pick');
+  await p.fill('dialog.project-picker input[aria-label="Folder on that node"]', folder);
+  await p.click('dialog.project-picker button:text-is("Use folder")');
+  await p.waitForSelector('dialog.project-picker', { state: 'detached' });
+}
+
+module.exports = { claimCode, createOwner, keywordsOnly, keyed, pickAgent, pickFolder };

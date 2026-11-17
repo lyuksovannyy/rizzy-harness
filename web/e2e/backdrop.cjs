@@ -13,7 +13,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { log, check, sleep, contrast } = require('./rich/lib.cjs');
-const { claimCode, createOwner, keywordsOnly, keyed } = require('./onboard.cjs');
+const { claimCode, createOwner, keywordsOnly, keyed, pickFolder } = require('./onboard.cjs');
 const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2eb-'));
 fs.mkdirSync(`${S}/data`, { recursive: true });
@@ -108,13 +108,15 @@ async function savePrefs(p, pick) {
     await sleep(300);
     const [border, accent] = await p.evaluate(() => {
       const probe = document.createElement('i');
-      probe.style.color = 'var(--accent)';
+      // Rizzy Glass (2f1041d6): the focus ring's token, the accent's own
+      // foreground shade.
+      probe.style.color = 'var(--focus)';
       document.body.append(probe);
       const a = getComputedStyle(probe).color;
       probe.remove();
       return [getComputedStyle(document.querySelector('.composer')).borderTopColor, a];
     });
-    check(border === accent, `the focused composer's border is the accent (${border} vs ${accent})`);
+    check(border === accent, `the focused composer's border is the focus colour (${border} vs ${accent})`);
     check(wallFetches.filter((u) => u === '/wall/queries.txt').length === 1, 'queries fetched once: ' + wallFetches);
     log(`ask: ${first.length} lines, none under the column; fetched ${wallFetches.join(', ')}`);
     await p.screenshot({ path: `${S}/bg-ask-dark.png` });
@@ -415,7 +417,7 @@ async function savePrefs(p, pick) {
     await p.screenshot({ path: `${S}/chat-gutter-chat-dark.png` });
     await home(p);
     await mode(p, 'Agentic');
-    await p.fill('.agentic-row input', `${S}/ws`);
+    await pickFolder(p, `${S}/ws`);
     await p.fill('.composer textarea', 'hello agent');
     await p.keyboard.press('Enter');
     await p.waitForSelector('.conversation .msg.assistant');

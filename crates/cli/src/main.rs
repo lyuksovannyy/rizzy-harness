@@ -626,6 +626,19 @@ async fn agentic_node(
             tracing::warn!("the node's instruction file: {w}");
         }
     }
+    // Where new projects' folders are made (X.26, PLAN.md T77): checked
+    // once here, after the data directory is protected; one node.toml
+    // names that breaks a rule stops the node.
+    match policy
+        .locate_projects(dir)
+        .map_err(|e| anyhow::anyhow!("node.toml: {e}"))?
+    {
+        Some(why) => tracing::warn!("{why}"),
+        None => match &policy.projects.located {
+            Some(d) => tracing::info!("new project folders: made in {}", d.display()),
+            None => tracing::info!("new project folders: off ([projects] dir = \"\")"),
+        },
+    }
     // The shell sandbox (FIX_PLAN 2.7): resolved and self-tested once; the
     // execution modes this node offers follow from it (N.10a).
     let (sandbox, host_shell) = start_sandbox(dir, &mut policy, refuse_without_sandbox)?;

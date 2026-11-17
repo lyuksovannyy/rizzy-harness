@@ -112,6 +112,7 @@ export function Home(props: {
           defaultModel={props.prefs?.default_model}
           agenticBlocked={props.agenticBlocked}
           hostRight={props.hostRight}
+          workspace={props.workspace}
           onSubmit={props.onSubmit}
           predict={props.predict}
           onLearn={props.onLearn}

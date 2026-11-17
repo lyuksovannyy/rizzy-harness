@@ -10,7 +10,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { createOwner, keywordsOnly, keyed } = require('./onboard.cjs');
+const { createOwner, keywordsOnly, keyed, pickFolder } = require('./onboard.cjs');
 const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2et-'));
 fs.mkdirSync(`${S}/data`, { recursive: true });
@@ -74,7 +74,7 @@ const SCRIPT = [
     // A new Agentic chat from the composer: it takes the Agentic default
     // agent (the Software Developer), shown in the picker, without a pick.
     await p.click('.mode-switch button:has-text("Agentic")');
-    await p.fill('.composer input.mono', `${S}/ws`);
+    await pickFolder(p, `${S}/ws`);
     const pickerLabel = await p.getAttribute('.agent-pick button[aria-label^="agent: "]', 'aria-label');
     log('picker:', pickerLabel);
     check(pickerLabel === 'agent: Software Developer', `the Agentic default is shown (${pickerLabel})`);

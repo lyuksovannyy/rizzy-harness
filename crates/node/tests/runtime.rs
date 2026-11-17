@@ -4162,3 +4162,55 @@ async fn a_sub_agent_started_across_the_stop_never_runs_a_turn_after_it() {
         "children whose turn did not end by the stop: {started_after:?}"
     );
 }
+
+// ---- A new project's folder (ADOPTION_PLAN X.26, PLAN.md T77) ----
+
+/// A folder the node made for a new project (`project.create`) is a
+/// repository with a commit: a session runs in it, and a sub-agent that
+/// writes gets a folder of its own there and its change comes back, where
+/// a plain folder refuses it
+/// (`a_writing_sub_agent_is_refused_outside_a_repository`).
+#[tokio::test]
+async fn a_new_project_folder_takes_a_writing_sub_agent() {
+    let mut h = Harness::new(|root| {
+        let mut p = auto_policy(root);
+        p.projects.dir = Some(root.join("ws/projects"));
+        std::fs::create_dir_all(root.join("data")).unwrap();
+        p.locate_projects(&root.join("data")).unwrap();
+        p
+    })
+    .await;
+    h.send(MasterToNode::ProjectCreate {
+        req_id: "pc".into(),
+        name: "Writer Test".into(),
+    });
+    let path = loop {
+        let msg = tokio::time::timeout(Duration::from_secs(20), h.link.from_node.recv())
+            .await
+            .expect("no answer")
+            .expect("link closed");
+        if let NodeToMaster::ProjectCreated {
+            req_id,
+            path,
+            error,
+        } = msg
+        {
+            assert_eq!(req_id, "pc");
+            break std::path::PathBuf::from(path.unwrap_or_else(|| panic!("{error:?}")));
+        }
+    };
+    assert!(path.starts_with(h.ws.join("projects").canonicalize().unwrap()));
+    h.ws = path.clone();
+    let sid = h.create().await;
+    let out = delegate_as_lead(
+        &mut h,
+        sid,
+        vec![agent("dev", vec![])],
+        "delegate: dev=run: echo new > made.txt",
+    )
+    .await;
+    let out = out.last().expect("a delegate call");
+    assert!(!out.contains("not started"), "{out}");
+    assert!(out.contains("finished"), "{out}");
+    assert_eq!(h.node.store().sessions().unwrap().len(), 2, "a child ran");
+}

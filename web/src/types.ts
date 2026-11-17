@@ -868,6 +868,8 @@ export interface NodeInfo {
   /** Its `[limits] max_steps` (X.14), the most a chat's own limit may be;
    * absent: the node cannot change a chat's limit. */
   max_steps?: number | null;
+  /** It makes new projects' folders (X.26; its node.toml's `[projects] dir`). */
+  projects?: boolean;
 }
 
 /** A server-wide account role (Settings → Users), not a workspace role. */

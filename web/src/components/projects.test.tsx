@@ -63,7 +63,7 @@ const chat = (id: string, extra: Partial<SessionRow> = {}): SessionRow => ({
 });
 
 describe("the bar on a project's page", () => {
-  test("no Search mode and no Incognito; the project's folder is filled in", () => {
+  test("no Search mode and no Incognito; the project's folder is filled in", async () => {
     const c = mount(
       <Composer
         where="home"
@@ -81,8 +81,13 @@ describe("the bar on a project's page", () => {
     expect(modes).toEqual(["Ask", "Agentic"]);
     expect(c.host.querySelector(".pill.incognito")).toBeNull();
     act(() => [...c.host.querySelectorAll<HTMLButtonElement>(".mode-switch button")].find((b) => b.textContent === "Agentic")!.click());
-    const folder = [...c.host.querySelectorAll<HTMLInputElement>("input")].find((i) => i.value === "/srv/garden");
-    expect(folder).toBeTruthy();
+    // The Project button (X.26, a lazy chunk) shows the folder's last part.
+    const by = Date.now() + 4000;
+    while (!c.host.querySelector(".project-pick") && Date.now() < by)
+      await act(async () => new Promise((r) => setTimeout(r, 10)));
+    const folder = c.host.querySelector<HTMLButtonElement>(".project-pick")!;
+    expect(folder.textContent).toBe("garden");
+    expect(folder.title).toBe("/srv/garden");
     c.unmount();
   });
 });

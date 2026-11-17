@@ -7,7 +7,7 @@ const { spawn, execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { claimCode, createOwner, keywordsOnly, pickAgent } = require('./onboard.cjs');
+const { claimCode, createOwner, keywordsOnly, pickAgent, pickFolder } = require('./onboard.cjs');
 const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2e8-'));
 // The remote node's project sits outside its data directory: a session
@@ -72,7 +72,7 @@ let PAGE = null;
     // The default Assistant has no bash since the roster (9c32186).
     await pickAgent(p);
     await p.selectOption('.agentic-row select', nodeId);
-    await p.fill('.agentic-row input', `${W}`);
+    await pickFolder(p, `${W}`);
     await p.click('.composer .send');
     await p.waitForSelector('.approval');
     await p.click('.approval button:has-text("Allow")');
@@ -91,7 +91,7 @@ let PAGE = null;
     await p.click('.mode-switch button:has-text("Agentic")');
     await pickAgent(p, 'Senior Teamlead');
     await p.selectOption('.agentic-row select', nodeId);
-    await p.fill('.agentic-row input', `${W}`);
+    await pickFolder(p, `${W}`);
     await p.click('.composer .send');
     await p.waitForSelector('.tool >> text=@reviewer: check the notes');
     await p.waitForFunction(() => document.querySelectorAll('.tool.tool-ok').length >= 2);

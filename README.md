@@ -1455,6 +1455,10 @@ background_agent_timeout_s = 1800    # wall-clock limit of one background sub-ag
 callback_turns = 3                   # turns the agent may run in a row without you when commands end; 0: off (0 .. 20)
 callback_max_steps = 20              # model calls one such turn may make, never above max_steps or the chat's own limit (1 .. 10000)
 handoff_notes_per_hour = 4           # hand-off notes this node writes per chat per hour; 0: off, the server asks for none (0 .. 60)
+projects_per_hour = 20               # new project folders this node makes per hour (only those made count; in memory); 0: off (0 .. 200)
+
+[projects]
+dir = "~/rizzy-projects"             # where "New project" makes folders (see "Projects"); inside workspace_roots, its parent existing, on the data directory's file system; "" turns it off
 
 [sandbox]
 mode = "required"                    # required | best-effort | off
@@ -2483,6 +2487,39 @@ chat do not get it again, and neither does a chat whose agent has project
 memory off. Keeping your personal memory out of
 a team workspace leaves its projects' memory in. Agentic chats started in a project
 take its default node and folder. Temporary chats cannot join a project.
+
+**Starting an agentic chat: the Project button.** On the start screen, Agentic
+shows the node, a **Project** button and how the chat's commands run (always:
+"sandbox" where that is all the node offers, the choice with its warning where
+it offers the host shell and you may use it). The button opens a popup:
+
+- **Projects**: the workspace's projects with their folders, searchable; pick
+  one and the chat starts in that project, on its node, in its folder. Every
+  chat of a project works in that one folder (they share its files, as chats in
+  one folder always have).
+- **New project**: type a name and Create. The node makes a new folder for it,
+  `project-name-example-ab1c` for "Project Name Example" (the name in lower-case
+  letters, digits and dashes, then four random characters), inside the folder its
+  `node.toml` names (`[projects] dir`, default `~/rizzy-projects`, which must lie
+  inside `workspace_roots`), makes it a git repository with one empty commit (so
+  sub-agents that write can work there), and the project is created with that node
+  and folder. The server never names the place: you cannot type a destination,
+  in the sandbox or the host shell; to work elsewhere, use an existing folder.
+  Only those who may manage the workspace's projects see it; a node whose
+  `node.toml` turns it off (`dir = ""`), or whose projects folder breaks a rule
+  (outside `workspace_roots`, in or over its data directory: the node does not
+  start when node.toml names such a folder; its parent folder must exist, and it
+  must be on the same file system as the node's data directory), says so
+  instead. The repository is built in the node's own data directory and moved
+  in under a name nothing holds, so a chat cannot steer it elsewhere. A node
+  makes at most `[limits] projects_per_hour` (20) folders an hour (only those
+  made count; a restart starts the count again).
+- **Existing folder**: the path field you had before, with your recent folders,
+  for a chat in a checkout you already have (no project).
+- **From a repository**: later (cloning from GitHub, GitLab, Gitea or Forgejo).
+
+A project without a folder offers "Create its folder on <node>". Deleting a
+project leaves its folder on the node.
 Design and open questions: [docs/projects.md](docs/projects.md).
 
 ## The environment line

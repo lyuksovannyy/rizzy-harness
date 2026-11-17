@@ -26,6 +26,10 @@ export interface ProjectSummary {
   /** The caller's own chats in it. */
   chats: number;
   updated_ms: number;
+  /** Its node and folder (its settings' defaults), for the start screen's
+   * Project popup (X.26); null when it has none. */
+  node_id?: string | null;
+  cwd?: string | null;
 }
 
 export interface ProjectDetail extends ProjectSummary {
@@ -89,7 +93,11 @@ export const projectsApi = {
     template_id?: string;
     instructions?: string;
     workspace_id?: string;
+    /** Make its folder on this node (X.26): the project exists only once the folder does. */
+    folder_on?: string;
   }) => call<ProjectDetail>("POST", "/api/projects", b),
+  /** A project without a folder gets a new one on `node` (X.26). */
+  giveFolder: (id: string, node: string) => call<ProjectDetail>("POST", `${base(id)}/folder`, { node_id: node }),
   get: (id: string) => call<ProjectDetail>("GET", base(id)),
   update: (
     id: string,

@@ -10,7 +10,7 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { createOwner, keywordsOnly, keyed } = require('./onboard.cjs');
+const { createOwner, keywordsOnly, keyed, pickFolder } = require('./onboard.cjs');
 const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2eam-'));
 fs.mkdirSync(`${S}/data`, { recursive: true });
@@ -78,7 +78,7 @@ async function turnsEnded(p, sid, n) {
     await p.waitForSelector('h1.greeting');
 
     await p.click('.mode-switch button:has-text("Agentic")');
-    await p.fill('.composer input.mono', `${S}/ws`);
+    await pickFolder(p, `${S}/ws`);
     const local = await p.evaluate(async () => (await (await fetch('/api/nodes')).json()).nodes.find((n) => n.node_id === 'local'));
     log('node allows', local.max_approval, 'default', local.default_approval);
     check(local.max_approval === 'auto' && local.default_approval === 'auto', 'a fresh node allows auto and starts there');
@@ -88,7 +88,8 @@ async function turnsEnded(p, sid, n) {
       await p.selectOption(SELECT, 'host');
       await p.click('dialog.host-warning button:text-is("Use the host shell")');
     }
-    // The new chat's picker: the node's default, three choices, one line each.
+    // The new chat's picker: the node's default, four choices (Plan, then
+    // the three that run things), one line each.
     await p.waitForSelector(PICK);
     check((await p.innerText(PICK)).includes('Auto'), 'a new chat starts in Auto');
     await p.click(PICK);
@@ -96,7 +97,8 @@ async function turnsEnded(p, sid, n) {
     check(box.right <= 1280 && box.left >= 0, `the menu stays on screen: ${JSON.stringify(box)}`);
     const rows = await p.$$eval('.approval-pick li', (ls) => ls.map((l) => l.innerText.replace(/\s+/g, ' ')));
     log('choices:', rows.join(' | '));
-    check(rows.length === 3, 'three choices');
+    check(rows.length === 4, 'four choices');
+    check(['Plan', 'Ask', 'Accept edits', 'Auto'].every((n, i) => rows[i].startsWith(n)), 'Plan, Ask, Accept edits, Auto in that order');
     await sleep(400); // the menu fades in
     await p.screenshot({ path: `${S}/shots/approval-new-chat.png` });
     await p.keyboard.press('Escape');

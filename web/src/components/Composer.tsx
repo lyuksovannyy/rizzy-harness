@@ -17,6 +17,7 @@ import { AgentMark, agentAlert } from "./AgentAvatar";
 import type { Agent, ApprovalMode, AvatarState, Effort, ExecMode, ModelInfo, NodeInfo, UploadedAttachment } from "../types";
 import { type HostRight, mayPickHost } from "../lib/execModes";
 import { shownName } from "../md/hiddenChars";
+import type { ProjectChoice } from "./ProjectPicker";
 
 // An attached image's chip loads through a link (P-1); its own chunk, so
 // the first load does not carry the link code.
@@ -28,26 +29,11 @@ const ExecChoice = lazy(() => import("./ExecChoice"));
 const ApprovalModePick = lazy(() => import("./ApprovalModePick"));
 // The chat's step limit (X.14), beside the approval mode: same chats.
 const StepLimitPick = lazy(() => import("./StepLimitPick"));
+// Where a new agentic chat works (X.26): the Project button and its popup.
+const ProjectPicker = lazy(() => import("./ProjectPicker"));
 
-const FOLDERS_KEY = "harness.folders";
 const EFFORTS: Effort[] = ["low", "medium", "high", "max"];
 
-function recentFolders(): string[] {
-  try {
-    return JSON.parse(localStorage.getItem(FOLDERS_KEY) ?? "[]") as string[];
-  } catch {
-    return [];
-  }
-}
-
-function rememberFolder(f: string) {
-  const list = [f, ...recentFolders().filter((x) => x !== f)].slice(0, 8);
-  try {
-    localStorage.setItem(FOLDERS_KEY, JSON.stringify(list));
-  } catch {
-    /* storage unavailable */
-  }
-}
 
 export interface Submission {
   text: string;
@@ -68,6 +54,8 @@ export interface Submission {
   images?: string[];
   /** Agentic: how its commands run (N.10a); `host` only once its warning was confirmed. */
   execMode?: ExecMode;
+  /** Home, agentic: the project picked in the Project popup (X.26). */
+  projectId?: string;
   /** Agentic: the approval mode the person picked (T50); absent: the node's default. */
   approvalMode?: ApprovalMode;
   /** Session, a chat with a folder: the paths its text mentions with `@path` (T63). */
@@ -139,6 +127,8 @@ export function Composer(props: {
    * upload to `workspace`'s Media. `pending`: pick up "Use in chat" (the
    * home screen). `left`: how many more this chat takes. */
   images?: { workspace: string | null; pending?: boolean; left?: number } | null;
+  /** Home: the workspace whose projects the Project popup lists. */
+  workspace?: string | null;
   /** Home: who may pick the host shell (N.10a); absent, nobody here. */
   hostRight?: HostRight;
   /** Session: the chat's approval mode and how to change it (T50); absent:
@@ -195,7 +185,15 @@ export function Composer(props: {
   const setModel = (m: string) => setPicked({ agent: answering, model: m });
   const [effort, setEffort] = useState<Effort | null>(null);
   const [nodeId, setNodeId] = useState(props.project?.nodeId ?? props.workers[0]?.node_id ?? "");
-  const [cwd, setCwd] = useState(() => props.project?.cwd ?? recentFolders()[0] ?? "");
+  // Where the new chat works (X.26): a folder, and the project picked in
+  // the Project popup with the node it is on. Without a project page's
+  // folder, the Project button starts at the latest folder used.
+  const [place, setPlace] = useState<Partial<ProjectChoice>>({ cwd: props.project?.cwd ?? "" });
+  const cwd = place.cwd ?? "";
+  const project = place.project;
+  // A project is on its node: another node starts with none. A folder
+  // (no node named) stays, as the typed path did.
+  const unpick = () => place.nodeId && setPlace({});
   // The new chat's mode: `host` only after its warning (ExecChoice).
   // Bound to the node it was confirmed for (review L-j): a node switch,
   // the user's or an automatic one, never carries it to another node.
@@ -289,7 +287,10 @@ export function Composer(props: {
 
   // Keep selections valid as lists load.
   useEffect(() => {
-    if (!props.workers.some((w) => w.node_id === nodeId)) setNodeId(props.workers[0]?.node_id ?? "");
+    if (!props.workers.some((w) => w.node_id === nodeId)) {
+      setNodeId(props.workers[0]?.node_id ?? "");
+      unpick();
+    }
   }, [props.workers, nodeId]);
   useEffect(() => {
     if (mode === "agentic" && props.agenticBlocked) setMode("ask");
@@ -501,9 +502,9 @@ export function Composer(props: {
         pictures,
         ...(home && mode === "agentic" ? { execMode: exec } : {}),
         ...(home && mode === "agentic" && approvalPick ? { approvalMode: approvalPick } : {}),
+        projectId: project?.id,
         ...(filesOf && hasPathToken ? { files: await sendable(filesOf, body) } : {}),
       });
-      if (mode === "agentic") rememberFolder(cwd.trim());
       if (home) props.onLearn?.(body, mode);
       setFiles([]);
       setFound([]);
@@ -974,6 +975,7 @@ export function Composer(props: {
                 onChange={(e) => {
                   setNodeId(e.target.value);
                   setHostFor(null);
+                  unpick();
                 }}
               >
                 {props.workers.map((n) => (
@@ -983,24 +985,26 @@ export function Composer(props: {
                 ))}
               </select>
             </label>
-            <label className="grow">
-              {t("composer.folder")}
-              <input
-                className="mono"
-                list="recent-folders"
-                placeholder="/home/me/project"
-                value={cwd}
-                onChange={(e) => setCwd(e.target.value)}
+            <Suspense fallback={null}>
+              <ProjectPicker
+                nodeId={nodeId}
+                workers={props.workers}
+                workspace={props.workspace}
+                cwd={cwd}
+                project={project}
+                fixed={inProject}
+                // `hostFor` names its node: another node's chat starts at the sandbox.
+                // A folder names no node: the one chosen stays.
+                onPick={(c) => {
+                  if (c.nodeId) setNodeId(c.nodeId);
+                  setPlace(c);
+                }}
               />
-              <datalist id="recent-folders">
-                {recentFolders().map((f) => (
-                  <option key={f} value={f} />
-                ))}
-              </datalist>
-            </label>
-            {hostPickable && worker && (
+            </Suspense>
+            {worker && (
               <Suspense fallback={null}>
               <ExecChoice
+                pickable={hostPickable}
                 // A choice is for one node: another starts at the sandbox.
                 key={worker.node_id}
                 node={worker.embedded ? "local" : shownName(worker.hostname)}

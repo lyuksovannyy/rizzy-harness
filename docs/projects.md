@@ -53,6 +53,54 @@ uses them too. They are only defaults: the node's `node.toml` still decides what
 (T5), and agentic access is still the member's execution level there (the lower of the
 account's ceiling and their level in the workspace: the same gate as any agentic chat).
 
+### The Project button and a project's folder (ADOPTION_PLAN X.26, PLAN.md T77)
+
+On the start screen, the agentic row's **Project** button (in place of the free "Folder on that
+node" field) opens a popup with:
+
+- **the workspace's projects**, searchable, each with its folder; picking one starts the chat in
+  that project, on its node, in its folder (`project_id`, `node_id`, `cwd` as before). A project
+  whose node is not connected is shown and cannot be picked; one without a folder offers
+  **Create its folder on <node>** to whoever may manage projects.
+- **New project**: a name. The master asks the chosen node to make the folder, and creates the
+  project only once the node answered with it (`POST /api/projects` with `folder_on`): a node
+  that refuses, does not offer it, or is away leaves no project. The node makes
+  `<slug>-<4 random characters>` (`Project Name Example` → `project-name-example-ab1c`) in the
+  folder its node.toml names (`[projects] dir`, default `~/rizzy-projects`), as a git repository
+  on `main` with one empty commit. The master never sends a path; in both execution modes the
+  folder goes there (the owner's first wording had a typed destination in host mode; decision 2
+  of 2026-11-17 replaced it).
+- **Existing folder**: the free path field with the recent folders, as before, for a chat
+  without a project; the node bounds it by `workspace_roots` as before.
+- **From a repository**, marked *Later* (X.27).
+
+**How the node makes it** (PLAN.md T77): the repository is built in the node's own staging folder
+(`<data>/projects-staging`, which no chat can see) and moved into the projects folder with a
+rename that never replaces anything already at the name, so a chat that can write in the
+projects folder cannot steer the node's git into another repository. The projects folder's
+parent must exist, and it must be on the same file system as the node's data directory. A node
+makes at most `[limits] projects_per_hour` folders an hour (only folders made count; the count is
+in memory, so a restart starts it again).
+
+**Folders no project keeps.** "Create its folder" claims the project first: a second request at
+the same time is refused before any node is asked. A folder can still be left without a project
+when its node answers after the server's 30-second wait (the answer names the node and the
+folder name's first part), or when saving the project fails after the folder exists (the answer
+names the node and the path). Remove it on the node, or open it with *Existing folder*.
+
+**One folder per project** (decision 6): every chat of the project works in that folder, as chats
+in one folder do today (they share its uncommitted files; checkpoints and undo work per chat as
+in any folder). The folder stays the node's: deleting the project leaves it; a folder deleted on
+disk makes the next chat's create fail with the node's reason (`cwd …: No such file or
+directory`), and a project whose node was removed shows that node as not connected.
+
+The execution mode is always shown beside the button (decision 8): a label where the node offers
+only the sandbox, the choice (with its warning) where it offers the host shell too and the person
+may use it.
+
+The project page's own bar keeps the project fixed: its Project button offers only *Existing
+folder* (the project's folder filled in). The routine editor's folder field is unchanged.
+
 ## Memory
 
 Three kinds of facts, all in the existing `MemoryStore` (`crates/memory`, built-in SQLite or
@@ -298,6 +346,7 @@ members too is open question 3.
 | word or discard a project proposal | the source chat's owner (any member) |
 | confirm a project proposal (make it active) | `settings`, or the source chat's owner when the project's `members_activate_facts` is on |
 | set the default node/folder | `settings`; *using* them still needs agentic access |
+| create a project with its folder on a node (`folder_on`), or give one without a folder its folder | `settings`, a level of at least `sandbox` there, and the right to use that node (the embedded node: admins by default) |
 
 Non-members get 404 for everything (as for workspaces), managers' actions 403 for the others.
 The API token acts as an owner of every existing workspace (contract), so it may do all of the
@@ -319,6 +368,7 @@ interface ProjectSettings { workspace_memory: boolean; node_id: string | null; c
 interface ProjectSummary {
   project_id: string; workspace_id: string; name: string; description: string;
   icon: ProjectIcon; accent: string; chats: number /* the caller's own */; updated_ms: number;
+  node_id: string | null; cwd: string | null; // its settings' defaults (the Project popup's rows)
 }
 interface ProjectDetail extends ProjectSummary {
   instructions: string; settings: ProjectSettings; can_manage: boolean;
@@ -335,7 +385,8 @@ interface BoardTemplate { template_id: string; name: string; builtin: boolean;
 | method & path | body | answer |
 |---|---|---|
 | GET `/api/projects?workspace=` | – | `{ projects, workspace_id, can_create, icons, accents }` |
-| POST `/api/projects` | `{ name, description?, icon?, accent?, template_id?, instructions?, workspace_id? }` | `ProjectDetail` (users default to the active workspace; the API token must name one) |
+| POST `/api/projects` | `{ name, description?, icon?, accent?, template_id?, instructions?, workspace_id?, folder_on? }` | `ProjectDetail` (users default to the active workspace; the API token must name one). `folder_on`: a node id; the node makes the project's folder first (409 when it refuses or does not offer it, 503 when it is away, 404 for an unknown node, 403 as for an agentic chat there) and the settings name it |
+| POST `/api/projects/{id}/folder` | `{ node_id }` | `ProjectDetail`; a project without a folder gets one made on that node (409 when it has one) |
 | GET `/api/projects/{id}` | – | `ProjectDetail` (404 when not a member) |
 | PATCH `/api/projects/{id}` | any of `name, description, icon, accent, instructions, settings` | `ProjectDetail` |
 | DELETE `/api/projects/{id}` | – | `{ ok }` (chats return to no project; facts and board deleted) |

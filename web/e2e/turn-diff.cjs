@@ -9,7 +9,7 @@ const net = require('net');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { claimCode, createOwner, keywordsOnly, keyed, pickAgent } = require('./onboard.cjs');
+const { claimCode, createOwner, keywordsOnly, keyed, pickAgent, pickFolder } = require('./onboard.cjs');
 const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
 const S = process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2e-diff-'));
 const D = `${S}/data`, R = `${S}/repo`;
@@ -54,7 +54,7 @@ let PAGE = null;
     // A turn whose change comes from a shell command.
     await p.fill('.composer textarea', 'run: printf "added by the turn\\n" >> a.txt; echo new > b.txt');
     await p.click('.mode-switch button:has-text("Agentic")');
-    await p.fill('.agentic-row input', R);
+    await pickFolder(p, R);
     await pickAgent(p);
     await p.click('.composer .send');
     await p.click('.approval button:has-text("Allow")');
