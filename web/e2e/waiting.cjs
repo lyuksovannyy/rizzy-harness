@@ -112,6 +112,8 @@ function recorder() {
     const chat = await shownAfter();
     check(chat != null && chat < 100, `chat: the message shows at once (${chat} ms)`);
     check((await status().innerText()).includes('is waiting for the model'), 'waiting from the click on');
+    // The agent picker is held while the message is on its way (PR 135).
+    check(await p.locator('.agent-pick button.select-button').isDisabled(), 'the agent picker is held while the message is sent');
     await p.screenshot({ path: `${S}/waiting-4-second-sending.png` });
     await p.waitForSelector('.conversation .msg.user.sending', { state: 'detached', timeout: 15000 });
     check((await bubbles('slow: 1').count()) === 2, 'two messages, none twice');

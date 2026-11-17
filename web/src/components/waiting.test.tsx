@@ -171,6 +171,35 @@ describe("a message in an open chat", () => {
   });
 });
 
+describe("the agent picker while a message is on its way (PR 135)", () => {
+  const picker = () => host.querySelector<HTMLButtonElement>('.composer button.select-button[aria-label^="agent:"]')!;
+  const hover = () => picker().closest(".agent-pick")?.getAttribute("title");
+
+  test("held from the click on Send until the logged row, with the running turn's hover text", async () => {
+    const d = deferred();
+    prompt.mockReturnValue(d.p);
+    await show(view(earlier));
+    expect(picker().disabled).toBe(false);
+    type("to this agent");
+    await send();
+    expect(picker().disabled).toBe(true);
+    expect(hover()).toBe("Stop the agent to pick another");
+    await act(async () => d.ok({ ok: true }));
+    // Taken, not logged yet: still held.
+    expect(picker().disabled).toBe(true);
+    await show(view([...earlier, { type: "user", turn_id: "t2", text: "to this agent" }, { type: "turn_end", turn_id: "t2", reason: "completed" } as Item]));
+    expect(picker().disabled).toBe(false);
+  });
+
+  test("a refused send frees it again", async () => {
+    prompt.mockRejectedValue(new Error("the node is not connected"));
+    await show(view(earlier));
+    type("refused");
+    await send();
+    expect(picker().disabled).toBe(false);
+  });
+});
+
 describe("after the server took it", () => {
   test("no longer marked Sending… while the log's message is on its way (a slow socket); still one bubble", async () => {
     prompt.mockResolvedValue({ ok: true });

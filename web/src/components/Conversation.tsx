@@ -963,7 +963,10 @@ export default function Conversation(props: {
             models={props.models}
             workers={[]}
             agentId={agentPick?.[0] ?? activeAgent}
-            picking={!!agentPick?.[1]}
+            // Held too while a message of this tab is on its way (from the
+            // click on Send until its row is logged or it is refused): a
+            // message that looks sent goes to the agent it was sent to.
+            picking={!!agentPick?.[1] || sending.some((o) => !o.failed)}
             onAgentChange={(id) => {
               setPickErr(null);
               setAgentPick([id, true]);

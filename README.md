@@ -3043,9 +3043,13 @@ An `@mention` (also its Retry), an answer to an agent's question and a
 fallback model that answered once are no switch. While the agent works (a
 turn runs or is being stopped, a resumed turn, a retry, a `/compact`) the
 picker is disabled: Stop it, or wait for the turn to end, and the picker is
-back. The node refuses a change sent anyway ("The agent is working…"). A
-pick shows at once; the picker waits for the server's answer before the next
-one, and goes back with the reason if it was refused.
+back. The node refuses a change sent anyway ("The agent is working…"). It is
+also disabled from the moment you send a message until the chat holds it (or
+the server refused it), so a message goes to the agent the picker showed when
+you sent it. A pick shows at once; the picker waits for the server's answer
+before the next one, and goes back with the reason if it was refused. A pick
+on its way does not hold back Send: the server takes the pick and the
+message in the order you made them.
 
 "Your facts" are the memories in Settings → Account; an agent without them
 neither recalls nor proposes them. Scout and Reviewer are read-only by their
