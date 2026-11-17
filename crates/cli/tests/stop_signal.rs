@@ -164,10 +164,11 @@ fn spawn(data: &Path, args: &[&str], envs: &[(&str, &str)], ready: &str) -> Proc
         .env("HARNESS_LOG", "info")
         .env("NO_COLOR", "1")
         .env_remove("HARNESS_JOIN_TOKEN")
-        // The node's checkpoints honour the user's global git ignore file
-        // (by design); a developer's `~/.config/git/ignore` matching the
-        // test's files made the slow checkpoint instant and
-        // `a_stop_past_its_bound_exits_1_naming_the_sessions` exit 0.
+        // No git config of the developer's in the server's environment (the
+        // node's checkpoints no longer follow the global ignore file since
+        // X.31; a `~/.config/git/ignore` matching the test's files once made
+        // the slow checkpoint instant and
+        // `a_stop_past_its_bound_exits_1_naming_the_sessions` exit 0).
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("XDG_CONFIG_HOME", "/nonexistent")
         .stdin(Stdio::null())
@@ -1246,7 +1247,7 @@ async fn an_unusable_stop_wait_is_refused_not_a_dead_stop() {
     assert_eq!(end_reason(&s2.events(&sid).await), "stopped");
 }
 
-// ---- the node's checkpoints follow the user's global git ignore ----
+// ---- the node's checkpoints do not follow the user's global git ignore ----
 
 /// Every path of every snapshot in the checkpoint stores under `data`.
 fn snapshotted(data: &Path) -> Vec<String> {
@@ -1287,42 +1288,151 @@ fn snapshotted(data: &Path) -> Vec<String> {
     paths
 }
 
-/// The shipped binary's node still finds the user's global ignore file
-/// from its own environment (`NodePolicy::load` takes `HOME`,
-/// `XDG_CONFIG_HOME` and `GIT_CONFIG_GLOBAL` from the process; `node run`
-/// loads its policy the same way), so a file the user ignores globally is
-/// not in its checkpoints. Test rigs build their policy in code and get
-/// none of it (`policy::tests::code_built_policies_have_no_home_skill_roots_and_node_toml_keeps_them`).
+/// `git` in `dir` with no config of the developer's.
+fn user_git(dir: &Path, args: &[&str]) {
+    let ok = Command::new("git")
+        .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("XDG_CONFIG_HOME", "/nonexistent")
+        .status()
+        .unwrap()
+        .success();
+    assert!(ok, "git {args:?}");
+}
+
+fn text(p: &Path) -> String {
+    std::fs::read_to_string(p).unwrap_or_else(|e| format!("({e})"))
+}
+
+/// The node's own git does not follow the user's global ignore file (owner,
+/// 2026-11-17, ADOPTION_PLAN X.31), on the shipped binary with the user's
+/// global config in the process naming one (`core.excludesFile`; git reads
+/// `$XDG_CONFIG_HOME/git/ignore` only when that is unset): a file only it
+/// names is
+/// checkpointed, an agent's edit to it is undone, and a sub-agent sees it
+/// and its change merges back. The repository's own `.gitignore` and
+/// `.git/info/exclude` still apply: their files are in no checkpoint and an
+/// undo leaves them as they are. Before X.31 the globally ignored file was
+/// in no checkpoint and the undo left it changed.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_served_node_follows_the_users_global_git_ignore() {
+async fn a_served_node_does_not_follow_the_users_global_git_ignore() {
     let (dir, data, ws) = setup();
-    let xdg = dir.path().join("xdg");
-    std::fs::create_dir_all(xdg.join("git")).unwrap();
-    std::fs::write(xdg.join("git/ignore"), "globally-ignored.txt\n").unwrap();
-    let s = serve_with(&data, &[], &[("XDG_CONFIG_HOME", xdg.to_str().unwrap())]);
+    // The repository: its own ignore rules name two other files.
+    std::fs::write(ws.join("kept.txt"), "k1\n").unwrap();
+    std::fs::write(ws.join(".gitignore"), "repo-ignored.txt\n").unwrap();
+    user_git(&ws, &["init", "-q", "-b", "main"]);
+    user_git(&ws, &["add", "."]);
+    user_git(&ws, &["commit", "-qm", "init", "--no-gpg-sign"]);
+    std::fs::write(ws.join(".git/info/exclude"), "info-excluded.txt\n").unwrap();
+    for (f, v) in [
+        ("secret.env", "S=1\n"),
+        ("repo-ignored.txt", "r1\n"),
+        ("info-excluded.txt", "i1\n"),
+    ] {
+        std::fs::write(ws.join(f), v).unwrap();
+    }
+    // The user's global ignore file, named in their global config.
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join("my-ignore"), "secret.env\n").unwrap();
+    let global = home.join("global.gitconfig");
+    std::fs::write(
+        &global,
+        format!(
+            "[core]\n\texcludesFile = {}\n",
+            home.join("my-ignore").display()
+        ),
+    )
+    .unwrap();
+    let s = serve_with(
+        &data,
+        &[],
+        &[("GIT_CONFIG_GLOBAL", global.to_str().unwrap())],
+    );
     let sid = s.session(&ws, "auto", None).await;
     s.post(
         &format!("/api/sessions/{sid}/prompt"),
-        json!({"text": "run: echo a > kept.txt; echo b > globally-ignored.txt"}),
+        json!({"text": "run: echo k2 > kept.txt; echo S=2 > secret.env; \
+                        echo r2 > repo-ignored.txt; echo i2 > info-excluded.txt"}),
     )
     .await;
-    s.wait_for(&sid, "turn_ended").await;
-    // The after-turn checkpoint is written after the turn's tool call.
+    let evs = s.wait_for(&sid, "turn_ended").await;
+    let turn = evs
+        .iter()
+        .find(|e| e["kind"] == "turn_started")
+        .and_then(|e| e["payload"]["turn_id"].as_str())
+        .unwrap()
+        .to_string();
+    assert_eq!(text(&ws.join("secret.env")), "S=2\n", "{evs:?}");
+    // The after-turn checkpoint is written after the turn's end.
     let by = Instant::now() + WITHIN;
     let paths = loop {
         let p = snapshotted(&data);
-        if p.iter().any(|p| p.ends_with("kept.txt")) || Instant::now() >= by {
+        if p.iter().filter(|p| *p == "kept.txt").count() >= 2 || Instant::now() >= by {
             break p;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
-    assert!(
-        paths.iter().any(|p| p.ends_with("kept.txt")),
-        "no checkpoint holds kept.txt: {paths:?}\n{}",
-        s.proc.log()
+    for f in ["kept.txt", "secret.env"] {
+        assert!(
+            paths.iter().any(|p| p == f),
+            "no checkpoint holds {f}: {paths:?}\n{}",
+            s.proc.log()
+        );
+    }
+    for f in ["repo-ignored.txt", "info-excluded.txt"] {
+        assert!(
+            !paths.iter().any(|p| p == f),
+            "the repository ignores {f}: {paths:?}"
+        );
+    }
+
+    // Undo: the globally ignored file is put back; the repository's
+    // ignored files are left as the turn made them.
+    let (st, v) = s
+        .call(
+            reqwest::Method::POST,
+            &format!("/api/sessions/{sid}/turns/{turn}/restore"),
+            Some(json!({})),
+        )
+        .await;
+    assert_eq!(st, 200, "{v}\n{}", s.proc.log());
+    for (f, want) in [
+        ("kept.txt", "k1\n"),
+        ("secret.env", "S=1\n"),
+        ("repo-ignored.txt", "r2\n"),
+        ("info-excluded.txt", "i2\n"),
+    ] {
+        assert_eq!(text(&ws.join(f)), want, "{f} after the undo: {v}");
+    }
+
+    // A sub-agent's folder holds the file, and its change merges back.
+    s.post(
+        &format!("/api/sessions/{sid}/prompt"),
+        json!({"text": "delegate: coder=run: cat secret.env > seen.txt; echo S=child > secret.env",
+               "agent_id": "teamlead"}),
+    )
+    .await;
+    let by = Instant::now() + WITHIN;
+    while s
+        .events(&sid)
+        .await
+        .iter()
+        .filter(|e| e["kind"] == "turn_ended")
+        .count()
+        < 2
+    {
+        assert!(Instant::now() < by, "{}", s.proc.log());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        text(&ws.join("seen.txt")),
+        "S=1\n",
+        "{:?}",
+        s.events(&sid).await
     );
-    assert!(
-        !paths.iter().any(|p| p.ends_with("globally-ignored.txt")),
-        "a globally ignored file was checkpointed: {paths:?}"
-    );
+    assert_eq!(text(&ws.join("secret.env")), "S=child\n");
 }

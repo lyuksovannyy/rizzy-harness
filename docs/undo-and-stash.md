@@ -296,6 +296,52 @@ files gain this sentence. That is every agent whose effective tools include `wri
 
 No prompt is edited now.
 
+### 2.7 What a checkpoint holds: the repository's ignore rules, not the global file (X.31)
+
+Owner, 2026-11-17, asked whether Undo should say that a file the person's global git ignore
+covers is never checkpointed, or whether checkpoints should stop following that file: "should
+ignore". Since then every git process of the node runs with `core.excludesFile=/dev/null` and
+no global config (as before), and nothing copies the global file into the shadow any more
+(`git.rs` lost `global_excludes`, `UserGitEnv`, `NodePolicy::user_git` and `Bounds::user_git`).
+
+| Rule | Applies to checkpoints, the between-turns copy, stashes, sub-agents? |
+|---|---|
+| The repository's `.gitignore` files | Yes (git reads them from the work tree) |
+| `.git/info/exclude` | Yes: copied into the shadow's `info/exclude` at every checkpoint, when it is a regular file reached by no link, at most 1 MiB (`user_repo::read_bounded`); unchanged |
+| A plain folder's fixed list (`node_modules/`, `target/`, `.venv/`, `venv/`, `__pycache__/`, `dist/`, `build/`, `.cache/`, `*.pyc`) | Yes, for plain folders only; unchanged |
+| The user's global ignore file (`core.excludesFile`, `$XDG_CONFIG_HOME/git/ignore`, `~/.config/git/ignore`) | **No** (before X.31: yes) |
+
+So a file only the global file names is checkpointed, an agent's edit to it is undone, a
+sub-agent's folder holds it and the child's change to it merges back (it is no longer listed as
+"ignored, not brought back").
+
+**Cost.** Nothing bounds a checkpoint's size or file count; the 60 s snapshot limit
+(`SNAPSHOT_TIMEOUT`) and the 120 s limit per git call bound its time, and a snapshot past
+them leaves the turn without a checkpoint and says so in the chat. Measured with
+`crates/node/src/git_ignore_bench.rs` (ignored; `GI_DIR=<real disk> cargo test -p
+harness-node --lib globally_ignored_tree_cost -- --ignored --nocapture`), a repository of 100
+committed files plus `deps/`, which only the global file names, on the rotational USB disk,
+page cache warm (the tree had just been written; a cold first read is slower):
+
+| | first checkpoint | next one | checkpoint store | sub-agent base / folder fill / result | store after one sub-agent |
+|---|---|---|---|---|---|
+| Before X.31, `deps/` = 20,000 files, 286 MiB | 8 ms (101 paths) | 6 ms | 0 MiB | 8 ms / 4 ms (0 MiB) / 9 ms | 0 MiB |
+| After, same tree | 1.61 s (20,101 paths) | 66 ms | 159 MiB | 1.67 s / 0.48 s (312 MiB copied) / 0.60 s | 319 MiB |
+| After, `deps/` = 4 files, 1.9 GiB | 12.6 s | 72 ms | 783 MiB | 9.6 s / 7.7 s (1.9 GiB copied) / 2.9 s | 1,567 MiB |
+
+The sub-agent shadow (`<hash>-sub.git`) is a second store, so the folder's compressed size is
+paid twice once a writing sub-agent has run, and each running writing sub-agent holds a full
+copy until it ends. A per-file size cap at snapshot (OpenCode skips untracked files over
+2 MiB, Hermes over 10 MB, Warp marks files over 25 MiB skipped:
+`research/harnesses-round-2-appendix.md` §4.6) was not built: a file skipped before a turn and
+kept after it would read as created, and an undo would delete it, so the skipped paths have to
+reach the restore plan and the chat. The advice to the person is the repository's own
+`.gitignore`.
+
+**Secrets.** A `.env` the repository does not ignore now has its bytes in the node's data
+directory (`checkpoints/`, `sessions/<id>/files` while a sub-agent runs, stashes for up to 30
+days); see PLAN.md T76 for who can reach them and what is shown.
+
 ## 3. The stash
 
 ### 3.1 The object (recommendation)
@@ -645,6 +691,7 @@ without gc cost about 30 ms at 1,000 files, 70 ms at 10,000 and 600 ms at 100,00
 | A restart between question and answer | Nothing is lost; the answer re-plans (§3.3). |
 | The node is off at a stash's expiry midnight | Removed at the next start. Unusable from the expiry instant on. |
 | A very large stash | Costs its files' compressed size for up to 30 days, shown in the list and the total. Building it is bounded by the 60 s snapshot limit (`git.rs`, `SNAPSHOT_TIMEOUT`). |
+| A big folder only the global git ignore file named (§2.7) | Now checkpointed: its first checkpoint reads it all, the store holds its compressed size (twice with sub-agents). Past 60 s the turn has no checkpoint and the chat says so. |
 | A stash holding a secret (an edited `.env`) | File content on the node's disk, with the same exposure as the checkpoint store, for up to 30 days. Events carry paths and sizes only. |
 | A routine, with no person | No undo tool. `stash_apply` follows the routine's approval rules (O6); `stash_delete` is refused, because it always needs a person. Conflicts are skipped under `Ask` and `AskAll`; under `Auto` the agent decides. |
 | A turn that changes 5,000 files | Completes. It warns at its end and on its undo (§2.6), and its undo completes too. |

@@ -798,8 +798,6 @@ impl Stages {
             ceiling: Some(ceiling),
             protected: vec![self.data_dir.clone()],
             sandbox: self.git_sandbox.clone(),
-            // Only whether the folder has changes since its commit.
-            user_git: crate::git::UserGitEnv::from_process(),
         };
         meta.git = crate::git::describe(&dir, self.checkpoints.as_deref(), &bounds)
             .await

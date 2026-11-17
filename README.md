@@ -1150,8 +1150,17 @@ there when a checkpoint reads content your repository already has), and
 your repository's own git
 config, hooks and filters are never run for a checkpoint or an undo (in a
 repository the private copy borrows your committed objects instead of
-storing them again, and honours `.gitignore`, `.git/info/exclude` and your
-global git ignore file). The
+storing them again, and honours the repository's `.gitignore` files and
+`.git/info/exclude`). Your global git ignore file (`core.excludesFile`,
+`~/.config/git/ignore`) is not followed: a file only it names, such as a
+`.env` or `.idea/` your repository does not ignore itself, is checkpointed
+and an agent's edit to it is undone like any other file, and sub-agents see
+it in their copy. Its bytes then sit in the node's data directory with the
+checkpoints, and a large folder only your global file named (a
+`node_modules/`) costs its first checkpoint a full read and its compressed
+size on disk; a snapshot that takes over 60 s leaves the turn without a
+checkpoint and the chat says so. Add such folders to the repository's
+`.gitignore` to keep them out. The
 first checkpoint of a large repository reads every file once. Undo writes
 back the exact bytes. Sub-agents that can change files (with `write`, `edit` or `bash`) get
 a folder of their own, a copy of yours that the node keeps in its data

@@ -56,7 +56,6 @@ fn layout() -> Layout {
         ceiling: Some(home.clone()),
         protected: vec![top.join("data")],
         sandbox: None,
-        ..Default::default()
     };
     Layout {
         base: top.join("data/checkpoints"),
