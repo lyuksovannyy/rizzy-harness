@@ -57,6 +57,8 @@ export interface BoardCard {
   /** Someone else's chat shows as "private". */
   chat: { session_id: string; title: string } | "private" | null;
   created_by: string | null;
+  /** The agent that made it, by name (PLAN.md T78); null for a person's card. */
+  agent?: string | null;
   updated_ms: number;
 }
 

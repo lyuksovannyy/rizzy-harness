@@ -345,6 +345,9 @@ async fn serve(
     }
     // Searching earlier chats needs no memory store (PLAN.md T55).
     web_tools.push(Arc::new(harness_memory::Recall));
+    // The project board tools: the master answers them too (PLAN.md T78).
+    web_tools.push(Arc::new(harness_tools::Board));
+    web_tools.push(Arc::new(harness_tools::BoardEdit));
     if let Some(k) = web_key {
         secrets.add(k);
     }
@@ -706,7 +709,7 @@ async fn agentic_node(
 }
 
 /// The tools an agentic node registers: the built-in ones, `graph_query`,
-/// `recall` and `remember` (it runs nothing here: the master files the mirrored call
+/// `recall`, `board`, `board_edit` and `remember` (it runs nothing here: the master files the mirrored call
 /// as a proposal the person confirms; `denied_tools` turns it off). Each
 /// turn offers those its agent allows; node policy still gates every call.
 fn agentic_tools(graphify: &Arc<harness_tools::graphify::GraphifyState>) -> harness_tools::ToolSet {
@@ -717,6 +720,9 @@ fn agentic_tools(graphify: &Arc<harness_tools::graphify::GraphifyState>) -> harn
     tools.push(Arc::new(harness_memory::Remember));
     // Runs nothing here either: the master answers it (PLAN.md T55).
     tools.push(Arc::new(harness_memory::Recall));
+    // And the project board tools (PLAN.md T78).
+    tools.push(Arc::new(harness_tools::Board));
+    tools.push(Arc::new(harness_tools::BoardEdit));
     tools
 }
 
@@ -1450,5 +1456,10 @@ mod tests {
         assert!(names.contains(&"graph_query"), "{names:?}");
         // And `recall`, which the master answers (PLAN.md T55).
         assert!(names.contains(&"recall"), "{names:?}");
+        // And the board tools, which the master answers too (PLAN.md T78).
+        assert!(
+            names.contains(&"board") && names.contains(&"board_edit"),
+            "{names:?}"
+        );
     }
 }

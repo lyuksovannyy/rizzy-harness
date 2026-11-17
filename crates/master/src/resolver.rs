@@ -763,11 +763,10 @@ mod tests {
             );
         }
         // The built-ins as shipped: Scout and Reviewer with their shell.
+        // The Assistant changes a project's board (`board_edit`, PLAN.md
+        // T78), and is never a sub-agent anyway.
         for a in harness_agents::builtins() {
-            let small = matches!(
-                a.id.as_str(),
-                "scout" | "reviewer" | "researcher" | "general" | "smol"
-            );
+            let small = matches!(a.id.as_str(), "scout" | "reviewer" | "researcher" | "smol");
             assert_eq!(r.small_for(&a.spec).is_some(), small, "{}", a.id);
         }
     }

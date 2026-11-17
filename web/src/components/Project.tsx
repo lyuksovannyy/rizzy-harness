@@ -40,6 +40,14 @@ const TABS: [Tab, string][] = [
 ];
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
+/** A line an agent appended to a card's notes (`board_edit` note, PLAN.md T78). */
+const AGENT_NOTE = /^\[agent [^\]\n]+\]/m;
+
+/** What a card says about agents: made by one (its name), or noted by one. */
+export function agentMark(card: Pick<BoardCard, "agent" | "notes">): string | null {
+  if (card.agent) return `Added by ${card.agent} (agent)`;
+  return AGENT_NOTE.test(card.notes) ? "Noted by an agent" : null;
+}
 
 export default function Project(props: {
   /** A project id, or "new". */
@@ -444,6 +452,7 @@ function BoardView(props: { project: ProjectDetail; chats: SessionRow[]; version
                       </button>
                     )}
                     {card.chat === "private" && <span className="muted small">Linked to someone's chat</span>}
+                    {agentMark(card) && <span className="muted small">{agentMark(card)}</span>}
                   </li>
                 ),
               )}

@@ -53,6 +53,9 @@ CREATE TABLE IF NOT EXISTS board_cards (
     position   INTEGER NOT NULL,
     session_id TEXT,
     created_by TEXT,
+    -- The agent that made the card (its name), for a card made by the
+    -- `board_edit` tool (PLAN.md T78); NULL for a person's.
+    agent      TEXT,
     created_ms INTEGER NOT NULL,
     updated_ms INTEGER NOT NULL
 );
@@ -177,6 +180,8 @@ pub struct CardRow {
     pub position: i64,
     pub session_id: Option<String>,
     pub created_by: Option<String>,
+    /// The agent that made it (its name), when an agent did (T78).
+    pub agent: Option<String>,
     pub created_ms: i64,
     pub updated_ms: i64,
 }
@@ -189,6 +194,8 @@ pub struct NewCard {
     pub notes: String,
     pub session_id: Option<String>,
     pub created_by: Option<String>,
+    /// The agent making it (its name); `None` for a person.
+    pub agent: Option<String>,
 }
 
 /// Changes to a card. `column_id`/`position` move it (position = index in
@@ -232,8 +239,7 @@ fn project_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectRow> {
     })
 }
 
-const CARD_COLS: &str =
-    "card_id, column_id, title, notes, position, session_id, created_by, created_ms, updated_ms";
+const CARD_COLS: &str = "card_id, column_id, title, notes, position, session_id, created_by, created_ms, updated_ms, agent";
 
 fn card_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<CardRow> {
     Ok(CardRow {
@@ -246,6 +252,7 @@ fn card_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<CardRow> {
         created_by: r.get(6)?,
         created_ms: r.get(7)?,
         updated_ms: r.get(8)?,
+        agent: r.get(9)?,
     })
 }
 
@@ -787,7 +794,7 @@ impl Store {
         )?;
         let now = harness_core::now_ms();
         tx.execute(
-            &format!("INSERT INTO board_cards ({CARD_COLS}, project_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9)"),
+            &format!("INSERT INTO board_cards ({CARD_COLS}, project_id) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9, ?10)"),
             params![
                 c.card_id,
                 c.column_id,
@@ -797,6 +804,7 @@ impl Store {
                 c.session_id,
                 c.created_by,
                 now,
+                c.agent,
                 project
             ],
         )?;
@@ -872,6 +880,48 @@ impl Store {
         tx.execute(
             "UPDATE board_cards SET updated_ms = ?2 WHERE card_id = ?1",
             params![card, harness_core::now_ms()],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Append `line` to a card's notes, after a line break when it has
+    /// some (T78: an agent adds to what people wrote, never replaces it).
+    /// `false` when the project has no such card; refused, never cut, when
+    /// the notes would pass `max` characters.
+    pub fn append_card_note(
+        &self,
+        project: &str,
+        card: &str,
+        line: &str,
+        max: usize,
+    ) -> Result<bool> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let notes: Option<String> = tx
+            .query_row(
+                "SELECT notes FROM board_cards WHERE card_id = ?1 AND project_id = ?2",
+                params![card, project],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(notes) = notes else {
+            return Ok(false);
+        };
+        let new = if notes.is_empty() {
+            line.to_string()
+        } else {
+            format!("{notes}\n{line}")
+        };
+        let n = new.chars().count();
+        if n > max {
+            return Err(StoreError::Refused(format!(
+                "the card's notes would be {n} characters; a card holds at most {max}"
+            )));
+        }
+        tx.execute(
+            "UPDATE board_cards SET notes = ?2, updated_ms = ?3 WHERE card_id = ?1",
+            params![card, new, harness_core::now_ms()],
         )?;
         tx.commit()?;
         Ok(true)

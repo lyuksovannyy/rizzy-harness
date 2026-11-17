@@ -117,6 +117,9 @@ CREATE TABLE board_cards (
     position   INTEGER NOT NULL,
     session_id TEXT,
     created_by TEXT,
+    -- The agent that made the card (its name), for a card made by the
+    -- `board_edit` tool (PLAN.md T78); NULL for a person's.
+    agent      TEXT,
     created_ms INTEGER NOT NULL,
     updated_ms INTEGER NOT NULL
 );

@@ -28,6 +28,8 @@ pub const MCP_ALL: &str = "mcp";
 /// - `todo`: writes only the chat's own task list (its own log).
 /// - `skill`: loads a skill's instructions.
 /// - `recall`: searches the person's earlier chats and memory.
+/// - `board`: lists the project's task board (its writes are `board_edit`,
+///   which is not here: it changes a board other people read).
 /// - `web_search`, `web_fetch`: a search and a page read through the
 ///   node's web tools (they send a query or a URL out: read-only is not
 ///   secrecy, as with the read-only shell's network).
@@ -52,6 +54,7 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
     "todo",
     "skill",
     "recall",
+    "board",
     "web_search",
     "web_fetch",
     "remember",
@@ -59,6 +62,12 @@ pub const READ_ONLY_TOOLS: &[&str] = &[
 
 /// The shell: the one tool that changes things or not by where it runs.
 pub const SHELL: &str = "bash";
+
+/// Tools that change something through the master, never a file on the
+/// node: `publish` (an artifact) and `board_edit` (the project's task
+/// board, X.32). An agent with only these (and MCP tools) shares its
+/// parent's folder ([`AgentSpec::needs_own_folder`]).
+const THROUGH_MASTER: &[&str] = &["publish", crate::board::EDIT_TOOL];
 
 /// Whether a call of `tool` can change anything: every tool not on
 /// [`READ_ONLY_TOOLS`] (MCP tools always), and [`SHELL`] unless this call
@@ -265,8 +274,8 @@ impl AgentSpec {
     /// changes things, and at least one of the tools it may call (offered
     /// by the node) can change files directly: `write`, `edit`, a writable
     /// `bash` (which every agent that changes things has, if it has
-    /// `bash`), `all`, or a tool nobody listed. `publish` (an artifact
-    /// through the master) and MCP tools (their own server's calls, with
+    /// `bash`), `all`, or a tool nobody listed. `publish` and `board_edit`
+    /// (through the master, [`THROUGH_MASTER`]) and MCP tools (their own server's calls, with
     /// their own approval) do not: an agent with only those shares its
     /// parent's folder, as on main, so a chat in a plain folder can still
     /// delegate to a calendar or notes agent. So an agent that shares the
@@ -284,7 +293,8 @@ impl AgentSpec {
             .filter(|t| self.allows_tool(t) && offered(t))
             .any(|t| {
                 let mcp = t == MCP_ALL || t.starts_with(MCP_PREFIX);
-                !mcp && t != "publish" && (t == SHELL || tool_changes(t, true))
+                !mcp && !THROUGH_MASTER.contains(&t.as_str())
+                    && (t == SHELL || tool_changes(t, true))
             })
     }
 
@@ -416,6 +426,7 @@ mod tests {
             "remember",
             "web_fetch",
             "notebook_edit",
+            "board_edit",
         ];
         for mask in 0u32..(1 << pool.len()) {
             let tools: Vec<&str> = (0..pool.len())
@@ -442,6 +453,7 @@ mod tests {
             &["read", "mcp"][..],
             &["read", "publish"],
             &["read", "mcp__notes__add", "publish"],
+            &["read", "board", "board_edit"],
         ] {
             assert!(changes(t) && !own(t), "{t:?}");
         }
@@ -475,6 +487,7 @@ mod tests {
             "write",
             "edit",
             "publish",
+            "board_edit",
             "delegate",
             "mcp",
             "mcp__s__read",

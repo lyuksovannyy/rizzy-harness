@@ -2488,6 +2488,39 @@ memory off. Keeping your personal memory out of
 a team workspace leaves its projects' memory in. Agentic chats started in a project
 take its default node and folder. Temporary chats cannot join a project.
 
+**Agents on the board.** In a project's chats, an agent with the **Board**
+switch (Agents page; on for the Assistant, the Software Developer and the
+Senior Teamlead, off for the others; off for a new agent) has two tools.
+`board` lists the board: every column with its id, and the open cards (not
+in a column marked done) with their ids, titles, notes cut at 500
+characters (12,000 for the whole answer, at most 100 cards) and who made
+them; the text is quoted and marked as written by people, never
+instructions. `board_edit` **adds** a card (default: the first column not
+marked done), **moves** one, or **appends a note** to one, as a line that
+starts `[agent <name>]`. It never deletes a card and never changes a title
+or a note someone wrote. A card an agent made shows "Added by <agent>
+(agent)" on the board and links the chat it was made in (others see "Linked
+to someone's chat"); a card with an agent's note shows "Noted by an agent".
+
+- Changes only where the chat's owner may manage projects (owners and
+  admins of a team workspace; you in your Personal one). A member's agent
+  can list the board, and is not offered `board_edit`.
+- The server takes the project from the chat the agent works in; nothing
+  the agent sends can name another project, workspace or person. Not in a
+  chat outside a project, a temporary chat, a turn started by an external
+  event (a routine's webhook) or a turn that reports a finished background
+  command. A sub-agent uses the board only when its own agent has the
+  switch.
+- At most 10 changes and 20 lists per turn (sub-agents' included). A note
+  that would take a card's notes past 4,000 characters is refused, not cut.
+- Plan mode lists and refuses every change; Ask asks before each change
+  (`board_edit` changes something other people read) and lists unasked;
+  Auto asks for neither. Every change is a line in the server's audit log
+  (ids only).
+- A node turns the tools off with `denied_tools = ["board", "board_edit"]`
+  in `node.toml`, and the server then answers no board call from it;
+  `denied_tools = ["board_edit"]` leaves agents there the list only.
+
 **Starting an agentic chat: the Project button.** On the start screen, Agentic
 shows the node, a **Project** button and how the chat's commands run (always:
 "sandbox" where that is all the node offers, the choice with its warning where
@@ -3150,10 +3183,10 @@ The built-in agents, grouped by category in the picker:
 
 | Agent (`@handle`, aliases) | Category | Runs as | Can |
 |---|---|---|---|
-| Assistant (`@general`, `@ai`), the chats' default | General | agent | web search and fetch; your facts; project memory; earlier chats and memory search |
+| Assistant (`@general`, `@ai`), the chats' default | General | agent | web search and fetch; your facts; project memory; earlier chats and memory search; the project board |
 | Smol (`@smol`) | General | agent, sub-agent | nothing but answer: no tools, no memory |
 | Researcher (`@researcher`, `@research`) | General | agent, sub-agent | web search and fetch; project memory; earlier chats and memory search |
-| Software Developer (`@coder`, `@dev`), the Agentic default | IT | agent, sub-agent | read, change and search files, run commands, the node's MCP servers, publish, web; delegates to Scout, Researcher and Reviewer; project memory |
+| Software Developer (`@coder`, `@dev`), the Agentic default | IT | agent, sub-agent | read, change and search files, run commands, the node's MCP servers, publish, web; delegates to Scout, Researcher and Reviewer; project memory; the project board |
 | Senior Teamlead (`@teamlead`) | IT | agent | everything the Software Developer has, plus your facts; delegates to Software Developer, Researcher, Writer, Scout and Reviewer |
 | Writer (`@writer`) | General | agent, sub-agent | read, change and search files, publish, web; project memory |
 | Scout (`@scout`) | IT | sub-agent | read and search files; read-only commands (`git log`, `git diff`, `grep` pipelines, in the read-only shell) |
@@ -3333,7 +3366,7 @@ running, or whose result is on its way, takes no follow-up.
 **Agents** in the sidebar lists every agent. Server admins can make agents there
 (name, handle, summary, instructions and feature switches: memory, project
 memory, earlier chats and memory search, web search, files, commands, MCP
-servers, sub-agents, background sub-agents, and whether it is offered as an agent,
+servers, the project board, sub-agents, background sub-agents, and whether it is offered as an agent,
 a sub-agent or both), change them, delete them, and change any agent's look.
 Built-in agents and agent files keep their name, handle, instructions and
 features: only their summary and **additional instructions** (added after

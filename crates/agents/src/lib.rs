@@ -203,6 +203,10 @@ const RECALL_TOOL: &str = "recall";
 /// page (Duplicate makes an editable copy), so this list IS the
 /// permission for them: to change who has it, change this line.
 pub const RECALL_BUILTINS: &[&str] = &["general", "researcher", "reviewer"];
+/// The project's task board (ADOPTION_PLAN X.32, PLAN.md T78): `board`
+/// lists it, `board_edit` adds, moves and notes cards. Its own switch.
+const BOARD_TOOL: &str = harness_core::board::READ_TOOL;
+const BOARD_EDIT_TOOL: &str = harness_core::board::EDIT_TOOL;
 /// Offered with either switch that builds things; no switch of its own.
 const PUBLISH_TOOL: &str = "publish";
 /// The agent's own task list: with the same switches, for the same reason
@@ -234,6 +238,13 @@ pub struct Features {
     /// (PLAN.md T55). Its own switch, off when absent.
     #[serde(default)]
     pub recall: bool,
+    /// The project's task board, in a project's chats (PLAN.md T78):
+    /// `board` lists it, `board_edit` adds, moves and notes cards (never
+    /// deletes or overwrites). An agent that changes nothing else and has
+    /// read-only commands gets `board` only, so it stays read-only. Its own
+    /// switch, off when absent.
+    #[serde(default)]
+    pub board: bool,
     /// `web_search` and `web_fetch`.
     pub web: bool,
     /// Read and search files.
@@ -294,10 +305,17 @@ impl Features {
             .filter(|(on, _)| *on)
             .flat_map(|(_, tools)| tools.iter().map(|t| t.to_string()))
             .collect();
+        if self.board {
+            tools.push(BOARD_TOOL.into());
+        }
         // The shell only where the node will run it read-only: the rest
-        // changes nothing (the shared rule, as the node reads it).
-        if self.read_only_commands && !changes_things(&tools) {
+        // changes nothing (the shared rule, as the node reads it). Such an
+        // agent stays read-only: the board's list, not its changes.
+        let read_only = self.read_only_commands && !changes_things(&tools);
+        if read_only {
             tools.extend(COMMAND_TOOLS.iter().map(|t| t.to_string()));
+        } else if self.board {
+            tools.push(BOARD_EDIT_TOOL.into());
         }
         tools
     }
@@ -497,6 +515,7 @@ fn build(id: &str, fm: Frontmatter, body: &str, origin: Origin) -> Result<Agent,
         project_memory: fm.project_memory,
         personalisation: fm.personalisation,
         recall: fm.tools.allows(RECALL_TOOL),
+        board: fm.tools.allows(BOARD_TOOL),
         web: any(WEB_TOOLS),
         read_files: any(READ_TOOLS),
         edit_files: any(EDIT_TOOLS),
