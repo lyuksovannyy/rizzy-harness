@@ -84,7 +84,7 @@ export const FEATURE_GROUPS: { title: string; items: Feature[] }[] = [
       {
         key: "board",
         label: "Board",
-        hint: "In a project's chats: lists the task board, adds cards, moves them and appends notes (never deletes or rewrites); changes only where the chat's owner may manage projects",
+        hint: "In a project's chats: lists the task board; also adds cards, moves them and appends notes (never deletes or rewrites) where the chat's owner may manage projects, except for a read-only agent, which only lists",
       },
       { key: "delegate", label: "Launch sub-agents", hint: "Hands sub-tasks to the agents available as sub-agents" },
       {

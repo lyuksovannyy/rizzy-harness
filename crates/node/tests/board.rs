@@ -221,7 +221,7 @@ async fn a_call_asks_the_master_for_its_own_session() {
     let (ok, out) = &results[0];
     assert!(ok, "{out}");
     assert!(
-        out.contains("- card k1 \"Ship\", made by agent Assistant"),
+        out.contains("- card k1 \"Ship\", made by agent \"Assistant\""),
         "{out}"
     );
     assert!(

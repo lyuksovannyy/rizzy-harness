@@ -2496,8 +2496,8 @@ in a column marked done) with their ids, titles, notes cut at 500
 characters (12,000 for the whole answer, at most 100 cards) and who made
 them; the text is quoted and marked as written by people, never
 instructions. `board_edit` **adds** a card (default: the first column not
-marked done), **moves** one, or **appends a note** to one, as a line that
-starts `[agent <name>]`. It never deletes a card and never changes a title
+marked done), **moves** one, or **appends a note** to one, every line of it
+starting `[agent <name>]`. It never deletes a card and never changes a title
 or a note someone wrote. A card an agent made shows "Added by <agent>
 (agent)" on the board and links the chat it was made in (others see "Linked
 to someone's chat"); a card with an agent's note shows "Noted by an agent".
@@ -2505,6 +2505,12 @@ to someone's chat"); a card with an agent's note shows "Noted by an agent".
 - Changes only where the chat's owner may manage projects (owners and
   admins of a team workspace; you in your Personal one). A member's agent
   can list the board, and is not offered `board_edit`.
+- Changes only in a turn you sent yourself, signed in, or in a run of one of
+  your own routines (your decision of 2026-11-18: "Routines may change").
+  A turn sent with the API token can list the board, not change it. A
+  routine changes the board with nobody watching: up to 10 changes a run,
+  as often as its schedule fires; its changes are in the audit log with the
+  routine and run, and its cards link the run's chat.
 - The server takes the project from the chat the agent works in; nothing
   the agent sends can name another project, workspace or person. Not in a
   chat outside a project, a temporary chat, a turn started by an external
@@ -2516,7 +2522,10 @@ to someone's chat"); a card with an agent's note shows "Noted by an agent".
 - Plan mode lists and refuses every change; Ask asks before each change
   (`board_edit` changes something other people read) and lists unasked;
   Auto asks for neither. Every change is a line in the server's audit log
-  (ids only).
+  (ids only; a routine's run names the routine and the run).
+- An agent with the Board switch counts as one that changes things even in
+  a chat where it may only list: as a sub-agent it is not put on the small
+  model.
 - A node turns the tools off with `denied_tools = ["board", "board_edit"]`
   in `node.toml`, and the server then answers no board call from it;
   `denied_tools = ["board_edit"]` leaves agents there the list only.

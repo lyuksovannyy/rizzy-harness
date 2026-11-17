@@ -1333,6 +1333,8 @@ async fn prompt(
                 images,
                 callback: vec![],
                 by_owner: who.user_id.is_some() && who.user_id == row.owner_id,
+                // Never from a request: only the routine runner sets it.
+                routine_run: None,
                 files: b.files,
                 retry: None,
                 retry_images: false,

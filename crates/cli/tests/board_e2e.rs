@@ -281,8 +281,9 @@ async fn an_agent_adds_and_lists_a_card_of_its_projects_board() {
     );
     let listed = results[1]["output"].as_str().unwrap();
     assert!(
-        listed
-            .contains("\"Write the release notes\", made by agent Assistant, linked to this chat"),
+        listed.contains(
+            "\"Write the release notes\", made by agent \"Assistant\", linked to this chat"
+        ),
         "{listed}"
     );
     let board = s.get(&format!("/api/projects/{pid}/board")).await;
