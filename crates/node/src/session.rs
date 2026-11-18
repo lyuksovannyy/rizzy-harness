@@ -358,8 +358,10 @@ fn callback_check(history: &[RawEvent], bg_ids: &[String]) -> Result<(usize, Vec
 /// A session's MCP servers (see [`Session::mcp`]): node.toml's, for an
 /// agentic session that is not a sub-agent's, started in this chat's own
 /// folder and confinement (`home`) whoever's turn starts them. A
-/// sub-agent has none of its own: its foreground turns use its chat's
-/// ([`Session::chat_mcp`], X.34 step C).
+/// sub-agent has none of its own: the turns the node started for a
+/// `delegate` call (foreground or background) use its chat's
+/// (`Session::chat_table`, X.34 step C); a person's message there gets
+/// none.
 fn mcp_servers(
     node: &Inner,
     profile: Profile,

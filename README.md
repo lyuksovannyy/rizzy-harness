@@ -1993,8 +1993,10 @@ tool_timeout_sec = 300                # one call (1 .. 3600)
   server (it is no run the chat's agent started), nor does a read-only
   sub-agent, nor one in plan mode. Two edge
   cases: a sub-agent of a sub-agent that only reads and has Connectors can
-  still change the chat's folder through a server (inside the chat's
-  turn, so its Undo covers it); and a sub-agent that changes one file both
+  still change the chat's folder through a server (under a foreground
+  sub-agent that is inside the chat's turn, so its Undo covers it; under a
+  background one it counts as that background run's change, as above); and
+  a sub-agent that changes one file both
   in its copy and through a server ends with the server's version, its
   own change reported as not applied.
 - **Its environment** is the agent's core list above (not `env_pass`),
