@@ -268,7 +268,7 @@ async fn serve(
             %bind,
             "listening on an address that is not WireGuard (--insecure-bind){}. Use only on a \
              network you trust.",
-            if tls { "" } else { " and WITHOUT TLS: passwords and cookies travel in clear text" }
+            if tls { "" } else { " and WITHOUT TLS: passwords, cookies and pasted forge tokens travel in clear text" }
         ),
     }
     // First, before anything starts that runs commands (security review
@@ -412,6 +412,7 @@ async fn serve(
     // Before the first node link and the node listener: a replayed publish
     // must find the blob store.
     harness_master::storage::open(&master, dir)?;
+    harness_master::forge::open(&master, dir);
     master.set_provider_runtime(runtime);
     // PDF attachments are read by this binary's `pdf-text`, never in here.
     match std::env::current_exe().and_then(|e| e.canonicalize()) {

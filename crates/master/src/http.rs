@@ -18,6 +18,7 @@ mod artifacts;
 mod background;
 mod chat_allows;
 mod compact;
+mod connections;
 mod diff;
 mod files;
 mod hooks;
@@ -244,6 +245,7 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
         .merge(storage::routes())
         .merge(links::routes())
         .merge(profile::routes())
+        .merge(connections::routes())
         .merge(sessions::routes())
         // Matched routes only (the embedded UI files are not handlers); which
         // routes get which limit is the table in `limits.rs`.
