@@ -259,6 +259,7 @@ fn prompt(
         images: vec![],
         agent_named: false,
         files: vec![],
+        owner: None,
     }
 }
 

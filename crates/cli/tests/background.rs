@@ -937,6 +937,7 @@ impl Node {
             images: vec![],
             agent_named: false,
             files: vec![],
+            owner: None,
         });
     }
 

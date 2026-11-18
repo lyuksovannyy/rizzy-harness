@@ -339,6 +339,7 @@ fn prompt_with(
             images,
             files,
             agent_named: false,
+            owner: None,
         })
         .unwrap();
 }
@@ -357,6 +358,7 @@ fn retry(link: &NodeLink, sid: SessionId, req_id: &str, turn: &str) {
             savings: None,
             context: None,
             agent_named: false,
+            owner: None,
         })
         .unwrap();
 }

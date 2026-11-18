@@ -1945,9 +1945,11 @@ invalid entry stops the node at start; `rizzy-harness doctor` prints the
 effective list.
 
 **MCP servers.** A node can give its agentic chats the tools of Model
-Context Protocol servers (stdio servers only, for now). Only the node's
-own `node.toml` adds one: nothing the server, a prompt, an agent or a
-repository's `.mcp.json` or `.codex/config.toml` says starts anything. The
+Context Protocol servers (stdio servers only, for now). The node's own
+`node.toml` adds one; nothing the server, a prompt or an agent says starts
+anything, and neither does a repository's `.mcp.json` or
+`.codex/config.toml`, unless node.toml turns on a repository's servers and
+you approve each one (see "A repository's own servers" below). The
 fields are Codex's, so a definition can be copied over:
 
 ```toml
@@ -2025,6 +2027,97 @@ tool_timeout_sec = 300                # one call (1 .. 3600)
 
 `rizzy-harness doctor` starts each server once and prints how many tools
 it offers, or why it did not start.
+
+**A repository's own servers (`.mcp.json`).** Off by default. A node
+whose node.toml says
+
+```toml
+[mcp]
+project_servers = "ask"   # default "off": no .mcp.json is ever read
+```
+
+lets each person approve, one by one and for their own chats only, the
+servers a project folder declares in the standard `.mcp.json` (`{"mcpServers":
+{"<name>": {"command", "args", "env"}}}`, the shape Claude Code and others
+read). The project's page (Settings, "MCP servers from the repository")
+lists them for a project with a folder on such a node:
+
+- **What you see is what runs.** Each entry shows its command, then each
+  argument on its own line, then each `NAME=value` of its environment,
+  in full, as text, nothing joined, quoted or cut: the values too, since
+  they are part of what runs (`NODE_OPTIONS=--require ./x.js` or
+  `LD_PRELOAD` turn a harmless-looking command into repository code) and
+  are repository content the chat's agent can read anyway. An entry that
+  could not be shown so is *not supported* and cannot be approved: a
+  string over 512 characters or an entry over 4 KiB, any character but
+  printable ASCII and single spaces (the reason names it by its code
+  point), a space at a string's start or end or two in a row, an empty
+  argument. **A stated limit of this first version:** that rule also
+  refuses honest non-ASCII text, such as a path or a value with `é` or
+  Cyrillic letters, because invisible and look-alike characters (a soft
+  hyphen, a Hangul filler, a combining accent, a Cyrillic `р`) draw like
+  others and would let a person approve something other than what they
+  read. Its state
+  for you: *not approved* (it does not run), *approved*, *changed in the
+  file* (your approved copy keeps running), *gone from the file* (not
+  started), *not supported* or *hidden*, with the reason. Also not
+  supported: a server reached over the network (`type: "http"`/`"sse"`,
+  a `url`), an entry with a variable (`${HOME}`, `${TOKEN}`: nothing is
+  ever expanded from the node's environment), a field other than
+  `command`, `args`, `env` and `type: "stdio"`, a name that breaks the
+  server-name rule (1 to 32 of `a-z0-9-_`). A name node.toml has is
+  hidden: node.toml's server is the one used.
+- **Approve** takes the entry you were shown: if the file changed since
+  the list was read, it says so and approves nothing (Reload, look again).
+  The node keeps its own copy of the entry in its data directory (0600,
+  out of every chat's file view and shell), and **that copy is what runs**,
+  whatever the file says later. A change to the file shows as *changed*
+  and runs only once you approve it again; a new entry runs nothing;
+  **Remove** stops your approval's server at once and is always allowed.
+- **Reload** is the only thing that makes the node read the file again
+  (opening the list reads it once too, so a forgotten reload shows). No
+  file watcher, no check per turn: nothing an agent writes into
+  `.mcp.json` starts anything by itself. The node also reads the file once
+  per chat when that chat's first turn since the node started tells it
+  whose chat it is and that person approved something for its folder,
+  only to see which approved entries are still there: an entry gone from
+  the file is not started. A file that cannot be read (a link, not a regular file,
+  over 64 KiB, more than 32 servers, not the standard shape) changes
+  nothing.
+- **Where it runs:** in your own chats whose folder is the project's
+  folder, sandboxed ones only (a `host` chat starts none and says so; a
+  node that offers only host chats refuses the list), exactly like a
+  node.toml server there: in the chat's containment, its tools asked about
+  in `ask`, the same caps, the idle stop, the Connectors switch and the
+  Plugins and `denied_tools` lists by name. Another person's chat in the
+  same folder starts nothing you approved. **Its environment** is the core
+  list only (no `env_pass`, no `env_vars`) and the entry's `env` values.
+  Those reach the server's own process and no other: the node hands them
+  over in a private file the sandbox's guard passes on as an open
+  descriptor, and the sandbox sets them right before it starts the
+  server, after it confined itself; they are in no command line and on no
+  process that sets the sandbox up. An entry with `env` values therefore
+  runs only where the chat is contained by bubblewrap. They are not
+  secrets of the node: nothing scrubs them from what the server prints.
+- **What an approval does not pin:** the files the command runs. An
+  approved `./tools/server.py` or `npx some-package` runs whatever that
+  file or package is at the time, with the chat's own sandbox and no
+  more: approve what you would let the chat's shell run.
+
+A person's approvals live on the node, keyed by their account, the
+folder's real path and the server's name, at most 32 per person and
+folder and 1,000 per node; each approve and remove is an audit line on the
+server and on the node (ids and the server's name, never its command or
+environment). Because the key is the path, another repository cloned at
+the same path inherits them: its approved copies run only for names still
+in its file, and an entry of the same name shows as *changed* and runs the
+old approved copy until you approve or remove it. A renamed folder leaves
+its approvals behind (not listed, still counted; Remove by the old path
+works). If the node cannot use its approvals file (wrong owner or mode,
+damaged), nothing of it runs and approve and remove are refused, naming
+the file, until it is fixed and the node restarted. A request about a
+folder on a stalled mount is answered as not read after 10 seconds, but
+holds one of the node's two request slots until the read returns.
 
 Only stdio servers exist: the client library (`rmcp`, pinned at 3.8.0) has
 an advisory against its Streamable HTTP client before 3.9.0

@@ -171,6 +171,14 @@ pub struct ServerConfig {
     pub startup_timeout_sec: u64,
     #[serde(default = "default_tool")]
     pub tool_timeout_sec: u64,
+    /// Set `env` only on the server's own process, after its confinement
+    /// (a repository's server, X.36): handed to `sandbox-exec` on a
+    /// descriptor ([`crate::guard::ENV_FILE_ENV`]), never on the guard,
+    /// bubblewrap or `sandbox-exec` itself, never in a command line; such
+    /// a server with values starts only contained. Never read from
+    /// node.toml.
+    #[serde(skip)]
+    pub env_inside: bool,
 }
 
 fn on() -> bool {
@@ -195,6 +203,7 @@ impl std::fmt::Debug for ServerConfig {
             .field("disabled_tools", &self.disabled_tools)
             .field("startup_timeout_sec", &self.startup_timeout_sec)
             .field("tool_timeout_sec", &self.tool_timeout_sec)
+            .field("env_inside", &self.env_inside)
             .finish()
     }
 }
@@ -212,6 +221,7 @@ impl ServerConfig {
             disabled_tools: Vec::new(),
             startup_timeout_sec: DEFAULT_STARTUP_TIMEOUT_S,
             tool_timeout_sec: DEFAULT_TOOL_TIMEOUT_S,
+            env_inside: false,
         }
     }
 
@@ -357,6 +367,13 @@ pub struct Home {
 /// every server.
 pub struct SessionMcp {
     slots: Vec<Arc<Slot>>,
+    /// The repository's servers this chat's owner approved (X.36, PLAN.md
+    /// T82): their approved copies, set by the node before each turn's
+    /// load ([`Self::set_project`]), never a name node.toml has.
+    project: Mutex<Vec<Arc<Slot>>>,
+    /// What the node says about them this turn (a `host` chat, a name
+    /// node.toml took), shown once each like every note.
+    project_notes: Mutex<Vec<String>>,
     /// Where every server of the table starts (see [`Home`]); `None` (tests,
     /// `doctor`): in the caller's context. The loop offers a sub-agent no
     /// tool of a table without one.
@@ -390,6 +407,12 @@ impl SessionMcp {
         Self::make(servers, Some(Arc::new(home)))
     }
 
+    /// [`Self::at`], also when node.toml has no server: a chat whose node
+    /// takes a repository's approved servers (X.36) gets a table for them.
+    pub fn at_always(servers: &BTreeMap<String, ServerConfig>, home: Home) -> Arc<Self> {
+        Self::make_with(servers, Some(Arc::new(home)))
+    }
+
     /// Whether the servers start in their chat's [`Home`] whoever calls.
     pub fn homed(&self) -> bool {
         self.home.is_some()
@@ -399,32 +422,77 @@ impl SessionMcp {
         servers: &BTreeMap<String, ServerConfig>,
         home: Option<Arc<Home>>,
     ) -> Option<Arc<Self>> {
+        (servers.values().any(|c| c.enabled)).then(|| Self::make_with(servers, home))
+    }
+
+    fn make_with(servers: &BTreeMap<String, ServerConfig>, home: Option<Arc<Home>>) -> Arc<Self> {
         let slots: Vec<Arc<Slot>> = servers
             .iter()
             .filter(|(_, c)| c.enabled)
-            .map(|(name, cfg)| {
-                Arc::new(Slot {
-                    name: name.clone(),
-                    cfg: cfg.clone(),
-                    home: home.clone(),
-                    state: tokio::sync::Mutex::new(State::Idle),
-                    live: Mutex::new(None),
-                    fails: AtomicU32::new(0),
-                    generations: AtomicU64::new(0),
-                    counted: AtomicU64::new(0),
-                    last_used: Mutex::new(Instant::now()),
-                    busy: AtomicUsize::new(0),
-                })
-            })
+            .map(|(name, cfg)| Slot::new(name, cfg, home.clone(), false))
             .collect();
-        (!slots.is_empty()).then(|| {
-            Arc::new(Self {
-                slots,
-                home,
-                closed: Arc::new(AtomicBool::new(false)),
-                shown: Mutex::new(HashSet::new()),
-            })
+        Arc::new(Self {
+            slots,
+            project: Mutex::new(Vec::new()),
+            project_notes: Mutex::new(Vec::new()),
+            home,
+            closed: Arc::new(AtomicBool::new(false)),
+            shown: Mutex::new(HashSet::new()),
         })
+    }
+
+    /// Every server of the table now: node.toml's, then the repository's
+    /// approved ones.
+    fn all(&self) -> Vec<Arc<Slot>> {
+        let mut all = self.slots.clone();
+        all.extend(
+            self.project
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .iter()
+                .cloned(),
+        );
+        all
+    }
+
+    /// The repository's servers this chat may start from now on (X.36,
+    /// PLAN.md T82): the approved copies the node gives, by name. One
+    /// whose copy is the same keeps its process; one gone or changed is
+    /// stopped and never started again from this table (a tool of it a
+    /// turn still holds answers that it was removed); a name node.toml has
+    /// is never taken (node.toml wins). `notes` are said with the next
+    /// load. Nothing here reads a file: the node decides what to give.
+    pub fn set_project(&self, servers: &BTreeMap<String, ServerConfig>, notes: Vec<String>) {
+        let mut cur = self.project.lock().unwrap_or_else(|p| p.into_inner());
+        let closed = self.closed.load(Ordering::SeqCst);
+        let mut keep: Vec<Arc<Slot>> = Vec::new();
+        for s in cur.drain(..) {
+            match servers.get(&s.name) {
+                Some(c) if !closed && *c == s.cfg => keep.push(s),
+                _ => s.retire(),
+            }
+        }
+        if !closed {
+            for (name, cfg) in servers {
+                if self.slots.iter().any(|s| &s.name == name)
+                    || keep.iter().any(|s| &s.name == name)
+                {
+                    continue;
+                }
+                keep.push(Slot::new(name, cfg, self.home.clone(), true));
+            }
+        }
+        *cur = keep;
+        *self.project_notes.lock().unwrap_or_else(|p| p.into_inner()) = notes;
+    }
+
+    /// Whether `server` is one of the repository's approved servers here.
+    pub fn is_project(&self, server: &str) -> bool {
+        self.project
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .any(|s| s.name == server)
     }
 
     /// Start the servers that are not running (all at once, each within
@@ -441,18 +509,19 @@ impl SessionMcp {
     /// [`Self::load`] for the turn of session `viewer` (its notes are shown
     /// once in that session; a sub-agent's turn, X.34 step C, gets its own).
     pub async fn load_for(&self, viewer: &str, ctx: &ToolCtx, denied: &[String]) -> Loaded {
-        let mut notes = Vec::new();
+        let mut notes: Vec<String> = self
+            .project_notes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
         if self.closed.load(Ordering::SeqCst) {
             return Loaded {
                 tools: Vec::new(),
                 notes,
             };
         }
-        let slots: Vec<&Arc<Slot>> = self
-            .slots
-            .iter()
-            .filter(|s| !denied.contains(&s.name))
-            .collect();
+        let all = self.all();
+        let slots: Vec<&Arc<Slot>> = all.iter().filter(|s| !denied.contains(&s.name)).collect();
         let started =
             futures::future::join_all(slots.iter().map(|s| s.ensure(ctx, &self.closed))).await;
         let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
@@ -527,7 +596,7 @@ impl SessionMcp {
     /// for ([`Self::wait_gone`]).
     pub fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
-        for s in &self.slots {
+        for s in &self.all() {
             s.kill();
         }
     }
@@ -536,7 +605,7 @@ impl SessionMcp {
     /// when they are.
     pub async fn wait_gone(&self, bound: Duration) -> bool {
         let by = tokio::time::Instant::now() + bound;
-        for s in &self.slots {
+        for s in &self.all() {
             let rx = s
                 .live
                 .lock()
@@ -557,7 +626,7 @@ impl SessionMcp {
     /// Stop the servers no call used for `idle` (they start again when a
     /// turn needs them; this does not count as a failure).
     pub fn stop_idle(&self, idle: Duration) {
-        for s in &self.slots {
+        for s in &self.all() {
             let quiet = s.busy.load(Ordering::SeqCst) == 0
                 && s.last_used
                     .lock()
@@ -573,7 +642,7 @@ impl SessionMcp {
     /// The server and the server's own name of the tool offered as
     /// `public` (the approval card shows it: a hashed name says little).
     pub async fn origin(&self, public: &str) -> Option<(String, String)> {
-        for s in &self.slots {
+        for s in &self.all() {
             if let State::Up(up) = &*s.state.lock().await
                 && let Some(l) = up.listed.tools.iter().find(|l| l.name == public)
             {
@@ -583,14 +652,15 @@ impl SessionMcp {
         None
     }
 
-    /// The names of the table's servers (node.toml's enabled ones).
-    pub fn servers(&self) -> impl Iterator<Item = &str> {
-        self.slots.iter().map(|s| s.name.as_str())
+    /// The names of the table's servers (node.toml's enabled ones, then
+    /// the repository's approved ones the node gave last).
+    pub fn servers(&self) -> Vec<String> {
+        self.all().iter().map(|s| s.name.clone()).collect()
     }
 
     /// How many server processes are alive.
     pub fn running(&self) -> usize {
-        self.slots.iter().filter(|s| s.alive()).count()
+        self.all().iter().filter(|s| s.alive()).count()
     }
 }
 
@@ -604,6 +674,11 @@ struct Slot {
     name: String,
     cfg: ServerConfig,
     home: Option<Arc<Home>>,
+    /// A repository's approved server (X.36), not node.toml's.
+    project: bool,
+    /// Taken out of its table ([`SessionMcp::set_project`]): never started
+    /// again, so a tool of it a turn still holds starts nothing.
+    retired: AtomicBool,
     state: tokio::sync::Mutex<State>,
     /// The running process's stop order and end, for stops that must not
     /// wait for `state` (held across a start or a call).
@@ -665,6 +740,38 @@ struct Listed {
 }
 
 impl Slot {
+    fn new(name: &str, cfg: &ServerConfig, home: Option<Arc<Home>>, project: bool) -> Arc<Self> {
+        Arc::new(Slot {
+            name: name.to_string(),
+            cfg: cfg.clone(),
+            home,
+            project,
+            retired: AtomicBool::new(false),
+            state: tokio::sync::Mutex::new(State::Idle),
+            live: Mutex::new(None),
+            fails: AtomicU32::new(0),
+            generations: AtomicU64::new(0),
+            counted: AtomicU64::new(0),
+            last_used: Mutex::new(Instant::now()),
+            busy: AtomicUsize::new(0),
+        })
+    }
+
+    /// Out of its table for good: stopped, and never started again.
+    fn retire(&self) {
+        self.retired.store(true, Ordering::SeqCst);
+        self.kill();
+    }
+
+    /// Where its timeouts are set, for the words of a failure.
+    fn set_in(&self) -> &'static str {
+        if self.project {
+            "the default for a repository's server"
+        } else {
+            "in node.toml"
+        }
+    }
+
     fn kill(&self) {
         if let Some(l) = self.live.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
             l.kill.cancel();
@@ -748,6 +855,13 @@ impl Slot {
         if let State::Failed(why) = &*st {
             return Err(why.clone());
         }
+        if self.retired.load(Ordering::SeqCst) {
+            return Err(
+                "it is no longer one of this chat's servers (its approval was removed or \
+                 changed, or it left the repository's .mcp.json)"
+                    .into(),
+            );
+        }
         if closed.load(Ordering::SeqCst) {
             return Err("the chat's servers were stopped".into());
         }
@@ -756,6 +870,17 @@ impl Slot {
             _ = ctx.cancel.cancelled() => return Err("the turn was stopped".into()),
         };
         match started {
+            // Taken out of the table, or the chat's servers stopped, while
+            // it started (a removal does not wait for a start): it does not
+            // stay up, and no call runs on it.
+            Ok(Ok(up)) if self.retired.load(Ordering::SeqCst) || closed.load(Ordering::SeqCst) => {
+                up.live.kill.cancel();
+                Err(
+                    "it is no longer one of this chat's servers (it was taken out while it \
+                     started)"
+                        .into(),
+                )
+            }
             Ok(Ok(mut up)) => {
                 up.live.generation = self.generations.fetch_add(1, Ordering::SeqCst) + 1;
                 *self.live.lock().unwrap_or_else(|p| p.into_inner()) = Some(up.live.clone());
@@ -774,8 +899,9 @@ impl Slot {
             // The half-started process went with the dropped future.
             Err(_) => {
                 let msg = self.failed(&format!(
-                    "it did not answer within {} s (startup_timeout_sec in node.toml)",
-                    self.cfg.startup_timeout_sec
+                    "it did not answer within {} s (startup_timeout_sec, {})",
+                    self.cfg.startup_timeout_sec,
+                    self.set_in()
                 ));
                 if self.fails.load(Ordering::SeqCst) > MAX_RESTARTS {
                     *st = State::Failed(msg.clone());
@@ -894,9 +1020,10 @@ impl Slot {
                 let msg = self.failed_once(
                     generation,
                     &format!(
-                        "no answer within {} s (tool_timeout_sec in node.toml); the call was \
+                        "no answer within {} s (tool_timeout_sec, {}); the call was \
                      cancelled and the server stopped",
-                        self.cfg.tool_timeout_sec
+                        self.cfg.tool_timeout_sec,
+                        self.set_in()
                     ),
                 );
                 self.take_down(generation, &msg).await;
@@ -1033,8 +1160,10 @@ async fn start(
             ..Default::default()
         },
     )?;
-    for (k, v) in &cfg.env.0 {
-        cmd.env(k, v.expose());
+    if !cfg.env_inside {
+        for (k, v) in &cfg.env.0 {
+            cmd.env(k, v.expose());
+        }
     }
     cmd.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -1042,6 +1171,17 @@ async fn start(
     // A contained server's stdin is a FIFO the guard opens (its own stdin
     // is its control channel); the folder holding it is the node's own.
     let mut fifo_dir = None;
+    // A repository's server (X.36) with `env` values runs contained or
+    // not at all: the values reach only its own process, set by
+    // `sandbox-exec` after the confinement (see below); no other way of
+    // starting it keeps them off the processes before it.
+    if cfg.env_inside && !cfg.env.0.is_empty() && !contained {
+        return Err(
+            "a repository's server with env values runs only in a contained sandbox \
+                    (bubblewrap), which this chat does not have"
+                .into(),
+        );
+    }
     let writer: Box<dyn tokio::io::AsyncWrite + Send + Unpin> = if contained {
         let root = sandbox
             .private_root()
@@ -1060,6 +1200,16 @@ async fn start(
             .open_sender(&path)
             .map_err(|e| format!("{}: {e}", path.display()))?;
         cmd.env(crate::guard::STDIN_FIFO_ENV, &path);
+        // A repository's server's `env` values: in a 0600 file beside the
+        // FIFO, which the guard opens, unlinks and hands to bubblewrap as a
+        // descriptor; `sandbox-exec` reads it and sets the values right
+        // before its `exec`, after it confined itself. They are in no
+        // command line, and on no process before the server's own.
+        if cfg.env_inside && !cfg.env.0.is_empty() {
+            let file = dir.0.join("env");
+            write_inner_env(&file, &cfg.env)?;
+            cmd.env(crate::guard::ENV_FILE_ENV, &file);
+        }
         fifo_dir = Some(dir);
         Box::new(tx)
     } else {
@@ -1205,7 +1355,32 @@ async fn own(
     let _ = exited.send(Some(exit));
 }
 
-/// A node-private folder for one FIFO, removed when dropped.
+/// Write `env` for `sandbox-exec` ([`crate::guard::ENV_FILE_ENV`]): each
+/// `NAME=value` followed by a NUL, to a new 0600 file in the server's
+/// [`FifoDir`]. A node killed before the guard took it leaves it there;
+/// the node's next start empties its temp root (`sandbox::reset_tmp`).
+fn write_inner_env(file: &Path, env: &EnvValues) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut bytes = Vec::new();
+    for (k, v) in &env.0 {
+        bytes.extend_from_slice(k.as_bytes());
+        bytes.push(b'=');
+        bytes.extend_from_slice(v.expose().as_bytes());
+        bytes.push(0);
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(file)
+        .and_then(|mut f| f.write_all(&bytes))
+        .map_err(|e| format!("{}: {e}", file.display()))
+}
+
+/// A node-private folder for one FIFO (and a repository server's
+/// environment file), removed when dropped.
 struct FifoDir(PathBuf);
 
 impl FifoDir {

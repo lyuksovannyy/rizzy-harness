@@ -164,6 +164,7 @@ fn prompt(req: &str, sid: SessionId, text: &str) -> MasterToNode {
         images: vec![],
         agent_named: false,
         files: vec![],
+        owner: None,
     }
 }
 

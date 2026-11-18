@@ -9,6 +9,7 @@ other request with "method not found". Flags:
   --big-schema     one more tool whose input schema is over 8,000 bytes
   --page N         list N tools per page (with a cursor)
   --hang-init      never answer `initialize`
+  --slow-init MS   answer `initialize` after MS milliseconds
   --started PATH   append "started <pid>" to PATH when it starts
   --marker WORD    ignored (lets a test find the process in /proc)
   --say-env NAME   print "token <value of NAME>" to stderr and exit 1 at once
@@ -153,6 +154,8 @@ for line in sys.stdin.buffer:
     if method == "initialize":
         if flag("--hang-init"):
             continue
+        if value("--slow-init"):
+            time.sleep(int(value("--slow-init")) / 1000.0)
         send(
             {
                 "jsonrpc": "2.0",

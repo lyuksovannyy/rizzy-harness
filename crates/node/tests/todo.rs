@@ -116,6 +116,7 @@ fn prompt(link: &NodeLink, sid: SessionId, agent: Option<AgentSpec>, text: Strin
             images: vec![],
             agent_named: false,
             files: vec![],
+            owner: None,
         })
         .unwrap();
 }

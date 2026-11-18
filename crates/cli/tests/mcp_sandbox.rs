@@ -182,6 +182,7 @@ impl Node {
                 images: vec![],
                 agent_named: false,
                 files: vec![],
+                owner: None,
             })
             .unwrap();
         self.ack().await.unwrap();

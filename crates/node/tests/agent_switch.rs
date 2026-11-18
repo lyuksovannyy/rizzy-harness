@@ -238,6 +238,7 @@ impl N {
             images: vec![],
             agent_named: named,
             files: vec![],
+            owner: None,
         });
     }
 
@@ -464,6 +465,7 @@ async fn retry_after_a_switch_runs_the_new_agent_and_notes_it_once() {
         savings: None,
         context: None,
         agent_named: false,
+        owner: None,
     });
     n.until_end(sid).await;
     let switches = n.switches(sid);
@@ -537,6 +539,7 @@ async fn a_retry_of_a_mention_turn_writes_no_switch() {
         savings: None,
         context: None,
         agent_named: true,
+        owner: None,
     });
     n.until_end(sid).await;
     n.turn(sid, &a, false, "back to my chat").await;

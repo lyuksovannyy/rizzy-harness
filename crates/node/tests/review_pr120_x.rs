@@ -172,6 +172,7 @@ impl Node {
             images: vec![],
             agent_named: false,
             files: files.iter().map(|s| s.to_string()).collect(),
+            owner: None,
         })
         .await
         .unwrap();

@@ -185,6 +185,36 @@ impl Serve {
         v
     }
 
+    #[allow(dead_code)] // project_mcp_e2e only
+    pub async fn patch(&self, path: &str, body: Value) -> Value {
+        let r = self
+            .req(reqwest::Method::PATCH, path)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        let st = r.status();
+        let v = r.json().await.unwrap_or(Value::Null);
+        assert!(st.is_success(), "{path}: {st} {v}");
+        v
+    }
+
+    /// A call whose refusal the test reads: its status and body, as text.
+    #[allow(dead_code)] // project_mcp_e2e only
+    pub async fn raw(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> (reqwest::StatusCode, String) {
+        let mut rb = self.req(method, path);
+        if let Some(b) = body {
+            rb = rb.json(&b);
+        }
+        let r = rb.send().await.unwrap();
+        (r.status(), r.text().await.unwrap_or_default())
+    }
+
     pub async fn events(&self, sid: &str) -> Vec<Value> {
         let r = self
             .req(
