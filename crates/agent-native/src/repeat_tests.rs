@@ -779,6 +779,7 @@ async fn a_test_run_after_each_delegation_runs() {
         deny_tools: vec![],
         deny_skills: vec![],
         deny_mcp_servers: vec![],
+        stored_skills: vec![],
         delegates: vec![],
         caps: None,
     };
@@ -830,6 +831,7 @@ async fn a_failed_delegation_is_no_change() {
         deny_tools: vec![],
         deny_skills: vec![],
         deny_mcp_servers: vec![],
+        stored_skills: vec![],
         delegates: vec![],
         caps: None,
     };

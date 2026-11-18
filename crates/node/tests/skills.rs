@@ -218,6 +218,7 @@ fn both(home: &Path) -> NodePolicy {
         skills: SkillsPolicy {
             repository: true,
             roots: vec![home.to_path_buf()],
+            ..Default::default()
         },
         ..Default::default()
     }
@@ -248,6 +249,7 @@ fn spec(
         deny_tools: vec![],
         deny_skills: vec![],
         deny_mcp_servers: vec![],
+        stored_skills: vec![],
         delegates,
         caps: None,
     }
@@ -413,6 +415,7 @@ async fn node_toml_turns_repository_skills_or_all_skills_off() {
         skills: SkillsPolicy {
             repository: false,
             roots: vec![home.to_path_buf()],
+            ..Default::default()
         },
         ..Default::default()
     })
@@ -625,6 +628,7 @@ async fn the_shell_is_not_granted_a_withheld_skills_folder() {
             skills: SkillsPolicy {
                 repository: true,
                 roots: vec![home.to_path_buf(), second],
+                ..Default::default()
             },
             ..Default::default()
         }
@@ -689,4 +693,199 @@ async fn the_announcement_is_read_once_and_follows_hello() {
         NodeToMaster::Plugins { plugins } => assert_eq!(plugins, n.plugins),
         other => panic!("expected node.plugins, got {other:?}"),
     }
+}
+
+// ----- Stored skills (X.34 step B, PLAN.md T81) -----
+
+fn stored(names: &[(&str, &str)]) -> Vec<harness_core::skills::StoredSkillEntry> {
+    names
+        .iter()
+        .map(|(n, d)| harness_core::skills::StoredSkillEntry {
+            name: n.to_string(),
+            description: d.to_string(),
+            scope: harness_core::skills::StoredScope::Workspace,
+        })
+        .collect()
+}
+
+impl Node {
+    /// A turn during which the test is the master: each `skill.request`
+    /// is recorded (session, name) and answered with `body(name)`.
+    async fn turn_answering(
+        &mut self,
+        sid: SessionId,
+        text: &str,
+        agent: Option<harness_core::agent::AgentSpec>,
+        body: impl Fn(&str) -> Result<String, String>,
+    ) -> Vec<(SessionId, String)> {
+        let before = self.ended(sid);
+        let mut asked = Vec::new();
+        self.link
+            .to_node
+            .try_send(MasterToNode::Prompt {
+                savings: None,
+                context: Some(Box::new(harness_core::backend::MasterContext {
+                    turn: Some("Person: Ann".into()),
+                    standing: vec![],
+                    unattended: false,
+                })),
+                reply: None,
+                agent,
+                attachments: vec![],
+                compare: vec![],
+                req_id: "p".into(),
+                session_id: sid,
+                text: text.into(),
+                images: vec![],
+                agent_named: false,
+                files: vec![],
+            })
+            .unwrap();
+        let by = std::time::Instant::now() + Duration::from_secs(20);
+        while self.ended(sid) == before {
+            assert!(std::time::Instant::now() < by, "the turn did not end");
+            let Ok(Some(msg)) =
+                tokio::time::timeout(Duration::from_millis(20), self.link.from_node.recv()).await
+            else {
+                continue;
+            };
+            if let NodeToMaster::Skill {
+                req_id,
+                session_id,
+                name,
+            } = msg
+            {
+                let (body, error) = match body(&name) {
+                    Ok(b) => (Some(b), None),
+                    Err(e) => (None, Some(e)),
+                };
+                asked.push((session_id, name));
+                self.link
+                    .to_node
+                    .try_send(MasterToNode::SkillResult {
+                        req_id,
+                        body,
+                        error,
+                    })
+                    .unwrap();
+            }
+        }
+        asked
+    }
+}
+
+/// The master's stored skills are listed beside the node's own, whose of a
+/// name wins (its body, no request); loading a stored one asks the master
+/// for that name and session only and returns its text; the node says it
+/// takes them.
+#[tokio::test]
+async fn stored_skills_list_under_the_nodes_own_and_load_from_the_master() {
+    let mut n = start(both).await;
+    assert!(
+        n.capabilities
+            .iter()
+            .any(|c| c == harness_protocol::CAP_STORED_SKILLS),
+        "{:?}",
+        n.capabilities
+    );
+    let repo = n.repo.clone();
+    let sid = n.create(&repo).await;
+    let mut coder = spec("coder", &["read", "skill"], vec![]);
+    coder.stored_skills = stored(&[("deploy", "The master's deploy"), ("notes", "Take notes")]);
+    let asked = n
+        .turn_answering(sid, "load:notes", Some(coder.clone()), |name| {
+            Ok(format!("STORED {name} BODY"))
+        })
+        .await;
+    assert_eq!(asked, [(sid, "notes".to_string())]);
+    let first = n.requests()[0].clone();
+    assert!(
+        first.contains(harness_tools::skills::STORED_LEAD),
+        "{first}"
+    );
+    assert!(first.contains("| - notes: Take notes"), "{first}");
+    assert!(first.contains("| - deploy: The owner's deploy"), "{first}");
+    assert!(!first.contains("master's deploy"), "{first}");
+    let loaded = n.loaded(sid);
+    assert!(loaded[0].0, "{loaded:?}");
+    assert!(loaded[0].1.ends_with("STORED notes BODY"), "{loaded:?}");
+    assert!(loaded[0].1.contains("kept on the server"), "{loaded:?}");
+    // The clash: the node's own body, and the master is not asked.
+    let asked = n
+        .turn_answering(sid, "load:deploy", Some(coder), |_| Ok("NOT THIS".into()))
+        .await;
+    assert!(asked.is_empty(), "{asked:?}");
+    let loaded = n.loaded(sid);
+    assert!(loaded[1].1.ends_with("owner deploy body"), "{loaded:?}");
+}
+
+/// `[skills] from_master = false`: no capability, no list entry, no
+/// request, for the turn's agent and for its sub-agents.
+#[tokio::test]
+async fn from_master_off_ignores_the_list_and_never_asks() {
+    let mut n = start(|home| {
+        let mut p = both(home);
+        p.skills.from_master = false;
+        p
+    })
+    .await;
+    assert!(
+        !n.capabilities
+            .iter()
+            .any(|c| c == harness_protocol::CAP_STORED_SKILLS)
+    );
+    let sub = n.repo.join("sub");
+    let sid = n.create(&sub).await;
+    let mut scout = spec("scout", &["read", "skill"], vec![]);
+    scout.stored_skills = stored(&[("notes", "Take notes")]);
+    let mut lead = spec("lead", &["read", "skill"], vec![scout]);
+    lead.stored_skills = stored(&[("notes", "Take notes")]);
+    let asked = n
+        .turn_answering(
+            sid,
+            "delegate: scout=read: keep.txt",
+            Some(lead.clone()),
+            |_| Ok("NO".into()),
+        )
+        .await;
+    assert!(asked.is_empty());
+    for r in n.requests() {
+        assert!(!r.contains("notes: Take notes"), "{r}");
+    }
+    let asked = n
+        .turn_answering(sid, "load:notes", Some(lead), |_| Ok("NO".into()))
+        .await;
+    assert!(asked.is_empty());
+    let loaded = n.loaded(sid);
+    let last = loaded.last().unwrap();
+    assert!(!last.0 && last.1.contains("no skill `notes`"), "{loaded:?}");
+}
+
+/// An agent that neither works on files nor runs commands is offered the
+/// stored skills only: no skill folder of the node or the repository is
+/// listed or loaded for it.
+#[tokio::test]
+async fn an_agent_without_file_access_gets_stored_skills_only() {
+    let mut n = start(both).await;
+    let repo = n.repo.clone();
+    let sid = n.create(&repo).await;
+    let mut chat = spec("general", &["skill", "web_fetch"], vec![]);
+    chat.stored_skills = stored(&[("notes", "Take notes")]);
+    let asked = n
+        .turn_answering(sid, "load:release", Some(chat.clone()), |_| Ok("NO".into()))
+        .await;
+    assert!(asked.is_empty());
+    let first = n.requests()[0].clone();
+    assert!(first.contains("| - notes: Take notes"), "{first}");
+    assert!(!first.contains("release: Cut a release"), "{first}");
+    assert!(!first.contains("owner's deploy"), "{first}");
+    let loaded = n.loaded(sid);
+    assert!(
+        !loaded[0].0 && !loaded[0].1.contains("Tag it"),
+        "{loaded:?}"
+    );
+    let asked = n
+        .turn_answering(sid, "load:notes", Some(chat), |_| Ok("STORED".into()))
+        .await;
+    assert_eq!(asked, [(sid, "notes".to_string())]);
 }

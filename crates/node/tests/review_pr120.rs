@@ -437,6 +437,7 @@ async fn r6_a_sub_agents_task_is_scrubbed_like_a_message() {
         deny_tools: vec![],
         deny_skills: vec![],
         deny_mcp_servers: vec![],
+        stored_skills: vec![],
         delegates,
         caps: None,
     };

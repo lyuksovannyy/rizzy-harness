@@ -664,6 +664,7 @@ async fn a_sub_agent_never_runs_above_its_parent() {
         deny_tools: vec![],
         deny_skills: vec![],
         deny_mcp_servers: vec![],
+        stored_skills: vec![],
         delegates,
         caps: None,
     };
@@ -772,6 +773,7 @@ async fn a_sub_agent_prompted_later_follows_its_parent_also_after_a_restart() {
         deny_tools: vec![],
         deny_skills: vec![],
         deny_mcp_servers: vec![],
+        stored_skills: vec![],
         delegates,
         caps: None,
     };
@@ -1235,6 +1237,7 @@ async fn a_sub_agent_takes_no_chat_grant() {
         deny_tools: vec![],
         deny_skills: vec![],
         deny_mcp_servers: vec![],
+        stored_skills: vec![],
         delegates,
         caps: None,
     };
@@ -2177,6 +2180,7 @@ async fn a_sub_agent_of_a_plan_chat_cannot_write() {
         deny_tools: vec![],
         deny_skills: vec![],
         deny_mcp_servers: vec![],
+        stored_skills: vec![],
         delegates,
         caps: None,
     };
@@ -2569,6 +2573,7 @@ async fn a_writer_sub_agent_mid_turn_follows_its_parent_into_plan_mode() {
         deny_tools: vec![],
         deny_skills: vec![],
         deny_mcp_servers: vec![],
+        stored_skills: vec![],
         delegates,
         caps: None,
     };
@@ -2689,6 +2694,7 @@ async fn a_writer_childs_changes_are_kept_out_of_a_folder_now_in_plan_mode() {
         deny_tools: vec![],
         deny_skills: vec![],
         deny_mcp_servers: vec![],
+        stored_skills: vec![],
         delegates,
         caps: None,
     };
@@ -2769,6 +2775,7 @@ async fn a_plan_child_without_its_parent_stays_in_plan_mode() {
         deny_tools: vec![],
         deny_skills: vec![],
         deny_mcp_servers: vec![],
+        stored_skills: vec![],
         delegates,
         caps: None,
     };

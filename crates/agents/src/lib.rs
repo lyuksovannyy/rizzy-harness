@@ -212,9 +212,10 @@ const PUBLISH_TOOL: &str = "publish";
 /// The agent's own task list: with the same switches, for the same reason
 /// (work that takes many steps).
 const TODO_TOOL: &str = "todo";
-/// Skills (instructions in a folder, loaded by name): its own switch
-/// (`Features::skills`), with any switch that works on files or commands,
-/// where a task can call for one.
+/// Skills (instructions loaded by name): its own switch
+/// (`Features::skills`). The node offers its skill folders only to an agent
+/// that works on files or runs commands; the server's stored skills, which
+/// are text, to any (X.34 step B).
 const SKILL_TOOL: &str = "skill";
 
 /// Which set an agent belongs to (X.33): the server's (built-ins, files and
@@ -280,10 +281,10 @@ pub struct Features {
     pub mcp: bool,
     /// Skills (`skill`, X.34): load the skills this agent may use in its
     /// workspace (Plugins: Shared ones, and the ones Assigned to it). Its
-    /// own switch; it takes effect with file or command access, where a
-    /// task can call for a skill and its files can be read. On when absent,
-    /// so an agent saved before the switch keeps what it had: the tool
-    /// wherever it had file or command access.
+    /// own switch. With file or command access the node's skill folders
+    /// too; without, only the skills stored on the server (step B, text),
+    /// and the tool only in a turn that has one to load. On when absent,
+    /// so an agent saved before the switch keeps what it had.
     #[serde(default = "yes")]
     pub skills: bool,
     /// Hand sub-tasks to the agents available as sub-agents.
@@ -315,10 +316,7 @@ impl Features {
                 self.edit_files || self.commands,
                 &[PUBLISH_TOOL, TODO_TOOL][..],
             ),
-            (
-                self.skills && (self.read_files || self.edit_files || self.commands),
-                &[SKILL_TOOL][..],
-            ),
+            (self.skills, &[SKILL_TOOL][..]),
         ];
         let mut tools: Vec<String> = groups
             .iter()
@@ -579,6 +577,7 @@ fn build(id: &str, fm: Frontmatter, body: &str, origin: Origin) -> Result<Agent,
             deny_tools: vec![],
             deny_skills: vec![],
             deny_mcp_servers: vec![],
+            stored_skills: vec![],
             delegates: vec![],
             caps,
         },

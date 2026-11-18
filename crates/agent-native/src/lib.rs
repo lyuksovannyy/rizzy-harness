@@ -352,6 +352,10 @@ impl harness_core::backend::TurnHost for Logged<'_> {
         self.host.board()
     }
 
+    fn stored_skills(&self) -> Option<Arc<dyn harness_core::skills::StoredSkillSource>> {
+        self.host.stored_skills()
+    }
+
     // Both reach every tool call's context. Not forwarding them (the
     // trait's default answers `None`) turned the per-call pin check off and
     // denied a sub-agent its own folder (tests/host_forwarding.rs).
@@ -1346,7 +1350,7 @@ impl NativeBackend {
             .unwrap_or("")
             .trim()
             .to_string();
-        let Some(spec) = agent.delegates.iter().find(|d| d.agent_id == target) else {
+        let Some(found) = agent.delegates.iter().find(|d| d.agent_id == target) else {
             return (
                 ToolOutcome::err(format!(
                     "`{target}` is not an agent this one can delegate to"
@@ -1355,6 +1359,15 @@ impl NativeBackend {
                 false,
             );
         };
+        // The master's stored skills travel once, on the turn's own spec
+        // (X.34 step B, review of PR 148 H1): the child gets that list and
+        // its own spec's `deny_skills` takes out what it may not use, on
+        // every way a child starts (now, continued, in the background).
+        let child = harness_core::agent::AgentSpec {
+            stored_skills: agent.stored_skills.clone(),
+            ..found.clone()
+        };
+        let spec = &child;
         if task.is_empty() {
             return (
                 ToolOutcome::err("`task` must describe the sub-task"),
@@ -5648,6 +5661,7 @@ impl NativeBackend {
             seen: self.seen.session(ctx.session_id),
             recall: host.recall(),
             board: host.board(),
+            stored_skills: host.stored_skills(),
             read_offered: self.read_offered(ctx, host),
             // Only `refusal` reads it (`refusal_ctx`).
             read_unasked: false,
@@ -5971,6 +5985,7 @@ mod tests {
             deny_tools: vec![],
             deny_skills: vec![],
             deny_mcp_servers: vec![],
+            stored_skills: vec![],
             delegates: vec![],
             caps: None,
         }

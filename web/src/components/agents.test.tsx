@@ -265,15 +265,15 @@ describe("an agent's page", () => {
     );
   });
 
-  test("Skills is its own switch: on for a new agent, moot without file or command access, saved when turned off", async () => {
+  test("Skills is its own switch: on for a new agent, offered without file access too, saved when turned off", async () => {
     expect(NEW_FEATURES.skills).toBe(true);
     api.agent.mockResolvedValue(detail(reviewer, { prompt: "Review it.", features: { ...NEW_FEATURES, read_files: true } }));
     await show(admin, "reviewer");
     expect(sw("Skills").checked).toBe(true);
     expect(sw("Skills").disabled).toBe(false);
-    // Without file or command access it does nothing, so it is not offered.
+    // Without file or command access it still loads the server's stored skills (X.34 step B).
     act(() => sw("Read files").click());
-    expect(sw("Skills").disabled).toBe(true);
+    expect(sw("Skills").disabled).toBe(false);
     act(() => sw("Read files").click());
     act(() => sw("Skills").click());
     api.updateAgent.mockResolvedValue(detail(reviewer));

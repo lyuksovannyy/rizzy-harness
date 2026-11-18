@@ -68,7 +68,7 @@ fn builtin_roster_is_exactly_the_table() {
             name: "Assistant",
             category: "General",
             runs_as: (true, false),
-            tools: &["web_search", "web_fetch", "remember", "recall"],
+            tools: &["web_search", "web_fetch", "remember", "recall", "skill"],
             user_facts: true,
             project_memory: true,
             delegates: &[],
@@ -821,11 +821,12 @@ fn agents_that_build_get_the_task_list() {
     assert!(!with(false, false).iter().any(|t| t == "todo"));
 }
 
-/// Skills come with any switch that works on files or commands: an agent
-/// that reads, edits or runs things can load a skill's instructions; one
-/// that only chats or searches the web cannot (X.2).
+/// The Skills switch alone brings `skill` (X.34 step B): an agent that
+/// reads, edits or runs things gets the node's skill folders too; one that
+/// only chats is offered the server's stored skills, which are text (the
+/// master withholds the tool from it in a turn with none to load).
 #[test]
-fn agents_that_work_on_files_get_skills() {
+fn the_skills_switch_alone_brings_the_tool() {
     let with = |read_files: bool, edit_files: bool, commands: bool| {
         harness_agents::Features {
             read_files,
@@ -839,10 +840,10 @@ fn agents_that_work_on_files_get_skills() {
         (true, false, false),
         (false, true, false),
         (false, false, true),
+        (false, false, false),
     ] {
         assert!(with(r, e, c).iter().any(|t| t == "skill"), "{r} {e} {c}");
     }
-    assert!(!with(false, false, false).iter().any(|t| t == "skill"));
 }
 
 /// The Skills switch (X.34, the owner's rule: each capability its own
@@ -867,7 +868,10 @@ fn skills_are_their_own_switch() {
     assert!(old.skills && old.tools().iter().any(|t| t == "skill"));
     for a in harness_agents::builtins() {
         assert_eq!(a.features.skills, a.spec.allows_tool("skill"), "{}", a.id);
-        let with = ["coder", "teamlead", "writer", "scout", "reviewer"].contains(&a.id.as_str());
+        let with = [
+            "coder", "teamlead", "writer", "scout", "reviewer", "general",
+        ]
+        .contains(&a.id.as_str());
         assert_eq!(a.features.skills, with, "{}", a.id);
     }
 }

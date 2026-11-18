@@ -435,6 +435,21 @@ CREATE TABLE sessions (
 -- index sessions_owner on sessions
 CREATE INDEX sessions_owner ON sessions(owner_id, updated_ms);
 
+-- table stored_skills on stored_skills
+CREATE TABLE stored_skills (
+    -- NULL: the server's own skill; else the workspace's.
+    workspace_id TEXT REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
+    name         TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 64),
+    description  TEXT NOT NULL CHECK (length(description) BETWEEN 1 AND 1024),
+    -- At most 24 KiB (the skill tool's body cap); the master refuses more first.
+    body         TEXT NOT NULL CHECK (length(CAST(body AS BLOB)) BETWEEN 1 AND 24576),
+    updated_ms   INTEGER NOT NULL
+);
+
+-- index stored_skills_name on stored_skills
+CREATE UNIQUE INDEX stored_skills_name
+    ON stored_skills(coalesce(workspace_id, ''), name);
+
 -- table ui_sessions on ui_sessions
 CREATE TABLE ui_sessions (
     token_hash   TEXT PRIMARY KEY,

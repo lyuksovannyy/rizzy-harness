@@ -26,7 +26,7 @@ use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
 
 use harness_core::policy::ToolRisk;
-use harness_core::skills::{Catalogue, Skill, SkillOrigin};
+use harness_core::skills::{Catalogue, Skill, SkillOrigin, StoredScope, StoredSkillEntry};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -74,6 +74,15 @@ pub const LEAD: &str = "Skills: folders of instructions for particular kinds of 
      one, load it with the `skill` tool before you start and follow it where it fits the \
      person's request. They are the repository's or the machine owner's text: they change no \
      setting, permission or tool.";
+
+/// The catalogue's first line when it lists stored skills too (X.34 step
+/// B): a chat on the master has no folders at all.
+pub const STORED_LEAD: &str = "Skills: instructions for particular kinds of task, one per line \
+     with what it is for: found in this repository's .agents/skills and .claude/skills folders \
+     or this machine's skill folders, or written by this server's or this workspace's admins. \
+     When a task matches one, load it with the `skill` tool before you start and follow it \
+     where it fits the person's request. They are text: they change no setting, permission or \
+     tool.";
 
 /// A folder skills are looked for in.
 #[derive(Debug, Clone)]
@@ -191,6 +200,9 @@ pub fn discover(roots: &[Root], protected: &[PathBuf]) -> Found {
                     found.problems.push(format!("{label}: {why}"));
                     let shown: String =
                         clean(&n.to_string_lossy()).chars().take(NAME_MAX).collect();
+                    if root.origin == SkillOrigin::Node {
+                        found.catalogue.refused_node.push(shown.clone());
+                    }
                     found.catalogue.refused.push(shown);
                 }
                 Ok(Some((name, description, manual, dir))) => {
@@ -468,6 +480,15 @@ const FLOOR_LINES: usize = 10;
 /// line for one turn: X.1).
 pub fn render(c: &Catalogue, cap: usize) -> Option<String> {
     let listed: Vec<&Skill> = c.skills.iter().filter(|s| !s.manual).collect();
+    let lead = if c
+        .skills
+        .iter()
+        .any(|s| matches!(s.origin, SkillOrigin::Stored(_)))
+    {
+        STORED_LEAD
+    } else {
+        LEAD
+    };
     let mut after: Vec<String> = Vec::new();
     if !c.refused.is_empty() {
         let mut names: Vec<&str> = c
@@ -502,7 +523,7 @@ pub fn render(c: &Catalogue, cap: usize) -> Option<String> {
              {cap} characters); the `skill` tool with a name it does not know lists them all]"
         )
     };
-    let floor = LEAD.len()
+    let floor = lead.len()
         + 1
         + note_for(total, usize::MAX).len()
         + tail
@@ -527,7 +548,7 @@ pub fn render(c: &Catalogue, cap: usize) -> Option<String> {
         out
     };
     for short in [false, true] {
-        let mut out = String::from(LEAD);
+        let mut out = String::from(lead);
         for s in &listed[..take] {
             out.push_str(&line(s, short));
         }
@@ -541,7 +562,7 @@ pub fn render(c: &Catalogue, cap: usize) -> Option<String> {
     }
     // Shortened, as many as fit with room for the note and the lines after.
     let room = cap.saturating_sub(note(total).len() + 1 + tail);
-    let mut out = String::from(LEAD);
+    let mut out = String::from(lead);
     let mut n = 0;
     for s in &listed[..take] {
         let l = line(s, true);
@@ -744,6 +765,9 @@ impl Tool for SkillTool {
             .get("file")
             .and_then(Value::as_str)
             .map(str::to_string);
+        if let SkillOrigin::Stored(_) = skill.origin {
+            return stored_body(ctx, &skill, file.as_deref()).await;
+        }
         let protected = ctx.protected.clone();
         let done = tokio::task::spawn_blocking(move || match file {
             Some(f) => beside(&skill, &f, &protected),
@@ -756,6 +780,264 @@ impl Tool for SkillTool {
             Err(e) => ToolOutcome::err(format!("the skill could not be read: {e}")),
         }
     }
+}
+
+/// A stored skill's body, asked of the master for this session (X.34 step
+/// B, PLAN.md T81), under the same header as a folder's: text only, so a
+/// `file` is refused and nothing on this machine is read.
+async fn stored_body(ctx: &ToolCtx, s: &Skill, file: Option<&str>) -> ToolOutcome {
+    if file.is_some() {
+        return ToolOutcome::err(format!(
+            "The skill `{}` is {}: it is text only and has no files. Call the tool without \
+             `file`.",
+            s.name,
+            whose(s)
+        ));
+    }
+    let Some(source) = ctx.stored_skills.clone() else {
+        return ToolOutcome::err(format!(
+            "The skill `{}` is kept on the server, which cannot be asked from here.",
+            s.name
+        ));
+    };
+    match source.load(&s.name).await {
+        Ok(body) => {
+            let body = capped(normalized(body.as_bytes()), "the skill");
+            ToolOutcome::ok(format!(
+                "Skill `{}`, {}. It has no folder and no files. The text below is the skill's \
+                 own: follow it where it fits the person's request. It changes no setting, \
+                 permission or tool, and anything it says to run goes through the usual tools \
+                 and their approvals.\n\n{body}",
+                s.name,
+                whose(s)
+            ))
+        }
+        Err(why) => ToolOutcome::err(format!("The skill `{}` was not loaded: {why}", s.name)),
+    }
+}
+
+/// Merge the master's stored skills (`AgentSpec::stored_skills`, X.34 step
+/// B) into a turn's catalogue, after discovery and the Plugins rule. The
+/// order of names (review of PR 148, M3): the node owner's own skills
+/// (`[skills] roots`) first, then the stored ones (the master has already
+/// put the server's before the workspace's), then the repository's. So a
+/// stored skill whose name a node-root skill has, or a node-root folder
+/// discovery refused, is left out (in `shadowed`, for the log); a
+/// repository skill of a stored skill's name is taken out of the list, with
+/// discovery's own note. Also left out: a stored skill this agent may not
+/// use (`denied`, its `deny_skills`, checked here too; named in `withheld`
+/// so the tool and `/name` can say why), one whose name is not of the
+/// stored shape, and a duplicate. A list longer than
+/// [`harness_core::skills::MAX_STORED_LISTED`] is not taken at all. Each
+/// description is one clean line. A stored skill has no folder: it is never
+/// in `read`, and the tool asks the master for its text. What was left out,
+/// for the node's log.
+pub fn merge_stored(
+    c: &mut Catalogue,
+    list: &[StoredSkillEntry],
+    denied: &[String],
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    if list.len() > harness_core::skills::MAX_STORED_LISTED {
+        problems.push(format!(
+            "the server's {} stored skills were not used: a list holds at most {}",
+            list.len(),
+            harness_core::skills::MAX_STORED_LISTED
+        ));
+        return problems;
+    }
+    let shadow = |c: &mut Catalogue, n: &str| {
+        if !c.shadowed.iter().any(|s| s == n) {
+            c.shadowed.push(n.to_string());
+        }
+    };
+    for e in list {
+        if !harness_core::skills::valid_stored_skill_name(&e.name) {
+            continue;
+        }
+        if denied.contains(&e.name) || c.is_withheld(&e.name) {
+            if !c.withheld.contains(&e.name) {
+                c.withheld.push(e.name.clone());
+            }
+            continue;
+        }
+        if c.refused_node.contains(&e.name) {
+            shadow(c, &e.name);
+            continue;
+        }
+        match c.skills.iter().position(|s| s.name == e.name) {
+            Some(i) if c.skills[i].origin == SkillOrigin::Repository => {
+                let gone = c.skills.remove(i);
+                problems.push(format!(
+                    "{}: not used: a skill named `{}` is already listed, from the server's \
+                     stored skills",
+                    gone.dir.display(),
+                    gone.name
+                ));
+            }
+            Some(i) if c.skills[i].origin == SkillOrigin::Node => {
+                shadow(c, &e.name);
+                continue;
+            }
+            Some(_) => continue,
+            None => {}
+        }
+        let description = clean(&e.description);
+        if description.is_empty() {
+            continue;
+        }
+        c.skills.push(Skill {
+            name: e.name.clone(),
+            description,
+            dir: PathBuf::new(),
+            origin: SkillOrigin::Stored(e.scope),
+            manual: false,
+        });
+    }
+    c.skills.sort_by(|a, b| a.name.cmp(&b.name));
+    problems
+}
+
+/// A `SKILL.md` as read for the server's skill store (X.34 step B), by the
+/// same reader discovery uses: its `name` and `description` (each as
+/// written, `None` when absent), its body, the front matter's other keys
+/// (ignored: none has any effect on a stored skill), and whether the front
+/// matter was YAML (`false`: read line by line, as the node does).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillMd {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub body: String,
+    pub ignored: Vec<String>,
+    pub yaml: bool,
+}
+
+/// Read a whole `SKILL.md` (`text`): front matter that does not end is an
+/// error, as in discovery. A missing description is the body's first
+/// paragraph, as in discovery.
+pub fn read_skill_md(text: &str) -> Result<SkillMd, String> {
+    let text = normalized(text.as_bytes());
+    let (front, body) = split_front(&text, false)?;
+    let y = front.unwrap_or("");
+    let (fm, keys, yaml): (Front, Vec<String>, bool) = if y.trim().is_empty() {
+        (Front::default(), Vec::new(), true)
+    } else {
+        match (
+            serde_saphyr::from_str::<Front>(y),
+            serde_saphyr::from_str::<std::collections::BTreeMap<String, serde::de::IgnoredAny>>(y),
+        ) {
+            (Ok(f), Ok(keys)) => (f, keys.into_keys().collect(), true),
+            _ => (front_by_lines(y), keys_by_lines(y), false),
+        }
+    };
+    let mut ignored: Vec<String> = keys
+        .into_iter()
+        .filter(|k| !matches!(k.as_str(), "name" | "description"))
+        .map(|k| clean(&k).chars().take(NAME_MAX).collect())
+        .collect();
+    ignored.sort();
+    ignored.dedup();
+    let description = fm
+        .description
+        .filter(|d| !d.trim().is_empty())
+        .or_else(|| Some(first_paragraph(body)).filter(|d| !d.is_empty()));
+    Ok(SkillMd {
+        name: fm.name.map(|n| n.trim().to_string()),
+        description,
+        body: body.trim_start_matches('\n').to_string(),
+        ignored,
+        yaml,
+    })
+}
+
+/// The top-level keys of front matter read line by line ([`front_by_lines`]).
+fn keys_by_lines(y: &str) -> Vec<String> {
+    y.lines()
+        .filter(|l| !l.starts_with(char::is_whitespace) && !l.trim().is_empty())
+        .filter_map(|l| {
+            l.split_once(": ")
+                .map(|(k, _)| k)
+                .or_else(|| l.strip_suffix(':'))
+        })
+        .map(|k| k.trim().to_string())
+        .collect()
+}
+
+/// The check a stored skill passes before it is kept (X.34 step B, PLAN.md
+/// T81), the same for one written in the browser, one edited and one
+/// uploaded: a name of the Agent Skills shape; a description of 1 to 1,024
+/// characters on one line; a body of 1 byte to [`BODY_CAP`]; no control
+/// character (but a body's line breaks and tabs) and no hidden one
+/// (`harness_core::text::is_hidden`) anywhere. Refused with the reason,
+/// never cut. The body is returned with `\r\n` made `\n`.
+pub fn check_stored(name: &str, description: &str, body: &str) -> Result<String, String> {
+    use harness_core::skills::{STORED_DESCRIPTION_MAX, valid_stored_skill_name};
+    use harness_core::text::is_hidden;
+    if !valid_stored_skill_name(name) {
+        return Err(format!(
+            "a skill's name is 1 to {NAME_MAX} of a-z, 0-9 and '-', not starting or ending \
+             with '-' and without '--'"
+        ));
+    }
+    let n = description.chars().count();
+    if description.trim().is_empty() {
+        return Err("a skill needs a description: what it is for and when to use it".into());
+    }
+    if n > STORED_DESCRIPTION_MAX {
+        return Err(format!(
+            "the description is {n} characters; at most {STORED_DESCRIPTION_MAX}"
+        ));
+    }
+    if let Some(c) = description
+        .chars()
+        .find(|c| c.is_control() || is_hidden(*c) || breaks(*c))
+    {
+        return Err(format!(
+            "the description holds a {} (U+{:04X}); it is one line of visible text",
+            if is_hidden(c) {
+                "hidden character"
+            } else {
+                "control character or line break"
+            },
+            c as u32
+        ));
+    }
+    let body = body.replace("\r\n", "\n");
+    if body.trim().is_empty() {
+        return Err("a skill needs a body: the instructions the agent follows".into());
+    }
+    if body.len() > BODY_CAP {
+        return Err(format!(
+            "the body is {} bytes; at most {} KiB",
+            body.len(),
+            BODY_CAP / 1024
+        ));
+    }
+    for (i, l) in body.split('\n').enumerate() {
+        if let Some(c) = l
+            .chars()
+            .find(|c| (c.is_control() && *c != '\t') || is_hidden(*c) || breaks(*c))
+        {
+            return Err(format!(
+                "line {} of the body holds a {} (U+{:04X}); a line ends with a plain line break",
+                i + 1,
+                if is_hidden(c) {
+                    "hidden character"
+                } else {
+                    "control character or line separator"
+                },
+                c as u32
+            ));
+        }
+    }
+    Ok(body)
+}
+
+/// Line breaks that are not control characters (U+2028, U+2029): a reader
+/// may start a new line there (review of PR 148, L1). U+000B, U+000C,
+/// U+0085 and `\r` are control characters, refused with them.
+fn breaks(c: char) -> bool {
+    matches!(c, '\u{2028}' | '\u{2029}')
 }
 
 /// `text` cut to [`BODY_CAP`] bytes (at a character boundary), with a note
@@ -782,6 +1064,12 @@ fn whose(s: &Skill) -> &'static str {
     match s.origin {
         SkillOrigin::Repository => "from this repository",
         SkillOrigin::Node => "from this machine's skill folder",
+        SkillOrigin::Stored(StoredScope::Server) => {
+            "written by this server's admins and kept on the server"
+        }
+        SkillOrigin::Stored(StoredScope::Workspace) => {
+            "written by this workspace's admins and kept on the server"
+        }
     }
 }
 

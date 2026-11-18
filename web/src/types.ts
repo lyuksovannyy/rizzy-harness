@@ -524,7 +524,7 @@ export interface AgentFeatures {
   read_only_commands: boolean;
   /** "Connectors": the tools of the MCP servers the node runs for the chat that it may use here (Plugins); its own switch, not implied by commands. */
   mcp: boolean;
-  /** "Skills" (`skill`): the skills it may use here (Plugins); its own switch, in effect with file or command access (X.34). */
+  /** "Skills" (`skill`): the skills it may use here (Plugins); its own switch. A node's skill folders only with file or command access; the server's stored skills (text) for any agent (X.34 step B). */
   skills: boolean;
   /** Hands sub-tasks to the agents available as sub-agents. */
   delegate: boolean;

@@ -225,6 +225,14 @@ pub const CAP_RECALL: &str = "recall";
 /// any of them, so an Assigned item never reaches another agent there.
 pub const CAP_PLUGIN_ACCESS: &str = "plugin-access";
 
+/// The node capability that says it takes the master's stored skills
+/// (X.34 step B, PLAN.md T81): it offers the `skill` tool, node.toml
+/// `[skills] from_master` is on, it merges `AgentSpec::stored_skills` into
+/// a turn's catalogue and speaks `skill.request`. The master sends the list
+/// only to such a node (to any other it sends none), answers requests only
+/// from one and sends `skill.result` only to one.
+pub const CAP_STORED_SKILLS: &str = "stored-skills";
+
 /// Skills one `node.plugins` names; more are counted, not named.
 pub const MAX_ANNOUNCED_SKILLS: usize = 300;
 /// MCP servers one `node.plugins` names.
@@ -564,6 +572,16 @@ pub enum NodeToMaster {
         req_id: String,
         session_id: SessionId,
         request: harness_core::board::BoardRequest,
+    },
+    /// The agent of a session this node runs loads a stored skill (PLAN.md
+    /// T81): its name and nothing else. The master decides from
+    /// `session_id` alone (its workspace, its open turn's agent, the
+    /// Plugins rule) and answers with one `skill.result`.
+    #[serde(rename = "skill.request")]
+    Skill {
+        req_id: String,
+        session_id: SessionId,
+        name: String,
     },
     /// Bytes of a staged file, answering `artifact.fetch` (pull only: a
     /// node never sends one unasked). `error: "busy"` asks for a retry.
@@ -954,6 +972,17 @@ pub enum MasterToNode {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// The answer to a `skill.request`: the stored skill's body (text), or
+    /// why not. Only to nodes whose hello listed [`CAP_STORED_SKILLS`];
+    /// never acked.
+    #[serde(rename = "skill.result")]
+    SkillResult {
+        req_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// What one turn changed (X.12): read from the turn's checkpoints,
     /// answered by one `session.diff_result`, never by an ack, handled
     /// outside the node's command loop, and nothing is logged. `rewind`:
@@ -1015,6 +1044,7 @@ impl MasterToNode {
             | MasterToNode::ArtifactFetch { .. }
             | MasterToNode::RecallResult { .. }
             | MasterToNode::BoardResult { .. }
+            | MasterToNode::SkillResult { .. }
             | MasterToNode::Diff { .. }
             | MasterToNode::Files { .. }
             | MasterToNode::ProjectCreate { .. } => None,
@@ -1222,6 +1252,45 @@ mod tests {
             serde_json::to_value(&a).unwrap(),
             json!({"type": "board.result", "req_id": "r",
                    "answer": {"kind": "done", "card_id": "c", "said": "noted"}})
+        );
+        assert_eq!(a.req_id(), None, "never acked");
+    }
+
+    /// `skill.request` carries a name only: the master reads the workspace,
+    /// the agent and the person from the session (PLAN.md T81). A field
+    /// naming any of them is not read, and the answer is text or a reason.
+    #[test]
+    fn skill_messages_name_no_place() {
+        let sid: SessionId = "0193f2a0-0000-7000-8000-000000000001".parse().unwrap();
+        let r = NodeToMaster::Skill {
+            req_id: "r".into(),
+            session_id: sid,
+            name: "release-notes".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&r).unwrap(),
+            json!({"type": "skill.request", "req_id": "r", "session_id": sid,
+                   "name": "release-notes"})
+        );
+        let v = json!({"type": "skill.request", "req_id": "r", "session_id": sid,
+                       "name": "x", "workspace_id": "w", "agent_id": "a", "user_id": "u"});
+        assert_eq!(
+            serde_json::from_value::<NodeToMaster>(v).unwrap(),
+            NodeToMaster::Skill {
+                req_id: "r".into(),
+                session_id: sid,
+                name: "x".into()
+            },
+            "nothing else is kept"
+        );
+        let a = MasterToNode::SkillResult {
+            req_id: "r".into(),
+            body: Some("Do it.".into()),
+            error: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&a).unwrap(),
+            json!({"type": "skill.result", "req_id": "r", "body": "Do it."})
         );
         assert_eq!(a.req_id(), None, "never acked");
     }

@@ -33,6 +33,7 @@ mod providers;
 mod retry;
 mod routines;
 mod sessions;
+mod skills;
 mod step_limit;
 mod storage;
 mod users;
@@ -132,6 +133,14 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
         .route(
             "/api/workspaces/{id}/plugins/{kind}/{name}",
             axum::routing::put(plugins::put),
+        )
+        .route(
+            "/api/workspaces/{id}/skills",
+            axum::routing::post(skills::create),
+        )
+        .route(
+            "/api/workspaces/{id}/skills/{scope}/{name}",
+            get(skills::get_one).put(skills::put).delete(skills::delete),
         )
         .route(
             "/api/workspaces/{id}/members",

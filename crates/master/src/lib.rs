@@ -43,6 +43,7 @@ pub mod secrets;
 pub mod serve;
 pub mod sniff;
 pub mod storage;
+pub mod stored_skills;
 pub mod voice;
 pub mod workspaces;
 mod ws;
@@ -316,6 +317,8 @@ pub struct MasterInner {
     /// The board tools' counts per turn, calls per node and recent request
     /// ids (PLAN.md T78).
     board: board::Grants,
+    /// Stored skills' loads per turn and per node (PLAN.md T81).
+    stored_skills: stored_skills::Grants,
     /// The routine scheduler, once `start_routines` ran.
     routines: OnceLock<routines::RoutinesHandle>,
     /// The blob store, once `storage::open` ran (before any node links, so
@@ -459,6 +462,20 @@ fn blind(r: &Resolver, main: &str, compare: &[String]) -> Option<String> {
 }
 
 /// The length of `msg` as JSON, without building the text.
+/// The refusal for a command whose JSON passes
+/// [`harness_protocol::MAX_PROMPT_JSON`] (well under the link's 8 MiB
+/// frame, which would close the link for every chat of the node).
+pub(crate) fn too_large_for_link(msg: &MasterToNode) -> Option<CommandError> {
+    let size = json_len(msg);
+    (size > harness_protocol::MAX_PROMPT_JSON).then(|| {
+        CommandError::TooLarge(format!(
+            "This is too large to send to the node: {} KiB, at most {} KiB in one message",
+            size.div_ceil(1024),
+            harness_protocol::MAX_PROMPT_JSON / 1024
+        ))
+    })
+}
+
 fn json_len<T: Serialize + ?Sized>(msg: &T) -> usize {
     struct Count(usize);
     impl std::io::Write for Count {
@@ -629,6 +646,8 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::RecallResult { .. }
         // An answer to the node's own board call: nothing is run there.
         | MasterToNode::BoardResult { .. }
+        // A stored skill's text for the node's own load: nothing is run.
+        | MasterToNode::SkillResult { .. }
         // A read of two checkpoints: no event, no work.
         | MasterToNode::Diff { .. }
         // A listing of names for the composer: no event.
@@ -717,6 +736,7 @@ impl Master {
                 notes: Default::default(),
                 recall: Default::default(),
                 board: Default::default(),
+                stored_skills: Default::default(),
                 routines: OnceLock::new(),
                 storage: OnceLock::new(),
                 pulls: Default::default(),
@@ -1493,6 +1513,11 @@ impl Master {
                 session_id,
                 request,
             } => board::handle(self, node_id, req_id, session_id, request),
+            NodeToMaster::Skill {
+                req_id,
+                session_id,
+                name,
+            } => stored_skills::handle(self, node_id, req_id, session_id, name),
             NodeToMaster::ArtifactChunk {
                 req_id,
                 offset,
@@ -1720,6 +1745,20 @@ impl Master {
         // tool withheld instead (X.34, PLAN.md T80): fails closed.
         if !self.node_has(node_id, harness_protocol::CAP_PLUGIN_ACCESS) {
             plugins::fail_closed(&mut msg);
+        }
+        // Nor does one that does not take stored skills get their list
+        // (X.34 step B, PLAN.md T81).
+        if !self.node_has(node_id, harness_protocol::CAP_STORED_SKILLS) {
+            stored_skills::strip(&mut msg);
+        }
+        // Nothing goes on the link that its frame would refuse: an
+        // oversized frame closes the link for every chat of the node
+        // (review of PR 148, H1). Every command passes here; the caller
+        // gets the reason (a prompt, a retry, the agent switch and a new
+        // chat answer 413; a callback is recorded as refused).
+        if let Some(e) = too_large_for_link(&msg) {
+            tracing::warn!(node = %node_id, error = %e, "a command too large for the node link was not sent");
+            return Err(e);
         }
         let work = writes_to(&msg);
         // A diverged session takes no events, so nothing may make its node
@@ -2739,6 +2778,7 @@ impl Master {
     async fn forget(&self, sid: SessionId) {
         self.inner.recall.forget(sid);
         self.inner.board.forget(sid);
+        self.inner.stored_skills.forget(sid);
         let res = self
             .inner
             .mirror

@@ -3,8 +3,10 @@
 // connector; the sidebar's Plugins lists both with the node that has them,
 // the markup as text; the kind filter and the search narrow the list; the
 // owner assigns the skill to one agent (read back through the API) and makes
-// it Shared again; the page fits a phone's width. (What a turn then carries
-// is crates/master/tests/plugins_http.rs.)
+// it Shared again; X.34 step B: the owner writes a skill from the Add menu,
+// opens it (text only), and a chat of the Assistant loads it with the demo
+// provider; the page fits a phone's width. (What a turn then carries is
+// crates/master/tests/plugins_http.rs and stored_skills_http.rs.)
 // Usage: node web/e2e/plugins.cjs <path-to-harness-binary> [work-dir]
 const { chromium } = require('playwright');
 const { spawn } = require('child_process');
@@ -102,6 +104,39 @@ let PAGE = null;
     await deploy.locator('button:text-is("Save")').click();
     await p.waitForSelector('.plugin-row:has-text("deploy"):has-text("Shared: every agent")');
     log('Shared again');
+
+    // Step B: write a skill here, open it, and have the Assistant load it.
+    await p.click('button:text-is("Add")');
+    await p.click('[role="menuitem"]:text-is("Write a skill")');
+    await p.getByLabel('Name').fill('release-notes');
+    await p.getByLabel('Description: what it is for and when to use it').fill('Write release notes <i>from</i> the log');
+    await p.getByLabel('Instructions').fill('Group the changes by area.\n<b>Never</b> invent one.');
+    await p.click('.plugin-editor button:text-is("Save")');
+    const stored = p.locator('.plugin-row', { hasText: 'release-notes' });
+    await stored.waitFor();
+    check((await stored.textContent()).includes('Workspace'), 'shown as the workspace\'s');
+    await stored.locator('button:text-is("Open")').click();
+    await stored.locator('pre.skill-body').waitFor();
+    check((await stored.locator('pre.skill-body').textContent()).includes('<b>Never</b> invent one.'), 'the body as text');
+    check(await stored.locator('b, i').count() === 0, 'no markup rendered');
+    await p.screenshot({ path: `${S}/plugins-4-stored.png` });
+    log('wrote and opened a stored skill');
+    const chat = await api('POST', '/api/sessions', { profile: 'chat', workspace_id: ws });
+    check(chat.status === 200, `chat: ${JSON.stringify(chat.body)}`);
+    const sid = chat.body.session_id;
+    const script = JSON.stringify([{ tool: 'skill', input: { name: 'release-notes' } }]);
+    const sent = await api('POST', `/api/sessions/${sid}/prompt`, { text: `script: ${script}` });
+    check(sent.status === 200, `prompt: ${JSON.stringify(sent.body)}`);
+    let done = null;
+    for (let i = 0; i < 300 && !done; i++) {
+      await sleep(100);
+      const evs = (await api('GET', `/api/sessions/${sid}/events?limit=5000`)).body.events || [];
+      if (evs.some((e) => e.kind === 'turn_ended')) done = evs;
+    }
+    check(done, 'the turn ended');
+    const fin = done.find((e) => e.kind === 'tool_call_finished');
+    check(fin && fin.payload.ok && fin.payload.output.endsWith('<b>Never</b> invent one.'), `the Assistant loaded it: ${JSON.stringify(fin)}`);
+    log('the Assistant loaded the stored skill');
 
     // A narrow window: the page still fits.
     await p.setViewportSize({ width: 380, height: 800 });

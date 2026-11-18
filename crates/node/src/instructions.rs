@@ -114,17 +114,31 @@ pub(crate) const SKILLS_NOT_READ: &str = "[The skills were not looked for this t
 /// `denied`: the skills the turn's agent may not use in its workspace
 /// (`AgentSpec::deny_skills`, X.34), left out of the list, the tool, the
 /// shell's grants and `/name` ([`harness_tools::skills::withhold`]).
+///
+/// `stored`: the master's stored skills for this agent (X.34 step B), merged
+/// after the Plugins rule under the skills found here, which win a name
+/// ([`harness_tools::skills::merge_stored`]); empty where node.toml
+/// `[skills] from_master` is off. A discovery that did not finish takes
+/// none either: the list the model has stays as it was.
 pub(crate) fn with_skills(
     extra: &mut harness_core::backend::TurnExtra,
     found: Bounded<harness_tools::skills::Found>,
     invoking: Option<&str>,
     denied: &[String],
+    stored: &[harness_core::skills::StoredSkillEntry],
     cap: usize,
 ) -> Vec<String> {
     use harness_tools::skills;
     match found {
         Bounded::Done(mut f) => {
             skills::withhold(&mut f.catalogue, denied);
+            let merged = skills::merge_stored(&mut f.catalogue, stored, denied);
+            f.problems.extend(merged);
+            for n in &f.catalogue.shadowed {
+                f.problems.push(format!(
+                    "the server's stored skill `{n}` is not used: a skill of this node's own folders has its name"
+                ));
+            }
             // The list without the person's `/name`, which is this turn's
             // alone: the list stays one standing section (X.1).
             extra.skills_list = skills::render(&f.catalogue, cap);
@@ -798,7 +812,7 @@ mod tests {
             instructions: Some("FILES".into()),
             ..Default::default()
         };
-        let problems = with_skills(&mut extra, Bounded::TimedOut, None, &[], 8000);
+        let problems = with_skills(&mut extra, Bounded::TimedOut, None, &[], &[], 8000);
         assert_eq!(extra.instructions.as_deref(), Some("FILES"));
         assert!(extra.skills_list.is_none());
         assert!(
@@ -828,7 +842,14 @@ mod tests {
             instructions: Some("FILES".into()),
             ..Default::default()
         };
-        with_skills(&mut extra, Bounded::Done(found), Some("/a: now"), &[], 8000);
+        with_skills(
+            &mut extra,
+            Bounded::Done(found),
+            Some("/a: now"),
+            &[],
+            &[],
+            8000,
+        );
         assert_eq!(extra.instructions.as_deref(), Some("FILES"));
         let list = extra.skills_list.unwrap();
         assert!(list.contains("\n- a: A"), "{list}");
