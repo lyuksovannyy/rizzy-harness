@@ -119,7 +119,7 @@ impl Session {
                     observed,
                     cancel,
                     started,
-                    Some(max_tokens),
+                    ChildRun::Background { max_tokens },
                 )
                 .await?
             }
@@ -133,7 +133,7 @@ impl Session {
                     observed,
                     cancel,
                     started,
-                    Some(max_tokens),
+                    ChildRun::Background { max_tokens },
                 )
                 .await?
             }

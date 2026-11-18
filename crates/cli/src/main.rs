@@ -1162,6 +1162,14 @@ async fn doctor(dir: &Path) -> anyhow::Result<()> {
                 println!("ok    mcp {name}: disabled (enabled = false)");
                 continue;
             }
+            // A chat never starts it (T47): neither does doctor.
+            if p.denies(&format!("{}{name}__", harness_tools::mcp::PREFIX)) {
+                println!(
+                    "ok    mcp {name}: not started, `denied_tools` in node.toml denies the whole \
+                     server"
+                );
+                continue;
+            }
             check(
                 &format!("mcp {name}"),
                 harness_tools::mcp::probe(name, server, &ctx).await,

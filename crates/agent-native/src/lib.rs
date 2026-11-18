@@ -2648,6 +2648,9 @@ impl NativeBackend {
                         &denied,
                     )
                     .await;
+                // A tool node.toml's `denied_tools` names is not offered
+                // (a call of it is an unknown tool).
+                loaded.tools.retain(|t| !host.tool_denied(t.name()));
                 // A note can carry the end of a server's error output: it
                 // reaches the model only scrubbed, as tool output does
                 // (review M1).
@@ -5589,6 +5592,9 @@ impl NativeBackend {
                             // The person did not deny it: plan mode began
                             // while it waited (the node denied the card).
                             PLAN_STARTED_WHILE_WAITING.to_string()
+                        } else if host.tool_denied(tool.name()) {
+                            // Nobody was asked: node.toml refuses it.
+                            node_denied(tool.name())
                         } else {
                             // The person's note, quoted after the fixed sentence.
                             harness_core::event::denied_text(note.as_deref())
@@ -5745,6 +5751,15 @@ impl NativeBackend {
             Step::Cancelled => ToolOutcome::err(abandoned_note()),
         }
     }
+}
+
+/// The result of a call this node's policy refuses (node.toml
+/// `denied_tools`): no person was asked.
+fn node_denied(tool: &str) -> String {
+    format!(
+        "`{tool}` is denied by this node's policy (node.toml `denied_tools`); nobody was asked. \
+         Use another tool, or report that this one is not available here."
+    )
 }
 
 /// Whether the chat is in plan mode now (X.7), as the node says.

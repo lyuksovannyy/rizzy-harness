@@ -1979,9 +1979,15 @@ tool_timeout_sec = 300                # one call (1 .. 3600)
   that turn's checkpoint and Undo of that turn takes it back, but it is
   not in the sub-agent's own "what changed" report or its merge-back.
   Its calls are asked about in the sub-agent's own chat, never less than
-  its parent's would be. A background sub-agent gets no server (its calls
-  could land between the chat's turns, where no checkpoint covers them),
-  nor does a read-only one, nor one in plan mode.
+  its parent's would be. A background sub-agent gets no server, and
+  neither does a message you send yourself into a sub-agent's chat (its
+  calls could land outside every turn of the chat, where no checkpoint
+  covers them), nor a read-only one, nor one in plan mode. Two edge
+  cases: a sub-agent of a sub-agent that only reads and has Connectors can
+  still change the chat's folder through a server (inside the chat's
+  turn, so its Undo covers it); and a sub-agent that changes one file both
+  in its copy and through a server ends with the server's version, its
+  own change reported as not applied.
 - **Its environment** is the agent's core list above (not `env_pass`),
   plus its own `env_vars` and `env`. Provider keys, `.env` names and
   `HARNESS_*` are never passed; `env` values are scrubbed from every
