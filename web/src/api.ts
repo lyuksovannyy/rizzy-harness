@@ -190,7 +190,7 @@ export const api = {
     return data;
   },
   agents: (scope?: Scope | null) =>
-    call<{ agents: Agent[]; default: string; defaults?: { chat: string | null; agentic: string | null }; may_edit?: boolean }>(
+    call<{ agents: Agent[]; default: string; defaults?: { chat: string | null; agentic: string | null }; may_edit?: boolean; hidden?: { id: string; name: string }[] }>(
       "GET",
       scoped("/api/agents", scope),
     ),

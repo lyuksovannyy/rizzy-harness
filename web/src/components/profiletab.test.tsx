@@ -297,4 +297,15 @@ describe("Workspace settings → Agents", () => {
     await act(async () => host.querySelector<HTMLButtonElement>(".agent-open")!.click());
     expect(pageApi.agent).toHaveBeenCalledWith("coder", { workspace: "w1" });
   });
+  test("a workspace agent a server agent hides is named, and may be deleted", async () => {
+    api.agents.mockResolvedValue({ agents: [agent("planner")], default: "general", may_edit: true, hidden: [{ id: "planner", name: "Mine" }] });
+    await show({ ...me });
+    expect(host.textContent).toContain("a server agent has the same handle");
+    vi.stubGlobal("confirm", () => true);
+    pageApi.deleteAgent.mockResolvedValue({ ok: true });
+    api.agents.mockResolvedValue({ agents: [agent("planner")], default: "general", may_edit: true, hidden: [] });
+    await act(async () => [...host.querySelectorAll("button")].find((b) => b.textContent === "Delete")!.click());
+    expect(pageApi.deleteAgent).toHaveBeenCalledWith("planner", { workspace: "w1" });
+    expect(host.textContent).not.toContain("a server agent has the same handle");
+  });
 });

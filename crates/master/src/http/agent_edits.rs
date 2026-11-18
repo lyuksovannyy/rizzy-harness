@@ -74,6 +74,33 @@ pub(super) fn may_edit(who: &Principal, scope: Option<&ws::Access>) -> bool {
     }
 }
 
+/// A workspace's own agents that a server agent with the same id hides
+/// there (made at the server's scope after them, or a later file): the
+/// server's agent wins and theirs is skipped (PLAN.md T79). Only the
+/// workspace's editors are told, so they can delete or remake it.
+pub(super) async fn hidden(
+    m: &Master,
+    who: &Principal,
+    scope: Option<&ws::Access>,
+) -> Vec<serde_json::Value> {
+    let Some(a) = scope.filter(|a| may_edit(who, Some(a))) else {
+        return Vec::new();
+    };
+    let layer = m.workspace_layer(a.id()).await;
+    layer
+        .edits
+        .custom
+        .iter()
+        .filter(|(id, _)| {
+            layer
+                .set
+                .get(id)
+                .is_none_or(|x| x.scope != harness_agents::AgentScope::Workspace)
+        })
+        .map(|(id, c)| json!({ "id": id, "name": c.name }))
+        .collect()
+}
+
 impl From<AgentEditError> for ApiError {
     fn from(e: AgentEditError) -> Self {
         let code = match &e {

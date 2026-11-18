@@ -20,6 +20,8 @@ export default function WorkspaceAgents(props: WorkspacePanelProps) {
   const scope = useMemo<Scope>(() => ({ workspace: ws }), [ws]);
   const [agents, setAgents] = useState<Agent[] | null>(null);
   const [mayEdit, setMayEdit] = useState(false);
+  // Its own agents a server agent with the same handle hides here.
+  const [hidden, setHidden] = useState<{ id: string; name: string }[]>([]);
   const [open, setOpen] = useState<string | null>(null);
   const [seed, setSeed] = useState<NewAgent | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -29,6 +31,7 @@ export default function WorkspaceAgents(props: WorkspacePanelProps) {
         (r) => {
           setAgents(r.agents);
           setMayEdit(!!r.may_edit);
+          setHidden(r.hidden ?? []);
         },
         (x) => setErr(message(x)),
       ),
@@ -87,6 +90,22 @@ export default function WorkspaceAgents(props: WorkspacePanelProps) {
         )}
       </div>
       {err && <div className="error-text">{err}</div>}
+      {hidden.map((h) => (
+        <div key={h.id} className="row hidden-agent">
+          <span className="small grow">
+            {h.name} <span className="mono muted">@{h.id}</span>: a server agent has the same handle, so it is hidden here and @{h.id} means
+            the server's. Delete it, or make it again under another handle.
+          </span>
+          <button
+            type="button"
+            onClick={() =>
+              void remove({ id: h.id, name: h.name } as Agent)
+            }
+          >
+            Delete
+          </button>
+        </div>
+      ))}
       {agents === null ? (
         <div className="muted">Loading…</div>
       ) : (

@@ -5,7 +5,7 @@
 //! keeps them, bounds them and lets them go with their workspace (foreign
 //! key cascade). The server's own edits stay in `kv`.
 
-use rusqlite::{OptionalExtension, params};
+use rusqlite::params;
 
 use crate::{Result, Store, StoreError};
 
@@ -110,17 +110,13 @@ impl Store {
         )? > 0)
     }
 
-    /// A workspace that has an agent of its own with id `agent_id`, if any:
-    /// a server agent may not take that id (PLAN.md T79).
-    pub fn workspace_with_agent(&self, agent_id: &str) -> Result<Option<String>> {
-        Ok(self
-            .lock()
-            .query_row(
-                "SELECT workspace_id FROM workspace_agents
-                 WHERE agent_id = ?1 AND kind = 'custom' LIMIT 1",
-                params![agent_id],
-                |r| r.get(0),
-            )
-            .optional()?)
+    /// Remove every workspace's overlay on agent `agent_id`: the server
+    /// agent it was written for is gone, so it must not land on a later,
+    /// unrelated agent with that id (PLAN.md T79). How many went.
+    pub fn delete_workspace_overlays(&self, agent_id: &str) -> Result<usize> {
+        Ok(self.lock().execute(
+            "DELETE FROM workspace_agents WHERE agent_id = ?1 AND kind = 'overlay'",
+            params![agent_id],
+        )?)
     }
 }

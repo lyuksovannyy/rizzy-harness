@@ -625,16 +625,6 @@ async fn a_workspace_agent_stays_in_its_workspace() {
     assert!(!ids(&v).contains(&"helper".into()), "{v}");
     let (st, _) = token(&s, Method::GET, "/api/agents/helper", None).await;
     assert_eq!(st, StatusCode::NOT_FOUND);
-    // A server agent with that id is refused while a workspace has it, so
-    // a chat naming it never runs another agent.
-    let (st, v) = token(
-        &s,
-        Method::POST,
-        "/api/agents?scope=server",
-        Some(helper("helper", "SERVER-HELPER")),
-    )
-    .await;
-    assert_eq!(st, StatusCode::CONFLICT, "{v}");
     // A workspace's id cannot take a server agent's id or alias.
     for (id, aliases) in [
         ("coder", json!([])),
@@ -1015,4 +1005,303 @@ async fn a_running_turn_keeps_its_agent() {
     turns_ended(&s, &bo, &sid, 3).await;
     let (st, v) = prompt(&s, &bo, &sid, json!({"text": "once more"})).await;
     assert_eq!(st, StatusCode::CONFLICT, "{v}");
+}
+
+fn strong() -> Value {
+    json!({
+        "memory": true, "recall": true, "web": true, "read_files": true, "edit_files": true,
+        "commands": true, "mcp": true, "delegate": false, "as_agent": true, "as_subagent": false
+    })
+}
+
+/// H1 of the review, as the owner decided it ("Allow it", 2026-11-18): a
+/// team workspace's admin, who is no server admin, may make an agent that
+/// searches the member's earlier chats and memory and also runs commands,
+/// uses MCP servers and the web, make it both defaults, and give an agent
+/// a member already chose more switches later. The member's ordinary chat
+/// then runs it under the admin's system prompt. Pinned so that changing
+/// this is a deliberate decision (PLAN.md T79, accepted leftover).
+#[tokio::test]
+async fn a_workspace_admin_may_give_members_agents_chat_search_with_commands_as_decided() {
+    let s = start().await;
+    let bo = user(&s, "bo").await;
+    let cy = user(&s, "cy").await;
+    let a = team(&s, &bo, "Acme").await;
+    add(&s, &bo, &a, "cy", "member").await;
+    let (st, v) = create(
+        &s,
+        &bo,
+        &a,
+        json!({"id": "aide", "name": "Team aide", "prompt": "AIDE-PROMPT", "features": strong()}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, v) = call(
+        &s,
+        Method::PATCH,
+        &format!("/api/workspaces/{a}"),
+        Some(json!({"settings": {"default_agent": "aide", "default_agentic_agent": "aide"}})),
+        &bo,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let spec = s
+        .master
+        .resolver_for(Some(&a))
+        .await
+        .agent_spec_with(Some("aide"), None, None)
+        .unwrap();
+    for t in ["recall", "bash", "web_fetch", "mcp"] {
+        assert!(spec.allows_tool(t), "{t}");
+    }
+    let sid = chat(&s, &cy, &a, json!({})).await;
+    assert!(say(&s, &cy, &sid, "hi", 1).await.contains("AIDE-PROMPT"));
+    // Switches added later reach a chat that already chose the agent.
+    let weak = json!({"memory": false, "web": false, "read_files": true, "edit_files": true,
+        "commands": false, "delegate": false, "as_agent": true, "as_subagent": false});
+    let (st, v) = create(
+        &s,
+        &bo,
+        &a,
+        json!({"id": "reader", "name": "Reader", "prompt": "READER", "features": weak}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let picked = chat(&s, &cy, &a, json!({"agent_id": "reader"})).await;
+    say(&s, &cy, &picked, "hi", 1).await;
+    let (st, v) = call(
+        &s,
+        Method::PATCH,
+        &format!("/api/agents/reader?workspace={a}"),
+        Some(json!({"features": strong(), "prompt": "NOW-STRONGER"})),
+        &bo,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert!(
+        say(&s, &cy, &picked, "again", 2)
+            .await
+            .contains("NOW-STRONGER")
+    );
+    let tools: Vec<String> = s
+        .rec
+        .reqs
+        .lock()
+        .unwrap()
+        .last()
+        .unwrap()
+        .tools
+        .iter()
+        .map(|t| t.name.clone())
+        .collect();
+    assert!(tools.iter().any(|t| t == "bash"), "{tools:?}");
+}
+
+/// H1b: impersonation is not part of it. A workspace's agent may not be
+/// called what a server agent is called, or its id or an alias, after
+/// cleaning and case-folding; a name it already had stays when a server
+/// agent takes it later.
+#[tokio::test]
+async fn a_workspace_agent_cannot_take_a_server_agents_name() {
+    let s = start().await;
+    let bo = user(&s, "bo").await;
+    let a = team(&s, &bo, "Acme").await;
+    for name in [
+        "Assistant",
+        " assistant ",
+        "A-SSISTANT",
+        "Assist\u{200b}ant",
+        "Coder",
+        "dev",
+    ] {
+        let (st, v) = create(
+            &s,
+            &bo,
+            &a,
+            json!({"id": "fake", "name": name, "prompt": "x", "features": features()}),
+        )
+        .await;
+        assert_eq!(st, StatusCode::CONFLICT, "{name:?}: {v}");
+    }
+    let (st, v) = create(
+        &s,
+        &bo,
+        &a,
+        json!({"id": "mine", "name": "Planner", "prompt": "x", "features": features()}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, _) = call(
+        &s,
+        Method::PATCH,
+        &format!("/api/agents/mine?workspace={a}"),
+        Some(json!({"name": "Software developer"})),
+        &bo,
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    // The server takes the name later: allowed; the workspace's keeps it
+    // and can still be changed.
+    let (st, v) = token(
+        &s,
+        Method::POST,
+        "/api/agents?scope=server",
+        Some(json!({"id": "splanner", "name": "Planner", "prompt": "x", "features": features()})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, v) = call(
+        &s,
+        Method::PATCH,
+        &format!("/api/agents/mine?workspace={a}"),
+        Some(json!({"prompt": "y"})),
+        &bo,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+}
+
+/// M1 (r2 reversed): one rule, as for files: a server agent wins. Making
+/// a server agent whose id some account's workspace agent has succeeds and
+/// says nothing about workspaces; in that workspace the id now means the
+/// server's agent, and the workspace's editors see theirs as hidden.
+#[tokio::test]
+async fn a_server_agent_wins_over_a_workspace_agents_id() {
+    let s = start().await;
+    let cy = user(&s, "cy").await;
+    let p = personal_id(&s, &cy).await;
+    let (st, v) = create(&s, &cy, &p, helper("planner", "CY-PLANNER")).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let sid = chat(&s, &cy, &p, json!({"agent_id": "planner"})).await;
+    assert!(say(&s, &cy, &sid, "hi", 1).await.contains("CY-PLANNER"));
+    let (st, v) = call(
+        &s,
+        Method::POST,
+        "/api/agents?scope=server",
+        Some(helper("planner", "SERVER-PLANNER")),
+        &s.admin,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let text = v.to_string();
+    assert!(!text.contains("CY-PLANNER") && !text.contains(&p), "{v}");
+    // In cy's workspace @planner is the server's now.
+    assert!(
+        say(&s, &cy, &sid, "again", 2)
+            .await
+            .contains("SERVER-PLANNER")
+    );
+    let l = listed(&s, &cy, &p).await;
+    let shown: Vec<&Value> = l["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["id"] == "planner")
+        .collect();
+    assert_eq!(shown.len(), 1);
+    assert_eq!(shown[0]["scope"], "server");
+    assert_eq!(
+        l["hidden"],
+        json!([{"id": "planner", "name": "Helper"}]),
+        "{l}"
+    );
+    // Its editors may delete it; then nothing is hidden.
+    let (st, v) = call(
+        &s,
+        Method::DELETE,
+        &format!("/api/agents/planner?workspace={p}"),
+        None,
+        &cy,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(listed(&s, &cy, &p).await["hidden"], json!([]));
+}
+
+/// L1 (r3): ids win over aliases, and in a workspace's set the server's
+/// agents claim aliases first. A server agent may take an alias that is a
+/// workspace agent's id: in that workspace the id wins (`@helper` is the
+/// workspace's), everywhere else the alias is the server agent's.
+#[tokio::test]
+async fn a_workspace_agents_id_beats_a_server_alias_in_its_workspace() {
+    let s = start().await;
+    let bo = user(&s, "bo").await;
+    let a = team(&s, &bo, "Acme").await;
+    let (st, v) = create(&s, &bo, &a, helper("helper", "WS-HELPER")).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let mut body = helper("srv", "SERVER-SRV");
+    body["aliases"] = json!(["helper", "aide"]);
+    let (st, v) = token(&s, Method::POST, "/api/agents?scope=server", Some(body)).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let r = s.master.resolver_for(Some(&a)).await;
+    assert_eq!(r.top_level("helper").unwrap().id, "helper");
+    assert_eq!(r.top_level("aide").unwrap().id, "srv");
+    assert_eq!(
+        s.master.resolver(None).top_level("helper").unwrap().id,
+        "srv"
+    );
+    // A workspace agent may not take a server agent's alias.
+    let mut mine = helper("mine", "x");
+    mine["aliases"] = json!(["aide"]);
+    let (st, _) = create(&s, &bo, &a, mine).await;
+    assert_eq!(st, StatusCode::CONFLICT);
+}
+
+/// M2 (r4): a workspace's overlay on a server agent goes when that agent
+/// is deleted, so it never lands on a later, unrelated agent with its id.
+#[tokio::test]
+async fn a_deleted_server_agent_takes_workspace_overlays_with_it() {
+    let s = start().await;
+    let bo = user(&s, "bo").await;
+    let a = team(&s, &bo, "Acme").await;
+    let (st, v) = token(
+        &s,
+        Method::POST,
+        "/api/agents?scope=server",
+        Some(helper("tool", "OLD")),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, v) = call(
+        &s,
+        Method::PATCH,
+        &format!("/api/agents/tool?workspace={a}"),
+        Some(json!({"instructions": "STALE-WS-RULE"})),
+        &bo,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert!(
+        tool_prompt(&s, &a)
+            .await
+            .unwrap()
+            .ends_with("STALE-WS-RULE")
+    );
+    let (st, v) = token(&s, Method::DELETE, "/api/agents/tool?scope=server", None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert!(
+        s.master
+            .inner_mirror()
+            .workspace_agents(&a)
+            .unwrap()
+            .is_empty()
+    );
+    let (st, v) = token(
+        &s,
+        Method::POST,
+        "/api/agents?scope=server",
+        Some(helper("tool", "NEW-UNRELATED")),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(tool_prompt(&s, &a).await.as_deref(), Some("NEW-UNRELATED"));
+}
+
+async fn tool_prompt(s: &Server, ws: &str) -> Option<String> {
+    s.master
+        .resolver_for(Some(ws))
+        .await
+        .agents()
+        .get("tool")
+        .map(|t| t.spec.system_prompt.clone())
 }

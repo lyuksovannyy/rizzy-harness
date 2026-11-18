@@ -3406,12 +3406,23 @@ workspace's summary and additional instructions, which come after the
 server's. A workspace's agents are never listed in, or usable from, another
 workspace (by handle, `@mention`, the agent switch, a default or a routine),
 and a server admin who is not a member neither sees nor changes them. Their
-handles cannot be a server agent's, and the server cannot take a handle a
-workspace agent has. A workspace has at most 30 agents of its own, each
-stored in at most 64 KiB. Their switches give them nothing more than the
-person using them has: your level, the node's `node.toml` and the
-workspace's models still decide. Their look follows their handle (looks are
-server-wide). Deleting the workspace deletes its agents; deleting one leaves
+handles and names cannot be a server agent's (names compared ignoring case,
+spaces and punctuation). The server's agents win: if the server later gets
+an agent with a workspace agent's handle, that handle means the server's
+agent in the workspace too, and the workspace's own is listed as hidden in
+its Agents tab, to delete or make again under another handle. A server
+agent's alias equal to a workspace agent's handle does not count in that
+workspace. A workspace has at most 30 agents of its own, each stored in at
+most 64 KiB. Their tools still run only within your level, the node's
+`node.toml` and your approvals. **A workspace's admins decide what its
+agents are told and may do:** they write an agent's instructions, may make
+it the workspace's default, may change one you already picked, and may give
+it "Earlier chats and memory search" together with commands, MCP servers,
+the web or file edits, so it can search your earlier chats in that workspace
+and your memory (when you share it there) and has a way to send text out.
+The owner chose to allow this (2026-11-18). Such agents are marked
+"workspace", and their page shows what they can do. Their look follows their
+handle (looks are server-wide). Deleting the workspace deletes its agents; deleting one leaves
 its chats readable, needing another agent, and a default or routine that
 names it is refused until changed. A turn that is running keeps the agent it
 started with. Design notes: [docs/agent-pages.md](docs/agent-pages.md).

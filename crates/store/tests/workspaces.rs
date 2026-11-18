@@ -914,14 +914,20 @@ fn workspace_agents_are_bounded_and_go_with_the_workspace() {
     };
     assert_eq!(ids(&a), ["general", "one", "two"]);
     assert!(ids(&b).is_empty());
-    assert_eq!(
-        s.workspace_with_agent("one").unwrap().as_deref(),
-        Some(a.as_str())
+    // A server agent's deletion takes every workspace's overlay on it.
+    assert!(
+        s.workspace_agent_put(&b, "general", "overlay", "{}", 2)
+            .unwrap()
     );
-    assert_eq!(s.workspace_with_agent("general").unwrap(), None);
+    assert_eq!(s.delete_workspace_overlays("general").unwrap(), 2);
+    assert_eq!(
+        s.delete_workspace_overlays("one").unwrap(),
+        0,
+        "custom agents stay"
+    );
+    assert_eq!(ids(&a), ["one", "two"]);
     assert!(s.workspace_agent_delete(&a, "one", "custom").unwrap());
     assert!(!s.workspace_agent_delete(&a, "one", "custom").unwrap());
     assert!(s.delete_workspace(&a).unwrap());
     assert!(ids(&a).is_empty());
-    assert_eq!(s.workspace_with_agent("two").unwrap(), None);
 }

@@ -487,6 +487,9 @@ export function AgentPage(props: {
             </button>
           )}
         </header>
+        {listed?.scope === "workspace" && !creating && (
+          <p className="field-hint">Made by this workspace's admins, not the server. Its switches below say what it can do, including whether it searches your earlier chats.</p>
+        )}
         {looks && listed && (
           <AvatarEditor agent={listed} onSaved={props.onChanged} onClose={closeLooks} />
         )}

@@ -187,10 +187,12 @@ read-only.
   server's additional instructions under `# Additional instructions`, then the workspace's under
   `# Additional instructions for this workspace`; both change its prompt hash. A workspace's
   overlay goes on any agent it did not make (built-in, file, server custom). A workspace's custom
-  agent ids and aliases must not collide with any server agent's (refused on create, 409); a
-  server agent made later cannot take a workspace agent's id (refused, 409); a later *file* with
-  that id wins and the workspace's agent is skipped with a warning (the operator's file cannot be
-  refused). Delegates come from the agent's own layer or a wider one: a built-in, file or server
+  agent ids, aliases and names must not collide with any server agent's id, alias or name (names
+  compared letters and digits only, case-folded; 409). The server's agents win, one rule for files
+  and server agents alike: a server agent made later with a workspace agent's id is accepted, the
+  workspace's is skipped there with a warning and listed to its editors as hidden, and the id then
+  means the server's agent in that workspace. Ids beat aliases; server agents claim aliases first.
+  Deleting a server agent deletes every workspace's overlay on it. Delegates come from the agent's own layer or a wider one: a built-in, file or server
   agent never gets a workspace's agent as a sub-agent, even one with a name its `delegates` lists;
   a workspace agent that delegates gets every sub-agent of the server and of its workspace.
 - **Looks**: avatars stay in `config.toml` `[agent_avatars]` (one mechanism, server-wide, changed
@@ -313,6 +315,8 @@ fills the field; nothing is saved until the user presses Save.
   server, server file, workspace), a New agent button and the agent page in place, in the
   workspace's scope; the sidebar Agents page edits the server's agents (server admins) and opens a
   workspace's agents read-only.
-- **Left**: chosen looks for workspace agents; per-workspace caps on overlays (bounded by the
-  number of server agents); `@mention` of an alias that a later server agent took (the workspace's
-  agent loses that alias in its own workspace, logged).
+- **Accepted by the owner (2026-11-18, "Allow it")**: a workspace's admin may give its agents
+  "Earlier chats and memory search" with commands, MCP, the web or file edits and make one the
+  default (PLAN.md T79, T55).
+- **Left**: chosen looks for workspace agents; marking workspace agents in the composer's picker
+  (first-load code); per-workspace caps on overlays (bounded by the number of server agents).

@@ -620,6 +620,9 @@ async fn agents(
         },
         // Whether the caller may make and change agents in this scope.
         "may_edit": agent_edits::may_edit(&who, scope.as_ref()),
+        // For the workspace's editors: its own agents a server agent with
+        // the same id hides (PLAN.md T79), to delete or remake.
+        "hidden": agent_edits::hidden(&m, &who, scope.as_ref()).await,
     })))
 }
 

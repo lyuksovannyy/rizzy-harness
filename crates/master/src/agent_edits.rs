@@ -266,6 +266,15 @@ impl Master {
                 tracing::warn!(workspace = ws, agent = r.agent_id, error = %e, "unreadable workspace agent");
             }
         }
+        self.keep_layer(ws, generation, edits)
+    }
+
+    /// Compose workspace `ws`'s set from `edits`, read from the store when
+    /// the cache was at `generation`, and keep it only if no write came in
+    /// between: a load that began before a write holds what the write
+    /// replaced, and caching it would serve stale agents until the next
+    /// write (PLAN.md T79).
+    fn keep_layer(&self, ws: &str, generation: u64, edits: Edits) -> Arc<Layer> {
         let mut a = lock(&self.inner.agents);
         let (set, errors) = a.base.with_layers(&[&a.edits, &edits]);
         report(Some(ws), errors);
@@ -464,7 +473,7 @@ impl Master {
         let _w = writes.lock().await;
         let (own, seen) = self.place_edits(place).await;
         if create {
-            if let Some(why) = self.handle_holder(place, &own, &seen, id, None).await? {
+            if let Some(why) = self.handle_holder(&own, &seen, id, None) {
                 return Err(AgentEditError::Refused(why));
             }
         } else if !own.custom.contains_key(id) {
@@ -473,9 +482,21 @@ impl Master {
         // Ids and aliases are one namespace, built-ins' and files' included
         // (also an alias a custom agent's id pushed out of the set).
         for a in &c.aliases {
-            if let Some(why) = self.handle_holder(place, &own, &seen, a, Some(id)).await? {
+            if let Some(why) = self.handle_holder(&own, &seen, a, Some(id)) {
                 return Err(AgentEditError::Refused(why));
             }
+        }
+        // A name it already had stays (a server agent may have taken it
+        // since); a new or changed name may not be a server agent's.
+        let renamed = !own
+            .custom
+            .get(id)
+            .is_some_and(|o| fold(&o.name) == fold(&c.name));
+        if let Place::Workspace(_) = place
+            && renamed
+            && let Some(why) = self.name_holder(&c.name)
+        {
+            return Err(AgentEditError::Refused(why));
         }
         match place {
             Place::Server => {
@@ -508,25 +529,25 @@ impl Master {
         Ok(())
     }
 
-    /// Why `handle` cannot be a new id or alias at `place` for agent
-    /// `except`: the words name the agent that holds it ("`ai` is already
-    /// reserved for the Assistant agent (general)"). `None`: it is free.
-    /// `own` and `seen` are `place`'s edits and set. In a workspace the
-    /// server's agents hold their handles; at the server's scope so does a
-    /// workspace's agent of that id, so a chat that names it never runs
-    /// another (PLAN.md T79).
-    async fn handle_holder(
+    /// Why `handle` cannot be a new id or alias for agent `except`: the
+    /// words name the agent that holds it ("`ai` is already reserved for
+    /// the Assistant agent (general)"). `None`: it is free. `own` and
+    /// `seen` are the scope's edits and set. In a workspace the server's
+    /// agents hold their handles. At the server's scope no workspace is
+    /// looked at: a server agent wins over a workspace's agent with its id,
+    /// which is then skipped in that workspace, as for a later file
+    /// (PLAN.md T79), and a server admin learns nothing about workspaces.
+    fn handle_holder(
         &self,
-        place: &Place,
         own: &Edits,
         seen: &AgentSet,
         handle: &str,
         except: Option<&str>,
-    ) -> Result<Option<String>, AgentEditError> {
+    ) -> Option<String> {
         if RESERVED.contains(&handle) {
-            return Ok(Some(format!(
+            return Some(format!(
                 "`{handle}` is reserved for the page that makes agents: choose another"
-            )));
+            ));
         }
         let holder = |a: Option<&Agent>| {
             a.filter(|a| Some(a.id.as_str()) != except)
@@ -539,30 +560,31 @@ impl Master {
             .find_map(|m| m.get(handle))
             .filter(|_| Some(handle) != except)
             .map(|c| (c.name.clone(), handle.to_string()));
-        if let Some((name, id)) = holder(seen.resolve(handle))
+        let (name, id) = holder(seen.resolve(handle))
             .or_else(|| holder(self.agents().resolve(handle)))
             .or_else(|| holder(self.agent_definitions().resolve(handle)))
-            .or(shadowed)
-        {
-            return Ok(Some(format!(
-                "`{handle}` is already reserved for the {name} agent ({id}): choose another"
-            )));
-        }
-        if *place == Place::Server && except.is_none() {
-            let h = handle.to_string();
-            if self
-                .inner
-                .mirror
-                .call(move |s| s.workspace_with_agent(&h))
-                .await?
-                .is_some()
-            {
-                return Ok(Some(format!(
-                    "`{handle}` is already an agent of a workspace on this server: choose another"
-                )));
-            }
-        }
-        Ok(None)
+            .or(shadowed)?;
+        Some(format!(
+            "`{handle}` is already reserved for the {name} agent ({id}): choose another"
+        ))
+    }
+
+    /// Why a workspace's own agent cannot be called `name`: a server agent
+    /// is called that, or has it as its id or an alias, compared cleaned
+    /// and case-folded (letters and digits only), so no workspace shows a
+    /// second "Assistant" (PLAN.md T79). A server agent made later with a
+    /// name a workspace agent has is not refused: both stay, the workspace's
+    /// marked as the workspace's.
+    fn name_holder(&self, name: &str) -> Option<String> {
+        let key = fold(name);
+        let server = self.agents();
+        let a = server.list().iter().find(|a| {
+            fold(&a.name) == key || fold(&a.id) == key || a.aliases.iter().any(|x| fold(x) == key)
+        })?;
+        Some(format!(
+            "the server's {} agent (@{}) goes by that name: give this workspace's agent another",
+            a.name, a.id
+        ))
     }
 
     /// Delete an agent made at `place`. Built-in, file and wider agents
@@ -576,8 +598,16 @@ impl Master {
         }
         match place {
             Place::Server => {
-                let k = key(CUSTOM, id);
-                self.inner.mirror.call(move |s| s.kv_delete(&k)).await?;
+                // Workspaces' overlays on it go too: they were written for
+                // this agent, not for a later one with its id (T79).
+                let (k, aid) = (key(CUSTOM, id), id.to_string());
+                self.inner
+                    .mirror
+                    .call(move |s| {
+                        s.kv_delete(&k)?;
+                        s.delete_workspace_overlays(&aid)
+                    })
+                    .await?;
                 let mut a = lock(&self.inner.agents);
                 a.edits.custom.remove(id);
                 a.compose();
@@ -610,6 +640,14 @@ impl Master {
             None => AgentEditError::NotFound(id.into()),
         }
     }
+}
+
+/// `name` as names are compared: letters and digits only, case-folded.
+fn fold(name: &str) -> String {
+    name.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 /// The agent id at the end of a `<kind>:<scope>:<id>` key.
@@ -689,5 +727,41 @@ mod tests {
         assert!(!Arc::ptr_eq(&third, &m.workspace_layer(&ws).await));
         m.forget_workspace_agents(&ws);
         assert!(lock(&m.inner.agents).workspaces.is_empty());
+    }
+
+    /// L2 of the review: a load that read the store before a write and
+    /// finishes after it is not kept, so the next read sees the write.
+    #[tokio::test]
+    async fn a_load_that_began_before_a_write_is_not_kept() {
+        let (m, ws) = master().await;
+        // A load starts: it notes the generation and reads (no rows yet).
+        let before = lock(&m.inner.agents).generation;
+        let stale = Edits::default();
+        // A write lands while it is away.
+        let at = Place::Workspace(ws.clone());
+        m.save_agent_overlay(&at, "coder", rule("WRITTEN"))
+            .await
+            .unwrap();
+        // The load finishes with what it read: served once, never kept.
+        let served = m.keep_layer(&ws, before, stale);
+        assert!(
+            !served
+                .set
+                .get("coder")
+                .unwrap()
+                .spec
+                .system_prompt
+                .contains("WRITTEN")
+        );
+        let next = m.workspace_layer(&ws).await;
+        assert!(
+            next.set
+                .get("coder")
+                .unwrap()
+                .spec
+                .system_prompt
+                .ends_with("WRITTEN"),
+            "a stale load was cached"
+        );
     }
 }
