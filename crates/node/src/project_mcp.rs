@@ -1535,6 +1535,21 @@ mod tests {
         );
         add(&huge, serde_json::json!({"command": "x"}));
         add(&wide, serde_json::json!({"command": "x"}));
+        // Keys that pass the 8 KiB entry cap, so the reason that names
+        // them is the one built (re-check NEW-2: 499 characters).
+        for (n, key) in [
+            ("unknown-499", "k".repeat(499)),
+            ("unknown-1500", "k".repeat(1500)),
+            ("unknown-wide", "\u{1BCA0}".repeat(1500)),
+        ] {
+            let mut v = serde_json::json!({"command": "x"});
+            v[key.as_str()] = serde_json::json!(1);
+            add(n, v);
+            add(
+                &format!("{n}-env"),
+                serde_json::json!({"command": "x", "env": {key.as_str(): "v"}}),
+            );
+        }
         let mut unknown = serde_json::json!({"command": "x"});
         unknown[huge.as_str()] = serde_json::json!(1);
         add("unknown-long", unknown);

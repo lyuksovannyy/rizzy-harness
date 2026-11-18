@@ -804,6 +804,42 @@ mod tests {
         assert!(open_env_file(&file, Some(&root)).is_err(), "a link");
         assert!(victim.exists());
         std::fs::remove_file(&file).unwrap();
+        // A node-named folder elsewhere while the real one holds a file:
+        // the named path is refused, and the real file is not touched.
+        put(b"A=1\0", 0o600);
+        let elsewhere = base.join("elsewhere/.mcp-0123456789abcdef");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        std::fs::write(elsewhere.join("env"), "A=1\0").unwrap();
+        std::fs::set_permissions(
+            elsewhere.join("env"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        assert!(open_env_file(&elsewhere.join("env"), Some(&root)).is_err());
+        assert!(file.exists() && elsewhere.join("env").exists());
+        // A folder of the root not named `.mcp-<16 hex>`: refused.
+        let plain_dir = root.join("notmcp");
+        std::fs::create_dir(&plain_dir).unwrap();
+        std::fs::write(plain_dir.join("env"), "A=1\0").unwrap();
+        std::fs::set_permissions(
+            plain_dir.join("env"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        assert!(open_env_file(&plain_dir.join("env"), Some(&root)).is_err());
+        assert!(plain_dir.join("env").exists());
+        // A root given with `..`: refused.
+        let crooked = base.join("x/../sandbox-tmp");
+        std::fs::create_dir_all(base.join("x")).unwrap();
+        assert!(open_env_file(&crooked.join(".mcp-0123456789abcdef/env"), Some(&crooked)).is_err());
+        assert!(file.exists());
+        // A FIFO of mode 0600 at the name: refused (and not waited on).
+        std::fs::remove_file(&file).unwrap();
+        nix::unistd::mkfifo(&file, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(open_env_file(&file, Some(&root)).is_err(), "a FIFO");
+        assert!(file.exists());
+        std::fs::remove_file(&file).unwrap();
         // The folder itself a link to elsewhere: refused.
         std::fs::remove_dir(&dir).unwrap();
         let other = base.join("other");
