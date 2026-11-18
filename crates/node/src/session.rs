@@ -5710,6 +5710,7 @@ fn restore_notice(
         && plan.git_inside.is_empty()
         && plan.unsaved.is_empty()
         && plan.left.is_empty()
+        && !plan.incomplete
         && safety.is_none()
     {
         return None;
@@ -5780,6 +5781,13 @@ fn restore_notice(
              undoing this undo brings them back: {}.",
             left_listed(&removed)
         ));
+    }
+    if plan.incomplete {
+        s.push_str(
+            " Some files over the checkpoint size limit were not named in the checkpoint this \
+             undo went back to (it left out more than it names), so Undo could not check them \
+             or bring back their earlier versions.",
+        );
     }
     if !unsure.is_empty() {
         s.push_str(&format!(

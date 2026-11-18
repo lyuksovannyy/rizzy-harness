@@ -335,7 +335,13 @@ pub(super) async fn apply(
     // written either).
     // The way back if the write fails partway (A.16): with the size cap
     // waived for every path about to be written, so a large file of the
-    // folder there is held and put back.
+    // folder there is held and put back. No test can fail on this waiver
+    // alone (a mutation survives it): every path where the folder has an
+    // untracked file over the cap is refused before this point, by the base's
+    // or `now`'s record or, for an unnamed or new one, by the in-the-way
+    // check, and a small file grown in between is refused as changed during
+    // the merge either way. It is kept so `check` is a complete way back
+    // even if one of those checks changes.
     let again = snapshot_exempt(
         repo,
         &format!("refs/harness/{child}/check"),
@@ -395,9 +401,12 @@ pub(super) async fn apply(
             in_way
                 .into_iter()
                 .map(|p| {
+                    // The path itself, or a file where its folder would go.
                     let big = cap > 0
-                        && std::fs::symlink_metadata(root.join(rel_path(&p)))
-                            .is_ok_and(|m| m.is_file() && m.len() > cap);
+                        && std::iter::once(p.as_slice()).chain(parents(&p)).any(|q| {
+                            std::fs::symlink_metadata(root.join(rel_path(q)))
+                                .is_ok_and(|m| m.is_file() && m.len() > cap)
+                        });
                     (shown(&p), if big { SKIPPED } else { IGNORED })
                 })
                 .collect()

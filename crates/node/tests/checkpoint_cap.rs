@@ -236,7 +236,9 @@ async fn an_undo_beside_more_large_files_than_are_named_deletes_none_unnamed() {
     assert!(
         notes
             .iter()
-            .any(|n| n.contains("Undo did not delete these files") && n.contains("`f`")),
+            .any(|n| n.contains("Undo did not delete these files")
+                && n.contains("`f`")
+                && n.contains("were not named in the checkpoint this undo went back to")),
         "{notes:#?}"
     );
 }

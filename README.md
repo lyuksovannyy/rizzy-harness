@@ -1173,15 +1173,15 @@ first checkpoint of a large repository reads every file once. Undo writes
 back the exact bytes.
 
 **Files over the size limit.** A file git does not track (not in your
-repository's index or its `HEAD`) that is larger than `[limits]
+repository's index) that is larger than `[limits]
 checkpoint_untracked_max_kb` (10 MiB by default; `0` checkpoints every file
 whatever its size) is left out of checkpoints: a downloaded model, a dataset,
 an archive, a build output your `.gitignore` does not name. Files git
-tracks are always checkpointed, whatever their size. **The limit does not
-apply** in a linked git worktree or a submodule (where `.git` is a file), in
-a folder inside a repository that holds the node's data directory, or where
-the node cannot read the repository's index or `HEAD`: there it cannot tell
-which files git tracks, so every file is checkpointed as before. At the end
+tracks are always checkpointed, whatever their size. The limit applies only to a snapshot for which the node read the person's index itself, completely, in a repository it found without the ceiling cutting the search, or in a folder that is in no repository; everywhere else nothing is skipped. So it does not apply in a linked git worktree or a submodule (where
+`.git` is a file), in a folder whose workspace root lies inside a repository
+(or under a home folder that is one), in a repository whose index the node
+cannot read for that checkpoint (none yet, a split index, unreadable): there
+every file is checkpointed as before. At the end
 of a turn the chat names the files left out (the five largest, with their
 sizes, and how many more), once, and again when one of them is made, changed
 in size or deleted. Undo never deletes or writes over one without saying so:
@@ -1198,7 +1198,8 @@ brings it back (a very large one can make that checkpoint take over 60 s; the
 undo then changes nothing and says the folder could not be saved first). In
 a folder with more large files than a checkpoint names (over 1,000, or over
 256 KiB of their names), an undo deletes no untracked file the checkpoint
-does not hold, since it may have been one of the unnamed ones, and says so. A
+does not hold, since it may have been one of the unnamed ones, and the note
+says so and that the unnamed ones could not be checked or brought back. A
 sub-agent's copy of your folder leaves these files out too: the sub-agent
 works as if they did not exist, your files are not touched, its result tells
 the agent which ones it did not have, and a sub-agent that writes where you

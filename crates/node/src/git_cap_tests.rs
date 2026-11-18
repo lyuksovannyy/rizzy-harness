@@ -967,7 +967,6 @@ async fn nothing_is_left_out_when_neither_the_index_nor_head_can_be_read() {
     std::fs::write(&packed, t).unwrap();
     let _ = std::fs::remove_file(r.dir.join(".git/refs/heads/main"));
     let repo = r.repo(CAP).await;
-    assert!(repo.user_head.is_none(), "HEAD unreadable");
     std::fs::write(r.dir.join("tracked.bin"), vec![b'Z'; 5 * CAP as usize]).unwrap();
     r.put("untracked.bin", &State::Big(2 * CAP as usize, b'u'));
     let snap = snapshot_full(&repo, "refs/harness/s/t/before", "b")
@@ -1493,25 +1492,608 @@ async fn a_failed_put_back_names_a_large_file_it_left() {
     remove_folder(&folder).await;
 }
 
-/// The copy of the user's index is kept while the index is unchanged, and
-/// made again when git rewrites it.
+/// Each lookup has a copy of the index of its own, gone when it is done
+/// (review 2, RV7-RACE: a shared copy one snapshot removed under another's
+/// `ls-files` read a tracked file as untracked).
 #[tokio::test]
-async fn the_index_copy_is_kept_while_the_index_is_unchanged() {
-    use std::os::unix::fs::MetadataExt;
+async fn each_lookup_copies_the_index_for_itself_and_removes_it() {
     let r = rig();
     let repo = r.repo(CAP).await;
     let one = user_index_copy(&repo).await.unwrap();
-    let ino = std::fs::metadata(&one).unwrap().ino();
     let two = user_index_copy(&repo).await.unwrap();
-    assert_eq!(
-        (one.clone(), ino),
-        (two.clone(), std::fs::metadata(&two).unwrap().ino())
+    assert_ne!(one.0, two.0);
+    let p = one.0.clone();
+    drop(one);
+    assert!(!p.exists());
+    assert!(two.0.is_file());
+    let shadow = repo.shadow.clone().unwrap();
+    drop(two);
+    user_tracked(&repo, &[b"tracked.bin".to_vec()])
+        .await
+        .unwrap();
+    let left: Vec<String> = std::fs::read_dir(&shadow)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("harness-index-"))
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+}
+
+/// RV7-RACE for real: one task keeps rewriting the index, another keeps
+/// asking whether a tracked file is tracked. It is never read as untracked
+/// (an answer may be "unknown", which skips nothing).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lookup_racing_index_rewrites_never_reads_a_tracked_file_as_untracked() {
+    let r = rig();
+    let repo = std::sync::Arc::new(r.repo(CAP).await);
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (rp, st, dir) = (repo.clone(), stop.clone(), r.dir.clone());
+    let writer = tokio::spawn(async move {
+        let mut i = 0u32;
+        while !st.load(std::sync::atomic::Ordering::Relaxed) {
+            std::fs::write(
+                dir.join("n.txt"),
+                format!("{i}\n").repeat(i as usize % 7 + 1),
+            )
+            .unwrap();
+            sh(&dir, &["add", "n.txt"]);
+            let _ = user_tracked(&rp, &[b"n.txt".to_vec()]).await;
+            i += 1;
+        }
+        i
+    });
+    let (mut wrong, mut total) = (0, 0);
+    let t = std::time::Instant::now();
+    while t.elapsed() < std::time::Duration::from_secs(3) {
+        if let Some(s) = user_tracked(&repo, &[b"tracked.bin".to_vec()]).await
+            && !s.contains(b"tracked.bin".as_slice())
+        {
+            wrong += 1;
+        }
+        total += 1;
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let writes = writer.await.unwrap();
+    assert!(
+        total > 10 && writes > 10,
+        "{total} lookups, {writes} writes"
     );
-    r.put("n.txt", &State::Small("n\n"));
-    sh(&r.dir, &["add", "n.txt"]);
-    let three = user_index_copy(&repo).await.unwrap();
-    assert_ne!(three, one);
-    assert!(!one.exists(), "the old copy goes");
-    let found = user_tracked(&repo, &[b"n.txt".to_vec()]).await.unwrap();
-    assert!(found.contains(b"n.txt".as_slice()));
+    assert_eq!(wrong, 0, "a tracked file read as untracked, of {total}");
+}
+
+// ---- second review of PR 154 (proofs in .claude/handoff-2026-11-15/r-ckpt-cap-2/) ----
+
+/// NEW-1 (RV7-CHECK): the turn deletes the file `d`; afterwards the person
+/// makes `d/new`. An unforced undo, which would write `d`, refuses, with
+/// the cap on and off, as on main (git's pathspec `d` matches `d/new`).
+#[tokio::test]
+async fn an_unforced_undo_refuses_over_a_new_file_below_a_path_it_writes() {
+    for cap in [0, CAP] {
+        let r = rig();
+        let repo = r.repo(cap).await;
+        std::fs::write(r.dir.join("d"), "b\n").unwrap();
+        let b = snapshot(&repo, "refs/harness/s/t/before", "b")
+            .await
+            .unwrap();
+        std::fs::remove_file(r.dir.join("d")).unwrap();
+        let a = snapshot(&repo, "refs/harness/s/t/after", "a")
+            .await
+            .unwrap();
+        std::fs::create_dir(r.dir.join("d")).unwrap();
+        std::fs::write(r.dir.join("d/new"), "person's work\n").unwrap();
+        let e = restore_report(&repo, &b, &a, false).await.unwrap_err();
+        assert!(
+            e.contains("changed after the turn") && e.contains("d/new"),
+            "cap {cap}: {e}"
+        );
+        assert_eq!(r.get("d/new").as_deref(), Some(&b"person's work\n"[..]));
+    }
+}
+
+/// NEW-1's equivalence, with git as the oracle: on random small trees and
+/// change sets (files, folders, file and folder swaps, non-ASCII and odd
+/// names), `changed_under` with runs forced small answers exactly what one
+/// `git diff --name-only -z --no-renames <a> <b> -- <literal pathspecs>`
+/// answers.
+#[tokio::test]
+async fn changed_under_answers_as_git_pathspecs_do() {
+    let names: [&[u8]; 11] = [
+        b"a",
+        b"b",
+        b"a/x",
+        b"a/y",
+        b"b/x",
+        b"\xc3\xa9",
+        b"\xc3\xa9/z",
+        b"-n",
+        b"s p/q",
+        b"x*",
+        b"x1",
+    ];
+    let r = rig();
+    let repo = r.repo(0).await;
+    let mut x: u64 = 0x2545_f491;
+    let mut next = |n: u64| {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x % n
+    };
+    use std::os::unix::ffi::OsStrExt;
+    let tree = |r: &Rig, picks: &[usize]| {
+        for e in std::fs::read_dir(&r.dir).unwrap() {
+            let e = e.unwrap();
+            if e.file_name() != ".git" {
+                let p = e.path();
+                if p.is_dir() {
+                    std::fs::remove_dir_all(p).unwrap();
+                } else {
+                    std::fs::remove_file(p).unwrap();
+                }
+            }
+        }
+        for (k, i) in picks.iter().enumerate() {
+            let p = r.dir.join(std::ffi::OsStr::from_bytes(names[*i]));
+            if p.parent().is_some_and(|q| q.is_file()) || p.is_dir() {
+                continue;
+            }
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, format!("{k}\n")).unwrap();
+        }
+    };
+    for case in 0..300 {
+        let a_picks: Vec<usize> = (0..next(5)).map(|_| next(11) as usize).collect();
+        let b_picks: Vec<usize> = (0..next(5)).map(|_| next(11) as usize).collect();
+        tree(&r, &a_picks);
+        let a = snapshot(&repo, "refs/harness/s/o/a", "a").await.unwrap();
+        tree(&r, &b_picks);
+        let b = snapshot(&repo, "refs/harness/s/o/b", "b").await.unwrap();
+        let specs: Vec<Vec<u8>> = (0..1 + next(4))
+            .map(|_| names[next(11) as usize].to_vec())
+            .collect();
+        let mut c = command(&repo, None);
+        c.env("GIT_LITERAL_PATHSPECS", "1").args([
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--name-only",
+            "-z",
+            &a,
+            &b,
+            "--",
+        ]);
+        for p in &specs {
+            c.arg(rel_path(p));
+        }
+        let o = exec(c, None, GIT_TIMEOUT).await.unwrap();
+        let mut want: Vec<Vec<u8>> = o
+            .stdout
+            .split(|b| *b == 0)
+            .filter(|p| !p.is_empty())
+            .map(<[u8]>::to_vec)
+            .collect();
+        let mut got = changed_under(&repo, &a, &b, &specs, 1).await.unwrap();
+        want.sort();
+        want.dedup();
+        got.sort();
+        assert_eq!(got, want, "case {case}: specs {specs:?}");
+    }
+}
+
+/// NEW-2: every layout, whether the cap is on, and that a TRACKED file over
+/// the cap is never left out in any of them.
+#[tokio::test]
+async fn the_cap_applies_only_where_the_node_read_the_index_itself() {
+    use std::os::unix::fs::PermissionsExt;
+    struct Case {
+        name: &'static str,
+        /// Whether an untracked file over the cap is left out.
+        cap_on: bool,
+    }
+    let cases = [
+        Case {
+            name: "plain folder",
+            cap_on: true,
+        },
+        Case {
+            name: "repository at the root",
+            cap_on: true,
+        },
+        Case {
+            name: "workspace root inside a repository",
+            cap_on: false,
+        },
+        Case {
+            name: "linked worktree",
+            cap_on: false,
+        },
+        Case {
+            name: "submodule-style gitfile",
+            cap_on: false,
+        },
+        Case {
+            name: "split index",
+            cap_on: false,
+        },
+        Case {
+            name: "no index yet",
+            cap_on: false,
+        },
+        Case {
+            name: "no commit yet",
+            cap_on: true,
+        },
+        Case {
+            name: "index unreadable",
+            cap_on: false,
+        },
+        Case {
+            name: "index gone after the folder was looked at",
+            cap_on: false,
+        },
+    ];
+    for c in cases {
+        let d = tempfile::tempdir().unwrap();
+        let top = d.path().canonicalize().unwrap();
+        let repo_dir = top.join("repo");
+        std::fs::create_dir(&repo_dir).unwrap();
+        let mut ceiling = None;
+        let mut folder = repo_dir.clone();
+        let mut tracked: Option<PathBuf> = None;
+        let big = vec![b'T'; 3 * CAP as usize];
+        match c.name {
+            "plain folder" => {}
+            "linked worktree" => {
+                sh(&repo_dir, &["init", "-q", "-b", "main"]);
+                std::fs::write(repo_dir.join("t.bin"), &big).unwrap();
+                sh(&repo_dir, &["add", "."]);
+                sh(&repo_dir, &["commit", "-qm", "c"]);
+                folder = top.join("wt");
+                sh(
+                    &repo_dir,
+                    &["worktree", "add", "-q", folder.to_str().unwrap()],
+                );
+                tracked = Some(folder.join("t.bin"));
+            }
+            "submodule-style gitfile" => {
+                let real = top.join("real.git");
+                std::fs::create_dir(&real).unwrap();
+                sh(&real, &["init", "-q", "--bare"]);
+                std::fs::write(
+                    repo_dir.join(".git"),
+                    format!("gitdir: {}\n", real.display()),
+                )
+                .unwrap();
+            }
+            _ => {
+                sh(&repo_dir, &["init", "-q", "-b", "main"]);
+                if c.name != "no index yet" {
+                    std::fs::write(repo_dir.join("ws-t.bin"), &big).unwrap();
+                    sh(&repo_dir, &["add", "."]);
+                    tracked = Some(repo_dir.join("ws-t.bin"));
+                    if c.name != "no commit yet" {
+                        sh(&repo_dir, &["commit", "-qm", "c"]);
+                    }
+                }
+                match c.name {
+                    "workspace root inside a repository" => {
+                        let ws = repo_dir.join("ws");
+                        folder = ws.join("chat");
+                        std::fs::create_dir_all(&folder).unwrap();
+                        std::fs::write(folder.join("t.bin"), &big).unwrap();
+                        sh(&repo_dir, &["add", "."]);
+                        sh(&repo_dir, &["commit", "-qm", "c2"]);
+                        tracked = Some(folder.join("t.bin"));
+                        ceiling = Some(ws);
+                    }
+                    "split index" => {
+                        sh(&repo_dir, &["update-index", "--split-index"]);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let bounds = Bounds {
+            untracked_max: CAP,
+            ceiling,
+            ..Default::default()
+        };
+        let repo = checkpoint_repo(&folder, Some(&top.join("cp")), &bounds)
+            .await
+            .unwrap()
+            .unwrap();
+        match c.name {
+            "index unreadable" => std::fs::set_permissions(
+                repo_dir.join(".git/index"),
+                std::fs::Permissions::from_mode(0o000),
+            )
+            .unwrap(),
+            "index gone after the folder was looked at" => {
+                std::fs::remove_file(repo_dir.join(".git/index")).unwrap()
+            }
+            _ => {}
+        }
+        std::fs::write(folder.join("u.bin"), vec![b'u'; 2 * CAP as usize]).unwrap();
+        let snap = snapshot_full(&repo, "refs/harness/s/t/before", "b")
+            .await
+            .unwrap();
+        let names: Vec<String> = snap
+            .skipped
+            .files
+            .iter()
+            .map(|(p, _)| String::from_utf8_lossy(p).into_owned())
+            .collect();
+        assert_eq!(
+            names.contains(&"u.bin".to_string()),
+            c.cap_on,
+            "{}: {names:?}",
+            c.name
+        );
+        if let Some(t) = &tracked {
+            let rel = t
+                .strip_prefix(&repo.root)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            assert!(!names.contains(&rel), "{}: tracked {rel} left out", c.name);
+        }
+        let _ = std::fs::set_permissions(
+            repo_dir.join(".git/index"),
+            std::fs::Permissions::from_mode(0o644),
+        );
+    }
+}
+
+/// NEW-2 b (RV5-SPLIT): with a split index the index cannot be read here, and
+/// `HEAD` does not know a file that is staged and never committed: nothing
+/// is left out, and an edit to it is undone.
+#[tokio::test]
+async fn a_staged_large_file_with_a_split_index_is_undone() {
+    let r = rig();
+    sh(&r.dir, &["update-index", "--split-index"]);
+    std::fs::write(r.dir.join("staged.bin"), vec![b's'; 3 * CAP as usize]).unwrap();
+    sh(&r.dir, &["add", "staged.bin"]);
+    let repo = r.repo(CAP).await;
+    let b = snapshot_full(&repo, "refs/harness/s/t/before", "b")
+        .await
+        .unwrap();
+    assert!(b.skipped.is_empty(), "{:?}", b.skipped);
+    std::fs::write(r.dir.join("staged.bin"), vec![b'Z'; 5 * CAP as usize]).unwrap();
+    let a = snapshot(&repo, "refs/harness/s/t/after", "a")
+        .await
+        .unwrap();
+    let done = restore_report(&repo, &b.sha, &a, false).await.unwrap();
+    assert_eq!(r.get("staged.bin"), Some(vec![b's'; 3 * CAP as usize]));
+    assert!(done.plan.left.is_empty());
+}
+
+/// NEW-2 a (RV5-CEIL): the workspace root lies inside a repository; the walk
+/// stops at it, so the node cannot tell what git tracks: no cap, and an edit
+/// to a large tracked file is undone.
+#[tokio::test]
+async fn a_workspace_root_inside_a_repository_leaves_nothing_out() {
+    let r = rig();
+    let ws = r.dir.join("ws");
+    let chat = ws.join("chat");
+    std::fs::create_dir_all(&chat).unwrap();
+    std::fs::write(chat.join("big-tracked.bin"), vec![b't'; 3 * CAP as usize]).unwrap();
+    sh(&r.dir, &["add", "."]);
+    sh(&r.dir, &["commit", "-qm", "c"]);
+    let bounds = Bounds {
+        untracked_max: CAP,
+        ceiling: Some(ws.clone()),
+        ..Default::default()
+    };
+    let repo = checkpoint_repo(&chat, Some(&r.base), &bounds)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(repo.untracked_max(), 0);
+    let b = snapshot(&repo, "refs/harness/s/t/before", "b")
+        .await
+        .unwrap();
+    std::fs::write(chat.join("big-tracked.bin"), vec![b'Z'; 5 * CAP as usize]).unwrap();
+    let a = snapshot(&repo, "refs/harness/s/t/after", "a")
+        .await
+        .unwrap();
+    restore_report(&repo, &b, &a, false).await.unwrap();
+    assert_eq!(
+        std::fs::read(chat.join("big-tracked.bin")).unwrap(),
+        vec![b't'; 3 * CAP as usize]
+    );
+}
+
+/// NEW-3 (INC1): with an incomplete record, before has `d/` (an unnamed
+/// large `d/x`, a small `d/s`); the turn made `d` a file. The undo puts
+/// `d/s` back, which removes the file `d`: named removed, not "did not
+/// delete".
+#[tokio::test]
+async fn an_unsure_file_the_undo_must_remove_is_named_removed() {
+    for force in [false, true] {
+        let (r, repo) = incomplete_rig(1024).await;
+        std::fs::create_dir(r.dir.join("d")).unwrap();
+        std::fs::write(r.dir.join("d/x"), vec![b'X'; 1025]).unwrap();
+        std::fs::write(r.dir.join("d/s"), "s\n").unwrap();
+        let b = snapshot_full(&repo, "refs/harness/s/t/before", "b")
+            .await
+            .unwrap();
+        assert!(!b.skipped.files.iter().any(|(p, _)| p == b"d/x"));
+        std::fs::remove_dir_all(r.dir.join("d")).unwrap();
+        std::fs::write(r.dir.join("d"), "turn\n").unwrap();
+        let a = snapshot(&repo, "refs/harness/s/t/after", "a")
+            .await
+            .unwrap();
+        let done = restore_report(&repo, &b.sha, &a, force).await.unwrap();
+        assert_eq!(r.get("d/s").as_deref(), Some(&b"s\n"[..]), "force {force}");
+        assert_eq!(
+            kinds(&done.plan.left),
+            vec![("d".to_string(), LeftKind::Removed)],
+            "force {force}"
+        );
+        assert_eq!(size_in(&repo, &done.now, "d").await, Some(5));
+        assert!(done.plan.incomplete);
+    }
+}
+
+/// NEW-4: with an incomplete record the plan says so (and the undo note
+/// with it) where nothing else is named: an unnamed large file the turn
+/// deleted, an unnamed `d/x` whose folder the turn replaced, an unnamed
+/// large file the turn renamed.
+#[tokio::test]
+async fn an_incomplete_record_is_said_when_nothing_else_is_named() {
+    for case in ["deleted", "folder replaced", "renamed"] {
+        let (r, repo) = incomplete_rig(1024).await;
+        match case {
+            "folder replaced" => {
+                std::fs::create_dir(r.dir.join("d")).unwrap();
+                std::fs::write(r.dir.join("d/x"), vec![b'X'; 1025]).unwrap();
+            }
+            _ => r.put("f", &State::Big(1025, b'P')),
+        }
+        let b = snapshot_full(&repo, "refs/harness/s/t/before", "b")
+            .await
+            .unwrap();
+        assert!(b.skipped.more > 0);
+        match case {
+            "deleted" => r.put("f", &State::Absent),
+            "folder replaced" => {
+                std::fs::remove_dir_all(r.dir.join("d")).unwrap();
+            }
+            _ => std::fs::rename(r.dir.join("f"), r.dir.join("g")).unwrap(),
+        }
+        std::fs::write(r.dir.join("ctl.txt"), "turn\n").unwrap();
+        let a = snapshot(&repo, "refs/harness/s/t/after", "a")
+            .await
+            .unwrap();
+        let done = restore_report(&repo, &b.sha, &a, false).await.unwrap();
+        assert!(done.plan.incomplete, "{case}");
+        assert_eq!(r.get("ctl.txt").as_deref(), Some(&b"ctl0\n"[..]));
+    }
+}
+
+/// A malformed record line (only the node writes them) makes the record
+/// incomplete, never shorter in silence; an overflowing count too.
+#[tokio::test]
+async fn a_malformed_record_counts_as_incomplete() {
+    let r = rig();
+    let repo = r.repo(CAP).await;
+    let tree = run(
+        &repo,
+        &["write-tree"],
+        Some(&repo.shadow.clone().unwrap().join("i0")),
+    )
+    .await
+    .unwrap();
+    for msg in [
+        "m\n\nharness-skipped: notanumber 6162\n",
+        "m\n\nharness-skipped: 10 zz\n",
+        "m\n\nharness-skipped-more: 99999999999999999999999 1\n",
+    ] {
+        let sha = run_raw(
+            &repo,
+            &["commit-tree", "--no-gpg-sign", &tree, "-F", "-"],
+            None,
+            Some(msg.as_bytes().to_vec()),
+        )
+        .await
+        .unwrap();
+        let sha = String::from_utf8_lossy(&sha).trim().to_string();
+        assert!(skipped_in(&repo, &sha).await.more > 0, "{msg:?}");
+    }
+}
+
+/// A name holding the text `<U+200B>` never reads like one holding that
+/// character.
+#[test]
+fn a_literal_code_in_a_name_differs_from_the_character() {
+    assert_ne!(
+        shown("a<U+200B>b".as_bytes()),
+        shown("a\u{200B}b".as_bytes())
+    );
+    assert_ne!(shown("<\u{200B}".as_bytes()), shown("<U+200B>".as_bytes()));
+    assert_eq!(shown("a\u{200B}b".as_bytes()), "a<U+200B>b");
+}
+
+/// A large untracked file that appears during a merge where the child adds
+/// a folder is named for its size, not as a file git ignores.
+#[tokio::test]
+async fn a_large_file_where_a_child_adds_a_folder_is_named_for_its_size() {
+    let r = rig();
+    let bounds = Bounds {
+        untracked_max: CAP,
+        ..Default::default()
+    };
+    let sub = sub_repo(&r.dir, Some(&r.base), &bounds)
+        .await
+        .unwrap()
+        .unwrap();
+    let base = sub.base_full("c").await.unwrap();
+    let folder = sub
+        .make_folder("c", &base.sha, &sessions_of(&r.base))
+        .await
+        .unwrap();
+    std::fs::create_dir(folder.path.join("q")).unwrap();
+    std::fs::write(folder.path.join("q/x.txt"), "child\n").unwrap();
+    let result = sub.result(&folder, "c").await.unwrap();
+    let top = r.dir.clone();
+    let person = move || std::fs::write(top.join("q"), vec![b'P'; 2 * CAP as usize]).unwrap();
+    let res = sub
+        .apply_with(
+            &base.sha,
+            &result,
+            "c",
+            merge::Hooks {
+                between: Some(&person),
+                ..Default::default()
+            },
+        )
+        .await;
+    match &res {
+        Err(NotApplied::Conflict(c)) => {
+            assert!(c.iter().all(|(_, why)| why.contains("size limit")), "{c:?}")
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(r.get("q"), Some(vec![b'P'; 2 * CAP as usize]));
+    remove_folder(&folder).await;
+}
+
+/// Found by the random test (seed 30, cap 0 and on; the same on main): the
+/// turn deleted `a/` (with `a/x`); afterwards the person made a file `a`.
+/// Writing `a/x` back would replace it: the unforced undo refuses. A change
+/// elsewhere in a folder the undo writes into does not count.
+#[tokio::test]
+async fn an_unforced_undo_refuses_over_a_new_file_where_its_folder_goes() {
+    for cap in [0, CAP] {
+        let r = rig();
+        let repo = r.repo(cap).await;
+        std::fs::create_dir(r.dir.join("a")).unwrap();
+        std::fs::write(r.dir.join("a/x"), "x\n").unwrap();
+        std::fs::write(r.dir.join("a/y"), "y\n").unwrap();
+        let b = snapshot(&repo, "refs/harness/s/t/before", "b")
+            .await
+            .unwrap();
+        std::fs::remove_file(r.dir.join("a/x")).unwrap();
+        let a = snapshot(&repo, "refs/harness/s/t/after", "a")
+            .await
+            .unwrap();
+        // A sibling changed: not in the way.
+        std::fs::write(r.dir.join("a/y"), "person\n").unwrap();
+        restore_report(&repo, &b, &a, false).await.unwrap();
+        assert_eq!(r.get("a/x").as_deref(), Some(&b"x\n"[..]));
+        // The folder replaced by the person's file: refused.
+        std::fs::remove_file(r.dir.join("a/x")).unwrap();
+        let a2 = snapshot(&repo, "refs/harness/s/t2/after", "a")
+            .await
+            .unwrap();
+        std::fs::remove_dir_all(r.dir.join("a")).unwrap();
+        std::fs::write(r.dir.join("a"), "person's file\n").unwrap();
+        let e = restore_report(&repo, &b, &a2, false).await.unwrap_err();
+        assert!(
+            e.contains("changed after the turn") && e.contains('a'),
+            "cap {cap}: {e}"
+        );
+        assert_eq!(r.get("a").as_deref(), Some(&b"person's file\n"[..]));
+    }
 }

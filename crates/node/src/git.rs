@@ -92,13 +92,12 @@ pub struct Repo {
     /// left out of every snapshot and recorded in it (`[limits]
     /// checkpoint_untracked_max_kb`, docs/undo-and-stash.md §2.7); 0: no cap.
     untracked_max: u64,
-    /// The user's index (`<top>/.git/index`, reached by no link) and the
-    /// commit its `HEAD` names: what "tracked" means for the cap. `None` in
-    /// a plain folder, where nothing is tracked.
+    /// The user's index (`<top>/.git/index`, reached by no link): what
+    /// "tracked" means for the cap. `None` in a plain folder, and in a
+    /// repository with no index yet (then nothing is left out).
     user_index: Option<PathBuf>,
-    user_head: Option<String>,
-    /// The folder is a repository the node reads (`user_index`,
-    /// `user_head`); false in a plain folder, where nothing is tracked.
+    /// The folder is a repository the node reads; false in a folder that is
+    /// in no repository, where nothing is tracked.
     user_repo: bool,
 }
 
@@ -744,20 +743,23 @@ async fn repo_for_with(
             root_id,
             shadow_id,
             tree_rw: false,
-            // The cap applies only where the node can tell what git
-            // tracks: a repository it reads, or a folder in none (nothing is
-            // tracked there). In a repository it does not read (`.git` a
-            // file: a linked worktree, a submodule; or one whose folder
-            // holds the data directory, checkpointed as a plain folder) a
-            // file over the cap may be tracked, and leaving it out would
-            // break Undo of an edit to it: no cap there (§2.7.1).
+            // CAP_RULE: the cap applies only to a snapshot for which the
+            // node read the person's index itself, completely, in a
+            // repository it found without the ceiling cutting the search,
+            // or in a folder that is in no repository; everywhere else
+            // nothing is skipped. Here the layout half of it: a repository
+            // the node reads (its index is read per snapshot, see
+            // `user_tracked`), or a folder with no `.git` at or above it all
+            // the way to `/` (the walk's ceiling does not decide that). A
+            // repository it does not read (`.git` a file: a linked worktree,
+            // a submodule; one whose folder holds the data directory) or a
+            // `.git` above the ceiling: no cap (§2.7.1).
             untracked_max: match &found {
                 user_repo::Found::Repo(_) if info.is_some() => bounds.untracked_max,
-                user_repo::Found::None => bounds.untracked_max,
+                user_repo::Found::None if in_no_repository(&cwd).await => bounds.untracked_max,
                 _ => 0,
             },
             user_index: info.as_ref().and_then(|i| i.index.clone()),
-            user_head: info.as_ref().and_then(|i| i.head.clone()),
             user_repo: info.is_some(),
         },
         found,
@@ -780,7 +782,6 @@ fn dummy_repo() -> Repo {
         tree_rw: false,
         untracked_max: 0,
         user_index: None,
-        user_head: None,
         user_repo: false,
     }
 }
@@ -1134,10 +1135,15 @@ const ARGS_MAX: usize = 64 << 10;
 /// `paths` in runs whose bytes stay under [`ARGS_MAX`] (one path of up to
 /// 4,096 bytes is a run of its own at worst).
 fn arg_runs(paths: &[Vec<u8>]) -> Vec<&[Vec<u8>]> {
+    arg_runs_of(paths, ARGS_MAX)
+}
+
+/// [`arg_runs`] with runs of at most `max` bytes.
+fn arg_runs_of(paths: &[Vec<u8>], max: usize) -> Vec<&[Vec<u8>]> {
     let mut out = Vec::new();
     let (mut start, mut bytes) = (0, 0);
     for (i, p) in paths.iter().enumerate() {
-        if i > start && bytes + p.len() + 1 > ARGS_MAX {
+        if i > start && bytes + p.len() + 1 > max {
             out.push(&paths[start..i]);
             (start, bytes) = (i, 0);
         }
@@ -1189,16 +1195,27 @@ async fn over_cap<'a>(
         .collect())
 }
 
+/// Whether no `.git` entry of any kind is at `dir` or any folder above it,
+/// up to `/` (one `lstat` each, nothing followed or read): only then is the
+/// folder in no repository, whatever bounds the walk for the checkpoint root.
+async fn in_no_repository(dir: &Path) -> bool {
+    let dir = dir.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        dir.ancestors()
+            .all(|d| std::fs::symlink_metadata(d.join(".git")).is_err())
+    })
+    .await
+    .unwrap_or(false)
+}
+
 /// Which of `paths` git tracks in the user's repository, or `None` when the
-/// node cannot tell (then the cap does not apply: a tracked file must never
-/// be left out). Asked of the user's index (copied into the shadow by our
-/// code, see [`user_index_copy`], and listed there with `ls-files` limited
-/// to `paths` as literal pathspecs), or, when that cannot be read (a split
-/// index, one over [`USER_INDEX_MAX`]), of the tree of the commit `HEAD`
-/// names (`ls-tree`, through the borrowed object store). A folder that is in
-/// no repository at all tracks nothing (`Some` of nothing). A folder in a
-/// repository the node does not read (`.git` a file: a linked worktree, a
-/// submodule) never gets here: its cap is 0 ([`repo_for_with`]).
+/// node cannot tell for this call (then the snapshot leaves nothing out: a
+/// tracked file must never be). Told only by the user's index, read by our
+/// code completely into a copy that belongs to this call alone
+/// ([`user_index_copy`]) and listed there with `ls-files` limited to
+/// `paths` as literal pathspecs. Not by `HEAD`: it does not know a file
+/// that is staged and never committed. A folder in no repository tracks
+/// nothing (`Some` of nothing).
 async fn user_tracked(
     repo: &Repo,
     paths: &[Vec<u8>],
@@ -1206,19 +1223,14 @@ async fn user_tracked(
     if !repo.user_repo {
         return Some(Default::default());
     }
-    if let Some(index) = user_index_copy(repo).await
-        && let Some(found) = listed_of(repo, Some(&index), &["ls-files", "-z"], paths).await
-    {
-        return Some(found);
+    let copy = user_index_copy(repo).await?;
+    let found = listed_of(repo, Some(&copy.0), &["ls-files", "-z"], paths).await?;
+    // `ls-files` on an index file that is not there answers nothing and
+    // succeeds: the copy is this call's own, but check it all the same.
+    if !copy.0.is_file() {
+        return None;
     }
-    let head = repo.user_head.clone()?;
-    listed_of(
-        repo,
-        None,
-        &["ls-tree", "-r", "-z", "--name-only", "--full-tree", &head],
-        paths,
-    )
-    .await
+    Some(found)
 }
 
 /// The NUL-separated names git `args` lists for `paths` given as literal
@@ -1250,18 +1262,18 @@ async fn listed_of(
     Some(found)
 }
 
-/// A copy of the user's index in the shadow, for [`user_tracked`]: streamed
-/// (64 KiB at a time, never held whole) from the file opened with no link
-/// followed, at most [`USER_INDEX_MAX`] bytes, and kept: the next snapshot
-/// reuses it while the index is the same file with the same size and
-/// modification time (git replaces the index by a rename when it writes
-/// it, so a new one is a new file). `None` when there is none or it cannot
-/// be read.
-async fn user_index_copy(repo: &Repo) -> Option<PathBuf> {
+/// A copy of the user's index in the shadow, for one [`user_tracked`] call:
+/// a name of its own (removed when the returned guard is dropped, or by the
+/// start-up and collection sweep of `harness-index-*` after a crash),
+/// streamed 64 KiB at a time from the index opened with no link followed,
+/// at most [`USER_INDEX_MAX`] bytes. `None` when there is none, it is not a
+/// regular file, or the copy is not the whole file (its length differs from
+/// the length the open file had: the index was rewritten meanwhile, which
+/// is a race no test can stage, so this guard is kept by reading).
+async fn user_index_copy(repo: &Repo) -> Option<IndexFiles> {
     let (index, dir) = (repo.user_index.clone()?, repo.shadow.clone()?);
     tokio::task::spawn_blocking(move || {
         use nix::fcntl::OFlag;
-        use std::os::unix::fs::MetadataExt;
         let fd = nix::fcntl::open(
             &index,
             OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK | OFlag::O_CLOEXEC,
@@ -1273,21 +1285,8 @@ async fn user_index_copy(repo: &Repo) -> Option<PathBuf> {
         if !m.is_file() || m.len() > USER_INDEX_MAX {
             return None;
         }
-        let name = format!(
-            "harness-user-index-{}-{}-{}-{}.{}",
-            m.dev(),
-            m.ino(),
-            m.len(),
-            m.mtime(),
-            m.mtime_nsec()
-        );
-        let kept = dir.join(&name);
-        if kept.is_file() {
-            return Some(kept);
-        }
-        let tmp = dir.join(format!("harness-index-{}", harness_core::new_id()));
-        let _files = IndexFiles(tmp.clone());
-        let mut out = std::fs::File::create_new(&tmp).ok()?;
+        let tmp = IndexFiles(dir.join(format!("harness-index-{}", harness_core::new_id())));
+        let mut out = std::fs::File::create_new(&tmp.0).ok()?;
         let copied = std::io::copy(
             &mut std::io::BufReader::with_capacity(
                 64 << 10,
@@ -1296,23 +1295,7 @@ async fn user_index_copy(repo: &Repo) -> Option<PathBuf> {
             &mut out,
         )
         .ok()?;
-        if copied != m.len() {
-            return None;
-        }
-        drop(out);
-        // Older copies go; one being read by another snapshot stays
-        // readable until it is closed.
-        if let Ok(rd) = std::fs::read_dir(&dir) {
-            for e in rd.flatten() {
-                let n = e.file_name();
-                let n = n.to_string_lossy();
-                if n.starts_with("harness-user-index-") && n != name {
-                    let _ = std::fs::remove_file(e.path());
-                }
-            }
-        }
-        std::fs::rename(&tmp, &kept).ok()?;
-        Some(kept)
+        (copied == m.len()).then_some(tmp)
     })
     .await
     .ok()
@@ -1631,16 +1614,22 @@ async fn records(repo: &Repo, sha: &str) -> (Vec<Vec<u8>>, Skipped) {
         if let Some(h) = l.strip_prefix(NESTED_TRAILER) {
             nested.extend(hex::decode(h).ok());
         } else if let Some(rest) = l.strip_prefix(SKIPPED_TRAILER) {
-            if let Some((n, h)) = rest.split_once(' ')
-                && let (Ok(n), Ok(p)) = (n.parse::<u64>(), hex::decode(h))
+            match rest
+                .split_once(' ')
+                .and_then(|(n, h)| Some((n.parse::<u64>().ok()?, hex::decode(h).ok()?)))
             {
-                skipped.files.push((p, n));
+                Some((n, p)) => skipped.files.push((p, n)),
+                // Only the node writes these; one it cannot read is a file
+                // it cannot name: the record is incomplete (the safe side).
+                None => skipped.more = skipped.more.saturating_add(1),
             }
-        } else if let Some(rest) = l.strip_prefix(SKIPPED_MORE)
-            && let Some((c, b)) = rest.split_once(' ')
-        {
-            skipped.more = c.parse().unwrap_or(0);
-            skipped.more_bytes = b.parse().unwrap_or(0);
+        } else if let Some(rest) = l.strip_prefix(SKIPPED_MORE) {
+            let parsed = rest
+                .split_once(' ')
+                .and_then(|(c, b)| Some((c.parse::<usize>().ok()?, b.parse::<u64>().ok()?)));
+            let (c, b) = parsed.unwrap_or((1, 0));
+            skipped.more = skipped.more.saturating_add(c.max(1));
+            skipped.more_bytes = skipped.more_bytes.saturating_add(b);
         }
     }
     (nested, skipped)
@@ -1750,7 +1739,11 @@ async fn nested_in(repo: &Repo, sha: &str) -> Vec<Vec<u8>> {
 pub(crate) fn shown(p: &[u8]) -> String {
     let mut out = String::new();
     for c in String::from_utf8_lossy(p).chars() {
-        if c.is_control() {
+        if c == '<' {
+            // A literal `<` is written `<<`, so a name holding the text
+            // `<U+200B>` never reads like one holding that character.
+            out.push_str("<<");
+        } else if c.is_control() {
             out.push('\u{FFFD}');
         } else if harness_core::text::is_hidden(c) {
             // Bidi controls and invisible characters, as the diff view shows
@@ -1818,6 +1811,9 @@ pub struct RestorePlan {
     /// Files it leaves exactly as they are because a snapshot left them out
     /// for their size (docs/undo-and-stash.md §2.7).
     pub left: Vec<LeftAlone>,
+    /// The snapshot it restores to left out more files for their size than
+    /// it names: what those were cannot be checked or brought back.
+    pub incomplete: bool,
     /// What [`restore_paths`] writes: `from`'s mode, blob and path for each
     /// path it puts back, and the paths `from` does not have (deleted).
     writes: Vec<(String, String, Vec<u8>)>,
@@ -2361,6 +2357,7 @@ pub async fn restore_plan(
     } else {
         None
     };
+    let incomplete = s_from.more > 0;
     let (candidates, left) = leave_skipped(
         candidates,
         &diff.rows,
@@ -2400,15 +2397,29 @@ pub async fn restore_plan(
     let (deleted, written): (Vec<&DiffRow>, Vec<&DiffRow>) =
         candidates.iter().partition(|r| r.status == 'A');
     if check && !touched.is_empty() {
-        // The whole two-tree diff, matched on git's bytes (`-z`): no name
-        // list in argv, no quoting of non-ASCII names.
-        let want: HashSet<&[u8]> = candidates.iter().map(|r| r.path.as_slice()).collect();
-        let since: Vec<Vec<u8>> = diff_raw(repo, expected, now)
-            .await?
-            .into_iter()
-            .filter(|r| want.contains(r.path.as_slice()))
-            .map(|r| r.path)
+        // Git's own pathspec match, as before the cap (a changed path
+        // counts when it is a candidate or lies below one), with the names
+        // as literal pathspecs in runs (never one long argument list) and
+        // the answer as bytes (`-z`: no quoting of non-ASCII names).
+        let want: Vec<Vec<u8>> = candidates.iter().map(|r| r.path.clone()).collect();
+        let mut since = changed_under(repo, expected, now, &want, ARGS_MAX).await?;
+        // And a change exactly at a folder above one (a file the person put
+        // where the restore needs that folder): writing the path would
+        // replace it. Main did not look there; matched exactly, so a change
+        // elsewhere in that folder does not count.
+        let above: std::collections::BTreeSet<Vec<u8>> = want
+            .iter()
+            .flat_map(|p| parents(p).map(<[u8]>::to_vec))
             .collect();
+        if !above.is_empty() {
+            let above: Vec<Vec<u8>> = above.into_iter().collect();
+            let exact: HashSet<&[u8]> = above.iter().map(Vec::as_slice).collect();
+            for p in changed_under(repo, expected, now, &above, ARGS_MAX).await? {
+                if exact.contains(p.as_slice()) && !since.contains(&p) {
+                    since.push(p);
+                }
+            }
+        }
         let since = unchanged_skipped(repo, since, &s_expected, now).await?;
         if !since.is_empty() {
             return Err(format!(
@@ -2446,6 +2457,7 @@ pub async fn restore_plan(
         return Ok(RestorePlan {
             unsaved: Names::of(&files),
             left,
+            incomplete,
             ..plan_of(
                 touched,
                 &nested,
@@ -2458,6 +2470,7 @@ pub async fn restore_plan(
     }
     Ok(RestorePlan {
         left,
+        incomplete,
         ..plan_of(
             touched,
             &nested,
@@ -2513,6 +2526,7 @@ fn leave_skipped<'a>(
     let here_above: HashSet<&[u8]> = here.keys().flat_map(|p| parents(p)).collect();
     let mut left = Vec::new();
     let mut keep = Vec::with_capacity(candidates.len());
+    let mut maybe: Vec<&'a DiffRow> = Vec::new();
     for r in candidates {
         let p = r.path.as_slice();
         let leave = |size: u64, kind: LeftKind| LeftAlone {
@@ -2533,20 +2547,39 @@ fn leave_skipped<'a>(
         } else if here_above.contains(p) {
             left.push(leave(0, LeftKind::Kept));
         } else if unsure && r.status == 'A' && !tracked.is_some_and(|t| t.contains(p)) {
-            left.push(leave(0, LeftKind::Unsure));
+            maybe.push(r);
         } else {
             keep.push(r);
         }
     }
     // Where the restore writes a file: anything at or below such a path is
     // removed, and so is a file where its folders go.
-    let written: HashSet<&[u8]> = keep
+    let written: HashSet<&'a [u8]> = keep
         .iter()
+        .copied()
         .filter(|r| r.status != 'A')
         .map(|r| r.path.as_slice())
         .collect();
     let written_above: HashSet<&[u8]> = written.iter().flat_map(|p| parents(p)).collect();
     let removed = |p: &[u8]| written_above.contains(p) || parents(p).any(|d| written.contains(d));
+    // A path that may be one `from` left out unnamed is not deleted, unless
+    // the restore writes at or below it, or above it (`from`'s folder comes
+    // back where the turn put this file): then the write removes it anyway,
+    // it goes with its row, and `now` holds it (Removed, not Unsure).
+    for r in maybe {
+        let p = r.path.as_slice();
+        let kind = if removed(p) {
+            keep.push(r);
+            LeftKind::Removed
+        } else {
+            LeftKind::Unsure
+        };
+        left.push(LeftAlone {
+            path: p.to_vec(),
+            size: 0,
+            kind,
+        });
+    }
     let row_paths: HashSet<&[u8]> = rows.iter().map(|r| r.path.as_slice()).collect();
     for (p, n) in &from.files {
         if !row_paths.contains(p.as_slice()) && after.get(p.as_slice()) != Some(n) {
@@ -2577,6 +2610,49 @@ fn leave_skipped<'a>(
     left.sort_by(|a, b| a.path.cmp(&b.path));
     left.dedup_by(|a, b| a.path == b.path);
     (keep, left)
+}
+
+/// The paths that differ between snapshots `a` and `b` at or below one of
+/// `paths`: `git diff --name-only -z --no-renames a b -- <paths>`, the paths
+/// as literal pathspecs, in runs of at most `max` bytes of arguments, the
+/// runs' answers joined (each path once, in git's order of first sight).
+/// Rename detection is off, so a renamed file's old path is listed too.
+async fn changed_under(
+    repo: &Repo,
+    a: &str,
+    b: &str,
+    paths: &[Vec<u8>],
+    max: usize,
+) -> Result<Vec<Vec<u8>>, String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for run in arg_runs_of(paths, max) {
+        let mut c = command(repo, None);
+        c.env("GIT_LITERAL_PATHSPECS", "1").args([
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--name-only",
+            "-z",
+            a,
+            b,
+            "--",
+        ]);
+        for p in run {
+            c.arg(rel_path(p));
+        }
+        let o = exec(c, None, GIT_TIMEOUT).await?;
+        if !o.status.success() {
+            return Err(result_text(&["diff"], o));
+        }
+        for p in o.stdout.split(|b| *b == 0).filter(|p| !p.is_empty()) {
+            if seen.insert(p.to_vec()) {
+                out.push(p.to_vec());
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// The unforced check's `since` (paths that differ between `expected` and
@@ -2663,6 +2739,7 @@ fn plan_of(
         git_inside: Names::of(&outermost(git_inside)),
         unsaved: Names::default(),
         left: Vec::new(),
+        incomplete: false,
         writes: written
             .iter()
             .map(|r| (r.old_mode.clone(), r.old_id.clone(), r.path.clone()))
@@ -4298,6 +4375,11 @@ mod diff_tests;
 #[cfg(test)]
 #[path = "git_cap_tests.rs"]
 mod cap_tests;
+
+/// Undo's invariants under the size cap, on random trees. Test-only.
+#[cfg(test)]
+#[path = "git_cap_random_tests.rs"]
+mod cap_random_tests;
 
 /// What a folder only the user's global ignore file named costs (X.31).
 /// Ignored benchmark; lives in its own file.

@@ -347,27 +347,33 @@ source files, lockfiles and hand-made fixtures stay under it; what is over it an
 nearly always generated data, media, archives or downloaded dependencies, which is what cost
 seconds and gigabytes above.
 
-- **Tracked** means: in the user's index, or, when the index cannot be used (a split index,
-  over 256 MiB), in the tree of the commit `HEAD` names. Git is asked only when some file is
-  over the cap, and only about those files (`ls-files -z` / `ls-tree` with them as literal
-  pathspecs, in runs of at most 64 KiB of arguments: neither command takes pathspecs on stdin
-  in git 2.56), so a folder without such a file pays nothing. The index is copied into the
-  shadow by our code (opened with no link followed, streamed 64 KiB at a time, never held
-  whole) and the copy is kept while the index is the same file with the same size and
-  modification time. Measured with an index of 200,000 paths (17 MiB) and one large
-  untracked file, on the test's tmpfs: about 7 ms a lookup (12 ms with the copy), against
-  about 100 ms for PR 154's first version, which read the whole index into memory and built
-  a set of every path (`git_cap_tests.rs` `tracked_lookup_cost_with_a_large_index`, ignored).
-- **The cap applies only where the node can tell what git tracks**: in a repository whose
-  `.git` it reads, and in a folder that is in no repository at all (nothing is tracked there).
-  **Stated limit:** in a linked worktree or a submodule (`.git` is a file), in a folder the
-  node checkpoints as a plain one because its repository holds the data directory, and where
-  neither the index nor `HEAD` can be read (a split index together with an unreadable `HEAD`;
-  a repository with no index and no commit yet), nothing is left out and checkpoints are as
-  before the cap: a file over the cap there may be tracked, and leaving it out would break
-  Undo of an edit to it. The node does not follow a gitfile out of the folder to find a
-  linked worktree's index (R.1: no git of the node runs with the user's git directory, and
-  `user_repo::find` treats such a `.git` as unusual on purpose).
+- **The rule, in one sentence: The cap applies only to a snapshot for which the node read the person's index itself, completely, in a repository it found without the ceiling cutting the search, or in a folder that is in no repository; everywhere else nothing is skipped.** In detail:
+  - *Tracked* means in the person's index, read by our code for this snapshot (opened with no
+    link followed, streamed 64 KiB at a time into a copy that belongs to this one lookup and
+    is removed when it ends; a copy left by a crash is removed by the sweep of
+    `harness-index-*` at node start and at the shadow's collection), completely (the copy's
+    length must be the file's), and listed with `ls-files -z` limited to the files over the
+    cap as literal pathspecs (in runs of at most 64 KiB of arguments; git 2.56's `ls-files`
+    takes no pathspecs on stdin). `HEAD` is never asked: it does not know a file that is
+    staged and never committed. If the index is missing, not a regular file, over 256 MiB,
+    a split index (its shared part stays in `.git`), unreadable, or changes length while it is
+    copied, "tracked" is unknown for that snapshot and it leaves nothing out.
+  - *In a repository it found*: a `.git` directory the node reads. A `.git` that is a file
+    (a linked worktree, a submodule) or a repository whose folder holds the node's data
+    directory: no cap. The node does not follow a gitfile out of the folder (R.1;
+    `user_repo::find` treats such a `.git` as unusual on purpose).
+  - *Without the ceiling cutting the search*: the walk for the checkpoint root stops at the
+    workspace root; "no repository found" below it is not "in no repository". A folder gets
+    the cap as a plain folder only when no `.git` of any kind is at it or above it all the way
+    to `/` (one `lstat` each, nothing followed or read). A workspace root inside a repository
+    (or under a home folder that is itself a repository): no cap.
+  - Git is asked only when some file is over the cap, so a folder without one pays nothing.
+    Measured with an index of 200,000 paths (17 MiB) and one large untracked file, on the
+    test's tmpfs: about 10 ms a lookup (a fresh copy each time; the reused copy of the
+    previous round took about 7 ms and could be removed under a concurrent lookup, review 2
+    RV7-RACE), against about 95 ms for PR 154's first version, which read the whole index into
+    memory and built a set of every path (`git_cap_tests.rs`
+    `tracked_lookup_cost_with_a_large_index`, ignored).
 - **Measured once per snapshot**, by `symlink_metadata` on each path git listed (the shadow
   index's entries and the new untracked ones), never followed: a link is never left out, a
   sparse file counts at its apparent length (what git would read). A file that grows past the
@@ -406,7 +412,7 @@ untracked and over the cap at that snapshot):
 | before \ after | present | absent | skipped |
 |---|---|---|---|
 | present | restored to `before` (as before the cap) | restored (as before) | **restored to `before`**: that version is in the checkpoint; the pre-restore snapshot holds the large one, so undoing the undo brings it back. The unforced check compares the size `after` recorded with the file now |
-| absent | deleted (as before) | nothing | **left in place, not removed**; the note after the undo names it. Except where the undo writes a file at or above it (the turn made a folder where a file was, or replaced a folder by this file): then the write removes it, the pre-restore snapshot holds it, and the note says it was removed and that undoing the undo brings it back |
+| absent | deleted (as before) | nothing | **left in place, not removed**; the note after the undo names it. Except where the undo writes a file at, above or below it (the turn made a folder where a file was, or replaced a folder by this file): then the write removes it, the pre-restore snapshot holds it, and the note says it was removed and that undoing the undo brings it back |
 | skipped | **left in place** (the turn's version, or one git tracks since): its earlier version was never saved, so deleting it would bring nothing back; the note says it cannot be brought back | nothing on disk to touch; the note says it cannot be brought back | **left as it is**; named when the recorded size changed (same size: nothing can tell, nothing is said) |
 
 A left-alone file is never in `touched`, `files` or the restored count. The cases around them:
@@ -419,6 +425,14 @@ A left-alone file is never in `touched`, `files` or the restored count. The case
   are removed; the old file is named as lost. **Became a link**, or **a file the person then
   `git add`ed** (tracked, so `after` holds it): read as created by the turn, and left, never
   deleted.
+- **The unforced check** ("changed after the turn") asks git which paths differ between the
+  state the undo expects and the folder now, at or below each path the undo writes (git's own
+  literal pathspec match, as before the cap, in runs, as bytes), and also exactly at each
+  folder above one (a file the person put where the undo needs that folder; before the cap
+  this was overwritten unasked, and kept only by the pre-restore checkpoint). Review 2 found
+  that the first fix round matched whole paths only, so a person's new `d/new` below a path
+  `d` the undo writes was no longer seen, with the cap on and off; a test now compares the
+  matcher with git on 300 random trees.
 - **More skipped than the record names** (over 1,000, or over 256 KiB of names): the record
   names the largest. Grown in the turn and unnamed in `after`: the unforced check cannot
   match its size and refuses (forced restores it; the pre-restore snapshot keeps the large
@@ -426,7 +440,11 @@ A left-alone file is never in `touched`, `files` or the restored count. The case
   (`more > 0`), the undo deletes no file git does not track that `before` does not hold: such
   a file may be one `before` left out without naming it, whose earlier version was never
   saved, so it is left and named ("Undo did not delete these files … delete them yourself if
-  the turn made them"). Git is asked which of those paths it tracks (a tracked file is never
+  the turn made them"), unless the undo writes at, above or below it, which removes it anyway:
+  then it is named as removed (the pre-restore checkpoint holds it). And whenever that record
+  is incomplete, the note says that some files over the limit were not named in the
+  checkpoint and could not be checked or brought back (an unnamed file the turn deleted,
+  renamed, or lost with its folder is otherwise invisible to the undo). Git is asked which of those paths it tracks (a tracked file is never
   left out); if it cannot tell, none is deleted. The cost, said plainly: in such a folder an
   undo leaves every untracked file the turn made. Review P4 (a file over the cap before the
   turn, unnamed, shrunk by the turn) was deleted by an undo with no note; it is now kept and
@@ -441,7 +459,19 @@ A left-alone file is never in `touched`, `files` or the restored count. The case
 - **Stash and unstash** (§3) are not built, so nothing there yet; they will take their
   snapshot as a restore does.
 - **The cap at 0** is the code before it: nothing is measured, nothing recorded, every
-  snapshot identical (the whole harness-node suite passes with the default forced to 0).
+  snapshot identical (the whole harness-node suite passes with the default forced to 0),
+  except the unforced check's one addition above (a person's file exactly where a folder the
+  undo writes into goes), which refuses where main overwrote.
+- **Invariants on random trees** (`git_cap_random_tests.rs`, 150 scenarios with the cap at 0
+  and 150 with a 32-byte cap, seeded, `CAP_SEED=<n>` reruns one): nothing on disk before an
+  undo is lost from both the disk and the pre-restore snapshot; an unforced undo that goes
+  ahead changes nothing the person changed after the turn; every file the note names is as it
+  says; with the cap at 0 nothing is left out and, with no change by the person, the folder
+  is exactly as before the turn; undoing the undo restores the folder exactly; a tracked file
+  is never left out. Run on the first fix round's code it failed on seeds 149 (NEW-1) and 30
+  (the folder case above, also on main).
+- **A malformed record line** (only the node writes them) makes the record incomplete, never
+  shorter in silence.
 - **Names** are compared as git's bytes everywhere a list of them is read (`-z`; the unforced
   check reads the two-tree diff whole and matches bytes, so a non-ASCII name is not quoted
   and missed, review P9), and shown with control characters replaced and hidden or bidi
