@@ -718,6 +718,39 @@ fn a_small_cap_still_lists_skills_and_counts_the_invoked_line() {
     assert!(skills::render(&c, skills::CAP).unwrap().len() <= skills::CAP);
 }
 
+/// X.34 (PLAN.md T80): a denied name that discovery did not list (its
+/// `SKILL.md` was refused, or it fell past the catalogue's cap since it was
+/// assigned) is still a folder in a root. Any denial narrows the shell's
+/// grants to the kept skills' own folders, so that folder is not readable
+/// through the root either.
+#[test]
+fn a_denied_name_that_is_not_listed_still_narrows_the_grants() {
+    let t = tree();
+    put(
+        &t.home.join("notes/SKILL.md"),
+        skill_md("notes", "Write notes.", "n"),
+    );
+    // No description: refused by discovery, so never in the list (it was a
+    // valid `deploy` when it was assigned). Its other files are still there.
+    put(&t.home.join("deploy/SKILL.md"), "---\nname: deploy\n---\n");
+    put(&t.home.join("deploy/steps.md"), "secret steps");
+    let mut c = skills::discover(&roots(&t, &t.repo), &[]).catalogue;
+    assert_eq!(names(&c), ["notes"]);
+    assert_eq!(c.refused, ["deploy"]);
+    let root = t.home.canonicalize().unwrap();
+    assert!(c.read.contains(&root), "{:?}", c.read);
+    skills::withhold(&mut c, &["deploy".to_string()]);
+    assert_eq!(names(&c), ["notes"]);
+    assert!(c.withheld.is_empty(), "{:?}", c.withheld);
+    let deploy = root.join("deploy");
+    assert!(
+        !c.read.iter().any(|p| deploy.starts_with(p)),
+        "{:?}",
+        c.read
+    );
+    assert_eq!(c.read, [root.join("notes")]);
+}
+
 /// X.34 (PLAN.md T80): a skill the turn's agent may not use in its
 /// workspace leaves the list, the tool (which says why), `/name` and the
 /// shell's read-only grants, whatever its origin; the others stay, and a

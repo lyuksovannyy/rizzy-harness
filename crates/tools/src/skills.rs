@@ -624,8 +624,9 @@ pub fn withheld_line(n: &str) -> String {
 /// turn's agent may not use them in this workspace (`AgentSpec::
 /// deny_skills`). By name, whatever their origin. They leave the list, the
 /// tool and `/name` (named in `withheld`, so both can say why), and the
-/// shell's read-only grants: once anything is withheld, the shell is granted
-/// the folder of each kept node skill and never a whole root, so nothing
+/// shell's read-only grants: once anything is denied (listed here or not),
+/// the shell is granted the folder of each kept node skill and never a whole
+/// root, so nothing
 /// else lying in a root (a same-named copy discovery did not use, a refused
 /// folder, a withheld skill) is granted either, and no grant that holds a
 /// withheld skill's folder stays.
@@ -637,10 +638,10 @@ pub fn withhold(c: &mut Catalogue, denied: &[String]) {
         .into_iter()
         .partition(|s| denied.contains(&s.name));
     c.skills = kept;
-    if out.is_empty() {
-        return;
-    }
     c.withheld = out.iter().map(|s| s.name.clone()).collect();
+    // Any denial narrows the grants, also one that matched nothing listed:
+    // the denied name may be a folder discovery refused (it was a valid
+    // skill when it was assigned), and a whole root would still hold it.
     let mut read: Vec<PathBuf> = Vec::new();
     for s in c.skills.iter().filter(|s| s.origin == SkillOrigin::Node) {
         if !read.contains(&s.dir) {
