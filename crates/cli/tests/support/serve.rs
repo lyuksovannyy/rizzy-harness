@@ -185,6 +185,7 @@ impl Serve {
         v
     }
 
+    #[allow(dead_code)] // project_mcp_e2e only
     pub async fn patch(&self, path: &str, body: Value) -> Value {
         let r = self
             .req(reqwest::Method::PATCH, path)
@@ -199,6 +200,7 @@ impl Serve {
     }
 
     /// A call whose refusal the test reads: its status and body, as text.
+    #[allow(dead_code)] // project_mcp_e2e only
     pub async fn raw(
         &self,
         method: reqwest::Method,
