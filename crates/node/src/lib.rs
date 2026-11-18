@@ -629,9 +629,70 @@ impl NodeRuntime {
         self.inner.outbox().map(|o| o.backlog()).unwrap_or_default()
     }
 
+    /// What this node announces for the Plugins screen (ADOPTION_PLAN
+    /// X.34, PLAN.md T80): in an agentic node that offers the `skill` tool,
+    /// the names and descriptions of the skills in its own node.toml
+    /// `[skills] roots` (never a repository's: those belong to a session's
+    /// folder), and the names of its enabled `[mcp_servers]` that node.toml
+    /// does not deny. Names only: no path, command, argument or
+    /// environment. Read in a bound of its own; a slow folder announces
+    /// none rather than hold the link up. Bounded by the protocol's caps.
+    async fn plugins(&self) -> harness_protocol::NodePlugins {
+        use harness_tools::{mcp, skills};
+        let cfg = &self.inner.cfg;
+        if cfg.profile != harness_core::event::Profile::Agentic {
+            return Default::default();
+        }
+        let policy = &cfg.policy;
+        let mcp_servers = policy
+            .mcp_servers
+            .iter()
+            .filter(|(name, c)| c.enabled && !policy.denies(&format!("{}{name}__", mcp::PREFIX)))
+            .map(|(name, _)| name.clone())
+            .collect();
+        let mut found = harness_protocol::NodePlugins {
+            mcp_servers,
+            ..Default::default()
+        };
+        if cfg.backend.has_tool(skills::NAME) && !policy.denies(skills::NAME) {
+            let roots: Vec<skills::Root> = policy
+                .skills
+                .roots()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|path| skills::Root {
+                    path,
+                    origin: harness_core::skills::SkillOrigin::Node,
+                    bound: None,
+                })
+                .collect();
+            let protected = policy.protected_dirs.clone();
+            let read = tokio::task::spawn_blocking(move || skills::discover(&roots, &protected));
+            match tokio::time::timeout(instructions::READ_TIMEOUT, read).await {
+                Ok(Ok(f)) => {
+                    found.left_out = u32::try_from(f.catalogue.refused.len()).unwrap_or(u32::MAX);
+                    found.skills = f
+                        .catalogue
+                        .skills
+                        .into_iter()
+                        .map(|s| harness_protocol::AnnouncedSkill {
+                            name: s.name,
+                            description: s.description,
+                        })
+                        .collect();
+                }
+                _ => {
+                    tracing::warn!("skills: the node's skill folders were not read for the master")
+                }
+            }
+        }
+        found.bounded()
+    }
+
     /// Connect a (new) master link. Any previous link is replaced. `hello` is
     /// queued before any event so the master always sees it first.
     pub async fn attach(&self) -> NodeLink {
+        let plugins = self.plugins().await;
         let (out, out_rx) = outbox::Outbox::open();
         let (in_tx, mut in_rx) = mpsc::channel::<MasterToNode>(IN_QUEUE);
         let heads = self
@@ -654,6 +715,9 @@ impl NodeRuntime {
                 capabilities.push(harness_protocol::CAP_ARTIFACTS.into());
             }
             capabilities.push(harness_protocol::CAP_IMAGES.into());
+            // It reads `deny_skills` and `deny_mcp_servers` (X.34), in
+            // either profile: a chat-profile node runs neither.
+            capabilities.push(harness_protocol::CAP_PLUGIN_ACCESS.into());
             // A person's Retry of a failed last turn (X.21), in chats of
             // either profile.
             capabilities.push(harness_protocol::CAP_RETRY.into());
@@ -741,6 +805,8 @@ impl NodeRuntime {
                     })
                     .collect(),
             });
+            // What it has for the Plugins screen (X.34), right after.
+            let _ = out.try_send(NodeToMaster::Plugins { plugins });
             if let Some(old) = link.replace(out) {
                 old.retire();
             }

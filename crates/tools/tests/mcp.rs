@@ -66,7 +66,7 @@ fn pids(started: &std::path::Path) -> Vec<i32> {
 async fn tools_are_listed_under_prefixed_names_and_always_ask() {
     let dir = tempfile::tempdir().unwrap();
     let s = set(server(&[]));
-    let l = s.load(&ctx(&dir)).await;
+    let l = s.load(&ctx(&dir), &[]).await;
     assert!(l.notes.is_empty(), "{:?}", l.notes);
     let echo = tool(&l.tools, "mcp__fake__echo");
     assert!(echo.description().contains("Repeat the text."));
@@ -101,7 +101,7 @@ async fn tools_are_listed_under_prefixed_names_and_always_ask() {
 async fn a_huge_tool_list_and_a_huge_schema_are_cut_with_a_note() {
     let dir = tempfile::tempdir().unwrap();
     let s = set(server(&["--tools", "100", "--big-schema", "--page", "7"]));
-    let l = s.load(&ctx(&dir)).await;
+    let l = s.load(&ctx(&dir), &[]).await;
     assert_eq!(l.tools.len(), mcp::MAX_TOOLS);
     let all = l.notes.join("\n");
     assert!(all.contains("are not offered in this chat"), "{all}");
@@ -113,12 +113,12 @@ async fn a_huge_tool_list_and_a_huge_schema_are_cut_with_a_note() {
     assert!(all.contains("big"), "{all}");
     assert!(!l.tools.iter().any(|t| t.name() == "mcp__fake__big"));
     // Shown once; the next turn's load does not repeat them.
-    assert!(s.load(&ctx(&dir)).await.notes.is_empty());
+    assert!(s.load(&ctx(&dir), &[]).await.notes.is_empty());
     // node.toml's lists choose.
     let mut only = server(&["--tools", "100"]);
     only.enabled_tools = Some(vec!["t99".into(), "echo".into()]);
     only.disabled_tools = vec!["echo".into()];
-    let l = set(only).load(&ctx(&dir)).await;
+    let l = set(only).load(&ctx(&dir), &[]).await;
     let names: Vec<&str> = l.tools.iter().map(|t| t.name()).collect();
     assert_eq!(names, ["mcp__fake__t99"]);
 }
@@ -131,7 +131,7 @@ async fn a_server_that_hangs_at_start_is_cut_at_its_timeout() {
     cfg.startup_timeout_sec = 1;
     let s = set(cfg);
     let t = Instant::now();
-    let l = s.load(&ctx(&dir)).await;
+    let l = s.load(&ctx(&dir), &[]).await;
     assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
     assert!(l.tools.is_empty());
     assert!(
@@ -153,7 +153,7 @@ async fn a_call_that_hangs_is_cut_at_its_timeout_and_the_server_stopped() {
     let mut cfg = server(&["--started", started.to_str().unwrap()]);
     cfg.tool_timeout_sec = 1;
     let s = set(cfg);
-    let l = s.load(&ctx(&dir)).await;
+    let l = s.load(&ctx(&dir), &[]).await;
     let t = Instant::now();
     let r = tool(&l.tools, "mcp__fake__hang")
         .run(&ctx(&dir), json!({}))
@@ -176,7 +176,7 @@ async fn a_call_that_hangs_is_cut_at_its_timeout_and_the_server_stopped() {
 async fn a_huge_result_is_cut_and_a_message_over_the_cap_fails_at_once() {
     let dir = tempfile::tempdir().unwrap();
     let s = set(server(&[]));
-    let l = s.load(&ctx(&dir)).await;
+    let l = s.load(&ctx(&dir), &[]).await;
     let r = tool(&l.tools, "mcp__fake__huge")
         .run(&ctx(&dir), json!({}))
         .await;
@@ -197,7 +197,7 @@ async fn a_server_that_dies_is_an_error_and_is_restarted_a_bounded_number_of_tim
     let dir = tempfile::tempdir().unwrap();
     let started = dir.path().join("started");
     let s = set(server(&["--started", started.to_str().unwrap()]));
-    let l = s.load(&ctx(&dir)).await;
+    let l = s.load(&ctx(&dir), &[]).await;
     let die = tool(&l.tools, "mcp__fake__die");
     let mut last = String::new();
     for _ in 0..=mcp::MAX_RESTARTS {
@@ -234,7 +234,7 @@ async fn the_server_sees_only_the_allow_listed_environment() {
         env: harness_tools::ToolEnv::new(&[], ["CARGO_PKG_VERSION".to_string()]).unwrap(),
         ..ctx(&dir)
     };
-    let l = s.load(&c).await;
+    let l = s.load(&c, &[]).await;
     let r = tool(&l.tools, "mcp__fake__env").run(&c, json!({})).await;
     assert!(r.ok, "{}", r.output);
     let names: Vec<&str> = r
@@ -258,7 +258,7 @@ async fn a_stop_or_idle_time_ends_the_process_and_a_closed_set_starts_nothing() 
     let dir = tempfile::tempdir().unwrap();
     let started = dir.path().join("started");
     let s = set(server(&["--started", started.to_str().unwrap()]));
-    let l = s.load(&ctx(&dir)).await;
+    let l = s.load(&ctx(&dir), &[]).await;
     assert_eq!(s.running(), 1);
     let first = pids(&started)[0];
     assert!(alive(first));
@@ -284,7 +284,7 @@ async fn a_stop_or_idle_time_ends_the_process_and_a_closed_set_starts_nothing() 
     // Dropping a chat's set stops its server too.
     let started2 = dir.path().join("started2");
     let s2 = set(server(&["--started", started2.to_str().unwrap()]));
-    s2.load(&ctx(&dir)).await;
+    s2.load(&ctx(&dir), &[]).await;
     let p = pids(&started2)[0];
     drop(s2);
     let by = Instant::now() + mcp::STOP_WAIT;
@@ -310,7 +310,7 @@ async fn two_servers_never_offer_the_same_name() {
         server(&["--tool-names", "_echo", "--marker", "second"]),
     );
     let dir = tempfile::tempdir().unwrap();
-    let l = SessionMcp::new(&m).unwrap().load(&ctx(&dir)).await;
+    let l = SessionMcp::new(&m).unwrap().load(&ctx(&dir), &[]).await;
     let names: Vec<&str> = l.tools.iter().map(|t| t.name()).collect();
     assert_eq!(names, ["mcp__a___echo"], "{names:?}");
     let all = l.notes.join("\n");
@@ -332,7 +332,7 @@ async fn server_supplied_names_in_notes_are_one_clean_line() {
     names.push("zz-rev\u{202e}txt".into());
     let dir = tempfile::tempdir().unwrap();
     let l = set(server(&["--tool-names", &names.join(",")]))
-        .load(&ctx(&dir))
+        .load(&ctx(&dir), &[])
         .await;
     let all = l.notes.join(" ");
     assert!(all.contains("not offered"), "{all}");
@@ -346,7 +346,7 @@ async fn server_supplied_names_in_notes_are_one_clean_line() {
 async fn a_successful_call_starts_the_failure_count_again() {
     let dir = tempfile::tempdir().unwrap();
     let s = set(server(&[]));
-    let l = s.load(&ctx(&dir)).await;
+    let l = s.load(&ctx(&dir), &[]).await;
     let die = tool(&l.tools, "mcp__fake__die");
     let echo = tool(&l.tools, "mcp__fake__echo");
     for _ in 0..3 {
@@ -361,4 +361,46 @@ async fn a_successful_call_starts_the_failure_count_again() {
         let r = echo.run(&ctx(&dir), json!({"text": "ok"})).await;
         assert!(r.ok, "{}", r.output);
     }
+}
+
+/// X.34 (PLAN.md T80): a server the turn's agent may not use in its
+/// workspace is not started for that turn and none of its tools is
+/// offered; the other servers are; a later turn whose agent may use it
+/// starts it then.
+#[tokio::test]
+async fn a_denied_server_is_neither_started_nor_offered() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+    let mut m = BTreeMap::new();
+    m.insert(
+        "alpha".to_string(),
+        server(&["--started", a.to_str().unwrap()]),
+    );
+    m.insert(
+        "beta".to_string(),
+        server(&["--started", b.to_str().unwrap()]),
+    );
+    let s = SessionMcp::new(&m).unwrap();
+    let l = s.load(&ctx(&dir), &["alpha".to_string()]).await;
+    assert!(pids(&a).is_empty(), "the denied server was started");
+    assert_eq!(pids(&b).len(), 1);
+    assert!(
+        l.tools
+            .iter()
+            .all(|t| !t.name().starts_with("mcp__alpha__"))
+    );
+    assert!(l.tools.iter().any(|t| t.name().starts_with("mcp__beta__")));
+    assert!(l.notes.is_empty(), "{:?}", l.notes);
+    // Every server denied: nothing starts, nothing is offered.
+    let none = SessionMcp::new(&m).unwrap();
+    let all = ["alpha".to_string(), "beta".to_string()];
+    assert!(none.load(&ctx(&dir), &all).await.tools.is_empty());
+    assert_eq!(pids(&b).len(), 1);
+    // Another agent's turn that may use it starts it.
+    let l = s.load(&ctx(&dir), &[]).await;
+    assert_eq!(pids(&a).len(), 1);
+    assert!(l.tools.iter().any(|t| t.name().starts_with("mcp__alpha__")));
+    s.close();
+    none.close();
+    assert!(s.wait_gone(mcp::STOP_WAIT).await);
 }

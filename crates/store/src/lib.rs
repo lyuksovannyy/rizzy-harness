@@ -16,6 +16,7 @@ pub mod blobs;
 mod handoff;
 pub mod media;
 pub mod migrate;
+pub mod plugin_access;
 pub mod profile_images;
 mod projects;
 pub mod routines;
@@ -512,6 +513,7 @@ pub const MIGRATIONS: &[migrate::Migration] = &[&[
     session_images::SCHEMA,
     profile_images::SCHEMA,
     workspace_agents::SCHEMA,
+    plugin_access::SCHEMA,
 ]];
 
 /// A session's effective workspace: its `session_workspaces` row while the

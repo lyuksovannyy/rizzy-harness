@@ -85,7 +85,16 @@ export const FEATURE_GROUPS: { title: string; items: Feature[] }[] = [
         label: "Read-only commands",
         hint: "Runs commands that can only look (git log, grep, tests) in a read-only shell without network; only for an agent that changes nothing else",
       },
-      { key: "mcp", label: "MCP servers", hint: "Uses the tools of the MCP servers the node runs for the chat" },
+      {
+        key: "skills",
+        label: "Skills",
+        hint: "Loads the skills it may use in this workspace (Plugins); with file or command access",
+      },
+      {
+        key: "mcp",
+        label: "Connectors",
+        hint: "Uses the tools of the connectors (MCP servers) the node runs for the chat that it may use in this workspace (Plugins)",
+      },
       {
         key: "board",
         label: "Board",
@@ -115,6 +124,7 @@ export const NEW_FEATURES: AgentFeatures = {
   commands: false,
   read_only_commands: false,
   mcp: false,
+  skills: true,
   delegate: false,
   background_subagents: false,
   as_agent: true,
@@ -141,8 +151,9 @@ export function handleProblem(id: string, agents: Pick<Agent, "id">[]): string |
   return null;
 }
 
-/** A switch that does nothing with the others as they are: read-only commands next to a switch that changes things. */
+/** A switch that does nothing with the others as they are: read-only commands next to a switch that changes things, skills without file or command access. */
 export function moot(f: AgentFeatures, key: keyof AgentFeatures): boolean {
+  if (key === "skills") return !(f.read_files || f.edit_files || f.commands);
   return key === "read_only_commands" && (f.edit_files || f.commands || f.mcp);
 }
 

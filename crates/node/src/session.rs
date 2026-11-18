@@ -2797,7 +2797,8 @@ impl Session {
                 ins::READ_TIMEOUT,
             )
             .await;
-            ins::with_skills(&mut extra, found, invoking, skills::cap_for(window))
+            let denied = agent.map(|a| a.deny_skills.as_slice()).unwrap_or_default();
+            ins::with_skills(&mut extra, found, invoking, denied, skills::cap_for(window))
         };
         if !problems.is_empty() {
             tracing::info!(

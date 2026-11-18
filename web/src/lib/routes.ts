@@ -1,5 +1,5 @@
 // The hash routes: home, a chat, a project, a settings tab, the agents,
-// routines, media and artifacts. Small and dependency-free, since the first
+// routines, media, artifacts and plugins. Small and dependency-free, since the first
 // load parses them. Search has no route: it is an overlay.
 import type { SectionId, TabId } from "./settings";
 
@@ -20,7 +20,9 @@ export type Route =
   /** The grid, maybe filtered; an id opens that item's preview over it. */
   | { kind: "media"; filter: MediaFilter | null; id: string | null }
   /** id null: the list; else that artifact (a lineage) with its versions. */
-  | { kind: "artifacts"; id: string | null };
+  | { kind: "artifacts"; id: string | null }
+  /** The workspace's skills and connectors (X.34). */
+  | { kind: "plugins" };
 
 const PROJECT = /^#\/p\/(?:(new)|([0-9a-f]{32})(?:\/(chats|board|memory|settings))?)$/;
 const ROUTINES = /^#\/routines(?:\/(new|[0-9a-f]{32})(?:\/(runs))?)?$/;
@@ -40,6 +42,7 @@ export function parseRoute(hash: string): Route {
   const m = hash.match(/^#\/s\/([0-9a-f-]{36})$/);
   if (m) return { kind: "session", id: m[1]! };
   if (hash === "#/agents") return { kind: "agents", id: null };
+  if (hash === "#/plugins") return { kind: "plugins" };
   const a = hash.match(/^#\/agents\/([a-z0-9-]{1,32})$/);
   if (a) return { kind: "agents", id: a[1]! };
   // Agents moved out of Server settings into the sidebar.
@@ -68,6 +71,7 @@ export function routeHash(r: Route): string {
   if (r.kind === "routines") return `#/routines${r.id ? `/${r.id}${r.tab && r.id !== "new" ? `/${r.tab}` : ""}` : ""}`;
   if (r.kind === "media") return `#/media${r.filter ? `/${r.filter}` : ""}${r.id ? `/${r.id}` : ""}`;
   if (r.kind === "artifacts") return `#/artifacts${r.id ? `/${r.id}` : ""}`;
+  if (r.kind === "plugins") return "#/plugins";
   if (r.kind === "settings") return `#/settings${r.section ? `/${r.section}${r.tab ? `/${r.tab}` : ""}` : ""}`;
   return "#/";
 }

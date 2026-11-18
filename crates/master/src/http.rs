@@ -25,6 +25,7 @@ mod levels;
 mod links;
 mod media;
 mod memory;
+mod plugins;
 mod pricing;
 mod profile;
 mod projects;
@@ -126,6 +127,11 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
         .route(
             "/api/workspaces/{id}/memory",
             axum::routing::put(workspaces::set_memory),
+        )
+        .route("/api/workspaces/{id}/plugins", get(plugins::list))
+        .route(
+            "/api/workspaces/{id}/plugins/{kind}/{name}",
+            axum::routing::put(plugins::put),
         )
         .route(
             "/api/workspaces/{id}/members",

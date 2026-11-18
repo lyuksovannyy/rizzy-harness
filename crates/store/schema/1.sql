@@ -241,6 +241,17 @@ CREATE TABLE nodes (
     revoked_ms INTEGER
 );
 
+-- table plugin_access on plugin_access
+CREATE TABLE plugin_access (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
+    kind         TEXT NOT NULL CHECK (kind IN ('skill', 'mcp')),
+    name         TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 64),
+    -- The agent ids it is assigned to: a JSON array, at most 16 KiB.
+    agents       TEXT NOT NULL CHECK (length(CAST(agents AS BLOB)) <= 16384),
+    updated_ms   INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, kind, name)
+);
+
 -- table profile_images on profile_images
 CREATE TABLE profile_images (
     user_id    TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,

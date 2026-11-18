@@ -777,6 +777,8 @@ async fn a_test_run_after_each_delegation_runs() {
         no_personalisation: false,
         prompt_hash: "h".into(),
         deny_tools: vec![],
+        deny_skills: vec![],
+        deny_mcp_servers: vec![],
         delegates: vec![],
         caps: None,
     };
@@ -826,6 +828,8 @@ async fn a_failed_delegation_is_no_change() {
         no_personalisation: false,
         prompt_hash: "h".into(),
         deny_tools: vec![],
+        deny_skills: vec![],
+        deny_mcp_servers: vec![],
         delegates: vec![],
         caps: None,
     };

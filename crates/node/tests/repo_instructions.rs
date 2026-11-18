@@ -331,6 +331,8 @@ async fn a_sub_agent_gets_the_files_too() {
         no_personalisation: false,
         prompt_hash: "h".into(),
         deny_tools: vec![],
+        deny_skills: vec![],
+        deny_mcp_servers: vec![],
         delegates,
         caps: None,
     };
@@ -497,6 +499,8 @@ async fn a_sub_agent_gets_the_files_of_the_subfolders_it_touches() {
         no_personalisation: false,
         prompt_hash: "h".into(),
         deny_tools: vec![],
+        deny_skills: vec![],
+        deny_mcp_servers: vec![],
         delegates,
         caps: None,
     };

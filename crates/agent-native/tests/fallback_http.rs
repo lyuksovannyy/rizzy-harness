@@ -165,6 +165,8 @@ fn agent(fallbacks: &[&str], unavailable: &[&str]) -> AgentSpec {
         no_personalisation: false,
         prompt_hash: "h".into(),
         deny_tools: vec![],
+        deny_skills: vec![],
+        deny_mcp_servers: vec![],
         delegates: vec![],
         caps: None,
     }

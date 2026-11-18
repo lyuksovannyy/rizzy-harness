@@ -214,6 +214,103 @@ pub const CAP_REMEMBER: &str = "remember";
 /// one (PLAN.md T55).
 pub const CAP_RECALL: &str = "recall";
 
+/// The node capability that says it enforces `AgentSpec::deny_skills` and
+/// `AgentSpec::deny_mcp_servers` (ADOPTION_PLAN X.34, PLAN.md T80). To a
+/// node without it the master withholds the whole `skill` tool or `mcp`
+/// (through `deny_tools`, which every node reads) from an agent that has
+/// any of them, so an Assigned item never reaches another agent there.
+pub const CAP_PLUGIN_ACCESS: &str = "plugin-access";
+
+/// Skills one `node.plugins` names; more are counted, not named.
+pub const MAX_ANNOUNCED_SKILLS: usize = 300;
+/// MCP servers one `node.plugins` names.
+pub const MAX_ANNOUNCED_SERVERS: usize = 64;
+/// Characters of one announced skill's description.
+pub const MAX_ANNOUNCED_DESCRIPTION: usize = 200;
+/// Bytes of every announced name and description together.
+pub const MAX_ANNOUNCED_BYTES: usize = 64 * 1024;
+
+/// One skill a node announces: its name and a one-line description.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnnouncedSkill {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+/// What a node has for the Plugins screen (X.34): the skills of its own
+/// node.toml `[skills] roots` and the names of its `[mcp_servers]`, never
+/// anything else of them (no path, command, argument or environment).
+/// Repository skills are not here: they belong to a session's folder.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodePlugins {
+    #[serde(default)]
+    pub skills: Vec<AnnouncedSkill>,
+    #[serde(default)]
+    pub mcp_servers: Vec<String>,
+    /// Items found but not named (past a cap, or refused by the checks).
+    #[serde(default)]
+    pub left_out: u32,
+}
+
+impl NodePlugins {
+    /// This announcement as the master keeps it, whoever sent it: names
+    /// that pass the node's own rules (`valid_skill_name`,
+    /// `valid_mcp_server_name`: ASCII only, so no look-alike letter, hidden
+    /// character or line break), each once, sorted; descriptions one clean
+    /// line of at most [`MAX_ANNOUNCED_DESCRIPTION`] characters; at most
+    /// [`MAX_ANNOUNCED_SKILLS`] skills, [`MAX_ANNOUNCED_SERVERS`] servers
+    /// and [`MAX_ANNOUNCED_BYTES`] bytes. What is dropped is counted in
+    /// `left_out`.
+    pub fn bounded(self) -> NodePlugins {
+        use harness_core::agent::valid_mcp_server_name;
+        use harness_core::skills::valid_skill_name;
+        let mut left = u64::from(self.left_out);
+        let mut bytes = 0usize;
+        let mut skills: Vec<AnnouncedSkill> = Vec::new();
+        let mut sent = self.skills;
+        sent.sort_by(|a, b| a.name.cmp(&b.name));
+        for s in sent {
+            let description =
+                harness_core::text::clean_line(&s.description, MAX_ANNOUNCED_DESCRIPTION);
+            let size = s.name.len() + description.len();
+            if !valid_skill_name(&s.name)
+                || skills.last().is_some_and(|l| l.name == s.name)
+                || skills.len() >= MAX_ANNOUNCED_SKILLS
+                || bytes + size > MAX_ANNOUNCED_BYTES
+            {
+                left += 1;
+                continue;
+            }
+            bytes += size;
+            skills.push(AnnouncedSkill {
+                name: s.name,
+                description,
+            });
+        }
+        let mut servers: Vec<String> = Vec::new();
+        let mut sent = self.mcp_servers;
+        sent.sort();
+        for name in sent {
+            if !valid_mcp_server_name(&name)
+                || servers.last() == Some(&name)
+                || servers.len() >= MAX_ANNOUNCED_SERVERS
+                || bytes + name.len() > MAX_ANNOUNCED_BYTES
+            {
+                left += 1;
+                continue;
+            }
+            bytes += name.len();
+            servers.push(name);
+        }
+        NodePlugins {
+            skills,
+            mcp_servers: servers,
+            left_out: u32::try_from(left).unwrap_or(u32::MAX),
+        }
+    }
+}
+
 /// The node capability that says it offers the project board tools
 /// (`board`, `board_edit`: registered there and not both in its
 /// `denied_tools`) and speaks `board.request`. The master offers the tools
@@ -500,6 +597,12 @@ pub enum NodeToMaster {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// What the node has for the Plugins screen (X.34), sent after
+    /// `node.hello`. The master keeps the latest per link (bounded,
+    /// [`NodePlugins::bounded`]) and takes at most one in
+    /// `PLUGINS_EVERY`; it names nothing a node may run.
+    #[serde(rename = "node.plugins")]
+    Plugins { plugins: NodePlugins },
     /// The answer to `project.create` (pull only: never sent unasked): the
     /// absolute path of the folder the node made, or why it made none, in
     /// words for the person.
@@ -923,6 +1026,86 @@ mod tests {
     /// `project.create` carries a display name only (T77): its wire shape,
     /// never acked, and a place sent beside the name (`path`, `dir`, `cwd`)
     /// is dropped by the parse, so it cannot reach the node's handler.
+    /// X.34 (PLAN.md T80): whatever a node sends, the master keeps names
+    /// by the node's own rules, each once, one clean description line, and
+    /// at most the caps, counting the rest; the message names no path,
+    /// command or environment.
+    #[test]
+    fn announced_plugins_are_bounded_and_clean() {
+        let skill = |n: &str, d: &str| AnnouncedSkill {
+            name: n.into(),
+            description: d.into(),
+        };
+        let sent = NodePlugins {
+            skills: vec![
+                skill("deploy", "Ship\nit \u{202e}now\u{200b}"),
+                skill("deploy", "again"),
+                skill("d\u{0435}ploy", "Cyrillic e: a look-alike"),
+                skill("bad name", "space"),
+                skill("x\u{200b}", "hidden"),
+                skill(&"a".repeat(65), "long"),
+                skill("lint", &"é".repeat(500)),
+            ],
+            mcp_servers: vec![
+                "github".into(),
+                "GitHub".into(),
+                "a__b".into(),
+                "github".into(),
+                "-x".into(),
+            ],
+            left_out: 3,
+        };
+        let got = sent.bounded();
+        let names: Vec<&str> = got.skills.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["deploy", "lint"]);
+        assert_eq!(got.skills[0].description, "Ship it now");
+        assert_eq!(
+            got.skills[1].description.chars().count(),
+            MAX_ANNOUNCED_DESCRIPTION
+        );
+        assert_eq!(got.mcp_servers, ["github"]);
+        assert_eq!(got.left_out, 3 + 5 + 4);
+        // Past the count cap: named up to it, the rest counted.
+        let many = NodePlugins {
+            skills: (0..100_000).map(|i| skill(&format!("s{i}"), "d")).collect(),
+            mcp_servers: (0..1000).map(|i| format!("m{i}")).collect(),
+            left_out: u32::MAX,
+        }
+        .bounded();
+        assert_eq!(many.skills.len(), MAX_ANNOUNCED_SKILLS);
+        assert_eq!(many.mcp_servers.len(), MAX_ANNOUNCED_SERVERS);
+        assert_eq!(many.left_out, u32::MAX, "saturates");
+        // Past the byte cap.
+        let big = NodePlugins {
+            skills: (0..MAX_ANNOUNCED_SKILLS)
+                .map(|i| skill(&format!("s{i:03}"), &"é".repeat(MAX_ANNOUNCED_DESCRIPTION)))
+                .collect(),
+            ..Default::default()
+        }
+        .bounded();
+        let bytes: usize = big
+            .skills
+            .iter()
+            .map(|s| s.name.len() + s.description.len())
+            .sum();
+        assert!(bytes <= MAX_ANNOUNCED_BYTES, "{bytes}");
+        assert!(big.left_out > 0);
+        let wire = serde_json::to_value(NodeToMaster::Plugins {
+            plugins: NodePlugins {
+                skills: vec![skill("a", "b")],
+                mcp_servers: vec!["m".into()],
+                left_out: 0,
+            },
+        })
+        .unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({"type": "node.plugins", "plugins": {
+                "skills": [{"name": "a", "description": "b"}], "mcp_servers": ["m"], "left_out": 0
+            }})
+        );
+    }
+
     #[test]
     fn project_create_carries_a_name_only() {
         let m = MasterToNode::ProjectCreate {

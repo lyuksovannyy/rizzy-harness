@@ -175,7 +175,7 @@ describe("an agent's page", () => {
     expect(api.agent).toHaveBeenCalledWith("coder", "server");
     expect(host.querySelector("h1")!.textContent).toBe("Coder");
     expect(host.querySelector("pre.agent-prompt")!.textContent).toBe("You are careful.");
-    expect(switches().length).toBe(17);
+    expect(switches().length).toBe(18);
     expect(switches().every((s) => s.disabled)).toBe(true);
     expect(sw("Change files").checked).toBe(true);
     expect(button("Duplicate")).toBeDefined();
@@ -244,23 +244,43 @@ describe("an agent's page", () => {
     expect(sw("Personalisation").disabled).toBe(true);
   });
 
-  test("MCP servers is its own switch: off for a new agent, saved when turned on", async () => {
+  test("Connectors is its own switch: off for a new agent, saved when turned on", async () => {
     expect(NEW_FEATURES.mcp).toBe(false);
     api.agent.mockResolvedValue(detail(coder));
     await show(admin, "coder");
     // A built-in shows its own, read off the definition, and keeps it.
-    expect(sw("MCP servers").checked).toBe(true);
-    expect(sw("MCP servers").disabled).toBe(true);
+    expect(sw("Connectors").checked).toBe(true);
+    expect(sw("Connectors").disabled).toBe(true);
     api.agent.mockResolvedValue(detail(reviewer, { prompt: "Review it.", features: { ...NEW_FEATURES, commands: true } }));
     await show(admin, "reviewer");
     expect(sw("Run commands").checked).toBe(true);
-    expect(sw("MCP servers").checked).toBe(false);
-    act(() => sw("MCP servers").click());
+    expect(sw("Connectors").checked).toBe(false);
+    act(() => sw("Connectors").click());
     api.updateAgent.mockResolvedValue(detail(reviewer));
     await act(async () => button("Save")!.click());
     expect(api.updateAgent).toHaveBeenCalledWith(
       "reviewer",
       { name: "Reviewer", summary: "", prompt: "Review it.", features: { ...NEW_FEATURES, commands: true, mcp: true } },
+      "server",
+    );
+  });
+
+  test("Skills is its own switch: on for a new agent, moot without file or command access, saved when turned off", async () => {
+    expect(NEW_FEATURES.skills).toBe(true);
+    api.agent.mockResolvedValue(detail(reviewer, { prompt: "Review it.", features: { ...NEW_FEATURES, read_files: true } }));
+    await show(admin, "reviewer");
+    expect(sw("Skills").checked).toBe(true);
+    expect(sw("Skills").disabled).toBe(false);
+    // Without file or command access it does nothing, so it is not offered.
+    act(() => sw("Read files").click());
+    expect(sw("Skills").disabled).toBe(true);
+    act(() => sw("Read files").click());
+    act(() => sw("Skills").click());
+    api.updateAgent.mockResolvedValue(detail(reviewer));
+    await act(async () => button("Save")!.click());
+    expect(api.updateAgent).toHaveBeenCalledWith(
+      "reviewer",
+      { name: "Reviewer", summary: "", prompt: "Review it.", features: { ...NEW_FEATURES, read_files: true, skills: false } },
       "server",
     );
   });

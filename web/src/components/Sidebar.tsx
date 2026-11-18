@@ -105,29 +105,9 @@ function entries(p: SidebarProps): Entry[] {
       label: t("nav.artifacts"),
       current: r.kind === "artifacts",
     },
+    { key: "plugins", to: { kind: "plugins" }, icon: <Plug size={16} />, label: t("nav.plugins"), current: r.kind === "plugins" },
   ];
   return list.filter((e): e is Entry => !!e);
-}
-
-/** Connections: a placeholder until it is designed (no route, no code). */
-function Connections({ rail }: { rail?: boolean }) {
-  return (
-    <button
-      type="button"
-      className="nav-item later"
-      aria-disabled="true"
-      title={t("nav.comingLater")}
-      {...(rail ? { "aria-label": t("nav.connections") } : {})}
-    >
-      <Plug size={16} />
-      {!rail && (
-        <>
-          <span className="grow">{t("nav.connections")}</span>
-          <span className="later-tag">{t("nav.later")}</span>
-        </>
-      )}
-    </button>
-  );
 }
 
 export function Sidebar(props: SidebarProps) {
@@ -244,7 +224,6 @@ export function Sidebar(props: SidebarProps) {
           {areaLinks.slice(0, 1)}
           {searchButton}
           {areaLinks.slice(1)}
-          <Connections rail />
         </nav>
         <span className="spacer" />
         {accountButton}
@@ -274,7 +253,6 @@ export function Sidebar(props: SidebarProps) {
       </div>
       <nav aria-label="Main" className="sidebar-nav">
         {areaLinks}
-        <Connections />
       </nav>
       <SidebarLists
         route={route}

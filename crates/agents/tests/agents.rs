@@ -373,6 +373,7 @@ fn features() -> harness_agents::Features {
         commands: false,
         read_only_commands: false,
         mcp: false,
+        skills: true,
         delegate: false,
         as_agent: true,
         as_subagent: true,
@@ -842,6 +843,33 @@ fn agents_that_work_on_files_get_skills() {
         assert!(with(r, e, c).iter().any(|t| t == "skill"), "{r} {e} {c}");
     }
     assert!(!with(false, false, false).iter().any(|t| t == "skill"));
+}
+
+/// The Skills switch (X.34, the owner's rule: each capability its own
+/// switch): off, no `skill` tool whatever else is on; on when a stored page
+/// agent never had it, so it keeps today's tools; built-ins show it where
+/// their tool list has `skill`.
+#[test]
+fn skills_are_their_own_switch() {
+    let make = |skills: bool| harness_agents::Features {
+        commands: true,
+        skills,
+        ..features()
+    };
+    assert!(make(true).tools().iter().any(|t| t == "skill"));
+    assert!(!make(false).tools().iter().any(|t| t == "skill"));
+    let a = harness_agents::custom("s", "S", "", "s", make(false), vec![]).unwrap();
+    assert!(!a.spec.allows_tool("skill") && !a.features.skills);
+    // A page agent stored before the switch: on, as its tools were.
+    let mut stored = serde_json::to_value(features()).unwrap();
+    stored.as_object_mut().unwrap().remove("skills");
+    let old: harness_agents::Features = serde_json::from_value(stored).unwrap();
+    assert!(old.skills && old.tools().iter().any(|t| t == "skill"));
+    for a in harness_agents::builtins() {
+        assert_eq!(a.features.skills, a.spec.allows_tool("skill"), "{}", a.id);
+        let with = ["coder", "teamlead", "writer", "scout", "reviewer"].contains(&a.id.as_str());
+        assert_eq!(a.features.skills, with, "{}", a.id);
+    }
 }
 
 /// MCP servers are their own switch (the owner, 2026-11-14): commands no

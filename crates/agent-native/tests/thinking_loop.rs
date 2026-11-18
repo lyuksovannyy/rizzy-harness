@@ -183,6 +183,8 @@ fn agent(fallbacks: &[&str]) -> AgentSpec {
         ui: Default::default(),
         prompt_hash: "h".into(),
         deny_tools: vec![],
+        deny_skills: vec![],
+        deny_mcp_servers: vec![],
         delegates: vec![],
         caps: None,
         no_personalisation: false,

@@ -175,13 +175,23 @@ impl Node {
 
     /// One prompt to its turn's end, allowing every approval; the log.
     async fn run(&mut self, sid: SessionId, text: &str) -> Vec<harness_core::RawEvent> {
+        self.run_as(sid, text, None).await
+    }
+
+    /// [`Self::run`] as `agent` (the master sends one with every prompt).
+    async fn run_as(
+        &mut self,
+        sid: SessionId,
+        text: &str,
+        agent: Option<harness_core::agent::AgentSpec>,
+    ) -> Vec<harness_core::RawEvent> {
         self.link
             .to_node
             .try_send(MasterToNode::Prompt {
                 req_id: "p".into(),
                 session_id: sid,
                 text: text.into(),
-                agent: None,
+                agent,
                 attachments: vec![],
                 compare: vec![],
                 reply: None,
@@ -301,4 +311,99 @@ async fn the_server_is_gone_after_the_chat_is_deleted_and_after_a_stop() {
     assert!(alive(second));
     n.rt.stop(Duration::from_secs(20)).await;
     assert!(gone(second).await, "the server outlived the node's stop");
+}
+
+/// X.34 (PLAN.md T80): a server the chat's agent may not use in its
+/// workspace (`deny_mcp_servers`) is not started for its turn, and its
+/// tool is neither offered nor callable; `mcp` in the agent's tools does
+/// not bring it back.
+#[tokio::test]
+async fn a_server_denied_to_the_agent_is_not_started_nor_callable() {
+    let mut n = node().await;
+    let agent: harness_core::agent::AgentSpec = serde_json::from_value(serde_json::json!({
+        "agent_id": "x", "name": "X", "system_prompt": "", "prompt_hash": "h",
+        "tools": ["mcp", "mcp__fake__echo"], "deny_mcp_servers": ["fake"],
+    }))
+    .unwrap();
+    let sid = n.create(Some(agent.clone())).await;
+    let log = n.run_as(sid, SCRIPT, Some(agent)).await;
+    let out = outputs(&log);
+    assert!(
+        !out[0].0 && out[0].1.contains("unknown tool `mcp__fake__echo`"),
+        "{out:?}"
+    );
+    assert!(
+        pids(&started(&n.root(), "fake")).is_empty(),
+        "a denied server started"
+    );
+    // The same agent without the denial: started and called.
+    let allowed: harness_core::agent::AgentSpec = serde_json::from_value(serde_json::json!({
+        "agent_id": "x", "name": "X", "system_prompt": "", "prompt_hash": "h",
+        "tools": ["mcp"],
+    }))
+    .unwrap();
+    let log = n.run_as(sid, SCRIPT, Some(allowed)).await;
+    assert!(
+        outputs(&log).iter().any(|o| o.0),
+        "the allowed agent called it"
+    );
+    assert_eq!(pids(&started(&n.root(), "fake")).len(), 1);
+}
+
+/// X.34: the node announces the names of its enabled node.toml servers
+/// that node.toml does not deny, and nothing else of them (no command,
+/// argument or environment value).
+#[tokio::test]
+async fn the_node_announces_server_names_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let mut servers = BTreeMap::new();
+    let mut on = ServerConfig::new("python3", &[FAKE, "--secret-arg"]);
+    on.env = serde_json::from_value(serde_json::json!({"FAKE_TOKEN": "tok-9"})).unwrap();
+    servers.insert("github".to_string(), on);
+    let mut off = ServerConfig::new("python3", &[FAKE]);
+    off.enabled = false;
+    servers.insert("off".to_string(), off);
+    servers.insert("denied".to_string(), ServerConfig::new("python3", &[FAKE]));
+    let rt = NodeRuntime::start(NodeConfig {
+        node_id: "local".into(),
+        hostname: "test".into(),
+        policy: NodePolicy {
+            workspace_roots: vec![root.clone()],
+            mcp_servers: servers,
+            denied_tools: vec!["mcp__denied".into()],
+            ..Default::default()
+        },
+        store: Store::open(&root.join("node.db"), Durability::Full).unwrap(),
+        backend: Arc::new(NativeBackend::new(
+            Arc::new(Mock {
+                delay: Duration::from_millis(1),
+            }),
+            harness_tools::builtin(),
+            NativeConfig::default(),
+        )),
+        default_model: "mock".into(),
+        secrets: Default::default(),
+        profile: harness_core::event::Profile::Agentic,
+        incognito_ttl: None,
+        checkpoints_dir: None,
+        git_sandbox: None,
+        artifacts: None,
+    })
+    .await
+    .unwrap();
+    let mut link = rt.attach().await;
+    assert!(matches!(
+        link.from_node.recv().await.unwrap(),
+        NodeToMaster::Hello { .. }
+    ));
+    let msg = link.from_node.recv().await.unwrap();
+    let NodeToMaster::Plugins { plugins } = &msg else {
+        panic!("expected node.plugins, got {msg:?}")
+    };
+    assert_eq!(plugins.mcp_servers, ["github"]);
+    let text = serde_json::to_string(&msg).unwrap();
+    for no in ["python3", "secret-arg", "tok-9", "FAKE_TOKEN", "fake_mcp"] {
+        assert!(!text.contains(no), "{no} in {text}");
+    }
 }

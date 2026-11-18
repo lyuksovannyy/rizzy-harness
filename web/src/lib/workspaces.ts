@@ -81,7 +81,7 @@ export function keepsRoute(open: { workspace_id?: string | null } | null | undef
 
 /** Where a switch made on `route` lands: an area's page goes to that area's
  * list in the new workspace (an agent, routine, media item or artifact is
- * the old workspace's); null for every other route, which stays on an open
+ * the old workspace's), Plugins to the new one's; null for every other route, which stays on an open
  * chat of the target workspace (`keepsRoute`) or goes home. */
 export function switchRoute(route: Route): Route | null {
   switch (route.kind) {
@@ -91,6 +91,8 @@ export function switchRoute(route: Route): Route | null {
       return { kind: route.kind, id: null };
     case "media":
       return { kind: "media", filter: route.filter, id: null };
+    case "plugins":
+      return route;
     default:
       return null;
   }

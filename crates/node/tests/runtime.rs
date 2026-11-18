@@ -123,6 +123,11 @@ impl Harness {
             NodeToMaster::Hello { node_id, .. } => assert_eq!(node_id, "local"),
             other => panic!("expected hello, got {other:?}"),
         }
+        // What it has for the Plugins screen (X.34) always follows.
+        match link.from_node.recv().await.unwrap() {
+            NodeToMaster::Plugins { .. } => {}
+            other => panic!("expected node.plugins, got {other:?}"),
+        }
         Self {
             _dir: dir,
             ws,
@@ -1436,6 +1441,8 @@ fn agent(
         no_personalisation: false,
         prompt_hash: "h".into(),
         deny_tools: vec![],
+        deny_skills: vec![],
+        deny_mcp_servers: vec![],
         delegates,
         caps: None,
     }

@@ -931,3 +931,75 @@ fn workspace_agents_are_bounded_and_go_with_the_workspace() {
     assert!(s.delete_workspace(&a).unwrap());
     assert!(ids(&a).is_empty());
 }
+
+/// X.34 (PLAN.md T80): Assigned items are per workspace, bounded, and go
+/// with their workspace; a deleted agent leaves every list it was on (the
+/// item stays Assigned to the others, or to nobody).
+#[test]
+fn plugin_access_is_per_workspace_bounded_and_cleaned_up() {
+    let s = store();
+    let a = s.create_workspace("A", "a1").unwrap().workspace_id;
+    let b = s.create_workspace("B", "a1").unwrap().workspace_id;
+    let ids = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    assert!(
+        s.plugin_access_put(&a, "skill", "deploy", &ids(&["coder", "ops"]), 2)
+            .unwrap()
+    );
+    assert!(
+        s.plugin_access_put(&a, "mcp", "github", &ids(&["ops"]), 2)
+            .unwrap()
+    );
+    // Replacing one is not a new row; a third is refused.
+    assert!(
+        s.plugin_access_put(&a, "skill", "deploy", &ids(&["ops"]), 2)
+            .unwrap()
+    );
+    let e = s
+        .plugin_access_put(&a, "skill", "lint", &ids(&[]), 2)
+        .unwrap_err();
+    assert!(matches!(e, StoreError::Refused(_)), "{e}");
+    assert!(
+        !s.plugin_access_put("nope", "skill", "x", &ids(&[]), 2)
+            .unwrap()
+    );
+    // A bad kind or name is refused by the table itself.
+    assert!(s.plugin_access_put(&a, "hook", "x", &ids(&[]), 9).is_err());
+    assert!(s.plugin_access_put(&a, "skill", "", &ids(&[]), 9).is_err());
+    let big: Vec<String> = (0..2000).map(|i| format!("agent-{i}")).collect();
+    assert!(matches!(
+        s.plugin_access_put(&a, "skill", "deploy", &big, 9),
+        Err(StoreError::Refused(_))
+    ));
+    // The other workspace sees none of it.
+    assert!(s.plugin_access(&b).unwrap().is_empty());
+    assert!(
+        s.plugin_access_put(&b, "skill", "deploy", &ids(&["ops", "writer"]), 2)
+            .unwrap()
+    );
+    let rows = s.plugin_access(&a).unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        (rows[0].kind.as_str(), rows[0].name.as_str()),
+        ("mcp", "github")
+    );
+    assert_eq!(rows[1].agents, ["ops"]);
+    // A workspace agent deleted: only that workspace's lists.
+    assert_eq!(s.plugin_access_forget_agent(Some(&a), "ops").unwrap(), 2);
+    assert!(
+        s.plugin_access(&a)
+            .unwrap()
+            .iter()
+            .all(|r| r.agents.is_empty())
+    );
+    assert_eq!(s.plugin_access(&b).unwrap()[0].agents, ["ops", "writer"]);
+    // A server agent deleted: every workspace's.
+    assert_eq!(s.plugin_access_forget_agent(None, "writer").unwrap(), 1);
+    assert_eq!(s.plugin_access(&b).unwrap()[0].agents, ["ops"]);
+    // Shared again.
+    assert!(s.plugin_access_delete(&a, "mcp", "github").unwrap());
+    assert!(!s.plugin_access_delete(&a, "mcp", "github").unwrap());
+    // The workspace's rows go with it.
+    assert!(s.delete_workspace(&a).unwrap());
+    assert!(s.plugin_access(&a).unwrap().is_empty());
+    assert_eq!(s.plugin_access(&b).unwrap().len(), 1);
+}

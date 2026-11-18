@@ -717,3 +717,92 @@ fn a_small_cap_still_lists_skills_and_counts_the_invoked_line() {
     c.invoked = Some(c.skills[0].name.clone());
     assert!(skills::render(&c, skills::CAP).unwrap().len() <= skills::CAP);
 }
+
+/// X.34 (PLAN.md T80): a skill the turn's agent may not use in its
+/// workspace leaves the list, the tool (which says why), `/name` and the
+/// shell's read-only grants, whatever its origin; the others stay, and a
+/// node root that held it is replaced by the kept skills' own folders.
+#[tokio::test]
+async fn a_withheld_skill_leaves_the_list_the_tool_the_slash_and_the_shell() {
+    let t = tree();
+    put(
+        &t.home.join("deploy/SKILL.md"),
+        skill_md("deploy", "Ship it.", "secret steps"),
+    );
+    put(
+        &t.home.join("notes/SKILL.md"),
+        skill_md("notes", "Write notes.", "n"),
+    );
+    // Outside the root, by a link: its own grant.
+    let far = t.base.join("far/lint");
+    put(&far.join("SKILL.md"), skill_md("lint", "Lint it.", "l"));
+    std::os::unix::fs::symlink(&far, t.home.join("lint")).unwrap();
+    // The repository's skill of the same name stays out too (by name).
+    put(
+        &t.repo.join(".agents/skills/review/SKILL.md"),
+        skill_md("review", "Review.", "r"),
+    );
+    let mut c = skills::discover(&roots(&t, &t.repo), &[]).catalogue;
+    assert_eq!(names(&c), ["deploy", "lint", "notes", "review"]);
+    let root = t.home.canonicalize().unwrap();
+    assert!(c.read.contains(&root), "{:?}", c.read);
+    skills::withhold(
+        &mut c,
+        &[
+            "deploy".to_string(),
+            "review".to_string(),
+            "none".to_string(),
+        ],
+    );
+    assert_eq!(names(&c), ["lint", "notes"]);
+    assert_eq!(c.withheld, ["deploy", "review"]);
+    // The root is no longer granted whole: only the kept skills' folders.
+    let deploy = root.join("deploy");
+    assert!(
+        !c.read.iter().any(|p| deploy.starts_with(p)),
+        "{:?}",
+        c.read
+    );
+    assert!(c.read.contains(&root.join("notes")), "{:?}", c.read);
+    assert!(
+        c.read.contains(&far.canonicalize().unwrap()),
+        "{:?}",
+        c.read
+    );
+    let rendered = skills::render(&c, skills::CAP).unwrap();
+    assert!(
+        !rendered.contains("deploy") && !rendered.contains("review"),
+        "{rendered}"
+    );
+    assert_eq!(skills::invoked("/deploy now", &c), None);
+    assert_eq!(
+        skills::invoked_withheld("/deploy now", &c).as_deref(),
+        Some("deploy")
+    );
+    assert_eq!(skills::invoked_withheld("/notes now", &c), None);
+    assert!(skills::withheld_line("deploy").starts_with("[harness]"));
+    let ctx = ctx_with(&t.ws, c.clone());
+    let out = SkillTool.run(&ctx, json!({"name": "deploy"})).await;
+    assert!(!out.ok);
+    assert!(
+        out.output.contains("not available to this agent"),
+        "{}",
+        out.output
+    );
+    assert!(!out.output.contains("secret steps"), "{}", out.output);
+    let out = SkillTool
+        .run(&ctx, json!({"name": "deploy", "file": "SKILL.md"}))
+        .await;
+    assert!(
+        !out.ok && !out.output.contains("secret steps"),
+        "{}",
+        out.output
+    );
+    let out = SkillTool.run(&ctx, json!({"name": "notes"})).await;
+    assert!(out.ok, "{}", out.output);
+    // Nothing denied: nothing changes.
+    let mut same = skills::discover(&roots(&t, &t.repo), &[]).catalogue;
+    let before = same.clone();
+    skills::withhold(&mut same, &[]);
+    assert_eq!(same, before);
+}
