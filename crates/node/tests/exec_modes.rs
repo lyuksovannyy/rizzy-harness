@@ -140,6 +140,7 @@ fn create(sid: SessionId, cwd: &std::path::Path, mode: Option<ExecMode>) -> Mast
         incognito: false,
         no_callbacks: false,
         exec_mode: mode,
+        owner: None,
     }
 }
 
@@ -437,6 +438,7 @@ async fn an_agentic_session_without_a_recorded_mode_runs_nothing() {
             backend: "native".into(),
             node_id: "n".into(),
             approval_mode: harness_core::policy::ApprovalMode::Auto,
+            owner_id: None,
         })
         .into_parts();
         store
@@ -727,6 +729,7 @@ async fn a_chat_session_has_no_mode() {
         incognito: false,
         no_callbacks: false,
         exec_mode: mode,
+        owner: None,
     };
     let sid = SessionId::new();
     n.link

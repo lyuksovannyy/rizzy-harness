@@ -135,6 +135,7 @@ fn fake_with(id: &str, silent: bool) -> (NodeLink, Fake) {
                             incognito: false,
                             parent_session: None,
                             no_callbacks: false,
+                            owner_id: None,
                         }), now);
                     }
                     if let MasterToNode::Prompt { session_id, text, .. } = &msg {

@@ -867,6 +867,7 @@ async fn node_opts(
         cwd: node.ws.display().to_string(),
         model: None,
         approval_mode: Some(mode),
+        owner: None,
     });
     node.until(|k| matches!(k, EventKind::SessionCreated(_)))
         .await;

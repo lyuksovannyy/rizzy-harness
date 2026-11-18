@@ -112,6 +112,7 @@ async fn a_note_never_lands_inside_a_turn_and_never_refuses_a_prompt() {
             cwd: ws.display().to_string(),
             model: None,
             approval_mode: Some(ApprovalMode::Auto),
+            owner: None,
         })
         .unwrap();
     until(&mut link, sid, |k| {

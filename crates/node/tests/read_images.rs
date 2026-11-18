@@ -161,6 +161,7 @@ async fn the_chat_keeps_the_bytes_the_log_a_reference_and_delete_removes_them() 
         cwd: ws,
         model: None,
         approval_mode: Some(ApprovalMode::Auto),
+        owner: None,
     })
     .await
     .unwrap();

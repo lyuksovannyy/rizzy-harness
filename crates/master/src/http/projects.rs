@@ -24,10 +24,12 @@ use crate::workspaces::{Access, WsError};
 use crate::{Audience, Live, Master};
 
 mod folder;
+mod mcp;
 
 pub(super) fn routes() -> Router<Master> {
     Router::new()
         .merge(folder::routes())
+        .merge(mcp::routes())
         .route("/api/projects", get(list).post(create))
         .route(
             "/api/projects/{id}",

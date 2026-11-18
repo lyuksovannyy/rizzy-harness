@@ -186,6 +186,7 @@ impl Rig {
                 cwd: cwd.display().to_string(),
                 model: None,
                 approval_mode: Some(ApprovalMode::Auto),
+                owner: None,
             })
             .unwrap();
         if wait_ack {

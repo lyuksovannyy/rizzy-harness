@@ -32,6 +32,7 @@ pub mod prefs;
 pub mod presets;
 pub mod pricing;
 pub mod project_folder;
+pub mod project_mcp;
 pub mod projects;
 pub mod providers;
 pub mod recall;
@@ -332,6 +333,8 @@ pub struct MasterInner {
     files: files::Waiting,
     /// New project folders waiting for their node's answer (X.26, T77).
     project_folders: project_folder::Waiting,
+    /// Requests about project folders' `.mcp.json` waiting for nodes (X.36).
+    pub(crate) project_mcp: project_mcp::Waiting,
     /// Staged-file events per node and hour.
     artifact_throttle: artifacts::Throttle,
     /// Open UI sockets by user, so a login that ends closes them.
@@ -653,7 +656,9 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         // A listing of names for the composer: no event.
         | MasterToNode::Files { .. }
         // A new project's folder: no session at all.
-        | MasterToNode::ProjectCreate { .. } => None,
+        | MasterToNode::ProjectCreate { .. }
+        // A person's request about a project's `.mcp.json`: no session.
+        | MasterToNode::ProjectMcp { .. } => None,
     }
 }
 
@@ -743,6 +748,7 @@ impl Master {
                 diffs: Default::default(),
                 files: Default::default(),
                 project_folders: Default::default(),
+                project_mcp: Default::default(),
                 artifact_throttle: Default::default(),
                 sockets: Default::default(),
                 outbound: Mutex::new(outbound::Outbound::from_env()),
@@ -1346,6 +1352,7 @@ impl Master {
                 diff::node_down(&this, &nid);
                 files::node_down(&this, &nid);
                 project_folder::node_down(&this, &nid);
+                project_mcp::node_down(&this, &nid);
             }
             drop(nodes);
             let _ = this.inner.live.send(Live::NodesChanged);
@@ -1573,6 +1580,19 @@ impl Master {
                 match (path, error) {
                     (Some(p), None) => Ok(p),
                     (_, e) => Err(e.unwrap_or_else(|| "the node made no folder".into())),
+                },
+            ),
+            NodeToMaster::ProjectMcpResult {
+                req_id,
+                list,
+                error,
+            } => project_mcp::on_answer(
+                self,
+                node_id,
+                req_id,
+                match (list, error) {
+                    (Some(l), None) => Ok(*l),
+                    (_, e) => Err(e.unwrap_or_else(|| "the node sent no list".into())),
                 },
             ),
         }
@@ -1968,6 +1988,9 @@ impl Master {
                 agent: Some(agent),
                 incognito: spec.incognito,
                 exec_mode,
+                // Recorded by the node (X.36): it starts only the
+                // repository servers this account approved.
+                owner: owner.clone().filter(|_| profile == Profile::Agentic),
             })
             .await;
         match &sent {

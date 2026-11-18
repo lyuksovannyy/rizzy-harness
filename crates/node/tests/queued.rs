@@ -336,6 +336,7 @@ impl Node {
             cwd: self.dir.path().join("ws").display().to_string(),
             model: None,
             approval_mode: Some(mode),
+            owner: None,
         });
         assert_eq!(self.ack("c").await, Ok(()));
         sid
@@ -915,6 +916,7 @@ async fn parallel_answers_take_no_message_while_they_run() {
         cwd: String::new(),
         model: None,
         approval_mode: None,
+        owner: None,
     });
     assert_eq!(n.ack("c").await, Ok(()));
     n.send_json(

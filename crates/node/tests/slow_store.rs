@@ -133,6 +133,7 @@ impl Node {
             cwd: cwd.display().to_string(),
             model: None,
             approval_mode: Some(ApprovalMode::Auto),
+            owner: None,
         })
         .await;
         self.acked(&format!("create-{name}"), Duration::from_secs(30))

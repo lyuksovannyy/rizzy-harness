@@ -152,6 +152,7 @@ fn created(node: &str, cwd: &str, parent: Option<SessionId>) -> EventKind {
         agent_id: None,
         incognito: false,
         parent_session: parent,
+        owner_id: None,
     })
 }
 

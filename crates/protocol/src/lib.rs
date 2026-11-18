@@ -82,6 +82,109 @@ pub const CAP_PROJECTS: &str = "projects";
 /// refuses a longer one (the master's project names are far shorter).
 pub const MAX_PROJECT_NAME: usize = 256;
 
+/// The node capability that announces `project.mcp` (ADOPTION_PLAN X.36,
+/// PLAN.md T82): its node.toml says `[mcp] project_servers = "ask"`, so a
+/// person may approve the MCP servers a project folder's `.mcp.json`
+/// declares, one by one, for their own chats there. A node without it
+/// reads no `.mcp.json` and the master sends it no `project.mcp`.
+pub const CAP_PROJECT_MCP: &str = "project-mcp";
+
+/// The longest user id a `session.create` or `project.mcp` may carry, in
+/// bytes (the master's ids are 26 characters).
+pub const MAX_USER_ID: usize = 128;
+
+/// Whether `id` may name an account in a message to a node: 1 to
+/// [`MAX_USER_ID`] of ASCII letters, digits, `-` and `_` (the master's ids
+/// are ULIDs), so it is safe in a log line and as a key.
+pub fn valid_user_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_USER_ID
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// What a person asks a node about a project folder's `.mcp.json` (X.36).
+/// Every one reads the file once, then answers with the list as it is
+/// after the request. Nothing here names a program: an approval names a
+/// server of the file and the digest of the entry the person was shown.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum ProjectMcpRequest {
+    /// The list (opening it, and Reload).
+    List,
+    /// Approve the file's entry `name`, if it still has `digest`.
+    Approve { name: String, digest: String },
+    /// Remove this person's approval of `name` (always allowed).
+    Remove { name: String },
+}
+
+/// Where a server of a project's `.mcp.json` stands for one person.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectMcpState {
+    /// The file's entry is the one this person approved.
+    Approved,
+    /// Approved, but the file's entry differs now: the approved copy is
+    /// what runs until the new one is approved.
+    Changed,
+    /// In the file, not approved: it does not run.
+    New,
+    /// Approved, and no longer in the file: it is not started.
+    Removed,
+    /// It can never be approved (`reason` says why).
+    Unsupported,
+    /// The node's own node.toml has a server of this name, which wins.
+    Hidden,
+}
+
+/// One server as a person is shown it: what the entry runs, in full, as
+/// text; the names of its environment, never a value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectMcpEntry {
+    pub name: String,
+    pub state: ProjectMcpState,
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env_keys: Vec<String>,
+    /// The digest of the file's entry, to approve it with (`new`,
+    /// `changed`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+    /// Why it is `unsupported` or `hidden`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// For `changed`: what the approved copy runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_args: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_env_keys: Option<Vec<String>>,
+}
+
+/// A project folder's `.mcp.json` as one person stands with it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectMcpList {
+    /// Why the file could not be read, when it could not (a link, not a
+    /// regular file, over the cap, not the standard shape); `entries`
+    /// then holds this person's approved copies only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unreadable: Option<String>,
+    /// There is no `.mcp.json` in the folder.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub missing: bool,
+    #[serde(default)]
+    pub entries: Vec<ProjectMcpEntry>,
+    /// What the node said about the request (an approval refused because
+    /// the entry changed, …), in words for the person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
 /// The most paths one `session.prompt` may name in `files`, and the
 /// longest one, in bytes; a node reads at most its own number of them.
 pub const MAX_PROMPT_FILES: usize = 64;
@@ -636,6 +739,18 @@ pub enum NodeToMaster {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// The answer to `project.mcp` (pull only: never sent unasked): the
+    /// list after the request, or why there is none, in words for the
+    /// person. Names, commands, arguments and environment names; never an
+    /// environment value.
+    #[serde(rename = "project.mcp_result")]
+    ProjectMcpResult {
+        req_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        list: Option<Box<ProjectMcpList>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -674,6 +789,13 @@ pub enum MasterToNode {
         /// `session_created`; no later command carries or changes it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         exec_mode: Option<harness_core::policy::ExecMode>,
+        /// The account that owns the chat (its user id; none for the API
+        /// token's). Recorded in `session_created`, never changed: the node
+        /// starts only the repository MCP servers this account approved
+        /// (X.36, PLAN.md T82). A node refuses one that is not
+        /// [`valid_user_id`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<String>,
     },
     #[serde(rename = "session.prompt")]
     Prompt {
@@ -1015,6 +1137,21 @@ pub enum MasterToNode {
     /// has no effect. Only to nodes with [`CAP_PROJECTS`].
     #[serde(rename = "project.create")]
     ProjectCreate { req_id: String, name: String },
+    /// A person's request about a project folder's `.mcp.json` (X.36,
+    /// PLAN.md T82): whose request it is, the project's folder (the node
+    /// checks it as a chat's folder, `check_cwd`) and what they ask.
+    /// Answered by one `project.mcp_result`, never an ack, outside the
+    /// command loop; no session. The node refuses it unless its node.toml
+    /// says `[mcp] project_servers = "ask"`. Only to nodes with
+    /// [`CAP_PROJECT_MCP`], and only on a person's HTTP request: nothing a
+    /// turn, a tool or a model does sends one.
+    #[serde(rename = "project.mcp")]
+    ProjectMcp {
+        req_id: String,
+        user_id: String,
+        folder: String,
+        request: ProjectMcpRequest,
+    },
 }
 
 impl MasterToNode {
@@ -1047,7 +1184,8 @@ impl MasterToNode {
             | MasterToNode::SkillResult { .. }
             | MasterToNode::Diff { .. }
             | MasterToNode::Files { .. }
-            | MasterToNode::ProjectCreate { .. } => None,
+            | MasterToNode::ProjectCreate { .. }
+            | MasterToNode::ProjectMcp { .. } => None,
         }
     }
 }
@@ -1580,6 +1718,7 @@ mod tests {
             agent: None,
             incognito: false,
             no_callbacks,
+            owner: None,
         };
         assert!(
             serde_json::to_value(create(false))

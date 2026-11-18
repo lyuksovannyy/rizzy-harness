@@ -95,6 +95,7 @@ async fn create_in(link: &mut NodeLink, ws: &std::path::Path, mode: ApprovalMode
             cwd: ws.display().to_string(),
             model: None,
             approval_mode: Some(mode),
+            owner: None,
         })
         .unwrap();
     until(link, sid, |k| matches!(k, EventKind::SessionCreated(_))).await;

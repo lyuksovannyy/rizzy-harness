@@ -176,6 +176,7 @@ impl Harness {
             cwd: self.ws.display().to_string(),
             model: None,
             approval_mode: Some(harness_core::policy::ApprovalMode::Auto),
+            owner: None,
         });
         self.until(|k| matches!(k, EventKind::SessionCreated(_)))
             .await;
@@ -429,6 +430,7 @@ async fn cwd_outside_roots_is_refused() {
         cwd: "/usr".into(),
         model: None,
         approval_mode: None,
+        owner: None,
     });
     match h.link.from_node.recv().await.unwrap() {
         NodeToMaster::Ack { ok, error, .. } => {
@@ -467,6 +469,7 @@ async fn a_node_without_its_required_sandbox_refuses_sessions() {
         cwd: h.ws.display().to_string(),
         model: None,
         approval_mode: None,
+        owner: None,
     });
     match h.link.from_node.recv().await.unwrap() {
         NodeToMaster::Ack { ok, error, .. } => {
@@ -535,6 +538,7 @@ async fn cwd_containing_the_data_dir_is_refused() {
             cwd: cwd.display().to_string(),
             model: None,
             approval_mode: None,
+            owner: None,
         });
         match h.link.from_node.recv().await.unwrap() {
             NodeToMaster::Ack { ok, error, .. } => {
@@ -579,6 +583,7 @@ async fn a_loaded_session_over_the_data_dir_gets_no_turn() {
                 cwd: ws.display().to_string(),
                 model: None,
                 approval_mode: None,
+                owner: None,
             })
             .unwrap();
         let mut from = link.from_node;
@@ -752,6 +757,7 @@ async fn recovers_interrupted_turn_on_start() {
                 backend: "native".into(),
                 node_id: "local".into(),
                 approval_mode: Default::default(),
+                owner_id: None,
             }),
             EventKind::TurnStarted(TurnStarted {
                 cause: None,
@@ -866,6 +872,7 @@ async fn sub_task_sessions_ask_no_questions() {
         backend: "native".into(),
         node_id: "local".into(),
         approval_mode: Default::default(),
+        owner_id: None,
     })
     .into_parts();
     let created = RawEvent {
@@ -2083,6 +2090,7 @@ async fn ack_time_on_a_long_session() {
                 backend: "native".into(),
                 node_id: "local".into(),
                 approval_mode: Default::default(),
+                owner_id: None,
             });
             for seq in 1..=n {
                 let kind = if seq == 1 {
@@ -2956,6 +2964,7 @@ async fn create_in(h: &mut Harness, cwd: &std::path::Path) -> SessionId {
         cwd: cwd.display().to_string(),
         model: None,
         approval_mode: Some(harness_core::policy::ApprovalMode::Auto),
+        owner: None,
     });
     until_in(h, sid, |k| matches!(k, EventKind::SessionCreated(_))).await;
     sid
@@ -3678,6 +3687,7 @@ async fn create_with_mode(h: &mut Harness, mode: harness_core::policy::ApprovalM
         profile: None,
         agent: None,
         incognito: false,
+        owner: None,
     });
     h.until(|k| matches!(k, EventKind::SessionCreated(_))).await;
     sid
@@ -3925,6 +3935,7 @@ async fn a_stop_closes_the_running_turn_and_refuses_new_work() {
         cwd: h.ws.display().to_string(),
         model: None,
         approval_mode: None,
+        owner: None,
     });
     h.send(MasterToNode::Cancel {
         req_id: "x".into(),

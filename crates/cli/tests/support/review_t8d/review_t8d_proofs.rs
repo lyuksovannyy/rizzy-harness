@@ -303,6 +303,7 @@ no_callbacks: false,
             cwd: self.ws.display().to_string(),
             model: None,
             approval_mode: Some(mode),
+            owner: None,
         });
         self.until(sid, |k| matches!(k, EventKind::SessionCreated(_)))
             .await;

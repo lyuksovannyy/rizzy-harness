@@ -162,6 +162,7 @@ async fn create(link: &mut NodeLink, ws: &std::path::Path, no_callbacks: bool) -
             cwd: ws.display().to_string(),
             model: None,
             approval_mode: Some(ApprovalMode::Auto),
+            owner: None,
         })
         .unwrap();
     until(link, sid, |k| matches!(k, EventKind::SessionCreated(_))).await;

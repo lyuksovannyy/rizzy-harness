@@ -138,6 +138,7 @@ impl Link {
             cwd: cwd.display().to_string(),
             model: None,
             approval_mode: Some(ApprovalMode::Auto),
+            owner: None,
         });
         self.pump_until(|l| l.ack(&req).is_some(), Duration::from_secs(10))
             .await;

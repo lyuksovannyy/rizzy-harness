@@ -157,6 +157,7 @@ impl N {
             incognito: false,
             no_callbacks,
             exec_mode: exec,
+            owner: None,
         });
         self.ack().await.unwrap();
         sid

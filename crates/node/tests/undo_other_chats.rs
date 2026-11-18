@@ -125,6 +125,7 @@ impl Rig {
             cwd: self.ws.display().to_string(),
             model: None,
             approval_mode: Some(harness_core::policy::ApprovalMode::Auto),
+            owner: None,
         });
         self.until_in(sid, |k| matches!(k, EventKind::SessionCreated(_)))
             .await;
@@ -606,6 +607,7 @@ async fn an_incognito_chat_cannot_work_in_a_folder_so_its_purge_leaves_nothing()
         cwd: r.ws.display().to_string(),
         model: None,
         approval_mode: Some(harness_core::policy::ApprovalMode::Auto),
+        owner: None,
     });
     let err = loop {
         match r.recv().await {
@@ -767,6 +769,7 @@ fn seed_other_chat(store: &Store, ws: &Path, turns: u64, age_ms: i64) {
         backend: "native".into(),
         node_id: "local".into(),
         approval_mode: harness_core::policy::ApprovalMode::Auto,
+        owner_id: None,
     }));
     let file = ws.join("f.txt").display().to_string();
     for t in 0..turns {

@@ -151,6 +151,7 @@ impl Node {
             cwd,
             model: None,
             approval_mode: Some(ApprovalMode::Auto),
+            owner: None,
         })
         .await
         .unwrap();

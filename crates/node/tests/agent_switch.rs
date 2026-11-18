@@ -208,6 +208,7 @@ impl N {
             incognito: false,
             no_callbacks: false,
             exec_mode: None,
+            owner: None,
         });
         self.ack(&req_id).await.unwrap();
         sid
@@ -565,6 +566,7 @@ async fn a_chat_created_on_a_chosen_model_shows_no_notice_at_its_first_message()
         incognito: false,
         no_callbacks: false,
         exec_mode: None,
+        owner: None,
     });
     n.ack(&req_id).await.unwrap();
     n.turn(sid, &a, false, "first").await;

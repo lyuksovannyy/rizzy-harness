@@ -52,6 +52,9 @@ pub struct NodePolicy {
     /// programs each agentic chat may start, in its own confinement, and
     /// whose tools its agent is offered. Only this file adds one.
     pub mcp_servers: std::collections::BTreeMap<String, harness_tools::mcp::ServerConfig>,
+    /// A repository's own MCP servers (`[mcp]`, ADOPTION_PLAN X.36,
+    /// PLAN.md T82): off by default.
+    pub mcp: McpPolicy,
     /// Where the node makes new projects' folders on request (`[projects]`,
     /// ADOPTION_PLAN X.26, PLAN.md T77).
     pub projects: ProjectsPolicy,
@@ -72,6 +75,33 @@ pub struct NodePolicy {
     /// session). Never read from node.toml.
     #[serde(skip)]
     pub sandbox_tmp: Option<PathBuf>,
+}
+
+/// `[mcp]` in node.toml: a repository's own MCP servers (ADOPTION_PLAN
+/// X.36, PLAN.md T82). Nothing the master sends can change it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct McpPolicy {
+    /// `"off"` (default): no `.mcp.json` is ever read and every request
+    /// about one is refused. `"ask"`: a person may approve, one by one and
+    /// for their own chats only, the servers a project folder's
+    /// `.mcp.json` declares; the node keeps its own copy of each approved
+    /// entry, and that copy is what runs, in the chat's sandbox.
+    pub project_servers: ProjectServers,
+    /// Where the approved copies are kept (in the node's data directory,
+    /// 0600). Set by the runtime, never read from node.toml; without it
+    /// `"ask"` works as `"off"`.
+    #[serde(skip)]
+    pub approvals_file: Option<PathBuf>,
+}
+
+/// `[mcp] project_servers`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectServers {
+    #[default]
+    Off,
+    Ask,
 }
 
 /// `[sandbox]` in node.toml: what the agent's shell (and graphify) may
@@ -928,6 +958,7 @@ impl Default for NodePolicy {
             skills: SkillsPolicy::default(),
             instructions: InstructionsPolicy::default(),
             mcp_servers: Default::default(),
+            mcp: McpPolicy::default(),
             projects: ProjectsPolicy::default(),
             protected_dirs: Vec::new(),
             exec: Default::default(),

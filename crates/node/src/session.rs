@@ -184,10 +184,14 @@ pub(crate) struct Session {
     /// This session's background commands (T.8d): an agentic session that
     /// is not a sub-agent's. Dropping it stops every one.
     bg: Option<Arc<harness_tools::background::SessionBg>>,
-    /// This session's MCP servers (X.3), from node.toml alone: an agentic
-    /// session that is not a sub-agent's, on a node that has some. Started
-    /// by the first turn that offers their tools; dropping it stops them.
+    /// This session's MCP servers (X.3), from node.toml, and the
+    /// repository's that its owner approved (X.36, given before each turn):
+    /// an agentic session that is not a sub-agent's, on a node that has
+    /// some or takes a repository's. Started by the first turn that offers
+    /// their tools; dropping it stops them.
     mcp: Option<Arc<harness_tools::mcp::SessionMcp>>,
+    /// The account that owns the chat (`session_created.owner_id`, X.36).
+    owner: Option<String>,
     /// Ends that came while a turn ran: recorded at its next step boundary
     /// (`delivered`), or after its end.
     bg_queue: Mutex<Vec<harness_tools::background::Ended>>,
@@ -347,14 +351,20 @@ fn mcp_servers(
     if profile != Profile::Agentic || parent.is_some() {
         return None;
     }
-    harness_tools::mcp::SessionMcp::at(
-        &node.cfg.policy.mcp_servers,
-        harness_tools::mcp::Home {
-            key: id.to_string(),
-            workspace: cwd.to_path_buf(),
-            pin,
-        },
-    )
+    let home = harness_tools::mcp::Home {
+        key: id.to_string(),
+        workspace: cwd.to_path_buf(),
+        pin,
+    };
+    // A node that takes a repository's servers (X.36) gives every chat a
+    // table, filled before each turn with its owner's approved copies.
+    if node.project_mcp.is_some() {
+        return Some(harness_tools::mcp::SessionMcp::at_always(
+            &node.cfg.policy.mcp_servers,
+            home,
+        ));
+    }
+    harness_tools::mcp::SessionMcp::at(&node.cfg.policy.mcp_servers, home)
 }
 
 /// Pin an agentic session's folder (see [`Session::pin`]).
@@ -456,6 +466,9 @@ pub(crate) struct NewSession {
     pub no_callbacks: bool,
     /// Chosen by the runtime (or the parent's, for a sub-agent).
     pub exec_mode: Option<harness_core::policy::ExecMode>,
+    /// The chat's owner as the master named it (X.36); none for a
+    /// sub-agent's session, which has no table of its own.
+    pub owner: Option<String>,
 }
 
 impl Session {
@@ -476,6 +489,7 @@ impl Session {
             owned,
             no_callbacks,
             exec_mode,
+            owner,
         } = new;
         let (bg, ends) = background_table(&node, profile, parent_session, exec_mode, 1);
         let s = Arc::new(Self {
@@ -527,6 +541,7 @@ impl Session {
             pin_cell: Mutex::new(pin_of(profile, &cwd)),
             owned_cell: Mutex::new(owned),
             exec_mode,
+            owner: owner.filter(|_| parent_session.is_none()),
         });
         Self::record_ends(&s, ends);
         s.append(EventKind::SessionCreated(SessionCreated {
@@ -542,8 +557,12 @@ impl Session {
             node_id: node.cfg.node_id.clone(),
             approval_mode: mode,
             exec_mode,
+            owner_id: s.owner.clone(),
         }))
         .await?;
+        // The table is built: the repository's file is read now, once, for
+        // the names it holds, if the owner approved something here (X.36).
+        s.look_project_mcp(true).await;
         Ok(s)
     }
 
@@ -666,9 +685,36 @@ impl Session {
             // As recorded, never re-chosen: one the node no longer offers
             // runs nothing (`checked_folder`).
             exec_mode: meta.exec_mode,
+            owner: meta
+                .owner_id
+                .clone()
+                .filter(|_| meta.parent_session.is_none()),
         });
         Self::record_ends(&s, ends);
+        // Its table is built again after a restart: the repository's file
+        // is read once, if the owner approved something here and no chat
+        // of this start read that folder's file yet (X.36).
+        s.look_project_mcp(false).await;
         Ok(s)
+    }
+
+    /// Read this chat's folder's `.mcp.json` once, for the names it holds,
+    /// when its table is built (X.36, PLAN.md T82): only on a node that
+    /// takes a repository's servers, for a chat with an owner who approved
+    /// something for this folder; at a load only when no other chat of
+    /// this start read it. Never per turn. A read that does not end within
+    /// `project_mcp::LOOK_WAIT` changes nothing.
+    async fn look_project_mcp(&self, always: bool) {
+        let (Some(pm), Some(owner), Some(_)) = (&self.node.project_mcp, &self.owner, &self.mcp)
+        else {
+            return;
+        };
+        if !pm.has_approvals(owner, &self.cwd) || (!always && pm.knows(&self.cwd)) {
+            return;
+        }
+        let (pm, cwd) = (pm.clone(), self.cwd.clone());
+        let read = tokio::task::spawn_blocking(move || pm.look(&cwd));
+        let _ = tokio::time::timeout(crate::project_mcp::LOOK_WAIT, read).await;
     }
 
     /// The task that records this session's background ends, one at a
@@ -890,8 +936,49 @@ impl Session {
     /// The table's lifecycle stays its chat's alone (`close_mcp`,
     /// `mcp_idle`, `mcp_running` read only `self.mcp`).
     fn chat_mcp(&self) -> Option<Arc<harness_tools::mcp::SessionMcp>> {
+        self.chat_table(|s| s.mcp.clone()).flatten()
+    }
+
+    /// The chat's table as a turn takes it: first given its owner's
+    /// approved copies of the repository's servers for the chat's folder
+    /// as the node holds them now (X.36, PLAN.md T82: an approval taken or
+    /// removed since, a name the last read of the file did not find, a
+    /// `host` chat). Nothing is read from disk here.
+    fn chat_mcp_for_turn(&self) -> Option<Arc<harness_tools::mcp::SessionMcp>> {
+        self.chat_table(|root| {
+            root.sync_project_mcp();
+            root.mcp.clone()
+        })
+        .flatten()
+    }
+
+    /// Give this chat's table its owner's approved copies as the node
+    /// holds them now (X.36): before each turn, and at once for every chat
+    /// of a folder after a person's request about it, so a removed
+    /// approval or entry stops its server then. Nothing is read from disk.
+    pub(crate) fn sync_project_mcp(&self) {
+        let (Some(m), Some(pm)) = (&self.mcp, &self.node.project_mcp) else {
+            return;
+        };
+        let (servers, notes) = pm.servers_for(
+            &self.node.cfg.policy,
+            self.owner.as_deref(),
+            &self.cwd,
+            self.exec_mode,
+        );
+        m.set_project(&servers, notes);
+    }
+
+    /// This chat's folder, if it is a chat with a table (not a sub-agent's).
+    pub(crate) fn table_folder(&self) -> Option<&std::path::Path> {
+        self.mcp.as_ref().map(|_| self.cwd.as_path())
+    }
+
+    /// `f` of the chat at the top of this session's parents (itself for a
+    /// chat) under [`Self::chat_mcp`]'s rule.
+    fn chat_table<T>(&self, f: impl FnOnce(&Session) -> T) -> Option<T> {
         let Some(mut parent) = self.parent_session else {
-            return self.mcp.clone();
+            return Some(f(self));
         };
         // This turn, and each one above it, must be a foreground run of
         // the turn its parent is running now, up to the root chat.
@@ -902,7 +989,7 @@ impl Session {
                 return None;
             }
             match s.parent_session {
-                None => return s.mcp.clone(),
+                None => return Some(f(&s)),
                 Some(p) => {
                     by = s.delegated_by()?;
                     parent = p;
@@ -4031,6 +4118,7 @@ impl Session {
                 no_callbacks: true,
                 // Its parent's, always (N.10a).
                 exec_mode: self.exec_mode,
+                owner: None,
                 // A read-only grandchild works in its parent's node-owned folder.
                 owned: iso
                     .as_ref()
@@ -5153,7 +5241,7 @@ impl TurnHost for Session {
     }
 
     fn mcp(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
-        self.chat_mcp()
+        self.chat_mcp_for_turn()
             .map(|m| m as Arc<dyn std::any::Any + Send + Sync>)
     }
 
@@ -5317,8 +5405,13 @@ impl TurnHost for Session {
             .filter(|_| tool.starts_with(harness_tools::mcp::PREFIX))
             && let Some((server, raw)) = m.origin(tool).await
         {
+            let from = if m.is_project(&server) {
+                "; from the repository's .mcp.json, as you approved it"
+            } else {
+                "; from node.toml"
+            };
             reason = format!(
-                "{reason} (server `{server}`, its tool `{}`)",
+                "{reason} (server `{server}`, its tool `{}`{from})",
                 harness_core::event::shown_name(&raw)
             );
         }
@@ -5576,7 +5669,7 @@ fn tool_reason(tool: &str, risk: ToolRisk, input: &Value, policy: &crate::NodePo
     }
     if tool.starts_with(harness_tools::mcp::PREFIX) {
         return format!(
-            "`{tool}` is a tool of an MCP server this node runs (node.toml): a program the \
+            "`{tool}` is a tool of an MCP server this node runs: a program the \
              harness did not write, in this chat's folder; what it does is up to that server"
         );
     }

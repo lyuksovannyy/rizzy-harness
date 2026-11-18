@@ -69,6 +69,7 @@ impl Chat {
             agent: None,
             profile: Some(Profile::Chat),
             incognito: false,
+            owner: None,
         });
         assert_eq!(chat.ack("c").await, Ok(()));
         chat

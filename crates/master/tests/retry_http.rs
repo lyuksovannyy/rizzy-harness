@@ -77,6 +77,7 @@ impl Fake {
             agent_id: None,
             incognito: false,
             parent_session: parent,
+            owner_id: None,
         });
         self.emit(sid, k);
     }

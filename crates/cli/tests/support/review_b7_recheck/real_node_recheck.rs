@@ -193,6 +193,7 @@ impl Node {
             cwd: cwd.display().to_string(),
             model: None,
             approval_mode: Some(ApprovalMode::Auto),
+            owner: None,
         });
         if ack {
             self.wait("a create's ack", Duration::from_secs(30), |s| {

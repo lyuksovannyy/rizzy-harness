@@ -12,6 +12,7 @@ mod instructions;
 mod others;
 mod outbox;
 pub mod policy;
+mod project_mcp;
 pub mod projects;
 mod recall;
 mod session;
@@ -61,6 +62,8 @@ struct CreateArgs {
     no_callbacks: bool,
     /// A request only: [`exec::ExecOffers::choose`] decides.
     exec_mode: Option<harness_core::policy::ExecMode>,
+    /// The chat's owner (X.36): recorded, never changed.
+    owner: Option<String>,
 }
 
 /// The longest a delete waits for its session's background commands: the
@@ -132,7 +135,8 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::SkillResult { .. }
         | MasterToNode::Diff { .. }
         | MasterToNode::Files { .. }
-        | MasterToNode::ProjectCreate { .. } => None,
+        | MasterToNode::ProjectCreate { .. }
+        | MasterToNode::ProjectMcp { .. } => None,
     }
 }
 
@@ -216,6 +220,10 @@ pub(crate) struct Inner {
     /// ones being made (one at a time).
     projects_made: projects::Made,
     project_slots: Arc<tokio::sync::Semaphore>,
+    /// A repository's MCP servers (X.36, PLAN.md T82): only where node.toml
+    /// says `[mcp] project_servers = "ask"` on an agentic node; `None`
+    /// otherwise, and then no `.mcp.json` is ever read.
+    pub(crate) project_mcp: Option<Arc<project_mcp::ProjectMcp>>,
 }
 
 impl Inner {
@@ -524,6 +532,29 @@ impl NodeRuntime {
                 cfg.secrets.add(v.clone());
             }
         }
+        let project_mcp = match (
+            &cfg.policy.mcp.project_servers,
+            &cfg.policy.mcp.approvals_file,
+        ) {
+            (policy::ProjectServers::Ask, Some(file))
+                if cfg.profile == harness_core::event::Profile::Agentic =>
+            {
+                Some(Arc::new(project_mcp::ProjectMcp::open(
+                    file.clone(),
+                    cfg.secrets.clone(),
+                )))
+            }
+            (policy::ProjectServers::Ask, None)
+                if cfg.profile == harness_core::event::Profile::Agentic =>
+            {
+                tracing::warn!(
+                    "[mcp] project_servers = \"ask\", but this runtime keeps no approvals file: \
+                     a repository's MCP servers stay off"
+                );
+                None
+            }
+            _ => None,
+        };
         let rows = cfg.store.call(|s| s.sessions()).await?;
         let hosted: std::collections::HashSet<SessionId> =
             rows.iter().map(|r| r.session_id).collect();
@@ -548,6 +579,7 @@ impl NodeRuntime {
             file_lists: Arc::new(tokio::sync::Semaphore::new(DIFF_AT_ONCE)),
             projects_made: Default::default(),
             project_slots: Arc::new(tokio::sync::Semaphore::new(1)),
+            project_mcp,
         });
         for row in rows {
             let s = Session::load(inner.clone(), row.session_id).await?;
@@ -575,7 +607,7 @@ impl NodeRuntime {
         }
         // MCP servers no call used for a while are stopped (X.3): every
         // chat stays loaded, so they would pile up otherwise.
-        if !this.inner.cfg.policy.mcp_servers.is_empty() {
+        if !this.inner.cfg.policy.mcp_servers.is_empty() || this.inner.project_mcp.is_some() {
             let weak = Arc::downgrade(&this.inner);
             tokio::spawn(async move {
                 loop {
@@ -795,6 +827,11 @@ impl NodeRuntime {
                 {
                     capabilities.push(harness_protocol::CAP_PROJECTS.into());
                 }
+                // A repository's MCP servers (X.36, T82): only with node.toml
+                // `[mcp] project_servers = "ask"`.
+                if self.inner.project_mcp.is_some() {
+                    capabilities.push(harness_protocol::CAP_PROJECT_MCP.into());
+                }
                 // Hand-off notes (X.16): the master asks once a chat idles.
                 // Off is silent, as for callbacks: with
                 // `handoff_notes_per_hour = 0` the master asks nothing.
@@ -895,6 +932,14 @@ impl NodeRuntime {
                     MasterToNode::ProjectCreate { req_id, name } => {
                         this.create_project(req_id, name)
                     }
+                    // A person's request about a project's `.mcp.json`
+                    // (X.36): no session, its own task.
+                    MasterToNode::ProjectMcp {
+                        req_id,
+                        user_id,
+                        folder,
+                        request,
+                    } => this.project_mcp(req_id, user_id, folder, request),
                     // Answered here, at once: they must not wait behind a
                     // slow restore or delete (AUDIT S10), nor behind the
                     // output queued for the master (A.21): their acks go
@@ -1195,6 +1240,97 @@ impl NodeRuntime {
         });
     }
 
+    /// Answer `project.mcp` (X.36, PLAN.md T82) from a task of its own;
+    /// never acked: `project.mcp_result` is the answer. Refused unless
+    /// node.toml says `[mcp] project_servers = "ask"`; at most
+    /// `project_mcp::AT_ONCE` at a time on this node. An approval taken or
+    /// removed gets an audit line (ids and the server's name, never the
+    /// entry's environment).
+    fn project_mcp(
+        &self,
+        req_id: String,
+        user_id: String,
+        folder: String,
+        request: harness_protocol::ProjectMcpRequest,
+    ) {
+        let refuse = |error: String| NodeToMaster::ProjectMcpResult {
+            req_id: req_id.clone(),
+            list: None,
+            error: Some(error),
+        };
+        let Some(pm) = self.inner.project_mcp.clone() else {
+            return self.inner.publish(refuse(project_mcp::OFF.into()));
+        };
+        let Ok(permit) = pm.busy.clone().try_acquire_owned() else {
+            return self.inner.publish(refuse(
+                "this node is answering other requests about repository servers; try again".into(),
+            ));
+        };
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            let (u, f, r) = (user_id.clone(), folder.clone(), request);
+            let pm2 = pm.clone();
+            let inner2 = inner.clone();
+            let work =
+                tokio::task::spawn_blocking(move || pm2.handle(&inner2.cfg.policy, &u, &f, &r));
+            let out = match tokio::time::timeout(project_mcp::WAIT, work).await {
+                Ok(Ok(o)) => o,
+                Ok(Err(e)) => project_mcp::Outcome {
+                    list: Err(format!("the node failed to answer: {e}")),
+                    changed: None,
+                },
+                Err(_) => project_mcp::Outcome {
+                    list: Err("the node could not read the project's folder in time".into()),
+                    changed: None,
+                },
+            };
+            // Every chat of the folder takes up what the request changed
+            // now (an approval removed, an entry gone from the file): its
+            // server stops at once, not at that chat's next turn.
+            if let Ok(real) = inner.cfg.policy.check_cwd(&folder) {
+                let chats: Vec<Arc<Session>> = inner
+                    .sessions
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .values()
+                    .filter(|s| s.table_folder() == Some(real.as_path()))
+                    .cloned()
+                    .collect();
+                for s in chats {
+                    s.sync_project_mcp();
+                }
+            }
+            if let Some((what, name)) = &out.changed {
+                let detail = serde_json::json!({
+                    "user": user_id,
+                    "folder": folder,
+                    "server": name,
+                });
+                tracing::info!(user = %user_id, folder = %folder.escape_debug(), server = %name, "project MCP server {what}d");
+                let kind = if *what == "approve" {
+                    "project_mcp.approve"
+                } else {
+                    "project_mcp.remove"
+                };
+                inner.audit_log.record(kind, detail.to_string());
+            }
+            let msg = match out.list {
+                Ok(l) => NodeToMaster::ProjectMcpResult {
+                    req_id,
+                    list: Some(Box::new(l)),
+                    error: None,
+                },
+                Err(e) => NodeToMaster::ProjectMcpResult {
+                    req_id,
+                    list: None,
+                    error: Some(e),
+                },
+            };
+            inner.publish_wait(msg).await;
+        });
+    }
+
     /// "Save as artifact": check the path now (the ack carries a refusal),
     /// copy it later, ending in `artifact_staged` or
     /// `artifact_stage_failed` on the session's log.
@@ -1338,6 +1474,7 @@ impl NodeRuntime {
                 agent,
                 incognito,
                 exec_mode,
+                owner,
                 ..
             } => {
                 // The mode asked for (N.10a review N-d); what was chosen is
@@ -1360,6 +1497,7 @@ impl NodeRuntime {
                         incognito,
                         no_callbacks,
                         exec_mode,
+                        owner,
                     },
                 )
                 .await
@@ -1643,6 +1781,15 @@ impl NodeRuntime {
                 self.create_project(req_id, name);
                 Ok(())
             }
+            MasterToNode::ProjectMcp {
+                req_id,
+                user_id,
+                folder,
+                request,
+            } => {
+                self.project_mcp(req_id, user_id, folder, request);
+                Ok(())
+            }
         };
         if let Some(req_id) = req_id {
             let ack = NodeToMaster::Ack {
@@ -1675,6 +1822,7 @@ impl NodeRuntime {
             incognito,
             no_callbacks,
             exec_mode,
+            owner,
         } = args;
         if self.session(sid).is_some() {
             return Err("session already exists".into());
@@ -1688,6 +1836,12 @@ impl NodeRuntime {
             return Err(format!(
                 "this runtime hosts {hosted:?} sessions, not {profile:?}"
             ));
+        }
+        if owner
+            .as_deref()
+            .is_some_and(|o| !harness_protocol::valid_user_id(o))
+        {
+            return Err("the chat's owner is not a valid account id".into());
         }
         let policy = &self.inner.cfg.policy;
         // The mode first (N.10a): chosen inside what this node offers,
@@ -1727,6 +1881,7 @@ impl NodeRuntime {
                 owned: None,
                 no_callbacks,
                 exec_mode,
+                owner,
             },
         )
         .await
