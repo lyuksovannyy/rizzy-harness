@@ -4126,7 +4126,16 @@ async fn a_cancel_before_the_stop_stays_the_users() {
 /// checkpoint when the stop came ended `completed`.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_completed_turn_in_its_checkpoint_stays_completed() {
-    let mut h = Harness::new(auto_policy).await;
+    // No size cap, so the untracked sparse file is checkpointed (with the
+    // default cap it is left out and the checkpoint is quick).
+    let mut h = Harness::new(|root: &std::path::Path| NodePolicy {
+        limits: harness_node::LimitsPolicy {
+            checkpoint_untracked_max_kb: 0,
+            ..Default::default()
+        },
+        ..auto_policy(root)
+    })
+    .await;
     let sid = h.create().await;
     // A sparse file: its snapshot takes seconds and no disk.
     h.send(prompt_msg("p", sid, "run: truncate -s 2G big"));

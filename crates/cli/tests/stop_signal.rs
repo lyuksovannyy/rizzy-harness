@@ -338,6 +338,14 @@ fn setup() -> (tempfile::TempDir, PathBuf, PathBuf) {
     (dir, data, ws)
 }
 
+/// Turn the checkpoint size cap off in `data`'s node.toml.
+fn uncapped(data: &Path) {
+    let p = data.join("node.toml");
+    let mut t = std::fs::read_to_string(&p).unwrap();
+    t.push_str("\n[limits]\ncheckpoint_untracked_max_kb = 0\n");
+    std::fs::write(p, t).unwrap();
+}
+
 fn write_config(data: &Path, ws: &Path) {
     std::fs::create_dir_all(data).unwrap();
     std::fs::write(
@@ -947,6 +955,9 @@ async fn a_slow_after_turn_checkpoint_still_ends_stopped() {
     if !containment(&data.parent().unwrap().join("probe")) {
         return;
     }
+    // No size cap: the untracked sparse file must be checkpointed for the
+    // snapshot to take its time (the default cap leaves it out).
+    uncapped(&data);
     let _clean = Cleanup(ws.clone(), SECS);
     let s = serve(&data, &[]);
     let sid = s.session(&ws, "auto", None).await;
@@ -981,6 +992,9 @@ async fn a_stop_past_its_bound_exits_1_naming_the_sessions() {
     if !containment(&data.parent().unwrap().join("probe")) {
         return;
     }
+    // No size cap: the untracked sparse file must be checkpointed for the
+    // snapshot to take its time (the default cap leaves it out).
+    uncapped(&data);
     let _clean = Cleanup(ws.clone(), SECS);
     let args = ["serve", "--bind", "127.0.0.1:0"];
     let proc = spawn(

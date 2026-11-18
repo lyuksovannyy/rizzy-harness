@@ -26,7 +26,10 @@ fn peak() -> u64 {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_undo_of_large_files_holds_none_of_them_in_memory() {
     const BOUND: u64 = 48 << 20;
-    let mut rig = support::Rig::new().await;
+    // No size cap: these untracked 200 MiB files are what must be
+    // checkpointed and written back (with the default 10 MiB cap they are
+    // left out, and the undo rightly leaves them gone, §2.7.1).
+    let mut rig = support::Rig::with_checkpoint_cap_kb(0).await;
     // Two 200 MiB files (sparse; distinct first bytes), made in one turn
     // and deleted in the next; undoing the second writes both back.
     rig.turn(
