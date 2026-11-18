@@ -12,6 +12,7 @@ pub mod blobs;
 pub mod board;
 mod callbacks;
 pub mod config;
+pub mod connectors;
 pub mod diff;
 pub mod env;
 mod favicon;
@@ -37,6 +38,7 @@ pub mod project_mcp;
 pub mod projects;
 pub mod providers;
 pub mod recall;
+pub mod remote;
 pub mod resolver;
 pub mod response;
 pub mod routines;
@@ -345,6 +347,8 @@ pub struct MasterInner {
     outbound: Mutex<outbound::Outbound>,
     /// Sealed storage and forge connections (X.27 step 1).
     forge: forge::State,
+    /// Custom connectors' checks: limits, offers, test hooks (X.35).
+    connectors: connectors::State,
     /// Callback turns: the watcher's per-chat state (T.8d step 3).
     callbacks: callbacks::Callbacks,
     /// Hand-off notes asked for (X.16).
@@ -768,6 +772,7 @@ impl Master {
                 sockets: Default::default(),
                 outbound: Mutex::new(outbound::Outbound::from_env()),
                 forge: Default::default(),
+                connectors: Default::default(),
                 callbacks: Default::default(),
                 handoffs: Default::default(),
                 level_write_delay_ms: Default::default(),

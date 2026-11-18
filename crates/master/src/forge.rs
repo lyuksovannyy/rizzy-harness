@@ -23,17 +23,19 @@
 //! In this version a connection is stored and checked only: nothing sends a
 //! token to a node or a model (cloning and pushing are X.27 steps 2 to 4).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use futures::StreamExt as _;
 use harness_core::Secret;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 
+use crate::remote::Attempts;
+pub use crate::remote::Lookup;
 use crate::sealed::{Sample, Sealer, Stored};
 use crate::{Master, lock};
 
@@ -242,7 +244,6 @@ pub enum CheckError {
 }
 
 /// Master-side state: the sealer, the attempt limits and test hooks.
-#[derive(Default)]
 pub struct State {
     sealer: OnceLock<Sealer>,
     hosts: Mutex<Option<Vec<ForgeHost>>>,
@@ -253,17 +254,29 @@ pub struct State {
     lookup: Mutex<Lookup>,
 }
 
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            sealer: OnceLock::new(),
+            hosts: Mutex::new(None),
+            attempts: Attempts::new(LIMITS),
+            timeout_ms: AtomicU64::new(0),
+            lookup: Mutex::default(),
+        }
+    }
+}
+
 /// What the database holds sealed, with a few values to prove a key on.
 pub(crate) fn stored_now(store: &harness_store::Store) -> harness_store::Result<Stored> {
     let count = store.sealed_count()?;
     let samples = store
         .sealed_samples(crate::sealed::SAMPLES)?
         .into_iter()
-        .map(|(user, host, account, sealed)| Sample {
-            table: "user_connections".into(),
-            owner: user,
-            fields: vec![host, account],
-            sealed,
+        .map(|s| Sample {
+            table: s.table,
+            owner: s.owner,
+            fields: s.fields,
+            sealed: s.sealed,
         })
         .collect();
     Ok(Stored { count, samples })
@@ -324,15 +337,17 @@ impl Master {
     /// Tests: look forge names up in `table` (name to addresses) instead of
     /// the system's resolver; the address rules apply as in use.
     pub fn set_forge_lookup(&self, table: HashMap<String, Vec<IpAddr>>) {
-        *lock(&self.inner.forge.lookup) = Lookup {
-            fixed: Some(Arc::new(table)),
-            asked: Arc::default(),
-        };
+        *lock(&self.inner.forge.lookup) = Lookup::table(
+            table
+                .into_iter()
+                .map(|(k, v)| (k, v.into_iter().map(|ip| SocketAddr::new(ip, 0)).collect()))
+                .collect(),
+        );
     }
 
     /// Tests: the names forge calls looked up since `set_forge_lookup`.
     pub fn forge_names_asked(&self) -> Vec<String> {
-        lock(&lock(&self.inner.forge.lookup).asked).clone()
+        lock(&self.inner.forge.lookup).asked()
     }
 
     pub(crate) fn forge_lookup(&self) -> Lookup {
@@ -418,135 +433,21 @@ impl Master {
     }
 }
 
-/// Recent attempts by key (a person's id or a host).
-type Recent = HashMap<String, VecDeque<Instant>>;
-
-/// The per-person budget counts every check (it bounds what one person
-/// makes this server send); the per-host one counts failed checks only (it
-/// keeps this server from hammering a forge with bad tokens), so people
-/// whose tokens work are not locked out by others' junk, though failures
-/// alone can still use it up.
-#[derive(Default)]
-struct Attempts {
-    /// (every check per person, failed checks per host)
-    seen: Mutex<(Recent, Recent)>,
-}
-
-fn prune(q: &mut VecDeque<Instant>, now: Instant) {
-    while q.front().is_some_and(|t| now.duration_since(*t) >= WINDOW) {
-        q.pop_front();
-    }
-}
-
-impl Attempts {
-    fn admit(&self, user: &str, host: &str) -> Result<(), &'static str> {
-        let now = Instant::now();
-        let mut g = lock(&self.seen);
-        let (users, hosts) = &mut *g;
-        for map in [&mut *users, &mut *hosts] {
-            if map.len() >= MAX_TRACKED {
-                map.retain(|_, q| {
-                    prune(q, now);
-                    !q.is_empty()
-                });
-            }
-        }
-        if (!users.contains_key(user) && users.len() >= MAX_TRACKED)
-            || (!hosts.contains_key(host) && hosts.len() >= MAX_TRACKED)
-        {
-            return Err(
-                "too many token checks on this server right now; try again in a few minutes",
-            );
-        }
-        let u = users.entry(user.to_string()).or_default();
-        prune(u, now);
-        if u.len() >= PER_USER {
-            return Err("too many token checks from your account; try again in a few minutes");
-        }
-        if let Some(h) = hosts.get_mut(host) {
-            prune(h, now);
-            if h.len() >= PER_HOST {
-                return Err(
-                    "too many failed token checks against this forge; try again in a few minutes",
-                );
-            }
-        }
-        u.push_back(now);
-        Ok(())
-    }
-
-    fn failed(&self, host: &str) {
-        let now = Instant::now();
-        let mut g = lock(&self.seen);
-        let hosts = &mut g.1;
-        if !hosts.contains_key(host) && hosts.len() >= MAX_TRACKED {
-            hosts.retain(|_, q| {
-                prune(q, now);
-                !q.is_empty()
-            });
-            if hosts.len() >= MAX_TRACKED {
-                return;
-            }
-        }
-        let h = hosts.entry(host.to_string()).or_default();
-        prune(h, now);
-        h.push_back(now);
-    }
-}
-
 /// A pasted token, trimmed: 1 to [`MAX_TOKEN`] visible ASCII characters.
 pub fn clean_token(t: &str) -> Result<Secret<String>, String> {
-    let t = t.trim();
-    if t.is_empty() || t.len() > MAX_TOKEN || !t.bytes().all(|b| (0x21..=0x7e).contains(&b)) {
-        return Err(format!(
-            "a token is 1 to {MAX_TOKEN} visible ASCII characters with no spaces"
-        ));
-    }
-    Ok(Secret::new(t.to_string()))
+    crate::remote::clean_token(t, MAX_TOKEN)
 }
 
-/// How forge names are looked up: the system's resolver, or (tests) a
-/// fixed table; the names asked are kept for tests.
-#[derive(Clone, Default)]
-pub struct Lookup {
-    fixed: Option<Arc<HashMap<String, Vec<IpAddr>>>>,
-    asked: Arc<Mutex<Vec<String>>>,
-}
-
-/// The resolver of every forge call: it looks a name up and, unless the
-/// entry says `private_address`, keeps only public addresses (refusing the
-/// name when none is left). It runs for every connection, so a name that
-/// later resolves inward (DNS rebinding) is refused too.
-struct ForgeResolver {
-    lookup: Lookup,
-    public_only: bool,
-}
-
-impl reqwest::dns::Resolve for ForgeResolver {
-    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
-        let host = name.as_str().to_string();
-        let lookup = self.lookup.clone();
-        let public_only = self.public_only;
-        Box::pin(async move {
-            lock(&lookup.asked).push(host.clone());
-            let all: Vec<SocketAddr> = match &lookup.fixed {
-                Some(t) => t
-                    .get(&host)
-                    .map(|v| v.iter().map(|ip| SocketAddr::new(*ip, 0)).collect())
-                    .unwrap_or_default(),
-                None => tokio::net::lookup_host((host.as_str(), 0)).await?.collect(),
-            };
-            let addrs: Vec<SocketAddr> = all
-                .into_iter()
-                .filter(|a| !public_only || harness_web::is_public(a.ip()))
-                .collect();
-            if addrs.is_empty() {
-                return Err(format!("{host} does not resolve to an allowed address").into());
-            }
-            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
-        })
-    }
-}
+/// The forge limits (`crate::remote::Attempts`).
+pub(crate) const LIMITS: crate::remote::Limits = crate::remote::Limits {
+    per_user: PER_USER,
+    per_target: PER_HOST,
+    window: WINDOW,
+    max_tracked: MAX_TRACKED,
+    busy: "too many token checks on this server right now; try again in a few minutes",
+    user_over: "too many token checks from your account; try again in a few minutes",
+    target_over: "too many failed token checks against this forge; try again in a few minutes",
+};
 
 /// The client for `h`: its resolver (public addresses only unless the
 /// entry allows a private one), same-origin redirects, no proxy.
@@ -557,12 +458,6 @@ fn client(
 ) -> Result<reqwest::Client, CheckError> {
     let unreachable = |why| CheckError::Unreachable(h.host.clone(), why);
     check_api_base(h).map_err(|_| unreachable("its api_base is not allowed"))?;
-    let mut b = reqwest::Client::builder()
-        .connect_timeout(timeout.min(Duration::from_secs(5)))
-        .timeout(timeout)
-        .redirect(harness_agent_native::models::same_origin_redirects())
-        .no_proxy()
-        .user_agent(concat!("rizzy-harness/", env!("CARGO_PKG_VERSION")));
     if !h.private_address {
         let u = reqwest::Url::parse(&h.api_base).map_err(|_| unreachable("bad api_base"))?;
         harness_web::check_public_url(&u).map_err(|_| {
@@ -571,11 +466,8 @@ fn client(
             )
         })?;
     }
-    b = b.dns_resolver(Arc::new(ForgeResolver {
-        lookup: lookup.clone(),
-        public_only: !h.private_address,
-    }));
-    b.build().map_err(|_| unreachable("no HTTP client"))
+    crate::remote::client(timeout, lookup, !h.private_address, &[])
+        .map_err(|_| unreachable("no HTTP client"))
 }
 
 fn auth_headers(kind: ForgeKind, token: &Secret<String>) -> Result<HeaderMap, ()> {
@@ -760,22 +652,10 @@ pub fn valid_login(l: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
 }
 
-/// Characters that change how text around them reads: controls, bidi
-/// controls, zero-width and invisible ones.
-fn hidden(c: char) -> bool {
-    c.is_control()
-        || matches!(c,
-            '\u{00AD}' | '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}'
-            | '\u{2060}'..='\u{206F}' | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}')
-}
-
 /// Forge text shown to a person: hidden characters gone, spaces folded,
 /// at most [`MAX_DISPLAY`] characters; `None` when nothing is left.
 pub fn clean_text(s: &str) -> Option<String> {
-    let s: String = s.chars().filter(|c| !hidden(*c)).collect();
-    let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
-    let s: String = s.chars().take(MAX_DISPLAY).collect();
-    (!s.is_empty()).then_some(s)
+    crate::remote::clean_text(s, MAX_DISPLAY)
 }
 
 /// An e-mail address of visible ASCII with one `@` inside it, or `None`.
@@ -1088,7 +968,7 @@ mod tests {
 
     #[test]
     fn attempts_are_limited_per_person_and_per_host() {
-        let a = Attempts::default();
+        let a = Attempts::new(LIMITS);
         for _ in 0..PER_USER {
             a.admit("alice", "github.com").unwrap();
         }

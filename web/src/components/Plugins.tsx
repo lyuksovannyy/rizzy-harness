@@ -7,10 +7,12 @@
 // written here (Add: write one, or upload a SKILL.md, checked on the
 // server), opened, edited and deleted by their scope's editors. Everything
 // shown comes from a node or the server and is rendered as text only. The
-// person's own forge accounts (X.27) are listed first, in `Connections`.
+// person's own forge accounts (X.27) are listed first, in `Connections`, and
+// the workspace's custom connectors (X.35) after them, in `CustomConnectors`.
 import { useCallback, useEffect, useState } from "react";
 import { call } from "../api";
 import Connections from "./Connections";
+import CustomConnectors from "./CustomConnectors";
 import { shownName } from "../md/hiddenChars";
 import type { FeaturePageProps } from "./pages";
 import { Seg } from "./Seg";
@@ -33,6 +35,8 @@ interface Item {
   name: string;
   /** A skill stored on the server (step B). */
   stored?: Stored | null;
+  /** A custom connector of this workspace (X.35). */
+  custom?: { id: string; host: string | null; auth: string } | null;
   nodes: Announcer[];
   access: Access;
   agents: string[];
@@ -75,7 +79,7 @@ export default function Plugins(props: FeaturePageProps) {
   const [filter, setFilter] = useState<"all" | Kind>("all");
   const [q, setQ] = useState("");
   const [open, setOpen] = useState<string | null>(null);
-  const [adding, setAdding] = useState<"menu" | "write" | "upload" | null>(null);
+  const [adding, setAdding] = useState<"menu" | "write" | "upload" | "connector" | null>(null);
   const [said, setSaid] = useState<string[]>([]);
   const load = useCallback(() => {
     if (!scope) return;
@@ -116,6 +120,11 @@ export default function Plugins(props: FeaturePageProps) {
             <button type="button" role="menuitem" onClick={() => setAdding("upload")}>
               Upload SKILL.md
             </button>
+            {list?.can_edit && (
+              <button type="button" role="menuitem" onClick={() => setAdding("connector")}>
+                Add custom connector
+              </button>
+            )}
           </div>
         )}
         {scope && list && (adding === "write" || adding === "upload") && (
@@ -160,6 +169,16 @@ export default function Plugins(props: FeaturePageProps) {
           with the repository and are not listed here.
         </p>
         <Connections />
+        {scope && (
+          <CustomConnectors
+            scope={scope}
+            adding={adding === "connector"}
+            onAdded={() => {
+              setAdding(null);
+              load();
+            }}
+          />
+        )}
         {list?.unenforced.map((n) => (
           <div key={n.node_id} className="error-text" role="note">
             {`Node ${host(n)} does not enforce these settings (an older node): there, an agent that is denied any skill gets no skills, and one denied any connector gets no connectors.`}
@@ -246,7 +265,9 @@ function Row(props: {
         {described[0] && <div className="small">{described[0]}</div>}
         {described.length > 1 && <div className="muted small">Nodes describe it differently; the setting is by name and holds for each.</div>}
         <div className="muted small">
-          {i.stored
+          {i.custom
+            ? `Custom connector of this workspace at ${i.custom.host ?? "?"}. Agents cannot use it in this version.`
+            : i.stored
             ? i.nodes.length
               ? `Stored on the server. ${i.nodes.map(host).join(", ")} has its own skill of this name and uses that one there.`
               : "Stored on the server."

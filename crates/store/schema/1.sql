@@ -162,6 +162,24 @@ CREATE VIRTUAL TABLE chat_fts USING fts5(
     tokenize = 'unicode61 remove_diacritics 2'
 );
 
+-- table connector_accounts on connector_accounts
+CREATE TABLE connector_accounts (
+    user_id      TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    connector_id TEXT NOT NULL,
+    sealed_token BLOB NOT NULL CHECK (length(sealed_token) <= 4096),
+    created_ms   INTEGER NOT NULL,
+    updated_ms   INTEGER NOT NULL,
+    PRIMARY KEY (user_id, connector_id),
+    FOREIGN KEY (workspace_id, user_id)
+        REFERENCES workspace_members(workspace_id, user_id) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_id, connector_id)
+        REFERENCES workspace_connectors(workspace_id, connector_id) ON DELETE CASCADE
+);
+
+-- index connector_accounts_connector on connector_accounts
+CREATE INDEX connector_accounts_connector ON connector_accounts(connector_id);
+
 -- table deleted_sessions on deleted_sessions
 CREATE TABLE deleted_sessions (
     session_id TEXT PRIMARY KEY,
@@ -515,6 +533,22 @@ CREATE TABLE workspace_agents (
 
 -- index workspace_agents_agent on workspace_agents
 CREATE INDEX workspace_agents_agent ON workspace_agents(agent_id);
+
+-- table workspace_connectors on workspace_connectors
+CREATE TABLE workspace_connectors (
+    connector_id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
+    name         TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 32),
+    url          TEXT NOT NULL CHECK (length(url) BETWEEN 9 AND 512),
+    -- How a person signs in: none, or a token they paste.
+    auth         TEXT NOT NULL CHECK (auth IN ('none', 'token')),
+    -- The header the token goes in; NULL: Authorization (Bearer).
+    header       TEXT CHECK (header IS NULL OR length(header) BETWEEN 1 AND 64),
+    created_ms   INTEGER NOT NULL,
+    updated_ms   INTEGER NOT NULL,
+    UNIQUE (workspace_id, name),
+    UNIQUE (workspace_id, connector_id)
+);
 
 -- table workspace_members on workspace_members
 CREATE TABLE workspace_members (

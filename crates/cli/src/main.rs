@@ -1376,15 +1376,40 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn init_tracing() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("HARNESS_LOG")
-                .unwrap_or_else(|_| "info".into()),
-        )
-        .with_writer(std::io::stderr)
-        // No colour codes in `docker logs`, journald or files.
-        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
-        .init();
+    use tracing_subscriber::util::SubscriberInitExt as _;
+    let env = tracing_subscriber::EnvFilter::try_from_env("HARNESS_LOG")
+        .unwrap_or_else(|_| "info".into());
+    // No colour codes in `docker logs`, journald or files.
+    let ansi = std::io::IsTerminal::is_terminal(&std::io::stderr());
+    logger(env, std::io::stderr, ansi).init();
+}
+
+/// The server's log: `env` decides the levels, [`quiet`] drops what no
+/// level may write.
+fn logger<W>(
+    env: tracing_subscriber::EnvFilter,
+    writer: W,
+    ansi: bool,
+) -> impl tracing::Subscriber + Send + Sync
+where
+    W: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + Send + Sync + 'static,
+{
+    use tracing_subscriber::Layer as _;
+    use tracing_subscriber::layer::SubscriberExt as _;
+    tracing_subscriber::registry().with(
+        tracing_subscriber::fmt::layer()
+            .with_writer(writer)
+            .with_ansi(ansi)
+            .with_filter(env)
+            .with_filter(quiet()),
+    )
+}
+
+/// Whatever HARNESS_LOG says, rmcp's HTTP client transport (custom
+/// connectors, PLAN.md T84) writes nothing: its lines can carry a remote
+/// server's words. Only that target; the node's MCP client logs as ever.
+fn quiet() -> tracing_subscriber::filter::FilterFn<fn(&tracing::Metadata<'_>) -> bool> {
+    tracing_subscriber::filter::filter_fn(|m| harness_master::connectors::log_allowed(m.target()))
 }
 
 async fn async_main(cli: Cli, dir: PathBuf, dotenv_names: Vec<String>) -> anyhow::Result<()> {
@@ -1470,6 +1495,43 @@ async fn async_main(cli: Cli, dir: PathBuf, dotenv_names: Vec<String>) -> anyhow
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The server's log drops rmcp's HTTP client transport, even at TRACE,
+    /// and keeps rmcp's other lines (the node's MCP client) and ours.
+    #[test]
+    fn the_log_drops_the_connector_transport_only() {
+        use std::sync::{Arc, Mutex};
+        #[derive(Clone, Default)]
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let buf = Buf::default();
+        let b2 = buf.clone();
+        let sub = logger(
+            tracing_subscriber::EnvFilter::new("trace"),
+            move || b2.clone(),
+            false,
+        );
+        tracing::subscriber::with_default(sub, || {
+            tracing::error!(target: "rmcp::transport::streamable_http_client", "remote CANARY-1");
+            tracing::info!(target: "rmcp::transport::streamable_http_client::x", "CANARY-2");
+            tracing::info!(target: "rmcp::service", "node line");
+            tracing::info!(target: "harness_master::connectors", "our line");
+        });
+        let out = String::from_utf8_lossy(&buf.0.lock().unwrap()).to_string();
+        assert!(!out.contains("CANARY"), "{out}");
+        assert!(
+            out.contains("node line") && out.contains("our line"),
+            "{out}"
+        );
+    }
 
     /// A coding chat can propose project facts: agentic nodes register
     /// `remember` (it runs nothing on the node; the master files the

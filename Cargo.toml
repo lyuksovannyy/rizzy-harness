@@ -78,6 +78,11 @@ rust-embed = "8.13.0"
 # client half only, over our own stdio pipes. Pinned exactly: a 3.x minor
 # ships most weeks and each has changed the client API (MRTR, tasks).
 rmcp = { version = "=3.8.0", default-features = false, features = ["client", "transport-async-rw"] }
+# The event-stream parser behind rmcp's streamable HTTP client trait (its
+# `Sse` type is in the trait's signatures): the master's connector client
+# (ADOPTION_PLAN X.35, PLAN.md T84) builds its streams with it. MIT OR
+# Apache-2.0, from rmcp's author, no `unsafe`; pinned exactly.
+sse-stream = "=0.2.6"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["float_roundtrip"] }
 serde-saphyr = "=2.0.0"

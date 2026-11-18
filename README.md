@@ -3137,6 +3137,67 @@ that host's `/user` path, with what they pasted). Over a plain-http bind on a
 network (`--insecure-bind` without `--tls`), the pasted token travels in clear
 text like the login password; the server warns about that at start.
 
+## Custom connectors: a workspace's remote MCP servers
+
+Under **Plugins → Connectors**, after your forge accounts, are the
+workspace's **custom connectors**: remote MCP servers the workspace's admins
+(whoever holds its `settings` permission, and the API token) add by address
+with **Add → Add custom connector**: a name (`a-z`, `0-9`, `-`, `_`, at most
+32, the rule of a node's own servers; it does not change later), the
+server's address and how a person signs in:
+
+- **None**: the server needs no account; anyone in the workspace can
+  **Check** what it offers.
+- **Each person's token**: every member connects **their own account** by
+  pasting a token the service gave them. It goes in `Authorization: Bearer
+  <token>`, or in a header the admin names (such as `X-API-Key`; not `Host`,
+  `Cookie`, `Content-Length`, `Transfer-Encoding`, hop-by-hop or MCP's own
+  headers). There is no shared workspace account.
+
+**Sign-in through a browser (OAuth) is not built yet.** Many hosted MCP
+servers need it; those cannot be added until it is.
+
+**Connect** checks the token by speaking MCP to the server with it
+(`initialize`, then `tools/list`) and stores it only if that works, sealed
+like a forge token (see "Where the token is kept" above; it is bound to you,
+the workspace, the connector and its address). **Replace token**,
+**Disconnect** and **Check** do what they say. Your account is yours alone:
+another member, a workspace admin, a server admin and the API token can
+neither see, use, replace nor delete it. It goes when you disconnect, when
+the connector is deleted, when you leave the workspace or your account is
+deleted. **Editing a connector's address or sign-in disconnects everyone's
+accounts for it** (their tokens were given for the old address, and a token
+is never sent to an address its owner did not see); the screen asks first.
+
+**What it offers.** After a check you see the server's name and version, its
+instructions and its tools (name and description), as text, cleaned of
+control and hidden characters and capped: at most 64 tools, 8 pages of the
+tool list and 1 MiB read per check, the rest shown as "and more". This is
+kept for a few minutes in the server's memory, for you only, and nowhere
+else; nothing of it goes to a node.
+
+**The address rules.** `https://` only, on a public host name: no IP
+address, no `localhost`, no name without a dot, no `xn--` (look-alike) name,
+no port, no user or password, no `?` query and no `#` part. Every connection
+the server makes for a check reaches public addresses only (checked on each
+connection, so a name that later resolves inward is refused); a redirect is
+not followed; no proxy from the environment is used; 10 seconds and 1 MiB
+for the whole check; an error's text from the server is never read or
+shown. A server on a private network stays a node's own server
+(`node.toml`).
+
+**Limits.** 50 connectors per workspace; 100 accounts per person; 20 checks
+per person in 10 minutes, and 60 failed checks per connector in 10 minutes,
+everyone together. A connector may not take the name of an MCP server one
+of the server's nodes announces (if a node announces it later, the screen
+says so). A skill of the same name is another kind of item and is chosen
+apart.
+
+**In this version agents cannot use a custom connector yet.** It is a
+Plugins item by name, so its Shared / Assigned choice can already be made;
+agents calling its tools through the server, with the chat owner's account,
+come next (ADOPTION_PLAN X.35 step 2).
+
 ## What goes with each message
 
 Besides your words, a message to the model carries a block the harness adds

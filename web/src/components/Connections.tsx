@@ -144,7 +144,8 @@ function Account(props: { c: Conn; pasting: boolean; onPaste: () => void; act: (
   );
 }
 
-function Paste(props: { host?: Host; onCancel: () => void; onSend: (token: string) => Promise<void> }) {
+/** A token field (also custom connectors'): sent once, cleared at once, kept from browsers and password managers. */
+export function Paste(props: { host?: Host; hint?: string; label?: string; onCancel: () => void; onSend: (token: string) => Promise<void> }) {
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
   const h = props.host;
@@ -165,8 +166,9 @@ function Paste(props: { host?: Host; onCancel: () => void; onSend: (token: strin
           {`Make a token at ${h.token_page}. Later steps (listing repositories, clone and push) will need: ${h.scopes_needed}.`}
         </div>
       )}
+      {props.hint && <div className="muted small">{props.hint}</div>}
       <label>
-        Access token
+        {props.label ?? "Access token"}
         {/* Not a password of this site: "new-password" keeps browsers from
             filling or saving it, and the data-* attributes ask password
             managers (1Password, LastPass, Bitwarden, Dashlane) to leave it. */}

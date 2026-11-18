@@ -14,6 +14,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 pub mod artifacts;
 pub mod blobs;
 pub mod connections;
+pub mod custom_connectors;
 mod handoff;
 pub mod media;
 pub mod migrate;
@@ -518,6 +519,7 @@ pub const MIGRATIONS: &[migrate::Migration] = &[&[
     plugin_access::SCHEMA,
     stored_skills::SCHEMA,
     connections::SCHEMA,
+    custom_connectors::SCHEMA,
 ]];
 
 /// A session's effective workspace: its `session_workspaces` row while the
