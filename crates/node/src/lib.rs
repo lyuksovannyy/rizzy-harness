@@ -539,9 +539,18 @@ impl NodeRuntime {
                 cfg.policy.protect(&s);
             }
         }
-        // MCP servers' `env` values never reach an event (X.3).
-        for server in cfg.policy.mcp_servers.values() {
-            for v in server.env.0.values() {
+        // MCP servers' `env` values never reach an event (X.3). One that is
+        // part of the redaction marker cannot be a secret and is never
+        // redacted (PLAN.md T3): named once, by its variable.
+        for (name, server) in &cfg.policy.mcp_servers {
+            for (var, v) in &server.env.0 {
+                if harness_core::secret::is_marker_part(v.expose()) {
+                    tracing::warn!(
+                        "[mcp_servers.{name}] env {var}: a value that is part of \"{}\" is not \
+                         treated as a secret",
+                        harness_core::secret::MARKER
+                    );
+                }
                 cfg.secrets.add(v.clone());
             }
         }

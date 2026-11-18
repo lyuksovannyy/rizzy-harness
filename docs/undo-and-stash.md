@@ -334,7 +334,7 @@ paid twice once a writing sub-agent has run, and each running writing sub-agent 
 copy until it ends. The size cap below bounds the last row; the first two (many files, each
 small) stay as measured. The advice to the person stays the repository's own `.gitignore`.
 
-#### 2.7.1 A size cap on files git does not track (A.23, built 2026-11-18)
+#### 2.7.1 A size cap on files git does not track (A.24, built 2026-11-18)
 
 **The rule.** A file git does not track that is larger than `[limits]
 checkpoint_untracked_max_kb` (KiB; default 10,240, 10 MiB; `0` turns the cap off) is left out

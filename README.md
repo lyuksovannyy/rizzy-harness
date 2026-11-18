@@ -2039,7 +2039,10 @@ tool_timeout_sec = 300                # one call (1 .. 3600)
   `HARNESS_*` are never passed; `env` values are scrubbed from every
   output like the provider keys. So put only secrets in `env`: a value
   such as `/home/me` there would be blanked in every chat's text. Pass
-  ordinary variables with `env_vars`.
+  ordinary variables with `env_vars`. What the harness itself keeps in a
+  chat's log (its folder, its model, ids, field names) is never blanked,
+  whatever `env` holds; a value that is part of `[REDACTED]` is not
+  treated as a secret, and the node says so when it starts.
 - **Its tools** are offered as `mcp__<server>__<tool>`. An agent gets them
   when its `tools` list holds `mcp` (Software Developer and Senior
   Teamlead do; agents made on the Agents page with the "Connectors"

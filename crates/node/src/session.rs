@@ -21,6 +21,20 @@ use tokio_util::sync::CancellationToken;
 
 use crate::Inner;
 
+/// An event to append: scrubbed on the way (`Raw`), or already scrubbed
+/// the way the log stores it (`Scrubbed`: the person's message, which the
+/// model is sent as it was scrubbed).
+pub(crate) enum Append {
+    Raw(EventKind),
+    Scrubbed(EventKind),
+}
+
+impl From<EventKind> for Append {
+    fn from(k: EventKind) -> Self {
+        Append::Raw(k)
+    }
+}
+
 /// The master's context of a queued message ([`Session::queued_context`]).
 struct QueuedContext {
     /// The agent the master computed it for.
@@ -1148,9 +1162,9 @@ impl Session {
     }
 
     /// Assign the next seq, scrub, persist (fsync), then publish.
-    async fn append(&self, kind: EventKind) -> Result<RawEvent, StoreError> {
+    async fn append(&self, kind: impl Into<Append>) -> Result<RawEvent, StoreError> {
         let mut head = self.head.lock().await;
-        self.append_at(&mut head, kind).await
+        self.append_at(&mut head, kind.into()).await
     }
 
     /// Append `kind` only if the log's head is still `expected` and `go`
@@ -1167,17 +1181,31 @@ impl Session {
         if *head != expected || !go() {
             return Ok(None);
         }
-        self.append_at(&mut head, kind).await.map(Some)
+        self.append_at(&mut head, kind.into()).await.map(Some)
     }
 
-    async fn append_at(&self, head: &mut u64, kind: EventKind) -> Result<RawEvent, StoreError> {
-        let (kind, mut payload) = kind.into_parts();
-        if !self.node.cfg.secrets.is_empty() {
-            // The string fields, not the serialized text: a secret holding a
-            // quote or backslash is escaped there, and a replacement can
-            // break the JSON.
-            self.node.cfg.secrets.scrub_value(&mut payload);
-        }
+    async fn append_at(&self, head: &mut u64, kind: Append) -> Result<RawEvent, StoreError> {
+        let (kind, payload) = match kind {
+            Append::Raw(k) => {
+                let (kind, mut payload) = k.into_parts();
+                // Its free text only, never its schema: whatever node.toml's
+                // values are, the stored event decodes as this kind (T3).
+                let out = self.node.cfg.secrets.scrub_event(&kind, &mut payload);
+                if let harness_core::secret::schema::Outcome::Fallback { left } = out {
+                    tracing::warn!(
+                        session = %self.id,
+                        kind = %kind,
+                        paths = left,
+                        "a configured secret was left in an event: removing it there would \
+                         have made the event unreadable"
+                    );
+                }
+                (kind, payload)
+            }
+            // Scrubbed already, as the model was sent it: not again (a
+            // second pass need not leave it the same).
+            Append::Scrubbed(k) => k.into_parts(),
+        };
         let ev = RawEvent {
             session_id: self.id,
             seq: *head + 1,
@@ -1222,13 +1250,13 @@ impl Session {
     /// on `Err` the caller must not do what the event describes. The first
     /// failure stops the turn (its token is cancelled) and makes the rest of
     /// its appends fail untried; the backend then ends the turn.
-    pub(crate) async fn emit(&self, kind: EventKind) -> Result<(), LogError> {
+    pub(crate) async fn emit(&self, kind: impl Into<Append>) -> Result<(), LogError> {
         if self.log_failed.load(Ordering::SeqCst) {
             return Err(LogError(
                 "an earlier event of this turn was not written".into(),
             ));
         }
-        match self.append(kind).await {
+        match self.append(kind.into()).await {
             Ok(_) => Ok(()),
             Err(e) => {
                 self.note_log_failure(&e);
@@ -1824,7 +1852,7 @@ impl Session {
         let mut msg = self.user_message(turn_id, input).await?;
         msg.queued = true;
         let ev = self
-            .append(EventKind::UserMessage(msg.clone()))
+            .append(Append::Scrubbed(EventKind::UserMessage(msg.clone())))
             .await
             .map_err(|e| e.to_string())?;
         self.pending
@@ -2668,7 +2696,9 @@ impl Session {
                     .take();
             }
             if let Some(msg) = msg {
-                written = self.emit(EventKind::UserMessage(msg.clone())).await;
+                written = self
+                    .emit(Append::Scrubbed(EventKind::UserMessage(msg.clone())))
+                    .await;
             }
         }
         if let Err(e) = written {
@@ -2741,8 +2771,9 @@ impl Session {
         // payload): the model is sent this very message, so it never gets
         // a node secret the log does not hold, and the next request
         // rebuilds it byte for byte (review of PR 120, H2; PLAN.md T59).
-        let mut v = serde_json::to_value(&msg).map_err(|e| e.to_string())?;
-        self.node.cfg.secrets.scrub_value(&mut v);
+        // Appended as [`Append::Scrubbed`], not scrubbed a second time.
+        let (kind, mut v) = EventKind::UserMessage(msg).into_parts();
+        self.node.cfg.secrets.scrub_event(&kind, &mut v);
         serde_json::from_value(v).map_err(|e| e.to_string())
     }
 
