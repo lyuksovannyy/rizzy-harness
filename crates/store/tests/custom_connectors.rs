@@ -1,0 +1,243 @@
+//! A workspace's custom connectors and each person's account for one
+//! (ADOPTION_PLAN X.35 step 1, PLAN.md T84): capped, unique by name, read
+//! by (workspace, id) and (person, workspace, id) only; an edited URL or
+//! sign-in removes every account in the same transaction; accounts go
+//! with their connector, membership, person and workspace.
+
+use harness_store::custom_connectors::{AccountPut, ConnectorAdd, ConnectorRow};
+use harness_store::{NewUser, Role, Store};
+
+fn user(s: &Store, id: &str) {
+    s.create_user(&NewUser {
+        user_id: id.into(),
+        username: id.into(),
+        password_hash: "$argon2id$x".into(),
+        role: Role::Member,
+        exec_ceiling: harness_core::policy::ExecLevel::None,
+        must_change_password: false,
+    })
+    .unwrap();
+}
+
+fn connector(id: &str, ws: &str, name: &str, url: &str) -> ConnectorRow {
+    ConnectorRow {
+        connector_id: id.into(),
+        workspace_id: ws.into(),
+        name: name.into(),
+        url: url.into(),
+        auth: "token".into(),
+        header: None,
+        created_ms: 0,
+        updated_ms: 0,
+    }
+}
+
+const U1: &str = "https://mcp.example.com/a";
+const U2: &str = "https://mcp.example.com/b";
+
+/// (store, team workspace, other team workspace) with alice and bob in the
+/// first, carol in the second.
+fn setup() -> (Store, String, String) {
+    let s = Store::open_in_memory().unwrap();
+    for u in ["alice", "bob", "carol"] {
+        user(&s, u);
+    }
+    let team = s.create_workspace("Team", "alice").unwrap().workspace_id;
+    let other = s.create_workspace("Other", "carol").unwrap().workspace_id;
+    assert!(s.add_member(&team, "bob", "member").unwrap());
+    (s, team, other)
+}
+
+#[test]
+fn connectors_are_unique_capped_and_kept_per_workspace() {
+    let (s, team, other) = setup();
+    assert_eq!(
+        s.connector_add(&connector("k1", &team, "linear", U1), 2)
+            .unwrap(),
+        ConnectorAdd::Added
+    );
+    assert_eq!(
+        s.connector_add(&connector("k2", &team, "linear", U2), 2)
+            .unwrap(),
+        ConnectorAdd::NameTaken
+    );
+    assert_eq!(
+        s.connector_add(&connector("k2", &team, "notion", U2), 2)
+            .unwrap(),
+        ConnectorAdd::Added
+    );
+    assert_eq!(
+        s.connector_add(&connector("k3", &team, "third", U2), 2)
+            .unwrap(),
+        ConnectorAdd::OverCap
+    );
+    // Another workspace has its own names and its own cap.
+    assert_eq!(
+        s.connector_add(&connector("k4", &other, "linear", U1), 2)
+            .unwrap(),
+        ConnectorAdd::Added
+    );
+    assert_eq!(
+        s.connector_add(&connector("k5", "nope", "x", U1), 2)
+            .unwrap(),
+        ConnectorAdd::NoWorkspace
+    );
+    assert_eq!(s.connectors_of(&team).unwrap().len(), 2);
+    // By (workspace, id): another workspace's id is nobody's here.
+    assert!(s.connector(&team, "k4").unwrap().is_none());
+    assert!(!s.connector_delete(&team, "k4").unwrap());
+    assert!(
+        s.connector_update(&team, "k4", U2, "none", None)
+            .unwrap()
+            .is_none()
+    );
+    assert!(s.connector(&other, "k4").unwrap().is_some());
+    // The table refuses what the master refuses.
+    for bad in [
+        connector("x1", &team, "", U1),
+        connector("x2", &team, &"n".repeat(33), U1),
+        ConnectorRow {
+            auth: "oauth".into(),
+            ..connector("x3", &team, "x3", U1)
+        },
+        connector(
+            "x4",
+            &team,
+            "x4",
+            &format!("https://e.com/{}", "a".repeat(520)),
+        ),
+    ] {
+        assert!(s.connector_add(&bad, 50).is_err(), "{bad:?}");
+    }
+}
+
+#[test]
+fn accounts_are_per_person_checked_against_the_url_and_capped() {
+    let (s, team, other) = setup();
+    s.connector_add(&connector("k1", &team, "linear", U1), 50)
+        .unwrap();
+    s.connector_add(&connector("k2", &team, "notion", U1), 50)
+        .unwrap();
+    s.connector_add(&connector("k9", &other, "linear", U1), 50)
+        .unwrap();
+    let put = |u: &str, ws: &str, id: &str, url: &str, b: &[u8], cap| {
+        s.connector_account_put(u, ws, id, url, b, cap).unwrap()
+    };
+    assert_eq!(put("alice", &team, "k1", U1, b"a1", 1), AccountPut::Added);
+    assert_eq!(
+        put("alice", &team, "k1", U1, b"a2", 1),
+        AccountPut::Replaced
+    );
+    assert_eq!(put("alice", &team, "k2", U1, b"a3", 1), AccountPut::OverCap);
+    assert_eq!(put("bob", &team, "k1", U1, b"b1", 5), AccountPut::Added);
+    // A token checked against another URL is not stored.
+    assert_eq!(put("bob", &team, "k2", U2, b"b2", 5), AccountPut::Changed);
+    // Not a member there; another workspace's connector.
+    assert_eq!(
+        put("carol", &team, "k1", U1, b"c", 5),
+        AccountPut::NotMember
+    );
+    assert_eq!(put("alice", &team, "k9", U1, b"x", 5), AccountPut::Changed);
+    assert_eq!(
+        put("alice", &other, "k9", U1, b"x", 5),
+        AccountPut::NotMember
+    );
+    // Read by the person only.
+    assert_eq!(
+        s.connector_account_sealed("alice", &team, "k1").unwrap(),
+        Some(b"a2".to_vec())
+    );
+    assert_eq!(s.connector_accounts_of("alice", &team).unwrap().len(), 1);
+    assert!(
+        s.connector_account_sealed("carol", &team, "k1")
+            .unwrap()
+            .is_none()
+    );
+    assert!(!s.connector_account_delete("carol", &team, "k1").unwrap());
+    assert!(
+        s.connector_account_sealed("alice", &other, "k1")
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(s.sealed_count().unwrap(), 2);
+    let samples = s.sealed_samples(5).unwrap();
+    let a = samples.iter().find(|x| x.owner == "alice").unwrap();
+    assert_eq!(a.table, "connector_accounts");
+    assert_eq!(a.fields, [team.clone(), "k1".to_string(), U1.to_string()]);
+    // A connector without sign-in takes no token.
+    s.connector_update(&team, "k2", U1, "none", None).unwrap();
+    assert_eq!(put("bob", &team, "k2", U1, b"b3", 5), AccountPut::Changed);
+}
+
+#[test]
+fn an_edited_url_or_sign_in_removes_every_account_at_once() {
+    let (s, team, _) = setup();
+    s.connector_add(&connector("k1", &team, "linear", U1), 50)
+        .unwrap();
+    for u in ["alice", "bob"] {
+        s.connector_account_put(u, &team, "k1", U1, b"t", 50)
+            .unwrap();
+    }
+    // The same definition again keeps them; a new header does not.
+    let (_, removed) = s
+        .connector_update(&team, "k1", U1, "token", None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(removed, 0);
+    let (r, removed) = s
+        .connector_update(&team, "k1", U1, "token", Some("x-api-key"))
+        .unwrap()
+        .unwrap();
+    assert_eq!((removed, r.header.as_deref()), (2, Some("x-api-key")));
+    assert_eq!(s.sealed_count().unwrap(), 0);
+    for u in ["alice", "bob"] {
+        s.connector_account_put(u, &team, "k1", U1, b"t", 50)
+            .unwrap();
+    }
+    let (r, removed) = s
+        .connector_update(&team, "k1", U2, "token", None)
+        .unwrap()
+        .unwrap();
+    assert_eq!((removed, r.url.as_str()), (2, U2));
+    assert_eq!(s.sealed_count().unwrap(), 0);
+    s.connector_account_put("alice", &team, "k1", U2, b"t", 50)
+        .unwrap();
+    let (_, removed) = s
+        .connector_update(&team, "k1", U2, "none", None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(removed, 1);
+}
+
+#[test]
+fn accounts_go_with_their_connector_membership_person_and_workspace() {
+    let (s, team, other) = setup();
+    s.connector_add(&connector("k1", &team, "linear", U1), 50)
+        .unwrap();
+    s.connector_add(&connector("k2", &team, "notion", U1), 50)
+        .unwrap();
+    s.connector_add(&connector("k9", &other, "linear", U1), 50)
+        .unwrap();
+    for (u, ws, k) in [
+        ("alice", &team, "k1"),
+        ("alice", &team, "k2"),
+        ("bob", &team, "k1"),
+        ("bob", &team, "k2"),
+        ("carol", &other, "k9"),
+    ] {
+        assert_eq!(
+            s.connector_account_put(u, ws, k, U1, b"t", 50).unwrap(),
+            AccountPut::Added
+        );
+    }
+    assert!(s.connector_delete(&team, "k2").unwrap());
+    assert_eq!(s.sealed_count().unwrap(), 3);
+    assert!(s.remove_member(&team, "bob", None).unwrap());
+    assert!(s.connector_accounts_of("bob", &team).unwrap().is_empty());
+    assert_eq!(s.sealed_count().unwrap(), 2);
+    s.delete_user("carol").unwrap();
+    assert_eq!(s.sealed_count().unwrap(), 1);
+    assert!(s.delete_workspace(&team).unwrap());
+    assert!(s.connectors_of(&team).unwrap().is_empty());
+    assert_eq!(s.sealed_count().unwrap(), 0);
+}

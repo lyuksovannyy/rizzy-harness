@@ -603,3 +603,34 @@ async fn a_server_taken_out_while_it_starts_does_not_stay_up() {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
+
+/// Review of PR 155, MEDIUM 3: two tools of one server whose names clean to
+/// the same public name: the first keeps it, the other is left out and
+/// said so, not offered under a name another tool answers to.
+#[tokio::test]
+async fn two_tools_with_one_public_name_keep_the_first() {
+    let hashed = mcp::public_name("fake", "a b");
+    let twin = hashed.strip_prefix("mcp__fake__").unwrap().to_string();
+    assert_eq!(
+        mcp::public_name("fake", &twin),
+        hashed,
+        "the reviewer's pair"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let l = set(server(&["--tool-names", &format!("a b,{twin},echo")]))
+        .load(&ctx(&dir), &[])
+        .await;
+    let names: Vec<&str> = l.tools.iter().map(|t| t.name()).collect();
+    assert_eq!(
+        names.iter().filter(|n| **n == hashed).count(),
+        1,
+        "{names:?}"
+    );
+    assert!(names.contains(&"mcp__fake__echo"), "{names:?}");
+    let all = l.notes.join(" ");
+    assert!(
+        all.contains("1 tool(s) of MCP server `fake` left out"),
+        "{all}"
+    );
+    assert!(all.contains(&twin), "{all}");
+}

@@ -123,6 +123,36 @@ pub(super) async fn list(
     } else {
         Vec::new()
     };
+    // The workspace's custom connectors (X.35): an item by name like a
+    // node's server, so Shared / Assigned holds for them too (agents use
+    // them from the next version on).
+    let w = a.id().to_string();
+    let custom: BTreeMap<String, Value> = match m
+        .inner
+        .mirror
+        .call(move |s| s.connectors_of(&w))
+        .await
+    {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|r| {
+                let host = reqwest::Url::parse(&r.url)
+                    .ok()
+                    .and_then(|u| u.host_str().map(str::to_string));
+                (
+                    r.name.clone(),
+                    json!({"id": r.connector_id, "host": host, "auth": r.auth}),
+                )
+            })
+            .collect(),
+        Err(e) => {
+            tracing::warn!(error = %e, workspace = %a.id(), "could not read the custom connectors");
+            BTreeMap::new()
+        }
+    };
+    for name in custom.keys() {
+        items.entry((plugins::MCP, name.clone())).or_default();
+    }
     // Settings for names no node announces now stay listed: they still
     // hold for any node that has the name.
     for (kind, name, _) in chosen.iter() {
@@ -146,10 +176,14 @@ pub(super) async fn list(
             let stored = (kind == plugins::SKILL)
                 .then(|| stored_by_name.get(&name).cloned())
                 .flatten();
+            let custom = (kind == plugins::MCP)
+                .then(|| custom.get(&name).cloned())
+                .flatten();
             json!({
                 "kind": kind,
                 "name": name,
                 "stored": stored,
+                "custom": custom,
                 "nodes": nodes,
                 "access": if assigned.is_some() { "assigned" } else { "shared" },
                 "agents": assigned.unwrap_or_default(),

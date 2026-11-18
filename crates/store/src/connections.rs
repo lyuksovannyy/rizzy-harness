@@ -70,8 +70,17 @@ pub struct NewConnection {
     pub sealed_token: Vec<u8>,
 }
 
-/// A sealed token with its row's user, host and account.
-pub type SealedSample = (String, String, String, Vec<u8>);
+/// A sealed value with the row it is bound to: its table, its owner (a
+/// user) and the row's own key fields in the table's order
+/// (`user_connections`: host, account; `connector_accounts`: workspace,
+/// connector, the connector's URL).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SealedSample {
+    pub table: String,
+    pub owner: String,
+    pub fields: Vec<String>,
+    pub sealed: Vec<u8>,
+}
 
 /// What [`Store::connection_put`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -226,24 +235,45 @@ impl Store {
         )? > 0)
     }
 
-    /// How many sealed values the database holds (a missing key file is
-    /// made again only at 0).
+    /// How many sealed values the database holds, every table together (a
+    /// missing key file is made again only at 0).
     pub fn sealed_count(&self) -> Result<u64> {
         let conn = self.lock();
-        let n: i64 = conn.query_row("SELECT COUNT(*) FROM user_connections", [], |r| r.get(0))?;
+        let n: i64 = conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM user_connections)
+                  + (SELECT COUNT(*) FROM connector_accounts)",
+            [],
+            |r| r.get(0),
+        )?;
         Ok(n as u64)
     }
 
-    /// Up to `n` sealed values with their rows (user, host, account), to
-    /// prove a key opens what is stored before it is used.
+    /// Up to `n` sealed values with their rows, the oldest first, from every
+    /// table, to prove a key opens what is stored before it is used.
     pub fn sealed_samples(&self, n: usize) -> Result<Vec<SealedSample>> {
         let conn = self.lock();
         let mut st = conn.prepare(
-            "SELECT user_id, host, account_id, sealed_token FROM user_connections
-             ORDER BY created_ms, connection_id LIMIT ?1",
+            "SELECT t, owner, f1, f2, f3, sealed FROM (
+                 SELECT 'user_connections' AS t, user_id AS owner, host AS f1, account_id AS f2,
+                        NULL AS f3, sealed_token AS sealed, created_ms AS at, connection_id AS k
+                 FROM user_connections
+                 UNION ALL
+                 SELECT 'connector_accounts', a.user_id, a.workspace_id, a.connector_id, c.url,
+                        a.sealed_token, a.created_ms, a.user_id || '/' || a.connector_id
+                 FROM connector_accounts a JOIN workspace_connectors c
+                   ON c.connector_id = a.connector_id AND c.workspace_id = a.workspace_id
+             ) ORDER BY at, k LIMIT ?1",
         )?;
         let rows = st.query_map(params![n as i64], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            let f3: Option<String> = r.get(4)?;
+            let mut fields: Vec<String> = vec![r.get(2)?, r.get(3)?];
+            fields.extend(f3);
+            Ok(SealedSample {
+                table: r.get(0)?,
+                owner: r.get(1)?,
+                fields,
+                sealed: r.get(5)?,
+            })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }

@@ -316,8 +316,13 @@ fn valid_server_name(name: &str) -> bool {
 
 /// The model-facing name of `server`'s tool `tool`: `mcp__<server>__<tool>`
 /// as it is when that is clean and short enough, else cleaned, cut and
-/// given 12 hex characters of `sha256(server \0 tool)` (DeepSeek's rule),
-/// so two tools never share a name.
+/// given 12 hex characters of `sha256(server \0 tool)` (DeepSeek's rule).
+/// Two tools of one server CAN share it (review of PR 155: `a b` and
+/// `a_b_<its hash>` both become `mcp__<server>__a_b_<hash>`), so every
+/// list built from it keeps the first and leaves the other out, counted
+/// ([`list`] here, the master's connector offer too). Two servers' tools
+/// never share one: the server part, before the first `__`, is the
+/// server's own clean name, never cut.
 pub fn public_name(server: &str, tool: &str) -> String {
     use sha2::Digest;
     const HASH: usize = 12;
@@ -1479,12 +1484,20 @@ async fn list(
     }
     let mut tools: Vec<Listed> = Vec::new();
     let mut seen = HashSet::new();
+    let mut public_seen = HashSet::new();
+    let mut collided = Vec::new();
     let mut big = Vec::new();
     for t in raw.into_iter().take(MAX_LISTED) {
         let Some(raw_name) = t.get("name").and_then(Value::as_str).map(str::to_string) else {
             continue;
         };
         if !cfg.offers(&raw_name) || !seen.insert(raw_name.clone()) {
+            continue;
+        }
+        // One public name, one tool: the first listed keeps it.
+        let public = public_name(server, &raw_name);
+        if !public_seen.insert(public.clone()) {
+            collided.push(shown(&raw_name));
             continue;
         }
         let schema = t.get("inputSchema").cloned().unwrap_or(Value::Null);
@@ -1500,7 +1513,7 @@ async fn list(
             .unwrap_or("")
             .to_string();
         tools.push(Listed {
-            name: public_name(server, &raw_name),
+            name: public,
             description: format!(
                 "(MCP server `{server}`) {}",
                 shorten(&description, MAX_DESCRIPTION_CHARS)
@@ -1511,6 +1524,14 @@ async fn list(
         });
     }
     tools.sort_by(|a, b| a.name.cmp(&b.name));
+    if !collided.is_empty() {
+        notes.push(format!(
+            "{} tool(s) of MCP server `{server}` left out: the name each would be offered under \
+             is another of its tools' ({})",
+            collided.len(),
+            shorten(&collided.join(", "), 300)
+        ));
+    }
     if !big.is_empty() {
         notes.push(format!(
             "{} tool(s) of MCP server `{server}` are not offered: their input schema is over \

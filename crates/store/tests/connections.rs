@@ -80,7 +80,8 @@ fn per_account_replace_cap_and_privacy() {
     assert_eq!(s.sealed_count().unwrap(), 3);
     let samples = s.sealed_samples(2).unwrap();
     assert_eq!(samples.len(), 2);
-    assert_eq!(samples[0].3, b"two".to_vec());
+    assert_eq!(samples[0].sealed, b"two".to_vec());
+    assert_eq!(samples[0].table, "user_connections");
     assert!(s.connection_delete("alice", "c1").unwrap());
     assert!(s.connection("alice", "c1").unwrap().is_none());
     assert_eq!(s.sealed_count().unwrap(), 2);
