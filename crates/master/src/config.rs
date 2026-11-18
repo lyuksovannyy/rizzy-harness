@@ -50,6 +50,10 @@ pub struct Config {
     pub artifacts: crate::artifacts::ArtifactsConfig,
     #[serde(skip_serializing_if = "crate::pricing::PricingConfig::is_default")]
     pub pricing: crate::pricing::PricingConfig,
+    /// `[forge]`: forge hosts people may connect besides the built-in ones
+    /// (X.27); only this file adds one.
+    #[serde(skip_serializing_if = "crate::forge::ForgeConfig::is_default")]
+    pub forge: crate::forge::ForgeConfig,
 }
 
 impl Default for Config {
@@ -71,6 +75,7 @@ impl Default for Config {
             media: Default::default(),
             artifacts: Default::default(),
             pricing: Default::default(),
+            forge: Default::default(),
         }
     }
 }
@@ -95,6 +100,7 @@ struct RawConfig {
     media: crate::media::MediaConfig,
     artifacts: crate::artifacts::ArtifactsConfig,
     pricing: crate::pricing::PricingConfig,
+    forge: crate::forge::ForgeConfig,
 }
 
 impl From<RawConfig> for Config {
@@ -116,6 +122,7 @@ impl From<RawConfig> for Config {
             media: r.media,
             artifacts: r.artifacts,
             pricing: r.pricing,
+            forge: r.forge,
         };
         c.normalize();
         c
@@ -656,6 +663,9 @@ impl Config {
     pub fn validate(&self) -> anyhow::Result<()> {
         if self.providers.is_empty() {
             bail!("no providers");
+        }
+        if let Err(e) = self.forge.validate() {
+            bail!("{e}");
         }
         // As stored: three upper-case letters (the API cleans what it is sent).
         match crate::pricing::clean_currency(&self.pricing.currency) {

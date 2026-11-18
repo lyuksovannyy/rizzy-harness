@@ -16,6 +16,7 @@ pub mod diff;
 pub mod env;
 mod favicon;
 pub mod files;
+pub mod forge;
 mod handoff;
 mod http;
 pub mod levels;
@@ -38,6 +39,7 @@ pub mod recall;
 pub mod resolver;
 pub mod response;
 pub mod routines;
+pub mod sealed;
 pub mod search;
 pub mod secrets;
 pub mod serve;
@@ -338,6 +340,8 @@ pub struct MasterInner {
     sockets: ws::Sockets,
     /// Hosts an admin's provider test may reach besides public addresses.
     outbound: Mutex<outbound::Outbound>,
+    /// Sealed storage and forge connections (X.27 step 1).
+    forge: forge::State,
     /// Callback turns: the watcher's per-chat state (T.8d step 3).
     callbacks: callbacks::Callbacks,
     /// Hand-off notes asked for (X.16).
@@ -746,6 +750,7 @@ impl Master {
                 artifact_throttle: Default::default(),
                 sockets: Default::default(),
                 outbound: Mutex::new(outbound::Outbound::from_env()),
+                forge: Default::default(),
                 callbacks: Default::default(),
                 handoffs: Default::default(),
                 level_write_delay_ms: Default::default(),
