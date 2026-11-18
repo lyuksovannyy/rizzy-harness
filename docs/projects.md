@@ -298,10 +298,47 @@ One board per project, made when the project is.
     may manage projects.
   A template only seeds columns. Applying one to a board with cards is refused (409), so
   nothing is lost silently.
-- **Agents**: phase 1 gives them the board *read-only* through the per-turn block. Later, a
-  `board` tool (list, add, move cards) run by the master for chat and agentic sessions alike,
-  writes allowed only when the chat's owner may manage projects, every change an audit line
-  and a card note "by <agent> in <chat>".
+- **Agents** (ADOPTION_PLAN X.32, PLAN.md T78): every project chat keeps the per-turn
+  board line (open card titles, 8 at most). An agent with the **Board** switch also has two
+  tools, answered by the master for chat and agentic sessions alike (the node files a
+  `board.request` naming only its session, as `recall` does; `crates/master/src/board.rs`):
+  - `board` (read-only): every column with its id, the open cards with id, title, notes cut
+    at 500 characters, who made them and their chat link as the asking chat's owner may see
+    it (this chat, one of the owner's by title, or "another member's chat": T10). At most 100
+    cards and 12,000 characters of titles and notes; done columns are counted, not listed.
+    Card text is quoted line by line under a harness line saying it is data.
+  - `board_edit` (changes): `add` (title ≤ 200, notes ≤ 4,000, a column by id or name, default
+    the first not done), `move` (card id, column, position), `note` (append ≤ 1,000
+    characters, every line of it marked `[agent <name>] …` so no line reads as another
+    agent's or a person's; refused, not cut, past 4,000 in all). **No
+    delete, no rewrite** of a title or notes. A card it adds has `agent` (the agent's name),
+    `created_by` the chat's owner and the asking chat as its link.
+  - Who: the project comes from the session's own row (a sub-agent's: its parent's), the
+    person from its owner; the node must run the session. Changes need the owner's "may
+    manage projects" (`settings`, the same check as the HTTP routes), checked per request;
+    `Master::prompt` withholds `board_edit` from a turn whose owner lacks it and from a turn
+    the owner did not send signed in, unless it is a run of the owner's own routine (the
+    owner, 2026-11-18: "Routines may change"; the runner passes the run, checked against the
+    master's record of it: active, its chat this chat, its routine the owner's). So a routine
+    run can change the board; an API-token turn can only list it. Both tools are withheld
+    outside a project, in temporary chats, untrusted (webhook) and callback turns, and on a
+    node without the `board` capability. Each request is checked against what the turn's log
+    says was withheld. The turn's agent must allow the tool (a sub-agent: its own switch;
+    its parent's turn's withholding binds it; its changes count on the parent's turn).
+  - Bounds: 10 changes and 20 lists per turn (sub-agents' included), 4 calls at once per node;
+    a repeated request id gets its first answer and changes nothing again.
+  - Each change is an audit line `board.agent` (action, project, card, chat, owner, agent,
+    node, and the routine and run when the chat is a routine run's; never card text) and a `projects_changed` nudge to the project's members.
+  - Modes: plan mode lists and refuses changes; Ask asks before `board_edit`; Auto runs both.
+  - Read-only agents: Scout and Reviewer have the switch off. A page agent that changes
+    nothing else and has read-only commands gets `board` only, so it stays read-only.
+  - An agent with the switch counts as one that changes things by its definition: as a
+    sub-agent it is not put on the small model, even where `board_edit` is withheld. Plan
+    mode's "may delegate to" judges the spec as sent, so a child whose `board_edit` the master
+    withheld is a reader there.
+  - Output: names (project, columns, titles, agents, chat titles) are JSON strings inside the
+    harness's lines, notes are quoted lines; the rendered answer stays below the tool output
+    cap (30,000 characters), ending on a whole card with a count of the cards left out.
 
 ## Artifacts — deferred
 
@@ -376,7 +413,8 @@ interface ProjectDetail extends ProjectSummary {
 }
 interface BoardCard { card_id: string; column_id: string; title: string; notes: string;
   position: number; chat: { session_id: string; title: string } | "private" | null;
-  created_by: string | null; updated_ms: number }
+  created_by: string | null; agent: string | null /* the agent that made it (T78) */;
+  updated_ms: number }
 interface BoardColumn { column_id: string; name: string; done: boolean; cards: BoardCard[] }
 interface BoardTemplate { template_id: string; name: string; builtin: boolean;
   columns: { name: string; done: boolean }[] }
@@ -484,8 +522,8 @@ rules (T5).
 7. **Personal memory in project chats**: always (subject to the member's workspace switch,
    which leaves project memory on; see "Memory"), or should a project be able to turn
    personal recall off (e.g. client work)?
-8. **Board for agents**: should agents move and create cards (phase 3 `board` tool), and
-   should their changes need the user's approval?
+8. **Board for agents**: built (X.32, above): agents add, move and append notes; changes ask
+   in Ask mode and are refused in plan mode, like other changes.
 9. **One board per project** enough, or several (e.g. "Bugs" and "Roadmap")?
 
 ## Phases
@@ -510,9 +548,10 @@ pages: initial 96.5 → 100.1 KB, total 309.9 → 320.2 KB, so `TOTAL_KB` is 321
 
 **Phase 2** — a `projects` workspace permission if wanted (open question 3), workspace memory
 and the project switch **[ws]**; project files; "Update the brief from my chats"; card
-assignees; an agent `board` tool.
+assignees.
 
-**Phase 3** — agents on the board (`board` tool), artifacts.
+**Phase 3** — artifacts. (Agents on the board, the `board` and `board_edit` tools, are built:
+ADOPTION_PLAN X.32.)
 
 ## Integration points
 

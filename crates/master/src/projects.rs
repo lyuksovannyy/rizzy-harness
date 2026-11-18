@@ -831,6 +831,7 @@ mod tests {
             position: 0,
             session_id: None,
             created_by: None,
+            agent: None,
             created_ms: 0,
             updated_ms: 0,
         }

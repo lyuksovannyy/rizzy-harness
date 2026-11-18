@@ -348,6 +348,10 @@ impl harness_core::backend::TurnHost for Logged<'_> {
         self.host.recall()
     }
 
+    fn board(&self) -> Option<Arc<dyn harness_core::board::BoardSource>> {
+        self.host.board()
+    }
+
     // Both reach every tool call's context. Not forwarding them (the
     // trait's default answers `None`) turned the per-call pin check off and
     // denied a sub-agent its own folder (tests/host_forwarding.rs).
@@ -5638,6 +5642,7 @@ impl NativeBackend {
             skills: ctx.extra.skills.clone(),
             seen: self.seen.session(ctx.session_id),
             recall: host.recall(),
+            board: host.board(),
             read_offered: self.read_offered(ctx, host),
             // Only `refusal` reads it (`refusal_ctx`).
             read_unasked: false,

@@ -760,6 +760,9 @@ async fn launch(m: Master, a: Admitted) {
         effort: a.spec.effort.clone(),
         context: Some(context),
         untrusted: rendered.untrusted,
+        // The master's own knowledge that this turn is the run (PLAN.md
+        // T78: a run may change its project's board).
+        routine_run: Some(a.run.run_id.clone()),
         ..Default::default()
     };
     if let Err(e) = m.prompt(sid, rendered.text, opts).await {

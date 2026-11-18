@@ -509,6 +509,8 @@ export interface AgentFeatures {
   project_memory: boolean;
   /** `recall`: searches your own earlier chats and memory; its own switch. */
   recall: boolean;
+  /** The project's task board in project chats (`board`, `board_edit`); its own switch (PLAN.md T78). */
+  board: boolean;
   web: boolean;
   read_files: boolean;
   edit_files: boolean;

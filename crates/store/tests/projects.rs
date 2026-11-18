@@ -85,6 +85,7 @@ fn card(s: &Store, p: &str, column: &str, title: &str) -> String {
                 notes: String::new(),
                 session_id: None,
                 created_by: None,
+                agent: None,
             },
             100,
         )
@@ -773,4 +774,27 @@ fn earlier_chats_follow_the_chats_workspace() {
     assert!(s.earlier_chats("mine", "u1", me, 5).unwrap().is_empty());
     s.set_session_project(a, Some("p")).unwrap();
     assert_eq!(s.earlier_chats("p", "u1", me, 5).unwrap().len(), 1);
+}
+
+/// An appended note goes after the notes people wrote, never over them;
+/// one that would pass the limit is refused and changes nothing (T78).
+#[test]
+fn notes_are_appended_and_refused_past_the_limit() {
+    let (s, w) = store();
+    project(&s, "p", &w);
+    let (cols, _) = s.board("p").unwrap();
+    let k = card(&s, "p", &cols[0].column_id, "Task");
+    assert!(s.append_card_note("p", &k, "first", 20).unwrap());
+    assert!(s.append_card_note("p", &k, "second", 20).unwrap());
+    assert_eq!(s.card("p", &k).unwrap().unwrap().notes, "first\nsecond");
+    let e = s
+        .append_card_note("p", &k, "this is too long", 20)
+        .unwrap_err();
+    assert!(matches!(e, harness_store::StoreError::Refused(_)), "{e:?}");
+    assert_eq!(s.card("p", &k).unwrap().unwrap().notes, "first\nsecond");
+    assert!(
+        !s.append_card_note("other", &k, "x", 20).unwrap(),
+        "another project's card"
+    );
+    assert!(!s.append_card_note("p", "nope", "x", 20).unwrap());
 }

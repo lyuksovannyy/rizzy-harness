@@ -9,6 +9,7 @@ pub mod attachments;
 pub mod auth;
 pub mod avatars;
 pub mod blobs;
+pub mod board;
 mod callbacks;
 pub mod config;
 pub mod diff;
@@ -305,6 +306,9 @@ pub struct MasterInner {
     notes: memory::Notes,
     /// `recall`'s counts per turn and hour, and its searches per node.
     recall: recall::Grants,
+    /// The board tools' counts per turn, calls per node and recent request
+    /// ids (PLAN.md T78).
+    board: board::Grants,
     /// The routine scheduler, once `start_routines` ran.
     routines: OnceLock<routines::RoutinesHandle>,
     /// The blob store, once `storage::open` ran (before any node links, so
@@ -403,6 +407,13 @@ pub struct PromptOpts {
     /// HTTP prompt route decides it): only then may the turn's `remember`
     /// apply without a click (PLAN.md T49).
     pub by_owner: bool,
+    /// The routine run this turn is (`run_id`): set only by the master's
+    /// own routine runner (`routines/runner.rs`), never from a request,
+    /// and checked against the store's record of the run when it is used.
+    /// A run of a routine the chat's owner owns may change the project
+    /// board as the owner's own turn may (the owner, 2026-11-18: "Routines
+    /// may change"; PLAN.md T78).
+    pub routine_run: Option<String>,
     /// Paths the person mentioned with `@path` (PLAN.md T63): names only,
     /// which the node reads under its own `read` rules.
     pub files: Vec<String>,
@@ -609,6 +620,8 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::ArtifactRelease { .. }
         // An answer to the node's own search: nothing is written.
         | MasterToNode::RecallResult { .. }
+        // An answer to the node's own board call: nothing is run there.
+        | MasterToNode::BoardResult { .. }
         // A read of two checkpoints: no event, no work.
         | MasterToNode::Diff { .. }
         // A listing of names for the composer: no event.
@@ -696,6 +709,7 @@ impl Master {
                 turn_memory: Mutex::new(HashMap::new()),
                 notes: Default::default(),
                 recall: Default::default(),
+                board: Default::default(),
                 routines: OnceLock::new(),
                 storage: OnceLock::new(),
                 pulls: Default::default(),
@@ -1463,6 +1477,11 @@ impl Master {
                 session_id,
                 query,
             } => recall::handle(self, node_id, req_id, session_id, query),
+            NodeToMaster::Board {
+                req_id,
+                session_id,
+                request,
+            } => board::handle(self, node_id, req_id, session_id, request),
             NodeToMaster::ArtifactChunk {
                 req_id,
                 offset,
@@ -2007,6 +2026,7 @@ impl Master {
             images,
             callback,
             by_owner,
+            routine_run,
             files,
             retry,
             retry_images,
@@ -2192,6 +2212,31 @@ impl Master {
         // (`AgentRef::withheld` in `turn_started`), which is what a later
         // search is checked against: no flag is kept here.
         let recalls = may_recall && agent.allows_tool("recall");
+        // The project board tools (PLAN.md T78): only in a project chat
+        // whose owner's turn runs it, on a node that offers them; not in an
+        // untrusted or a callback turn (text nobody wrote could steer
+        // changes to a board other people read). Changes only in a turn the
+        // owner sent signed in as themselves (`by_owner`: not the API
+        // token) or a run of the owner's own routine (the master's record
+        // of it, `board::routine_turn`), and only when they may change the
+        // board. Withheld here, so the turn's log says
+        // so (`AgentRef::withheld`), which every request is checked against;
+        // the permission is checked again per request.
+        match project.as_ref() {
+            Some(p)
+                if !untrusted
+                    && !resume
+                    && row.owner_id.is_some()
+                    && self.node_has(&row.node_id, harness_protocol::CAP_BOARD) =>
+            {
+                if !(by_owner || board::routine_turn(self, &row, routine_run.as_deref()).await)
+                    || !board::owner_may_change(self, &row, p).await
+                {
+                    board::deny_edit(&mut agent);
+                }
+            }
+            _ => board::deny(&mut agent),
+        }
         // The owner's facts, whole while they fit, each with its id
         // (`memory::turn_block`).
         let mut noted = Vec::new();
@@ -2677,6 +2722,7 @@ impl Master {
     /// Drop the mirror copy of a session and refuse its events from now on.
     async fn forget(&self, sid: SessionId) {
         self.inner.recall.forget(sid);
+        self.inner.board.forget(sid);
         let res = self
             .inner
             .mirror

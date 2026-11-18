@@ -4920,6 +4920,13 @@ impl TurnHost for Session {
         }))
     }
 
+    fn board(&self) -> Option<Arc<dyn harness_core::board::BoardSource>> {
+        Some(Arc::new(crate::board::LinkBoard {
+            node: self.node.clone(),
+            session: self.id,
+        }))
+    }
+
     fn denial_note(&self, call_id: &str) -> Option<String> {
         self.deny_notes
             .lock()

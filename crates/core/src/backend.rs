@@ -159,6 +159,13 @@ pub trait TurnHost: Send + Sync {
         None
     }
 
+    /// Where this session's `board` and `board_edit` calls go (the node's
+    /// link to the master, bound to this session); `None` where there is
+    /// none (tests, a runtime without a master).
+    fn board(&self) -> Option<std::sync::Arc<dyn crate::board::BoardSource>> {
+        None
+    }
+
     /// This session's folder as pinned when the session was created
     /// ([`crate::folder::FolderPin`]): every tool call checks it before it
     /// reads, writes or starts anything there. `None` where no folder is

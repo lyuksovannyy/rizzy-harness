@@ -763,11 +763,13 @@ mod tests {
             );
         }
         // The built-ins as shipped: Scout and Reviewer with their shell.
+        // The Assistant changes a project's board (`board_edit`, PLAN.md
+        // T78), so it is not put on the small model when a custom agent
+        // delegates to it, even in a chat where `board_edit` is withheld
+        // (no project, or an owner who may not manage it): the resolver
+        // judges the definition, before `Master::prompt` narrows it.
         for a in harness_agents::builtins() {
-            let small = matches!(
-                a.id.as_str(),
-                "scout" | "reviewer" | "researcher" | "general" | "smol"
-            );
+            let small = matches!(a.id.as_str(), "scout" | "reviewer" | "researcher" | "smol");
             assert_eq!(r.small_for(&a.spec).is_some(), small, "{}", a.id);
         }
     }

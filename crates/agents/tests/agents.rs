@@ -366,6 +366,7 @@ fn features() -> harness_agents::Features {
         project_memory: true,
         personalisation: true,
         recall: false,
+        board: false,
         web: true,
         read_files: true,
         edit_files: false,
@@ -976,14 +977,15 @@ fn a_budget_line_is_refused_by_name() {
 }
 
 /// The shared rule (PLAN.md T70) for every built-in, as shipped: Scout,
-/// Reviewer, Researcher, General and Smol change nothing (Scout and
-/// Reviewer's `bash` is the read-only shell; `remember` and the web tools
-/// change nothing by themselves); Coder, Writer and Team Lead do.
+/// Reviewer, Researcher and Smol change nothing (Scout and Reviewer's
+/// `bash` is the read-only shell; `remember` and the web tools change
+/// nothing by themselves); Coder, Writer and Team Lead do, and General
+/// does through `board_edit` (a project's board, PLAN.md T78).
 #[test]
 fn every_built_in_is_judged_by_the_shared_rule() {
     let all = builtins();
     for (id, changes, read_only_shell) in [
-        ("general", false, false),
+        ("general", true, false),
         ("coder", true, false),
         ("researcher", false, false),
         ("writer", true, false),
@@ -1117,4 +1119,58 @@ fn background_sub_agents_are_their_own_switch() {
     assert_ne!(on.spec.prompt_hash, make(true, false).spec.prompt_hash);
     let off = make(false, true);
     assert!(off.spec.caps.is_none() && off.features.background_subagents);
+}
+
+/// The Board switch (ADOPTION_PLAN X.32, PLAN.md T78): on for the default
+/// agent and the ones that build (Assistant, Software Developer, Senior
+/// Teamlead), off for the read-only roles and the rest; a page agent gets
+/// both tools, except one that stays read-only (its read-only shell), which
+/// gets the list only.
+#[test]
+fn the_board_switch() {
+    use harness_agents::{Features, custom};
+    let all = builtins();
+    for (id, on) in [
+        ("general", true),
+        ("coder", true),
+        ("teamlead", true),
+        ("researcher", false),
+        ("writer", false),
+        ("smol", false),
+        ("scout", false),
+        ("reviewer", false),
+    ] {
+        let a = all.iter().find(|a| a.id == id).expect(id);
+        assert_eq!(a.features.board, on, "{id}");
+        assert_eq!(a.spec.allows_tool("board"), on, "{id}");
+        assert_eq!(a.spec.allows_tool("board_edit"), on, "{id}");
+    }
+    let make = |f: Features| custom("x", "X", "", "Do.", f, vec![]).unwrap();
+    assert!(!features().board, "off for a new agent");
+    let off = make(features());
+    assert!(!off.spec.allows_tool("board") && !off.spec.allows_tool("board_edit"));
+    let on = make(Features {
+        board: true,
+        ..features()
+    });
+    assert!(on.features.board);
+    assert!(on.spec.allows_tool("board") && on.spec.allows_tool("board_edit"));
+    // A reader with read-only commands keeps its read-only shell and lists
+    // the board only.
+    let reader = make(Features {
+        board: true,
+        read_only_commands: true,
+        ..features()
+    });
+    assert!(reader.spec.allows_tool("board") && !reader.spec.allows_tool("board_edit"));
+    assert!(reader.spec.allows_tool("bash") && !reader.spec.changes_things(|_| true));
+    assert!(reader.features.board);
+    // A file agent lists it by name.
+    let file = parse(
+        "lister",
+        "---\nname: L\ntools: [read, board]\n---\nLook.\n",
+        false,
+    )
+    .unwrap();
+    assert!(file.features.board && !file.spec.allows_tool("board_edit"));
 }

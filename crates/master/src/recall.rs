@@ -199,7 +199,8 @@ impl From<String> for Refusal {
 /// The session a request names, checked against the node that sent it,
 /// and the top-level chat it belongs to (a sub-agent's parent). A
 /// sub-agent of a sub-agent is refused (delegation is one level deep).
-async fn sessions(
+/// The board tools ask the same (`crate::board`).
+pub(crate) async fn sessions(
     m: &Master,
     node_id: &str,
     sid: SessionId,
@@ -214,7 +215,7 @@ async fn sessions(
         .flatten()
         .ok_or_else(refused)?;
     if row.node_id != node_id {
-        tracing::warn!(node = %node_id, session = %sid, "a node asked to search for another node's session");
+        tracing::warn!(node = %node_id, session = %sid, "a node asked for another node's session");
         return Err(refused());
     }
     let top = match row.parent_id {
@@ -222,7 +223,7 @@ async fn sessions(
         None => row.clone(),
     };
     if top.parent_id.is_some() {
-        return Err("recall is not available to a sub-agent's sub-agent".into());
+        return Err("not available to a sub-agent's sub-agent".into());
     }
     Ok((row, top))
 }

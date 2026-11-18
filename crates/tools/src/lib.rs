@@ -7,6 +7,7 @@ pub mod approval;
 pub mod args;
 pub mod background;
 mod bash;
+mod board;
 pub mod contain;
 pub mod guard;
 pub use bash::{
@@ -50,6 +51,7 @@ pub use bash::{
     Bash, ENDED_MS_LEAD, FOREGROUND_DESCRIPTION, KEPT_OUTPUT_LEAD, STILL_ALIVE_TAIL, ShellChild,
     foreground_schema, read_only_note,
 };
+pub use board::{Board, BoardEdit, render as render_board};
 pub use edit::Edit;
 pub use env::ToolEnv;
 pub use fs::{Read, Write};
@@ -214,6 +216,9 @@ pub struct ToolCtx {
     /// Where `recall` sends its query: the session's link to the master
     /// (`TurnHost::recall`); `None` where there is none.
     pub recall: Option<Arc<dyn harness_core::recall::RecallSource>>,
+    /// Where `board` and `board_edit` send their requests: the session's
+    /// link to the master (`TurnHost::board`); `None` where there is none.
+    pub board: Option<Arc<dyn harness_core::board::BoardSource>>,
     /// The agent may call `read` here (its tools include it): only then
     /// does `edit`'s refusal of an unread file show the file's lines.
     pub read_offered: bool,
@@ -253,6 +258,7 @@ impl ToolCtx {
             skills: None,
             seen: Default::default(),
             recall: None,
+            board: None,
             read_offered: true,
             read_unasked: true,
             read_only_shell: false,

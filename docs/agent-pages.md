@@ -30,10 +30,10 @@ The roster (`crates/agents/builtin/`, since 2026-11; Ultracode removed):
 
 | id | aliases | name | category | runs as | tools |
 |---|---|---|---|---|---|
-| `general` (default) | `ai` | Assistant | General | agent | web_search, web_fetch, remember; user facts, project memory |
+| `general` (default) | `ai` | Assistant | General | agent | web_search, web_fetch, remember, board, board_edit; user facts, project memory |
 | `smol` | | Smol | General | agent, sub-agent | none; no memory |
 | `researcher` | `research` | Researcher | General | agent, sub-agent | web_search, web_fetch, remember; project memory |
-| `coder` | `dev` | Software Developer | IT | agent, sub-agent | bash, tool_output, read, write, edit, grep, glob, outline, graph_query, publish, web, remember; delegates to scout, researcher, reviewer; project memory |
+| `coder` | `dev` | Software Developer | IT | agent, sub-agent | bash, tool_output, read, write, edit, grep, glob, outline, graph_query, publish, web, remember, board, board_edit; delegates to scout, researcher, reviewer; project memory |
 | `teamlead` | | Senior Teamlead | IT | agent | the developer's tools; user facts; delegates to coder, researcher, writer, scout, reviewer (4 runs, 200k tokens per turn) |
 | `writer` | | Writer | General | agent, sub-agent | read, write, edit, grep, glob, web, publish, remember; project memory |
 | `scout` | | Scout | IT | sub-agent | read, grep, glob, outline, graph_query, read-only commands (`bash` in the read-only shell); no memory |
@@ -104,6 +104,7 @@ in the database).
 | Workspace memory | Doesn't exist (a non-goal of workspaces v1) | Shown, disabled, "planned" |
 | Project memory | A project's facts (docs/projects.md): recalled into its chats' turns, `remember` with `scope: "project"` proposes new ones | Works (added with Projects). Off: no project facts and no project proposals in that agent's turns; the project's instructions and board still come |
 | Earlier chats and memory search | `recall` (PLAN.md T55): the person's own earlier chats in the workspace and the memory the chat reads, by keywords, read-only | Works (tool list); its own switch since 2026-11-14 (the owner: "must have dedicated permission, like web search, file access do"). On for Assistant, Researcher and Reviewer (`RECALL_BUILTINS`), off for the built-ins that can run commands, use MCP servers or publish (Software Developer, Senior Teamlead, Writer), for Smol, Scout and a new agent; built-ins are read-only here, so that list is their permission; a page agent saved before it reads with it off |
+| Board | `board` (list) and `board_edit` (add, move, append a note; never delete or rewrite) on the task board of the chat's project (PLAN.md T78, docs/projects.md "Task board") | Works (tool list); its own switch (the owner's rule: each capability its own switch). On for Assistant, Software Developer and Senior Teamlead (their definitions list both tools), off for the others and a new agent. A page agent that changes nothing else and has read-only commands gets `board` only, so it stays read-only; changes need the chat owner's "may manage projects". An agent with the switch counts as one that changes things: as a sub-agent it is not put on the small model, even in a chat where `board_edit` is withheld |
 | Web search | `web_search` + `web_fetch` tools (chat runtime, from `[web]`) | Works (tool list) |
 | Available as Agent | Every agent is in the picker and `@mentions` | Works: hidden from the picker and mentions, and the server refuses it as a chat's or a turn's agent (`Resolver::top_level`) |
 | Available as Sub-agent | An agent is a sub-agent only if another lists it in `delegates` | Works: off removes it from every agent's `delegates` |

@@ -175,7 +175,7 @@ describe("an agent's page", () => {
     expect(api.agent).toHaveBeenCalledWith("coder", undefined);
     expect(host.querySelector("h1")!.textContent).toBe("Coder");
     expect(host.querySelector("pre.agent-prompt")!.textContent).toBe("You are careful.");
-    expect(switches().length).toBe(16);
+    expect(switches().length).toBe(17);
     expect(switches().every((s) => s.disabled)).toBe(true);
     expect(sw("Change files").checked).toBe(true);
     expect(button("Duplicate")).toBeDefined();
@@ -277,6 +277,21 @@ describe("an agent's page", () => {
     expect(api.updateAgent).toHaveBeenCalledWith(
       "reviewer",
       { name: "Reviewer", summary: "", prompt: "Review it.", features: { ...NEW_FEATURES, recall: true } },
+      undefined,
+    );
+  });
+
+  test("the board is its own switch, off for a new agent", async () => {
+    expect(NEW_FEATURES.board).toBe(false);
+    api.agent.mockResolvedValue(detail(reviewer, { prompt: "Review it." }));
+    await show(admin, "reviewer");
+    expect(sw("Board").checked).toBe(false);
+    act(() => sw("Board").click());
+    api.updateAgent.mockResolvedValue(detail(reviewer));
+    await act(async () => button("Save")!.click());
+    expect(api.updateAgent).toHaveBeenCalledWith(
+      "reviewer",
+      { name: "Reviewer", summary: "", prompt: "Review it.", features: { ...NEW_FEATURES, board: true } },
       undefined,
     );
   });

@@ -214,6 +214,13 @@ pub const CAP_REMEMBER: &str = "remember";
 /// one (PLAN.md T55).
 pub const CAP_RECALL: &str = "recall";
 
+/// The node capability that says it offers the project board tools
+/// (`board`, `board_edit`: registered there and not both in its
+/// `denied_tools`) and speaks `board.request`. The master offers the tools
+/// only in project chats on such a node, answers requests only from one,
+/// and sends `board.result` only to one (ADOPTION_PLAN X.32, PLAN.md T78).
+pub const CAP_BOARD: &str = "board";
+
 /// The node capability that says it runs sessions of an execution mode
 /// (N.10a): `exec:sandbox`, `exec:host`. Announced from the node's own
 /// self-test and `[execution]` at start; what the UI offers and names. The
@@ -446,6 +453,16 @@ pub enum NodeToMaster {
         req_id: String,
         session_id: SessionId,
         query: harness_core::recall::RecallQuery,
+    },
+    /// A `board` or `board_edit` call of a session this node runs (PLAN.md
+    /// T78): what to do and nothing else. The master finds the project,
+    /// the person and whether they may change the board from `session_id`
+    /// alone and answers with one `board.result`.
+    #[serde(rename = "board.request")]
+    Board {
+        req_id: String,
+        session_id: SessionId,
+        request: harness_core::board::BoardRequest,
     },
     /// Bytes of a staged file, answering `artifact.fetch` (pull only: a
     /// node never sends one unasked). `error: "busy"` asks for a retry.
@@ -820,6 +837,16 @@ pub enum MasterToNode {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// The answer to a `board.request`: the board or what was changed, or
+    /// why not. Only to nodes whose hello listed `CAP_BOARD`; never acked.
+    #[serde(rename = "board.result")]
+    BoardResult {
+        req_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answer: Option<harness_core::board::BoardAnswer>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// What one turn changed (X.12): read from the turn's checkpoints,
     /// answered by one `session.diff_result`, never by an ack, handled
     /// outside the node's command loop, and nothing is logged. `rewind`:
@@ -880,6 +907,7 @@ impl MasterToNode {
             | MasterToNode::Resume { .. }
             | MasterToNode::ArtifactFetch { .. }
             | MasterToNode::RecallResult { .. }
+            | MasterToNode::BoardResult { .. }
             | MasterToNode::Diff { .. }
             | MasterToNode::Files { .. }
             | MasterToNode::ProjectCreate { .. } => None,
@@ -963,6 +991,50 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&a).unwrap(),
             json!({"type": "recall.result", "req_id": "r", "error": "no"})
+        );
+        assert_eq!(a.req_id(), None, "never acked");
+    }
+
+    /// `board.request` carries what to do only: a field naming a project,
+    /// a workspace, a user or a chat does not parse, so a node cannot point
+    /// the master at another board (PLAN.md T78).
+    #[test]
+    fn board_messages_name_no_place() {
+        use harness_core::board::{BoardAnswer, BoardRequest};
+        let sid: SessionId = "0193f2a0-0000-7000-8000-000000000001".parse().unwrap();
+        let r = NodeToMaster::Board {
+            req_id: "r".into(),
+            session_id: sid,
+            request: BoardRequest::Note {
+                card_id: "c".into(),
+                text: "done".into(),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&r).unwrap(),
+            json!({"type": "board.request", "req_id": "r", "session_id": sid,
+                   "request": {"action": "note", "card_id": "c", "text": "done"}})
+        );
+        for extra in ["project_id", "workspace_id", "user_id", "owner"] {
+            let v = json!({"type": "board.request", "req_id": "r", "session_id": sid,
+                           "request": {"action": "list", extra: "x"}});
+            assert!(
+                serde_json::from_value::<NodeToMaster>(v).is_err(),
+                "{extra}"
+            );
+        }
+        let a = MasterToNode::BoardResult {
+            req_id: "r".into(),
+            answer: Some(BoardAnswer::Done {
+                card_id: "c".into(),
+                said: "noted".into(),
+            }),
+            error: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&a).unwrap(),
+            json!({"type": "board.result", "req_id": "r",
+                   "answer": {"kind": "done", "card_id": "c", "said": "noted"}})
         );
         assert_eq!(a.req_id(), None, "never acked");
     }

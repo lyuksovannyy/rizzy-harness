@@ -586,6 +586,8 @@ async fn board_json(m: &Master, who: &Principal, project: &str) -> ApiResult<Val
                         "position": k.position,
                         "chat": chat,
                         "created_by": k.created_by,
+                        // The agent that made it (T78), by name.
+                        "agent": k.agent,
                         "updated_ms": k.updated_ms,
                     })
                 })
@@ -733,6 +735,7 @@ async fn add_card(
         notes: p::clean("notes", &b.notes, p::NOTES_MAX, true).map_err(bad)?,
         session_id: b.session_id,
         created_by: who.user_id.clone(),
+        agent: None,
     };
     let pid = row.project_id.clone();
     let found = m

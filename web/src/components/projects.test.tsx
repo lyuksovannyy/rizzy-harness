@@ -21,7 +21,7 @@ vi.mock("../lib/projects", async (original) => {
   const m = await original<typeof import("../lib/projects")>();
   return { ...m, projectsApi: { ...m.projectsApi, get: (id: string) => get(id) } };
 });
-const { default: Project } = await import("./Project");
+const { default: Project, agentMark } = await import("./Project");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -153,5 +153,14 @@ describe("project page", () => {
     expect(host.textContent).toContain("Garden");
     expect(switched).toEqual(["w2"]);
     act(() => root.unmount());
+  });
+});
+
+describe("board cards and agents", () => {
+  test("a card made or noted by an agent says so", () => {
+    expect(agentMark({ agent: "Assistant", notes: "" })).toBe("Added by Assistant (agent)");
+    expect(agentMark({ agent: null, notes: "mine\n[agent Assistant] started" })).toBe("Noted by an agent");
+    expect(agentMark({ agent: null, notes: "plain [agent x] mid-line" })).toBeNull();
+    expect(agentMark({ notes: "" })).toBeNull();
   });
 });

@@ -4,6 +4,7 @@
 pub mod agent;
 pub mod artifacts;
 pub mod backend;
+pub mod board;
 pub mod event;
 pub mod folder;
 pub mod handoff;

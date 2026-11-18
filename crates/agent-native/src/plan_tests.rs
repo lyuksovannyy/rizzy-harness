@@ -228,7 +228,8 @@ impl harness_tools::Tool for Stand {
 }
 
 /// Every tool the registry can hold, under its real name and risk (the
-/// builtin set, `remember`, `recall`, the web tools, `graph_query`).
+/// builtin set, `remember`, `recall`, the board tools, the web tools,
+/// `graph_query`).
 const REGISTRY: &[(&str, ToolRisk, bool)] = &[
     ("bash", ToolRisk::Mutating, false),
     ("bash_output", ToolRisk::ReadOnly, false),
@@ -245,6 +246,8 @@ const REGISTRY: &[(&str, ToolRisk, bool)] = &[
     ("skill", ToolRisk::ReadOnly, false),
     ("remember", ToolRisk::ReadOnly, false),
     ("recall", ToolRisk::ReadOnly, false),
+    ("board", ToolRisk::ReadOnly, false),
+    ("board_edit", ToolRisk::Mutating, false),
     ("web_search", ToolRisk::ReadOnly, false),
     ("web_fetch", ToolRisk::ReadOnly, false),
     ("graph_query", ToolRisk::ReadOnly, false),
@@ -380,6 +383,7 @@ async fn every_mutating_tool_is_refused_with_no_card_and_no_run() {
         "edit",
         "publish",
         "remember",
+        "board_edit",
         "mcp__srv__do",
         "bash",
     ];
@@ -422,7 +426,7 @@ async fn the_request_offers_only_what_plan_mode_runs() {
     let r = run(host.clone(), vec![], None).await;
     let reqs = r.rec.seen.lock().unwrap().clone();
     let names: Vec<&str> = reqs[0].tools.iter().map(|t| t.name.as_str()).collect();
-    for gone in ["write", "edit", "publish", "remember", "bash"] {
+    for gone in ["write", "edit", "publish", "remember", "board_edit", "bash"] {
         assert!(!names.contains(&gone), "{gone} offered: {names:?}");
     }
     for kept in [
@@ -434,6 +438,7 @@ async fn the_request_offers_only_what_plan_mode_runs() {
         "todo",
         "skill",
         "recall",
+        "board",
         "web_search",
         "web_fetch",
         "graph_query",
@@ -783,4 +788,22 @@ async fn plan_mode_judges_delegates_by_the_shared_list() {
         let (ok, out) = host.result(id);
         assert!(!ok && out.contains("it can change files"), "{id}: {out}");
     }
+}
+
+/// The board tools in plan mode (PLAN.md T78): the change is refused
+/// with the sentence, the list runs.
+#[tokio::test]
+async fn plan_mode_lists_the_board_and_refuses_its_changes() {
+    let host = Arc::new(Host::new(ApprovalMode::Plan));
+    let r = run(
+        host.clone(),
+        vec![vec![call("board", "c0")], vec![call("board_edit", "c1")]],
+        None,
+    )
+    .await;
+    assert_eq!(r.out.reason, TurnEndReason::Completed, "{:?}", r.out);
+    assert!(host.result("c0").0, "list ran");
+    let (ok, out) = host.result("c1");
+    assert!(!ok && out.contains("nothing was changed"), "{out}");
+    assert_eq!(r.runs.load(Ordering::SeqCst), 1, "only the list ran");
 }

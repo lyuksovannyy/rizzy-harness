@@ -3,6 +3,7 @@
 
 pub mod artifacts;
 mod audit;
+mod board;
 mod environment;
 pub mod exec;
 mod git;
@@ -126,6 +127,7 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::ApprovalRespond { .. }
         | MasterToNode::ArtifactFetch { .. }
         | MasterToNode::RecallResult { .. }
+        | MasterToNode::BoardResult { .. }
         | MasterToNode::Diff { .. }
         | MasterToNode::Files { .. }
         | MasterToNode::ProjectCreate { .. } => None,
@@ -196,6 +198,8 @@ pub(crate) struct Inner {
     pub(crate) background: Arc<harness_tools::background::Registry>,
     /// `recall` calls waiting for the master's answer (PLAN.md T55).
     pub(crate) recalls: recall::Pending,
+    /// `board` and `board_edit` calls waiting for the master (PLAN.md T78).
+    pub(crate) boards: board::Pending,
     /// Room for turn diffs being read ([`DIFF_AT_ONCE`]).
     diffs: Arc<tokio::sync::Semaphore>,
     /// Room for `@` completions being walked (T63), as many as diffs.
@@ -529,6 +533,7 @@ impl NodeRuntime {
             stopping: AtomicBool::new(false),
             background: harness_tools::background::Registry::new(bg_limits, bg_secrets),
             recalls: Default::default(),
+            boards: Default::default(),
             diffs: Arc::new(tokio::sync::Semaphore::new(DIFF_AT_ONCE)),
             file_lists: Arc::new(tokio::sync::Semaphore::new(DIFF_AT_ONCE)),
             projects_made: Default::default(),
@@ -665,6 +670,13 @@ impl NodeRuntime {
             {
                 capabilities.push(harness_protocol::CAP_RECALL.into());
             }
+            // The board tools likewise (PLAN.md T78): the master answers
+            // board requests only from a node that offers one of them.
+            let offers =
+                |t: &str| self.inner.cfg.backend.has_tool(t) && !self.inner.cfg.policy.denies(t);
+            if offers(harness_core::board::READ_TOOL) || offers(harness_core::board::EDIT_TOOL) {
+                capabilities.push(harness_protocol::CAP_BOARD.into());
+            }
             if self.inner.cfg.profile == harness_core::event::Profile::Agentic {
                 // The modes it offers and their gaps (N.10a), as decided at
                 // start.
@@ -754,6 +766,12 @@ impl NodeRuntime {
                         hits,
                         error,
                     } => this.inner.recalls.answer(&req_id, hits, error),
+                    // Likewise a board call's answer.
+                    MasterToNode::BoardResult {
+                        req_id,
+                        answer,
+                        error,
+                    } => this.inner.boards.answer(&req_id, answer, error),
                     // Likewise a turn's diff (X.12): a read of two
                     // checkpoints, in a task of its own, never behind a
                     // command of the session (a restore holds its lane).
@@ -1470,6 +1488,14 @@ impl NodeRuntime {
                 error,
             } => {
                 self.inner.recalls.answer(&req_id, hits, error);
+                Ok(())
+            }
+            MasterToNode::BoardResult {
+                req_id,
+                answer,
+                error,
+            } => {
+                self.inner.boards.answer(&req_id, answer, error);
                 Ok(())
             }
             MasterToNode::ArtifactStage {
