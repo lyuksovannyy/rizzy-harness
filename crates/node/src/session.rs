@@ -67,13 +67,27 @@ struct RunningTurn {
     /// When it began; a sub-agent's turn has its parent's (B.9, T65:
     /// what changed since then is not taken as instructions in it).
     began: std::time::SystemTime,
-    /// For a sub-agent's run that a running turn of its parent started or
-    /// continued in the foreground (it waits for it): that parent turn's
-    /// id. `None` for every other turn: a person's message, a retry, a
-    /// callback, a background run (X.24). Only such a run gets its chat's
-    /// MCP servers ([`Session::chat_mcp`]): its calls then land inside the
-    /// root chat's running turn, in its checkpoint.
-    delegated_by: Option<String>,
+    /// What a sub-agent's run is part of, set only where the node starts
+    /// that run for its parent's `delegate` call (`start_child`,
+    /// `start_continue`). `None` for every other turn: a person's message,
+    /// a retry, a callback. Only a turn with one gets its chat's MCP
+    /// servers ([`Session::chat_mcp`]); it goes with the turn's slot, so
+    /// the session's next turn has none.
+    delegated_by: Option<Delegation>,
+}
+
+/// See [`RunningTurn::delegated_by`].
+#[derive(Clone, PartialEq, Eq)]
+enum Delegation {
+    /// A foreground run of the parent's turn with this id, which waits for
+    /// it: its calls land inside that turn.
+    Foreground(String),
+    /// A background run (X.24) the node started for its chat's `delegate`
+    /// call with `background: true`, or a background follow-up: only a
+    /// chat's own turn starts one (`may_start_background`). Its calls can
+    /// land between the chat's turns, in no checkpoint (the owner accepted
+    /// it on 2026-11-18, PLAN.md T47, T72).
+    Background,
 }
 
 /// How a sub-agent's run is started: in the foreground (its parent's turn
@@ -919,12 +933,13 @@ impl Session {
     /// T47): a chat's own; for a sub-agent, its chat's (the one at the top
     /// of its parents, as the node holds them now), the same table and
     /// processes, which run in the chat's folder, and only while the
-    /// sub-agent's turn is a foreground run of its parent's running turn,
-    /// and so on up to the root chat, whose own turn is running: its calls
-    /// then land inside that turn, in its checkpoint. None for a person's
-    /// message to a sub-agent's chat, a retry or callback there, a
-    /// background run (X.24) or anything under one (their calls could land
-    /// outside every turn of the chat), nor when a parent is not held.
+    /// sub-agent's turn is a run the node started for its parent's
+    /// `delegate` call: a foreground run of its parent's running turn, and
+    /// so on up, or a background run of the chat's (X.24; the owner's
+    /// decision of 2026-11-18: by its own switch; its calls can land
+    /// between the chat's turns, in no checkpoint, T72). None for a
+    /// person's message to a sub-agent's chat, a retry there (a callback
+    /// never runs there), nor when a parent is not held.
     /// Whether the turn's agent may use them is the loop's to read.
     /// The table's lifecycle stays its chat's alone (`close_mcp`,
     /// `mcp_idle`, `mcp_running` read only `self.mcp`).
@@ -975,12 +990,19 @@ impl Session {
             return Some(f(self));
         };
         // This turn, and each one above it, must be a foreground run of
-        // the turn its parent is running now, up to the root chat.
+        // the turn its parent is running now, or a background run of the
+        // root chat, up to the root chat.
         let mut by = self.delegated_by()?;
         for _ in 0..8 {
             let s = self.node.session(parent)?;
-            if s.id == self.id || s.running_turn_id()? != by {
+            if s.id == self.id {
                 return None;
+            }
+            match &by {
+                Delegation::Foreground(turn) if s.running_turn_id()? != *turn => return None,
+                // Only a chat starts one; never followed further up.
+                Delegation::Background if s.parent_session.is_some() => return None,
+                _ => {}
             }
             match s.parent_session {
                 None => return Some(f(&s)),
@@ -1002,8 +1024,9 @@ impl Session {
             .map(|t| t.turn_id.clone())
     }
 
-    /// The parent turn the running turn is a foreground run of, if it is.
-    fn delegated_by(&self) -> Option<String> {
+    /// What the running turn is a run of, if the node started it for a
+    /// parent's `delegate` call.
+    fn delegated_by(&self) -> Option<Delegation> {
         self.turn
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -4154,10 +4177,11 @@ impl Session {
             })
             .unwrap_or_default();
         let parent_began = began.unwrap_or_else(std::time::SystemTime::now);
-        // The parent turn this run is part of, for a foreground run only.
+        // The parent turn this run is part of, or that it is a background
+        // run of the chat's.
         let delegated_by = match run {
-            ChildRun::Foreground => parent_turn,
-            ChildRun::Background { .. } => None,
+            ChildRun::Foreground => parent_turn.map(Delegation::Foreground),
+            ChildRun::Background { .. } => Some(Delegation::Background),
         };
         let by_stop = Arc::new(AtomicBool::new(false));
         if let Err(e) = child.claim_turn(RunningTurn {
@@ -4543,10 +4567,11 @@ impl Session {
             })
             .unwrap_or_default();
         let parent_began = began.unwrap_or_else(std::time::SystemTime::now);
-        // The parent turn this run is part of, for a foreground run only.
+        // The parent turn this run is part of, or that it is a background
+        // run of the chat's.
         let delegated_by = match run {
-            ChildRun::Foreground => parent_turn,
-            ChildRun::Background { .. } => None,
+            ChildRun::Foreground => parent_turn.map(Delegation::Foreground),
+            ChildRun::Background { .. } => Some(Delegation::Background),
         };
         let by_stop = Arc::new(AtomicBool::new(false));
         // Taken before its folder is touched: a second follow-up (another
