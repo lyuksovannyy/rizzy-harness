@@ -754,10 +754,21 @@ async fn turns_carry_names_by_the_plugins_rule_and_never_a_body() {
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
+    // The list travels once, on the top spec, with what any spec of the
+    // message may use; each spec's own deny list says what it may not.
     let c = turn_as(&t, sid, "coder").await;
-    assert_eq!(names(&c), [("style".to_string(), StoredScope::Server)]);
-    assert_eq!(names(sub(&c, "scout")).len(), 2);
-    assert_eq!(names(sub(&c, "reviewer")).len(), 1);
+    assert_eq!(names(&c).len(), 2, "the scout may use deploy");
+    assert!(c.deny_skills.contains(&"deploy".to_string()));
+    assert!(sub(&c, "scout").deny_skills.is_empty());
+    assert!(
+        sub(&c, "reviewer")
+            .deny_skills
+            .contains(&"deploy".to_string())
+    );
+    assert!(c.delegates.iter().all(|d| d.stored_skills.is_empty()));
+    // The Assistant (no sub-agents) gets only what it may use.
+    let g = turn_as(&t, sid, "general").await;
+    assert_eq!(names(&g), [("style".to_string(), StoredScope::Server)]);
     // The other workspace: the server's only.
     let o = chat(&t, &alex, &other).await;
     let c = turn_as(&t, o, "coder").await;
@@ -906,4 +917,252 @@ async fn a_body_reaches_only_the_open_turns_agent() {
     assert_eq!(st, StatusCode::OK);
     let e = t.chat.ask(sid, "deploy").await.unwrap_err();
     assert!(e.contains("no stored skill"), "{e}");
+}
+
+fn command_bytes(t: &T, pick: impl Fn(&MasterToNode) -> bool) -> (usize, MasterToNode) {
+    let seen = t.chat.seen.lock().unwrap();
+    let m = seen
+        .iter()
+        .rev()
+        .find(|m| pick(m))
+        .expect("a command")
+        .clone();
+    (serde_json::to_vec(&m).unwrap().len(), m)
+}
+
+/// The most a turn's command may grow by its stored-skill list at the
+/// caps: 150 entries of a 64-character name and a 200-character
+/// description of 4-byte characters, about 130 KiB, sent once.
+const LIST_BOUND: usize = 256 * 1024;
+
+/// Review of PR 148 (H1): at the store's caps (75 + 75 skills whose
+/// descriptions are 1,024 four-byte characters) the list travels once, on
+/// the top spec, its descriptions cut to 200 characters on the wire: a
+/// Senior Teamlead's prompt and a workspace lead's agent switch with 18
+/// sub-agents stay far under the link's frame, and the next message goes.
+#[tokio::test]
+async fn the_list_travels_once_and_fits_the_link() {
+    let t = start().await;
+    let [alex, _bob, _carol] = users(&t).await;
+    let ws = team(&t, &alex, "Team").await;
+    let sid = chat(&t, &alex, &ws).await;
+    turn_as(&t, sid, "teamlead").await;
+    let (before, _) = command_bytes(&t, |m| matches!(m, MasterToNode::Prompt { .. }));
+    let desc: String = "\u{1F600}".repeat(1024);
+    for i in 0..75 {
+        write(&t, &alex, &ws, "workspace", &format!("w{i}"), &desc, "b").await;
+        write(&t, &alex, &ws, "server", &format!("s{i}"), &desc, "b").await;
+    }
+    let spec = turn_as(&t, sid, "teamlead").await;
+    let (lead, _) = command_bytes(&t, |m| matches!(m, MasterToNode::Prompt { .. }));
+    assert!(spec.delegates.len() >= 4, "{}", spec.delegates.len());
+    assert_eq!(spec.stored_skills.len(), 150);
+    assert!(spec.delegates.iter().all(|d| d.stored_skills.is_empty()));
+    assert!(
+        spec.stored_skills
+            .iter()
+            .all(|e| e.description.chars().count() == 200),
+        "cut to 200 on the wire"
+    );
+    assert!(
+        lead - before < LIST_BOUND,
+        "teamlead prompt grew {before} -> {lead}"
+    );
+    // The full description stays in the store and on the screen.
+    let v = req(
+        &t,
+        Method::GET,
+        &format!("/api/workspaces/{ws}/skills/workspace/w0"),
+        None,
+        &alex,
+    )
+    .await
+    .1;
+    assert_eq!(v["description"].as_str().unwrap().chars().count(), 1024);
+    // A workspace lead with 18 sub-agents.
+    let features = json!({
+        "memory": false, "web": false, "read_files": true, "edit_files": true,
+        "commands": false, "delegate": false, "as_agent": true, "as_subagent": true
+    });
+    for i in 0..12 {
+        let (st, v) = req(
+            &t,
+            Method::POST,
+            &format!("/api/agents?workspace={ws}"),
+            Some(
+                json!({"id": format!("helper{i}"), "name": format!("Helper {i}"),
+                        "prompt": "Help.", "features": features}),
+            ),
+            &alex,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+    }
+    let mut f = features.clone();
+    f["delegate"] = json!(true);
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        &format!("/api/agents?workspace={ws}"),
+        Some(json!({"id": "lead", "name": "Lead", "prompt": "Lead.", "features": f})),
+        &alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        &format!("/api/sessions/{sid}/agent"),
+        Some(json!({"agent_id": "lead"})),
+        &alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (set_len, set) = command_bytes(&t, |m| matches!(m, MasterToNode::SetAgent { .. }));
+    let MasterToNode::SetAgent { agent, .. } = set else {
+        unreachable!()
+    };
+    assert!(agent.delegates.len() >= 18, "{}", agent.delegates.len());
+    assert!(
+        set_len < LIST_BOUND + 64 * 1024,
+        "set_agent is {set_len} bytes"
+    );
+    t.master
+        .prompt(
+            sid,
+            "hello".into(),
+            PromptOpts {
+                by_owner: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("the next message goes");
+}
+
+/// Review of PR 148 (M1, the coordinator's decision): unlike `recall` and
+/// the board, a stored skill loads in a callback turn and in a temporary
+/// chat: it is an admin's instructions for agents, not the person's data.
+#[tokio::test]
+async fn callback_and_temporary_turns_load_stored_skills() {
+    let t = start().await;
+    let [alex, _bob, _carol] = users(&t).await;
+    let ws = team(&t, &alex, "Team").await;
+    write(
+        &t,
+        &alex,
+        &ws,
+        "workspace",
+        "deploy",
+        "Deploy it",
+        "Ship carefully.",
+    )
+    .await;
+    let sid = chat(&t, &alex, &ws).await;
+    t.chat
+        .emit(
+            sid,
+            "turn_started",
+            json!({"turn_id": "cb1", "cause": {"callback": ["bg-1"]},
+                   "agent": {"agent_id": "coder", "name": "coder", "prompt_hash": "h", "withheld": []}}),
+        )
+        .await;
+    landed(&t, sid).await;
+    assert_eq!(t.chat.ask(sid, "deploy").await.unwrap(), "Ship carefully.");
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        "/api/sessions",
+        Some(json!({"profile": "chat", "workspace_id": ws, "incognito": true})),
+        &alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let tmp: SessionId = v["session_id"].as_str().unwrap().parse().unwrap();
+    for _ in 0..200 {
+        if t.master.inner_mirror().session(tmp).unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    running(&t, tmp, "t1", "coder", &[]).await;
+    assert_eq!(t.chat.ask(tmp, "deploy").await.unwrap(), "Ship carefully.");
+}
+
+/// Review of PR 148 (M2): a turn and its sub-agents share one cap,
+/// counted on the chat's turn.
+#[tokio::test]
+async fn a_turn_and_its_sub_agents_share_the_cap() {
+    let t = start().await;
+    let [alex, _bob, _carol] = users(&t).await;
+    let ws = team(&t, &alex, "Team").await;
+    write(&t, &alex, &ws, "workspace", "deploy", "Deploy it", "Ship.").await;
+    let sid = chat(&t, &alex, &ws).await;
+    running(&t, sid, "t1", "coder", &[]).await;
+    let per = harness_master::stored_skills::PER_TURN;
+    for _ in 0..per / 2 {
+        t.chat.ask(sid, "deploy").await.unwrap();
+    }
+    let mut kids = Vec::new();
+    for k in 0..3 {
+        let kid = SessionId::new();
+        t.chat
+            .emit(
+                kid,
+                "session_created",
+                json!({"title": "@scout", "cwd": "/", "model": "m", "backend": "native",
+                       "node_id": "master", "profile": "chat", "approval_mode": "ask",
+                       "parent_session": sid}),
+            )
+            .await;
+        landed(&t, kid).await;
+        running(&t, kid, &format!("k{k}"), "scout", &[]).await;
+        kids.push(kid);
+    }
+    let mut ok = per / 2;
+    for kid in &kids {
+        for _ in 0..per {
+            ok += t.chat.ask(*kid, "deploy").await.is_ok() as u32;
+        }
+    }
+    assert_eq!(ok, per, "one cap for the turn and its sub-agents");
+    let e = t.chat.ask(sid, "deploy").await.unwrap_err();
+    assert!(e.contains("already loaded"), "{e}");
+    // The chat's next turn has a cap of its own.
+    ended(&t, sid, "t1").await;
+    running(&t, sid, "t2", "coder", &[]).await;
+    assert!(t.chat.ask(sid, "deploy").await.is_ok());
+}
+
+/// Review of PR 148 (L7): a chat outside any workspace (the API token's)
+/// carries no list and is answered no body.
+#[tokio::test]
+async fn a_chat_outside_any_workspace_gets_no_stored_skill() {
+    let t = start().await;
+    let [alex, _bob, _carol] = users(&t).await;
+    let ws = team(&t, &alex, "Team").await;
+    write(&t, &alex, &ws, "server", "style", "House style", "Short.").await;
+    let r = reqwest::Client::new()
+        .post(format!("{}/api/sessions", t.base))
+        .bearer_auth("tok")
+        .json(&json!({"profile": "chat"}))
+        .send()
+        .await
+        .unwrap();
+    assert!(r.status().is_success(), "{}", r.status());
+    let v: Value = r.json().await.unwrap();
+    let sid: SessionId = v["session_id"].as_str().unwrap().parse().unwrap();
+    for _ in 0..200 {
+        if t.master.inner_mirror().session(sid).unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let row = t.master.inner_mirror().session(sid).unwrap().unwrap();
+    assert!(row.workspace_id.is_none(), "{row:?}");
+    let spec = turn_as(&t, sid, "coder").await;
+    assert!(spec.stored_skills.is_empty());
+    running(&t, sid, "t1", "coder", &[]).await;
+    let e = t.chat.ask(sid, "style").await.unwrap_err();
+    assert!(e.contains("only in a workspace's chats"), "{e}");
 }

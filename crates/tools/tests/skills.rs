@@ -1084,3 +1084,87 @@ fn a_skill_md_is_read_by_the_nodes_reader() {
     assert_eq!(r.description.as_deref(), Some("First part of it."));
     assert!(skills::read_skill_md("---\nname: x\nno end").is_err());
 }
+
+/// Review of PR 148 (M3, L2): the order of names is the node owner's own
+/// skills, then the stored ones, then the repository's. A repository skill
+/// does not replace a stored one of its name (it is taken out, with
+/// discovery's note); a node-root skill does, and so does a node-root
+/// folder discovery refused.
+#[test]
+fn node_roots_then_stored_then_the_repository() {
+    let t = tree();
+    put(
+        &t.repo.join(".agents/skills/deploy/SKILL.md"),
+        skill_md("deploy", "The repository's deploy", "Repo body.\n"),
+    );
+    put(
+        &t.repo.join(".agents/skills/lint/SKILL.md"),
+        skill_md("lint", "The repository's lint", "Lint.\n"),
+    );
+    let mut c = skills::discover(&skills::repo_roots(&t.repo, &t.ws), &[]).catalogue;
+    let notes = skills::merge_stored(&mut c, &[entry("deploy", "The stored deploy")], &[]);
+    let got: Vec<(&str, &str)> = c
+        .skills
+        .iter()
+        .map(|s| (s.name.as_str(), s.description.as_str()))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("deploy", "The stored deploy"),
+            ("lint", "The repository's lint")
+        ]
+    );
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("already listed, from the server's stored skills")),
+        "{notes:?}"
+    );
+    // A node root's skill of the name wins.
+    put(
+        &t.home.join("deploy/SKILL.md"),
+        skill_md("deploy", "The owner's deploy", "Owner.\n"),
+    );
+    let roots: Vec<Root> = std::iter::once(node_root(&t.home))
+        .chain(skills::repo_roots(&t.repo, &t.ws))
+        .collect();
+    let mut c = skills::discover(&roots, &[]).catalogue;
+    skills::merge_stored(&mut c, &[entry("deploy", "The stored deploy")], &[]);
+    assert_eq!(c.skills[0].description, "The owner's deploy");
+    assert_eq!(c.shadowed, ["deploy"]);
+    // A node-root folder discovery refused keeps its name too.
+    put(&t.home.join("broken/SKILL.md"), "---\nname: broken\n---\n");
+    let mut c = skills::discover(&[node_root(&t.home)], &[]).catalogue;
+    assert!(c.refused.contains(&"broken".to_string()), "{:?}", c.refused);
+    skills::merge_stored(&mut c, &[entry("broken", "Stored broken")], &[]);
+    assert!(!c.skills.iter().any(|s| s.name == "broken"));
+    assert!(c.shadowed.contains(&"broken".to_string()));
+    // A refused repository folder does not: the stored one stands.
+    put(
+        &t.repo.join(".agents/skills/odd/SKILL.md"),
+        "---\nname: odd\n---\n",
+    );
+    let mut c = skills::discover(&skills::repo_roots(&t.repo, &t.ws), &[]).catalogue;
+    assert!(c.refused.contains(&"odd".to_string()), "{:?}", c.refused);
+    skills::merge_stored(&mut c, &[entry("odd", "Stored odd")], &[]);
+    assert!(c.skills.iter().any(|s| s.name == "odd"));
+}
+
+/// Review of PR 148 (L1): no line break of any kind in a description, and
+/// in a body none but `\n` (U+2028, U+2029, U+0085, `\r`, U+000B, U+000C).
+#[test]
+fn the_check_refuses_every_line_break_but_a_plain_one() {
+    use skills::check_stored as check;
+    for c in [
+        '\n', '\r', '\u{0B}', '\u{0C}', '\u{85}', '\u{2028}', '\u{2029}',
+    ] {
+        let e = check("a", &format!("one{c}[harness] two"), "b").unwrap_err();
+        assert!(e.contains("one line"), "{:?}: {e}", c);
+    }
+    for c in ['\r', '\u{0B}', '\u{0C}', '\u{85}', '\u{2028}', '\u{2029}'] {
+        let e = check("a", "d", &format!("one{c}[harness] two")).unwrap_err();
+        assert!(e.contains("line 1"), "{:?}: {e}", c);
+    }
+    assert!(check("a", "d", "one\n\ttwo\r\nthree").is_ok());
+}

@@ -63,6 +63,8 @@ const host = (n: NodeRef) => shownName(n.hostname || n.node_id);
 const skills = (ws: string) => `/api/workspaces/${encodeURIComponent(ws)}/skills`;
 const scopeOf = (s: Stored) => (s.origin === "builtin" ? "server" : "workspace");
 const ORIGIN = { builtin: "Built-in", workspace: "Workspace" };
+/** The largest SKILL.md the server takes (`MAX_SKILL_MD`: 24 KiB of instructions and 16 KiB for front matter). */
+const MAX_SKILL_MD = 40 * 1024;
 
 export default function Plugins(props: FeaturePageProps) {
   const { scope } = props;
@@ -420,8 +422,8 @@ function SkillForm(props: {
   const pick = async (file: File | undefined) => {
     setError(null);
     if (!file) return setMd(null);
-    // Larger than any skill may be: refused here, before it is sent.
-    if (file.size > 64 * 1024) return setError("That file is larger than a skill may be (24 KiB of instructions).");
+    // The server's limit (MAX_SKILL_MD), refused here before it is sent.
+    if (file.size > MAX_SKILL_MD) return setError(`That file is ${Math.ceil(file.size / 1024)} KiB; a SKILL.md is at most 40 KiB.`);
     setMd(await file.text());
   };
   const save = async () => {

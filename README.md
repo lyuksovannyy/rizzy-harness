@@ -2786,7 +2786,12 @@ with the **Skills** switch on (on for a new agent and for agents saved before
 it existed); the Researcher does not. A skill folder is offered only to an
 agent that reads files, edits them or runs commands; an agent without (the
 Assistant, say) gets the skills stored on the server only (below), and the
-tool only in a message that has one for it. A sub-agent with the tool gets
+tool only in a message that has one for it. Precisely: any agent whose
+tools, after what the server withholds for the message, include none of
+`read`, `grep`, `glob`, `write`, `edit` or `bash` sees no skill folder of
+the node or the repository; that includes an agent defined in a file with
+`skill` but no file tool, and a `tools: all` agent whose file tools are
+withheld. A sub-agent with the tool gets
 the list too. Which skills
 an agent sees is the workspace's choice (Plugins, below): a skill Assigned to
 other agents is not in its list, the tool refuses it with the reason, and
@@ -2841,21 +2846,31 @@ own (in your Personal workspace, you). Members see them and can open them;
 editors of a skill's scope edit and delete it (its name stays). A
 workspace's skill cannot take a Built-in skill's name; one that had it before
 the Built-in one was made is hidden, and the screen tells the workspace's
-editors. Each scope holds at most 75 skills and 1 MiB of text. Deleting a
-workspace deletes its skills.
+editors. Each scope holds at most 75 skills and 1 MiB of text; an upload is
+at most 40 KiB. Deleting a workspace deletes its skills. Plugins' Shared /
+Assigned choice is by name: when a Built-in skill takes the name of a
+workspace skill that was Assigned, that choice then governs the Built-in
+skill in that workspace.
 
-**How an agent gets one.** With each message the server sends the names and
-descriptions of the stored skills that agent may use in the chat's workspace
-(after Plugins' Shared / Assigned choice), never the instructions; they join
-the node's own list. When the agent loads one (or you start a message with
-`/name`), the node asks the server for that skill's text, and the server
-answers from the chat alone: its workspace, the agent of the running message,
-whether that agent may use it. At most 16 loads per message. An edit or a
-delete counts from the next load on; what was loaded earlier stays in the
-chat's history. A node's own skill of a name wins over a stored one. A node
-whose `node.toml` sets `[skills] from_master = false` takes none: the text is
-of the same kind as the instructions and memory the server sends already, so
-it is on by default.
+**How an agent gets one.** With each message the server sends, once, the
+names and descriptions (one line, at most 200 characters; the whole
+description stays on the server) of the stored skills that the message's
+agent or any of its sub-agents may use in the chat's workspace, never the
+instructions; each agent gets that list less what Plugins' Shared / Assigned
+choice keeps from it, and it joins the node's own list. When the agent loads
+one (or you start a message with `/name`), the node asks the server for that
+skill's text, and the server answers from the chat alone: its workspace, the
+agent of the running message (a sub-agent's own), whether that agent may use
+it. Callback turns, webhook turns and temporary chats get them too (unlike
+earlier-chat search and the board): a stored skill is an admin's
+instructions, not your data. At most 16 loads per message, its sub-agents'
+included. An edit or a delete counts from the next load on; what was loaded
+earlier stays in the chat's history. When names meet, this machine's own
+skill folders (`[skills] roots`) win, then the stored skills (Built-in before
+Workspace), then the repository's: a repository cannot stand in for a skill
+your admins wrote. A node whose `node.toml` sets `[skills] from_master =
+false` takes none: the text is of the same kind as the instructions and
+memory the server sends already, so it is on by default.
 
 ## Plugins: who may use which skill and connector
 

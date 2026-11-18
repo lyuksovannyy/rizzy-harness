@@ -19,7 +19,10 @@
 //! agent (the sub-agent's own in a sub-agent's session) must have `skill`
 //! and may use that skill by the workspace's Plugins rule, checked here
 //! again, and the skill must be one that workspace sees now. Counted per
-//! turn ([`PER_TURN`]) and per node at once ([`PER_NODE`]).
+//! chat turn, sub-agents included ([`PER_TURN`]), and per node at once
+//! ([`PER_NODE`]). Unlike `recall` and the board, it answers in callback,
+//! untrusted (webhook) and temporary turns too: a stored skill is
+//! instruction text an admin wrote for agents, not the person's data.
 //!
 //! **Names across scopes** (the rule agents got in PR 146): a server skill
 //! wins. A workspace skill cannot be made under a server skill's name (the
@@ -43,8 +46,8 @@ use crate::{Master, lock};
 pub const MAX_PER_SCOPE: usize = 75;
 /// Bytes of one scope's names, descriptions and bodies together.
 pub const MAX_SCOPE_BYTES: usize = 1024 * 1024;
-/// Bodies one turn of a chat may load (a sub-agent's session counts its
-/// own).
+/// Bodies one turn of a chat may load, its sub-agents' loads included
+/// (counted on the chat's open turn, as `recall` counts).
 pub const PER_TURN: u32 = 16;
 /// Loads one node may have in progress on the master; past it, refused.
 pub const PER_NODE: usize = 4;
@@ -72,34 +75,39 @@ impl Offered {
         &self.entries
     }
 
-    /// Put on `spec` and on each of its sub-agents (each by its own id) the
-    /// stored skills it may load here: for one that may use `skill`, every
-    /// offered skill its deny list (the Plugins rule, applied first) does
-    /// not name. One that does not work on files and has none to load
-    /// loses `skill` for the turn: a node's skill folders are not for it,
-    /// and an empty tool is noise.
+    /// Put on `spec` (the turn's agent) the stored skills any spec of the
+    /// message may load here: the list travels once, on the top spec, never
+    /// on a delegate's (review of PR 148, H1: copied onto each delegate it
+    /// multiplied a message past the link's frame). The node gives each
+    /// spec, a sub-agent's included, this list minus that spec's own
+    /// `deny_skills` (the Plugins rule, applied before this). A spec that
+    /// does not work on files and has nothing of the list to load loses
+    /// `skill` for the turn: a node's skill folders are not for it, and an
+    /// empty tool is noise.
     pub fn offer(&self, spec: &mut AgentSpec) {
-        self.offer_one(spec);
-        for d in &mut spec.delegates {
-            self.offer_one(d);
-        }
-    }
-
-    fn offer_one(&self, spec: &mut AgentSpec) {
-        spec.stored_skills.clear();
-        if !spec.allows_tool(SKILL_TOOL) {
-            return;
-        }
+        let may = |s: &AgentSpec, name: &str| s.allows_tool(SKILL_TOOL) && s.allows_skill(name);
         spec.stored_skills = self
             .entries
             .iter()
-            .filter(|e| spec.allows_skill(&e.name))
+            .filter(|e| may(spec, &e.name) || spec.delegates.iter().any(|d| may(d, &e.name)))
             .take(harness_core::skills::MAX_STORED_LISTED)
             .cloned()
             .collect();
-        if spec.stored_skills.is_empty() && !spec.works_on_files() {
-            spec.deny_tools.push(SKILL_TOOL.into());
+        let list = std::mem::take(&mut spec.stored_skills);
+        let withhold = |s: &mut AgentSpec| {
+            s.stored_skills.clear();
+            if s.allows_tool(SKILL_TOOL)
+                && !s.works_on_files()
+                && !list.iter().any(|e| s.allows_skill(&e.name))
+            {
+                s.deny_tools.push(SKILL_TOOL.into());
+            }
+        };
+        withhold(spec);
+        for d in &mut spec.delegates {
+            withhold(d);
         }
+        spec.stored_skills = list;
     }
 }
 
@@ -136,12 +144,17 @@ pub fn strip(msg: &mut MasterToNode) {
         _ => None,
     };
     let Some(spec) = spec else { return };
+    if spec.stored_skills.is_empty() {
+        return;
+    }
+    spec.stored_skills.clear();
     let one = |s: &mut AgentSpec| {
-        if !s.stored_skills.is_empty() {
-            s.stored_skills.clear();
-            if !s.works_on_files() && !s.deny_tools.iter().any(|t| t == SKILL_TOOL) {
-                s.deny_tools.push(SKILL_TOOL.into());
-            }
+        s.stored_skills.clear();
+        if s.allows_tool(SKILL_TOOL)
+            && !s.works_on_files()
+            && !s.deny_tools.iter().any(|t| t == SKILL_TOOL)
+        {
+            s.deny_tools.push(SKILL_TOOL.into());
         }
     };
     one(spec);
@@ -150,7 +163,8 @@ pub fn strip(msg: &mut MasterToNode) {
     }
 }
 
-/// Loads counted per asking session and turn, loads in progress per node.
+/// Loads counted per chat and turn, loads in progress per node. Kept in
+/// memory: the counts start over past [`KEPT`] chats and at a restart.
 #[derive(Default)]
 pub struct Grants {
     turns: Mutex<HashMap<SessionId, (String, u32)>>,
@@ -198,8 +212,13 @@ impl Master {
                 entries: v
                     .into_iter()
                     .map(|(scope, r)| StoredSkillEntry {
+                        // One line, cut for the wire (review of PR 148,
+                        // H1); the store and the screen keep it whole.
+                        description: harness_core::text::clean_line(
+                            &r.description,
+                            harness_core::skills::WIRE_DESCRIPTION,
+                        ),
                         name: r.name,
-                        description: r.description,
                         scope,
                     })
                     .collect(),
@@ -324,7 +343,25 @@ pub async fn answer(
         "the skill could not be read on the server; try again".to_string()
     })?;
     let (_, skill) = found.ok_or_else(none)?;
-    m.inner.stored_skills.take(row.session_id, &open.turn_id)?;
+    // Counted on the chat's turn, as `recall` counts (review of PR 148,
+    // M2): a sub-agent's loads go on its parent's open turn, so one message
+    // and its sub-agents share the cap. A background sub-agent whose
+    // parent's turn has ended counts on its own turn, under the parent chat.
+    let counted = match row.parent_id {
+        Some(_) => {
+            let top_sid = top.session_id;
+            m.inner
+                .mirror
+                .call(move |s| s.open_turn(top_sid))
+                .await
+                .ok()
+                .flatten()
+                .map(|t| t.turn_id)
+                .unwrap_or_else(|| format!("{}:{}", row.session_id, open.turn_id))
+        }
+        None => open.turn_id.clone(),
+    };
+    m.inner.stored_skills.take(top.session_id, &counted)?;
     Ok(skill.body)
 }
 
@@ -380,6 +417,29 @@ mod tests {
         assert!(c.allows_tool("skill") && c.stored_skills.is_empty());
     }
 
+    /// Review of PR 148 (H1a): the list travels once, on the top spec, and
+    /// holds what any spec of the message may use: a skill the top agent is
+    /// denied but a sub-agent may use is on it (the node takes it out for
+    /// the top agent by its own denial); no delegate carries a list.
+    #[test]
+    fn the_list_travels_once_with_what_any_spec_may_use() {
+        let mut top = spec("lead", serde_json::json!("all"));
+        top.deny_skills = vec!["deploy".into()];
+        let mut scout = spec("scout", serde_json::json!(["read", "skill"]));
+        scout.deny_skills = vec!["notes".into()];
+        let mut none = spec("none", serde_json::json!(["read", "skill"]));
+        none.deny_skills = vec!["deploy".into(), "notes".into(), "lint".into()];
+        top.delegates = vec![scout, none];
+        offered(&["deploy", "lint", "notes"]).offer(&mut top);
+        let names: Vec<&str> = top.stored_skills.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["deploy", "lint", "notes"]);
+        assert!(top.delegates.iter().all(|d| d.stored_skills.is_empty()));
+        let mut only = spec("lead", serde_json::json!("all"));
+        only.deny_skills = vec!["deploy".into()];
+        offered(&["deploy"]).offer(&mut only);
+        assert!(only.stored_skills.is_empty(), "nobody may use it: not sent");
+    }
+
     /// A node without the capability gets no list, and an agent that had
     /// `skill` only for the list loses it there.
     #[test]
@@ -427,5 +487,24 @@ mod tests {
         );
         assert_eq!(hidden.len(), 1);
         assert_eq!(hidden[0].workspace_id.as_deref(), Some("w"));
+    }
+
+    /// Review of PR 148 (H1c): a command over the link's safe size is
+    /// refused before it is sent, whatever its kind.
+    #[test]
+    fn a_command_too_large_for_the_link_is_refused() {
+        let mut a = spec("lead", serde_json::json!("all"));
+        let msg = |a: AgentSpec| MasterToNode::SetAgent {
+            req_id: "r".into(),
+            session_id: SessionId::new(),
+            agent: a,
+        };
+        assert!(crate::too_large_for_link(&msg(a.clone())).is_none());
+        a.system_prompt = "x".repeat(harness_protocol::MAX_PROMPT_JSON);
+        let e = crate::too_large_for_link(&msg(a)).expect("refused");
+        assert!(
+            e.to_string().contains("too large to send to the node"),
+            "{e}"
+        );
     }
 }

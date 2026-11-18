@@ -28,6 +28,10 @@ pub struct Rig {
     pub delegates: Vec<harness_core::agent::AgentSpec>,
     /// The master's context [`Rig::lead_turn`] sends (`None`: none).
     pub lead_context: Option<harness_core::backend::MasterContext>,
+    /// The stored skills the lead's spec carries (X.34 step B) and the
+    /// lead's own `deny_skills`.
+    pub lead_stored: Vec<harness_core::skills::StoredSkillEntry>,
+    pub lead_deny_skills: Vec<String>,
     pub dir: tempfile::TempDir,
     pub ws: PathBuf,
     _node: NodeRuntime,
@@ -162,6 +166,8 @@ impl Rig {
             lead_caps: None,
             delegates: vec![],
             lead_context: None,
+            lead_stored: vec![],
+            lead_deny_skills: vec![],
             dir,
             ws,
             _node: node,
@@ -327,6 +333,8 @@ impl Rig {
             ],
         );
         lead.caps = self.lead_caps;
+        lead.stored_skills = self.lead_stored.clone();
+        lead.deny_skills = self.lead_deny_skills.clone();
         for d in &self.delegates {
             lead.delegates.retain(|x| x.agent_id != d.agent_id);
             lead.delegates.push(d.clone());

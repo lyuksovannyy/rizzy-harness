@@ -1350,7 +1350,7 @@ impl NativeBackend {
             .unwrap_or("")
             .trim()
             .to_string();
-        let Some(spec) = agent.delegates.iter().find(|d| d.agent_id == target) else {
+        let Some(found) = agent.delegates.iter().find(|d| d.agent_id == target) else {
             return (
                 ToolOutcome::err(format!(
                     "`{target}` is not an agent this one can delegate to"
@@ -1359,6 +1359,15 @@ impl NativeBackend {
                 false,
             );
         };
+        // The master's stored skills travel once, on the turn's own spec
+        // (X.34 step B, review of PR 148 H1): the child gets that list and
+        // its own spec's `deny_skills` takes out what it may not use, on
+        // every way a child starts (now, continued, in the background).
+        let child = harness_core::agent::AgentSpec {
+            stored_skills: agent.stored_skills.clone(),
+            ..found.clone()
+        };
+        let spec = &child;
         if task.is_empty() {
             return (
                 ToolOutcome::err("`task` must describe the sub-task"),

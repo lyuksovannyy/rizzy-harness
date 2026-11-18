@@ -31,6 +31,11 @@ use crate::auth::Principal;
 use crate::stored_skills;
 use crate::workspaces::{self as ws, Perm};
 
+/// The largest SKILL.md taken: the body's cap and room for front matter.
+/// The browser refuses a larger file before sending it, with the same
+/// number (`web/src/components/Plugins.tsx`).
+pub(super) const MAX_SKILL_MD: usize = harness_tools::skills::BODY_CAP + 16 * 1024;
+
 fn bad(msg: impl Into<String>) -> ApiError {
     ApiError(StatusCode::BAD_REQUEST, msg.into())
 }
@@ -129,11 +134,13 @@ fn check(
             }
             // The whole file must fit what a skill may hold, with room for
             // its front matter: a larger one is refused before it is read.
-            if md.len() > harness_tools::skills::BODY_CAP + 16 * 1024 {
+            if md.len() > MAX_SKILL_MD {
                 return Err(bad(format!(
-                    "the file is {} KiB; a skill's SKILL.md is at most {} KiB",
-                    md.len() / 1024,
-                    harness_tools::skills::BODY_CAP / 1024 + 16
+                    "the file is {} KiB; a SKILL.md is at most {} KiB (its instructions at most \
+                     {} KiB)",
+                    md.len().div_ceil(1024),
+                    MAX_SKILL_MD / 1024,
+                    harness_tools::skills::BODY_CAP / 1024
                 )));
             }
             let read = harness_tools::skills::read_skill_md(&md).map_err(bad)?;
@@ -203,6 +210,17 @@ fn check(
     })
 }
 
+/// The check off the async workers: a YAML alias bomb in an upload costs
+/// about a second of parsing (review of PR 148, L3).
+async fn checked(f: impl FnOnce() -> ApiResult<Checked> + Send + 'static) -> ApiResult<Checked> {
+    tokio::task::spawn_blocking(f).await.map_err(|e| {
+        ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("the skill could not be checked: {e}"),
+        )
+    })?
+}
+
 pub(super) async fn create(
     State(m): State<Master>,
     headers: HeaderMap,
@@ -213,7 +231,7 @@ pub(super) async fn create(
     let a = ws::access(&m, &who, &id).await?;
     let scope = scope_of(&b.scope)?;
     require_write(&who, &a, scope)?;
-    let c = check(b.name, b.description, b.body, b.skill_md)?;
+    let c = checked(move || check(b.name, b.description, b.body, b.skill_md)).await?;
     let w = a.id().to_string();
     let (name, description, body) = (c.name.clone(), c.description.clone(), c.body.clone());
     let made = m
@@ -288,7 +306,7 @@ pub(super) async fn put(
     let a = ws::access(&m, &who, &id).await?;
     let scope = scope_of(&scope)?;
     require_write(&who, &a, scope)?;
-    let c = check(Some(name), b.description, b.body, b.skill_md)?;
+    let c = checked(move || check(Some(name), b.description, b.body, b.skill_md)).await?;
     let w = a.id().to_string();
     let (n, description, body) = (c.name.clone(), c.description.clone(), c.body.clone());
     let found = m

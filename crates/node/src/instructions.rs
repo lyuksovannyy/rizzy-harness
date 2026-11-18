@@ -132,10 +132,11 @@ pub(crate) fn with_skills(
     match found {
         Bounded::Done(mut f) => {
             skills::withhold(&mut f.catalogue, denied);
-            skills::merge_stored(&mut f.catalogue, stored, denied);
+            let merged = skills::merge_stored(&mut f.catalogue, stored, denied);
+            f.problems.extend(merged);
             for n in &f.catalogue.shadowed {
                 f.problems.push(format!(
-                    "the server's stored skill `{n}` is not used: a skill found here has its name"
+                    "the server's stored skill `{n}` is not used: a skill of this node's own folders has its name"
                 ));
             }
             // The list without the person's `/name`, which is this turn's

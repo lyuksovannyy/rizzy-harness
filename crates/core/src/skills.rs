@@ -52,6 +52,9 @@ pub struct StoredSkillEntry {
 /// Stored skills one spec may list; the node takes none from a longer
 /// list (it fails closed, nothing is cut).
 pub const MAX_STORED_LISTED: usize = 150;
+/// A stored skill's description as a turn's list carries it: one line of
+/// at most this many characters (the store keeps the whole of it).
+pub const WIRE_DESCRIPTION: usize = 200;
 /// A stored skill's description, at most (characters; the format's limit).
 pub const STORED_DESCRIPTION_MAX: usize = 1024;
 
@@ -119,6 +122,10 @@ pub struct Catalogue {
     /// Stored skills left out this turn because one of the node's own has
     /// the name (the node's wins), by name: for the node's log only.
     pub shadowed: Vec<String>,
+    /// Folder names of `refused` that lie in the node owner's own roots: a
+    /// stored skill never stands in for one of them (the node's name wins,
+    /// review of PR 148 L2).
+    pub refused_node: Vec<String>,
 }
 
 /// A skill's name: 1 to 64 ASCII letters, digits, `.`, `_` or `-`,

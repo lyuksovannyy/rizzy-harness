@@ -200,6 +200,9 @@ pub fn discover(roots: &[Root], protected: &[PathBuf]) -> Found {
                     found.problems.push(format!("{label}: {why}"));
                     let shown: String =
                         clean(&n.to_string_lossy()).chars().take(NAME_MAX).collect();
+                    if root.origin == SkillOrigin::Node {
+                        found.catalogue.refused_node.push(shown.clone());
+                    }
                     found.catalogue.refused.push(shown);
                 }
                 Ok(Some((name, description, manual, dir))) => {
@@ -814,21 +817,40 @@ async fn stored_body(ctx: &ToolCtx, s: &Skill, file: Option<&str>) -> ToolOutcom
 }
 
 /// Merge the master's stored skills (`AgentSpec::stored_skills`, X.34 step
-/// B) into a turn's catalogue, after discovery and the Plugins rule: one
-/// whose name a skill found here has is left out (the node's own wins; in
-/// `shadowed`, for the log), as is one this agent may not use, one whose
-/// name is not of the stored shape, and a duplicate. A list longer than
+/// B) into a turn's catalogue, after discovery and the Plugins rule. The
+/// order of names (review of PR 148, M3): the node owner's own skills
+/// (`[skills] roots`) first, then the stored ones (the master has already
+/// put the server's before the workspace's), then the repository's. So a
+/// stored skill whose name a node-root skill has, or a node-root folder
+/// discovery refused, is left out (in `shadowed`, for the log); a
+/// repository skill of a stored skill's name is taken out of the list, with
+/// discovery's own note. Also left out: a stored skill this agent may not
+/// use (`denied`, its `deny_skills`, checked here too; named in `withheld`
+/// so the tool and `/name` can say why), one whose name is not of the
+/// stored shape, and a duplicate. A list longer than
 /// [`harness_core::skills::MAX_STORED_LISTED`] is not taken at all. Each
 /// description is one clean line. A stored skill has no folder: it is never
-/// in `read`, and the tool asks the master for its text.
-///
-/// `denied`: the agent's `deny_skills`, checked here too (the master leaves
-/// those out already); a denied stored skill is named in `withheld`, so the
-/// tool and `/name` can say why.
-pub fn merge_stored(c: &mut Catalogue, list: &[StoredSkillEntry], denied: &[String]) {
+/// in `read`, and the tool asks the master for its text. What was left out,
+/// for the node's log.
+pub fn merge_stored(
+    c: &mut Catalogue,
+    list: &[StoredSkillEntry],
+    denied: &[String],
+) -> Vec<String> {
+    let mut problems = Vec::new();
     if list.len() > harness_core::skills::MAX_STORED_LISTED {
-        return;
+        problems.push(format!(
+            "the server's {} stored skills were not used: a list holds at most {}",
+            list.len(),
+            harness_core::skills::MAX_STORED_LISTED
+        ));
+        return problems;
     }
+    let shadow = |c: &mut Catalogue, n: &str| {
+        if !c.shadowed.iter().any(|s| s == n) {
+            c.shadowed.push(n.to_string());
+        }
+    };
     for e in list {
         if !harness_core::skills::valid_stored_skill_name(&e.name) {
             continue;
@@ -839,11 +861,26 @@ pub fn merge_stored(c: &mut Catalogue, list: &[StoredSkillEntry], denied: &[Stri
             }
             continue;
         }
-        if c.skills.iter().any(|s| s.name == e.name) {
-            if !c.shadowed.contains(&e.name) {
-                c.shadowed.push(e.name.clone());
-            }
+        if c.refused_node.contains(&e.name) {
+            shadow(c, &e.name);
             continue;
+        }
+        match c.skills.iter().position(|s| s.name == e.name) {
+            Some(i) if c.skills[i].origin == SkillOrigin::Repository => {
+                let gone = c.skills.remove(i);
+                problems.push(format!(
+                    "{}: not used: a skill named `{}` is already listed, from the server's \
+                     stored skills",
+                    gone.dir.display(),
+                    gone.name
+                ));
+            }
+            Some(i) if c.skills[i].origin == SkillOrigin::Node => {
+                shadow(c, &e.name);
+                continue;
+            }
+            Some(_) => continue,
+            None => {}
         }
         let description = clean(&e.description);
         if description.is_empty() {
@@ -858,6 +895,7 @@ pub fn merge_stored(c: &mut Catalogue, list: &[StoredSkillEntry], denied: &[Stri
         });
     }
     c.skills.sort_by(|a, b| a.name.cmp(&b.name));
+    problems
 }
 
 /// A `SKILL.md` as read for the server's skill store (X.34 step B), by the
@@ -952,7 +990,7 @@ pub fn check_stored(name: &str, description: &str, body: &str) -> Result<String,
     }
     if let Some(c) = description
         .chars()
-        .find(|c| c.is_control() || is_hidden(*c))
+        .find(|c| c.is_control() || is_hidden(*c) || breaks(*c))
     {
         return Err(format!(
             "the description holds a {} (U+{:04X}); it is one line of visible text",
@@ -978,21 +1016,28 @@ pub fn check_stored(name: &str, description: &str, body: &str) -> Result<String,
     for (i, l) in body.split('\n').enumerate() {
         if let Some(c) = l
             .chars()
-            .find(|c| (c.is_control() && *c != '\t') || is_hidden(*c))
+            .find(|c| (c.is_control() && *c != '\t') || is_hidden(*c) || breaks(*c))
         {
             return Err(format!(
-                "line {} of the body holds a {} (U+{:04X})",
+                "line {} of the body holds a {} (U+{:04X}); a line ends with a plain line break",
                 i + 1,
                 if is_hidden(c) {
                     "hidden character"
                 } else {
-                    "control character"
+                    "control character or line separator"
                 },
                 c as u32
             ));
         }
     }
     Ok(body)
+}
+
+/// Line breaks that are not control characters (U+2028, U+2029): a reader
+/// may start a new line there (review of PR 148, L1). U+000B, U+000C,
+/// U+0085 and `\r` are control characters, refused with them.
+fn breaks(c: char) -> bool {
+    matches!(c, '\u{2028}' | '\u{2029}')
 }
 
 /// `text` cut to [`BODY_CAP`] bytes (at a character boundary), with a note
