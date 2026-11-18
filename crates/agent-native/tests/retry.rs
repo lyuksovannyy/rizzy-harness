@@ -179,6 +179,7 @@ fn agent(fallbacks: &[&str]) -> AgentSpec {
         deny_tools: vec![],
         deny_skills: vec![],
         deny_mcp_servers: vec![],
+        stored_skills: vec![],
         delegates: vec![],
         caps: None,
     }

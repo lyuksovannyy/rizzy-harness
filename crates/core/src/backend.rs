@@ -166,6 +166,13 @@ pub trait TurnHost: Send + Sync {
         None
     }
 
+    /// Where this session's loads of a stored skill go (X.34 step B: the
+    /// node's link to the master, bound to this session); `None` where
+    /// there is none (tests, a runtime without a master).
+    fn stored_skills(&self) -> Option<std::sync::Arc<dyn crate::skills::StoredSkillSource>> {
+        None
+    }
+
     /// This session's folder as pinned when the session was created
     /// ([`crate::folder::FolderPin`]): every tool call checks it before it
     /// reads, writes or starts anything there. `None` where no folder is

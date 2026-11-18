@@ -119,6 +119,18 @@ pub struct SkillsPolicy {
     /// them.
     #[serde(default = "SkillsPolicy::home_roots")]
     pub roots: Vec<PathBuf>,
+    /// Take the skills the server's and the workspace's admins stored on
+    /// the master (X.34 step B, PLAN.md T81): their names and descriptions
+    /// come with each turn, a body when the agent loads one. Text only, of
+    /// the kind the instructions and memory the master sends already are;
+    /// this node's own skill of a name wins. `false`: the node ignores the
+    /// list and never asks. On by default.
+    #[serde(default = "yes")]
+    pub from_master: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 /// Built in code: no root. A policy a program makes for itself reads
@@ -134,6 +146,7 @@ impl Default for SkillsPolicy {
         Self {
             repository: true,
             roots: Vec::new(),
+            from_master: true,
         }
     }
 }
@@ -153,6 +166,7 @@ impl SkillsPolicy {
         Self {
             repository: true,
             roots: Self::home_roots(),
+            from_master: true,
         }
     }
 
@@ -1520,6 +1534,7 @@ tool_timeout_sec = 120
             deny_tools: vec![],
             deny_skills: vec![],
             deny_mcp_servers: vec![],
+            stored_skills: vec![],
             delegates,
             caps,
         };
@@ -1673,6 +1688,7 @@ tool_timeout_sec = 120
             deny_tools: vec![],
             deny_skills: vec![],
             deny_mcp_servers: vec![],
+            stored_skills: vec![],
             delegates: vec![],
             caps,
         };

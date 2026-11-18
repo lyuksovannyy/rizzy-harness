@@ -369,8 +369,8 @@ async fn an_assigned_item_is_denied_to_every_other_agent_and_workspace() {
         "the lists enter the hash"
     );
     // Each sub-agent by its own id: scout may load deploy, reviewer not;
-    // neither may use github (sub-agents get no MCP tools anyway: the
-    // list only narrows).
+    // neither may use github (a sub-agent uses its chat's servers only by
+    // its own switch, X.34 step C; the list only narrows).
     let scout = sub(&coder, "scout");
     assert!(scout.deny_skills.is_empty(), "{:?}", scout.deny_skills);
     assert_eq!(scout.deny_mcp_servers, ["github"]);

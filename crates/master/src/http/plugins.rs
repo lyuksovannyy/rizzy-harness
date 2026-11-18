@@ -6,6 +6,11 @@
 //!   announce it and this workspace's choice (Shared, or Assigned and to
 //!   which of its agents); the workspace's agents for the picker; whether
 //!   the caller may change it.
+//!   A skill stored on the server (`crate::stored_skills`, step B) is an
+//!   item too, with `stored`: its origin (`builtin`: the server's,
+//!   `workspace`: this one's), description and whether the caller may
+//!   change it; `hidden_skills` names, for editors only, this workspace's
+//!   own skills a server skill's name hides.
 //! * `PUT /api/workspaces/{id}/plugins/{kind}/{name}`: for whoever holds
 //!   the workspace's `settings` permission, `{"access": "shared"}` or
 //!   `{"access": "assigned", "agents": [ids]}`. Ids must be agents of this
@@ -79,6 +84,45 @@ pub(super) async fn list(
             }));
         }
     }
+    // The skills stored on the server (X.34 step B): the server's
+    // (Built-in) and this workspace's, one row per name with a node's of
+    // that name (which a node uses instead of the stored one there).
+    let (stored, hidden) = match m.visible_skills(a.id()).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, workspace = %a.id(), "could not read the stored skills");
+            (Vec::new(), Vec::new())
+        }
+    };
+    let mut stored_by_name: BTreeMap<String, Value> = BTreeMap::new();
+    for (scope, r) in &stored {
+        items.entry((plugins::SKILL, r.name.clone())).or_default();
+        stored_by_name.insert(
+            r.name.clone(),
+            json!({
+                "origin": match scope {
+                    harness_core::skills::StoredScope::Server => "builtin",
+                    harness_core::skills::StoredScope::Workspace => "workspace",
+                },
+                "description": r.description,
+                "updated_ms": r.updated_ms,
+                "can_edit": match scope {
+                    harness_core::skills::StoredScope::Server => who.is_admin(),
+                    harness_core::skills::StoredScope::Workspace => a.can(Perm::Settings),
+                },
+            }),
+        );
+    }
+    // A workspace skill a server skill's name hides: only its editors are
+    // told, so they can delete or remake it.
+    let hidden: Vec<Value> = if a.can(Perm::Settings) {
+        hidden
+            .iter()
+            .map(|r| json!({"name": r.name, "description": r.description}))
+            .collect()
+    } else {
+        Vec::new()
+    };
     // Settings for names no node announces now stay listed: they still
     // hold for any node that has the name.
     for (kind, name, _) in chosen.iter() {
@@ -99,9 +143,13 @@ pub(super) async fn list(
                     .cloned()
                     .collect::<Vec<_>>()
             });
+            let stored = (kind == plugins::SKILL)
+                .then(|| stored_by_name.get(&name).cloned())
+                .flatten();
             json!({
                 "kind": kind,
                 "name": name,
+                "stored": stored,
                 "nodes": nodes,
                 "access": if assigned.is_some() { "assigned" } else { "shared" },
                 "agents": assigned.unwrap_or_default(),
@@ -124,6 +172,8 @@ pub(super) async fn list(
         "items": list,
         "agents": agent_list,
         "can_edit": a.can(Perm::Settings),
+        "can_edit_server": who.is_admin(),
+        "hidden_skills": hidden,
         "unenforced": unenforced,
         "left_out": left_out,
     })))

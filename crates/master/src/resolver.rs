@@ -35,6 +35,9 @@ pub struct Resolver {
     /// The workspace's Plugins settings (X.34): what each agent may not
     /// use, put on every spec this resolver makes.
     access: crate::plugins::Assignments,
+    /// The workspace's stored skills (X.34 step B): put on every spec this
+    /// resolver makes, after `access`. None outside a workspace.
+    stored: crate::stored_skills::Offered,
 }
 
 /// Put a workspace's chains on the server's config. Chains whose main model
@@ -147,6 +150,7 @@ impl Master {
             agentic_default,
             agentic_problem,
             access: Default::default(),
+            stored: Default::default(),
         }
     }
 
@@ -183,6 +187,8 @@ impl Master {
         let mut r = self.resolver_with(agents, settings.as_ref());
         // Personal workspaces too: their owner chooses for their own agents.
         r.access = self.assignments(&w.workspace_id).await;
+        // Its stored skills, the server's with its own (X.34 step B).
+        r.stored = self.offered_skills(&w.workspace_id).await;
         r
     }
 }
@@ -524,6 +530,9 @@ impl Resolver {
         // What this agent and each sub-agent may not use in this workspace
         // (X.34, PLAN.md T80): deny lists only, each by its own id.
         self.access.deny(&mut spec);
+        // Then the stored skills each may load here (X.34 step B, PLAN.md
+        // T81): names and descriptions only, none outside a workspace.
+        self.stored.offer(&mut spec);
         Ok(spec)
     }
 

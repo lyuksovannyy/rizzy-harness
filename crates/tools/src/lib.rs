@@ -219,6 +219,10 @@ pub struct ToolCtx {
     /// Where `board` and `board_edit` send their requests: the session's
     /// link to the master (`TurnHost::board`); `None` where there is none.
     pub board: Option<Arc<dyn harness_core::board::BoardSource>>,
+    /// Where `skill` asks for a stored skill's body (X.34 step B): the
+    /// session's link to the master (`TurnHost::stored_skills`); `None`
+    /// where there is none.
+    pub stored_skills: Option<Arc<dyn harness_core::skills::StoredSkillSource>>,
     /// The agent may call `read` here (its tools include it): only then
     /// does `edit`'s refusal of an unread file show the file's lines.
     pub read_offered: bool,
@@ -259,6 +263,7 @@ impl ToolCtx {
             seen: Default::default(),
             recall: None,
             board: None,
+            stored_skills: None,
             read_offered: true,
             read_unasked: true,
             read_only_shell: false,

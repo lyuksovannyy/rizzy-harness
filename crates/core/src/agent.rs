@@ -225,6 +225,16 @@ pub struct AgentSpec {
     /// start: only node.toml adds one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny_mcp_servers: Vec<String>,
+    /// The stored skills (X.34 step B, PLAN.md T81) this agent may load in
+    /// this chat's workspace, by name and description only: text the
+    /// server's or the workspace's admins wrote, kept on the master. Set by
+    /// the master per turn, for every spec (a sub-agent's its own), after
+    /// the Plugins rule. The node merges them under its own skills
+    /// (node.toml `[skills] from_master`, its own of a name winning) and
+    /// asks the master for a body only when one is loaded. Nothing here
+    /// names a file or a program.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stored_skills: Vec<crate::skills::StoredSkillEntry>,
     /// Agents this one may hand sub-tasks to (`delegate` tool). Resolved by
     /// the master; their own `delegates` are empty, so depth is one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -265,6 +275,10 @@ impl Default for DelegateCaps {
     }
 }
 
+/// The tools whose agent works on files or runs commands
+/// ([`AgentSpec::works_on_files`]).
+pub const FILE_TOOLS: [&str; 6] = ["read", "grep", "glob", "write", "edit", SHELL];
+
 impl AgentSpec {
     /// Whether this agent may use `tool`. An entry `mcp` in `tools` (or in
     /// `deny_tools`) stands for every MCP tool (`mcp__<server>__<tool>`,
@@ -277,6 +291,14 @@ impl AgentSpec {
                 .iter()
                 .any(|t| t == tool || (mcp && t == MCP_ALL))
             && !mcp_server_of(tool).is_some_and(|s| self.deny_mcp_servers.iter().any(|d| d == s))
+    }
+
+    /// Whether this agent works on files or runs commands (any of `read`,
+    /// `grep`, `glob`, `write`, `edit`, `bash`): only such an agent is
+    /// offered the node's own skills, which are folders (X.34 step B); one
+    /// without gets stored skills only.
+    pub fn works_on_files(&self) -> bool {
+        FILE_TOOLS.iter().any(|t| self.allows_tool(t))
     }
 
     /// Whether this agent may load skill `name` here (`deny_skills`).
