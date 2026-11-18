@@ -33,6 +33,7 @@ pub mod prefs;
 pub mod presets;
 pub mod pricing;
 pub mod project_folder;
+pub mod project_mcp;
 pub mod projects;
 pub mod providers;
 pub mod recall;
@@ -334,6 +335,8 @@ pub struct MasterInner {
     files: files::Waiting,
     /// New project folders waiting for their node's answer (X.26, T77).
     project_folders: project_folder::Waiting,
+    /// Requests about project folders' `.mcp.json` waiting for nodes (X.36).
+    pub(crate) project_mcp: project_mcp::Waiting,
     /// Staged-file events per node and hour.
     artifact_throttle: artifacts::Throttle,
     /// Open UI sockets by user, so a login that ends closes them.
@@ -618,6 +621,17 @@ const DIVERGED: &str = "this chat's log diverged: two node processes wrote it wi
 /// The session a command would make its node write to. Cancel, delete and
 /// a deny are left out on purpose: they are how a diverged session is
 /// stopped (Gate 3 review P-7).
+/// Put the chat's owner on a turn command (X.36): a prompt, a retry, a
+/// callback. Every other command starts no turn and carries none.
+fn set_turn_owner(msg: &mut MasterToNode, who: Option<String>) {
+    match msg {
+        MasterToNode::Prompt { owner, .. }
+        | MasterToNode::Callback { owner, .. }
+        | MasterToNode::Retry { owner, .. } => *owner = who,
+        _ => {}
+    }
+}
+
 fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
     match msg {
         MasterToNode::ApprovalRespond { decision, .. } if !decision.allows() => None,
@@ -657,7 +671,9 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         // A listing of names for the composer: no event.
         | MasterToNode::Files { .. }
         // A new project's folder: no session at all.
-        | MasterToNode::ProjectCreate { .. } => None,
+        | MasterToNode::ProjectCreate { .. }
+        // A person's request about a project's `.mcp.json`: no session.
+        | MasterToNode::ProjectMcp { .. } => None,
     }
 }
 
@@ -747,6 +763,7 @@ impl Master {
                 diffs: Default::default(),
                 files: Default::default(),
                 project_folders: Default::default(),
+                project_mcp: Default::default(),
                 artifact_throttle: Default::default(),
                 sockets: Default::default(),
                 outbound: Mutex::new(outbound::Outbound::from_env()),
@@ -1351,6 +1368,7 @@ impl Master {
                 diff::node_down(&this, &nid);
                 files::node_down(&this, &nid);
                 project_folder::node_down(&this, &nid);
+                project_mcp::node_down(&this, &nid);
             }
             drop(nodes);
             let _ = this.inner.live.send(Live::NodesChanged);
@@ -1580,6 +1598,19 @@ impl Master {
                     (_, e) => Err(e.unwrap_or_else(|| "the node made no folder".into())),
                 },
             ),
+            NodeToMaster::ProjectMcpResult {
+                req_id,
+                list,
+                error,
+            } => project_mcp::on_answer(
+                self,
+                node_id,
+                req_id,
+                match (list, error) {
+                    (Some(l), None) => Ok(*l),
+                    (_, e) => Err(e.unwrap_or_else(|| "the node sent no list".into())),
+                },
+            ),
         }
     }
 
@@ -1788,6 +1819,10 @@ impl Master {
             if let Some(why) = workspaces::work_refusal(self, &row).await {
                 return Err(CommandError::Forbidden(why));
             }
+            // A turn carries the chat's owner, from its row and whoever
+            // built the command: the node starts that account's approved
+            // repository MCP servers and nobody else's (X.36, PLAN.md T82).
+            set_turn_owner(&mut msg, row.owner_id.clone());
         }
         let (tx, rx) = oneshot::channel();
         lock(&self.inner.acks).insert(req_id.clone(), (node_id.to_string(), tx));
@@ -2385,6 +2420,7 @@ impl Master {
                     standing,
                     unattended: true,
                 })),
+                owner: None,
             };
             return self
                 .send_command(&row.node_id, move |req_id| {
@@ -2410,6 +2446,7 @@ impl Master {
                 savings,
                 context,
                 agent_named: picked,
+                owner: None,
             },
             None => MasterToNode::Prompt {
                 req_id: String::new(),
@@ -2424,6 +2461,7 @@ impl Master {
                 images,
                 agent_named: picked,
                 files,
+                owner: None,
             },
         };
         // The link drops a frame over 8 MiB; the margin covers the request
@@ -2927,5 +2965,45 @@ impl Master {
             grant_id,
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod turn_owner_tests {
+    use super::*;
+
+    /// X.36 (review of PR 150, NEW-4): every turn command, a prompt, a
+    /// retry and a callback, gets the chat's owner; no other command
+    /// carries one.
+    #[test]
+    fn every_turn_command_carries_the_owner() {
+        let sid = SessionId::new();
+        let msg = |v: serde_json::Value| -> MasterToNode { serde_json::from_value(v).unwrap() };
+        let turns = [
+            msg(
+                serde_json::json!({"type": "session.prompt", "req_id": "r", "session_id": sid, "text": "x"}),
+            ),
+            msg(
+                serde_json::json!({"type": "session.retry", "req_id": "r", "session_id": sid, "turn_id": "t"}),
+            ),
+            msg(
+                serde_json::json!({"type": "session.callback", "req_id": "r", "session_id": sid, "bg_ids": ["bg-1"]}),
+            ),
+        ];
+        for mut m in turns {
+            set_turn_owner(&mut m, Some("01ALEX".into()));
+            let owner = match &m {
+                MasterToNode::Prompt { owner, .. }
+                | MasterToNode::Retry { owner, .. }
+                | MasterToNode::Callback { owner, .. } => owner.clone(),
+                _ => None,
+            };
+            assert_eq!(owner.as_deref(), Some("01ALEX"), "{m:?}");
+        }
+        let mut other =
+            msg(serde_json::json!({"type": "session.cancel", "req_id": "r", "session_id": sid}));
+        let before = other.clone();
+        set_turn_owner(&mut other, Some("01ALEX".into()));
+        assert_eq!(other, before);
     }
 }

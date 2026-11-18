@@ -133,6 +133,7 @@ async fn a_note_never_lands_inside_a_turn_and_never_refuses_a_prompt() {
                 images: vec![],
                 agent_named: false,
                 files: vec![],
+                owner: None,
             })
             .unwrap();
     };

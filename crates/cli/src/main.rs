@@ -633,6 +633,19 @@ async fn agentic_node(
             tracing::warn!("the node's instruction file: {w}");
         }
     }
+    // A repository's MCP servers (X.36, PLAN.md T82): the approved copies
+    // live in this data directory (protected above), never in a folder a
+    // chat can reach.
+    policy.mcp.approvals_file = Some(dir.join("project-mcp.json"));
+    match policy.mcp.project_servers {
+        harness_node::policy::ProjectServers::Ask => tracing::info!(
+            "a repository's MCP servers (.mcp.json): a person may approve them, one by one, for \
+             their own sandboxed chats ([mcp] project_servers = \"ask\")"
+        ),
+        harness_node::policy::ProjectServers::Off => {
+            tracing::info!("a repository's MCP servers (.mcp.json): off")
+        }
+    }
     // Where new projects' folders are made (X.26, PLAN.md T77): checked
     // once here, after the data directory is protected; one node.toml
     // names that breaks a rule stops the node.
@@ -1249,7 +1262,9 @@ fn main() -> anyhow::Result<()> {
     if std::env::args_os().nth(1).as_deref() == Some(harness_tools::sandbox::SUBCOMMAND.as_ref()) {
         // Before anything else: nothing the guard, bubblewrap or the node
         // left open (the image this runs from, review T8F-2) reaches the
-        // command.
+        // command. A repository MCP server's environment is read from its
+        // descriptor first (X.36), to be set on the command alone.
+        harness_tools::sandbox::take_inner_env();
         harness_tools::sandbox::close_inherited();
     }
     if std::env::args_os().nth(1).as_deref() == Some(harness_tools::sandbox::SUBCOMMAND.as_ref())

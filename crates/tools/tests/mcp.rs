@@ -418,3 +418,188 @@ async fn notes_are_shown_once_per_session() {
     s.close();
     s.wait_gone(mcp::STOP_WAIT).await;
 }
+
+/// X.36 (PLAN.md T82): a repository's approved servers join the table
+/// through `set_project`, beside node.toml's: a name node.toml has stays
+/// node.toml's; one taken out (its approval removed, gone from the file)
+/// stops, and a tool of it a turn still holds starts nothing again; one
+/// whose `env` goes only to its own process (`env_inside`) starts only
+/// contained (the contained path: `cli/tests/project_mcp_e2e.rs`).
+#[tokio::test]
+async fn a_repositorys_servers_come_and_go_through_set_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut node = BTreeMap::new();
+    node.insert(
+        "fake".to_string(),
+        server(&["--tool-names", "who", "--marker", "node"]),
+    );
+    let s = SessionMcp::at_always(
+        &node,
+        mcp::Home {
+            key: "k".into(),
+            workspace: dir.path().to_path_buf(),
+            pin: None,
+        },
+    );
+    let started = dir.path().join("started");
+    let proj = server(&[
+        "--tool-names",
+        "env,who",
+        "--marker",
+        "proj",
+        "--started",
+        started.to_str().unwrap(),
+    ]);
+    let mut shadow = server(&["--tool-names", "who", "--marker", "shadow"]);
+    shadow.env_inside = true;
+    let mut given = BTreeMap::new();
+    given.insert("proj".to_string(), proj.clone());
+    given.insert("fake".to_string(), shadow);
+    s.set_project(&given, vec!["a note".into()]);
+    assert!(s.is_project("proj") && !s.is_project("fake"));
+    let l = s.load(&ctx(&dir), &[]).await;
+    assert!(l.notes.iter().any(|n| n == "a note"), "{:?}", l.notes);
+    let who = tool(&l.tools, "mcp__fake__who")
+        .run(&ctx(&dir), json!({}))
+        .await;
+    assert_eq!(who.output, "served by node tool who");
+    let held = tool(&l.tools, "mcp__proj__who").clone();
+    assert_eq!(
+        held.run(&ctx(&dir), json!({})).await.output,
+        "served by proj tool who"
+    );
+    let pid = pids(&started)[0];
+    // The same copy again keeps its process.
+    s.set_project(&given, vec![]);
+    let l = s.load(&ctx(&dir), &[]).await;
+    assert!(l.notes.is_empty());
+    tool(&l.tools, "mcp__proj__who")
+        .run(&ctx(&dir), json!({}))
+        .await;
+    assert_eq!(pids(&started).len(), 1);
+    // Taken out: stopped, and the held tool starts nothing.
+    s.set_project(&BTreeMap::new(), vec![]);
+    let by = Instant::now() + Duration::from_secs(10);
+    while alive(pid) {
+        assert!(Instant::now() < by, "the removed server still runs");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let r = held.run(&ctx(&dir), json!({})).await;
+    assert!(
+        !r.ok && r.output.contains("no longer one of this chat's servers"),
+        "{}",
+        r.output
+    );
+    assert_eq!(pids(&started).len(), 1, "a removed server started again");
+    let l = s.load(&ctx(&dir), &[]).await;
+    assert!(l.tools.iter().all(|t| !t.name().starts_with("mcp__proj__")));
+    // `env_inside` outside a contained sandbox: not started at all.
+    let mut inside = server(&["--started", started.to_str().unwrap()]);
+    inside.env = serde_json::from_value(json!({"PROJ_VALUE": "inside-only"})).unwrap();
+    inside.env_inside = true;
+    let mut given = BTreeMap::new();
+    given.insert("inside".to_string(), inside);
+    s.set_project(&given, vec![]);
+    let l = s.load(&ctx(&dir), &[]).await;
+    assert!(
+        l.notes
+            .iter()
+            .any(|n| n.contains("only in a contained sandbox")),
+        "{:?}",
+        l.notes
+    );
+    assert_eq!(
+        pids(&started).len(),
+        1,
+        "an env_inside server started uncontained"
+    );
+    s.close();
+    assert!(s.wait_gone(mcp::STOP_WAIT).await);
+}
+
+/// Review of PR 150 (LOW): a repository server taken out of the table
+/// while it is still starting does not stay up, and the turn that started
+/// it gets no tool of it.
+#[tokio::test]
+async fn a_server_taken_out_while_it_starts_does_not_stay_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = SessionMcp::at_always(
+        &BTreeMap::new(),
+        mcp::Home {
+            key: "k".into(),
+            workspace: dir.path().to_path_buf(),
+            pin: None,
+        },
+    );
+    let started = dir.path().join("started");
+    let slow = server(&[
+        "--slow-init",
+        "1500",
+        "--started",
+        started.to_str().unwrap(),
+    ]);
+    let mut given = BTreeMap::new();
+    given.insert("slow".to_string(), slow);
+    s.set_project(&given, vec![]);
+    let c = ctx(&dir);
+    let load = s.load(&c, &[]);
+    let taker = async {
+        while pids(&started).is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        s.set_project(&BTreeMap::new(), vec![]);
+    };
+    let (l, ()) = tokio::join!(load, taker);
+    assert!(
+        l.tools.iter().all(|t| !t.name().starts_with("mcp__slow__")),
+        "a removed server's tools were offered"
+    );
+    let pid = pids(&started)[0];
+    let by = Instant::now() + Duration::from_secs(10);
+    while alive(pid) {
+        assert!(
+            Instant::now() < by,
+            "the server taken out while it started still runs"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // Closing works the same way.
+    let t = SessionMcp::at_always(
+        &BTreeMap::new(),
+        mcp::Home {
+            key: "k2".into(),
+            workspace: dir.path().to_path_buf(),
+            pin: None,
+        },
+    );
+    let started2 = dir.path().join("started2");
+    let mut given = BTreeMap::new();
+    given.insert(
+        "slow".to_string(),
+        server(&[
+            "--slow-init",
+            "1500",
+            "--started",
+            started2.to_str().unwrap(),
+        ]),
+    );
+    t.set_project(&given, vec![]);
+    let load = t.load(&c, &[]);
+    let closer = async {
+        while pids(&started2).is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        t.close();
+    };
+    let (l, ()) = tokio::join!(load, closer);
+    assert!(l.tools.is_empty());
+    let pid = pids(&started2)[0];
+    let by = Instant::now() + Duration::from_secs(10);
+    while alive(pid) {
+        assert!(
+            Instant::now() < by,
+            "the server of a closed table still runs"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}

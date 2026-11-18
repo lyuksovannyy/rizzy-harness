@@ -230,6 +230,7 @@ fn prompt(link: &NodeLink, sid: SessionId, req_id: &str, text: String) {
             images: vec![],
             files: vec![],
             agent_named: false,
+            owner: None,
         })
         .unwrap();
 }

@@ -37,6 +37,79 @@ use serde::{Deserialize, Serialize};
 /// The subcommand name of the wrapper.
 pub const SUBCOMMAND: &str = "sandbox-exec";
 
+/// What [`take_inner_env`] read: the values `exec` sets on the command.
+static INNER_ENV: std::sync::OnceLock<Result<Vec<(OsString, OsString)>, String>> =
+    std::sync::OnceLock::new();
+
+/// The most bytes of a repository server's environment read.
+const MAX_INNER_ENV: u64 = 64 * 1024;
+
+/// `sandbox-exec`, before [`close_inherited`]: a repository's MCP server's
+/// `env` values (X.36), on the descriptor its guard named in
+/// [`crate::guard::INNER_ENV_FD`] (`NAME=value`, each ended by a NUL), read
+/// once, through `/proc/self/fd` (a regular file of this user the guard
+/// checked and unlinked), and kept for [`exec`], which sets them on the
+/// command alone, after the confinement. Nothing when the variable is not
+/// set; a descriptor that cannot be read, a malformed or a `HARNESS_*`
+/// name refuses the command.
+pub fn take_inner_env() {
+    use std::io::Read;
+    let read = || -> Result<Vec<(OsString, OsString)>, String> {
+        let Some(n) = std::env::var_os(crate::guard::INNER_ENV_FD) else {
+            return Ok(Vec::new());
+        };
+        let n: u32 = n
+            .to_str()
+            .and_then(|n| n.parse().ok())
+            .ok_or("the server's environment names no descriptor")?;
+        let f = std::fs::File::open(format!("/proc/self/fd/{n}"))
+            .map_err(|e| format!("the server's environment: {e}"))?;
+        if !f.metadata().map_err(|e| e.to_string())?.is_file() {
+            return Err("the server's environment is not a file".into());
+        }
+        let mut bytes = Vec::new();
+        f.take(MAX_INNER_ENV + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| format!("the server's environment: {e}"))?;
+        if bytes.len() as u64 > MAX_INNER_ENV {
+            return Err("the server's environment is too large".into());
+        }
+        parse_inner_env(&bytes)
+    };
+    let _ = INNER_ENV.set(read());
+}
+
+/// The items of a repository server's environment file: `NAME=value`,
+/// each ended by a NUL. A name that is not a variable name, or one of the
+/// harness's own (`HARNESS_*`, so no file can name the guard's or
+/// `sandbox-exec`'s settings), refuses the whole file.
+pub fn parse_inner_env(bytes: &[u8]) -> Result<Vec<(OsString, OsString)>, String> {
+    let mut out = Vec::new();
+    for item in bytes.split(|b| *b == 0).filter(|i| !i.is_empty()) {
+        let at = item
+            .iter()
+            .position(|b| *b == b'=')
+            .ok_or("a malformed environment entry")?;
+        let (k, v) = (&item[..at], &item[at + 1..]);
+        let name_ok = k
+            .first()
+            .is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_')
+            && k.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'_')
+            && !crate::env::DENY_PREFIXES
+                .iter()
+                .any(|p| k.starts_with(p.as_bytes()));
+        if !name_ok {
+            return Err("a malformed or reserved environment name".into());
+        }
+        use std::os::unix::ffi::OsStrExt;
+        out.push((
+            std::ffi::OsStr::from_bytes(k).to_os_string(),
+            std::ffi::OsStr::from_bytes(v).to_os_string(),
+        ));
+    }
+    Ok(out)
+}
+
 /// `sandbox-exec`, first: close every descriptor above 2 this process was
 /// given (T.8f, review T8F-2). A contained `sandbox-exec` is started from a
 /// descriptor of the node's image that its guard left open (and, with
@@ -47,7 +120,9 @@ pub const SUBCOMMAND: &str = "sandbox-exec";
 /// it would stay (re-check R-3). `close_range(2)` would end that, but nix
 /// 0.31.3 has no safe wrapper of it, and no start of the node reaches this
 /// case (both forms of the view have a `/proc`). Nothing opened before this
-/// is needed after it.
+/// is needed after it: the one thing read before it, a repository MCP
+/// server's environment ([`take_inner_env`]), is kept in memory, and its
+/// descriptor is closed here with the rest.
 pub fn close_inherited() {
     let fds: Vec<i32> = match std::fs::read_dir("/proc/self/fd") {
         Ok(d) => d
@@ -2806,7 +2881,21 @@ pub fn exec(req: ExecRequest) -> i32 {
         eprintln!("{SUBCOMMAND}: cannot turn core dumps off, not running the command: {e}");
         return EXIT_UNCONFINED;
     }
-    let err = std::process::Command::new(program).args(args).exec();
+    // A repository server's values (X.36), on this command alone; the
+    // descriptor's name goes with nothing.
+    let inner = match INNER_ENV.get() {
+        Some(Ok(v)) => v.clone(),
+        Some(Err(e)) => {
+            eprintln!("{SUBCOMMAND}: {e}, not running the command");
+            return 2;
+        }
+        None => Vec::new(),
+    };
+    let err = std::process::Command::new(program)
+        .args(args)
+        .env_remove(crate::guard::INNER_ENV_FD)
+        .envs(inner)
+        .exec();
     eprintln!("{SUBCOMMAND}: {}: {err}", Path::new(program).display());
     if err.kind() == std::io::ErrorKind::NotFound {
         127
@@ -3631,5 +3720,44 @@ mod tests {
 
     fn toml_like<T: for<'de> Deserialize<'de>>(s: &str) -> T {
         serde_json::from_str(s).unwrap()
+    }
+
+    /// Review of PR 150 (NEW-3): `sandbox-exec` takes a repository
+    /// server's values only under variable names that are not the
+    /// harness's own.
+    #[test]
+    fn the_inner_env_takes_no_harness_name_and_no_malformed_one() {
+        let ok = parse_inner_env(b"A=1\0NODE_OPTIONS=--require ./x.js\0EMPTY=\0").unwrap();
+        assert_eq!(ok.len(), 3);
+        assert_eq!(ok[1].1, "--require ./x.js");
+        for bad in [
+            &b"HARNESS_GUARD_STDIN_FIFO=/tmp/f\0"[..],
+            b"HARNESS_INNER_ENV_FD=3\0",
+            b"A=1\0HARNESS_X=1\0",
+            b"1A=1\0",
+            b"A-B=1\0",
+            b"=1\0",
+            b"NOEQUALS\0",
+        ] {
+            assert!(
+                parse_inner_env(bad).is_err(),
+                "{:?}",
+                String::from_utf8_lossy(bad)
+            );
+        }
+    }
+
+    /// Review of PR 150 (NEW-4): a node killed between writing a server's
+    /// environment file and its guard taking it leaves `.mcp-*/env`
+    /// behind; the next start empties the temp root, that file with it.
+    #[test]
+    fn a_left_environment_file_goes_at_the_next_start() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("sandbox-tmp");
+        std::fs::create_dir_all(root.join(".mcp-0123456789abcdef")).unwrap();
+        std::fs::write(root.join(".mcp-0123456789abcdef/env"), "A=secret\0").unwrap();
+        reset_tmp(&root).unwrap();
+        assert!(root.is_dir());
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
     }
 }

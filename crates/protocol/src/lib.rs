@@ -82,6 +82,218 @@ pub const CAP_PROJECTS: &str = "projects";
 /// refuses a longer one (the master's project names are far shorter).
 pub const MAX_PROJECT_NAME: usize = 256;
 
+/// The node capability that announces `project.mcp` (ADOPTION_PLAN X.36,
+/// PLAN.md T82): its node.toml says `[mcp] project_servers = "ask"`, so a
+/// person may approve the MCP servers a project folder's `.mcp.json`
+/// declares, one by one, for their own chats there. A node without it
+/// reads no `.mcp.json` and the master sends it no `project.mcp`.
+pub const CAP_PROJECT_MCP: &str = "project-mcp";
+
+/// The longest user id a `session.create` or `project.mcp` may carry, in
+/// bytes (the master's ids are 26 characters).
+pub const MAX_USER_ID: usize = 128;
+
+/// Whether `id` may name an account in a message to a node: 1 to
+/// [`MAX_USER_ID`] of ASCII letters, digits, `-` and `_` (the master's ids
+/// are ULIDs), so it is safe in a log line and as a key.
+pub fn valid_user_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_USER_ID
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// The longest string of a `project.mcp_result` entry, in characters: an
+/// approvable entry's command, argument, `env` name or value (shown whole,
+/// never cut), the cut text of one that cannot be approved, a reason. The
+/// node keeps to it by construction and the master refuses a list that
+/// does not (X.36, PLAN.md T82).
+pub const MAX_SHOWN: usize = 512;
+
+/// The first character of `s` that an approvable entry may not hold, if
+/// any: an approvable string is printable ASCII (0x21 to 0x7E) and single
+/// spaces only, so what a screen draws is what runs (no invisible, combining
+/// or look-alike character: review of PR 150, NEW-1). Spaces at the edges
+/// and runs of them are the node's and the master's other checks.
+pub fn first_unshowable(s: &str) -> Option<char> {
+    s.chars().find(|c| !(' '..='~').contains(c))
+}
+
+/// How a character is named in a reason: its code point, never itself.
+pub fn code_point(c: char) -> String {
+    format!("U+{:04X}", c as u32)
+}
+
+/// What a person asks a node about a project folder's `.mcp.json` (X.36).
+/// Every one reads the file once, then answers with the list as it is
+/// after the request. Nothing here names a program: an approval names a
+/// server of the file and the digest of the entry the person was shown.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum ProjectMcpRequest {
+    /// The list (opening it, and Reload).
+    List,
+    /// Approve the file's entry `name`, if it still has `digest`.
+    Approve { name: String, digest: String },
+    /// Remove this person's approval of `name` (always allowed).
+    Remove { name: String },
+}
+
+/// Where a server of a project's `.mcp.json` stands for one person.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectMcpState {
+    /// The file's entry is the one this person approved.
+    Approved,
+    /// Approved, but the file's entry differs now: the approved copy is
+    /// what runs until the new one is approved.
+    Changed,
+    /// In the file, not approved: it does not run.
+    New,
+    /// Approved, and no longer in the file: it is not started.
+    Removed,
+    /// It can never be approved (`reason` says why).
+    Unsupported,
+    /// The node's own node.toml has a server of this name, which wins.
+    Hidden,
+}
+
+/// One `env` entry of a repository's server, as the asking person is
+/// shown it: the value too, which is repository content and part of what
+/// runs (X.36).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectMcpEnv {
+    pub name: String,
+    pub value: String,
+}
+
+/// One server as a person is shown it: what the entry runs, whole, as
+/// text: the command, each argument, each `env` name and value. For an
+/// entry that can be approved these are exactly the strings the digest
+/// covers and the node runs; one that cannot be approved may be shown
+/// escaped and cut.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectMcpEntry {
+    pub name: String,
+    pub state: ProjectMcpState,
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: Vec<ProjectMcpEnv>,
+    /// The digest of the file's entry, to approve it with (`new`,
+    /// `changed`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+    /// Why it is `unsupported` or `hidden`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// For `changed`: what the approved copy runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_args: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_env: Option<Vec<ProjectMcpEnv>>,
+}
+
+/// A project folder's `.mcp.json` as one person stands with it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectMcpList {
+    /// Why the file could not be read, when it could not (a link, not a
+    /// regular file, over the cap, not the standard shape); `entries`
+    /// then holds this person's approved copies only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unreadable: Option<String>,
+    /// There is no `.mcp.json` in the folder.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub missing: bool,
+    #[serde(default)]
+    pub entries: Vec<ProjectMcpEntry>,
+    /// What the node said about the request (an approval refused because
+    /// the entry changed, …), in words for the person.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// The most entries a [`ProjectMcpList`] may hold (the node's 32 in the
+/// file and 32 gone from it), and arguments or `env` entries per entry.
+pub const MAX_LISTED_ENTRIES: usize = 64;
+pub const MAX_LISTED_PARTS: usize = 64;
+
+impl ProjectMcpList {
+    /// Whether the page can show this list whole (X.36): at most
+    /// [`MAX_LISTED_ENTRIES`] entries of at most [`MAX_LISTED_PARTS`]
+    /// arguments and `env` entries; every string of every entry (name,
+    /// command, arguments, `env` names and values, digest, reason, the
+    /// approved copy's) printable ASCII and spaces of at most
+    /// [`MAX_SHOWN`] characters ([`first_unshowable`]); `unreadable` and
+    /// `note` at most [`MAX_SHOWN`] characters without a control character.
+    /// The node builds every list to pass it; the master refuses one that
+    /// does not.
+    pub fn showable(&self) -> Result<(), String> {
+        let text = |what: &str, s: &str| -> Result<(), String> {
+            if s.chars().count() > MAX_SHOWN {
+                return Err(format!("{what} is longer than {MAX_SHOWN} characters"));
+            }
+            match first_unshowable(s) {
+                Some(c) => Err(format!("{what} holds {}", code_point(c))),
+                None => Ok(()),
+            }
+        };
+        let words = |what: &str, s: &Option<String>| -> Result<(), String> {
+            match s {
+                Some(s) if s.chars().count() > MAX_SHOWN => {
+                    Err(format!("{what} is longer than {MAX_SHOWN} characters"))
+                }
+                Some(s) if s.chars().any(char::is_control) => {
+                    Err(format!("{what} holds a control character"))
+                }
+                _ => Ok(()),
+            }
+        };
+        let parts = |args: &[String], env: &[ProjectMcpEnv]| -> Result<(), String> {
+            if args.len() > MAX_LISTED_PARTS || env.len() > MAX_LISTED_PARTS {
+                return Err("an entry has too many arguments or env entries".into());
+            }
+            for a in args {
+                text("an argument", a)?;
+            }
+            for e in env {
+                text("an env name", &e.name)?;
+                text("an env value", &e.value)?;
+            }
+            Ok(())
+        };
+        if self.entries.len() > MAX_LISTED_ENTRIES {
+            return Err(format!("more than {MAX_LISTED_ENTRIES} entries"));
+        }
+        words("the file's state", &self.unreadable)?;
+        words("the note", &self.note)?;
+        for e in &self.entries {
+            text("a name", &e.name)?;
+            text("a command", &e.command)?;
+            parts(&e.args, &e.env)?;
+            for (what, s) in [
+                ("a digest", &e.digest),
+                ("a reason", &e.reason),
+                ("an approved command", &e.approved_command),
+            ] {
+                if let Some(s) = s {
+                    text(what, s)?;
+                }
+            }
+            parts(
+                e.approved_args.as_deref().unwrap_or_default(),
+                e.approved_env.as_deref().unwrap_or_default(),
+            )?;
+        }
+        Ok(())
+    }
+}
+
 /// The most paths one `session.prompt` may name in `files`, and the
 /// longest one, in bytes; a node reads at most its own number of them.
 pub const MAX_PROMPT_FILES: usize = 64;
@@ -636,8 +848,25 @@ pub enum NodeToMaster {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// The answer to `project.mcp` (pull only: never sent unasked): the
+    /// list after the request for the asking person, or why there is none,
+    /// in words for that person. Each entry's command, arguments and `env`
+    /// names and values: repository content, shown so the person sees
+    /// what runs; the master passes it to the asker alone.
+    #[serde(rename = "project.mcp_result")]
+    ProjectMcpResult {
+        req_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        list: Option<Box<ProjectMcpList>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
 }
 
+// A command is built, sent once and dropped; none is kept in bulk, so the
+// size of its largest variant (`session.prompt`, with its spec and, since
+// X.36, its owner) costs nothing worth boxing every literal for.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum MasterToNode {
@@ -719,6 +948,14 @@ pub enum MasterToNode {
         /// found in the message; nothing here is file content.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         files: Vec<String>,
+        /// The account that owns the chat (its user id; none for the API
+        /// token's), set by the master from the chat's row in
+        /// `send_command` whoever builds the command: the node starts only
+        /// the repository MCP servers this account approved (X.36, PLAN.md
+        /// T82), and refuses a turn whose `owner` is not
+        /// [`valid_user_id`]. Kept in the node's memory, never logged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<String>,
     },
     /// Resume an idle chat because background commands ended (a callback
     /// turn, T.8d step 3; only to nodes with `CAP_CALLBACK`). There is no
@@ -743,6 +980,14 @@ pub enum MasterToNode {
         /// Absent: the turn reads no memory.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context: Option<Box<harness_core::backend::MasterContext>>,
+        /// The account that owns the chat (its user id; none for the API
+        /// token's), set by the master from the chat's row in
+        /// `send_command` whoever builds the command: the node starts only
+        /// the repository MCP servers this account approved (X.36, PLAN.md
+        /// T82), and refuses a turn whose `owner` is not
+        /// [`valid_user_id`]. Kept in the node's memory, never logged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<String>,
     },
     /// Run the chat's failed last turn again (a person's Retry, X.21; only
     /// to nodes with [`CAP_RETRY`]). Sent only for the chat's owner. No
@@ -768,6 +1013,14 @@ pub enum MasterToNode {
         /// `session.prompt`'s: the retry is then no switch of the chat's.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         agent_named: bool,
+        /// The account that owns the chat (its user id; none for the API
+        /// token's), set by the master from the chat's row in
+        /// `send_command` whoever builds the command: the node starts only
+        /// the repository MCP servers this account approved (X.36, PLAN.md
+        /// T82), and refuses a turn whose `owner` is not
+        /// [`valid_user_id`]. Kept in the node's memory, never logged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<String>,
     },
     /// Write the chat's hand-off note now if one is due (X.16,
     /// docs/handoff-notes.md; only to nodes with [`CAP_HANDOFF`]). A
@@ -1015,6 +1268,21 @@ pub enum MasterToNode {
     /// has no effect. Only to nodes with [`CAP_PROJECTS`].
     #[serde(rename = "project.create")]
     ProjectCreate { req_id: String, name: String },
+    /// A person's request about a project folder's `.mcp.json` (X.36,
+    /// PLAN.md T82): whose request it is, the project's folder (the node
+    /// checks it as a chat's folder, `check_cwd`) and what they ask.
+    /// Answered by one `project.mcp_result`, never an ack, outside the
+    /// command loop; no session. The node refuses it unless its node.toml
+    /// says `[mcp] project_servers = "ask"`. Only to nodes with
+    /// [`CAP_PROJECT_MCP`], and only on a person's HTTP request: nothing a
+    /// turn, a tool or a model does sends one.
+    #[serde(rename = "project.mcp")]
+    ProjectMcp {
+        req_id: String,
+        user_id: String,
+        folder: String,
+        request: ProjectMcpRequest,
+    },
 }
 
 impl MasterToNode {
@@ -1047,7 +1315,8 @@ impl MasterToNode {
             | MasterToNode::SkillResult { .. }
             | MasterToNode::Diff { .. }
             | MasterToNode::Files { .. }
-            | MasterToNode::ProjectCreate { .. } => None,
+            | MasterToNode::ProjectCreate { .. }
+            | MasterToNode::ProjectMcp { .. } => None,
         }
     }
 }
@@ -1259,6 +1528,64 @@ mod tests {
     /// `skill.request` carries a name only: the master reads the workspace,
     /// the agent and the person from the session (PLAN.md T81). A field
     /// naming any of them is not read, and the answer is text or a reason.
+    #[test]
+    fn project_mcp_messages_name_no_program() {
+        // X.36: an approval names a server and a digest, never a command;
+        // a command, an argument or an environment sent beside it is not
+        // kept.
+        let v = json!({"type": "project.mcp", "req_id": "r", "user_id": "01A", "folder": "/p",
+                       "request": {"op": "approve", "name": "s", "digest": "d",
+                                   "command": "sh", "args": ["-c", "x"], "env": {"A": "1"}}});
+        assert_eq!(
+            serde_json::from_value::<MasterToNode>(v).unwrap(),
+            MasterToNode::ProjectMcp {
+                req_id: "r".into(),
+                user_id: "01A".into(),
+                folder: "/p".into(),
+                request: ProjectMcpRequest::Approve {
+                    name: "s".into(),
+                    digest: "d".into()
+                },
+            }
+        );
+        assert!(
+            serde_json::from_value::<MasterToNode>(
+                json!({"type": "project.mcp", "req_id": "r", "user_id": "u", "folder": "/p",
+                       "request": {"op": "install", "command": "sh"}})
+            )
+            .is_err()
+        );
+        // An entry shows its env values: part of what runs.
+        let e = ProjectMcpEntry {
+            name: "s".into(),
+            state: ProjectMcpState::New,
+            command: "npx".into(),
+            args: vec![],
+            env: vec![ProjectMcpEnv {
+                name: "NODE_OPTIONS".into(),
+                value: "--require ./x.js".into(),
+            }],
+            digest: None,
+            reason: None,
+            approved_command: None,
+            approved_args: None,
+            approved_env: None,
+        };
+        let text = serde_json::to_string(&e).unwrap();
+        assert!(text.contains("--require ./x.js"), "{text}");
+        for (id, ok) in [
+            ("01JD8Z", true),
+            ("a-b_c", true),
+            ("", false),
+            ("a b", false),
+            ("a\nb", false),
+            ("é", false),
+        ] {
+            assert_eq!(valid_user_id(id), ok, "{id:?}");
+        }
+        assert!(!valid_user_id(&"a".repeat(MAX_USER_ID + 1)));
+    }
+
     #[test]
     fn skill_messages_name_no_place() {
         let sid: SessionId = "0193f2a0-0000-7000-8000-000000000001".parse().unwrap();
@@ -1494,6 +1821,7 @@ mod tests {
             images: vec![img.clone()],
             agent_named: false,
             files: vec![],
+            owner: None,
         };
         let v = serde_json::to_value(&p).unwrap();
         assert_eq!(
@@ -1522,6 +1850,7 @@ mod tests {
             images: vec![],
             agent_named: false,
             files: vec![],
+            owner: None,
         };
         let v = serde_json::to_value(prompt(None)).unwrap();
         assert!(v.get("reply").is_none(), "{v}");
@@ -1554,6 +1883,7 @@ mod tests {
             agent: None,
             savings: None,
             context: None,
+            owner: None,
         };
         let v = serde_json::to_value(&c).unwrap();
         assert_eq!(

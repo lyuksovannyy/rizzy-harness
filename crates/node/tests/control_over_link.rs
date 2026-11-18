@@ -228,6 +228,7 @@ impl Master {
             images: vec![],
             agent_named: false,
             files: vec![],
+            owner: None,
         })
         .await;
         (sid, cwd)

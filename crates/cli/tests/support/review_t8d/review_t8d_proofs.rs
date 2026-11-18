@@ -324,6 +324,7 @@ no_callbacks: false,
             images: vec![],
             agent_named: false,
             files: vec![],
+            owner: None,
         });
     }
 
