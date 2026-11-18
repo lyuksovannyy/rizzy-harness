@@ -13,6 +13,8 @@ import type { PluginList } from "./Plugins";
 
 const call = vi.fn();
 vi.mock("../api", () => ({ call }));
+// The forge accounts above the list have their own test (connections.test.tsx).
+vi.mock("./Connections", () => ({ default: () => null }));
 const { default: Plugins } = await import("./Plugins");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;

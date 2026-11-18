@@ -2006,13 +2006,21 @@ tool_timeout_sec = 300                # one call (1 .. 3600)
   that turn's checkpoint and Undo of that turn takes it back, but it is
   not in the sub-agent's own "what changed" report or its merge-back.
   Its calls are asked about in the sub-agent's own chat, never less than
-  its parent's would be. A background sub-agent gets no server, and
-  neither does a message you send yourself into a sub-agent's chat (its
-  calls could land outside every turn of the chat, where no checkpoint
-  covers them), nor a read-only one, nor one in plan mode. Two edge
+  its parent's would be. A background sub-agent follows its own switch
+  the same way (since 2026-11-18), with one difference you should know:
+  it keeps working after the turn that started it, so its server calls
+  can land while the chat's next turn runs (that turn's Undo then takes
+  them back, although that turn's agent did not make them) or between
+  two turns, where no checkpoint covers them and no Undo takes them back.
+  Its card waits in its own chat until you answer or its wall-clock limit
+  ends it. A message you send yourself into a sub-agent's chat gets no
+  server (it is no run the chat's agent started), nor does a read-only
+  sub-agent, nor one in plan mode. Two edge
   cases: a sub-agent of a sub-agent that only reads and has Connectors can
-  still change the chat's folder through a server (inside the chat's
-  turn, so its Undo covers it); and a sub-agent that changes one file both
+  still change the chat's folder through a server (under a foreground
+  sub-agent that is inside the chat's turn, so its Undo covers it; under a
+  background one it counts as that background run's change, as above); and
+  a sub-agent that changes one file both
   in its copy and through a server ends with the server's version, its
   own change reported as not applied.
 - **Its environment** is the agent's core list above (not `env_pass`),
@@ -3063,6 +3071,103 @@ and a turn that only picks up messages you queued, one turn late. Chats made
 outside any workspace (through the API token without one) are not narrowed,
 and get no stored skills. Custom connectors and sub-agents with connectors
 come later.
+
+## Connections: your own forge accounts
+
+At the top of **Plugins**, under **Connectors**, you connect your own account
+on a forge (GitHub, GitLab, Gitea, Forgejo, and self-hosted ones the server
+allows) with an **access token you paste**. The screen says where on that
+forge a token is made and which scopes the later steps will need:
+
+| Forge | Where | Scopes for listing, clone and push |
+|---|---|---|
+| GitHub, GitHub Enterprise | Settings → Developer settings → tokens (`/settings/tokens`) | classic: `repo`; fine-grained: Contents read and write, Metadata read |
+| GitLab | Preferences → Access tokens (`/-/user_settings/personal_access_tokens`) | `read_user` (to check the account), `read_api`, `read_repository`, `write_repository` |
+| Gitea, Forgejo | Settings → Applications (`/user/settings/applications`) | `read:user`, and read and write on repository |
+
+The server asks the forge who the token belongs to (`GET /user`) and keeps
+the account: its id, `@login`, display name, the e-mail the forge links to it
+(GitLab: the commit e-mail) and, where the forge reports them, the token's
+scopes, so you see a token that can do more than it needs (GitHub reports
+them for classic tokens only, GitLab through its token endpoint, Gitea and
+Forgejo not at all). Pasting a token for the same account again replaces the
+token; **Replace token** does the same and refuses a token of another account;
+**Disconnect** deletes the row and its token. A connection is yours in every
+workspace, and nobody else sees or uses it: not another member, not a server
+admin, not the API token (which has no account, so these routes refuse it).
+Deleting your account deletes your connections. At most 20 connections per
+person; at most 10 token checks per person in 10 minutes, and at most 60
+**failed** checks per forge host in 10 minutes from this server, everyone
+together. The host budget is there so this server does not hammer a forge
+with bad tokens; checks that work do not use it up, but a run of failures
+(people pasting junk) can, and then nobody can connect to that host until
+the window moves on. The forge's answer is read as untrusted text (at most 64 KiB, 10
+seconds; its error text is never shown).
+
+**In this version a connection is stored and checked only.** Nothing lists
+repositories, clones or pushes with it, and no token is sent to a node or a
+model; that comes next (ADOPTION_PLAN X.27 steps 2 to 4).
+
+**Where the token is kept.** In `master.db`, sealed with AES-256-GCM under a
+key in `<data>/keys/secrets.key` (32 random bytes, mode 0600 in a 0700 folder,
+made the first time a token is stored, never rewritten). The key, and each
+token while it is in use, are in the server process's memory and are not
+wiped from it; anyone who can read that process's memory (root on the
+master) can read them. Each sealed token is
+bound to its row (the person, the host and the account), so one copied into
+another row, another person's or another table does not open. What follows:
+
+- **Back up `secrets.key` with `master.db`.** A copy of `master.db` alone
+  opens no token; and if `secrets.key` is lost, every stored token is lost
+  (people paste theirs again).
+- If `secrets.key` is missing while tokens are stored, or is not a private
+  regular file of the server's user of exactly 32 bytes (a link, a folder,
+  readable by group or others, cut short), the server does not make a new one
+  (that would orphan every stored token): it refuses to store or open tokens,
+  says so in its log with what to do, and the screen points people at the
+  admin. Restore the file from the backup. To give the stored tokens up
+  instead, people disconnect (that needs no key); the next token stored makes
+  a new key. A key file readable by others also stops the server at start, like
+  its other key files.
+- If `secrets.key` is a valid key but **not the one** the stored tokens were
+  sealed with (a backup of another server, or of another date), the server
+  finds out at start by trying it on stored tokens, and refuses the same way:
+  it never seals new tokens under a key that does not open the old ones.
+- While the server cannot store tokens, the screen says so, and a pasted
+  token is refused before it is sent to the forge.
+- No key rotation yet.
+
+**Which forges.** `github.com` and `gitlab.com` are built in. The server's
+admin adds others in `config.toml`, and only there (no screen or API route
+adds one):
+
+```toml
+[[forge.hosts]]
+host = "git.example.com"            # exactly as people pick it: lower case, no port
+kind = "gitea"                      # github | gitlab | gitea | forgejo
+api_base = "https://git.example.com/api/v1"   # GitLab /api/v4, GitHub Enterprise /api/v3
+# api_host = "api.git.example.com"  # only if the API is on another host than `host`
+# private_address = true            # only if the forge is on a private address (LAN, VPN)
+```
+
+`api_base` must be on `host` itself unless the entry names its API's own host
+in `api_host`: that is for forges whose API lives on another name, such as
+GitHub Enterprise Cloud with data residency (`host = "acme.ghe.com"`,
+`api_host = "api.acme.ghe.com"`, `api_base = "https://api.acme.ghe.com"`); the
+built-in github.com entry is the same (`api.github.com`). The API host goes
+through exactly the same address rules, and redirects may not leave it.
+
+The server reaches a forge only by https (plain http only to this machine or
+a host in `HARNESS_PLAIN_HTTP_HOSTS`), at the entry's `api_base`, never at
+anything a person typed, with the token in a header (never in the URL), no
+environment proxy, and redirects only within the same origin. A forge on a
+**private address** is refused unless its entry says `private_address = true`:
+that lets the server connect to whatever address that name resolves to, for
+this host's token checks only. Set it only for a name you control, since a
+person who can paste a token can make the server send requests there (to
+that host's `/user` path, with what they pasted). Over a plain-http bind on a
+network (`--insecure-bind` without `--tls`), the pasted token travels in clear
+text like the login password; the server warns about that at start.
 
 ## What goes with each message
 

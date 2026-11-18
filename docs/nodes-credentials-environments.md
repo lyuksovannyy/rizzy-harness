@@ -253,6 +253,13 @@ Notes:
   `<data>/keys/secrets.key` (0600). A copied `master.db` alone then leaks no key, and deleting
   a workspace or a user removes theirs by cascade. `secrets.toml` keeps the harness keys
   (embeddings, voice, web search).
+  **Built (2026-11-18, ADOPTION_PLAN X.27 step 1, PLAN.md T83):** the sealing
+  (`crates/master/src/sealed.rs`: version byte, random 96-bit nonce, associated data binding
+  table, owner and the row's key fields) and `user_connections` for Connection tokens
+  (`crates/store/src/connections.rs`; built with a `scopes` column and `updated_ms` beyond the
+  table above, `account_id` capped at 32 characters). Workspace keys are not moved yet;
+  `workspace_connection_choice` is not built (a later step adds it in place: no migration
+  before the first tag, and nothing uses it until clone and push exist).
 - **Archived is master-side state, not an event.** The node that owns the session may be
   gone, and only it may append. An archived session refuses prompt, approval, restore and
   set-agent with 409, whatever the node says.
@@ -557,6 +564,12 @@ saved per user (`user_connections`). When a user connects a forge in a workspace
 has an account for that host, the prompt asks: "Use @login" or "Add another account". The
 answer goes into `workspace_connection_choice`. Owners and admins also add the workspace's
 own forge account (`workspace_forge_accounts`).
+
+**Built (2026-11-18, X.27 step 1):** a pasted access token only (no device or OAuth sign-in
+yet), checked with the forge's `GET /user`, for the built-in `github.com` and `gitlab.com`
+and the hosts the admin lists in `config.toml` (`[[forge.hosts]]`); shown under Plugins →
+Connectors. Stored and checked only: no `forge.grant`, no clone or push, no workspace forge
+account and no "Use @login" choice yet (README "Connections").
 
 **Git with network.** The hardened git refuses every transport (`protocol.allow=never`,
 `credential.helper=`; `crates/node/src/git.rs`). Clone, classification fetch and push use a
