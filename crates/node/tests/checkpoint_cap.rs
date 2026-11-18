@@ -189,3 +189,54 @@ async fn a_sub_agent_writing_over_the_large_file_is_not_applied() {
         vec![b'd'; 9000]
     );
 }
+
+/// An undo that writes a file where the turn made a folder holding a large
+/// file removes that file: the note says so and that undoing the undo
+/// brings it back (review of PR 154, P2).
+#[tokio::test]
+async fn an_undo_that_removes_a_large_file_says_so() {
+    let mut r = repo_rig().await;
+    r.write("d", "small\n");
+    let turn = r
+        .turn("rm d && mkdir d && head -c 9000 /dev/zero > d/big && echo x > d/x")
+        .await;
+    let mark = r.seen.len();
+    let undo = r.restore(&turn.id.unwrap(), false).await;
+    assert_eq!(undo.result, Ok(()));
+    assert_eq!(r.read("d").as_deref(), Some("small\n"));
+    let notes = r.notes_since(mark);
+    assert!(
+        notes.iter().any(|n| n.contains("Undo removed these files")
+            && n.contains("`d/big` (8.8 KiB)")
+            && n.contains("undoing this undo brings them back")),
+        "{notes:#?}"
+    );
+    let again = r.restore(&undo.saved.unwrap(), false).await;
+    assert_eq!(again.result, Ok(()));
+    assert_eq!(std::fs::read(r.ws.join("d/big")).unwrap(), vec![0u8; 9000]);
+}
+
+/// More files over the cap than a checkpoint names, and the turn shrank one
+/// it did not name: the undo does not delete it and says why (review of PR
+/// 154, P4).
+#[tokio::test]
+async fn an_undo_beside_more_large_files_than_are_named_deletes_none_unnamed() {
+    let mut r = repo_rig().await;
+    std::fs::create_dir(r.ws.join("deps")).unwrap();
+    for i in 0..1200 {
+        big(&r, &format!("deps/{i:05}"), 5000, b'd');
+    }
+    big(&r, "f", 4100, b'f');
+    let turn = r.turn("echo small > f").await;
+    let mark = r.seen.len();
+    let undo = r.restore(&turn.id.unwrap(), false).await;
+    assert_eq!(undo.result, Ok(()));
+    assert_eq!(r.read("f").as_deref(), Some("small\n"));
+    let notes = r.notes_since(mark);
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("Undo did not delete these files") && n.contains("`f`")),
+        "{notes:#?}"
+    );
+}

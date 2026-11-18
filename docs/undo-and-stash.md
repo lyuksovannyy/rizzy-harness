@@ -347,11 +347,27 @@ source files, lockfiles and hand-made fixtures stay under it; what is over it an
 nearly always generated data, media, archives or downloaded dependencies, which is what cost
 seconds and gigabytes above.
 
-- **Tracked** means: in the user's index (read by our code with no link followed, at most
-  256 MiB, copied into the shadow and listed with `ls-files`), or, when the index cannot be
-  read (none yet, a split index), in the tree of the commit `HEAD` names. It is asked only
-  when some file is over the cap, so a folder without such a file pays nothing for it. In a
-  plain folder nothing is tracked.
+- **Tracked** means: in the user's index, or, when the index cannot be used (a split index,
+  over 256 MiB), in the tree of the commit `HEAD` names. Git is asked only when some file is
+  over the cap, and only about those files (`ls-files -z` / `ls-tree` with them as literal
+  pathspecs, in runs of at most 64 KiB of arguments: neither command takes pathspecs on stdin
+  in git 2.56), so a folder without such a file pays nothing. The index is copied into the
+  shadow by our code (opened with no link followed, streamed 64 KiB at a time, never held
+  whole) and the copy is kept while the index is the same file with the same size and
+  modification time. Measured with an index of 200,000 paths (17 MiB) and one large
+  untracked file, on the test's tmpfs: about 7 ms a lookup (12 ms with the copy), against
+  about 100 ms for PR 154's first version, which read the whole index into memory and built
+  a set of every path (`git_cap_tests.rs` `tracked_lookup_cost_with_a_large_index`, ignored).
+- **The cap applies only where the node can tell what git tracks**: in a repository whose
+  `.git` it reads, and in a folder that is in no repository at all (nothing is tracked there).
+  **Stated limit:** in a linked worktree or a submodule (`.git` is a file), in a folder the
+  node checkpoints as a plain one because its repository holds the data directory, and where
+  neither the index nor `HEAD` can be read (a split index together with an unreadable `HEAD`;
+  a repository with no index and no commit yet), nothing is left out and checkpoints are as
+  before the cap: a file over the cap there may be tracked, and leaving it out would break
+  Undo of an edit to it. The node does not follow a gitfile out of the folder to find a
+  linked worktree's index (R.1: no git of the node runs with the user's git directory, and
+  `user_repo::find` treats such a `.git` as unusual on purpose).
 - **Measured once per snapshot**, by `symlink_metadata` on each path git listed (the shadow
   index's entries and the new untracked ones), never followed: a link is never left out, a
   sparse file counts at its apparent length (what git would read). A file that grows past the
@@ -359,13 +375,29 @@ seconds and gigabytes above.
   between the two). A file an earlier snapshot captured that is over the cap now is taken out
   of the shadow's index before `add -u` reads it.
 - **Recorded** in the snapshot's commit message, beside the nested repositories:
-  `harness-skipped: <size> <hex path>` (git's bytes, so any name round-trips), the largest
-  1,000 by size, and `harness-skipped-more: <count> <bytes>` for the rest. A snapshot without
+  `harness-skipped: <size> <hex path>` (git's bytes, so any name round-trips), largest first,
+  at most 1,000 entries **and at most 256 KiB** of such lines (room for 31 paths of the
+  maximum 4,096 bytes, about 1,000 of 120 bytes), and `harness-skipped-more: <count> <bytes>`
+  for the rest. The message reaches git on stdin (`commit-tree -F -`), never as an argument:
+  PR 154's first version passed it as one argument, and 1,000 ordinary 70-byte paths went past
+  Linux's 128 KiB limit for one argument, so every snapshot of that folder failed and Undo was
+  gone there (review P1). The nested-repository lines go the same way. A snapshot without
   these lines (every one taken before this change, or with the cap at 0) left nothing out.
 - **The pre-restore snapshot waives the cap** for the paths the restore writes or deletes,
   anything below them (a path that is a folder now) and a file where one's folder would go
-  (`git.rs`, `Exempt`, `snapshot_exempt`): so it holds every file the restore writes over,
-  whatever its size, and undoing the undo (A.9) still loses nothing.
+  (`git.rs`, `Exempt`, `snapshot_exempt`): so it holds every file the restore writes over or
+  removes, whatever its size, and undoing the undo (A.9) still loses nothing. That snapshot
+  then stores whatever the undo is about to overwrite, however large: past the 60 s snapshot
+  limit the undo fails with "the folder could not be saved first" and changes nothing. An
+  interrupted restore's own restore matches its paths by the names its event carries (lossy
+  UTF-8), so a name that is not UTF-8 is not exempt there and stays under the cap.
+- **The merge-back of a sub-agent** takes the same exemption for every snapshot it may put
+  the folder back from: the one right before it writes (`check`), the one after a failed write
+  (`failed`, which the put-back reads) and the one naming what a failed put-back left
+  (`broken`). PR 154's first version took them capped, so a large file the child wrote was not
+  seen and a failed write was not put back (review P11). The snapshot of the folder the merge
+  is computed against (`now`) stays capped: what it leaves out is what makes a child's change
+  there a conflict.
 
 **What a restore does** (`git.rs`, `leave_skipped`, `unchanged_skipped`; `before` is the state
 restored to, `after` the one the folder should be in, for a rewind the latest; "skipped" means
@@ -374,7 +406,7 @@ untracked and over the cap at that snapshot):
 | before \ after | present | absent | skipped |
 |---|---|---|---|
 | present | restored to `before` (as before the cap) | restored (as before) | **restored to `before`**: that version is in the checkpoint; the pre-restore snapshot holds the large one, so undoing the undo brings it back. The unforced check compares the size `after` recorded with the file now |
-| absent | deleted (as before) | nothing | **left in place, not removed**; the note after the undo names it |
+| absent | deleted (as before) | nothing | **left in place, not removed**; the note after the undo names it. Except where the undo writes a file at or above it (the turn made a folder where a file was, or replaced a folder by this file): then the write removes it, the pre-restore snapshot holds it, and the note says it was removed and that undoing the undo brings it back |
 | skipped | **left in place** (the turn's version, or one git tracks since): its earlier version was never saved, so deleting it would bring nothing back; the note says it cannot be brought back | nothing on disk to touch; the note says it cannot be brought back | **left as it is**; named when the recorded size changed (same size: nothing can tell, nothing is said) |
 
 A left-alone file is never in `touched`, `files` or the restored count. The cases around them:
@@ -387,11 +419,20 @@ A left-alone file is never in `touched`, `files` or the restored count. The case
   are removed; the old file is named as lost. **Became a link**, or **a file the person then
   `git add`ed** (tracked, so `after` holds it): read as created by the turn, and left, never
   deleted.
-- **More than 1,000 skipped**: the record names the largest; for an unnamed one the restore
-  knows nothing. Safe either way: grown in the turn and unnamed in `after`, the unforced check
-  cannot match its size and refuses (forced restores it, the pre-restore snapshot keeps the
-  large one); unnamed in `before` and present after, an undo deletes the turn's version (which
-  `after` and the pre-restore snapshot hold) and does not say the earlier one is lost.
+- **More skipped than the record names** (over 1,000, or over 256 KiB of names): the record
+  names the largest. Grown in the turn and unnamed in `after`: the unforced check cannot
+  match its size and refuses (forced restores it; the pre-restore snapshot keeps the large
+  one). **The rule for `before` (the checkpoint restored to):** when its record is incomplete
+  (`more > 0`), the undo deletes no file git does not track that `before` does not hold: such
+  a file may be one `before` left out without naming it, whose earlier version was never
+  saved, so it is left and named ("Undo did not delete these files … delete them yourself if
+  the turn made them"). Git is asked which of those paths it tracks (a tracked file is never
+  left out); if it cannot tell, none is deleted. The cost, said plainly: in such a folder an
+  undo leaves every untracked file the turn made. Review P4 (a file over the cap before the
+  turn, unnamed, shrunk by the turn) was deleted by an undo with no note; it is now kept and
+  named. Tested at 1,200 skipped files for every cell of the table, unforced and forced:
+  whatever an undo changes on disk, the snapshot it took first holds as it was, and a file over
+  the cap before the turn is never deleted.
 - **A sub-agent's merge-back** (`git/merge.rs`): a child change at, above or below a path
   skipped in its base or in the folder now is a conflict ("a file of yours over the checkpoint
   size limit … is there"), and nothing of that child is written. The restore plan also never
@@ -400,7 +441,17 @@ A left-alone file is never in `touched`, `files` or the restored count. The case
 - **Stash and unstash** (§3) are not built, so nothing there yet; they will take their
   snapshot as a restore does.
 - **The cap at 0** is the code before it: nothing is measured, nothing recorded, every
-  snapshot identical.
+  snapshot identical (the whole harness-node suite passes with the default forced to 0).
+- **Names** are compared as git's bytes everywhere a list of them is read (`-z`; the unforced
+  check reads the two-tree diff whole and matches bytes, so a non-ASCII name is not quoted
+  and missed, review P9), and shown with control characters replaced and hidden or bidi
+  characters as `<U+…>` codes.
+- **Still unbounded:** the number of files, the size of files git tracks (they are in the
+  user's objects already, borrowed), the total of files under the cap, and a sub-agent's own
+  result: the child's result snapshot stores everything the child made in the second store
+  (`<hash>-sub.git`) first; its write limits (200 MiB a file, 2 GiB in all,
+  `WriteLimits::SUB_AGENT`) are checked when it is merged back, after that, so a refused
+  oversized result has been stored until the sub-agent snapshots are pruned and collected.
 
 **What the person sees.** No new event: the existing chat notes (`error` events with the turn
 id, as for "This turn has no checkpoint").
@@ -413,9 +464,16 @@ id, as for "This turn has no checkpoint").
   changed, "Made, changed or deleted during this turn, in no checkpoint: …", with "cannot bring
   back" for those over the cap before the turn. At most five named with sizes, the rest
   counted. A folder that always holds the same large files is named once, not at every turn.
-- **After an undo** that left one: "Undo could not bring back the earlier versions of these
-  files: … what is there now was left as it is: …" and "Undo left these files as they are,
-  and did not remove them: …".
+- **After an undo** that met one: "Undo could not bring back the earlier versions of these
+  files: … what is there now was left as it is: …", "Undo left these files as they are, and
+  did not remove them: …", "Undo removed these files, which are over the checkpoint size
+  limit, to put back what was there before the turn; the checkpoint it saved first holds
+  them, so undoing this undo brings them back: …" and "Undo did not delete these files, which
+  git does not track: the checkpoint it went back to left out more large files than it names,
+  and these may have been among them; delete them yourself if the turn made them: …".
+- **A merge-back conflict** on such a file says "a file of yours over the checkpoint size
+  limit, which git does not track and the sub-agent never saw, is there", also for one the
+  base's record did not name (review P8 found "a file of yours that git ignores").
 - **A sub-agent's result** (the parent agent's tool result, shown on the delegate card): "1
   file of the folder is over the checkpoint size limit and not tracked by git, so it was not
   copied into the sub-agent's folder: the sub-agent worked as if it did not exist, and it was

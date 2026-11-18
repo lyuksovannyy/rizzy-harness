@@ -47,7 +47,7 @@ use std::time::Duration;
 use super::{
     APPLY, DiffRow, GIT_TIMEOUT, IndexFiles, Names, Repo, SHOWN_MAX, WriteLimits, command,
     diff_raw, exec, fresh_index, hold, parents, rel_path, restore_diff, restore_paths,
-    restore_plan, run, run_raw, secure_blobs, shown, skipped_in, snapshot,
+    restore_plan, run, run_raw, secure_blobs, shown, skipped_in, snapshot, snapshot_exempt,
 };
 
 /// A file larger than this on any side is not merged line by line when
@@ -333,18 +333,43 @@ pub(super) async fn apply(
     // Changed since: a file the person, another chat or a process changed
     // after `now` is not overwritten (and nothing else of this child is
     // written either).
-    let again = snapshot(
+    // The way back if the write fails partway (A.16): with the size cap
+    // waived for every path about to be written, so a large file of the
+    // folder there is held and put back.
+    let again = snapshot_exempt(
         repo,
         &format!("refs/harness/{child}/check"),
         "harness: folder right before a sub-agent's result is written",
+        &diff.exempt(),
     )
     .await
-    .map_err(failed)?;
-    let moved: HashSet<Vec<u8>> = diff_raw(repo, &now, &again)
-        .await
-        .map_err(failed)?
+    .map_err(failed)?
+    .sha;
+    let moved_rows = diff_raw(repo, &now, &again).await.map_err(failed)?;
+    // A file `now` left out for its size (a name its record did not give)
+    // that `again` holds, the cap waived there, reads as added; it did not
+    // change, it was not seen: the check below names it for what it is.
+    let added: Vec<Vec<u8>> = moved_rows
+        .iter()
+        .filter(|r| r.status == 'A')
+        .map(|r| r.path.clone())
+        .collect();
+    let cap = repo.untracked_max();
+    let unseen: HashSet<Vec<u8>> = if cap > 0 && !added.is_empty() {
+        super::sizes_in(repo, &again, &added)
+            .await
+            .map_err(failed)?
+            .into_iter()
+            .filter(|(_, n)| *n > cap)
+            .map(|(p, _)| p)
+            .collect()
+    } else {
+        HashSet::new()
+    };
+    let moved: HashSet<Vec<u8>> = moved_rows
         .into_iter()
         .map(|r| r.path)
+        .filter(|p| !unseen.contains(p))
         .collect();
     let during: Vec<(String, &'static str)> = diff
         .rows
@@ -361,9 +386,25 @@ pub(super) async fn apply(
     // review of PR 118, H3). So is a file in the way of a folder it adds.
     let in_way = ignored_in_the_way(repo, &diff.rows).await;
     if !in_way.is_empty() {
-        return Err(NotApplied::Conflict(
-            in_way.iter().map(|p| (shown(p), IGNORED)).collect(),
-        ));
+        // A file in the way that is over the size cap is one the snapshots
+        // left out for its size (one the base's record did not name), not
+        // one git ignores: say which.
+        let root = repo.root.clone();
+        let cap = repo.untracked_max();
+        let named = tokio::task::spawn_blocking(move || {
+            in_way
+                .into_iter()
+                .map(|p| {
+                    let big = cap > 0
+                        && std::fs::symlink_metadata(root.join(rel_path(&p)))
+                            .is_ok_and(|m| m.is_file() && m.len() > cap);
+                    (shown(&p), if big { SKIPPED } else { IGNORED })
+                })
+                .collect()
+        })
+        .await
+        .unwrap_or_default();
+        return Err(NotApplied::Conflict(named));
     }
     let plan = restore_plan(repo, &diff, &again, true)
         .await
@@ -383,14 +424,15 @@ pub(super) async fn apply(
             Ok(done) => failed(done.text(&e)),
             Err(put_back) => {
                 let touched: HashSet<&[u8]> = diff.rows.iter().map(|r| r.path.as_slice()).collect();
-                let written = match snapshot(
+                let written = match snapshot_exempt(
                     repo,
                     &format!("refs/harness/{child}/broken"),
                     "harness: folder after a failed sub-agent write",
+                    &diff.exempt(),
                 )
                 .await
                 {
-                    Ok(after) => diff_raw(repo, &again, &after)
+                    Ok(after) => diff_raw(repo, &again, &after.sha)
                         .await
                         .unwrap_or_default()
                         .into_iter()
@@ -489,12 +531,16 @@ async fn put_back(
     made: &[Vec<u8>],
 ) -> Result<PutBack, String> {
     let mut d = restore_diff(repo, again, target).await?;
-    let now = snapshot(
+    // With the size cap waived for the paths the write touched, so a large
+    // file the child wrote is seen and put back.
+    let now = snapshot_exempt(
         repo,
         &format!("refs/harness/{child}/failed"),
         "harness: folder after a sub-agent write failed partway",
+        &d.exempt(),
     )
-    .await?;
+    .await?
+    .sha;
     // The folder now where it is not as the write meant to leave it.
     let off: HashMap<Vec<u8>, Side> = diff_raw(repo, target, &now)
         .await?

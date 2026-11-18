@@ -98,9 +98,24 @@ impl State {
     }
 }
 
+/// What a restore left, as (name, its earlier version is lost); a file
+/// that was removed or not deleted for another reason fails the caller's
+/// comparison (see [`kinds`]).
 fn names(left: &[LeftAlone]) -> Vec<(String, bool)> {
     left.iter()
-        .map(|l| (String::from_utf8_lossy(&l.path).into_owned(), l.lost))
+        .map(|l| {
+            assert!(matches!(l.kind, LeftKind::Lost | LeftKind::Kept), "{l:?}");
+            (
+                String::from_utf8_lossy(&l.path).into_owned(),
+                l.kind == LeftKind::Lost,
+            )
+        })
+        .collect()
+}
+
+fn kinds(left: &[LeftAlone]) -> Vec<(String, LeftKind)> {
+    left.iter()
+        .map(|l| (String::from_utf8_lossy(&l.path).into_owned(), l.kind))
         .collect()
 }
 
@@ -822,4 +837,583 @@ async fn a_split_index_falls_back_to_head() {
         size_in(&repo, &snap.sha, "tracked.bin").await,
         Some(5 * CAP)
     );
+}
+
+// ---- review of PR 154 (proofs in .claude/handoff-2026-11-15/r-ckpt-cap/) ----
+
+/// A sub-agent's merge, with the parent's `z` read-only so the write fails
+/// part-way after `a.bin` (over the cap) was written: everything the child
+/// wrote is put back (A.16). Review P11: the put-back's snapshot left the
+/// large file out, so it stayed on disk (and a small parent file it
+/// overwrote was not put back).
+async fn failed_merge_puts_back(parent_has_small: bool, children: usize) {
+    use std::os::unix::fs::PermissionsExt;
+    let r = rig();
+    if parent_has_small {
+        std::fs::write(r.dir.join("a.bin"), "parent\n").unwrap();
+    }
+    let bounds = Bounds {
+        untracked_max: CAP,
+        ..Default::default()
+    };
+    let sub = sub_repo(&r.dir, Some(&r.base), &bounds)
+        .await
+        .unwrap()
+        .unwrap();
+    // A first child that lands: a large file of its own.
+    if children == 2 {
+        let base = sub.base_full("c0").await.unwrap();
+        let f = sub
+            .make_folder("c0", &base.sha, &sessions_of(&r.base))
+            .await
+            .unwrap();
+        std::fs::write(f.path.join("first.bin"), vec![b'F'; 2 * CAP as usize]).unwrap();
+        let result = sub.result(&f, "c0").await.unwrap();
+        sub.apply(&base.sha, &result, "c0").await.unwrap();
+        remove_folder(&f).await;
+    }
+    let base = sub.base_full("c").await.unwrap();
+    let folder = sub
+        .make_folder("c", &base.sha, &sessions_of(&r.base))
+        .await
+        .unwrap();
+    std::fs::write(folder.path.join("a.bin"), vec![b'C'; 2 * CAP as usize]).unwrap();
+    std::fs::create_dir(folder.path.join("z")).unwrap();
+    std::fs::write(folder.path.join("z/b.txt"), "child b\n").unwrap();
+    let result = sub.result(&folder, "c").await.unwrap();
+    std::fs::create_dir(r.dir.join("z")).unwrap();
+    std::fs::set_permissions(r.dir.join("z"), std::fs::Permissions::from_mode(0o555)).unwrap();
+    let res = sub.apply(&base.sha, &result, "c").await;
+    std::fs::set_permissions(r.dir.join("z"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let ctx = format!("parent small {parent_has_small}, children {children}");
+    let e = res.expect_err(&ctx);
+    assert!(e.nothing_written(), "{ctx}: {}", e.text());
+    assert!(
+        e.text().contains("put back as they were"),
+        "{ctx}: {}",
+        e.text()
+    );
+    let want = parent_has_small.then(|| b"parent\n".to_vec());
+    assert_eq!(r.get("a.bin"), want, "{ctx}: a.bin");
+    assert!(!r.dir.join("z/b.txt").exists());
+    if children == 2 {
+        assert_eq!(r.get("first.bin"), Some(vec![b'F'; 2 * CAP as usize]));
+    }
+    remove_folder(&folder).await;
+}
+
+#[tokio::test]
+async fn a_failed_sub_agent_write_takes_back_a_large_file_it_made() {
+    failed_merge_puts_back(false, 1).await;
+}
+
+#[tokio::test]
+async fn a_failed_sub_agent_write_puts_back_a_small_file_it_made_large() {
+    failed_merge_puts_back(true, 1).await;
+}
+
+#[tokio::test]
+async fn a_failed_second_sub_agent_write_is_put_back_and_the_first_stays() {
+    failed_merge_puts_back(false, 2).await;
+    failed_merge_puts_back(true, 2).await;
+}
+
+/// Review P3: in a linked worktree (`.git` is a file) the node cannot tell
+/// what git tracks, so nothing is left out: an edit to a large committed
+/// file is undone as on main.
+#[tokio::test]
+async fn a_linked_worktree_leaves_nothing_out_and_undoes_a_large_tracked_file() {
+    let r = rig();
+    let wt = r.dir.parent().unwrap().join("wt");
+    sh(&r.dir, &["worktree", "add", "-q", wt.to_str().unwrap()]);
+    let bounds = Bounds {
+        untracked_max: CAP,
+        ..Default::default()
+    };
+    let repo = checkpoint_repo(&wt, Some(&r.base), &bounds)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(repo.untracked_max(), 0);
+    std::fs::write(wt.join("untracked.bin"), vec![b'u'; 2 * CAP as usize]).unwrap();
+    let b = snapshot_full(&repo, "refs/harness/s/t/before", "b")
+        .await
+        .unwrap();
+    assert!(b.skipped.is_empty(), "{:?}", b.skipped);
+    std::fs::write(wt.join("tracked.bin"), vec![b'Z'; 5 * CAP as usize]).unwrap();
+    let a = snapshot_full(&repo, "refs/harness/s/t/after", "a")
+        .await
+        .unwrap();
+    let done = restore_report(&repo, &b.sha, &a.sha, false).await.unwrap();
+    assert_eq!(
+        std::fs::read(wt.join("tracked.bin")).unwrap(),
+        vec![b't'; 3 * CAP as usize]
+    );
+    assert!(done.plan.left.is_empty());
+}
+
+/// Neither the index (split) nor `HEAD` (packed-refs over 1 MiB, the loose
+/// ref gone) can be read: tracking is unknown, so nothing is left out.
+#[tokio::test]
+async fn nothing_is_left_out_when_neither_the_index_nor_head_can_be_read() {
+    let r = rig();
+    sh(&r.dir, &["update-index", "--split-index"]);
+    sh(&r.dir, &["pack-refs", "--all"]);
+    let packed = r.dir.join(".git/packed-refs");
+    let mut t = std::fs::read_to_string(&packed).unwrap();
+    for i in 0..40_000 {
+        t.push_str(&format!("{:040x} refs/tags/pad{i}\n", 1));
+    }
+    std::fs::write(&packed, t).unwrap();
+    let _ = std::fs::remove_file(r.dir.join(".git/refs/heads/main"));
+    let repo = r.repo(CAP).await;
+    assert!(repo.user_head.is_none(), "HEAD unreadable");
+    std::fs::write(r.dir.join("tracked.bin"), vec![b'Z'; 5 * CAP as usize]).unwrap();
+    r.put("untracked.bin", &State::Big(2 * CAP as usize, b'u'));
+    let snap = snapshot_full(&repo, "refs/harness/s/t/before", "b")
+        .await
+        .unwrap();
+    assert!(snap.skipped.is_empty(), "{:?}", snap.skipped);
+    assert_eq!(
+        size_in(&repo, &snap.sha, "tracked.bin").await,
+        Some(5 * CAP)
+    );
+}
+
+/// A folder in no repository tracks nothing: the cap applies.
+#[tokio::test]
+async fn a_plain_folder_keeps_the_cap() {
+    let d = tempfile::tempdir().unwrap();
+    let dir = d.path().canonicalize().unwrap().join("plain");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::write(dir.join("big.bin"), vec![b'x'; 2 * CAP as usize]).unwrap();
+    std::fs::write(dir.join("small"), "s\n").unwrap();
+    let bounds = Bounds {
+        untracked_max: CAP,
+        ..Default::default()
+    };
+    let repo = checkpoint_repo(&dir, Some(&d.path().join("cp")), &bounds)
+        .await
+        .unwrap()
+        .unwrap();
+    let snap = snapshot_full(&repo, "refs/harness/s/t/before", "b")
+        .await
+        .unwrap();
+    assert_eq!(snap.skipped.files, vec![(b"big.bin".to_vec(), 2 * CAP)]);
+}
+
+/// The skipped-record lines of snapshot `sha`, in bytes.
+async fn record_bytes(repo: &Repo, sha: &str) -> usize {
+    run(repo, &["cat-file", "commit", sha], None)
+        .await
+        .unwrap()
+        .lines()
+        .filter(|l| l.starts_with(SKIPPED_TRAILER))
+        .map(|l| l.len() + 1)
+        .sum()
+}
+
+/// Review P1: 1,000 skipped files with ordinary 70-byte paths put the
+/// record over Linux's 128 KiB limit for one argument, and every snapshot
+/// of the folder failed. Now the message goes on stdin and the record is
+/// bounded in bytes; past the bound the rest is counted.
+#[tokio::test]
+async fn a_record_of_long_paths_is_bounded_in_bytes_and_never_an_argument() {
+    let r = rig();
+    let cap = 1024u64;
+    let repo = r.repo(cap).await;
+    let deps = r.dir.join("data/train/images/batch_0001");
+    std::fs::create_dir_all(&deps).unwrap();
+    for i in 0..1000u32 {
+        std::fs::write(
+            deps.join(format!("sample_{i:06}_augmented_rgb.tif")),
+            vec![b'd'; 1100],
+        )
+        .unwrap();
+    }
+    let snap = snapshot_full(&repo, "refs/harness/s/t/before", "b")
+        .await
+        .unwrap();
+    assert_eq!(snap.skipped.count(), 1000);
+    assert!(record_bytes(&repo, &snap.sha).await <= SKIPPED_RECORD_BYTES);
+    // Deep paths: far fewer fit the byte bound; the rest are counted.
+    let deep = r.dir.join(format!("{}/x", "d".repeat(200)).repeat(8));
+    std::fs::create_dir_all(&deep).unwrap();
+    for i in 0..100u32 {
+        std::fs::write(deep.join(format!("{i:03}")), vec![b'e'; 2000]).unwrap();
+    }
+    let snap = snapshot_full(&repo, "refs/harness/s/t/after", "a")
+        .await
+        .unwrap();
+    assert_eq!(snap.skipped.count(), 1100);
+    assert!(snap.skipped.more > 0);
+    let bytes = record_bytes(&repo, &snap.sha).await;
+    assert!(bytes <= SKIPPED_RECORD_BYTES, "{bytes}");
+    assert!(bytes > SKIPPED_RECORD_BYTES - 4 * 1700, "{bytes}: filled");
+    assert_eq!(skipped_in(&repo, &snap.sha).await, snap.skipped);
+}
+
+/// The longest path the folder allows, with bytes that are not UTF-8, over
+/// the cap: recorded byte for byte, and left by an undo.
+#[tokio::test]
+async fn a_path_of_maximum_length_is_recorded_byte_exact() {
+    use std::os::unix::ffi::OsStrExt;
+    let r = rig();
+    let repo = r.repo(CAP).await;
+    let b = snapshot(&repo, "refs/harness/s/t/before", "b")
+        .await
+        .unwrap();
+    // PATH_MAX is 4,096 with its NUL: the folder's own path takes the rest.
+    let room = 4095 - r.dir.as_os_str().len() - 1;
+    let mut rel: Vec<u8> = Vec::new();
+    while room - rel.len() > 256 {
+        rel.extend(std::iter::repeat_n(b'\xe9', 200));
+        rel.push(b'/');
+    }
+    let last = room - rel.len();
+    rel.extend(std::iter::repeat_n(b'\xff', last));
+    assert_eq!(rel.len(), room);
+    let full = r.dir.join(std::ffi::OsStr::from_bytes(&rel));
+    std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+    std::fs::write(&full, vec![b'm'; 2 * CAP as usize]).unwrap();
+    let a = snapshot_full(&repo, "refs/harness/s/t/after", "a")
+        .await
+        .unwrap();
+    assert_eq!(a.skipped.files, vec![(rel.clone(), 2 * CAP)]);
+    assert_eq!(skipped_in(&repo, &a.sha).await, a.skipped);
+    assert!(record_bytes(&repo, &a.sha).await <= SKIPPED_RECORD_BYTES);
+    let done = restore_report(&repo, &b, &a.sha, true).await.unwrap();
+    assert!(full.exists());
+    assert_eq!(kinds(&done.plan.left)[0].1, LeftKind::Kept);
+}
+
+/// Review P2: before, `d` is a file; the turn made `d/` with a large `d/big`
+/// and `d/x`. The undo writes `d` back, which removes `d/big`: it is named as
+/// removed (not "left"), and the snapshot taken first holds it.
+#[tokio::test]
+async fn a_large_file_below_a_path_the_undo_writes_is_named_removed_and_kept() {
+    for force in [false, true] {
+        let r = rig();
+        let repo = r.repo(CAP).await;
+        std::fs::write(r.dir.join("d"), "b\n").unwrap();
+        let b = snapshot(&repo, "refs/harness/s/t/before", "b")
+            .await
+            .unwrap();
+        std::fs::remove_file(r.dir.join("d")).unwrap();
+        std::fs::create_dir(r.dir.join("d")).unwrap();
+        std::fs::write(r.dir.join("d/big"), vec![b'B'; 2 * CAP as usize]).unwrap();
+        std::fs::write(r.dir.join("d/x"), "x\n").unwrap();
+        let a = snapshot(&repo, "refs/harness/s/t/after", "a")
+            .await
+            .unwrap();
+        let done = restore_report(&repo, &b, &a, force).await.unwrap();
+        assert_eq!(r.get("d").as_deref(), Some(&b"b\n"[..]));
+        assert_eq!(
+            kinds(&done.plan.left),
+            vec![("d/big".to_string(), LeftKind::Removed)]
+        );
+        assert_eq!(size_in(&repo, &done.now, "d/big").await, Some(2 * CAP));
+    }
+}
+
+/// Review P10: before, `d/` holds `d/x`; the turn replaced it by a large
+/// file `d`. The undo puts `d/x` back, removing `d`: named as removed, and
+/// undoing the undo brings the large file back.
+#[tokio::test]
+async fn a_large_file_above_a_path_the_undo_writes_is_named_removed_and_comes_back() {
+    let r = rig();
+    let repo = r.repo(CAP).await;
+    std::fs::create_dir(r.dir.join("d")).unwrap();
+    std::fs::write(r.dir.join("d/x"), "x\n").unwrap();
+    let b = snapshot(&repo, "refs/harness/s/t/before", "b")
+        .await
+        .unwrap();
+    std::fs::remove_dir_all(r.dir.join("d")).unwrap();
+    std::fs::write(r.dir.join("d"), vec![b'B'; 2 * CAP as usize]).unwrap();
+    let a = snapshot(&repo, "refs/harness/s/t/after", "a")
+        .await
+        .unwrap();
+    let done = restore_report(&repo, &b, &a, false).await.unwrap();
+    assert_eq!(r.get("d/x").as_deref(), Some(&b"x\n"[..]));
+    assert_eq!(
+        kinds(&done.plan.left),
+        vec![("d".to_string(), LeftKind::Removed)]
+    );
+    assert_eq!(size_in(&repo, &done.now, "d").await, Some(2 * CAP));
+    let here = snapshot(&repo, "refs/harness/s/u/after", "u")
+        .await
+        .unwrap();
+    restore_report(&repo, &done.now, &here, false)
+        .await
+        .unwrap();
+    assert_eq!(r.get("d"), Some(vec![b'B'; 2 * CAP as usize]));
+}
+
+/// 1,200 skipped `deps/` files beside `f`, the smallest of them (so the
+/// record does not name it when it is over the cap).
+async fn incomplete_rig(cap: u64) -> (Rig, Repo) {
+    let r = rig();
+    let repo = r.repo(cap).await;
+    let deps = r.dir.join("deps");
+    std::fs::create_dir(&deps).unwrap();
+    for i in 0..1200u32 {
+        std::fs::write(deps.join(format!("{i:05}")), vec![b'd'; 2000]).unwrap();
+    }
+    (r, repo)
+}
+
+/// Review P4: with more skipped files than the record names, a file over
+/// the cap before the turn and not named, shrunk by the turn, was deleted
+/// by an unforced undo with no note. Now it is not deleted, and named.
+#[tokio::test]
+async fn an_unnamed_large_file_the_turn_shrank_is_not_deleted() {
+    let (r, repo) = incomplete_rig(1024).await;
+    r.put("f", &State::Big(1025, b'P'));
+    let b = snapshot_full(&repo, "refs/harness/s/t/before", "b")
+        .await
+        .unwrap();
+    assert!(b.skipped.more > 0);
+    assert!(!b.skipped.files.iter().any(|(p, _)| p == b"f"));
+    r.put("f", &State::Small("a\n"));
+    let a = snapshot(&repo, "refs/harness/s/t/after", "a")
+        .await
+        .unwrap();
+    for force in [false, true] {
+        let done = restore_report(&repo, &b.sha, &a, force).await.unwrap();
+        assert_eq!(r.get("f").as_deref(), Some(&b"a\n"[..]), "force {force}");
+        assert!(!done.files.iter().any(|p| p == "f"));
+        assert_eq!(
+            kinds(&done.plan.left),
+            vec![("f".to_string(), LeftKind::Unsure)]
+        );
+    }
+}
+
+/// Every cell of the table with the checkpoint's record incomplete (1,200
+/// skipped, `f` the smallest): whatever the undo changes on disk, the
+/// snapshot it took first holds as it was, and nothing the turn found on
+/// disk unnamed is deleted.
+#[tokio::test]
+async fn with_an_incomplete_record_no_cell_loses_a_file() {
+    let small_b = State::Small("b\n");
+    let big_b = State::Big(1025, b'B');
+    let small_a = State::Small("a\n");
+    let big_a = State::Big(1030, b'A');
+    for before in [small_b.clone(), State::Absent, big_b.clone()] {
+        for after in [small_a.clone(), State::Absent, big_a.clone()] {
+            for force in [false, true] {
+                let ctx = format!("{before:?} -> {after:?}, force {force}");
+                let (r, repo) = incomplete_rig(1024).await;
+                r.put("f", &before);
+                let b = snapshot(&repo, "refs/harness/s/t/before", "b")
+                    .await
+                    .unwrap();
+                r.put("f", &after);
+                let a = snapshot(&repo, "refs/harness/s/t/after", "a")
+                    .await
+                    .unwrap();
+                let on_disk = r.get("f");
+                let done = match restore_report(&repo, &b, &a, force).await {
+                    Ok(d) => d,
+                    Err(e) => {
+                        // A refusal changes nothing.
+                        assert!(!force, "{ctx}: {e}");
+                        assert_eq!(r.get("f"), on_disk, "{ctx}");
+                        continue;
+                    }
+                };
+                let now = r.get("f");
+                if now != on_disk
+                    && let Some(was) = &on_disk
+                {
+                    let held = run_raw(
+                        &repo,
+                        &["cat-file", "blob", &format!("{}:f", done.now)],
+                        None,
+                        None,
+                    )
+                    .await
+                    .unwrap_or_default();
+                    assert_eq!(&held, was, "{ctx}: changed and not saved first");
+                }
+                // A file over the cap before the turn is never deleted.
+                if matches!(before, State::Big(..)) && on_disk.is_some() {
+                    assert!(now.is_some(), "{ctx}: deleted");
+                }
+                assert_eq!(std::fs::read_dir(r.dir.join("deps")).unwrap().count(), 1200);
+            }
+        }
+    }
+}
+
+/// Review P9: names git would quote (non-ASCII, not UTF-8) grown over the
+/// cap in the turn pass the unforced check (matched as bytes) and are
+/// undone; changed after it, they are refused and named readably.
+#[tokio::test]
+async fn non_ascii_names_are_matched_as_bytes_by_the_unforced_check() {
+    use std::os::unix::ffi::OsStrExt;
+    for name in [&b"\xc3\xa9.bin"[..], &b"\xff\xfe.bin"[..]] {
+        let r = rig();
+        let repo = r.repo(CAP).await;
+        let p = r.dir.join(std::ffi::OsStr::from_bytes(name));
+        std::fs::write(&p, "b\n").unwrap();
+        let b = snapshot(&repo, "refs/harness/s/t/before", "b")
+            .await
+            .unwrap();
+        std::fs::write(&p, vec![b'B'; 2 * CAP as usize]).unwrap();
+        let a = snapshot(&repo, "refs/harness/s/t/after", "a")
+            .await
+            .unwrap();
+        restore_report(&repo, &b, &a, false).await.unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"b\n");
+        // Changed after the turn: refused, the name as a person reads it.
+        let r = rig();
+        let repo = r.repo(CAP).await;
+        let p = r.dir.join(std::ffi::OsStr::from_bytes(name));
+        std::fs::write(&p, "b\n").unwrap();
+        let b = snapshot(&repo, "refs/harness/s/t/before", "b")
+            .await
+            .unwrap();
+        std::fs::write(&p, "a\n").unwrap();
+        let a = snapshot(&repo, "refs/harness/s/t/after", "a")
+            .await
+            .unwrap();
+        std::fs::write(&p, "person\n").unwrap();
+        let e = restore_report(&repo, &b, &a, false).await.unwrap_err();
+        assert!(e.contains(&shown(name)), "{e}");
+        assert!(!e.contains("\\3"), "{e}");
+    }
+}
+
+/// Review P8: a child writing where the parent has a file over the cap that
+/// the base's record does not name is a conflict for that reason, not "a
+/// file git ignores".
+#[tokio::test]
+async fn an_unnamed_skipped_file_in_the_way_of_a_child_is_named_for_its_size() {
+    let r = rig();
+    let deps = r.dir.join("deps");
+    std::fs::create_dir(&deps).unwrap();
+    for i in 0..1200u32 {
+        std::fs::write(deps.join(format!("{i:05}")), vec![b'd'; 2000]).unwrap();
+    }
+    r.put("p.bin", &State::Big(1025, b'P'));
+    let bounds = Bounds {
+        untracked_max: 1024,
+        ..Default::default()
+    };
+    let sub = sub_repo(&r.dir, Some(&r.base), &bounds)
+        .await
+        .unwrap()
+        .unwrap();
+    let base = sub.base_full("c").await.unwrap();
+    assert!(!base.skipped.files.iter().any(|(p, _)| p == b"p.bin"));
+    let folder = sub
+        .make_folder("c", &base.sha, &sessions_of(&r.base))
+        .await
+        .unwrap();
+    std::fs::write(folder.path.join("p.bin"), "child\n").unwrap();
+    let result = sub.result(&folder, "c").await.unwrap();
+    match sub.apply(&base.sha, &result, "c").await {
+        Err(NotApplied::Conflict(c)) => {
+            assert_eq!(c.len(), 1, "{c:?}");
+            assert!(c[0].1.contains("size limit"), "{c:?}");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(r.get("p.bin"), Some(vec![b'P'; 1025]));
+    remove_folder(&folder).await;
+}
+
+/// L4: hidden and bidi characters in a name reach a note by code point.
+#[test]
+fn hidden_characters_in_a_name_are_shown_by_code_point() {
+    assert_eq!(
+        shown("a\u{202E}b\u{200B}c\n".as_bytes()),
+        "a<U+202E>b<U+200B>c\u{FFFD}"
+    );
+    let s = Skipped {
+        files: vec![("x\u{202E}y".as_bytes().to_vec(), 2048)],
+        more: 0,
+        more_bytes: 0,
+    };
+    assert!(s.listed(5).contains("x<U+202E>y"), "{}", s.listed(5));
+}
+
+/// Review M3: what deciding "tracked" costs with a user index of 200,000
+/// paths and one large untracked file: the copy is streamed and kept, git
+/// is asked about the one candidate only. The old way (read the whole
+/// index into memory, write it, list every path, build a set) is timed
+/// beside it. Ignored; run with `--ignored --nocapture`.
+#[tokio::test]
+#[ignore]
+async fn tracked_lookup_cost_with_a_large_index() {
+    let r = rig();
+    let blob = {
+        let o = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&r.dir)
+            .args(["hash-object", "-w", "/dev/null"])
+            .output()
+            .unwrap();
+        String::from_utf8(o.stdout).unwrap().trim().to_string()
+    };
+    let mut info = Vec::new();
+    for i in 0..200_000u32 {
+        info.extend(format!("100644 {blob}\tsrc/m{:03}/f{i:06}.rs\0", i % 500).into_bytes());
+    }
+    let mut c = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&r.dir)
+        .args(["update-index", "-z", "--index-info"])
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    c.stdin.take().unwrap().write_all(&info).unwrap();
+    assert!(c.wait().unwrap().success());
+    let index_len = std::fs::metadata(r.dir.join(".git/index")).unwrap().len();
+    r.put("big.bin", &State::Big(2 * CAP as usize, b'x'));
+    let repo = r.repo(CAP).await;
+    for run_no in 1..=3 {
+        let t = std::time::Instant::now();
+        let got = user_tracked(&repo, &[b"big.bin".to_vec()]).await.unwrap();
+        eprintln!(
+            "new, call {run_no}: {:?} ({} found; index {} KiB)",
+            t.elapsed(),
+            got.len(),
+            index_len >> 10
+        );
+    }
+    let t = std::time::Instant::now();
+    let snap = snapshot_full(&repo, "refs/harness/s/t/before", "b")
+        .await
+        .unwrap();
+    eprintln!("snapshot with the lookup: {:?}", t.elapsed());
+    assert_eq!(snap.skipped.files.len(), 1);
+    // The old way, as PR 154's first version did it.
+    for run_no in 1..=3 {
+        let t = std::time::Instant::now();
+        let bytes = user_repo::read_bounded(&r.dir.join(".git/index"), 256 << 20).unwrap();
+        let held = bytes.len();
+        let tmp = repo.shadow.clone().unwrap().join("old-index-copy");
+        std::fs::write(&tmp, &bytes).unwrap();
+        drop(bytes);
+        let out = run_raw(&repo, &["ls-files", "-z"], Some(&tmp), None)
+            .await
+            .unwrap();
+        let set: std::collections::HashSet<Vec<u8>> = out
+            .split(|b| *b == 0)
+            .filter(|p| !p.is_empty())
+            .map(<[u8]>::to_vec)
+            .collect();
+        eprintln!(
+            "old, call {run_no}: {:?} ({} paths in a set, {} KiB held, {} KiB listed)",
+            t.elapsed(),
+            set.len(),
+            held >> 10,
+            out.len() >> 10
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
 }

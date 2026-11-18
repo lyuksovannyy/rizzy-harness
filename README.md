@@ -1177,23 +1177,34 @@ repository's index or its `HEAD`) that is larger than `[limits]
 checkpoint_untracked_max_kb` (10 MiB by default; `0` checkpoints every file
 whatever its size) is left out of checkpoints: a downloaded model, a dataset,
 an archive, a build output your `.gitignore` does not name. Files git
-tracks are always checkpointed, whatever their size. At the end of a turn
-the chat names the files left out (the five largest, with their sizes, and
-how many more), once, and again when one of them is made, changed in size or
-deleted. Undo never deletes, overwrites or counts one of them: a file made
-over the limit during the turn stays; a file that was over the limit before
-the turn and that the turn shrank, replaced or deleted cannot be brought
-back (its earlier content was never saved), and the note after the undo
-names it. A file the turn grew over the limit is put back to its earlier
-version, which the turn's checkpoint holds: the checkpoint an undo takes of
-the folder first holds every file the undo writes over, whatever its size,
-so undoing the undo brings the large version back. A sub-agent's copy of
-your folder leaves these files out too: the sub-agent works as if they did
-not exist, your files are not touched, its result tells the agent which ones
-it did not have, and a sub-agent that writes where you have one is not
-applied (nothing of it is written). Sizes are read once per checkpoint,
-without following links (a link is always checkpointed; a sparse file counts
-at its full length). Sub-agents that can change files (with `write`, `edit` or `bash`) get
+tracks are always checkpointed, whatever their size. **The limit does not
+apply** in a linked git worktree or a submodule (where `.git` is a file), in
+a folder inside a repository that holds the node's data directory, or where
+the node cannot read the repository's index or `HEAD`: there it cannot tell
+which files git tracks, so every file is checkpointed as before. At the end
+of a turn the chat names the files left out (the five largest, with their
+sizes, and how many more), once, and again when one of them is made, changed
+in size or deleted. Undo never deletes or writes over one without saying so:
+a file made over the limit during the turn stays; a file that was over the
+limit before the turn and that the turn shrank, replaced or deleted cannot
+be brought back (its earlier content was never saved), and the note after
+the undo names it. A file the turn grew over the limit is put back to its
+earlier version, which the turn's checkpoint holds. Where the undo must
+remove one to put back what was there (the turn made a folder holding it
+where a file was, or replaced a folder by it), it removes it and says so.
+In both cases the checkpoint an undo takes of the folder first holds every
+file the undo writes over or removes, whatever its size, so undoing the undo
+brings it back (a very large one can make that checkpoint take over 60 s; the
+undo then changes nothing and says the folder could not be saved first). In
+a folder with more large files than a checkpoint names (over 1,000, or over
+256 KiB of their names), an undo deletes no untracked file the checkpoint
+does not hold, since it may have been one of the unnamed ones, and says so. A
+sub-agent's copy of your folder leaves these files out too: the sub-agent
+works as if they did not exist, your files are not touched, its result tells
+the agent which ones it did not have, and a sub-agent that writes where you
+have one is not applied (nothing of it is written). Sizes are read once per
+checkpoint, without following links (a link is always checkpointed; a
+sparse file counts at its full length). Sub-agents that can change files (with `write`, `edit` or `bash`) get
 a folder of their own, a copy of yours that the node keeps in its data
 directory (`sessions/<id>/files`), so your folder must be a git
 repository (inside the node's `workspace_roots`, with a plain `.git`

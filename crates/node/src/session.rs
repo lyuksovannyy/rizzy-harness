@@ -5716,8 +5716,16 @@ fn restore_notice(
             plan.changed_repos.listed()
         ));
     }
-    let (lost, kept): (Vec<&crate::git::LeftAlone>, Vec<&crate::git::LeftAlone>) =
-        plan.left.iter().partition(|l| l.lost);
+    use crate::git::LeftKind;
+    let of = |k: LeftKind| -> Vec<&crate::git::LeftAlone> {
+        plan.left.iter().filter(|l| l.kind == k).collect()
+    };
+    let (lost, kept, removed, unsure) = (
+        of(LeftKind::Lost),
+        of(LeftKind::Kept),
+        of(LeftKind::Removed),
+        of(LeftKind::Unsure),
+    );
     if !lost.is_empty() {
         s.push_str(&format!(
             " Undo could not bring back the earlier versions of these files: they were over \
@@ -5734,6 +5742,22 @@ fn restore_notice(
             left_listed(&kept)
         ));
     }
+    if !removed.is_empty() {
+        s.push_str(&format!(
+            " Undo removed these files, which are over the checkpoint size limit, to put back \
+             what was there before the turn; the checkpoint it saved first holds them, so \
+             undoing this undo brings them back: {}.",
+            left_listed(&removed)
+        ));
+    }
+    if !unsure.is_empty() {
+        s.push_str(&format!(
+            " Undo did not delete these files, which git does not track: the checkpoint it \
+             went back to left out more large files than it names, and these may have been \
+             among them; delete them yourself if the turn made them: {}.",
+            left_listed(&unsure)
+        ));
+    }
     Some(s)
 }
 
@@ -5748,10 +5772,7 @@ fn left_listed(left: &[&crate::git::LeftAlone]) -> String {
         .iter()
         .take(SKIPPED_SHOWN)
         .map(|l| {
-            let name = String::from_utf8_lossy(&l.path)
-                .chars()
-                .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
-                .collect::<String>();
+            let name = crate::git::shown(&l.path);
             match l.size {
                 0 => format!("`{name}`"),
                 n => format!("`{name}` ({})", crate::git::human_size(n)),
