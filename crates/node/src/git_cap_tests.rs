@@ -796,3 +796,30 @@ async fn a_large_file_a_sub_agent_makes_is_brought_back() {
     assert_eq!(r.get("made.bin"), Some(vec![b'm'; 2 * CAP as usize]));
     remove_folder(&folder).await;
 }
+
+/// When the user's index cannot be used in the shadow (a split index: its
+/// shared part stays in `.git`), "tracked" falls back to `HEAD`'s tree: a
+/// committed file over the cap is still checkpointed.
+#[tokio::test]
+async fn a_split_index_falls_back_to_head() {
+    let r = rig();
+    sh(&r.dir, &["update-index", "--split-index"]);
+    assert!(
+        std::fs::read_dir(r.dir.join(".git")).unwrap().any(|e| e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("sharedindex.")),
+        "git made a split index"
+    );
+    let repo = r.repo(CAP).await;
+    std::fs::write(r.dir.join("tracked.bin"), vec![b'z'; 5 * CAP as usize]).unwrap();
+    let snap = snapshot_full(&repo, "refs/harness/s/t/before", "b")
+        .await
+        .unwrap();
+    assert!(snap.skipped.files.is_empty(), "{:?}", snap.skipped);
+    assert_eq!(
+        size_in(&repo, &snap.sha, "tracked.bin").await,
+        Some(5 * CAP)
+    );
+}
