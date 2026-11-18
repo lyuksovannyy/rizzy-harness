@@ -144,15 +144,20 @@ describe("the fold loads with the chat, not with the first screen", () => {
     ws.onopen!();
     live.watch(SID);
     expect(live.view(SID)!.head_seq).toBe(0);
+    // Order matters here: held in reverse, 3 and 2 would be gaps.
     ws.say(event(1, "turn_started", { turn_id: "t" }));
     ws.say(event(2, "user_message", { turn_id: "t", text: "hello" }));
     ws.say(event(1, "turn_started", { turn_id: "t" }));
+    ws.say(event(3, "user_message", { turn_id: "t", text: "again" }));
     await vi.dynamicImportSettled();
     const v = live.view(SID)!;
-    expect(v.head_seq).toBe(2);
-    expect(v.items).toEqual([{ type: "user", turn_id: "t", text: "hello" }]);
+    expect(v.head_seq).toBe(3);
+    expect(v.items).toEqual([
+      { type: "user", turn_id: "t", text: "hello" },
+      { type: "user", turn_id: "t", text: "again" },
+    ]);
     // After it is here, events fold as they come.
-    ws.say(event(3, "error", { message: "boom" }));
+    ws.say(event(4, "error", { message: "boom" }));
     expect(live.view(SID)!.items.at(-1)).toEqual({ type: "error", message: "boom" });
     live.close();
   });

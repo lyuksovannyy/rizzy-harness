@@ -5,6 +5,7 @@
 // once you say yes there; a fact kept in a workspace never leaves it. You can
 // move any fact between the two, restore one the assistant replaced or
 // forgot, or delete it.
+import { own } from "../emptyView";
 import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { pageApi } from "../apiPages";
@@ -53,7 +54,7 @@ function FactRow(props: { f: MemoryFact; onChange: () => void; home: string | nu
         <input className="grow" value={edit} aria-label="memory text" onChange={(e) => setEdit(e.target.value)} />
       )}
       <div className="row fact-meta">
-        <span className="muted small">{KIND_LABEL[f.kind]}</span>
+        <span className="muted small">{own(KIND_LABEL, f.kind) ?? f.kind}</span>
         <span className={`small fact-place${f.place === "workspace" ? " here" : ""}`}>{placeLabel(f)}</span>
         {f.source_session && (
           <a className="small" href={`#/s/${f.source_session}`}>

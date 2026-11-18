@@ -2,6 +2,7 @@
 // Drawn in SVG from theme tokens (styles.css, "Agent avatars"), so it
 // follows the theme; the face shows what the agent is doing. Motion is CSS
 // only and stops under reduced motion, where the expressions stay.
+import { own } from "../emptyView";
 import { AlertTriangle } from "lucide-react";
 import { useId, useRef } from "react";
 import { useMedia } from "../bg/hooks";
@@ -64,8 +65,8 @@ export function AgentAvatar(props: {
   const shine = `av-shine-${raw}`;
   const shade = `av-shade-${raw}`;
   const svg = useRef<SVGSVGElement>(null);
-  const body = BODY[shape] ?? BODY.circle;
-  const eye = EYE[eyes] ?? EYE.round;
+  const body = own(BODY, shape) ?? BODY.circle;
+  const eye = own(EYE, eyes) ?? EYE.round;
   const [cy, half] = body.eye;
   const gap = half + eye.spread;
   // Agents side by side should not blink together.

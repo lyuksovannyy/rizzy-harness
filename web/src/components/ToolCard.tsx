@@ -1,3 +1,4 @@
+import { own } from "../emptyView";
 import { ChevronDown, ChevronRight, Globe, Search } from "lucide-react";
 import { useMemo, useState } from "react";
 import { pageApi } from "../apiPages";
@@ -260,7 +261,7 @@ export function ToolCard({
           {status === "running" && <span className="muted small">· its progress is in the panel on the right</span>}
           {reported && (
             <span
-              className={`tool-status child-status s-${CHILD_STATUS_CLASS[reported]}`}
+              className={`tool-status child-status s-${own(CHILD_STATUS_CLASS, reported) ?? "waiting"}`}
               title="What the sub-agent reported; the harness did not check it"
             >
               {reported}

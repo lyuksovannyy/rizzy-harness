@@ -5,6 +5,7 @@
 // their own role or on their own row, nobody grants a level above their own,
 // only owners grant host); the server still checks, and its refusals show
 // here.
+import { own } from "../../emptyView";
 import { Check } from "lucide-react";
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import { pageApi } from "../../apiPages";
@@ -133,7 +134,7 @@ export function WorkspaceMembers(props: WorkspacePanelProps) {
                       </span>
                     ) : m.role === "owner" || !may ? (
                       <span title={m.role === "owner" ? "An owner's level here is always host" : undefined}>
-                        {LEVEL_LABEL[m.exec_level]}
+                        {own(LEVEL_LABEL, m.exec_level) ?? m.exec_level}
                       </span>
                     ) : (
                       <LevelSelect
@@ -147,7 +148,7 @@ export function WorkspaceMembers(props: WorkspacePanelProps) {
                       />
                     )}
                     {m.effective_level && m.effective_level !== m.exec_level && (
-                      <span className="muted small"> counts as {LEVEL_LABEL[m.effective_level]} (their account's level)</span>
+                      <span className="muted small"> counts as {own(LEVEL_LABEL, m.effective_level) ?? m.effective_level} (their account's level)</span>
                     )}
                   </td>
                   <td>

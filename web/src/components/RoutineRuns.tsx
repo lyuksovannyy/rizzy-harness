@@ -3,6 +3,7 @@
 // of its answer, and its chat. A row opens to show the prompt it was given
 // and, for a webhook run, the event (untrusted data, shown as plain text).
 // Unseen runs are bold; opening one's chat counts as seeing it.
+import { own } from "../emptyView";
 import { Fragment, useEffect, useState } from "react";
 import { markRunSeen } from "../lib/routineResults";
 import {
@@ -129,7 +130,7 @@ export function RoutineRuns(props: { routine: Routine; zone: string; navigate: R
                       </button>
                       {late && <div className="muted small">scheduled {clock(run.scheduled_ms!, zone)}</div>}
                     </td>
-                    <td data-label="Trigger">{TRIGGER_LABEL[run.trigger_kind] ?? run.trigger_kind}</td>
+                    <td data-label="Trigger">{own(TRIGGER_LABEL, run.trigger_kind) ?? run.trigger_kind}</td>
                     <td data-label="Status" className={isBad(run.status) ? "routine-bad" : ""} title={run.reason ?? undefined}>
                       {statusLabel(run)}
                       {run.reason && <div className="muted small">{run.reason}</div>}

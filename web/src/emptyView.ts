@@ -19,3 +19,11 @@ export function emptyView(): SessionView {
     checkpoints: {},
   };
 }
+
+/** `o[k]` only when `k` is `o`'s own key. Every lookup of a table or a view
+ * map by a string from an event, a model, a node or the server goes through
+ * this: a key such as "__proto__", "constructor" or "toString" otherwise
+ * reads `Object.prototype` (review of PR 156: a tool named "constructor",
+ * which a model can send, and a turn id "toString" took the chat down). */
+export const own = <V>(o: { readonly [k: string]: V } | undefined | null, k: unknown): V | undefined =>
+  o && typeof k == "string" && Object.hasOwn(o, k) ? o[k] : undefined;

@@ -104,7 +104,7 @@ const ITEM: Record<string, Check> = {
     done: B,
     author: nul(S),
     variant: nul(rec({ group: S, index: N, "?model": S })),
-    "?blocks": arr(rec({ ordinal: N, hash: S, id: S, type: S, "?spec": OBJ, "?error": S })),
+    "?blocks": arr(rec({ ordinal: N, hash: S, id: S, type: S, "?spec": ANY, "?error": S })),
   }),
   thinking: rec({ type: S, message_id: S, blocks: arr(rec({ type: S, "?text": S })) }),
   tool: rec({
@@ -443,4 +443,39 @@ describe("the three crashes found in review, as regressions", () => {
       expect(v.items.find((it) => it.type === "assistant")).toMatchObject({ text: "hi" });
     });
   }
+});
+
+describe("the fold guard: enum values (review of PR 156, MEDIUM 1)", () => {
+  // A value outside its enum is what serde refuses, so the event is dropped
+  // and counted, as in the Rust fold; rows key tables by these strings.
+  const cases: [string, Record<string, unknown>, string][] = [
+    ["session_created", { title: "t", cwd: "/w", model: "m", backend: "b", node_id: "n", approval_mode: "ask", profile: "agentic" }, "exec_mode"],
+    ["session_created", { title: "t", cwd: "/w", model: "m", backend: "b", node_id: "n", approval_mode: "ask", profile: "agentic" }, "approval_mode"],
+    ["approval_mode_changed", { mode: "ask" }, "mode"],
+    ["turn_ended", { turn_id: "t", reason: "completed" }, "reason"],
+    ["checkpoint", { turn_id: "t", phase: "before", git_ref: "r" }, "phase"],
+  ];
+  for (const [kind, payload, field] of cases)
+    for (const bad of ["__proto__", "constructor", "a_value_from_a_newer_node", ""]) {
+      it(`${kind}.${field} = ${JSON.stringify(bad)} is dropped and counted`, () => {
+        vi.spyOn(console, "warn").mockImplementation(() => {});
+        const v = fold([ev(1, "turn_started", { turn_id: "t0" })]);
+        const before = structuredClone(v);
+        apply(v, ev(2, kind, { ...payload, [field]: bad }));
+        expect(v).toStrictEqual(droppedFrom(before, ev(2, kind, null)));
+        // And the good value folds.
+        const w = fold([ev(1, "turn_started", { turn_id: "t0" })]);
+        apply(w, ev(2, kind, payload));
+        expect(w.unknown_events).toBe(0);
+      });
+    }
+
+  it("an enum value outside its list in an array element drops the event too", () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const v = fold([
+      ev(1, "todo_updated", { turn_id: "t", call_id: "c", items: [{ content: "a", status: "__proto__" }, { content: "b", status: "done" }] }),
+    ]);
+    expect(v.todo).toBeUndefined();
+    expect(v.unknown_events).toBe(1);
+  });
 });

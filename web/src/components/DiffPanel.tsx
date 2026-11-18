@@ -15,6 +15,7 @@
 // What is drawn is bounded (review D3): a file's lines exist in the page only
 // while it is open, the first OPEN_FILES files start open, and each file
 // draws LINES_SHOWN lines until "Show more" asks for the rest.
+import { own } from "../emptyView";
 import { PanelRightClose } from "lucide-react";
 import { useEffect, useRef, useState, type JSX } from "react";
 import { pageApi } from "../apiPages";
@@ -170,7 +171,7 @@ function FileLines({ f, limit }: { f: DiffFile; limit: number }) {
 }
 
 function FileBlock({ f, index }: { f: DiffFile; index: number }) {
-  const s = STATUS[f.status];
+  const s = own(STATUS, f.status) ?? STATUS.modified;
   const why = noLines(f);
   const [open, setOpen] = useState(index < OPEN_FILES);
   const [limit, setLimit] = useState(LINES_SHOWN);
@@ -368,12 +369,12 @@ export default function DiffPanel(props: {
                     }}
                   >
                     <span className={`diff-badge diff-st-${f.status}`} aria-hidden>
-                      {STATUS[f.status].letter}
+                      {(own(STATUS, f.status) ?? STATUS.modified).letter}
                     </span>{" "}
                     <span className="mono">
                       <Marked text={f.path} />
                     </span>
-                    <span className="sr-only"> ({STATUS[f.status].word})</span>
+                    <span className="sr-only"> ({(own(STATUS, f.status) ?? STATUS.modified).word})</span>
                   </button>
                 </li>
               ))}

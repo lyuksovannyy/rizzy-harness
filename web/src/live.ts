@@ -28,7 +28,9 @@ export class Live {
   private opened = false;
   // The fold loads with the chat, not with the first screen (it holds the
   // payload guard, and only a watched session needs it): events that come
-  // before it are held, in order, and applied once it is here.
+  // before it are held, in order, and applied once it is here. In the app
+  // the chat's screen loads the fold with itself (Shell.tsx), so it is here
+  // before the first event; the hold is for a watch from elsewhere.
   private fold: Fold | null = null;
   private loading: Promise<unknown> | null = null;
   private failed = false;
@@ -129,8 +131,10 @@ export class Live {
       },
       (err) => {
         // Tried again at the next watch, not per event (no request per
-        // delta). A chunk that is gone after an update fails the chat's own
-        // chunk too, and the page says so (ScreenBoundary).
+        // delta). In the app this is not reached: the chat's screen loads
+        // the fold with itself, so a fold chunk that fails fails that screen
+        // (ScreenBoundary says so), and React.lazy keeps that failure until
+        // a reload. Kept for a watch that does not come from that screen.
         this.loading = null;
         this.failed = true;
         this.early = [];

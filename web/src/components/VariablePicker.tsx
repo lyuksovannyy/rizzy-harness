@@ -2,6 +2,7 @@
 // this routine can use, grouped by namespace, inserted as `{{ path }}` where
 // the cursor is. Only what the server lists for this routine shows: a
 // schedule routine has no webhook data, so no `event.*`.
+import { own } from "../emptyView";
 import { Braces } from "lucide-react";
 import { type RefObject, useEffect, useId, useRef, useState } from "react";
 import type { Draft, RoutineList, VarSpec } from "../lib/routines";
@@ -25,7 +26,7 @@ const NAMESPACE: Record<string, string> = {
 export function pickerGroups(list: Pick<RoutineList, "variables" | "sources">, when: Draft["when"], eventPaths: string[]): VarGroup[] {
   const groups = list.variables
     .filter((g) => g.namespace !== "event" && g.vars.length > 0)
-    .map((g) => ({ label: NAMESPACE[g.namespace] ?? g.namespace, vars: g.vars }));
+    .map((g) => ({ label: own(NAMESPACE, g.namespace) ?? g.namespace, vars: g.vars }));
   if (when !== "webhook") return groups;
   const source = list.sources.find((s) => s.kind === "webhook");
   const seen = new Set((source?.vars ?? []).map((v) => v.path));

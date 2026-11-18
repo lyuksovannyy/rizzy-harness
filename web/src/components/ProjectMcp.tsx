@@ -9,6 +9,7 @@
 // Remove are yours alone: an approval covers your own sandboxed chats in
 // this folder. Reload asks the node to read the file again; nothing else
 // does. Part of the project page's lazy chunk.
+import { own } from "../emptyView";
 import { useCallback, useEffect, useState } from "react";
 import { call } from "../api";
 import "./ProjectMcp.css";
@@ -132,7 +133,7 @@ export default function ProjectMcp(props: { projectId: string; hasFolder: boolea
             <li key={`${e.state}:${e.name}`} className={`mcp-entry state-${e.state}`}>
               <div className="row">
                 <strong className="mono">{e.name}</strong>
-                <span className="tag">{LABEL[e.state] ?? e.state}</span>
+                <span className="tag">{own(LABEL, e.state) ?? e.state}</span>
                 <span className="grow" />
                 {(e.state === "new" || e.state === "changed") && e.digest && (
                   <button type="button" className="primary" disabled={busy} onClick={() => void approve(e)}>
@@ -146,7 +147,7 @@ export default function ProjectMcp(props: { projectId: string; hasFolder: boolea
                 )}
               </div>
               {e.reason && <p className="muted small">{e.reason}</p>}
-              {WHAT[e.state] && <p className="muted small">{WHAT[e.state]}</p>}
+              {own(WHAT, e.state) && <p className="muted small">{own(WHAT, e.state)}</p>}
               {e.command && <Runs label="In the file" command={e.command} args={e.args} env={e.env} />}
               {e.state === "changed" && e.approved_command && (
                 <>
