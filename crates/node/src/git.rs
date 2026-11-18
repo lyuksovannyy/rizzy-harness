@@ -1226,7 +1226,9 @@ async fn user_tracked(
     let copy = user_index_copy(repo).await?;
     let found = listed_of(repo, Some(&copy.0), &["ls-files", "-z"], paths).await?;
     // `ls-files` on an index file that is not there answers nothing and
-    // succeeds: the copy is this call's own, but check it all the same.
+    // succeeds. The copy is this call's own and only its guard removes it,
+    // so no test can make it vanish here (its mutation survives); the check
+    // stays so that "nothing tracked" can never come from a missing file.
     if !copy.0.is_file() {
         return None;
     }
@@ -1627,7 +1629,9 @@ async fn records(repo: &Repo, sha: &str) -> (Vec<Vec<u8>>, Skipped) {
             let parsed = rest
                 .split_once(' ')
                 .and_then(|(c, b)| Some((c.parse::<usize>().ok()?, b.parse::<u64>().ok()?)));
-            let (c, b) = parsed.unwrap_or((1, 0));
+            // Unreadable, or a count of 0 (the node writes the line only
+            // with more): at least one file unnamed.
+            let (c, b) = parsed.unwrap_or((0, 0));
             skipped.more = skipped.more.saturating_add(c.max(1));
             skipped.more_bytes = skipped.more_bytes.saturating_add(b);
         }

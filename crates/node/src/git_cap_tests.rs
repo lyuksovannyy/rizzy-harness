@@ -1989,6 +1989,7 @@ async fn a_malformed_record_counts_as_incomplete() {
         "m\n\nharness-skipped: notanumber 6162\n",
         "m\n\nharness-skipped: 10 zz\n",
         "m\n\nharness-skipped-more: 99999999999999999999999 1\n",
+        "m\n\nharness-skipped-more: 0 0\n",
     ] {
         let sha = run_raw(
             &repo,
