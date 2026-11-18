@@ -13,6 +13,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 // module path (`routines::RoutineMark`), so no `pub use` lines are added.
 pub mod artifacts;
 pub mod blobs;
+pub mod connections;
 mod handoff;
 pub mod media;
 pub mod migrate;
@@ -516,6 +517,7 @@ pub const MIGRATIONS: &[migrate::Migration] = &[&[
     workspace_agents::SCHEMA,
     plugin_access::SCHEMA,
     stored_skills::SCHEMA,
+    connections::SCHEMA,
 ]];
 
 /// A session's effective workspace: its `session_workspaces` row while the

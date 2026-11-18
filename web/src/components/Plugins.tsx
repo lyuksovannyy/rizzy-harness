@@ -6,9 +6,11 @@
 // picked); the workspace's editors choose, members read. Stored skills are
 // written here (Add: write one, or upload a SKILL.md, checked on the
 // server), opened, edited and deleted by their scope's editors. Everything
-// shown comes from a node or the server and is rendered as text only.
+// shown comes from a node or the server and is rendered as text only. The
+// person's own forge accounts (X.27) are listed first, in `Connections`.
 import { useCallback, useEffect, useState } from "react";
 import { call } from "../api";
+import Connections from "./Connections";
 import { shownName } from "../md/hiddenChars";
 import type { FeaturePageProps } from "./pages";
 import { Seg } from "./Seg";
@@ -157,6 +159,7 @@ export default function Plugins(props: FeaturePageProps) {
           Assigned: only the agents picked. An agent also needs its own Skills or Connectors switch. A repository's own skills come
           with the repository and are not listed here.
         </p>
+        <Connections />
         {list?.unenforced.map((n) => (
           <div key={n.node_id} className="error-text" role="note">
             {`Node ${host(n)} does not enforce these settings (an older node): there, an agent that is denied any skill gets no skills, and one denied any connector gets no connectors.`}

@@ -466,6 +466,27 @@ CREATE INDEX ui_sessions_expires ON ui_sessions(expires_ms);
 -- index ui_sessions_user on ui_sessions
 CREATE INDEX ui_sessions_user ON ui_sessions(user_id);
 
+-- table user_connections on user_connections
+CREATE TABLE user_connections (
+    connection_id TEXT PRIMARY KEY,
+    user_id       TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    host          TEXT NOT NULL CHECK (length(host) BETWEEN 1 AND 253),
+    account_id    TEXT NOT NULL CHECK (length(account_id) BETWEEN 1 AND 32),
+    login         TEXT NOT NULL CHECK (length(login) BETWEEN 1 AND 255),
+    display_name  TEXT CHECK (length(display_name) <= 1024),
+    -- The e-mail the forge links to the account, when it gives one.
+    commit_email  TEXT CHECK (length(commit_email) <= 1024),
+    -- The token's scopes as the forge reported them (a JSON array), NULL
+    -- when the forge does not report them.
+    scopes        TEXT CHECK (length(scopes) <= 4096),
+    -- Scopes the forge reported beyond those kept (the list is capped).
+    scopes_more   INTEGER NOT NULL DEFAULT 0 CHECK (scopes_more >= 0),
+    sealed_token  BLOB NOT NULL CHECK (length(sealed_token) <= 4096),
+    created_ms    INTEGER NOT NULL,
+    updated_ms    INTEGER NOT NULL,
+    UNIQUE (user_id, host, account_id)
+);
+
 -- table users on users
 CREATE TABLE users (
     user_id       TEXT PRIMARY KEY,
