@@ -812,7 +812,20 @@ pub struct LimitsPolicy {
     /// New project folders this node makes per hour (`project.create`,
     /// T77), all requests together; 0 turns making them off.
     pub projects_per_hour: usize,
+    /// KiB over which a file git does not track is left out of checkpoints
+    /// (undo leaves such a file as it is and the chat names it,
+    /// docs/undo-and-stash.md §2.7); 0: no cap, every file is checkpointed.
+    /// Tracked files are always checkpointed, whatever their size.
+    pub checkpoint_untracked_max_kb: u64,
 }
+
+/// `[limits] checkpoint_untracked_max_kb` by default: 10 MiB. Between
+/// OpenCode's 2 MiB and Warp's 25 MiB, Hermes's 10 MB: source files,
+/// lockfiles and hand-made fixtures stay under it; what is over it and
+/// untracked is nearly always generated data, media, archives or
+/// downloaded dependencies, which is what made checkpoints cost seconds and
+/// gigabytes (§2.7).
+pub const DEFAULT_CHECKPOINT_UNTRACKED_MAX_KB: u64 = 10 * 1024;
 
 /// `max_approval_mode` when node.toml does not say: `auto`, so the owner's
 /// default for new chats (`DEFAULT_CHAT_APPROVAL`, 2026-11-14) holds on a
@@ -866,11 +879,17 @@ impl Default for LimitsPolicy {
             callback_max_steps: DEFAULT_CALLBACK_MAX_STEPS,
             handoff_notes_per_hour: DEFAULT_HANDOFF_PER_HOUR,
             projects_per_hour: DEFAULT_PROJECTS_PER_HOUR,
+            checkpoint_untracked_max_kb: DEFAULT_CHECKPOINT_UNTRACKED_MAX_KB,
         }
     }
 }
 
 impl LimitsPolicy {
+    /// [`Self::checkpoint_untracked_max_kb`] in bytes (0: no cap).
+    pub fn checkpoint_untracked_max(&self) -> u64 {
+        self.checkpoint_untracked_max_kb.saturating_mul(1024)
+    }
+
     /// The background table's bounds.
     pub fn background(&self) -> harness_tools::background::Limits {
         harness_tools::background::Limits {
@@ -1674,6 +1693,26 @@ tool_timeout_sec = 120
             let e = p.validate().unwrap_err();
             assert!(e.contains(bad.split(' ').next().unwrap()), "{bad}: {e}");
         }
+    }
+
+    /// §2.7 of docs/undo-and-stash.md: the size cap on untracked files is
+    /// node.toml's, 10 MiB by default, in KiB, 0 for none; a huge value
+    /// does not overflow.
+    #[test]
+    fn checkpoint_untracked_cap_default_and_off() {
+        assert_eq!(
+            NodePolicy::default().limits.checkpoint_untracked_max(),
+            10 << 20
+        );
+        let p: NodePolicy = toml::from_str("[limits]\ncheckpoint_untracked_max_kb = 0\n").unwrap();
+        assert!(p.validate().is_ok());
+        assert_eq!(p.limits.checkpoint_untracked_max(), 0);
+        let p: NodePolicy = toml::from_str(&format!(
+            "[limits]\ncheckpoint_untracked_max_kb = {}\n",
+            i64::MAX
+        ))
+        .unwrap();
+        assert_eq!(p.limits.checkpoint_untracked_max(), u64::MAX);
     }
 
     /// X.24: background sub-agents are node.toml's, 4 a chat and 30 min

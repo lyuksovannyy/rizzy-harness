@@ -115,7 +115,22 @@ impl Rig {
         .await
     }
 
+    /// A rig whose node leaves untracked files over `kb` KiB out of
+    /// checkpoints (`[limits] checkpoint_untracked_max_kb`).
+    pub async fn with_checkpoint_cap_kb(kb: u64) -> Self {
+        Self::build_with(
+            NodePolicy::default().checkpoints_keep,
+            NativeConfig::default(),
+            Some(kb),
+        )
+        .await
+    }
+
     async fn build(keep: usize, native: NativeConfig) -> Self {
+        Self::build_with(keep, native, None).await
+    }
+
+    async fn build_with(keep: usize, native: NativeConfig, cap_kb: Option<u64>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let ws = dir.path().join("ws");
         std::fs::create_dir(&ws).unwrap();
@@ -128,6 +143,12 @@ impl Rig {
                 workspace_roots: vec![dir.path().into()],
                 max_approval_mode: harness_core::policy::ApprovalMode::Auto,
                 checkpoints_keep: keep,
+                limits: harness_node::LimitsPolicy {
+                    checkpoint_untracked_max_kb: cap_kb.unwrap_or(
+                        harness_node::LimitsPolicy::default().checkpoint_untracked_max_kb,
+                    ),
+                    ..Default::default()
+                },
                 // Never the developer's own skills (`~/.agents/skills`):
                 // they would be in every turn's context.
                 skills: harness_node::SkillsPolicy {

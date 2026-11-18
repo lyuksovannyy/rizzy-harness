@@ -1170,7 +1170,30 @@ size on disk; a snapshot that takes over 60 s leaves the turn without a
 checkpoint and the chat says so. Add such folders to the repository's
 `.gitignore` to keep them out. The
 first checkpoint of a large repository reads every file once. Undo writes
-back the exact bytes. Sub-agents that can change files (with `write`, `edit` or `bash`) get
+back the exact bytes.
+
+**Files over the size limit.** A file git does not track (not in your
+repository's index or its `HEAD`) that is larger than `[limits]
+checkpoint_untracked_max_kb` (10 MiB by default; `0` checkpoints every file
+whatever its size) is left out of checkpoints: a downloaded model, a dataset,
+an archive, a build output your `.gitignore` does not name. Files git
+tracks are always checkpointed, whatever their size. At the end of a turn
+the chat names the files left out (the five largest, with their sizes, and
+how many more), once, and again when one of them is made, changed in size or
+deleted. Undo never deletes, overwrites or counts one of them: a file made
+over the limit during the turn stays; a file that was over the limit before
+the turn and that the turn shrank, replaced or deleted cannot be brought
+back (its earlier content was never saved), and the note after the undo
+names it. A file the turn grew over the limit is put back to its earlier
+version, which the turn's checkpoint holds: the checkpoint an undo takes of
+the folder first holds every file the undo writes over, whatever its size,
+so undoing the undo brings the large version back. A sub-agent's copy of
+your folder leaves these files out too: the sub-agent works as if they did
+not exist, your files are not touched, its result tells the agent which ones
+it did not have, and a sub-agent that writes where you have one is not
+applied (nothing of it is written). Sizes are read once per checkpoint,
+without following links (a link is always checkpointed; a sparse file counts
+at its full length). Sub-agents that can change files (with `write`, `edit` or `bash`) get
 a folder of their own, a copy of yours that the node keeps in its data
 directory (`sessions/<id>/files`), so your folder must be a git
 repository (inside the node's `workspace_roots`, with a plain `.git`
@@ -1459,6 +1482,7 @@ callback_turns = 3                   # turns the agent may run in a row without 
 callback_max_steps = 20              # model calls one such turn may make, never above max_steps or the chat's own limit (1 .. 10000)
 handoff_notes_per_hour = 4           # hand-off notes this node writes per chat per hour; 0: off, the server asks for none (0 .. 60)
 projects_per_hour = 20               # new project folders this node makes per hour (only those made count; in memory); 0: off (0 .. 200)
+checkpoint_untracked_max_kb = 10240  # KiB over which a file git does not track is left out of checkpoints (undo leaves it alone; see "Files over the size limit"); 0: no limit
 
 [projects]
 dir = "~/rizzy-projects"             # where "New project" makes folders (see "Projects"); inside workspace_roots, its parent existing, on the data directory's file system; "" turns it off

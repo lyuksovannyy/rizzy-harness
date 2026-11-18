@@ -406,6 +406,8 @@ struct Isolation {
     sub: crate::git::SubRepo,
     child: crate::git::ChildFolder,
     base: String,
+    /// What the base left out for its size: not in the child's folder.
+    skipped: crate::git::Skipped,
     cwd: PathBuf,
 }
 
@@ -1307,6 +1309,7 @@ impl Session {
             ceiling: policy.root_of(dir).ok(),
             protected: policy.protected_dirs.clone(),
             sandbox: self.node.cfg.git_sandbox.clone(),
+            untracked_max: policy.limits.checkpoint_untracked_max(),
         }
     }
 
@@ -3300,6 +3303,7 @@ impl Session {
         match res {
             Ok((snap, files)) => {
                 let sha = snap.sha.clone();
+                let skipped = snap.skipped.clone();
                 let ignore_changed: Vec<String> = files
                     .iter()
                     .map(|(_, p)| p)
@@ -3317,6 +3321,7 @@ impl Session {
                     }))
                     .await;
                 if recorded.is_ok() {
+                    self.skipped_notice(turn_id, repo, before, &skipped).await;
                     // S-6: files that ignore rules written during this turn
                     // now leave out are in neither snapshot, so an undo of
                     // the turn leaves them; say so.
@@ -3349,6 +3354,45 @@ impl Session {
                 self.no_checkpoint_notice(turn_id, &e).await;
             }
         }
+    }
+
+    /// Tell the person, in the chat, which files this turn's checkpoints
+    /// left out because git does not track them and they are over the size
+    /// limit (docs/undo-and-stash.md §2.7): an `error` note, as for the
+    /// other checkpoint notes. Said when the files left out before or after
+    /// the turn are not exactly those of the state this chat last recorded
+    /// (the first turn, a file made, grown, shrunk or deleted, by the turn
+    /// or between turns), so a folder that always holds the same large
+    /// files is named once, not at every turn.
+    async fn skipped_notice(
+        &self,
+        turn_id: &str,
+        repo: &crate::git::Repo,
+        before: &str,
+        after: &crate::git::Skipped,
+    ) {
+        let before = crate::git::skipped_in(repo, before).await;
+        if before.is_empty() && after.is_empty() {
+            return;
+        }
+        let prev = self
+            .last_state
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
+        let prev = match prev {
+            Some(sha) => Some(crate::git::skipped_in(repo, &sha).await),
+            None => None,
+        };
+        if prev.as_ref() == Some(&before) && &before == after {
+            return;
+        }
+        let _ = self
+            .emit(EventKind::Error(ErrorEvent {
+                turn_id: Some(turn_id.into()),
+                message: skipped_note(repo.untracked_max(), &before, after),
+            }))
+            .await;
     }
 
     /// Copy what an undo of this turn needs into the checkpoint repository's
@@ -3626,11 +3670,18 @@ impl Session {
         // the unforced check.
         let saved = format!("restore-{}", harness_core::new_id());
         let saved_ref = format!("refs/harness/{}/{saved}/before", self.id);
-        let now = crate::git::snapshot_full(&repo, &saved_ref, "harness: before restore")
-            .await
-            .map_err(|e| {
-                format!("nothing was restored: the folder could not be saved first ({e})")
-            })?;
+        // Whatever its size, every file the restore writes over or deletes
+        // is in this snapshot, so undoing the restore brings it back (§2.7).
+        let exempt = match (&checked, &interrupted) {
+            (Some(d), _) => d.exempt(),
+            (None, files) => crate::git::Exempt::of_names(files.as_deref().unwrap_or_default()),
+        };
+        let now =
+            crate::git::snapshot_exempt(&repo, &saved_ref, "harness: before restore", &exempt)
+                .await
+                .map_err(|e| {
+                    format!("nothing was restored: the folder could not be saved first ({e})")
+                })?;
         let planned = async {
             let diff = match (checked, &interrupted) {
                 (Some(d), _) => d,
@@ -4754,7 +4805,8 @@ impl Session {
         let base_ref = format!("refs/harness/{child}/base");
         let mut made: Option<crate::git::ChildFolder> = None;
         let res = async {
-            let base = sub.base(&id).await?;
+            let snap = sub.base_full(&id).await?;
+            let (base, skipped) = (snap.sha, snap.skipped);
             let folder = sub.make_folder(&id, &base, &sessions).await?;
             made = Some(folder.clone());
             let rel = here
@@ -4777,6 +4829,7 @@ impl Session {
                 sub: sub.clone(),
                 child: folder,
                 base,
+                skipped,
                 cwd,
             })
         }
@@ -4871,6 +4924,23 @@ impl Session {
                 }
             }
         };
+        // What the base left out for its size: the child worked without
+        // those files (absent from its folder) and they were not touched.
+        if !iso.skipped.is_empty() {
+            let n = iso.skipped.count();
+            let (file, are, they, it) = if n == 1 {
+                ("file", "is", "it was", "it")
+            } else {
+                ("files", "are", "they were", "they")
+            };
+            note.push_str(if note.ends_with('.') { " " } else { ". " });
+            note.push_str(&format!(
+                "{n} {file} of the folder {are} over the checkpoint size limit and not tracked by \
+                 git, so {they} not copied into the sub-agent's folder: the sub-agent worked as \
+                 if {it} did not exist, and {they} left as {it} {are}: {}.",
+                iso.skipped.listed(SKIPPED_SHOWN)
+            ));
+        }
         // What the result snapshot leaves out, said rather than dropped.
         let ignored = iso.sub.ignored(&iso.child).await;
         if !ignored.is_empty() {
@@ -5581,6 +5651,7 @@ fn restore_notice(
     if plan.changed_repos.is_empty()
         && plan.git_inside.is_empty()
         && plan.unsaved.is_empty()
+        && plan.left.is_empty()
         && safety.is_none()
     {
         return None;
@@ -5618,7 +5689,131 @@ fn restore_notice(
             plan.changed_repos.listed()
         ));
     }
+    let (lost, kept): (Vec<&crate::git::LeftAlone>, Vec<&crate::git::LeftAlone>) =
+        plan.left.iter().partition(|l| l.lost);
+    if !lost.is_empty() {
+        s.push_str(&format!(
+            " Undo could not bring back the earlier versions of these files: they were over \
+             the checkpoint size limit and git did not track them, so no checkpoint holds \
+             them; what is there now was left as it is: {}.",
+            left_listed(&lost)
+        ));
+    }
+    if !kept.is_empty() {
+        s.push_str(&format!(
+            " Undo left these files as they are, and did not remove them: they are over the \
+             checkpoint size limit and git does not track them, so no checkpoint holds them: \
+             {}.",
+            left_listed(&kept)
+        ));
+    }
     Some(s)
+}
+
+/// How many files a note about files left out for their size names; the
+/// rest are counted.
+const SKIPPED_SHOWN: usize = 5;
+
+/// Files an undo left alone, for a note: at most [`SKIPPED_SHOWN`] with
+/// their recorded size, the rest counted.
+fn left_listed(left: &[&crate::git::LeftAlone]) -> String {
+    let mut s = left
+        .iter()
+        .take(SKIPPED_SHOWN)
+        .map(|l| {
+            let name = String::from_utf8_lossy(&l.path)
+                .chars()
+                .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
+                .collect::<String>();
+            match l.size {
+                0 => format!("`{name}`"),
+                n => format!("`{name}` ({})", crate::git::human_size(n)),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    if left.len() > SKIPPED_SHOWN {
+        s.push_str(&format!(" and {} more", left.len() - SKIPPED_SHOWN));
+    }
+    s
+}
+
+/// The note after a turn whose checkpoints left files out for their size
+/// (`cap` bytes; `before` and `after` the two snapshots' records).
+fn skipped_note(cap: u64, before: &crate::git::Skipped, after: &crate::git::Skipped) -> String {
+    let limit = crate::git::human_size(cap);
+    let mut s = String::new();
+    if !after.is_empty() {
+        let n = after.count();
+        s.push_str(&format!(
+            "Not checkpointed: {n} file{} over {limit} that git does not track: {}. Undo will \
+             not bring back or remove what they hold now; it only puts back an earlier version \
+             that a checkpoint holds.",
+            if n == 1 { "" } else { "s" },
+            after.listed(SKIPPED_SHOWN)
+        ));
+    }
+    // Named files whose record differs between the two snapshots: made,
+    // grown, shrunk, changed in size or deleted during the turn.
+    let a: std::collections::HashMap<&[u8], u64> = after
+        .files
+        .iter()
+        .map(|(p, n)| (p.as_slice(), *n))
+        .collect();
+    let b: std::collections::HashMap<&[u8], u64> = before
+        .files
+        .iter()
+        .map(|(p, n)| (p.as_slice(), *n))
+        .collect();
+    let mut changed: Vec<(Vec<u8>, u64)> = after
+        .files
+        .iter()
+        .filter(|(p, n)| b.get(p.as_slice()) != Some(n))
+        .chain(
+            before
+                .files
+                .iter()
+                .filter(|(p, _)| !a.contains_key(p.as_slice())),
+        )
+        .cloned()
+        .collect();
+    changed.sort();
+    changed.dedup_by(|x, y| x.0 == y.0);
+    let gone: Vec<&(Vec<u8>, u64)> = before
+        .files
+        .iter()
+        .filter(|(p, _)| !a.contains_key(p.as_slice()))
+        .collect();
+    if !changed.is_empty() {
+        let listed = crate::git::Skipped {
+            files: changed,
+            more: 0,
+            more_bytes: 0,
+        }
+        .listed(SKIPPED_SHOWN);
+        s.push_str(&format!(
+            "{}Made, changed or deleted during this turn, in no checkpoint: {listed}.",
+            if s.is_empty() { "" } else { " " }
+        ));
+        if !gone.is_empty() {
+            s.push_str(&format!(
+                " {} over {limit} before the turn, so undoing it cannot bring back {} earlier \
+                 version{}.",
+                if gone.len() == 1 {
+                    "One was"
+                } else {
+                    "Some were"
+                },
+                if gone.len() == 1 { "its" } else { "their" },
+                if gone.len() == 1 { "" } else { "s" }
+            ));
+        }
+    }
+    s.push_str(
+        " (The limit is `[limits] checkpoint_untracked_max_kb` in the node's node.toml; files \
+         the repository's `.gitignore` names are never checkpointed and not listed here.)",
+    );
+    s
 }
 
 /// What an approval card says the tool would do. Publishing changes nothing

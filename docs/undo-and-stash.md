@@ -315,9 +315,9 @@ So a file only the global file names is checkpointed, an agent's edit to it is u
 sub-agent's folder holds it and the child's change to it merges back (it is no longer listed as
 "ignored, not brought back").
 
-**Cost.** Nothing bounds a checkpoint's size or file count; the 60 s snapshot limit
-(`SNAPSHOT_TIMEOUT`) and the 120 s limit per git call bound its time, and a snapshot past
-them leaves the turn without a checkpoint and says so in the chat. Measured with
+**Cost.** Before the size cap below (2026-11-18) nothing bounded a checkpoint's size or file
+count; the 60 s snapshot limit (`SNAPSHOT_TIMEOUT`) and the 120 s limit per git call bound its
+time, and a snapshot past them leaves the turn without a checkpoint and says so in the chat. Measured with
 `crates/node/src/git_ignore_bench.rs` (ignored; `GI_DIR=<real disk> cargo test -p
 harness-node --lib globally_ignored_tree_cost -- --ignored --nocapture`), a repository of 100
 committed files plus `deps/`, which only the global file names, on the rotational USB disk,
@@ -331,12 +331,116 @@ page cache warm (the tree had just been written; a cold first read is slower):
 
 The sub-agent shadow (`<hash>-sub.git`) is a second store, so the folder's compressed size is
 paid twice once a writing sub-agent has run, and each running writing sub-agent holds a full
-copy until it ends. A per-file size cap at snapshot (OpenCode skips untracked files over
-2 MiB, Hermes over 10 MB, Warp marks files over 25 MiB skipped:
-`research/harnesses-round-2-appendix.md` §4.6) was not built: a file skipped before a turn and
-kept after it would read as created, and an undo would delete it, so the skipped paths have to
-reach the restore plan and the chat. The advice to the person is the repository's own
-`.gitignore`.
+copy until it ends. The size cap below bounds the last row; the first two (many files, each
+small) stay as measured. The advice to the person stays the repository's own `.gitignore`.
+
+#### 2.7.1 A size cap on files git does not track (A.23, built 2026-11-18)
+
+**The rule.** A file git does not track that is larger than `[limits]
+checkpoint_untracked_max_kb` (KiB; default 10,240, 10 MiB; `0` turns the cap off) is left out
+of every snapshot: turn checkpoints (`before`, `after`), the between-turns copy, the
+pre-restore snapshot (with one exception, below), a sub-agent's base and so its folder.
+Tracked files are always in: the repository already holds them (borrowed, no second copy),
+and leaving one out would break Undo of an edit to it. 10 MiB lies between OpenCode's 2 MiB
+and Warp's 25 MiB, as Hermes's 10 MB does (`research/harnesses-round-2-appendix.md` §4.6):
+source files, lockfiles and hand-made fixtures stay under it; what is over it and untracked is
+nearly always generated data, media, archives or downloaded dependencies, which is what cost
+seconds and gigabytes above.
+
+- **Tracked** means: in the user's index (read by our code with no link followed, at most
+  256 MiB, copied into the shadow and listed with `ls-files`), or, when the index cannot be
+  read (none yet, a split index), in the tree of the commit `HEAD` names. It is asked only
+  when some file is over the cap, so a folder without such a file pays nothing for it. In a
+  plain folder nothing is tracked.
+- **Measured once per snapshot**, by `symlink_metadata` on each path git listed (the shadow
+  index's entries and the new untracked ones), never followed: a link is never left out, a
+  sparse file counts at its apparent length (what git would read). A file that grows past the
+  cap between that `lstat` and git's read is stored at its new size (the window is the time
+  between the two). A file an earlier snapshot captured that is over the cap now is taken out
+  of the shadow's index before `add -u` reads it.
+- **Recorded** in the snapshot's commit message, beside the nested repositories:
+  `harness-skipped: <size> <hex path>` (git's bytes, so any name round-trips), the largest
+  1,000 by size, and `harness-skipped-more: <count> <bytes>` for the rest. A snapshot without
+  these lines (every one taken before this change, or with the cap at 0) left nothing out.
+- **The pre-restore snapshot waives the cap** for the paths the restore writes or deletes,
+  anything below them (a path that is a folder now) and a file where one's folder would go
+  (`git.rs`, `Exempt`, `snapshot_exempt`): so it holds every file the restore writes over,
+  whatever its size, and undoing the undo (A.9) still loses nothing.
+
+**What a restore does** (`git.rs`, `leave_skipped`, `unchanged_skipped`; `before` is the state
+restored to, `after` the one the folder should be in, for a rewind the latest; "skipped" means
+untracked and over the cap at that snapshot):
+
+| before \ after | present | absent | skipped |
+|---|---|---|---|
+| present | restored to `before` (as before the cap) | restored (as before) | **restored to `before`**: that version is in the checkpoint; the pre-restore snapshot holds the large one, so undoing the undo brings it back. The unforced check compares the size `after` recorded with the file now |
+| absent | deleted (as before) | nothing | **left in place, not removed**; the note after the undo names it |
+| skipped | **left in place** (the turn's version, or one git tracks since): its earlier version was never saved, so deleting it would bring nothing back; the note says it cannot be brought back | nothing on disk to touch; the note says it cannot be brought back | **left as it is**; named when the recorded size changed (same size: nothing can tell, nothing is said) |
+
+A left-alone file is never in `touched`, `files` or the restored count. The cases around them:
+
+- **Crossing the cap after the turn**, either way: the pre-restore snapshot holds the file
+  (cap waived), so the unforced check sees a change and refuses ("changed after the turn");
+  "Undo anyway" overwrites it and the pre-restore snapshot keeps it. A file the turn grew and
+  the person deleted afterwards is simply put back.
+- **A skipped path that became a folder** in the turn: the folder's files are the turn's and
+  are removed; the old file is named as lost. **Became a link**, or **a file the person then
+  `git add`ed** (tracked, so `after` holds it): read as created by the turn, and left, never
+  deleted.
+- **More than 1,000 skipped**: the record names the largest; for an unnamed one the restore
+  knows nothing. Safe either way: grown in the turn and unnamed in `after`, the unforced check
+  cannot match its size and refuses (forced restores it, the pre-restore snapshot keeps the
+  large one); unnamed in `before` and present after, an undo deletes the turn's version (which
+  `after` and the pre-restore snapshot hold) and does not say the earlier one is lost.
+- **A sub-agent's merge-back** (`git/merge.rs`): a child change at, above or below a path
+  skipped in its base or in the folder now is a conflict ("a file of yours over the checkpoint
+  size limit … is there"), and nothing of that child is written. The restore plan also never
+  writes a path the folder's snapshot left out (`leave_skipped`, the `now` rule), as a second
+  line.
+- **Stash and unstash** (§3) are not built, so nothing there yet; they will take their
+  snapshot as a restore does.
+- **The cap at 0** is the code before it: nothing is measured, nothing recorded, every
+  snapshot identical.
+
+**What the person sees.** No new event: the existing chat notes (`error` events with the turn
+id, as for "This turn has no checkpoint").
+
+- **After a turn**, when the files left out before or after it are not exactly those of the
+  chat's last recorded state (the first turn, a file made, grown, shrunk or deleted by the turn
+  or between turns): "Not checkpointed: 3 files over 10.0 MiB that git does not track:
+  `deps/model.bin` (1.2 GiB), … Undo will not bring back or remove what they hold now; it only
+  puts back an earlier version that a checkpoint holds." and, for the ones whose record
+  changed, "Made, changed or deleted during this turn, in no checkpoint: …", with "cannot bring
+  back" for those over the cap before the turn. At most five named with sizes, the rest
+  counted. A folder that always holds the same large files is named once, not at every turn.
+- **After an undo** that left one: "Undo could not bring back the earlier versions of these
+  files: … what is there now was left as it is: …" and "Undo left these files as they are,
+  and did not remove them: …".
+- **A sub-agent's result** (the parent agent's tool result, shown on the delegate card): "1
+  file of the folder is over the checkpoint size limit and not tracked by git, so it was not
+  copied into the sub-agent's folder: the sub-agent worked as if it did not exist, and it was
+  left as it is: `data.bin` (12.0 MiB)." **What this breaks, plainly:** a sub-agent whose task
+  needs such a file (reads a dataset, runs a model file) finds it missing, works without it or
+  fails, and its report may not say why; the parent learns it only from this sentence. No link
+  or bind into the child's folder is made for it: that would let the child write the parent's
+  file outside every checkpoint.
+
+**Measured after** (the bench above, `GI_CAP_KB=10240` against `0`, same disk, warm cache,
+2026-11-18, other builds running; outputs in the builder's notes, one run each):
+
+| | first checkpoint | next one | checkpoint store | sub-agent base / folder fill / result | store after one sub-agent |
+|---|---|---|---|---|---|
+| `deps/` = 4 files, 1.9 GiB, cap 10 MiB | 5.7 s (101 paths) | 46 ms | 0 MiB | 0.17 s / 4.2 s (0 MiB copied) / 0.04 s | 0 MiB |
+| `deps/` = 20,000 files, 286 MiB, no cap | 1.72 s | 37 ms | 159 MiB | 2.35 s / 0.80 s / 0.60 s | 319 MiB |
+| the same, cap 10 MiB (no file over it) | 1.59 s | 57 ms | 159 MiB | 1.59 s / 0.49 s / 0.88 s | 319 MiB |
+
+The 1.9 GiB case no longer stores or copies anything of `deps/`. Its first checkpoint (5.7 s)
+and the folder fill (4.2 s, for 101 small files) ran right after the bench wrote 1.9 GiB, and
+the next checkpoint of the same folder took 46 ms, so most of those seconds look like the disk
+flushing that write; this was not separated out. The cost of the cap where nothing is over it
+is one `lstat` per path: 20 ms more for a repeat checkpoint of 20,100 paths (37 to 57 ms); the
+first-checkpoint and sub-agent differences in that row are within run-to-run noise on this
+loaded disk.
 
 **Secrets.** A `.env` the repository does not ignore now has its bytes in the node's data
 directory (`checkpoints/`, `sessions/<id>/files` while a sub-agent runs, stashes for up to 30
@@ -691,7 +795,8 @@ without gc cost about 30 ms at 1,000 files, 70 ms at 10,000 and 600 ms at 100,00
 | A restart between question and answer | Nothing is lost; the answer re-plans (§3.3). |
 | The node is off at a stash's expiry midnight | Removed at the next start. Unusable from the expiry instant on. |
 | A very large stash | Costs its files' compressed size for up to 30 days, shown in the list and the total. Building it is bounded by the 60 s snapshot limit (`git.rs`, `SNAPSHOT_TIMEOUT`). |
-| A big folder only the global git ignore file named (§2.7) | Now checkpointed: its first checkpoint reads it all, the store holds its compressed size (twice with sub-agents). Past 60 s the turn has no checkpoint and the chat says so. |
+| A big folder only the global git ignore file named (§2.7) | Now checkpointed: its first checkpoint reads it all, the store holds its compressed size (twice with sub-agents). Past 60 s the turn has no checkpoint and the chat says so. Files of it over the size cap (10 MiB) are left out, named in the chat, and never touched by an undo (§2.7.1). |
+| An agent makes, grows, shrinks or deletes a file over the size cap (§2.7.1) | Made: undo leaves it. Grown: undo puts the earlier version back, the pre-restore snapshot keeps the large one. Shrunk or deleted: its earlier version was never saved; undo leaves what is there and says so. |
 | A stash holding a secret (an edited `.env`) | File content on the node's disk, with the same exposure as the checkpoint store, for up to 30 days. Events carry paths and sizes only. |
 | A routine, with no person | No undo tool. `stash_apply` follows the routine's approval rules (O6); `stash_delete` is refused, because it always needs a person. Conflicts are skipped under `Ask` and `AskAll`; under `Auto` the agent decides. |
 | A turn that changes 5,000 files | Completes. It warns at its end and on its undo (§2.6), and its undo completes too. |

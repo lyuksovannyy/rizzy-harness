@@ -11,8 +11,10 @@
 //!
 //! `GI_FILES` (default 20,000) files of `GI_BYTES` (default 15,000) bytes
 //! of text under `deps/`, which the repository's own `.gitignore` does not
-//! name. Everything is made under a temporary folder in `GI_DIR` and removed
-//! at the end.
+//! name. `GI_CAP_KB` is the size cap on untracked files (`[limits]
+//! checkpoint_untracked_max_kb`; default 0, no cap, as before the cap).
+//! Everything is made under a temporary folder in `GI_DIR` and removed at
+//! the end.
 
 use super::*;
 use std::time::Instant;
@@ -90,7 +92,11 @@ async fn globally_ignored_tree_cost() {
     // origin/main before X.31, with a global ignore file naming `deps/`,
     // took 8 ms for each checkpoint and stored nothing of `deps/` (see the
     // doc for the full table).
-    let bounds = Bounds::default();
+    let bounds = Bounds {
+        untracked_max: env_or("GI_CAP_KB", 0) as u64 * 1024,
+        ..Default::default()
+    };
+    eprintln!("cap: {} KiB", bounds.untracked_max / 1024);
     let base = d.path().join("cp");
 
     let repo = checkpoint_repo(&ws, Some(&base), &bounds)

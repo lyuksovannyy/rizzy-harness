@@ -88,6 +88,15 @@ pub struct Repo {
     /// The work tree is written by git (filling a sub-agent's new folder,
     /// which no session can reach yet): read-write in the jail.
     tree_rw: bool,
+    /// A file git does not track that is larger than this many bytes is
+    /// left out of every snapshot and recorded in it (`[limits]
+    /// checkpoint_untracked_max_kb`, docs/undo-and-stash.md §2.7); 0: no cap.
+    untracked_max: u64,
+    /// The user's index (`<top>/.git/index`, reached by no link) and the
+    /// commit its `HEAD` names: what "tracked" means for the cap. `None` in
+    /// a plain folder, where nothing is tracked.
+    user_index: Option<PathBuf>,
+    user_head: Option<String>,
 }
 
 /// The sandbox of a [`Repo`]'s git processes; equal when it is the same one.
@@ -164,6 +173,11 @@ impl Repo {
         self.shadow.is_some()
     }
 
+    /// The size cap on files git does not track, in bytes (0: none).
+    pub fn untracked_max(&self) -> u64 {
+        self.untracked_max
+    }
+
     /// The same shadow with another work tree (a sub-agent's folder, which
     /// the node made and no session can reach: its identity now).
     fn with_root(&self, root: &Path) -> Self {
@@ -177,6 +191,9 @@ impl Repo {
     /// This, as a scratch work tree (see [`Repo::scratch`]).
     fn scratch(mut self) -> Self {
         self.scratch = true;
+        // A sub-agent's result is its own work: nothing is left out of it
+        // for its size (the result's write limits bound it instead).
+        self.untracked_max = 0;
         self
     }
 }
@@ -519,6 +536,9 @@ pub struct Bounds {
     /// The sandbox the node's git for this folder runs in (R1b-2); `None`
     /// where the node has none.
     pub sandbox: Option<std::sync::Arc<harness_tools::sandbox::Sandbox>>,
+    /// Bytes over which a file git does not track is left out of a
+    /// checkpoint (`[limits] checkpoint_untracked_max_kb`); 0: no cap.
+    pub untracked_max: u64,
 }
 
 impl Bounds {
@@ -721,6 +741,9 @@ async fn repo_for_with(
             root_id,
             shadow_id,
             tree_rw: false,
+            untracked_max: bounds.untracked_max,
+            user_index: info.as_ref().and_then(|i| i.index.clone()),
+            user_head: info.as_ref().and_then(|i| i.head.clone()),
         },
         found,
     )))
@@ -740,6 +763,9 @@ fn dummy_repo() -> Repo {
         root_id: Identity { dev: 0, ino: 0 },
         shadow_id: None,
         tree_rw: false,
+        untracked_max: 0,
+        user_index: None,
+        user_head: None,
     }
 }
 
@@ -799,10 +825,47 @@ impl Drop for IndexFiles {
     }
 }
 
-/// A tree of the folder, and the nested repositories left out of it.
+/// A tree of the folder, and what was left out of it: the nested
+/// repositories, and the files left out for their size.
 struct WorkTree {
     id: String,
     nested: Vec<Vec<u8>>,
+    skipped: Vec<(Vec<u8>, u64)>,
+}
+
+/// Paths the size cap does not apply to in one snapshot: a restore's
+/// snapshot of the folder right before it writes (`snapshot_exempt`) holds
+/// every file the restore writes over or deletes, whatever its size, so
+/// undoing the restore can bring it back. A file is exempt when it is one
+/// of the paths, below one (the path is a folder now), or above one (a file
+/// where the path's folder would go).
+#[derive(Debug, Default)]
+pub struct Exempt {
+    paths: std::collections::HashSet<Vec<u8>>,
+    above: std::collections::HashSet<Vec<u8>>,
+}
+
+impl Exempt {
+    pub fn of(paths: impl IntoIterator<Item = Vec<u8>>) -> Self {
+        let paths: std::collections::HashSet<Vec<u8>> = paths.into_iter().collect();
+        let above = paths
+            .iter()
+            .flat_map(|p| parents(p).map(<[u8]>::to_vec))
+            .collect();
+        Self { paths, above }
+    }
+
+    /// Paths as an event names them (lossy UTF-8: a name that is not
+    /// UTF-8 is not matched, and stays under the cap).
+    pub fn of_names(names: &[String]) -> Self {
+        Self::of(names.iter().map(|n| n.as_bytes().to_vec()))
+    }
+
+    fn covers(&self, p: &[u8]) -> bool {
+        self.paths.contains(p)
+            || self.above.contains(p)
+            || parents(p).any(|d| self.paths.contains(d))
+    }
 }
 
 /// Tree of the working directory as it is now (tracked + untracked, minus
@@ -821,16 +884,24 @@ struct WorkTree {
 /// Which step failed decides, never git's message, so a `write-tree` that
 /// failed for another reason (a full disk) also costs one rehash of the
 /// folder; checkpoints and their refs are not touched.
+#[cfg(test)]
 async fn worktree_tree(repo: &Repo) -> Result<WorkTree, String> {
-    match worktree_tree_from(repo, true).await {
+    worktree_tree_with(repo, &Exempt::default()).await
+}
+
+/// [`worktree_tree`] with `exempt` out of the size cap.
+async fn worktree_tree_with(repo: &Repo, exempt: &Exempt) -> Result<WorkTree, String> {
+    match worktree_tree_from_with(repo, true, exempt).await {
         Err(TreeError::WriteTree(first)) if repo.is_shadow() => {
             tracing::warn!(error = %first, "checkpoint index rebuilt from the folder");
-            worktree_tree_from(repo, false).await.map_err(|again| {
-                format!(
-                    "{}; before that, with the kept index: {first}",
-                    again.text()
-                )
-            })
+            worktree_tree_from_with(repo, false, exempt)
+                .await
+                .map_err(|again| {
+                    format!(
+                        "{}; before that, with the kept index: {first}",
+                        again.text()
+                    )
+                })
         }
         r => r.map_err(TreeError::text),
     }
@@ -852,17 +923,30 @@ impl TreeError {
 
 /// [`worktree_tree`] with the private index seeded from the repository's
 /// (`seed`) or empty.
+#[cfg(test)]
 async fn worktree_tree_from(repo: &Repo, seed: bool) -> Result<WorkTree, TreeError> {
+    worktree_tree_from_with(repo, seed, &Exempt::default()).await
+}
+
+async fn worktree_tree_from_with(
+    repo: &Repo,
+    seed: bool,
+    exempt: &Exempt,
+) -> Result<WorkTree, TreeError> {
     let (real, idx) = seeded_index(repo, seed).await.map_err(TreeError::Stage)?;
     let _files = IndexFiles(idx.clone());
     let res = async {
-        let nested = stage_without_nested(repo, &idx)
+        let staged = stage_without_nested(repo, &idx, exempt)
             .await
             .map_err(TreeError::Stage)?;
         let id = run(repo, &["write-tree"], Some(&idx))
             .await
             .map_err(TreeError::WriteTree)?;
-        Ok(WorkTree { id, nested })
+        Ok(WorkTree {
+            id,
+            nested: staged.nested,
+            skipped: staged.skipped,
+        })
     }
     .await;
     // The shadow keeps the index git just wrote: the next checkpoint only
@@ -895,7 +979,18 @@ async fn worktree_tree_from(repo: &Repo, seed: bool) -> Result<WorkTree, TreeErr
 /// is entered by git (the index has paths there), so those files stay
 /// recorded and undoable. The folder is walked once, by git; nothing is run
 /// or opened inside a nested repository.
-async fn stage_without_nested(repo: &Repo, idx: &Path) -> Result<Vec<Vec<u8>>, String> {
+///
+/// With a size cap ([`Repo::untracked_max`]), a file git does not track
+/// (see [`user_tracked`]) that is larger than the cap is not staged, and
+/// one an earlier snapshot staged is taken out of the index: it is in no
+/// tree, and is returned with its size for the snapshot's record. Each
+/// candidate (the index's paths and the new ones) is measured once, by
+/// `symlink_metadata` on the path as git listed it, never followed: a link
+/// is never left out, a sparse file counts at its full length (what git
+/// would read). A file that grows past the cap after it was measured and
+/// before git reads it is staged at its new size (the window is the time
+/// between the two).
+async fn stage_without_nested(repo: &Repo, idx: &Path, exempt: &Exempt) -> Result<Staged, String> {
     use std::collections::{BTreeSet, HashSet};
     let staged = run_raw(repo, &["ls-files", "-z", "--stage"], Some(idx), None).await?;
     let (tracked, gitlinks) = split_stage(&staged);
@@ -926,14 +1021,29 @@ async fn stage_without_nested(repo: &Repo, idx: &Path) -> Result<Vec<Vec<u8>>, S
     // A tracked file replaced by a repository of the same name: out of the
     // index, or `add -u` would stage a gitlink (or fail on one without a
     // commit).
-    let (gone, _) = split_within(&tracked, &set);
+    let (gone, indexed) = split_within(&tracked, &set);
     let gone: Vec<Vec<u8>> = gone.into_iter().map(<[u8]>::to_vec).collect();
     force_remove(repo, idx, &gone).await?;
+    // New files, by name.
+    let (_, new) = split_within(&untracked, &set);
+    // Files over the size cap that git does not track: out of the index
+    // before `add -u` reads them, and not added below.
+    let skipped = if repo.untracked_max > 0 {
+        over_cap(repo, indexed.iter().chain(new.iter()).copied(), exempt).await?
+    } else {
+        Vec::new()
+    };
+    let left_out: HashSet<&[u8]> = skipped.iter().map(|(p, _)| p.as_slice()).collect();
+    let out_of_index: Vec<Vec<u8>> = indexed
+        .iter()
+        .filter(|p| left_out.contains(*p))
+        .map(|p| p.to_vec())
+        .collect();
+    force_remove(repo, idx, &out_of_index).await?;
+    let new: Vec<&[u8]> = new.into_iter().filter(|p| !left_out.contains(p)).collect();
     // Tracked files: changes and deletions, no walk. (No pathspec: with
     // none, `-u` is the whole tree, and `.` fails on an empty index.)
     run(repo, &["add", "-u"], Some(idx)).await?;
-    // New files, by name.
-    let (_, new) = split_within(&untracked, &set);
     // The second line behind the jail (R1b-2): a new path whose folder now
     // really lies outside the folder (a link swapped in after git listed
     // it) or in a protected one is left out, as the file tools refuse it.
@@ -966,7 +1076,7 @@ async fn stage_without_nested(repo: &Repo, idx: &Path) -> Result<Vec<Vec<u8>>, S
     let entered: HashSet<&[u8]> = untracked.iter().flat_map(|p| parents(p)).collect();
     let dropped: Vec<Vec<u8>> = tracked
         .iter()
-        .filter(|p| !kept.contains(*p) && !entered.contains(*p))
+        .filter(|p| !kept.contains(*p) && !entered.contains(*p) && !left_out.contains(*p))
         .map(|p| p.to_vec())
         .collect();
     let root = repo.root.clone();
@@ -982,7 +1092,102 @@ async fn stage_without_nested(repo: &Repo, idx: &Path) -> Result<Vec<Vec<u8>>, S
     .await
     .map_err(|e| e.to_string())?;
     nested.extend(replaced);
-    Ok(outermost(nested))
+    Ok(Staged {
+        nested: outermost(nested),
+        skipped,
+    })
+}
+
+/// What [`stage_without_nested`] left out of the index.
+struct Staged {
+    /// Nested repositories (relative, minimal, sorted).
+    nested: Vec<Vec<u8>>,
+    /// Files git does not track that are over the cap, with their size.
+    skipped: Vec<(Vec<u8>, u64)>,
+}
+
+/// The most of the user's index read to tell which files git tracks (an
+/// index of a million files is about 100 MiB).
+const USER_INDEX_MAX: u64 = 256 << 20;
+
+/// Of `paths` (relative, as git listed them), the regular files larger than
+/// the cap that `exempt` does not cover and git does not track, with their
+/// sizes. One `symlink_metadata` each; the user's index is read only when
+/// some file is over the cap.
+async fn over_cap<'a>(
+    repo: &Repo,
+    paths: impl Iterator<Item = &'a [u8]>,
+    exempt: &Exempt,
+) -> Result<Vec<(Vec<u8>, u64)>, String> {
+    let cap = repo.untracked_max;
+    let paths: Vec<Vec<u8>> = paths
+        .filter(|p| !exempt.covers(p))
+        .map(<[u8]>::to_vec)
+        .collect();
+    let root = repo.root.clone();
+    let over: Vec<(Vec<u8>, u64)> = tokio::task::spawn_blocking(move || {
+        paths
+            .into_iter()
+            .filter_map(|p| {
+                let m = std::fs::symlink_metadata(root.join(rel_path(&p))).ok()?;
+                (m.is_file() && m.len() > cap).then_some((p, m.len()))
+            })
+            .collect()
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    if over.is_empty() {
+        return Ok(over);
+    }
+    let tracked = user_tracked(repo).await;
+    Ok(over
+        .into_iter()
+        .filter(|(p, _)| !tracked.contains(p))
+        .collect())
+}
+
+/// The paths git tracks in the user's repository: its index (read by our
+/// code with no link followed, bounded, copied into the shadow and listed
+/// there with `ls-files`), or, when that cannot be read (none yet, a split
+/// index, too large), its `HEAD` commit's tree (through the borrowed
+/// object store). Empty in a plain folder, and when neither can be read: a
+/// file over the cap is then left out, and undo leaves it alone.
+async fn user_tracked(repo: &Repo) -> std::collections::HashSet<Vec<u8>> {
+    let listed = |out: Vec<u8>| -> std::collections::HashSet<Vec<u8>> {
+        out.split(|b| *b == 0)
+            .filter(|p| !p.is_empty())
+            .map(<[u8]>::to_vec)
+            .collect()
+    };
+    if let (Some(index), Some(dir)) = (&repo.user_index, &repo.shadow) {
+        let index = index.clone();
+        let bytes =
+            tokio::task::spawn_blocking(move || user_repo::read_bounded(&index, USER_INDEX_MAX))
+                .await
+                .ok()
+                .flatten();
+        if let Some(bytes) = bytes {
+            let tmp = dir.join(format!("harness-index-{}", harness_core::new_id()));
+            let _files = IndexFiles(tmp.clone());
+            if tokio::fs::write(&tmp, bytes).await.is_ok()
+                && let Ok(out) = run_raw(repo, &["ls-files", "-z"], Some(&tmp), None).await
+            {
+                return listed(out);
+            }
+        }
+    }
+    if let Some(head) = &repo.user_head
+        && let Ok(out) = run_raw(
+            repo,
+            &["ls-tree", "-r", "-z", "--name-only", head],
+            None,
+            None,
+        )
+        .await
+    {
+        return listed(out);
+    }
+    Default::default()
 }
 
 /// The paths of `paths` (relative to the folder) whose containing folder
@@ -1151,12 +1356,153 @@ pub struct Snapshot {
     pub sha: String,
     /// Relative to the checkpoint's folder, sorted, for showing.
     pub nested: Names,
+    /// The files it left out for their size (as recorded in it).
+    pub skipped: Skipped,
+}
+
+/// The most files left out for their size that one snapshot records by
+/// name; the rest are counted (`more`, `more_bytes`).
+pub const SKIPPED_RECORD_MAX: usize = 1000;
+
+/// The files a snapshot left out because git does not track them and they
+/// are over the cap: path (git's bytes) and size, largest first, at most
+/// [`SKIPPED_RECORD_MAX`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Skipped {
+    pub files: Vec<(Vec<u8>, u64)>,
+    pub more: usize,
+    pub more_bytes: u64,
+}
+
+/// A file a restore left exactly as it is because a snapshot left it out
+/// for its size.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeftAlone {
+    pub path: Vec<u8>,
+    /// Its size as last recorded (0: not recorded).
+    pub size: u64,
+    /// Its earlier version was over the cap and never saved, so the restore
+    /// could not bring it back (else: left in place, not removed).
+    pub lost: bool,
+}
+
+impl Skipped {
+    /// The record of `files`: largest first (then by path), at most
+    /// [`SKIPPED_RECORD_MAX`] named.
+    fn of(mut files: Vec<(Vec<u8>, u64)>) -> Self {
+        files.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let rest = files.split_off(files.len().min(SKIPPED_RECORD_MAX));
+        Self {
+            files,
+            more: rest.len(),
+            more_bytes: rest
+                .iter()
+                .map(|(_, n)| n)
+                .fold(0, |a, n| a.saturating_add(*n)),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty() && self.more == 0
+    }
+
+    /// How many files, named or counted.
+    pub fn count(&self) -> usize {
+        self.files.len() + self.more
+    }
+
+    /// The named ones by path.
+    fn map(&self) -> std::collections::HashMap<&[u8], u64> {
+        self.files.iter().map(|(p, n)| (p.as_slice(), *n)).collect()
+    }
+
+    /// "`a` (1.9 GiB), `b` (12.0 MiB) and 3 more", at most `shown` named.
+    pub fn listed(&self, shown_max: usize) -> String {
+        let mut s = self
+            .files
+            .iter()
+            .take(shown_max)
+            .map(|(p, n)| format!("`{}` ({})", shown(p), human_size(*n)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let more = self.count().saturating_sub(shown_max.min(self.files.len()));
+        if more > 0 {
+            s.push_str(&format!(" and {more} more"));
+        }
+        s
+    }
+}
+
+/// A size for a person: `512 bytes`, `4.0 KiB`, `12.3 MiB`, `1.9 GiB`.
+pub fn human_size(n: u64) -> String {
+    const UNITS: [&str; 4] = ["KiB", "MiB", "GiB", "TiB"];
+    if n < 1024 {
+        return format!("{n} bytes");
+    }
+    let mut v = n as f64 / 1024.0;
+    let mut u = 0;
+    while v >= 1024.0 && u + 1 < UNITS.len() {
+        v /= 1024.0;
+        u += 1;
+    }
+    format!("{v:.1} {}", UNITS[u])
+}
+
+/// The line prefixes in a snapshot's message that name one file left out
+/// for its size (`<size> <hex path>`) and count the rest (`<count>
+/// <bytes>`).
+const SKIPPED_TRAILER: &str = "harness-skipped: ";
+const SKIPPED_MORE: &str = "harness-skipped-more: ";
+
+/// What snapshot `sha` recorded as left out: nested repositories, and files
+/// left out for their size (neither for a snapshot taken before they were
+/// recorded). One `cat-file`.
+async fn records(repo: &Repo, sha: &str) -> (Vec<Vec<u8>>, Skipped) {
+    let text = run(repo, &["cat-file", "commit", sha], None)
+        .await
+        .unwrap_or_default();
+    let mut nested = Vec::new();
+    let mut skipped = Skipped::default();
+    for l in text.lines() {
+        if let Some(h) = l.strip_prefix(NESTED_TRAILER) {
+            nested.extend(hex::decode(h).ok());
+        } else if let Some(rest) = l.strip_prefix(SKIPPED_TRAILER) {
+            if let Some((n, h)) = rest.split_once(' ')
+                && let (Ok(n), Ok(p)) = (n.parse::<u64>(), hex::decode(h))
+            {
+                skipped.files.push((p, n));
+            }
+        } else if let Some(rest) = l.strip_prefix(SKIPPED_MORE)
+            && let Some((c, b)) = rest.split_once(' ')
+        {
+            skipped.more = c.parse().unwrap_or(0);
+            skipped.more_bytes = b.parse().unwrap_or(0);
+        }
+    }
+    (nested, skipped)
+}
+
+/// The files snapshot `sha` left out for their size.
+pub(crate) async fn skipped_in(repo: &Repo, sha: &str) -> Skipped {
+    records(repo, sha).await.1
 }
 
 /// Snapshot the working directory into a commit stored at `ref_name`, and
 /// say which nested repositories it left out (see [`snapshot`]).
 pub async fn snapshot_full(repo: &Repo, ref_name: &str, msg: &str) -> Result<Snapshot, String> {
-    snapshot_within(repo, ref_name, msg, SNAPSHOT_TIMEOUT).await
+    snapshot_within(repo, ref_name, msg, SNAPSHOT_TIMEOUT, &Exempt::default()).await
+}
+
+/// [`snapshot_full`] with `exempt` out of the size cap: the snapshot a
+/// restore takes of the folder right before it writes, so it holds every
+/// file the restore writes over or deletes (see [`Exempt`]).
+pub async fn snapshot_exempt(
+    repo: &Repo,
+    ref_name: &str,
+    msg: &str,
+    exempt: &Exempt,
+) -> Result<Snapshot, String> {
+    snapshot_within(repo, ref_name, msg, SNAPSHOT_TIMEOUT, exempt).await
 }
 
 /// [`snapshot_full`] with its time limit. The caller holds the shadow
@@ -1167,9 +1513,10 @@ async fn snapshot_within(
     ref_name: &str,
     msg: &str,
     limit: Duration,
+    exempt: &Exempt,
 ) -> Result<Snapshot, String> {
     tokio::time::timeout(limit, async {
-        let tree = worktree_tree(repo).await?;
+        let tree = worktree_tree_with(repo, exempt).await?;
         let head = run(repo, &["rev-parse", "--verify", "-q", "HEAD"], None)
             .await
             .ok();
@@ -1181,6 +1528,22 @@ async fn snapshot_within(
             message.push('\n');
             for n in &tree.nested {
                 message.push_str(&format!("\n{NESTED_TRAILER}{}", hex::encode(n)));
+            }
+        }
+        // So are the files left out for their size, bounded: the largest
+        // by name, the rest counted. A restore reads them (see
+        // `restore_plan`); a snapshot without them left nothing out.
+        let skipped = Skipped::of(tree.skipped);
+        if !skipped.is_empty() {
+            message.push_str(if tree.nested.is_empty() { "\n" } else { "" });
+            for (p, n) in &skipped.files {
+                message.push_str(&format!("\n{SKIPPED_TRAILER}{n} {}", hex::encode(p)));
+            }
+            if skipped.more > 0 {
+                message.push_str(&format!(
+                    "\n{SKIPPED_MORE}{} {}",
+                    skipped.more, skipped.more_bytes
+                ));
             }
         }
         let mut args = vec![
@@ -1199,6 +1562,7 @@ async fn snapshot_within(
         Ok(Snapshot {
             sha,
             nested: Names::of(&tree.nested),
+            skipped,
         })
     })
     .await
@@ -1216,13 +1580,7 @@ const NESTED_TRAILER: &str = "harness-nested: ";
 /// The nested repositories snapshot `sha` left out (none for a snapshot
 /// taken before A.15).
 async fn nested_in(repo: &Repo, sha: &str) -> Vec<Vec<u8>> {
-    run(repo, &["cat-file", "commit", sha], None)
-        .await
-        .unwrap_or_default()
-        .lines()
-        .filter_map(|l| l.strip_prefix(NESTED_TRAILER))
-        .filter_map(|h| hex::decode(h).ok())
-        .collect()
+    records(repo, sha).await.0
 }
 
 /// A relative path from git's `-z` output, for showing: lossy UTF-8, and
@@ -1286,6 +1644,9 @@ pub struct RestorePlan {
     /// files, say): they are inside a directory the restore replaces by a
     /// file. An unforced restore is refused instead.
     pub unsaved: Names,
+    /// Files it leaves exactly as they are because a snapshot left them out
+    /// for their size (docs/undo-and-stash.md §2.7).
+    pub left: Vec<LeftAlone>,
     /// What [`restore_paths`] writes: `from`'s mode, blob and path for each
     /// path it puts back, and the paths `from` does not have (deleted).
     writes: Vec<(String, String, Vec<u8>)>,
@@ -1299,6 +1660,8 @@ pub struct Restored {
     pub files: Vec<String>,
     pub nested: Vec<String>,
     pub plan: RestorePlan,
+    /// The snapshot of the folder taken right before the write.
+    pub now: String,
 }
 
 /// [`restore`], also saying what it left alone.
@@ -1310,7 +1673,9 @@ pub async fn restore_report(
     force: bool,
 ) -> Result<Restored, String> {
     let diff = restore_diff(repo, from, expected).await?;
-    let now = snapshot(repo, "refs/harness/test/now/before", "now").await?;
+    let now = snapshot_exempt(repo, "refs/harness/test/now/before", "now", &diff.exempt())
+        .await?
+        .sha;
     let plan = restore_plan(repo, &diff, &now, !force).await?;
     secure_blobs(repo, &plan).await?;
     let files = restore_paths(repo, &plan, WriteLimits::UNDO).await?;
@@ -1318,6 +1683,7 @@ pub async fn restore_report(
         files,
         nested: plan.nested.shown.clone(),
         plan,
+        now,
     })
 }
 
@@ -1538,6 +1904,12 @@ impl RestoreDiff {
         let keep: std::collections::HashSet<&str> = files.iter().map(String::as_str).collect();
         self.rows
             .retain(|r| keep.contains(String::from_utf8_lossy(&r.path).as_ref()));
+    }
+
+    /// Its paths out of the size cap, for the snapshot taken right before
+    /// the restore writes (see [`Exempt`]).
+    pub fn exempt(&self) -> Exempt {
+        Exempt::of(self.rows.iter().map(|r| r.path.clone()))
     }
 
     /// The paths it differs in that are files (not gitlinks), as an event
@@ -1775,14 +2147,17 @@ pub async fn restore_plan(
 ) -> Result<RestorePlan, String> {
     use std::collections::{BTreeSet, HashSet};
     let (from, expected) = (diff.from.as_str(), diff.expected.as_str());
-    let in_from: BTreeSet<Vec<u8>> = nested_in(repo, from).await.into_iter().collect();
-    let in_expected: BTreeSet<Vec<u8>> = nested_in(repo, expected).await.into_iter().collect();
+    let (n_from, s_from) = records(repo, from).await;
+    let (n_expected, s_expected) = records(repo, expected).await;
+    let (n_now, s_now) = records(repo, now).await;
+    let in_from: BTreeSet<Vec<u8>> = n_from.into_iter().collect();
+    let in_expected: BTreeSet<Vec<u8>> = n_expected.into_iter().collect();
     let changed_repos: Vec<Vec<u8>> = in_from
         .symmetric_difference(&in_expected)
         .cloned()
         .collect();
     let mut nested: BTreeSet<Vec<u8>> = in_from.union(&in_expected).cloned().collect();
-    nested.extend(nested_in(repo, now).await);
+    nested.extend(n_now);
     let mut candidates: Vec<&DiffRow> = Vec::new();
     for r in &diff.rows {
         if r.gitlink {
@@ -1797,6 +2172,9 @@ pub async fn restore_plan(
         .into_iter()
         .filter(|r| !within(&r.path, &set))
         .collect();
+    // Files a snapshot left out for their size are never written, deleted
+    // or counted (§2.7).
+    let (candidates, left) = leave_skipped(candidates, &diff.rows, &s_from, &s_expected, &s_now);
     // Whatever the snapshots say: nothing outside the folder, nothing in a
     // protected one (R.1, S-3).
     let paths: Vec<Vec<u8>> = candidates.iter().map(|r| r.path.clone()).collect();
@@ -1839,10 +2217,11 @@ pub async fn restore_plan(
         ];
         args.extend(touched.iter().map(|(_, p)| p.as_str()));
         let since = run(repo, &args, None).await?;
+        let since = unchanged_skipped(repo, since.lines().collect(), &s_expected, now).await?;
         if !since.is_empty() {
             return Err(format!(
                 "these files changed after the turn; undo would overwrite that: {}",
-                since.lines().collect::<Vec<_>>().join(", ")
+                since.join(", ")
             ));
         }
     }
@@ -1870,6 +2249,7 @@ pub async fn restore_plan(
         }
         return Ok(RestorePlan {
             unsaved: Names::of(&files),
+            left,
             ..plan_of(
                 touched,
                 &nested,
@@ -1880,14 +2260,173 @@ pub async fn restore_plan(
             )
         });
     }
-    Ok(plan_of(
-        touched,
-        &nested,
-        &changed_repos,
-        git_inside,
-        &written,
-        &deleted,
-    ))
+    Ok(RestorePlan {
+        left,
+        ..plan_of(
+            touched,
+            &nested,
+            &changed_repos,
+            git_inside,
+            &written,
+            &deleted,
+        )
+    })
+}
+
+/// Split a restore's `candidates` into those it may write and the files it
+/// leaves exactly as they are because a snapshot left them out for their
+/// size (docs/undo-and-stash.md §2.7; `from` is the state restored to,
+/// `expected` the one the folder should be in, `now` the folder):
+///
+/// - a path `from` left out: its earlier content was never saved, so the
+///   file there now (the turn's, or one git tracks since) is not deleted;
+/// - a path `now` left out, or a file `now` left out where the path's
+///   folder would go, or below the path (a restore takes `now` with the
+///   cap waived for its paths, [`Exempt`], so only a restore that did not,
+///   a sub-agent's merge-back, meets one): not written over or deleted.
+///
+/// A path only `expected` left out (grown over the cap during the turn) is
+/// written: `from`'s version is in the checkpoint, and `now` holds the
+/// version it replaces. With no row: a file `from` left out that `expected`
+/// does not hold at the same size (deleted, changed, replaced) cannot be
+/// brought back; one only `expected` left out (made over the cap during the
+/// turn) is not removed. Both are named, never counted as restored.
+fn leave_skipped<'a>(
+    candidates: Vec<&'a DiffRow>,
+    rows: &[DiffRow],
+    from: &Skipped,
+    expected: &Skipped,
+    now: &Skipped,
+) -> (Vec<&'a DiffRow>, Vec<LeftAlone>) {
+    use std::collections::HashSet;
+    let (before, after, here) = (from.map(), expected.map(), now.map());
+    if before.is_empty() && after.is_empty() && here.is_empty() {
+        return (candidates, Vec::new());
+    }
+    let here_above: HashSet<&[u8]> = here.keys().flat_map(|p| parents(p)).collect();
+    let mut left = Vec::new();
+    let mut keep = Vec::with_capacity(candidates.len());
+    for r in candidates {
+        let p = r.path.as_slice();
+        let leave = |size: u64, lost: bool| LeftAlone {
+            path: p.to_vec(),
+            size,
+            lost,
+        };
+        if let Some(n) = before.get(p) {
+            left.push(leave(*n, true));
+        } else if let Some(n) = here.get(p) {
+            left.push(leave(*n, false));
+        } else if let Some(d) = parents(p).find(|d| here.contains_key(d)) {
+            left.push(LeftAlone {
+                path: d.to_vec(),
+                size: here[d],
+                lost: false,
+            });
+        } else if here_above.contains(p) {
+            left.push(leave(0, false));
+        } else {
+            keep.push(r);
+        }
+    }
+    let row_paths: HashSet<&[u8]> = rows.iter().map(|r| r.path.as_slice()).collect();
+    for (p, n) in &from.files {
+        if !row_paths.contains(p.as_slice()) && after.get(p.as_slice()) != Some(n) {
+            left.push(LeftAlone {
+                path: p.clone(),
+                size: *n,
+                lost: true,
+            });
+        }
+    }
+    for (p, n) in &expected.files {
+        if !row_paths.contains(p.as_slice()) && !before.contains_key(p.as_slice()) {
+            left.push(LeftAlone {
+                path: p.clone(),
+                size: *n,
+                lost: false,
+            });
+        }
+    }
+    left.sort_by(|a, b| a.path.cmp(&b.path));
+    left.dedup_by(|a, b| a.path == b.path);
+    (keep, left)
+}
+
+/// The unforced check's `since` (paths that differ between `expected` and
+/// `now`) without the files `expected` left out for their size that `now`
+/// holds at the size `expected` recorded: grown over the cap during the
+/// turn and, as far as the record tells, not changed since (`now` holds
+/// them all the same, so a change of the same size is still saved before
+/// it is written over). Names are git's `--name-only` text, as the check
+/// reports them.
+async fn unchanged_skipped<'a>(
+    repo: &Repo,
+    since: Vec<&'a str>,
+    expected: &Skipped,
+    now: &str,
+) -> Result<Vec<&'a str>, String> {
+    if since.is_empty() || expected.files.is_empty() {
+        return Ok(since);
+    }
+    let recorded: std::collections::HashMap<String, (&[u8], u64)> = expected
+        .files
+        .iter()
+        .map(|(p, n)| (String::from_utf8_lossy(p).into_owned(), (p.as_slice(), *n)))
+        .collect();
+    let asked: Vec<Vec<u8>> = since
+        .iter()
+        .filter_map(|l| recorded.get(*l).map(|(p, _)| p.to_vec()))
+        .collect();
+    if asked.is_empty() {
+        return Ok(since);
+    }
+    let sizes = sizes_in(repo, now, &asked).await?;
+    Ok(since
+        .into_iter()
+        .filter(|l| {
+            !recorded
+                .get(*l)
+                .is_some_and(|(p, n)| sizes.get(*p) == Some(n))
+        })
+        .collect())
+}
+
+/// The size of each of `paths` that snapshot `sha` holds as a file: one
+/// `ls-tree -r -l`, the paths given as literal pathspecs.
+async fn sizes_in(
+    repo: &Repo,
+    sha: &str,
+    paths: &[Vec<u8>],
+) -> Result<std::collections::HashMap<Vec<u8>, u64>, String> {
+    let mut c = command(repo, None);
+    c.env("GIT_LITERAL_PATHSPECS", "1").args([
+        "ls-tree",
+        "-r",
+        "-z",
+        "-l",
+        "--full-tree",
+        sha,
+        "--",
+    ]);
+    for p in paths {
+        c.arg(rel_path(p));
+    }
+    let out = exec(c, None, GIT_TIMEOUT).await?;
+    if !out.status.success() {
+        return Err(result_text(&["ls-tree"], out));
+    }
+    // `<mode> <type> <id> <size>\t<path>`
+    Ok(out
+        .stdout
+        .split(|b| *b == 0)
+        .filter_map(|e| {
+            let tab = e.iter().position(|b| *b == b'\t')?;
+            let meta = String::from_utf8_lossy(&e[..tab]);
+            let size = meta.split_whitespace().nth(3)?.parse().ok()?;
+            Some((e[tab + 1..].to_vec(), size))
+        })
+        .collect())
 }
 
 fn plan_of(
@@ -1904,6 +2443,7 @@ fn plan_of(
         changed_repos: Names::of(changed_repos),
         git_inside: Names::of(&outermost(git_inside)),
         unsaved: Names::default(),
+        left: Vec::new(),
         writes: written
             .iter()
             .map(|r| (r.old_mode.clone(), r.old_id.clone(), r.path.clone()))
@@ -2478,11 +3018,19 @@ fn child_git_files(user: &user_repo::UserRepo) -> Vec<(&'static str, String)> {
 }
 
 impl SubRepo {
-    /// Snapshot the parent's folder as the sub-agent's base (uncommitted
-    /// work included), at `refs/harness/<child>/base` in the shadow.
+    /// [`Self::base_full`], its id only (tests).
+    #[cfg(any(test, feature = "testing"))]
     pub async fn base(&self, child: &str) -> Result<String, String> {
+        self.base_full(child).await.map(|s| s.sha)
+    }
+
+    /// Snapshot the parent's folder as the sub-agent's base (uncommitted
+    /// work included), at `refs/harness/<child>/base` in the shadow, with
+    /// what it left out (files over the size cap are not in it, so not in
+    /// the child's folder).
+    pub async fn base_full(&self, child: &str) -> Result<Snapshot, String> {
         let _busy = hold(&self.repo).await;
-        snapshot(
+        snapshot_full(
             &self.repo,
             &format!("refs/harness/{child}/base"),
             "harness: sub-agent base",
@@ -3523,6 +4071,11 @@ mod restore_memory_tests;
 #[cfg(test)]
 #[path = "git_diff_tests.rs"]
 mod diff_tests;
+
+/// The size cap on files git does not track (§2.7). Test-only.
+#[cfg(test)]
+#[path = "git_cap_tests.rs"]
+mod cap_tests;
 
 /// What a folder only the user's global ignore file named costs (X.31).
 /// Ignored benchmark; lives in its own file.

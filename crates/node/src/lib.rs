@@ -31,7 +31,7 @@ use tokio::sync::mpsc;
 
 pub use git::SNAPSHOT_TIMEOUT;
 pub use outbox::Backlog;
-pub use policy::{InstructionsPolicy, NodePolicy, SkillsPolicy};
+pub use policy::{InstructionsPolicy, LimitsPolicy, NodePolicy, SkillsPolicy};
 use session::Session;
 
 /// Commands that start new work, refused while the node stops: a session,
@@ -412,6 +412,7 @@ pub mod testing {
             ceiling: None,
             protected: protected.to_vec(),
             sandbox,
+            untracked_max: 0,
         }
     }
 

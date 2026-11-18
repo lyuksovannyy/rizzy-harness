@@ -47,7 +47,7 @@ use std::time::Duration;
 use super::{
     APPLY, DiffRow, GIT_TIMEOUT, IndexFiles, Names, Repo, SHOWN_MAX, WriteLimits, command,
     diff_raw, exec, fresh_index, hold, parents, rel_path, restore_diff, restore_paths,
-    restore_plan, run, run_raw, secure_blobs, shown, snapshot,
+    restore_plan, run, run_raw, secure_blobs, shown, skipped_in, snapshot,
 };
 
 /// A file larger than this on any side is not merged line by line when
@@ -192,6 +192,8 @@ const CLASH: &str = "a file and a folder of the same name";
 const NO_MERGE: &str = "git could not merge it";
 const DURING: &str = "changed in the folder while the merge ran";
 const IGNORED: &str = "a file of yours that git ignores is in the way";
+const SKIPPED: &str = "a file of yours over the checkpoint size limit, which git does not track \
+                       and the sub-agent never saw, is there";
 /// Under a folder the child replaced by a file: how many entries are looked
 /// at, and how many files in the way are named, before the walk stops.
 const IN_THE_WAY_LOOKED: usize = 20_000;
@@ -229,6 +231,19 @@ pub(super) async fn apply(
     )
     .await
     .map_err(failed)?;
+    // A path where the folder has a file over the size cap that git does not
+    // track (left out of the base, so the child never saw it, or of the
+    // folder now): at it, above it or below it, the child's change would
+    // write over or delete a file no snapshot holds (§2.7).
+    let skipped = skipped_paths(repo, &[base, &now]).await;
+    let on_skipped: Vec<(String, &'static str)> = rows
+        .iter()
+        .filter(|r| touches(&skipped, &r.path))
+        .map(|r| (shown(&r.path), SKIPPED))
+        .collect();
+    if !on_skipped.is_empty() {
+        return Err(NotApplied::Conflict(on_skipped));
+    }
     let folder: HashMap<Vec<u8>, DiffRow> = diff_raw(repo, base, &now)
         .await
         .map_err(failed)?
@@ -399,6 +414,33 @@ pub(super) async fn apply(
         same,
         nested_skipped,
     })
+}
+
+/// The paths the snapshots `shas` left out for their size, and the folders
+/// above them.
+async fn skipped_paths(repo: &Repo, shas: &[&str]) -> (HashSet<Vec<u8>>, HashSet<Vec<u8>>) {
+    let mut files = HashSet::new();
+    for sha in shas {
+        files.extend(
+            skipped_in(repo, sha)
+                .await
+                .files
+                .into_iter()
+                .map(|(p, _)| p),
+        );
+    }
+    let above = files
+        .iter()
+        .flat_map(|p| parents(p).map(<[u8]>::to_vec))
+        .collect();
+    (files, above)
+}
+
+/// Whether a write at `p` meets one of `skipped`: at it, below it (it is a
+/// file where `p`'s folder would go) or above it.
+fn touches(skipped: &(HashSet<Vec<u8>>, HashSet<Vec<u8>>), p: &[u8]) -> bool {
+    let (files, above) = skipped;
+    files.contains(p) || above.contains(p) || parents(p).any(|d| files.contains(d))
 }
 
 /// What a put-back after a failed write did.

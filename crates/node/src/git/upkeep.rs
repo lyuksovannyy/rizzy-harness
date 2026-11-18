@@ -1019,6 +1019,7 @@ mod tests {
             "refs/harness/s/u/before",
             "b",
             Duration::from_secs(2),
+            &super::super::Exempt::default(),
         )
         .await;
         TEST_GIT.with(|g| *g.borrow_mut() = None);

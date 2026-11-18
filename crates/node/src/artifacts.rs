@@ -798,6 +798,7 @@ impl Stages {
             ceiling: Some(ceiling),
             protected: vec![self.data_dir.clone()],
             sandbox: self.git_sandbox.clone(),
+            untracked_max: 0,
         };
         meta.git = crate::git::describe(&dir, self.checkpoints.as_deref(), &bounds)
             .await
