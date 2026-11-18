@@ -865,6 +865,12 @@ export default function Conversation(props: {
                 }
               })
             )}
+            {/* Events this page could not fold: a newer node's kind, or a payload of the wrong shape (fold.ts, the guard). */}
+            {!!view?.unknown_events && (
+              <div className="small muted pad" role="note" data-testid="unshown">
+                {t("conv.unshown", { n: String(view.unknown_events) })}
+              </div>
+            )}
             {sending.map((o) => (
               <div key={`out${o.id}`} className={`msg user ${o.failed ? "failed" : o.ok ? "sent" : "sending"}`}>
                 <div className="bubble">{o.text}</div>

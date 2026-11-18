@@ -647,3 +647,33 @@ describe("a turn's changes (X.12)", () => {
     expect(document.activeElement).toBe(open);
   });
 });
+
+describe("events the fold could not show", () => {
+  test("a chat says how many, and nothing when there are none", async () => {
+    await show([{ type: "error", message: "x" }], sessionRow());
+    expect(host.querySelector("[data-testid=unshown]")).toBeNull();
+    current = { ...view([{ type: "error", message: "x" }]), unknown_events: 2 };
+    await act(async () => root.render(<Conversation live={live} sessionId={SID} row={sessionRow()} nodes={[]} agents={[]} models={[]} />));
+    expect(host.querySelector("[data-testid=unshown]")!.textContent).toBe(
+      "2 of this chat's events could not be shown: this page does not know them, or they came malformed.",
+    );
+  });
+});
+
+// The fold keeps a tool's `input` as the node sent it (fold.ts, the guard:
+// type `j`); the cards that read inside it must not throw on any shape.
+describe("rows given what the fold keeps as sent", () => {
+  const inputs: unknown[] = [null, 5, "x", [1, "a"], {}, { command: 5, path: {}, query: [], url: 7, agent: null, task: {}, pattern: 1, old_string: 2, new_string: [] }, { a: { b: { c: [{ d: 1 }] } } }];
+  const tools = ["bash", "read", "write", "edit", "grep", "glob", "web_search", "web_fetch", "delegate", "publish", "todo", "unknown_tool"];
+  for (const tool of tools) {
+    test(`a ${tool} card with any input renders`, async () => {
+      for (const input of inputs) {
+        const item = { type: "tool", call_id: "c", author: null, tool, input, live_output: "", result: { ok: true, output: "out", exit_code: null }, approval: null } as Item;
+        await show([item], sessionRow());
+        expect(host.textContent).not.toBe("");
+      }
+    });
+  }
+
+  // A `ui:` block's spec of the wrong shape: see src/ui/uishapes.test.tsx.
+});

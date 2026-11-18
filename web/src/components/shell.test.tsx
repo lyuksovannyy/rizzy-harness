@@ -61,6 +61,14 @@ vi.mock("./Sidebar", () => ({
   },
 }));
 vi.mock("./SearchPanel", () => ({ default: () => <dialog open className="panel-stub" /> }));
+// A screen whose chunk is gone after an update: `lazy` throws the import's
+// rejection where the screen renders, which is what this does (a rejecting
+// mock factory reaches React wrapped in vitest's own error).
+vi.mock("./Plugins", () => ({
+  default: () => {
+    throw new TypeError("Failed to fetch dynamically imported module: https://h/assets/Plugins-old.js");
+  },
+}));
 const { Shell, opensSearch } = await import("./Shell");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -252,5 +260,25 @@ describe("Shell", () => {
     expect(sidebar!.rail).toBe(true);
     expect(host.querySelector(".shell")!.className).toContain("collapsed");
     expect(sidebar!.routineUnseen).toBe(3);
+  });
+});
+
+describe("a screen whose chunk fails to load", () => {
+  test("says the app was updated in its place, the sidebar stays, and another screen clears it", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    history.replaceState(null, "", "#/plugins");
+    await render(props());
+    await vi.waitFor(() => expect(host.querySelector("main [role=alert]")).not.toBeNull());
+    expect(host.querySelector("main [role=alert]")!.textContent).toContain("The app may have been updated");
+    expect(host.querySelector("main [role=alert] button")!.textContent).toBe("Reload");
+    expect(host.querySelector(".sidebar")).not.toBeNull();
+    expect(host.textContent).not.toContain("Plugins-old");
+    await act(async () => {
+      history.replaceState(null, "", "#/");
+      window.dispatchEvent(new HashChangeEvent("hashchange"));
+    });
+    expect(host.querySelector("main [role=alert]")).toBeNull();
+    expect(homeProps).not.toBeNull();
+    vi.restoreAllMocks();
   });
 });
