@@ -122,28 +122,90 @@ pub const ENV_FILE_ENV: &str = "HARNESS_GUARD_ENV_FILE";
 /// only, after its confinement (`crate::sandbox::take_inner_env`).
 pub const INNER_ENV_FD: &str = "HARNESS_INNER_ENV_FD";
 
+/// The largest environment file the guard accepts ([`ENV_FILE_ENV`]).
+pub const MAX_ENV_FILE: u64 = 64 * 1024;
+
 /// Open [`ENV_FILE_ENV`]'s file, check it, unlink it, and leave the
 /// descriptor open across `exec` (not close-on-exec): bubblewrap inherits
-/// it and passes it on to `sandbox-exec`.
-fn open_env_file(path: &std::path::Path) -> Result<std::os::fd::OwnedFd, String> {
+/// it and passes it on to `sandbox-exec`. The guard runs outside the
+/// sandbox as the node's user, so it trusts no path (review of PR 150,
+/// NEW-3): the path must be exactly `<root>/.mcp-<16 hex>/env`, `root`
+/// the node's temp root this guard was given (`--mark`), with no `..`;
+/// the root is opened without following a link at its name, the folder
+/// and the file relative to it the same way, and on the opened
+/// descriptors the folder must be the guard user's and the file a regular
+/// file of that user with one link, mode 0600 and at most
+/// [`MAX_ENV_FILE`] bytes. Only then is the name removed; on any failure
+/// nothing is removed and the server does not start.
+fn open_env_file(
+    path: &std::path::Path,
+    root: Option<&std::path::Path>,
+) -> Result<std::os::fd::OwnedFd, String> {
     use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl};
-    let fd = nix::fcntl::open(
-        path,
-        OFlag::O_RDONLY | OFlag::O_NONBLOCK | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
-        nix::sys::stat::Mode::empty(),
-    )
-    .map_err(|e| format!("the server's environment {}: {e}", path.display()))?;
-    let st = nix::sys::stat::fstat(&fd).map_err(|e| format!("fstat: {e}"))?;
-    use nix::sys::stat::SFlag;
-    let file = (st.st_mode & SFlag::S_IFMT.bits()) == SFlag::S_IFREG.bits();
-    if !file || st.st_uid != nix::unistd::getuid().as_raw() {
-        return Err(format!(
-            "the server's environment {} is not a file of this user",
+    use nix::sys::stat::{Mode, SFlag};
+    use std::path::Component;
+    let refuse = |why: &str| {
+        format!(
+            "the server's environment {} is refused ({why}); nothing was started",
             path.display()
+        )
+    };
+    let root = root.ok_or_else(|| refuse("this guard was given no temp root"))?;
+    let plain = |p: &std::path::Path| {
+        p.is_absolute()
+            && p.components()
+                .all(|c| matches!(c, Component::RootDir | Component::Normal(_)))
+    };
+    if !plain(path) || !plain(root) {
+        return Err(refuse("not a plain absolute path"));
+    }
+    let dir_name = path
+        .parent()
+        .and_then(|d| d.file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    let well_named = dir_name
+        .strip_prefix(".mcp-")
+        .is_some_and(|h| h.len() == 16 && h.bytes().all(|b| b.is_ascii_hexdigit()));
+    if path.file_name() != Some(OsStr::new("env"))
+        || path.parent().and_then(|d| d.parent()) != Some(root)
+        || !well_named
+    {
+        return Err(refuse("not the node's own environment file"));
+    }
+    let dir_flags = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
+    let top = nix::fcntl::open(root, dir_flags, Mode::empty())
+        .map_err(|e| refuse(&format!("its temp root: {e}")))?;
+    let sub = nix::fcntl::openat(&top, dir_name, dir_flags, Mode::empty())
+        .map_err(|e| refuse(&format!("its folder: {e}")))?;
+    let me = nix::unistd::getuid().as_raw();
+    let st = nix::sys::stat::fstat(&sub).map_err(|e| refuse(&format!("fstat: {e}")))?;
+    if st.st_uid != me {
+        return Err(refuse("its folder is not this user's"));
+    }
+    let fd = nix::fcntl::openat(
+        &sub,
+        "env",
+        OFlag::O_RDONLY | OFlag::O_NONBLOCK | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| refuse(&format!("open: {e}")))?;
+    let st = nix::sys::stat::fstat(&fd).map_err(|e| refuse(&format!("fstat: {e}")))?;
+    let file = (st.st_mode & SFlag::S_IFMT.bits()) == SFlag::S_IFREG.bits();
+    if !file
+        || st.st_uid != me
+        || st.st_nlink != 1
+        || st.st_mode & 0o7777 != 0o600
+        || st.st_size < 0
+        || st.st_size as u64 > MAX_ENV_FILE
+    {
+        return Err(refuse(
+            "not a regular file of this user with one link, mode 0600 and at most 64 KiB",
         ));
     }
-    let _ = std::fs::remove_file(path);
-    fcntl(&fd, FcntlArg::F_SETFD(FdFlag::empty())).map_err(|e| format!("fcntl: {e}"))?;
+    nix::unistd::unlinkat(&sub, "env", nix::unistd::UnlinkatFlags::NoRemoveDir)
+        .map_err(|e| refuse(&format!("unlink: {e}")))?;
+    fcntl(&fd, FcntlArg::F_SETFD(FdFlag::empty())).map_err(|e| refuse(&format!("fcntl: {e}")))?;
     Ok(fd)
 }
 
@@ -253,7 +315,13 @@ pub fn main() -> i32 {
         .windows(2)
         .find(|w| w[0] == NODE)
         .and_then(|w| w[1].to_str()?.parse::<i32>().ok());
-    match run(program, &args[at + 2..], node) {
+    // The node's temp root (`--mark`): the only place an environment file
+    // for a repository's server may be ([`ENV_FILE_ENV`]).
+    let root = args[..at]
+        .windows(2)
+        .find(|w| w[0] == MARK)
+        .map(|w| std::path::PathBuf::from(&w[1]));
+    match run(program, &args[at + 2..], node, root.as_deref()) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("{SUBCOMMAND}: {e}");
@@ -271,7 +339,12 @@ enum Phase {
     Killing(Instant, bool),
 }
 
-fn run(program: &OsStr, args: &[OsString], node: Option<i32>) -> Result<i32, String> {
+fn run(
+    program: &OsStr,
+    args: &[OsString],
+    node: Option<i32>,
+    root: Option<&std::path::Path>,
+) -> Result<i32, String> {
     // A node that died before this ran: start nothing.
     if let Some(n) = node
         && nix::unistd::getppid().as_raw() != n
@@ -317,7 +390,7 @@ fn run(program: &OsStr, args: &[OsString], node: Option<i32>) -> Result<i32, Str
     // A repository's server's environment, as a descriptor bubblewrap
     // passes on ([`ENV_FILE_ENV`]): its number only, never its content.
     let env_fd = match std::env::var_os(ENV_FILE_ENV) {
-        Some(p) => Some(open_env_file(std::path::Path::new(&p))?),
+        Some(p) => Some(open_env_file(std::path::Path::new(&p), root)?),
         None => None,
     };
     let mut command = std::process::Command::new(program);
@@ -651,6 +724,7 @@ fn watch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     #[test]
     fn reports_round_trip() {
@@ -665,5 +739,83 @@ mod tests {
         }
         assert_eq!(Report::parse("ended"), None);
         assert_eq!(Report::parse("gone 3"), None);
+    }
+
+    /// Review of PR 150 (NEW-3): the guard opens an environment file only
+    /// at `<root>/.mcp-<16 hex>/env`, a regular 0600 file of its user with
+    /// one link and at most 64 KiB; anything else is refused and nothing is
+    /// removed.
+    #[test]
+    fn the_env_file_is_taken_only_from_the_nodes_own_place() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let base = d.path().canonicalize().unwrap();
+        let root = base.join("sandbox-tmp");
+        let dir = root.join(".mcp-0123456789abcdef");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("env");
+        let put = |bytes: &[u8], mode: u32| {
+            let _ = std::fs::remove_file(&file);
+            std::fs::write(&file, bytes).unwrap();
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        // The good case: taken, and its name removed.
+        put(b"A=1\0", 0o600);
+        assert!(open_env_file(&file, Some(&root)).is_ok());
+        assert!(!file.exists());
+        // Another file of the user, anywhere else: refused, kept.
+        let victim = base.join("victim");
+        std::fs::write(&victim, "keep me").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o600)).unwrap();
+        for p in [
+            victim.clone(),
+            PathBuf::from("/proc/self/environ"),
+            root.join(".mcp-0123456789abcdef/../../victim"),
+            root.join("env"),
+            root.join(".mcp-zz/env"),
+            root.join(".mcp-0123456789abcdef/other"),
+        ] {
+            assert!(open_env_file(&p, Some(&root)).is_err(), "{}", p.display());
+        }
+        assert!(
+            victim.exists(),
+            "a file outside the node's place was removed"
+        );
+        // No root given: refused.
+        put(b"A=1\0", 0o600);
+        assert!(open_env_file(&file, None).is_err());
+        assert!(file.exists());
+        // The right place, but the wrong file.
+        for (mode, why) in [(0o644, "mode"), (0o400, "mode")] {
+            put(b"A=1\0", mode);
+            assert!(open_env_file(&file, Some(&root)).is_err(), "{why}");
+            assert!(file.exists(), "{why}: removed");
+        }
+        put(b"A=1\0", 0o600);
+        std::fs::hard_link(&file, base.join("second-link")).unwrap();
+        assert!(open_env_file(&file, Some(&root)).is_err(), "two links");
+        assert!(file.exists() && base.join("second-link").exists());
+        std::fs::remove_file(base.join("second-link")).unwrap();
+        put(&vec![b'a'; MAX_ENV_FILE as usize + 1], 0o600);
+        assert!(open_env_file(&file, Some(&root)).is_err(), "too large");
+        assert!(file.exists());
+        std::fs::remove_file(&file).unwrap();
+        std::os::unix::fs::symlink(&victim, &file).unwrap();
+        assert!(open_env_file(&file, Some(&root)).is_err(), "a link");
+        assert!(victim.exists());
+        std::fs::remove_file(&file).unwrap();
+        // The folder itself a link to elsewhere: refused.
+        std::fs::remove_dir(&dir).unwrap();
+        let other = base.join("other");
+        std::fs::create_dir(&other).unwrap();
+        std::fs::write(other.join("env"), "A=1\0").unwrap();
+        std::fs::set_permissions(other.join("env"), std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        std::os::unix::fs::symlink(&other, &dir).unwrap();
+        assert!(
+            open_env_file(&file, Some(&root)).is_err(),
+            "the folder is a link"
+        );
+        assert!(other.join("env").exists());
     }
 }

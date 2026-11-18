@@ -488,10 +488,18 @@ async fn answers_pass_whole_or_not_at_all_and_floods_are_refused() {
     let t = start().await;
     let pid = project(&t, &t.alex, Some("remote")).await;
     let path = format!("/api/projects/{pid}/mcp");
-    let spoils: [fn(&mut ProjectMcpEntry); 3] = [
+    // Over the bounds, a control character, and (review of PR 150, NEW-1)
+    // any character outside printable ASCII in an entry: a lying or buggy
+    // node cannot show an invisible or look-alike character.
+    let spoils: [fn(&mut ProjectMcpEntry); 8] = [
         |e| e.command = "c".repeat(513),
         |e| e.args = vec!["a\nb".into()],
         |e| e.env[0].value = "v\u{1b}[2J".into(),
+        |e| e.args = vec!["--require ./saf\u{AD}e.js".into()],
+        |e| e.env[0].value = "my\u{A0}file".into(),
+        |e| e.command = "\u{440}\u{443}thon3".into(),
+        |e| e.reason = Some("r".repeat(513)),
+        |e| e.approved_args = Some(vec!["safe\u{301}.js".into()]),
     ];
     for spoil in spoils {
         {

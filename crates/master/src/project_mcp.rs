@@ -152,43 +152,20 @@ pub async fn ask(
     }
 }
 
-/// The most entries a list may hold (the node's 32 in the file and 32
-/// gone from it), and the longest string of one, in characters (the
-/// node's 512 for an approvable entry, its cut text otherwise).
-const MAX_LIST: usize = 64;
-const MAX_STRING: usize = 512;
-
 /// A list as the master passes it on: whole, or not at all. Nothing is
 /// cut on the way to the person (what they approve is what runs): a list
-/// over the bounds, or with a control character, is refused whole, and an
-/// entry that cannot be approved carries no digest.
+/// that breaks [`ProjectMcpList::showable`] (over the bounds, a control
+/// character, an entry string outside printable ASCII: a lying or buggy
+/// node cannot show an invisible or look-alike character) is refused
+/// whole, and an entry that cannot be approved carries no digest.
 fn checked(mut l: ProjectMcpList) -> Result<ProjectMcpList, String> {
-    const REFUSED: &str = "the node sent a list the page could not show whole; nothing of \
-         it is shown";
-    let ok = |s: &str| s.chars().count() <= MAX_STRING && !s.chars().any(char::is_control);
-    let opt = |s: &Option<String>| s.as_deref().is_none_or(ok);
-    let env_ok = |v: &[harness_protocol::ProjectMcpEnv]| {
-        v.len() <= 64 && v.iter().all(|e| ok(&e.name) && ok(&e.value))
-    };
-    let all_ok = l.entries.len() <= MAX_LIST
-        && opt(&l.unreadable)
-        && opt(&l.note)
-        && l.entries.iter().all(|e| {
-            ok(&e.name)
-                && ok(&e.command)
-                && e.args.len() <= 64
-                && e.args.iter().all(|a| ok(a))
-                && env_ok(&e.env)
-                && opt(&e.digest)
-                && opt(&e.reason)
-                && opt(&e.approved_command)
-                && e.approved_args
-                    .as_deref()
-                    .is_none_or(|a| a.len() <= 64 && a.iter().all(|x| ok(x)))
-                && e.approved_env.as_deref().is_none_or(env_ok)
-        });
-    if !all_ok {
-        return Err(REFUSED.into());
+    if let Err(why) = l.showable() {
+        tracing::warn!(error = %why, "a node sent a project MCP list the page could not show whole");
+        return Err(
+            "the node sent a list the page could not show whole; nothing of it is \
+                    shown"
+                .into(),
+        );
     }
     for e in &mut l.entries {
         if !matches!(e.state, ProjectMcpState::New | ProjectMcpState::Changed) {

@@ -110,9 +110,9 @@ reads them for the person looking. Only on a node whose node.toml says `[mcp] pr
 
 - Each entry shows its name, its command, then each argument on its own line, then each
   `NAME=value` of its environment, in full as text (nothing joined, quoted or cut: the node makes
-  an entry it could not show so unsupported: a string over 512 characters, an entry over 4 KiB, a
-  control or line-break character, a hidden or direction character, spaces a screen would fold, an
-  empty argument), and its state for this person: not approved, approved, changed in the file
+  an entry it could not show so unsupported: a string over 512 characters, an entry over 4 KiB, any
+  character but printable ASCII and single spaces (named by its code point; non-ASCII paths and
+  values are refused in this first version), spaces a screen would fold, an empty argument), and its state for this person: not approved, approved, changed in the file
   (the approved copy keeps running), gone from the file, not supported (remote, a `${…}`
   variable, another field, a bad name, the display rules; with the reason) or hidden (node.toml
   has the name).

@@ -2049,9 +2049,15 @@ lists them for a project with a folder on such a node:
   `LD_PRELOAD` turn a harmless-looking command into repository code) and
   are repository content the chat's agent can read anyway. An entry that
   could not be shown so is *not supported* and cannot be approved: a
-  string over 512 characters or an entry over 4 KiB, a control character
-  or a line break of any kind, a hidden or direction character, a space at
-  a string's start or end or two in a row, an empty argument. Its state
+  string over 512 characters or an entry over 4 KiB, any character but
+  printable ASCII and single spaces (the reason names it by its code
+  point), a space at a string's start or end or two in a row, an empty
+  argument. **A stated limit of this first version:** that rule also
+  refuses honest non-ASCII text, such as a path or a value with `é` or
+  Cyrillic letters, because invisible and look-alike characters (a soft
+  hyphen, a Hangul filler, a combining accent, a Cyrillic `р`) draw like
+  others and would let a person approve something other than what they
+  read. Its state
   for you: *not approved* (it does not run), *approved*, *changed in the
   file* (your approved copy keeps running), *gone from the file* (not
   started), *not supported* or *hidden*, with the reason. Also not

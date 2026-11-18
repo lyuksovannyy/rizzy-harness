@@ -104,6 +104,27 @@ pub fn valid_user_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+/// The longest string of a `project.mcp_result` entry, in characters: an
+/// approvable entry's command, argument, `env` name or value (shown whole,
+/// never cut), the cut text of one that cannot be approved, a reason. The
+/// node keeps to it by construction and the master refuses a list that
+/// does not (X.36, PLAN.md T82).
+pub const MAX_SHOWN: usize = 512;
+
+/// The first character of `s` that an approvable entry may not hold, if
+/// any: an approvable string is printable ASCII (0x21 to 0x7E) and single
+/// spaces only, so what a screen draws is what runs (no invisible, combining
+/// or look-alike character: review of PR 150, NEW-1). Spaces at the edges
+/// and runs of them are the node's and the master's other checks.
+pub fn first_unshowable(s: &str) -> Option<char> {
+    s.chars().find(|c| !(' '..='~').contains(c))
+}
+
+/// How a character is named in a reason: its code point, never itself.
+pub fn code_point(c: char) -> String {
+    format!("U+{:04X}", c as u32)
+}
+
 /// What a person asks a node about a project folder's `.mcp.json` (X.36).
 /// Every one reads the file once, then answers with the list as it is
 /// after the request. Nothing here names a program: an approval names a
@@ -195,6 +216,82 @@ pub struct ProjectMcpList {
     /// the entry changed, …), in words for the person.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+}
+
+/// The most entries a [`ProjectMcpList`] may hold (the node's 32 in the
+/// file and 32 gone from it), and arguments or `env` entries per entry.
+pub const MAX_LISTED_ENTRIES: usize = 64;
+pub const MAX_LISTED_PARTS: usize = 64;
+
+impl ProjectMcpList {
+    /// Whether the page can show this list whole (X.36): at most
+    /// [`MAX_LISTED_ENTRIES`] entries of at most [`MAX_LISTED_PARTS`]
+    /// arguments and `env` entries; every string of every entry (name,
+    /// command, arguments, `env` names and values, digest, reason, the
+    /// approved copy's) printable ASCII and spaces of at most
+    /// [`MAX_SHOWN`] characters ([`first_unshowable`]); `unreadable` and
+    /// `note` at most [`MAX_SHOWN`] characters without a control character.
+    /// The node builds every list to pass it; the master refuses one that
+    /// does not.
+    pub fn showable(&self) -> Result<(), String> {
+        let text = |what: &str, s: &str| -> Result<(), String> {
+            if s.chars().count() > MAX_SHOWN {
+                return Err(format!("{what} is longer than {MAX_SHOWN} characters"));
+            }
+            match first_unshowable(s) {
+                Some(c) => Err(format!("{what} holds {}", code_point(c))),
+                None => Ok(()),
+            }
+        };
+        let words = |what: &str, s: &Option<String>| -> Result<(), String> {
+            match s {
+                Some(s) if s.chars().count() > MAX_SHOWN => {
+                    Err(format!("{what} is longer than {MAX_SHOWN} characters"))
+                }
+                Some(s) if s.chars().any(char::is_control) => {
+                    Err(format!("{what} holds a control character"))
+                }
+                _ => Ok(()),
+            }
+        };
+        let parts = |args: &[String], env: &[ProjectMcpEnv]| -> Result<(), String> {
+            if args.len() > MAX_LISTED_PARTS || env.len() > MAX_LISTED_PARTS {
+                return Err("an entry has too many arguments or env entries".into());
+            }
+            for a in args {
+                text("an argument", a)?;
+            }
+            for e in env {
+                text("an env name", &e.name)?;
+                text("an env value", &e.value)?;
+            }
+            Ok(())
+        };
+        if self.entries.len() > MAX_LISTED_ENTRIES {
+            return Err(format!("more than {MAX_LISTED_ENTRIES} entries"));
+        }
+        words("the file's state", &self.unreadable)?;
+        words("the note", &self.note)?;
+        for e in &self.entries {
+            text("a name", &e.name)?;
+            text("a command", &e.command)?;
+            parts(&e.args, &e.env)?;
+            for (what, s) in [
+                ("a digest", &e.digest),
+                ("a reason", &e.reason),
+                ("an approved command", &e.approved_command),
+            ] {
+                if let Some(s) = s {
+                    text(what, s)?;
+                }
+            }
+            parts(
+                e.approved_args.as_deref().unwrap_or_default(),
+                e.approved_env.as_deref().unwrap_or_default(),
+            )?;
+        }
+        Ok(())
+    }
 }
 
 /// The most paths one `session.prompt` may name in `files`, and the

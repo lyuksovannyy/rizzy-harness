@@ -37,17 +37,6 @@ use serde::{Deserialize, Serialize};
 /// The subcommand name of the wrapper.
 pub const SUBCOMMAND: &str = "sandbox-exec";
 
-/// `sandbox-exec`, first: close every descriptor above 2 this process was
-/// given (T.8f, review T8F-2). A contained `sandbox-exec` is started from a
-/// descriptor of the node's image that its guard left open (and, with
-/// binds by path, nothing else closes descriptors on the way), and the
-/// command must hold nothing of the image, the view or the guard. The list
-/// is `/proc/self/fd` (taken whole, then closed); without `/proc`, every
-/// number below the soft descriptor limit (capped at 65536), so one above
-/// it would stay (re-check R-3). `close_range(2)` would end that, but nix
-/// 0.31.3 has no safe wrapper of it, and no start of the node reaches this
-/// case (both forms of the view have a `/proc`). Nothing opened before this
-/// is needed after it.
 /// What [`take_inner_env`] read: the values `exec` sets on the command.
 static INNER_ENV: std::sync::OnceLock<Result<Vec<(OsString, OsString)>, String>> =
     std::sync::OnceLock::new();
@@ -85,34 +74,55 @@ pub fn take_inner_env() {
         if bytes.len() as u64 > MAX_INNER_ENV {
             return Err("the server's environment is too large".into());
         }
-        let mut out = Vec::new();
-        for item in bytes.split(|b| *b == 0).filter(|i| !i.is_empty()) {
-            let at = item
-                .iter()
-                .position(|b| *b == b'=')
-                .ok_or("a malformed environment entry")?;
-            let (k, v) = (&item[..at], &item[at + 1..]);
-            let name_ok = k
-                .first()
-                .is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_')
-                && k.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'_')
-                && !crate::env::DENY_PREFIXES
-                    .iter()
-                    .any(|p| k.starts_with(p.as_bytes()));
-            if !name_ok {
-                return Err("a malformed or reserved environment name".into());
-            }
-            use std::os::unix::ffi::OsStrExt;
-            out.push((
-                std::ffi::OsStr::from_bytes(k).to_os_string(),
-                std::ffi::OsStr::from_bytes(v).to_os_string(),
-            ));
-        }
-        Ok(out)
+        parse_inner_env(&bytes)
     };
     let _ = INNER_ENV.set(read());
 }
 
+/// The items of a repository server's environment file: `NAME=value`,
+/// each ended by a NUL. A name that is not a variable name, or one of the
+/// harness's own (`HARNESS_*`, so no file can name the guard's or
+/// `sandbox-exec`'s settings), refuses the whole file.
+pub fn parse_inner_env(bytes: &[u8]) -> Result<Vec<(OsString, OsString)>, String> {
+    let mut out = Vec::new();
+    for item in bytes.split(|b| *b == 0).filter(|i| !i.is_empty()) {
+        let at = item
+            .iter()
+            .position(|b| *b == b'=')
+            .ok_or("a malformed environment entry")?;
+        let (k, v) = (&item[..at], &item[at + 1..]);
+        let name_ok = k
+            .first()
+            .is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_')
+            && k.iter().all(|c| c.is_ascii_alphanumeric() || *c == b'_')
+            && !crate::env::DENY_PREFIXES
+                .iter()
+                .any(|p| k.starts_with(p.as_bytes()));
+        if !name_ok {
+            return Err("a malformed or reserved environment name".into());
+        }
+        use std::os::unix::ffi::OsStrExt;
+        out.push((
+            std::ffi::OsStr::from_bytes(k).to_os_string(),
+            std::ffi::OsStr::from_bytes(v).to_os_string(),
+        ));
+    }
+    Ok(out)
+}
+
+/// `sandbox-exec`, first: close every descriptor above 2 this process was
+/// given (T.8f, review T8F-2). A contained `sandbox-exec` is started from a
+/// descriptor of the node's image that its guard left open (and, with
+/// binds by path, nothing else closes descriptors on the way), and the
+/// command must hold nothing of the image, the view or the guard. The list
+/// is `/proc/self/fd` (taken whole, then closed); without `/proc`, every
+/// number below the soft descriptor limit (capped at 65536), so one above
+/// it would stay (re-check R-3). `close_range(2)` would end that, but nix
+/// 0.31.3 has no safe wrapper of it, and no start of the node reaches this
+/// case (both forms of the view have a `/proc`). Nothing opened before this
+/// is needed after it: the one thing read before it, a repository MCP
+/// server's environment ([`take_inner_env`]), is kept in memory, and its
+/// descriptor is closed here with the rest.
 pub fn close_inherited() {
     let fds: Vec<i32> = match std::fs::read_dir("/proc/self/fd") {
         Ok(d) => d
@@ -3710,5 +3720,44 @@ mod tests {
 
     fn toml_like<T: for<'de> Deserialize<'de>>(s: &str) -> T {
         serde_json::from_str(s).unwrap()
+    }
+
+    /// Review of PR 150 (NEW-3): `sandbox-exec` takes a repository
+    /// server's values only under variable names that are not the
+    /// harness's own.
+    #[test]
+    fn the_inner_env_takes_no_harness_name_and_no_malformed_one() {
+        let ok = parse_inner_env(b"A=1\0NODE_OPTIONS=--require ./x.js\0EMPTY=\0").unwrap();
+        assert_eq!(ok.len(), 3);
+        assert_eq!(ok[1].1, "--require ./x.js");
+        for bad in [
+            &b"HARNESS_GUARD_STDIN_FIFO=/tmp/f\0"[..],
+            b"HARNESS_INNER_ENV_FD=3\0",
+            b"A=1\0HARNESS_X=1\0",
+            b"1A=1\0",
+            b"A-B=1\0",
+            b"=1\0",
+            b"NOEQUALS\0",
+        ] {
+            assert!(
+                parse_inner_env(bad).is_err(),
+                "{:?}",
+                String::from_utf8_lossy(bad)
+            );
+        }
+    }
+
+    /// Review of PR 150 (NEW-4): a node killed between writing a server's
+    /// environment file and its guard taking it leaves `.mcp-*/env`
+    /// behind; the next start empties the temp root, that file with it.
+    #[test]
+    fn a_left_environment_file_goes_at_the_next_start() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("sandbox-tmp");
+        std::fs::create_dir_all(root.join(".mcp-0123456789abcdef")).unwrap();
+        std::fs::write(root.join(".mcp-0123456789abcdef/env"), "A=secret\0").unwrap();
+        reset_tmp(&root).unwrap();
+        assert!(root.is_dir());
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
     }
 }

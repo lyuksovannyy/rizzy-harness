@@ -283,61 +283,79 @@ pub fn parse(bytes: &[u8]) -> FileRead {
     )
 }
 
-/// How a string of an entry that cannot be approved is shown: one line,
-/// hidden and control characters as escapes, cut with a mark. An
-/// approvable entry's strings are shown as they are (see [`unshowable`]).
+/// How a string of an entry that cannot be approved is shown: printable
+/// ASCII, every other character as its `\u{…}` escape, cut with a mark,
+/// so it never passes [`harness_protocol::MAX_SHOWN`]. An approvable
+/// entry's strings are shown as they are (see [`unshowable`]).
 fn shown(s: &str) -> String {
-    const CUT: usize = 500;
+    escaped(s, 500, "...[cut]")
+}
+
+/// A short excerpt of `s` for a reason or a name: [`shown`]'s escapes, at
+/// most 64 characters of it.
+fn excerpt(s: &str) -> String {
+    escaped(s, 64, "...")
+}
+
+fn escaped(s: &str, keep: usize, mark: &str) -> String {
     let out: String = s
         .chars()
         .flat_map(|c| {
-            if c.is_control() || is_break(c) || harness_core::text::is_hidden(c) {
-                c.escape_unicode().collect::<Vec<_>>()
-            } else {
+            if (' '..='~').contains(&c) {
                 vec![c]
+            } else {
+                c.escape_unicode().collect::<Vec<_>>()
             }
         })
         .collect();
-    if out.chars().count() <= CUT {
+    if out.chars().count() <= keep {
         out
     } else {
-        let mut cut: String = out.chars().take(CUT).collect();
-        cut.push_str("…[cut]");
+        let mut cut: String = out.chars().take(keep).collect();
+        cut.push_str(mark);
         cut
     }
 }
 
-/// A line break of any kind (beside the control characters).
-fn is_break(c: char) -> bool {
-    matches!(
-        c,
-        '\n' | '\r' | '\u{0B}' | '\u{0C}' | '\u{85}' | '\u{2028}' | '\u{2029}'
-    )
-}
-
-/// Why `s` would not be shown whole and unchanged, if it would not.
-pub fn unshowable(s: &str) -> Option<&'static str> {
+/// Why `s` would not be shown whole and unchanged, if it would not. An
+/// approvable string is printable ASCII (0x21 to 0x7E) and single spaces
+/// only (review of PR 150, NEW-1: invisible, combining and look-alike
+/// characters draw the same as others), at most
+/// [`MAX_SHOWN_CHARS`] characters, with no space at either end. The
+/// first other character is named by its code point, never printed.
+pub fn unshowable(s: &str) -> Option<String> {
     if s.chars().count() > MAX_SHOWN_CHARS {
-        return Some("longer than the 512 characters the page shows whole");
+        return Some("longer than the 512 characters the page shows whole".into());
     }
-    if s.chars().any(|c| c.is_control() || is_break(c)) {
-        return Some("a control character or a line break");
+    if let Some(c) = harness_protocol::first_unshowable(s) {
+        return Some(format!(
+            "it holds {}: only printable ASCII and single spaces are shown exactly as they run",
+            harness_protocol::code_point(c)
+        ));
     }
-    if s.chars().any(harness_core::text::is_hidden) {
-        return Some("a hidden or direction character");
+    if s.contains("  ") {
+        return Some("a run of spaces a screen would fold".into());
     }
-    let mut prev_space = false;
-    for c in s.chars() {
-        let space = c.is_whitespace();
-        if space && prev_space {
-            return Some("a run of spaces a screen would fold");
-        }
-        prev_space = space;
-    }
-    if s.starts_with(char::is_whitespace) || s.ends_with(char::is_whitespace) {
-        return Some("a space at its start or end, which a screen would not show");
+    if s.starts_with(' ') || s.ends_with(' ') {
+        return Some("a space at its start or end, which a screen would not show".into());
     }
     None
+}
+
+/// Words for the person that may name a path: one line, at most 480
+/// characters (well inside [`harness_protocol::MAX_SHOWN`]), cut with a mark.
+fn words(s: &str) -> String {
+    let line: String = s
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    if line.chars().count() <= 480 {
+        line
+    } else {
+        let mut cut: String = line.chars().take(477).collect();
+        cut.push_str("...");
+        cut
+    }
 }
 
 fn valid_env_name(k: &str) -> bool {
@@ -371,22 +389,39 @@ fn parse_entry(name: &str, v: &Value) -> Parsed {
             entry,
         };
     }
-    let env: Vec<ProjectMcpEnv> = v
+    // At most 64 parts, the last naming how many more there were.
+    const KEEP: usize = harness_protocol::MAX_LISTED_PARTS - 1;
+    let mut env: Vec<ProjectMcpEnv> = v
         .get("env")
         .and_then(Value::as_object)
         .map(|m| {
             m.iter()
+                .take(KEEP)
                 .map(|(k, x)| ProjectMcpEnv {
-                    name: shown(k),
+                    name: excerpt(k),
                     value: shown(x.as_str().unwrap_or_default()),
                 })
                 .collect()
         })
         .unwrap_or_default();
+    let env_total = v
+        .get("env")
+        .and_then(Value::as_object)
+        .map_or(0, |m| m.len());
+    if env_total > KEEP {
+        env.push(ProjectMcpEnv {
+            name: "...".into(),
+            value: format!("[{} more]", env_total - KEEP),
+        });
+    }
+    let mut shown_args: Vec<String> = args.iter().take(KEEP).map(|a| shown(a)).collect();
+    if args.len() > KEEP {
+        shown_args.push(format!("...[{} more]", args.len() - KEEP));
+    }
     Parsed {
         entry,
         command: shown(&command),
-        args: args.iter().map(|a| shown(a)).collect(),
+        args: shown_args,
         env,
     }
 }
@@ -429,9 +464,9 @@ fn check_entry(name: &str, v: &Value) -> Result<Entry, String> {
     for k in obj.keys() {
         if !matches!(k.as_str(), "type" | "command" | "args" | "env") {
             return Err(format!(
-                "not supported: it uses {:?}, which the node does not read (only command, args \
-                 and env)",
-                shown(k)
+                "not supported: it uses \"{}\", which the node does not read (only command, \
+                 args and env)",
+                excerpt(k)
             ));
         }
     }
@@ -464,8 +499,8 @@ fn check_entry(name: &str, v: &Value) -> Result<Entry, String> {
                 };
                 if !valid_env_name(k) {
                     return Err(format!(
-                        "not supported: the env name {:?} is not a variable name",
-                        shown(k)
+                        "not supported: the env name \"{}\" is not a variable name",
+                        excerpt(k)
                     ));
                 }
                 if harness_tools::env::DENY_PREFIXES
@@ -490,7 +525,7 @@ fn check_entry(name: &str, v: &Value) -> Result<Entry, String> {
     for t in all.clone() {
         if t.contains("${") {
             return Err(
-                "not supported: uses a variable (`${…}`), which the node never expands \
+                "not supported: uses a variable (`${...}`), which the node never expands \
                  from its own environment"
                     .into(),
             );
@@ -691,8 +726,27 @@ impl ProjectMcp {
         (out, notes)
     }
 
-    /// A person's request (`project.mcp`), handled whole: blocking.
+    /// A person's request (`project.mcp`), handled whole: blocking. The
+    /// list it answers with always passes [`ProjectMcpList::showable`]:
+    /// the note and the file's state (which can name a long path) are cut
+    /// to a bound, so one long path never makes the master refuse the
+    /// person's list.
     pub(crate) fn handle(
+        &self,
+        policy: &NodePolicy,
+        user: &str,
+        folder: &str,
+        req: &ProjectMcpRequest,
+    ) -> Outcome {
+        let mut out = self.handle_whole(policy, user, folder, req);
+        if let Ok(l) = &mut out.list {
+            l.note = l.note.take().map(|n| words(&n));
+            l.unreadable = l.unreadable.take().map(|n| words(&n));
+        }
+        out
+    }
+
+    fn handle_whole(
         &self,
         policy: &NodePolicy,
         user: &str,
@@ -789,8 +843,8 @@ impl ProjectMcp {
         };
         let Some(parsed) = entries.get(name) else {
             return Err(format!(
-                "not approved: the file has no server {:?}",
-                shown(name)
+                "not approved: the file has no server \"{}\"",
+                excerpt(name)
             ));
         };
         let entry = match &parsed.entry {
@@ -892,7 +946,7 @@ impl ProjectMcp {
             FileRead::Entries(entries) => {
                 for (name, p) in entries {
                     let mut x = ProjectMcpEntry {
-                        name: harness_core::text::clean_line(name, 64),
+                        name: excerpt(name),
                         state: ProjectMcpState::New,
                         command: p.command.clone(),
                         args: p.args.clone(),
@@ -1089,13 +1143,13 @@ mod tests {
             )
             .contains("variable name")
         );
-        assert!(why(r#"{"mcpServers": {"a": {"command": "x\u0000"}}}"#, "a").contains("control"));
+        assert!(why(r#"{"mcpServers": {"a": {"command": "x\u0000"}}}"#, "a").contains("U+0000"));
         assert!(
             why(
                 r#"{"mcpServers": {"a": {"command": "x", "args": ["\u202e"]}}}"#,
                 "a"
             )
-            .contains("hidden")
+            .contains("U+202E")
         );
         let many = format!(
             r#"{{"mcpServers": {{"a": {{"command": "x", "args": [{}]}}}}}}"#,
@@ -1355,30 +1409,79 @@ mod tests {
         };
         let p = parse_one(entry_json("sh", &["-c", &padded], &[]));
         assert!(p.entry.is_err(), "the padded entry can be approved");
-        assert!(p.args[1].ends_with("…[cut]"), "a cut string is not marked");
-        for (what, bad) in [
-            ("longer", "a".repeat(MAX_SHOWN_CHARS + 1)),
-            ("line break", "a\nb".to_string()),
-            ("line break", "a\rb".to_string()),
-            ("line break", "a\u{0B}b".to_string()),
-            ("line break", "a\u{0C}b".to_string()),
-            ("line break", "a\u{85}b".to_string()),
-            ("line break", "a\u{2028}b".to_string()),
-            ("line break", "a\u{2029}b".to_string()),
-            ("control", "a\tb".to_string()),
-            ("hidden", "a\u{202E}b".to_string()),
-            ("hidden", "a\u{200B}b".to_string()),
-            ("run of spaces", "a  b".to_string()),
-            ("start or end", " a".to_string()),
-            ("start or end", "a ".to_string()),
+        assert!(
+            p.args[1].ends_with("...[cut]"),
+            "a cut string is not marked"
+        );
+        let mut cases: Vec<(String, String)> = vec![
+            ("longer".into(), "a".repeat(MAX_SHOWN_CHARS + 1)),
+            ("run of spaces".into(), "a  b".to_string()),
+            ("start or end".into(), " a".to_string()),
+            ("start or end".into(), "a ".to_string()),
+        ];
+        // Every character outside printable ASCII is refused, named by its
+        // code point: line breaks, controls, hidden and direction
+        // characters, and the invisible and look-alike ones of the review
+        // of PR 150 (NEW-1).
+        for c in [
+            '\n',
+            '\r',
+            '\u{0B}',
+            '\u{0C}',
+            '\u{85}',
+            '\u{2028}',
+            '\u{2029}',
+            '\t',
+            '\u{0}',
+            '\u{7F}',
+            '\u{202E}',
+            '\u{200B}',
+            '\u{AD}',
+            '\u{34F}',
+            '\u{115F}',
+            '\u{1160}',
+            '\u{3164}',
+            '\u{FFA0}',
+            '\u{2800}',
+            '\u{180E}',
+            '\u{180B}',
+            '\u{FE00}',
+            '\u{FE0F}',
+            '\u{17B4}',
+            '\u{FFF9}',
+            '\u{1BCA0}',
+            '\u{A0}',
+            '\u{3000}',
+            '\u{301}',
+            '\u{440}',
+            '\u{443}',
+            '\u{E9}',
         ] {
+            cases.push((
+                harness_protocol::code_point(c),
+                format!("--require ./saf{c}e.js"),
+            ));
+        }
+        cases.push(("U+0301".into(), format!("safe{}.js", "\u{301}".repeat(20))));
+        cases.push(("U+0440".into(), "\u{440}\u{443}thon3".into()));
+        for (what, bad) in &cases {
             for json in [
-                entry_json(&bad, &[], &[]),
-                entry_json("x", &[&bad], &[]),
-                entry_json("x", &[], &[("K", &bad)]),
+                entry_json(bad, &[], &[]),
+                entry_json("x", &[bad], &[]),
+                entry_json("x", &[], &[("K", bad)]),
             ] {
-                let why = parse_one(json).entry.unwrap_err();
-                assert!(why.contains(what), "{bad:?}: {why}");
+                let p = parse_one(json);
+                let why = p.entry.unwrap_err();
+                assert!(why.contains(what.as_str()), "{bad:?}: {why}");
+                // Named, never printed: the reason and the shown strings
+                // are printable ASCII.
+                for t in std::iter::once(&why)
+                    .chain(std::iter::once(&p.command))
+                    .chain(p.args.iter())
+                    .chain(p.env.iter().map(|e| &e.value))
+                {
+                    assert_eq!(harness_protocol::first_unshowable(t), None, "{t:?}");
+                }
             }
         }
         assert!(
@@ -1412,5 +1515,104 @@ mod tests {
             .entry
             .unwrap_err();
         assert!(why.contains("4 KiB"), "{why}");
+    }
+
+    /// Review of PR 150 (NEW-2): one bad entry never blanks the list. The
+    /// worst reason of every refusal, and every shown string of an entry
+    /// that cannot be approved, stay within what the master accepts, so a
+    /// list with them and with an approved entry passes `showable` whole.
+    #[test]
+    fn the_worst_entry_never_blanks_the_list() {
+        let huge = "k".repeat(10_000);
+        let wide = "\u{1BCA0}".repeat(3_000);
+        let mut servers = serde_json::Map::new();
+        let mut add = |name: &str, v: Value| {
+            servers.insert(name.to_string(), v);
+        };
+        add(
+            "good",
+            serde_json::json!({"command": "python3", "args": ["srv.py"]}),
+        );
+        add(&huge, serde_json::json!({"command": "x"}));
+        add(&wide, serde_json::json!({"command": "x"}));
+        let mut unknown = serde_json::json!({"command": "x"});
+        unknown[huge.as_str()] = serde_json::json!(1);
+        add("unknown-long", unknown);
+        let mut unknown = serde_json::json!({"command": "x"});
+        unknown[wide.as_str()] = serde_json::json!(1);
+        add("unknown-wide", unknown);
+        add("type", serde_json::json!({"type": huge, "command": "x"}));
+        add("remote", serde_json::json!({"url": huge}));
+        add(
+            "env-name",
+            serde_json::json!({"command": "x", "env": {huge.as_str(): "v"}}),
+        );
+        add(
+            "env-wide",
+            serde_json::json!({"command": "x", "env": {wide.as_str(): "v"}}),
+        );
+        add(
+            "harness",
+            serde_json::json!({"command": "x", "env": {"HARNESS_X": "v"}}),
+        );
+        add(
+            "env-value",
+            serde_json::json!({"command": "x", "env": {"A": wide}}),
+        );
+        add(
+            "var",
+            serde_json::json!({"command": format!("${{{huge}}}")}),
+        );
+        add(
+            "cmd-wide",
+            serde_json::json!({"command": wide, "args": [wide, huge]}),
+        );
+        add(
+            "not-string",
+            serde_json::json!({"command": 1, "args": [1, 2]}),
+        );
+        add(
+            "args",
+            serde_json::json!({"command": "x", "args": vec!["a"; MAX_ARGS + 1]}),
+        );
+        add(
+            "big",
+            serde_json::json!({"command": "x", "args": [ "b".repeat(9_000) ]}),
+        );
+        let json = serde_json::json!({"mcpServers": servers}).to_string();
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().canonicalize().unwrap();
+        let ws = root.join("ws");
+        std::fs::create_dir(&ws).unwrap();
+        std::fs::write(ws.join(FILE), &json).unwrap();
+        // A file this big is unreadable as a whole; the bounds per entry
+        // are what is tested, so the cap is checked through `parse`.
+        let FileRead::Entries(m) = parse(json.as_bytes()) else {
+            panic!()
+        };
+        assert!(m.len() > 10);
+        let pm = ProjectMcp::open(root.join("project-mcp.json"));
+        let p = policy(&root);
+        let list = pm.list(
+            &p,
+            "u",
+            &ws,
+            &FileRead::Entries(m),
+            Some(format!("x{}", "/a".repeat(4000))),
+        );
+        let reasons: Vec<&str> = list
+            .entries
+            .iter()
+            .filter_map(|e| e.reason.as_deref())
+            .collect();
+        assert!(reasons.len() >= 13, "{reasons:?}");
+        let mut l = list.clone();
+        l.note = l.note.map(|n| words(&n));
+        assert_eq!(l.showable(), Ok(()), "{l:#?}");
+        assert!(
+            l.entries
+                .iter()
+                .any(|e| e.name == "good" && e.digest.is_some())
+        );
     }
 }

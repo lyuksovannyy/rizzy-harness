@@ -1355,9 +1355,10 @@ async fn own(
     let _ = exited.send(Some(exit));
 }
 
-/// A node-private folder for one FIFO, removed when dropped.
 /// Write `env` for `sandbox-exec` ([`crate::guard::ENV_FILE_ENV`]): each
-/// `NAME=value` followed by a NUL, to a new 0600 file.
+/// `NAME=value` followed by a NUL, to a new 0600 file in the server's
+/// [`FifoDir`]. A node killed before the guard took it leaves it there;
+/// the node's next start empties its temp root (`sandbox::reset_tmp`).
 fn write_inner_env(file: &Path, env: &EnvValues) -> Result<(), String> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
@@ -1378,6 +1379,8 @@ fn write_inner_env(file: &Path, env: &EnvValues) -> Result<(), String> {
         .map_err(|e| format!("{}: {e}", file.display()))
 }
 
+/// A node-private folder for one FIFO (and a repository server's
+/// environment file), removed when dropped.
 struct FifoDir(PathBuf);
 
 impl FifoDir {

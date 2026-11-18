@@ -1008,3 +1008,89 @@ async fn a_padded_command_line_cannot_be_approved() {
     assert!(!pwned.exists(), "the hidden tail ran");
     n.rt.stop(Duration::from_secs(20)).await;
 }
+
+/// Review of PR 150 (NEW-1): an approvable string is printable ASCII and
+/// single spaces only. Every invisible or look-alike character the review
+/// found (each drew the same as a harmless name in the real page) makes
+/// the entry unsupported, named by its code point; an ASCII entry beside
+/// them still approves.
+#[tokio::test]
+async fn invisible_and_look_alike_characters_cannot_be_approved() {
+    let mut n = start(ON).await;
+    let root = n.root();
+    let cases: Vec<(String, String)> = [
+        '\u{AD}',
+        '\u{34F}',
+        '\u{115F}',
+        '\u{1160}',
+        '\u{3164}',
+        '\u{FFA0}',
+        '\u{2800}',
+        '\u{180E}',
+        '\u{180B}',
+        '\u{FE00}',
+        '\u{FE0F}',
+        '\u{17B4}',
+        '\u{FFF9}',
+        '\u{1BCA0}',
+        '\u{A0}',
+        '\u{3000}',
+        '\u{301}',
+        '\u{440}',
+    ]
+    .iter()
+    .map(|c| {
+        (
+            harness_protocol::code_point(*c),
+            format!("--require ./saf{c}e.js"),
+        )
+    })
+    .chain([(
+        "U+0301".to_string(),
+        format!("safe{}.js", "\u{301}".repeat(20)),
+    )])
+    .collect();
+    for (what, s) in &cases {
+        for (name, entry) in [
+            ("in-command", serde_json::json!({"command": s})),
+            (
+                "in-arg",
+                serde_json::json!({"command": "python3", "args": [FAKE, s]}),
+            ),
+            (
+                "in-env",
+                serde_json::json!({"command": "python3", "args": [FAKE], "env": {"NODE_OPTIONS": s}}),
+            ),
+        ] {
+            write_mcp(
+                &n.ws,
+                serde_json::json!({ "bad": entry, "good": server(&root, "ascii") }),
+            );
+            let l = n.ask(ALICE, ProjectMcpRequest::List).await.unwrap();
+            let e = entry_of(&l, "bad");
+            assert_eq!(
+                e.state,
+                ProjectMcpState::Unsupported,
+                "{what} {name}: {e:?}"
+            );
+            assert!(e.digest.is_none());
+            assert!(
+                e.reason.as_deref().unwrap().contains(what.as_str()),
+                "{e:?}"
+            );
+            assert!(entry_of(&l, "good").digest.is_some());
+        }
+    }
+    // The ASCII entry approves and runs.
+    n.approve(ALICE, "good").await;
+    let sid = n.create(Some(ALICE), None).await;
+    assert_eq!(
+        n.call(sid, &["mcp__good__who"]).await[0],
+        (true, "served by ascii tool who".into())
+    );
+    n.rt.stop(Duration::from_secs(20)).await;
+}
+
+fn entry_of<'a>(l: &'a ProjectMcpList, name: &str) -> &'a harness_protocol::ProjectMcpEntry {
+    entry(l, name)
+}

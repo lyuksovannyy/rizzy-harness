@@ -2962,3 +2962,43 @@ impl Master {
         .await
     }
 }
+
+#[cfg(test)]
+mod turn_owner_tests {
+    use super::*;
+
+    /// X.36 (review of PR 150, NEW-4): every turn command, a prompt, a
+    /// retry and a callback, gets the chat's owner; no other command
+    /// carries one.
+    #[test]
+    fn every_turn_command_carries_the_owner() {
+        let sid = SessionId::new();
+        let msg = |v: serde_json::Value| -> MasterToNode { serde_json::from_value(v).unwrap() };
+        let turns = [
+            msg(
+                serde_json::json!({"type": "session.prompt", "req_id": "r", "session_id": sid, "text": "x"}),
+            ),
+            msg(
+                serde_json::json!({"type": "session.retry", "req_id": "r", "session_id": sid, "turn_id": "t"}),
+            ),
+            msg(
+                serde_json::json!({"type": "session.callback", "req_id": "r", "session_id": sid, "bg_ids": ["bg-1"]}),
+            ),
+        ];
+        for mut m in turns {
+            set_turn_owner(&mut m, Some("01ALEX".into()));
+            let owner = match &m {
+                MasterToNode::Prompt { owner, .. }
+                | MasterToNode::Retry { owner, .. }
+                | MasterToNode::Callback { owner, .. } => owner.clone(),
+                _ => None,
+            };
+            assert_eq!(owner.as_deref(), Some("01ALEX"), "{m:?}");
+        }
+        let mut other =
+            msg(serde_json::json!({"type": "session.cancel", "req_id": "r", "session_id": sid}));
+        let before = other.clone();
+        set_turn_owner(&mut other, Some("01ALEX".into()));
+        assert_eq!(other, before);
+    }
+}
