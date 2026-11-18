@@ -1417,3 +1417,27 @@ async fn tracked_lookup_cost_with_a_large_index() {
         let _ = std::fs::remove_file(&tmp);
     }
 }
+
+/// With an incomplete record, a file the turn made and `git add`ed is
+/// tracked, so never one the checkpoint left out: the undo deletes it.
+#[tokio::test]
+async fn with_an_incomplete_record_a_tracked_new_file_is_still_deleted() {
+    let (r, repo) = incomplete_rig(1024).await;
+    let b = snapshot_full(&repo, "refs/harness/s/t/before", "b")
+        .await
+        .unwrap();
+    assert!(b.skipped.more > 0);
+    r.put("new.txt", &State::Small("n\n"));
+    r.put("loose.txt", &State::Small("l\n"));
+    sh(&r.dir, &["add", "new.txt"]);
+    let a = snapshot(&repo, "refs/harness/s/t/after", "a")
+        .await
+        .unwrap();
+    let done = restore_report(&repo, &b.sha, &a, false).await.unwrap();
+    assert!(!r.dir.join("new.txt").exists());
+    assert!(r.dir.join("loose.txt").exists());
+    assert_eq!(
+        kinds(&done.plan.left),
+        vec![("loose.txt".to_string(), LeftKind::Unsure)]
+    );
+}
