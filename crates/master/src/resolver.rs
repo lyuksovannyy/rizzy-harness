@@ -162,9 +162,13 @@ impl Master {
         match self.inner.mirror.call(move |s| s.workspace(&id)).await {
             Ok(Some(w)) => self.resolver_in(&w).await,
             Ok(None) => self.resolver(None),
+            // The server's settings, but the Plugins choice is not known:
+            // fail closed (no `skill`, no MCP tools for the turn, T80).
             Err(e) => {
                 tracing::warn!(error = %e, "could not load workspace settings; using the server's");
-                self.resolver(None)
+                let mut r = self.resolver(None);
+                r.access = crate::plugins::Assignments::unreadable();
+                r
             }
         }
     }

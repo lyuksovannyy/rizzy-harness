@@ -43,6 +43,19 @@ impl harness_agent_native::Provider for Spy {
         let answered = req.messages[at + 1..]
             .iter()
             .any(|m| matches!(m, ChatMsg::Tool { .. }));
+        if theirs == "grants" && !answered {
+            return Ok(harness_agent_native::Completion {
+                text: String::new(),
+                tool_calls: vec![ToolCallRef {
+                    call_id: harness_core::new_id(),
+                    tool: "grants".into(),
+                    input: json!({}),
+                }],
+                usage: None,
+                stop: Default::default(),
+                thinking: None,
+            });
+        }
         let name = theirs
             .strip_prefix("load:")
             .or_else(|| theirs.strip_prefix('/'))
@@ -61,6 +74,38 @@ impl harness_agent_native::Provider for Spy {
             });
         }
         self.0.complete(req, deltas).await
+    }
+}
+
+/// A test tool: the node owner's skill folders this call's shell would be
+/// granted read-only (`skills::shell_reads`, what `bash` binds), one per
+/// line.
+struct Grants;
+
+#[async_trait::async_trait]
+impl harness_tools::Tool for Grants {
+    fn name(&self) -> &str {
+        "grants"
+    }
+    fn description(&self) -> &str {
+        "the shell's skill grants"
+    }
+    fn schema(&self) -> serde_json::Value {
+        json!({"type": "object", "properties": {}})
+    }
+    fn risk(&self) -> harness_core::policy::ToolRisk {
+        harness_core::policy::ToolRisk::ReadOnly
+    }
+    async fn run(
+        &self,
+        ctx: &harness_tools::ToolCtx,
+        _input: serde_json::Value,
+    ) -> harness_tools::ToolOutcome {
+        let paths: Vec<String> = harness_tools::skills::shell_reads(ctx)
+            .into_iter()
+            .map(|(p, _)| p.display().to_string())
+            .collect();
+        harness_tools::ToolOutcome::ok(format!("GRANTS\n{}", paths.join("\n")))
     }
 }
 
@@ -131,7 +176,11 @@ async fn start(policy: impl FnOnce(&Path) -> NodePolicy) -> Node {
         store: Store::open(&base.join("node.db"), Durability::Full).unwrap(),
         backend: Arc::new(NativeBackend::new(
             Arc::new(spy),
-            harness_tools::builtin(),
+            {
+                let mut tools = harness_tools::builtin();
+                tools.push(Arc::new(Grants));
+                tools
+            },
             NativeConfig::default(),
         )),
         default_model: "mock".into(),
@@ -553,4 +602,91 @@ async fn the_node_announces_its_own_skills_and_enforces_the_lists() {
     })
     .await;
     assert!(n.plugins.skills.is_empty(), "{:?}", n.plugins);
+}
+
+/// Review of PR 147 (M1, M4): through the node, a turn whose agent may not
+/// use `deploy` gives its shell the kept skills' own folders and never a
+/// whole root: not the first root holding `deploy`, nor a second root
+/// whose own `deploy` discovery did not use; the same agent without the
+/// denial gets both roots.
+#[tokio::test]
+async fn the_shell_is_not_granted_a_withheld_skills_folder() {
+    let mut n = start(|home| {
+        let second = home.parent().unwrap().join("second");
+        put(
+            &second.join("deploy/SKILL.md"),
+            &skill_md("deploy", "Second deploy", "second deploy body"),
+        );
+        put(
+            &second.join("other/SKILL.md"),
+            &skill_md("other", "Other", "o"),
+        );
+        NodePolicy {
+            skills: SkillsPolicy {
+                repository: true,
+                roots: vec![home.to_path_buf(), second],
+            },
+            ..Default::default()
+        }
+    })
+    .await;
+    let repo = n.repo.clone();
+    let home = n
+        .repo
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("home/skills");
+    let second = home.parent().unwrap().join("second");
+    let sid = n.create(&repo).await;
+    let mut coder = spec("coder", &["read", "skill", "grants"], vec![]);
+    n.turn(sid, "grants", Some(coder.clone())).await;
+    coder.deny_skills = vec!["deploy".into()];
+    n.turn(sid, "grants", Some(coder)).await;
+    let grants: Vec<String> = n
+        .loaded(sid)
+        .into_iter()
+        .filter(|(_, out)| out.starts_with("GRANTS"))
+        .map(|(_, out)| out)
+        .collect();
+    assert_eq!(grants.len(), 2, "{grants:?}");
+    let lines = |g: &str| g.lines().skip(1).map(str::to_string).collect::<Vec<_>>();
+    let shown = |p: &std::path::Path| p.display().to_string();
+    assert_eq!(lines(&grants[0]), [shown(&home), shown(&second)]);
+    let narrowed = lines(&grants[1]);
+    assert_eq!(
+        narrowed,
+        [shown(&home.join("manual")), shown(&second.join("other"))],
+        "{narrowed:?}"
+    );
+}
+
+/// Review of PR 147 (L4): the announcement is read once per runtime and
+/// never holds hello up: a later link gets hello first and the same list
+/// (a skill added since is announced after a restart), so a slow or hung
+/// folder costs at most one read, not one per reconnect.
+#[tokio::test]
+async fn the_announcement_is_read_once_and_follows_hello() {
+    let n = start(both).await;
+    let home = n
+        .repo
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("home/skills");
+    put(
+        &home.join("later/SKILL.md"),
+        &skill_md("later", "Added later", "l"),
+    );
+    let mut link = n.node.attach().await;
+    match link.from_node.recv().await.unwrap() {
+        NodeToMaster::Hello { .. } => {}
+        other => panic!("expected hello first, got {other:?}"),
+    }
+    match link.from_node.recv().await.unwrap() {
+        NodeToMaster::Plugins { plugins } => assert_eq!(plugins, n.plugins),
+        other => panic!("expected node.plugins, got {other:?}"),
+    }
 }

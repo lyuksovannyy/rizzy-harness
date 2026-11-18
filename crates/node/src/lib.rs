@@ -186,6 +186,10 @@ pub(crate) struct Inner {
     pub(crate) restoring: Mutex<Vec<std::path::PathBuf>>,
     /// The current link to the master, if connected.
     link: Mutex<Option<Arc<outbox::Outbox>>>,
+    /// What this node announces for the Plugins screen (X.34), read once
+    /// per runtime by the first link and shared by every later one; a read
+    /// still in flight is waited for, never started twice.
+    plugins: tokio::sync::OnceCell<harness_protocol::NodePlugins>,
     /// The audit lines of inline commands (`audit.rs`).
     audit_log: audit::AuditLog,
     /// Where published files are staged; `None` when this runtime does not
@@ -528,6 +532,7 @@ impl NodeRuntime {
             sessions: Mutex::new(HashMap::new()),
             restoring: Mutex::new(Vec::new()),
             link: Mutex::new(None),
+            plugins: tokio::sync::OnceCell::new(),
             audit_log,
             stages,
             stopping: AtomicBool::new(false),
@@ -635,8 +640,10 @@ impl NodeRuntime {
     /// `[skills] roots` (never a repository's: those belong to a session's
     /// folder), and the names of its enabled `[mcp_servers]` that node.toml
     /// does not deny. Names only: no path, command, argument or
-    /// environment. Read in a bound of its own; a slow folder announces
-    /// none rather than hold the link up. Bounded by the protocol's caps.
+    /// environment. Read once per runtime ([`Inner::plugins`]) in a
+    /// blocking task with no time limit: a hung folder costs one thread and
+    /// the announcement, never hello, the link or a second thread at a
+    /// reconnect. Bounded by the protocol's caps.
     async fn plugins(&self) -> harness_protocol::NodePlugins {
         use harness_tools::{mcp, skills};
         let cfg = &self.inner.cfg;
@@ -668,8 +675,8 @@ impl NodeRuntime {
                 .collect();
             let protected = policy.protected_dirs.clone();
             let read = tokio::task::spawn_blocking(move || skills::discover(&roots, &protected));
-            match tokio::time::timeout(instructions::READ_TIMEOUT, read).await {
-                Ok(Ok(f)) => {
+            match read.await {
+                Ok(f) => {
                     found.left_out = u32::try_from(f.catalogue.refused.len()).unwrap_or(u32::MAX);
                     found.skills = f
                         .catalogue
@@ -681,8 +688,8 @@ impl NodeRuntime {
                         })
                         .collect();
                 }
-                _ => {
-                    tracing::warn!("skills: the node's skill folders were not read for the master")
+                Err(e) => {
+                    tracing::warn!(error = %e, "skills: the node's skill folders were not read for the master")
                 }
             }
         }
@@ -692,7 +699,6 @@ impl NodeRuntime {
     /// Connect a (new) master link. Any previous link is replaced. `hello` is
     /// queued before any event so the master always sees it first.
     pub async fn attach(&self) -> NodeLink {
-        let plugins = self.plugins().await;
         let (out, out_rx) = outbox::Outbox::open();
         let (in_tx, mut in_rx) = mpsc::channel::<MasterToNode>(IN_QUEUE);
         let heads = self
@@ -805,8 +811,20 @@ impl NodeRuntime {
                     })
                     .collect(),
             });
-            // What it has for the Plugins screen (X.34), right after.
-            let _ = out.try_send(NodeToMaster::Plugins { plugins });
+            // What it has for the Plugins screen (X.34): sent once it is
+            // read (the first link reads it, later ones reuse it), never
+            // holding hello or the link up.
+            let announce = out.clone();
+            let this = self.clone();
+            tokio::spawn(async move {
+                let plugins = this
+                    .inner
+                    .plugins
+                    .get_or_init(|| this.plugins())
+                    .await
+                    .clone();
+                let _ = announce.try_send(NodeToMaster::Plugins { plugins });
+            });
             if let Some(old) = link.replace(out) {
                 old.retire();
             }

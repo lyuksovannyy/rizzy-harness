@@ -125,6 +125,8 @@ struct T {
     base: String,
     master: Master,
     node: Fake,
+    /// The master's database, which a test can break under it.
+    db: std::path::PathBuf,
     _dir: tempfile::TempDir,
 }
 
@@ -135,8 +137,9 @@ async fn start_with(caps: &[&str]) -> T {
     let addr = listener.local_addr().unwrap();
     let claim_path = dir.path().join("claim-code");
     std::fs::write(&claim_path, "X").unwrap();
+    let db = dir.path().join("master.db");
     let master = Master::new(
-        Store::open_in_memory().unwrap(),
+        Store::open(&db, harness_store::Durability::Full).unwrap(),
         Auth::new(Secret::new("tok".into()), vec![addr.to_string()], false).with_claim(Claim {
             code: Secret::new("CLAIM".into()),
             path: claim_path,
@@ -152,6 +155,7 @@ async fn start_with(caps: &[&str]) -> T {
         base: format!("http://{addr}"),
         master,
         node,
+        db,
         _dir: dir,
     }
 }
@@ -803,4 +807,52 @@ async fn the_lists_never_name_anything_to_run() {
     );
     let json = serde_json::to_string(&general).unwrap();
     assert!(!json.contains("notonanynode"), "{json}");
+}
+
+/// Break the master's database under it with `sql` (another connection).
+fn break_db(t: &T, sql: &str) {
+    let c = rusqlite::Connection::open(&t.db).unwrap();
+    c.pragma_update(None, "foreign_keys", false).unwrap();
+    c.execute_batch(sql).unwrap();
+}
+
+/// Review of PR 147 (M2, M11): Plugins settings that cannot be read fail
+/// closed: the turn's agent and its sub-agents lose the whole `skill` tool
+/// and every MCP tool, whether the settings' own read fails or the
+/// workspace's.
+#[tokio::test]
+async fn settings_that_cannot_be_read_withhold_skills_and_connectors() {
+    let t = start().await;
+    let [alex, _] = users(&t).await;
+    let ws = team(&t, &alex, "Team").await;
+    assign(&t, &alex, &ws, "skill", "deploy", &["coder"]).await;
+    let sid = chat(&t, &alex, &ws).await;
+    let ok = turn_as(&t, sid, "coder").await;
+    assert!(ok.allows_tool("skill") && ok.allows_mcp());
+    // The settings' own read fails.
+    break_db(&t, "DROP TABLE plugin_access;");
+    let c = turn_as(&t, sid, "coder").await;
+    for a in [&c, sub(&c, "reviewer")] {
+        assert!(
+            !a.allows_tool("skill"),
+            "{}: {:?}",
+            a.agent_id,
+            a.deny_tools
+        );
+        assert!(!a.allows_mcp(), "{}: {:?}", a.agent_id, a.deny_tools);
+    }
+    // The workspace's read fails: the server's settings, still closed.
+    break_db(&t, "ALTER TABLE workspaces RENAME TO workspaces_gone;");
+    let spec = t
+        .master
+        .resolver_for(Some(&ws))
+        .await
+        .agent_spec_with(Some("coder"), None, None)
+        .unwrap();
+    assert!(
+        !spec.allows_tool("skill") && !spec.allows_mcp(),
+        "{:?}",
+        spec.deny_tools
+    );
+    assert!(!sub(&spec, "scout").allows_tool("skill"));
 }

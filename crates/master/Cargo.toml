@@ -57,6 +57,9 @@ tracing.workspace = true
 
 [dev-dependencies]
 axum = { workspace = true, features = ["multipart"] }
+# Breaks a table under a running master (tests/plugins_http.rs: settings
+# that cannot be read fail closed); already the store's dependency.
+rusqlite.workspace = true
 harness-link.workspace = true
 async-trait.workspace = true
 harness-agent-native.workspace = true

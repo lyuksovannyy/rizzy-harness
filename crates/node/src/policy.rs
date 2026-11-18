@@ -850,7 +850,10 @@ impl LimitsPolicy {
 
     /// The master's agent spec within this node's delegation bounds: its
     /// per-turn sub-agent cap no higher than `max_subagents`, at every
-    /// level, and no delegates below `max_delegation_depth`.
+    /// level, and no delegates below `max_delegation_depth`. Deny lists
+    /// over the node's own caps ([`MAX_DENIED_NAMES`], [`MAX_DENIED_NAME`])
+    /// withhold the whole `skill` tool or every MCP tool from that spec
+    /// (X.34: fails closed, nothing is cut).
     pub fn bound_delegation(
         &self,
         mut agent: harness_core::agent::AgentSpec,
@@ -869,11 +872,29 @@ impl LimitsPolicy {
         // below the top: a sub-agent starts none.
         caps.background &= depth == 0 && self.background_agents_per_chat > 0;
         agent.caps = Some(caps);
+        let over = |l: &[String]| {
+            l.len() > MAX_DENIED_NAMES || l.iter().any(|n| n.len() > MAX_DENIED_NAME)
+        };
+        for (list_over, tool) in [
+            (over(&agent.deny_skills), harness_tools::skills::NAME),
+            (over(&agent.deny_mcp_servers), harness_core::agent::MCP_ALL),
+        ] {
+            if list_over && !agent.deny_tools.iter().any(|t| t == tool) {
+                agent.deny_tools.push(tool.into());
+            }
+        }
         for d in &mut agent.delegates {
             self.bound_at(d, depth + 1);
         }
     }
 }
+
+/// Names one spec's `deny_skills` or `deny_mcp_servers` may hold on this
+/// node (X.34; the master sends at most 200 Assigned items a workspace).
+pub const MAX_DENIED_NAMES: usize = 1000;
+/// Bytes of one name in those lists (a skill's is at most 64, a server's
+/// 32).
+pub const MAX_DENIED_NAME: usize = 128;
 
 impl Default for NodePolicy {
     fn default() -> Self {
@@ -1408,6 +1429,35 @@ mod tests {
         let one = p(&["mcp__github__drop"]);
         assert!(one.denies("mcp__github__drop") && !one.denies("mcp__github__list"));
         assert!(p(&["bash"]).denies("bash") && !p(&["bash"]).denies("mcp__bash__x"));
+    }
+
+    /// Review of PR 147 (L5): deny lists over the node's caps withhold the
+    /// whole tool from that spec, a sub-agent's too; within them nothing
+    /// changes; nothing is cut.
+    #[test]
+    fn oversized_deny_lists_withhold_the_whole_tool() {
+        let l = LimitsPolicy::default();
+        let base: harness_core::agent::AgentSpec = serde_json::from_value(serde_json::json!({
+            "agent_id": "a", "name": "A", "system_prompt": "", "tools": "all", "prompt_hash": "h"
+        }))
+        .unwrap();
+        let many: Vec<String> = (0..=MAX_DENIED_NAMES).map(|i| format!("s{i}")).collect();
+        let mut top = base.clone();
+        top.deny_skills = many.clone();
+        let mut child = base.clone();
+        child.agent_id = "c".into();
+        child.deny_mcp_servers = vec!["x".repeat(MAX_DENIED_NAME + 1)];
+        top.delegates = vec![child];
+        let got = l.bound_delegation(top);
+        assert!(!got.allows_tool("skill") && got.allows_mcp());
+        assert_eq!(got.deny_skills.len(), many.len(), "nothing cut");
+        let c = &got.delegates[0];
+        assert!(!c.allows_mcp() && c.allows_tool("skill"));
+        let mut fine = base.clone();
+        fine.deny_skills = (0..MAX_DENIED_NAMES).map(|i| format!("s{i}")).collect();
+        fine.deny_mcp_servers = vec!["x".repeat(MAX_DENIED_NAME)];
+        let got = l.bound_delegation(fine);
+        assert!(got.allows_tool("skill") && got.allows_mcp() && got.deny_tools.is_empty());
     }
 
     #[test]

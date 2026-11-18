@@ -800,6 +800,38 @@ async fn a_withheld_skill_leaves_the_list_the_tool_the_slash_and_the_shell() {
     );
     let out = SkillTool.run(&ctx, json!({"name": "notes"})).await;
     assert!(out.ok, "{}", out.output);
+    // Review of PR 147 (M1): a second root with its own `deploy` (not used:
+    // the first root's wins) and another file is not granted whole once
+    // anything is withheld; only the kept skills' own folders are.
+    let second = t.base.join("second/skills");
+    put(
+        &second.join("deploy/SKILL.md"),
+        skill_md("deploy", "Other.", "second deploy"),
+    );
+    put(
+        &second.join("other/SKILL.md"),
+        skill_md("other", "Other.", "o"),
+    );
+    put(&second.join("loose.txt"), "not a skill");
+    let mut two = roots(&t, &t.repo);
+    two.insert(1, node_root(&second));
+    let mut c = skills::discover(&two, &[]).catalogue;
+    let second = second.canonicalize().unwrap();
+    assert!(c.read.contains(&second), "{:?}", c.read);
+    skills::withhold(&mut c, &["deploy".to_string()]);
+    for leak in [
+        second.join("deploy/SKILL.md"),
+        second.join("loose.txt"),
+        root.join("deploy/SKILL.md"),
+    ] {
+        assert!(
+            !c.read.iter().any(|p| leak.starts_with(p)),
+            "{leak:?} granted: {:?}",
+            c.read
+        );
+    }
+    assert!(c.read.contains(&second.join("other")), "{:?}", c.read);
+    assert!(c.read.contains(&root.join("notes")), "{:?}", c.read);
     // Nothing denied: nothing changes.
     let mut same = skills::discover(&roots(&t, &t.repo), &[]).catalogue;
     let before = same.clone();

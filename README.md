@@ -2850,8 +2850,10 @@ adds anything: a node runs only what its `node.toml` has, and its
 one skill or server, so there an agent denied any skill gets no skills, and
 one denied any connector gets no connectors; the screen names such nodes.
 Deleting an agent takes it off every list (an agent made later with its id
-starts with nothing Assigned to it). A node's list is read when it connects:
-restart the node (or let it reconnect) after adding a skill or server.
+starts with nothing Assigned to it). A node reads its list once, when it
+starts: restart the node after adding a skill or server (until then the new
+one is usable, Shared, but not listed). If the settings cannot be read, the
+turn gets no skills and no connectors rather than all of them.
 **Limits:** 200 Assigned items per workspace, 100 agents per item; a node
 names at most 300 skills and 64 servers (64 KiB of names and descriptions,
 descriptions cut to 200 characters), and the screen says how many more a
@@ -2860,8 +2862,13 @@ node has.
 **What it does not do (yet):** text of a skill or connector the agent was
 allowed earlier stays in the chat's history when another agent takes the
 next turn; in a `host` chat the shell reads whatever the node's user can,
-so a withheld skill's files are not hidden there; a repository's skill files
-stay readable as repository files. Adding a skill on the master, custom
+so a withheld skill's files are not hidden there, and neither are they in
+any chat when the skill folder lies under a system folder every sandboxed
+shell reads (`/usr`, `/etc`, `/opt`): keep `[skills] roots` in a home
+folder. A repository's skill files stay readable as repository files. A
+change of assignment reaches a background sub-agent that is already running,
+and a turn that only picks up messages you queued, one turn late. Chats made
+outside any workspace (through the API token without one) are not narrowed. Adding a skill on the master, custom
 connectors and sub-agents with connectors come later.
 
 ## What goes with each message

@@ -624,9 +624,11 @@ pub fn withheld_line(n: &str) -> String {
 /// turn's agent may not use them in this workspace (`AgentSpec::
 /// deny_skills`). By name, whatever their origin. They leave the list, the
 /// tool and `/name` (named in `withheld`, so both can say why), and the
-/// shell's read-only grants: a node root that holds one is replaced by the
-/// folders of the kept skills in it, and no grant that holds a withheld
-/// skill's folder stays.
+/// shell's read-only grants: once anything is withheld, the shell is granted
+/// the folder of each kept node skill and never a whole root, so nothing
+/// else lying in a root (a same-named copy discovery did not use, a refused
+/// folder, a withheld skill) is granted either, and no grant that holds a
+/// withheld skill's folder stays.
 pub fn withhold(c: &mut Catalogue, denied: &[String]) {
     if denied.is_empty() {
         return;
@@ -640,15 +642,9 @@ pub fn withhold(c: &mut Catalogue, denied: &[String]) {
     }
     c.withheld = out.iter().map(|s| s.name.clone()).collect();
     let mut read: Vec<PathBuf> = Vec::new();
-    for p in std::mem::take(&mut c.read) {
-        if out.iter().any(|s| s.dir.starts_with(&p)) {
-            for s in c.skills.iter().filter(|s| s.origin == SkillOrigin::Node) {
-                if s.dir.starts_with(&p) && !read.contains(&s.dir) {
-                    read.push(s.dir.clone());
-                }
-            }
-        } else if !read.contains(&p) {
-            read.push(p);
+    for s in c.skills.iter().filter(|s| s.origin == SkillOrigin::Node) {
+        if !read.contains(&s.dir) {
+            read.push(s.dir.clone());
         }
     }
     read.retain(|p| !out.iter().any(|s| s.dir.starts_with(p)));

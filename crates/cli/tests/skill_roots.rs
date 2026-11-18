@@ -164,3 +164,61 @@ async fn an_agent_without_the_tool_gets_no_such_bind() {
     assert!(r.output.contains("done"), "{}", r.output);
     assert!(!r.output.contains("SKILL-SCRIPT-RAN"), "{}", r.output);
 }
+
+/// X.34 (PLAN.md T80; review of PR 147, M1): with a skill withheld from the
+/// turn's agent, the real shell reads the kept skill's files and none of
+/// the withheld one's, nor anything else lying in the root.
+#[tokio::test]
+async fn a_withheld_skill_is_not_readable_from_the_shell() {
+    let f = fixture();
+    let Some(sb) = f.sandbox() else { return };
+    std::fs::create_dir_all(f.real.join("deploy")).unwrap();
+    std::fs::write(
+        f.real.join("deploy/SKILL.md"),
+        "---\nname: deploy\ndescription: Ship\n---\nDEPLOY-SECRET-STEPS\n",
+    )
+    .unwrap();
+    std::fs::write(f.real.join("loose.txt"), "LOOSE-FILE\n").unwrap();
+    // A second root with its own `deploy`, which discovery does not use
+    // (the first root's wins).
+    let second = f.real.parent().unwrap().join("second");
+    std::fs::create_dir_all(second.join("deploy")).unwrap();
+    std::fs::write(
+        second.join("deploy/SKILL.md"),
+        "---\nname: deploy\ndescription: Ship\n---\nSECOND-DEPLOY-STEPS\n",
+    )
+    .unwrap();
+    let mut c = skills::discover(
+        &[
+            Root {
+                path: f.root.clone(),
+                origin: SkillOrigin::Node,
+                bound: None,
+            },
+            Root {
+                path: second.clone(),
+                origin: SkillOrigin::Node,
+                bound: None,
+            },
+        ],
+        std::slice::from_ref(&f.data),
+    )
+    .catalogue;
+    skills::withhold(&mut c, &["deploy".to_string()]);
+    assert_eq!(c.read, [f.real.join("hello")]);
+    let ctx = f.ctx(sb, Some(c));
+    let r = Bash
+        .run(
+            &ctx,
+            json!({ "command": format!(
+                "cat {0}/hello/SKILL.md; cat {0}/deploy/SKILL.md; cat {0}/loose.txt; cat {1}/deploy/SKILL.md",
+                f.real.display(),
+                second.display()
+            ) }),
+        )
+        .await;
+    assert!(!r.output.contains("SECOND-DEPLOY-STEPS"), "{}", r.output);
+    assert!(r.output.contains("Run scripts/hi.sh."), "{}", r.output);
+    assert!(!r.output.contains("DEPLOY-SECRET-STEPS"), "{}", r.output);
+    assert!(!r.output.contains("LOOSE-FILE"), "{}", r.output);
+}

@@ -253,8 +253,10 @@ async fn only_node_toml_servers_run_and_a_call_is_asked_about() {
         "tools": ["mcp", "mcp__evil__echo"],
     }))
     .unwrap();
-    let sid = n.create(Some(agent)).await;
-    let log = n.run(sid, SCRIPT).await;
+    // Where turns read it: with the prompt (review of PR 147: at Create
+    // only, the spec never took effect).
+    let sid = n.create(Some(agent.clone())).await;
+    let log = n.run_as(sid, SCRIPT, Some(agent)).await;
     let out = outputs(&log);
     assert_eq!(out.len(), 3, "{out:?}");
     assert_eq!(out[0], (true, "hello from mcp".to_string()));

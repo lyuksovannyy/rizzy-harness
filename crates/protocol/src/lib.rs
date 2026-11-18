@@ -1,5 +1,9 @@
 //! Master <-> node messages. PLAN.md §3. JSON, `{"type": "..."}`-tagged.
-//! Changes must be additive within a major `PROTOCOL_VERSION`.
+//! Changes must be additive within a major `PROTOCOL_VERSION`. Before the
+//! first tagged release that is not yet held to (no compatibility code):
+//! `node.plugins` (X.34) is the first message a node sends unasked that an
+//! older master does not know, and such a master drops the link on it as
+//! a bad frame; master and nodes are updated together until the tag.
 
 use harness_core::agent::AgentSpec;
 use harness_core::event::Profile;
@@ -597,10 +601,10 @@ pub enum NodeToMaster {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
-    /// What the node has for the Plugins screen (X.34), sent after
-    /// `node.hello`. The master keeps the latest per link (bounded,
-    /// [`NodePlugins::bounded`]) and takes at most one in
-    /// `PLUGINS_EVERY`; it names nothing a node may run.
+    /// What the node has for the Plugins screen (X.34), sent unasked after
+    /// `node.hello` once the node has read it. The master keeps the first
+    /// one of each link, bounded ([`NodePlugins::bounded`]), and ignores a
+    /// second on the same link; it names nothing a node may run.
     #[serde(rename = "node.plugins")]
     Plugins { plugins: NodePlugins },
     /// The answer to `project.create` (pull only: never sent unasked): the
@@ -1023,9 +1027,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// `project.create` carries a display name only (T77): its wire shape,
-    /// never acked, and a place sent beside the name (`path`, `dir`, `cwd`)
-    /// is dropped by the parse, so it cannot reach the node's handler.
     /// X.34 (PLAN.md T80): whatever a node sends, the master keeps names
     /// by the node's own rules, each once, one clean description line, and
     /// at most the caps, counting the rest; the message names no path,
@@ -1106,6 +1107,9 @@ mod tests {
         );
     }
 
+    /// `project.create` carries a display name only (T77): its wire shape,
+    /// never acked, and a place sent beside the name (`path`, `dir`, `cwd`)
+    /// is dropped by the parse, so it cannot reach the node's handler.
     #[test]
     fn project_create_carries_a_name_only() {
         let m = MasterToNode::ProjectCreate {
