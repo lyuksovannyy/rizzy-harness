@@ -2,8 +2,9 @@
 //! foreground sub-agent whose OWN agent may use MCP is offered its chat's
 //! servers, the same table and processes, started in the chat's folder
 //! whoever starts them; one whose switch is off, a denied server, the
-//! node's `denied_tools`, a read-only agent, plan mode and a background
-//! run get none. Calls are asked about in the sub-agent's own chat as the
+//! node's `denied_tools`, a read-only agent and plan mode get none. A
+//! background run (X.24) follows its own switch too (owner, 2026-11-18);
+//! a person's message or a retry in a sub-agent's chat gets none. Calls are asked about in the sub-agent's own chat as the
 //! parent's are; a stop and a deletion leave nothing running; parallel
 //! sub-agents get their own answers; a sub-agent's turn has the chat's
 //! caps. Unconfined (no bubblewrap), with the scripted agent; the
@@ -90,9 +91,57 @@ fn git(dir: &Path, args: &[&str]) {
     assert!(ok, "git {args:?}");
 }
 
+/// A second server, `put`, for the tests that need a server to change the
+/// chat's folder: its one tool `put` writes `text` to `path` where the
+/// server runs, after the file `gate` exists (if given) and `ms` more
+/// milliseconds, each call from a thread of its own; it appends
+/// "started <pid>" to the file its `--started` names.
+const PUT: &str = r#"
+import json, os, sys, threading, time
+args = sys.argv[1:]
+if "--started" in args:
+    with open(args[args.index("--started") + 1], "a") as f:
+        f.write("started %d\n" % os.getpid())
+LOCK = threading.Lock()
+def send(m):
+    with LOCK:
+        sys.stdout.write(json.dumps(m) + "\n"); sys.stdout.flush()
+def work(i, a):
+    gate = a.get("gate")
+    while gate and not os.path.exists(gate):
+        time.sleep(0.02)
+    time.sleep(int(a.get("ms", 0)) / 1000.0)
+    with open(os.path.join(os.getcwd(), a["path"]), "w") as f:
+        f.write(a.get("text", ""))
+    send({"jsonrpc": "2.0", "id": i, "result": {"content": [{"type": "text", "text": "wrote %s" % a["path"]}]}})
+for line in sys.stdin:
+    try:
+        m = json.loads(line)
+    except ValueError:
+        continue
+    if "id" not in m or "method" not in m:
+        continue
+    i, meth, p = m["id"], m["method"], m.get("params") or {}
+    if meth == "initialize":
+        send({"jsonrpc": "2.0", "id": i, "result": {"protocolVersion": p.get("protocolVersion", "2025-06-18"), "capabilities": {"tools": {}}, "serverInfo": {"name": "put", "version": "0"}}})
+    elif meth == "tools/list":
+        props = {k: {"type": "string"} for k in ("path", "text", "gate")}
+        props["ms"] = {"type": "integer"}
+        send({"jsonrpc": "2.0", "id": i, "result": {"tools": [{"name": "put", "description": "Write a file.", "inputSchema": {"type": "object", "properties": props}}]}})
+    elif meth == "tools/call":
+        threading.Thread(target=work, args=(i, p.get("arguments") or {}), daemon=True).start()
+    else:
+        send({"jsonrpc": "2.0", "id": i, "error": {"code": -32601, "message": "no"}})
+"#;
+
 /// A node with the fake server `fake` (more arguments `extra`) in its
 /// node.toml, a committed repository `ws`, and `policy` changed by `edit`.
 async fn node_with(extra: &[&str], edit: impl FnOnce(&mut NodePolicy)) -> Node {
+    node_full(extra, false, edit).await
+}
+
+/// [`node_with`], and with `put` the [`PUT`] server too.
+async fn node_full(extra: &[&str], put: bool, edit: impl FnOnce(&mut NodePolicy)) -> Node {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();
     let ws = root.join("ws");
@@ -106,6 +155,22 @@ async fn node_with(extra: &[&str], edit: impl FnOnce(&mut NodePolicy)) -> Node {
     args.extend_from_slice(extra);
     let mut servers = BTreeMap::new();
     servers.insert("fake".to_string(), ServerConfig::new("python3", &args));
+    if put {
+        let script = root.join("put_mcp.py");
+        std::fs::write(&script, PUT).unwrap();
+        let started = root.join("started-put");
+        servers.insert(
+            "put".to_string(),
+            ServerConfig::new(
+                "python3",
+                &[
+                    script.to_str().unwrap(),
+                    "--started",
+                    started.to_str().unwrap(),
+                ],
+            ),
+        );
+    }
     let mut policy = NodePolicy {
         workspace_roots: vec![root.clone()],
         max_approval_mode: ApprovalMode::Auto,
@@ -770,40 +835,762 @@ async fn a_sub_agent_gets_the_chats_caps() {
     );
 }
 
-/// A background sub-agent (X.24) gets no server: its calls could land in
-/// the chat's folder between the chat's turns, where no checkpoint covers
-/// them (PLAN.md T72's residual), so Undo could not take them back.
-#[tokio::test]
-async fn a_background_sub_agent_gets_no_server() {
-    let mut n = node().await;
-    let sid = n.create(ApprovalMode::Auto).await;
-    let task = script(json!([call("mcp__fake__echo", json!({"text": "x"}))]));
-    let mut l = lead(&["read"], vec![helper(&["mcp"], json!({}))]);
+/// A lead that may delegate in the background (X.24), with `tools`.
+fn bg_lead(tools: &[&str], delegates: Vec<AgentSpec>) -> AgentSpec {
+    let mut l = lead(tools, delegates);
     l.caps = Some(harness_core::agent::DelegateCaps {
         max_subagents: 4,
         max_tokens: 200_000,
         background: true,
     });
+    l
+}
+
+/// The lead's step: `task` to `agent` in the background.
+fn bg_delegate(agent: &str, task: &str) -> Value {
+    call(
+        "delegate",
+        json!({"agent": agent, "task": task, "background": true}),
+    )
+}
+
+/// A `put` call through the [`PUT`] server.
+fn put(path: &str, text: &str, gate: Option<&Path>) -> Value {
+    let mut input = json!({"path": path, "text": text});
+    if let Some(g) = gate {
+        input["gate"] = json!(g.display().to_string());
+    }
+    call("mcp__put__put", input)
+}
+
+/// A background child that a non-writing helper is: it works in the chat's
+/// folder and its only tool that changes things is MCP.
+fn mcp_helper() -> AgentSpec {
+    spec("helper", &["read", "mcp"], vec![], json!({}))
+}
+
+impl Node {
+    /// Start `steps` as the lead's turn and wait for the chat's
+    /// `background_ended` (cards allowed meanwhile).
+    async fn background(&mut self, sid: SessionId, steps: Value, l: AgentSpec) {
+        self.turn(sid, &script(steps), l).await;
+        let own = self.results(sid);
+        assert!(
+            own.iter().any(|r| r.0 == "delegate" && r.1),
+            "started in the background: {own:#?}"
+        );
+        self.until(|e| e.session_id == sid && e.kind == "background_ended")
+            .await;
+    }
+
+    /// [`Self::until`], or at once if `pred` held for an event seen.
+    async fn seen_or_until(&mut self, pred: impl Fn(&RawEvent) -> bool) {
+        if !self.seen.iter().any(&pred) {
+            self.until(pred).await;
+        }
+    }
+
+    fn started_put(&self) -> Vec<i32> {
+        pids(&self.root().join("started-put"))
+    }
+
+    fn read_ws(&self, f: &str) -> Option<String> {
+        std::fs::read_to_string(self.ws.join(f)).ok()
+    }
+
+    /// The position in `seen` of the first event of `sid` matching `pred`.
+    fn pos(&self, sid: SessionId, pred: impl Fn(&RawEvent) -> bool) -> usize {
+        self.seen
+            .iter()
+            .position(|e| e.session_id == sid && pred(e))
+            .expect("the event")
+    }
+
+    /// Undo `turn` of `sid`.
+    async fn undo(&mut self, sid: SessionId, turn: &str) -> Result<(), String> {
+        self.link
+            .to_node
+            .try_send(MasterToNode::Restore {
+                req_id: "r".into(),
+                session_id: sid,
+                turn_id: turn.into(),
+                force: false,
+                rewind: false,
+            })
+            .unwrap();
+        self.ack().await
+    }
+
+    /// The turn ids of `sid`, in order.
+    fn turns(&self, sid: SessionId) -> Vec<String> {
+        self.seen
+            .iter()
+            .filter(|e| e.session_id == sid)
+            .filter_map(|e| match e.typed() {
+                Ok(EventKind::TurnStarted(t)) => Some(t.turn_id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The files of `turn`'s `after` checkpoint.
+    fn changed_by(&self, sid: SessionId, turn: &str) -> Vec<String> {
+        self.seen
+            .iter()
+            .filter(|e| e.session_id == sid)
+            .find_map(|e| match e.typed() {
+                Ok(EventKind::Checkpoint(c))
+                    if c.turn_id == turn
+                        && c.phase == harness_core::event::CheckpointPhase::After =>
+                {
+                    Some(c.files)
+                }
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// Owner's decision (2026-11-18, X.34 step C): "sub-agents allowed to use
+/// mcp depending on their own permissions". A background sub-agent (X.24)
+/// whose own switch is on uses its chat's server, in the chat's folder
+/// (never its own copy), and its call is asked about in its own chat with
+/// the card naming the server, as a foreground one's.
+#[tokio::test]
+async fn a_background_sub_agent_with_its_switch_on_uses_the_chats_server_in_the_chats_folder() {
+    let mut n = node().await;
+    let sid = n.create(ApprovalMode::Ask).await;
+    let task = script(json!([call("mcp__fake__cwd", json!({}))]));
+    n.background(
+        sid,
+        json!([bg_delegate("helper", &task)]),
+        bg_lead(&["read"], vec![helper(&["mcp"], json!({}))]),
+    )
+    .await;
+    let res = n.child_results(sid);
+    assert_eq!(res.len(), 1, "{res:#?}");
+    let child = res[0].0;
+    let ws = n.ws.canonicalize().unwrap();
+    assert_eq!(
+        (res[0].2, res[0].3.clone()),
+        (true, format!("cwd={}", ws.display())),
+        "{res:#?}"
+    );
+    let cwd_of_child = n
+        .seen
+        .iter()
+        .find_map(|e| match e.typed() {
+            Ok(EventKind::SessionCreated(c)) if e.session_id == child => Some(c.cwd),
+            _ => None,
+        })
+        .unwrap();
+    assert_ne!(Path::new(&cwd_of_child), ws, "the helper had its own copy");
+    let asked = n.asked();
+    assert!(
+        asked.iter().any(|(s, t, r)| *s == child
+            && t == "mcp__fake__cwd"
+            && r.contains("MCP server")
+            && r.contains("server `fake`, its tool `cwd`")),
+        "{asked:#?}"
+    );
+    assert_eq!(n.started().len(), 1);
+}
+
+/// Abuse: a background sub-agent whose own switch is off gets nothing (the
+/// lead's switch is on), nor does one the server is denied to (its own
+/// `deny_mcp_servers`) or whose node denies it (`denied_tools`): no
+/// process starts for it.
+#[tokio::test]
+async fn a_background_sub_agent_whose_switch_is_off_or_server_denied_gets_nothing() {
+    let task = script(json!([call("mcp__fake__echo", json!({"text": "x"}))]));
+    for (label, h, denied) in [
+        ("switch off", helper(&[], json!({})), None),
+        (
+            "denied to it",
+            helper(&["mcp"], json!({"deny_mcp_servers": ["fake"]})),
+            None,
+        ),
+        (
+            "node denies",
+            helper(&["mcp"], json!({})),
+            Some("mcp__fake"),
+        ),
+    ] {
+        let mut n = node_with(&[], |p| {
+            if let Some(d) = denied {
+                p.denied_tools = vec![d.into()];
+            }
+        })
+        .await;
+        let sid = n.create(ApprovalMode::Auto).await;
+        n.background(
+            sid,
+            json!([bg_delegate("helper", &task)]),
+            bg_lead(&["read"], vec![h]),
+        )
+        .await;
+        let res = n.child_results(sid);
+        assert_eq!(res.len(), 1, "{label}: {res:#?}");
+        assert!(!res[0].2 && res[0].3 != "x", "{label}: {res:#?}");
+        assert!(n.started().is_empty(), "{label}: a server started");
+    }
+    // The lead's own switch gives a background sub-agent whose switch is
+    // off nothing either (the lead's turn starts the server).
+    let mut n = node().await;
+    let sid = n.create(ApprovalMode::Auto).await;
+    n.background(
+        sid,
+        json!([
+            call("mcp__fake__echo", json!({"text": "lead"})),
+            bg_delegate("helper", &task)
+        ]),
+        bg_lead(&["read", "mcp"], vec![helper(&[], json!({}))]),
+    )
+    .await;
+    assert_eq!(n.results(sid)[0].2, "lead");
+    let res = n.child_results(sid);
+    assert!(
+        res.len() == 1 && !res[0].2 && unknown(&res[0].3, "mcp__fake__echo"),
+        "{res:#?}"
+    );
+}
+
+/// The ask a background sub-agent's MCP call gets is the one a foreground
+/// sub-agent's call of the same tool gets in the same mode: the same card
+/// (wording, server named, "for this turn" offered, "for this chat" not),
+/// or none at all where neither is asked about.
+#[tokio::test]
+async fn a_background_sub_agents_call_is_asked_about_as_a_foreground_ones() {
+    type Card = (String, bool, bool);
+    let cards = |n: &Node, child: SessionId| -> Vec<Card> {
+        n.seen
+            .iter()
+            .filter(|e| e.session_id == child)
+            .filter_map(|e| match e.typed() {
+                Ok(EventKind::ApprovalRequested(a)) => Some((a.reason, a.turn_allow, a.chat_allow)),
+                _ => None,
+            })
+            .collect()
+    };
+    let task = script(json!([call("mcp__fake__echo", json!({"text": "x"}))]));
+    for mode in [
+        ApprovalMode::AskAll,
+        ApprovalMode::Ask,
+        ApprovalMode::AcceptEdits,
+        ApprovalMode::Auto,
+    ] {
+        let mut n = node().await;
+        let sid = n.create(mode).await;
+        n.turn(
+            sid,
+            &format!("delegate: helper={task}"),
+            bg_lead(&["read"], vec![helper(&["mcp"], json!({}))]),
+        )
+        .await;
+        let fg = n.children(sid)[0];
+        n.background(
+            sid,
+            json!([bg_delegate("helper", &task)]),
+            bg_lead(&["read"], vec![helper(&["mcp"], json!({}))]),
+        )
+        .await;
+        let bg = n.children(sid)[1];
+        let res = n.child_results(sid);
+        assert!(res.iter().all(|r| r.2 && r.3 == "x"), "{mode:?}: {res:#?}");
+        let (f, b) = (cards(&n, fg), cards(&n, bg));
+        assert_eq!(f, b, "{mode:?}");
+        if mode == ApprovalMode::Auto {
+            assert!(f.is_empty(), "{f:#?}");
+        } else {
+            assert_eq!(f.len(), 1, "{mode:?}: {f:#?}");
+            assert!(
+                f[0].0.contains("server `fake`, its tool `echo`") && f[0].1 && !f[0].2,
+                "{mode:?}: {f:#?}"
+            );
+        }
+    }
+}
+
+/// Abuse: a person's message and a Retry in a background sub-agent's chat
+/// while its run goes on are refused (not run beside it with its marker);
+/// after the run, its chat's next turn is a turn of its own: no server.
+/// (A callback never runs in a sub-agent's chat: it has no background
+/// table and takes no callbacks.)
+#[tokio::test]
+async fn a_person_or_a_retry_in_a_background_sub_agents_chat_during_its_run_gets_no_server() {
+    let mut n = node().await;
+    let sid = n.create(ApprovalMode::Auto).await;
+    let task = script(json!([call(
+        "mcp__fake__slow",
+        json!({"text": "bg", "ms": 2500})
+    )]));
+    n.turn(
+        sid,
+        &script(json!([bg_delegate("helper", &task)])),
+        bg_lead(&["read"], vec![mcp_helper()]),
+    )
+    .await;
+    n.seen_or_until(|e| {
+        e.session_id != sid
+            && matches!(e.typed(), Ok(EventKind::ToolCallStarted(c)) if c.tool == "mcp__fake__slow")
+    })
+    .await;
+    let child = n.children(sid)[0];
+    let during = n
+        .person_turn_in(
+            child,
+            &script(json!([call("mcp__fake__echo", json!({"text": "during"}))])),
+            mcp_helper(),
+        )
+        .await;
+    assert!(
+        during
+            .as_ref()
+            .is_err_and(|e| e.contains("a sub-agent's chat takes no message")),
+        "{during:?}"
+    );
+    let turn = n.turns(child)[0].clone();
+    n.link
+        .to_node
+        .try_send(MasterToNode::Retry {
+            req_id: "rt".into(),
+            session_id: child,
+            turn_id: turn,
+            agent: Some(mcp_helper()),
+            savings: None,
+            context: None,
+            agent_named: false,
+            owner: None,
+        })
+        .unwrap();
+    assert!(n.ack().await.is_err(), "a retry ran in a sub-agent's chat");
+    n.until(|e| e.session_id == sid && e.kind == "background_ended")
+        .await;
+    let res = n.child_results(sid);
+    assert_eq!((res[0].2, res[0].3.as_str()), (true, "bg"), "{res:#?}");
+    // Its marker went with its run: the next turn there is the person's.
+    let after = n
+        .person_turn_in(
+            child,
+            &script(json!([call("mcp__fake__echo", json!({"text": "after"}))])),
+            mcp_helper(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !after.1 && unknown(&after.2, "mcp__fake__echo"),
+        "{after:?}"
+    );
+}
+
+/// A background follow-up (`delegate` with `session` and `background`) is
+/// a background run the node started: it gets the server too; the person's
+/// turn in that chat after it does not.
+#[tokio::test]
+async fn a_background_follow_up_gets_the_server() {
+    let mut n = node().await;
+    let sid = n.create(ApprovalMode::Auto).await;
+    let first = script(json!([call("mcp__fake__echo", json!({"text": "first"}))]));
+    n.background(
+        sid,
+        json!([bg_delegate("helper", &first)]),
+        bg_lead(&["read"], vec![mcp_helper()]),
+    )
+    .await;
+    let child = n.children(sid)[0];
+    let again = script(json!([call("mcp__fake__echo", json!({"text": "again"}))]));
+    let from = n.seen.len();
     n.turn(
         sid,
         &script(json!([call(
             "delegate",
-            json!({"agent": "helper", "task": task, "background": true})
+            json!({"agent": "helper", "session": child.to_string(), "task": again, "background": true})
         )])),
-        l,
+        bg_lead(&["read"], vec![mcp_helper()]),
     )
     .await;
-    let own = n.results(sid);
-    assert!(own[0].1, "started in the background: {own:#?}");
+    if !n.seen[from..]
+        .iter()
+        .any(|e| e.session_id == sid && e.kind == "background_ended")
+    {
+        n.until(|e| e.session_id == sid && e.kind == "background_ended")
+            .await;
+    }
+    let res = n.results(child);
+    let outs: Vec<(bool, &str)> = res.iter().map(|r| (r.1, r.2.as_str())).collect();
+    assert_eq!(outs, vec![(true, "first"), (true, "again")], "{res:#?}");
+    assert_eq!(n.started().len(), 1);
+}
+
+/// Abuse: plan mode. A plan-mode chat starts no background sub-agent with
+/// Connectors (it changes things); a chat entering plan mode while its
+/// background sub-agent works has that sub-agent's next server call
+/// refused.
+#[tokio::test]
+async fn plan_mode_holds_for_a_background_sub_agents_server_calls() {
+    let mut n = node().await;
+    let sid = n.create(ApprovalMode::Plan).await;
+    let task = script(json!([call("mcp__fake__echo", json!({"text": "x"}))]));
+    n.turn(
+        sid,
+        &script(json!([bg_delegate("helper", &task)])),
+        bg_lead(&["read"], vec![mcp_helper()]),
+    )
+    .await;
+    assert!(
+        n.child_results(sid).is_empty(),
+        "{:#?}",
+        n.child_results(sid)
+    );
+    assert!(n.results(sid).iter().all(|r| !r.1), "{:#?}", n.results(sid));
+    assert!(n.started().is_empty());
+
+    let mut n = node().await;
+    let sid = n.create(ApprovalMode::Auto).await;
+    let task = script(json!([
+        call("mcp__fake__slow", json!({"text": "first", "ms": 1500})),
+        call("mcp__fake__echo", json!({"text": "after plan"})),
+    ]));
+    n.turn(
+        sid,
+        &script(json!([bg_delegate("helper", &task)])),
+        bg_lead(&["read"], vec![mcp_helper()]),
+    )
+    .await;
+    n.seen_or_until(|e| {
+        e.session_id != sid
+            && matches!(e.typed(), Ok(EventKind::ToolCallStarted(c)) if c.tool == "mcp__fake__slow")
+    })
+    .await;
+    n.link
+        .to_node
+        .try_send(MasterToNode::SetApprovalMode {
+            lowering: true,
+            req_id: "plan".into(),
+            session_id: sid,
+            mode: ApprovalMode::Plan,
+        })
+        .unwrap();
     n.until(|e| e.session_id == sid && e.kind == "background_ended")
         .await;
     let res = n.child_results(sid);
-    assert_eq!(res.len(), 1, "{res:#?}");
+    assert_eq!(res.len(), 2, "{res:#?}");
+    assert_eq!((res[0].2, res[0].3.as_str()), (true, "first"), "{res:#?}");
+    assert!(!res[1].2 && !res[1].3.contains("after plan"), "{res:#?}");
+}
+
+/// Abuse: the chat is stopped (Stop all) or deleted while a background
+/// sub-agent's call is in flight. A stop ends the call and the run (the
+/// chat's server stays until it idles or the chat goes); a deletion kills
+/// the server, so a write it had not made yet never lands.
+#[tokio::test]
+async fn stopping_or_deleting_the_chat_under_a_background_sub_agents_call_leaves_nothing() {
+    // Stop all.
+    let mut n = node().await;
+    let sid = n.create(ApprovalMode::Auto).await;
+    let task = script(json!([call("mcp__fake__hang", json!({}))]));
+    n.turn(
+        sid,
+        &script(json!([bg_delegate("helper", &task)])),
+        bg_lead(&["read"], vec![mcp_helper()]),
+    )
+    .await;
+    n.seen_or_until(|e| {
+        e.session_id != sid
+            && matches!(e.typed(), Ok(EventKind::ToolCallStarted(c)) if c.tool == "mcp__fake__hang")
+    })
+    .await;
+    n.link
+        .to_node
+        .try_send(MasterToNode::StopBackground {
+            req_id: "s".into(),
+            session_id: sid,
+            bg_id: None,
+            by: harness_protocol::StopBackgroundBy::User,
+        })
+        .unwrap();
+    let ended = n
+        .until(|e| e.session_id == sid && e.kind == "background_ended")
+        .await;
     assert!(
-        !res[0].2 && unknown(&res[0].3, "mcp__fake__echo"),
+        matches!(ended.typed(), Ok(EventKind::BackgroundEnded(b)) if b.reason == harness_core::event::BackgroundReason::StoppedByUser),
+        "{ended:?}"
+    );
+    let res = n.child_results(sid);
+    assert_eq!(res.len(), 1, "{res:#?}");
+    assert!(!res[0].2, "the hung call was not ended: {res:#?}");
+    let pid = n.started()[0];
+    assert!(
+        alive(pid),
+        "the chat's server stays until it idles or the chat goes"
+    );
+    n.link
+        .to_node
+        .try_send(MasterToNode::Delete {
+            req_id: "d".into(),
+            session_id: sid,
+        })
+        .unwrap();
+    n.ack().await.unwrap();
+    assert!(gone(pid).await, "the deleted chat's server still runs");
+
+    // Deleted under a call that writes the chat's folder later.
+    let mut n = node_full(&[], true, |_| {}).await;
+    let sid = n.create(ApprovalMode::Auto).await;
+    let gate = n.root().join("late-gate");
+    let task = script(json!([put("late.txt", "late", Some(&gate))]));
+    n.turn(
+        sid,
+        &script(json!([bg_delegate("helper", &task)])),
+        bg_lead(&["read"], vec![mcp_helper()]),
+    )
+    .await;
+    n.seen_or_until(|e| {
+        e.session_id != sid
+            && matches!(e.typed(), Ok(EventKind::ToolCallStarted(c)) if c.tool == "mcp__put__put")
+    })
+    .await;
+    let pid = n.started_put()[0];
+    n.link
+        .to_node
+        .try_send(MasterToNode::Delete {
+            req_id: "d".into(),
+            session_id: sid,
+        })
+        .unwrap();
+    n.ack().await.unwrap();
+    assert!(gone(pid).await, "the deleted chat's server still runs");
+    // The write it was waiting to make can no longer land.
+    std::fs::write(&gate, "").unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        n.read_ws("late.txt"),
+        None,
+        "a write landed after the delete"
+    );
+}
+
+/// The node's stop under a background sub-agent's call in flight leaves
+/// no server process.
+#[tokio::test]
+async fn the_nodes_stop_under_a_background_sub_agents_call_leaves_no_server() {
+    let mut n = node().await;
+    let sid = n.create(ApprovalMode::Auto).await;
+    let task = script(json!([call("mcp__fake__hang", json!({}))]));
+    n.turn(
+        sid,
+        &script(json!([bg_delegate("helper", &task)])),
+        bg_lead(&["read"], vec![mcp_helper()]),
+    )
+    .await;
+    n.seen_or_until(|e| {
+        e.session_id != sid
+            && matches!(e.typed(), Ok(EventKind::ToolCallStarted(c)) if c.tool == "mcp__fake__hang")
+    })
+    .await;
+    let pid = n.started()[0];
+    n._rt.stop(Duration::from_secs(10)).await;
+    assert!(gone(pid).await, "the server outlived the node's stop");
+}
+
+/// A server that dies under a background sub-agent's call is started
+/// again for its next call, as for a foreground one; and a background
+/// sub-agent at its token cap makes no call after it: what it started is
+/// the chat's, gone with the chat.
+#[tokio::test]
+async fn a_background_sub_agents_server_restarts_and_its_token_cap_ends_its_calls() {
+    let mut n = node().await;
+    let sid = n.create(ApprovalMode::Auto).await;
+    let task = script(json!([
+        call("mcp__fake__die", json!({})),
+        call("mcp__fake__echo", json!({"text": "again"})),
+    ]));
+    n.background(
+        sid,
+        json!([bg_delegate("helper", &task)]),
+        bg_lead(&["read"], vec![mcp_helper()]),
+    )
+    .await;
+    let res = n.child_results(sid);
+    assert_eq!(res.len(), 2, "{res:#?}");
+    assert!(!res[0].2, "{res:#?}");
+    assert_eq!((res[1].2, res[1].3.as_str()), (true, "again"), "{res:#?}");
+    assert_eq!(n.started().len(), 2, "started again after the crash");
+
+    // Its token cap: a share so small that its second request is refused.
+    let mut n = node().await;
+    let sid = n.create(ApprovalMode::Auto).await;
+    let task = script(json!([
+        call("mcp__fake__echo", json!({"text": "one"})),
+        call("mcp__fake__echo", json!({"text": "two"})),
+    ]));
+    let mut l = bg_lead(&["read"], vec![mcp_helper()]);
+    l.caps.as_mut().unwrap().max_tokens = 50;
+    l.caps.as_mut().unwrap().max_subagents = 1;
+    n.background(sid, json!([bg_delegate("helper", &task)]), l)
+        .await;
+    let res = n.child_results(sid);
+    assert_eq!((res[0].2, res[0].3.as_str()), (true, "one"), "{res:#?}");
+    // Past its share its next call is not run (only `finish` is offered).
+    assert!(res[1..].iter().all(|r| !r.2 && r.3 != "two"), "{res:#?}");
+    let pid = n.started()[0];
+    n.link
+        .to_node
+        .try_send(MasterToNode::Delete {
+            req_id: "d".into(),
+            session_id: sid,
+        })
+        .unwrap();
+    n.ack().await.unwrap();
+    assert!(gone(pid).await, "the deleted chat's server still runs");
+}
+
+/// Abuse: the chat's caps hold for a background sub-agent's turn as for a
+/// foreground one's.
+#[tokio::test]
+async fn a_background_sub_agent_gets_the_chats_caps() {
+    let mut n = node_with(&["--tools", "45"], |_| {}).await;
+    let sid = n.create(ApprovalMode::Auto).await;
+    let task = script(json!([
+        call("mcp__fake__pid", json!({})),
+        call("mcp__fake__t44", json!({})),
+    ]));
+    n.background(
+        sid,
+        json!([bg_delegate("helper", &task)]),
+        bg_lead(&["read"], vec![mcp_helper()]),
+    )
+    .await;
+    let res = n.child_results(sid);
+    assert_eq!(res.len(), 2, "{res:#?}");
+    assert!(res[0].2, "{res:#?}");
+    assert!(
+        !res[1].2 && unknown(&res[1].3, "mcp__fake__t44"),
         "{res:#?}"
     );
-    assert!(n.started().is_empty());
+    let offered = res[1].3.matches("mcp__fake__").count() - 1;
+    assert!(
+        offered <= harness_tools::mcp::MAX_TOOLS,
+        "{offered}: {}",
+        res[1].3
+    );
+}
+
+/// The accepted leftover (owner, 2026-11-18), case 1: a background
+/// sub-agent changes the chat's folder through a server WHILE the chat's
+/// own next turn runs. The change lies between that turn's before and
+/// after snapshots, so the turn's checkpoint lists it and Undo of that
+/// turn takes it back, although the turn's own agent did not make it.
+#[tokio::test]
+async fn undo_of_the_chats_turn_takes_back_a_background_server_write_made_during_it() {
+    let mut n = node_full(&[], true, |_| {}).await;
+    let sid = n.create(ApprovalMode::Auto).await;
+    let child_gate = n.root().join("child-gate");
+    let own_gate = n.root().join("own-gate");
+    let task = script(json!([put("during.txt", "bg", Some(&child_gate))]));
+    n.turn(
+        sid,
+        &script(json!([bg_delegate("helper", &task)])),
+        bg_lead(&["read"], vec![mcp_helper()]),
+    )
+    .await;
+    // The chat's next turn, held open by its own call until the child wrote.
+    n.prompt(
+        sid,
+        &script(json!([put("own.txt", "lead", Some(&own_gate))])),
+        bg_lead(&["read", "mcp"], vec![]),
+    );
+    n.until(|e| {
+        e.session_id == sid
+            && matches!(e.typed(), Ok(EventKind::ToolCallStarted(c)) if c.tool == "mcp__put__put")
+    })
+    .await;
+    std::fs::write(&child_gate, "").unwrap();
+    let child = n.children(sid)[0];
+    n.until(|e| e.session_id == child && e.kind == "tool_call_finished")
+        .await;
+    std::fs::write(&own_gate, "").unwrap();
+    n.until(|e| e.session_id == sid && e.kind == "turn_ended")
+        .await;
+    if !n
+        .seen
+        .iter()
+        .any(|e| e.session_id == sid && e.kind == "background_ended")
+    {
+        n.until(|e| e.session_id == sid && e.kind == "background_ended")
+            .await;
+    }
+    let turns = n.turns(sid);
+    let second = turns[1].clone();
+    let started = n.pos(
+        sid,
+        |e| matches!(e.typed(), Ok(EventKind::TurnStarted(t)) if t.turn_id == second),
+    );
+    let wrote = n.pos(child, |e| e.kind == "tool_call_finished");
+    let ended = n.pos(sid, |e| {
+        e.kind == "turn_ended" && e.seq > n.seen[started].seq
+    });
+    assert!(
+        started < wrote && wrote < ended,
+        "{started} {wrote} {ended}"
+    );
+    assert_eq!(n.read_ws("during.txt").as_deref(), Some("bg"));
+    let files = n.changed_by(sid, &second);
+    assert!(
+        files.iter().any(|f| f == "during.txt") && files.iter().any(|f| f == "own.txt"),
+        "{files:?}"
+    );
+    n.undo(sid, &second).await.unwrap();
+    assert_eq!(
+        n.read_ws("during.txt"),
+        None,
+        "Undo left the child's change"
+    );
+    assert_eq!(n.read_ws("own.txt"), None);
+}
+
+/// The accepted leftover, case 2: a background sub-agent changes the
+/// chat's folder through a server BETWEEN the chat's turns. No checkpoint
+/// of the chat lists it, and Undo of the turn that started the sub-agent
+/// leaves it in place (it undoes that turn's own change only).
+#[tokio::test]
+async fn undo_never_takes_back_a_background_server_write_made_between_turns() {
+    let mut n = node_full(&[], true, |_| {}).await;
+    let sid = n.create(ApprovalMode::Auto).await;
+    let gate = n.root().join("gate");
+    let task = script(json!([put("between.txt", "bg", Some(&gate))]));
+    let l = bg_lead(&["read", "write"], vec![mcp_helper()]);
+    n.turn(
+        sid,
+        &script(json!([
+            call("write", json!({"path": "own.txt", "content": "lead"})),
+            bg_delegate("helper", &task),
+        ])),
+        l,
+    )
+    .await;
+    // The chat's turn is over; then the sub-agent writes.
+    std::fs::write(&gate, "").unwrap();
+    n.until(|e| e.session_id == sid && e.kind == "background_ended")
+        .await;
+    let child = n.children(sid)[0];
+    let ended = n.pos(sid, |e| e.kind == "turn_ended");
+    let wrote = n.pos(child, |e| e.kind == "tool_call_finished");
+    assert!(ended < wrote, "{ended} {wrote}");
+    assert_eq!(n.read_ws("between.txt").as_deref(), Some("bg"));
+    let first = n.turns(sid)[0].clone();
+    let files = n.changed_by(sid, &first);
+    assert!(
+        files.iter().any(|f| f == "own.txt") && !files.iter().any(|f| f == "between.txt"),
+        "{files:?}"
+    );
+    n.undo(sid, &first).await.unwrap();
+    assert_eq!(n.read_ws("own.txt"), None);
+    assert_eq!(
+        n.read_ws("between.txt").as_deref(),
+        Some("bg"),
+        "a change made between turns is in no checkpoint"
+    );
 }
 
 impl Node {
@@ -909,7 +1696,10 @@ async fn a_person_prompting_a_former_background_sub_agent_gets_no_server() {
         .await
         .unwrap();
     assert!(!last.1 && unknown(&last.2, "mcp__fake__echo"), "{last:?}");
-    assert!(n.started().is_empty());
+    // Its background run itself used the server (owner, 2026-11-18).
+    let bg = n.results(child);
+    assert_eq!((bg[0].1, bg[0].2.as_str()), (true, "bg"), "{bg:#?}");
+    assert_eq!(n.started().len(), 1);
 }
 
 /// HIGH 1: while the chat's own turn runs, a person's turn in a sub-agent's
@@ -955,9 +1745,12 @@ async fn a_person_turn_in_a_sub_agents_chat_beside_the_chats_turn_gets_no_server
     assert_eq!(own.last().unwrap().2, "chat", "{own:#?}");
 }
 
-/// L3 (R4): a foreground grandchild under a background child gets no
-/// server; under a foreground child (R5) it gets the chat's, in the chat's
-/// folder.
+/// L3 (R4), as the owner decided on 2026-11-18: a foreground grandchild is
+/// part of the run of the turn that waits for it, so under a background
+/// child (its run is one the node started for the chat's `delegate` call)
+/// it gets the chat's server in the chat's folder, as under a foreground
+/// child (R5); each by its own switch. A person's turn in the grandchild's
+/// chat afterwards gets none.
 #[tokio::test]
 async fn a_grandchild_follows_every_turn_above_it() {
     let boss = || {
@@ -998,8 +1791,30 @@ async fn a_grandchild_follows_every_turn_above_it() {
         .iter()
         .find(|r| r.1 == "mcp__fake__cwd")
         .expect("the grandchild called");
-    assert!(!g.2 && unknown(&g.3, "mcp__fake__cwd"), "{res:#?}");
-    assert!(n.started().is_empty());
+    let ws = n.ws.canonicalize().unwrap();
+    assert_eq!(
+        (g.2, g.3.clone()),
+        (true, format!("cwd={}", ws.display())),
+        "{res:#?}"
+    );
+    assert_eq!(n.started().len(), 1);
+    let boss_id = n.children(sid)[0];
+    let grandchild = n.children(boss_id)[0];
+    // Refused (it worked in its writing parent's copy, which is gone), or
+    // run without the server.
+    let later = n
+        .person_turn_in(
+            grandchild,
+            &script(json!([call("mcp__fake__echo", json!({"text": "later"}))])),
+            spec("helper", &["read", "mcp"], vec![], json!({})),
+        )
+        .await;
+    if let Ok(later) = later {
+        assert!(
+            !later.1 && unknown(&later.2, "mcp__fake__echo"),
+            "{later:?}"
+        );
+    }
     // Under a foreground child.
     let mut n = node_with(&[], |p| p.limits.max_delegation_depth = 2).await;
     let sid = n.create(ApprovalMode::Auto).await;

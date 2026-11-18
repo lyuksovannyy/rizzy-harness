@@ -2620,8 +2620,9 @@ impl NativeBackend {
         // The chat's MCP servers (X.3), started now if they are not running,
         // in the chat's own folder and confinement (the table's home), for
         // an agent that may use them: the chat's own, or a sub-agent's by
-        // its own switch (X.34 step C; the node hands a foreground
-        // sub-agent its chat's table, a background one none). What did not
+        // its own switch (X.34 step C; the node hands its chat's table to a
+        // run it started for a `delegate` call, foreground or background,
+        // and to no other turn of a sub-agent's chat). What did not
         // start, or was left out, is shown to the person (an `error` item)
         // and told to the model with this turn's context, once each.
         let (mcp_tools, mcp_notes) =
