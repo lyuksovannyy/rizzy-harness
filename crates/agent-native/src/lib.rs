@@ -2618,23 +2618,52 @@ impl NativeBackend {
             };
         }
         // The chat's MCP servers (X.3), started now if they are not running,
-        // in this chat's confinement; never for a sub-agent, nor for an
-        // agent that may use none. What did not start, or was left out, is
-        // shown to the person (an `error` item) and told to the model with
-        // this turn's context, once each.
+        // in the chat's own folder and confinement (the table's home), for
+        // an agent that may use them: the chat's own, or a sub-agent's by
+        // its own switch (X.34 step C; the node hands a foreground
+        // sub-agent its chat's table, a background one none). What did not
+        // start, or was left out, is shown to the person (an `error` item)
+        // and told to the model with this turn's context, once each.
         let (mcp_tools, mcp_notes) = match host
             .mcp()
             .and_then(|m| m.downcast::<harness_tools::mcp::SessionMcp>().ok())
         {
             // Not in plan mode (X.7): a server's tools have effects only it
-            // knows, so none is started or offered then.
-            Some(m) if !child && agent.is_none_or(|a| a.allows_mcp()) && !is_plan(host) => {
-                // Servers this agent may not use in its workspace (X.34)
-                // are neither started nor offered for its turn.
-                let denied = agent
-                    .map(|a| a.deny_mcp_servers.as_slice())
+            // knows, so none is started or offered then. Not for an agent
+            // the harness treats as read-only (PLAN.md T70: its shell is
+            // the read-only one, it shares its parent's folder, may run on
+            // the small model and be started in plan mode): a server can
+            // change anything it can reach. A sub-agent only from a table
+            // whose servers start in their chat's home, never its copy.
+            Some(m)
+                if agent.is_none_or(|a| a.allows_mcp() && self.writes(a, host))
+                    && !is_plan(host)
+                    && (!child || m.homed()) =>
+            {
+                // Servers this agent may not use in its workspace (X.34),
+                // and those node.toml's `denied_tools` denies whole (`mcp`,
+                // `mcp__<server>`), are neither started nor offered for
+                // its turn: a denied server's program does not run.
+                let mut denied: Vec<String> = agent
+                    .map(|a| a.deny_mcp_servers.clone())
                     .unwrap_or_default();
-                let mut loaded = m.load(&self.start_ctx(&ctx, host), denied).await;
+                denied.extend(
+                    m.servers()
+                        .filter(|s| {
+                            host.tool_denied(&format!("{}{s}__", harness_tools::mcp::PREFIX))
+                        })
+                        .map(str::to_string),
+                );
+                let mut loaded = m
+                    .load_for(
+                        &ctx.session_id.to_string(),
+                        &self.start_ctx(&ctx, host),
+                        &denied,
+                    )
+                    .await;
+                // A tool node.toml's `denied_tools` names is not offered
+                // (a call of it is an unknown tool).
+                loaded.tools.retain(|t| !host.tool_denied(t.name()));
                 // A note can carry the end of a server's error output: it
                 // reaches the model only scrubbed, as tool output does
                 // (review M1).
@@ -5576,6 +5605,9 @@ impl NativeBackend {
                             // The person did not deny it: plan mode began
                             // while it waited (the node denied the card).
                             PLAN_STARTED_WHILE_WAITING.to_string()
+                        } else if host.tool_denied(tool.name()) {
+                            // Nobody was asked: node.toml refuses it.
+                            node_denied(tool.name())
                         } else {
                             // The person's note, quoted after the fixed sentence.
                             harness_core::event::denied_text(note.as_deref())
@@ -5733,6 +5765,15 @@ impl NativeBackend {
             Step::Cancelled => ToolOutcome::err(abandoned_note()),
         }
     }
+}
+
+/// The result of a call this node's policy refuses (node.toml
+/// `denied_tools`): no person was asked.
+fn node_denied(tool: &str) -> String {
+    format!(
+        "`{tool}` is denied by this node's policy (node.toml `denied_tools`); nobody was asked. \
+         Use another tool, or report that this one is not available here."
+    )
 }
 
 /// Whether the chat is in plan mode now (X.7), as the node says.

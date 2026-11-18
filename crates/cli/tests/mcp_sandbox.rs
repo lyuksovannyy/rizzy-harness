@@ -306,3 +306,43 @@ async fn host_and_sandbox_chats_servers_end_with_the_nodes_stop() {
     assert!(left.is_empty(), "{left:?}");
     assert!(n.none_marked().await, "left: {:?}", n.marked());
 }
+
+/// Review of PR 149, L6: `doctor` does not start a server that node.toml's
+/// `denied_tools` denies whole (no chat would), and says why; another
+/// server is still probed.
+#[test]
+fn doctor_does_not_start_a_server_denied_whole() {
+    let dir = tempfile::Builder::new()
+        .prefix("mcp-doctor-")
+        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+        .unwrap();
+    let data = dir.path().canonicalize().unwrap().join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let started = data.join("started-denied");
+    let toml = format!(
+        "denied_tools = [\"mcp__denied\"]\n\n\
+         [mcp_servers.denied]\ncommand = \"python3\"\nargs = [\"{FAKE}\", \"--started\", \"{}\"]\n\n\
+         [mcp_servers.other]\ncommand = \"python3\"\nargs = [\"{FAKE}\"]\n",
+        started.display()
+    );
+    std::fs::write(data.join("node.toml"), toml).unwrap();
+    let out = std::process::Command::new(EXE)
+        .args(["--data-dir", data.to_str().unwrap(), "doctor"])
+        .env("HARNESS_LOG", "error")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let line = |name: &str| {
+        text.lines()
+            .find(|l| l.contains(&format!("mcp {name}:")))
+            .unwrap_or_else(|| panic!("no mcp {name} line: {text}"))
+            .to_string()
+    };
+    assert!(
+        line("denied").contains("not started") && line("denied").contains("denied_tools"),
+        "{text}"
+    );
+    assert!(!line("other").contains("not started"), "{text}");
+    assert!(!started.exists(), "doctor started a denied server");
+}

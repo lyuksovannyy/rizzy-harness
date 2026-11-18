@@ -14,12 +14,16 @@ other request with "method not found". Flags:
   --say-env NAME   print "token <value of NAME>" to stderr and exit 1 at once
   --tool-names A,B the tools are these (echo's behaviour), no others
 
-Tools: echo, env, hang, huge, flood, die, image, fail, pid.
+Tools: echo, env, hang, huge, flood, die, image, fail, pid, cwd, slow
+(answers after `ms` milliseconds from a thread of its own, so answers can
+come in another order than the calls).
 """
 
 import json
 import os
 import sys
+import threading
+import time
 
 args = sys.argv[1:]
 
@@ -46,9 +50,13 @@ if value("--say-env"):
 out = sys.stdout.buffer
 
 
+LOCK = threading.Lock()
+
+
 def send(msg):
-    out.write(json.dumps(msg).encode() + b"\n")
-    out.flush()
+    with LOCK:
+        out.write(json.dumps(msg).encode() + b"\n")
+        out.flush()
 
 
 def obj(props=None):
@@ -71,6 +79,12 @@ TOOLS = [
     {"name": "image", "description": "An image.", "inputSchema": obj()},
     {"name": "fail", "description": "An error result.", "inputSchema": obj()},
     {"name": "pid", "description": "Its process.", "inputSchema": obj()},
+    {"name": "cwd", "description": "Its working folder.", "inputSchema": obj()},
+    {
+        "name": "slow",
+        "description": "Repeat the text after ms milliseconds.",
+        "inputSchema": obj({"text": {"type": "string"}, "ms": {"type": "integer"}}),
+    },
 ]
 for i in range(int(value("--tools", "0"))):
     TOOLS.append({"name": "t%d" % i, "description": "Tool %d." % i, "inputSchema": obj()})
@@ -119,6 +133,8 @@ def call(name, arguments):
         return {"content": [{"type": "image", "data": "aGVsbG8=", "mimeType": "image/png"}]}
     if name == "fail":
         return text("it went wrong", error=True)
+    if name == "cwd":
+        return text("cwd=%s" % os.getcwd())
     if name == "pid":
         return text("pid=%d ns=%s" % (os.getpid(), os.readlink("/proc/self/ns/pid")))
     return text("no tool " + name, error=True)
@@ -159,6 +175,14 @@ for line in sys.stdin.buffer:
         else:
             result = {"tools": TOOLS}
         send({"jsonrpc": "2.0", "id": mid, "result": result})
+    elif method == "tools/call" and params.get("name") == "slow":
+        a = params.get("arguments") or {}
+
+        def later(mid=mid, a=a):
+            time.sleep(int(a.get("ms", 0)) / 1000.0)
+            send({"jsonrpc": "2.0", "id": mid, "result": text(str(a.get("text", "")))})
+
+        threading.Thread(target=later, daemon=True).start()
     elif method == "tools/call":
         r = call(params.get("name"), params.get("arguments") or {})
         if r is not None:

@@ -8,12 +8,15 @@
 //! policy the only door, and DeepSeek's settings RPC shows what that costs).
 //!
 //! **One process per chat, in the chat's own confinement.** A server is
-//! started lazily, at the first turn of an agentic chat (never a
-//! sub-agent's) that offers MCP tools, through the same
-//! [`crate::sandbox::Confinement::shell`] as that chat's `bash`: its
-//! execution mode, its folder (read-write, as for `bash`), its file view,
-//! its network rule, its guard. A per-node process would serve every user's
-//! chats from one folder and one mode. Its environment is the allow-listed
+//! started lazily, at the first turn of an agentic chat, or of a
+//! foreground sub-agent of it whose own agent may use it, that offers MCP
+//! tools, through the same [`crate::sandbox::Confinement::shell`] as that
+//! chat's `bash`: its execution mode, its folder (read-write, as for
+//! `bash`), its file view, its network rule, its guard. Where it runs is
+//! the chat's [`Home`], fixed when the node makes the table: a sub-agent's
+//! turn or call that starts a server starts it there, never in the
+//! sub-agent's own copy of the folder (PLAN.md T47). A per-node process
+//! would serve every user's chats from one folder and one mode. Its environment is the allow-listed
 //! core list (`crate::env`), the server's own `env_vars` names (the node's
 //! deny-list still wins) and its own `env` values; nothing else of the
 //! node's. A contained server reads its requests from a FIFO the guard
@@ -56,7 +59,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::{Duration, Instant};
@@ -336,16 +339,34 @@ pub fn public_name(server: &str, tool: &str) -> String {
 
 // ---- a chat's servers ----
 
+/// Where a chat's servers run, whoever's turn starts them: the chat's own
+/// folder (as pinned when the chat was made) and its confinement's key
+/// (its session id: its temp folder). Set by the node when it makes the
+/// table; the execution mode is the caller's, which a sub-agent always
+/// shares with its chat (N.10a).
+#[derive(Clone)]
+pub struct Home {
+    pub key: String,
+    pub workspace: PathBuf,
+    pub pin: Option<harness_core::folder::FolderPin>,
+}
+
 /// One chat's MCP servers, made by the node for an agentic chat that is not
-/// a sub-agent's (from node.toml alone) and handed to its turns
-/// (`TurnHost::mcp`). Dropping it stops every server.
+/// a sub-agent's (from node.toml alone) and handed to its turns and to
+/// those of its foreground sub-agents (`TurnHost::mcp`). Dropping it stops
+/// every server.
 pub struct SessionMcp {
     slots: Vec<Arc<Slot>>,
+    /// Where every server of the table starts (see [`Home`]); `None` (tests,
+    /// `doctor`): in the caller's context. The loop offers a sub-agent no
+    /// tool of a table without one.
+    home: Option<Arc<Home>>,
     /// Set by [`Self::close`]: nothing starts any more (the chat is being
     /// deleted, the node is stopping).
     closed: Arc<AtomicBool>,
-    /// Notes already shown in this chat (each is shown once).
-    shown: Mutex<HashSet<String>>,
+    /// Notes already shown, by the session they were shown in (each is
+    /// shown once in each: a sub-agent's model is told what its chat's was).
+    shown: Mutex<HashSet<(String, String)>>,
 }
 
 /// What a turn gets: the tools to offer, and notes for the person and the
@@ -357,8 +378,27 @@ pub struct Loaded {
 }
 
 impl SessionMcp {
-    /// The enabled servers of `servers`; `None` when there is none.
+    /// The enabled servers of `servers`; `None` when there is none. They
+    /// start in the context of whichever call starts them (tests, `doctor`);
+    /// a chat's are made with [`Self::at`].
     pub fn new(servers: &BTreeMap<String, ServerConfig>) -> Option<Arc<Self>> {
+        Self::make(servers, None)
+    }
+
+    /// [`Self::new`] for a chat: every server starts in `home`.
+    pub fn at(servers: &BTreeMap<String, ServerConfig>, home: Home) -> Option<Arc<Self>> {
+        Self::make(servers, Some(Arc::new(home)))
+    }
+
+    /// Whether the servers start in their chat's [`Home`] whoever calls.
+    pub fn homed(&self) -> bool {
+        self.home.is_some()
+    }
+
+    fn make(
+        servers: &BTreeMap<String, ServerConfig>,
+        home: Option<Arc<Home>>,
+    ) -> Option<Arc<Self>> {
         let slots: Vec<Arc<Slot>> = servers
             .iter()
             .filter(|(_, c)| c.enabled)
@@ -366,9 +406,12 @@ impl SessionMcp {
                 Arc::new(Slot {
                     name: name.clone(),
                     cfg: cfg.clone(),
+                    home: home.clone(),
                     state: tokio::sync::Mutex::new(State::Idle),
                     live: Mutex::new(None),
                     fails: AtomicU32::new(0),
+                    generations: AtomicU64::new(0),
+                    counted: AtomicU64::new(0),
                     last_used: Mutex::new(Instant::now()),
                     busy: AtomicUsize::new(0),
                 })
@@ -377,6 +420,7 @@ impl SessionMcp {
         (!slots.is_empty()).then(|| {
             Arc::new(Self {
                 slots,
+                home,
                 closed: Arc::new(AtomicBool::new(false)),
                 shown: Mutex::new(HashSet::new()),
             })
@@ -391,6 +435,12 @@ impl SessionMcp {
     /// for this turn; one already running for another agent's turn stays
     /// up until it idles.
     pub async fn load(&self, ctx: &ToolCtx, denied: &[String]) -> Loaded {
+        self.load_for("", ctx, denied).await
+    }
+
+    /// [`Self::load`] for the turn of session `viewer` (its notes are shown
+    /// once in that session; a sub-agent's turn, X.34 step C, gets its own).
+    pub async fn load_for(&self, viewer: &str, ctx: &ToolCtx, denied: &[String]) -> Loaded {
         let mut notes = Vec::new();
         if self.closed.load(Ordering::SeqCst) {
             return Loaded {
@@ -467,7 +517,7 @@ impl SessionMcp {
             let mut shown = self.shown.lock().unwrap_or_else(|p| p.into_inner());
             notes
                 .into_iter()
-                .filter(|n| shown.insert(n.clone()))
+                .filter(|n| shown.insert((viewer.to_string(), n.clone())))
                 .collect()
         };
         Loaded { tools, notes }
@@ -533,6 +583,11 @@ impl SessionMcp {
         None
     }
 
+    /// The names of the table's servers (node.toml's enabled ones).
+    pub fn servers(&self) -> impl Iterator<Item = &str> {
+        self.slots.iter().map(|s| s.name.as_str())
+    }
+
     /// How many server processes are alive.
     pub fn running(&self) -> usize {
         self.slots.iter().filter(|s| s.alive()).count()
@@ -548,11 +603,18 @@ impl Drop for SessionMcp {
 struct Slot {
     name: String,
     cfg: ServerConfig,
+    home: Option<Arc<Home>>,
     state: tokio::sync::Mutex<State>,
     /// The running process's stop order and end, for stops that must not
     /// wait for `state` (held across a start or a call).
     live: Mutex<Option<Live>>,
     fails: AtomicU32,
+    /// The last process started's number (each start takes the next one).
+    generations: AtomicU64,
+    /// The highest process number whose end was counted as a failure: one
+    /// process that dies under several calls is one failure, not one per
+    /// call in flight.
+    counted: AtomicU64,
     last_used: Mutex<Instant>,
     busy: AtomicUsize,
 }
@@ -561,6 +623,8 @@ struct Slot {
 struct Live {
     kill: CancellationToken,
     exited: watch::Receiver<Option<Exit>>,
+    /// Which process of the slot this is (see `Slot::generations`).
+    generation: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -619,9 +683,25 @@ impl Slot {
         *self.last_used.lock().unwrap_or_else(|p| p.into_inner()) = Instant::now();
     }
 
-    /// Count a failure; the reason a caller gives the model.
+    /// Count a failure of a start (no process ran); the reason a caller
+    /// gives the model.
     fn failed(&self, why: &str) -> String {
         let n = self.fails.fetch_add(1, Ordering::SeqCst) + 1;
+        Self::failed_text(why, n)
+    }
+
+    /// Count the failure of process `generation` once, whichever of the calls in
+    /// flight on it sees it first; the others give the same reason.
+    fn failed_once(&self, generation: u64, why: &str) -> String {
+        let n = if self.counted.fetch_max(generation, Ordering::SeqCst) < generation {
+            self.fails.fetch_add(1, Ordering::SeqCst) + 1
+        } else {
+            self.fails.load(Ordering::SeqCst)
+        };
+        Self::failed_text(why, n)
+    }
+
+    fn failed_text(why: &str, n: u32) -> String {
         if n > MAX_RESTARTS {
             format!(
                 "{why}. It failed {n} times in this chat and is not started again until the \
@@ -646,17 +726,17 @@ impl Slot {
                         self.touch();
                         return Ok(up.listed.clone());
                     }
-                    Some(exit) => Some((up.why_ended(&exit), exit.ordered)),
+                    Some(exit) => Some((up.why_ended(&exit), exit.ordered, up.live.generation)),
                 }
             }
             _ => None,
         };
-        if let Some((why, ordered)) = ended {
+        if let Some((why, ordered, generation)) = ended {
             {
                 {
                     *st = State::Idle;
                     if !ordered {
-                        let msg = self.failed(&why);
+                        let msg = self.failed_once(generation, &why);
                         if self.fails.load(Ordering::SeqCst) > MAX_RESTARTS {
                             *st = State::Failed(msg.clone());
                             return Err(msg);
@@ -672,11 +752,12 @@ impl Slot {
             return Err("the chat's servers were stopped".into());
         }
         let started = tokio::select! {
-            r = tokio::time::timeout(self.cfg.startup_timeout(), start(&self.name, &self.cfg, ctx)) => r,
+            r = tokio::time::timeout(self.cfg.startup_timeout(), start(&self.name, &self.cfg, ctx, self.home.as_deref())) => r,
             _ = ctx.cancel.cancelled() => return Err("the turn was stopped".into()),
         };
         match started {
-            Ok(Ok(up)) => {
+            Ok(Ok(mut up)) => {
+                up.live.generation = self.generations.fetch_add(1, Ordering::SeqCst) + 1;
                 *self.live.lock().unwrap_or_else(|p| p.into_inner()) = Some(up.live.clone());
                 let listed = up.listed.clone();
                 *st = State::Up(Box::new(up));
@@ -704,11 +785,15 @@ impl Slot {
         }
     }
 
-    /// Stop the running process after a failure a call saw (`msg`, from
-    /// [`Self::failed`]) and forget it; past the restarts, for good.
-    async fn take_down(&self, msg: &str) {
+    /// Stop process `generation` after a failure a call saw (`msg`, from
+    /// [`Self::failed_once`]) and forget it; past the restarts, for good.
+    /// A process started since (another caller's restart) is left alone.
+    async fn take_down(&self, generation: u64, msg: &str) {
         let mut st = self.state.lock().await;
         if let State::Up(up) = &*st {
+            if up.live.generation != generation {
+                return;
+            }
             up.live.kill.cancel();
         }
         *st = if self.fails.load(Ordering::SeqCst) > MAX_RESTARTS {
@@ -728,7 +813,7 @@ impl Slot {
         if let Err(e) = self.ensure(ctx, closed).await {
             return ToolOutcome::err(format!("MCP server `{}` is not available: {e}", self.name));
         }
-        let (peer, mut exited, stderr, oversize) = {
+        let (peer, mut exited, stderr, oversize, generation) = {
             let st = self.state.lock().await;
             let State::Up(up) = &*st else {
                 return ToolOutcome::err(format!("MCP server `{}` stopped", self.name));
@@ -738,6 +823,7 @@ impl Slot {
                 up.live.exited.clone(),
                 up.stderr.clone(),
                 up.oversize.clone(),
+                up.live.generation,
             )
         };
         let Value::Object(args) = input else {
@@ -756,15 +842,15 @@ impl Slot {
                 // Stopped by the harness (the chat closed, the node
                 // stopping): not the server's failure.
                 if exit.as_ref().is_some_and(|e| e.ordered) {
-                    self.take_down("").await;
+                    self.take_down(generation, "").await;
                     return ToolOutcome::err(format!(
                         "MCP server `{}` was stopped by the harness during the call",
                         self.name
                     ));
                 }
                 let why = self.ended_text(&stderr, &oversize, exit);
-                let msg = self.failed(&why);
-                self.take_down(&msg).await;
+                let msg = self.failed_once(generation, &why);
+                self.take_down(generation, &msg).await;
                 return ToolOutcome::err(format!("MCP server `{}`: {msg}", self.name));
             }
             _ = ctx.cancel.cancelled() => return ToolOutcome::err("[cancelled]"),
@@ -800,17 +886,20 @@ impl Slot {
                         None => format!("the call failed ({e})"),
                     }
                 };
-                let msg = self.failed(&why);
-                self.take_down(&msg).await;
+                let msg = self.failed_once(generation, &why);
+                self.take_down(generation, &msg).await;
                 ToolOutcome::err(format!("MCP server `{}`: {msg}", self.name))
             }
             Err(_) => {
-                let msg = self.failed(&format!(
-                    "no answer within {} s (tool_timeout_sec in node.toml); the call was \
+                let msg = self.failed_once(
+                    generation,
+                    &format!(
+                        "no answer within {} s (tool_timeout_sec in node.toml); the call was \
                      cancelled and the server stopped",
-                    self.cfg.tool_timeout_sec
-                ));
-                self.take_down(&msg).await;
+                        self.cfg.tool_timeout_sec
+                    ),
+                );
+                self.take_down(generation, &msg).await;
                 ToolOutcome::err(format!("MCP server `{}`: {msg}", self.name))
             }
         }
@@ -905,20 +994,42 @@ fn shorten(s: &str, max: usize) -> String {
 
 // ---- starting a server ----
 
-/// Start `cfg` in `ctx`'s confinement, `initialize` it and list its tools.
-async fn start(name: &str, cfg: &ServerConfig, ctx: &ToolCtx) -> Result<Up, String> {
+/// Start `cfg` in its chat's `home` (its folder, its pin, its temp folder;
+/// nothing of a node-owned sub-agent folder) with `ctx`'s execution mode,
+/// environment and protected folders, or, without a home, in `ctx`'s
+/// confinement; `initialize` it and list its tools.
+async fn start(
+    name: &str,
+    cfg: &ServerConfig,
+    ctx: &ToolCtx,
+    home: Option<&Home>,
+) -> Result<Up, String> {
     let env = ctx.env.with_pass(&cfg.env_vars)?;
     let args: Vec<&OsStr> = cfg.args.iter().map(OsStr::new).collect();
-    let (mut cmd, contained) = ctx.sandbox.shell(
+    let (sandbox, workspace, pin, owned) = match home {
+        Some(h) => (
+            ctx.sandbox.for_session(&h.key),
+            h.workspace.as_path(),
+            h.pin.as_ref(),
+            None,
+        ),
+        None => (
+            ctx.sandbox.clone(),
+            ctx.workspace.as_path(),
+            ctx.pin.as_ref(),
+            ctx.owned.clone(),
+        ),
+    };
+    let (mut cmd, contained) = sandbox.shell(
         OsStr::new(&cfg.command),
         &args,
-        &ctx.workspace,
-        ctx.pin.as_ref(),
+        workspace,
+        pin,
         &env,
         &ctx.protected,
         crate::sandbox::Grants {
             workspace_write: true,
-            owned: ctx.owned.clone(),
+            owned,
             ..Default::default()
         },
     )?;
@@ -932,8 +1043,7 @@ async fn start(name: &str, cfg: &ServerConfig, ctx: &ToolCtx) -> Result<Up, Stri
     // is its control channel); the folder holding it is the node's own.
     let mut fifo_dir = None;
     let writer: Box<dyn tokio::io::AsyncWrite + Send + Unpin> = if contained {
-        let root = ctx
-            .sandbox
+        let root = sandbox
             .private_root()
             .ok_or("the sandbox has no private folder for the server's input")?;
         let dir = FifoDir::new(root)?;
@@ -991,6 +1101,7 @@ async fn start(name: &str, cfg: &ServerConfig, ctx: &ToolCtx) -> Result<Up, Stri
             Live {
                 kill: CancellationToken::new(),
                 exited: rx,
+                generation: 0,
             },
             tx,
         )
@@ -1497,5 +1608,58 @@ mod tests {
             serde_json::json!({"content": [{"type": "text", "text": "z".repeat(5_000_000)}]}),
         );
         assert!(huge.truncated && huge.output.chars().count() < crate::MAX_OUTPUT_CHARS + 100);
+    }
+
+    fn fake_set() -> Arc<SessionMcp> {
+        let fake = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/support/fake_mcp.py");
+        let mut m = BTreeMap::new();
+        m.insert("fake".to_string(), ServerConfig::new("python3", &[fake]));
+        SessionMcp::new(&m).unwrap()
+    }
+
+    async fn generation_up(slot: &Slot) -> Option<u64> {
+        match &*slot.state.lock().await {
+            State::Up(up) => Some(up.live.generation),
+            _ => None,
+        }
+    }
+
+    /// Review of PR 149, MEDIUM 2: a process's end is one failure however
+    /// many calls in flight saw it, and a caller that saw an old process
+    /// fail never takes down the one started since.
+    #[tokio::test]
+    async fn a_failure_counts_once_per_process_and_spares_a_newer_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolCtx::new(dir.path());
+        let set = fake_set();
+        assert!(!set.load(&ctx, &[]).await.tools.is_empty());
+        let slot = set.slots[0].clone();
+        let first = generation_up(&slot).await.unwrap();
+        // Four calls saw process `first` die: counted once.
+        for _ in 0..4 {
+            slot.failed_once(first, "it ended");
+        }
+        assert_eq!(slot.fails.load(Ordering::SeqCst), 1);
+        // It is replaced (another caller's restart) before a late caller
+        // takes the old one down.
+        slot.kill();
+        let mut exited = slot.live.lock().unwrap().as_ref().unwrap().exited.clone();
+        let _ = exited.wait_for(Option::is_some).await;
+        slot.ensure(&ctx, &AtomicBool::new(false)).await.unwrap();
+        let second = generation_up(&slot).await.unwrap();
+        assert!(second > first);
+        slot.take_down(first, "late").await;
+        assert_eq!(
+            generation_up(&slot).await,
+            Some(second),
+            "the newer process was taken down"
+        );
+        assert!(slot.alive());
+        // Its own failure is counted, once.
+        slot.failed_once(second, "it ended");
+        slot.failed_once(second, "it ended");
+        assert_eq!(slot.fails.load(Ordering::SeqCst), 2);
+        set.close();
+        set.wait_gone(STOP_WAIT).await;
     }
 }

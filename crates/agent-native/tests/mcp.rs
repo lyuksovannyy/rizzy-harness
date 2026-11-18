@@ -280,3 +280,71 @@ async fn a_servers_error_output_reaches_the_model_scrubbed() {
     let events = format!("{:?}", host.events.lock().unwrap());
     assert!(!events.contains(token), "{events}");
 }
+
+/// X.34 step C: a sub-agent's turn whose own agent may use MCP is offered
+/// a table whose servers start in their chat's home (`SessionMcp::at`),
+/// which here is another folder than the sub-agent's own; never one that
+/// would start them wherever the caller works (`SessionMcp::new`).
+#[tokio::test]
+async fn a_sub_agent_gets_only_a_homed_table_and_its_servers_start_at_home() {
+    let dir = tempfile::tempdir().unwrap();
+    let chat = dir.path().join("chat");
+    let copy = dir.path().join("copy");
+    std::fs::create_dir(&chat).unwrap();
+    std::fs::create_dir(&copy).unwrap();
+    let started = dir.path().join("started");
+    fn child<'a>(host: &'a Host, copy: &Path) -> TurnCtx<'a> {
+        let mut t = turn(host, copy, Some(agent(&["read", "write", "mcp"])));
+        t.parent_session = Some(harness_core::SessionId::new());
+        t
+    }
+    let calls = vec![("mcp__fake__cwd", json!({}))];
+    // A table without a home: nothing for a sub-agent.
+    let host = Host {
+        events: Mutex::default(),
+        asked: Mutex::default(),
+        mcp: Some(servers(&started)),
+    };
+    let script = Arc::new(Script {
+        calls: calls.clone(),
+        seen: Mutex::default(),
+    });
+    NativeBackend::new(script, harness_tools::builtin(), NativeConfig::default())
+        .run_turn(child(&host, &copy))
+        .await;
+    let r = host.results();
+    assert!(!r[0].0 && r[0].1.contains("unknown tool"), "{r:?}");
+    assert!(
+        !started.exists(),
+        "an unhomed table started for a sub-agent"
+    );
+    // A homed one: offered, and the server runs in the chat's folder.
+    let mut m = BTreeMap::new();
+    m.insert(
+        "fake".to_string(),
+        ServerConfig::new("python3", &[FAKE, "--started", started.to_str().unwrap()]),
+    );
+    let home = harness_tools::mcp::Home {
+        key: "chat".into(),
+        workspace: chat.clone(),
+        pin: None,
+    };
+    let host = Host {
+        events: Mutex::default(),
+        asked: Mutex::default(),
+        mcp: SessionMcp::at(&m, home),
+    };
+    let script = Arc::new(Script {
+        calls,
+        seen: Mutex::default(),
+    });
+    NativeBackend::new(script, harness_tools::builtin(), NativeConfig::default())
+        .run_turn(child(&host, &copy))
+        .await;
+    let r = host.results();
+    assert_eq!(r, [(true, format!("cwd={}", chat.display()))]);
+    assert_eq!(
+        *host.asked.lock().unwrap(),
+        [("mcp__fake__cwd".to_string(), ToolRisk::Mutating)]
+    );
+}

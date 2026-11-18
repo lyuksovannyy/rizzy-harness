@@ -1969,7 +1969,26 @@ tool_timeout_sec = 300                # one call (1 .. 3600)
   folder read-write), in a `host` chat as the node's user. So a server
   needs what a command needs there: `npx` needs `[sandbox] write =
   ["~/.npm"]` and the network on; a server that reads a config file needs
-  its folder in `[sandbox] read`. Sub-agents get no MCP tools.
+  its folder in `[sandbox] read`. A server node.toml's `denied_tools`
+  denies whole (`mcp`, or `mcp__<server>`) is not started at all.
+- **Sub-agents** follow their own agent's Connectors switch, never their
+  parent's. With it on, a sub-agent working in the foreground (its parent
+  waits for it) is offered the chat's servers: the same processes, which
+  always work in the chat's folder, also for a sub-agent that changes
+  files in its own copy. So what a sub-agent does through a server is a
+  change to the chat's folder, made during the parent's turn: it is in
+  that turn's checkpoint and Undo of that turn takes it back, but it is
+  not in the sub-agent's own "what changed" report or its merge-back.
+  Its calls are asked about in the sub-agent's own chat, never less than
+  its parent's would be. A background sub-agent gets no server, and
+  neither does a message you send yourself into a sub-agent's chat (its
+  calls could land outside every turn of the chat, where no checkpoint
+  covers them), nor a read-only one, nor one in plan mode. Two edge
+  cases: a sub-agent of a sub-agent that only reads and has Connectors can
+  still change the chat's folder through a server (inside the chat's
+  turn, so its Undo covers it); and a sub-agent that changes one file both
+  in its copy and through a server ends with the server's version, its
+  own change reported as not applied.
 - **Its environment** is the agent's core list above (not `env_pass`),
   plus its own `env_vars` and `env`. Provider keys, `.env` names and
   `HARNESS_*` are never passed; `env` values are scrubbed from every
