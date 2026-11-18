@@ -218,8 +218,10 @@ pub trait TurnHost: Send + Sync {
     /// This session's MCP servers (`harness_tools::mcp::SessionMcp`,
     /// ADOPTION_PLAN X.3), made by the node from its own node.toml alone.
     /// Type-erased like [`Self::background`]; `None` where there are none
-    /// (chat sessions, sub-agents, nodes without servers, tests). The loop
-    /// offers none to a sub-agent whatever this returns.
+    /// (chat sessions, a background sub-agent's run, nodes without servers,
+    /// tests). A foreground sub-agent gets its chat's (X.34 step C); the
+    /// loop offers their tools only to an agent whose own spec allows MCP
+    /// and that the harness does not treat as read-only.
     fn mcp(&self) -> Option<std::sync::Arc<dyn std::any::Any + Send + Sync>> {
         None
     }

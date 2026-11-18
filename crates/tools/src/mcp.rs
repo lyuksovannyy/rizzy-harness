@@ -8,12 +8,15 @@
 //! policy the only door, and DeepSeek's settings RPC shows what that costs).
 //!
 //! **One process per chat, in the chat's own confinement.** A server is
-//! started lazily, at the first turn of an agentic chat (never a
-//! sub-agent's) that offers MCP tools, through the same
-//! [`crate::sandbox::Confinement::shell`] as that chat's `bash`: its
-//! execution mode, its folder (read-write, as for `bash`), its file view,
-//! its network rule, its guard. A per-node process would serve every user's
-//! chats from one folder and one mode. Its environment is the allow-listed
+//! started lazily, at the first turn of an agentic chat, or of a
+//! foreground sub-agent of it whose own agent may use it, that offers MCP
+//! tools, through the same [`crate::sandbox::Confinement::shell`] as that
+//! chat's `bash`: its execution mode, its folder (read-write, as for
+//! `bash`), its file view, its network rule, its guard. Where it runs is
+//! the chat's [`Home`], fixed when the node makes the table: a sub-agent's
+//! turn or call that starts a server starts it there, never in the
+//! sub-agent's own copy of the folder (PLAN.md T47). A per-node process
+//! would serve every user's chats from one folder and one mode. Its environment is the allow-listed
 //! core list (`crate::env`), the server's own `env_vars` names (the node's
 //! deny-list still wins) and its own `env` values; nothing else of the
 //! node's. A contained server reads its requests from a FIFO the guard
@@ -336,16 +339,34 @@ pub fn public_name(server: &str, tool: &str) -> String {
 
 // ---- a chat's servers ----
 
+/// Where a chat's servers run, whoever's turn starts them: the chat's own
+/// folder (as pinned when the chat was made) and its confinement's key
+/// (its session id: its temp folder). Set by the node when it makes the
+/// table; the execution mode is the caller's, which a sub-agent always
+/// shares with its chat (N.10a).
+#[derive(Clone)]
+pub struct Home {
+    pub key: String,
+    pub workspace: PathBuf,
+    pub pin: Option<harness_core::folder::FolderPin>,
+}
+
 /// One chat's MCP servers, made by the node for an agentic chat that is not
-/// a sub-agent's (from node.toml alone) and handed to its turns
-/// (`TurnHost::mcp`). Dropping it stops every server.
+/// a sub-agent's (from node.toml alone) and handed to its turns and to
+/// those of its foreground sub-agents (`TurnHost::mcp`). Dropping it stops
+/// every server.
 pub struct SessionMcp {
     slots: Vec<Arc<Slot>>,
+    /// Where every server of the table starts (see [`Home`]); `None` (tests,
+    /// `doctor`): in the caller's context. The loop offers a sub-agent no
+    /// tool of a table without one.
+    home: Option<Arc<Home>>,
     /// Set by [`Self::close`]: nothing starts any more (the chat is being
     /// deleted, the node is stopping).
     closed: Arc<AtomicBool>,
-    /// Notes already shown in this chat (each is shown once).
-    shown: Mutex<HashSet<String>>,
+    /// Notes already shown, by the session they were shown in (each is
+    /// shown once in each: a sub-agent's model is told what its chat's was).
+    shown: Mutex<HashSet<(String, String)>>,
 }
 
 /// What a turn gets: the tools to offer, and notes for the person and the
@@ -357,8 +378,27 @@ pub struct Loaded {
 }
 
 impl SessionMcp {
-    /// The enabled servers of `servers`; `None` when there is none.
+    /// The enabled servers of `servers`; `None` when there is none. They
+    /// start in the context of whichever call starts them (tests, `doctor`);
+    /// a chat's are made with [`Self::at`].
     pub fn new(servers: &BTreeMap<String, ServerConfig>) -> Option<Arc<Self>> {
+        Self::make(servers, None)
+    }
+
+    /// [`Self::new`] for a chat: every server starts in `home`.
+    pub fn at(servers: &BTreeMap<String, ServerConfig>, home: Home) -> Option<Arc<Self>> {
+        Self::make(servers, Some(Arc::new(home)))
+    }
+
+    /// Whether the servers start in their chat's [`Home`] whoever calls.
+    pub fn homed(&self) -> bool {
+        self.home.is_some()
+    }
+
+    fn make(
+        servers: &BTreeMap<String, ServerConfig>,
+        home: Option<Arc<Home>>,
+    ) -> Option<Arc<Self>> {
         let slots: Vec<Arc<Slot>> = servers
             .iter()
             .filter(|(_, c)| c.enabled)
@@ -366,6 +406,7 @@ impl SessionMcp {
                 Arc::new(Slot {
                     name: name.clone(),
                     cfg: cfg.clone(),
+                    home: home.clone(),
                     state: tokio::sync::Mutex::new(State::Idle),
                     live: Mutex::new(None),
                     fails: AtomicU32::new(0),
@@ -377,6 +418,7 @@ impl SessionMcp {
         (!slots.is_empty()).then(|| {
             Arc::new(Self {
                 slots,
+                home,
                 closed: Arc::new(AtomicBool::new(false)),
                 shown: Mutex::new(HashSet::new()),
             })
@@ -391,6 +433,12 @@ impl SessionMcp {
     /// for this turn; one already running for another agent's turn stays
     /// up until it idles.
     pub async fn load(&self, ctx: &ToolCtx, denied: &[String]) -> Loaded {
+        self.load_for("", ctx, denied).await
+    }
+
+    /// [`Self::load`] for the turn of session `viewer` (its notes are shown
+    /// once in that session; a sub-agent's turn, X.34 step C, gets its own).
+    pub async fn load_for(&self, viewer: &str, ctx: &ToolCtx, denied: &[String]) -> Loaded {
         let mut notes = Vec::new();
         if self.closed.load(Ordering::SeqCst) {
             return Loaded {
@@ -467,7 +515,7 @@ impl SessionMcp {
             let mut shown = self.shown.lock().unwrap_or_else(|p| p.into_inner());
             notes
                 .into_iter()
-                .filter(|n| shown.insert(n.clone()))
+                .filter(|n| shown.insert((viewer.to_string(), n.clone())))
                 .collect()
         };
         Loaded { tools, notes }
@@ -533,6 +581,11 @@ impl SessionMcp {
         None
     }
 
+    /// The names of the table's servers (node.toml's enabled ones).
+    pub fn servers(&self) -> impl Iterator<Item = &str> {
+        self.slots.iter().map(|s| s.name.as_str())
+    }
+
     /// How many server processes are alive.
     pub fn running(&self) -> usize {
         self.slots.iter().filter(|s| s.alive()).count()
@@ -548,6 +601,7 @@ impl Drop for SessionMcp {
 struct Slot {
     name: String,
     cfg: ServerConfig,
+    home: Option<Arc<Home>>,
     state: tokio::sync::Mutex<State>,
     /// The running process's stop order and end, for stops that must not
     /// wait for `state` (held across a start or a call).
@@ -672,7 +726,7 @@ impl Slot {
             return Err("the chat's servers were stopped".into());
         }
         let started = tokio::select! {
-            r = tokio::time::timeout(self.cfg.startup_timeout(), start(&self.name, &self.cfg, ctx)) => r,
+            r = tokio::time::timeout(self.cfg.startup_timeout(), start(&self.name, &self.cfg, ctx, self.home.as_deref())) => r,
             _ = ctx.cancel.cancelled() => return Err("the turn was stopped".into()),
         };
         match started {
@@ -905,20 +959,42 @@ fn shorten(s: &str, max: usize) -> String {
 
 // ---- starting a server ----
 
-/// Start `cfg` in `ctx`'s confinement, `initialize` it and list its tools.
-async fn start(name: &str, cfg: &ServerConfig, ctx: &ToolCtx) -> Result<Up, String> {
+/// Start `cfg` in its chat's `home` (its folder, its pin, its temp folder;
+/// nothing of a node-owned sub-agent folder) with `ctx`'s execution mode,
+/// environment and protected folders, or, without a home, in `ctx`'s
+/// confinement; `initialize` it and list its tools.
+async fn start(
+    name: &str,
+    cfg: &ServerConfig,
+    ctx: &ToolCtx,
+    home: Option<&Home>,
+) -> Result<Up, String> {
     let env = ctx.env.with_pass(&cfg.env_vars)?;
     let args: Vec<&OsStr> = cfg.args.iter().map(OsStr::new).collect();
-    let (mut cmd, contained) = ctx.sandbox.shell(
+    let (sandbox, workspace, pin, owned) = match home {
+        Some(h) => (
+            ctx.sandbox.for_session(&h.key),
+            h.workspace.as_path(),
+            h.pin.as_ref(),
+            None,
+        ),
+        None => (
+            ctx.sandbox.clone(),
+            ctx.workspace.as_path(),
+            ctx.pin.as_ref(),
+            ctx.owned.clone(),
+        ),
+    };
+    let (mut cmd, contained) = sandbox.shell(
         OsStr::new(&cfg.command),
         &args,
-        &ctx.workspace,
-        ctx.pin.as_ref(),
+        workspace,
+        pin,
         &env,
         &ctx.protected,
         crate::sandbox::Grants {
             workspace_write: true,
-            owned: ctx.owned.clone(),
+            owned,
             ..Default::default()
         },
     )?;
@@ -932,8 +1008,7 @@ async fn start(name: &str, cfg: &ServerConfig, ctx: &ToolCtx) -> Result<Up, Stri
     // is its control channel); the folder holding it is the node's own.
     let mut fifo_dir = None;
     let writer: Box<dyn tokio::io::AsyncWrite + Send + Unpin> = if contained {
-        let root = ctx
-            .sandbox
+        let root = sandbox
             .private_root()
             .ok_or("the sandbox has no private folder for the server's input")?;
         let dir = FifoDir::new(root)?;

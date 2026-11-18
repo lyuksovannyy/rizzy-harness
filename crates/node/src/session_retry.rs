@@ -62,6 +62,7 @@ impl Session {
             callback: false,
             compare: false,
             began: std::time::SystemTime::now(),
+            background: false,
         })?;
         if self.node.is_stopping() {
             self.release(&turn_id);

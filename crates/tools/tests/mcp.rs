@@ -404,3 +404,17 @@ async fn a_denied_server_is_neither_started_nor_offered() {
     none.close();
     assert!(s.wait_gone(mcp::STOP_WAIT).await);
 }
+
+/// X.34 step C: a note is shown once in each session that loads the table
+/// (a sub-agent's model is told what its chat's was), not once per table.
+#[tokio::test]
+async fn notes_are_shown_once_per_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = set(server(&["--tools", "45"]));
+    let cut = |n: &[String]| n.iter().any(|n| n.contains("are not offered"));
+    assert!(cut(&s.load_for("chat", &ctx(&dir), &[]).await.notes));
+    assert!(!cut(&s.load_for("chat", &ctx(&dir), &[]).await.notes));
+    assert!(cut(&s.load_for("child", &ctx(&dir), &[]).await.notes));
+    s.close();
+    s.wait_gone(mcp::STOP_WAIT).await;
+}

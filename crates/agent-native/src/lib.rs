@@ -2605,23 +2605,49 @@ impl NativeBackend {
             };
         }
         // The chat's MCP servers (X.3), started now if they are not running,
-        // in this chat's confinement; never for a sub-agent, nor for an
-        // agent that may use none. What did not start, or was left out, is
-        // shown to the person (an `error` item) and told to the model with
-        // this turn's context, once each.
+        // in the chat's own folder and confinement (the table's home), for
+        // an agent that may use them: the chat's own, or a sub-agent's by
+        // its own switch (X.34 step C; the node hands a foreground
+        // sub-agent its chat's table, a background one none). What did not
+        // start, or was left out, is shown to the person (an `error` item)
+        // and told to the model with this turn's context, once each.
         let (mcp_tools, mcp_notes) = match host
             .mcp()
             .and_then(|m| m.downcast::<harness_tools::mcp::SessionMcp>().ok())
         {
             // Not in plan mode (X.7): a server's tools have effects only it
-            // knows, so none is started or offered then.
-            Some(m) if !child && agent.is_none_or(|a| a.allows_mcp()) && !is_plan(host) => {
-                // Servers this agent may not use in its workspace (X.34)
-                // are neither started nor offered for its turn.
-                let denied = agent
-                    .map(|a| a.deny_mcp_servers.as_slice())
+            // knows, so none is started or offered then. Not for an agent
+            // the harness treats as read-only (PLAN.md T70: its shell is
+            // the read-only one, it shares its parent's folder, may run on
+            // the small model and be started in plan mode): a server can
+            // change anything it can reach. A sub-agent only from a table
+            // whose servers start in their chat's home, never its copy.
+            Some(m)
+                if agent.is_none_or(|a| a.allows_mcp() && self.writes(a, host))
+                    && !is_plan(host)
+                    && (!child || m.homed()) =>
+            {
+                // Servers this agent may not use in its workspace (X.34),
+                // and those node.toml's `denied_tools` denies whole (`mcp`,
+                // `mcp__<server>`), are neither started nor offered for
+                // its turn: a denied server's program does not run.
+                let mut denied: Vec<String> = agent
+                    .map(|a| a.deny_mcp_servers.clone())
                     .unwrap_or_default();
-                let mut loaded = m.load(&self.start_ctx(&ctx, host), denied).await;
+                denied.extend(
+                    m.servers()
+                        .filter(|s| {
+                            host.tool_denied(&format!("{}{s}__", harness_tools::mcp::PREFIX))
+                        })
+                        .map(str::to_string),
+                );
+                let mut loaded = m
+                    .load_for(
+                        &ctx.session_id.to_string(),
+                        &self.start_ctx(&ctx, host),
+                        &denied,
+                    )
+                    .await;
                 // A note can carry the end of a server's error output: it
                 // reaches the model only scrubbed, as tool output does
                 // (review M1).

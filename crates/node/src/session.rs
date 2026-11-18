@@ -67,6 +67,9 @@ struct RunningTurn {
     /// When it began; a sub-agent's turn has its parent's (B.9, T65:
     /// what changed since then is not taken as instructions in it).
     began: std::time::SystemTime,
+    /// A background sub-agent's run (X.24): it gets no MCP tools
+    /// ([`Session::chat_mcp`]).
+    background: bool,
 }
 
 /// The running turn as a message sent meanwhile sees it.
@@ -308,16 +311,29 @@ fn callback_check(history: &[RawEvent], bg_ids: &[String]) -> Result<(usize, Vec
 }
 
 /// A session's MCP servers (see [`Session::mcp`]): node.toml's, for an
-/// agentic session that is not a sub-agent's.
+/// agentic session that is not a sub-agent's, started in this chat's own
+/// folder and confinement (`home`) whoever's turn starts them. A
+/// sub-agent has none of its own: its foreground turns use its chat's
+/// ([`Session::chat_mcp`], X.34 step C).
 fn mcp_servers(
     node: &Inner,
     profile: Profile,
     parent: Option<SessionId>,
+    id: SessionId,
+    cwd: &std::path::Path,
+    pin: Option<harness_core::folder::FolderPin>,
 ) -> Option<Arc<harness_tools::mcp::SessionMcp>> {
     if profile != Profile::Agentic || parent.is_some() {
         return None;
     }
-    harness_tools::mcp::SessionMcp::new(&node.cfg.policy.mcp_servers)
+    harness_tools::mcp::SessionMcp::at(
+        &node.cfg.policy.mcp_servers,
+        harness_tools::mcp::Home {
+            key: id.to_string(),
+            workspace: cwd.to_path_buf(),
+            pin,
+        },
+    )
 }
 
 /// Pin an agentic session's folder (see [`Session::pin`]).
@@ -443,7 +459,14 @@ impl Session {
         let (bg, ends) = background_table(&node, profile, parent_session, exec_mode, 1);
         let s = Arc::new(Self {
             bg,
-            mcp: mcp_servers(&node, profile, parent_session),
+            mcp: mcp_servers(
+                &node,
+                profile,
+                parent_session,
+                id,
+                &cwd,
+                pin_of(profile, &cwd),
+            ),
             bg_queue: Mutex::new(Vec::new()),
             bg_flush: Arc::default(),
             bg_failed: AtomicBool::new(false),
@@ -568,7 +591,14 @@ impl Session {
         );
         let s = Arc::new(Self {
             bg,
-            mcp: mcp_servers(&node, meta.profile, meta.parent_session),
+            mcp: mcp_servers(
+                &node,
+                meta.profile,
+                meta.parent_session,
+                id,
+                std::path::Path::new(&meta.cwd),
+                pin.clone(),
+            ),
             bg_queue: Mutex::new(Vec::new()),
             bg_flush: Arc::default(),
             bg_failed: AtomicBool::new(false),
@@ -823,6 +853,46 @@ impl Session {
         if let Some(m) = &self.mcp {
             m.close();
         }
+    }
+
+    /// The MCP servers this session's turn may use (X.34 step C, PLAN.md
+    /// T47): a chat's own; for a sub-agent, its chat's (the one at the top
+    /// of its parents, as the node holds them now), the same table and
+    /// processes, which run in the chat's folder; none for a background
+    /// sub-agent's run or one under it (X.24: its calls could land between
+    /// the chat's turns, in no turn's checkpoint), nor when the chat is not
+    /// held. Whether the turn's agent may use them is the loop's to read.
+    /// The table's lifecycle stays its chat's alone (`close_mcp`,
+    /// `mcp_idle`, `mcp_running` read only `self.mcp`).
+    fn chat_mcp(&self) -> Option<Arc<harness_tools::mcp::SessionMcp>> {
+        let mut at = match self.parent_session {
+            None => return self.mcp.clone(),
+            Some(p) => p,
+        };
+        if self.in_background() {
+            return None;
+        }
+        for _ in 0..8 {
+            let s = self.node.session(at)?;
+            if s.id == self.id {
+                return None;
+            }
+            match s.parent_session {
+                None => return s.mcp.clone(),
+                Some(_) if s.in_background() => return None,
+                Some(p) => at = p,
+            }
+        }
+        None
+    }
+
+    /// Whether this session's running turn is a background sub-agent's.
+    fn in_background(&self) -> bool {
+        self.turn
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .is_some_and(|t| t.background)
     }
 
     /// MCP server processes of this session still alive.
@@ -1436,6 +1506,7 @@ impl Session {
                 callback: false,
                 compare: !compare.is_empty(),
                 began: std::time::SystemTime::now(),
+                background: false,
             })
         };
         if let Err(e) = claim() {
@@ -1723,6 +1794,7 @@ impl Session {
             callback: false,
             compare: false,
             began: std::time::SystemTime::now(),
+            background: false,
         })
         .ok()?;
         let (history, mut queued) = match self.begin(None, &turn_id, agent, true).await {
@@ -1803,6 +1875,7 @@ impl Session {
             callback: true,
             compare: false,
             began: std::time::SystemTime::now(),
+            background: false,
         })
         .map_err(|e| {
             if e == TURN_RUNNING || e == harness_protocol::COMPACTING {
@@ -3924,6 +3997,8 @@ impl Session {
             callback: false,
             compare: false,
             began: parent_began,
+            // Only a background run has its own token cap (X.24).
+            background: max_tokens.is_some(),
         }) {
             if let Some(i) = iso {
                 crate::git::remove_folder(&i.child).await;
@@ -4300,6 +4375,7 @@ impl Session {
                 callback: false,
                 compare: false,
                 began: parent_began,
+                background: max_tokens.is_some(),
             })
             .is_err()
         {
@@ -4962,8 +5038,7 @@ impl TurnHost for Session {
     }
 
     fn mcp(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
-        self.mcp
-            .clone()
+        self.chat_mcp()
             .map(|m| m as Arc<dyn std::any::Any + Send + Sync>)
     }
 
@@ -5123,8 +5198,7 @@ impl TurnHost for Session {
         // An MCP tool's card names the server and its own name of the tool
         // (review N2): a cleaned or hashed public name says little.
         if let Some(m) = self
-            .mcp
-            .as_ref()
+            .chat_mcp()
             .filter(|_| tool.starts_with(harness_tools::mcp::PREFIX))
             && let Some((server, raw)) = m.origin(tool).await
         {
