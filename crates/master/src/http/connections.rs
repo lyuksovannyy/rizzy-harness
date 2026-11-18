@@ -10,6 +10,8 @@
 //! * `PUT /api/connections/{id}/token` `{"token"}`: replace the token of
 //!   one connection; refused when the new token is another account's.
 //! * `DELETE /api/connections/{id}`.
+//! * `GET /api/connections/{id}/repositories` (X.27 step 2):
+//!   `http/connection_repos.rs`.
 //!
 //! A connection is its person's alone: every query names the caller, so
 //! another user, a server admin and the API token (which has no account)
@@ -51,12 +53,12 @@ pub(super) fn routes() -> Router<Master> {
         )
 }
 
-fn err(code: StatusCode, msg: impl Into<String>) -> ApiError {
+pub(super) fn err(code: StatusCode, msg: impl Into<String>) -> ApiError {
     ApiError(code, msg.into())
 }
 
 /// The caller's account id: connections belong to a person.
-async fn person(m: &Master, headers: &HeaderMap) -> ApiResult<String> {
+pub(super) async fn person(m: &Master, headers: &HeaderMap) -> ApiResult<String> {
     let who = require(m, headers).await?;
     who.user_id.ok_or_else(|| {
         err(
@@ -127,7 +129,7 @@ async fn list(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Json<Val
 
 /// What a person sees when the key file needs the admin; the reason goes
 /// to the log (it names a path, never a secret).
-fn sealing_failed(e: crate::sealed::SealError) -> ApiError {
+pub(super) fn sealing_failed(e: crate::sealed::SealError) -> ApiError {
     tracing::error!(error = %e, "sealed secrets: refused");
     err(
         StatusCode::SERVICE_UNAVAILABLE,
@@ -344,7 +346,7 @@ async fn remove(
     let me = person(&m, &headers).await?;
     let (u, i) = (me.clone(), id.clone());
     let row = m.inner.mirror.call(move |s| s.connection(&u, &i)).await?;
-    let (u, i) = (me.clone(), id);
+    let (u, i) = (me.clone(), id.clone());
     if !m
         .inner
         .mirror
@@ -353,6 +355,8 @@ async fn remove(
     {
         return Err(err(StatusCode::NOT_FOUND, "no such connection"));
     }
+    // Its cached listings go with it.
+    m.forget_repos(&me, &id);
     if let Some(r) = row {
         audit(&m, "disconnect", &me, &r.host, &r.login).await;
     }
