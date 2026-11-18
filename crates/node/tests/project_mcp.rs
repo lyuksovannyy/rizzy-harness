@@ -881,6 +881,10 @@ async fn repository_env_values_change_nobody_elses_events() {
     write_mcp(&n.ws, serde_json::json!({ "proj": s }));
     let l = n.approve(ALICE, "proj").await;
     assert_eq!(entry(&l, "proj").state, ProjectMcpState::Approved);
+    // Alice's own chat takes her approved copy (its turn gives the table
+    // the values; unconfined here, so the server itself does not start).
+    let alice = n.create(Some(ALICE), None).await;
+    n.call(alice, &["mcp__proj__who"]).await;
     let bob = n.create(Some(BOB), None).await;
     let log = n.run(bob, "hello function world").await;
     let bad: Vec<_> = log

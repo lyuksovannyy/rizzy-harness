@@ -834,11 +834,11 @@ impl ProjectMcp {
     fn remove(&self, user: &str, folder: &str, name: &str) -> Result<bool, String> {
         let mut all = self.approvals.lock().unwrap_or_else(|p| p.into_inner());
         let key = (user.to_string(), folder.to_string(), name.to_string());
-        if !all.contains_key(&key) {
-            return Ok(false);
-        }
         if let Some(e) = &self.store_error {
             return Err(format!("not removed: {e}"));
+        }
+        if !all.contains_key(&key) {
+            return Ok(false);
         }
         let old = all.remove(&key);
         if let Err(e) = write_store(&self.file, &all) {
@@ -1279,6 +1279,11 @@ mod tests {
             &ProjectMcpRequest::Remove { name: "old".into() },
         );
         assert!(o.changed.is_none());
+        let note = o.list.unwrap().note.unwrap();
+        assert!(
+            note.contains("not removed") && note.contains("project-mcp.json"),
+            "{note}"
+        );
         assert_eq!(
             std::fs::read(&file).unwrap(),
             before,
