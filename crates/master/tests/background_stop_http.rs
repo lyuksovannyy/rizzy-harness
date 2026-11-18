@@ -131,7 +131,6 @@ fn fake(id: &str, caps: &[&str]) -> (NodeLink, Fake) {
                                         agent_id: None,
                                         incognito: false,
                                         parent_session: None,
-                                        owner_id: None,
                                     });
                                     send(&mut seqs, *session_id, created);
                                 }

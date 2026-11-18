@@ -142,7 +142,6 @@ impl Node {
             cwd: ws,
             model: None,
             approval_mode: Some(ApprovalMode::Auto),
-            owner: None,
         })
         .await
         .unwrap();
@@ -163,6 +162,7 @@ impl Node {
             images: vec![],
             agent_named: false,
             files: files.iter().map(|s| s.to_string()).collect(),
+            owner: None,
         }
     }
 
@@ -382,7 +382,6 @@ async fn a_chat_without_a_folder_refuses_a_mention() {
         cwd: String::new(),
         model: None,
         approval_mode: None,
-        owner: None,
     })
     .await
     .unwrap();

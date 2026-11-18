@@ -140,7 +140,6 @@ fn create(sid: SessionId, cwd: &std::path::Path, mode: Option<ExecMode>) -> Mast
         incognito: false,
         no_callbacks: false,
         exec_mode: mode,
-        owner: None,
     }
 }
 
@@ -158,6 +157,7 @@ fn prompt(sid: SessionId, text: &str) -> MasterToNode {
         images: vec![],
         agent_named: false,
         files: vec![],
+        owner: None,
     }
 }
 
@@ -391,6 +391,7 @@ async fn a_session_whose_mode_is_no_longer_offered_runs_nothing_after_a_restart(
                     agent: None,
                     savings: None,
                     context: None,
+                    owner: None,
                 },
             ),
             (
@@ -438,7 +439,6 @@ async fn an_agentic_session_without_a_recorded_mode_runs_nothing() {
             backend: "native".into(),
             node_id: "n".into(),
             approval_mode: harness_core::policy::ApprovalMode::Auto,
-            owner_id: None,
         })
         .into_parts();
         store
@@ -681,6 +681,7 @@ async fn a_sub_agents_mode_is_its_parents() {
             images,
             agent_named: false,
             files: vec![],
+            owner: None,
         })
         .unwrap();
     ack(&mut n).await.unwrap();
@@ -729,7 +730,6 @@ async fn a_chat_session_has_no_mode() {
         incognito: false,
         no_callbacks: false,
         exec_mode: mode,
-        owner: None,
     };
     let sid = SessionId::new();
     n.link

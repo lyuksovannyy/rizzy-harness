@@ -107,6 +107,46 @@ pub const NODE: &str = "--node";
 /// `env` values may not set one (`crate::mcp::validate`).
 pub const STDIN_FIFO_ENV: &str = "HARNESS_GUARD_STDIN_FIFO";
 
+/// Set by the node on the guard of a repository's MCP server (X.36,
+/// `crate::mcp` `env_inside`): the path of a 0600 file in the same
+/// node-private folder as [`STDIN_FIFO_ENV`]'s FIFO, holding the server's
+/// `env` values (`NAME=value`, each ended by a NUL). The guard opens it
+/// without following a link, checks it is a regular file of this user,
+/// removes the name and leaves the descriptor to bubblewrap, naming its
+/// number in [`INNER_ENV_FD`]; nothing of its content is read here.
+pub const ENV_FILE_ENV: &str = "HARNESS_GUARD_ENV_FILE";
+
+/// The descriptor number of [`ENV_FILE_ENV`]'s file, as bubblewrap and
+/// `sandbox-exec` see it: `sandbox-exec` reads the values from it before
+/// it closes what it inherited and sets them on the command's own `exec`
+/// only, after its confinement (`crate::sandbox::take_inner_env`).
+pub const INNER_ENV_FD: &str = "HARNESS_INNER_ENV_FD";
+
+/// Open [`ENV_FILE_ENV`]'s file, check it, unlink it, and leave the
+/// descriptor open across `exec` (not close-on-exec): bubblewrap inherits
+/// it and passes it on to `sandbox-exec`.
+fn open_env_file(path: &std::path::Path) -> Result<std::os::fd::OwnedFd, String> {
+    use nix::fcntl::{FcntlArg, FdFlag, OFlag, fcntl};
+    let fd = nix::fcntl::open(
+        path,
+        OFlag::O_RDONLY | OFlag::O_NONBLOCK | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        nix::sys::stat::Mode::empty(),
+    )
+    .map_err(|e| format!("the server's environment {}: {e}", path.display()))?;
+    let st = nix::sys::stat::fstat(&fd).map_err(|e| format!("fstat: {e}"))?;
+    use nix::sys::stat::SFlag;
+    let file = (st.st_mode & SFlag::S_IFMT.bits()) == SFlag::S_IFREG.bits();
+    if !file || st.st_uid != nix::unistd::getuid().as_raw() {
+        return Err(format!(
+            "the server's environment {} is not a file of this user",
+            path.display()
+        ));
+    }
+    let _ = std::fs::remove_file(path);
+    fcntl(&fd, FcntlArg::F_SETFD(FdFlag::empty())).map_err(|e| format!("fcntl: {e}"))?;
+    Ok(fd)
+}
+
 /// Open [`STDIN_FIFO_ENV`]'s FIFO for reading (it never waits for a
 /// writer), check it, unlink it, and make it blocking again.
 fn open_stdin_fifo(path: &std::path::Path) -> Result<std::os::fd::OwnedFd, String> {
@@ -274,14 +314,29 @@ fn run(program: &OsStr, args: &[OsString], node: Option<i32>) -> Result<i32, Str
         Some(p) => Stdio::from(open_stdin_fifo(std::path::Path::new(&p))?),
         None => Stdio::null(),
     };
-    let child = std::process::Command::new(program)
+    // A repository's server's environment, as a descriptor bubblewrap
+    // passes on ([`ENV_FILE_ENV`]): its number only, never its content.
+    let env_fd = match std::env::var_os(ENV_FILE_ENV) {
+        Some(p) => Some(open_env_file(std::path::Path::new(&p))?),
+        None => None,
+    };
+    let mut command = std::process::Command::new(program);
+    command
         .args(&args)
         .env_remove(STDIN_FIFO_ENV)
+        .env_remove(ENV_FILE_ENV)
+        .env_remove(INNER_ENV_FD);
+    if let Some(fd) = &env_fd {
+        use std::os::fd::AsRawFd;
+        command.env(INNER_ENV_FD, fd.as_raw_fd().to_string());
+    }
+    let child = command
         .stdin(stdin)
         .process_group(0)
         .spawn()
         .map_err(|e| format!("cannot start {}: {e}", program.to_string_lossy()))?;
     drop(view_fds);
+    drop(env_fd);
     let bwrap = child.id() as i32;
     // Reaped below by `waitpid`, never through `Child`.
     drop(child);

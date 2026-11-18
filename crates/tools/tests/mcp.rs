@@ -422,9 +422,9 @@ async fn notes_are_shown_once_per_session() {
 /// X.36 (PLAN.md T82): a repository's approved servers join the table
 /// through `set_project`, beside node.toml's: a name node.toml has stays
 /// node.toml's; one taken out (its approval removed, gone from the file)
-/// stops, and a tool of it a turn still holds starts nothing again; its
-/// `env` values are set inside the command (`/usr/bin/env`), never on the
-/// process that starts it.
+/// stops, and a tool of it a turn still holds starts nothing again; one
+/// whose `env` goes only to its own process (`env_inside`) starts only
+/// contained (the contained path: `cli/tests/project_mcp_e2e.rs`).
 #[tokio::test]
 async fn a_repositorys_servers_come_and_go_through_set_project() {
     let dir = tempfile::tempdir().unwrap();
@@ -442,7 +442,7 @@ async fn a_repositorys_servers_come_and_go_through_set_project() {
         },
     );
     let started = dir.path().join("started");
-    let mut proj = server(&[
+    let proj = server(&[
         "--tool-names",
         "env,who",
         "--marker",
@@ -450,8 +450,6 @@ async fn a_repositorys_servers_come_and_go_through_set_project() {
         "--started",
         started.to_str().unwrap(),
     ]);
-    proj.env = serde_json::from_value(json!({"PROJ_VALUE": "inside-only"})).unwrap();
-    proj.env_inside = true;
     let mut shadow = server(&["--tool-names", "who", "--marker", "shadow"]);
     shadow.env_inside = true;
     let mut given = BTreeMap::new();
@@ -470,10 +468,7 @@ async fn a_repositorys_servers_come_and_go_through_set_project() {
         held.run(&ctx(&dir), json!({})).await.output,
         "served by proj tool who"
     );
-    // The value reached the server, set by `env` inside the command.
     let pid = pids(&started)[0];
-    let environ = std::fs::read(format!("/proc/{pid}/environ")).unwrap();
-    assert!(String::from_utf8_lossy(&environ).contains("PROJ_VALUE=inside-only"));
     // The same copy again keeps its process.
     s.set_project(&given, vec![]);
     let l = s.load(&ctx(&dir), &[]).await;
@@ -498,6 +493,113 @@ async fn a_repositorys_servers_come_and_go_through_set_project() {
     assert_eq!(pids(&started).len(), 1, "a removed server started again");
     let l = s.load(&ctx(&dir), &[]).await;
     assert!(l.tools.iter().all(|t| !t.name().starts_with("mcp__proj__")));
+    // `env_inside` outside a contained sandbox: not started at all.
+    let mut inside = server(&["--started", started.to_str().unwrap()]);
+    inside.env = serde_json::from_value(json!({"PROJ_VALUE": "inside-only"})).unwrap();
+    inside.env_inside = true;
+    let mut given = BTreeMap::new();
+    given.insert("inside".to_string(), inside);
+    s.set_project(&given, vec![]);
+    let l = s.load(&ctx(&dir), &[]).await;
+    assert!(
+        l.notes
+            .iter()
+            .any(|n| n.contains("only in a contained sandbox")),
+        "{:?}",
+        l.notes
+    );
+    assert_eq!(
+        pids(&started).len(),
+        1,
+        "an env_inside server started uncontained"
+    );
     s.close();
     assert!(s.wait_gone(mcp::STOP_WAIT).await);
+}
+
+/// Review of PR 150 (LOW): a repository server taken out of the table
+/// while it is still starting does not stay up, and the turn that started
+/// it gets no tool of it.
+#[tokio::test]
+async fn a_server_taken_out_while_it_starts_does_not_stay_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = SessionMcp::at_always(
+        &BTreeMap::new(),
+        mcp::Home {
+            key: "k".into(),
+            workspace: dir.path().to_path_buf(),
+            pin: None,
+        },
+    );
+    let started = dir.path().join("started");
+    let slow = server(&[
+        "--slow-init",
+        "1500",
+        "--started",
+        started.to_str().unwrap(),
+    ]);
+    let mut given = BTreeMap::new();
+    given.insert("slow".to_string(), slow);
+    s.set_project(&given, vec![]);
+    let c = ctx(&dir);
+    let load = s.load(&c, &[]);
+    let taker = async {
+        while pids(&started).is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        s.set_project(&BTreeMap::new(), vec![]);
+    };
+    let (l, ()) = tokio::join!(load, taker);
+    assert!(
+        l.tools.iter().all(|t| !t.name().starts_with("mcp__slow__")),
+        "a removed server's tools were offered"
+    );
+    let pid = pids(&started)[0];
+    let by = Instant::now() + Duration::from_secs(10);
+    while alive(pid) {
+        assert!(
+            Instant::now() < by,
+            "the server taken out while it started still runs"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // Closing works the same way.
+    let t = SessionMcp::at_always(
+        &BTreeMap::new(),
+        mcp::Home {
+            key: "k2".into(),
+            workspace: dir.path().to_path_buf(),
+            pin: None,
+        },
+    );
+    let started2 = dir.path().join("started2");
+    let mut given = BTreeMap::new();
+    given.insert(
+        "slow".to_string(),
+        server(&[
+            "--slow-init",
+            "1500",
+            "--started",
+            started2.to_str().unwrap(),
+        ]),
+    );
+    t.set_project(&given, vec![]);
+    let load = t.load(&c, &[]);
+    let closer = async {
+        while pids(&started2).is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        t.close();
+    };
+    let (l, ()) = tokio::join!(load, closer);
+    assert!(l.tools.is_empty());
+    let pid = pids(&started2)[0];
+    let by = Instant::now() + Duration::from_secs(10);
+    while alive(pid) {
+        assert!(
+            Instant::now() < by,
+            "the server of a closed table still runs"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }

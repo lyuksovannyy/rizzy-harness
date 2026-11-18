@@ -62,8 +62,6 @@ struct CreateArgs {
     no_callbacks: bool,
     /// A request only: [`exec::ExecOffers::choose`] decides.
     exec_mode: Option<harness_core::policy::ExecMode>,
-    /// The chat's owner (X.36): recorded, never changed.
-    owner: Option<String>,
 }
 
 /// The longest a delete waits for its session's background commands: the
@@ -138,6 +136,20 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::ProjectCreate { .. }
         | MasterToNode::ProjectMcp { .. } => None,
     }
+}
+
+/// A turn command's `owner` (X.36): a malformed one refuses the command
+/// (nothing about it is logged); a well-formed one is kept for the chat's
+/// table.
+async fn learn_owner(s: &Session, owner: Option<String>) -> Result<(), String> {
+    if owner
+        .as_deref()
+        .is_some_and(|o| !harness_protocol::valid_user_id(o))
+    {
+        return Err("the command names a malformed account id as the chat's owner".into());
+    }
+    s.learn_owner(owner).await;
+    Ok(())
 }
 
 /// Turn diffs computed at once (X.12); one more is refused at once with
@@ -539,10 +551,7 @@ impl NodeRuntime {
             (policy::ProjectServers::Ask, Some(file))
                 if cfg.profile == harness_core::event::Profile::Agentic =>
             {
-                Some(Arc::new(project_mcp::ProjectMcp::open(
-                    file.clone(),
-                    cfg.secrets.clone(),
-                )))
+                Some(Arc::new(project_mcp::ProjectMcp::open(file.clone())))
             }
             (policy::ProjectServers::Ask, None)
                 if cfg.profile == harness_core::event::Profile::Agentic =>
@@ -1474,7 +1483,6 @@ impl NodeRuntime {
                 agent,
                 incognito,
                 exec_mode,
-                owner,
                 ..
             } => {
                 // The mode asked for (N.10a review N-d); what was chosen is
@@ -1497,7 +1505,6 @@ impl NodeRuntime {
                         incognito,
                         no_callbacks,
                         exec_mode,
-                        owner,
                     },
                 )
                 .await
@@ -1540,6 +1547,7 @@ impl NodeRuntime {
                 reply,
                 images,
                 files,
+                owner,
                 ..
             } => {
                 self.audit("session.prompt", session_id).await;
@@ -1563,7 +1571,10 @@ impl NodeRuntime {
                     files,
                 };
                 match self.session(session_id) {
-                    Some(s) => s.prompt(input, agent, agent_named, compare, extra).await,
+                    Some(s) => match learn_owner(&s, owner).await {
+                        Ok(()) => s.prompt(input, agent, agent_named, compare, extra).await,
+                        Err(e) => Err(e),
+                    },
                     None => Err("unknown session".into()),
                 }
             }
@@ -1573,16 +1584,20 @@ impl NodeRuntime {
                 agent,
                 savings,
                 context,
+                owner,
                 ..
             } => {
                 self.audit("session.callback", session_id).await;
                 // The standing parts only; this turn's own line never.
                 let standing = context.map(|c| c.standing);
                 match self.session(session_id) {
-                    Some(s) => {
-                        s.callback(bg_ids, agent, savings.unwrap_or_default(), standing)
-                            .await
-                    }
+                    Some(s) => match learn_owner(&s, owner).await {
+                        Ok(()) => {
+                            s.callback(bg_ids, agent, savings.unwrap_or_default(), standing)
+                                .await
+                        }
+                        Err(e) => Err(e),
+                    },
                     None => Err("unknown session".into()),
                 }
             }
@@ -1593,6 +1608,7 @@ impl NodeRuntime {
                 savings,
                 context,
                 agent_named,
+                owner,
                 ..
             } => {
                 self.audit("session.retry", session_id).await;
@@ -1607,7 +1623,10 @@ impl NodeRuntime {
                     ..Default::default()
                 };
                 match self.session(session_id) {
-                    Some(s) => s.retry(&turn_id, agent, agent_named, extra).await,
+                    Some(s) => match learn_owner(&s, owner).await {
+                        Ok(()) => s.retry(&turn_id, agent, agent_named, extra).await,
+                        Err(e) => Err(e),
+                    },
                     None => Err("unknown session".into()),
                 }
             }
@@ -1822,7 +1841,6 @@ impl NodeRuntime {
             incognito,
             no_callbacks,
             exec_mode,
-            owner,
         } = args;
         if self.session(sid).is_some() {
             return Err("session already exists".into());
@@ -1836,12 +1854,6 @@ impl NodeRuntime {
             return Err(format!(
                 "this runtime hosts {hosted:?} sessions, not {profile:?}"
             ));
-        }
-        if owner
-            .as_deref()
-            .is_some_and(|o| !harness_protocol::valid_user_id(o))
-        {
-            return Err("the chat's owner is not a valid account id".into());
         }
         let policy = &self.inner.cfg.policy;
         // The mode first (N.10a): chosen inside what this node offers,
@@ -1881,7 +1893,6 @@ impl NodeRuntime {
                 owned: None,
                 no_callbacks,
                 exec_mode,
-                owner,
             },
         )
         .await

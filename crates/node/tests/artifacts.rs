@@ -159,7 +159,6 @@ impl Node {
             profile: None,
             agent: None,
             incognito: false,
-            owner: None,
         });
         self.until(|m| is_ack(m, &format!("create-{sid}"))).await;
         sid
@@ -179,6 +178,7 @@ impl Node {
             images: vec![],
             agent_named: false,
             files: vec![],
+            owner: None,
         });
     }
 }

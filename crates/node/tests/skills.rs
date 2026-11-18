@@ -284,7 +284,6 @@ impl Node {
             cwd: cwd.display().to_string(),
             model: None,
             approval_mode: Some(ApprovalMode::Auto),
-            owner: None,
         })
         .await;
         sid
@@ -314,6 +313,7 @@ impl Node {
             images: vec![],
             agent_named: false,
             files: vec![],
+            owner: None,
         })
         .await;
         let by = std::time::Instant::now() + Duration::from_secs(20);
@@ -740,6 +740,7 @@ impl Node {
                 images: vec![],
                 agent_named: false,
                 files: vec![],
+                owner: None,
             })
             .unwrap();
         let by = std::time::Instant::now() + Duration::from_secs(20);

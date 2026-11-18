@@ -103,7 +103,6 @@ impl N {
             incognito: false,
             no_callbacks: false,
             exec_mode: None,
-            owner: None,
         });
         self.ack().await.unwrap();
         sid
@@ -155,6 +154,7 @@ impl N {
             images: vec![],
             agent_named: false,
             files: vec![],
+            owner: None,
         });
     }
 

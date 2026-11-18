@@ -1261,7 +1261,9 @@ fn main() -> anyhow::Result<()> {
     if std::env::args_os().nth(1).as_deref() == Some(harness_tools::sandbox::SUBCOMMAND.as_ref()) {
         // Before anything else: nothing the guard, bubblewrap or the node
         // left open (the image this runs from, review T8F-2) reaches the
-        // command.
+        // command. A repository MCP server's environment is read from its
+        // descriptor first (X.36), to be set on the command alone.
+        harness_tools::sandbox::take_inner_env();
         harness_tools::sandbox::close_inherited();
     }
     if std::env::args_os().nth(1).as_deref() == Some(harness_tools::sandbox::SUBCOMMAND.as_ref())

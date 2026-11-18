@@ -26,14 +26,28 @@
 //! `host` chat. Every rule of node.toml's servers holds (PLAN.md T47): the
 //! chat's own confinement, the caps, the idle stop, the approval of calls.
 //!
+//! **What the person sees is what runs.** An entry is approvable only if
+//! every string of it (the command, each argument, each `env` name and
+//! value) can be shown whole and unchanged: at most [`MAX_SHOWN_CHARS`]
+//! characters, the whole entry at most [`MAX_SHOWN_ENTRY`] bytes, no
+//! control character or line break of any kind, no hidden or direction
+//! character, no space at either end and no run of spaces a screen would
+//! fold. The list carries those strings in full (`env` values included:
+//! they are part of what runs, `NODE_OPTIONS` or `LD_PRELOAD` turn a
+//! harmless command into repository code), and the digest the click must
+//! match is over exactly them.
+//!
 //! **Environment.** A project server gets less than the chat's `bash`:
 //! the core allow-list only (no `env_pass`, no `env_vars`: like a
 //! node.toml server without `env_vars`), and its entry's own `env` values,
-//! which are set only inside the sandbox
-//! (`/usr/bin/env NAME=value … command`, `ServerConfig::env_inside`), so
-//! no value of a repository file reaches a process outside it (the
-//! wrapper, bubblewrap: an `LD_PRELOAD` there would run before them). The
-//! values join the node's scrubber; answers to the master carry names only.
+//! which reach only the server's own process: the node writes them to a
+//! private file the guard hands to bubblewrap as a descriptor, and
+//! `sandbox-exec` sets them after it confined itself, right before the
+//! `exec` (`ServerConfig::env_inside`); they are in no command line and
+//! not on the guard, bubblewrap or `sandbox-exec` itself. They are
+//! repository content the chat's agent can read anyway, so they join no
+//! scrubber; they are never written to an event, a log or an audit line by
+//! the harness, and only the asking person's answer carries them.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Read;
@@ -42,9 +56,10 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-use harness_core::secret::{Secret, SecretSet};
+use harness_core::secret::Secret;
 use harness_protocol::{
-    ProjectMcpEntry, ProjectMcpList, ProjectMcpRequest, ProjectMcpState, valid_user_id,
+    ProjectMcpEntry, ProjectMcpEnv, ProjectMcpList, ProjectMcpRequest, ProjectMcpState,
+    valid_user_id,
 };
 use harness_tools::mcp::{EnvValues, ServerConfig};
 use nix::fcntl::OFlag;
@@ -61,6 +76,11 @@ pub const MAX_FILE: u64 = 64 * 1024;
 pub const MAX_ENTRIES: usize = 32;
 /// The largest entry (its JSON), in bytes; a larger one is unsupported.
 pub const MAX_ENTRY: usize = 8 * 1024;
+/// The longest string of an approvable entry (its command, an argument, an
+/// `env` name or value), in characters, and its strings together, in
+/// bytes: so a whole entry fits a screen and is shown uncut.
+pub const MAX_SHOWN_CHARS: usize = 512;
+pub const MAX_SHOWN_ENTRY: usize = 4 * 1024;
 /// Arguments, and environment names, one entry may have.
 pub const MAX_ARGS: usize = 64;
 pub const MAX_ENV: usize = 64;
@@ -132,8 +152,14 @@ impl Entry {
         c
     }
 
-    fn env_keys(&self) -> Vec<String> {
-        self.env.keys().cloned().collect()
+    fn env_shown(&self) -> Vec<ProjectMcpEnv> {
+        self.env
+            .iter()
+            .map(|(k, v)| ProjectMcpEnv {
+                name: k.clone(),
+                value: v.clone(),
+            })
+            .collect()
     }
 }
 
@@ -144,7 +170,7 @@ pub struct Parsed {
     pub entry: Result<Entry, String>,
     pub command: String,
     pub args: Vec<String>,
-    pub env_keys: Vec<String>,
+    pub env: Vec<ProjectMcpEnv>,
 }
 
 /// What a read of a folder's `.mcp.json` found.
@@ -257,25 +283,61 @@ pub fn parse(bytes: &[u8]) -> FileRead {
     )
 }
 
-/// What a string looks like to the person: one line, hidden and control
-/// characters shown as escapes (only an unsupported entry can hold one).
+/// How a string of an entry that cannot be approved is shown: one line,
+/// hidden and control characters as escapes, cut with a mark. An
+/// approvable entry's strings are shown as they are (see [`unshowable`]).
 fn shown(s: &str) -> String {
+    const CUT: usize = 500;
     let out: String = s
         .chars()
         .flat_map(|c| {
-            if c.is_control() || harness_core::text::is_hidden(c) {
+            if c.is_control() || is_break(c) || harness_core::text::is_hidden(c) {
                 c.escape_unicode().collect::<Vec<_>>()
             } else {
                 vec![c]
             }
         })
         .collect();
-    out.chars().take(2048).collect()
+    if out.chars().count() <= CUT {
+        out
+    } else {
+        let mut cut: String = out.chars().take(CUT).collect();
+        cut.push_str("…[cut]");
+        cut
+    }
 }
 
-fn bad_char(s: &str) -> bool {
-    s.chars()
-        .any(|c| c.is_control() || harness_core::text::is_hidden(c))
+/// A line break of any kind (beside the control characters).
+fn is_break(c: char) -> bool {
+    matches!(
+        c,
+        '\n' | '\r' | '\u{0B}' | '\u{0C}' | '\u{85}' | '\u{2028}' | '\u{2029}'
+    )
+}
+
+/// Why `s` would not be shown whole and unchanged, if it would not.
+pub fn unshowable(s: &str) -> Option<&'static str> {
+    if s.chars().count() > MAX_SHOWN_CHARS {
+        return Some("longer than the 512 characters the page shows whole");
+    }
+    if s.chars().any(|c| c.is_control() || is_break(c)) {
+        return Some("a control character or a line break");
+    }
+    if s.chars().any(harness_core::text::is_hidden) {
+        return Some("a hidden or direction character");
+    }
+    let mut prev_space = false;
+    for c in s.chars() {
+        let space = c.is_whitespace();
+        if space && prev_space {
+            return Some("a run of spaces a screen would fold");
+        }
+        prev_space = space;
+    }
+    if s.starts_with(char::is_whitespace) || s.ends_with(char::is_whitespace) {
+        return Some("a space at its start or end, which a screen would not show");
+    }
+    None
 }
 
 fn valid_env_name(k: &str) -> bool {
@@ -298,20 +360,34 @@ fn parse_entry(name: &str, v: &Value) -> Parsed {
                 .collect()
         })
         .unwrap_or_default();
-    let env_keys: Vec<String> = v
+    let entry = check_entry(name, v);
+    // An approvable entry is shown exactly as it runs; any other one as
+    // escaped, cut text.
+    if let Ok(e) = &entry {
+        return Parsed {
+            command: e.command.clone(),
+            args: e.args.clone(),
+            env: e.env_shown(),
+            entry,
+        };
+    }
+    let env: Vec<ProjectMcpEnv> = v
         .get("env")
         .and_then(Value::as_object)
-        .map(|m| m.keys().cloned().collect())
+        .map(|m| {
+            m.iter()
+                .map(|(k, x)| ProjectMcpEnv {
+                    name: shown(k),
+                    value: shown(x.as_str().unwrap_or_default()),
+                })
+                .collect()
+        })
         .unwrap_or_default();
-    let shown_parts = Parsed {
-        entry: Err(String::new()),
+    Parsed {
+        entry,
         command: shown(&command),
         args: args.iter().map(|a| shown(a)).collect(),
-        env_keys: env_keys.iter().map(|k| shown(k)).collect(),
-    };
-    Parsed {
-        entry: check_entry(name, v),
-        ..shown_parts
+        env,
     }
 }
 
@@ -420,18 +496,31 @@ fn check_entry(name: &str, v: &Value) -> Result<Entry, String> {
             );
         }
     }
-    for t in all {
-        if bad_char(t) {
-            return Err("not supported: it holds a control or hidden character".into());
+    // What is shown is what runs: every string whole and unchanged.
+    let mut bytes = 0usize;
+    let parts = std::iter::once(("the command", command.as_str()))
+        .chain(args.iter().map(|a| ("an argument", a.as_str())))
+        .chain(env.keys().map(|k| ("an env name", k.as_str())))
+        .chain(env.values().map(|x| ("an env value", x.as_str())));
+    for (what, t) in parts {
+        if let Some(why) = unshowable(t) {
+            return Err(format!(
+                "not supported: {what} cannot be shown whole and unchanged ({why})"
+            ));
         }
+        bytes += t.len();
     }
-    if command.trim().is_empty() {
+    if bytes > MAX_SHOWN_ENTRY {
+        return Err(format!(
+            "not supported: the entry is larger than the {} KiB the page shows whole",
+            MAX_SHOWN_ENTRY / 1024
+        ));
+    }
+    if command.is_empty() {
         return Err("not supported: the command is empty".into());
     }
-    // `/usr/bin/env NAME=value … command`: a command with `=` would be
-    // taken for one more value.
-    if command.contains('=') {
-        return Err("not supported: a command with `=` in it".into());
+    if args.iter().any(String::is_empty) {
+        return Err("not supported: an empty argument, which a screen would not show".into());
     }
     Ok(Entry {
         command: command.clone(),
@@ -472,7 +561,10 @@ pub(crate) struct ProjectMcp {
     /// then, and unchanged by an unreadable file.
     seen: Mutex<HashMap<PathBuf, BTreeSet<String>>>,
     pub(crate) busy: std::sync::Arc<tokio::sync::Semaphore>,
-    secrets: SecretSet,
+    /// Why the approvals file could not be read at start, if it could not:
+    /// then nothing is approved or removed (nothing would be written over
+    /// what it held) until it is fixed and the node restarted.
+    store_error: Option<String>,
 }
 
 fn folder_key(p: &Path) -> String {
@@ -480,33 +572,40 @@ fn folder_key(p: &Path) -> String {
 }
 
 impl ProjectMcp {
-    /// The store at `file`, as written before (a file that cannot be read
-    /// or parsed: none, and the log says why; nothing runs that is not in
-    /// it). Every approved `env` value joins `secrets`.
-    pub(crate) fn open(file: PathBuf, secrets: SecretSet) -> Self {
+    /// The store at `file`, as written before. A file that cannot be used
+    /// (not a regular file, not the node user's own with mode 0600, not
+    /// what the node writes) fails closed and loud: none of it is taken,
+    /// the log says why, and approve and remove are refused naming the
+    /// file, so nothing is written over it.
+    pub(crate) fn open(file: PathBuf) -> Self {
         let mut approvals = BTreeMap::new();
+        let mut store_error = None;
         match read_store(&file) {
             Ok(Some(saved)) => {
                 for a in saved.approvals.into_iter().take(MAX_APPROVALS) {
-                    for v in a.entry.env.values() {
-                        secrets.add(Secret::new(v.clone()));
-                    }
                     approvals.insert((a.user, a.folder, a.name), a.entry);
                 }
             }
             Ok(None) => {}
-            Err(e) => tracing::warn!(
-                file = %file.display(),
-                error = %e,
-                "project MCP approvals could not be read; none are taken"
-            ),
+            Err(e) => {
+                tracing::error!(
+                    file = %file.display(),
+                    error = %e,
+                    "project MCP approvals cannot be used; none are taken, and none are approved or removed until the file is fixed and the node restarted"
+                );
+                store_error = Some(format!(
+                    "the node's approvals file {} cannot be used ({e}): nothing is approved or \
+                     removed until it is fixed or moved away and the node restarted",
+                    file.display()
+                ));
+            }
         }
         Self {
             file,
             approvals: Mutex::new(approvals),
             seen: Mutex::new(HashMap::new()),
             busy: std::sync::Arc::new(tokio::sync::Semaphore::new(AT_ONCE)),
-            secrets,
+            store_error,
         }
     }
 
@@ -544,14 +643,6 @@ impl ProjectMcp {
     pub(crate) fn look(&self, folder: &Path) {
         let read = read_file(folder);
         self.note_read(folder, &read);
-    }
-
-    /// Whether the node knows what `folder`'s file held at some read.
-    pub(crate) fn knows(&self, folder: &Path) -> bool {
-        self.seen
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .contains_key(folder)
     }
 
     /// The servers a chat of `owner` in `folder` starts from now on, and
@@ -629,25 +720,27 @@ impl ProjectMcp {
             let key = real
                 .as_deref()
                 .map_or_else(|_| folder.to_string(), folder_key);
-            let removed = self.remove(user, &key, name);
+            let (removed, note) = match self.remove(user, &key, name) {
+                Ok(true) => (true, None),
+                Ok(false) => (false, Some(format!("you had no approval of {name} here"))),
+                Err(e) => (false, Some(e)),
+            };
             let changed = removed.then(|| ("remove", name.clone()));
             return match real {
                 Ok(p) => {
                     let read = read_file(&p);
                     self.note_read(&p, &read);
                     Outcome {
-                        list: Ok(self.list(policy, user, &p, &read, None)),
+                        list: Ok(self.list(policy, user, &p, &read, note)),
                         changed,
                     }
                 }
                 Err(e) => Outcome {
                     list: Ok(ProjectMcpList {
                         unreadable: Some(e),
-                        note: Some(if removed {
-                            format!("removed your approval of {name}")
-                        } else {
-                            format!("you had no approval of {name} here")
-                        }),
+                        note: Some(
+                            note.unwrap_or_else(|| format!("removed your approval of {name}")),
+                        ),
                         ..Default::default()
                     }),
                     changed,
@@ -685,6 +778,9 @@ impl ProjectMcp {
     ) -> Result<(), String> {
         const RELOAD: &str = "changed: the file's entry is not the one you were shown; reload \
              and look again";
+        if let Some(e) = &self.store_error {
+            return Err(format!("not approved: {e}"));
+        }
         let FileRead::Entries(entries) = read else {
             return Err(match read {
                 FileRead::Unreadable(why) => format!("not approved: the file {why}"),
@@ -730,25 +826,32 @@ impl ProjectMcp {
             };
             return Err(format!("not approved: the node could not save it: {e}"));
         }
-        for v in entry.env.values() {
-            self.secrets.add(Secret::new(v.clone()));
-        }
         Ok(())
     }
 
-    fn remove(&self, user: &str, folder: &str, name: &str) -> bool {
+    /// Remove an approval: `Ok(false)` when there was none; an `Err` (the
+    /// store cannot be used, or the write failed) leaves it in place.
+    fn remove(&self, user: &str, folder: &str, name: &str) -> Result<bool, String> {
         let mut all = self.approvals.lock().unwrap_or_else(|p| p.into_inner());
         let key = (user.to_string(), folder.to_string(), name.to_string());
-        let Some(old) = all.remove(&key) else {
-            return false;
-        };
-        if let Err(e) = write_store(&self.file, &all) {
-            // Not kept on disk, gone from memory: it no longer runs here,
-            // and the log says it may come back at the next start.
-            tracing::warn!(error = %e, "a removed project MCP approval could not be saved; it is gone until the node restarts");
-            let _ = old;
+        if !all.contains_key(&key) {
+            return Ok(false);
         }
-        true
+        if let Some(e) = &self.store_error {
+            return Err(format!("not removed: {e}"));
+        }
+        let old = all.remove(&key);
+        if let Err(e) = write_store(&self.file, &all) {
+            if let Some(old) = old {
+                all.insert(key, old);
+            }
+            return Err(format!(
+                "not removed: the node could not save the change to {}: {e}; the approval \
+                 stays",
+                self.file.display()
+            ));
+        }
+        Ok(true)
     }
 
     fn list(
@@ -769,12 +872,12 @@ impl ProjectMcp {
             state,
             command: e.command.clone(),
             args: e.args.clone(),
-            env_keys: e.env_keys(),
+            env: e.env_shown(),
             digest: None,
             reason: None,
             approved_command: None,
             approved_args: None,
-            approved_env_keys: None,
+            approved_env: None,
         };
         match read {
             FileRead::Unreadable(why) => {
@@ -793,12 +896,12 @@ impl ProjectMcp {
                         state: ProjectMcpState::New,
                         command: p.command.clone(),
                         args: p.args.clone(),
-                        env_keys: p.env_keys.clone(),
+                        env: p.env.clone(),
                         digest: None,
                         reason: None,
                         approved_command: None,
                         approved_args: None,
-                        approved_env_keys: None,
+                        approved_env: None,
                     };
                     match &p.entry {
                         _ if harness_core::agent::valid_mcp_server_name(name)
@@ -823,7 +926,7 @@ impl ProjectMcp {
                                 x.digest = Some(e.digest());
                                 x.approved_command = Some(a.command.clone());
                                 x.approved_args = Some(a.args.clone());
-                                x.approved_env_keys = Some(a.env_keys());
+                                x.approved_env = Some(a.env_shown());
                             }
                         },
                     }
@@ -835,7 +938,7 @@ impl ProjectMcp {
                         x.state = ProjectMcpState::Changed;
                         x.approved_command = Some(a.command.clone());
                         x.approved_args = Some(a.args.clone());
-                        x.approved_env_keys = Some(a.env_keys());
+                        x.approved_env = Some(a.env_shown());
                     }
                     out.entries.push(x);
                 }
@@ -944,7 +1047,13 @@ mod tests {
         let fs = m["fs"].entry.clone().unwrap();
         assert_eq!(fs.command, "npx");
         assert_eq!(fs.args, ["-y", "srv"]);
-        assert_eq!(m["fs"].env_keys, ["TOKEN"]);
+        assert_eq!(
+            m["fs"].env,
+            [ProjectMcpEnv {
+                name: "TOKEN".into(),
+                value: "t".into()
+            }]
+        );
         assert!(m["s"].entry.is_ok());
         assert!(
             why(
@@ -988,7 +1097,6 @@ mod tests {
             )
             .contains("hidden")
         );
-        assert!(why(r#"{"mcpServers": {"a": {"command": "A=1"}}}"#, "a").contains("`=`"));
         let many = format!(
             r#"{{"mcpServers": {{"a": {{"command": "x", "args": [{}]}}}}}}"#,
             vec!["\"a\""; MAX_ARGS + 1].join(",")
@@ -1092,14 +1200,212 @@ mod tests {
             std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
             0o600
         );
-        let secrets = SecretSet::default();
-        let pm = ProjectMcp::open(file.clone(), secrets.clone());
+        let pm = ProjectMcp::open(file.clone());
         assert!(pm.has_approvals("u", Path::new("/f")));
         assert!(!pm.has_approvals("v", Path::new("/f")));
-        assert_eq!(secrets.scrub("x secret-value-1 y"), "x [REDACTED] y");
         // A loosened file is not taken.
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let pm = ProjectMcp::open(file, SecretSet::default());
+        let pm = ProjectMcp::open(file);
         assert!(!pm.has_approvals("u", Path::new("/f")));
+    }
+
+    /// A node with `[mcp] project_servers = "ask"` rooted at `root`.
+    fn policy(root: &Path) -> NodePolicy {
+        NodePolicy {
+            workspace_roots: vec![root.to_path_buf()],
+            ..Default::default()
+        }
+    }
+
+    fn entry_json(command: &str, args: &[&str], env: &[(&str, &str)]) -> String {
+        let env: serde_json::Map<String, Value> = env
+            .iter()
+            .map(|(k, v)| (k.to_string(), Value::String(v.to_string())))
+            .collect();
+        serde_json::json!({"mcpServers": {"s": {"command": command, "args": args, "env": env}}})
+            .to_string()
+    }
+
+    /// Review of PR 150 (LOW): an approvals file the node cannot use fails
+    /// closed and loud: approve and remove are refused naming the file,
+    /// and nothing is written over it.
+    #[test]
+    fn an_unusable_store_refuses_approve_and_remove_and_is_not_overwritten() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().canonicalize().unwrap();
+        let ws = root.join("ws");
+        std::fs::create_dir(&ws).unwrap();
+        std::fs::write(ws.join(FILE), entry_json("python3", &["srv.py"], &[])).unwrap();
+        let file = root.join("project-mcp.json");
+        let mut all = BTreeMap::new();
+        all.insert(
+            ("u".to_string(), folder_key(&ws), "old".to_string()),
+            Entry {
+                command: "x".into(),
+                args: vec![],
+                env: BTreeMap::new(),
+            },
+        );
+        write_store(&file, &all).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let before = std::fs::read(&file).unwrap();
+        let pm = ProjectMcp::open(file.clone());
+        let p = policy(&root);
+        let folder = ws.display().to_string();
+        let FileRead::Entries(m) = read_file(&ws) else {
+            panic!()
+        };
+        let digest = m["s"].entry.clone().unwrap().digest();
+        let o = pm.handle(
+            &p,
+            "u",
+            &folder,
+            &ProjectMcpRequest::Approve {
+                name: "s".into(),
+                digest,
+            },
+        );
+        let note = o.list.unwrap().note.unwrap();
+        assert!(
+            note.contains("cannot be used") && note.contains("project-mcp.json"),
+            "{note}"
+        );
+        assert!(o.changed.is_none());
+        let o = pm.handle(
+            &p,
+            "u",
+            &folder,
+            &ProjectMcpRequest::Remove { name: "old".into() },
+        );
+        assert!(o.changed.is_none());
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            before,
+            "the store was written over"
+        );
+    }
+
+    /// Review of PR 150 (LOW): a remove whose write fails is reported, and
+    /// the approval stays (in memory and on disk alike).
+    #[test]
+    fn a_remove_that_cannot_be_saved_keeps_the_approval() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().canonicalize().unwrap();
+        let (ws, data) = (root.join("ws"), root.join("data"));
+        std::fs::create_dir(&ws).unwrap();
+        std::fs::create_dir(&data).unwrap();
+        std::fs::write(ws.join(FILE), entry_json("python3", &["srv.py"], &[])).unwrap();
+        let pm = ProjectMcp::open(data.join("project-mcp.json"));
+        let p = policy(&root);
+        let folder = ws.display().to_string();
+        let l = pm
+            .handle(&p, "u", &folder, &ProjectMcpRequest::List)
+            .list
+            .unwrap();
+        let digest = l.entries[0].digest.clone().unwrap();
+        let o = pm.handle(
+            &p,
+            "u",
+            &folder,
+            &ProjectMcpRequest::Approve {
+                name: "s".into(),
+                digest,
+            },
+        );
+        assert!(o.changed.is_some());
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let o = pm.handle(
+            &p,
+            "u",
+            &folder,
+            &ProjectMcpRequest::Remove { name: "s".into() },
+        );
+        std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let note = o.list.unwrap().note.unwrap();
+        assert!(note.contains("not removed"), "{note}");
+        assert!(o.changed.is_none());
+        assert!(
+            pm.has_approvals("u", &ws),
+            "the approval went from memory alone"
+        );
+    }
+
+    /// Review of PR 150 (HIGH 2): what the person is shown is what is
+    /// hashed and run, or the entry cannot be approved. The reviewer's
+    /// entry (a command line padded so its tail falls past what the page
+    /// showed) is unsupported; every class of string a screen would not
+    /// show whole and unchanged is too; an entry at the limits is shown
+    /// whole and its digest is that of the strings shown.
+    #[test]
+    fn only_what_is_shown_whole_can_be_approved() {
+        let padded = format!(
+            "echo starting a safe server{}; touch /tmp/pwned; exec python3 x",
+            " ".repeat(3000)
+        );
+        let parse_one = |json: String| match parse(json.as_bytes()) {
+            FileRead::Entries(m) => m["s"].clone(),
+            other => panic!("{other:?}"),
+        };
+        let p = parse_one(entry_json("sh", &["-c", &padded], &[]));
+        assert!(p.entry.is_err(), "the padded entry can be approved");
+        assert!(p.args[1].ends_with("…[cut]"), "a cut string is not marked");
+        for (what, bad) in [
+            ("longer", "a".repeat(MAX_SHOWN_CHARS + 1)),
+            ("line break", "a\nb".to_string()),
+            ("line break", "a\rb".to_string()),
+            ("line break", "a\u{0B}b".to_string()),
+            ("line break", "a\u{0C}b".to_string()),
+            ("line break", "a\u{85}b".to_string()),
+            ("line break", "a\u{2028}b".to_string()),
+            ("line break", "a\u{2029}b".to_string()),
+            ("control", "a\tb".to_string()),
+            ("hidden", "a\u{202E}b".to_string()),
+            ("hidden", "a\u{200B}b".to_string()),
+            ("run of spaces", "a  b".to_string()),
+            ("start or end", " a".to_string()),
+            ("start or end", "a ".to_string()),
+        ] {
+            for json in [
+                entry_json(&bad, &[], &[]),
+                entry_json("x", &[&bad], &[]),
+                entry_json("x", &[], &[("K", &bad)]),
+            ] {
+                let why = parse_one(json).entry.unwrap_err();
+                assert!(why.contains(what), "{bad:?}: {why}");
+            }
+        }
+        assert!(
+            parse_one(entry_json("x", &[""], &[]))
+                .entry
+                .unwrap_err()
+                .contains("empty")
+        );
+        // At the limits: 512-character strings, about 4 KiB in all.
+        let long = "b".repeat(MAX_SHOWN_CHARS);
+        let args: Vec<&str> = (0..6).map(|_| long.as_str()).collect();
+        let p = parse_one(entry_json("python3", &args, &[("NODE_OPTIONS", &long)]));
+        let e = p.entry.clone().unwrap();
+        assert_eq!(p.command, e.command);
+        assert_eq!(p.args, e.args);
+        assert_eq!(p.env, e.env_shown());
+        let shown = Entry {
+            command: p.command.clone(),
+            args: p.args.clone(),
+            env: p
+                .env
+                .iter()
+                .map(|x| (x.name.clone(), x.value.clone()))
+                .collect(),
+        };
+        assert_eq!(shown.digest(), e.digest());
+        assert_eq!(shown.config().args, e.args, "what runs is what is shown");
+        // One more argument passes the whole-entry limit.
+        let args: Vec<&str> = (0..8).map(|_| long.as_str()).collect();
+        let why = parse_one(entry_json("python3", &args, &[]))
+            .entry
+            .unwrap_err();
+        assert!(why.contains("4 KiB"), "{why}");
     }
 }

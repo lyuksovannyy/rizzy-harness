@@ -133,7 +133,6 @@ impl Node {
             cwd: cwd.display().to_string(),
             model: None,
             approval_mode: Some(ApprovalMode::Auto),
-            owner: None,
         })
         .await;
         self.acked(&format!("create-{name}"), Duration::from_secs(30))
@@ -165,6 +164,7 @@ fn prompt(req: &str, sid: SessionId, text: &str) -> MasterToNode {
         images: vec![],
         agent_named: false,
         files: vec![],
+        owner: None,
     }
 }
 

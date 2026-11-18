@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 // "MCP servers from the repository" (X.36) against a mocked API: each
-// entry's command and arguments in full as text, environment names only,
+// entry's command, then each argument on its own line, then each
+// NAME=value, exactly as sent (nothing joined, quoted or cut), as text;
 // Approve sends the name and the digest it was shown, Remove the name,
 // Reload asks again; the node's refusal and the reasons are shown.
 import { act } from "react";
@@ -10,27 +11,37 @@ import type { McpList } from "./ProjectMcp";
 
 const call = vi.fn();
 vi.mock("../api", () => ({ call }));
-const { default: ProjectMcp, commandLine } = await import("./ProjectMcp");
+const { default: ProjectMcp } = await import("./ProjectMcp");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 const list: McpList = {
   node_id: "n1",
   entries: [
-    { name: "fs", state: "new", command: "npx", args: ["-y", "@x/server", "a b"], env_keys: ["TOKEN"], digest: "d".repeat(64) },
+    {
+      name: "fs",
+      state: "new",
+      command: "npx",
+      args: ["-y", "@x/server", "a b", "it's \"quoted\" $HOME"],
+      env: [
+        { name: "TOKEN", value: "t-123" },
+        { name: "NODE_OPTIONS", value: "--require ./x.js" },
+      ],
+      digest: "d".repeat(64),
+    },
     {
       name: "db",
       state: "changed",
       command: "uvx",
       args: ["db-new"],
-      env_keys: [],
+      env: [],
       digest: "e".repeat(64),
       approved_command: "uvx",
       approved_args: ["db-old"],
-      approved_env_keys: [],
+      approved_env: [{ name: "OLD", value: "1" }],
     },
-    { name: "web", state: "unsupported", command: "", args: [], env_keys: [], reason: "not supported: remote" },
-    { name: "x", state: "approved", command: '<img src="https://x.example/a.png">', args: [], env_keys: [] },
+    { name: "web", state: "unsupported", command: "", args: [], env: [], reason: "not supported: remote" },
+    { name: "x", state: "approved", command: '<img src="https://x.example/a.png">', args: [], env: [] },
   ],
 };
 
@@ -55,18 +66,26 @@ async function show(hasFolder = true) {
 
 const button = (label: string, n = 0) =>
   [...host.querySelectorAll("button")].filter((b) => b.textContent === label)[n] as HTMLButtonElement;
+const lines = (cls: string, entry: number) =>
+  [...(host.querySelectorAll(".mcp-entry")[entry]?.querySelectorAll(`.${cls}`) ?? [])].map((n) => n.textContent);
 
-test("lists every entry as text, and Approve, Remove and Reload ask the node", async () => {
+test("each argument and NAME=value on its own line, unmodified, as text", async () => {
   call.mockResolvedValue(list);
   await show();
   expect(call).toHaveBeenCalledWith("GET", "/api/projects/p1/mcp");
-  const text = host.textContent ?? "";
-  expect(text).toContain("npx -y @x/server 'a b'");
-  expect(text).toContain("Environment: TOKEN (values not shown)");
-  expect(text).toContain("uvx db-old");
-  expect(text).toContain("not supported: remote");
+  expect(lines("mcp-arg", 0)).toEqual(["-y", "@x/server", "a b", "it's \"quoted\" $HOME"]);
+  expect(lines("mcp-env", 0)).toEqual(["TOKEN=t-123", "NODE_OPTIONS=--require ./x.js"]);
+  // The changed entry: the file's, then the approved copy that runs now.
+  expect(lines("mcp-arg", 1)).toEqual(["db-new", "db-old"]);
+  expect(lines("mcp-env", 1)).toEqual(["OLD=1"]);
+  expect(host.textContent).toContain("not supported: remote");
   expect(host.querySelector("img")).toBeNull();
-  expect(text).toContain('<img src="https://x.example/a.png">');
+  expect(host.textContent).toContain('<img src="https://x.example/a.png">');
+});
+
+test("Approve, Remove and Reload ask the node", async () => {
+  call.mockResolvedValue(list);
+  await show();
   await act(async () => button("Approve").click());
   expect(call).toHaveBeenLastCalledWith("POST", "/api/projects/p1/mcp/approve", { name: "fs", digest: "d".repeat(64) });
   await act(async () => button("Approve the change").click());
@@ -87,8 +106,4 @@ test("the node's refusal and a project without a folder are said", async () => {
   await show(false);
   expect(call).not.toHaveBeenCalled();
   expect(host.textContent).toContain("no folder on a node");
-});
-
-test("a command line quotes what would be split", () => {
-  expect(commandLine("python3", ["x.py", "--name", "it's here", ""])).toBe("python3 x.py --name 'it'\\''s here' ''");
 });

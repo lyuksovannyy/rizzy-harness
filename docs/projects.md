@@ -108,17 +108,21 @@ The Settings tab of a project with a folder on a node (`settings.node_id` and `c
 reads them for the person looking. Only on a node whose node.toml says `[mcp] project_servers =
 "ask"`; elsewhere the section says the node does not run a repository's servers (the default).
 
-- Each entry shows its name, its command and arguments in full as text, its environment's names
-  (never a value) and its state for this person: not approved, approved, changed in the file
+- Each entry shows its name, its command, then each argument on its own line, then each
+  `NAME=value` of its environment, in full as text (nothing joined, quoted or cut: the node makes
+  an entry it could not show so unsupported: a string over 512 characters, an entry over 4 KiB, a
+  control or line-break character, a hidden or direction character, spaces a screen would fold, an
+  empty argument), and its state for this person: not approved, approved, changed in the file
   (the approved copy keeps running), gone from the file, not supported (remote, a `${…}`
-  variable, another field, a bad name, a hidden character; with the reason) or hidden (node.toml
+  variable, another field, a bad name, the display rules; with the reason) or hidden (node.toml
   has the name).
 - **Approve** (new or changed entries) sends the entry's name and the digest the list gave; the
   node approves only if the file's entry still has it, keeps its own copy (data directory, 0600)
   and runs that copy in this person's sandboxed chats in this folder, never the file's text.
   **Remove** takes the person's approval away (always allowed; its server stops at once).
   **Reload** reads the file again; nothing else does but opening the list, an approve or a remove
-  and, once, the building of a chat's server table (to leave out an entry gone from the file).
+  and, once per chat, its first turn since the node started (to leave out an entry gone from the
+  file).
 - An approval is the person's own: another member's chats in the folder start nothing of it. Who
   may ask: a member of the project's workspace who may run agent chats on its node (the rule of
   the project's folder), never the API token. Each approve and remove is an audit line.
@@ -449,7 +453,7 @@ interface BoardTemplate { template_id: string; name: string; builtin: boolean;
 | GET `/api/projects?workspace=` | – | `{ projects, workspace_id, can_create, icons, accents }` |
 | POST `/api/projects` | `{ name, description?, icon?, accent?, template_id?, instructions?, workspace_id?, folder_on? }` | `ProjectDetail` (users default to the active workspace; the API token must name one). `folder_on`: a node id; the node makes the project's folder first (409 when it refuses or does not offer it, 503 when it is away, 404 for an unknown node, 403 as for an agentic chat there) and the settings name it |
 | POST `/api/projects/{id}/folder` | `{ node_id }` | `ProjectDetail`; a project without a folder gets one made on that node (409 when it has one) |
-| GET `/api/projects/{id}/mcp` | — | the folder's `.mcp.json` for the caller (X.36): `{ node_id, entries: [{ name, state, command, args, env_keys, digest?, reason?, approved_command?, approved_args?, approved_env_keys? }], unreadable?, missing?, note? }`; 403 for the API token or without a level for agent chats there, 409 without a folder or on a node without the feature, 503 when the node is away, 429 past 30 a minute |
+| GET `/api/projects/{id}/mcp` | — | the folder's `.mcp.json` for the caller (X.36): `{ node_id, entries: [{ name, state, command, args, env: [{ name, value }], digest?, reason?, approved_command?, approved_args?, approved_env? }], unreadable?, missing?, note? }`, whole or refused (409); 403 for the API token or without a level for agent chats there, 409 without a folder or on a node without the feature, 503 when the node is away, 429 past 30 a minute |
 | POST `/api/projects/{id}/mcp/approve` | `{ name, digest }` | the list after it; `note` says why nothing was approved (the entry changed: reload) |
 | POST `/api/projects/{id}/mcp/remove` | `{ name }` | the list after it |
 | GET `/api/projects/{id}` | – | `ProjectDetail` (404 when not a member) |

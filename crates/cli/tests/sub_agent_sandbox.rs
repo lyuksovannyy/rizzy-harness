@@ -675,7 +675,6 @@ async fn a_delegated_sub_agent_gets_its_folder_through_the_node() {
             cwd: f.repo.display().to_string(),
             model: None,
             approval_mode: Some(harness_core::policy::ApprovalMode::Auto),
-            owner: None,
         })
         .unwrap();
     let shell = format!(
@@ -711,6 +710,7 @@ async fn a_delegated_sub_agent_gets_its_folder_through_the_node() {
             images: vec![],
             agent_named: false,
             files: vec![],
+            owner: None,
         })
         .unwrap();
     loop {

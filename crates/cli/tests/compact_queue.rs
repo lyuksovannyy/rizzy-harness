@@ -206,7 +206,6 @@ async fn create(n: &mut Node) -> SessionId {
             cwd: n.ws.display().to_string(),
             model: None,
             approval_mode: Some(ApprovalMode::Auto),
-            owner: None,
         })
         .unwrap();
     until(&mut n.link, sid, |k| {
@@ -231,6 +230,7 @@ fn prompt(link: &NodeLink, sid: SessionId, req_id: &str, text: String) {
             images: vec![],
             files: vec![],
             agent_named: false,
+            owner: None,
         })
         .unwrap();
 }

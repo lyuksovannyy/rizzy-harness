@@ -3,11 +3,14 @@
 //! with node.toml `[mcp] project_servers = "ask"`. A member lists a
 //! project folder's `.mcp.json` over HTTP, approves one entry, and a
 //! sandboxed chat in the folder starts the approved copy inside the
-//! chat's containment: its own PID namespace, its `env` value set only
-//! inside (the wrapper and bubblewrap never have it), scrubbed from the
-//! chat. The chat's shell can neither read nor write the node's approved
-//! copies; a `host` chat starts nothing; the entry's value is in no HTTP
-//! answer, event or line of the server's log.
+//! chat's containment: its own PID namespace, its `env` value on the
+//! server's own process alone (no other process of the machine has it in
+//! its command line or environment: not the guard, bubblewrap or
+//! `sandbox-exec`). The list shows the value to the person approving (it
+//! is repository content and part of what runs); the harness writes it
+//! into no event and no line of the server's log. The chat's shell can
+//! neither read nor write the node's approved copies; a `host` chat starts
+//! nothing.
 //!
 //! Needs bubblewrap and python3; with `HARNESS_REQUIRE_BWRAP=1` a node that
 //! offers no sandboxed chats fails the test.
@@ -39,6 +42,27 @@ fn results(evs: &[Value]) -> Vec<(bool, String)> {
             )
         })
         .collect()
+}
+
+/// Every process of this machine (that this user can read) whose command
+/// line or environment holds the canary: pid, command line, environment.
+fn with_canary() -> Vec<(i32, String, String)> {
+    let mut out = Vec::new();
+    for e in std::fs::read_dir("/proc").unwrap().flatten() {
+        let Ok(pid) = e.file_name().to_string_lossy().parse::<i32>() else {
+            continue;
+        };
+        let cmd = std::fs::read(format!("/proc/{pid}/cmdline"))
+            .map(|b| String::from_utf8_lossy(&b).replace('\0', " "))
+            .unwrap_or_default();
+        let env = std::fs::read(format!("/proc/{pid}/environ"))
+            .map(|b| String::from_utf8_lossy(&b).replace('\0', "\n"))
+            .unwrap_or_default();
+        if cmd.contains(CANARY) || env.contains(CANARY) {
+            out.push((pid, cmd, env));
+        }
+    }
+    out
 }
 
 /// Processes of this machine whose command line holds `marker`: their pid,
@@ -119,12 +143,11 @@ async fn an_approved_repository_server_runs_inside_the_chats_sandbox() {
         )
         .await;
     assert!(st.is_success(), "{st} {text}\n{}", s.log());
-    assert!(!text.contains(CANARY), "{text}");
     let l: Value = serde_json::from_str(&text).unwrap();
     let e = &l["entries"][0];
     assert_eq!(e["name"], "envy");
     assert_eq!(e["state"], "new");
-    assert_eq!(e["env_keys"], json!(["MY_TOKEN"]));
+    assert_eq!(e["env"], json!([{"name": "MY_TOKEN", "value": CANARY}]));
     let digest = e["digest"].as_str().unwrap().to_string();
     let (st, text) = s
         .raw(
@@ -134,7 +157,6 @@ async fn an_approved_repository_server_runs_inside_the_chats_sandbox() {
         )
         .await;
     assert!(st.is_success(), "{st} {text}");
-    assert!(!text.contains(CANARY));
     assert_eq!(
         serde_json::from_str::<Value>(&text).unwrap()["entries"][0]["state"],
         "approved"
@@ -153,7 +175,7 @@ async fn an_approved_repository_server_runs_inside_the_chats_sandbox() {
         &sid,
         &[
             json!({"tool": "mcp__envy__pid", "input": {}}),
-            json!({"tool": "mcp__envy__env", "input": {}}),
+            json!({"tool": "bash", "input": {"command": "true"}}),
             json!({"tool": "bash", "input": {"command": format!("cat {}", copies.display())}}),
             json!({"tool": "bash", "input": {"command": format!("echo x >> {}", copies.display())}}),
         ],
@@ -172,20 +194,19 @@ async fn an_approved_repository_server_runs_inside_the_chats_sandbox() {
         "the server shares the host's PID namespace: {}",
         out[0].1
     );
-    // The value reached it, and the chat sees it scrubbed.
-    assert!(
-        out[1].0 && out[1].1.contains("MY_TOKEN=[REDACTED]"),
-        "{}",
-        out[1].1
-    );
-    // Only the server's own process has it in its environment: not the
-    // wrapper, not bubblewrap.
+    // The value reached the server's own process, and no other process
+    // of this machine has it, in its command line or its environment (the
+    // guard, both bubblewrap processes, `sandbox-exec` before its exec).
     let procs = processes(&marker);
-    assert!(!procs.is_empty(), "no process of the server");
-    let server: Vec<_> = procs.iter().filter(|p| p.2.contains(CANARY)).collect();
+    assert!(procs.len() >= 2, "no guard or no server: {procs:#?}");
+    let holders = with_canary();
     assert!(
-        server.len() == 1 && server[0].1.starts_with("python3 "),
-        "{procs:#?}"
+        holders.len() == 1
+            && holders[0].1.starts_with("python3 ")
+            && holders[0].1.contains(&marker)
+            && !holders[0].1.contains(CANARY)
+            && holders[0].2.contains(&format!("MY_TOKEN={CANARY}")),
+        "{holders:#?}"
     );
     // The shell reaches neither the approved copies nor the store.
     assert!(!out[2].1.contains(CANARY), "{}", out[2].1);

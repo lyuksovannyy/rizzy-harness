@@ -35,7 +35,6 @@ fn created(sid: SessionId) -> RawEvent {
             backend: "native".into(),
             node_id: "local".into(),
             approval_mode: Default::default(),
-            owner_id: None,
         }),
     )
 }

@@ -41,8 +41,6 @@ export interface SessionCreated {
   no_callbacks?: boolean;
   /** How its commands run; absent for a chat (no commands). */
   exec_mode?: ExecMode;
-  /** The account that owns it (X.36: whose approved repository MCP servers it starts). */
-  owner_id?: string;
 }
 
 export interface AgentRef {

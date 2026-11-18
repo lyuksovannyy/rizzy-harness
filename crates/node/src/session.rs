@@ -190,8 +190,14 @@ pub(crate) struct Session {
     /// some or takes a repository's. Started by the first turn that offers
     /// their tools; dropping it stops them.
     mcp: Option<Arc<harness_tools::mcp::SessionMcp>>,
-    /// The account that owns the chat (`session_created.owner_id`, X.36).
-    owner: Option<String>,
+    /// The account that owns the chat, as the master named it with the
+    /// last turn command (`owner` on a prompt, retry or callback, X.36):
+    /// whose approved repository servers its table takes. In memory only:
+    /// after a restart it is learned again from the next turn.
+    owner: Mutex<Option<String>>,
+    /// The chat's folder's `.mcp.json` was read once for this chat (when
+    /// its owner was first learned, X.36): never again for it.
+    looked: AtomicBool,
     /// Ends that came while a turn ran: recorded at its next step boundary
     /// (`delivered`), or after its end.
     bg_queue: Mutex<Vec<harness_tools::background::Ended>>,
@@ -466,9 +472,6 @@ pub(crate) struct NewSession {
     pub no_callbacks: bool,
     /// Chosen by the runtime (or the parent's, for a sub-agent).
     pub exec_mode: Option<harness_core::policy::ExecMode>,
-    /// The chat's owner as the master named it (X.36); none for a
-    /// sub-agent's session, which has no table of its own.
-    pub owner: Option<String>,
 }
 
 impl Session {
@@ -489,7 +492,6 @@ impl Session {
             owned,
             no_callbacks,
             exec_mode,
-            owner,
         } = new;
         let (bg, ends) = background_table(&node, profile, parent_session, exec_mode, 1);
         let s = Arc::new(Self {
@@ -541,7 +543,8 @@ impl Session {
             pin_cell: Mutex::new(pin_of(profile, &cwd)),
             owned_cell: Mutex::new(owned),
             exec_mode,
-            owner: owner.filter(|_| parent_session.is_none()),
+            owner: Mutex::new(None),
+            looked: AtomicBool::new(false),
         });
         Self::record_ends(&s, ends);
         s.append(EventKind::SessionCreated(SessionCreated {
@@ -557,12 +560,8 @@ impl Session {
             node_id: node.cfg.node_id.clone(),
             approval_mode: mode,
             exec_mode,
-            owner_id: s.owner.clone(),
         }))
         .await?;
-        // The table is built: the repository's file is read now, once, for
-        // the names it holds, if the owner approved something here (X.36).
-        s.look_project_mcp(true).await;
         Ok(s)
     }
 
@@ -685,31 +684,25 @@ impl Session {
             // As recorded, never re-chosen: one the node no longer offers
             // runs nothing (`checked_folder`).
             exec_mode: meta.exec_mode,
-            owner: meta
-                .owner_id
-                .clone()
-                .filter(|_| meta.parent_session.is_none()),
+            owner: Mutex::new(None),
+            looked: AtomicBool::new(false),
         });
         Self::record_ends(&s, ends);
-        // Its table is built again after a restart: the repository's file
-        // is read once, if the owner approved something here and no chat
-        // of this start read that folder's file yet (X.36).
-        s.look_project_mcp(false).await;
         Ok(s)
     }
 
-    /// Read this chat's folder's `.mcp.json` once, for the names it holds,
-    /// when its table is built (X.36, PLAN.md T82): only on a node that
-    /// takes a repository's servers, for a chat with an owner who approved
-    /// something for this folder; at a load only when no other chat of
-    /// this start read it. Never per turn. A read that does not end within
-    /// `project_mcp::LOOK_WAIT` changes nothing.
-    async fn look_project_mcp(&self, always: bool) {
-        let (Some(pm), Some(owner), Some(_)) = (&self.node.project_mcp, &self.owner, &self.mcp)
-        else {
+    /// The owner a turn command names (X.36, PLAN.md T82), before its turn
+    /// runs: kept for this chat's table. The first time this chat learns an
+    /// owner who approved something for its folder (since the node
+    /// started), the folder's `.mcp.json` is read once, for the names it
+    /// holds; never again for this chat, never per turn. A read that does
+    /// not end within `project_mcp::LOOK_WAIT` changes nothing.
+    pub(crate) async fn learn_owner(&self, owner: Option<String>) {
+        *self.owner.lock().unwrap_or_else(|p| p.into_inner()) = owner.clone();
+        let (Some(pm), Some(owner), Some(_)) = (&self.node.project_mcp, owner, &self.mcp) else {
             return;
         };
-        if !pm.has_approvals(owner, &self.cwd) || (!always && pm.knows(&self.cwd)) {
+        if !pm.has_approvals(&owner, &self.cwd) || self.looked.swap(true, Ordering::SeqCst) {
             return;
         }
         let (pm, cwd) = (pm.clone(), self.cwd.clone());
@@ -960,9 +953,10 @@ impl Session {
         let (Some(m), Some(pm)) = (&self.mcp, &self.node.project_mcp) else {
             return;
         };
+        let owner = self.owner.lock().unwrap_or_else(|p| p.into_inner()).clone();
         let (servers, notes) = pm.servers_for(
             &self.node.cfg.policy,
-            self.owner.as_deref(),
+            owner.as_deref(),
             &self.cwd,
             self.exec_mode,
         );
@@ -4118,7 +4112,6 @@ impl Session {
                 no_callbacks: true,
                 // Its parent's, always (N.10a).
                 exec_mode: self.exec_mode,
-                owner: None,
                 // A read-only grandchild works in its parent's node-owned folder.
                 owned: iso
                     .as_ref()

@@ -1,8 +1,11 @@
 // "MCP servers from the repository" on a project's Settings tab
 // (ADOPTION_PLAN X.36, docs/projects.md, PLAN.md T82): the servers the
 // project folder's `.mcp.json` declares, as the project's node reads them
-// for you, each with what it runs (in full, as text), the names of its
-// environment (never a value) and where it stands for you. Approve and
+// for you, each with what it runs in full, as text: the command, then each
+// argument on its own line, then each `NAME=value` of its environment
+// (repository content, part of what runs), nothing joined, quoted or cut
+// (the node makes an entry it could not show so unsupported), and where
+// it stands for you. Approve and
 // Remove are yours alone: an approval covers your own sandboxed chats in
 // this folder. Reload asks the node to read the file again; nothing else
 // does. Part of the project page's lazy chunk.
@@ -12,17 +15,22 @@ import "./ProjectMcp.css";
 
 export type McpState = "approved" | "changed" | "new" | "removed" | "unsupported" | "hidden";
 
+export interface McpEnv {
+  name: string;
+  value: string;
+}
+
 export interface McpEntry {
   name: string;
   state: McpState;
   command: string;
   args: string[];
-  env_keys: string[];
+  env: McpEnv[];
   digest?: string;
   reason?: string;
   approved_command?: string;
   approved_args?: string[];
-  approved_env_keys?: string[];
+  approved_env?: McpEnv[];
 }
 
 export interface McpList {
@@ -49,10 +57,28 @@ const WHAT: Partial<Record<McpState, string>> = {
   removed: "Not started; remove your approval to forget it.",
 };
 
-/** A command line as text: an argument with spaces or quotes is quoted. */
-export function commandLine(command: string, args: string[]): string {
-  const q = (a: string) => (a === "" || /[\s"'\\$`]/.test(a) ? `'${a.replace(/'/g, `'\\''`)}'` : a);
-  return [command, ...args].map(q).join(" ");
+/** What an entry runs, one line each, exactly as the node sent it. */
+function Runs(props: { command: string; args: string[]; env: McpEnv[]; label: string }) {
+  return (
+    <dl className="mcp-runs" aria-label={props.label}>
+      <dt>Command</dt>
+      <dd>
+        <code className="mcp-line">{props.command}</code>
+      </dd>
+      {props.args.length > 0 && <dt>Arguments</dt>}
+      {props.args.map((a, i) => (
+        <dd key={`a${i}`}>
+          <code className="mcp-line mcp-arg">{a}</code>
+        </dd>
+      ))}
+      {props.env.length > 0 && <dt>Environment</dt>}
+      {props.env.map((e, i) => (
+        <dd key={`e${i}`}>
+          <code className="mcp-line mcp-env">{`${e.name}=${e.value}`}</code>
+        </dd>
+      ))}
+    </dl>
+  );
 }
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -85,7 +111,8 @@ export default function ProjectMcp(props: { projectId: string; hasFolder: boolea
       <p className="field-hint">
         The servers this project's folder declares in <code>.mcp.json</code>. One runs only after you approve it,
         only in your own sandboxed chats in this folder (never in a host chat), exactly as you approved it: a later
-        change to the file runs only once you approve it again. Approving pins the command, not the files it runs.
+        change to the file runs only once you approve it again. Approving pins the command, its arguments and its
+        environment as shown here, not the files it runs.
       </p>
       {!props.hasFolder && <p className="muted">This project has no folder on a node, so it has no .mcp.json.</p>}
       {error && <p className="error-text">{error}</p>}
@@ -120,17 +147,16 @@ export default function ProjectMcp(props: { projectId: string; hasFolder: boolea
               </div>
               {e.reason && <p className="muted small">{e.reason}</p>}
               {WHAT[e.state] && <p className="muted small">{WHAT[e.state]}</p>}
-              {e.command && <pre className="mono mcp-cmd">{commandLine(e.command, e.args)}</pre>}
-              {e.env_keys.length > 0 && (
-                <p className="muted small">Environment: {e.env_keys.join(", ")} (values not shown)</p>
-              )}
+              {e.command && <Runs label="In the file" command={e.command} args={e.args} env={e.env} />}
               {e.state === "changed" && e.approved_command && (
                 <>
                   <p className="muted small">What runs now (your approved copy):</p>
-                  <pre className="mono mcp-cmd">{commandLine(e.approved_command, e.approved_args ?? [])}</pre>
-                  {(e.approved_env_keys ?? []).length > 0 && (
-                    <p className="muted small">Environment: {(e.approved_env_keys ?? []).join(", ")}</p>
-                  )}
+                  <Runs
+                    label="Your approved copy"
+                    command={e.approved_command}
+                    args={e.approved_args ?? []}
+                    env={e.approved_env ?? []}
+                  />
                 </>
               )}
             </li>

@@ -90,7 +90,6 @@ fn events() -> Vec<RawEvent> {
             backend: "native".into(),
             node_id: "local".into(),
             approval_mode: ApprovalMode::Ask,
-            owner_id: None,
         }),
         EventKind::TurnStarted(TurnStarted {
             cause: None,

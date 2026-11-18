@@ -189,7 +189,6 @@ impl Rig {
             cwd: rig.ws.display().to_string(),
             model: None,
             approval_mode: Some(harness_core::policy::ApprovalMode::Auto),
-            owner: None,
         });
         rig.until(|k| matches!(k, EventKind::SessionCreated(_)))
             .await;
@@ -277,6 +276,7 @@ impl Rig {
             images: vec![],
             agent_named: false,
             files: vec![],
+            owner: None,
         });
     }
 
@@ -358,7 +358,6 @@ impl Rig {
             cwd: self.ws.display().to_string(),
             model: None,
             approval_mode: Some(harness_core::policy::ApprovalMode::Auto),
-            owner: None,
         });
         self.until(|k| matches!(k, EventKind::SessionCreated(_)))
             .await;
@@ -382,6 +381,7 @@ impl Rig {
             images: vec![],
             agent_named: false,
             files: vec![],
+            owner: None,
         });
         loop {
             self.until(|k| matches!(k, EventKind::TurnEnded(_))).await;

@@ -182,7 +182,6 @@ impl Node {
                 incognito: false,
                 no_callbacks: false,
                 exec_mode: Some(mode),
-                owner: None,
             })
             .unwrap();
         self.ack().await.unwrap();
@@ -206,6 +205,7 @@ impl Node {
                 images: vec![],
                 agent_named: false,
                 files: vec![],
+                owner: None,
             })
             .unwrap();
         self.ack().await.unwrap();

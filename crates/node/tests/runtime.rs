@@ -176,7 +176,6 @@ impl Harness {
             cwd: self.ws.display().to_string(),
             model: None,
             approval_mode: Some(harness_core::policy::ApprovalMode::Auto),
-            owner: None,
         });
         self.until(|k| matches!(k, EventKind::SessionCreated(_)))
             .await;
@@ -216,6 +215,7 @@ async fn approval_roundtrip_and_auto_request_is_clamped() {
         images: vec![],
         agent_named: false,
         files: vec![],
+        owner: None,
     });
     let EventKind::ApprovalRequested(a) = h
         .until(|k| matches!(k, EventKind::ApprovalRequested(_)))
@@ -261,6 +261,7 @@ async fn cancel_while_waiting_for_approval_and_while_running() {
         images: vec![],
         agent_named: false,
         files: vec![],
+        owner: None,
     });
     h.until(|k| matches!(k, EventKind::ApprovalRequested(_)))
         .await;
@@ -295,6 +296,7 @@ async fn cancel_while_waiting_for_approval_and_while_running() {
         images: vec![],
         agent_named: false,
         files: vec![],
+        owner: None,
     });
     let EventKind::ApprovalRequested(a) = h
         .until(|k| matches!(k, EventKind::ApprovalRequested(_)))
@@ -361,6 +363,7 @@ async fn cancel_right_after_prompt_stops_that_turn() {
             images: vec![],
             agent_named: false,
             files: vec![],
+            owner: None,
         });
         h.send(MasterToNode::Cancel {
             req_id: format!("x{round}"),
@@ -397,6 +400,7 @@ async fn policy_denied_tool_never_runs() {
         images: vec![],
         agent_named: false,
         files: vec![],
+        owner: None,
     });
     let EventKind::ApprovalResolved(r) = h
         .until(|k| matches!(k, EventKind::ApprovalResolved(_)))
@@ -430,7 +434,6 @@ async fn cwd_outside_roots_is_refused() {
         cwd: "/usr".into(),
         model: None,
         approval_mode: None,
-        owner: None,
     });
     match h.link.from_node.recv().await.unwrap() {
         NodeToMaster::Ack { ok, error, .. } => {
@@ -469,7 +472,6 @@ async fn a_node_without_its_required_sandbox_refuses_sessions() {
         cwd: h.ws.display().to_string(),
         model: None,
         approval_mode: None,
-        owner: None,
     });
     match h.link.from_node.recv().await.unwrap() {
         NodeToMaster::Ack { ok, error, .. } => {
@@ -538,7 +540,6 @@ async fn cwd_containing_the_data_dir_is_refused() {
             cwd: cwd.display().to_string(),
             model: None,
             approval_mode: None,
-            owner: None,
         });
         match h.link.from_node.recv().await.unwrap() {
             NodeToMaster::Ack { ok, error, .. } => {
@@ -583,7 +584,6 @@ async fn a_loaded_session_over_the_data_dir_gets_no_turn() {
                 cwd: ws.display().to_string(),
                 model: None,
                 approval_mode: None,
-                owner: None,
             })
             .unwrap();
         let mut from = link.from_node;
@@ -617,6 +617,7 @@ async fn a_loaded_session_over_the_data_dir_gets_no_turn() {
             images: vec![],
             agent_named: false,
             files: vec![],
+            owner: None,
         })
         .unwrap();
     loop {
@@ -652,6 +653,7 @@ async fn resume_replays_in_batches() {
         images: vec![],
         agent_named: false,
         files: vec![],
+        owner: None,
     });
     h.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
     h.send(MasterToNode::Resume {
@@ -701,6 +703,7 @@ async fn resume_batches_are_limited_by_bytes() {
             images: vec![],
             agent_named: false,
             files: vec![],
+            owner: None,
         });
         h.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
     }
@@ -757,7 +760,6 @@ async fn recovers_interrupted_turn_on_start() {
                 backend: "native".into(),
                 node_id: "local".into(),
                 approval_mode: Default::default(),
-                owner_id: None,
             }),
             EventKind::TurnStarted(TurnStarted {
                 cause: None,
@@ -838,6 +840,7 @@ async fn recovers_interrupted_turn_on_start() {
             images: vec![],
             agent_named: false,
             files: vec![],
+            owner: None,
         })
         .unwrap();
     loop {
@@ -872,7 +875,6 @@ async fn sub_task_sessions_ask_no_questions() {
         backend: "native".into(),
         node_id: "local".into(),
         approval_mode: Default::default(),
-        owner_id: None,
     })
     .into_parts();
     let created = RawEvent {
@@ -904,6 +906,7 @@ async fn sub_task_sessions_ask_no_questions() {
             images: vec![],
             agent_named: false,
             files: vec![],
+            owner: None,
         })
         .unwrap();
     let blocks = loop {
@@ -969,6 +972,7 @@ async fn git_checkpoints_and_undo() {
         images: vec![],
         agent_named: false,
         files: vec![],
+        owner: None,
     });
     let EventKind::Checkpoint(after) = h
         .until(|k| matches!(k, EventKind::Checkpoint(c) if c.phase == CheckpointPhase::After))
@@ -1085,6 +1089,7 @@ async fn hostile_repo_config_does_not_run_on_checkpoint_or_undo() {
         images: vec![],
         agent_named: false,
         files: vec![],
+        owner: None,
     });
     let EventKind::Checkpoint(after) = h
         .until(|k| matches!(k, EventKind::Checkpoint(c) if c.phase == CheckpointPhase::After))
@@ -1142,6 +1147,7 @@ async fn shadow_checkpoints_keep_latest_and_rewind() {
             images: vec![],
             agent_named: false,
             files: vec![],
+            owner: None,
         });
         let EventKind::Checkpoint(after) = h
             .until(|k| matches!(k, EventKind::Checkpoint(c) if c.phase == CheckpointPhase::After))
@@ -1247,6 +1253,7 @@ async fn a_tool_does_not_run_when_its_event_cannot_be_written() {
             images: vec![],
             agent_named: false,
             files: vec![],
+            owner: None,
         })
     };
     // The ack for `id`, collecting events on the way.
@@ -1301,6 +1308,7 @@ async fn a_tool_does_not_run_when_its_event_cannot_be_written() {
             images: vec![],
             agent_named: false,
             files: vec![],
+            owner: None,
         });
         match ack(&mut h, &id).await {
             Err(e) if e.contains("already running") => {
@@ -1378,6 +1386,7 @@ async fn an_approval_whose_answer_was_not_written_is_closed_with_the_turn() {
         images: vec![],
         agent_named: false,
         files: vec![],
+        owner: None,
     });
     let EventKind::ApprovalRequested(a) = h
         .until(|k| matches!(k, EventKind::ApprovalRequested(_)))
@@ -1511,6 +1520,7 @@ async fn a_sub_agent_whose_log_failed_changes_nothing_in_the_folder() {
         images: vec![],
         agent_named: false,
         files: vec![],
+        owner: None,
     });
     let EventKind::ToolCallFinished(result) = h
         .until(|k| matches!(k, EventKind::ToolCallFinished(f) if f.output.contains("@dev")))
@@ -1611,6 +1621,7 @@ async fn delegate_as_lead(
         images: vec![],
         agent_named: false,
         files: vec![],
+        owner: None,
     });
     loop {
         h.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
@@ -1988,6 +1999,7 @@ async fn a_failed_append_kills_the_running_command() {
         images: vec![],
         agent_named: false,
         files: vec![],
+        owner: None,
     });
     let EventKind::TurnEnded(t) = h.until(|k| matches!(k, EventKind::TurnEnded(_))).await else {
         unreachable!()
@@ -2038,6 +2050,7 @@ async fn an_unclosed_turn_is_closed_once_by_a_restart() {
         images: vec![],
         agent_named: false,
         files: vec![],
+        owner: None,
     });
     h.until(|k| matches!(k, EventKind::AssistantMessage(_)))
         .await;
@@ -2090,7 +2103,6 @@ async fn ack_time_on_a_long_session() {
                 backend: "native".into(),
                 node_id: "local".into(),
                 approval_mode: Default::default(),
-                owner_id: None,
             });
             for seq in 1..=n {
                 let kind = if seq == 1 {
@@ -2137,6 +2149,7 @@ async fn ack_time_on_a_long_session() {
                 images: vec![],
                 agent_named: false,
                 files: vec![],
+                owner: None,
             })
             .unwrap();
         loop {
@@ -2238,6 +2251,7 @@ impl Harness {
             images: vec![],
             agent_named: false,
             files: vec![],
+            owner: None,
         });
         let mut asked = vec![];
         loop {
@@ -2378,6 +2392,7 @@ async fn prompt_turn(h: &mut Harness, sid: SessionId, text: &str) -> String {
         images: vec![],
         agent_named: false,
         files: vec![],
+        owner: None,
     });
     let EventKind::Checkpoint(after) = h
         .until(|k| matches!(k, EventKind::Checkpoint(c) if c.phase == CheckpointPhase::After))
@@ -2964,7 +2979,6 @@ async fn create_in(h: &mut Harness, cwd: &std::path::Path) -> SessionId {
         cwd: cwd.display().to_string(),
         model: None,
         approval_mode: Some(harness_core::policy::ApprovalMode::Auto),
-        owner: None,
     });
     until_in(h, sid, |k| matches!(k, EventKind::SessionCreated(_))).await;
     sid
@@ -3003,6 +3017,7 @@ async fn start_long_turn(h: &mut Harness, sid: SessionId) {
         images: vec![],
         agent_named: false,
         files: vec![],
+        owner: None,
     });
     until_in(h, sid, |k| matches!(k, EventKind::ToolCallStarted(_))).await;
 }
@@ -3098,6 +3113,7 @@ async fn a_restore_is_refused_when_the_busy_chat_reaches_the_folder_through_a_sy
         images: vec![],
         agent_named: false,
         files: vec![],
+        owner: None,
     });
     let err = ack_for(&mut h, &format!("p-{b}")).await.unwrap_err();
     assert!(err.contains("folder was replaced"), "{err}");
@@ -3302,6 +3318,7 @@ async fn a_session_whose_folder_was_replaced_refuses_to_work() {
             images: vec![],
             agent_named: false,
             files: vec![],
+            owner: None,
         });
         let e = ack_for(&mut h, &format!("p{i}")).await.unwrap_err();
         assert!(e.contains("folder was replaced"), "{target:?}: {e}");
@@ -3356,6 +3373,7 @@ async fn turn_of(
         images: vec![],
         agent_named: false,
         files: vec![],
+        owner: None,
     });
     loop {
         h.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
@@ -3630,6 +3648,7 @@ async fn lead_turn(
         images: vec![],
         agent_named: false,
         files: vec![],
+        owner: None,
     });
     loop {
         let k = h
@@ -3687,7 +3706,6 @@ async fn create_with_mode(h: &mut Harness, mode: harness_core::policy::ApprovalM
         profile: None,
         agent: None,
         incognito: false,
-        owner: None,
     });
     h.until(|k| matches!(k, EventKind::SessionCreated(_))).await;
     sid
@@ -3898,6 +3916,7 @@ fn prompt_msg(req_id: &str, sid: SessionId, text: &str) -> MasterToNode {
         images: vec![],
         agent_named: false,
         files: vec![],
+        owner: None,
     }
 }
 
@@ -3935,7 +3954,6 @@ async fn a_stop_closes_the_running_turn_and_refuses_new_work() {
         cwd: h.ws.display().to_string(),
         model: None,
         approval_mode: None,
-        owner: None,
     });
     h.send(MasterToNode::Cancel {
         req_id: "x".into(),
@@ -4147,6 +4165,7 @@ async fn a_sub_agent_started_across_the_stop_never_runs_a_turn_after_it() {
             images: vec![],
             agent_named: false,
             files: vec![],
+            owner: None,
         });
         h.until(|k| matches!(k, EventKind::ToolCallStarted(c) if c.tool == "delegate"))
             .await;

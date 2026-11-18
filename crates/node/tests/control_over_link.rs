@@ -213,7 +213,6 @@ impl Master {
             cwd: cwd.display().to_string(),
             model: None,
             approval_mode: Some(ApprovalMode::Auto),
-            owner: None,
         })
         .await;
         self.send(MasterToNode::Prompt {
@@ -229,6 +228,7 @@ impl Master {
             images: vec![],
             agent_named: false,
             files: vec![],
+            owner: None,
         })
         .await;
         (sid, cwd)

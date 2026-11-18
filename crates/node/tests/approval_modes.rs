@@ -157,7 +157,6 @@ impl N {
             incognito: false,
             no_callbacks,
             exec_mode: exec,
-            owner: None,
         });
         self.ack().await.unwrap();
         sid
@@ -260,6 +259,7 @@ fn prompt(
         images: vec![],
         agent_named: false,
         files: vec![],
+        owner: None,
     }
 }
 

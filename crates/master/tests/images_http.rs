@@ -100,7 +100,6 @@ fn old_node(id: &str) -> (NodeLink, Arc<Mutex<Vec<MasterToNode>>>) {
                     agent_id: None,
                     incognito: false,
                     parent_session: None,
-                    owner_id: None,
                 })
                 .into_parts();
                 let event = RawEvent {

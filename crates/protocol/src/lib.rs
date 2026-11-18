@@ -138,8 +138,20 @@ pub enum ProjectMcpState {
     Hidden,
 }
 
-/// One server as a person is shown it: what the entry runs, in full, as
-/// text; the names of its environment, never a value.
+/// One `env` entry of a repository's server, as the asking person is
+/// shown it: the value too, which is repository content and part of what
+/// runs (X.36).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectMcpEnv {
+    pub name: String,
+    pub value: String,
+}
+
+/// One server as a person is shown it: what the entry runs, whole, as
+/// text: the command, each argument, each `env` name and value. For an
+/// entry that can be approved these are exactly the strings the digest
+/// covers and the node runs; one that cannot be approved may be shown
+/// escaped and cut.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectMcpEntry {
     pub name: String,
@@ -149,7 +161,7 @@ pub struct ProjectMcpEntry {
     #[serde(default)]
     pub args: Vec<String>,
     #[serde(default)]
-    pub env_keys: Vec<String>,
+    pub env: Vec<ProjectMcpEnv>,
     /// The digest of the file's entry, to approve it with (`new`,
     /// `changed`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -163,7 +175,7 @@ pub struct ProjectMcpEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approved_args: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub approved_env_keys: Option<Vec<String>>,
+    pub approved_env: Option<Vec<ProjectMcpEnv>>,
 }
 
 /// A project folder's `.mcp.json` as one person stands with it.
@@ -740,9 +752,10 @@ pub enum NodeToMaster {
         error: Option<String>,
     },
     /// The answer to `project.mcp` (pull only: never sent unasked): the
-    /// list after the request, or why there is none, in words for the
-    /// person. Names, commands, arguments and environment names; never an
-    /// environment value.
+    /// list after the request for the asking person, or why there is none,
+    /// in words for that person. Each entry's command, arguments and `env`
+    /// names and values: repository content, shown so the person sees
+    /// what runs; the master passes it to the asker alone.
     #[serde(rename = "project.mcp_result")]
     ProjectMcpResult {
         req_id: String,
@@ -753,6 +766,10 @@ pub enum NodeToMaster {
     },
 }
 
+// A command is built, sent once and dropped; none is kept in bulk, so the
+// size of its largest variant (`session.prompt`, with its spec and, since
+// X.36, its owner) costs nothing worth boxing every literal for.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum MasterToNode {
@@ -789,13 +806,6 @@ pub enum MasterToNode {
         /// `session_created`; no later command carries or changes it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         exec_mode: Option<harness_core::policy::ExecMode>,
-        /// The account that owns the chat (its user id; none for the API
-        /// token's). Recorded in `session_created`, never changed: the node
-        /// starts only the repository MCP servers this account approved
-        /// (X.36, PLAN.md T82). A node refuses one that is not
-        /// [`valid_user_id`].
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        owner: Option<String>,
     },
     #[serde(rename = "session.prompt")]
     Prompt {
@@ -841,6 +851,14 @@ pub enum MasterToNode {
         /// found in the message; nothing here is file content.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         files: Vec<String>,
+        /// The account that owns the chat (its user id; none for the API
+        /// token's), set by the master from the chat's row in
+        /// `send_command` whoever builds the command: the node starts only
+        /// the repository MCP servers this account approved (X.36, PLAN.md
+        /// T82), and refuses a turn whose `owner` is not
+        /// [`valid_user_id`]. Kept in the node's memory, never logged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<String>,
     },
     /// Resume an idle chat because background commands ended (a callback
     /// turn, T.8d step 3; only to nodes with `CAP_CALLBACK`). There is no
@@ -865,6 +883,14 @@ pub enum MasterToNode {
         /// Absent: the turn reads no memory.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         context: Option<Box<harness_core::backend::MasterContext>>,
+        /// The account that owns the chat (its user id; none for the API
+        /// token's), set by the master from the chat's row in
+        /// `send_command` whoever builds the command: the node starts only
+        /// the repository MCP servers this account approved (X.36, PLAN.md
+        /// T82), and refuses a turn whose `owner` is not
+        /// [`valid_user_id`]. Kept in the node's memory, never logged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<String>,
     },
     /// Run the chat's failed last turn again (a person's Retry, X.21; only
     /// to nodes with [`CAP_RETRY`]). Sent only for the chat's owner. No
@@ -890,6 +916,14 @@ pub enum MasterToNode {
         /// `session.prompt`'s: the retry is then no switch of the chat's.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         agent_named: bool,
+        /// The account that owns the chat (its user id; none for the API
+        /// token's), set by the master from the chat's row in
+        /// `send_command` whoever builds the command: the node starts only
+        /// the repository MCP servers this account approved (X.36, PLAN.md
+        /// T82), and refuses a turn whose `owner` is not
+        /// [`valid_user_id`]. Kept in the node's memory, never logged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<String>,
     },
     /// Write the chat's hand-off note now if one is due (X.16,
     /// docs/handoff-notes.md; only to nodes with [`CAP_HANDOFF`]). A
@@ -1424,21 +1458,24 @@ mod tests {
             )
             .is_err()
         );
-        // An entry carries environment names, never values.
+        // An entry shows its env values: part of what runs.
         let e = ProjectMcpEntry {
             name: "s".into(),
             state: ProjectMcpState::New,
             command: "npx".into(),
             args: vec![],
-            env_keys: vec!["TOKEN".into()],
+            env: vec![ProjectMcpEnv {
+                name: "NODE_OPTIONS".into(),
+                value: "--require ./x.js".into(),
+            }],
             digest: None,
             reason: None,
             approved_command: None,
             approved_args: None,
-            approved_env_keys: None,
+            approved_env: None,
         };
         let text = serde_json::to_string(&e).unwrap();
-        assert!(!text.contains("\"env\""), "{text}");
+        assert!(text.contains("--require ./x.js"), "{text}");
         for (id, ok) in [
             ("01JD8Z", true),
             ("a-b_c", true),
@@ -1687,6 +1724,7 @@ mod tests {
             images: vec![img.clone()],
             agent_named: false,
             files: vec![],
+            owner: None,
         };
         let v = serde_json::to_value(&p).unwrap();
         assert_eq!(
@@ -1715,6 +1753,7 @@ mod tests {
             images: vec![],
             agent_named: false,
             files: vec![],
+            owner: None,
         };
         let v = serde_json::to_value(prompt(None)).unwrap();
         assert!(v.get("reply").is_none(), "{v}");
@@ -1747,6 +1786,7 @@ mod tests {
             agent: None,
             savings: None,
             context: None,
+            owner: None,
         };
         let v = serde_json::to_value(&c).unwrap();
         assert_eq!(
@@ -1773,7 +1813,6 @@ mod tests {
             agent: None,
             incognito: false,
             no_callbacks,
-            owner: None,
         };
         assert!(
             serde_json::to_value(create(false))

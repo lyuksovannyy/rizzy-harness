@@ -617,6 +617,17 @@ const DIVERGED: &str = "this chat's log diverged: two node processes wrote it wi
 /// The session a command would make its node write to. Cancel, delete and
 /// a deny are left out on purpose: they are how a diverged session is
 /// stopped (Gate 3 review P-7).
+/// Put the chat's owner on a turn command (X.36): a prompt, a retry, a
+/// callback. Every other command starts no turn and carries none.
+fn set_turn_owner(msg: &mut MasterToNode, who: Option<String>) {
+    match msg {
+        MasterToNode::Prompt { owner, .. }
+        | MasterToNode::Callback { owner, .. }
+        | MasterToNode::Retry { owner, .. } => *owner = who,
+        _ => {}
+    }
+}
+
 fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
     match msg {
         MasterToNode::ApprovalRespond { decision, .. } if !decision.allows() => None,
@@ -1803,6 +1814,10 @@ impl Master {
             if let Some(why) = workspaces::work_refusal(self, &row).await {
                 return Err(CommandError::Forbidden(why));
             }
+            // A turn carries the chat's owner, from its row and whoever
+            // built the command: the node starts that account's approved
+            // repository MCP servers and nobody else's (X.36, PLAN.md T82).
+            set_turn_owner(&mut msg, row.owner_id.clone());
         }
         let (tx, rx) = oneshot::channel();
         lock(&self.inner.acks).insert(req_id.clone(), (node_id.to_string(), tx));
@@ -1988,9 +2003,6 @@ impl Master {
                 agent: Some(agent),
                 incognito: spec.incognito,
                 exec_mode,
-                // Recorded by the node (X.36): it starts only the
-                // repository servers this account approved.
-                owner: owner.clone().filter(|_| profile == Profile::Agentic),
             })
             .await;
         match &sent {
@@ -2403,6 +2415,7 @@ impl Master {
                     standing,
                     unattended: true,
                 })),
+                owner: None,
             };
             return self
                 .send_command(&row.node_id, move |req_id| {
@@ -2428,6 +2441,7 @@ impl Master {
                 savings,
                 context,
                 agent_named: picked,
+                owner: None,
             },
             None => MasterToNode::Prompt {
                 req_id: String::new(),
@@ -2442,6 +2456,7 @@ impl Master {
                 images,
                 agent_named: picked,
                 files,
+                owner: None,
             },
         };
         // The link drops a frame over 8 MiB; the margin covers the request

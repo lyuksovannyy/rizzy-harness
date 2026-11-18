@@ -208,7 +208,6 @@ impl N {
             incognito: false,
             no_callbacks: false,
             exec_mode: None,
-            owner: None,
         });
         self.ack(&req_id).await.unwrap();
         sid
@@ -239,6 +238,7 @@ impl N {
             images: vec![],
             agent_named: named,
             files: vec![],
+            owner: None,
         });
     }
 
@@ -465,6 +465,7 @@ async fn retry_after_a_switch_runs_the_new_agent_and_notes_it_once() {
         savings: None,
         context: None,
         agent_named: false,
+        owner: None,
     });
     n.until_end(sid).await;
     let switches = n.switches(sid);
@@ -538,6 +539,7 @@ async fn a_retry_of_a_mention_turn_writes_no_switch() {
         savings: None,
         context: None,
         agent_named: true,
+        owner: None,
     });
     n.until_end(sid).await;
     n.turn(sid, &a, false, "back to my chat").await;
@@ -566,7 +568,6 @@ async fn a_chat_created_on_a_chosen_model_shows_no_notice_at_its_first_message()
         incognito: false,
         no_callbacks: false,
         exec_mode: None,
-        owner: None,
     });
     n.ack(&req_id).await.unwrap();
     n.turn(sid, &a, false, "first").await;

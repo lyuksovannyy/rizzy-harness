@@ -834,7 +834,6 @@ mod tests {
             parent_session: None,
             no_callbacks: false,
             exec_mode: None,
-            owner_id: None,
         };
         let change = |mode, requested| {
             EventKind::ApprovalModeChanged(ApprovalModeChanged { mode, requested })

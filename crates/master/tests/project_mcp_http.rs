@@ -19,8 +19,8 @@ use harness_master::auth::{Auth, Claim};
 use harness_master::{Master, router};
 use harness_node::NodeLink;
 use harness_protocol::{
-    CAP_PROJECT_MCP, MasterToNode, NodeToMaster, PROTOCOL_VERSION, ProjectMcpEntry, ProjectMcpList,
-    ProjectMcpRequest, ProjectMcpState,
+    CAP_PROJECT_MCP, MasterToNode, NodeToMaster, PROTOCOL_VERSION, ProjectMcpEntry, ProjectMcpEnv,
+    ProjectMcpList, ProjectMcpRequest, ProjectMcpState,
 };
 use harness_store::Store;
 use reqwest::{Method, StatusCode};
@@ -35,12 +35,15 @@ fn listed(name: &str, state: ProjectMcpState) -> ProjectMcpEntry {
         state,
         command: "npx".into(),
         args: vec!["-y".into(), "srv".into()],
-        env_keys: vec!["TOKEN".into()],
+        env: vec![ProjectMcpEnv {
+            name: "TOKEN".into(),
+            value: "repository-value".into(),
+        }],
         digest: Some("d".repeat(64)),
         reason: None,
         approved_command: None,
         approved_args: None,
-        approved_env_keys: None,
+        approved_env: None,
     }
 }
 
@@ -69,6 +72,39 @@ fn fake(id: &str, caps: &[&str], answer: Arc<Mutex<ProjectMcpList>>) -> (NodeLin
     tokio::spawn(async move {
         while let Some(msg) = commands.recv().await {
             keep.lock().unwrap().push(msg.clone());
+            if let MasterToNode::Create {
+                session_id,
+                cwd,
+                exec_mode,
+                ..
+            } = &msg
+            {
+                use harness_core::event::{EventKind, Profile, SessionCreated};
+                let (kind, payload) = EventKind::SessionCreated(SessionCreated {
+                    exec_mode: *exec_mode,
+                    no_callbacks: false,
+                    title: "t".into(),
+                    cwd: cwd.clone(),
+                    model: "demo::mock".into(),
+                    backend: "native".into(),
+                    node_id: "remote".into(),
+                    approval_mode: harness_core::policy::ApprovalMode::Ask,
+                    profile: Profile::Agentic,
+                    agent_id: None,
+                    incognito: false,
+                    parent_session: None,
+                })
+                .into_parts();
+                let _ = tx.try_send(NodeToMaster::Event {
+                    event: harness_core::RawEvent {
+                        session_id: *session_id,
+                        seq: 1,
+                        ts_ms: harness_core::now_ms(),
+                        kind,
+                        payload,
+                    },
+                });
+            }
             if let MasterToNode::ProjectMcp {
                 req_id, request, ..
             } = &msg
@@ -269,7 +305,11 @@ async fn the_node_is_asked_with_the_callers_id_and_the_projects_folder() {
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(v["node_id"], "remote");
     assert_eq!(v["entries"][0]["name"], "fs");
-    assert_eq!(v["entries"][0]["env_keys"], json!(["TOKEN"]));
+    // The env value too: repository content, part of what runs.
+    assert_eq!(
+        v["entries"][0]["env"],
+        json!([{"name": "TOKEN", "value": "repository-value"}])
+    );
     let (st, v) = req(
         &t,
         Method::POST,
@@ -310,7 +350,10 @@ async fn the_node_is_asked_with_the_callers_id_and_the_projects_folder() {
         a[0].contains("\"server\":\"fs\"") && a[0].contains("approved"),
         "{a:?}"
     );
-    assert!(!a[0].contains("npx") && !a[0].contains("TOKEN"), "{a:?}");
+    assert!(
+        !a[0].contains("npx") && !a[0].contains("TOKEN") && !a[0].contains("repository-value"),
+        "{a:?}"
+    );
     assert_eq!(audit(&t, "project_mcp.remove").await.len(), 1);
     // Bodies of the wrong shape never reach the node.
     for body in [
@@ -398,32 +441,86 @@ async fn only_a_member_who_may_run_agent_chats_there_may_ask() {
     assert!(asked(&t.remote).is_empty(), "{:?}", asked(&t.remote));
 }
 
-/// What a node answers is passed on bounded and as one-line text, whatever
-/// it sent; a flood of requests from one account is refused.
+/// Every turn command carries the chat's owner, whoever built it (the
+/// node starts that account's approved servers): set in `send_command`.
 #[tokio::test]
-async fn answers_are_bounded_and_floods_refused() {
+async fn a_turn_carries_the_chats_owner() {
     let t = start().await;
-    {
-        let mut a = t.answer.lock().unwrap();
-        let mut hostile = listed("x", ProjectMcpState::Unsupported);
-        hostile.command = format!("evil\n\u{1b}[2J{}", "c".repeat(10_000));
-        hostile.args = vec!["a".into(); 500];
-        a.entries = vec![hostile; 300];
-    }
+    let (_, me) = req(&t, Method::GET, "/api/me", None, &t.alex).await;
+    let alex_id = me["user"]["user_id"].as_str().unwrap().to_string();
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        "/api/sessions",
+        Some(json!({"node_id": "remote", "cwd": "/home/remote/repo", "profile": "agentic"})),
+        &t.alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let sid = v["session_id"].as_str().unwrap().to_string();
+    let (st, v) = req(
+        &t,
+        Method::POST,
+        &format!("/api/sessions/{sid}/prompt"),
+        Some(json!({"text": "hi"})),
+        &t.alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let owners: Vec<Option<String>> = t
+        .remote
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|m| match m {
+            MasterToNode::Prompt { owner, .. } => Some(owner.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(owners, [Some(alex_id)]);
+}
+
+/// What a node answers is passed on whole or not at all (nothing cut on
+/// the way to the person, review of PR 150 HIGH 2); a flood of requests
+/// from one account is refused.
+#[tokio::test]
+async fn answers_pass_whole_or_not_at_all_and_floods_are_refused() {
+    let t = start().await;
     let pid = project(&t, &t.alex, Some("remote")).await;
     let path = format!("/api/projects/{pid}/mcp");
+    let spoils: [fn(&mut ProjectMcpEntry); 3] = [
+        |e| e.command = "c".repeat(513),
+        |e| e.args = vec!["a\nb".into()],
+        |e| e.env[0].value = "v\u{1b}[2J".into(),
+    ];
+    for spoil in spoils {
+        {
+            let mut a = t.answer.lock().unwrap();
+            let mut hostile = listed("x", ProjectMcpState::New);
+            spoil(&mut hostile);
+            a.entries = vec![hostile];
+        }
+        let (st, v) = req(&t, Method::GET, &path, None, &t.alex).await;
+        assert_eq!(st, StatusCode::CONFLICT, "{v}");
+        assert!(v.to_string().contains("could not show whole"), "{v}");
+    }
+    {
+        let mut a = t.answer.lock().unwrap();
+        a.entries = vec![listed("x", ProjectMcpState::New); 65];
+    }
+    let (st, _) = req(&t, Method::GET, &path, None, &t.alex).await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    {
+        let mut a = t.answer.lock().unwrap();
+        let mut whole = listed("x", ProjectMcpState::Unsupported);
+        whole.command = "c".repeat(512);
+        a.entries = vec![whole];
+    }
     let (st, v) = req(&t, Method::GET, &path, None, &t.alex).await;
     assert_eq!(st, StatusCode::OK);
-    let entries = v["entries"].as_array().unwrap();
-    assert_eq!(entries.len(), 64);
-    let cmd = entries[0]["command"].as_str().unwrap();
+    assert_eq!(v["entries"][0]["command"].as_str().unwrap().len(), 512);
     assert!(
-        cmd.chars().count() <= 2048 && !cmd.chars().any(char::is_control),
-        "{cmd:?}"
-    );
-    assert_eq!(entries[0]["args"].as_array().unwrap().len(), 64);
-    assert!(
-        entries[0].get("digest").is_none(),
+        v["entries"][0].get("digest").is_none(),
         "an unsupported entry's digest"
     );
     let mut refused = false;

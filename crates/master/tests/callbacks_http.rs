@@ -173,7 +173,6 @@ fn fake_with(
                             incognito: false,
                             parent_session: None,
                             no_callbacks: false,
-                            owner_id: None,
                         });
                         send(&mut seqs, *session_id, created, now);
                     }

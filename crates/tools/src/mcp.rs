@@ -81,10 +81,6 @@ use crate::{Tool, ToolCtx, ToolOutcome};
 /// Every MCP tool's name starts with this.
 pub const PREFIX: &str = "mcp__";
 
-/// What sets a repository's server's `env` inside its confinement
-/// ([`ServerConfig::env_inside`]).
-pub const ENV_PROGRAM: &str = "/usr/bin/env";
-
 /// The longest tool name (the providers' function-name limit; DeepSeek's
 /// `MAX_PUBLIC_NAME_LENGTH`).
 pub const MAX_NAME: usize = 64;
@@ -175,10 +171,11 @@ pub struct ServerConfig {
     pub startup_timeout_sec: u64,
     #[serde(default = "default_tool")]
     pub tool_timeout_sec: u64,
-    /// Set `env` only inside the confinement (a repository's server,
-    /// X.36): the command becomes `/usr/bin/env NAME=value … command
-    /// args…`, so no value reaches a process that runs before the
-    /// confinement does (the wrapper, bubblewrap). Never read from
+    /// Set `env` only on the server's own process, after its confinement
+    /// (a repository's server, X.36): handed to `sandbox-exec` on a
+    /// descriptor ([`crate::guard::ENV_FILE_ENV`]), never on the guard,
+    /// bubblewrap or `sandbox-exec` itself, never in a command line; such
+    /// a server with values starts only contained. Never read from
     /// node.toml.
     #[serde(skip)]
     pub env_inside: bool,
@@ -873,6 +870,17 @@ impl Slot {
             _ = ctx.cancel.cancelled() => return Err("the turn was stopped".into()),
         };
         match started {
+            // Taken out of the table, or the chat's servers stopped, while
+            // it started (a removal does not wait for a start): it does not
+            // stay up, and no call runs on it.
+            Ok(Ok(up)) if self.retired.load(Ordering::SeqCst) || closed.load(Ordering::SeqCst) => {
+                up.live.kill.cancel();
+                Err(
+                    "it is no longer one of this chat's servers (it was taken out while it \
+                     started)"
+                        .into(),
+                )
+            }
             Ok(Ok(mut up)) => {
                 up.live.generation = self.generations.fetch_add(1, Ordering::SeqCst) + 1;
                 *self.live.lock().unwrap_or_else(|p| p.into_inner()) = Some(up.live.clone());
@@ -1124,28 +1132,7 @@ async fn start(
     home: Option<&Home>,
 ) -> Result<Up, String> {
     let env = ctx.env.with_pass(&cfg.env_vars)?;
-    // A repository's server (X.36): its values are set by `env` inside
-    // the confinement, never on the wrapper that sets the confinement up.
-    let inside: Vec<std::ffi::OsString> = if cfg.env_inside && !cfg.env.0.is_empty() {
-        cfg.env
-            .0
-            .iter()
-            .map(|(k, v)| format!("{k}={}", v.expose()).into())
-            .chain(std::iter::once(cfg.command.clone().into()))
-            .collect()
-    } else {
-        Vec::new()
-    };
-    let program: &OsStr = if inside.is_empty() {
-        OsStr::new(&cfg.command)
-    } else {
-        OsStr::new(ENV_PROGRAM)
-    };
-    let args: Vec<&OsStr> = inside
-        .iter()
-        .map(|a| a.as_os_str())
-        .chain(cfg.args.iter().map(OsStr::new))
-        .collect();
+    let args: Vec<&OsStr> = cfg.args.iter().map(OsStr::new).collect();
     let (sandbox, workspace, pin, owned) = match home {
         Some(h) => (
             ctx.sandbox.for_session(&h.key),
@@ -1161,7 +1148,7 @@ async fn start(
         ),
     };
     let (mut cmd, contained) = sandbox.shell(
-        program,
+        OsStr::new(&cfg.command),
         &args,
         workspace,
         pin,
@@ -1184,6 +1171,17 @@ async fn start(
     // A contained server's stdin is a FIFO the guard opens (its own stdin
     // is its control channel); the folder holding it is the node's own.
     let mut fifo_dir = None;
+    // A repository's server (X.36) with `env` values runs contained or
+    // not at all: the values reach only its own process, set by
+    // `sandbox-exec` after the confinement (see below); no other way of
+    // starting it keeps them off the processes before it.
+    if cfg.env_inside && !cfg.env.0.is_empty() && !contained {
+        return Err(
+            "a repository's server with env values runs only in a contained sandbox \
+                    (bubblewrap), which this chat does not have"
+                .into(),
+        );
+    }
     let writer: Box<dyn tokio::io::AsyncWrite + Send + Unpin> = if contained {
         let root = sandbox
             .private_root()
@@ -1202,6 +1200,16 @@ async fn start(
             .open_sender(&path)
             .map_err(|e| format!("{}: {e}", path.display()))?;
         cmd.env(crate::guard::STDIN_FIFO_ENV, &path);
+        // A repository's server's `env` values: in a 0600 file beside the
+        // FIFO, which the guard opens, unlinks and hands to bubblewrap as a
+        // descriptor; `sandbox-exec` reads it and sets the values right
+        // before its `exec`, after it confined itself. They are in no
+        // command line, and on no process before the server's own.
+        if cfg.env_inside && !cfg.env.0.is_empty() {
+            let file = dir.0.join("env");
+            write_inner_env(&file, &cfg.env)?;
+            cmd.env(crate::guard::ENV_FILE_ENV, &file);
+        }
         fifo_dir = Some(dir);
         Box::new(tx)
     } else {
@@ -1348,6 +1356,28 @@ async fn own(
 }
 
 /// A node-private folder for one FIFO, removed when dropped.
+/// Write `env` for `sandbox-exec` ([`crate::guard::ENV_FILE_ENV`]): each
+/// `NAME=value` followed by a NUL, to a new 0600 file.
+fn write_inner_env(file: &Path, env: &EnvValues) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut bytes = Vec::new();
+    for (k, v) in &env.0 {
+        bytes.extend_from_slice(k.as_bytes());
+        bytes.push(b'=');
+        bytes.extend_from_slice(v.expose().as_bytes());
+        bytes.push(0);
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(nix::libc::O_NOFOLLOW)
+        .open(file)
+        .and_then(|mut f| f.write_all(&bytes))
+        .map_err(|e| format!("{}: {e}", file.display()))
+}
+
 struct FifoDir(PathBuf);
 
 impl FifoDir {

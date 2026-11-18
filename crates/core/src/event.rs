@@ -505,13 +505,6 @@ pub struct SessionCreated {
     /// runs nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exec_mode: Option<crate::policy::ExecMode>,
-    /// The account that owns the chat, as the master named it at create
-    /// (`session.create` `owner`), never changed: the node starts a
-    /// repository's MCP servers that this account approved, and nobody
-    /// else's (ADOPTION_PLAN X.36, PLAN.md T82). `None` for a sub-agent's
-    /// session, a chat the API token made, and the chat runtime.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner_id: Option<String>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -2326,7 +2319,6 @@ mod tests {
                 agent_id: Some("general".into()),
                 incognito: true,
                 parent_session: None,
-                owner_id: None,
             }),
             EventKind::TurnStarted(TurnStarted {
                 cause: None,

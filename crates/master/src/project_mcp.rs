@@ -152,36 +152,50 @@ pub async fn ask(
     }
 }
 
-/// A list as the master passes it on, whatever a node sent: at most 64
-/// entries, every string one bounded line (a node's text is shown as text
-/// anyway), no state a list cannot have.
-fn bounded(mut l: ProjectMcpList) -> ProjectMcpList {
-    let line = |s: &str, n: usize| -> String {
-        s.chars()
-            .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
-            .take(n)
-            .collect()
+/// The most entries a list may hold (the node's 32 in the file and 32
+/// gone from it), and the longest string of one, in characters (the
+/// node's 512 for an approvable entry, its cut text otherwise).
+const MAX_LIST: usize = 64;
+const MAX_STRING: usize = 512;
+
+/// A list as the master passes it on: whole, or not at all. Nothing is
+/// cut on the way to the person (what they approve is what runs): a list
+/// over the bounds, or with a control character, is refused whole, and an
+/// entry that cannot be approved carries no digest.
+fn checked(mut l: ProjectMcpList) -> Result<ProjectMcpList, String> {
+    const REFUSED: &str = "the node sent a list the page could not show whole; nothing of \
+         it is shown";
+    let ok = |s: &str| s.chars().count() <= MAX_STRING && !s.chars().any(char::is_control);
+    let opt = |s: &Option<String>| s.as_deref().is_none_or(ok);
+    let env_ok = |v: &[harness_protocol::ProjectMcpEnv]| {
+        v.len() <= 64 && v.iter().all(|e| ok(&e.name) && ok(&e.value))
     };
-    let opt = |s: &Option<String>, n: usize| s.as_deref().map(|s| line(s, n));
-    let list = |v: &[String]| -> Vec<String> { v.iter().take(64).map(|a| line(a, 2048)).collect() };
-    l.entries.truncate(64);
+    let all_ok = l.entries.len() <= MAX_LIST
+        && opt(&l.unreadable)
+        && opt(&l.note)
+        && l.entries.iter().all(|e| {
+            ok(&e.name)
+                && ok(&e.command)
+                && e.args.len() <= 64
+                && e.args.iter().all(|a| ok(a))
+                && env_ok(&e.env)
+                && opt(&e.digest)
+                && opt(&e.reason)
+                && opt(&e.approved_command)
+                && e.approved_args
+                    .as_deref()
+                    .is_none_or(|a| a.len() <= 64 && a.iter().all(|x| ok(x)))
+                && e.approved_env.as_deref().is_none_or(env_ok)
+        });
+    if !all_ok {
+        return Err(REFUSED.into());
+    }
     for e in &mut l.entries {
-        e.name = line(&e.name, 64);
-        e.command = line(&e.command, 2048);
-        e.args = list(&e.args);
-        e.env_keys = list(&e.env_keys);
-        e.digest = opt(&e.digest, 64);
-        e.reason = opt(&e.reason, MAX_ERROR);
-        e.approved_command = opt(&e.approved_command, 2048);
-        e.approved_args = e.approved_args.as_deref().map(list);
-        e.approved_env_keys = e.approved_env_keys.as_deref().map(list);
         if !matches!(e.state, ProjectMcpState::New | ProjectMcpState::Changed) {
             e.digest = None;
         }
     }
-    l.unreadable = opt(&l.unreadable, MAX_ERROR);
-    l.note = opt(&l.note, MAX_ERROR);
-    l
+    Ok(l)
 }
 
 /// A `project.mcp_result` from `node_id`: to the request it answers, if
@@ -200,7 +214,7 @@ pub fn on_answer(m: &Master, node_id: &str, req_id: String, answer: Answer) {
     };
     if let Some(tx) = tx {
         let _ = tx.send(match answer {
-            Ok(l) => Ok(bounded(l)),
+            Ok(l) => checked(l),
             Err(e) => Err(e
                 .chars()
                 .filter(|c| !c.is_control())
