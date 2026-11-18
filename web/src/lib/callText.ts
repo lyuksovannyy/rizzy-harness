@@ -7,6 +7,7 @@
 // long runs of blanks become counted markers; a word that mixes scripts and
 // a path that leaves the chat's folder are named. Pure functions here, the
 // rendering in components/CallInput.tsx. Lazy: only the conversation loads it.
+import { own } from "../emptyView";
 import { SHOWN_SRC, codeOf } from "../md/hiddenChars";
 
 /** `cmd`: a command, a path or a short value, where a few blanks in a row
@@ -296,8 +297,10 @@ export function fields(tool: string, input: unknown): Field[] {
   }
   const rec = input as Record<string, unknown>;
   const done = new Set<string>();
-  if (WEB_SHOWN[tool] !== undefined && WEB_SHOWN[tool] in rec) done.add(WEB_SHOWN[tool]);
-  const special = [...(SPECIAL[tool] ?? [])];
+  // The tool's name is the model's (an unknown tool's call keeps it): own keys only.
+  const shown = own(WEB_SHOWN, tool);
+  if (shown !== undefined && Object.hasOwn(rec, shown)) done.add(shown);
+  const special = [...(own(SPECIAL, tool) ?? [])];
   if (!special.some((s) => s.key === "path")) special.push({ key: "path", label: "path", as: "path" });
   for (const s of special) {
     const v = rec[s.key];

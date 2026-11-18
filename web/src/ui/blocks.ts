@@ -1,6 +1,7 @@
 // Pure derivations over the folded timeline for ui blocks (rich_plan §6.2).
 // Nothing here is stored: a reload folds the same log and gets the same
 // answer.
+import { own } from "../emptyView";
 import { turnStart } from "../lib/callback";
 import type { FormValue, Item, ProgressSpec, SessionView, TurnEndReason } from "../types";
 
@@ -27,7 +28,7 @@ type Assistant = Extract<Item, { type: "assistant" }>;
  * from: its blocks are not part of the turn's job. */
 function unchosen(a: Assistant, selection: Record<string, string>): boolean {
   if (!a.variant) return false;
-  const chosen = selection[a.variant.group];
+  const chosen = own(selection, a.variant.group);
   return chosen === undefined ? a.variant.index !== 0 : chosen !== a.message_id;
 }
 

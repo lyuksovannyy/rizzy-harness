@@ -4,6 +4,7 @@
 // for images, video and audio, and every version. The pieces the list page
 // reuses (the icon, the actions, the versions) live here too; both are one
 // lazy chunk. Nothing here renders or runs an artifact's contents.
+import { own } from "../emptyView";
 import { ArrowLeft, File, FileArchive, FileText, Film, Image as ImageIcon, Music, Package } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { HttpError } from "../api";
@@ -73,7 +74,7 @@ export function ArtifactIcon({ a }: { a: Pick<Artifact, "artifact_id" | "kind" |
   if (v?.has_thumb && !broken) {
     return <LinkedImg className="artifact-thumb" url={versionThumbUrl(a.artifact_id, v.version_id)} alt="" onError={() => setBroken(true)} />;
   }
-  const Icon = ICONS[a.kind ?? ""] ?? File;
+  const Icon = own(ICONS, a.kind) ?? File;
   return (
     <span className="artifact-icon" aria-hidden="true">
       <Icon size={20} />
@@ -261,7 +262,7 @@ export function Versions(props: { a: Pick<Artifact, "artifact_id" | "mine">; ver
               <div className="artifact-version-main">
                 <span className="badge">v{v.seq}</span>
                 <span className={v.status === "failed" ? "routine-bad" : ""}>
-                  {STATUS[v.status]}
+                  {own(STATUS, v.status) ?? shownName(String(v.status))}
                   {v.pinned ? " · pinned" : ""}
                 </span>
                 {v.status === "pending" && v.progress && (

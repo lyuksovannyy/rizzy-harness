@@ -90,6 +90,9 @@ const en = {
   "nav.railAccount": "{name} — {tier}",
   "account.serverAdmin": "Server admin",
   "account.user": "User",
+  "boundary.load": "This part of the app could not be loaded. The app may have been updated: reload to get the new version.",
+  "boundary.render": "Something went wrong, and this page could not be shown.",
+  "boundary.reload": "Reload",
   // ── end shell ──
 
   // ── feature pages (I4) ──

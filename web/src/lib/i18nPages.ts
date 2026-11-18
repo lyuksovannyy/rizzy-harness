@@ -28,6 +28,7 @@ export const pages = {
   "conv.summaryManual": "The chat was summarised for the model at your request",
   "conv.summaryFocus": "Kept in focus: {focus}",
   "conv.compacting": "Summarising the chat for the model…",
+  "conv.unshown": "{n} of this chat's events could not be shown: this page does not know them, or they came malformed.",
   "conv.handoff": "Hand-off note for the next chat, written by {model}",
   "conv.handoffFixed": "Hand-off note: the next chat gets the facts from this chat's log only ({why})",
   "conv.shortened": "Context shortened for the model ({what}): about {before} to {after} tokens. Everything stays shown here.",

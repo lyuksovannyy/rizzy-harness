@@ -1,6 +1,7 @@
 // "Trying again in N s": a model call failed for a passing reason and the
 // node waits before sending it again (`model_retry`). The fold drops it once
 // output resumes; this only counts down to the time the node gave.
+import { own } from "../emptyView";
 import { useEffect, useState } from "react";
 import "../lib/i18nPages";
 import { t, type Key } from "../lib/i18n";
@@ -34,7 +35,7 @@ export function RetryNote({ retry }: { retry: ModelRetry }) {
   const vars = {
     model: shownName(retry.model),
     // A class this build does not know (a newer node) is shown as sent.
-    why: WHY[retry.reason] ? t(WHY[retry.reason]) : shownName(String(retry.reason)),
+    why: own(WHY, retry.reason) ? t(own(WHY, retry.reason)!) : shownName(String(retry.reason)),
     s: String(left),
     n: String(retry.attempt),
     of: String(retry.of),

@@ -322,7 +322,7 @@ describe("rule 8: what is displayed is what is sent", () => {
     const ev = (seq: number, kind: string, payload: object) => ({ session_id: "s", seq, ts_ms: 0, kind, payload });
     apply(v, ev(1, "session_created", { title: "t", cwd: "/w", model: "m", backend: "b", node_id: "n", approval_mode: "ask", profile: "agentic" }));
     const input = JSON.parse('{"command":"echo \\"a\\\\nb\\"","2":"first?","z":1}');
-    apply(v, ev(2, "tool_call_started", { call_id: "c", tool: "bash", input }));
+    apply(v, ev(2, "tool_call_started", { turn_id: "t", call_id: "c", tool: "bash", input }));
     apply(v, ev(3, "approval_requested", { approval_id: "a", call_id: "c", tool: "bash", input, reason: "r", turn_allow: true }));
     const t = v.items[0] as Tool;
     expect(t.input).toBe(input);

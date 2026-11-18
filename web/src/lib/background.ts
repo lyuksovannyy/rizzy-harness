@@ -2,6 +2,7 @@
 // docs/background-commands.md §4.11), derived from the fold only: the same
 // after a reload and in a second tab. Only the strip's lazy chunk and its
 // tests import this.
+import { own } from "../emptyView";
 import type { SessionView } from "../types";
 
 /** A command's head: its first line, at most this many characters. */
@@ -56,7 +57,7 @@ export function runningBackground(view: SessionView | null | undefined): BgRow[]
 
 /** How `bg_id` ended, as the log says, or null while it runs. */
 export function endOf(view: SessionView | null | undefined, bg_id: string): { reason: string; exit_code: number | null } | null {
-  if (!view?.background?.[bg_id]?.ended) return null;
+  if (!view || !own(view.background, bg_id)?.ended) return null;
   for (let i = view.items.length - 1; i >= 0; i--) {
     const it = view.items[i]!;
     if (it.type === "background_ended" && it.bg_id === bg_id) return { reason: it.reason, exit_code: it.exit_code };
@@ -97,6 +98,6 @@ export function reasonText(reason: string, exit_code: number | null): string {
     node_restarted: "ended with its node",
     finished: "finished",
   };
-  const w = words[reason] ?? reason.replace(/_/g, " ");
+  const w = own(words, reason) ?? reason.replace(/_/g, " ");
   return exit_code != null && reason === "exited" ? `${w} with code ${exit_code}` : w;
 }

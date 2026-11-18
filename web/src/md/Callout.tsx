@@ -1,3 +1,4 @@
+import { own } from "../emptyView";
 import { Info, Lightbulb, MessageSquareWarning, OctagonAlert, TriangleAlert } from "lucide-react";
 import { Children, isValidElement, type ComponentProps } from "react";
 import type { ExtraProps } from "react-markdown";
@@ -23,8 +24,8 @@ export function CalloutTitle({ children }: ComponentProps<"span"> & ExtraProps) 
  * `callout-title` child, moved into the head) is the model's. */
 export function Callout(props: Props) {
   const tone = props["data-tone"] as Tone | undefined;
-  if (!tone || !(tone in ICONS)) return <aside>{props.children}</aside>;
-  const Icon = ICONS[tone];
+  const Icon = own(ICONS, tone);
+  if (!tone || !Icon) return <aside>{props.children}</aside>;
   const parts = Children.toArray(props.children);
   const at = parts.findIndex((c) => isValidElement(c) && c.type === CalloutTitle);
   const title = at >= 0 ? parts.splice(at, 1)[0] : null;

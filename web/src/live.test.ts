@@ -130,3 +130,60 @@ describe("Live.watch", () => {
     live.close();
   });
 });
+
+describe("the fold loads with the chat, not with the first screen", () => {
+  const SID = "s1";
+  const event = (seq: number, kind: string, payload: object) => ({
+    type: "event",
+    event: { session_id: SID, seq, ts_ms: 0, kind, payload },
+  });
+
+  test("events that come before it has loaded are folded in order once it has, duplicates once", async () => {
+    const live = new Live();
+    const ws = FakeSocket.all[0]!;
+    ws.onopen!();
+    live.watch(SID);
+    expect(live.view(SID)!.head_seq).toBe(0);
+    // Order matters here: held in reverse, 3 and 2 would be gaps.
+    ws.say(event(1, "turn_started", { turn_id: "t" }));
+    ws.say(event(2, "user_message", { turn_id: "t", text: "hello" }));
+    ws.say(event(1, "turn_started", { turn_id: "t" }));
+    ws.say(event(3, "user_message", { turn_id: "t", text: "again" }));
+    await vi.dynamicImportSettled();
+    const v = live.view(SID)!;
+    expect(v.head_seq).toBe(3);
+    expect(v.items).toEqual([
+      { type: "user", turn_id: "t", text: "hello" },
+      { type: "user", turn_id: "t", text: "again" },
+    ]);
+    // After it is here, events fold as they come.
+    ws.say(event(4, "error", { message: "boom" }));
+    expect(live.view(SID)!.items.at(-1)).toEqual({ type: "error", message: "boom" });
+    live.close();
+  });
+
+  test("a load that fails is tried again at the next watch, which asks the server again", async () => {
+    const live = new Live();
+    const ws = FakeSocket.all[0]!;
+    ws.onopen!();
+    const real = live.loadModule;
+    const load = vi.fn(() => Promise.reject(new Error("chunk gone")));
+    live.loadModule = load;
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    live.watch(SID);
+    ws.say(event(1, "turn_started", { turn_id: "t" }));
+    ws.say(event(2, "user_message", { turn_id: "t", text: "hello" }));
+    await vi.waitFor(() => expect(logged).toHaveBeenCalledTimes(1));
+    // Events that come meanwhile do not each try again (no request per delta).
+    ws.say(event(3, "error", { message: "boom" }));
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(live.view(SID)!.head_seq).toBe(0);
+    live.loadModule = real;
+    ws.sent.length = 0;
+    live.watch("s2");
+    await vi.dynamicImportSettled();
+    await vi.waitFor(() => expect(ws.sent.map((m) => JSON.parse(m))).toContainEqual({ type: "subscribe", session_id: SID, after_seq: 0 }));
+    logged.mockRestore();
+    live.close();
+  });
+});
