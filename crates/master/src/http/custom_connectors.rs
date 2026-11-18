@@ -47,7 +47,7 @@ use crate::{Audience, Master, forge};
 
 /// A body is a name, an address and a header name, or a token: far below.
 const BODY_LIMIT: usize = 8192;
-pub(crate) const TABLE: &str = "connector_accounts";
+pub(crate) const TABLE: &str = connectors::ACCOUNTS_TABLE;
 
 pub(super) fn routes() -> Router<Master> {
     Router::new()
@@ -122,20 +122,8 @@ fn announced(m: &Master, local_ok: bool) -> std::collections::BTreeSet<String> {
         .collect()
 }
 
-/// What a person saw of a connector before sending a token or checking:
-/// changes with its URL, its sign-in and its header.
 fn stamp(r: &ConnectorRow) -> String {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    for part in [
-        r.url.as_str(),
-        r.auth.as_str(),
-        r.header.as_deref().unwrap_or(""),
-    ] {
-        h.update((part.len() as u32).to_be_bytes());
-        h.update(part.as_bytes());
-    }
-    hex::encode(h.finalize())[..16].to_string()
+    connectors::stamp(r)
 }
 
 /// `seen` must be the connector's [`stamp`] now: else 409, before anything
@@ -221,7 +209,12 @@ async fn list(
             let offer = me
                 .as_deref()
                 .and_then(|u| m.connector_offer(u, &r.connector_id));
-            row_json(r, names.contains(&r.name), connected, offer)
+            let mut v = row_json(r, names.contains(&r.name), connected, offer);
+            // How many of its tools the caller's agents are offered now
+            // (connected where it takes a token, and read): null when none
+            // are read yet.
+            v["agent_tools"] = json!(me.as_deref().and_then(|u| m.connector_agent_tools(u, r)));
+            v
         })
         .collect();
     Ok(Json(json!({
@@ -467,7 +460,7 @@ async fn run(
     me: &str,
     r: &ConnectorRow,
     token: Option<&Secret<String>>,
-) -> ApiResult<Offer> {
+) -> ApiResult<(Offer, Vec<connectors::tools::AgentTool>)> {
     m.connector_attempt(me, &r.connector_id)
         .map_err(|e| err(StatusCode::TOO_MANY_REQUESTS, e))?;
     let header = match token {
@@ -488,7 +481,8 @@ async fn run(
     .await
     .map_err(|b| err(StatusCode::TOO_MANY_REQUESTS, b.to_string()))?;
     m.connector_checked(&checked);
-    checked.result.map_err(|f| {
+    let tools = checked.tools;
+    checked.result.map(|o| (o, tools)).map_err(|f| {
         m.connector_failed(&r.connector_id);
         tracing::info!(connector = %r.connector_id, error = %f, "a connector check failed");
         err(StatusCode::BAD_GATEWAY, format!("{}: {f}", host_of(&r.url)))
@@ -535,7 +529,7 @@ async fn connect(
     sealer
         .ready(&forge::stored(&m).await?)
         .map_err(sealing_failed)?;
-    let offer = run(&m, &me, &r, Some(&token)).await?;
+    let (offer, tools) = run(&m, &me, &r, Some(&token)).await?;
     let st = forge::stored(&m).await?;
     let fields = [
         r.workspace_id.as_str(),
@@ -580,6 +574,9 @@ async fn connect(
         }
     };
     m.connector_offer_put(&me, &r.connector_id, offer.clone());
+    // What this check read is what the person's agents are offered from
+    // their next message (X.35 step 2).
+    m.connector_tools_put(&me, &r, tools);
     audit(
         &m,
         json!({"action": action, "user": me, "workspace": r.workspace_id,
@@ -669,9 +666,10 @@ async fn check(
     } else {
         None
     };
-    let offer = run(&m, &me, &r, token.as_ref()).await?;
+    let (offer, tools) = run(&m, &me, &r, token.as_ref()).await?;
     drop(token);
     m.connector_offer_put(&me, &r.connector_id, offer.clone());
+    m.connector_tools_put(&me, &r, tools);
     let connected = (r.auth == "token").then_some(true);
     Ok(Json(row_json(
         &r,

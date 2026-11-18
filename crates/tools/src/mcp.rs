@@ -1573,8 +1573,9 @@ async fn own_task<T: Send + 'static>(
 }
 
 /// A call's result as tool output: its text, with every other kind of
-/// content named.
-fn render(server: &str, result: Value) -> ToolOutcome {
+/// content named (the master renders a custom connector's result with it
+/// too, X.35 step 2).
+pub fn render(server: &str, result: Value) -> ToolOutcome {
     let mut out = String::new();
     let budget = crate::MAX_OUTPUT_CHARS * 2;
     let mut push = |s: &str| {

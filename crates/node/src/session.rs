@@ -180,6 +180,10 @@ pub(crate) struct Session {
     /// Rebuilt from the log at load; a sub-agent's chat has none and
     /// takes none from its parent.
     grants: Mutex<HashMap<String, harness_tools::CallKey>>,
+    /// The custom connectors' tools the running turn's spec carried (X.35
+    /// step 2): the approval card names a call's connector and the
+    /// server's own name of the tool from them.
+    connector_tools: Mutex<Vec<harness_core::connectors::ConnectorToolEntry>>,
     /// An append of the running turn failed: the rest of its appends fail
     /// without being tried, so the turn ends (cleared when a turn starts).
     log_failed: AtomicBool,
@@ -566,6 +570,7 @@ impl Session {
             plan_denied: Mutex::new(std::collections::HashSet::new()),
             deny_notes: Mutex::new(HashMap::new()),
             grants: Mutex::new(HashMap::new()),
+            connector_tools: Mutex::new(Vec::new()),
             log_failed: AtomicBool::new(false),
             unclosed: AtomicBool::new(false),
             unresolved: Mutex::new(Vec::new()),
@@ -705,6 +710,7 @@ impl Session {
             plan_denied: Mutex::new(std::collections::HashSet::new()),
             deny_notes: Mutex::new(HashMap::new()),
             grants: Mutex::new(grants),
+            connector_tools: Mutex::new(Vec::new()),
             log_failed: AtomicBool::new(false),
             unclosed: AtomicBool::new(false),
             unresolved: Mutex::new(Vec::new()),
@@ -3130,6 +3136,13 @@ impl Session {
             return (TurnEndReason::Error, None);
         }
 
+        *self
+            .connector_tools
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = agent
+            .as_ref()
+            .map(|a| a.connector_tools.clone())
+            .unwrap_or_default();
         let extra_cause_none = extra.cause.is_none();
         let mut extra = self
             .with_instructions(
@@ -5258,6 +5271,21 @@ impl TurnHost for Session {
         }))
     }
 
+    /// Only where node.toml takes connectors, and only for a turn that gets
+    /// its chat's MCP tools ([`Self::chat_mcp`]'s rule: a chat's own turn,
+    /// or a run the node started for a parent's `delegate` call; never a
+    /// person's message in a sub-agent's chat).
+    fn connectors(&self) -> Option<Arc<dyn harness_core::connectors::ConnectorSource>> {
+        if !self.node.cfg.policy.mcp.master_connectors {
+            return None;
+        }
+        self.chat_table(|_| ())?;
+        Some(Arc::new(crate::connectors::LinkConnectors {
+            node: self.node.clone(),
+            session: self.id,
+        }))
+    }
+
     fn denial_note(&self, call_id: &str) -> Option<String> {
         self.deny_notes
             .lock()
@@ -5464,6 +5492,26 @@ impl TurnHost for Session {
             reason = format!(
                 "{reason} (server `{server}`, its tool `{}`{from})",
                 harness_core::event::shown_name(&raw)
+            );
+        }
+        // A custom connector's tool (X.35 step 2): the card names the
+        // connector and says the call goes out from the server with the
+        // chat owner's account. A node server wins a name, so it is looked
+        // up first.
+        else if tool.starts_with(harness_tools::mcp::PREFIX)
+            && let Some(e) = self
+                .connector_tools
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .iter()
+                .find(|e| e.name == tool)
+                .cloned()
+        {
+            reason = format!(
+                "{reason} (connector `{}`, its tool `{}`; the server makes this call with the chat \
+                 owner's account)",
+                e.connector,
+                harness_core::event::shown_name(&e.tool)
             );
         }
         let (tx, rx) = oneshot::channel();

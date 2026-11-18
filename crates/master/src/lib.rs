@@ -670,6 +670,8 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::BoardResult { .. }
         // A stored skill's text for the node's own load: nothing is run.
         | MasterToNode::SkillResult { .. }
+        // A connector call's text for the node's own call: nothing is run.
+        | MasterToNode::ConnectorResult { .. }
         // A read of two checkpoints: no event, no work.
         | MasterToNode::Diff { .. }
         // A listing of names for the composer: no event.
@@ -1546,6 +1548,15 @@ impl Master {
                 session_id,
                 name,
             } => stored_skills::handle(self, node_id, req_id, session_id, name),
+            NodeToMaster::Connector {
+                req_id,
+                session_id,
+                tool,
+                arguments,
+            } => connectors::call::handle(self, node_id, req_id, session_id, tool, arguments),
+            NodeToMaster::ConnectorCancel { req_id } => {
+                connectors::call::cancel(self, node_id, &req_id)
+            }
             NodeToMaster::ArtifactChunk {
                 req_id,
                 offset,
@@ -1791,6 +1802,10 @@ impl Master {
         // (X.34 step B, PLAN.md T81).
         if !self.node_has(node_id, harness_protocol::CAP_STORED_SKILLS) {
             stored_skills::strip(&mut msg);
+        }
+        // Nor a custom connector's tools (X.35 step 2, PLAN.md T85).
+        if !self.node_has(node_id, harness_protocol::CAP_CONNECTORS) {
+            connectors::call::strip(&mut msg);
         }
         // Nothing goes on the link that its frame would refuse: an
         // oversized frame closes the link for every chat of the node
@@ -2337,6 +2352,28 @@ impl Master {
             }
             _ => board::deny(&mut agent),
         }
+        // A workspace's custom connectors (X.35 step 2, PLAN.md T85): with
+        // the chat owner's own account, so only in a turn the owner sent
+        // signed in as themselves or a run of the owner's own routine (the
+        // board's rule), never in an untrusted or a callback turn. Decided
+        // and recorded here for every turn (`connectors::call`), which
+        // every call is checked against; the tools come from the master's
+        // cache, never fetched on this path.
+        let may_connect = !untrusted
+            && !resume
+            && (by_owner || board::routine_turn(self, &row, routine_run.as_deref()).await);
+        let reading = self.offer_connectors(&row, may_connect, &mut agent).await;
+        if !reading.is_empty() {
+            turn_context.push(format!(
+                "The tools of connector(s) {} are being read from the server for the first \
+                 time; they are offered from the person's next message.",
+                reading
+                    .iter()
+                    .map(|n| format!("`{n}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
         // The owner's facts, whole while they fit, each with its id
         // (`memory::turn_block`).
         let mut noted = Vec::new();
@@ -2827,6 +2864,7 @@ impl Master {
         self.inner.recall.forget(sid);
         self.inner.board.forget(sid);
         self.inner.stored_skills.forget(sid);
+        self.inner.connectors.calls.forget(sid);
         let res = self
             .inner
             .mirror

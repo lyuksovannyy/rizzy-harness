@@ -36,6 +36,8 @@ export interface Custom {
   /** `null`: this connector needs no sign-in. */
   connected: boolean | null;
   offer: Offer | null;
+  /** How many of its tools the caller's agents are offered now; `null`: none read yet. */
+  agent_tools?: number | null;
   /** Changes with the address, the sign-in and the header: sent with a token or a check. */
   stamp: string;
 }
@@ -48,7 +50,7 @@ interface List {
 }
 
 const base = (ws: string) => `/api/workspaces/${encodeURIComponent(ws)}/connectors`;
-const NOT_YET = "In this version agents cannot use a custom connector yet: you can connect your account and see what it offers.";
+const AGENTS = "Your agents (with the Connectors switch) use a connector with your own account, in the messages you send and your own routines, and each call is asked about as any MCP tool call; nobody else's agent uses your account.";
 const NO_OAUTH =
   "Sign-in through a browser (OAuth) is not built yet; many hosted MCP servers need it and cannot be added until it is. A connector here signs in with a token you paste, or not at all.";
 
@@ -72,7 +74,7 @@ export default function CustomConnectors(props: { scope: string; live?: Live; ad
   return (
     <section aria-label="Custom connectors">
       <h3>Custom connectors</h3>
-      <p className="muted small">{`Remote MCP servers this workspace's admins added by address. Each person connects their own account; nobody else sees or uses it, admins included. ${NOT_YET}`}</p>
+      <p className="muted small">{`Remote MCP servers this workspace's admins added by address. Each person connects their own account; nobody else sees or uses it, admins included. ${AGENTS}`}</p>
       {props.adding && list?.can_edit && (
         <Definition
           title="Add custom connector"
@@ -129,9 +131,16 @@ function Row(props: { c: Custom; list: List; path: string; onChanged: () => void
         </div>
         <div className="muted small">{`${c.url} · ${signIn}`}</div>
         {c.clash && (
-          <div className="error-text">{`A node of this server has its own MCP server named ${c.name}; until one of them is renamed, which one an agent gets is not decided here.`}</div>
+          <div className="error-text">{`A node of this server has its own MCP server named ${c.name}; until one of them is renamed, agents in chats on that node get the node's server under this name, not this connector.`}</div>
         )}
         {c.connected !== null && list.person && <div className="small">{c.connected ? "Your account is connected." : "Your account is not connected."}</div>}
+        {list.person && (c.auth === "none" || c.connected) && (
+          <div className="small">
+            {typeof c.agent_tools === "number"
+              ? `Your agents can use ${c.agent_tools} of its tools now.`
+              : "Your agents get its tools once it has been checked (Check, or your next message reads them)."}
+          </div>
+        )}
         {c.offer && <OfferView o={c.offer} />}
         {mode === "paste" && (
           <Paste

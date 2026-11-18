@@ -171,10 +171,15 @@ pub fn hidden(c: char) -> bool {
             | '\u{2060}'..='\u{206F}' | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}')
 }
 
-/// Remote text shown to a person: hidden characters gone, spaces folded,
-/// at most `max` characters; `None` when nothing is left.
+/// Remote text shown to a person: one line (every line break and tab a
+/// space, so "a\nb" stays two words), hidden characters gone, spaces
+/// folded, at most `max` characters; `None` when nothing is left.
 pub fn clean_text(s: &str, max: usize) -> Option<String> {
-    let s: String = s.chars().filter(|c| !hidden(*c)).collect();
+    let s: String = s
+        .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .filter(|c| !hidden(*c))
+        .collect();
     let s = s.split_whitespace().collect::<Vec<_>>().join(" ");
     let s: String = s.chars().take(max).collect();
     (!s.is_empty()).then_some(s)

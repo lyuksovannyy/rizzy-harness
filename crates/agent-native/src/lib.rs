@@ -356,6 +356,11 @@ impl harness_core::backend::TurnHost for Logged<'_> {
         self.host.stored_skills()
     }
 
+    // Not forwarding it would offer no connector tool (the trait's default).
+    fn connectors(&self) -> Option<Arc<dyn harness_core::connectors::ConnectorSource>> {
+        self.host.connectors()
+    }
+
     // Both reach every tool call's context. Not forwarding them (the
     // trait's default answers `None`) turned the per-call pin check off and
     // denied a sub-agent its own folder (tests/host_forwarding.rs).
@@ -1363,8 +1368,11 @@ impl NativeBackend {
         // (X.34 step B, review of PR 148 H1): the child gets that list and
         // its own spec's `deny_skills` takes out what it may not use, on
         // every way a child starts (now, continued, in the background).
+        // So do the custom connectors' tools (X.35 step 2): the child's own
+        // `deny_tools` and `deny_mcp_servers` narrow them.
         let child = harness_core::agent::AgentSpec {
             stored_skills: agent.stored_skills.clone(),
+            connector_tools: agent.connector_tools.clone(),
             ..found.clone()
         };
         let spec = &child;
@@ -2625,7 +2633,7 @@ impl NativeBackend {
         // and to no other turn of a sub-agent's chat). What did not
         // start, or was left out, is shown to the person (an `error` item)
         // and told to the model with this turn's context, once each.
-        let (mcp_tools, mcp_notes) =
+        let (mut mcp_tools, mut mcp_notes) =
             match host
                 .mcp()
                 .and_then(|m| m.downcast::<harness_tools::mcp::SessionMcp>().ok())
@@ -2684,6 +2692,43 @@ impl NativeBackend {
                 }
                 _ => (Vec::new(), Vec::new()),
             };
+        // A workspace's custom connectors (X.35 step 2, PLAN.md T85): the
+        // master's list, offered as MCP tools under the same rule (an agent
+        // that may use MCP and changes things, never in plan mode) and the
+        // same per-chat caps, after this node's own servers, which win a
+        // name. The host gives a source only where node.toml takes them and
+        // only to a turn that gets its chat's MCP tools (T47). A call goes
+        // to the master; nothing starts here.
+        if let (Some(a), Some(source)) = (agent, host.connectors())
+            && !a.connector_tools.is_empty()
+            && a.allows_mcp()
+            && self.writes(a, host)
+            && !is_plan(host)
+        {
+            let offered = harness_tools::connector::offer(
+                &a.connector_tools,
+                &mcp_tools,
+                // node.toml's `denied_tools`: `mcp`, `mcp__<connector>`, one
+                // tool, as for the node's own servers.
+                |e| a.allows_tool(&e.name) && !host.tool_denied(&e.name),
+                source,
+            );
+            mcp_tools.extend(offered.tools);
+            for n in offered.notes {
+                let n = self.config.secrets.scrub(&n);
+                if host
+                    .emit(EventKind::Error(harness_core::event::ErrorEvent {
+                        turn_id: Some(ctx.turn_id.clone()),
+                        message: n.clone(),
+                    }))
+                    .await
+                    .is_err()
+                {
+                    return stopped(usage);
+                }
+                mcp_notes.push(n);
+            }
+        }
         // System prompt (with the summary) and the history before this turn.
         let base_system = system;
         // The task list as it stood at the summary's end goes with it: the
@@ -6025,6 +6070,7 @@ mod tests {
             deny_skills: vec![],
             deny_mcp_servers: vec![],
             stored_skills: vec![],
+            connector_tools: vec![],
             delegates: vec![],
             caps: None,
         }

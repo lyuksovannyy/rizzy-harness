@@ -76,10 +76,12 @@ const input = (el: HTMLInputElement, value: string) => {
 };
 
 describe("custom connectors", () => {
-  test("lists connectors and what a check found as text, says agents do not use them yet", async () => {
-    await show([linear, open], false);
+  test("lists connectors and what a check found as text, says whose account agents use", async () => {
+    await show([{ ...linear, agent_tools: 3 }, open], false);
     expect(call).toHaveBeenCalledWith("GET", "/api/workspaces/ws1/connectors");
-    expect(host.textContent).toContain("agents cannot use a custom connector yet");
+    expect(host.textContent).toContain("use a connector with your own account");
+    expect(host.textContent).toContain("Your agents can use 3 of its tools now.");
+    expect(host.textContent).toContain("Your agents get its tools once it has been checked");
     expect(host.textContent).toContain("Linear <b>MCP</b> 1.0 offers 1 or more tool");
     expect(host.textContent).toContain('<a href="https://evil.example">x</a>');
     expect(host.querySelector("img")).toBeNull();

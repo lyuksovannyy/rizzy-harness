@@ -139,6 +139,7 @@ async fn start_at(dir: tempfile::TempDir, o: Opts) -> Node {
                 ProjectServers::Off
             },
             approvals_file: Some(data.join("project-mcp.json")),
+            ..McpPolicy::default()
         },
         exec: offers(o),
         ..Default::default()

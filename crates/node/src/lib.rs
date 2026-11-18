@@ -4,6 +4,7 @@
 pub mod artifacts;
 mod audit;
 mod board;
+mod connectors;
 mod environment;
 pub mod exec;
 mod git;
@@ -131,6 +132,7 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::RecallResult { .. }
         | MasterToNode::BoardResult { .. }
         | MasterToNode::SkillResult { .. }
+        | MasterToNode::ConnectorResult { .. }
         | MasterToNode::Diff { .. }
         | MasterToNode::Files { .. }
         | MasterToNode::ProjectCreate { .. }
@@ -224,6 +226,8 @@ pub(crate) struct Inner {
     pub(crate) boards: board::Pending,
     /// Loads of a stored skill waiting for their `skill.result`.
     pub(crate) stored_skills: stored_skills::Pending,
+    /// Connector calls waiting for the master's answer (X.35 step 2).
+    pub(crate) connectors: connectors::Pending,
     /// Room for turn diffs being read ([`DIFF_AT_ONCE`]).
     diffs: Arc<tokio::sync::Semaphore>,
     /// Room for `@` completions being walked (T63), as many as diffs.
@@ -593,6 +597,7 @@ impl NodeRuntime {
             recalls: Default::default(),
             boards: Default::default(),
             stored_skills: Default::default(),
+            connectors: Default::default(),
             diffs: Arc::new(tokio::sync::Semaphore::new(DIFF_AT_ONCE)),
             file_lists: Arc::new(tokio::sync::Semaphore::new(DIFF_AT_ONCE)),
             projects_made: Default::default(),
@@ -809,6 +814,15 @@ impl NodeRuntime {
             if offers(harness_tools::skills::NAME) && self.inner.cfg.policy.skills.from_master {
                 capabilities.push(harness_protocol::CAP_STORED_SKILLS.into());
             }
+            // Custom connectors (X.35 step 2, PLAN.md T85), in either
+            // profile: where node.toml `[mcp] master_connectors` is on and
+            // `denied_tools` does not deny every MCP tool. Without it the
+            // master sends no list and answers no call.
+            if self.inner.cfg.policy.mcp.master_connectors
+                && !self.inner.cfg.policy.denies(harness_core::agent::MCP_ALL)
+            {
+                capabilities.push(harness_protocol::CAP_CONNECTORS.into());
+            }
             if self.inner.cfg.profile == harness_core::event::Profile::Agentic {
                 // The modes it offers and their gaps (N.10a), as decided at
                 // start.
@@ -929,6 +943,12 @@ impl NodeRuntime {
                         body,
                         error,
                     } => this.inner.stored_skills.answer(&req_id, body, error),
+                    // Likewise a connector call's answer (X.35 step 2).
+                    MasterToNode::ConnectorResult {
+                        req_id,
+                        answer,
+                        error,
+                    } => this.inner.connectors.answer(&req_id, answer, error),
                     // Likewise a turn's diff (X.12): a read of two
                     // checkpoints, in a task of its own, never behind a
                     // command of the session (a restore holds its lane).
@@ -1772,6 +1792,14 @@ impl NodeRuntime {
                 error,
             } => {
                 self.inner.stored_skills.answer(&req_id, body, error);
+                Ok(())
+            }
+            MasterToNode::ConnectorResult {
+                req_id,
+                answer,
+                error,
+            } => {
+                self.inner.connectors.answer(&req_id, answer, error);
                 Ok(())
             }
             MasterToNode::ArtifactStage {

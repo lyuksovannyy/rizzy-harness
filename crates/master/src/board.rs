@@ -159,7 +159,7 @@ fn deny_tools(spec: &mut harness_core::agent::AgentSpec, tools: &[&str]) {
 }
 
 /// The chat owner's account, if it may still act (not disabled).
-async fn owner(m: &Master, top: &SessionRow) -> Result<Principal, String> {
+pub(crate) async fn owner(m: &Master, top: &SessionRow) -> Result<Principal, String> {
     let Some(id) = top.owner_id.clone() else {
         return Err("this chat has no owner".into());
     };

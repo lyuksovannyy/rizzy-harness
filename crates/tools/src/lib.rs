@@ -8,6 +8,7 @@ pub mod args;
 pub mod background;
 mod bash;
 mod board;
+pub mod connector;
 pub mod contain;
 pub mod guard;
 pub use bash::{

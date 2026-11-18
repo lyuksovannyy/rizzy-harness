@@ -383,6 +383,7 @@ fn agent_w(w: u64) -> AgentSpec {
         deny_skills: vec![],
         deny_mcp_servers: vec![],
         stored_skills: vec![],
+        connector_tools: vec![],
         delegates: vec![],
         caps: None,
     }

@@ -2,7 +2,8 @@
 //! "Custom connectors"): a workspace's admins add a remote MCP server by its
 //! address; each member connects their own account to it (a token they
 //! paste, for a connector that signs in with one) and sees what it offers.
-//! In this version no agent uses a connector and nothing reaches a node.
+//! Agents call its tools through the master with the chat owner's own
+//! account ([`call`], step 2, PLAN.md T85); its token never reaches a node.
 //!
 //! * **The connector** ([`check_name`], [`check_url`], [`check_header`]): a
 //!   name by the node's MCP server rule (so step 2 can name its tools
@@ -30,8 +31,10 @@
 //! * **Abuse**: checks are limited per person and (failed ones) per
 //!   connector (`crate::remote::Attempts`).
 
+pub mod call;
 pub mod client;
 pub mod pool;
+pub mod tools;
 
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
@@ -285,6 +288,10 @@ impl Default for Net {
 #[derive(Debug)]
 pub struct Checked {
     pub result: Result<Offer, Failure>,
+    /// The tools agents may be offered (X.35 step 2), with their schemas,
+    /// as the same check read them ([`tools::AgentTool`]); empty when the
+    /// check failed.
+    pub tools: Vec<tools::AgentTool>,
     /// Tasks still alive on the worker's runtime when the check ended.
     pub tasks_left: usize,
     /// Bytes of the budget used.
@@ -306,12 +313,13 @@ pub async fn check(
         .run(who, move || async move {
             let budget = Budget::new(CHECK_BYTES);
             let timeout = net.timeout;
-            let result =
+            let (result, tools) =
                 match tokio::time::timeout(timeout, run(&name, &url, token, &net, budget.clone()))
                     .await
                 {
-                    Ok(r) => r,
-                    Err(_) => Err(Failure::Timeout),
+                    Ok(Ok((offer, tools))) => (Ok(offer), tools),
+                    Ok(Err(f)) => (Err(f), Vec::new()),
+                    Err(_) => (Err(Failure::Timeout), Vec::new()),
                 };
             // Let what was closed finish closing, then count what is left.
             for _ in 0..20 {
@@ -320,6 +328,7 @@ pub async fn check(
             tokio::time::sleep(Duration::from_millis(20)).await;
             Checked {
                 result,
+                tools,
                 tasks_left: tokio::runtime::Handle::current()
                     .metrics()
                     .num_alive_tasks(),
@@ -329,6 +338,7 @@ pub async fn check(
         .await?;
     Ok(out.unwrap_or(Checked {
         result: Err(Failure::Protocol),
+        tools: Vec::new(),
         tasks_left: 0,
         bytes_read: 0,
     }))
@@ -340,8 +350,114 @@ async fn run(
     token: Option<TokenHeader>,
     net: &Net,
     budget: Arc<Budget>,
-) -> Result<Offer, Failure> {
-    use rmcp::model::{ClientCapabilities, ClientConfig, Implementation, PaginatedRequestParams};
+) -> Result<(Offer, Vec<tools::AgentTool>), Failure> {
+    use rmcp::model::PaginatedRequestParams;
+
+    let (service, http) = session(url, token, net, budget).await?;
+    let failed = |http: &Http| http.first_failure().unwrap_or(Failure::Protocol);
+    let peer = service.peer_info();
+    let server = peer.as_ref().and_then(|p| p.server_info.as_ref());
+    let mut offer = Offer {
+        server_name: server.and_then(|s| remote::clean_text(&s.name, MAX_SERVER_TEXT)),
+        server_version: server.and_then(|s| remote::clean_text(&s.version, MAX_SERVER_TEXT)),
+        instructions: peer
+            .as_ref()
+            .and_then(|p| p.instructions.as_deref())
+            .and_then(|s| remote::clean_text(s, MAX_INSTRUCTIONS)),
+        tools: Vec::new(),
+        more: false,
+        left_out: 0,
+        checked_ms: harness_core::now_ms(),
+    };
+    let mut cursor = None;
+    let mut seen = std::collections::HashSet::new();
+    let mut agents = std::collections::HashSet::new();
+    let mut text = 0usize;
+    let mut for_agents = tools::Collect::new(name);
+    for page in 0.. {
+        if page == MAX_PAGES {
+            offer.more = true;
+            break;
+        }
+        let params = PaginatedRequestParams::default().with_cursor(cursor);
+        let r = match service.list_tools(Some(params)).await {
+            Ok(r) => r,
+            // Pages already read stand; the budget running out is "and
+            // more", any other failure of a later page too.
+            Err(_) if page > 0 => {
+                offer.more = true;
+                break;
+            }
+            Err(_) => {
+                let f = failed(&http);
+                let _ = service.cancel().await;
+                return Err(f);
+            }
+        };
+        for t in r.tools {
+            if offer.tools.len() >= MAX_TOOLS {
+                offer.more = true;
+                break;
+            }
+            // One raw name once; one agent name once (two names can clean
+            // to the same one: the first keeps it, the other is counted).
+            if !seen.insert(t.name.to_string()) {
+                continue;
+            }
+            let agent_name = harness_tools::mcp::public_name(name, &t.name);
+            if !agents.insert(agent_name.clone()) {
+                offer.left_out += 1;
+                continue;
+            }
+            for_agents.take(&t, &agent_name);
+            let Some(shown) = remote::clean_text(&t.name, MAX_TOOL_NAME) else {
+                continue;
+            };
+            let description = t
+                .description
+                .as_deref()
+                .and_then(|d| remote::clean_text(d, MAX_DESCRIPTION))
+                .filter(|d| {
+                    let fits = text + d.chars().count() <= MAX_TEXT;
+                    if fits {
+                        text += d.chars().count();
+                    } else {
+                        offer.more = true;
+                    }
+                    fits
+                });
+            offer.tools.push(OfferedTool {
+                agent_name,
+                name: shown,
+                description,
+            });
+        }
+        cursor = r.next_cursor;
+        if cursor.is_none() || offer.more {
+            break;
+        }
+    }
+    let _ = service.cancel().await;
+    Ok((offer, for_agents.done()))
+}
+
+/// The client side of one MCP session with the connector at `url`: our
+/// HTTP client on the rules of `crate::remote` (public addresses only, no
+/// redirect, no proxy, nothing compressed), `token` in its header to that
+/// URL only, every body counted against `budget`; `initialize` done.
+pub(crate) async fn session(
+    url: &str,
+    token: Option<TokenHeader>,
+    net: &Net,
+    budget: Arc<Budget>,
+) -> Result<
+    (
+        rmcp::service::RunningService<rmcp::RoleClient, rmcp::model::ClientConfig>,
+        Http,
+    ),
+    Failure,
+> {
+    use rmcp::model::{ClientCapabilities, ClientConfig, Implementation};
     use rmcp::service::{ClientLifecycleMode, ClientServiceExt as _};
     use rmcp::transport::StreamableHttpClientTransport;
     use rmcp::transport::common::client_side_sse::NeverRetry;
@@ -380,93 +496,28 @@ async fn run(
         Implementation::new(harness_core::APP_NAME, env!("CARGO_PKG_VERSION")),
     )
     .with_protocol_version(rmcp::model::ProtocolVersion::LATEST_WITH_INITIALIZE);
-    let failed = |http: &Http| http.first_failure().unwrap_or(Failure::Protocol);
     let service = info
         .serve_with_lifecycle(transport, ClientLifecycleMode::Initialize)
         .await
-        .map_err(|_| failed(&http))?;
-    let peer = service.peer_info();
-    let server = peer.as_ref().and_then(|p| p.server_info.as_ref());
-    let mut offer = Offer {
-        server_name: server.and_then(|s| remote::clean_text(&s.name, MAX_SERVER_TEXT)),
-        server_version: server.and_then(|s| remote::clean_text(&s.version, MAX_SERVER_TEXT)),
-        instructions: peer
-            .as_ref()
-            .and_then(|p| p.instructions.as_deref())
-            .and_then(|s| remote::clean_text(s, MAX_INSTRUCTIONS)),
-        tools: Vec::new(),
-        more: false,
-        left_out: 0,
-        checked_ms: harness_core::now_ms(),
-    };
-    let mut cursor = None;
-    let mut seen = std::collections::HashSet::new();
-    let mut agents = std::collections::HashSet::new();
-    let mut text = 0usize;
-    for page in 0.. {
-        if page == MAX_PAGES {
-            offer.more = true;
-            break;
-        }
-        let params = PaginatedRequestParams::default().with_cursor(cursor);
-        let r = match service.list_tools(Some(params)).await {
-            Ok(r) => r,
-            // Pages already read stand; the budget running out is "and
-            // more", any other failure of a later page too.
-            Err(_) if page > 0 => {
-                offer.more = true;
-                break;
-            }
-            Err(_) => {
-                let f = failed(&http);
-                let _ = service.cancel().await;
-                return Err(f);
-            }
-        };
-        for t in r.tools {
-            if offer.tools.len() >= MAX_TOOLS {
-                offer.more = true;
-                break;
-            }
-            // One raw name once; one agent name once (two names can clean
-            // to the same one: the first keeps it, the other is counted).
-            if !seen.insert(t.name.to_string()) {
-                continue;
-            }
-            let agent_name = harness_tools::mcp::public_name(name, &t.name);
-            if !agents.insert(agent_name.clone()) {
-                offer.left_out += 1;
-                continue;
-            }
-            let Some(shown) = remote::clean_text(&t.name, MAX_TOOL_NAME) else {
-                continue;
-            };
-            let description = t
-                .description
-                .as_deref()
-                .and_then(|d| remote::clean_text(d, MAX_DESCRIPTION))
-                .filter(|d| {
-                    let fits = text + d.chars().count() <= MAX_TEXT;
-                    if fits {
-                        text += d.chars().count();
-                    } else {
-                        offer.more = true;
-                    }
-                    fits
-                });
-            offer.tools.push(OfferedTool {
-                agent_name,
-                name: shown,
-                description,
-            });
-        }
-        cursor = r.next_cursor;
-        if cursor.is_none() || offer.more {
-            break;
-        }
+        .map_err(|_| http.first_failure().unwrap_or(Failure::Protocol))?;
+    Ok((service, http))
+}
+
+/// What a person saw of a connector before sending a token or checking,
+/// and what a turn's list of its tools was made for: changes with its URL,
+/// its sign-in and its header.
+pub fn stamp(r: &harness_store::custom_connectors::ConnectorRow) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    for part in [
+        r.url.as_str(),
+        r.auth.as_str(),
+        r.header.as_deref().unwrap_or(""),
+    ] {
+        h.update((part.len() as u32).to_be_bytes());
+        h.update(part.as_bytes());
     }
-    let _ = service.cancel().await;
-    Ok(offer)
+    hex::encode(h.finalize())[..16].to_string()
 }
 
 impl Offer {
@@ -551,11 +602,19 @@ impl Cache {
     }
 }
 
-/// Master-side state: the limits, the cache and the test hooks.
+/// The table a person's sealed token is bound to (`crate::sealed`).
+pub const ACCOUNTS_TABLE: &str = "connector_accounts";
+
+/// Master-side state: the limits, the caches, the call workers and the
+/// test hooks.
 pub struct State {
     attempts: Attempts,
     pool: Pool,
     cache: Mutex<Cache>,
+    /// Each person's tools of each connector, with schemas (step 2).
+    pub(crate) tools: Mutex<tools::Cache>,
+    /// Agents' calls (step 2): their own workers, counts and grants.
+    pub(crate) calls: call::State,
     net: Mutex<Net>,
     tasks_left: AtomicUsize,
 }
@@ -566,6 +625,8 @@ impl Default for State {
             attempts: Attempts::new(LIMITS),
             pool: Pool::default(),
             cache: Mutex::default(),
+            tools: Mutex::default(),
+            calls: call::State::default(),
             net: Mutex::default(),
             tasks_left: AtomicUsize::new(0),
         }
@@ -644,8 +705,11 @@ impl Master {
         lock(&self.inner.connectors.cache).put(user, id, o)
     }
 
+    /// Forget what a check found of connector `id` (one person's, or
+    /// everyone's): the offer shown and the tools agents are offered.
     pub(crate) fn connector_offer_forget(&self, user: Option<&str>, id: &str) {
-        lock(&self.inner.connectors.cache).forget(user, id)
+        lock(&self.inner.connectors.cache).forget(user, id);
+        self.connector_tools_forget(user, id);
     }
 }
 

@@ -3048,8 +3048,7 @@ folder. A repository's skill files stay readable as repository files. A
 change of assignment reaches a background sub-agent that is already running,
 and a turn that only picks up messages you queued, one turn late. Chats made
 outside any workspace (through the API token without one) are not narrowed,
-and get no stored skills. Custom connectors and sub-agents with connectors
-come later.
+and get no stored skills.
 
 ## Connections: your own forge accounts
 
@@ -3219,10 +3218,58 @@ of the server's nodes announces (if a node announces it later, the screen
 says so). A skill of the same name is another kind of item and is chosen
 apart.
 
-**In this version agents cannot use a custom connector yet.** It is a
-Plugins item by name, so its Shared / Assigned choice can already be made;
-agents calling its tools through the server, with the chat owner's account,
-come next (ADOPTION_PLAN X.35 step 2).
+**Agents use a custom connector with your own account.** An agent whose
+**Connectors** switch is on (the per-agent MCP switch, see "Plugins" above),
+in a chat of yours, is offered the tools of the workspace's connectors you
+can use: one without sign-in, or one you connected and the server can open
+your token for. They are named like any MCP tool, `mcp__<connector>__<tool>`,
+and described as the server describes them (one line, cleaned, under
+"(MCP server `<connector>`)"). The server makes each call itself, with
+**your** account and nobody else's: never another member's, also when
+another member added the connector, and never in a sub-agent's or routine's
+chat of someone else's.
+
+- **Which messages.** Only those you send signed in as yourself, and runs of
+  your own routines. Not a message sent with the API token, not a turn a
+  background command's end started, not a webhook (untrusted) message: those
+  are offered no connector, and a call in one is refused on the server.
+- **Shared / Assigned** on the Plugins screen decides which agents get a
+  connector, by name, as for a node's server; a sub-agent follows its own
+  switch and its own assignment and gets the connectors of the chat's owner.
+- **Approvals.** A call is an MCP tool call: in **Ask** it is asked about, the
+  card naming the connector and its tool and saying the server makes it with
+  your account; in **Plan** it is refused; "for this turn" covers that one
+  exact call. A denied call is not sent.
+- **What comes back** is text only (images and other content are named, not
+  passed), at most 256 KiB read from the server and 8,192 JSON values per
+  message, cut to the usual tool-output size, and treated as the server's
+  words: a line in it that looks like the harness's is shown to the model as
+  quoted text.
+- **When it is read.** The list of a connector's tools comes from the last
+  check (yours, or one the server makes in the background); a message never
+  waits for a remote server. The first message after you connect has the
+  tools at once; a connector nobody has checked yet is offered from your
+  next message (the agent is told so). Lists are read again in the
+  background after 10 minutes and not used after an hour.
+- **Limits.** 30 calls per message (sub-agents' included); 2 at once per
+  person and per connector; the server makes at most 4 calls at once and
+  refuses a fifth at once ("try again in a moment"); each call ends after 2
+  minutes. A stopped turn drops its call; the remote server may still have
+  done what it was asked (as with a node's MCP server).
+- **The node decides.** `[mcp] master_connectors = true` (the default) in
+  `node.toml` offers them on that node: a call runs nothing on the node and
+  the token never reaches it; only the result's text enters the model's
+  context. `false` offers none and asks nothing. `denied_tools` (`mcp`,
+  `mcp__<connector>`, or one tool) still wins, and a node's own MCP server of
+  the same name wins the name.
+- **What is kept.** No token, arguments or results in the server's log or
+  audit (there is no audit line per call); the call and its result are in the
+  chat's history like any tool call.
+
+**Not built yet:** sign-in through a browser (OAuth), an MCP server's
+resources and prompts, messages the server starts itself, showing a call's
+partial results while it runs, a shared workspace account, and connectors
+on a private address (those stay a node's own servers).
 
 ## What goes with each message
 
