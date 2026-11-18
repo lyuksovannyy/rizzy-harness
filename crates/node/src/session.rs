@@ -1145,12 +1145,9 @@ impl Session {
 
     async fn append_at(&self, head: &mut u64, kind: EventKind) -> Result<RawEvent, StoreError> {
         let (kind, mut payload) = kind.into_parts();
-        if !self.node.cfg.secrets.is_empty() {
-            // The string fields, not the serialized text: a secret holding a
-            // quote or backslash is escaped there, and a replacement can
-            // break the JSON.
-            self.node.cfg.secrets.scrub_value(&mut payload);
-        }
+        // Its free text only, never its schema: whatever node.toml's values
+        // are, the stored event decodes as this kind (PLAN.md T3).
+        self.node.cfg.secrets.scrub_event(&kind, &mut payload);
         let ev = RawEvent {
             session_id: self.id,
             seq: *head + 1,
@@ -2713,8 +2710,8 @@ impl Session {
         // payload): the model is sent this very message, so it never gets
         // a node secret the log does not hold, and the next request
         // rebuilds it byte for byte (review of PR 120, H2; PLAN.md T59).
-        let mut v = serde_json::to_value(&msg).map_err(|e| e.to_string())?;
-        self.node.cfg.secrets.scrub_value(&mut v);
+        let (kind, mut v) = EventKind::UserMessage(msg).into_parts();
+        self.node.cfg.secrets.scrub_event(&kind, &mut v);
         serde_json::from_value(v).map_err(|e| e.to_string())
     }
 

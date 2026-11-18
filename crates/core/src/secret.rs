@@ -1,6 +1,8 @@
 use std::fmt;
 use std::sync::{Arc, RwLock};
 
+mod schema;
+
 /// A value that must never appear in logs. `Debug` and `Display` are redacted.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct Secret<T>(T);
