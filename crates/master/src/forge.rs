@@ -327,12 +327,13 @@ impl Master {
     }
 }
 
+/// Recent attempts by key (a person's id or a host).
+type Recent = HashMap<String, VecDeque<Instant>>;
+
 #[derive(Default)]
 struct Attempts {
-    seen: Mutex<(
-        HashMap<String, VecDeque<Instant>>,
-        HashMap<String, VecDeque<Instant>>,
-    )>,
+    /// (per person, per host)
+    seen: Mutex<(Recent, Recent)>,
 }
 
 fn prune(q: &mut VecDeque<Instant>, now: Instant) {
@@ -850,7 +851,7 @@ mod tests {
         while n < PER_HOST {
             a.admit(&format!("u{who}"), "github.com").unwrap();
             n += 1;
-            if n % PER_USER == 0 {
+            if n.is_multiple_of(PER_USER) {
                 who += 1;
             }
         }

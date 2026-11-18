@@ -2947,6 +2947,82 @@ outside any workspace (through the API token without one) are not narrowed,
 and get no stored skills. Custom connectors and sub-agents with connectors
 come later.
 
+## Connections: your own forge accounts
+
+At the top of **Plugins**, under **Connectors**, you connect your own account
+on a forge (GitHub, GitLab, Gitea, Forgejo, and self-hosted ones the server
+allows) with an **access token you paste**. The screen says where on that
+forge a token is made and which scopes the later steps will need:
+
+| Forge | Where | Scopes for listing, clone and push |
+|---|---|---|
+| GitHub, GitHub Enterprise | Settings → Developer settings → tokens (`/settings/tokens`) | classic: `repo`; fine-grained: Contents read and write, Metadata read |
+| GitLab | Preferences → Access tokens (`/-/user_settings/personal_access_tokens`) | `read_user` (to check the account), `read_api`, `read_repository`, `write_repository` |
+| Gitea, Forgejo | Settings → Applications (`/user/settings/applications`) | `read:user`, and read and write on repository |
+
+The server asks the forge who the token belongs to (`GET /user`) and keeps
+the account: its id, `@login`, display name, the e-mail the forge links to it
+(GitLab: the commit e-mail) and, where the forge reports them, the token's
+scopes, so you see a token that can do more than it needs (GitHub reports
+them for classic tokens only, GitLab through its token endpoint, Gitea and
+Forgejo not at all). Pasting a token for the same account again replaces the
+token; **Replace token** does the same and refuses a token of another account;
+**Disconnect** deletes the row and its token. A connection is yours in every
+workspace, and nobody else sees or uses it: not another member, not a server
+admin, not the API token (which has no account, so these routes refuse it).
+Deleting your account deletes your connections. At most 20 connections per
+person; at most 10 token checks per person and 60 per forge host in 10
+minutes. The forge's answer is read as untrusted text (at most 64 KiB, 10
+seconds; its error text is never shown).
+
+**In this version a connection is stored and checked only.** Nothing lists
+repositories, clones or pushes with it, and no token is sent to a node or a
+model; that comes next (ADOPTION_PLAN X.27 steps 2 to 4).
+
+**Where the token is kept.** In `master.db`, sealed with AES-256-GCM under a
+key in `<data>/keys/secrets.key` (32 random bytes, mode 0600 in a 0700 folder,
+made the first time a token is stored, never rewritten). Each sealed token is
+bound to its row (the person, the host and the account), so one copied into
+another row, another person's or another table does not open. What follows:
+
+- **Back up `secrets.key` with `master.db`.** A copy of `master.db` alone
+  opens no token; and if `secrets.key` is lost, every stored token is lost
+  (people paste theirs again).
+- If `secrets.key` is missing while tokens are stored, or is not a private
+  regular file of the server's user of exactly 32 bytes (a link, a folder,
+  readable by group or others, cut short), the server does not make a new one
+  (that would orphan every stored token): it refuses to store or open tokens,
+  says so in its log with what to do, and the screen points people at the
+  admin. Restore the file from the backup. To give the stored tokens up
+  instead, people disconnect (that needs no key); the next token stored makes
+  a new key. A key file readable by others also stops the server at start, like
+  its other key files.
+- No key rotation yet.
+
+**Which forges.** `github.com` and `gitlab.com` are built in. The server's
+admin adds others in `config.toml`, and only there (no screen or API route
+adds one):
+
+```toml
+[[forge.hosts]]
+host = "git.example.com"            # exactly as people pick it: lower case, no port
+kind = "gitea"                      # github | gitlab | gitea | forgejo
+api_base = "https://git.example.com/api/v1"   # GitLab /api/v4, GitHub Enterprise /api/v3
+# private_address = true            # only if the forge is on a private address (LAN, VPN)
+```
+
+The server reaches a forge only by https (plain http only to this machine or
+a host in `HARNESS_PLAIN_HTTP_HOSTS`), at the entry's `api_base`, never at
+anything a person typed, with the token in a header (never in the URL), no
+environment proxy, and redirects only within the same origin. A forge on a
+**private address** is refused unless its entry says `private_address = true`:
+that lets the server connect to whatever address that name resolves to, for
+this host's token checks only. Set it only for a name you control, since a
+person who can paste a token can make the server send requests there (to
+that host's `/user` path, with what they pasted). Over a plain-http bind on a
+network (`--insecure-bind` without `--tls`), the pasted token travels in clear
+text like the login password; the server warns about that at start.
+
 ## What goes with each message
 
 Besides your words, a message to the model carries a block the harness adds
