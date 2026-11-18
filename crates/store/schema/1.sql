@@ -455,6 +455,20 @@ CREATE TABLE users (
     must_change_password INTEGER NOT NULL DEFAULT 0
 );
 
+-- table workspace_agents on workspace_agents
+CREATE TABLE workspace_agents (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
+    agent_id     TEXT NOT NULL,
+    kind         TEXT NOT NULL CHECK (kind IN ('custom', 'overlay')),
+    -- At most 64 KiB (MAX_DOC_BYTES); the master refuses more first.
+    doc          TEXT NOT NULL CHECK (length(CAST(doc AS BLOB)) <= 65536),
+    updated_ms   INTEGER NOT NULL,
+    PRIMARY KEY (workspace_id, agent_id)
+);
+
+-- index workspace_agents_agent on workspace_agents
+CREATE INDEX workspace_agents_agent ON workspace_agents(agent_id);
+
 -- table workspace_members on workspace_members
 CREATE TABLE workspace_members (
     workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id) ON DELETE CASCADE,

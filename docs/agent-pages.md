@@ -1,8 +1,9 @@
 # Agents pages: design note
 
 Status: first cut built on branch `claude/agents-pages-d365c2` (see "What this branch builds"),
-rebased onto the workspaces work (2026-11-08). Agent edits are still server-wide; what workspace
-agents would need is marked **[ws]**.
+rebased onto the workspaces work (2026-11-08). Workspace agents (ADOPTION_PLAN X.33, PLAN.md T79)
+are built: see "Workspace agents" at the end; the items once marked **[ws]** below say what was
+built.
 
 ## What the user sees
 
@@ -175,19 +176,26 @@ read-only.
   agents. First cut: the master's `kv` table, `agent-edit:server:<id>` and
   `agent-custom:server:<id>` (JSON). No schema change, so no conflict with the workspaces schema
   being written in parallel.
-- **With workspaces** **[ws]**: a table `workspace_agents (workspace_id REFERENCES workspaces ON
-  DELETE CASCADE, agent_id, kind, doc JSON, updated_ms, PRIMARY KEY (workspace_id, agent_id))`, so
-  deleting a workspace deletes its agents. Server-wide edits keep a `server` scope (kv or the same
-  table with a NULL workspace). No migration is needed before the first release (PLAN.md
-  principle). Files stay for operator-defined server agents: they are easy to version and copy
-  between servers, while a team's agents belong to the team's data, not to the server's disk.
-- **Layering** **[ws]**: the set a chat sees = built-ins + files (server) → server edits → the
-  workspace's edits and custom agents. A built-in's prompt can then get server *and* workspace
-  additional instructions, in that order. A workspace's custom agent ids must not collide with
-  server agent ids (refused on create; a later file with that id wins and the custom one is skipped
-  with a warning).
-- **Looks**: avatars stay in `config.toml` `[agent_avatars]` for now (one mechanism, server-wide).
-  A workspace agent **[ws]** should carry its avatar in its own doc instead.
+- **Workspace agents** (built, X.33): the table `workspace_agents (workspace_id REFERENCES
+  workspaces ON DELETE CASCADE, agent_id, kind 'custom'|'overlay', doc JSON at most 64 KiB,
+  updated_ms, PRIMARY KEY (workspace_id, agent_id))` (`crates/store/src/workspace_agents.rs`), so
+  deleting a workspace deletes its agents. The server's edits stay in `kv` as they were (nothing
+  that exists moved). Files stay for operator-defined server agents: they are easy to version and
+  copy between servers, while a team's agents belong to the team's data, not to the server's disk.
+- **Layering** (built): the set a chat sees = built-ins + files (server) → server edits → the
+  workspace's edits and custom agents (`AgentSet::with_layers`). A built-in's prompt gets the
+  server's additional instructions under `# Additional instructions`, then the workspace's under
+  `# Additional instructions for this workspace`; both change its prompt hash. A workspace's
+  overlay goes on any agent it did not make (built-in, file, server custom). A workspace's custom
+  agent ids and aliases must not collide with any server agent's (refused on create, 409); a
+  server agent made later cannot take a workspace agent's id (refused, 409); a later *file* with
+  that id wins and the workspace's agent is skipped with a warning (the operator's file cannot be
+  refused). Delegates come from the agent's own layer or a wider one: a built-in, file or server
+  agent never gets a workspace's agent as a sub-agent, even one with a name its `delegates` lists;
+  a workspace agent that delegates gets every sub-agent of the server and of its workspace.
+- **Looks**: avatars stay in `config.toml` `[agent_avatars]` (one mechanism, server-wide, changed
+  at the server's scope only). A workspace's own agent has the look its id gives
+  (`AgentAvatar::default_for`); carrying a chosen look in its doc is left for later.
 
 ## Permissions
 
@@ -196,13 +204,14 @@ One helper on each side decides "may edit agents here":
 - web: `mayEditAgents(me)` in `web/src/lib/agents.ts`;
 - master: `require_agent_editor` in `crates/master/src/http/agent_edits.rs`.
 
-Today both mean *server admin*, because every edit is server-wide. **[ws]**: a workspace's own
-agents and edits would take the `settings` permission in that workspace: on the master
-`crate::workspaces::access(m, who, workspace_id)` then `Access::can(Perm::Settings)` (or
-`require(Perm::Settings)`), on the web `can(me.workspace, "settings")` from `lib/workspaces.ts`.
-Personal workspaces have the owner holding every permission, so each user could make personal
-agents. Server-scope edits (additional instructions on a built-in for the whole server) stay with
-harness admins, on this page when the server scope is chosen.
+A write names its scope (`?scope=server` or `?workspace=<id>`; neither is 400). The server's
+scope is for server admins (`mayEditAgents` on the web, the sidebar Agents page). A workspace's
+own agents and edits take the `settings` permission there: `workspaces::access(m, who, id)` then
+`Access::require(Perm::Settings)` (a permission, never a role name); a non-member, a server admin
+included, gets 404 as for every workspace read; the API token acts as an owner of any workspace,
+as it does everywhere. Personal workspaces have the owner holding every permission, so each user
+makes agents for themselves there. The listing says whether the caller may edit in its scope
+(`may_edit`), and the web follows it (Workspace settings → Agents).
 
 Reading: anyone who can use an agent can open its page read-only, including its instructions. It
 is a self-hosted team tool, and knowing what an agent is told helps you trust it. The list endpoint
@@ -255,10 +264,9 @@ fills the field; nothing is saved until the user presses Save.
    explicit `agent_id` the mention is only text), workspace and user defaults (refused on save,
    refused when used) and routines (blocked). A chat whose agent became sub-agent-only or was
    removed refuses its next prompt until another agent is chosen.
-7. **Additional instructions per workspace** **[ws]**: should a team admin be able to add them to
-   built-ins for their team (my proposal: yes, after the server's own), or only server admins?
-8. **Who can make agents in a team workspace** **[ws]**: only `settings` holders (admins), or
-   members too?
+7. ~~**Additional instructions per workspace**~~ Settled (X.33): yes, after the server's own.
+8. ~~**Who can make agents in a team workspace**~~ Settled (X.33): `settings` holders (owners,
+   admins); members use them.
 
 ## What this branch builds
 
@@ -284,18 +292,27 @@ fills the field; nothing is saved until the user presses Save.
 - Bundle: the page's lazy chunk is about 5 KB; after the rebase the total is 309.9 of 310 KB and
   the initial load 96.5 of 110 KB (main: 304.9 and 96.1).
 
-## Workspace agents: what is left **[ws]**
+## Workspace agents (built, X.33)
 
-- **Agent set per workspace**: `Master::resolver` takes `self.agents()`, one server-wide set
-  (`agent_edits::Agents`: base → server edits). Workspace agents would compose a set per workspace
-  (base → server edits → that workspace's edits and custom agents) in `Master::resolver` /
-  `resolver_for`, from the workspace's stored edits, so every list, picker and turn agrees.
-- **Storage**: kv keys `agent-edit:server:*` / `agent-custom:server:*` → a `workspace_agents` table
-  with the workspace id and an FK cascade, so deleting a workspace deletes its agents.
-- **Permission**: `require_agent_editor` and `mayEditAgents` → `Access::can(Perm::Settings)` /
-  `can(me.workspace, "settings")` for the workspace's own agents; the server scope stays with
-  harness admins.
-- **API**: the agent endpoints already read `?workspace=` for the model line; a write would save
-  into that workspace instead of the server's scope.
-- **Looks**: avatars stay in `config.toml` `[agent_avatars]`, server-wide; a workspace agent should
-  carry its avatar in its own doc.
+- **Agent set per workspace**: `Master::agents_in(workspace)` composes base → server edits → that
+  workspace's edits and custom agents (`AgentSet::with_layers`), cached per workspace (at most 32
+  kept) and dropped by a write to that workspace, a write at the server's scope, reloading the
+  definitions, or the workspace's deletion. `Master::resolver_for` / `resolver_in` /
+  `Access::resolver` build every resolver from it, so the listing, the picker, new chats, prompts
+  (`agent_id`, `@mention`), the agent switch, workspace defaults and chains, routines, recall and
+  the board all resolve through the chat's own workspace set (PLAN.md T79). The server's set
+  (`Master::agents`) stays for the server's settings, user preferences and the API token without a
+  workspace.
+- **Storage**: `workspace_agents` (above). A workspace has at most 30 agents of its own
+  (`MAX_WORKSPACE_AGENTS`, checked in the store's transaction too); each document is at most
+  64 KiB (`MAX_DOC_BYTES`, also a CHECK on the column). Refused past either, never cut.
+- **Permission and API**: above. `GET /api/agents/{id}?workspace=` adds `own`,
+  `server_instructions` and `may_edit`; deleting a workspace's agent also drops its model chain
+  from the workspace's settings (a default naming it stays, refused when used: `BadDefault`).
+- **Web**: Workspace settings → Agents lists the workspace's agents with their origin (built-in,
+  server, server file, workspace), a New agent button and the agent page in place, in the
+  workspace's scope; the sidebar Agents page edits the server's agents (server admins) and opens a
+  workspace's agents read-only.
+- **Left**: chosen looks for workspace agents; per-workspace caps on overlays (bounded by the
+  number of server agents); `@mention` of an alias that a later server agent took (the workspace's
+  agent loses that alias in its own workspace, logged).

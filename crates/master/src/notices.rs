@@ -61,8 +61,14 @@ struct Uses {
 
 /// The notices `who` sees in `scope` (`None`: the server's own values).
 pub async fn for_viewer(m: &Master, who: &Principal, scope: Option<&Access>) -> Vec<Notice> {
-    let settings = scope.and_then(|a| a.settings(m));
-    let r = m.resolver(settings.as_ref());
+    let settings = match scope {
+        Some(a) => a.settings(m).await,
+        None => None,
+    };
+    let r = match scope {
+        Some(a) => a.resolver(m).await,
+        None => m.resolver(None),
+    };
     let Some(cfg) = r.config() else {
         return Vec::new();
     };

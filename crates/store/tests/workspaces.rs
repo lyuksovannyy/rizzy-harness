@@ -869,3 +869,59 @@ fn a_level_change_holds_only_while_its_setter_stands_as_read() {
     let lines = s.audit_lines("level.").unwrap().len();
     assert_eq!(lines, 5, "only the writes that landed are audited");
 }
+
+/// X.33: a workspace's agent documents are capped, bounded in size, kept
+/// per workspace and deleted with it (foreign key cascade).
+#[test]
+fn workspace_agents_are_bounded_and_go_with_the_workspace() {
+    use harness_store::workspace_agents::MAX_DOC_BYTES;
+    let s = store();
+    let a = s.create_workspace("A", "a1").unwrap().workspace_id;
+    let b = s.create_workspace("B", "b1").unwrap().workspace_id;
+    assert!(s.workspace_agent_put(&a, "one", "custom", "{}", 2).unwrap());
+    assert!(s.workspace_agent_put(&a, "two", "custom", "{}", 2).unwrap());
+    // Past the cap: refused, nothing written; a replace is no new agent.
+    assert!(matches!(
+        s.workspace_agent_put(&a, "three", "custom", "{}", 2),
+        Err(StoreError::Refused(_))
+    ));
+    assert!(
+        s.workspace_agent_put(&a, "two", "custom", "{\"v\":2}", 2)
+            .unwrap()
+    );
+    // Overlays do not count.
+    assert!(
+        s.workspace_agent_put(&a, "general", "overlay", "{}", 2)
+            .unwrap()
+    );
+    // Too big: refused by the store and by the table.
+    let big = "x".repeat(MAX_DOC_BYTES + 1);
+    assert!(
+        s.workspace_agent_put(&a, "big", "overlay", &big, 2)
+            .is_err()
+    );
+    // An unknown workspace stores nothing.
+    assert!(
+        !s.workspace_agent_put("nope", "x", "custom", "{}", 2)
+            .unwrap()
+    );
+    let ids = |ws: &str| -> Vec<String> {
+        s.workspace_agents(ws)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.agent_id)
+            .collect()
+    };
+    assert_eq!(ids(&a), ["general", "one", "two"]);
+    assert!(ids(&b).is_empty());
+    assert_eq!(
+        s.workspace_with_agent("one").unwrap().as_deref(),
+        Some(a.as_str())
+    );
+    assert_eq!(s.workspace_with_agent("general").unwrap(), None);
+    assert!(s.workspace_agent_delete(&a, "one", "custom").unwrap());
+    assert!(!s.workspace_agent_delete(&a, "one", "custom").unwrap());
+    assert!(s.delete_workspace(&a).unwrap());
+    assert!(ids(&a).is_empty());
+    assert_eq!(s.workspace_with_agent("two").unwrap(), None);
+}

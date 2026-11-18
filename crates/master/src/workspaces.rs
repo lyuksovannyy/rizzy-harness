@@ -7,7 +7,8 @@
 
 use std::collections::BTreeMap;
 
-use harness_store::{SessionRow, StoreError, WorkspaceRow};
+use harness_agents::AgentSet;
+use harness_store::{SessionRow, Store, StoreError, WorkspaceRow};
 use serde::{Deserialize, Serialize};
 
 use harness_core::policy::ExecMode;
@@ -215,28 +216,27 @@ impl WorkspaceSettings {
     }
 
     /// A document from a PATCH: unknown fields are an error, then every
-    /// reference is checked.
-    pub fn parse(v: serde_json::Value, m: &Master) -> Result<Self, String> {
+    /// reference is checked against `agents`, the workspace's set.
+    pub fn parse(v: serde_json::Value, m: &Master, agents: &AgentSet) -> Result<Self, String> {
         let s: Self = serde_json::from_value(v).map_err(|e| format!("bad settings: {e}"))?;
-        s.validate(m)?;
+        s.validate(m, agents)?;
         Ok(s)
     }
 
-    /// Known agents and models only, with the same chain rules as the
-    /// server's. Checks the master's model list, so it works without a
-    /// provider runtime.
-    pub fn validate(&self, m: &Master) -> Result<(), String> {
-        let agents = m.agents();
+    /// Known agents (of `agents`, the workspace's set) and models only,
+    /// with the same chain rules as the server's. Checks the master's model
+    /// list, so it works without a provider runtime.
+    pub fn validate(&self, m: &Master, agents: &AgentSet) -> Result<(), String> {
         if let Some(a) = &self.default_agent {
-            check_default_agent(&agents, "default_agent", a)?;
+            check_default_agent(agents, "default_agent", a)?;
         }
         if let Some(a) = &self.default_agentic_agent {
-            check_agentic_default(&agents, "default_agentic_agent", a)?;
+            check_agentic_default(agents, "default_agentic_agent", a)?;
         }
         let models = m.models();
         let knows = |id: &str| models.iter().any(|x| x.id == id);
         for (agent, chain) in &self.agent_models {
-            check_chain(&agents, &knows, agent, chain)?;
+            check_chain(agents, &knows, agent, chain)?;
         }
         Ok(())
     }
@@ -247,8 +247,7 @@ impl WorkspaceSettings {
     /// that needs it is refused with an error naming the setting, and the
     /// settings page shows what to fix (saving it unchanged is refused the
     /// same way).
-    pub fn normalized(&self, m: &Master) -> Self {
-        let agents = m.agents();
+    pub fn normalized(&self, m: &Master, agents: &AgentSet) -> Self {
         let models = m.models();
         let knows = |id: &str| models.iter().any(|x| x.id == id);
         Self {
@@ -271,6 +270,29 @@ impl WorkspaceSettings {
                 .collect(),
         }
     }
+}
+
+/// Remove agent `agent_id`'s model chain from workspace `ws`'s stored
+/// settings, when it has one: a deleted workspace agent's chain goes with
+/// it, so a new agent with that id starts fresh (X.33). The rest of the
+/// document stays as stored (a default naming it stays, and is refused
+/// when a chat needs it).
+pub(crate) fn drop_agent_chain(s: &Store, ws: &str, agent_id: &str) -> Result<(), StoreError> {
+    let Some(w) = s.workspace(ws)? else {
+        return Ok(());
+    };
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&w.settings) else {
+        return Ok(());
+    };
+    let gone = v
+        .get_mut("agent_models")
+        .and_then(|m| m.as_object_mut())
+        .and_then(|m| m.remove(agent_id))
+        .is_some();
+    if gone {
+        s.set_workspace_settings(ws, &v.to_string())?;
+    }
+    Ok(())
 }
 
 /// The caller's standing in one workspace.
@@ -325,15 +347,20 @@ impl Access {
         self.role.map(Role::rank).unwrap_or(0)
     }
 
-    /// The workspace's own settings, stale references dropped; `None` for a
-    /// Personal workspace, which has none (the server's apply).
-    pub fn settings(&self, m: &Master) -> Option<WorkspaceSettings> {
-        (!self.personal).then(|| WorkspaceSettings::read(&self.workspace).normalized(m))
+    /// The workspace's own settings, stale references dropped (against its
+    /// own agents); `None` for a Personal workspace, which has none (the
+    /// server's apply).
+    pub async fn settings(&self, m: &Master) -> Option<WorkspaceSettings> {
+        if self.personal {
+            return None;
+        }
+        let agents = m.agents_in(Some(self.id())).await;
+        Some(WorkspaceSettings::read(&self.workspace).normalized(m, &agents))
     }
 
-    /// The effective configuration here.
-    pub fn resolver(&self, m: &Master) -> crate::Resolver {
-        m.resolver(self.settings(m).as_ref())
+    /// The effective configuration here, with this workspace's agents.
+    pub async fn resolver(&self, m: &Master) -> crate::Resolver {
+        m.resolver_in(&self.workspace).await
     }
 }
 

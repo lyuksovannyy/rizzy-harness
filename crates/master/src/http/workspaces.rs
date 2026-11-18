@@ -145,7 +145,8 @@ async fn detail(m: &Master, who: &Principal, a: &Access) -> ApiResult<Json<Value
         levels::effective(who, Some(a)),
         a.memory_answered,
     );
-    v["settings"] = json!(WorkspaceSettings::read(&a.workspace).normalized(m));
+    let agents = m.agents_in(Some(a.id())).await;
+    v["settings"] = json!(WorkspaceSettings::read(&a.workspace).normalized(m, &agents));
     v["use_memory"] = json!(a.use_memory);
     v["created_ms"] = json!(a.workspace.created_ms);
     Ok(Json(v))
@@ -326,9 +327,11 @@ pub(super) async fn patch(
     }
     a.require(Perm::Settings)?;
     let name = b.name.as_deref().map(clean_name).transpose()?;
+    // Against this workspace's agents: its own may be its defaults.
+    let agents = m.agents_in(Some(a.id())).await;
     let settings = b
         .settings
-        .map(|v| WorkspaceSettings::parse(v, &m))
+        .map(|v| WorkspaceSettings::parse(v, &m, &agents))
         .transpose()
         .map_err(bad)?
         .map(|s| serde_json::to_string(&s).expect("settings serialize"));
@@ -463,8 +466,10 @@ async fn delete_workspace(m: &Master, ws: String) -> ApiResult<Option<Vec<String
         .map(|(members, _)| former(members))
         .unwrap_or_default();
     crate::projects::forget_gone(m, projects, &told).await;
-    // Its memory is the workspace's, and goes with it.
+    // Its memory is the workspace's, and goes with it; so do its agents
+    // (their rows by the foreign key, their set here).
     if gone.is_some() {
+        m.forget_workspace_agents(&ws_id);
         crate::memory::forget_workspace(m, &ws_id).await;
     }
     // What ran in its chats for the team stops, as at a member's removal.
@@ -663,6 +668,7 @@ pub(super) async fn remove_member(
             Ok::<_, StoreError>(removed)
         })
         .await?;
+    m.forget_workspace_agents(a.id());
     if !removed {
         return Err(no_member());
     }

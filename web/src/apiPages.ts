@@ -114,9 +114,10 @@ export const pageApi = {
     b: { name?: string; summary?: string; prompt?: string; instructions?: string; features?: AgentFeatures },
     scope?: Scope | null,
   ) => call<AgentDetail>("PATCH", scoped(`/api/agents/${encodeURIComponent(id)}`, scope), b),
-  deleteAgent: (id: string) => call<{ ok: boolean }>("DELETE", `/api/agents/${encodeURIComponent(id)}`),
+  /** Writes name their scope: a workspace's own agents, or the server's ("server"). */
+  deleteAgent: (id: string, scope: Scope) => call<{ ok: boolean }>("DELETE", scoped(`/api/agents/${encodeURIComponent(id)}`, scope)),
   /** A summary written by the default model from these instructions; nothing is saved. */
-  agentSummary: (b: { name: string; prompt: string }) => call<{ summary: string }>("POST", "/api/agent-summary", b),
+  agentSummary: (b: { name: string; prompt: string }, scope: Scope) => call<{ summary: string }>("POST", scoped("/api/agent-summary", scope), b),
   providers: () => call<ProvidersState>("GET", "/api/admin/providers"),
   /** Always resolves; a failed connection is `{ok: false, error}`. */
   testProvider: (b: { preset: string; base_url?: string; api_key?: string; provider_id?: string }) =>

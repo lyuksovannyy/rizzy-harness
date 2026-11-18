@@ -20,6 +20,7 @@ pub mod profile_images;
 mod projects;
 pub mod routines;
 pub mod session_images;
+pub mod workspace_agents;
 pub use projects::{
     CardPatch, CardRow, ColumnRow, EarlierChat, EarlierSource, NewCard, NewColumn, NewProject,
     ProjectLink, ProjectPatch, ProjectRow, TemplateRow,
@@ -510,6 +511,7 @@ pub const MIGRATIONS: &[migrate::Migration] = &[&[
     routines::SCHEMA,
     session_images::SCHEMA,
     profile_images::SCHEMA,
+    workspace_agents::SCHEMA,
 ]];
 
 /// A session's effective workspace: its `session_workspaces` row while the

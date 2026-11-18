@@ -552,7 +552,7 @@ async fn scoped_resolver(
     q: &ScopeQuery,
 ) -> ApiResult<crate::Resolver> {
     Ok(match settings_scope(m, who, q).await? {
-        Some(a) => a.resolver(m),
+        Some(a) => a.resolver(m).await,
         None => m.resolver(None),
     })
 }
@@ -597,7 +597,11 @@ async fn agents(
     Query(q): Query<ScopeQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let who = require(&m, &headers).await?;
-    let r = scoped_resolver(&m, &who, &q).await?;
+    let scope = settings_scope(&m, &who, &q).await?;
+    let r = match &scope {
+        Some(a) => a.resolver(&m).await,
+        None => m.resolver(None),
+    };
     let agents: Vec<serde_json::Value> = r
         .agents()
         .list()
@@ -614,6 +618,8 @@ async fn agents(
             "chat": r.default_for(harness_core::event::Profile::Chat).ok(),
             "agentic": r.default_for(harness_core::event::Profile::Agentic).ok(),
         },
+        // Whether the caller may make and change agents in this scope.
+        "may_edit": agent_edits::may_edit(&who, scope.as_ref()),
     })))
 }
 

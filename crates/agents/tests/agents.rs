@@ -1174,3 +1174,113 @@ fn the_board_switch() {
     .unwrap();
     assert!(file.features.board && !file.spec.allows_tool("board_edit"));
 }
+
+/// X.33: a workspace's layer goes on top of the server's. Its additional
+/// instructions follow the server's under their own heading; its agents
+/// are marked as the workspace's, cannot take a server agent's id, and see
+/// the server's sub-agents and their own; a server or built-in agent never
+/// gets a workspace agent as a sub-agent, even one with a name it lists.
+#[test]
+fn a_workspace_layer_goes_on_the_servers() {
+    use harness_agents::AgentScope;
+    use harness_agents::edits::{ADDITIONAL, ADDITIONAL_WORKSPACE, Custom, Edits, Overlay};
+    let mut defs = builtins();
+    defs.push(
+        harness_agents::parse(
+            "boss",
+            "---\nname: Boss\ntools: [read]\ndelegates: [helper]\n---\nBoss.\n",
+            false,
+        )
+        .unwrap(),
+    );
+    let base = AgentSet::from_agents(defs, DEFAULT_AGENT);
+    let custom = |name: &str, delegate: bool| Custom {
+        name: name.into(),
+        summary: String::new(),
+        prompt: format!("{name} prompt."),
+        features: harness_agents::Features {
+            delegate,
+            ..features()
+        },
+        aliases: vec![],
+        category: None,
+    };
+    let overlay = |s: &str, i: &str| Overlay {
+        summary: s.into(),
+        instructions: i.into(),
+    };
+    let mut server = Edits::default();
+    server
+        .overlays
+        .insert("coder".into(), overlay("", "SERVER-RULE"));
+    server
+        .custom
+        .insert("slead".into(), custom("Server lead", true));
+    let mut ws = Edits::default();
+    ws.overlays
+        .insert("coder".into(), overlay("Team coder", "TEAM-RULE"));
+    ws.overlays
+        .insert("slead".into(), overlay("", "TEAM-LEAD-RULE"));
+    ws.custom.insert("helper".into(), custom("Helper", false));
+    ws.custom.insert("lead".into(), custom("Lead", true));
+    // Taken by the server: skipped and reported.
+    ws.custom.insert("slead".into(), custom("Mine", false));
+    ws.custom.insert("coder".into(), custom("Mine", false));
+    // An overlay on its own agent does nothing.
+    ws.overlays.insert("helper".into(), overlay("x", "y"));
+
+    let (server_set, _) = base.with_edits(&server);
+    let (set, errors) = base.with_layers(&[&server, &ws]);
+    let shadowed: Vec<&str> = errors
+        .iter()
+        .filter_map(|e| match e {
+            AgentError::Shadowed(id) => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(shadowed, ["coder", "slead"], "{errors:?}");
+
+    let coder = base.get("coder").unwrap();
+    let edited = set.get("coder").unwrap();
+    assert_eq!(
+        edited.spec.system_prompt,
+        format!(
+            "{}\n\n{ADDITIONAL}\n\nSERVER-RULE\n\n{ADDITIONAL_WORKSPACE}\n\nTEAM-RULE",
+            coder.spec.system_prompt
+        )
+    );
+    assert_eq!(edited.description, "Team coder");
+    assert_ne!(
+        edited.spec.prompt_hash,
+        server_set.get("coder").unwrap().spec.prompt_hash
+    );
+    assert!(
+        set.get("slead")
+            .unwrap()
+            .spec
+            .system_prompt
+            .ends_with("TEAM-LEAD-RULE")
+    );
+    assert_eq!(set.get("slead").unwrap().scope, AgentScope::Server);
+    let helper = set.get("helper").unwrap();
+    assert_eq!(helper.scope, AgentScope::Workspace);
+    assert_eq!(helper.spec.system_prompt, "Helper prompt.");
+    assert_eq!(helper.description, "");
+
+    // Delegates from the agent's own layer or a wider one.
+    assert!(set.get("boss").unwrap().delegates.is_empty());
+    assert!(
+        !set.get("slead")
+            .unwrap()
+            .delegates
+            .contains(&"helper".into())
+    );
+    let lead = &set.get("lead").unwrap().delegates;
+    assert!(
+        lead.contains(&"helper".into()) && lead.contains(&"scout".into()),
+        "{lead:?}"
+    );
+    // The server's set is the same with or without an empty workspace.
+    let (again, _) = base.with_layers(&[&server, &Edits::default()]);
+    assert_eq!(again.list(), server_set.list());
+}

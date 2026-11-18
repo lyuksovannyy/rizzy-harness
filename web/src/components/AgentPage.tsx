@@ -1,9 +1,12 @@
 // One agent's page (docs/agent-pages.md): its face, name and handle, the
-// summary, its instructions and what it can do. An agent made here is
-// edited whole. A built-in or file agent keeps its name, handle,
-// instructions and features: only its summary, look and additional
-// instructions (added after its own) change, and Duplicate makes an
-// editable copy. Without permission the page is read-only.
+// summary, its instructions and what it can do, read and changed in one
+// scope: the server's, or one workspace's (X.33). An agent made in that
+// scope is edited whole. One it did not make (built in, a file, and in a
+// workspace the server's) keeps its name, handle, instructions and
+// features: only its summary and additional instructions (added after its
+// own, and in a workspace after the server's) change, and Duplicate makes
+// an editable copy. Looks are server-wide: only the server's scope changes
+// them. Without permission the page is read-only.
 import { Sparkles, Trash2 } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 import { type Scope } from "../api";
@@ -14,19 +17,21 @@ import type { Agent, AgentDetail, AgentFeatures, NewAgent } from "../types";
 import { AgentAvatar, AgentMark, agentAlert } from "./AgentAvatar";
 import { AvatarEditor } from "./AvatarEditor";
 
-/** What the list says after the name: where the agent comes from, and where it can't be used. */
+/** What the list says after the name: where the agent comes from (built in, the server's, the workspace's), and where it can't be used. */
 export function agentMarkers(a: Agent): string[] {
   const out: string[] = [];
-  if (a.origin === "file") out.push("file");
-  else if (a.origin !== "custom") out.push("built-in");
+  if (a.scope === "workspace") out.push("workspace");
+  else if (a.origin === "file") out.push("server file");
+  else if (a.origin === "custom") out.push("server");
+  else out.push("built-in");
   if (a.features?.as_agent === false) out.push("sub-agent only");
   return out;
 }
 
-/** Asks first; chats that used the agent go on with the default one. */
-export async function confirmDelete(a: Agent): Promise<boolean> {
-  if (!confirm(`Delete ${a.name}? Chats that use @${a.id} go on with the default agent.`)) return false;
-  await pageApi.deleteAgent(a.id);
+/** Asks first; chats that used the agent need another one chosen before their next message. */
+export async function confirmDelete(a: Agent, scope: Scope): Promise<boolean> {
+  if (!confirm(`Delete ${a.name}? Chats that use @${a.id} need another agent chosen before their next message.`)) return false;
+  await pageApi.deleteAgent(a.id, scope);
   return true;
 }
 
@@ -233,7 +238,7 @@ export function AgentPage(props: {
   onOpen: (id: string | null) => void;
   onDuplicate: (d: NewAgent) => void;
   onChanged: () => void;
-  /** The workspace the agents were listed for, so the model line agrees with the list. */
+  /** Where the page reads and, when `editable`, writes: a workspace's agents or the server's ("server"). */
   scope?: Scope | null;
 }) {
   const creating = props.id === NEW_AGENT;
@@ -303,8 +308,11 @@ export function AgentPage(props: {
       </section>
     );
   }
-  const locked = !creating && detail?.origin !== "custom";
-  const canEdit = props.editable;
+  const locked = !creating && !(detail?.own ?? detail?.origin === "custom");
+  // A write always names its scope; without one the page only reads.
+  const writeScope = props.scope ?? null;
+  const canEdit = props.editable && writeScope !== null;
+  const inWorkspace = !!writeScope && writeScope !== "server";
   const dirty = !same(draft, saved);
   const set = (p: Partial<Draft>) => {
     setMsg(null);
@@ -328,14 +336,14 @@ export function AgentPage(props: {
             prompt: draft.prompt,
             features: draft.features,
           },
-          props.scope,
+          writeScope,
         );
         props.onChanged();
         props.onOpen(d.id);
         return;
       }
       const d = locked
-        ? await pageApi.updateAgent(props.id, { summary: draft.summary, instructions: draft.instructions }, props.scope)
+        ? await pageApi.updateAgent(props.id, { summary: draft.summary, instructions: draft.instructions }, writeScope)
         : await pageApi.updateAgent(
             props.id,
             {
@@ -344,7 +352,7 @@ export function AgentPage(props: {
               prompt: draft.prompt,
               features: draft.features,
             },
-            props.scope,
+            writeScope,
           );
       setDetail(d);
       setDraft(draftOf(d));
@@ -362,8 +370,10 @@ export function AgentPage(props: {
     setBusy("summary");
     setErr(null);
     try {
-      const prompt = locked && draft.instructions.trim() ? `${draft.prompt}\n\n${draft.instructions}` : draft.prompt;
-      const r = await pageApi.agentSummary({ name: draft.name, prompt });
+      const extra = [detail?.server_instructions ?? "", locked ? draft.instructions : ""].map((t) => t.trim()).filter(Boolean);
+      const prompt = [draft.prompt, ...extra].join("\n\n");
+      if (!writeScope) return;
+      const r = await pageApi.agentSummary({ name: draft.name, prompt }, writeScope);
       set({ summary: r.summary });
     } catch (x) {
       setErr(x instanceof Error ? x.message : String(x));
@@ -373,10 +383,10 @@ export function AgentPage(props: {
   };
 
   const remove = async () => {
-    if (!listed) return;
+    if (!listed || !writeScope) return;
     setErr(null);
     try {
-      if (await confirmDelete(listed)) {
+      if (await confirmDelete(listed, writeScope)) {
         props.onChanged();
         props.onOpen(null);
       }
@@ -391,7 +401,7 @@ export function AgentPage(props: {
       id: handleProblem(id, props.agents) ? "" : id,
       name: `${draft.name} (copy)`,
       summary: draft.summary || detail?.description_default || "",
-      prompt: draft.instructions.trim() ? `${draft.prompt}\n\n${draft.instructions.trim()}` : draft.prompt,
+      prompt: [draft.prompt, detail?.server_instructions ?? "", draft.instructions].map((t) => t.trim()).filter(Boolean).join("\n\n"),
       features: draft.features,
     });
   };
@@ -402,7 +412,8 @@ export function AgentPage(props: {
         <BackLink onOpen={props.onOpen} />
         <header className="agent-head">
           {listed && !creating ? (
-            canEdit ? (
+            // Looks are server-wide (config.toml): changed at the server's scope only.
+            canEdit && !inWorkspace ? (
               <button
                 ref={face}
                 type="button"
@@ -521,12 +532,20 @@ export function AgentPage(props: {
           {locked ? (
             <>
               <div className="field">
-                <span className="field-label">Instructions{detail?.origin === "file" ? " (from its file)" : " (built in)"}</span>
+                <span className="field-label">
+                  Instructions{detail?.origin === "file" ? " (from its file)" : detail?.origin === "custom" ? " (the server's)" : " (built in)"}
+                </span>
                 <pre className="agent-prompt">{draft.prompt}</pre>
               </div>
+              {inWorkspace && detail?.server_instructions && (
+                <div className="field">
+                  <span className="field-label">Additional instructions (the server's)</span>
+                  <pre className="agent-prompt">{detail.server_instructions}</pre>
+                </div>
+              )}
               <div className="field">
                 <label htmlFor={`${ids}-extra`} className="field-label">
-                  Additional instructions
+                  {inWorkspace ? "Additional instructions for this workspace" : "Additional instructions"}
                 </label>
                 <textarea
                   id={`${ids}-extra`}

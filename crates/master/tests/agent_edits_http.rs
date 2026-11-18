@@ -106,6 +106,12 @@ async fn start() -> T {
 }
 
 async fn call(t: &T, method: Method, path: &str, body: Option<Value>) -> (StatusCode, Value) {
+    // Every change here is the server's: a write names its scope (X.33).
+    let path = if method != Method::GET && path.starts_with("/api/agent") && !path.contains('?') {
+        format!("{path}?scope=server")
+    } else {
+        path.to_string()
+    };
     let mut rb = reqwest::Client::new()
         .request(method, format!("{}{path}", t.base))
         .bearer_auth("tok");

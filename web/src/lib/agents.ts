@@ -3,11 +3,11 @@
 import type { Agent, Me } from "../types";
 
 /**
- * Whether `me` may make, change and delete agents. Today: the server's
- * admins, since agent edits are server-wide. Workspace agents would add
- * `can(me.workspace, "settings")` (lib/workspaces.ts) for the active
- * workspace's own. The server checks the same rule (`require_agent_editor`
- * in crates/master/src/http/agent_edits.rs).
+ * Whether `me` may make, change and delete the server's agents: the
+ * server's admins. A workspace's own agents (X.33) take its `settings`
+ * permission; the listing says so (`may_edit` from `/api/agents`). The
+ * server checks both (`require_agent_editor` in
+ * crates/master/src/http/agent_edits.rs).
  */
 export function mayEditAgents(me: Pick<Me, "role">): boolean {
   return me.role === "admin";

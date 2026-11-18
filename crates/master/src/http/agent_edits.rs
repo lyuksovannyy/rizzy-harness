@@ -1,6 +1,7 @@
 //! The Agents page (docs/agent-pages.md): one agent with its instructions,
-//! making, changing and deleting agents, and writing a summary from an
-//! agent's instructions with the default model.
+//! making, changing and deleting agents at the server's scope or in one
+//! workspace (X.33, PLAN.md T79), and writing a summary from an agent's
+//! instructions with the default model.
 
 use std::time::Duration;
 
@@ -13,20 +14,64 @@ use harness_agents::edits::{Custom, Overlay};
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{
-    ApiError, ApiResult, ScopeQuery, agent_json, require, require_admin, runtime, scoped_resolver,
-};
+use super::{ApiError, ApiResult, ScopeQuery, agent_json, require, runtime, settings_scope};
 use crate::Master;
-use crate::agent_edits::AgentEditError;
+use crate::agent_edits::{AgentEditError, Place};
 use crate::auth::Principal;
+use crate::workspaces::{self as ws, Perm};
 
-/// Whoever may make, change and delete agents: today the server's admins,
-/// because edits are server-wide. Workspace agents would add the
-/// `settings` permission in the agent's workspace
-/// (`workspaces::access(..)?.can(Perm::Settings)`; web: `mayEditAgents` in
-/// web/src/lib/agents.ts).
-async fn require_agent_editor(m: &Master, headers: &HeaderMap) -> ApiResult<Principal> {
-    require_admin(m, headers).await
+/// Where a write goes and whether `who` may make it (PLAN.md T79): a write
+/// names its scope. `?scope=server` is the server's set, for the server's
+/// admins; `?workspace=<id>` is that workspace's own, for whoever holds its
+/// `settings` permission (its owners and admins; everyone in their own
+/// Personal workspace; the API token, which acts as an owner of any
+/// workspace). A non-member, a server admin included, gets 404 as for every
+/// workspace read (`workspaces::access`). The web asks the same through
+/// `may_edit` on the listing.
+async fn require_agent_editor(
+    m: &Master,
+    headers: &HeaderMap,
+    q: &ScopeQuery,
+) -> ApiResult<(Principal, Place)> {
+    let who = require(m, headers).await?;
+    let place = match (q.scope.as_deref(), q.workspace.as_deref()) {
+        (Some("server"), None) => {
+            if !who.is_admin() {
+                return Err(ApiError(
+                    StatusCode::FORBIDDEN,
+                    "only the server's admins change the server's agents".into(),
+                ));
+            }
+            Place::Server
+        }
+        (None, Some(id)) => {
+            let a = ws::access(m, &who, id).await?;
+            a.require(Perm::Settings)?;
+            Place::Workspace(a.id().to_string())
+        }
+        (None, None) => {
+            return Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                "say where the change goes: ?workspace=<id> or ?scope=server".into(),
+            ));
+        }
+        _ => {
+            return Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                "ask for a workspace or for the server scope, not both".into(),
+            ));
+        }
+    };
+    Ok((who, place))
+}
+
+/// Whether `who` may change the agents of the scope a read resolved to
+/// (`None`: the server's).
+pub(super) fn may_edit(who: &Principal, scope: Option<&ws::Access>) -> bool {
+    match scope {
+        None => who.is_admin(),
+        Some(a) => a.can(Perm::Settings),
+    }
 }
 
 impl From<AgentEditError> for ApiError {
@@ -41,25 +86,29 @@ impl From<AgentEditError> for ApiError {
     }
 }
 
-/// An agent as its page shows it: the listing in the asked scope (its
-/// model line follows the workspace's chains, like `/api/agents`), plus its
-/// instructions as written (a built-in's own prompt, without the additional
-/// instructions), the saved summary (empty: the definition's
-/// `description_default`).
+/// An agent as its page shows it in `place`: the listing in that scope
+/// (its model line follows the workspace's chains, like `/api/agents`),
+/// plus its instructions as written (a built-in's own prompt, without any
+/// additional instructions), `place`'s own summary and additional
+/// instructions (empty summary: `description_default`), in a workspace the
+/// server's additional instructions (`server_instructions`, read-only
+/// there), and whether `place` made it (`own`: edited whole).
 async fn detail(
     m: &Master,
-    who: &Principal,
-    q: &ScopeQuery,
+    r: &crate::Resolver,
+    place: &Place,
     id: &str,
 ) -> ApiResult<serde_json::Value> {
-    let r = scoped_resolver(m, who, q).await?;
     let a = r
         .agents()
         .get(id)
         .ok_or_else(|| ApiError::from(AgentEditError::NotFound(id.into())))?;
-    let mut v = agent_json(m, &r, a);
-    let edits = m.agent_edits();
-    match edits.custom.get(id) {
+    let mut v = agent_json(m, r, a);
+    let (own, _) = m.place_edits(place).await;
+    let server = m.agent_edits();
+    v["own"] = json!(own.custom.contains_key(id));
+    v["server_instructions"] = json!("");
+    match own.custom.get(id) {
         Some(c) => {
             v["prompt"] = json!(c.prompt);
             v["summary"] = json!(c.summary);
@@ -67,16 +116,37 @@ async fn detail(
             v["description_default"] = json!("");
         }
         None => {
+            // What the wider scope made: a definition, or a server agent
+            // seen from a workspace.
             let defs = m.agent_definitions();
-            let def = defs.get(id);
-            let o = edits.overlays.get(id).cloned().unwrap_or_default();
-            v["prompt"] = json!(def.map(|d| &d.spec.system_prompt));
+            let wider = m.agents();
+            let (prompt, default) = match (defs.get(id), server.custom.get(id)) {
+                (Some(d), _) => (d.spec.system_prompt.clone(), d.description.clone()),
+                (None, Some(c)) => (c.prompt.clone(), c.summary.clone()),
+                (None, None) => (a.spec.system_prompt.clone(), a.description.clone()),
+            };
+            let o = own.overlays.get(id).cloned().unwrap_or_default();
+            v["prompt"] = json!(prompt);
             v["summary"] = json!(o.summary);
             v["instructions"] = json!(o.instructions);
-            v["description_default"] = json!(def.map(|d| &d.description));
+            v["description_default"] = json!(default);
+            if let Place::Workspace(_) = place {
+                let so = server.overlays.get(id).cloned().unwrap_or_default();
+                v["server_instructions"] = json!(so.instructions);
+                v["description_default"] =
+                    json!(wider.get(id).map_or(default, |w| w.description.clone()));
+            }
         }
     }
     Ok(v)
+}
+
+/// The resolver and place a write's answer is read in.
+async fn written(m: &Master, place: &Place) -> crate::Resolver {
+    match place {
+        Place::Server => m.resolver(None),
+        Place::Workspace(ws) => m.resolver_for(Some(ws)).await,
+    }
 }
 
 /// Anyone who can use an agent may read what it is told.
@@ -87,7 +157,14 @@ pub(super) async fn get_agent(
     Query(q): Query<ScopeQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let who = require(&m, &headers).await?;
-    Ok(Json(detail(&m, &who, &q, &id).await?))
+    let scope = settings_scope(&m, &who, &q).await?;
+    let (place, r) = match &scope {
+        Some(a) => (Place::Workspace(a.id().to_string()), a.resolver(&m).await),
+        None => (Place::Server, m.resolver(None)),
+    };
+    let mut v = detail(&m, &r, &place, &id).await?;
+    v["may_edit"] = json!(may_edit(&who, scope.as_ref()));
+    Ok(Json(v))
 }
 
 #[derive(Deserialize)]
@@ -112,7 +189,7 @@ pub(super) async fn create_agent(
     Query(q): Query<ScopeQuery>,
     Json(b): Json<NewAgent>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let who = require_agent_editor(&m, &headers).await?;
+    let (_, place) = require_agent_editor(&m, &headers, &q).await?;
     let id = b.id.trim().to_string();
     let c = Custom {
         name: b.name,
@@ -122,13 +199,16 @@ pub(super) async fn create_agent(
         aliases: b.aliases,
         category: b.category,
     };
-    m.save_custom_agent(&id, c, true).await?;
-    Ok(Json(detail(&m, &who, &q, &id).await?))
+    m.save_custom_agent(&place, &id, c, true).await?;
+    Ok(Json(
+        detail(&m, &written(&m, &place).await, &place, &id).await?,
+    ))
 }
 
-/// The fields to change; the rest stay. Built-in and file agents take only
-/// `summary` and `instructions` (the rest may be sent as they are);
-/// custom ones everything but `instructions`.
+/// The fields to change; the rest stay. Agents the scope did not make
+/// (built-in, file, and in a workspace the server's) take only `summary`
+/// and `instructions` (the rest may be sent as they are); its own agents
+/// everything but `instructions`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct AgentChange {
@@ -148,8 +228,9 @@ pub(super) async fn update_agent(
     Query(q): Query<ScopeQuery>,
     Json(b): Json<AgentChange>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let who = require_agent_editor(&m, &headers).await?;
-    match m.agent_edits().custom.get(&id).cloned() {
+    let (_, place) = require_agent_editor(&m, &headers, &q).await?;
+    let (own, seen) = m.place_edits(&place).await;
+    match own.custom.get(&id).cloned() {
         Some(old) => {
             if b.instructions
                 .as_deref()
@@ -169,17 +250,16 @@ pub(super) async fn update_agent(
                 aliases: b.aliases.unwrap_or(old.aliases),
                 category: b.category.or(old.category),
             };
-            m.save_custom_agent(&id, c, false).await?;
+            m.save_custom_agent(&place, &id, c, false).await?;
         }
         None => {
-            let set = m.agent_definitions();
+            let set = m.wider(&place);
             let Some(def) = set.get(&id) else {
                 return Err(AgentEditError::NotFound(id).into());
             };
             // Aliases as the list shows them: a custom agent's id may have
             // pushed one of the definition's out.
-            let shown = m.agents();
-            let shown = shown.get(&id).unwrap_or(def);
+            let shown = seen.get(&id).unwrap_or(def);
             if b.name.as_ref().is_some_and(|n| n.trim() != def.name)
                 || b.prompt.is_some()
                 || b.features.is_some_and(|f| f != def.features)
@@ -188,35 +268,36 @@ pub(super) async fn update_agent(
                     .as_ref()
                     .is_some_and(|c| c.trim() != def.category)
             {
-                return Err(m.edit_refusal(&id).into());
+                return Err(m.edit_refusal(&place, &id).await.into());
             }
-            let old = m
-                .agent_edits()
-                .overlays
-                .get(&id)
-                .cloned()
-                .unwrap_or_default();
+            let old = own.overlays.get(&id).cloned().unwrap_or_default();
             let o = Overlay {
                 summary: b.summary.unwrap_or(old.summary),
                 instructions: b.instructions.unwrap_or(old.instructions),
             };
-            m.save_agent_overlay(&id, o).await?;
+            m.save_agent_overlay(&place, &id, o).await?;
         }
     }
-    Ok(Json(detail(&m, &who, &q, &id).await?))
+    Ok(Json(
+        detail(&m, &written(&m, &place).await, &place, &id).await?,
+    ))
 }
 
-/// Deletes an agent made here, with its look and model chain, so a new
-/// agent with the same handle starts fresh. Chats that used it go on with
-/// the default agent.
+/// Deletes an agent made at the scope. At the server's scope its look and
+/// model chain go too (config.toml), in a workspace its chain there, so a
+/// new agent with the same handle starts fresh. Chats that used it refuse
+/// their next prompt until another agent is chosen (`AgentGone`).
 pub(super) async fn delete_agent(
     State(m): State<Master>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    Query(q): Query<ScopeQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    require_agent_editor(&m, &headers).await?;
-    m.delete_custom_agent(&id).await?;
-    if let Some(rt) = m.provider_runtime() {
+    let (_, place) = require_agent_editor(&m, &headers, &q).await?;
+    m.delete_custom_agent(&place, &id).await?;
+    if place == Place::Server
+        && let Some(rt) = m.provider_runtime()
+    {
         let _edits = rt.lock_edits().await;
         let mut cfg = rt.config();
         let looks = cfg.agent_avatars.remove(&id).is_some();
@@ -249,9 +330,10 @@ pub(super) struct SummaryBody {
 pub(super) async fn generate_summary(
     State(m): State<Master>,
     headers: HeaderMap,
+    Query(q): Query<ScopeQuery>,
     Json(b): Json<SummaryBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    require_agent_editor(&m, &headers).await?;
+    require_agent_editor(&m, &headers, &q).await?;
     let prompt = b.prompt.trim();
     if prompt.is_empty() {
         return Err(ApiError(
