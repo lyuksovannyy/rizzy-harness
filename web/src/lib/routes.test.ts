@@ -78,6 +78,12 @@ describe("parseRoute", () => {
     }
   });
 
+  it("reads plugins", () => {
+    expect(parseRoute("#/plugins")).toEqual({ kind: "plugins" });
+    expect(routeHash({ kind: "plugins" })).toBe("#/plugins");
+    expect(parseRoute("#/plugins/x")).toEqual({ kind: "home" });
+  });
+
   it("reads artifacts: the list and one", () => {
     const id = "0193f1c2a4b57d6e8f9012345678abcd";
     expect(parseRoute("#/artifacts")).toEqual({ kind: "artifacts", id: null });

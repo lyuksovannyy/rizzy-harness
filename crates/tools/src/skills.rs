@@ -387,12 +387,7 @@ fn split_front(text: &str, cut: bool) -> Result<(Option<&str>, &str), String> {
 }
 
 fn valid_name(n: &str) -> bool {
-    let b = n.as_bytes();
-    !b.is_empty()
-        && b.len() <= NAME_MAX
-        && b[0].is_ascii_alphanumeric()
-        && b.iter()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
+    harness_core::skills::valid_skill_name(n)
 }
 
 /// Characters that change how text around them reads without being seen:
@@ -577,22 +572,84 @@ pub fn asked_line(n: &str) -> String {
 /// `/name` never invokes it.
 pub const RESERVED: &[&str] = &["compact"];
 
-/// The skill the person's message names with `/name` at its start (the
-/// first word, without a trailing `:`, `,` or `.`), if there is one of
-/// that name and the name is not [`RESERVED`].
-pub fn invoked(text: &str, c: &Catalogue) -> Option<String> {
+/// The name a message's leading `/name` gives (the first word, without a
+/// trailing `:`, `,` or `.`), unless it is [`RESERVED`].
+fn slash_name(text: &str) -> Option<&str> {
     let rest = text.trim_start().strip_prefix('/')?;
     let name = rest
         .split(char::is_whitespace)
         .next()?
         .trim_end_matches([':', ',', '.']);
-    if RESERVED.contains(&name) {
-        return None;
-    }
+    (!RESERVED.contains(&name)).then_some(name)
+}
+
+/// The skill the person's message names with `/name` at its start (the
+/// first word, without a trailing `:`, `,` or `.`), if there is one of
+/// that name and the name is not [`RESERVED`].
+pub fn invoked(text: &str, c: &Catalogue) -> Option<String> {
+    let name = slash_name(text)?;
     c.skills
         .iter()
         .find(|s| s.name == name)
         .map(|s| s.name.clone())
+}
+
+/// The skill the person's `/name` asks for when this turn's agent may not
+/// use it here ([`withhold`]): said to the model ([`withheld_line`]) so it
+/// tells the person, rather than looking for a skill that is not listed.
+pub fn invoked_withheld(text: &str, c: &Catalogue) -> Option<String> {
+    let name = slash_name(text)?;
+    c.is_withheld(name).then(|| name.to_string())
+}
+
+/// Why a withheld skill is not loaded: the tool's answer and the `/name`
+/// line both say it.
+pub fn withheld_why(n: &str) -> String {
+    format!(
+        "The skill `{n}` is not available to this agent: this workspace's Plugins settings \
+         assign it to other agents only."
+    )
+}
+
+/// The line for a person's `/n` that names a withheld skill.
+pub fn withheld_line(n: &str) -> String {
+    format!(
+        "[harness] The person's message starts with /{n}: they ask for the skill `{n}`, which \
+         this agent may not use here (this workspace's Plugins settings assign it to other \
+         agents only). Tell the person so; do not look for it another way."
+    )
+}
+
+/// Leave the skills named in `denied` out of `c` (X.34, PLAN.md T80): the
+/// turn's agent may not use them in this workspace (`AgentSpec::
+/// deny_skills`). By name, whatever their origin. They leave the list, the
+/// tool and `/name` (named in `withheld`, so both can say why), and the
+/// shell's read-only grants: once anything is denied (listed here or not),
+/// the shell is granted the folder of each kept node skill and never a whole
+/// root, so nothing
+/// else lying in a root (a same-named copy discovery did not use, a refused
+/// folder, a withheld skill) is granted either, and no grant that holds a
+/// withheld skill's folder stays.
+pub fn withhold(c: &mut Catalogue, denied: &[String]) {
+    if denied.is_empty() {
+        return;
+    }
+    let (out, kept): (Vec<Skill>, Vec<Skill>) = std::mem::take(&mut c.skills)
+        .into_iter()
+        .partition(|s| denied.contains(&s.name));
+    c.skills = kept;
+    c.withheld = out.iter().map(|s| s.name.clone()).collect();
+    // Any denial narrows the grants, also one that matched nothing listed:
+    // the denied name may be a folder discovery refused (it was a valid
+    // skill when it was assigned), and a whole root would still hold it.
+    let mut read: Vec<PathBuf> = Vec::new();
+    for s in c.skills.iter().filter(|s| s.origin == SkillOrigin::Node) {
+        if !read.contains(&s.dir) {
+            read.push(s.dir.clone());
+        }
+    }
+    read.retain(|p| !out.iter().any(|s| s.dir.starts_with(p)));
+    c.read = read;
 }
 
 /// The node owner's skill folders the agent's shell may read in this call
@@ -665,6 +722,9 @@ impl Tool for SkillTool {
             Ok(n) => n.to_string(),
             Err(e) => return ToolOutcome::err(e),
         };
+        if c.is_withheld(&name) {
+            return ToolOutcome::err(withheld_why(&name));
+        }
         let Some(skill) = c.loadable(&name).cloned() else {
             let known: Vec<&str> = c
                 .skills

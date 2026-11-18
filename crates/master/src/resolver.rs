@@ -32,6 +32,9 @@ pub struct Resolver {
     /// else the server's (`coder`).
     agentic_default: String,
     agentic_problem: Option<String>,
+    /// The workspace's Plugins settings (X.34): what each agent may not
+    /// use, put on every spec this resolver makes.
+    access: crate::plugins::Assignments,
 }
 
 /// Put a workspace's chains on the server's config. Chains whose main model
@@ -143,6 +146,7 @@ impl Master {
             default_problem,
             agentic_default,
             agentic_problem,
+            access: Default::default(),
         }
     }
 
@@ -158,9 +162,13 @@ impl Master {
         match self.inner.mirror.call(move |s| s.workspace(&id)).await {
             Ok(Some(w)) => self.resolver_in(&w).await,
             Ok(None) => self.resolver(None),
+            // The server's settings, but the Plugins choice is not known:
+            // fail closed (no `skill`, no MCP tools for the turn, T80).
             Err(e) => {
                 tracing::warn!(error = %e, "could not load workspace settings; using the server's");
-                self.resolver(None)
+                let mut r = self.resolver(None);
+                r.access = crate::plugins::Assignments::unreadable();
+                r
             }
         }
     }
@@ -172,7 +180,10 @@ impl Master {
         let agents = self.agents_in(Some(&w.workspace_id)).await;
         let settings =
             (!w.personal()).then(|| WorkspaceSettings::read(w).normalized(self, &agents));
-        self.resolver_with(agents, settings.as_ref())
+        let mut r = self.resolver_with(agents, settings.as_ref());
+        // Personal workspaces too: their owner chooses for their own agents.
+        r.access = self.assignments(&w.workspace_id).await;
+        r
     }
 }
 
@@ -510,7 +521,15 @@ impl Resolver {
         if spec.delegates.is_empty() {
             spec.caps = None;
         }
+        // What this agent and each sub-agent may not use in this workspace
+        // (X.34, PLAN.md T80): deny lists only, each by its own id.
+        self.access.deny(&mut spec);
         Ok(spec)
+    }
+
+    /// This scope's Plugins settings (X.34): none outside a workspace.
+    pub fn assignments(&self) -> &crate::plugins::Assignments {
+        &self.access
     }
 }
 

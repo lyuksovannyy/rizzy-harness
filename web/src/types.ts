@@ -522,8 +522,10 @@ export interface AgentFeatures {
   commands: boolean;
   /** Commands in the read-only shell, for an agent that changes nothing else (PLAN.md T70). */
   read_only_commands: boolean;
-  /** The tools of the MCP servers the node runs for the chat; its own switch, not implied by commands. */
+  /** "Connectors": the tools of the MCP servers the node runs for the chat that it may use here (Plugins); its own switch, not implied by commands. */
   mcp: boolean;
+  /** "Skills" (`skill`): the skills it may use here (Plugins); its own switch, in effect with file or command access (X.34). */
+  skills: boolean;
   /** Hands sub-tasks to the agents available as sub-agents. */
   delegate: boolean;
   /** The person's reply style and personal instructions (Settings → Personalisation); on unless turned off. */

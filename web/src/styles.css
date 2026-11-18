@@ -990,9 +990,6 @@ select:where(:hover:not(:disabled, :focus-visible)) {
 .sidebar-nav .nav-item:is(:hover, .active) > svg {
   color: var(--accent-fg);
 }
-.sidebar-nav .nav-item.later > svg {
-  color: inherit;
-}
 .nav-item:hover:not(:disabled),
 .session-item:hover:not(:disabled) {
   background: var(--bg-hover);
@@ -4461,20 +4458,6 @@ input.add-line {
   background: var(--fill-2);
   font-weight: var(--w-heading);
 }
-.nav-item.later {
-  color: var(--fg-2);
-  cursor: default;
-}
-.nav-item.later:hover {
-  background: transparent;
-}
-.later-tag {
-  font-size: var(--text-2xs);
-  padding: 0 6px;
-  border-radius: var(--r-full);
-  background: var(--bg-hover);
-  color: var(--fg-2);
-}
 /* The unseen routine results. */
 .nav-dot {
   width: 7px;
@@ -4680,12 +4663,6 @@ ul.chats.sub .session-item {
   align-items: center;
   gap: 2px;
   margin-top: var(--space-2);
-}
-.rail .nav-item.later {
-  width: 36px;
-  height: 36px;
-  justify-content: center;
-  padding: 0;
 }
 a.icon.rail-item {
   position: relative;
@@ -5331,4 +5308,16 @@ button.pp-row:hover:not(:disabled),
 }
 .exec-only {
   color: var(--fg);
+}
+
+/* Plugins (X.34): the Shared / Assigned editor under a row. */
+.plugin-row {
+  display: flex;
+  gap: var(--space-3);
+  align-items: flex-start;
+}
+.plugin-editor {
+  display: grid;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
 }

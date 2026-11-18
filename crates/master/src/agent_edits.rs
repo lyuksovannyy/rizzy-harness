@@ -588,7 +588,9 @@ impl Master {
     }
 
     /// Delete an agent made at `place`. Built-in, file and wider agents
-    /// stay. In a workspace its model chain there goes with it.
+    /// stay. In a workspace its model chain there goes with it, and so do
+    /// the Plugins items assigned to it (in every workspace, for a server
+    /// agent): a later agent with its id starts with none (PLAN.md T80).
     pub async fn delete_custom_agent(&self, place: &Place, id: &str) -> Result<(), AgentEditError> {
         let writes = self.agent_writes();
         let _w = writes.lock().await;
@@ -605,7 +607,9 @@ impl Master {
                     .mirror
                     .call(move |s| {
                         s.kv_delete(&k)?;
-                        s.delete_workspace_overlays(&aid)
+                        s.delete_workspace_overlays(&aid)?;
+                        // Nor what workspaces assigned to it (X.34, T80).
+                        s.plugin_access_forget_agent(None, &aid)
                     })
                     .await?;
                 let mut a = lock(&self.inner.agents);
@@ -618,6 +622,7 @@ impl Master {
                     .mirror
                     .call(move |s| {
                         s.workspace_agent_delete(&w, &aid, WS_CUSTOM)?;
+                        s.plugin_access_forget_agent(Some(&w), &aid)?;
                         crate::workspaces::drop_agent_chain(s, &w, &aid)
                     })
                     .await?;

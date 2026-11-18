@@ -134,6 +134,8 @@ fn agent(id: &str, model: &str) -> AgentSpec {
         ui: Default::default(),
         prompt_hash: format!("h-{id}"),
         deny_tools: vec![],
+        deny_skills: vec![],
+        deny_mcp_servers: vec![],
         delegates: vec![],
         caps: None,
         no_personalisation: false,

@@ -44,6 +44,7 @@ const Project = lazy(() => import("./Project"));
 const Routines = lazy(() => import("./Routines"));
 const Media = lazy(() => import("./Media"));
 const Artifacts = lazy(() => import("./Artifacts"));
+const Plugins = lazy(() => import("./Plugins"));
 const MemoryShareAsk = lazy(() => import("./MemoryShareAsk"));
 // Imported on the first sign of intent (pointer or focus on Search, or a
 // shortcut), so the panel opens without waiting.
@@ -682,6 +683,8 @@ export function Shell(props: {
             <Media {...page} filter={route.filter} id={route.id} />
           ) : route.kind === "artifacts" ? (
             <Artifacts {...page} id={route.id} projects={projects} />
+          ) : route.kind === "plugins" ? (
+            <Plugins {...page} />
           ) : route.kind === "settings" ? (
             <Settings
               me={me}

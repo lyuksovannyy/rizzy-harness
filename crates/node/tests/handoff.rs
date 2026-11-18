@@ -401,6 +401,8 @@ fn agent(id: &str, tools: &[&str], delegates: Vec<AgentSpec>) -> AgentSpec {
         no_personalisation: false,
         prompt_hash: "h".into(),
         deny_tools: vec![],
+        deny_skills: vec![],
+        deny_mcp_servers: vec![],
         delegates,
         caps: None,
     }

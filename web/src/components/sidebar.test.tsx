@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 // The sidebar: the areas in order and only when the viewer has them, the
-// open page marked, rows that are real links, the unseen dot, Connections
-// as a disabled placeholder, the chat rows' dots (sidebartree.test.tsx has
+// open page marked, rows that are real links, the unseen dot, Plugins
+// for everyone, the chat rows' dots (sidebartree.test.tsx has
 // Projects, the tree and the node badge), the footer's account button with
 // its tier line, the collapsed rail, and the account
 // menu's chunk loaded on intent.
@@ -126,10 +126,10 @@ const navLinks = () => all('nav[aria-label="Main"] a');
 const byText = (sel: string, text: string) => all(sel).find((e) => e.textContent?.trim() === text)!;
 
 describe("sidebar", () => {
-  test("the areas in order, each only when the viewer has it; Connections is a disabled placeholder", async () => {
+  test("the areas in order, each only when the viewer has it; Plugins for everyone", async () => {
     await render();
     expect(q("aside")!.getAttribute("aria-label")).toBe("Sidebar");
-    expect(navLinks().map((a) => a.textContent)).toEqual(["New chat", "Agents"]);
+    expect(navLinks().map((a) => a.textContent)).toEqual(["New chat", "Agents", "Plugins"]);
     await render({ features: features(true) });
     expect(navLinks().map((a) => [a.textContent, a.getAttribute("href")])).toEqual([
       ["New chat", "#/"],
@@ -137,14 +137,11 @@ describe("sidebar", () => {
       ["Routines", "#/routines"],
       ["Media", "#/media"],
       ["Artifacts", "#/artifacts"],
+      ["Plugins", "#/plugins"],
     ]);
     // The end-to-end scripts start fresh chats by this class.
     expect(all(".new-chat").map((a) => a.textContent)).toEqual(["New chat"]);
-    const later = q('nav[aria-label="Main"] button')!;
-    expect(later.getAttribute("aria-disabled")).toBe("true");
-    expect(later.textContent).toBe("ConnectionsLater");
-    expect(later.title).toBe("Coming later");
-    expect(later.getAttribute("href")).toBeNull();
+    expect(q('nav[aria-label="Main"] button')).toBeNull();
   });
 
   test("the open page is aria-current; a plain click navigates in place, a modified one is the browser's", async () => {
@@ -242,7 +239,7 @@ describe("sidebar", () => {
       ["Routines, 3 new results", "Routines"],
       ["Media", "Media"],
       ["Artifacts", "Artifacts"],
-      ["Connections", "Coming later"],
+      ["Plugins", "Plugins"],
       ["Alex — Acme · Admin", "Alex — Acme · Admin"],
     ]);
     // No Projects or chats in the rail.

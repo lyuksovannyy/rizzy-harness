@@ -212,8 +212,9 @@ const PUBLISH_TOOL: &str = "publish";
 /// The agent's own task list: with the same switches, for the same reason
 /// (work that takes many steps).
 const TODO_TOOL: &str = "todo";
-/// Skills (instructions in a folder, loaded by name): with any switch that
-/// works on files or commands, where a task can call for one.
+/// Skills (instructions in a folder, loaded by name): its own switch
+/// (`Features::skills`), with any switch that works on files or commands,
+/// where a task can call for one.
 const SKILL_TOOL: &str = "skill";
 
 /// Which set an agent belongs to (X.33): the server's (built-ins, files and
@@ -277,6 +278,14 @@ pub struct Features {
     /// agent saved before the switch has no MCP tools until it is turned on.
     #[serde(default)]
     pub mcp: bool,
+    /// Skills (`skill`, X.34): load the skills this agent may use in its
+    /// workspace (Plugins: Shared ones, and the ones Assigned to it). Its
+    /// own switch; it takes effect with file or command access, where a
+    /// task can call for a skill and its files can be read. On when absent,
+    /// so an agent saved before the switch keeps what it had: the tool
+    /// wherever it had file or command access.
+    #[serde(default = "yes")]
+    pub skills: bool,
     /// Hand sub-tasks to the agents available as sub-agents.
     pub delegate: bool,
     /// Start sub-agents that run in the background (`delegate` with
@@ -307,7 +316,7 @@ impl Features {
                 &[PUBLISH_TOOL, TODO_TOOL][..],
             ),
             (
-                self.read_files || self.edit_files || self.commands,
+                self.skills && (self.read_files || self.edit_files || self.commands),
                 &[SKILL_TOOL][..],
             ),
         ];
@@ -535,6 +544,7 @@ fn build(id: &str, fm: Frontmatter, body: &str, origin: Origin) -> Result<Agent,
         commands: any(COMMAND_TOOLS) && !read_only_shell,
         read_only_commands: read_only_shell,
         mcp: mcp_listed(&fm.tools),
+        skills: fm.tools.allows(SKILL_TOOL),
         delegate: !fm.delegates.is_empty(),
         background_subagents: fm.background_subagents && !fm.delegates.is_empty(),
         as_agent: fm.available_as.contains(&Use::Agent),
@@ -567,6 +577,8 @@ fn build(id: &str, fm: Frontmatter, body: &str, origin: Origin) -> Result<Agent,
             no_personalisation: !fm.personalisation,
             prompt_hash,
             deny_tools: vec![],
+            deny_skills: vec![],
+            deny_mcp_servers: vec![],
             delegates: vec![],
             caps,
         },

@@ -305,8 +305,8 @@ and leaves their approvals deny-only; your other chats go on.
 
 Top to bottom: **New chat**, **Agents**, then **Routines**, **Media** and
 **Artifacts** (each shown once you can use it in this workspace; Routines
-carries a dot while results wait unseen), **Connections** (a placeholder for
-later), then **Projects**, your other chats, and your account. Search and
+carries a dot while results wait unseen), **Plugins** (see "Plugins: who may
+use which skill and connector"), then **Projects**, your other chats, and your account. Search and
 Collapse sit together at the top right.
 
 Each project is a box with its chats inside; its **+** opens the project to
@@ -1977,7 +1977,7 @@ tool_timeout_sec = 300                # one call (1 .. 3600)
   ordinary variables with `env_vars`.
 - **Its tools** are offered as `mcp__<server>__<tool>`. An agent gets them
   when its `tools` list holds `mcp` (Software Developer and Senior
-  Teamlead do; agents made on the Agents page with the "MCP servers"
+  Teamlead do; agents made on the Agents page with the "Connectors"
   switch do: "Run commands" alone does not bring them), or names
   one exactly; `deny_tools: [mcp]` removes them all, and `denied_tools` in
   node.toml refuses one by name, `mcp__<server>` all of one server's, and
@@ -1985,6 +1985,9 @@ tool_timeout_sec = 300                # one call (1 .. 3600)
   64,000 bytes of their descriptions and schemas, and leaves out a tool
   whose schema is over 8,000 bytes; what is left out, and a server that
   did not start, is shown in the chat once (choose with `enabled_tools`).
+  A workspace can keep a server for some of its agents only (Plugins: see
+  "Plugins: who may use which skill and connector"); for the others it is
+  not started and its tools are not offered.
 - **Every call is asked about** in the `ask` mode, like `bash`: the
   harness did not write the server, and what a server says about its own
   tools (`readOnlyHint`) is never believed. A result is tool output like
@@ -2777,9 +2780,13 @@ folder's path, and the names of the files beside it, which it reads with the
 same tool (`file`) or, inside the chat's folder, with its usual tools. When a
 long chat is summarised, the summary names the skills the work still follows
 so the agent can load them again. The Software Developer, Senior Teamlead,
-Writer, Reviewer and Scout have the tool, as do custom agents that read or edit
-files or run commands; the Assistant and the Researcher do not. A sub-agent
-with the tool gets the list too.
+Writer, Reviewer and Scout have the tool, as do custom agents with the
+**Skills** switch on and file or command access (the switch is on for a new
+agent and for agents saved before it existed); the Assistant and the
+Researcher do not. A sub-agent with the tool gets the list too. Which skills
+an agent sees is the workspace's choice (Plugins, below): a skill Assigned to
+other agents is not in its list, the tool refuses it with the reason, and
+`/name` of it is answered with a note instead.
 
 **Asking for one.** A message of yours that starts with `/name` (a skill's
 name, then your text; `/name:` works too) asks the agent to load that skill
@@ -2809,6 +2816,60 @@ out of them, or set `roots = []`.
 **Cost:** about 25 tokens per listed skill, up to the cap (about 2k tokens),
 sent like the instruction files: with the first message and again only when the
 list changes; a body costs only when it is loaded.
+
+## Plugins: who may use which skill and connector
+
+**Plugins** in the sidebar lists, for the workspace you are in, the skills
+and the connectors (MCP servers) this server's nodes have: the skills in each
+node's own `[skills] roots` and the servers in its `[mcp_servers]`, each with
+the nodes that have it (a node sends the names, and a one-line description of
+a skill, when it connects; never a path, command, argument or environment
+value). Filter it to Connectors or Skills, or search names and descriptions.
+A repository's own skills (`.agents/skills`, `.claude/skills`) come with the
+repository and are not listed.
+
+Each item is **Shared** (every agent of this workspace may use it; the
+default, so nothing changes until someone chooses) or **Assigned** (only the
+agents picked, none if none is). The workspace's owners and admins choose
+(in your Personal workspace, you); members see the list and the choice. The
+choice is per workspace: another workspace's chats on the same node are not
+touched. It is by name: the same name on two nodes is one item, whatever each
+node's copy says (the screen says when their descriptions differ).
+
+An agent also needs its own switch: **Skills** (with file or command access)
+and **Connectors** on its page. A sub-agent follows its own: a skill Assigned
+to Scout reaches Scout when another agent hands it a task, and does not reach
+the agent that hands it. Sub-agents get no connectors at all.
+
+What is not allowed is withheld on the node: the skill is left out of the
+agent's list, the `skill` tool and `/name` say it is not available to this
+agent, and the shell gets no read access to its folder; a server is not
+started for that agent's turns and its tools are not offered. Nothing here
+adds anything: a node runs only what its `node.toml` has, and its
+`denied_tools` still wins. A node from before this feature cannot withhold
+one skill or server, so there an agent denied any skill gets no skills, and
+one denied any connector gets no connectors; the screen names such nodes.
+Deleting an agent takes it off every list (an agent made later with its id
+starts with nothing Assigned to it). A node reads its list once, when it
+starts: restart the node after adding a skill or server (until then the new
+one is usable, Shared, but not listed). If the settings cannot be read, the
+turn gets no skills and no connectors rather than all of them.
+**Limits:** 200 Assigned items per workspace, 100 agents per item; a node
+names at most 300 skills and 64 servers (64 KiB of names and descriptions,
+descriptions cut to 200 characters), and the screen says how many more a
+node has.
+
+**What it does not do (yet):** text of a skill or connector the agent was
+allowed earlier stays in the chat's history when another agent takes the
+next turn; in a `host` chat the shell reads whatever the node's user can,
+so a withheld skill's files are not hidden there, and neither are they in
+any chat when the skill folder lies under a system folder every sandboxed
+shell reads (`/usr`, `/etc`, `/opt`): keep `[skills] roots` in a home
+folder. A repository's skill files stay readable as repository files. A
+change of assignment reaches a background sub-agent that is already running,
+and a turn that only picks up messages you queued, one turn late. Chats made
+outside any workspace (through the API token without one) are not narrowed. Adding a skill on the master, custom
+connectors and sub-agents with connectors come later.
 
 ## What goes with each message
 
@@ -3377,8 +3438,8 @@ running, or whose result is on its way, takes no follow-up.
 
 **Agents** in the sidebar lists every agent of the workspace you are in. Server admins can make the server's agents there
 (name, handle, summary, instructions and feature switches: memory, project
-memory, earlier chats and memory search, web search, files, commands, MCP
-servers, the project board, sub-agents, background sub-agents, and whether it is offered as an agent,
+memory, earlier chats and memory search, web search, files, commands,
+skills, connectors (MCP servers), the project board, sub-agents, background sub-agents, and whether it is offered as an agent,
 a sub-agent or both), change them, delete them, and change any agent's look.
 Built-in agents and agent files keep their name, handle, instructions and
 features: only their summary and **additional instructions** (added after

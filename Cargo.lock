@@ -1561,6 +1561,7 @@ dependencies = [
  "nix",
  "pdf-extract",
  "reqwest",
+ "rusqlite",
  "rust-embed",
  "rustls",
  "serde",

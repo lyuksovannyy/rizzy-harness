@@ -27,6 +27,7 @@ pub mod nodes;
 pub mod notices;
 pub mod outbound;
 pub mod pdf;
+pub mod plugins;
 pub mod prefs;
 pub mod presets;
 pub mod pricing;
@@ -246,6 +247,12 @@ struct NodeConn {
     /// parse are sent only when it announced their capability (an unknown
     /// message drops the link), so additions stay additive.
     capabilities: Vec<String>,
+    /// What it announced for the Plugins screen (X.34): the first
+    /// `node.plugins` of its latest link, bounded ([`plugins`]). Kept while
+    /// it is away.
+    plugins: harness_protocol::NodePlugins,
+    /// This link sent its `node.plugins` already: a second one is ignored.
+    plugins_taken: bool,
 }
 
 /// The node a command went to, and where its ack goes.
@@ -1227,6 +1234,8 @@ impl Master {
                 resuming: HashSet::new(),
                 generation: 0,
                 capabilities: Vec::new(),
+                plugins: Default::default(),
+                plugins_taken: false,
             });
             entry.info.hostname = hostname;
             entry.info.version = version;
@@ -1245,6 +1254,7 @@ impl Master {
             entry.capabilities = capabilities;
             entry.tx = Some(link.to_node.clone());
             entry.resuming.clear();
+            entry.plugins_taken = false;
             entry.generation += 1;
             entry.generation
         };
@@ -1465,6 +1475,7 @@ impl Master {
             NodeToMaster::Hello { .. } => {
                 tracing::warn!(node = %node_id, "unexpected second hello");
             }
+            NodeToMaster::Plugins { plugins } => plugins::node_announced(self, node_id, plugins),
             NodeToMaster::Deleted { session_id } => {
                 // Only the owning node may delete its session.
                 let owner = self.owner(session_id).await.ok();
@@ -1704,7 +1715,12 @@ impl Master {
         build: impl FnOnce(String) -> MasterToNode,
     ) -> Result<(), CommandError> {
         let req_id = new_id();
-        let msg = build(req_id.clone());
+        let mut msg = build(req_id.clone());
+        // A node that does not read the Plugins deny lists gets the whole
+        // tool withheld instead (X.34, PLAN.md T80): fails closed.
+        if !self.node_has(node_id, harness_protocol::CAP_PLUGIN_ACCESS) {
+            plugins::fail_closed(&mut msg);
+        }
         let work = writes_to(&msg);
         // A diverged session takes no events, so nothing may make its node
         // write one (a turn would run with nobody seeing it). Cancel and

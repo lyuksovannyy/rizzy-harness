@@ -48,6 +48,26 @@ pub struct Catalogue {
     /// agent's shell may read them, never write (`bash` grants them
     /// read-only to sessions whose agent has the `skill` tool).
     pub read: Vec<PathBuf>,
+    /// Skills found here that this turn's agent may not use in its
+    /// workspace (`AgentSpec::deny_skills`, X.34), by name: left out of
+    /// `skills` and of `read`, so the tool and `/name` can say why rather
+    /// than "no such skill".
+    pub withheld: Vec<String>,
+}
+
+/// A skill's name: 1 to 64 ASCII letters, digits, `.`, `_` or `-`,
+/// starting with a letter or digit (the Agent Skills format's limit). The
+/// one rule for a found skill and an announced one (X.34), so a name never
+/// holds a look-alike letter, a hidden character or a line break.
+pub const SKILL_NAME_MAX: usize = 64;
+
+pub fn valid_skill_name(n: &str) -> bool {
+    let b = n.as_bytes();
+    !b.is_empty()
+        && b.len() <= SKILL_NAME_MAX
+        && b[0].is_ascii_alphanumeric()
+        && b.iter()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-'))
 }
 
 impl Catalogue {
@@ -58,5 +78,10 @@ impl Catalogue {
             .iter()
             .find(|s| s.name == name)
             .filter(|s| !s.manual || self.invoked.as_deref() == Some(name))
+    }
+
+    /// Whether `name` is a skill this turn's agent may not use here.
+    pub fn is_withheld(&self, name: &str) -> bool {
+        self.withheld.iter().any(|w| w == name)
     }
 }

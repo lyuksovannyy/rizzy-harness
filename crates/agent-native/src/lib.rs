@@ -2616,7 +2616,12 @@ impl NativeBackend {
             // Not in plan mode (X.7): a server's tools have effects only it
             // knows, so none is started or offered then.
             Some(m) if !child && agent.is_none_or(|a| a.allows_mcp()) && !is_plan(host) => {
-                let mut loaded = m.load(&self.start_ctx(&ctx, host)).await;
+                // Servers this agent may not use in its workspace (X.34)
+                // are neither started nor offered for its turn.
+                let denied = agent
+                    .map(|a| a.deny_mcp_servers.as_slice())
+                    .unwrap_or_default();
+                let mut loaded = m.load(&self.start_ctx(&ctx, host), denied).await;
                 // A note can carry the end of a server's error output: it
                 // reaches the model only scrubbed, as tool output does
                 // (review M1).
@@ -5964,6 +5969,8 @@ mod tests {
             no_personalisation: false,
             prompt_hash: "h".into(),
             deny_tools: vec![],
+            deny_skills: vec![],
+            deny_mcp_servers: vec![],
             delegates: vec![],
             caps: None,
         }

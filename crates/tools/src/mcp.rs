@@ -298,19 +298,7 @@ pub fn validate(servers: &BTreeMap<String, ServerConfig>) -> Result<(), String> 
 }
 
 fn valid_server_name(name: &str) -> bool {
-    (1..=32).contains(&name.len())
-        && name
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
-        && name
-            .bytes()
-            .next()
-            .is_some_and(|b| b.is_ascii_alphanumeric())
-        && name
-            .bytes()
-            .last()
-            .is_some_and(|b| b.is_ascii_alphanumeric())
-        && !name.contains("__")
+    harness_core::agent::valid_mcp_server_name(name)
 }
 
 /// The model-facing name of `server`'s tool `tool`: `mcp__<server>__<tool>`
@@ -397,8 +385,12 @@ impl SessionMcp {
 
     /// Start the servers that are not running (all at once, each within
     /// its `startup_timeout_sec`), in the confinement `ctx` gives (this
-    /// chat's), and return the tools this turn may offer.
-    pub async fn load(&self, ctx: &ToolCtx) -> Loaded {
+    /// chat's), and return the tools this turn may offer. A server in
+    /// `denied` (the turn's agent may not use it in its workspace,
+    /// `AgentSpec::deny_mcp_servers`, X.34) is neither started nor offered
+    /// for this turn; one already running for another agent's turn stays
+    /// up until it idles.
+    pub async fn load(&self, ctx: &ToolCtx, denied: &[String]) -> Loaded {
         let mut notes = Vec::new();
         if self.closed.load(Ordering::SeqCst) {
             return Loaded {
@@ -406,14 +398,19 @@ impl SessionMcp {
                 notes,
             };
         }
+        let slots: Vec<&Arc<Slot>> = self
+            .slots
+            .iter()
+            .filter(|s| !denied.contains(&s.name))
+            .collect();
         let started =
-            futures::future::join_all(self.slots.iter().map(|s| s.ensure(ctx, &self.closed))).await;
+            futures::future::join_all(slots.iter().map(|s| s.ensure(ctx, &self.closed))).await;
         let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
         let mut text = 0usize;
         // One name, one tool (review L1): `mcp__a___echo` is both `a_`'s
         // `echo` and `a`'s `_echo` where node.toml did not refuse `a_`.
         let mut taken: HashSet<String> = HashSet::new();
-        for (slot, res) in self.slots.iter().zip(started) {
+        for (slot, res) in slots.into_iter().zip(started) {
             let listed = match res {
                 Ok(l) => l,
                 Err(e) => {
@@ -1390,7 +1387,7 @@ pub async fn probe(name: &str, cfg: &ServerConfig, ctx: &ToolCtx) -> Result<Stri
     let mut servers = BTreeMap::new();
     servers.insert(name.to_string(), cfg.clone());
     let set = SessionMcp::new(&servers).ok_or("disabled (enabled = false)")?;
-    let loaded = set.load(ctx).await;
+    let loaded = set.load(ctx, &[]).await;
     set.close();
     set.wait_gone(STOP_WAIT).await;
     let (tools, notes) = (loaded.tools.len(), loaded.notes);

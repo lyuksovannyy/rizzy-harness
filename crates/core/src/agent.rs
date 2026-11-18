@@ -12,6 +12,35 @@ pub const MCP_PREFIX: &str = "mcp__";
 /// The `tools` entry that stands for every MCP tool.
 pub const MCP_ALL: &str = "mcp";
 
+/// A node.toml `[mcp_servers]` name: 1 to 32 of `a-z`, `0-9`, `-`, `_`,
+/// starting and ending with a letter or digit, without `__` (so the server
+/// of a tool named `mcp__<server>__<tool>` is always the part before the
+/// first `__`: [`mcp_server_of`]).
+pub fn valid_mcp_server_name(name: &str) -> bool {
+    (1..=32).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+        && name
+            .bytes()
+            .next()
+            .is_some_and(|b| b.is_ascii_alphanumeric())
+        && name
+            .bytes()
+            .last()
+            .is_some_and(|b| b.is_ascii_alphanumeric())
+        && !name.contains("__")
+}
+
+/// The server of the MCP tool named `tool` (`mcp__<server>__<tool>`). A
+/// server name is clean and at most 32 characters, so cleaning or cutting a
+/// long tool name (`harness_tools::mcp::public_name`) never touches it.
+pub fn mcp_server_of(tool: &str) -> Option<&str> {
+    let rest = tool.strip_prefix(MCP_PREFIX)?;
+    let (server, _) = rest.split_once("__")?;
+    valid_mcp_server_name(server).then_some(server)
+}
+
 /// **The tools that cannot change anything** (ADOPTION_PLAN T.7, PLAN.md
 /// T70): not a file, not a process outside their own call, not a setting,
 /// nothing on another machine through the node. The one allow-list every
@@ -182,6 +211,20 @@ pub struct AgentSpec {
     /// in an incognito chat). Set by the master per session.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny_tools: Vec<String>,
+    /// Skills this agent may not use in this chat's workspace (X.34,
+    /// PLAN.md T80): the ones its Plugins page marks Assigned to other
+    /// agents. Set by the master per turn, for every spec (a sub-agent's
+    /// its own). A deny list only: it never names a skill to load, and the
+    /// node leaves these out of the catalogue, the `skill` tool and `/name`
+    /// whatever their origin.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny_skills: Vec<String>,
+    /// MCP servers (node.toml `[mcp_servers]` names) this agent may not use
+    /// in this chat's workspace, as `deny_skills`: the node neither starts
+    /// them for its turn nor offers or runs their tools. Never a server to
+    /// start: only node.toml adds one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny_mcp_servers: Vec<String>,
     /// Agents this one may hand sub-tasks to (`delegate` tool). Resolved by
     /// the master; their own `delegates` are empty, so depth is one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -233,6 +276,18 @@ impl AgentSpec {
                 .deny_tools
                 .iter()
                 .any(|t| t == tool || (mcp && t == MCP_ALL))
+            && !mcp_server_of(tool).is_some_and(|s| self.deny_mcp_servers.iter().any(|d| d == s))
+    }
+
+    /// Whether this agent may load skill `name` here (`deny_skills`).
+    pub fn allows_skill(&self, name: &str) -> bool {
+        !self.deny_skills.iter().any(|d| d == name)
+    }
+
+    /// Whether this agent may use MCP server `server` here
+    /// (`deny_mcp_servers`).
+    pub fn allows_mcp_server(&self, server: &str) -> bool {
+        !self.deny_mcp_servers.iter().any(|d| d == server)
     }
 
     /// Whether this agent may use any MCP tool: the node starts a chat's
@@ -347,6 +402,44 @@ mod tests {
         assert!(!d.allows_tool("mcp__x__y") && !d.allows_mcp() && d.allows_tool("bash"));
         // `mcp` is not a tool of its own name only.
         assert!(!spec(list(&["mcp"]), &[]).allows_tool("mcpx"));
+    }
+
+    /// X.34 (PLAN.md T80): a denied server's tools are not allowed, by
+    /// whatever name they are offered (cut and hashed ones too), and a
+    /// denial never allows anything.
+    #[test]
+    fn a_denied_server_takes_its_tools_and_nothing_else() {
+        let mut a = listed(&["bash", "mcp"], &[]);
+        a.deny_mcp_servers = vec!["github".into()];
+        assert!(!a.allows_tool("mcp__github__create_issue"));
+        assert!(a.allows_tool("mcp__gitlab__create_issue"));
+        assert!(a.allows_tool("mcp__github-x__y"), "only that server");
+        assert!(a.allows_tool("bash") && a.allows_mcp());
+        assert!(!a.allows_mcp_server("github") && a.allows_mcp_server("gitlab"));
+        // A long tool name is cut and hashed after the server's part.
+        let long = format!("mcp__github__{}_0123456789ab", "x".repeat(40));
+        assert!(!a.allows_tool(&long));
+        assert_eq!(mcp_server_of("mcp__a___echo"), Some("a"));
+        assert_eq!(mcp_server_of("mcp__x"), None);
+        assert_eq!(mcp_server_of("read"), None);
+        assert_eq!(mcp_server_of("mcp__Bad__x"), None);
+        // An agent without MCP gets none by being denied another server.
+        let mut b = listed(&["bash"], &[]);
+        b.deny_mcp_servers = vec!["github".into()];
+        assert!(!b.allows_tool("mcp__gitlab__x") && !b.allows_mcp());
+        // Skills: by exact name.
+        let mut c = listed(&["skill"], &[]);
+        c.deny_skills = vec!["deploy".into()];
+        assert!(!c.allows_skill("deploy") && c.allows_skill("deploy2"));
+        assert!(c.allows_tool("skill"), "the tool stays for the others");
+        // Old specs without the fields still read.
+        let old: AgentSpec = serde_json::from_value(serde_json::json!({
+            "agent_id": "a", "name": "A", "system_prompt": "", "tools": "all", "prompt_hash": "h"
+        }))
+        .unwrap();
+        assert!(old.deny_skills.is_empty() && old.deny_mcp_servers.is_empty());
+        let json = serde_json::to_value(&old).unwrap();
+        assert!(json.get("deny_skills").is_none() && json.get("deny_mcp_servers").is_none());
     }
 
     fn listed(tools: &[&str], deny: &[&str]) -> AgentSpec {
