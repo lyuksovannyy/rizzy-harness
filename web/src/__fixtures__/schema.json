@@ -1,0 +1,2126 @@
+{
+  "kinds": {
+    "agent_changed": [
+      {
+        "path": "agent",
+        "required": true,
+        "type": "object"
+      },
+      {
+        "path": "agent.agent_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "agent.effort",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "agent.name",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "agent.prompt_hash",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "agent.withheld",
+        "required": false,
+        "type": "array"
+      },
+      {
+        "path": "agent.withheld[]",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "model",
+        "required": false,
+        "type": "string"
+      }
+    ],
+    "approval_mode_changed": [
+      {
+        "path": "mode",
+        "required": true,
+        "restricted": true,
+        "type": "string",
+        "values": [
+          "plan",
+          "ask_all",
+          "ask",
+          "accept_edits",
+          "auto"
+        ]
+      },
+      {
+        "path": "requested",
+        "required": false,
+        "restricted": true,
+        "type": "string",
+        "values": [
+          "plan",
+          "ask_all",
+          "ask",
+          "accept_edits",
+          "auto"
+        ]
+      }
+    ],
+    "approval_requested": [
+      {
+        "path": "approval_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "call_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "chat_allow",
+        "required": false,
+        "type": "boolean"
+      },
+      {
+        "path": "input",
+        "required": true,
+        "type": "any"
+      },
+      {
+        "path": "reason",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "tool",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "turn_allow",
+        "required": false,
+        "type": "boolean"
+      }
+    ],
+    "approval_resolved": [
+      {
+        "path": "approval_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "by",
+        "required": true,
+        "restricted": true,
+        "type": "string",
+        "values": [
+          "user",
+          "policy",
+          "cancelled",
+          "interrupted"
+        ]
+      },
+      {
+        "path": "decision",
+        "required": true,
+        "restricted": true,
+        "type": "string",
+        "values": [
+          "allow",
+          "deny",
+          "allow_session",
+          "allow_chat"
+        ]
+      },
+      {
+        "path": "note",
+        "required": false,
+        "type": "string"
+      }
+    ],
+    "artifact_stage_failed": [
+      {
+        "path": "error",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "name",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "path",
+        "required": true,
+        "type": "string"
+      }
+    ],
+    "artifact_staged": [
+      {
+        "path": "by",
+        "required": true,
+        "restricted": true,
+        "type": "string",
+        "values": [
+          "agent",
+          "user"
+        ]
+      },
+      {
+        "path": "call_id",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "filename",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "kind_hint",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "meta",
+        "required": false,
+        "type": "object"
+      },
+      {
+        "path": "meta.entries",
+        "required": false,
+        "type": "array"
+      },
+      {
+        "path": "meta.entries[]",
+        "required": true,
+        "type": "object"
+      },
+      {
+        "path": "meta.entries[].path",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "meta.entries[].size",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "meta.entries_total",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "meta.git",
+        "required": false,
+        "type": "object"
+      },
+      {
+        "path": "meta.git.branch",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "meta.git.commit",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "meta.git.dirty",
+        "required": true,
+        "type": "boolean"
+      },
+      {
+        "path": "meta.package",
+        "required": false,
+        "type": "object"
+      },
+      {
+        "path": "meta.package.name",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "meta.package.version",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "meta.skipped",
+        "required": false,
+        "type": "map"
+      },
+      {
+        "path": "meta.skipped{}",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "meta.source_path",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "meta.target",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "meta.toolchain",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "name",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "notes",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "packed",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "sha256",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "size",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "source_path",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "stage_id",
+        "required": true,
+        "type": "string"
+      }
+    ],
+    "assistant_delta": [
+      {
+        "path": "author",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "message_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "text",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "turn_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "variant",
+        "required": false,
+        "type": "object"
+      },
+      {
+        "path": "variant.group",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "variant.index",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "variant.model",
+        "required": false,
+        "type": "string"
+      }
+    ],
+    "assistant_message": [
+      {
+        "path": "author",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "blocks",
+        "required": false,
+        "type": "array"
+      },
+      {
+        "path": "blocks[]",
+        "required": true,
+        "type": "object"
+      },
+      {
+        "path": "blocks[].error",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "blocks[].hash",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "blocks[].id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "blocks[].ordinal",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "blocks[].spec",
+        "required": false,
+        "type": "any"
+      },
+      {
+        "path": "blocks[].type",
+        "required": true,
+        "restricted": true,
+        "type": "string",
+        "values": [
+          "choices",
+          "form",
+          "progress",
+          "chart"
+        ]
+      },
+      {
+        "path": "message_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "text",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "thinking",
+        "required": false,
+        "type": "object"
+      },
+      {
+        "path": "thinking.blocks",
+        "required": true,
+        "type": "array"
+      },
+      {
+        "path": "thinking.blocks[]",
+        "required": true,
+        "type": "object"
+      },
+      {
+        "path": "thinking.blocks[].data",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "thinking.blocks[].signature",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "thinking.blocks[].text",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "thinking.blocks[].type",
+        "required": true,
+        "restricted": true,
+        "type": "string",
+        "values": [
+          "signed",
+          "redacted",
+          "text"
+        ]
+      },
+      {
+        "path": "thinking.model",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "thinking.prefix",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "thinking.unsent",
+        "required": false,
+        "type": "boolean"
+      },
+      {
+        "path": "tool_calls",
+        "required": false,
+        "type": "array"
+      },
+      {
+        "path": "tool_calls[]",
+        "required": true,
+        "type": "object"
+      },
+      {
+        "path": "tool_calls[].call_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "tool_calls[].input",
+        "required": true,
+        "type": "any"
+      },
+      {
+        "path": "tool_calls[].tool",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "turn_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "variant",
+        "required": false,
+        "type": "object"
+      },
+      {
+        "path": "variant.group",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "variant.index",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "variant.model",
+        "required": false,
+        "type": "string"
+      }
+    ],
+    "background_ended": [
+      {
+        "path": "bg_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "child",
+        "required": false,
+        "type": "object"
+      },
+      {
+        "path": "child.agent_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "child.ok",
+        "required": false,
+        "type": "boolean"
+      },
+      {
+        "path": "child.result",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "child.session",
+        "required": true,
+        "restricted": true,
+        "type": "string"
+      },
+      {
+        "path": "child.usage",
+        "required": false,
+        "type": "object"
+      },
+      {
+        "path": "child.usage.by_model",
+        "required": false,
+        "type": "map"
+      },
+      {
+        "path": "child.usage.by_model{}",
+        "required": true,
+        "type": "object"
+      },
+      {
+        "path": "child.usage.by_model{}.cache_read_tokens",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "child.usage.by_model{}.cache_write_tokens",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "child.usage.by_model{}.input_tokens",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "child.usage.by_model{}.output_tokens",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "child.usage.cache_read_tokens",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "child.usage.cache_write_tokens",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "child.usage.context_tokens",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "child.usage.input_tokens",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "child.usage.model",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "child.usage.output_tokens",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "child.usage.summary_at",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "child.usage.window",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "confirmed",
+        "required": true,
+        "restricted": true,
+        "type": "string",
+        "values": [
+          "ended",
+          "still_alive",
+          "unconfirmed",
+          "unknown"
+        ]
+      },
+      {
+        "path": "delivered",
+        "required": false,
+        "type": "boolean"
+      },
+      {
+        "path": "exit_code",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "output_bytes",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "ran_ms",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "reason",
+        "required": true,
+        "restricted": true,
+        "type": "string",
+        "values": [
+          "exited",
+          "timed_out",
+          "stopped_by_agent",
+          "stopped_by_user",
+          "access_revoked",
+          "session_deleted",
+          "node_stopping",
+          "node_restarted",
+          "finished"
+        ]
+      },
+      {
+        "path": "signal",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "tail",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "tail_cut",
+        "required": false,
+        "type": "boolean"
+      }
+    ],
+    "background_started": [
+      {
+        "path": "bg_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "call_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "child",
+        "required": false,
+        "type": "object"
+      },
+      {
+        "path": "child.agent_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "child.session",
+        "required": true,
+        "restricted": true,
+        "type": "string"
+      },
+      {
+        "path": "ends_by_ms",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "timeout_s",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "turn_id",
+        "required": true,
+        "type": "string"
+      }
+    ],
+    "callback_refused": [
+      {
+        "path": "bg_ids",
+        "required": true,
+        "type": "array"
+      },
+      {
+        "path": "bg_ids[]",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "reason",
+        "required": true,
+        "type": "string"
+      }
+    ],
+    "chat_allow_added": [
+      {
+        "path": "approval_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "grant_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "input",
+        "required": true,
+        "type": "any"
+      },
+      {
+        "path": "key",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "tool",
+        "required": true,
+        "type": "string"
+      }
+    ],
+    "chat_allow_removed": [
+      {
+        "path": "grant_id",
+        "required": true,
+        "type": "string"
+      }
+    ],
+    "checkpoint": [
+      {
+        "path": "excluded",
+        "required": false,
+        "type": "array"
+      },
+      {
+        "path": "excluded[]",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "excluded_more",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "files",
+        "required": false,
+        "type": "array"
+      },
+      {
+        "path": "files[]",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "git_ref",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "phase",
+        "required": true,
+        "restricted": true,
+        "type": "string",
+        "values": [
+          "before",
+          "after",
+          "restored",
+          "before_restore"
+        ]
+      },
+      {
+        "path": "turn_id",
+        "required": true,
+        "type": "string"
+      }
+    ],
+    "compact_failed": [
+      {
+        "path": "reason",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "usage",
+        "required": false,
+        "type": "object"
+      },
+      {
+        "path": "usage.by_model",
+        "required": false,
+        "type": "map"
+      },
+      {
+        "path": "usage.by_model{}",
+        "required": true,
+        "type": "object"
+      },
+      {
+        "path": "usage.by_model{}.cache_read_tokens",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "usage.by_model{}.cache_write_tokens",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "usage.by_model{}.input_tokens",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "usage.by_model{}.output_tokens",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "usage.cache_read_tokens",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "usage.cache_write_tokens",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "usage.context_tokens",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "usage.input_tokens",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "usage.model",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "usage.output_tokens",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "usage.summary_at",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "usage.window",
+        "required": false,
+        "type": "number"
+      }
+    ],
+    "context_sent": [
+      {
+        "path": "frame",
+        "required": true,
+        "restricted": true,
+        "type": "string",
+        "values": [
+          "person",
+          "task",
+          "callback",
+          "step"
+        ]
+      },
+      {
+        "path": "sections",
+        "required": false,
+        "type": "array"
+      },
+      {
+        "path": "sections[]",
+        "required": true,
+        "type": "object"
+      },
+      {
+        "path": "sections[].digest",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "sections[].key",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "sections[].note",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "sections[].text",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "turn_id",
+        "required": true,
+        "type": "string"
+      }
+    ],
+    "context_shortened": [
+      {
+        "path": "cleared",
+        "required": false,
+        "type": "object"
+      },
+      {
+        "path": "cleared.results",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "cleared.turn_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "folded",
+        "required": false,
+        "type": "object"
+      },
+      {
+        "path": "folded.steps",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "folded.text",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "folded.todo",
+        "required": false,
+        "type": "array"
+      },
+      {
+        "path": "folded.todo[]",
+        "required": true,
+        "type": "object"
+      },
+      {
+        "path": "folded.todo[].content",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "folded.todo[].status",
+        "required": true,
+        "restricted": true,
+        "type": "string",
+        "values": [
+          "pending",
+          "in_progress",
+          "done"
+        ]
+      },
+      {
+        "path": "thinking",
+        "required": false,
+        "type": "object"
+      },
+      {
+        "path": "thinking.steps",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "thinking.turn_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "tokens_after",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "tokens_before",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "turn_id",
+        "required": true,
+        "type": "string"
+      }
+    ],
+    "error": [
+      {
+        "path": "message",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "turn_id",
+        "required": false,
+        "type": "string"
+      }
+    ],
+    "handoff_written": [
+      {
+        "path": "failed",
+        "required": false,
+        "type": "array"
+      },
+      {
+        "path": "failed[]",
+        "required": true,
+        "type": "object"
+      },
+      {
+        "path": "failed[].model",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "failed[].reason",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "model",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "text",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "through_seq",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "usage",
+        "required": false,
+        "type": "object"
+      },
+      {
+        "path": "usage.by_model",
+        "required": false,
+        "type": "map"
+      },
+      {
+        "path": "usage.by_model{}",
+        "required": true,
+        "type": "object"
+      },
+      {
+        "path": "usage.by_model{}.cache_read_tokens",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "usage.by_model{}.cache_write_tokens",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "usage.by_model{}.input_tokens",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "usage.by_model{}.output_tokens",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "usage.cache_read_tokens",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "usage.cache_write_tokens",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "usage.context_tokens",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "usage.input_tokens",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "usage.model",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "usage.output_tokens",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "usage.summary_at",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "usage.window",
+        "required": false,
+        "type": "number"
+      }
+    ],
+    "history_summarized": [
+      {
+        "path": "focus",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "manual",
+        "required": false,
+        "type": "boolean"
+      },
+      {
+        "path": "text",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "through_seq",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "tokens_after",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "turn_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "usage",
+        "required": false,
+        "type": "object"
+      },
+      {
+        "path": "usage.by_model",
+        "required": false,
+        "type": "map"
+      },
+      {
+        "path": "usage.by_model{}",
+        "required": true,
+        "type": "object"
+      },
+      {
+        "path": "usage.by_model{}.cache_read_tokens",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "usage.by_model{}.cache_write_tokens",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "usage.by_model{}.input_tokens",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "usage.by_model{}.output_tokens",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "usage.cache_read_tokens",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "usage.cache_write_tokens",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "usage.context_tokens",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "usage.input_tokens",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "usage.model",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "usage.output_tokens",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "usage.summary_at",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "usage.window",
+        "required": false,
+        "type": "number"
+      }
+    ],
+    "images_withheld": [
+      {
+        "path": "calls",
+        "required": true,
+        "type": "array"
+      },
+      {
+        "path": "calls[]",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "reason",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "status",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "turn_id",
+        "required": true,
+        "type": "string"
+      }
+    ],
+    "model_fallback": [
+      {
+        "path": "from",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "model",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "reason",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "turn_id",
+        "required": true,
+        "type": "string"
+      }
+    ],
+    "model_retry": [
+      {
+        "path": "at_ms",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "attempt",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "model",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "of",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "reason",
+        "required": true,
+        "restricted": true,
+        "type": "string",
+        "values": [
+          "rate_limit",
+          "overloaded",
+          "server_error",
+          "network",
+          "no_answer"
+        ]
+      },
+      {
+        "path": "turn_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "wait_ms",
+        "required": true,
+        "type": "number"
+      }
+    ],
+    "queued_delivered": [
+      {
+        "path": "seqs",
+        "required": true,
+        "type": "array"
+      },
+      {
+        "path": "seqs[]",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "turn_id",
+        "required": true,
+        "type": "string"
+      }
+    ],
+    "retry_given_up": [
+      {
+        "path": "model",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "turn_id",
+        "required": true,
+        "type": "string"
+      }
+    ],
+    "session_created": [
+      {
+        "path": "agent_id",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "approval_mode",
+        "required": true,
+        "restricted": true,
+        "type": "string",
+        "values": [
+          "plan",
+          "ask_all",
+          "ask",
+          "accept_edits",
+          "auto"
+        ]
+      },
+      {
+        "path": "backend",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "cwd",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "exec_mode",
+        "required": false,
+        "restricted": true,
+        "type": "string",
+        "values": [
+          "sandbox",
+          "host"
+        ]
+      },
+      {
+        "path": "incognito",
+        "required": false,
+        "type": "boolean"
+      },
+      {
+        "path": "model",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "no_callbacks",
+        "required": false,
+        "type": "boolean"
+      },
+      {
+        "path": "node_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "parent_session",
+        "required": false,
+        "restricted": true,
+        "type": "string"
+      },
+      {
+        "path": "profile",
+        "required": true,
+        "restricted": true,
+        "type": "string",
+        "values": [
+          "chat",
+          "agentic"
+        ]
+      },
+      {
+        "path": "title",
+        "required": true,
+        "type": "string"
+      }
+    ],
+    "step_limit_changed": [
+      {
+        "path": "max_steps",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "requested",
+        "required": false,
+        "type": "number"
+      }
+    ],
+    "thinking_withheld": [
+      {
+        "path": "model",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "reason",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "status",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "turn_id",
+        "required": true,
+        "type": "string"
+      }
+    ],
+    "todo_updated": [
+      {
+        "path": "call_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "items",
+        "required": false,
+        "type": "array"
+      },
+      {
+        "path": "items[]",
+        "required": true,
+        "type": "object"
+      },
+      {
+        "path": "items[].content",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "items[].status",
+        "required": true,
+        "restricted": true,
+        "type": "string",
+        "values": [
+          "pending",
+          "in_progress",
+          "done"
+        ]
+      },
+      {
+        "path": "turn_id",
+        "required": true,
+        "type": "string"
+      }
+    ],
+    "tool_call_finished": [
+      {
+        "path": "call_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "exit_code",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "image",
+        "required": false,
+        "type": "object"
+      },
+      {
+        "path": "image.bytes",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "image.height",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "image.mime",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "image.sha256",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "image.width",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "note",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "ok",
+        "required": true,
+        "type": "boolean"
+      },
+      {
+        "path": "output",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "seen",
+        "required": false,
+        "type": "object"
+      },
+      {
+        "path": "seen.base",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "seen.path",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "seen.sha256",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "sources",
+        "required": false,
+        "type": "array"
+      },
+      {
+        "path": "sources[]",
+        "required": true,
+        "type": "object"
+      },
+      {
+        "path": "sources[].id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "sources[].title",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "sources[].url",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "truncated",
+        "required": false,
+        "type": "boolean"
+      }
+    ],
+    "tool_call_started": [
+      {
+        "path": "author",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "call_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "input",
+        "required": true,
+        "type": "any"
+      },
+      {
+        "path": "tool",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "turn_id",
+        "required": true,
+        "type": "string"
+      }
+    ],
+    "tool_output_delta": [
+      {
+        "path": "call_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "stream",
+        "required": true,
+        "restricted": true,
+        "type": "string",
+        "values": [
+          "stdout",
+          "stderr"
+        ]
+      },
+      {
+        "path": "text",
+        "required": true,
+        "type": "string"
+      }
+    ],
+    "turn_ended": [
+      {
+        "path": "reason",
+        "required": true,
+        "restricted": true,
+        "type": "string",
+        "values": [
+          "completed",
+          "cancelled",
+          "error",
+          "interrupted",
+          "stopped",
+          "limit"
+        ]
+      },
+      {
+        "path": "turn_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "usage",
+        "required": false,
+        "type": "object"
+      },
+      {
+        "path": "usage.by_model",
+        "required": false,
+        "type": "map"
+      },
+      {
+        "path": "usage.by_model{}",
+        "required": true,
+        "type": "object"
+      },
+      {
+        "path": "usage.by_model{}.cache_read_tokens",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "usage.by_model{}.cache_write_tokens",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "usage.by_model{}.input_tokens",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "usage.by_model{}.output_tokens",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "usage.cache_read_tokens",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "usage.cache_write_tokens",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "usage.context_tokens",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "usage.input_tokens",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "usage.model",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "usage.output_tokens",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "usage.summary_at",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "usage.window",
+        "required": false,
+        "type": "number"
+      }
+    ],
+    "turn_started": [
+      {
+        "path": "agent",
+        "required": false,
+        "type": "object"
+      },
+      {
+        "path": "agent.agent_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "agent.effort",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "agent.name",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "agent.prompt_hash",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "agent.withheld",
+        "required": false,
+        "type": "array"
+      },
+      {
+        "path": "agent.withheld[]",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "cause",
+        "required": false,
+        "type": "object"
+      },
+      {
+        "path": "cause.callback",
+        "required": true,
+        "type": "array"
+      },
+      {
+        "path": "cause.callback[]",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "continued_by",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "environment",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "retry",
+        "required": false,
+        "type": "object"
+      },
+      {
+        "path": "retry.error",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "retry.failed_model",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "retry.model",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "retry.reason",
+        "required": true,
+        "restricted": true,
+        "type": "string",
+        "values": [
+          "completed",
+          "cancelled",
+          "error",
+          "interrupted",
+          "stopped",
+          "limit"
+        ]
+      },
+      {
+        "path": "retry.turn_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "turn_id",
+        "required": true,
+        "type": "string"
+      }
+    ],
+    "user_message": [
+      {
+        "path": "attachments",
+        "required": false,
+        "type": "array"
+      },
+      {
+        "path": "attachments[]",
+        "required": true,
+        "type": "object"
+      },
+      {
+        "path": "attachments[].mime",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "attachments[].name",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "attachments[].text",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "attachments[].truncated",
+        "required": false,
+        "type": "boolean"
+      },
+      {
+        "path": "files",
+        "required": false,
+        "type": "array"
+      },
+      {
+        "path": "files[]",
+        "required": true,
+        "type": "object"
+      },
+      {
+        "path": "files[].bytes",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "files[].lines",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "files[].note",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "files[].path",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "files[].seen",
+        "required": false,
+        "type": "object"
+      },
+      {
+        "path": "files[].seen.base",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "files[].seen.path",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "files[].seen.sha256",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "files[].shown",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "files[].state",
+        "required": true,
+        "restricted": true,
+        "type": "string",
+        "values": [
+          "file",
+          "cut",
+          "folder",
+          "missing",
+          "refused",
+          "binary",
+          "too_large"
+        ]
+      },
+      {
+        "path": "files[].text",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "images",
+        "required": false,
+        "type": "array"
+      },
+      {
+        "path": "images[]",
+        "required": true,
+        "type": "object"
+      },
+      {
+        "path": "images[].height",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "images[].media_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "images[].mime",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "images[].name",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "images[].sha256",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "images[].width",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "queued",
+        "required": false,
+        "type": "boolean"
+      },
+      {
+        "path": "reply",
+        "required": false,
+        "type": "object"
+      },
+      {
+        "path": "reply.block_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "reply.message_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "reply.values",
+        "required": true,
+        "type": "map"
+      },
+      {
+        "path": "reply.values{}",
+        "required": true,
+        "type": "any"
+      },
+      {
+        "path": "text",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "turn_id",
+        "required": true,
+        "type": "string"
+      }
+    ],
+    "variant_selected": [
+      {
+        "path": "group",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "message_id",
+        "required": true,
+        "type": "string"
+      }
+    ]
+  }
+}

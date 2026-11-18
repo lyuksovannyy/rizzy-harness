@@ -1,6 +1,7 @@
 // Fence languages we highlight, and their aliases. The grammars themselves
 // load lazily (highlight.ts); this map stays in the Conversation chunk so an
 // unknown language never pulls in the highlighter.
+import { own } from "../emptyView";
 
 export const GRAMMARS = [
   "bash",
@@ -50,6 +51,7 @@ const known = new Set<string>(GRAMMARS);
 
 export function grammarFor(lang: string): Grammar | null {
   const l = lang.toLowerCase();
-  const g = ALIASES[l] ?? l;
+  // The model's fence language: own keys only ("constructor" is no alias).
+  const g = own(ALIASES, l) ?? l;
   return known.has(g) ? (g as Grammar) : null;
 }

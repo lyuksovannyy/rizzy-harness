@@ -3,6 +3,7 @@
 // page's code stays in its lazy chunk. Next runs and rendered prompts come
 // from the server (`/preview`); the only cron here is the few shapes the
 // builder writes, read back so a saved schedule opens in the same shape.
+import { own } from "../emptyView";
 import { call } from "../api";
 import type { Effort } from "../types";
 
@@ -348,7 +349,7 @@ const STATUS: Record<string, string> = {
 
 /** A run's status as people read it; a coalesced row says how many: "Skipped ×3". */
 export function statusLabel(r: Pick<Run, "status" | "repeats">): string {
-  const label = STATUS[r.status] ?? r.status;
+  const label = own(STATUS, r.status) ?? r.status;
   return r.repeats > 1 ? `${label} ×${r.repeats}` : label;
 }
 

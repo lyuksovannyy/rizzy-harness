@@ -3,6 +3,7 @@
 // cards say without asking. Kept out of api.ts and types.ts so this code
 // loads with the Artifacts page or a chat, never with the first screen.
 // Artifacts are stored files: nothing here renders or runs one.
+import { own } from "../emptyView";
 import { call } from "../api";
 import type { ArtifactMeta } from "../types";
 
@@ -142,7 +143,7 @@ const KIND: Record<string, string> = {
 };
 
 /** "Program", "Archive", …; anything else is a "File". */
-export const kindLabel = (kind: string | null) => (kind && KIND[kind]) || "File";
+export const kindLabel = (kind: string | null) => own(KIND, kind) || "File";
 
 /** The chip beside a name: the build target when the node knew it, else the format. */
 export function chipOf(v: Pick<ArtifactVersion, "meta" | "format" | "packed">): string | null {

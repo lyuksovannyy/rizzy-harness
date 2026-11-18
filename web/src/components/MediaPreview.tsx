@@ -6,6 +6,7 @@
 // the chats an image went into). Its own lazy chunk, shared with chats. An
 // image too large to decode safely, a HEIC the browser cannot show and a MOV
 // it cannot play all fall back to Download.
+import { own } from "../emptyView";
 import { ChevronLeft, ChevronRight, Download, File, Film, Image as ImageIcon, Music, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { bytes } from "../lib/bytes";
@@ -114,7 +115,7 @@ export default function MediaPreview(props: {
   // Links, not bare URLs: neither an element nor a download sends the login key (P-1).
   const src = useLink(contentUrl(m.media_id));
   const file = useLink(contentUrl(m.media_id, true), true);
-  const Icon = ICON[m.kind] ?? File;
+  const Icon = own(ICON, m.kind) ?? File;
   const download = (
     <a className="button-like row" href={file} download={m.name}>
       <Download size={16} aria-hidden="true" /> Download
@@ -186,7 +187,7 @@ export default function MediaPreview(props: {
         <dl className="media-facts small">
           <dt>Kind</dt>
           <dd>
-            {KIND_LABEL[m.kind]}, {m.format.toUpperCase()}
+            {own(KIND_LABEL, m.kind) ?? m.kind}, {m.format.toUpperCase()}
           </dd>
           <dt>Size</dt>
           <dd>{bytes(m.size)}</dd>

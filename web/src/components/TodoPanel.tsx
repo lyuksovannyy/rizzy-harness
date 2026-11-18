@@ -6,6 +6,7 @@
 // changes. Every item is the model's text: shown as text, hidden
 // characters marked. Its own lazy chunk: the conversation loads it on the
 // chat's first list.
+import { own } from "../emptyView";
 import { Check, ChevronDown, ChevronRight, Circle, CircleDot } from "lucide-react";
 import { useEffect, useState } from "react";
 import { showHidden } from "../md/hiddenChars";
@@ -47,9 +48,9 @@ export default function TodoPanel({ items, running }: { items: TodoItem[]; runni
               className={`todo-row todo-${it.status}`}
               data-status={it.status}
               aria-current={it.status === "in_progress" ? "step" : undefined}
-              title={WORD[it.status]}
+              title={own(WORD, it.status) ?? "to do"}
             >
-              {MARK[it.status]}
+              {own(MARK, it.status) ?? MARK.pending}
               <span className="todo-text">{showHidden(it.content)}</span>
             </li>
           ))}

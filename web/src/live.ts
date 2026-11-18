@@ -3,8 +3,10 @@
 // server replays exactly what we missed. Duplicates are dropped by seq, and a
 // gap (which the server should never produce) triggers a resubscribe.
 import { loginKey } from "./api";
-import { apply, emptyView, FoldError } from "./fold";
+import { emptyView } from "./emptyView";
 import type { RawEvent, SessionView } from "./types";
+
+type Fold = typeof import("./fold");
 
 export type ConnState = "connecting" | "live" | "offline";
 
@@ -24,6 +26,17 @@ export class Live {
   private closed = false;
   private pending = false;
   private opened = false;
+  // The fold loads with the chat, not with the first screen (it holds the
+  // payload guard, and only a watched session needs it): events that come
+  // before it are held, in order, and applied once it is here. In the app
+  // the chat's screen loads the fold with itself (Shell.tsx), so it is here
+  // before the first event; the hold is for a watch from elsewhere.
+  private fold: Fold | null = null;
+  private loading: Promise<unknown> | null = null;
+  private failed = false;
+  /** The fold's chunk (a seam for the tests of a failed load). */
+  loadModule: () => Promise<Fold> = () => import("./fold");
+  private early: RawEvent[] = [];
   state: ConnState = "connecting";
   /** Bumped on every change so React can cheaply detect updates. */
   version = 0;
@@ -81,6 +94,7 @@ export class Live {
    * the same one, and the subscription ends with the last `unwatch`. */
   watch(sessionId: string) {
     this.watchers.set(sessionId, (this.watchers.get(sessionId) ?? 0) + 1);
+    this.loadFold();
     if (!this.views.has(sessionId)) {
       this.views.set(sessionId, emptyView());
       this.sendSubscribe(sessionId);
@@ -102,6 +116,54 @@ export class Live {
   close() {
     this.closed = true;
     this.ws?.close();
+  }
+
+  private loadFold() {
+    if (this.fold) return;
+    this.loading ??= this.loadModule().then(
+      (m) => {
+        this.fold = m;
+        const early = this.early;
+        this.early = [];
+        for (const e of early) this.onEvent(e);
+        // What came while it could not load: the server sends it again.
+        if (this.failed) for (const id of this.views.keys()) this.sendSubscribe(id);
+      },
+      (err) => {
+        // Tried again at the next watch, not per event (no request per
+        // delta). In the app this is not reached: the chat's screen loads
+        // the fold with itself, so a fold chunk that fails fails that screen
+        // (ScreenBoundary says so), and React.lazy keeps that failure until
+        // a reload. Kept for a watch that does not come from that screen.
+        this.loading = null;
+        this.failed = true;
+        this.early = [];
+        console.error(err);
+      },
+    );
+  }
+
+  private onEvent(e: RawEvent) {
+    if (!this.fold) {
+      if (this.loading) this.early.push(e);
+      return;
+    }
+    const v = this.views.get(e.session_id);
+    if (!v) return;
+    if (e.seq <= v.head_seq) return; // duplicate
+    if (e.seq > v.head_seq + 1) {
+      this.sendSubscribe(e.session_id); // gap: ask again from our cursor
+      return;
+    }
+    try {
+      // Never throws for a payload (the fold's guard); only for a seq or
+      // session that does not fit, checked above.
+      this.fold.apply(v, e);
+    } catch (err) {
+      if (!(err instanceof this.fold.FoldError)) throw err;
+      console.error(err);
+    }
+    this.notify();
   }
 
   private send(msg: unknown) {
@@ -156,24 +218,9 @@ export class Live {
 
   private onMessage(msg: { type: string; event?: RawEvent; session_id?: string }) {
     switch (msg.type) {
-      case "event": {
-        const e = msg.event!;
-        const v = this.views.get(e.session_id);
-        if (!v) return;
-        if (e.seq <= v.head_seq) return; // duplicate
-        if (e.seq > v.head_seq + 1) {
-          this.sendSubscribe(e.session_id); // gap: ask again from our cursor
-          return;
-        }
-        try {
-          apply(v, e);
-        } catch (err) {
-          if (!(err instanceof FoldError)) throw err;
-          console.error(err);
-        }
-        this.notify();
+      case "event":
+        this.onEvent(msg.event!);
         break;
-      }
       case "sessions_changed":
         this.onSessionsChanged();
         break;

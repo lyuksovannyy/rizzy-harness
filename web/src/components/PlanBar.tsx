@@ -6,6 +6,7 @@
 // records it), then sends "Carry out the plan." as their message. Nothing
 // the agent writes reaches it. Its own lazy chunk: loaded on the first chat
 // in plan mode.
+import { own } from "../emptyView";
 import { ClipboardList } from "lucide-react";
 import { useState } from "react";
 import type { ApprovalMode } from "../types";
@@ -44,7 +45,7 @@ export default function PlanBar(props: {
             type="button"
             className="plan-bar-choice"
             disabled={busy || !!why}
-            title={why ?? `Switch to ${MODE_WORDS[c.mode].label} and send "${CARRY_OUT}"`}
+            title={why ?? `Switch to ${(own(MODE_WORDS, c.mode)?.label ?? "another mode")} and send "${CARRY_OUT}"`}
             onClick={() => {
               setBusy(true);
               setErr(null);

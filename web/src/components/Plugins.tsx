@@ -9,6 +9,7 @@
 // shown comes from a node or the server and is rendered as text only. The
 // person's own forge accounts (X.27) are listed first, in `Connections`, and
 // the workspace's custom connectors (X.35) after them, in `CustomConnectors`.
+import { own } from "../emptyView";
 import { useCallback, useEffect, useState } from "react";
 import { call } from "../api";
 import Connections from "./Connections";
@@ -260,8 +261,8 @@ function Row(props: {
     <li className="agent-row plugin-row">
       <div className="grow">
         <div>
-          <strong>{shownName(i.name)}</strong> <span className="muted small">{KIND[i.kind]}</span>
-          {i.stored && <span className="muted small">{` · ${ORIGIN[i.stored.origin]}`}</span>}
+          <strong>{shownName(i.name)}</strong> <span className="muted small">{own(KIND, i.kind) ?? i.kind}</span>
+          {i.stored && <span className="muted small">{` · ${own(ORIGIN, i.stored.origin) ?? i.stored.origin}`}</span>}
         </div>
         {described[0] && <div className="small">{described[0]}</div>}
         {described.length > 1 && <div className="muted small">Nodes describe it differently; the setting is by name and holds for each.</div>}

@@ -5,6 +5,7 @@
 // for 30 minutes and only together with the cookie. Requests made in one
 // tick go in one call; a link is reused until shortly before it expires.
 // Only lazy chunks import this, so the first load does not carry it.
+import { own } from "../emptyView";
 import { useEffect, useState } from "react";
 import { call, loginKey } from "../api";
 
@@ -27,7 +28,7 @@ function flush() {
     call<{ links: Record<string, string> }>("POST", "/api/links", { urls }).then(
       (r) =>
         part.forEach((w) => {
-          const l = r.links[w.url];
+          const l = own(r.links, w.url);
           if (l) w.done(l);
           else w.fail(new Error("no link"));
         }),
