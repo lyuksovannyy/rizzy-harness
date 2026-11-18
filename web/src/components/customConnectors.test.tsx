@@ -23,6 +23,7 @@ const linear = {
   auth: "token",
   header: "authorization",
   clash: false,
+  stamp: "s1",
   connected: true,
   offer: {
     server_name: "Linear <b>MCP</b>",
@@ -47,13 +48,25 @@ afterEach(() => {
   host.remove();
 });
 
+let topics: Record<string, () => void> = {};
+const live = {
+  onTopic: (t: string, fn: () => void) => {
+    topics[t] = fn;
+    return () => delete topics[t];
+  },
+} as unknown as import("../live").Live;
+
 async function show(connectors: unknown[], can_edit: boolean, adding = false) {
+  let list = connectors;
   call.mockImplementation((method: string) =>
-    Promise.resolve(method === "GET" ? { connectors, can_edit, person: true, available: true, max: 50 } : {}),
+    Promise.resolve(method === "GET" ? { connectors: list, can_edit, person: true, available: true, max: 50 } : {}),
   );
   await act(async () => {
-    root.render(<CustomConnectors scope="ws1" adding={adding} onAdded={() => undefined} />);
+    root.render(<CustomConnectors scope="ws1" live={live} adding={adding} onAdded={() => undefined} />);
   });
+  return (next: unknown[]) => {
+    list = next;
+  };
 }
 const button = (text: string) => [...host.querySelectorAll("button")].find((b) => b.textContent === text);
 const input = (el: HTMLInputElement, value: string) => {
@@ -86,14 +99,14 @@ describe("custom connectors", () => {
     expect(field.getAttribute("autocomplete")).toBe("new-password");
     await act(async () => input(field, " tok-123 "));
     await act(async () => host.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true })));
-    expect(call).toHaveBeenCalledWith("PUT", "/api/workspaces/ws1/connectors/k1/account", { token: " tok-123 " });
+    expect(call).toHaveBeenCalledWith("PUT", "/api/workspaces/ws1/connectors/k1/account", { token: " tok-123 ", seen: "s1" });
   });
 
   test("check posts; a connector without sign-in has no Connect", async () => {
     await show([open], false);
     expect(button("Connect")).toBeUndefined();
     await act(async () => button("Check")!.click());
-    expect(call).toHaveBeenCalledWith("POST", "/api/workspaces/ws1/connectors/k2/check");
+    expect(call).toHaveBeenCalledWith("POST", "/api/workspaces/ws1/connectors/k2/check", { seen: "s1" });
   });
 
   test("editors add with the browser sign-in note, and an address change asks first", async () => {
@@ -112,6 +125,31 @@ describe("custom connectors", () => {
     confirm.mockReturnValue(true);
     await act(async () => [...edit.querySelectorAll("button")].find((b) => b.textContent === "Save")!.click());
     expect(call).toHaveBeenCalledWith("PUT", "/api/workspaces/ws1/connectors/k1", { url: "https://other.example.com/mcp", auth: "token" });
+    vi.unstubAllGlobals();
+  });
+
+  test("a change event reloads the list, and an open token form on a changed connector closes", async () => {
+    const next = await show([{ ...linear, connected: false, offer: null }], false);
+    await act(async () => button("Connect")!.click());
+    expect(host.querySelector('input[type="password"]')).toBeTruthy();
+    next([{ ...linear, url: "https://elsewhere.example.com/mcp", stamp: "s2", connected: false, offer: null }]);
+    await act(async () => topics["connectors"]!());
+    expect(call.mock.calls.filter((c) => c[0] === "GET").length).toBe(2);
+    expect(host.textContent).toContain("https://elsewhere.example.com/mcp");
+    expect(host.querySelector('input[type="password"]')).toBeNull();
+  });
+
+  test("a header change asks before it disconnects everyone", async () => {
+    await show([linear], true);
+    await act(async () => button("Edit")!.click());
+    const edit = host.querySelector<HTMLElement>('[aria-label="Edit linear"]')!;
+    const header = [...edit.querySelectorAll("input")].find((i) => i.placeholder === "X-API-Key")!;
+    await act(async () => input(header, "X-API-Key"));
+    const confirm = vi.fn(() => false);
+    vi.stubGlobal("confirm", confirm);
+    await act(async () => [...edit.querySelectorAll("button")].find((b) => b.textContent === "Save")!.click());
+    expect(String((confirm.mock.calls[0] as unknown[])[0])).toContain("header disconnects everyone's accounts");
+    expect(call).not.toHaveBeenCalledWith("PUT", "/api/workspaces/ws1/connectors/k1", expect.anything());
     vi.unstubAllGlobals();
   });
 });

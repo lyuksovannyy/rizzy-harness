@@ -8,6 +8,7 @@ import { call } from "../api";
 import { Paste } from "./Connections";
 import { shownName } from "../md/hiddenChars";
 import { Seg } from "./Seg";
+import type { Live } from "../live";
 
 interface Tool {
   name: string;
@@ -20,6 +21,8 @@ interface Offer {
   instructions: string | null;
   tools: Tool[];
   more: boolean;
+  /** Tools left out: their agent name is another tool's. */
+  left_out?: number;
 }
 export interface Custom {
   id: string;
@@ -33,6 +36,8 @@ export interface Custom {
   /** `null`: this connector needs no sign-in. */
   connected: boolean | null;
   offer: Offer | null;
+  /** Changes with the address, the sign-in and the header: sent with a token or a check. */
+  stamp: string;
 }
 interface List {
   connectors: Custom[];
@@ -47,7 +52,7 @@ const NOT_YET = "In this version agents cannot use a custom connector yet: you c
 const NO_OAUTH =
   "Sign-in through a browser (OAuth) is not built yet; many hosted MCP servers need it and cannot be added until it is. A connector here signs in with a token you paste, or not at all.";
 
-export default function CustomConnectors(props: { scope: string; adding: boolean; onAdded: () => void }) {
+export default function CustomConnectors(props: { scope: string; live?: Live; adding: boolean; onAdded: () => void }) {
   const { scope } = props;
   const [list, setList] = useState<List | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -59,7 +64,11 @@ export default function CustomConnectors(props: { scope: string; adding: boolean
       })
       .catch((e: Error) => setError(e.message));
   }, [scope]);
-  useEffect(load, [load]);
+  useEffect(() => {
+    load();
+    // An admin's change, or one's own in another tab: look again.
+    return props.live?.onTopic("connectors", load);
+  }, [load, props.live]);
   return (
     <section aria-label="Custom connectors">
       <h3>Custom connectors</h3>
@@ -93,6 +102,9 @@ export default function CustomConnectors(props: { scope: string; adding: boolean
 function Row(props: { c: Custom; list: List; path: string; onChanged: () => void }) {
   const { c, list, path } = props;
   const [mode, setMode] = useState<"paste" | "edit" | null>(null);
+  // A form open on what changed under it closes: what it would send to
+  // is not what the person saw.
+  useEffect(() => setMode(null), [c.stamp]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const act = async (f: () => Promise<unknown>) => {
@@ -126,7 +138,7 @@ function Row(props: { c: Custom; list: List; path: string; onChanged: () => void
             label="Token"
             hint={`Sent once to ${c.host} to check it, then stored sealed on this server and never shown again.`}
             onCancel={() => setMode(null)}
-            onSend={(token) => act(() => call("PUT", `${path}/account`, { token }))}
+            onSend={(token) => act(() => call("PUT", `${path}/account`, { token, seen: c.stamp }))}
           />
         )}
         {mode === "edit" && (
@@ -135,8 +147,13 @@ function Row(props: { c: Custom; list: List; path: string; onChanged: () => void
             c={c}
             onCancel={() => setMode(null)}
             onSave={(b) => {
-              const moved = b.url !== c.url || b.auth !== c.auth;
-              if (moved && !window.confirm(`A new address or sign-in disconnects everyone's accounts for ${c.name}: their tokens were given for the old one. Save?`)) {
+              const header = b.auth === "token" ? (b.header?.trim().toLowerCase() || "authorization") : c.header;
+              const moved = b.url !== c.url || b.auth !== c.auth || header !== c.header;
+              if (
+                moved &&
+                c.auth === "token" &&
+                !window.confirm(`A new address, sign-in or header disconnects everyone's accounts for ${c.name}: their tokens were given for the old one. Save?`)
+              ) {
                 return Promise.resolve();
               }
               return act(() => call("PUT", path, b));
@@ -147,7 +164,7 @@ function Row(props: { c: Custom; list: List; path: string; onChanged: () => void
         {!mode && (
           <div className="row">
             {list.person && (c.auth === "none" || c.connected) && (
-              <button type="button" disabled={busy} onClick={() => void act(() => call("POST", `${path}/check`))}>
+              <button type="button" disabled={busy} onClick={() => void act(() => call("POST", `${path}/check`, { seen: c.stamp }))}>
                 {busy ? "Checking…" : "Check"}
               </button>
             )}
@@ -203,6 +220,7 @@ function OfferView({ o }: { o: Offer }) {
         ))}
       </ul>
       {o.more && <div className="muted small">And more: only the first ones are read.</div>}
+      {!!o.left_out && <div className="muted small">{`${o.left_out} tool${o.left_out === 1 ? "" : "s"} left out: the name an agent would see is another of its tools'.`}</div>}
     </div>
   );
 }

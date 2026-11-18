@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use fake_mcp::{CANARY, Fake, GOOD};
 use harness_core::Secret;
 use harness_master::connectors::client::Failure;
-use harness_master::connectors::{self, CHECK_BYTES, Checked, MAX_TOOLS, Net};
+use harness_master::connectors::{self, Busy, CHECK_BYTES, Checked, MAX_TOOLS, Net, Pool};
 
 /// Everything this process logs, at every level, unfiltered.
 fn logs() -> Arc<Mutex<Vec<u8>>> {
@@ -51,6 +51,7 @@ fn log_text() -> String {
 struct T {
     fake: Fake,
     net: Net,
+    pool: Pool,
     _dir: tempfile::TempDir,
 }
 
@@ -67,6 +68,7 @@ async fn start() -> T {
     T {
         fake,
         net,
+        pool: Pool::default(),
         _dir: dir,
     }
 }
@@ -77,12 +79,15 @@ fn token(t: &str) -> Option<connectors::client::TokenHeader> {
 
 async fn run(t: &T, path: &str, tok: Option<&str>) -> Checked {
     connectors::check(
+        &t.pool,
+        "tester",
         "conn",
         &format!("https://mcp.test/{path}"),
         tok.and_then(token),
         &t.net,
     )
     .await
+    .expect("a worker is free")
 }
 
 /// After a check: no connection open at the fake, no task left on the
@@ -128,11 +133,10 @@ async fn a_check_reads_what_the_server_offers_with_our_headers_only() {
         seen.iter().all(|s| s.method != "GET"),
         "no standalone stream"
     );
-    // The exact headers of each request (`accept-encoding` is reqwest's:
-    // an answer is counted against the budget after decoding).
+    // The exact headers of each request: no `accept-encoding` (nothing
+    // compressed is asked for, so the budget counts wire bytes).
     let first = [
         "accept",
-        "accept-encoding",
         "authorization",
         "content-length",
         "content-type",
@@ -149,7 +153,6 @@ async fn a_check_reads_what_the_server_offers_with_our_headers_only() {
     // reqwest's own `accept: */*` on a request that sets none.
     let mut del = vec![
         "accept",
-        "accept-encoding",
         "authorization",
         "host",
         "mcp-protocol-version",
@@ -335,7 +338,9 @@ async fn private_addresses_and_bad_urls_get_no_connection() {
         "https://u:p@mcp.test/ok",
         "https://mcp.test:8443/ok",
     ] {
-        let c = connectors::check("conn", url, token(GOOD), &t.net).await;
+        let c = connectors::check(&t.pool, "tester", "conn", url, token(GOOD), &t.net)
+            .await
+            .unwrap();
         assert_eq!(c.result.unwrap_err(), Failure::Connect, "{url}");
     }
     assert_eq!(
@@ -362,7 +367,11 @@ async fn paging_and_counts_are_capped() {
     assert_eq!(lists, connectors::MAX_PAGES);
     assert_clean(&t, &c).await;
 
+    // 10,000 tools in one answer are more than one check reads.
     let c = run(&t, "many", None).await;
+    assert_eq!(c.result.as_ref().unwrap_err(), &Failure::TooLarge);
+    assert_clean(&t, &c).await;
+    let c = run(&t, "smalltools", None).await;
     let o = c.result.as_ref().unwrap();
     assert_eq!(o.tools.len(), MAX_TOOLS);
     assert!(o.more);
@@ -470,6 +479,8 @@ async fn the_client_refuses_any_other_url() {
             Duration::from_secs(2),
             &t.net.lookup,
             false,
+            harness_master::remote::Redirects::None,
+            true,
             &t.net.roots,
         )
         .unwrap(),
@@ -503,4 +514,171 @@ async fn the_client_refuses_any_other_url() {
     .unwrap();
     assert!(t.net.lookup.asked().is_empty(), "nothing was looked up");
     assert_eq!(t.fake.count(), 0);
+}
+
+/// Review of PR 155, MEDIUM 4: no redirect is followed, not even to
+/// another path of the same origin, and the token stays at the first one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn no_redirect_is_followed_even_on_the_same_origin() {
+    let t = start().await;
+    let c = run(&t, "samehost", Some(GOOD)).await;
+    let e = c.result.unwrap_err();
+    assert_eq!(e, Failure::Redirected(307));
+    assert!(e.to_string().contains("an admin should enter"), "{e}");
+    assert!(
+        !e.to_string().contains("elsewhere"),
+        "the Location is not shown: {e}"
+    );
+    let seen = t.fake.seen();
+    assert!(seen.iter().all(|s| s.path == "/samehost"), "{seen:?}");
+    assert_eq!(
+        seen.iter()
+            .filter(|s| s.rpc() == Some("tools/list"))
+            .count(),
+        1
+    );
+}
+
+/// Review of PR 155, MEDIUM 4: nothing compressed is asked for, and a
+/// compressed answer is refused unread.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn nothing_compressed_is_asked_for_or_read() {
+    let t = start().await;
+    let c = run(&t, "gzip", None).await;
+    assert_eq!(
+        c.result.unwrap_err(),
+        Failure::BadAnswer("it is compressed")
+    );
+    assert_eq!(c.bytes_read, 0);
+    for s in t.fake.seen() {
+        assert!(s.header("accept-encoding").is_none(), "{:?}", s.headers);
+    }
+}
+
+/// Review of PR 155, LOW: a 50 MB error body is not read; the fake hands
+/// the connection only what fits before the client stops.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_error_body_is_not_read_at_all() {
+    let t = start().await;
+    let c = run(&t, "bigerror", None).await;
+    assert_eq!(c.result.unwrap_err(), Failure::Status(500));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let sent = t.fake.error_sent.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        sent < 8 * 1024 * 1024,
+        "{sent} bytes of the error body went out"
+    );
+}
+
+/// Review of PR 155, HIGH 1b: a message under the byte budget with more
+/// values than are read is refused before it is parsed, as JSON and as an
+/// event; one with fewer is read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn too_many_values_are_refused_before_parsing() {
+    let t = start().await;
+    for path in ["dense", "densesse"] {
+        let c = run(&t, path, None).await;
+        assert_eq!(c.result.unwrap_err(), Failure::TooComplex, "{path}");
+        assert!(c.bytes_read < CHECK_BYTES, "{path}: under the budget");
+    }
+    let c = run(&t, "smalltools", None).await;
+    let o = c.result.unwrap();
+    assert_eq!(o.tools.len(), MAX_TOOLS);
+    assert!(o.more);
+    let c = run(&t, "tiny", None).await;
+    assert_eq!(c.result.unwrap_err(), Failure::TooLarge);
+    // The budget is 512 KiB: 600 KB of one string is over it.
+    assert_eq!(CHECK_BYTES, 512 * 1024);
+    let c = run(&t, "longtext", None).await;
+    assert_eq!(c.result.unwrap_err(), Failure::TooLarge);
+}
+
+/// Review of PR 155, MEDIUM 3: two tools whose agent names are one: the
+/// first keeps it, the other is left out and counted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tools_whose_agent_names_collide_keep_the_first() {
+    let t = start().await;
+    let o = run(&t, "collide", None).await.result.unwrap();
+    let names: Vec<(&str, &str)> = o
+        .tools
+        .iter()
+        .map(|x| (x.name.as_str(), x.agent_name.as_str()))
+        .collect();
+    assert_eq!(names.len(), 2, "{names:?}");
+    assert_eq!(names[0].0, "a b");
+    assert_eq!(names[1].0, "a.b");
+    assert_ne!(names[0].1, names[1].1);
+    assert_eq!(o.left_out, 1);
+}
+
+/// Review of PR 155, HIGH 1a: two checks at most run at once; a third is
+/// refused at once, never queued; a person has one at a time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn checks_beyond_the_pool_are_refused_at_once() {
+    let t = start().await;
+    let go = |who: &'static str| {
+        let (pool, net) = (&t.pool, t.net.clone());
+        async move {
+            connectors::check(pool, who, "conn", "https://mcp.test/slowinit", None, &net).await
+        }
+    };
+    let (a, b, c, d) = tokio::join!(
+        go("ann"),
+        go("ben"),
+        async {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let started = Instant::now();
+            let r = go("cid").await;
+            (r, started.elapsed())
+        },
+        async {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            go("ann").await
+        }
+    );
+    assert!(a.unwrap().result.is_ok());
+    assert!(b.unwrap().result.is_ok());
+    let (c, took) = c;
+    assert_eq!(c.unwrap_err(), Busy::Full);
+    assert!(
+        took < Duration::from_millis(100),
+        "refused at once, not queued: {took:?}"
+    );
+    assert_eq!(d.unwrap_err(), Busy::Person);
+    assert_eq!(t.pool.most_at_once(), 2);
+    assert!(
+        t.fake
+            .most_in_init
+            .load(std::sync::atomic::Ordering::SeqCst)
+            <= 2
+    );
+    // Free again afterwards.
+    assert!(go("cid").await.unwrap().result.is_ok());
+}
+
+/// Review of PR 155, L1: sse-stream's `tracing` feature (its warnings quote
+/// the server's lines) stays off.
+#[test]
+fn sse_stream_logs_nothing_of_its_own() {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let out = std::process::Command::new(cargo)
+        .args([
+            "tree",
+            "--offline",
+            "-p",
+            "harness-master",
+            "-e",
+            "features",
+            "-i",
+            "sse-stream",
+        ])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success() && text.contains("sse-stream v0.2.6"),
+        "{text}"
+    );
+    assert!(!text.contains("feature \"tracing\""), "{text}");
 }

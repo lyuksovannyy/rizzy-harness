@@ -178,13 +178,22 @@ fn an_edited_url_or_sign_in_removes_every_account_at_once() {
         s.connector_account_put(u, &team, "k1", U1, b"t", 50)
             .unwrap();
     }
-    // A new header for the same address keeps them.
+    // The same definition again keeps them; a new header does not.
+    let (_, removed) = s
+        .connector_update(&team, "k1", U1, "token", None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(removed, 0);
     let (r, removed) = s
         .connector_update(&team, "k1", U1, "token", Some("x-api-key"))
         .unwrap()
         .unwrap();
-    assert_eq!((removed, r.header.as_deref()), (0, Some("x-api-key")));
-    assert_eq!(s.sealed_count().unwrap(), 2);
+    assert_eq!((removed, r.header.as_deref()), (2, Some("x-api-key")));
+    assert_eq!(s.sealed_count().unwrap(), 0);
+    for u in ["alice", "bob"] {
+        s.connector_account_put(u, &team, "k1", U1, b"t", 50)
+            .unwrap();
+    }
     let (r, removed) = s
         .connector_update(&team, "k1", U2, "token", None)
         .unwrap()

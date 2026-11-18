@@ -59,6 +59,11 @@ pub struct Fake {
     /// Connections open now, and accepted in all.
     pub open: Arc<AtomicUsize>,
     pub accepted: Arc<AtomicUsize>,
+    /// Bytes of `bigerror` bodies handed to the connection so far.
+    pub error_sent: Arc<AtomicUsize>,
+    /// Checks in `initialize` now, and the most at once (`slowinit`).
+    pub in_init: Arc<AtomicUsize>,
+    pub most_in_init: Arc<AtomicUsize>,
     pub port: u16,
     pub cert_der: Vec<u8>,
 }
@@ -108,6 +113,9 @@ pub async fn start(dir: &std::path::Path) -> Fake {
         cert_der: cert.cert_der.clone(),
         ..Fake::default()
     };
+    f.error_sent = Arc::default();
+    f.in_init = Arc::default();
+    f.most_in_init = Arc::default();
     f.seen = Arc::default();
     let app = axum::Router::new().fallback(handle).with_state(f.clone());
     let f2 = f.clone();
@@ -250,12 +258,110 @@ async fn handle(State(f): State<Fake>, req: Request) -> Response {
             format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"error\":{{\"code\":-1,\"message\":\"{CANARY}\"}}}}"),
         )
             .into_response(),
-        ("bigerror", _) => fifty_mb(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "application/json",
-            b"{\"error\":\"",
-            b'a',
-        ),
+        ("bigerror", _) => {
+            // Counted as each chunk is taken by the connection: a client
+            // that does not read stops it after what the socket buffers.
+            let sent = f.error_sent.clone();
+            let chunk = Bytes::from(vec![b'a'; 64 * 1024]);
+            let body = futures::stream::iter((0..800).map(move |_| {
+                sent.fetch_add(chunk.len(), Ordering::SeqCst);
+                Ok::<_, std::io::Error>(chunk.clone())
+            }));
+            let mut r = Response::new(Body::from_stream(body));
+            *r.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+            r.headers_mut()
+                .insert("content-type", "application/json".parse().unwrap());
+            r
+        }
+        ("gzip", _) => {
+            // Compressed although nothing asked for it (a tiny valid gzip of "{}").
+            let mut r = Response::new(Body::from(vec![
+                0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 3, 0xab, 0xae, 5, 0, 0x43, 0xbf, 0xa6, 0xa3, 2, 0,
+                0, 0,
+            ]));
+            r.headers_mut()
+                .insert("content-type", "application/json".parse().unwrap());
+            r.headers_mut()
+                .insert("content-encoding", "gzip".parse().unwrap());
+            session(r)
+        }
+        ("samehost", "tools/list") => (
+            StatusCode::TEMPORARY_REDIRECT,
+            [("location", "/elsewhere/collect")],
+        )
+            .into_response(),
+        ("slowinit", "initialize") => {
+            let now = f.in_init.fetch_add(1, Ordering::SeqCst) + 1;
+            f.most_in_init.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            f.in_init.fetch_sub(1, Ordering::SeqCst);
+            json_resp(init_result(&id, &body, "fake"))
+        }
+        ("tiny", "tools/list") => {
+            // About 1 MB of minimal tools (the reviewer's): cheap to send,
+            // dear to parse.
+            let mut s = format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{\"tools\":[");
+            let mut i = 0;
+            while s.len() < 1_000_000 {
+                if i > 0 {
+                    s.push(',');
+                }
+                s.push_str(&format!(
+                    "{{\"name\":\"{i}\",\"inputSchema\":{{\"a\":{{}},\"b\":{{}},\"c\":{{}}}}}}"
+                ));
+                i += 1;
+            }
+            s.push_str("]}}");
+            let mut r = Response::new(Body::from(s));
+            r.headers_mut()
+                .insert("content-type", "application/json".parse().unwrap());
+            session(r)
+        }
+        ("dense", "tools/list") | ("densesse", "tools/list") => {
+            // Under the budget, over the value count: never parsed.
+            let mut s = format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{\"tools\":[");
+            let mut i = 0;
+            while s.len() < 400_000 {
+                if i > 0 {
+                    s.push(',');
+                }
+                s.push_str(&format!("{{\"name\":\"{i}\",\"inputSchema\":{{}}}}"));
+                i += 1;
+            }
+            s.push_str("]}}");
+            if mode == "densesse" {
+                return events(format!("event: message\ndata: {s}\n\n"));
+            }
+            let mut r = Response::new(Body::from(s));
+            r.headers_mut()
+                .insert("content-type", "application/json".parse().unwrap());
+            session(r)
+        }
+        ("smalltools", "tools/list") => {
+            // Just under the value cap, under the budget: parsed.
+            let tools: Vec<Value> = (0..1300)
+                .map(|i| json!({"name": format!("t{i}"), "inputSchema": {"type": "object", "a": {}}}))
+                .collect();
+            json_resp(rpc_result(&id, json!({"tools": tools})))
+        }
+        ("longtext", "tools/list") => json_resp(rpc_result(
+            // 600 KB in one string: few values, more bytes than one check reads.
+            &id,
+            json!({"tools": [{"name": "t", "description": "d".repeat(600_000),
+                              "inputSchema": {"type": "object"}}]}),
+        )),
+        ("collide", "tools/list") => {
+            let hashed = harness_tools::mcp::public_name("conn", "a b");
+            let twin = hashed.strip_prefix("mcp__conn__").unwrap().to_string();
+            json_resp(rpc_result(
+                &id,
+                json!({"tools": [
+                    {"name": "a b", "inputSchema": {"type": "object"}},
+                    {"name": twin, "inputSchema": {"type": "object"}},
+                    {"name": "a.b", "inputSchema": {"type": "object"}},
+                ]}),
+            ))
+        }
         ("textplain", _) => (StatusCode::OK, format!("hello {CANARY}")).into_response(),
         ("redirect-other", _) => (
             StatusCode::TEMPORARY_REDIRECT,

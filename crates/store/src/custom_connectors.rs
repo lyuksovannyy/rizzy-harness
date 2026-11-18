@@ -187,8 +187,8 @@ impl Store {
     }
 
     /// Change connector `id` of `ws` to `url`, `auth` and `header`. When the
-    /// URL or the sign-in changes, every account of it is removed first, in
-    /// the same transaction. `None`: no such connector of `ws`; else the
+    /// URL, the sign-in or the header changes, every account of it is
+    /// removed first, in the same transaction. `None`: no such connector of `ws`; else the
     /// row as it is now and how many accounts were removed.
     pub fn connector_update(
         &self,
@@ -213,7 +213,9 @@ impl Store {
         let Some(old) = old else {
             return Ok(None);
         };
-        let removed = if old.url != url || old.auth != auth {
+        // The header decides who on the way reads the token (a proxy logs
+        // some headers and redacts Authorization): a new one is a new place.
+        let removed = if old.url != url || old.auth != auth || old.header.as_deref() != header {
             tx.execute(
                 "DELETE FROM connector_accounts WHERE workspace_id = ?1 AND connector_id = ?2",
                 params![ws, id],

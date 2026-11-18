@@ -86,12 +86,16 @@ impl Node {
 }
 
 fn fake_node() -> (harness_node::NodeLink, Node) {
+    fake_node_as("master")
+}
+
+fn fake_node_as(node_id: &str) -> (harness_node::NodeLink, Node) {
     let (to_node, mut commands) = mpsc::channel::<MasterToNode>(1024);
     let (to_master, from_node) = mpsc::channel::<NodeToMaster>(1024);
     to_master
         .try_send(NodeToMaster::Hello {
             protocol_version: PROTOCOL_VERSION,
-            node_id: "master".into(),
+            node_id: node_id.into(),
             hostname: "h".into(),
             version: "0".into(),
             capabilities: vec!["profile:chat".into()],
@@ -360,23 +364,36 @@ async fn add(t: &T, c: &str, ws: &str, name: &str, path: &str) -> (StatusCode, V
     .await
 }
 
+/// The connector's stamp as `c` sees it now (what a page sends back).
+async fn stamp_of(t: &T, c: &str, ws: &str, id: &str) -> String {
+    let (_, l) = req(t, Method::GET, &base(ws), None, Some(c)).await;
+    l["connectors"]
+        .as_array()
+        .and_then(|a| a.iter().find(|x| x["id"] == id))
+        .and_then(|x| x["stamp"].as_str())
+        .unwrap_or("unseen")
+        .to_string()
+}
+
 async fn connect(t: &T, c: &str, ws: &str, id: &str, token: &str) -> (StatusCode, Value) {
+    let seen = stamp_of(t, c, ws, id).await;
     req(
         t,
         Method::PUT,
         &format!("{}/{id}/account", base(ws)),
-        Some(json!({"token": token})),
+        Some(json!({"token": token, "seen": seen})),
         Some(c),
     )
     .await
 }
 
 async fn check(t: &T, c: &str, ws: &str, id: &str) -> (StatusCode, Value) {
+    let seen = stamp_of(t, c, ws, id).await;
     req(
         t,
         Method::POST,
         &format!("{}/{id}/check", base(ws)),
-        None,
+        Some(json!({"seen": seen})),
         Some(c),
     )
     .await
@@ -543,7 +560,8 @@ async fn define_connect_check_and_disconnect_and_the_token_is_nowhere() {
     assert_eq!(st, StatusCode::OK);
     assert_eq!(t.store.sealed_count().unwrap(), 1);
 
-    // An edit forgets every offer of the connector (here a header only).
+    // A new header disconnects her too (it decides who on the way reads
+    // the token), and forgets the offer.
     let (st, _) = edit(
         &t,
         alice,
@@ -554,14 +572,16 @@ async fn define_connect_check_and_disconnect_and_the_token_is_nowhere() {
     .await;
     assert_eq!(st, StatusCode::OK);
     let (_, l) = req(&t, Method::GET, &base(&p.team), None, Some(alice)).await;
-    assert_eq!(
-        find(&l, "fakemcp")["connected"],
-        true,
-        "a header change keeps her account"
-    );
+    assert_eq!(find(&l, "fakemcp")["connected"], false);
     assert_eq!(find(&l, "fakemcp")["offer"], Value::Null);
-    let (st, _) = check(&t, alice, &p.team, &id).await;
+    assert_eq!(t.store.sealed_count().unwrap(), 0);
+    let (st, _) = connect(&t, alice, &p.team, &id, GOOD).await;
     assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        t.fake.seen().last().unwrap().header("x-api-key"),
+        Some(GOOD),
+        "in the new header"
+    );
     // Failed checks of every kind say what failed in fixed words.
     for (path, needle) in [
         ("e500/mcp", "HTTP 500"),
@@ -705,7 +725,7 @@ async fn others_cannot_see_use_replace_or_delete_an_account() {
         &t,
         Method::POST,
         &format!("{}/{id}/check", base(&p.other)),
-        None,
+        Some(json!({"seen": "x"})),
         Some(&p.dan),
     )
     .await;
@@ -773,7 +793,7 @@ async fn an_edited_address_disconnects_everyone_first() {
             |r| r.get(0),
         )
         .unwrap();
-    // A new header for the same address keeps the accounts.
+    // A new header for the same address disconnects them as a new URL does.
     let (st, e) = edit(
         &t,
         alice,
@@ -783,8 +803,23 @@ async fn an_edited_address_disconnects_everyone_first() {
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{e}");
-    assert_eq!(e["disconnected"], 0);
+    assert_eq!(e["disconnected"], 2);
     assert_eq!(e["header"], "x-api-key");
+    assert_eq!(t.store.sealed_count().unwrap(), 0);
+    // The same definition again changes nothing.
+    let (_, e) = edit(
+        &t,
+        alice,
+        &p.team,
+        &id,
+        json!({"url": "https://mcp.test/auth/mcp", "auth": "token", "header": "x-api-key"}),
+    )
+    .await;
+    assert_eq!(e["disconnected"], 0);
+    for who in [alice, &p.bob.0] {
+        let (st, _) = connect(&t, who, &p.team, &id, GOOD).await;
+        assert_eq!(st, StatusCode::OK);
+    }
     let before = t.fake.count();
     let (st, e) = edit(
         &t,
@@ -892,6 +927,10 @@ async fn bad_definitions_are_refused_without_a_call() {
         "Cookie",
         "Transfer-Encoding",
         "Connection",
+        "Referer",
+        "X-Forwarded-For",
+        "Via",
+        "Accept-Encoding",
         "X-Key\r\nX: 1",
         "X-Key: 1",
     ] {
@@ -953,6 +992,14 @@ async fn names_clashes_and_the_plugins_listing() {
     t.node.announce(&["nodemcp", "later"]).await;
     let (st, e) = add(&t, alice, &p.team, "nodemcp", "ok").await;
     assert_eq!(st, StatusCode::CONFLICT, "{e}");
+    // The local node's servers are not shown to a member who may not use
+    // that node (only admins, here), so they do not clash for her either.
+    let (link, local) = fake_node_as("local");
+    t.master.add_link(link, true).await.unwrap();
+    local.announce(&["localonly"]).await;
+    let (st, e) = add(&t, alice, &p.team, "localonly", "ok").await;
+    assert_eq!(st, StatusCode::OK, "{e}");
+    assert_eq!(e["clash"], false);
     let (_, l) = req(&t, Method::GET, &base(&p.team), None, Some(alice)).await;
     assert_eq!(
         find(&l, "later")["clash"],
@@ -1095,4 +1142,104 @@ async fn a_lost_key_refuses_connect_before_any_call() {
         !t.dir.path().join("keys/secrets.key").exists(),
         "no new key"
     );
+}
+
+/// Review of PR 155, MEDIUM 2: a page that saw the connector before an
+/// admin changed it sends its token nowhere: 409 before any call.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stale_page_sends_its_token_nowhere() {
+    let t = start().await;
+    let p = people(&t).await;
+    let alice = &p.alice.0;
+    let (_, c) = add(&t, alice, &p.team, "fakemcp", "auth/mcp").await;
+    let id = c["id"].as_str().unwrap().to_string();
+    let bob = &p.bob.0;
+    let old = stamp_of(&t, bob, &p.team, &id).await;
+    for body in [
+        json!({"url": "https://other.test/auth/mcp", "auth": "token"}),
+        json!({"url": "https://other.test/auth/mcp", "auth": "token", "header": "X-API-Key"}),
+        json!({"url": "https://other.test/auth/mcp", "auth": "token"}),
+        json!({"url": "https://other.test/auth/mcp", "auth": "none"}),
+    ] {
+        // Each of URL, header and sign-in changes it, one at a time.
+        let before = stamp_of(&t, bob, &p.team, &id).await;
+        let (st, _) = edit(&t, alice, &p.team, &id, body).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_ne!(stamp_of(&t, bob, &p.team, &id).await, before);
+    }
+    edit(
+        &t,
+        alice,
+        &p.team,
+        &id,
+        json!({"url": "https://other.test/auth/mcp", "auth": "token"}),
+    )
+    .await;
+    let acct = format!("{}/{id}/account", base(&p.team));
+    let before = (t.fake.count(), t.master.connector_names_asked().len());
+    let (st, e) = req(
+        &t,
+        Method::PUT,
+        &acct,
+        Some(json!({"token": GOOD, "seen": old})),
+        Some(bob),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{e}");
+    assert!(e["error"].as_str().unwrap().contains("changed"), "{e}");
+    let (st, _) = req(
+        &t,
+        Method::POST,
+        &format!("{}/{id}/check", base(&p.team)),
+        Some(json!({"seen": old})),
+        Some(bob),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    // Without what it saw, nothing is taken either.
+    let (st, _) = req(
+        &t,
+        Method::PUT,
+        &acct,
+        Some(json!({"token": GOOD})),
+        Some(bob),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        (t.fake.count(), t.master.connector_names_asked().len()),
+        before,
+        "no request, no lookup"
+    );
+    assert_eq!(t.store.sealed_count().unwrap(), 0);
+    // A connector without sign-in: a check of a page that saw the old
+    // address is not run either.
+    edit(
+        &t,
+        alice,
+        &p.team,
+        &id,
+        json!({"url": "https://mcp.test/ok", "auth": "none"}),
+    )
+    .await;
+    let old = stamp_of(&t, bob, &p.team, &id).await;
+    edit(
+        &t,
+        alice,
+        &p.team,
+        &id,
+        json!({"url": "https://other.test/ok", "auth": "none"}),
+    )
+    .await;
+    let before = t.fake.count();
+    let (st, e) = req(
+        &t,
+        Method::POST,
+        &format!("{}/{id}/check", base(&p.team)),
+        Some(json!({"seen": old})),
+        Some(bob),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{e}");
+    assert_eq!(t.fake.count(), before, "not run");
 }

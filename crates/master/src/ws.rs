@@ -47,7 +47,7 @@ const PAGE: usize = 1000;
 
 /// The `Live::Changed` topics; after a lag each is sent once, since any of
 /// them may have been dropped.
-const TOPICS: [&str; 3] = ["routines", "media", "artifacts"];
+const TOPICS: [&str; 4] = ["routines", "media", "artifacts", "connectors"];
 
 /// Largest client message and frame. The client only sends subscribe and
 /// unsubscribe messages (well under 1 KiB); the WebSocket layer refuses

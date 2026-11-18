@@ -11,8 +11,8 @@ export type ConnState = "connecting" | "live" | "offline";
 type Listener = () => void;
 
 /** The areas whose lists change without content on the wire (`<topic>_changed`). */
-export type LiveTopic = "routines" | "media" | "artifacts";
-const TOPICS: LiveTopic[] = ["routines", "media", "artifacts"];
+export type LiveTopic = "routines" | "media" | "artifacts" | "connectors";
+const TOPICS: LiveTopic[] = ["routines", "media", "artifacts", "connectors"];
 
 export class Live {
   private ws: WebSocket | null = null;

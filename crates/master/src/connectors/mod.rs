@@ -10,23 +10,28 @@
 //!   user, query or fragment, and how a person signs in: `none`, or
 //!   `token` in `Authorization: Bearer …` or a header the admin names.
 //! * **The call** ([`check`]): the rules of `crate::remote` (public
-//!   addresses only on every connection, same-origin redirects not
-//!   followed, no proxy, connect and total time limits, no idle
+//!   addresses only on every connection, no redirect followed, no proxy,
+//!   nothing compressed, connect and total time limits, no idle
 //!   connection), through our own HTTP client for rmcp's transport
 //!   (`client`): one [`CHECK_BYTES`] budget for the whole check, error
-//!   bodies never read, our headers only, no standalone stream. It runs on
-//!   a runtime of its own on a thread of its own whose log output goes
-//!   nowhere (rmcp logs what servers send: names, instructions, results),
-//!   and that runtime is dropped when the check ends, so no task, socket
-//!   or buffer of it outlives it ([`Checked::tasks_left`] says how many
-//!   were still there when it ended, for tests).
+//!   bodies never read, a value count before any parse, our headers only,
+//!   no standalone stream. It runs on one of two long-lived workers
+//!   ([`pool`]) whose log output goes nowhere (rmcp logs what servers send:
+//!   names, instructions, results); a check that finds none idle, or whose
+//!   person has one running, is refused at once. No task or socket of a
+//!   check outlives it ([`Checked::tasks_left`] counts what was still
+//!   there; tests assert none); what it read is freed when it ends (the
+//!   two workers' allocator arenas keep up to about two checks' peak for
+//!   reuse), and only the cleaned offer is kept.
 //! * **What it offers** ([`Offer`]): the server's name and version, its
 //!   instructions and its tools (name, description), cleaned and capped,
-//!   kept only in a small per-person cache in memory ([`Cache`]).
+//!   kept only in a small per-person cache in memory ([`Cache`]), bounded
+//!   by entries and by bytes.
 //! * **Abuse**: checks are limited per person and (failed ones) per
 //!   connector (`crate::remote::Attempts`).
 
 pub mod client;
+pub mod pool;
 
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
@@ -41,15 +46,19 @@ use serde::Serialize;
 use crate::remote::{self, Attempts, Lookup};
 use crate::{Master, lock};
 use client::{Budget, Failure, Http, TokenHeader};
+pub use pool::{Busy, Pool};
 
 /// The bytes one check may read, all its requests together (initialize,
 /// the initialized notification, every `tools/list` page), counted on the
-/// raw bodies before any parsing. A tool list of [`MAX_TOOLS`] with long
-/// descriptions and schemas fits many times over. Step 2 (calling a
-/// connector's tools) will need its own budget per call, sized by what a
-/// tool's result may be and what the model is shown of it: not decided
-/// here.
-pub const CHECK_BYTES: usize = 1024 * 1024;
+/// raw bodies as they come over the wire (nothing compressed is taken),
+/// before any parsing; no message bigger than this reaches the JSON
+/// parser, and none with more than `client::MAX_JSON_VALUES` values. 512
+/// KiB (it was 1 MiB): parsing costs tens of times the bytes, and a check
+/// shows at most [`MAX_TOOLS`] tools, which with long descriptions and
+/// schemas fit many times over. Step 2 (calling a connector's tools) sets
+/// its own budget per call, sized by what a tool's result may be and what
+/// the model is shown of it: not decided here.
+pub const CHECK_BYTES: usize = 512 * 1024;
 /// The time of each request, its answer's body included (the forge's), and
 /// of the whole check; connecting within `remote::CONNECT_TIMEOUT`.
 pub const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
@@ -79,6 +88,9 @@ pub const WINDOW: Duration = Duration::from_secs(600);
 /// How long a check's offer is kept for its person, and how many.
 pub const CACHE_TTL: Duration = Duration::from_secs(600);
 pub const MAX_CACHED: usize = 256;
+/// The bytes of every offer held, all people together ([`Offer::weight`]).
+/// One offer at every cap weighs about 0.2 MiB, so at least 20 of those fit.
+pub const MAX_CACHED_BYTES: usize = 4 * 1024 * 1024;
 
 const LIMITS: remote::Limits = remote::Limits {
     per_user: PER_USER,
@@ -156,42 +168,46 @@ pub fn check_url(raw: &str) -> Result<String, String> {
     Ok(out)
 }
 
-/// Headers a token may not go in: ones the HTTP layer or the transport
-/// sets, and hop-by-hop ones.
-const REFUSED_HEADERS: &[&str] = &[
-    "host",
-    "content-length",
-    "content-type",
-    "cookie",
-    "transfer-encoding",
-    "connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "proxy-connection",
-    "te",
-    "trailer",
-    "upgrade",
-    "accept",
-    "user-agent",
-    "mcp-session-id",
-    "mcp-protocol-version",
-    "last-event-id",
+/// `X-` headers that proxies, load balancers and tracing add, forward or
+/// log: a token never goes in one, whatever it is called.
+const X_REFUSED: &[&str] = &[
+    "x-forwarded-",
+    "x-real-ip",
+    "x-original-",
+    "x-request-",
+    "x-correlation-",
+    "x-envoy-",
+    "x-amzn-",
+    "x-cloud-trace-",
 ];
 
-/// The header an admin names for the token: a header name of at most 64
-/// characters, not one of [`REFUSED_HEADERS`]; stored lower-case.
+const HEADER_RULE: &str = "the token goes in Authorization, or in a header whose name ends in -Key, \
+                           -Token or -Auth (such as X-API-Key or Private-Token), or one that starts \
+                           with X- and is not a forwarding or tracing header; 1 to 64 letters, digits \
+                           and -";
+
+/// The header an admin names for the token, stored lower-case. An allow
+/// rule (the header decides who on the way reads the token: proxies and
+/// access logs redact `Authorization` and pass or log others): exactly
+/// `authorization`; or a name ending in `-key`, `-token` or `-auth`; or
+/// one starting `x-` that is not in [`X_REFUSED`]. Never `sec-*`,
+/// `proxy-*` or `mcp-*`, and only letters, digits and `-`.
 pub fn check_header(raw: &str) -> Result<String, String> {
-    let raw = raw.trim();
-    let name = HeaderName::from_bytes(raw.as_bytes())
-        .ok()
-        .filter(|_| (1..=64).contains(&raw.len()))
-        .ok_or_else(|| {
-            "a header name is 1 to 64 of letters, digits and - (for example X-API-Key)".to_string()
-        })?;
-    let s = name.as_str().to_string();
-    if REFUSED_HEADERS.contains(&s.as_str()) || s.starts_with("mcp-") || s.starts_with("sec-") {
-        return Err(format!("the token cannot go in the {raw} header"));
+    let s = raw.trim().to_ascii_lowercase();
+    let shape = (1..=64).contains(&s.len())
+        && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        && !s.starts_with('-')
+        && !s.ends_with('-');
+    if !shape || HeaderName::from_bytes(s.as_bytes()).is_err() {
+        return Err(HEADER_RULE.into());
+    }
+    let never = ["sec-", "proxy-", "mcp-"].iter().any(|p| s.starts_with(p))
+        || X_REFUSED.iter().any(|p| s.starts_with(p));
+    let allowed = s == "authorization"
+        || ["-key", "-token", "-auth"].iter().any(|e| s.ends_with(e))
+        || s.starts_with("x-");
+    if never || !allowed {
+        return Err(HEADER_RULE.into());
     }
     Ok(s)
 }
@@ -237,6 +253,9 @@ pub struct Offer {
     pub tools: Vec<OfferedTool>,
     /// The server has more than was read or shown.
     pub more: bool,
+    /// Tools left out because the name an agent would see is another of
+    /// its tools'.
+    pub left_out: u32,
     pub checked_ms: i64,
 }
 
@@ -266,65 +285,53 @@ impl Default for Net {
 #[derive(Debug)]
 pub struct Checked {
     pub result: Result<Offer, Failure>,
-    /// Tasks still alive on the check's runtime when it ended (before the
-    /// runtime, and they with it, was dropped).
+    /// Tasks still alive on the worker's runtime when the check ended.
     pub tasks_left: usize,
     /// Bytes of the budget used.
     pub bytes_read: usize,
 }
 
 /// Run one check of the connector `name` at `url` with `token` (a header,
-/// or none). Never logs; see the module comment.
-pub async fn check(name: &str, url: &str, token: Option<TokenHeader>, net: &Net) -> Checked {
+/// or none) for `who`, on a worker of `pool` ([`pool`]). Never logs.
+pub async fn check(
+    pool: &Pool,
+    who: &str,
+    name: &str,
+    url: &str,
+    token: Option<TokenHeader>,
+    net: &Net,
+) -> Result<Checked, Busy> {
     let (name, url, net) = (name.to_string(), url.to_string(), net.clone());
-    let (tx, rx) = tokio::sync::oneshot::channel();
-    let spawned = std::thread::Builder::new()
-        .name("connector-check".into())
-        .spawn(move || {
-            let _quiet =
-                tracing::subscriber::set_default(tracing::subscriber::NoSubscriber::default());
-            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            else {
-                return;
-            };
+    let out = pool
+        .run(who, move || async move {
             let budget = Budget::new(CHECK_BYTES);
-            let b2 = budget.clone();
             let timeout = net.timeout;
-            let result = rt.block_on(async move {
-                match tokio::time::timeout(timeout, run(&name, &url, token, &net, b2)).await {
+            let result =
+                match tokio::time::timeout(timeout, run(&name, &url, token, &net, budget.clone()))
+                    .await
+                {
                     Ok(r) => r,
                     Err(_) => Err(Failure::Timeout),
-                }
-            });
+                };
             // Let what was closed finish closing, then count what is left.
-            rt.block_on(async {
-                for _ in 0..20 {
-                    tokio::task::yield_now().await;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            });
-            let tasks_left = rt.metrics().num_alive_tasks();
-            rt.shutdown_timeout(Duration::from_secs(1));
-            let _ = tx.send(Checked {
+            for _ in 0..20 {
+                tokio::task::yield_now().await;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            Checked {
                 result,
-                tasks_left,
+                tasks_left: tokio::runtime::Handle::current()
+                    .metrics()
+                    .num_alive_tasks(),
                 bytes_read: CHECK_BYTES - budget.left(),
-            });
-        });
-    if spawned.is_err() {
-        return Checked {
-            result: Err(Failure::Connect),
-            tasks_left: 0,
-            bytes_read: 0,
-        };
-    }
-    rx.await.unwrap_or(Checked {
+            }
+        })
+        .await?;
+    Ok(out.unwrap_or(Checked {
         result: Err(Failure::Protocol),
         tasks_left: 0,
         bytes_read: 0,
-    })
+    }))
 }
 
 async fn run(
@@ -342,8 +349,15 @@ async fn run(
 
     // The rules once more, on what is about to be connected to.
     check_url(url).map_err(|_| Failure::Connect)?;
-    let c = remote::client(net.timeout, &net.lookup, !net.allow_private, &net.roots)
-        .map_err(|_| Failure::Connect)?;
+    let c = remote::client(
+        net.timeout,
+        &net.lookup,
+        !net.allow_private,
+        remote::Redirects::None,
+        true,
+        &net.roots,
+    )
+    .map_err(|_| Failure::Connect)?;
     let http = Http {
         client: c,
         url: url.into(),
@@ -382,10 +396,12 @@ async fn run(
             .and_then(|s| remote::clean_text(s, MAX_INSTRUCTIONS)),
         tools: Vec::new(),
         more: false,
+        left_out: 0,
         checked_ms: harness_core::now_ms(),
     };
     let mut cursor = None;
     let mut seen = std::collections::HashSet::new();
+    let mut agents = std::collections::HashSet::new();
     let mut text = 0usize;
     for page in 0.. {
         if page == MAX_PAGES {
@@ -412,7 +428,14 @@ async fn run(
                 offer.more = true;
                 break;
             }
+            // One raw name once; one agent name once (two names can clean
+            // to the same one: the first keeps it, the other is counted).
             if !seen.insert(t.name.to_string()) {
+                continue;
+            }
+            let agent_name = harness_tools::mcp::public_name(name, &t.name);
+            if !agents.insert(agent_name.clone()) {
+                offer.left_out += 1;
                 continue;
             }
             let Some(shown) = remote::clean_text(&t.name, MAX_TOOL_NAME) else {
@@ -432,7 +455,7 @@ async fn run(
                     fits
                 });
             offer.tools.push(OfferedTool {
-                agent_name: harness_tools::mcp::public_name(name, &t.name),
+                agent_name,
                 name: shown,
                 description,
             });
@@ -446,31 +469,56 @@ async fn run(
     Ok(offer)
 }
 
-/// Offers by (person, connector), for a short while, in memory only.
+impl Offer {
+    /// What it takes in memory, near enough: its text's bytes and a fixed
+    /// amount per tool and per offer.
+    pub fn weight(&self) -> usize {
+        let opt = |s: &Option<String>| s.as_ref().map_or(0, String::len);
+        256 + opt(&self.server_name)
+            + opt(&self.server_version)
+            + opt(&self.instructions)
+            + self
+                .tools
+                .iter()
+                .map(|t| 96 + t.name.len() + t.agent_name.len() + opt(&t.description))
+                .sum::<usize>()
+    }
+}
+
+/// Offers by (person, connector), for a short while, in memory only, at
+/// most [`MAX_CACHED`] and [`MAX_CACHED_BYTES`]; the oldest go first.
 #[derive(Default)]
 pub struct Cache {
     map: HashMap<(String, String), (Instant, Offer)>,
     order: VecDeque<(String, String)>,
+    bytes: usize,
 }
 
 impl Cache {
     pub fn put(&mut self, user: &str, connector: &str, offer: Offer) {
         let k = (user.to_string(), connector.to_string());
-        if self
-            .map
-            .insert(k.clone(), (Instant::now(), offer))
-            .is_none()
-        {
-            self.order.push_back(k);
+        let w = offer.weight();
+        if let Some((_, old)) = self.map.insert(k.clone(), (Instant::now(), offer)) {
+            self.bytes -= old.weight();
+            self.order.retain(|o| o != &k);
         }
-        while self.map.len() > MAX_CACHED {
+        self.order.push_back(k);
+        self.bytes += w;
+        while self.map.len() > MAX_CACHED || self.bytes > MAX_CACHED_BYTES {
             match self.order.pop_front() {
                 Some(old) => {
-                    self.map.remove(&old);
+                    if let Some((_, o)) = self.map.remove(&old) {
+                        self.bytes -= o.weight();
+                    }
                 }
                 None => break,
             }
         }
+    }
+
+    /// The weight of everything held.
+    pub fn bytes(&self) -> usize {
+        self.bytes
     }
 
     pub fn get(&self, user: &str, connector: &str) -> Option<Offer> {
@@ -482,8 +530,14 @@ impl Cache {
 
     /// Forget one person's offer of `connector`, or everyone's (`None`).
     pub fn forget(&mut self, user: Option<&str>, connector: &str) {
-        self.map
-            .retain(|(u, c), _| !(c == connector && user.is_none_or(|x| x == u)));
+        let bytes = &mut self.bytes;
+        self.map.retain(|(u, c), (_, o)| {
+            let keep = !(c == connector && user.is_none_or(|x| x == u));
+            if !keep {
+                *bytes -= o.weight();
+            }
+            keep
+        });
         self.order
             .retain(|(u, c)| !(c == connector && user.is_none_or(|x| x == u)));
     }
@@ -500,6 +554,7 @@ impl Cache {
 /// Master-side state: the limits, the cache and the test hooks.
 pub struct State {
     attempts: Attempts,
+    pool: Pool,
     cache: Mutex<Cache>,
     net: Mutex<Net>,
     tasks_left: AtomicUsize,
@@ -509,6 +564,7 @@ impl Default for State {
     fn default() -> Self {
         Self {
             attempts: Attempts::new(LIMITS),
+            pool: Pool::default(),
             cache: Mutex::default(),
             net: Mutex::default(),
             tasks_left: AtomicUsize::new(0),
@@ -549,6 +605,16 @@ impl Master {
     /// Tests: offers held in memory.
     pub fn connector_offers_cached(&self) -> usize {
         lock(&self.inner.connectors.cache).len()
+    }
+
+    /// The check workers (`pool`).
+    pub fn connector_pool(&self) -> &Pool {
+        &self.inner.connectors.pool
+    }
+
+    /// Tests: the bytes of the offers held.
+    pub fn connector_offer_bytes(&self) -> usize {
+        lock(&self.inner.connectors.cache).bytes()
     }
 
     pub(crate) fn connector_net(&self) -> Net {
@@ -629,26 +695,63 @@ mod tests {
 
     #[test]
     fn token_headers_are_checked_names() {
-        assert_eq!(check_header("X-API-Key").unwrap(), "x-api-key");
-        assert_eq!(check_header("Authorization").unwrap(), "authorization");
+        for (ok, stored) in [
+            ("Authorization", "authorization"),
+            ("X-API-Key", "x-api-key"),
+            ("Api-Key", "api-key"),
+            ("Private-Token", "private-token"),
+            ("X-Auth", "x-auth"),
+            ("Some-Auth", "some-auth"),
+            ("X-Linear-Token", "x-linear-token"),
+            ("x-custom", "x-custom"),
+        ] {
+            assert_eq!(check_header(ok).as_deref(), Ok(stored), "{ok}");
+        }
         for bad in [
-            "Host",
-            "content-length",
+            "Referer",
+            "Origin",
+            "X-Forwarded-For",
+            "X-Forwarded-Host",
+            "Forwarded",
+            "Via",
+            "X-Real-IP",
+            "X-Original-URL",
+            "X-Request-Id",
+            "X-Correlation-Id",
+            "X-Envoy-Peer",
+            "X-Amzn-Trace-Id",
+            "X-Cloud-Trace-Context",
+            "Location",
+            "Set-Cookie",
             "Cookie",
+            "Accept-Encoding",
+            "Content-Encoding",
+            "Expect",
+            "Range",
+            "Date",
+            "Host",
+            "Content-Length",
             "Transfer-Encoding",
             "Connection",
             "Upgrade",
             "Proxy-Authorization",
+            "Proxy-Key",
+            "Sec-WebSocket-Key",
             "Mcp-Session-Id",
-            "mcp-anything",
-            "Sec-Fetch-Site",
+            "mcp-token",
+            "-key",
             "X-Key\r\nEvil: 1",
             "X-Key: 1",
             "X Key",
+            "X_Key",
+            "X-Key_1",
+            "X-Key!",
+            "X-Api.Key",
             "",
-            &"x".repeat(65),
+            &format!("x-{}", "k".repeat(63)),
         ] {
-            assert!(check_header(bad).is_err(), "{bad:?} was taken");
+            let e = check_header(bad).unwrap_err();
+            assert!(e.contains("-Key, -Token or -Auth"), "{bad:?}: {e}");
         }
         let t = Secret::new("abc".into());
         let h = token_header(None, &t).unwrap();
@@ -701,6 +804,42 @@ mod tests {
         assert!(log_allowed("harness_master::connectors"));
     }
 
+    /// Offers at every cap: the cache holds at most MAX_CACHED_BYTES of
+    /// them, by its own count, and the count is what is held.
+    #[test]
+    fn the_cache_is_bounded_in_bytes_at_the_worst() {
+        let big = |c: char, n: usize| Some(c.to_string().repeat(n));
+        let worst = Offer {
+            server_name: big('é', MAX_SERVER_TEXT),
+            server_version: big('é', MAX_SERVER_TEXT),
+            instructions: big('é', MAX_INSTRUCTIONS),
+            tools: (0..MAX_TOOLS)
+                .map(|i| OfferedTool {
+                    name: format!("{i}{}", "é".repeat(MAX_TOOL_NAME - 3)),
+                    agent_name: "a".repeat(64),
+                    description: big('é', MAX_TEXT / MAX_TOOLS),
+                })
+                .collect(),
+            more: true,
+            left_out: 0,
+            checked_ms: 0,
+        };
+        let w = worst.weight();
+        assert!(w < 300 * 1024, "{w}");
+        let mut c = Cache::default();
+        for i in 0..MAX_CACHED {
+            c.put(&format!("u{i}"), "k", worst.clone());
+            assert!(c.bytes() <= MAX_CACHED_BYTES, "{}", c.bytes());
+        }
+        assert_eq!(c.len(), MAX_CACHED_BYTES / w);
+        let held: usize = c.map.values().map(|(_, o)| o.weight()).sum();
+        assert_eq!(held, c.bytes());
+        // Replacing and forgetting keep the count right.
+        c.put("u255", "k", worst.clone());
+        c.forget(None, "k");
+        assert_eq!((c.len(), c.bytes()), (0, 0));
+    }
+
     #[test]
     fn the_cache_is_bounded_and_forgets() {
         let o = Offer {
@@ -709,6 +848,7 @@ mod tests {
             instructions: None,
             tools: vec![],
             more: false,
+            left_out: 0,
             checked_ms: 0,
         };
         let mut c = Cache::default();

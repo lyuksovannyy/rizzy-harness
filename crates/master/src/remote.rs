@@ -9,11 +9,13 @@
 //!   connection, so a name that later resolves inward (DNS rebinding) is
 //!   refused too. An IP-literal host never reaches a resolver: callers
 //!   check those with `harness_web::check_public_url` first.
-//! * **How.** Redirects stay on the same origin
-//!   (`harness_agent_native::models::same_origin_redirects`: another
-//!   origin is not followed, its 3xx comes back as the answer); no
-//!   environment proxy; a connect and a total time limit; no idle
-//!   connection is kept (`pool_max_idle_per_host(0)`).
+//! * **How.** Redirects as the caller says ([`Redirects`]: forges stay on
+//!   the same origin, `harness_agent_native::models::same_origin_redirects`,
+//!   where another origin is not followed and its 3xx comes back as the
+//!   answer; connectors follow none); no environment proxy; a connect and a
+//!   total time limit; no idle connection is kept
+//!   (`pool_max_idle_per_host(0)`); for connectors no content encoding is
+//!   asked for or decoded, so what is counted is what came over the wire.
 //! * **What comes back** is untrusted: [`clean_text`] drops controls,
 //!   bidi controls and invisible characters and caps the length;
 //!   callers read at most a fixed number of bytes and never an error body.
@@ -40,6 +42,9 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct Lookup {
     pub(crate) fixed: Option<Arc<HashMap<String, Vec<SocketAddr>>>>,
     pub(crate) asked: Arc<Mutex<Vec<String>>>,
+    /// Tests: this name's lookup blocks a blocking thread for this long,
+    /// as a system resolver that does not answer does, then fails.
+    pub(crate) stall: Option<(String, Duration)>,
 }
 
 impl Lookup {
@@ -48,6 +53,16 @@ impl Lookup {
         Self {
             fixed: Some(Arc::new(table)),
             asked: Arc::default(),
+            stall: None,
+        }
+    }
+
+    /// Tests: like [`Lookup::table`], and `name` stalls for `d` on a
+    /// blocking thread.
+    pub fn stalling(table: HashMap<String, Vec<SocketAddr>>, name: &str, d: Duration) -> Self {
+        Self {
+            stall: Some((name.to_string(), d)),
+            ..Self::table(table)
         }
     }
 
@@ -72,6 +87,13 @@ impl reqwest::dns::Resolve for RemoteResolver {
         let public_only = self.public_only;
         Box::pin(async move {
             lock(&lookup.asked).push(host.clone());
+            if let Some((name, d)) = &lookup.stall
+                && *name == host
+            {
+                let d = *d;
+                let _ = tokio::task::spawn_blocking(move || std::thread::sleep(d)).await;
+                return Err(format!("{host} did not resolve").into());
+            }
             let all: Vec<SocketAddr> = match &lookup.fixed {
                 Some(t) => t.get(&host).cloned().unwrap_or_default(),
                 None => tokio::net::lookup_host((host.as_str(), 0)).await?.collect(),
@@ -88,21 +110,38 @@ impl reqwest::dns::Resolve for RemoteResolver {
     }
 }
 
+/// Which redirects a client follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Redirects {
+    /// Same origin only (forges).
+    SameOrigin,
+    /// None: every 3xx is the answer (connectors).
+    None,
+}
+
 /// A client with the rules above: `timeout` for the whole of each request
 /// (its answer's body included), connect within [`CONNECT_TIMEOUT`],
-/// same-origin redirects, no proxy, no idle connection kept, the resolver
+/// `redirects`, no proxy, no idle connection kept, the resolver
 /// (`public_only` unless the caller's entry allows a private address).
-/// `extra_roots`: tests only (a fake server's own certificate).
+/// With `identity`, no content encoding is asked for or decoded (gzip is
+/// the one decoder this build of reqwest has; a test asserts that no
+/// `Accept-Encoding` is sent, so one added later shows). `extra_roots`:
+/// tests only (a fake server's own certificate).
 pub fn client(
     timeout: Duration,
     lookup: &Lookup,
     public_only: bool,
+    redirects: Redirects,
+    identity: bool,
     extra_roots: &[Vec<u8>],
 ) -> Result<reqwest::Client, reqwest::Error> {
     let mut b = reqwest::Client::builder()
         .connect_timeout(timeout.min(CONNECT_TIMEOUT))
         .timeout(timeout)
-        .redirect(harness_agent_native::models::same_origin_redirects())
+        .redirect(match redirects {
+            Redirects::SameOrigin => harness_agent_native::models::same_origin_redirects(),
+            Redirects::None => reqwest::redirect::Policy::none(),
+        })
         .no_proxy()
         .pool_max_idle_per_host(0)
         .user_agent(concat!("rizzy-harness/", env!("CARGO_PKG_VERSION")))
@@ -110,6 +149,9 @@ pub fn client(
             lookup: lookup.clone(),
             public_only,
         }));
+    if identity {
+        b = b.no_gzip();
+    }
     if !extra_roots.is_empty() {
         let mut certs = Vec::new();
         for der in extra_roots {

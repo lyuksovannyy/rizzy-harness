@@ -172,6 +172,7 @@ export default function Plugins(props: FeaturePageProps) {
         {scope && (
           <CustomConnectors
             scope={scope}
+            live={props.live}
             adding={adding === "connector"}
             onAdded={() => {
               setAdding(null);

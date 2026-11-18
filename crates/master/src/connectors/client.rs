@@ -59,7 +59,10 @@ pub enum Failure {
     Refused(u16),
     #[error("it answered HTTP {0}")]
     Status(u16),
-    #[error("it redirected to another address (HTTP {0}), which is not followed")]
+    #[error(
+        "it redirected (HTTP {0}), which is not followed: an admin should enter the address it \
+         redirects to"
+    )]
     Redirected(u16),
     #[error("it did not answer in time")]
     Timeout,
@@ -67,6 +70,8 @@ pub enum Failure {
     Connect,
     #[error("it sent more than this server reads in one check")]
     TooLarge,
+    #[error("it sent a message with more parts than this server reads")]
+    TooComplex,
     #[error("it answered with content this server does not read")]
     ContentType,
     #[error("it sent an answer this server does not accept: {0}")]
@@ -271,6 +276,14 @@ impl StreamableHttpClient for Http {
         ) {
             return Ok(StreamableHttpPostResponse::Accepted);
         }
+        // Nothing compressed: no encoding was asked for, and one that comes
+        // anyway is refused unread (the budget counts bytes on the wire).
+        if r.headers()
+            .get(reqwest::header::CONTENT_ENCODING)
+            .is_some_and(|v| !v.as_bytes().eq_ignore_ascii_case(b"identity"))
+        {
+            return Err(self.fail(Failure::BadAnswer("it is compressed")));
+        }
         let new_session = match r.headers().get("mcp-session-id") {
             None => None,
             Some(v)
@@ -293,8 +306,20 @@ impl StreamableHttpClient for Http {
         }
         match mime(&r).as_deref() {
             Some(EVENTS) => {
-                let events = SseStream::from_bytes_stream(self.capped(r))
-                    .map(|e| e.map_err(|_| SseError::InvalidLine));
+                let failure = self.failure.clone();
+                let events = SseStream::from_bytes_stream(self.capped(r)).map(move |e| match e {
+                    Ok(ev)
+                        if ev
+                            .data
+                            .as_deref()
+                            .is_some_and(|d| too_complex(d.as_bytes())) =>
+                    {
+                        note(&failure, Failure::TooComplex);
+                        Err(SseError::InvalidLine)
+                    }
+                    Ok(ev) => Ok(ev),
+                    Err(_) => Err(SseError::InvalidLine),
+                });
                 Ok(StreamableHttpPostResponse::Sse(
                     boxed_events(events),
                     new_session,
@@ -308,6 +333,9 @@ impl StreamableHttpClient for Http {
                 }
                 if no_reply_needed && body.iter().all(u8::is_ascii_whitespace) {
                     return Ok(StreamableHttpPostResponse::Accepted);
+                }
+                if too_complex(&body) {
+                    return Err(self.fail(Failure::TooComplex));
                 }
                 let m: ServerJsonRpcMessage = serde_json::from_slice(&body)
                     .map_err(|_| self.fail(Failure::BadAnswer("it is not a JSON-RPC message")))?;
@@ -345,6 +373,49 @@ impl StreamableHttpClient for Http {
     ) -> Result<BoxStream<'static, Result<Sse, SseError>>, StreamableHttpError<Failure>> {
         Err(StreamableHttpError::ServerDoesNotSupportSse)
     }
+}
+
+fn note(slot: &Mutex<Option<Failure>>, f: Failure) {
+    let mut g = lock(slot);
+    if g.is_none() {
+        *g = Some(f);
+    }
+}
+
+/// JSON values one message may have (objects, arrays and the elements
+/// between their commas, counted outside strings) before it is parsed.
+/// Parsed into rmcp's types a value costs about 1 KB (measured: 12,000
+/// values of a tool list took a worker 11 MB; a 1 MB list of minimal tools
+/// grew the process by 37 MB before this cap, review of PR 155), so this
+/// keeps one check under about 8 MB; a real tool list with schemas is a
+/// few thousand values a page.
+pub const MAX_JSON_VALUES: usize = 8_192;
+
+/// Whether `b` has more than [`MAX_JSON_VALUES`] values: a scan, no parse.
+pub fn too_complex(b: &[u8]) -> bool {
+    let (mut n, mut in_str, mut esc) = (0usize, false, false);
+    for &c in b {
+        if in_str {
+            match (esc, c) {
+                (true, _) => esc = false,
+                (false, b'\\') => esc = true,
+                (false, b'"') => in_str = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            b'"' => in_str = true,
+            b'{' | b'[' | b',' => {
+                n += 1;
+                if n > MAX_JSON_VALUES {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 fn boxed_events(

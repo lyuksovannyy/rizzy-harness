@@ -71,7 +71,7 @@ pub(super) fn routes() -> Router<Master> {
         )
         .route(
             "/api/workspaces/{id}/connectors/{cid}/check",
-            axum::routing::post(check),
+            axum::routing::post(check).layer(DefaultBodyLimit::max(BODY_LIMIT)),
         )
 }
 
@@ -88,11 +88,17 @@ fn parse<T: for<'de> Deserialize<'de>>(body: &[u8]) -> ApiResult<T> {
     })
 }
 
-/// The caller in workspace `id`, and their account id when they have one.
-async fn caller(m: &Master, headers: &HeaderMap, id: &str) -> ApiResult<(Access, Option<String>)> {
+/// The caller in workspace `id`, their account id when they have one, and
+/// whether they may see the local node's servers (the Plugins rule).
+async fn caller(
+    m: &Master,
+    headers: &HeaderMap,
+    id: &str,
+) -> ApiResult<(Access, Option<String>, bool)> {
     let who = require(m, headers).await?;
     let a = access(m, &who, id).await?;
-    Ok((a, who.user_id))
+    let local_ok = crate::workspaces::may_use_local_node(m, &who);
+    Ok((a, who.user_id, local_ok))
 }
 
 /// The caller's own account id: an account belongs to a person.
@@ -105,12 +111,44 @@ fn person(me: Option<String>) -> ApiResult<String> {
     })
 }
 
-/// Server names the nodes announce (any node: the check is conservative).
-fn announced(m: &Master) -> std::collections::BTreeSet<String> {
+/// Server names the nodes announce, as the Plugins screen shows them to
+/// the caller (the local node's only to those who may use it): a clash is
+/// told about nothing the caller could not see there.
+fn announced(m: &Master, local_ok: bool) -> std::collections::BTreeSet<String> {
     m.announcers()
         .into_iter()
+        .filter(|n| local_ok || !m.is_local_node(&n.node_id))
         .flat_map(|n| n.plugins.mcp_servers)
         .collect()
+}
+
+/// What a person saw of a connector before sending a token or checking:
+/// changes with its URL, its sign-in and its header.
+fn stamp(r: &ConnectorRow) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    for part in [
+        r.url.as_str(),
+        r.auth.as_str(),
+        r.header.as_deref().unwrap_or(""),
+    ] {
+        h.update((part.len() as u32).to_be_bytes());
+        h.update(part.as_bytes());
+    }
+    hex::encode(h.finalize())[..16].to_string()
+}
+
+/// `seen` must be the connector's [`stamp`] now: else 409, before anything
+/// is sent anywhere.
+fn same(r: &ConnectorRow, seen: &str) -> ApiResult<()> {
+    if stamp(r) == seen {
+        Ok(())
+    } else {
+        Err(err(
+            StatusCode::CONFLICT,
+            "this connector changed since you opened the page: look again",
+        ))
+    }
 }
 
 fn host_of(url: &str) -> String {
@@ -132,6 +170,7 @@ fn row_json(r: &ConnectorRow, clash: bool, connected: Option<bool>, offer: Optio
         "connected": connected,
         "offer": offer,
         "updated_ms": r.updated_ms,
+        "stamp": stamp(r),
     })
 }
 
@@ -157,7 +196,7 @@ async fn list(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Value>> {
-    let (a, me) = caller(&m, &headers, &id).await?;
+    let (a, me, local) = caller(&m, &headers, &id).await?;
     let ws = a.id().to_string();
     let w = ws.clone();
     let rows = m.inner.mirror.call(move |s| s.connectors_of(&w)).await?;
@@ -174,7 +213,7 @@ async fn list(
         }
         None => Vec::new(),
     };
-    let names = announced(&m);
+    let names = announced(&m, local);
     let list: Vec<Value> = rows
         .iter()
         .map(|r| {
@@ -259,13 +298,13 @@ async fn create(
     Path(id): Path<String>,
     body: Bytes,
 ) -> ApiResult<Json<Value>> {
-    let (a, me) = caller(&m, &headers, &id).await?;
+    let (a, me, local) = caller(&m, &headers, &id).await?;
     a.require(Perm::Settings)?;
     let d: Definition = parse(&body)?;
     let name = d.name.clone().unwrap_or_default();
     connectors::check_name(&name).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
     let (url, auth, header) = checked(&d)?;
-    if announced(&m).contains(&name) {
+    if announced(&m, local).contains(&name) {
         return Err(err(
             StatusCode::CONFLICT,
             format!("a node of this server has its own MCP server named {name}; pick another name"),
@@ -330,7 +369,7 @@ async fn edit(
     Path((id, cid)): Path<(String, String)>,
     body: Bytes,
 ) -> ApiResult<Json<Value>> {
-    let (a, me) = caller(&m, &headers, &id).await?;
+    let (a, me, local) = caller(&m, &headers, &id).await?;
     a.require(Perm::Settings)?;
     let d: Definition = parse(&body)?;
     let old = row(&m, a.id(), &cid).await?;
@@ -359,7 +398,7 @@ async fn edit(
     )
     .await;
     m.changed("connectors", Audience::Workspace(a.id().to_string()));
-    let mut v = row_json(&r, announced(&m).contains(&r.name), None, None);
+    let mut v = row_json(&r, announced(&m, local).contains(&r.name), None, None);
     v["disconnected"] = json!(removed);
     Ok(Json(v))
 }
@@ -369,7 +408,7 @@ async fn remove(
     headers: HeaderMap,
     Path((id, cid)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
-    let (a, me) = caller(&m, &headers, &id).await?;
+    let (a, me, _) = caller(&m, &headers, &id).await?;
     a.require(Perm::Settings)?;
     let old = row(&m, a.id(), &cid).await?;
     let (w, c) = (a.id().to_string(), cid.clone());
@@ -438,7 +477,16 @@ async fn run(
         ),
         None => None,
     };
-    let checked: Checked = connectors::check(&r.name, &r.url, header, &m.connector_net()).await;
+    let checked: Checked = connectors::check(
+        m.connector_pool(),
+        me,
+        &r.name,
+        &r.url,
+        header,
+        &m.connector_net(),
+    )
+    .await
+    .map_err(|b| err(StatusCode::TOO_MANY_REQUESTS, b.to_string()))?;
     m.connector_checked(&checked);
     checked.result.map_err(|f| {
         m.connector_failed(&r.connector_id);
@@ -451,6 +499,14 @@ async fn run(
 #[serde(deny_unknown_fields)]
 struct TokenBody {
     token: String,
+    /// The connector's stamp as the person saw it.
+    seen: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CheckBody {
+    seen: String,
 }
 
 async fn connect(
@@ -459,12 +515,13 @@ async fn connect(
     Path((id, cid)): Path<(String, String)>,
     body: Bytes,
 ) -> ApiResult<Json<Value>> {
-    let (a, me) = caller(&m, &headers, &id).await?;
+    let (a, me, local) = caller(&m, &headers, &id).await?;
     let me = person(me)?;
     let b: TokenBody = parse(&body)?;
     let token = connectors::clean_token(&b.token).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
-    drop(b);
+    let seen = b.seen;
     let r = row(&m, a.id(), &cid).await?;
+    same(&r, &seen)?;
     if r.auth != "token" {
         return Err(err(
             StatusCode::CONFLICT,
@@ -532,7 +589,7 @@ async fn connect(
     m.changed("connectors", Audience::User(me.clone()));
     Ok(Json(row_json(
         &r,
-        announced(&m).contains(&r.name),
+        announced(&m, local).contains(&r.name),
         Some(true),
         Some(offer),
     )))
@@ -543,7 +600,7 @@ async fn disconnect(
     headers: HeaderMap,
     Path((id, cid)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
-    let (a, me) = caller(&m, &headers, &id).await?;
+    let (a, me, _) = caller(&m, &headers, &id).await?;
     let me = person(me)?;
     let (u, w, c) = (me.clone(), a.id().to_string(), cid.clone());
     if !m
@@ -571,10 +628,13 @@ async fn check(
     State(m): State<Master>,
     headers: HeaderMap,
     Path((id, cid)): Path<(String, String)>,
+    body: Bytes,
 ) -> ApiResult<Json<Value>> {
-    let (a, me) = caller(&m, &headers, &id).await?;
+    let (a, me, local) = caller(&m, &headers, &id).await?;
     let me = person(me)?;
+    let b: CheckBody = parse(&body)?;
     let r = row(&m, a.id(), &cid).await?;
+    same(&r, &b.seen)?;
     let token = if r.auth == "token" {
         let (u, w, c) = (me.clone(), r.workspace_id.clone(), r.connector_id.clone());
         let blob = m
@@ -615,7 +675,7 @@ async fn check(
     let connected = (r.auth == "token").then_some(true);
     Ok(Json(row_json(
         &r,
-        announced(&m).contains(&r.name),
+        announced(&m, local).contains(&r.name),
         connected,
         Some(offer),
     )))

@@ -466,8 +466,15 @@ fn client(
             )
         })?;
     }
-    crate::remote::client(timeout, lookup, !h.private_address, &[])
-        .map_err(|_| unreachable("no HTTP client"))
+    crate::remote::client(
+        timeout,
+        lookup,
+        !h.private_address,
+        crate::remote::Redirects::SameOrigin,
+        false,
+        &[],
+    )
+    .map_err(|_| unreachable("no HTTP client"))
 }
 
 fn auth_headers(kind: ForgeKind, token: &Secret<String>) -> Result<HeaderMap, ()> {
