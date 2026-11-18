@@ -1620,14 +1620,35 @@ mod tests {
             .iter()
             .filter_map(|e| e.reason.as_deref())
             .collect();
-        assert!(reasons.len() >= 13, "{reasons:?}");
-        let mut l = list.clone();
-        l.note = l.note.map(|n| words(&n));
-        assert_eq!(l.showable(), Ok(()), "{l:#?}");
+        assert!(reasons.len() >= 19, "{reasons:?}");
         assert!(
-            l.entries
+            reasons
+                .iter()
+                .any(|r| r.contains("which the node does not read")),
+            "{reasons:?}"
+        );
+        let mut entries_only = list.clone();
+        entries_only.note = None;
+        assert_eq!(entries_only.showable(), Ok(()), "{entries_only:#?}");
+        assert!(
+            list.entries
                 .iter()
                 .any(|e| e.name == "good" && e.digest.is_some())
         );
+        // A person's request whose words name a long path and a long name
+        // (a folder gone, as Remove allows) still answers with a list the
+        // master takes: `handle` cuts the note and the file's state.
+        let gone = format!("/x/{}", "a".repeat(2000));
+        let o = pm.handle(
+            &p,
+            "u",
+            &gone,
+            &ProjectMcpRequest::Remove {
+                name: "n".repeat(2000),
+            },
+        );
+        let l = o.list.unwrap();
+        assert!(l.unreadable.is_some() && l.note.is_some());
+        assert_eq!(l.showable(), Ok(()), "{l:?}");
     }
 }
