@@ -3,6 +3,7 @@
 // per forge host the server allows: Connect (a pasted access token, sent once
 // and never shown again), then @login with its host, Replace token and
 // Disconnect. Everything the forge said is rendered as text only.
+import { own } from "../emptyView";
 import { useCallback, useEffect, useState } from "react";
 import { call } from "../api";
 import { shownName } from "../md/hiddenChars";
@@ -74,7 +75,7 @@ export default function Connections() {
             <li key={h.host} className="agent-row connection-row">
               <div className="grow">
                 <div>
-                  <strong>{KIND[h.kind] ?? h.kind}</strong> <span className="muted small">{h.host}</span>
+                  <strong>{own(KIND, h.kind) ?? h.kind}</strong> <span className="muted small">{h.host}</span>
                 </div>
                 {mine.map((c) => (
                   <Account key={c.id} c={c} pasting={pasting === c.id} onPaste={() => setPasting(c.id)} act={act} />

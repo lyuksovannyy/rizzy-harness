@@ -10,6 +10,8 @@ import Choices from "./Choices";
 import Form from "./Form";
 import { PREVIEW, type InputProps } from "./Input";
 import Progress from "./Progress";
+import { specFits } from "./shape";
+import { rt } from "../md/strings";
 
 const Chart = lazy(() => import("./Chart"));
 
@@ -17,6 +19,14 @@ const Chart = lazy(() => import("./Chart"));
  * `input` is where a question or form stands and where its answer goes. */
 export default function UiBlock({ block, slot, input }: { block: Block; slot?: ProgressSlot; input?: InputProps }) {
   const answer = input ?? { sessionId: null, messageId: null, blockId: block.id, info: PREVIEW };
+  if (!block.spec) return null;
+  // A spec of a shape its card does not read (shape.ts): one line instead.
+  if (!specFits(block))
+    return (
+      <div className="ui-error" role="note" data-testid="ui-unshown">
+        {rt("ui.unshown")}
+      </div>
+    );
   switch (block.type) {
     case "choices":
       return block.spec ? <Choices spec={block.spec} input={answer} /> : null;

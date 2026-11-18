@@ -1,22 +1,8 @@
 // Port of crates/core/src/view.rs. The shared fixture test keeps them equal.
 import type { BackgroundState, Item, ModelTokens, RawEvent, SessionView, StagedArtifact, TodoItem, Usage } from "./types";
+import { emptyView, own } from "./emptyView";
 
-export function emptyView(): SessionView {
-  return {
-    session_id: null,
-    head_seq: 0,
-    meta: null,
-    items: [],
-    running_turn: null,
-    pending_approvals: [],
-    unknown_events: 0,
-    running_agent: null,
-    variant_selection: {},
-    usage: { input_tokens: 0, output_tokens: 0, context_tokens: 0 },
-    context_tokens: 0,
-    checkpoints: {},
-  };
-}
+export { emptyView };
 
 export class FoldError extends Error {}
 
@@ -28,10 +14,13 @@ export const MAX_USAGE_MODELS = 16;
 // object through its prototype ("__proto__", "constructor"): reads check own
 // keys, writes define own properties (review of PR 119, M1). The objects stay
 // plain, so the view keeps the JSON shape the Rust fold writes.
+// The same holds for every map the view keys by a node's id (checkpoints by
+// turn, background entries, chat allows, variant choices): a "__proto__"
+// turn id once wrote to Object.prototype.
 type ByModel = Record<string, ModelTokens>;
-const own = (o: ByModel, k: string): ModelTokens | undefined => (Object.hasOwn(o, k) ? o[k] : undefined);
-const put = (o: ByModel, k: string, v: ModelTokens) =>
-  Object.defineProperty(o, k, { value: v, writable: true, enumerable: true, configurable: true });
+const put = <T>(o: Record<string, T>, k: string, v: T): T => (
+  Object.defineProperty(o, k, { value: v, writable: true, enumerable: true, configurable: true }), v
+);
 
 /** Rust's BTreeMap<String> order: UTF-8 bytes, which is code point order
  * (JS objects list integer-like keys first, and `sort()` compares UTF-16). */
@@ -55,12 +44,9 @@ function tokensOf(t: ModelTokens): ModelTokens {
   return c;
 }
 
-const isObj = (x: unknown): boolean => !!x && typeof x == "object" && !Array.isArray(x);
-const str = (x: unknown) => (typeof x == "string" ? x : "");
+const isObj = (x: unknown): x is Record<string, unknown> => !!x && typeof x == "object" && !Array.isArray(x);
 
 function addUsage(to: Usage, u: Usage) {
-  // A node's payload is not type-checked on the way (review F7).
-  if (!isObj(u)) return;
   to.input_tokens += u.input_tokens;
   to.output_tokens += u.output_tokens;
   if (u.cache_read_tokens) to.cache_read_tokens = (to.cache_read_tokens ?? 0) + u.cache_read_tokens;
@@ -68,7 +54,6 @@ function addUsage(to: Usage, u: Usage) {
   const from = u.by_model ?? {};
   for (const model of sortedKeys(from)) {
     const t = own(from, model)!;
-    if (!isObj(t)) continue;
     const by = (to.by_model ??= {});
     const mine = own(by, model);
     if (mine) {
@@ -105,44 +90,209 @@ export function cappedUsage(u: Usage): Usage {
 const IMAGE_WITHHELD_ROW =
   "[image not shown to the model: the provider refused a request that carried it]";
 
-const KNOWN = new Set([
-  "session_created",
-  "turn_started",
-  "user_message",
-  "assistant_delta",
-  "assistant_message",
-  "tool_call_started",
-  "tool_output_delta",
-  "tool_call_finished",
-  "approval_requested",
-  "approval_resolved",
-  "checkpoint",
-  "turn_ended",
-  "error",
-  "agent_changed",
-  "variant_selected",
-  "history_summarized",
-  "context_shortened",
-  "model_fallback",
-  "model_retry",
-  "retry_given_up",
-  "artifact_staged",
-  "artifact_stage_failed",
-  "background_started",
-  "background_ended",
-  "callback_refused",
-  "queued_delivered",
-  "todo_updated",
-  "approval_mode_changed",
-  "context_sent",
-  "chat_allow_added",
-  "chat_allow_removed",
-  "step_limit_changed",
-  "handoff_written",
-  "compact_failed",
-  "images_withheld",
-  "thinking_withheld",
-]);
+// ── The guard: where events enter the fold (nothing a node sends can crash it) ──
+// A node's payload reaches the browser as the node wrote it: the master
+// relays it without reading it, and a node may be older, newer, buggy or
+// hostile (reviews of PRs 130, 134 and 137 each found one that crashed a
+// fold or a row). So every payload is checked here, once, against the
+// schema of its kind, and the fold below reads only the checked copy:
+// - a payload that is not an object, or a field serde requires that is
+//   missing, of the wrong type or (an enum) not one of its values, drops
+//   the event: it is counted in `unknown_events` and the state is otherwise
+//   the state before it. The Rust fold does the same with what serde cannot
+//   read. An enum value outside its list drops the event wherever it stands
+//   (optional fields and array elements too): a newer node's new value is
+//   therefore not shown by an older page, and counted, as the Rust fold
+//   counts it;
+// - an optional field of the wrong type is left out, as if absent, and so is
+//   an array element of the wrong type. Here the browser deliberately
+//   differs from the Rust fold, which drops the whole event: a bad `thinking`
+//   or background `child` does not cost the message or the end (review of
+//   PR 137). Only a buggy or hostile node causes it, and the chat then shows
+//   an event the server's own views count as unknown;
+// - fields the guard does not list are left out (forward compatible: a
+//   newer node's extra fields fold as before; serde drops them too).
+// Numbers are checked as numbers, not as serde's integer ranges. `j` values
+// are kept as sent (a tool's `input`, a `ui:` block's `spec`, a form's
+// values), and so is an artifact's `meta` (`o`): the rows that read inside
+// them check what they read.
+//
+// The table is compared with the Rust schema (web/src/schema.test.ts and
+// crates/core/tests/browser_schema.rs): every field serde requires is
+// listed, and every optional one is listed or named there as not read.
+//
+// A field is `name` (a string) or `name:T`, `?name` when optional. T is one
+// of s n b (string, number, boolean), o (an object), j (any JSON value),
+// =e (one of ENUMS[e]), [T (an array of T), {T (an object of T by key) or
+// @x (the struct x of STRUCTS).
+const ENUMS: Record<string, string> = {
+  approvalMode: "plan ask_all ask accept_edits auto",
+  profile: "chat agentic",
+  execMode: "sandbox host",
+  turnEnd: "completed cancelled error interrupted stopped limit",
+  mention: "file cut folder missing refused binary too_large",
+  uiKind: "choices form progress chart",
+  thought: "signed redacted text",
+  stream: "stdout stderr",
+  decision: "allow deny allow_session allow_chat",
+  resolvedBy: "user policy cancelled interrupted",
+  phase: "before after restored before_restore",
+  bgReason: "exited timed_out stopped_by_agent stopped_by_user access_revoked session_deleted node_stopping node_restarted finished",
+  confirmed: "ended still_alive unconfirmed unknown",
+  retryReason: "rate_limit overloaded server_error network no_answer",
+  stagedBy: "agent user",
+  todoStatus: "pending in_progress done",
+  frame: "person task callback step",
+};
+
+const STRUCTS: Record<string, string> = {
+  tokens: "input_tokens:n output_tokens:n ?cache_read_tokens:n ?cache_write_tokens:n",
+  usage:
+    "input_tokens:n output_tokens:n context_tokens:n ?cache_read_tokens:n ?cache_write_tokens:n ?window:n ?summary_at:n ?model ?by_model:{@tokens",
+  agent: "agent_id name prompt_hash ?withheld:[s ?effort",
+  variant: "group index:n ?model",
+  cause: "callback:[s",
+  retry: "turn_id reason:=turnEnd ?failed_model ?model",
+  attachment: "name mime text",
+  mention: "path state:=mention",
+  reply: "message_id block_id values:{j",
+  image: "media_id sha256 mime name width:n height:n",
+  ui: "ordinal:n hash type:=uiKind id ?spec:j ?error",
+  thinking: "model blocks:[@thought",
+  thought: "type:=thought ?text",
+  source: "id url title",
+  cleared: "turn_id results:n",
+  unthought: "turn_id steps:n",
+  folded: "steps:n text",
+  child: "session agent_id",
+  ended: "session agent_id ?result ?usage:@usage",
+  failure: "model reason",
+  todo: "content status:=todoStatus",
+};
+
+// Every kind the fold handles.
+const KINDS: Record<string, string> = {
+  session_created:
+    "title cwd model backend node_id approval_mode:=approvalMode profile:=profile ?agent_id ?incognito:b ?parent_session ?no_callbacks:b ?exec_mode:=execMode",
+  turn_started: "turn_id ?agent:@agent ?cause:@cause ?continued_by ?retry:@retry",
+  user_message: "turn_id text ?attachments:[@attachment ?files:[@mention ?reply:@reply ?images:[@image ?queued:b",
+  assistant_delta: "turn_id message_id text ?author ?variant:@variant",
+  assistant_message: "turn_id message_id text ?author ?variant:@variant ?blocks:[@ui ?thinking:@thinking",
+  tool_call_started: "turn_id call_id tool input:j ?author",
+  tool_output_delta: "call_id stream:=stream text",
+  tool_call_finished: "call_id ok:b output ?exit_code:n ?sources:[@source",
+  approval_requested: "approval_id call_id tool input:j reason ?turn_allow:b ?chat_allow:b",
+  approval_resolved: "approval_id decision:=decision by:=resolvedBy ?note",
+  checkpoint: "turn_id phase:=phase git_ref ?files:[s",
+  turn_ended: "turn_id reason:=turnEnd ?usage:@usage",
+  error: "message",
+  agent_changed: "agent:@agent ?model",
+  variant_selected: "group message_id",
+  history_summarized: "turn_id through_seq:n text ?manual:b ?focus ?usage:@usage ?tokens_after:n",
+  context_shortened: "turn_id ?cleared:@cleared ?folded:@folded ?thinking:@unthought tokens_before:n tokens_after:n",
+  model_fallback: "turn_id model from ?reason",
+  model_retry: "turn_id model attempt:n of:n at_ms:n wait_ms:n reason:=retryReason",
+  retry_given_up: "turn_id model",
+  artifact_staged:
+    "stage_id ?call_id by:=stagedBy name filename ?packed size:n sha256 ?kind_hint source_path ?notes ?meta:o",
+  artifact_stage_failed: "path ?name error",
+  background_started: "bg_id call_id turn_id timeout_s:n ends_by_ms:n ?child:@child",
+  background_ended:
+    "bg_id reason:=bgReason ?exit_code:n confirmed:=confirmed ran_ms:n output_bytes:n ?tail ?child:@ended",
+  callback_refused: "bg_ids:[s reason",
+  queued_delivered: "turn_id seqs:[n",
+  todo_updated: "turn_id call_id ?items:[@todo",
+  approval_mode_changed: "mode:=approvalMode ?requested:=approvalMode",
+  context_sent: "turn_id frame:=frame",
+  chat_allow_added: "grant_id approval_id tool input:j",
+  chat_allow_removed: "grant_id",
+  step_limit_changed: "max_steps:n ?requested:n",
+  handoff_written: "through_seq:n ?text ?model ?failed:[@failure ?usage:@usage",
+  compact_failed: "reason ?usage:@usage",
+  images_withheld: "turn_id calls:[s status:n",
+  thinking_withheld: "turn_id model status:n",
+};
+
+/** The guard's tables, for the test that compares them with Rust's schema. */
+export const GUARD = { ENUMS, STRUCTS, KINDS };
+
+const BAD = Symbol("bad");
+// A string outside its enum: never left out as a bad optional field or array
+// element would be, it drops the whole event (a newer node's value, which
+// serde refuses too; rows key tables by these strings).
+const UNKNOWN = Symbol("unknown value");
+type Field = [name: string, optional: boolean, type: string];
+const parsed = new Map<string, Field[]>();
+const fields = (spec: string): Field[] => {
+  let f = parsed.get(spec);
+  if (!f) {
+    f = spec
+      .split(" ")
+      .filter(Boolean)
+      .map((w) => {
+        const opt = w[0] === "?";
+        const [name, type = "s"] = (opt ? w.slice(1) : w).split(":");
+        return [name!, opt, type];
+      });
+    parsed.set(spec, f);
+  }
+  return f;
+};
+
+/** `x` as type `t`, a checked copy, BAD, or UNKNOWN (which wins over everything). */
+function checked(t: string, x: unknown): unknown {
+  const rest = t.slice(1);
+  switch (t[0]) {
+    case "s":
+      return typeof x == "string" ? x : BAD;
+    case "n":
+      return typeof x == "number" ? x : BAD;
+    case "b":
+      return typeof x == "boolean" ? x : BAD;
+    case "o":
+      return isObj(x) ? x : BAD;
+    case "j":
+      return x === undefined ? BAD : x;
+    case "=":
+      return typeof x != "string" ? BAD : ENUMS[rest]!.split(" ").includes(x) ? x : UNKNOWN;
+    case "[": {
+      if (!Array.isArray(x)) return BAD;
+      const a = x.map((y) => checked(rest, y));
+      return a.includes(UNKNOWN) ? UNKNOWN : a.filter((y) => y !== BAD);
+    }
+    case "{": {
+      if (!isObj(x)) return BAD;
+      const m: Record<string, unknown> = {};
+      for (const k of Object.keys(x)) {
+        const y = checked(rest, x[k]);
+        if (y === UNKNOWN) return UNKNOWN;
+        if (y !== BAD) put(m, k, y);
+      }
+      return m;
+    }
+    default:
+      return struct(STRUCTS[rest]!, x);
+  }
+}
+
+function struct(spec: string, x: unknown): unknown {
+  if (!isObj(x)) return BAD;
+  const out: Record<string, unknown> = {};
+  for (const [name, opt, type] of fields(spec)) {
+    const v = Object.hasOwn(x, name) ? x[name] : undefined;
+    const y = opt && v == null ? BAD : checked(type, v);
+    if (y === UNKNOWN) return UNKNOWN;
+    if (y !== BAD) out[name] = y;
+    else if (!opt) return BAD;
+  }
+  return out;
+}
+
+/** Counted, and one console line: the kind (cut) and seq, never the content. */
+function notShown(v: SessionView, e: RawEvent) {
+  v.unknown_events += 1;
+  console.warn("[fold] event not shown:", String(e.kind).slice(0, 64), e.seq);
+}
 
 const CLEARS_RETRY = new Set([
   "turn_started",
@@ -205,11 +355,22 @@ export function apply(v: SessionView, e: RawEvent): void {
   }
   v.session_id = e.session_id;
   v.head_seq = e.seq;
-  if (!KNOWN.has(e.kind)) {
-    v.unknown_events += 1;
-    return;
+  const p = Object.hasOwn(KINDS, e.kind) ? struct(KINDS[e.kind]!, e.payload) : BAD;
+  if (p === BAD || p === UNKNOWN) return notShown(v, e);
+  try {
+    fold1(v, e, p);
+  } catch {
+    // No checked payload reaches this (the fuzz tests). If a fold bug does,
+    // the chat stays up, but the step is not atomic: what it changed before
+    // the throw (a `delete v.retry`, a pushed item) stays, and the event is
+    // also counted. Accepted: making it atomic needs a copy of the view per
+    // event, for a case no input reaches.
+    notShown(v, e);
   }
-  const p = e.payload ?? {};
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function fold1(v: SessionView, e: RawEvent, p: any): void {
   // Anything the turn shows next means the wait is over (as the Rust view).
   if (CLEARS_RETRY.has(e.kind)) delete v.retry;
   switch (e.kind) {
@@ -294,8 +455,7 @@ export function apply(v: SessionView, e: RawEvent): void {
     case "assistant_message": {
       const a = lastAssistant(v, p.message_id);
       // Its thinking, a row before what the step said (X.25), as the Rust view.
-      // The blocks as the server sent them (kind and text only, `for_browser`);
-      // the row checks them (an array, each block), so a malformed one breaks nothing.
+      // Each block's kind and text (`for_browser` sent no more; the guard keeps no more).
       if (p.thinking) v.items.splice(a ? v.items.indexOf(a) : v.items.length, 0, { type: "thinking", message_id: p.message_id, blocks: p.thinking.blocks });
       if (a) {
         a.text = p.text;
@@ -345,7 +505,7 @@ export function apply(v: SessionView, e: RawEvent): void {
     }
     case "images_withheld": {
       // As the Rust view: the row says its image was not shown (X.23).
-      for (const id of Array.isArray(p.calls) ? p.calls : []) {
+      for (const id of p.calls) {
         const t = lastTool(v, id);
         if (t?.result) t.result.output += "\n\n" + IMAGE_WITHHELD_ROW;
       }
@@ -376,7 +536,7 @@ export function apply(v: SessionView, e: RawEvent): void {
       break;
     }
     case "checkpoint": {
-      const c = (v.checkpoints[p.turn_id] ??= { before: null, after: null, files: [], restored: false });
+      const c = own(v.checkpoints, p.turn_id) ?? put(v.checkpoints, p.turn_id, { before: null, after: null, files: [], restored: false });
       if (p.phase === "before") c.before = p.git_ref;
       else if (p.phase === "after") {
         c.after = p.git_ref;
@@ -406,9 +566,12 @@ export function apply(v: SessionView, e: RawEvent): void {
     case "error":
       v.items.push({ type: "error", message: p.message });
       break;
-    case "agent_changed":
-      v.items.push({ type: "agent_changed", agent: p.agent, model: p.model });
+    case "agent_changed": {
+      const it: Extract<Item, { type: "agent_changed" }> = { type: "agent_changed", agent: p.agent };
+      if (p.model != null) it.model = p.model;
+      v.items.push(it);
       break;
+    }
     case "approval_mode_changed": {
       if (v.meta) v.meta.approval_mode = p.mode;
       const it: Extract<Item, { type: "approval_mode_changed" }> = { type: "approval_mode_changed", mode: p.mode };
@@ -424,7 +587,7 @@ export function apply(v: SessionView, e: RawEvent): void {
       break;
     }
     case "variant_selected":
-      v.variant_selection[p.group] = p.message_id;
+      put(v.variant_selection, p.group, p.message_id);
       break;
     case "history_summarized": {
       // A person's /compact (X.20): its cost is the chat's, and the meter
@@ -473,16 +636,14 @@ export function apply(v: SessionView, e: RawEvent): void {
     case "background_started": {
       const b: BackgroundState = { call_id: p.call_id, ends_by_ms: p.ends_by_ms, timeout_s: p.timeout_s, ended: false };
       // A background sub-agent (X.24), not a command.
-      // Only as an object, with strings (review F7: a node's payload is untyped).
-      const c = p.child;
-      if (isObj(c)) b.child = { session: str(c.session), agent_id: str(c.agent_id) };
-      (v.background ??= {})[p.bg_id] = b;
+      if (p.child) b.child = p.child;
+      put((v.background ??= {}), p.bg_id, b);
       break;
     }
     case "background_ended": {
-      const b = v.background?.[p.bg_id];
+      const b = v.background && own(v.background, p.bg_id);
       if (b) b.ended = true;
-      const c = isObj(p.child) ? p.child : null;
+      const c = p.child;
       // Its cost is the chat's, as a foreground sub-agent's is its turn's.
       if (c?.usage) addUsage(v.usage, c.usage);
       const it: Extract<Item, { type: "background_ended" }> = {
@@ -491,14 +652,14 @@ export function apply(v: SessionView, e: RawEvent): void {
         reason: p.reason,
         exit_code: p.exit_code ?? null,
         ran_ms: p.ran_ms,
-        tail: c ? str(c.result) : (p.tail ?? ""),
+        tail: (c ? c.result : p.tail) ?? "",
       };
-      if (c) it.agent = str(c.agent_id);
+      if (c) it.agent = c.agent_id;
       v.items.push(it);
       break;
     }
     case "chat_allow_added":
-      (v.chat_allows ??= {})[p.grant_id] = { tool: p.tool, input: p.input };
+      put((v.chat_allows ??= {}), p.grant_id, { tool: p.tool, input: p.input });
       break;
     case "chat_allow_removed":
       if (v.chat_allows) {
@@ -508,8 +669,8 @@ export function apply(v: SessionView, e: RawEvent): void {
       break;
     case "todo_updated": {
       // The whole list each time; an empty one is no list (serde omits it).
-      const items = Array.isArray(p.items) ? p.items : [];
-      if (items.length) v.todo = items.map((i: { content: string; status: TodoItem["status"] }) => ({ content: i.content, status: i.status }));
+      const items: TodoItem[] = p.items ?? [];
+      if (items.length) v.todo = items;
       else delete v.todo;
       break;
     }

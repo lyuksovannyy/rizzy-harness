@@ -4,6 +4,7 @@
 // delete (an agent's items can go from Artifacts too), and open one in the preview (MediaPreview, its own chunk, which
 // chats use too). Thumbnails are made by this browser (lib/thumbs.ts) as
 // tiles scroll into view. A lazy chunk; the strings live here.
+import { own } from "../emptyView";
 import { Bot, File, Film, Image as ImageIcon, Music, Play, Upload } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { HttpError } from "../api";
@@ -63,7 +64,7 @@ interface Sending {
 /** What a tile says to a screen reader: "beach.jpg, Image, 2.3 MB, added 3 days ago". */
 export function tileLabel(m: MediaItem, now: number): string {
   const added = when(m.created_ms, now).replace(/^(Yesterday|Now)$/i, (w) => w.toLowerCase());
-  return `${m.name}, ${KIND_LABEL[m.kind]}, ${bytes(m.size)}, added ${added}${m.origin === "agent" ? ", published by an agent" : ""}`;
+  return `${m.name}, ${own(KIND_LABEL, m.kind) ?? m.kind}, ${bytes(m.size)}, added ${added}${m.origin === "agent" ? ", published by an agent" : ""}`;
 }
 
 /** "Use in chat": the id waits in this tab for the home bar (at most the 4 a message takes). */

@@ -31,12 +31,16 @@ import type {
 } from "../types";
 import type { Submission } from "./Composer";
 import { Home } from "./Home";
+import { Screen } from "./ScreenBoundary";
 import type { FeaturePageProps } from "./pages";
 import { Sidebar } from "./Sidebar";
 import { agentDefaults, type AgentDefaults } from "../lib/agentDefaults";
 
 // Everything but the home screen loads on demand (new-tab speed budget).
-const Conversation = lazy(() => import("./Conversation"));
+// The chat's chunk and the fold's at once (live.ts loads the fold for a
+// watched chat): one wait, and a fold chunk that is gone fails the chat's
+// screen, which says so, instead of a chat that never loads.
+const Conversation = lazy(() => Promise.all([import("./Conversation"), import("../fold")]).then(([m]) => m));
 const Settings = lazy(() => import("./Settings"));
 const Onboarding = lazy(() => import("./Onboarding"));
 const Agents = lazy(() => import("./Agents"));
@@ -623,7 +627,8 @@ export function Shell(props: {
               <MemoryShareAsk workspace={w} onAnswered={workspacesChanged} />
             </Suspense>
           ))}
-        <Suspense fallback={<div className="muted pad">Loading…</div>}>
+        {/* Its chunk gone (an update) or a throw: a message in its place; the sidebar stays. */}
+        <Screen reset={routeHash(route)}>
           {route.kind === "session" ? (
             <Conversation
               key={route.id}
@@ -729,7 +734,7 @@ export function Shell(props: {
               history={history}
             />
           )}
-        </Suspense>
+        </Screen>
       </main>
       {searching && (
         <Suspense fallback={<SearchPending typed={searchTyped} />}>

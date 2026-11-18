@@ -3422,6 +3422,20 @@ node accepts from its master only a node id in the master's own shape
 (`a-z`, `0-9`, `-`, at most 64): anything else is refused, also with 77.
 Upgrade the server first, then its nodes.
 
+A chat shows what it can of a node's events: one it does not know (a newer
+node, or a value of a list such as an end reason that this page does not
+know) or one missing what the event needs (a node with a bug) is left out,
+counted, and named in the browser's console by its kind and number, and the
+chat says "N of this chat's events could not be shown". An event whose
+optional part is malformed still shows, without that part: the server's own
+views count such an event as unknown, so only a buggy or hostile node makes
+the two differ. A part of the chat that cannot be drawn shows "This item
+could not be shown." in its place, and the rest of the chat stays; a tool
+call waiting for your answer then offers only Deny. A browser tab left open
+across a server upgrade can ask for page parts that no longer exist: the
+page then says the app may have been updated, with a Reload button, and the
+sidebar stays usable; it never reloads by itself.
+
 **A node on a slow link.** A node's chats share one link to the server.
 When they produce output faster than the link carries (several chats
 streaming command output over a slow uplink), the node holds their output

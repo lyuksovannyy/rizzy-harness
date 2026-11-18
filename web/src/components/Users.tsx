@@ -1,3 +1,4 @@
+import { own } from "../emptyView";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { pageApi } from "../apiPages";
 import type { Me, Role, User } from "../types";
@@ -119,7 +120,7 @@ export function Users({ me }: { me: Me }) {
                         u.role === "admin" &&
                         role === "member" &&
                         !confirm(
-                          `Make ${u.username} a user? Their level will then be ${LEVEL_LABEL[u.exec_ceiling_stored]}; set it first if that is not what they should have.`,
+                          `Make ${u.username} a user? Their level will then be ${own(LEVEL_LABEL, u.exec_ceiling_stored) ?? u.exec_ceiling_stored}; set it first if that is not what they should have.`,
                         )
                       )
                         return;

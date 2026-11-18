@@ -14,7 +14,8 @@ function restore(spec: FormSpec, raw: unknown): Draft {
   const draft = initialDraft(spec);
   if (!raw || typeof raw !== "object") return draft;
   for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    const was = draft[k];
+    // A stored key is the browser's, the field ids the model's: own keys only.
+    const was = Object.hasOwn(draft, k) ? draft[k] : undefined;
     const same = Array.isArray(was) ? Array.isArray(v) && v.every((x) => typeof x === "string") : typeof v === typeof was;
     if (was !== undefined && same) draft[k] = v as Draft[string];
   }
@@ -76,7 +77,7 @@ export default function Form({ spec, input }: { spec: FormSpec; input: InputProp
                   disabled={!ready}
                   // Only a value can be wrong; a missing required one
                   // just keeps Send off.
-                  error={f.id in values ? fieldError(f, values[f.id]) : null}
+                  error={Object.hasOwn(values, f.id) ? fieldError(f, values[f.id]) : null}
                 />
               )}
             </li>

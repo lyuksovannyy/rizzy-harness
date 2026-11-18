@@ -2,6 +2,7 @@
 // over everything, opened from the sidebar, Ctrl/Cmd+K or "/". One input,
 // a tab per kind, and a listbox the arrow keys move through while focus
 // stays in the input. Nothing typed lists the newest items.
+import { own } from "../emptyView";
 import { CalendarClock, File, Film, Image, MessageSquare, Music, Package, Terminal, X } from "lucide-react";
 import { type KeyboardEvent, type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { api } from "../api";
@@ -105,7 +106,7 @@ function icon(r: SearchResult, projects: ProjectSummary[]): ReactNode {
   if (r.type === "routine") return <CalendarClock size={16} />;
   if (r.type === "agentic") return <Terminal size={16} />;
   if (r.kind === "chat") return <MessageSquare size={16} />;
-  return KIND_ICON[r.type] ?? <File size={16} />;
+  return own(KIND_ICON, r.type) ?? <File size={16} />;
 }
 
 interface Page {
@@ -314,7 +315,7 @@ export default function SearchPanel(props: {
                 <span className="search-line">
                   <span className="ellipsis grow">
                     <Highlight text={r.title || t("session.untitled")} />
-                    <span className="muted"> · {TYPE_LABEL[r.type] ?? TYPE_LABEL.other}</span>
+                    <span className="muted"> · {own(TYPE_LABEL, r.type) ?? TYPE_LABEL.other}</span>
                   </span>
                   <span className="muted small search-when">{when(r.time_ms, now, props.timeZone)}</span>
                 </span>

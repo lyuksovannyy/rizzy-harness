@@ -3,6 +3,7 @@
 // and the choices with one line each saying what runs unasked. A choice the
 // node does not allow is shown disabled with the reason. The node decides:
 // it clamps whatever is sent, and the chat shows what it recorded.
+import { own } from "../emptyView";
 import { Select } from "./Select";
 import type { ApprovalMode } from "../types";
 
@@ -21,12 +22,15 @@ const HOST_AUTO = "Runs every command as the node's own user, no sandbox, with n
 
 /** Why `mode` cannot be chosen here, or null: only the node's ceiling. */
 export function whyNot(mode: ApprovalMode, max: ApprovalMode): string | null {
-  return RANK[mode] > RANK[max] ? "Off on this node (max_approval_mode in its node.toml)" : null;
+  return rank(mode) > rank(max) ? "Off on this node (max_approval_mode in its node.toml)" : null;
 }
+
+/** A mode this build does not know (from a node or the server) ranks as the strictest. */
+const rank = (m: string) => own(RANK, m) ?? -1;
 
 /** The loosest of `mode` and what the node allows (what it will give). */
 export function clampMode(mode: ApprovalMode, max: ApprovalMode): ApprovalMode {
-  return RANK[mode] > RANK[max] ? max : mode;
+  return rank(mode) > rank(max) ? max : mode;
 }
 
 export function ApprovalModePick(props: {

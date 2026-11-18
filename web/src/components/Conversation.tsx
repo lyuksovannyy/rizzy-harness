@@ -1,8 +1,9 @@
 // An open session: header, timeline, reply composer. Loaded lazily so the
 // new-tab home screen stays small.
+import { own } from "../emptyView";
 import "../lib/i18nPages";
 import { AtSign, Download, FileText, Image as ImageIcon, Package, Trash2 } from "lucide-react";
-import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { isValidElement, lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { api } from "../api";
 import { pageApi } from "../apiPages";
 import { endWords, turnStart } from "../lib/callback";
@@ -51,6 +52,7 @@ import { type Outgoing, outbox } from "../lib/outbox";
 import { LiveCtx } from "../lib/liveCtx";
 import { repliedBlock, ReplyBubble } from "./ReplyBubble";
 import { ToolCard, WebGroupCard } from "./ToolCard";
+import { RowBoundary, RowFailed } from "./RowBoundary";
 import { canJoinProject, ProjectChip } from "./ProjectChip";
 import type { ProjectSummary } from "../lib/projects";
 
@@ -275,6 +277,23 @@ export default function Conversation(props: {
     return () => live.unwatch(sessionId);
   }, [live, sessionId]);
   const view = live.view(sessionId);
+  /** One item, in its own boundary: a row that throws costs that row, not the chat (RowBoundary). */
+  const row = (it: Item, i: number, draw: () => ReactNode) => {
+    let el: ReactNode;
+    try {
+      el = draw();
+    } catch (e) {
+      console.error(e);
+      el = <RowFailed item={it} sessionId={sessionId} canAnswer={!blocked} />;
+    }
+    if (el == null || el === false) return null;
+    const key = isValidElement(el) && el.key != null ? el.key : i;
+    return (
+      <RowBoundary key={key} item={it} sessionId={sessionId} canAnswer={!blocked}>
+        {el}
+      </RowBoundary>
+    );
+  };
   const scroller = useRef<HTMLDivElement>(null);
   const stick = useRef(true);
 
@@ -563,7 +582,7 @@ export default function Conversation(props: {
             {!view || view.head_seq === 0 ? (
               <div className="muted pad">Loading…</div>
             ) : (
-              view.items.map((it, i) => {
+              view.items.map((it, i) => row(it, i, () => {
                 if (i <= groupedUntil) return null;
                 const web = webGroups.get(i);
                 if (web) {
@@ -588,7 +607,7 @@ export default function Conversation(props: {
                     (x): x is Extract<typeof x, { type: "assistant" }> => x.type === "assistant" && x.variant?.group === g,
                   );
                   const chosen =
-                    view.variant_selection[g] ?? answers.find((a) => a.variant?.index === 0)?.message_id;
+                    own(view.variant_selection, g) ?? answers.find((a) => a.variant?.index === 0)?.message_id;
                   const busy = running && view.running_turn === g;
                   return (
                     <div key={i} className="variants" style={{ gridTemplateColumns: `repeat(${answers.length}, minmax(0, 1fr))` }}>
@@ -749,8 +768,8 @@ export default function Conversation(props: {
                   case "approval_mode_changed":
                     return (
                       <div key={i} className="divider">
-                        Approval mode: {MODE_NAMES[it.mode]}
-                        {it.requested ? ` (asked for ${MODE_NAMES[it.requested]}; this node allows no more)` : ""}
+                        Approval mode: {own(MODE_NAMES, it.mode)}
+                        {it.requested ? ` (asked for ${own(MODE_NAMES, it.requested)}; this node allows no more)` : ""}
                       </div>
                     );
                   case "step_limit_changed":
@@ -814,10 +833,10 @@ export default function Conversation(props: {
                     );
                   }
                   case "turn_end": {
-                    const cp = view.checkpoints[it.turn_id];
+                    const cp = own(view.checkpoints, it.turn_id);
                     const laterChanges = view.items.slice(i + 1).some((x) => {
                       if (x.type !== "turn_end") return false;
-                      const c = view.checkpoints[x.turn_id];
+                      const c = own(view.checkpoints, x.turn_id);
                       return !!c && c.files.length > 0 && !c.restored;
                     });
                     const undo =
@@ -863,7 +882,13 @@ export default function Conversation(props: {
                     );
                   }
                 }
-              })
+              }))
+            )}
+            {/* Events this page could not fold: a newer node's kind, or a payload of the wrong shape (fold.ts, the guard). */}
+            {!!view?.unknown_events && (
+              <div className="small muted pad" role="note" data-testid="unshown">
+                {t("conv.unshown", { n: String(view.unknown_events) })}
+              </div>
             )}
             {sending.map((o) => (
               <div key={`out${o.id}`} className={`msg user ${o.failed ? "failed" : o.ok ? "sent" : "sending"}`}>
@@ -1030,11 +1055,11 @@ export default function Conversation(props: {
         </div>
         {diffOf?.session === sessionId &&
           (() => {
-            const cp = view?.checkpoints[diffOf.turn];
+            const cp = own(view?.checkpoints, diffOf.turn);
             const at = items.findIndex((x) => x.type === "turn_end" && x.turn_id === diffOf.turn);
             const laterChanges = items.slice(at + 1).some((x) => {
               if (x.type !== "turn_end") return false;
-              const c = view?.checkpoints[x.turn_id];
+              const c = own(view?.checkpoints, x.turn_id);
               return !!c && c.files.length > 0 && !c.restored;
             });
             return (
