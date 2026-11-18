@@ -1398,6 +1398,61 @@ mod tests {
     /// the agent and the person from the session (PLAN.md T81). A field
     /// naming any of them is not read, and the answer is text or a reason.
     #[test]
+    fn project_mcp_messages_name_no_program() {
+        // X.36: an approval names a server and a digest, never a command;
+        // a command, an argument or an environment sent beside it is not
+        // kept.
+        let v = json!({"type": "project.mcp", "req_id": "r", "user_id": "01A", "folder": "/p",
+                       "request": {"op": "approve", "name": "s", "digest": "d",
+                                   "command": "sh", "args": ["-c", "x"], "env": {"A": "1"}}});
+        assert_eq!(
+            serde_json::from_value::<MasterToNode>(v).unwrap(),
+            MasterToNode::ProjectMcp {
+                req_id: "r".into(),
+                user_id: "01A".into(),
+                folder: "/p".into(),
+                request: ProjectMcpRequest::Approve {
+                    name: "s".into(),
+                    digest: "d".into()
+                },
+            }
+        );
+        assert!(
+            serde_json::from_value::<MasterToNode>(
+                json!({"type": "project.mcp", "req_id": "r", "user_id": "u", "folder": "/p",
+                       "request": {"op": "install", "command": "sh"}})
+            )
+            .is_err()
+        );
+        // An entry carries environment names, never values.
+        let e = ProjectMcpEntry {
+            name: "s".into(),
+            state: ProjectMcpState::New,
+            command: "npx".into(),
+            args: vec![],
+            env_keys: vec!["TOKEN".into()],
+            digest: None,
+            reason: None,
+            approved_command: None,
+            approved_args: None,
+            approved_env_keys: None,
+        };
+        let text = serde_json::to_string(&e).unwrap();
+        assert!(!text.contains("\"env\""), "{text}");
+        for (id, ok) in [
+            ("01JD8Z", true),
+            ("a-b_c", true),
+            ("", false),
+            ("a b", false),
+            ("a\nb", false),
+            ("é", false),
+        ] {
+            assert_eq!(valid_user_id(id), ok, "{id:?}");
+        }
+        assert!(!valid_user_id(&"a".repeat(MAX_USER_ID + 1)));
+    }
+
+    #[test]
     fn skill_messages_name_no_place() {
         let sid: SessionId = "0193f2a0-0000-7000-8000-000000000001".parse().unwrap();
         let r = NodeToMaster::Skill {

@@ -418,3 +418,86 @@ async fn notes_are_shown_once_per_session() {
     s.close();
     s.wait_gone(mcp::STOP_WAIT).await;
 }
+
+/// X.36 (PLAN.md T82): a repository's approved servers join the table
+/// through `set_project`, beside node.toml's: a name node.toml has stays
+/// node.toml's; one taken out (its approval removed, gone from the file)
+/// stops, and a tool of it a turn still holds starts nothing again; its
+/// `env` values are set inside the command (`/usr/bin/env`), never on the
+/// process that starts it.
+#[tokio::test]
+async fn a_repositorys_servers_come_and_go_through_set_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut node = BTreeMap::new();
+    node.insert(
+        "fake".to_string(),
+        server(&["--tool-names", "who", "--marker", "node"]),
+    );
+    let s = SessionMcp::at_always(
+        &node,
+        mcp::Home {
+            key: "k".into(),
+            workspace: dir.path().to_path_buf(),
+            pin: None,
+        },
+    );
+    let started = dir.path().join("started");
+    let mut proj = server(&[
+        "--tool-names",
+        "env,who",
+        "--marker",
+        "proj",
+        "--started",
+        started.to_str().unwrap(),
+    ]);
+    proj.env = serde_json::from_value(json!({"PROJ_VALUE": "inside-only"})).unwrap();
+    proj.env_inside = true;
+    let mut shadow = server(&["--tool-names", "who", "--marker", "shadow"]);
+    shadow.env_inside = true;
+    let mut given = BTreeMap::new();
+    given.insert("proj".to_string(), proj.clone());
+    given.insert("fake".to_string(), shadow);
+    s.set_project(&given, vec!["a note".into()]);
+    assert!(s.is_project("proj") && !s.is_project("fake"));
+    let l = s.load(&ctx(&dir), &[]).await;
+    assert!(l.notes.iter().any(|n| n == "a note"), "{:?}", l.notes);
+    let who = tool(&l.tools, "mcp__fake__who")
+        .run(&ctx(&dir), json!({}))
+        .await;
+    assert_eq!(who.output, "served by node tool who");
+    let held = tool(&l.tools, "mcp__proj__who").clone();
+    assert_eq!(
+        held.run(&ctx(&dir), json!({})).await.output,
+        "served by proj tool who"
+    );
+    // The value reached the server, set by `env` inside the command.
+    let pid = pids(&started)[0];
+    let environ = std::fs::read(format!("/proc/{pid}/environ")).unwrap();
+    assert!(String::from_utf8_lossy(&environ).contains("PROJ_VALUE=inside-only"));
+    // The same copy again keeps its process.
+    s.set_project(&given, vec![]);
+    let l = s.load(&ctx(&dir), &[]).await;
+    assert!(l.notes.is_empty());
+    tool(&l.tools, "mcp__proj__who")
+        .run(&ctx(&dir), json!({}))
+        .await;
+    assert_eq!(pids(&started).len(), 1);
+    // Taken out: stopped, and the held tool starts nothing.
+    s.set_project(&BTreeMap::new(), vec![]);
+    let by = Instant::now() + Duration::from_secs(10);
+    while alive(pid) {
+        assert!(Instant::now() < by, "the removed server still runs");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let r = held.run(&ctx(&dir), json!({})).await;
+    assert!(
+        !r.ok && r.output.contains("no longer one of this chat's servers"),
+        "{}",
+        r.output
+    );
+    assert_eq!(pids(&started).len(), 1, "a removed server started again");
+    let l = s.load(&ctx(&dir), &[]).await;
+    assert!(l.tools.iter().all(|t| !t.name().starts_with("mcp__proj__")));
+    s.close();
+    assert!(s.wait_gone(mcp::STOP_WAIT).await);
+}
