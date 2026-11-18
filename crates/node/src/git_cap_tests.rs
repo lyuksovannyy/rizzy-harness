@@ -1441,3 +1441,77 @@ async fn with_an_incomplete_record_a_tracked_new_file_is_still_deleted() {
         vec![("loose.txt".to_string(), LeftKind::Unsure)]
     );
 }
+
+/// The failed merge of P11, and putting back fails too: the outcome names
+/// the large file that holds the child's version (the snapshot that finds
+/// it waives the cap).
+#[tokio::test]
+async fn a_failed_put_back_names_a_large_file_it_left() {
+    use std::os::unix::fs::PermissionsExt;
+    let r = rig();
+    let bounds = Bounds {
+        untracked_max: CAP,
+        ..Default::default()
+    };
+    let sub = sub_repo(&r.dir, Some(&r.base), &bounds)
+        .await
+        .unwrap()
+        .unwrap();
+    let base = sub.base_full("c").await.unwrap();
+    let folder = sub
+        .make_folder("c", &base.sha, &sessions_of(&r.base))
+        .await
+        .unwrap();
+    std::fs::write(folder.path.join("a.bin"), vec![b'C'; 2 * CAP as usize]).unwrap();
+    std::fs::create_dir(folder.path.join("z")).unwrap();
+    std::fs::write(folder.path.join("z/b.txt"), "child b\n").unwrap();
+    let result = sub.result(&folder, "c").await.unwrap();
+    std::fs::create_dir(r.dir.join("z")).unwrap();
+    std::fs::set_permissions(r.dir.join("z"), std::fs::Permissions::from_mode(0o555)).unwrap();
+    let top = r.dir.clone();
+    let lock =
+        move || std::fs::set_permissions(&top, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let res = sub
+        .apply_with(
+            &base.sha,
+            &result,
+            "c",
+            merge::Hooks {
+                before_put_back: Some(&lock),
+                ..Default::default()
+            },
+        )
+        .await;
+    std::fs::set_permissions(&r.dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(r.dir.join("z"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    match &res {
+        Err(NotApplied::Partial { written, .. }) => {
+            assert_eq!(written.shown, vec!["a.bin".to_string()], "{res:?}");
+        }
+        other => panic!("{other:?}"),
+    }
+    remove_folder(&folder).await;
+}
+
+/// The copy of the user's index is kept while the index is unchanged, and
+/// made again when git rewrites it.
+#[tokio::test]
+async fn the_index_copy_is_kept_while_the_index_is_unchanged() {
+    use std::os::unix::fs::MetadataExt;
+    let r = rig();
+    let repo = r.repo(CAP).await;
+    let one = user_index_copy(&repo).await.unwrap();
+    let ino = std::fs::metadata(&one).unwrap().ino();
+    let two = user_index_copy(&repo).await.unwrap();
+    assert_eq!(
+        (one.clone(), ino),
+        (two.clone(), std::fs::metadata(&two).unwrap().ino())
+    );
+    r.put("n.txt", &State::Small("n\n"));
+    sh(&r.dir, &["add", "n.txt"]);
+    let three = user_index_copy(&repo).await.unwrap();
+    assert_ne!(three, one);
+    assert!(!one.exists(), "the old copy goes");
+    let found = user_tracked(&repo, &[b"n.txt".to_vec()]).await.unwrap();
+    assert!(found.contains(&b"n.txt".to_vec()));
+}
