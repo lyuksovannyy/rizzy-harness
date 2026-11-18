@@ -1513,5 +1513,5 @@ async fn the_index_copy_is_kept_while_the_index_is_unchanged() {
     assert_ne!(three, one);
     assert!(!one.exists(), "the old copy goes");
     let found = user_tracked(&repo, &[b"n.txt".to_vec()]).await.unwrap();
-    assert!(found.contains(&b"n.txt".to_vec()));
+    assert!(found.contains(b"n.txt".as_slice()));
 }
