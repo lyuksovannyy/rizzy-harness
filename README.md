@@ -280,9 +280,12 @@ Settings has four sections:
   it (its creator too). Until you answer, the answer is no; you can change it
   here at any time (see **Memory.** further down); the workspace's
   memory (Memory tab), which every member reads; and its agents (Agents tab:
-  the list the Agents page shows, with this workspace's models; every agent
-  belongs to the whole server, so only server admins get its edit and delete
-  buttons there, as on the Agents page).
+  the agents its chats use, with this workspace's models, each marked
+  built-in, server or workspace). Whoever may change the workspace's settings
+  (its owners and admins; you, in your Personal workspace) makes the
+  workspace's **own agents** there and adds this workspace's summary and
+  additional instructions to the server's agents (after the server's own);
+  see **Agents** further down.
 - **Workspace admin** (admins and owners; not for Personal): its name, default
   agents (chats and Agentic), the model each agent uses there (the Assistant's, `general`, is the
   workspace's default model), members and roles, deleting it.
@@ -3372,7 +3375,7 @@ off, and changes it had made in its own copy are gone; the agent can give it
 a follow-up (`session`), which keeps its conversation. One that is still
 running, or whose result is on its way, takes no follow-up.
 
-**Agents** in the sidebar lists every agent. Server admins can make agents there
+**Agents** in the sidebar lists every agent of the workspace you are in. Server admins can make the server's agents there
 (name, handle, summary, instructions and feature switches: memory, project
 memory, earlier chats and memory search, web search, files, commands, MCP
 servers, the project board, sub-agents, background sub-agents, and whether it is offered as an agent,
@@ -3391,7 +3394,38 @@ refused, naming it ("`ai` is already reserved for the Assistant agent
 (general)"), as is an alias listed twice or equal to the agent's own id. An
 existing file or agent whose id is now a built-in's alias keeps its id and the
 built-in loses that alias (logged at startup, naming both agents). Deleting an agent leaves its chats
-readable; each needs another agent before its next message. Design notes: [docs/agent-pages.md](docs/agent-pages.md).
+readable; each needs another agent before its next message.
+
+**Workspace agents.** Built-in agents, agent files and the agents server
+admins make are the server's: every workspace has them. A workspace can also
+have **its own**: in Workspace settings → Agents, whoever may change the
+workspace's settings (owners and admins; everyone in their own Personal
+workspace, where the agents are just for them) makes agents only that
+workspace has, changes and deletes them, and gives the server's agents this
+workspace's summary and additional instructions, which come after the
+server's. A workspace's agents are never listed in, or usable from, another
+workspace (by handle, `@mention`, the agent switch, a default or a routine),
+and a server admin who is not a member neither sees nor changes them. Their
+handles and names cannot be a server agent's (names compared ignoring case,
+spaces and punctuation). The server's agents win: if the server later gets
+an agent with a workspace agent's handle, that handle means the server's
+agent in the workspace too, and the workspace's own is listed as hidden in
+its Agents tab, to delete or make again under another handle. A server
+agent's alias equal to a workspace agent's handle does not count in that
+workspace. A workspace has at most 30 agents of its own, each stored in at
+most 64 KiB. Their tools still run only within your level, the node's
+`node.toml` and your approvals. **A workspace's admins decide what its
+agents are told and may do:** they write an agent's instructions, may make
+it the workspace's default, may change one you already picked, and may give
+it "Earlier chats and memory search" together with commands, MCP servers,
+the web or file edits, so it can search your earlier chats in that workspace
+and your memory (when you share it there) and has a way to send text out.
+The owner chose to allow this (2026-11-18). Such agents are marked
+"workspace", and their page shows what they can do. Their look follows their
+handle (looks are server-wide). Deleting the workspace deletes its agents; deleting one leaves
+its chats readable, needing another agent, and a default or routine that
+names it is refused until changed. A turn that is running keeps the agent it
+started with. Design notes: [docs/agent-pages.md](docs/agent-pages.md).
 
 ## Development
 

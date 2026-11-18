@@ -216,6 +216,17 @@ const TODO_TOOL: &str = "todo";
 /// works on files or commands, where a task can call for one.
 const SKILL_TOOL: &str = "skill";
 
+/// Which set an agent belongs to (X.33): the server's (built-ins, files and
+/// agents made at the server's scope) or one workspace's own. Reported in
+/// listings; the master keeps a workspace's agents out of every other.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentScope {
+    #[default]
+    Server,
+    Workspace,
+}
+
 /// What an agent can do, as the Agents page shows it. A custom agent is
 /// made from these; for the others they are read off the definition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -342,6 +353,8 @@ pub struct Agent {
     pub category: String,
     pub builtin: bool,
     pub origin: Origin,
+    /// The server's, or made in the workspace it is listed for.
+    pub scope: AgentScope,
     pub features: Features,
     /// Agent ids this one may delegate to (resolved by the master).
     pub delegates: Vec<String>,
@@ -535,6 +548,7 @@ fn build(id: &str, fm: Frontmatter, body: &str, origin: Origin) -> Result<Agent,
         category,
         builtin: origin == Origin::Builtin,
         origin,
+        scope: AgentScope::Server,
         features,
         delegates: fm.delegates,
         spec: AgentSpec {

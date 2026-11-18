@@ -1076,7 +1076,7 @@ async fn agent_memory_switches_in_a_project() {
         let (st, v) = req(
             &t,
             Method::POST,
-            "/api/agents",
+            "/api/agents?scope=server",
             Some(json!({"id": agent, "name": agent, "prompt": "Help.", "features": f})),
             &alex,
         )

@@ -133,7 +133,7 @@ describe("the list", () => {
   test("rows show name, handle, marker and summary; editors get edit, and delete on custom agents", async () => {
     await show(admin, null);
     const rows = [...host.querySelectorAll("li.agent-item")];
-    expect(rows.map((r) => r.querySelector(".agent-name")!.textContent)).toEqual(["Coder @coder · built-in", "Reviewer @reviewer"]);
+    expect(rows.map((r) => r.querySelector(".agent-name")!.textContent)).toEqual(["Coder @coder · built-in", "Reviewer @reviewer · server"]);
     expect(rows[0]!.querySelector(".agent-summary")!.textContent).toBe("coder things.");
     expect(rows[0]!.querySelector('[aria-label="Edit Coder"]')).not.toBeNull();
     expect(rows[0]!.querySelector('[aria-label="Delete Coder"]')).toBeNull();
@@ -143,7 +143,7 @@ describe("the list", () => {
     vi.stubGlobal("confirm", () => true);
     api.deleteAgent.mockResolvedValue({ ok: true });
     await act(async () => button("Delete Reviewer")!.click());
-    expect(api.deleteAgent).toHaveBeenCalledWith("reviewer");
+    expect(api.deleteAgent).toHaveBeenCalledWith("reviewer", "server");
     expect(onChanged).toHaveBeenCalled();
 
     act(() => (rows[0]!.querySelector(".agent-open") as HTMLButtonElement).click());
@@ -154,7 +154,7 @@ describe("the list", () => {
     await show(member, null);
     expect(host.querySelector('[aria-label^="Edit"], [aria-label^="Delete"]')).toBeNull();
     expect(button("New agent")).toBeUndefined();
-    expect(host.textContent).toContain("Only admins can add or change agents.");
+    expect(host.textContent).toContain("Only server admins change the server's agents.");
   });
 
   test("file agents, sub-agent-only agents and gone models are marked", async () => {
@@ -164,7 +164,7 @@ describe("the list", () => {
     const rows = [...host.querySelectorAll("li.agent-item")];
     expect(rows[0]!.classList.contains("bad")).toBe(true);
     expect(rows[0]!.querySelector(".agent-alert")).not.toBeNull();
-    expect(rows[1]!.querySelector(".agent-name")!.textContent).toBe("Scout @scout · file · sub-agent only");
+    expect(rows[1]!.querySelector(".agent-name")!.textContent).toBe("Scout @scout · server file · sub-agent only");
   });
 });
 
@@ -172,7 +172,7 @@ describe("an agent's page", () => {
   test("a built-in keeps its name, instructions and features; summary and additional instructions save", async () => {
     api.agent.mockResolvedValue(detail(coder));
     await show(admin, "coder");
-    expect(api.agent).toHaveBeenCalledWith("coder", undefined);
+    expect(api.agent).toHaveBeenCalledWith("coder", "server");
     expect(host.querySelector("h1")!.textContent).toBe("Coder");
     expect(host.querySelector("pre.agent-prompt")!.textContent).toBe("You are careful.");
     expect(switches().length).toBe(17);
@@ -186,7 +186,7 @@ describe("an agent's page", () => {
     type(host.querySelectorAll("textarea")[1]!, "Use pnpm.");
     api.updateAgent.mockResolvedValue(detail(coder, { summary: "Our engineer.", instructions: "Use pnpm." }));
     await act(async () => button("Save")!.click());
-    expect(api.updateAgent).toHaveBeenCalledWith("coder", { summary: "Our engineer.", instructions: "Use pnpm." }, undefined);
+    expect(api.updateAgent).toHaveBeenCalledWith("coder", { summary: "Our engineer.", instructions: "Use pnpm." }, "server");
     expect(onChanged).toHaveBeenCalled();
     expect(host.textContent).toContain("Saved.");
   });
@@ -213,7 +213,7 @@ describe("an agent's page", () => {
         prompt: "Review it.",
         features: { ...NEW_FEATURES, as_subagent: false, commands: true, project_memory: false },
       },
-      undefined,
+      "server",
     );
     vi.stubGlobal("confirm", () => true);
     api.deleteAgent.mockResolvedValue({ ok: true });
@@ -237,7 +237,7 @@ describe("an agent's page", () => {
     expect(api.updateAgent).toHaveBeenCalledWith(
       "reviewer",
       { name: "Reviewer", summary: "", prompt: "Review it.", features: { ...NEW_FEATURES, personalisation: false } },
-      undefined,
+      "server",
     );
     // Without permission it is shown, not changed.
     await show(member, "reviewer");
@@ -261,7 +261,7 @@ describe("an agent's page", () => {
     expect(api.updateAgent).toHaveBeenCalledWith(
       "reviewer",
       { name: "Reviewer", summary: "", prompt: "Review it.", features: { ...NEW_FEATURES, commands: true, mcp: true } },
-      undefined,
+      "server",
     );
   });
 
@@ -277,7 +277,7 @@ describe("an agent's page", () => {
     expect(api.updateAgent).toHaveBeenCalledWith(
       "reviewer",
       { name: "Reviewer", summary: "", prompt: "Review it.", features: { ...NEW_FEATURES, recall: true } },
-      undefined,
+      "server",
     );
   });
 
@@ -292,7 +292,7 @@ describe("an agent's page", () => {
     expect(api.updateAgent).toHaveBeenCalledWith(
       "reviewer",
       { name: "Reviewer", summary: "", prompt: "Review it.", features: { ...NEW_FEATURES, board: true } },
-      undefined,
+      "server",
     );
   });
 
@@ -313,7 +313,7 @@ describe("an agent's page", () => {
     expect(api.updateAgent).toHaveBeenCalledWith(
       "reviewer",
       { name: "Reviewer", summary: "", prompt: "Review it.", features: { ...NEW_FEATURES, read_files: true, read_only_commands: true } },
-      undefined,
+      "server",
     );
   });
 
@@ -338,7 +338,7 @@ describe("an agent's page", () => {
     api.agentSummary.mockResolvedValue({ summary: "Engineer that uses pnpm." });
     await show(admin, "coder");
     await act(async () => buttons().find((b) => b.textContent?.includes("Write from instructions"))!.click());
-    expect(api.agentSummary).toHaveBeenCalledWith({ name: "Coder", prompt: "You are careful.\n\nUse pnpm." });
+    expect(api.agentSummary).toHaveBeenCalledWith({ name: "Coder", prompt: "You are careful.\n\nUse pnpm." }, "server");
     expect(host.querySelector("textarea")!.value).toBe("Engineer that uses pnpm.");
     expect(api.updateAgent).not.toHaveBeenCalled();
   });
@@ -379,7 +379,7 @@ describe("an agent's page", () => {
     await act(async () => create().click());
     expect(api.createAgent).toHaveBeenCalledWith(
       { id: "cr", name: "Code Reviewer", summary: "", prompt: "Review it.", features: NEW_FEATURES },
-      undefined,
+      "server",
     );
     expect(onOpen).toHaveBeenCalledWith("cr");
   });
@@ -400,5 +400,44 @@ describe("an agent's page", () => {
     expect(button("Create agent")!.disabled).toBe(false);
     await act(async () => button("Create agent")!.click());
     expect(api.createAgent.mock.calls[0]![0]).toMatchObject({ id: "coder-copy", name: "Coder (copy)" });
+  });
+});
+
+describe("an agent's page in a workspace (X.33)", () => {
+  test("shows the server's additional instructions, saves the workspace's in its scope, no looks", async () => {
+    const { AgentPage } = await import("./AgentPage");
+    const scope = { workspace: "w1" };
+    api.agent.mockResolvedValue(detail(coder, { server_instructions: "Use pnpm.", instructions: "Team rule.", own: false }));
+    await act(async () =>
+      root.render(
+        <AgentPage id="coder" agents={AGENTS} editable seed={null} onOpen={onOpen} onDuplicate={() => {}} onChanged={onChanged} scope={scope} />,
+      ),
+    );
+    expect(api.agent).toHaveBeenCalledWith("coder", scope);
+    expect(host.textContent).toContain("Additional instructions (the server's)");
+    expect([...host.querySelectorAll("pre.agent-prompt")].map((p) => p.textContent)).toEqual(["You are careful.", "Use pnpm."]);
+    expect(host.textContent).toContain("Additional instructions for this workspace");
+    expect(button("Change how Coder looks")).toBeUndefined();
+    type(host.querySelectorAll("textarea")[1]!, "Team rule two.");
+    api.updateAgent.mockResolvedValue(detail(coder, { instructions: "Team rule two.", own: false }));
+    await act(async () => button("Save")!.click());
+    expect(api.updateAgent).toHaveBeenCalledWith("coder", { summary: "", instructions: "Team rule two." }, scope);
+  });
+
+  test("an agent made in the workspace is edited whole there", async () => {
+    const { AgentPage } = await import("./AgentPage");
+    const scope = { workspace: "w1" };
+    const mine = agent("mine", { builtin: false, origin: "custom", scope: "workspace", features: NEW_FEATURES });
+    api.agent.mockResolvedValue(detail(mine, { prompt: "Mine.", own: true }));
+    await act(async () =>
+      root.render(
+        <AgentPage id="mine" agents={[mine]} editable seed={null} onOpen={onOpen} onDuplicate={() => {}} onChanged={onChanged} scope={scope} />,
+      ),
+    );
+    expect(host.querySelector<HTMLInputElement>('input[aria-label="Name"]')).not.toBeNull();
+    vi.stubGlobal("confirm", () => true);
+    api.deleteAgent.mockResolvedValue({ ok: true });
+    await act(async () => button("Delete Mine")!.click());
+    expect(api.deleteAgent).toHaveBeenCalledWith("mine", scope);
   });
 });

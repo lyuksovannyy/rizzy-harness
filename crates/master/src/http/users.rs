@@ -280,7 +280,11 @@ pub(super) async fn delete_user(
     for ws in workspaces {
         let w = ws.clone();
         match m.inner.mirror.call(move |s| s.workspace(&w)).await {
-            Ok(None) => crate::memory::forget_workspace(&m, &ws).await,
+            Ok(None) => {
+                crate::memory::forget_workspace(&m, &ws).await;
+                // Its agents went with it (foreign key); so does their set.
+                m.forget_workspace_agents(&ws);
+            }
             Ok(Some(_)) => rosters.push(ws),
             Err(_) => {}
         }

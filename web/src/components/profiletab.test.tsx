@@ -18,6 +18,7 @@ const pageApi = {
   setProfileImage: vi.fn(),
   removeProfileImage: vi.fn(),
   deleteAgent: vi.fn(),
+  agent: vi.fn(),
 };
 const api = { agents: vi.fn() };
 vi.mock("../apiPages", () => ({ pageApi }));
@@ -261,21 +262,50 @@ describe("Workspace settings → Agents", () => {
     expect(host.querySelector("i")).toBeNull();
   });
 
-  test("a member sees no edit or delete; an admin gets them on the same rows", async () => {
-    api.agents.mockResolvedValue({ agents: [agent("coder"), agent("mine", { origin: "custom", builtin: false })], default: "general" });
-    await show(me);
-    expect(host.querySelector(".agent-actions")).toBeNull();
+  test("a member sees no edit or delete; a settings holder edits, and deletes the workspace's own", async () => {
+    const mine = agent("mine", { origin: "custom", builtin: false, scope: "workspace" });
+    const server = agent("lead", { origin: "custom", builtin: false });
+    api.agents.mockResolvedValue({ agents: [agent("coder"), server, mine], default: "general", may_edit: false });
+    // A server admin who is no admin here gets no more than any member.
     await show({ ...me, role: "admin" });
+    expect(host.querySelector(".agent-actions")).toBeNull();
+    expect(button("New agent")).toBeUndefined();
+    expect([...host.querySelectorAll(".agent-name")].map((n) => n.textContent)).toEqual([
+      "coder @coder · built-in",
+      "lead @lead · server",
+      "mine @mine · workspace",
+    ]);
+    api.agents.mockResolvedValue({ agents: [agent("coder"), server, mine], default: "general", may_edit: true });
+    // A fresh panel: the list is read when it opens.
+    act(() => root.unmount());
+    root = createRoot(host);
+    await show(me);
     expect(button("Edit coder")).toBeDefined();
+    expect(button("Edit lead")).toBeDefined();
     expect(button("Delete coder")).toBeUndefined();
+    expect(button("Delete lead")).toBeUndefined();
+    expect(button("New agent")).toBeDefined();
     vi.stubGlobal("confirm", () => true);
     pageApi.deleteAgent.mockResolvedValue({ ok: true });
-    api.agents.mockResolvedValue({ agents: [agent("coder")], default: "general" });
+    api.agents.mockResolvedValue({ agents: [agent("coder")], default: "general", may_edit: true });
     await act(async () => button("Delete mine")!.click());
-    expect(pageApi.deleteAgent).toHaveBeenCalledWith("mine");
+    expect(pageApi.deleteAgent).toHaveBeenCalledWith("mine", { workspace: "w1" });
     expect(button("Delete mine")).toBeUndefined();
-    // A row opens the agent's page, where its switches are.
+    // A row opens the agent's page here, in this workspace's scope.
+    const f = { memory: true, project_memory: true, personalisation: true, recall: false, board: false, web: true, read_files: false, edit_files: false, commands: false, read_only_commands: false, mcp: false, delegate: false, background_subagents: false, as_agent: true, as_subagent: true };
+    pageApi.agent.mockResolvedValue({ ...agent("coder"), origin: "builtin", features: f, prompt: "P", summary: "", instructions: "", description_default: "" });
     await act(async () => host.querySelector<HTMLButtonElement>(".agent-open")!.click());
-    expect(location.hash).toBe("#/agents/coder");
+    expect(pageApi.agent).toHaveBeenCalledWith("coder", { workspace: "w1" });
+  });
+  test("a workspace agent a server agent hides is named, and may be deleted", async () => {
+    api.agents.mockResolvedValue({ agents: [agent("planner")], default: "general", may_edit: true, hidden: [{ id: "planner", name: "Mine" }] });
+    await show({ ...me });
+    expect(host.textContent).toContain("a server agent has the same handle");
+    vi.stubGlobal("confirm", () => true);
+    pageApi.deleteAgent.mockResolvedValue({ ok: true });
+    api.agents.mockResolvedValue({ agents: [agent("planner")], default: "general", may_edit: true, hidden: [] });
+    await act(async () => [...host.querySelectorAll("button")].find((b) => b.textContent === "Delete")!.click());
+    expect(pageApi.deleteAgent).toHaveBeenCalledWith("planner", { workspace: "w1" });
+    expect(host.textContent).not.toContain("a server agent has the same handle");
   });
 });

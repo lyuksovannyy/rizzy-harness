@@ -494,12 +494,17 @@ export interface Agent {
   avatar: AgentAvatar;
   /** Where its definition comes from (absent in older fixtures: built in). */
   origin?: AgentOrigin;
+  /** The server's (built in, a file, made at the server's scope) or the listed workspace's own (X.33). Absent: the server's. */
+  scope?: AgentScope;
   /** What it can do; for built-in and file agents read off the definition. */
   features?: AgentFeatures;
 }
 
 /** Built into the server, a file on the server (`agents/<id>.md`), or made on the Agents page. */
 export type AgentOrigin = "builtin" | "file" | "custom";
+
+/** Which set an agent belongs to: the server's, or the workspace's it is listed in. */
+export type AgentScope = "server" | "workspace";
 
 /** The Agents page's switches (see `harness_agents::Features`). */
 export interface AgentFeatures {
@@ -539,9 +544,15 @@ export interface AgentDetail extends Agent {
   prompt: string;
   /** The saved summary; empty means `description_default` (built-in and file agents). */
   summary: string;
-  /** Built-in and file agents: text added after their prompt. */
+  /** Agents this scope did not make: its text added after their prompt. */
   instructions: string;
   description_default: string;
+  /** Made in the scope it was read in, so edited whole (absent: `origin === "custom"`). */
+  own?: boolean;
+  /** Read in a workspace: the server's additional instructions, which come before the workspace's. */
+  server_instructions?: string;
+  /** Whether the caller may change agents in the scope it was read in. */
+  may_edit?: boolean;
 }
 
 /** A new agent made on the Agents page. */

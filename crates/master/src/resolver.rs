@@ -65,9 +65,19 @@ fn overlay(cfg: &mut Config, ws: &WorkspaceSettings) {
 
 impl Master {
     /// The effective configuration with workspace settings `ws` on top of
-    /// the server's (`None`: the server's own).
+    /// the server's (`None`: the server's own), with the server's agents.
+    /// A workspace's chats use [`Master::resolver_for`], which has its own.
     pub fn resolver(&self, ws: Option<&WorkspaceSettings>) -> Resolver {
-        let agents = self.agents();
+        self.resolver_with(self.agents(), ws)
+    }
+
+    /// The effective configuration with `agents` (one scope's set) and the
+    /// workspace settings `ws`.
+    pub(crate) fn resolver_with(
+        &self,
+        agents: AgentSet,
+        ws: Option<&WorkspaceSettings>,
+    ) -> Resolver {
         let mut models = self.models();
         let cfg = self.provider_runtime().map(|rt| {
             let mut cfg = rt.config();
@@ -136,23 +146,33 @@ impl Master {
         }
     }
 
-    /// The effective configuration in a workspace: a team workspace's
-    /// settings, stale references dropped, on top of the server's. Personal
-    /// workspaces (they have no settings of their own), unknown ones and
-    /// none get the server's.
+    /// The effective configuration in a workspace: its agents, and a team
+    /// workspace's settings, stale references dropped, on top of the
+    /// server's. Personal workspaces have no settings of their own (the
+    /// server's apply) but agents of their own; unknown ones and none get
+    /// the server's.
     pub async fn resolver_for(&self, workspace_id: Option<&str>) -> Resolver {
         let Some(id) = workspace_id.map(str::to_string) else {
             return self.resolver(None);
         };
-        let settings = match self.inner.mirror.call(move |s| s.workspace(&id)).await {
-            Ok(Some(w)) if !w.personal() => Some(WorkspaceSettings::read(&w).normalized(self)),
-            Ok(_) => None,
+        match self.inner.mirror.call(move |s| s.workspace(&id)).await {
+            Ok(Some(w)) => self.resolver_in(&w).await,
+            Ok(None) => self.resolver(None),
             Err(e) => {
                 tracing::warn!(error = %e, "could not load workspace settings; using the server's");
-                None
+                self.resolver(None)
             }
-        };
-        self.resolver(settings.as_ref())
+        }
+    }
+
+    /// The effective configuration in workspace `w`: its agents (the
+    /// server's set with its own on top, X.33) and, for a team workspace,
+    /// its settings with stale references dropped.
+    pub(crate) async fn resolver_in(&self, w: &harness_store::WorkspaceRow) -> Resolver {
+        let agents = self.agents_in(Some(&w.workspace_id)).await;
+        let settings =
+            (!w.personal()).then(|| WorkspaceSettings::read(w).normalized(self, &agents));
+        self.resolver_with(agents, settings.as_ref())
     }
 }
 
@@ -573,8 +593,12 @@ mod tests {
     fn a_subagent_only_agent_is_no_default() {
         let m = master();
         with_helper(&m);
-        let e = WorkspaceSettings::parse(serde_json::json!({"default_agent": "helper"}), &m)
-            .unwrap_err();
+        let e = WorkspaceSettings::parse(
+            serde_json::json!({"default_agent": "helper"}),
+            &m,
+            &m.agents(),
+        )
+        .unwrap_err();
         assert!(e.contains("sub-agent"), "{e}");
         let stored = WorkspaceSettings {
             default_agent: Some("helper".into()),
@@ -582,7 +606,7 @@ mod tests {
         };
         // Kept as stored, so the setting to fix shows; refused when used.
         assert_eq!(
-            stored.normalized(&m).default_agent.as_deref(),
+            stored.normalized(&m, &m.agents()).default_agent.as_deref(),
             Some("helper")
         );
         let r = m.resolver(Some(&stored));
@@ -617,6 +641,7 @@ mod tests {
         let ws = WorkspaceSettings::parse(
             serde_json::json!({"default_agent": "writer", "default_agentic_agent": "teamlead"}),
             &m,
+            &m.agents(),
         )
         .unwrap();
         let r = m.resolver(Some(&ws));
@@ -625,7 +650,12 @@ mod tests {
         // The ordinary default may be an agent with file tools (a chat
         // simply has none to offer it).
         assert!(
-            WorkspaceSettings::parse(serde_json::json!({"default_agent": "coder"}), &m).is_ok()
+            WorkspaceSettings::parse(
+                serde_json::json!({"default_agent": "coder"}),
+                &m,
+                &m.agents()
+            )
+            .is_ok()
         );
         for (id, why) in [
             ("general", "no file or command tools"),
@@ -635,7 +665,7 @@ mod tests {
             ("nope", "unknown agent"),
         ] {
             let doc = serde_json::json!({"default_agentic_agent": id});
-            let e = WorkspaceSettings::parse(doc, &m).unwrap_err();
+            let e = WorkspaceSettings::parse(doc, &m, &m.agents()).unwrap_err();
             assert!(
                 e.contains("default_agentic_agent") && e.contains(why),
                 "{id}: {e}"

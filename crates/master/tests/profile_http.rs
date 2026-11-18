@@ -448,7 +448,7 @@ async fn personalisation_reaches_only_the_owners_chats_framed() {
     let (st, v) = req(
         &t,
         Method::POST,
-        "/api/agents",
+        "/api/agents?scope=server",
         Some(json!({"id": "strict", "name": "Strict", "prompt": "Answer in JSON.", "features": features})),
         &alex,
     )
