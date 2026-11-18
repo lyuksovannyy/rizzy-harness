@@ -24,8 +24,9 @@
 //! token to a node or a model (cloning and pushing are X.27 steps 2 to 4).
 
 use std::collections::{HashMap, VecDeque};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
@@ -33,7 +34,7 @@ use harness_core::Secret;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
 
-use crate::sealed::Sealer;
+use crate::sealed::{Sample, Sealer, Stored};
 use crate::{Master, lock};
 
 /// Connections one person may have.
@@ -55,7 +56,11 @@ pub const CALL_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_LOGIN: usize = 100;
 const MAX_DISPLAY: usize = 128;
 const MAX_EMAIL: usize = 254;
-const MAX_SCOPES: usize = 64;
+/// Scopes kept, by count and by the bytes of their names together: 32
+/// names with 2,048 bytes between them are at most 2,146 bytes as JSON,
+/// under the column's 4,096.
+pub const MAX_SCOPES: usize = 32;
+pub const MAX_SCOPE_BYTES: usize = 2048;
 
 /// Which API a forge speaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,9 +92,16 @@ pub struct ForgeHost {
     pub host: String,
     pub kind: ForgeKind,
     /// Where its API is: `https://git.example.com/api/v4` (GitLab),
-    /// `…/api/v3` (GitHub Enterprise), `…/api/v1` (Gitea, Forgejo). Its
-    /// host must be `host`; a port is allowed.
+    /// `…/api/v3` (GitHub Enterprise Server), `…/api/v1` (Gitea, Forgejo).
+    /// Its host must be `host`, or `api_host` when that is given; a port is
+    /// allowed.
     pub api_base: String,
+    /// The API's own host, where it is not the forge's: `api.github.com`
+    /// for github.com, `api.<name>.ghe.com` for GitHub Enterprise Cloud with
+    /// data residency. It goes through the same address rules as `host`.
+    /// Unset: the API is on `host` itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_host: Option<String>,
     /// The forge is on a private address (a LAN, a VPN): the admin allows
     /// the server to connect there for this host only.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -125,6 +137,13 @@ impl ForgeConfig {
             if self.hosts[..i].iter().any(|o| o.host == h.host) {
                 return Err(format!("{at}: listed twice"));
             }
+            if let Some(a) = &h.api_host
+                && !valid_host(a)
+            {
+                return Err(format!(
+                    "{at}: api_host must be a lower-case name or address with no port, path or dot at the end"
+                ));
+            }
             check_api_base(h).map_err(|e| format!("{at}: {e}"))?;
         }
         Ok(())
@@ -138,12 +157,14 @@ pub fn builtins() -> Vec<ForgeHost> {
             host: "github.com".into(),
             kind: ForgeKind::Github,
             api_base: "https://api.github.com".into(),
+            api_host: Some("api.github.com".into()),
             private_address: false,
         },
         ForgeHost {
             host: "gitlab.com".into(),
             kind: ForgeKind::Gitlab,
             api_base: "https://gitlab.com/api/v4".into(),
+            api_host: None,
             private_address: false,
         },
     ]
@@ -165,7 +186,9 @@ pub fn valid_host(h: &str) -> bool {
         })
 }
 
-fn check_api_base(h: &ForgeHost) -> Result<(), String> {
+/// `api_base` is allowed by `url_allowed` and on the entry's API host
+/// (`api_host`, else `host`), with no query, fragment or trailing `/`.
+pub fn check_api_base(h: &ForgeHost) -> Result<(), String> {
     if !crate::config::url_allowed(&h.api_base) {
         return Err(
             "api_base must be https:// (plain http only for localhost or a host in HARNESS_PLAIN_HTTP_HOSTS), with no user name or password"
@@ -173,8 +196,15 @@ fn check_api_base(h: &ForgeHost) -> Result<(), String> {
         );
     }
     let u = reqwest::Url::parse(&h.api_base).map_err(|e| format!("api_base: {e}"))?;
-    if u.host_str() != Some(h.host.as_str()) {
-        return Err(format!("api_base must be on {} itself", h.host));
+    let api_host = h.api_host.as_deref().unwrap_or(&h.host);
+    if u.host_str() != Some(api_host) {
+        return Err(match &h.api_host {
+            Some(a) => format!("api_base must be on its api_host {a}"),
+            None => format!(
+                "api_base must be on {} itself (an API on another host needs api_host naming it)",
+                h.host
+            ),
+        });
     }
     if u.query().is_some() || u.fragment().is_some() || h.api_base.ends_with('/') {
         return Err("api_base must have no query, no fragment and no / at the end".into());
@@ -191,6 +221,8 @@ pub struct Account {
     pub commit_email: Option<String>,
     /// `None`: this forge (or this kind of token) does not report scopes.
     pub scopes: Option<Vec<String>>,
+    /// Scopes reported beyond those kept ([`MAX_SCOPES`], [`MAX_SCOPE_BYTES`]).
+    pub scopes_more: u32,
 }
 
 /// Why a check failed, in words that name no token and quote nothing the
@@ -217,6 +249,29 @@ pub struct State {
     attempts: Attempts,
     /// Tests: a shorter call timeout, in ms (0: [`CALL_TIMEOUT`]).
     timeout_ms: AtomicU64,
+    /// How forge names are looked up (tests: a fixed table).
+    lookup: Mutex<Lookup>,
+}
+
+/// What the database holds sealed, with a few values to prove a key on.
+pub(crate) fn stored_now(store: &harness_store::Store) -> harness_store::Result<Stored> {
+    let count = store.sealed_count()?;
+    let samples = store
+        .sealed_samples(crate::sealed::SAMPLES)?
+        .into_iter()
+        .map(|(user, host, account, sealed)| Sample {
+            table: "user_connections".into(),
+            owner: user,
+            fields: vec![host, account],
+            sealed,
+        })
+        .collect();
+    Ok(Stored { count, samples })
+}
+
+/// [`stored_now`] off the async runtime.
+pub(crate) async fn stored(m: &Master) -> harness_store::Result<Stored> {
+    m.inner.mirror.call(stored_now).await
 }
 
 /// Open sealed storage under `data_dir` (`<data>/keys/secrets.key`) and
@@ -224,9 +279,15 @@ pub struct State {
 /// stop the server: connections fail with a pointer to the log.
 pub fn open(m: &Master, data_dir: &std::path::Path) {
     let s = Sealer::new(data_dir);
-    let sealed = m.inner.mirror.sealed_count().unwrap_or(0);
-    if let Err(e) = s.check(sealed) {
-        tracing::error!(error = %e, "sealed secrets are unavailable");
+    // The key must open what is stored (a backup's key of another server
+    // is refused here, and again at every use until it is fixed).
+    match stored_now(&m.inner.mirror) {
+        Ok(st) => {
+            if let Err(e) = s.check(&st) {
+                tracing::error!(error = %e, "sealed secrets are unavailable");
+            }
+        }
+        Err(e) => tracing::error!(error = %e, "could not read the sealed secrets"),
     }
     let _ = m.inner.forge.sealer.set(s);
 }
@@ -258,6 +319,24 @@ impl Master {
     /// Tests: allow exactly `hosts` (built-ins included only if listed).
     pub fn set_forge_hosts(&self, hosts: Vec<ForgeHost>) {
         *lock(&self.inner.forge.hosts) = Some(hosts);
+    }
+
+    /// Tests: look forge names up in `table` (name to addresses) instead of
+    /// the system's resolver; the address rules apply as in use.
+    pub fn set_forge_lookup(&self, table: HashMap<String, Vec<IpAddr>>) {
+        *lock(&self.inner.forge.lookup) = Lookup {
+            fixed: Some(Arc::new(table)),
+            asked: Arc::default(),
+        };
+    }
+
+    /// Tests: the names forge calls looked up since `set_forge_lookup`.
+    pub fn forge_names_asked(&self) -> Vec<String> {
+        lock(&lock(&self.inner.forge.lookup).asked).clone()
+    }
+
+    pub(crate) fn forge_lookup(&self) -> Lookup {
+        lock(&self.inner.forge.lookup).clone()
     }
 
     /// Tests: cut forge calls after `d`.
@@ -307,6 +386,12 @@ impl Master {
                 path: "keys/secrets.key".into(),
                 why: "sealed storage is not set up".into(),
             })?;
+        let st = stored(self)
+            .await
+            .map_err(|e| crate::sealed::SealError::Io {
+                path: "master.db".into(),
+                source: std::io::Error::other(e.to_string()),
+            })?;
         let fields = [row.host.as_str(), row.account_id.as_str()];
         sealer
             .open(
@@ -316,6 +401,7 @@ impl Master {
                     fields: &fields,
                 },
                 &blob,
+                &st,
             )
             .map(Some)
     }
@@ -325,14 +411,24 @@ impl Master {
     pub(crate) fn forge_attempt(&self, user: &str, host: &str) -> Result<(), &'static str> {
         self.inner.forge.attempts.admit(user, host)
     }
+
+    /// A check against `host` failed: it counts against the host's budget.
+    pub(crate) fn forge_failed(&self, host: &str) {
+        self.inner.forge.attempts.failed(host)
+    }
 }
 
 /// Recent attempts by key (a person's id or a host).
 type Recent = HashMap<String, VecDeque<Instant>>;
 
+/// The per-person budget counts every check (it bounds what one person
+/// makes this server send); the per-host one counts failed checks only (it
+/// keeps this server from hammering a forge with bad tokens), so people
+/// whose tokens work are not locked out by others' junk, though failures
+/// alone can still use it up.
 #[derive(Default)]
 struct Attempts {
-    /// (per person, per host)
+    /// (every check per person, failed checks per host)
     seen: Mutex<(Recent, Recent)>,
 }
 
@@ -367,14 +463,34 @@ impl Attempts {
         if u.len() >= PER_USER {
             return Err("too many token checks from your account; try again in a few minutes");
         }
-        let h = hosts.entry(host.to_string()).or_default();
-        prune(h, now);
-        if h.len() >= PER_HOST {
-            return Err("too many token checks against this forge; try again in a few minutes");
+        if let Some(h) = hosts.get_mut(host) {
+            prune(h, now);
+            if h.len() >= PER_HOST {
+                return Err(
+                    "too many failed token checks against this forge; try again in a few minutes",
+                );
+            }
         }
         u.push_back(now);
-        h.push_back(now);
         Ok(())
+    }
+
+    fn failed(&self, host: &str) {
+        let now = Instant::now();
+        let mut g = lock(&self.seen);
+        let hosts = &mut g.1;
+        if !hosts.contains_key(host) && hosts.len() >= MAX_TRACKED {
+            hosts.retain(|_, q| {
+                prune(q, now);
+                !q.is_empty()
+            });
+            if hosts.len() >= MAX_TRACKED {
+                return;
+            }
+        }
+        let h = hosts.entry(host.to_string()).or_default();
+        prune(h, now);
+        h.push_back(now);
     }
 }
 
@@ -389,9 +505,56 @@ pub fn clean_token(t: &str) -> Result<Secret<String>, String> {
     Ok(Secret::new(t.to_string()))
 }
 
+/// How forge names are looked up: the system's resolver, or (tests) a
+/// fixed table; the names asked are kept for tests.
+#[derive(Clone, Default)]
+pub struct Lookup {
+    fixed: Option<Arc<HashMap<String, Vec<IpAddr>>>>,
+    asked: Arc<Mutex<Vec<String>>>,
+}
+
+/// The resolver of every forge call: it looks a name up and, unless the
+/// entry says `private_address`, keeps only public addresses (refusing the
+/// name when none is left). It runs for every connection, so a name that
+/// later resolves inward (DNS rebinding) is refused too.
+struct ForgeResolver {
+    lookup: Lookup,
+    public_only: bool,
+}
+
+impl reqwest::dns::Resolve for ForgeResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        let lookup = self.lookup.clone();
+        let public_only = self.public_only;
+        Box::pin(async move {
+            lock(&lookup.asked).push(host.clone());
+            let all: Vec<SocketAddr> = match &lookup.fixed {
+                Some(t) => t
+                    .get(&host)
+                    .map(|v| v.iter().map(|ip| SocketAddr::new(*ip, 0)).collect())
+                    .unwrap_or_default(),
+                None => tokio::net::lookup_host((host.as_str(), 0)).await?.collect(),
+            };
+            let addrs: Vec<SocketAddr> = all
+                .into_iter()
+                .filter(|a| !public_only || harness_web::is_public(a.ip()))
+                .collect();
+            if addrs.is_empty() {
+                return Err(format!("{host} does not resolve to an allowed address").into());
+            }
+            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
 /// The client for `h`: its resolver (public addresses only unless the
 /// entry allows a private one), same-origin redirects, no proxy.
-fn client(h: &ForgeHost, timeout: Duration) -> Result<reqwest::Client, CheckError> {
+fn client(
+    h: &ForgeHost,
+    timeout: Duration,
+    lookup: &Lookup,
+) -> Result<reqwest::Client, CheckError> {
     let unreachable = |why| CheckError::Unreachable(h.host.clone(), why);
     check_api_base(h).map_err(|_| unreachable("its api_base is not allowed"))?;
     let mut b = reqwest::Client::builder()
@@ -407,8 +570,11 @@ fn client(h: &ForgeHost, timeout: Duration) -> Result<reqwest::Client, CheckErro
                 "it is on a private address, and its entry does not say private_address = true",
             )
         })?;
-        b = b.dns_resolver(harness_web::public_only_resolver());
     }
+    b = b.dns_resolver(Arc::new(ForgeResolver {
+        lookup: lookup.clone(),
+        public_only: !h.private_address,
+    }));
     b.build().map_err(|_| unreachable("no HTTP client"))
 }
 
@@ -499,8 +665,9 @@ pub async fn who_am_i(
     h: &ForgeHost,
     token: &Secret<String>,
     timeout: Duration,
+    lookup: &Lookup,
 ) -> Result<Account, CheckError> {
-    match tokio::time::timeout(timeout, ask(h, token, timeout)).await {
+    match tokio::time::timeout(timeout, ask(h, token, timeout, lookup)).await {
         Ok(r) => r,
         Err(_) => Err(CheckError::Unreachable(
             h.host.clone(),
@@ -513,8 +680,9 @@ async fn ask(
     h: &ForgeHost,
     token: &Secret<String>,
     timeout: Duration,
+    lookup: &Lookup,
 ) -> Result<Account, CheckError> {
-    let c = client(h, timeout)?;
+    let c = client(h, timeout, lookup)?;
     let headers = auth_headers(h.kind, token)
         .map_err(|_| CheckError::BadAnswer(h.host.clone(), "the token cannot be sent"))?;
     let (resp_headers, v) = get(&c, h, "/user", headers.clone()).await?;
@@ -549,21 +717,31 @@ async fn ask(
             .and_then(|x| x.as_str())
             .and_then(clean_email),
     };
-    let scopes = match h.kind {
+    let reported: Option<Vec<String>> = match h.kind {
         // Classic tokens report theirs; fine-grained ones send no header.
         ForgeKind::Github => resp_headers
             .get("x-oauth-scopes")
             .and_then(|x| x.to_str().ok())
-            .map(|s| clean_scopes(s.split(','))),
+            .map(|s| s.split(',').map(str::to_string).collect()),
         // A second call; its failure only leaves the scopes unknown.
         ForgeKind::Gitlab => match get(&c, h, "/personal_access_tokens/self", headers).await {
-            Ok((_, t)) => t
-                .get("scopes")
-                .and_then(|s| s.as_array())
-                .map(|a| clean_scopes(a.iter().filter_map(|x| x.as_str()))),
+            Ok((_, t)) => t.get("scopes").and_then(|s| s.as_array()).map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str())
+                    .take(10_000)
+                    .map(str::to_string)
+                    .collect()
+            }),
             Err(_) => None,
         },
         ForgeKind::Gitea | ForgeKind::Forgejo => None,
+    };
+    let (scopes, scopes_more) = match reported {
+        Some(r) => {
+            let (kept, more) = clean_scopes(r.iter().map(String::as_str));
+            (Some(kept), more)
+        }
+        None => (None, 0),
     };
     Ok(Account {
         account_id,
@@ -571,6 +749,7 @@ async fn ask(
         display_name,
         commit_email: email,
         scopes,
+        scopes_more,
     })
 }
 
@@ -611,16 +790,25 @@ pub fn clean_email(s: &str) -> Option<String> {
     ok.then(|| s.to_string())
 }
 
-fn clean_scopes<'a>(it: impl Iterator<Item = &'a str>) -> Vec<String> {
-    it.map(str::trim)
-        .filter(|s| {
-            (1..=64).contains(&s.len())
-                && s.bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b':' | b'-' | b'.'))
-        })
-        .take(MAX_SCOPES)
-        .map(str::to_string)
-        .collect()
+/// The scopes kept: well-formed ones, at most [`MAX_SCOPES`] of them and
+/// [`MAX_SCOPE_BYTES`] of names together (so what is stored always fits
+/// its column), and how many well-formed ones were left over.
+fn clean_scopes<'a>(it: impl Iterator<Item = &'a str>) -> (Vec<String>, u32) {
+    let mut kept = Vec::new();
+    let (mut bytes, mut more) = (0usize, 0u32);
+    for s in it.map(str::trim).filter(|s| {
+        (1..=64).contains(&s.len())
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b':' | b'-' | b'.'))
+    }) {
+        if kept.len() < MAX_SCOPES && bytes + s.len() <= MAX_SCOPE_BYTES {
+            bytes += s.len();
+            kept.push(s.to_string());
+        } else {
+            more = more.saturating_add(1);
+        }
+    }
+    (kept, more)
 }
 
 /// Where on `h` a person makes a token, and the scopes later steps (listing
@@ -651,6 +839,7 @@ mod tests {
             host: h.into(),
             kind: ForgeKind::Gitea,
             api_base: base.into(),
+            api_host: None,
             private_address: false,
         }
     }
@@ -784,6 +973,69 @@ mod tests {
         );
     }
 
+    /// Review HIGH 1: the built-in list must work as shipped.
+    #[test]
+    fn every_built_in_host_passes_its_own_rules_and_builds_a_client() {
+        for h in builtins() {
+            check_api_base(&h).unwrap_or_else(|e| panic!("{}: {e}", h.host));
+            assert!(!h.private_address, "{}", h.host);
+            client(&h, CALL_TIMEOUT, &Lookup::default())
+                .unwrap_or_else(|e| panic!("{}: {e}", h.host));
+        }
+        let gh = builtins()
+            .into_iter()
+            .find(|h| h.host == "github.com")
+            .unwrap();
+        assert_eq!(gh.api_host.as_deref(), Some("api.github.com"));
+    }
+
+    #[test]
+    fn an_api_on_another_host_must_be_named() {
+        let mut h = host("ghe.example.com", "https://api.ghe.example.com");
+        h.kind = ForgeKind::Github;
+        let e = ForgeConfig {
+            hosts: vec![h.clone()],
+        }
+        .validate()
+        .unwrap_err();
+        assert!(e.contains("needs api_host"), "{e}");
+        h.api_host = Some("api.ghe.example.com".into());
+        ForgeConfig {
+            hosts: vec![h.clone()],
+        }
+        .validate()
+        .unwrap();
+        // Named, it must still be where api_base points, and well-formed.
+        h.api_host = Some("api.other.example.com".into());
+        let e = ForgeConfig {
+            hosts: vec![h.clone()],
+        }
+        .validate()
+        .unwrap_err();
+        assert!(e.contains("its api_host api.other.example.com"), "{e}");
+        h.api_host = Some("API.ghe.example.com".into());
+        assert!(
+            ForgeConfig { hosts: vec![h] }
+                .validate()
+                .unwrap_err()
+                .contains("api_host must be")
+        );
+    }
+
+    /// Review L1: what is kept always fits the column.
+    #[test]
+    fn scopes_are_capped_by_count_and_bytes() {
+        let long: Vec<String> = (0..64)
+            .map(|i| format!("{i:02}{}", "s".repeat(62)))
+            .collect();
+        let (kept, more) = clean_scopes(long.iter().map(String::as_str));
+        assert_eq!((kept.len(), more), (MAX_SCOPES, 32));
+        assert!(serde_json::to_string(&kept).unwrap().len() <= 4096);
+        let short: Vec<String> = (0..100).map(|i| format!("s{i}")).collect();
+        let (kept, more) = clean_scopes(short.iter().map(String::as_str));
+        assert_eq!((kept.len(), more), (MAX_SCOPES, 68));
+    }
+
     #[test]
     fn forge_text_is_cleaned() {
         assert_eq!(
@@ -814,7 +1066,7 @@ mod tests {
         }
         assert_eq!(
             clean_scopes(" repo, read:org ,<x>, ".split(',')),
-            vec!["repo".to_string(), "read:org".to_string()]
+            (vec!["repo".to_string(), "read:org".to_string()], 0)
         );
     }
 
@@ -845,20 +1097,18 @@ mod tests {
                 .unwrap_err()
                 .contains("your account")
         );
-        // Others still may, up to the host's limit.
-        let mut n = PER_USER;
-        let mut who = 0;
-        while n < PER_HOST {
-            a.admit(&format!("u{who}"), "github.com").unwrap();
-            n += 1;
-            if n.is_multiple_of(PER_USER) {
-                who += 1;
-            }
+        // Checks that work never use up the host's budget (review L2) ...
+        for i in 0..(3 * PER_HOST) {
+            a.admit(&format!("ok{i}"), "github.com").unwrap();
+        }
+        // ... failed ones do, for everyone.
+        for _ in 0..PER_HOST {
+            a.failed("github.com");
         }
         assert!(
             a.admit("zed", "github.com")
                 .unwrap_err()
-                .contains("this forge")
+                .contains("failed token checks against this forge")
         );
         assert!(a.admit("zed", "gitlab.com").is_ok());
     }

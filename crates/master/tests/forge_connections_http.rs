@@ -8,6 +8,7 @@
 mod common;
 use common::{Login as _, SameOrigin as _};
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -188,6 +189,22 @@ async fn forge(State(f): State<Fake>, req: Request) -> Response {
             axum::Json(json!({"id": 5, "login": "<img src=x onerror=alert(1)>"})).into_response()
         }
         "/noid/user" => axum::Json(json!({"id": "42; DROP", "login": "ada"})).into_response(),
+        // Back to the forge's own host: not the API's origin.
+        "/redir-forge/user" => (
+            AxStatus::FOUND,
+            [("location", format!("http://localhost:{port}/gh/user"))],
+        )
+            .into_response(),
+        "/manyscopes/user" => {
+            let scopes: Vec<String> = (0..64)
+                .map(|i| format!("{i:02}{}", "s".repeat(62)))
+                .collect();
+            (
+                [("x-oauth-scopes", scopes.join(", "))],
+                axum::Json(json!({"id": 50, "login": "many"})),
+            )
+                .into_response()
+        }
         _ => (AxStatus::NOT_FOUND, "no").into_response(),
     }
 }
@@ -215,6 +232,7 @@ impl Fake {
             host: host.into(),
             kind,
             api_base: format!("http://{host}:{}{path}", self.addr.get().unwrap().port()),
+            api_host: None,
             private_address: true,
         }
     }
@@ -271,6 +289,12 @@ async fn start() -> T {
     }
 }
 
+/// The test's own client: never through an environment proxy (the proxy
+/// test's child process has one set, for the server's client to ignore).
+fn client() -> reqwest::Client {
+    reqwest::Client::builder().no_proxy().build().unwrap()
+}
+
 /// `who`: a cookie, `Some("api")` for the API token, `None` for nobody.
 async fn req(
     t: &T,
@@ -279,7 +303,7 @@ async fn req(
     body: Option<Value>,
     who: Option<&str>,
 ) -> (StatusCode, Value) {
-    let mut rb = reqwest::Client::new().request(method, format!("{}{path}", t.base));
+    let mut rb = client().request(method, format!("{}{path}", t.base));
     if let Some(b) = body {
         rb = rb.json(&b);
     }
@@ -300,9 +324,7 @@ async fn req(
 }
 
 async fn post_anon(t: &T, path: &str, body: Value, c: Option<&str>) -> reqwest::Response {
-    let mut rb = reqwest::Client::new()
-        .post(format!("{}{path}", t.base))
-        .json(&body);
+    let mut rb = client().post(format!("{}{path}", t.base)).json(&body);
     if let Some(c) = c {
         rb = rb.login(c).same_origin();
     }
@@ -555,6 +577,19 @@ async fn connect_replace_disconnect_and_the_token_is_nowhere() {
     assert_eq!(st, StatusCode::BAD_GATEWAY, "{e}");
     assert!(e["error"].as_str().unwrap().contains("HTTP 401"), "{e}");
     assert!(!e.to_string().contains("Bad credentials"), "{e}");
+
+    // An https entry whose server speaks no TLS: the handshake fails.
+    let port = t.forge.addr.get().unwrap().port();
+    t.master.set_forge_hosts(vec![ForgeHost {
+        api_base: format!("https://127.0.0.1:{port}/gh"),
+        ..t.forge.host("127.0.0.1", ForgeKind::Github, "/gh")
+    }]);
+    let (st, e) = connect(&t, &alice, "127.0.0.1", TOKEN_B).await;
+    assert_eq!(st, StatusCode::BAD_GATEWAY, "{e}");
+    assert!(
+        e["error"].as_str().unwrap().contains("connection failed"),
+        "{e}"
+    );
 
     // A forge that answers 500, and one that never answers.
     t.master.set_forge_hosts(vec![
@@ -843,6 +878,7 @@ async fn the_cap_and_the_account_deletion() {
                     display_name: None,
                     commit_email: None,
                     scopes: None,
+                    scopes_more: 0,
                     sealed_token: vec![1],
                 },
                 harness_master::forge::MAX_PER_USER,
@@ -930,16 +966,9 @@ async fn sealed_tokens_stay_with_their_row_and_their_key() {
     assert!(!t.dir.path().join("keys/secrets.key").exists());
 }
 
-/// The key file missing while tokens exist, over HTTP: a paste is refused
-/// with a pointer to the admin, nothing is stored, no key is made.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_lost_key_file_refuses_new_tokens() {
-    let t = start().await;
-    let [_, (alice, _), (bob, _)] = users(&t).await;
-    let (st, _) = connect(&t, &alice, "127.0.0.1", TOKEN_A).await;
-    assert_eq!(st, StatusCode::OK);
-    // A restart with the file gone (a fresh master on the same database).
-    std::fs::remove_file(t.dir.path().join("keys/secrets.key")).unwrap();
+/// A fresh master on `t`'s database and data directory, as after a
+/// restart; it answers at the returned `T` (same forge, same store).
+async fn restart(t: &T) -> T {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let m = Master::new(
@@ -952,27 +981,287 @@ async fn a_lost_key_file_refuses_new_tokens() {
     );
     harness_master::forge::open(&m, t.dir.path());
     m.set_forge_hosts(t.master.forge_hosts());
-    tokio::spawn(async move { axum::serve(listener, router(m)).await.unwrap() });
-    let t2 = T {
+    let m2 = m.clone();
+    tokio::spawn(async move { axum::serve(listener, router(m2)).await.unwrap() });
+    T {
         base: format!("http://{addr}"),
         addr,
-        master: t.master.clone(),
+        master: m,
         store: t.store.clone(),
         forge: t.forge.clone(),
         dir: tempfile::tempdir().unwrap(),
         answers: Arc::default(),
-    };
-    let (st, e) = connect(&t2, &bob, "127.0.0.1", TOKEN_B).await;
+    }
+}
+
+/// After a restart that cannot seal (`why`): the list says so, a paste is
+/// refused before the token goes anywhere, nothing is stored, the key file
+/// is as it was, and the log says what to do (`log`).
+async fn assert_refuses_before_any_call(t: &T, t2: &T, bob: &str, log: &str) {
+    let key = t.dir.path().join("keys/secrets.key");
+    let key_before = std::fs::read(&key).ok();
+    let (st, l) = req(t2, Method::GET, "/api/connections", None, Some(bob)).await;
+    assert_eq!(st, StatusCode::OK, "{l}");
+    assert_eq!(l["available"], false, "{l}");
+    let before = t.forge.count();
+    let (st, e) = connect(t2, bob, "127.0.0.1", TOKEN_B).await;
     assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE, "{e}");
     assert!(e["error"].as_str().unwrap().contains("admin"), "{e}");
+    assert_eq!(t.forge.count(), before, "the token was sent nowhere");
+    assert_eq!(t.store.sealed_count().unwrap(), 1, "nothing stored");
+    assert_eq!(
+        std::fs::read(&key).ok(),
+        key_before,
+        "the key file is as it was"
+    );
+    let logs = String::from_utf8_lossy(&logs().lock().unwrap()).to_string();
+    assert!(logs.contains(log), "the log says what to do: {log}");
+}
+
+/// The key file missing while tokens exist (review M2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_lost_key_file_refuses_new_tokens() {
+    let t = start().await;
+    let [_, (alice, _), (bob, _)] = users(&t).await;
+    let (st, _) = connect(&t, &alice, "127.0.0.1", TOKEN_A).await;
+    assert_eq!(st, StatusCode::OK);
+    std::fs::remove_file(t.dir.path().join("keys/secrets.key")).unwrap();
+    let t2 = restart(&t).await;
+    assert_refuses_before_any_call(&t, &t2, &bob, "secrets.key is missing").await;
     assert!(
         !t.dir.path().join("keys/secrets.key").exists(),
         "no new key"
     );
-    assert_eq!(t.store.sealed_count().unwrap(), 1);
-    let logs = String::from_utf8_lossy(&logs().lock().unwrap()).to_string();
-    assert!(
-        logs.contains("secrets.key is missing"),
-        "the log says what to do"
+}
+
+/// Review M1: a backup's key of another server put back beside this
+/// master.db is refused at start and at every use; nothing is sealed under
+/// it, and the old tokens are reported as such, not as damaged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_key_from_another_backup_is_refused() {
+    let t = start().await;
+    let [_, (alice, alice_id), (bob, _)] = users(&t).await;
+    let (_, c) = connect(&t, &alice, "127.0.0.1", TOKEN_A).await;
+    let id = c["id"].as_str().unwrap().to_string();
+    let key = t.dir.path().join("keys/secrets.key");
+    std::fs::write(&key, [0x5au8; 32]).unwrap();
+    let t2 = restart(&t).await;
+    assert_refuses_before_any_call(&t, &t2, &bob, "is not the key master.db").await;
+    let e = t2
+        .master
+        .connection_token(&alice_id, &id)
+        .await
+        .unwrap_err();
+    assert!(e.to_string().contains("is not the key"), "{e}");
+    // The master that proved the right key before the swap still opens it:
+    // the stored token itself is intact.
+    assert_eq!(
+        t.master
+            .connection_token(&alice_id, &id)
+            .await
+            .unwrap()
+            .unwrap()
+            .expose(),
+        TOKEN_A
     );
+}
+
+/// Review HIGH 1: with the shipped list (no test hosts), a paste for each
+/// built-in host gets as far as looking up its API host; the lookup is a
+/// table that answers nothing, so no request leaves the machine.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_built_in_hosts_reach_their_api_hosts() {
+    logs();
+    let dir = tempfile::tempdir().unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let claim_path = dir.path().join("claim-code");
+    std::fs::write(&claim_path, "X").unwrap();
+    let store = Store::open(&dir.path().join("master.db"), Durability::Normal).unwrap();
+    let master = Master::new(
+        store.clone(),
+        Auth::new(
+            Secret::new("api-token-xyz".into()),
+            vec![addr.to_string()],
+            false,
+        )
+        .with_claim(Claim {
+            code: Secret::new("CLAIM".into()),
+            path: claim_path,
+        }),
+    );
+    master.set_sealer(Sealer::new(dir.path()));
+    master.set_forge_lookup(HashMap::new());
+    let m2 = master.clone();
+    tokio::spawn(async move { axum::serve(listener, router(m2)).await.unwrap() });
+    let t = T {
+        base: format!("http://{addr}"),
+        addr,
+        master: master.clone(),
+        store,
+        forge: fake_forge().await,
+        dir,
+        answers: Arc::default(),
+    };
+    let [_, (alice, _), _] = users(&t).await;
+    let (_, l) = req(&t, Method::GET, "/api/connections", None, Some(&alice)).await;
+    let hosts: Vec<&str> = l["hosts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["host"].as_str().unwrap())
+        .collect();
+    assert_eq!(hosts, ["github.com", "gitlab.com"]);
+    for (host, api) in [
+        ("github.com", "api.github.com"),
+        ("gitlab.com", "gitlab.com"),
+    ] {
+        let (st, e) = connect(&t, &alice, host, TOKEN_A).await;
+        assert_eq!(st, StatusCode::BAD_GATEWAY, "{host}: {e}");
+        let msg = e["error"].as_str().unwrap();
+        assert!(msg.contains("connection failed"), "{host}: {msg}");
+        assert!(!msg.contains("api_base"), "{host}: {msg}");
+        assert_eq!(
+            master.forge_names_asked().last().map(String::as_str),
+            Some(api)
+        );
+    }
+}
+
+/// Review HIGH 1: with an API host of its own, a redirect back to the
+/// forge's host is another origin and is not followed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn redirects_stay_on_the_api_host() {
+    let t = start().await;
+    let [_, (alice, _), _] = users(&t).await;
+    let port = t.forge.addr.get().unwrap().port();
+    t.master.set_forge_hosts(vec![ForgeHost {
+        host: "localhost".into(),
+        api_host: Some("127.0.0.1".into()),
+        api_base: format!("http://127.0.0.1:{port}/redir-forge"),
+        kind: ForgeKind::Github,
+        private_address: true,
+    }]);
+    let before = t.forge.count();
+    let (st, e) = connect(&t, &alice, "localhost", TOKEN_A).await;
+    assert_eq!(st, StatusCode::BAD_GATEWAY, "{e}");
+    assert!(e["error"].as_str().unwrap().contains("HTTP 302"), "{e}");
+    assert_eq!(t.forge.count(), before + 1, "the redirect was not followed");
+}
+
+/// A TCP listener that counts connections and says nothing.
+async fn silent_listener() -> (u16, Arc<std::sync::atomic::AtomicUsize>) {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    let n = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let n2 = n.clone();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((s, _)) = l.accept().await {
+            n2.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            held.push(s);
+        }
+    });
+    (port, n)
+}
+
+/// Review M3: a name that resolves to a private address is refused unless
+/// the entry says `private_address = true` (the resolver, not only the
+/// literal check, keeps the call public).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_name_that_resolves_inward_needs_private_address() {
+    let t = start().await;
+    let [_, (alice, _), _] = users(&t).await;
+    let (port, hits) = silent_listener().await;
+    t.master.set_forge_lookup(HashMap::from([(
+        "forge.test".to_string(),
+        vec!["127.0.0.1".parse().unwrap()],
+    )]));
+    let entry = |private_address| ForgeHost {
+        host: "forge.test".into(),
+        kind: ForgeKind::Gitea,
+        api_base: format!("https://forge.test:{port}/api/v1"),
+        api_host: None,
+        private_address,
+    };
+    t.master.set_forge_hosts(vec![entry(false)]);
+    let (st, e) = connect(&t, &alice, "forge.test", TOKEN_A).await;
+    assert_eq!(st, StatusCode::BAD_GATEWAY, "{e}");
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no connection inward"
+    );
+    assert!(
+        t.master
+            .forge_names_asked()
+            .contains(&"forge.test".to_string())
+    );
+    // Allowed by the entry, the same name is connected to.
+    t.master.set_forge_hosts(vec![entry(true)]);
+    let (st, _) = connect(&t, &alice, "forge.test", TOKEN_A).await;
+    assert_eq!(st, StatusCode::BAD_GATEWAY);
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+/// Review M3: environment proxies are not used. The check runs in a child
+/// process of this test binary with `HTTP_PROXY`, `HTTPS_PROXY` and
+/// `ALL_PROXY` pointing at a listener that counts connections (setting the
+/// environment here would need `unsafe`).
+#[test]
+fn environment_proxies_are_ignored() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let (port, hits) = rt.block_on(silent_listener());
+    let proxy = format!("http://127.0.0.1:{port}");
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "proxy_child", "--ignored", "--nocapture"])
+        .env("HTTP_PROXY", &proxy)
+        .env("HTTPS_PROXY", &proxy)
+        .env("ALL_PROXY", &proxy)
+        .env("http_proxy", &proxy)
+        .env("https_proxy", &proxy)
+        .env("all_proxy", &proxy)
+        .env_remove("NO_PROXY")
+        .env_remove("no_proxy")
+        .env("FORGE_PROXY_CHILD", "1")
+        .output()
+        .unwrap();
+    let text =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success() && text.contains("1 passed"), "{text}");
+    assert_eq!(
+        hits.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the proxy was used"
+    );
+    drop(rt);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "run by environment_proxies_are_ignored"]
+async fn proxy_child() {
+    if std::env::var("FORGE_PROXY_CHILD").is_err() {
+        return;
+    }
+    let t = start().await;
+    let [_, (alice, _), _] = users(&t).await;
+    let (st, c) = connect(&t, &alice, "127.0.0.1", TOKEN_A).await;
+    assert_eq!(st, StatusCode::OK, "{c}");
+}
+
+/// Review L1: a token with very many scopes is stored with as many as fit,
+/// and the rest counted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn many_scopes_are_kept_as_far_as_they_fit() {
+    let t = start().await;
+    let [_, (alice, _), _] = users(&t).await;
+    t.master.set_forge_hosts(vec![t.forge.host(
+        "127.0.0.1",
+        ForgeKind::Github,
+        "/manyscopes",
+    )]);
+    let (st, c) = connect(&t, &alice, "127.0.0.1", TOKEN_A).await;
+    assert_eq!(st, StatusCode::OK, "{c}");
+    assert_eq!(c["scopes"].as_array().unwrap().len(), 32);
+    assert_eq!(c["scopes_more"], 32);
 }

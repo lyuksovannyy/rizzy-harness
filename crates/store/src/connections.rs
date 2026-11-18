@@ -26,6 +26,8 @@ CREATE TABLE IF NOT EXISTS user_connections (
     -- The token's scopes as the forge reported them (a JSON array), NULL
     -- when the forge does not report them.
     scopes        TEXT CHECK (length(scopes) <= 4096),
+    -- Scopes the forge reported beyond those kept (the list is capped).
+    scopes_more   INTEGER NOT NULL DEFAULT 0 CHECK (scopes_more >= 0),
     sealed_token  BLOB NOT NULL CHECK (length(sealed_token) <= 4096),
     created_ms    INTEGER NOT NULL,
     updated_ms    INTEGER NOT NULL,
@@ -45,6 +47,8 @@ pub struct ConnectionRow {
     pub commit_email: Option<String>,
     /// `None`: the forge does not report scopes.
     pub scopes: Option<Vec<String>>,
+    /// Scopes reported beyond `scopes` (not kept).
+    pub scopes_more: u32,
     pub created_ms: i64,
     pub updated_ms: i64,
 }
@@ -62,8 +66,12 @@ pub struct NewConnection {
     pub display_name: Option<String>,
     pub commit_email: Option<String>,
     pub scopes: Option<Vec<String>>,
+    pub scopes_more: u32,
     pub sealed_token: Vec<u8>,
 }
+
+/// A sealed token with its row's user, host and account.
+pub type SealedSample = (String, String, String, Vec<u8>);
 
 /// What [`Store::connection_put`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,7 +86,7 @@ pub enum ConnectionPut {
 }
 
 const COLS: &str = "connection_id, user_id, host, account_id, login, display_name, commit_email, \
-                    scopes, created_ms, updated_ms";
+                    scopes, created_ms, updated_ms, scopes_more";
 
 fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionRow> {
     let scopes: Option<String> = r.get(7)?;
@@ -94,6 +102,7 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectionRow> {
         scopes: scopes.and_then(|s| serde_json::from_str(&s).ok()),
         created_ms: r.get(8)?,
         updated_ms: r.get(9)?,
+        scopes_more: r.get(10)?,
     })
 }
 
@@ -122,7 +131,7 @@ impl Store {
             Some(id) => {
                 tx.execute(
                     "UPDATE user_connections SET login = ?2, display_name = ?3, commit_email = ?4,
-                         scopes = ?5, sealed_token = ?6, updated_ms = ?7
+                         scopes = ?5, sealed_token = ?6, updated_ms = ?7, scopes_more = ?8
                      WHERE connection_id = ?1",
                     params![
                         id,
@@ -131,7 +140,8 @@ impl Store {
                         c.commit_email,
                         scopes,
                         c.sealed_token,
-                        now
+                        now,
+                        c.scopes_more
                     ],
                 )?;
                 ConnectionPut::Replaced(id)
@@ -147,8 +157,9 @@ impl Store {
                 }
                 tx.execute(
                     "INSERT INTO user_connections (connection_id, user_id, host, account_id, login,
-                         display_name, commit_email, scopes, sealed_token, created_ms, updated_ms)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
+                         display_name, commit_email, scopes, sealed_token, created_ms, updated_ms,
+                         scopes_more)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?11)",
                     params![
                         c.connection_id,
                         c.user_id,
@@ -159,7 +170,8 @@ impl Store {
                         c.commit_email,
                         scopes,
                         c.sealed_token,
-                        now
+                        now,
+                        c.scopes_more
                     ],
                 )?;
                 ConnectionPut::Added(c.connection_id.clone())
@@ -220,5 +232,19 @@ impl Store {
         let conn = self.lock();
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM user_connections", [], |r| r.get(0))?;
         Ok(n as u64)
+    }
+
+    /// Up to `n` sealed values with their rows (user, host, account), to
+    /// prove a key opens what is stored before it is used.
+    pub fn sealed_samples(&self, n: usize) -> Result<Vec<SealedSample>> {
+        let conn = self.lock();
+        let mut st = conn.prepare(
+            "SELECT user_id, host, account_id, sealed_token FROM user_connections
+             ORDER BY created_ms, connection_id LIMIT ?1",
+        )?;
+        let rows = st.query_map(params![n as i64], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 }

@@ -2971,8 +2971,12 @@ token; **Replace token** does the same and refuses a token of another account;
 workspace, and nobody else sees or uses it: not another member, not a server
 admin, not the API token (which has no account, so these routes refuse it).
 Deleting your account deletes your connections. At most 20 connections per
-person; at most 10 token checks per person and 60 per forge host in 10
-minutes. The forge's answer is read as untrusted text (at most 64 KiB, 10
+person; at most 10 token checks per person in 10 minutes, and at most 60
+**failed** checks per forge host in 10 minutes from this server, everyone
+together. The host budget is there so this server does not hammer a forge
+with bad tokens; checks that work do not use it up, but a run of failures
+(people pasting junk) can, and then nobody can connect to that host until
+the window moves on. The forge's answer is read as untrusted text (at most 64 KiB, 10
 seconds; its error text is never shown).
 
 **In this version a connection is stored and checked only.** Nothing lists
@@ -2981,7 +2985,10 @@ model; that comes next (ADOPTION_PLAN X.27 steps 2 to 4).
 
 **Where the token is kept.** In `master.db`, sealed with AES-256-GCM under a
 key in `<data>/keys/secrets.key` (32 random bytes, mode 0600 in a 0700 folder,
-made the first time a token is stored, never rewritten). Each sealed token is
+made the first time a token is stored, never rewritten). The key, and each
+token while it is in use, are in the server process's memory and are not
+wiped from it; anyone who can read that process's memory (root on the
+master) can read them. Each sealed token is
 bound to its row (the person, the host and the account), so one copied into
 another row, another person's or another table does not open. What follows:
 
@@ -2997,6 +3004,12 @@ another row, another person's or another table does not open. What follows:
   instead, people disconnect (that needs no key); the next token stored makes
   a new key. A key file readable by others also stops the server at start, like
   its other key files.
+- If `secrets.key` is a valid key but **not the one** the stored tokens were
+  sealed with (a backup of another server, or of another date), the server
+  finds out at start by trying it on stored tokens, and refuses the same way:
+  it never seals new tokens under a key that does not open the old ones.
+- While the server cannot store tokens, the screen says so, and a pasted
+  token is refused before it is sent to the forge.
 - No key rotation yet.
 
 **Which forges.** `github.com` and `gitlab.com` are built in. The server's
@@ -3008,8 +3021,16 @@ adds one):
 host = "git.example.com"            # exactly as people pick it: lower case, no port
 kind = "gitea"                      # github | gitlab | gitea | forgejo
 api_base = "https://git.example.com/api/v1"   # GitLab /api/v4, GitHub Enterprise /api/v3
+# api_host = "api.git.example.com"  # only if the API is on another host than `host`
 # private_address = true            # only if the forge is on a private address (LAN, VPN)
 ```
+
+`api_base` must be on `host` itself unless the entry names its API's own host
+in `api_host`: that is for forges whose API lives on another name, such as
+GitHub Enterprise Cloud with data residency (`host = "acme.ghe.com"`,
+`api_host = "api.acme.ghe.com"`, `api_base = "https://api.acme.ghe.com"`); the
+built-in github.com entry is the same (`api.github.com`). The API host goes
+through exactly the same address rules, and redirects may not leave it.
 
 The server reaches a forge only by https (plain http only to this machine or
 a host in `HARNESS_PLAIN_HTTP_HOSTS`), at the entry's `api_base`, never at

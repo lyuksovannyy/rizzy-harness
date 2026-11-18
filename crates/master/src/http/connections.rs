@@ -98,6 +98,7 @@ fn row_json(r: &ConnectionRow, hosts: &[ForgeHost]) -> Value {
         "display_name": r.display_name,
         "commit_email": r.commit_email,
         "scopes": r.scopes,
+        "scopes_more": r.scopes_more,
         "created_ms": r.created_ms,
         "updated_ms": r.updated_ms,
     })
@@ -107,11 +108,20 @@ async fn list(State(m): State<Master>, headers: HeaderMap) -> ApiResult<Json<Val
     let me = person(&m, &headers).await?;
     let hosts = m.forge_hosts();
     let rows = m.inner.mirror.call(move |s| s.connections_of(&me)).await?;
+    // Whether a token pasted now could be stored: the key is there (or can
+    // be made) and opens what is stored. Nothing is made by listing.
+    let available = match m.sealer() {
+        Some(s) => {
+            let st = forge::stored(&m).await?;
+            s.check(&st).is_ok()
+        }
+        None => false,
+    };
     Ok(Json(json!({
         "hosts": hosts.iter().map(host_json).collect::<Vec<_>>(),
         "connections": rows.iter().map(|r| row_json(r, &hosts)).collect::<Vec<_>>(),
         "max": forge::MAX_PER_USER,
-        "available": m.sealer().is_some(),
+        "available": available,
     })))
 }
 
@@ -133,8 +143,17 @@ fn unavailable() -> ApiError {
     )
 }
 
+/// Get the sealing key now (made if nothing is stored, proven against what
+/// is): before a token is sent anywhere, so a paste that could not be
+/// stored never leaves the machine.
+async fn ready(m: &Master) -> ApiResult<()> {
+    let sealer = m.sealer().ok_or_else(unavailable)?.clone();
+    let st = forge::stored(m).await?;
+    sealer.ready(&st).map_err(sealing_failed)
+}
+
 /// Check `token` with `h` for `me`: the attempt limits first, then the
-/// forge's answer.
+/// forge's answer; a failure counts against the host's budget.
 async fn check(
     m: &Master,
     me: &str,
@@ -143,9 +162,10 @@ async fn check(
 ) -> ApiResult<forge::Account> {
     m.forge_attempt(me, &h.host)
         .map_err(|e| err(StatusCode::TOO_MANY_REQUESTS, e))?;
-    forge::who_am_i(h, token, m.forge_timeout())
+    forge::who_am_i(h, token, m.forge_timeout(), &m.forge_lookup())
         .await
         .map_err(|e| {
+            m.forge_failed(&h.host);
             tracing::info!(host = %h.host, error = %e, "a forge token check failed");
             err(StatusCode::BAD_GATEWAY, e.to_string())
         })
@@ -161,16 +181,14 @@ async fn store(
     new_id: String,
 ) -> ApiResult<ConnectionPut> {
     let sealer = m.sealer().ok_or_else(unavailable)?.clone();
-    let sealed_now = m.inner.mirror.call(|s| s.sealed_count()).await?;
+    let st = forge::stored(m).await?;
     let fields = [h.host.as_str(), a.account_id.as_str()];
     let at = Binding {
         table: TABLE,
         owner: me,
         fields: &fields,
     };
-    let sealed = sealer
-        .seal(&at, token, sealed_now)
-        .map_err(sealing_failed)?;
+    let sealed = sealer.seal(&at, token, &st).map_err(sealing_failed)?;
     let c = NewConnection {
         connection_id: new_id,
         user_id: me.to_string(),
@@ -180,6 +198,7 @@ async fn store(
         display_name: a.display_name,
         commit_email: a.commit_email,
         scopes: a.scopes,
+        scopes_more: a.scopes_more,
         sealed_token: sealed,
     };
     let put = m
@@ -241,9 +260,7 @@ async fn create(
         })?;
     let token = forge::clean_token(&b.token).map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
     drop(b);
-    if m.sealer().is_none() {
-        return Err(unavailable());
-    }
+    ready(&m).await?;
     let a = check(&m, &me, &h, &token).await?;
     let login = a.login.clone();
     let id = harness_core::new_id();
@@ -297,9 +314,7 @@ async fn replace(
                 "this server no longer allows that forge host; disconnect it instead",
             )
         })?;
-    if m.sealer().is_none() {
-        return Err(unavailable());
-    }
+    ready(&m).await?;
     let a = check(&m, &me, &h, &token).await?;
     if a.account_id != row.account_id {
         return Err(err(

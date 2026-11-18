@@ -21,6 +21,8 @@ interface Conn {
   display_name: string | null;
   commit_email: string | null;
   scopes: string[] | null;
+  /** Scopes the forge reported beyond those kept. */
+  scopes_more?: number;
 }
 interface List {
   hosts: Host[];
@@ -117,7 +119,9 @@ function Account(props: { c: Conn; pasting: boolean; onPaste: () => void; act: (
       </div>
       {c.commit_email && <div className="muted small">{`Commit e-mail: ${shownName(c.commit_email)}`}</div>}
       <div className="muted small">
-        {c.scopes ? `Token scopes: ${c.scopes.join(", ") || "none"}` : "This forge does not report the token's scopes."}
+        {c.scopes
+          ? `Token scopes: ${c.scopes.join(", ") || "none"}${c.scopes_more ? ` and ${c.scopes_more} more` : ""}`
+          : "This forge does not report the token's scopes."}
       </div>
       {props.pasting ? (
         <Paste onCancel={props.onPaste} onSend={(token) => props.act(() => call("PUT", `${path}/token`, { token }))} />
@@ -150,7 +154,10 @@ function Paste(props: { host?: Host; onCancel: () => void; onSend: (token: strin
       onSubmit={(e) => {
         e.preventDefault();
         setBusy(true);
-        void props.onSend(token).finally(() => setBusy(false));
+        const sent = token;
+        // The token leaves this page's state at once, whatever the answer.
+        setToken("");
+        void props.onSend(sent).finally(() => setBusy(false));
       }}
     >
       {h && (
@@ -160,7 +167,23 @@ function Paste(props: { host?: Host; onCancel: () => void; onSend: (token: strin
       )}
       <label>
         Access token
-        <input type="password" autoComplete="off" spellCheck={false} value={token} onChange={(e) => setToken(e.target.value)} />
+        {/* Not a password of this site: "new-password" keeps browsers from
+            filling or saving it, and the data-* attributes ask password
+            managers (1Password, LastPass, Bitwarden, Dashlane) to leave it. */}
+        <input
+          type="password"
+          name="forge-access-token"
+          autoComplete="new-password"
+          autoCapitalize="off"
+          autoCorrect="off"
+          spellCheck={false}
+          data-1p-ignore=""
+          data-lpignore="true"
+          data-bwignore=""
+          data-form-type="other"
+          value={token}
+          onChange={(e) => setToken(e.target.value)}
+        />
       </label>
       <div className="row">
         <button type="submit" className="primary" disabled={busy || !token.trim()}>

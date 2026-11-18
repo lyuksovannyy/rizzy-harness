@@ -479,6 +479,8 @@ CREATE TABLE user_connections (
     -- The token's scopes as the forge reported them (a JSON array), NULL
     -- when the forge does not report them.
     scopes        TEXT CHECK (length(scopes) <= 4096),
+    -- Scopes the forge reported beyond those kept (the list is capped).
+    scopes_more   INTEGER NOT NULL DEFAULT 0 CHECK (scopes_more >= 0),
     sealed_token  BLOB NOT NULL CHECK (length(sealed_token) <= 4096),
     created_ms    INTEGER NOT NULL,
     updated_ms    INTEGER NOT NULL,

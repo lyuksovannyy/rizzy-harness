@@ -26,6 +26,7 @@ const ada = {
   display_name: '<img src="https://x.example/a.png"> Ada',
   commit_email: "ada@example.com",
   scopes: ["repo", "admin:org"],
+  scopes_more: 3,
 };
 
 let host: HTMLDivElement;
@@ -65,7 +66,7 @@ describe("connections", () => {
     expect(host.textContent).toContain('<img src="https://x.example/a.png"> Ada');
     expect(host.querySelector("img")).toBeNull();
     expect(host.querySelector("a")).toBeNull();
-    expect(host.textContent).toContain("Token scopes: repo, admin:org");
+    expect(host.textContent).toContain("Token scopes: repo, admin:org and 3 more");
     expect(host.textContent).toContain("cloning and pushing come next");
     expect(button("Replace token")).toBeTruthy();
     expect(button("Disconnect")).toBeTruthy();
@@ -76,6 +77,9 @@ describe("connections", () => {
     await act(async () => button("Connect")!.click());
     const field = host.querySelector<HTMLInputElement>('input[type="password"]')!;
     expect(field).toBeTruthy();
+    expect(field.getAttribute("autocomplete")).toBe("new-password");
+    expect(field.hasAttribute("data-1p-ignore")).toBe(true);
+    expect(field.getAttribute("data-lpignore")).toBe("true");
     expect(host.textContent).toContain("https://github.com/settings/tokens");
     await act(async () => input(field, "  tok_123  "));
     await act(async () => button("Save")!.click());
@@ -105,6 +109,7 @@ describe("connections", () => {
     await act(async () => input(host.querySelector<HTMLInputElement>('input[type="password"]')!, "bad"));
     await act(async () => button("Save")!.click());
     expect(host.textContent).toContain("refused this token");
-    expect(host.querySelector('input[type="password"]')).toBeTruthy();
+    // The field stays for another try, emptied: the token is not kept.
+    expect(host.querySelector<HTMLInputElement>('input[type="password"]')!.value).toBe("");
   });
 });

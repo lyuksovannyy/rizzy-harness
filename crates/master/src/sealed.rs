@@ -21,8 +21,11 @@
 //! it with `master.db`, and a copied `master.db` alone opens nothing). The
 //! key is never made again while sealed values exist: that would orphan
 //! them silently, so a missing or damaged file is an error that says what
-//! to do. `Secret<…>` holds the plaintext; it is not zeroed on drop
-//! (neither is any other `Secret` in this code base).
+//! to do; a key that does not open what is stored (a backup of another
+//! server) is refused the same way, before anything is sealed with it.
+//! Memory: the key lives in this process for its whole life (in the
+//! library's key object), and opened plaintexts live in `Secret<…>` and
+//! working buffers; none of it is wiped (no `Secret` in this code base is).
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -66,13 +69,44 @@ impl Binding<'_> {
     }
 }
 
+/// What the database holds sealed now: how many values, and a few of them
+/// (with their rows) to prove a key opens them before anything is sealed
+/// or opened with it. A trial open of real rows was chosen over a separate
+/// key-check value: it needs no extra row to keep in step, and it checks
+/// the key against the very values it must open.
+#[derive(Debug, Clone, Default)]
+pub struct Stored {
+    pub count: u64,
+    pub samples: Vec<Sample>,
+}
+
+/// One sealed value with the row it is bound to.
+#[derive(Debug, Clone)]
+pub struct Sample {
+    pub table: String,
+    pub owner: String,
+    pub fields: Vec<String>,
+    pub sealed: Vec<u8>,
+}
+
+/// How many stored values a key is tried on.
+pub const SAMPLES: usize = 5;
+
+fn held(n: &u64) -> String {
+    match n {
+        0 => "sealed secrets".into(),
+        1 => "1 sealed secret".into(),
+        n => format!("{n} sealed secrets"),
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SealError {
     #[error(
-        "{path} is missing, but master.db holds {sealed} sealed secret(s) made with it. Restore the \
-         file from the backup that has this master.db; the server does not make a new one, which \
-         would leave them unreadable for good. To give them up instead, people disconnect the \
-         connections (no key is needed for that) and the next one makes a new key"
+        "{path} is missing, but master.db holds {} made with it. Restore the file from the backup \
+         that has this master.db; the server does not make a new one, which would leave them \
+         unreadable for good. To give them up instead, people disconnect the connections (no key \
+         is needed for that) and the next one makes a new key", held(.sealed)
     )]
     KeyMissing { path: PathBuf, sealed: u64 },
     #[error(
@@ -80,6 +114,18 @@ pub enum SealError {
          fixed; restore it from a backup (a regular file of this server's user, mode 0600, {KEY_LEN} bytes)"
     )]
     KeyBad { path: PathBuf, why: String },
+    #[error(
+        "{path} is not the key master.db's {} were sealed with (none of the {tried} tried opened): \
+         a key from another server or another backup. Restore the secrets.key that belongs to this \
+         master.db. Until then nothing is sealed or opened, so no new secret is sealed under a key \
+         that does not open the old ones. To give the old ones up instead, people disconnect the \
+         connections (no key is needed for that)", held(.sealed)
+    )]
+    KeyWrong {
+        path: PathBuf,
+        sealed: u64,
+        tried: usize,
+    },
     #[error("{path}: {source}")]
     Io {
         path: PathBuf,
@@ -95,17 +141,49 @@ pub enum SealError {
     Damaged,
 }
 
-/// The key-encryption key at `<data>/keys/secrets.key`, read on first use.
+/// The key-encryption key at `<data>/keys/secrets.key`, read on first use
+/// and kept only once it has opened what the database holds.
 #[derive(Clone)]
 pub struct Sealer {
     path: PathBuf,
     key: Arc<Mutex<Option<Arc<LessSafeKey>>>>,
+    /// One loader or creator at a time in this process.
+    making: Arc<Mutex<()>>,
 }
 
 impl std::fmt::Debug for Sealer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Sealer").field("path", &self.path).finish()
     }
+}
+
+fn open_with(
+    key: &LessSafeKey,
+    at: &Binding<'_>,
+    sealed: &[u8],
+) -> Result<Secret<String>, SealError> {
+    let Some(&version) = sealed.first() else {
+        return Err(SealError::Damaged);
+    };
+    if version != VERSION {
+        return Err(SealError::UnknownVersion(version));
+    }
+    if sealed.len() < MIN_LEN {
+        return Err(SealError::Damaged);
+    }
+    let nonce: [u8; NONCE_LEN] = sealed[1..1 + NONCE_LEN]
+        .try_into()
+        .map_err(|_| SealError::Damaged)?;
+    let mut buf = sealed[1 + NONCE_LEN..].to_vec();
+    let plain = key
+        .open_in_place(
+            Nonce::assume_unique_for_key(nonce),
+            Aad::from(at.aad(version)),
+            &mut buf,
+        )
+        .map_err(|_| SealError::Damaged)?;
+    let text = String::from_utf8(plain.to_vec()).map_err(|_| SealError::Damaged)?;
+    Ok(Secret::new(text))
 }
 
 impl Sealer {
@@ -118,6 +196,7 @@ impl Sealer {
         Self {
             path,
             key: Arc::default(),
+            making: Arc::default(),
         }
     }
 
@@ -125,77 +204,88 @@ impl Sealer {
         &self.path
     }
 
-    /// Check the file as it is now (startup): fine when it is absent and
-    /// nothing is sealed, or present and usable.
-    pub fn check(&self, sealed: u64) -> Result<(), SealError> {
-        match load(&self.path)? {
-            Some(_) => Ok(()),
-            None if sealed > 0 => Err(SealError::KeyMissing {
-                path: self.path.clone(),
-                sealed,
-            }),
-            None => Ok(()),
-        }
-    }
-
     fn cached(&self) -> Option<Arc<LessSafeKey>> {
         self.key.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
-    fn remember(&self, k: LessSafeKey) -> Arc<LessSafeKey> {
+    /// `k` if it opens at least one of `stored`'s samples (or nothing is
+    /// stored), kept for later; else [`SealError::KeyWrong`].
+    fn accept(&self, k: LessSafeKey, stored: &Stored) -> Result<Arc<LessSafeKey>, SealError> {
+        // Nothing to try it on (no sample given): only the count matters.
+        if stored.count > 0 && !stored.samples.is_empty() {
+            let opens = stored.samples.iter().any(|s| {
+                let fields: Vec<&str> = s.fields.iter().map(String::as_str).collect();
+                let at = Binding {
+                    table: &s.table,
+                    owner: &s.owner,
+                    fields: &fields,
+                };
+                open_with(&k, &at, &s.sealed).is_ok()
+            });
+            if !opens {
+                return Err(SealError::KeyWrong {
+                    path: self.path.clone(),
+                    sealed: stored.count,
+                    tried: stored.samples.len(),
+                });
+            }
+        }
         let k = Arc::new(k);
         *self.key.lock().unwrap_or_else(|p| p.into_inner()) = Some(k.clone());
-        k
+        Ok(k)
     }
 
-    /// The key for opening: the file must exist.
-    fn key_to_open(&self) -> Result<Arc<LessSafeKey>, SealError> {
+    /// The key, loaded and proven against `stored`; made when absent only
+    /// if `make` and nothing is stored.
+    fn key(&self, stored: &Stored, make: bool) -> Result<Option<Arc<LessSafeKey>>, SealError> {
         if let Some(k) = self.cached() {
-            return Ok(k);
+            return Ok(Some(k));
         }
-        match load(&self.path)? {
-            Some(k) => Ok(self.remember(k)),
-            None => Err(SealError::KeyMissing {
-                path: self.path.clone(),
-                sealed: 1,
-            }),
-        }
-    }
-
-    /// The key for sealing: made when absent, but only while nothing is
-    /// sealed (`sealed` is how many values the database holds).
-    fn key_to_seal(&self, sealed: u64) -> Result<Arc<LessSafeKey>, SealError> {
+        let _one = self.making.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(k) = self.cached() {
-            return Ok(k);
+            return Ok(Some(k));
         }
         if let Some(k) = load(&self.path)? {
-            return Ok(self.remember(k));
+            return self.accept(k, stored).map(Some);
         }
-        if sealed > 0 {
+        if stored.count > 0 {
             return Err(SealError::KeyMissing {
                 path: self.path.clone(),
-                sealed,
+                sealed: stored.count,
             });
         }
-        create(&self.path)?;
+        if !make {
+            return Ok(None);
+        }
+        create(&self.path, |f| f.write_all(&random_key()?))?;
         match load(&self.path)? {
-            Some(k) => Ok(self.remember(k)),
-            None => Err(SealError::KeyBad {
-                path: self.path.clone(),
-                why: "it was made but cannot be read back".into(),
-            }),
+            Some(k) => self.accept(k, stored).map(Some),
+            None => Err(bad(&self.path, "it was made but cannot be read back")),
         }
     }
 
-    /// Seal `plain` for the row `at`. `sealed` is how many sealed values
-    /// the database already holds (a missing key is made only at 0).
+    /// Whether sealing would work now, without making a key (the list's
+    /// `available`, and the start-up check).
+    pub fn check(&self, stored: &Stored) -> Result<(), SealError> {
+        self.key(stored, false).map(|_| ())
+    }
+
+    /// Get the key for sealing now, making it if nothing is stored: called
+    /// before anything leaves the machine for a value that is to be sealed.
+    pub fn ready(&self, stored: &Stored) -> Result<(), SealError> {
+        self.key(stored, true).map(|_| ())
+    }
+
+    /// Seal `plain` for the row `at`; `stored` is what the database holds.
     pub fn seal(
         &self,
         at: &Binding<'_>,
         plain: &Secret<String>,
-        sealed: u64,
+        stored: &Stored,
     ) -> Result<Vec<u8>, SealError> {
-        let key = self.key_to_seal(sealed)?;
+        let key = self
+            .key(stored, true)?
+            .ok_or_else(|| bad(&self.path, "no key"))?;
         let mut nonce = [0u8; NONCE_LEN];
         getrandom::fill(&mut nonce).map_err(|e| SealError::Io {
             path: self.path.clone(),
@@ -215,8 +305,14 @@ impl Sealer {
         Ok(out)
     }
 
-    /// Open a value sealed for the row `at`.
-    pub fn open(&self, at: &Binding<'_>, sealed: &[u8]) -> Result<Secret<String>, SealError> {
+    /// Open a value sealed for the row `at`; `stored` is what the database
+    /// holds (the key is proven against it first). Never makes a key.
+    pub fn open(
+        &self,
+        at: &Binding<'_>,
+        sealed: &[u8],
+        stored: &Stored,
+    ) -> Result<Secret<String>, SealError> {
         let Some(&version) = sealed.first() else {
             return Err(SealError::Damaged);
         };
@@ -226,21 +322,24 @@ impl Sealer {
         if sealed.len() < MIN_LEN {
             return Err(SealError::Damaged);
         }
-        let key = self.key_to_open()?;
-        let nonce: [u8; NONCE_LEN] = sealed[1..1 + NONCE_LEN]
-            .try_into()
-            .map_err(|_| SealError::Damaged)?;
-        let mut buf = sealed[1 + NONCE_LEN..].to_vec();
-        let plain = key
-            .open_in_place(
-                Nonce::assume_unique_for_key(nonce),
-                Aad::from(at.aad(version)),
-                &mut buf,
-            )
-            .map_err(|_| SealError::Damaged)?;
-        let text = String::from_utf8(plain.to_vec()).map_err(|_| SealError::Damaged)?;
-        Ok(Secret::new(text))
+        let need = Stored {
+            count: stored.count.max(1),
+            samples: stored.samples.clone(),
+        };
+        let key = self
+            .key(&need, false)?
+            .ok_or_else(|| SealError::KeyMissing {
+                path: self.path.clone(),
+                sealed: stored.count,
+            })?;
+        open_with(&key, at, sealed)
     }
+}
+
+fn random_key() -> std::io::Result<[u8; KEY_LEN]> {
+    let mut raw = [0u8; KEY_LEN];
+    getrandom::fill(&mut raw).map_err(|e| std::io::Error::other(e.to_string()))?;
+    Ok(raw)
 }
 
 fn bad(path: &Path, why: impl Into<String>) -> SealError {
@@ -319,8 +418,9 @@ fn load(path: &Path) -> Result<Option<LessSafeKey>, SealError> {
     if f.read(&mut rest).map_err(io(path))? != 0 {
         return Err(bad(path, format!("it is longer than {KEY_LEN} bytes")));
     }
+    // The key bytes stay in this process's memory (here and inside the
+    // library's key object) and are not wiped: see the module comment.
     let k = UnboundKey::new(&AES_256_GCM, &raw).map_err(|_| bad(path, "it is not a key"))?;
-    raw.fill(0);
     Ok(Some(LessSafeKey::new(k)))
 }
 
@@ -356,56 +456,60 @@ fn key_dir(dir: &Path) -> Result<(), SealError> {
             if md.mode() & 0o077 != 0 {
                 std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
                     .map_err(io(dir))?;
+                tracing::warn!(
+                    path = %dir.display(),
+                    was = format!("{:03o}", md.mode() & 0o777),
+                    "narrowed the key folder to mode 700"
+                );
             }
         }
     }
     Ok(())
 }
 
-/// Make the key file: 32 random bytes into a new private file, then linked
-/// into place, which fails when a file is already there (another start won
-/// the race): that one stays, this one goes.
+/// Make the key file with `write`: created exclusively (`O_EXCL`, so a
+/// file already there, another creator's, is never replaced) under its
+/// final name, mode 0600 from the start, written and synced; on any
+/// failure the file this call made is removed, so no partial key stays.
+/// No temporary file and no hard link (which some file systems lack).
 #[cfg(unix)]
-fn create(path: &Path) -> Result<(), SealError> {
+fn create(
+    path: &Path,
+    write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+) -> Result<(), SealError> {
     use std::os::unix::fs::OpenOptionsExt;
     let dir = path.parent().ok_or_else(|| bad(path, "it has no folder"))?;
     key_dir(dir)?;
-    let mut raw = [0u8; KEY_LEN];
-    getrandom::fill(&mut raw).map_err(|e| io(path)(std::io::Error::other(e.to_string())))?;
-    let tmp = dir.join(format!(".secrets.key.{}.new", crate::auth::random_hex(8)));
-    let written = (|| {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits())
-            .open(&tmp)?;
-        f.write_all(&raw)?;
-        f.sync_all()
-    })();
-    raw.fill(0);
-    if let Err(e) = written {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(io(&tmp)(e));
-    }
-    let linked = std::fs::hard_link(&tmp, path);
-    let _ = std::fs::remove_file(&tmp);
-    match linked {
-        Ok(()) => {
-            if let Ok(d) = std::fs::File::open(dir) {
-                let _ = d.sync_all();
-            }
-            tracing::info!(path = %path.display(), "made the key for sealed secrets");
-            Ok(())
-        }
+    let mut f = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits())
+        .open(path)
+    {
+        Ok(f) => f,
         // Someone else's file: it is loaded and judged like any other.
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-        Err(e) => Err(io(path)(e)),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+        Err(e) => return Err(io(path)(e)),
+    };
+    let written = write(&mut f).and_then(|()| f.sync_all());
+    drop(f);
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(path);
+        return Err(io(path)(e));
     }
+    if let Ok(d) = std::fs::File::open(dir) {
+        let _ = d.sync_all();
+    }
+    tracing::info!(path = %path.display(), "made the key for sealed secrets");
+    Ok(())
 }
 
 #[cfg(not(unix))]
-fn create(path: &Path) -> Result<(), SealError> {
+fn create(
+    path: &Path,
+    _write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+) -> Result<(), SealError> {
     Err(bad(path, "sealed storage needs a Unix system"))
 }
 
@@ -428,6 +532,13 @@ mod tests {
         }
     }
 
+    fn n(count: u64) -> Stored {
+        Stored {
+            count,
+            samples: Vec::new(),
+        }
+    }
+
     fn secret() -> Secret<String> {
         Secret::new(TOKEN.into())
     }
@@ -446,7 +557,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let s = Sealer::new(d.path());
         let f = at("u1", "github.com", "42");
-        let blob = s.seal(&conn(&f), &secret(), 0).unwrap();
+        let blob = s.seal(&conn(&f), &secret(), &n(0)).unwrap();
         assert_eq!(blob[0], VERSION);
         assert_eq!(blob.len(), MIN_LEN + TOKEN.len());
         assert!(
@@ -454,17 +565,17 @@ mod tests {
                 .windows(8)
                 .any(|w| TOKEN.as_bytes().windows(8).any(|t| t == w))
         );
-        assert_eq!(s.open(&conn(&f), &blob).unwrap().expose(), TOKEN);
+        assert_eq!(s.open(&conn(&f), &blob, &n(0)).unwrap().expose(), TOKEN);
         // A fresh nonce each time.
-        assert_ne!(blob, s.seal(&conn(&f), &secret(), 1).unwrap());
+        assert_ne!(blob, s.seal(&conn(&f), &secret(), &n(1)).unwrap());
         let key = d.path().join("keys/secrets.key");
         assert_eq!(mode(&key), 0o600);
         assert_eq!(mode(&d.path().join("keys")), 0o700);
         let first = std::fs::read(&key).unwrap();
         // Another sealer (a restart) uses the same file and never rewrites it.
         let again = Sealer::new(d.path());
-        assert_eq!(again.open(&conn(&f), &blob).unwrap().expose(), TOKEN);
-        again.seal(&conn(&f), &secret(), 0).unwrap();
+        assert_eq!(again.open(&conn(&f), &blob, &n(0)).unwrap().expose(), TOKEN);
+        again.seal(&conn(&f), &secret(), &n(0)).unwrap();
         assert_eq!(std::fs::read(&key).unwrap(), first);
         // No temporary file is left beside it.
         let names: Vec<_> = std::fs::read_dir(d.path().join("keys"))
@@ -482,13 +593,13 @@ mod tests {
         std::fs::write(&key, [7u8; KEY_LEN]).unwrap();
         std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
         // The race: create() finds a file already there and keeps it.
-        create(&key).unwrap();
+        create(&key, |f| f.write_all(&[9u8; KEY_LEN])).unwrap();
         assert_eq!(std::fs::read(&key).unwrap(), vec![7u8; KEY_LEN]);
         let s = Sealer::new(d.path());
         let f = at("u", "h", "a");
-        let blob = s.seal(&conn(&f), &secret(), 0).unwrap();
+        let blob = s.seal(&conn(&f), &secret(), &n(0)).unwrap();
         assert_eq!(std::fs::read(&key).unwrap(), vec![7u8; KEY_LEN]);
-        assert_eq!(s.open(&conn(&f), &blob).unwrap().expose(), TOKEN);
+        assert_eq!(s.open(&conn(&f), &blob, &n(0)).unwrap().expose(), TOKEN);
     }
 
     #[test]
@@ -496,7 +607,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let s = Sealer::new(d.path());
         let f = at("alice", "github.com", "42");
-        let blob = s.seal(&conn(&f), &secret(), 0).unwrap();
+        let blob = s.seal(&conn(&f), &secret(), &n(0)).unwrap();
         for other in [
             at("bob", "github.com", "42"),
             at("alice", "gitlab.com", "42"),
@@ -505,7 +616,7 @@ mod tests {
             at("alic", "egithub.com", "42"),
             at("alice", "github.com4", "2"),
         ] {
-            let e = s.open(&conn(&other), &blob).unwrap_err();
+            let e = s.open(&conn(&other), &blob, &n(0)).unwrap_err();
             assert!(matches!(e, SealError::Damaged), "{other:?}: {e}");
             no_secret(&e);
         }
@@ -514,8 +625,8 @@ mod tests {
             owner: "alice",
             fields: &["github.com", "42"],
         };
-        assert!(matches!(s.open(&ws, &blob), Err(SealError::Damaged)));
-        assert_eq!(s.open(&conn(&f), &blob).unwrap().expose(), TOKEN);
+        assert!(matches!(s.open(&ws, &blob, &n(0)), Err(SealError::Damaged)));
+        assert_eq!(s.open(&conn(&f), &blob, &n(0)).unwrap().expose(), TOKEN);
     }
 
     #[test]
@@ -523,33 +634,33 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let s = Sealer::new(d.path());
         let f = at("u", "github.com", "1");
-        let blob = s.seal(&conn(&f), &secret(), 0).unwrap();
+        let blob = s.seal(&conn(&f), &secret(), &n(0)).unwrap();
         for i in 1..blob.len() {
             for bit in [0x01u8, 0x80] {
                 let mut b = blob.clone();
                 b[i] ^= bit;
-                let e = s.open(&conn(&f), &b).unwrap_err();
+                let e = s.open(&conn(&f), &b, &n(0)).unwrap_err();
                 assert!(matches!(e, SealError::Damaged), "byte {i}: {e}");
                 no_secret(&e);
             }
         }
-        for n in 0..blob.len() {
-            let e = s.open(&conn(&f), &blob[..n]).unwrap_err();
+        for cut in 0..blob.len() {
+            let e = s.open(&conn(&f), &blob[..cut], &n(0)).unwrap_err();
             assert!(
                 matches!(e, SealError::Damaged | SealError::UnknownVersion(_)),
-                "cut at {n}: {e}"
+                "cut at {cut}: {e}"
             );
         }
         let mut longer = blob.clone();
         longer.push(0);
         assert!(matches!(
-            s.open(&conn(&f), &longer),
+            s.open(&conn(&f), &longer, &n(0)),
             Err(SealError::Damaged)
         ));
         for v in [0u8, 2, 0xff] {
             let mut b = blob.clone();
             b[0] = v;
-            let e = s.open(&conn(&f), &b).unwrap_err();
+            let e = s.open(&conn(&f), &b, &n(0)).unwrap_err();
             assert!(matches!(e, SealError::UnknownVersion(x) if x == v), "{e}");
             assert!(e.to_string().contains(&format!("version {v}")), "{e}");
         }
@@ -561,24 +672,31 @@ mod tests {
     fn a_database_without_its_key_opens_nothing() {
         let d = tempfile::tempdir().unwrap();
         let f = at("u", "github.com", "1");
-        let blob = Sealer::new(d.path()).seal(&conn(&f), &secret(), 0).unwrap();
+        let blob = Sealer::new(d.path())
+            .seal(&conn(&f), &secret(), &n(0))
+            .unwrap();
         let elsewhere = tempfile::tempdir().unwrap();
         let s = Sealer::new(elsewhere.path());
-        let e = s.open(&conn(&f), &blob).unwrap_err();
+        let e = s.open(&conn(&f), &blob, &n(0)).unwrap_err();
         assert!(matches!(e, SealError::KeyMissing { .. }), "{e}");
         no_secret(&e);
         // Opening never makes a key.
         assert!(!elsewhere.path().join("keys/secrets.key").exists());
         // A new key (sealing with nothing stored there) opens nothing old.
-        s.seal(&conn(&f), &secret(), 0).unwrap();
-        assert!(matches!(s.open(&conn(&f), &blob), Err(SealError::Damaged)));
+        s.seal(&conn(&f), &secret(), &n(0)).unwrap();
+        assert!(matches!(
+            s.open(&conn(&f), &blob, &n(0)),
+            Err(SealError::Damaged)
+        ));
     }
 
     #[test]
     fn a_missing_key_is_not_made_again_while_secrets_exist() {
         let d = tempfile::tempdir().unwrap();
         let s = Sealer::new(d.path());
-        let e = s.seal(&conn(&at("u", "h", "a")), &secret(), 3).unwrap_err();
+        let e = s
+            .seal(&conn(&at("u", "h", "a")), &secret(), &n(3))
+            .unwrap_err();
         let text = e.to_string();
         assert!(
             matches!(e, SealError::KeyMissing { sealed: 3, .. }),
@@ -589,8 +707,8 @@ mod tests {
             "{text}"
         );
         assert!(!d.path().join("keys/secrets.key").exists());
-        assert!(s.check(3).is_err());
-        assert!(s.check(0).is_ok());
+        assert!(s.check(&n(3)).is_err());
+        assert!(s.check(&n(0)).is_ok());
     }
 
     #[test]
@@ -598,16 +716,16 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let s = Sealer::new(d.path());
         let f = at("u", "h", "a");
-        let blob = s.seal(&conn(&f), &secret(), 0).unwrap();
+        let blob = s.seal(&conn(&f), &secret(), &n(0)).unwrap();
         let key = d.path().join("keys/secrets.key");
         let good = std::fs::read(&key).unwrap();
         let expect_bad = |label: &str, needle: &str| {
             // A fresh sealer: as after a restart (no cached key).
             let s = Sealer::new(d.path());
             for e in [
-                s.open(&conn(&f), &blob).unwrap_err(),
-                s.seal(&conn(&f), &secret(), 0).unwrap_err(),
-                s.check(1).unwrap_err(),
+                s.open(&conn(&f), &blob, &n(0)).unwrap_err(),
+                s.seal(&conn(&f), &secret(), &n(0)).unwrap_err(),
+                s.check(&n(1)).unwrap_err(),
             ] {
                 let t = e.to_string();
                 assert!(matches!(e, SealError::KeyBad { .. }), "{label}: {t}");
@@ -645,7 +763,7 @@ mod tests {
         std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600)).unwrap();
         assert_eq!(
             Sealer::new(d.path())
-                .open(&conn(&f), &blob)
+                .open(&conn(&f), &blob, &n(0))
                 .unwrap()
                 .expose(),
             TOKEN
@@ -659,7 +777,7 @@ mod tests {
         std::fs::create_dir(&keys).unwrap();
         std::fs::set_permissions(&keys, std::fs::Permissions::from_mode(0o755)).unwrap();
         Sealer::new(d.path())
-            .seal(&conn(&at("u", "h", "a")), &secret(), 0)
+            .seal(&conn(&at("u", "h", "a")), &secret(), &n(0))
             .unwrap();
         assert_eq!(mode(&keys), 0o700);
 
@@ -668,17 +786,97 @@ mod tests {
         std::fs::create_dir(&real).unwrap();
         std::os::unix::fs::symlink(&real, e.path().join("keys")).unwrap();
         let err = Sealer::new(e.path())
-            .seal(&conn(&at("u", "h", "a")), &secret(), 0)
+            .seal(&conn(&at("u", "h", "a")), &secret(), &n(0))
             .unwrap_err();
         assert!(matches!(err, SealError::KeyBad { .. }), "{err}");
         assert!(!real.join("secrets.key").exists());
+    }
+
+    fn sample(f: &[&str; 3], blob: &[u8]) -> Sample {
+        Sample {
+            table: "user_connections".into(),
+            owner: f[0].into(),
+            fields: vec![f[1].into(), f[2].into()],
+            sealed: blob.to_vec(),
+        }
+    }
+
+    /// Review M1: a backup's key (another valid key file) put back beside
+    /// this master.db: refused before anything is sealed or opened with it.
+    #[test]
+    fn a_key_that_does_not_open_what_is_stored_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+        let f = at("u", "github.com", "1");
+        let blob = Sealer::new(d.path())
+            .seal(&conn(&f), &secret(), &n(0))
+            .unwrap();
+        let stored = Stored {
+            count: 1,
+            samples: vec![sample(&f, &blob)],
+        };
+        // The right key passes the proof.
+        Sealer::new(d.path()).check(&stored).unwrap();
+        let key = d.path().join("keys/secrets.key");
+        std::fs::write(&key, [5u8; KEY_LEN]).unwrap();
+        let s = Sealer::new(d.path());
+        for e in [
+            s.check(&stored).unwrap_err(),
+            s.ready(&stored).unwrap_err(),
+            s.seal(&conn(&at("v", "github.com", "2")), &secret(), &stored)
+                .unwrap_err(),
+            s.open(&conn(&f), &blob, &stored).unwrap_err(),
+        ] {
+            let t = e.to_string();
+            assert!(matches!(e, SealError::KeyWrong { tried: 1, .. }), "{t}");
+            assert!(t.contains("is not the key") && t.contains("Restore"), "{t}");
+            no_secret(&e);
+        }
+        assert_eq!(std::fs::read(&key).unwrap(), vec![5u8; KEY_LEN], "kept");
+    }
+
+    #[test]
+    fn a_second_creator_loses_and_uses_the_first_key() {
+        let d = tempfile::tempdir().unwrap();
+        let key = d.path().join("keys/secrets.key");
+        create(&key, |f| f.write_all(&[1u8; KEY_LEN])).unwrap();
+        create(&key, |f| f.write_all(&[2u8; KEY_LEN])).unwrap();
+        assert_eq!(std::fs::read(&key).unwrap(), vec![1u8; KEY_LEN]);
+        assert_eq!(mode(&key), 0o600);
+    }
+
+    #[test]
+    fn a_failed_write_leaves_no_key_file() {
+        let d = tempfile::tempdir().unwrap();
+        let key = d.path().join("keys/secrets.key");
+        let e = create(&key, |f| {
+            f.write_all(&[3u8; 10])?;
+            Err(std::io::Error::other("disk full"))
+        })
+        .unwrap_err();
+        assert!(e.to_string().contains("disk full"), "{e}");
+        assert!(!key.exists());
+        assert_eq!(std::fs::read_dir(d.path().join("keys")).unwrap().count(), 0);
+        // The next attempt makes a good one.
+        let s = Sealer::new(d.path());
+        s.seal(&conn(&at("u", "h", "a")), &secret(), &n(0)).unwrap();
+        assert_eq!(std::fs::read(&key).unwrap().len(), KEY_LEN);
+    }
+
+    #[test]
+    fn the_missing_key_message_counts_what_it_knows() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Sealer::new(d.path());
+        let e = s.check(&n(3)).unwrap_err().to_string();
+        assert!(e.contains("holds 3 sealed secrets"), "{e}");
+        let e = s.check(&n(1)).unwrap_err().to_string();
+        assert!(e.contains("holds 1 sealed secret "), "{e}");
     }
 
     #[test]
     fn debug_shows_no_key() {
         let d = tempfile::tempdir().unwrap();
         let s = Sealer::new(d.path());
-        s.seal(&conn(&at("u", "h", "a")), &secret(), 0).unwrap();
+        s.seal(&conn(&at("u", "h", "a")), &secret(), &n(0)).unwrap();
         let text = format!("{s:?}");
         assert!(
             text.contains("secrets.key") && !text.contains("key: "),
