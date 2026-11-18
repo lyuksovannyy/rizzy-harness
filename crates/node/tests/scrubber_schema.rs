@@ -45,7 +45,13 @@ const WORDS: &[&str] = &[
     "tool_calls",
     "tool_call_finished",
     "session_created",
+    // Not in any text sent here, but in the text once a secret before it
+    // is redacted: a second pass would change the message again.
+    "] tail-word",
 ];
+
+/// Every person's text the model was sent, in order.
+static SEEN: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 /// The model: a first step that streams text (the key split across
 /// flushes), thinks, and calls the MCP server's `echo` with the key as a
@@ -70,6 +76,7 @@ impl Provider for Scripted {
             .rposition(|m| m.user_text().is_some())
             .unwrap_or(0);
         let user = req.messages[since].user_text().unwrap_or_default();
+        SEEN.lock().unwrap().push(user.to_string());
         let tools = req.messages[since..]
             .iter()
             .filter(|m| matches!(m, ChatMsg::Tool { .. }))
@@ -391,4 +398,63 @@ async fn schema_words_in_node_env_leave_every_log_whole() {
         SessionView::fold(&log).unwrap();
     }
     n.rt.stop(Duration::from_secs(20)).await;
+}
+
+/// The person's message is scrubbed once, and the log stores the text the
+/// model was sent (review R3): a secret that appears only once another is
+/// redacted (`] tail-word` after `[REDACTED`) is not redacted a second time
+/// in the log.
+#[tokio::test]
+async fn the_message_is_stored_as_the_model_was_sent_it() {
+    let mut n = start_at(tempfile::tempdir().unwrap()).await;
+    let sid = n.create().await;
+    let text = format!("say {CANARY} tail-word now");
+    n.run(sid, "01ALICE", &text).await;
+    let log = n.log(sid);
+    let stored = one(&log, "user_message")[0].payload["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(stored, "say [REDACTED] tail-word now");
+    let seen = SEEN.lock().unwrap().clone();
+    assert!(
+        seen.iter().any(|t| t.contains(&stored)),
+        "the model was sent another text: {seen:?}"
+    );
+    n.rt.stop(Duration::from_secs(20)).await;
+}
+
+/// The shipped build orders JSON keys as written (serde_json's
+/// `preserve_order`, through genai): a scrub keeps every key where it was,
+/// a renamed one too.
+#[test]
+fn key_order_survives_a_scrub() {
+    let probe: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(r#"{"b": 1, "a": 2}"#).unwrap();
+    assert_eq!(
+        probe.keys().next().map(String::as_str),
+        Some("b"),
+        "this build sorts keys: the test would prove nothing"
+    );
+    let set = harness_core::SecretSet::new(vec![harness_core::Secret::new(CANARY.into())]);
+    let input: serde_json::Value = serde_json::from_str(&format!(
+        r#"{{"zeta": 1, "{CANARY}": "v {CANARY}", "mid": {{"y": 1, "{CANARY}": 2, "a": 3}}, "alpha": 4}}"#
+    ))
+    .unwrap();
+    let (kind, mut p) = EventKind::ToolCallStarted(ToolCallStarted {
+        turn_id: "t".into(),
+        call_id: "c".into(),
+        tool: format!("x {CANARY}"),
+        input,
+        author: None,
+    })
+    .into_parts();
+    let before: Vec<String> = p.as_object().unwrap().keys().cloned().collect();
+    set.scrub_event(&kind, &mut p);
+    let after: Vec<String> = p.as_object().unwrap().keys().cloned().collect();
+    assert_eq!(before, after);
+    let keys =
+        |v: &serde_json::Value| -> Vec<String> { v.as_object().unwrap().keys().cloned().collect() };
+    assert_eq!(keys(&p["input"]), ["zeta", "[REDACTED]", "mid", "alpha"]);
+    assert_eq!(keys(&p["input"]["mid"]), ["y", "[REDACTED]", "a"]);
 }

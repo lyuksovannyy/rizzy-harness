@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use harness_core::artifacts::{ArtifactMeta, Entry, GitInfo, Package, StagedBy};
 use harness_core::event::*;
 use harness_core::policy::{ApprovalMode, Decision, ExecMode};
+use harness_core::secret::schema::{Class, KEPT, Outcome, positions};
 use harness_core::todo::{TodoItem, TodoStatus};
 use harness_core::view::SessionView;
 use harness_core::{RawEvent, Secret, SecretSet, SessionId};
@@ -495,17 +496,25 @@ fn slot(k: &EventKind) -> usize {
 }
 const KINDS: usize = 36;
 
-const USAGE: &str = "usage.by_model.{}";
-
 /// The free paths of each kind, written by hand (the oracle; the scrubber
 /// itself has no such table). `*` is any array index, a trailing `**`
 /// everything below (keys included), a trailing `{}` a map's keys. Every other position is schema: field
 /// names, tags, enum values, numbers, ids and the values the harness writes.
 const FREE: &[(&str, &[&str])] = &[
-    ("session_created", &["title"]),
+    ("session_created", &["title", "backend", "node_id"]),
     (
         "turn_started",
-        &["agent.name", "environment", "retry.error"],
+        &[
+            "agent.name",
+            "agent.prompt_hash",
+            "agent.withheld.*",
+            "agent.effort",
+            "environment",
+            "continued_by",
+            "retry.error",
+            "retry.failed_model",
+            "retry.model",
+        ],
     ),
     (
         "user_message",
@@ -524,12 +533,14 @@ const FREE: &[(&str, &[&str])] = &[
             "images.*.name",
         ],
     ),
-    ("assistant_delta", &["text", "author"]),
+    ("assistant_delta", &["text", "author", "variant.model"]),
     (
         "assistant_message",
         &[
             "text",
             "author",
+            "variant.model",
+            "blocks.*.hash",
             "tool_calls.*.call_id",
             "tool_calls.*.tool",
             "tool_calls.*.input.**",
@@ -566,18 +577,26 @@ const FREE: &[(&str, &[&str])] = &[
     ),
     ("approval_resolved", &["note"]),
     ("checkpoint", &["files.*", "excluded.*"]),
-    ("turn_ended", &[USAGE]),
+    ("turn_ended", &[]),
     ("error", &["message"]),
-    ("agent_changed", &["agent.name"]),
+    (
+        "agent_changed",
+        &[
+            "agent.name",
+            "agent.prompt_hash",
+            "agent.withheld.*",
+            "agent.effort",
+        ],
+    ),
     ("variant_selected", &[]),
-    ("history_summarized", &["text", "focus", USAGE]),
+    ("history_summarized", &["text", "focus"]),
     (
         "context_shortened",
         &["folded.text", "folded.todo.*.content"],
     ),
-    ("model_fallback", &["reason"]),
-    ("model_retry", &[]),
-    ("retry_given_up", &[]),
+    ("model_fallback", &["model", "from", "reason"]),
+    ("model_retry", &["model"]),
+    ("retry_given_up", &["model"]),
     (
         "artifact_staged",
         &[
@@ -600,21 +619,29 @@ const FREE: &[(&str, &[&str])] = &[
         ],
     ),
     ("artifact_stage_failed", &["path", "name", "error"]),
-    ("background_started", &["call_id"]),
+    ("background_started", &["call_id", "child.agent_id"]),
     (
         "background_ended",
-        &["tail", "child.result", "child.usage.by_model.{}"],
+        &["tail", "child.agent_id", "child.result"],
     ),
     ("callback_refused", &["reason"]),
     ("queued_delivered", &[]),
     ("todo_updated", &["call_id", "items.*.content"]),
     ("approval_mode_changed", &[]),
-    ("context_sent", &["sections.*.text", "sections.*.note"]),
+    // `sections.*.key` holds `approval_mode` here, not one of the
+    // harness's own keys: scrubbed.
+    (
+        "context_sent",
+        &["sections.*.key", "sections.*.text", "sections.*.note"],
+    ),
     ("chat_allow_added", &["tool", "input.**"]),
     ("chat_allow_removed", &[]),
     ("step_limit_changed", &[]),
-    ("handoff_written", &["text", "failed.*.reason", USAGE]),
-    ("compact_failed", &["reason", USAGE]),
+    (
+        "handoff_written",
+        &["text", "model", "failed.*.model", "failed.*.reason"],
+    ),
+    ("compact_failed", &["reason"]),
     ("images_withheld", &["calls.*", "reason"]),
     ("thinking_withheld", &["reason"]),
 ];
@@ -793,7 +820,12 @@ fn every_kind_keeps_its_schema_under_every_schema_word() {
     for k in every_kind("approval_mode") {
         let (kind, payload) = k.into_parts();
         let mut got = payload.clone();
-        set.scrub_event(&kind, &mut got);
+        // Never by the fallback: every class learned is right for it.
+        let out = set.scrub_event(&kind, &mut got);
+        assert!(
+            matches!(out, Outcome::Scrubbed | Outcome::Clean),
+            "{kind}: {out:?}"
+        );
         let want = oracle(&set, &kind, &payload, &mut vec![]);
         assert_eq!(got, want, "{kind}");
         let back = EventKind::from_parts(&kind, got).unwrap_or_else(|e| panic!("{kind}: {e}"));
@@ -813,7 +845,12 @@ fn a_real_secret_is_gone_from_every_free_position() {
     for k in every_kind(&w) {
         let (kind, payload) = k.into_parts();
         let mut got = payload.clone();
-        set.scrub_event(&kind, &mut got);
+        // Never by the fallback: every class learned is right for it.
+        let out = set.scrub_event(&kind, &mut got);
+        assert!(
+            matches!(out, Outcome::Scrubbed | Outcome::Clean),
+            "{kind}: {out:?}"
+        );
         assert_eq!(got, oracle(&set, &kind, &payload, &mut vec![]), "{kind}");
     }
     // The tool input with the secret as a key and as a value.
@@ -955,8 +992,19 @@ fn random_secret_sets_never_break_the_fixture() {
         let mut out = vec![];
         for e in &events {
             let before = e.typed();
+            // The fixture holds events as a browser gets them; some of those
+            // no longer decode, and only decodable ones are ever scrubbed.
+            if before.is_err() && e.kind != "from_a_newer_node" {
+                out.push(e.clone());
+                continue;
+            }
             let mut p = e.payload.clone();
-            set.scrub_event(&e.kind, &mut p);
+            let how = set.scrub_event(&e.kind, &mut p);
+            assert!(
+                !matches!(how, Outcome::Fallback { .. }),
+                "{words:?} {}: {how:?}",
+                e.kind
+            );
             let after = EventKind::from_parts(&e.kind, p.clone());
             if let Ok(b) = before {
                 let a = after.unwrap_or_else(|err| panic!("{words:?} broke {}: {err}", e.kind));
@@ -972,14 +1020,263 @@ fn random_secret_sets_never_break_the_fixture() {
 }
 
 /// A kind this build does not know (a newer node's) has no schema to keep:
-/// every string and key is scrubbed, as before.
+/// every string value is scrubbed, no key is touched (a key may be its
+/// schema).
 #[test]
-fn an_unknown_kind_is_scrubbed_everywhere() {
+fn an_unknown_kind_has_its_values_scrubbed_and_its_keys_kept() {
     let set = set_of(&[CANARY.to_string()]);
     let mut p = json!({ CANARY: { "turn_id": CANARY, "list": [format!("a{CANARY}")] } });
-    set.scrub_event("from_a_newer_node", &mut p);
+    assert_eq!(
+        set.scrub_event("from_a_newer_node", &mut p),
+        Outcome::Unknown
+    );
     assert_eq!(
         p,
-        json!({ "[REDACTED]": { "turn_id": "[REDACTED]", "list": ["a[REDACTED]"] } })
+        json!({ CANARY: { "turn_id": "[REDACTED]", "list": ["a[REDACTED]"] } })
     );
+}
+
+/// The allowlist names only positions that exist and are text (or a map's
+/// keys), in kinds that exist; every kind has its entry. A position not on
+/// it is scrubbed (the oracle of [`every_kind_keeps_its_schema_under_every_schema_word`]
+/// holds the other half: every text position not kept is free).
+#[test]
+fn the_allowlist_names_real_text_positions_of_every_kind() {
+    assert_eq!(KEPT.len(), KINDS);
+    for k in every_kind("approval_mode") {
+        let (kind, payload) = k.into_parts();
+        let (_, kept) = KEPT
+            .iter()
+            .find(|(n, _)| *n == kind)
+            .unwrap_or_else(|| panic!("KEPT has no entry for {kind}"));
+        let pos = positions(&kind, &payload);
+        let text: Vec<String> = pos
+            .iter()
+            .filter_map(|(g, c)| match c {
+                Class::Text => Some(g.clone()),
+                Class::Map => Some(format!("{g}.{{}}")),
+                _ => None,
+            })
+            .collect();
+        for g in *kept {
+            assert!(
+                text.iter().any(|t| t == g),
+                "{kind}: KEPT names {g}, which is not a text position: {text:?}"
+            );
+        }
+    }
+}
+
+/// The classification is per path, learned once: it rests on a path
+/// having one class in every element and every instance. Checked here
+/// over every kind built with several fillers and every event of the fold
+/// fixture, each position probed by itself.
+#[test]
+fn a_path_has_one_class_in_every_instance() {
+    let mut seen: BTreeMap<(String, String), (Class, String)> = BTreeMap::new();
+    let mut instances: Vec<(String, Value, String)> = vec![];
+    for w in [
+        "approval_mode",
+        CANARY,
+        "x",
+        "01a19bf2-0000-7000-8000-00000000f1f0",
+    ] {
+        for k in every_kind(w) {
+            let (kind, p) = k.into_parts();
+            instances.push((kind, p, format!("built with {w}")));
+        }
+    }
+    for e in fixture_events() {
+        if let Ok(k) = e.typed() {
+            let (kind, p) = k.into_parts();
+            instances.push((kind, p, format!("fixture seq {}", e.seq)));
+        }
+    }
+    for (kind, p, from) in &instances {
+        for (g, c) in positions(kind, p) {
+            match seen.get(&(kind.clone(), g.clone())) {
+                Some((was, at)) => {
+                    assert_eq!(*was, c, "{kind} {g}: {was:?} in {at}, {c:?} in {from}")
+                }
+                None => {
+                    seen.insert((kind.clone(), g), (c, from.clone()));
+                }
+            }
+        }
+    }
+    assert!(seen.len() > 300, "{}", seen.len());
+}
+
+/// `continued_by` is a call id the provider or model minted: scrubbed as
+/// every call id is, so the two still match.
+#[test]
+fn a_call_id_and_its_continued_by_scrub_alike() {
+    let set = set_of(&[CANARY.to_string()]);
+    let id = format!("call_{CANARY}");
+    let (k1, mut a) = EventKind::TurnStarted(TurnStarted {
+        turn_id: "t".into(),
+        agent: None,
+        cause: None,
+        environment: None,
+        continued_by: Some(id.clone()),
+        retry: None,
+    })
+    .into_parts();
+    let (k2, mut b) = EventKind::ToolCallStarted(ToolCallStarted {
+        turn_id: "t".into(),
+        call_id: id,
+        tool: "delegate".into(),
+        input: json!({}),
+        author: None,
+    })
+    .into_parts();
+    set.scrub_event(&k1, &mut a);
+    set.scrub_event(&k2, &mut b);
+    assert_eq!(a["continued_by"], b["call_id"]);
+    assert_eq!(a["continued_by"], "call_[REDACTED]");
+}
+
+fn sections(keys: &[&str]) -> EventKind {
+    EventKind::ContextSent(ContextSent {
+        turn_id: "t".into(),
+        frame: ContextFrame::Person,
+        sections: keys
+            .iter()
+            .map(|k| SentSection {
+                key: k.to_string(),
+                digest: "ab".into(),
+                text: "x".into(),
+                note: None,
+            })
+            .collect(),
+    })
+}
+
+/// A section's key: the harness's own keys as they are, even when a
+/// configured value equals one; a subfolder file's key keeps its prefix
+/// and has its path scrubbed; other text is scrubbed. The same in every
+/// turn, so what the history holds still compares.
+#[test]
+fn section_keys_keep_the_harness_keys_and_scrub_the_rest() {
+    let set = set_of(&[
+        "instructions".into(),
+        "workspace".into(),
+        "instructions:".into(),
+        CANARY.into(),
+    ]);
+    let nested = format!("instructions:{CANARY}/AGENTS.md");
+    let other = format!("x {CANARY}");
+    let keys = [
+        "instructions",
+        "workspace",
+        "memory_recall",
+        "instructions:web/AGENTS.md",
+        nested.as_str(),
+        other.as_str(),
+    ];
+    let mut out = vec![];
+    for _turn in 0..2 {
+        let (kind, mut p) = sections(&keys).into_parts();
+        set.scrub_event(&kind, &mut p);
+        let got: Vec<String> = p["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["key"].as_str().unwrap().to_string())
+            .collect();
+        out.push(got);
+    }
+    assert_eq!(out[0], out[1]);
+    assert_eq!(
+        out[0],
+        [
+            "instructions",
+            "workspace",
+            "memory_recall",
+            "instructions:web/AGENTS.md",
+            "instructions:[REDACTED]/AGENTS.md",
+            "x [REDACTED]",
+        ]
+    );
+}
+
+/// Usage by model reads as `usage.model` does, and two models whose names
+/// are secrets stay two (R5 of the review).
+#[test]
+fn usage_by_model_keeps_its_models_apart() {
+    let a = "aaaaaaaaaaaaKEY1";
+    let b = "bbbbbbbbbbbbKEY2";
+    let set = set_of(&[a.into(), b.into()]);
+    let mut u = usage(a);
+    u.by_model.insert(b.into(), u.by_model[a].clone());
+    let (kind, mut p) = EventKind::TurnEnded(TurnEnded {
+        turn_id: "t".into(),
+        reason: TurnEndReason::Completed,
+        usage: Some(u),
+    })
+    .into_parts();
+    set.scrub_event(&kind, &mut p);
+    let by = p["usage"]["by_model"].as_object().unwrap();
+    assert_eq!(by.len(), 2, "{p}");
+    assert!(
+        by.contains_key(p["usage"]["model"].as_str().unwrap()),
+        "{p}"
+    );
+}
+
+/// Two keys of a tool's JSON that scrub to the same text both stay.
+#[test]
+fn colliding_free_keys_lose_nothing() {
+    let a = "aaaaaaaaaaaaKEY1";
+    let b = "bbbbbbbbbbbbKEY2";
+    let set = set_of(&[a.into(), b.into()]);
+    let (kind, mut p) = EventKind::ToolCallStarted(ToolCallStarted {
+        turn_id: "t".into(),
+        call_id: "c".into(),
+        tool: "x".into(),
+        input: json!({ a: 1, b: 2 }),
+        author: None,
+    })
+    .into_parts();
+    set.scrub_event(&kind, &mut p);
+    let input = p["input"].as_object().unwrap();
+    assert_eq!(input.len(), 2, "{p}");
+    assert!(!p.to_string().contains("KEY"), "{p}");
+}
+
+/// A configured value inside the marker is never redacted, so scrubbing
+/// twice gives what once did (R3 of the review).
+#[test]
+fn scrubbing_twice_is_scrubbing_once() {
+    for w in ["REDACTED", "[REDACTED]", "EDACTED]", "[REDACTE"] {
+        let set = set_of(&[w.to_string(), CANARY.into()]);
+        let (kind, mut once) = EventKind::UserMessage(UserMessage {
+            turn_id: "t".into(),
+            text: format!("x {w} y {CANARY}"),
+            attachments: vec![],
+            files: vec![],
+            reply: None,
+            images: vec![],
+            queued: false,
+        })
+        .into_parts();
+        set.scrub_event(&kind, &mut once);
+        let mut twice = once.clone();
+        set.scrub_event(&kind, &mut twice);
+        assert_eq!(once, twice, "{w}");
+        assert_eq!(once["text"], format!("x {w} y [REDACTED]"), "{w}");
+    }
+}
+
+/// A payload that decodes but is not as the typed event writes it (a
+/// defaulted field left out) is stored as the typed event writes it, and
+/// its free text is still scrubbed.
+#[test]
+fn a_payload_not_in_its_written_form_is_still_scrubbed() {
+    let set = set_of(&[CANARY.into()]);
+    let mut p = json!({ "turn_id": "t", "message_id": "m", "text": format!("say {CANARY}") });
+    let out = set.scrub_event("assistant_message", &mut p);
+    assert_eq!(out, Outcome::Scrubbed);
+    assert_eq!(p["text"], "say [REDACTED]");
+    assert!(EventKind::from_parts("assistant_message", p).is_ok());
 }

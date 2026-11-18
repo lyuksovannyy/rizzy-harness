@@ -1,7 +1,7 @@
 use std::fmt;
 use std::sync::{Arc, RwLock};
 
-mod schema;
+pub mod schema;
 
 /// A value that must never appear in logs. `Debug` and `Display` are redacted.
 #[derive(Clone, Default, PartialEq, Eq)]
@@ -161,12 +161,24 @@ impl StreamScrubber {
     }
 }
 
+/// What a secret is replaced with.
+pub const MARKER: &str = "[REDACTED]";
+
+/// `value` is part of [`MARKER`] (and long enough to count): it cannot be a
+/// secret, and redacting it would rewrite every earlier redaction, so a
+/// second pass over scrubbed text would change it again. Never redacted;
+/// a node names such a configured value once at start.
+pub fn is_marker_part(value: &str) -> bool {
+    value.len() >= MIN_SECRET_LEN && MARKER.contains(value)
+}
+
 /// The secrets that are redacted, as bytes.
 fn live(secrets: &[Secret<String>]) -> Vec<&[u8]> {
     secrets
         .iter()
-        .map(|s| s.expose().as_bytes())
-        .filter(|v| v.len() >= MIN_SECRET_LEN)
+        .map(|s| s.expose().as_str())
+        .filter(|v| v.len() >= MIN_SECRET_LEN && !is_marker_part(v))
+        .map(str::as_bytes)
         .collect()
 }
 
@@ -223,7 +235,7 @@ fn scan(text: &str, live: &[&[u8]], stop: usize) -> (String, usize) {
             // character boundaries.
             Some(n) => {
                 out.push_str(&text[copied..i]);
-                out.push_str("[REDACTED]");
+                out.push_str(MARKER);
                 i += n;
                 copied = i;
             }

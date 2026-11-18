@@ -5,61 +5,216 @@
 //! (`accept_edits`), an id, the chat's folder or a model's name. Scrubbing
 //! such a position breaks the event (it no longer decodes, and a node whose
 //! `session_created` does not decode cannot restart) or rewrites what the
-//! harness relies on. So only free text is scrubbed: what a model, a tool,
-//! a provider or a person wrote. Which positions are free is decided by the
-//! event's own types, so a kind or field added later is covered without a
-//! list to keep:
-//! - a position whose change the typed event does not take back unchanged
-//!   (a struct's field name, a tag, an enum value, a number, a UUID) is
-//!   schema;
-//! - a `String` field, a `serde_json::Value` (a tool's input, a ui spec, a
-//!   form's values) and a map's keys are free, except the `String` fields
-//!   named in [`HARNESS_FIELDS`], which hold what the harness wrote.
+//! harness reads back to act on. So only free text is scrubbed.
+//!
+//! Which positions are free is decided by the event's own types, once per
+//! kind and path (array indexes and map keys generalised) for the life of
+//! the process, by probing: a position whose change the typed event does
+//! not take back unchanged (a struct's field name, a tag, an enum value, a
+//! UUID) is fixed; a `String` field is text; below a `serde_json::Value`
+//! (a tool's input, a ui spec, a form's values) everything is free, keys
+//! included; a map's keys are free. Text is scrubbed except at the
+//! positions in [`KEPT`], the values the harness writes and reads back
+//! (ids, the chat's folder, the configured model and agent, hashes). A
+//! position not on that list is scrubbed: a field added later is scrubbed
+//! unless someone adds it on purpose.
+//!
+//! The classification rests on one assumption, checked by a test over
+//! every kind: a path has one class, whichever element of an array or entry
+//! of a map it is met in. Should it ever fail, the final check catches a
+//! result that does not decode, and the edits are then taken one path at a
+//! time, each checked ([`Outcome::Fallback`]).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::{LazyLock, Mutex};
 
-use serde_json::Value;
+use serde::Deserialize;
+use serde_json::{Map, Value};
 
 use super::SecretSet;
 use crate::event::EventKind;
 
-/// `String` fields of the event schema whose value the harness writes from
-/// its own state (ids it made, the chat's folder, the configured model and
-/// agent, hashes): never scrubbed, wherever they are in an event. Only as a
-/// typed field: the same name as a key of a tool's JSON input is free.
-/// Values a model or a tool chose (call ids, tool names, ui block ids,
-/// paths, titles, mime types) are not here: they stay scrubbed. A field
-/// added under one of these names must hold harness-written values only.
-pub const HARNESS_FIELDS: &[&str] = &[
-    "agent_id",
-    "approval_id",
-    "backend",
-    "base",
-    "bg_id",
-    "bg_ids",
-    // A callback turn's `cause`: the ids of the background commands.
-    "callback",
-    "continued_by",
-    "cwd",
-    "digest",
-    "effort",
-    "failed_model",
-    "from",
-    "git_ref",
-    "grant_id",
-    "group",
-    "hash",
-    "key",
-    "media_id",
-    "message_id",
-    "model",
-    "node_id",
-    "prompt_hash",
-    "sha256",
-    "stage_id",
-    "turn_id",
-    "withheld",
+/// The text positions kept as they are, by event kind and path (`[]` an
+/// array element, `{}` a map's key): what the harness writes from its own
+/// state and reads back to act on. Never changed, whole value or part: a
+/// configured value that is not a secret is often a prefix of one (an env
+/// `HOME=/home/someone` is a prefix of every chat's folder), and a folder
+/// rewritten to `[REDACTED]/proj` breaks the session at its next load as a
+/// broken key would. The cost: a secret a person puts into a folder's name,
+/// a model's name or an agent's id stays in that one position (it is still
+/// removed from all free text). Who reads each:
+/// - `session_created` `cwd`, `model`, `agent_id`: the session's restore
+///   (`node/src/session.rs`, `Session::restore`), the agent switch
+///   (`node/src/session_agent.rs`, `switch_of`).
+/// - every `turn_id`, `retry.turn_id`, `cleared`/`thinking.turn_id`: the
+///   fold's items and running turn (`core/src/view.rs`), the context
+///   records per turn (`agent-native/src/context.rs`, `records`), undo's
+///   window (`node/src/others.rs`), callbacks (`master/src/callbacks.rs`).
+/// - `message_id`, `variant.group`, `variant_selected`: the fold
+///   (`view.rs`), the variant chosen (`agent-native/src/lib.rs`), a form's
+///   answer checked against its message (`core/src/ui/reply.rs`).
+/// - `approval_id`: the loop's pending answers (`agent-native/src/lib.rs`),
+///   the fold's pending approvals.
+/// - `grant_id`, `chat_allow_added.key`: the chat's grants rebuilt at
+///   restore (`session.rs`, `CallKey::from_hex`).
+/// - `bg_id`, `bg_ids[]`, `cause.callback[]`: the background table and its
+///   next id (`session.rs`), callbacks (`master/src/callbacks.rs`), undo.
+/// - `checkpoint.git_ref`: restore and undo (`session.rs`, `others.rs`,
+///   `view.rs`).
+/// - `seen.sha256`, `seen.base`: undo's changed-since check (`others.rs`).
+/// - images' `media_id`, `sha256`: the loop attaches the bytes by hash
+///   (`agent-native/src/images.rs`).
+/// - `artifact_staged` `stage_id`, `sha256`: the master's artifact pull
+///   (`master/src/artifacts.rs`).
+/// - `agent.agent_id`, `agent_changed.model`: the agent switch.
+/// - `thinking.model`, `thinking_withheld.model`: which model's thinking
+///   is sent back (`agent-native/src/llm.rs`, `withhold_thinking`).
+/// - `usage.model`, `usage.by_model` keys: usage merged by model
+///   (`Usage::add`); the two must read the same.
+/// - `sections[].digest`: what the history holds of a standing section
+///   (`context.rs`, `had`). `sections[].key` has its own rule
+///   ([`section_key`]).
+pub const KEPT: &[(&str, &[&str])] = &[
+    ("session_created", &["cwd", "model", "agent_id"]),
+    (
+        "turn_started",
+        &[
+            "turn_id",
+            "agent.agent_id",
+            "cause.callback[]",
+            "retry.turn_id",
+        ],
+    ),
+    (
+        "user_message",
+        &[
+            "turn_id",
+            "reply.message_id",
+            "files[].seen.sha256",
+            "files[].seen.base",
+            "images[].media_id",
+            "images[].sha256",
+        ],
+    ),
+    (
+        "assistant_delta",
+        &["turn_id", "message_id", "variant.group"],
+    ),
+    (
+        "assistant_message",
+        &["turn_id", "message_id", "variant.group", "thinking.model"],
+    ),
+    ("tool_call_started", &["turn_id"]),
+    ("tool_output_delta", &[]),
+    (
+        "tool_call_finished",
+        &["seen.sha256", "seen.base", "image.sha256"],
+    ),
+    ("approval_requested", &["approval_id"]),
+    ("approval_resolved", &["approval_id"]),
+    ("checkpoint", &["turn_id", "git_ref"]),
+    (
+        "turn_ended",
+        &["turn_id", "usage.model", "usage.by_model.{}"],
+    ),
+    ("error", &["turn_id"]),
+    ("agent_changed", &["agent.agent_id", "model"]),
+    ("variant_selected", &["group", "message_id"]),
+    (
+        "history_summarized",
+        &["turn_id", "usage.model", "usage.by_model.{}"],
+    ),
+    (
+        "context_shortened",
+        &["turn_id", "cleared.turn_id", "thinking.turn_id"],
+    ),
+    ("model_fallback", &["turn_id"]),
+    ("model_retry", &["turn_id"]),
+    ("retry_given_up", &["turn_id"]),
+    ("artifact_staged", &["stage_id", "sha256"]),
+    ("artifact_stage_failed", &[]),
+    ("background_started", &["bg_id", "turn_id"]),
+    (
+        "background_ended",
+        &["bg_id", "child.usage.model", "child.usage.by_model.{}"],
+    ),
+    ("callback_refused", &["bg_ids[]"]),
+    ("queued_delivered", &["turn_id"]),
+    ("todo_updated", &["turn_id"]),
+    ("approval_mode_changed", &[]),
+    ("context_sent", &["turn_id", "sections[].digest"]),
+    ("chat_allow_added", &["grant_id", "approval_id", "key"]),
+    ("chat_allow_removed", &["grant_id"]),
+    ("step_limit_changed", &[]),
+    ("handoff_written", &["usage.model", "usage.by_model.{}"]),
+    ("compact_failed", &["usage.model", "usage.by_model.{}"]),
+    ("images_withheld", &["turn_id"]),
+    ("thinking_withheld", &["turn_id", "model"]),
 ];
+
+/// The keys of the harness's own context sections (`agent-native`'s
+/// `SectionKey`, checked there against this list), besides the master's
+/// [`crate::backend::StandingKey`]s.
+pub const SECTION_KEYS: &[&str] = &["user_instructions", "instructions", "skills", "turn"];
+
+/// How the key of a subfolder's instruction file begins; the rest is the
+/// file's path in the repository.
+pub const NESTED_SECTION_PREFIX: &str = "instructions:";
+
+/// A `context_sent` section's key as it is stored: one of the harness's
+/// own keys as it is; a subfolder file's key with its prefix kept and its
+/// path scrubbed (so it still reads as one, the same in every turn); any
+/// other text scrubbed whole.
+fn section_key(set: &SecretSet, key: &str) -> String {
+    let own = SECTION_KEYS.contains(&key)
+        || crate::backend::StandingKey::ALL.iter().any(|k| {
+            serde_json::to_value(k)
+                .ok()
+                .is_some_and(|v| v.as_str() == Some(key))
+        });
+    if own {
+        return key.to_string();
+    }
+    match key.strip_prefix(NESTED_SECTION_PREFIX) {
+        Some(path) => format!("{NESTED_SECTION_PREFIX}{}", set.scrub(path)),
+        None => set.scrub(key),
+    }
+}
+
+/// What a position of an event is, by its type.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Class {
+    /// A `serde_json::Value`: free, everything below it too, keys included.
+    Free,
+    /// A typed `String`: free text, unless its position is [`KEPT`].
+    Text,
+    /// A string the types fix (an enum value, a tag, a UUID).
+    Fixed,
+    /// A struct: its keys are field names.
+    Struct,
+    /// A map: its keys are data.
+    Map,
+    /// A typed sequence.
+    Seq,
+}
+
+/// What [`SecretSet::scrub_event`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// Nothing in it to scrub, or only kept positions: untouched.
+    Clean,
+    /// Its free text scrubbed.
+    Scrubbed,
+    /// A kind this build does not know: every string value scrubbed, no
+    /// key touched.
+    Unknown,
+    /// The scrubbed event did not decode (a path whose class depends on
+    /// the element; none is known): the edits were taken one path at a
+    /// time, each checked, and those of `left` paths were left out. What
+    /// is stored decodes. Worth one logged line, with no text of it.
+    Fallback { left: usize },
+}
 
 #[derive(Clone, Debug)]
 enum Seg {
@@ -67,246 +222,639 @@ enum Seg {
     Index(usize),
 }
 
-/// One change [`SecretSet::scrub_value`] would make: a string value at
-/// `path` replaced, or (`key`) a key of the object at `path` renamed.
-struct Edit {
-    path: Vec<Seg>,
-    key: Option<String>,
-    to: String,
-}
-
-impl Edit {
-    /// What makes edits alike: the same position in every element of an
-    /// array (indices left out) and the same original text. Alike edits are
-    /// schema or free together (one `Vec<T>`'s elements share a type).
-    fn class(&self, from: &str) -> String {
-        let mut s = String::new();
-        for seg in &self.path {
-            match seg {
-                Seg::Key(k) => {
-                    s.push('.');
-                    s.push_str(k);
-                }
-                Seg::Index(_) => s.push_str("[]"),
-            }
-        }
-        if self.key.is_some() {
-            s.push_str(" key");
-        }
-        s.push('\0');
-        s.push_str(from);
-        s
-    }
-
-    /// The field name the value sits under (an array's elements under the
-    /// array's), for [`HARNESS_FIELDS`].
-    fn field(&self) -> Option<&str> {
-        if self.key.is_some() {
-            return None;
-        }
-        self.path.iter().rev().find_map(|s| match s {
-            Seg::Key(k) => Some(k.as_str()),
-            Seg::Index(_) => None,
-        })
-    }
-}
-
-fn collect(set: &SecretSet, v: &Value, path: &mut Vec<Seg>, out: &mut Vec<(Edit, String)>) {
+/// Whether anything in `v`, a string or a key, holds a secret.
+fn any_hit(set: &SecretSet, v: &Value) -> bool {
     match v {
-        Value::String(s) => {
-            let to = set.scrub(s);
-            if to != *s {
-                out.push((
-                    Edit {
-                        path: path.clone(),
-                        key: None,
-                        to,
-                    },
-                    s.clone(),
-                ));
-            }
-        }
-        Value::Array(a) => {
-            for (i, x) in a.iter().enumerate() {
-                path.push(Seg::Index(i));
-                collect(set, x, path, out);
-                path.pop();
-            }
-        }
-        Value::Object(m) => {
-            for (k, x) in m {
-                let to = set.scrub(k);
-                if to != *k {
-                    out.push((
-                        Edit {
-                            path: path.clone(),
-                            key: Some(k.clone()),
-                            to,
-                        },
-                        k.clone(),
-                    ));
-                }
-                path.push(Seg::Key(k.clone()));
-                collect(set, x, path, out);
-                path.pop();
-            }
-        }
-        _ => {}
+        Value::String(s) => set.scrub(s) != *s,
+        Value::Array(a) => a.iter().any(|x| any_hit(set, x)),
+        Value::Object(m) => m.iter().any(|(k, x)| set.scrub(k) != *k || any_hit(set, x)),
+        _ => false,
     }
 }
 
-fn at<'a>(v: &'a mut Value, path: &[Seg]) -> Option<&'a mut Value> {
+fn at<'a>(v: &'a Value, path: &[Seg]) -> Option<&'a Value> {
+    path.iter().try_fold(v, |v, seg| match seg {
+        Seg::Key(k) => v.get(k.as_str()),
+        Seg::Index(i) => v.get(*i),
+    })
+}
+
+fn at_mut<'a>(v: &'a mut Value, path: &[Seg]) -> Option<&'a mut Value> {
     path.iter().try_fold(v, |v, seg| match seg {
         Seg::Key(k) => v.get_mut(k.as_str()),
         Seg::Index(i) => v.get_mut(*i),
     })
 }
 
-/// `base` with `edits` made; with `probe`, each value replaced by a number
-/// instead (a typed `String` does not take one, free JSON does).
-fn apply(base: &Value, edits: &[&Edit], probe: bool) -> Value {
-    let mut v = base.clone();
-    // Values first, by paths of the original keys; then keys, deepest
-    // first, so a renamed key never hides a path still to be followed.
-    for e in edits.iter().filter(|e| e.key.is_none()) {
-        if let Some(x) = at(&mut v, &e.path) {
-            *x = if probe {
-                Value::from(0)
-            } else {
-                Value::String(e.to.clone())
-            };
+/// A copy to probe on: long strings shortened (no enum value, tag or id is
+/// long; a typed `String` and free JSON take any), so the probes of a
+/// large event cost what its structure costs.
+fn skeleton(v: &Value) -> Value {
+    match v {
+        Value::String(s) if s.len() > 64 => Value::String("s".into()),
+        Value::Array(a) => Value::Array(a.iter().map(skeleton).collect()),
+        Value::Object(m) => {
+            Value::Object(m.iter().map(|(k, x)| (k.clone(), skeleton(x))).collect())
         }
+        other => other.clone(),
     }
-    let mut keys: Vec<&&Edit> = edits.iter().filter(|e| e.key.is_some()).collect();
-    keys.sort_by_key(|e| std::cmp::Reverse(e.path.len()));
-    for e in keys {
-        if let (Some(Value::Object(m)), Some(k)) = (at(&mut v, &e.path), &e.key)
-            && let Some(x) = m.remove(k)
-        {
-            m.insert(e.to.clone(), x);
-        }
-    }
-    v
 }
 
-/// `payload` is a `kind` exactly as the typed event writes it: it decodes,
-/// as that kind, and encodes back to itself.
-fn holds(kind: &str, payload: &Value) -> bool {
-    EventKind::from_parts(kind, payload.clone()).is_ok_and(|e| {
-        let (k, p) = e.into_parts();
-        k == kind && p == *payload
+/// The event's own types, for one kind: whether a payload is that kind
+/// exactly as the typed event writes it (decodes, as that kind, and
+/// encodes back to itself). Takes the payload and gives it back.
+type Holds<'a> = &'a dyn Fn(Value) -> (bool, Value);
+
+/// Whether a text position is kept, and what a kept-in-part one becomes.
+enum Keep {
+    Yes,
+    No,
+    As(String),
+}
+
+struct Schema<'a> {
+    kind: &'a str,
+    holds: Holds<'a>,
+    /// `(path, original)` of a text position or a map key (`….{}`).
+    keep: &'a dyn Fn(&str, &str) -> Keep,
+}
+
+/// How a probe of a position came out.
+fn probe(s: &Schema, sk: &Value, path: &[Seg]) -> Class {
+    let with = |f: &dyn Fn(&mut Value)| {
+        let mut c = sk.clone();
+        if let Some(x) = at_mut(&mut c, path) {
+            f(x);
+        }
+        (s.holds)(c).0
+    };
+    let node = at(sk, path);
+    // A number where it stands: only free JSON takes it.
+    if with(&|x| *x = Value::from(0)) {
+        return Class::Free;
+    }
+    match node {
+        Some(Value::String(_)) => {
+            if with(&|x| *x = Value::String("\u{1}probe".into())) {
+                Class::Text
+            } else {
+                Class::Fixed
+            }
+        }
+        Some(Value::Object(m)) => match m.keys().next().cloned() {
+            // A renamed key: a struct drops it, a map keeps it.
+            Some(k) => {
+                let renamed = with(&|x| {
+                    if let Value::Object(m) = x
+                        && let Some(v) = m.remove(&k)
+                    {
+                        m.insert("\u{1}probe".into(), v);
+                    }
+                });
+                if renamed { Class::Map } else { Class::Struct }
+            }
+            None => Class::Struct,
+        },
+        _ => Class::Seq,
+    }
+}
+
+/// The classes known, per kind and path, for the life of the process.
+type Cache = HashMap<String, HashMap<String, Class>>;
+static CLASSES: LazyLock<Mutex<Cache>> = LazyLock::new(Mutex::default);
+
+/// The payload is not as the typed event writes it: no probe can be read.
+struct NotWritten;
+
+struct Classifier<'a, 'b> {
+    s: &'a Schema<'b>,
+    base: &'a Value,
+    cache: &'a mut Cache,
+    sk: Option<Value>,
+}
+
+impl Classifier<'_, '_> {
+    fn class(&mut self, path: &[Seg], g: &str) -> Result<Class, NotWritten> {
+        if let Some(c) = self.cache.get(self.s.kind).and_then(|m| m.get(g)) {
+            return Ok(*c);
+        }
+        if self.sk.is_none() {
+            // A probe is read against the payload as it is: only one the
+            // typed event writes back unchanged can be read, or every
+            // probe fails and a wrong class is learned for good.
+            let sk = skeleton(self.base);
+            if !(self.s.holds)(sk.clone()).0 {
+                return Err(NotWritten);
+            }
+            self.sk = Some(sk);
+        }
+        let c = probe(self.s, self.sk.as_ref().expect("set above"), path);
+        self.cache
+            .entry(self.s.kind.to_string())
+            .or_default()
+            .insert(g.to_string(), c);
+        Ok(c)
+    }
+
+    /// The class of the position at `path` and its general path; `Free`
+    /// as soon as an ancestor is free JSON.
+    fn resolve(&mut self, path: &[Seg]) -> Result<(Class, String), NotWritten> {
+        let mut g = String::new();
+        for i in 0..=path.len() {
+            let c = self.class(&path[..i], &g)?;
+            let Some(seg) = path.get(i) else {
+                return Ok((c, g));
+            };
+            match (c, seg) {
+                (Class::Struct, Seg::Key(k)) => push_key(&mut g, k),
+                (Class::Map, Seg::Key(_)) => g.push_str(".{}"),
+                (Class::Seq, Seg::Index(_)) => g.push_str("[]"),
+                // Free JSON, or a shape the class does not fit.
+                _ => return Ok((Class::Free, g)),
+            }
+        }
+        unreachable!("the loop returns at the path's end")
+    }
+}
+
+fn push_key(g: &mut String, k: &str) {
+    if !g.is_empty() {
+        g.push('.');
+    }
+    g.push_str(k);
+}
+
+/// Rename keys of `m` (`(old, new)`), each in its place, a name already
+/// there numbered (` (2)`), so no entry is lost.
+fn rename_keys(m: &mut Map<String, Value>, renames: &[(String, String)]) {
+    if renames.is_empty() {
+        return;
+    }
+    let to: HashMap<&str, &str> = renames
+        .iter()
+        .map(|(a, b)| (a.as_str(), b.as_str()))
+        .collect();
+    let old = std::mem::take(m);
+    let mut taken: HashSet<String> = old
+        .keys()
+        .filter(|k| !to.contains_key(k.as_str()))
+        .cloned()
+        .collect();
+    for (k, x) in old {
+        let name = match to.get(k.as_str()) {
+            None => k,
+            Some(want) => {
+                let mut name = want.to_string();
+                let mut n = 2;
+                while taken.contains(&name) {
+                    name = format!("{want} ({n})");
+                    n += 1;
+                }
+                taken.insert(name.clone());
+                name
+            }
+        };
+        m.insert(name, x);
+    }
+}
+
+/// Free JSON scrubbed: every string and key. Whether anything changed.
+fn scrub_free(set: &SecretSet, v: &mut Value) -> bool {
+    match v {
+        Value::String(s) => {
+            let c = set.scrub(s);
+            let changed = c != *s;
+            if changed {
+                *s = c;
+            }
+            changed
+        }
+        Value::Array(a) => a.iter_mut().fold(false, |ch, x| scrub_free(set, x) | ch),
+        Value::Object(m) => {
+            let mut changed = m.values_mut().fold(false, |ch, x| scrub_free(set, x) | ch);
+            let renames: Vec<(String, String)> = m
+                .keys()
+                .filter_map(|k| {
+                    let c = set.scrub(k);
+                    (c != *k).then(|| (k.clone(), c))
+                })
+                .collect();
+            changed |= !renames.is_empty();
+            rename_keys(m, &renames);
+            changed
+        }
+        _ => false,
+    }
+}
+
+/// One pass over a copy of the payload: each typed position by its class
+/// (learned once per path), free JSON scrubbed whole. `allow`: only the
+/// paths it names are changed (the fallback); `touched`: the paths changed.
+struct Walk<'a, 'b, 'c> {
+    set: &'a SecretSet,
+    cls: Classifier<'a, 'b>,
+    allow: Option<&'c [String]>,
+    touched: Vec<String>,
+}
+
+impl Walk<'_, '_, '_> {
+    fn may(&mut self, g: &str) -> bool {
+        let ok = self.allow.is_none_or(|a| a.iter().any(|x| x == g));
+        if ok && !self.touched.iter().any(|x| x == g) {
+            self.touched.push(g.to_string());
+        }
+        ok
+    }
+
+    fn walk(
+        &mut self,
+        v: &mut Value,
+        path: &mut Vec<Seg>,
+        g: &mut String,
+    ) -> Result<(), NotWritten> {
+        match self.cls.class(path, g)? {
+            Class::Free => match self.allow {
+                // The first pass: one scan, as the old scrubber did.
+                None => {
+                    if scrub_free(self.set, v) {
+                        self.may(g);
+                    }
+                }
+                Some(_) => {
+                    if self.may(g) {
+                        scrub_free(self.set, v);
+                    }
+                }
+            },
+            Class::Text => {
+                if let Value::String(x) = v {
+                    let to = self.set.scrub(x);
+                    if to != *x {
+                        let to = match (self.cls.s.keep)(g, x) {
+                            Keep::Yes => None,
+                            Keep::No => Some(to),
+                            Keep::As(t) => (t != *x).then_some(t),
+                        };
+                        if let Some(to) = to
+                            && self.may(g)
+                        {
+                            *x = to;
+                        }
+                    }
+                }
+            }
+            Class::Fixed => {}
+            Class::Seq => {
+                if let Value::Array(a) = v {
+                    let n = g.len();
+                    g.push_str("[]");
+                    for (i, x) in a.iter_mut().enumerate() {
+                        path.push(Seg::Index(i));
+                        self.walk(x, path, g)?;
+                        path.pop();
+                    }
+                    g.truncate(n);
+                }
+            }
+            Class::Struct => {
+                if let Value::Object(m) = v {
+                    for (k, x) in m.iter_mut() {
+                        let n = g.len();
+                        push_key(g, k);
+                        path.push(Seg::Key(k.clone()));
+                        self.walk(x, path, g)?;
+                        path.pop();
+                        g.truncate(n);
+                    }
+                }
+            }
+            Class::Map => {
+                if let Value::Object(m) = v {
+                    let n = g.len();
+                    g.push_str(".{}");
+                    for (k, x) in m.iter_mut() {
+                        path.push(Seg::Key(k.clone()));
+                        self.walk(x, path, g)?;
+                        path.pop();
+                    }
+                    // Keys after the values: the paths above are the
+                    // original keys, as the probes know them.
+                    let mut renames = vec![];
+                    for k in m.keys() {
+                        let to = self.set.scrub(k);
+                        if to == *k {
+                            continue;
+                        }
+                        let to = match (self.cls.s.keep)(g, k) {
+                            Keep::Yes => continue,
+                            Keep::No => to,
+                            Keep::As(t) if t != *k => t,
+                            Keep::As(_) => continue,
+                        };
+                        renames.push((k.clone(), to));
+                    }
+                    if !renames.is_empty() && self.may(g) {
+                        rename_keys(m, &renames);
+                    }
+                    g.truncate(n);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Scrub `payload` of the kind `s` describes (module docs).
+fn run(
+    set: &SecretSet,
+    s: &Schema,
+    payload: &mut Value,
+    cache: &mut Cache,
+) -> Result<Outcome, NotWritten> {
+    let pass = |allow: Option<&[String]>, cache: &mut Cache| {
+        let mut out = payload.clone();
+        let mut w = Walk {
+            set,
+            cls: Classifier {
+                s,
+                base: payload,
+                cache,
+                sk: None,
+            },
+            allow,
+            touched: vec![],
+        };
+        w.walk(&mut out, &mut vec![], &mut String::new())?;
+        let touched = w.touched;
+        let (ok, out) = (s.holds)(out);
+        Ok::<_, NotWritten>((ok, out, touched))
+    };
+    let (ok, out, touched) = pass(None, cache)?;
+    if touched.is_empty() {
+        return Ok(Outcome::Clean);
+    }
+    if ok {
+        *payload = out;
+        return Ok(Outcome::Scrubbed);
+    }
+    // One path at a time, each checked: at most as many checks as the
+    // event has paths changed, whatever the number of changes.
+    let mut kept: Vec<String> = vec![];
+    let mut best = None;
+    for g in &touched {
+        kept.push(g.clone());
+        let (ok, out, _) = pass(Some(&kept), cache)?;
+        if ok {
+            best = Some(out);
+        } else {
+            kept.pop();
+        }
+    }
+    if let Some(out) = best {
+        *payload = out;
+    }
+    Ok(Outcome::Fallback {
+        left: touched.len() - kept.len(),
     })
 }
 
-/// The groups of `groups` for which `test` holds, found by halving: one
-/// test when it holds for all, about `k·log2(n)` when it fails for `k`.
-fn passing(groups: &[usize], test: &mut dyn FnMut(&[usize]) -> bool, out: &mut Vec<usize>) {
-    if groups.is_empty() {
-        return;
+/// Every string value scrubbed, no key touched.
+fn values_only(set: &SecretSet, v: &mut Value) {
+    match v {
+        Value::String(s) => {
+            let c = set.scrub(s);
+            if c != *s {
+                *s = c;
+            }
+        }
+        Value::Array(a) => a.iter_mut().for_each(|x| values_only(set, x)),
+        Value::Object(m) => m.values_mut().for_each(|x| values_only(set, x)),
+        _ => {}
     }
-    if test(groups) {
-        out.extend_from_slice(groups);
-        return;
+}
+
+fn holds_event(kind: &str, payload: Value) -> (bool, Value) {
+    let mut w = Map::new();
+    w.insert("kind".into(), Value::String(kind.into()));
+    w.insert("payload".into(), payload);
+    let w = Value::Object(w);
+    let ok = EventKind::deserialize(&w).is_ok_and(|e| {
+        serde_json::to_value(&e).is_ok_and(|back| {
+            back.get("kind") == w.get("kind") && back.get("payload") == w.get("payload")
+        })
+    });
+    let Value::Object(mut w) = w else {
+        unreachable!("built as an object")
+    };
+    (ok, w.remove("payload").unwrap_or(Value::Null))
+}
+
+fn known(kind: &str) -> bool {
+    KEPT.iter().any(|(k, _)| *k == kind)
+}
+
+fn keep_of<'a>(set: &'a SecretSet, kind: &'a str) -> impl Fn(&str, &str) -> Keep + 'a {
+    move |g: &str, orig: &str| {
+        if kind == "context_sent" && g == "sections[].key" {
+            return Keep::As(section_key(set, orig));
+        }
+        let kept = KEPT
+            .iter()
+            .find(|(k, _)| *k == kind)
+            .is_some_and(|(_, paths)| paths.contains(&g));
+        if kept { Keep::Yes } else { Keep::No }
     }
-    if groups.len() == 1 {
-        return;
-    }
-    let (a, b) = groups.split_at(groups.len() / 2);
-    passing(a, test, out);
-    passing(b, test, out);
 }
 
 impl SecretSet {
     /// Scrub the payload of an event of `kind` in place, its free text only
     /// (module docs): whatever the set holds, the result decodes as the same
-    /// kind, with every schema position as it was. A payload with nothing to
-    /// scrub is left untouched, byte for byte. A kind this build does not
-    /// know has no schema to keep: every string and key is scrubbed
-    /// ([`SecretSet::scrub_value`]).
-    pub fn scrub_event(&self, kind: &str, payload: &mut Value) {
-        if self.is_empty() {
-            return;
+    /// kind, with every field name, tag, enum value and [`KEPT`] position as
+    /// it was. A payload with nothing to scrub is left untouched, byte for
+    /// byte. The first event of a kind to meet a path probes it (a few
+    /// decodes of a copy with long strings cut short); after that a scrub is
+    /// one pass, the lookups and one decode.
+    pub fn scrub_event(&self, kind: &str, payload: &mut Value) -> Outcome {
+        if self.is_empty() || !any_hit(self, payload) {
+            return Outcome::Clean;
         }
-        let mut found = vec![];
-        collect(self, payload, &mut vec![], &mut found);
-        if found.is_empty() {
-            return;
-        }
-        let Ok(typed) = EventKind::from_parts(kind, payload.clone()) else {
-            self.scrub_value(payload);
-            return;
+        let keep = keep_of(self, kind);
+        let holds = |v: Value| holds_event(kind, v);
+        let s = Schema {
+            kind,
+            holds: &holds,
+            keep: &keep,
         };
-        let (_, base) = typed.into_parts();
-        if base != *payload {
-            // Not as the typed event writes it (never from `append`): start
-            // from what it does write, so every check below compares alike.
-            *payload = base;
-            found.clear();
-            collect(self, payload, &mut vec![], &mut found);
+        let mut cache = CLASSES.lock().unwrap_or_else(|p| p.into_inner());
+        if let Ok(out) = run(self, &s, payload, &mut cache) {
+            return out;
         }
-        let base = &*payload;
-
-        // Alike edits in groups.
-        let mut classes: HashMap<String, usize> = HashMap::new();
-        let mut groups: Vec<Vec<usize>> = vec![];
-        for (i, (e, from)) in found.iter().enumerate() {
-            let g = *classes.entry(e.class(from)).or_insert_with(|| {
-                groups.push(vec![]);
-                groups.len() - 1
-            });
-            groups[g].push(i);
-        }
-        let edits = |gs: &[usize]| -> Vec<&Edit> {
-            gs.iter()
-                .flat_map(|g| groups[*g].iter().map(|i| &found[*i].0))
-                .collect()
-        };
-
-        // A harness field's value is kept where it is a typed `String`
-        // (a number in its place does not decode); in free JSON it is free.
-        let named: Vec<usize> = (0..groups.len())
-            .filter(|g| {
-                found[groups[*g][0]]
-                    .0
-                    .field()
-                    .is_some_and(|f| HARNESS_FIELDS.contains(&f))
-            })
-            .collect();
-        let mut untyped = vec![];
-        passing(
-            &named,
-            &mut |gs| holds(kind, &apply(base, &edits(gs), true)),
-            &mut untyped,
-        );
-        let mut typed_field = vec![false; groups.len()];
-        named.iter().for_each(|g| typed_field[*g] = true);
-        untyped.iter().for_each(|g| typed_field[*g] = false);
-        let open: Vec<usize> = (0..groups.len()).filter(|g| !typed_field[*g]).collect();
-
-        // Of the rest, the edits the typed event takes back unchanged.
-        let mut ok = vec![];
-        passing(
-            &open,
-            &mut |gs| holds(kind, &apply(base, &edits(gs), false)),
-            &mut ok,
-        );
-        if ok.is_empty() {
-            return;
-        }
-        let all = apply(base, &edits(&ok), false);
-        if holds(kind, &all) {
-            *payload = all;
-            return;
-        }
-        // Groups that pass alone but not together (none known): add them
-        // one at a time, each checked, so what is stored always decodes.
-        let mut kept: Vec<usize> = vec![];
-        for g in ok {
-            kept.push(g);
-            if !holds(kind, &apply(base, &edits(&kept), false)) {
-                kept.pop();
+        // Not as the typed event writes it (never from `append`): stored
+        // as it does write it, so the probes compare alike; a kind this
+        // build does not know has its values scrubbed, never its keys.
+        match EventKind::from_parts(kind, payload.clone()) {
+            Ok(e) => {
+                *payload = e.into_parts().1;
+                run(self, &s, payload, &mut cache).unwrap_or(Outcome::Unknown)
+            }
+            Err(_) => {
+                debug_assert!(!known(kind), "a {kind} that does not decode");
+                values_only(self, payload);
+                Outcome::Unknown
             }
         }
-        *payload = apply(base, &edits(&kept), false);
+    }
+}
+
+/// Every string and object position of `payload` (below free JSON, only
+/// its root) with its general path and class, probed afresh, nothing
+/// cached: for the tests that compare classes across instances and the
+/// kept positions with [`KEPT`].
+#[doc(hidden)]
+pub fn positions(kind: &str, payload: &Value) -> Vec<(String, Class)> {
+    let holds = |v: Value| holds_event(kind, v);
+    let keep = |_: &str, _: &str| Keep::No;
+    let s = Schema {
+        kind,
+        holds: &holds,
+        keep: &keep,
+    };
+    let mut paths = vec![];
+    fn walk(v: &Value, path: &mut Vec<Seg>, out: &mut Vec<Vec<Seg>>) {
+        match v {
+            Value::String(_) => out.push(path.clone()),
+            Value::Array(a) => {
+                out.push(path.clone());
+                for (i, x) in a.iter().enumerate() {
+                    path.push(Seg::Index(i));
+                    walk(x, path, out);
+                    path.pop();
+                }
+            }
+            Value::Object(m) => {
+                out.push(path.clone());
+                for (k, x) in m {
+                    path.push(Seg::Key(k.clone()));
+                    walk(x, path, out);
+                    path.pop();
+                }
+            }
+            _ => {}
+        }
+    }
+    walk(payload, &mut vec![], &mut paths);
+    let mut out: Vec<(String, Class)> = vec![];
+    for p in paths {
+        // Fresh per position: each element is judged by itself.
+        let mut cache = Cache::new();
+        let mut c = Classifier {
+            s: &s,
+            base: payload,
+            cache: &mut cache,
+            sk: None,
+        };
+        let Ok((class, g)) = c.resolve(&p) else {
+            return vec![];
+        };
+        // Below free JSON only its root counts.
+        if class == Class::Free && out.iter().any(|(x, c)| *c == Class::Free && *x == g) {
+            continue;
+        }
+        out.push((g, class));
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Secret;
+    use serde::Serialize;
+
+    /// A schema the event schema does not have: one path that is text in
+    /// one element and an enum value in another (an internally tagged
+    /// enum). The class learned from the first element is wrong for the
+    /// second, the final check sees the result does not decode, and the
+    /// one-path-at-a-time fallback keeps what decodes.
+    #[derive(Serialize, Deserialize, PartialEq, Debug)]
+    struct S {
+        xs: Vec<Y>,
+        note: String,
+    }
+    #[derive(Serialize, Deserialize, PartialEq, Debug)]
+    #[serde(tag = "t", rename_all = "snake_case")]
+    enum Y {
+        A { v: String },
+        B { v: Color },
+    }
+    #[derive(Serialize, Deserialize, PartialEq, Debug)]
+    #[serde(rename_all = "snake_case")]
+    enum Color {
+        Longcolor,
+    }
+
+    fn holds_s(v: Value) -> (bool, Value) {
+        let ok =
+            S::deserialize(&v).is_ok_and(|x| serde_json::to_value(&x).is_ok_and(|back| back == v));
+        (ok, v)
+    }
+
+    #[test]
+    fn a_path_of_two_classes_falls_back_and_still_decodes() {
+        let set = SecretSet::new(vec![Secret::new("longcolor".into())]);
+        let mut v = serde_json::to_value(S {
+            xs: vec![
+                Y::A {
+                    v: "a longcolor sky".into(),
+                },
+                Y::B {
+                    v: Color::Longcolor,
+                },
+            ],
+            note: "longcolor here".into(),
+        })
+        .unwrap();
+        let keep = |_: &str, _: &str| Keep::No;
+        let s = Schema {
+            kind: "synthetic",
+            holds: &holds_s,
+            keep: &keep,
+        };
+        let out = run(&set, &s, &mut v, &mut Cache::new()).ok();
+        assert_eq!(out, Some(Outcome::Fallback { left: 1 }));
+        // It decodes; the path that decodes is scrubbed, the other kept.
+        let back: S = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(back.note, "[REDACTED] here");
+        assert_eq!(
+            back.xs[1],
+            Y::B {
+                v: Color::Longcolor
+            }
+        );
+    }
+
+    #[test]
+    fn colliding_keys_are_numbered_not_lost() {
+        let set = SecretSet::new(vec![
+            Secret::new("aaaaaaaaKEY1".into()),
+            Secret::new("bbbbbbbbKEY2".into()),
+        ]);
+        let mut v = serde_json::json!({
+            "z": 1, "aaaaaaaaKEY1": 2, "[REDACTED]": 3, "bbbbbbbbKEY2": 4
+        });
+        let free = |v: Value| (true, v);
+        let keep = |_: &str, _: &str| Keep::No;
+        let s = Schema {
+            kind: "free",
+            holds: &free,
+            keep: &keep,
+        };
+        assert!(run(&set, &s, &mut v, &mut Cache::new()).is_ok());
+        let m = v.as_object().unwrap();
+        assert_eq!(m.len(), 4, "{v}");
+        let mut vals: Vec<i64> = m.values().map(|x| x.as_i64().unwrap()).collect();
+        vals.sort();
+        assert_eq!(vals, [1, 2, 3, 4]);
+        assert_eq!(m["[REDACTED]"], 3, "a key already there keeps its name");
     }
 }

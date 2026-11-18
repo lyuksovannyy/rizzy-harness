@@ -54,7 +54,10 @@ pub const BLOCK_CAP: usize = 1024 * 1024;
 pub const TURN: &str = "turn";
 
 /// How a nested instruction file's key begins (`instructions:web/AGENTS.md`).
-pub const NESTED_PREFIX: &str = "instructions:";
+/// The event scrubber keeps it and the harness's own keys as they are
+/// (`harness_core::secret::schema::SECTION_KEYS`; `tests/section_keys.rs`
+/// keeps the two lists alike).
+pub const NESTED_PREFIX: &str = harness_core::secret::schema::NESTED_SECTION_PREFIX;
 
 /// A standing section.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
