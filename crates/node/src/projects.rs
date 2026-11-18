@@ -756,13 +756,10 @@ mod tests {
         std::fs::create_dir(&bin).unwrap();
         let fake = bin.join("git");
         // `init` runs for real; `commit` fails.
-        std::fs::write(
+        script(
             &fake,
             "#!/bin/sh\nfor a in \"$@\"; do [ \"$a\" = commit ] && exit 1; done\nexec git \"$@\"\n",
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         crate::git::use_test_git(Some(fake));
         let res = r.make("Broken").await;
         crate::git::use_test_git(None);
@@ -818,16 +815,37 @@ mod tests {
         let bin = r.ws.parent().unwrap().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let fake = bin.join("git");
-        std::fs::write(
+        script(
             &fake,
-            format!(
+            &format!(
                 "#!/bin/sh\nfor a in \"$@\"; do [ \"$a\" = commit ] && {{ {before}; }}; done\nexec git \"$@\"\n"
             ),
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         fake
+    }
+
+    /// An executable script at `path`, written by a child process. This
+    /// test binary then never holds a write descriptor of it, so a child
+    /// that another test's thread forks in the meantime cannot inherit
+    /// one, and the kernel does not refuse to start the script with "Text
+    /// file busy" (seen in CI: the code under test starts it, so the
+    /// start cannot be retried from here; `copy_exe` in the cli tests is
+    /// the same answer for a copied program).
+    fn script(path: &Path, body: &str) {
+        use std::io::Write as _;
+        use std::process::{Command, Stdio};
+        let mut sh = Command::new("sh")
+            .args(["-c", r#"cat > "$1" && chmod 755 "$1""#, "sh"])
+            .arg(path)
+            .stdin(Stdio::piped())
+            .spawn()
+            .expect("sh");
+        sh.stdin
+            .take()
+            .expect("stdin")
+            .write_all(body.as_bytes())
+            .expect("script body");
+        assert!(sh.wait().expect("sh").success(), "{}", path.display());
     }
 
     /// A repository outside the workspace roots with one commit.
