@@ -28,6 +28,7 @@ import { ACCENTS } from "./forms";
 import { LinkedA } from "./Linked";
 import { shownName } from "../md/hiddenChars";
 import { useNewChatAgent, type AgentDefaults } from "../lib/agentDefaults";
+import ProjectMcp from "./ProjectMcp";
 
 // Artifacts has no route of its own (lib/routes.ts): the tab is this page's.
 type Tab = ProjectTab | "artifacts";
@@ -154,7 +155,10 @@ export default function Project(props: {
         {tab === "memory" && <ProjectMemory project={project} version={props.memoryVersion} onOpen={props.onOpenChat} />}
         {tab === "artifacts" && <ProjectArtifacts project={project} workspaceId={props.workspaceId} />}
         {tab === "settings" && (
-          <ProjectSettings project={project} nodes={props.nodes} onSaved={setProject} onDeleted={props.onDeleted} />
+          <>
+            <ProjectSettings project={project} nodes={props.nodes} onSaved={setProject} onDeleted={props.onDeleted} />
+            <ProjectMcp projectId={project.project_id} hasFolder={!!(project.settings.node_id && project.settings.cwd)} />
+          </>
         )}
       </div>
     </section>

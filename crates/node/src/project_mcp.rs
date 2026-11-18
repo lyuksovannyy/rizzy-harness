@@ -26,9 +26,10 @@
 //! `host` chat. Every rule of node.toml's servers holds (PLAN.md T47): the
 //! chat's own confinement, the caps, the idle stop, the approval of calls.
 //!
-//! **Environment.** A project server gets what the chat's `bash` gets
-//! (the core list and node.toml's `env_pass`, never `env_vars`) and its
-//! entry's own `env` values, which are set only inside the sandbox
+//! **Environment.** A project server gets less than the chat's `bash`:
+//! the core allow-list only (no `env_pass`, no `env_vars`: like a
+//! node.toml server without `env_vars`), and its entry's own `env` values,
+//! which are set only inside the sandbox
 //! (`/usr/bin/env NAME=value … command`, `ServerConfig::env_inside`), so
 //! no value of a repository file reaches a process outside it (the
 //! wrapper, bubblewrap: an `LD_PRELOAD` there would run before them). The
