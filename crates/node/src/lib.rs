@@ -15,6 +15,7 @@ pub mod policy;
 pub mod projects;
 mod recall;
 mod session;
+mod stored_skills;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -128,6 +129,7 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::ArtifactFetch { .. }
         | MasterToNode::RecallResult { .. }
         | MasterToNode::BoardResult { .. }
+        | MasterToNode::SkillResult { .. }
         | MasterToNode::Diff { .. }
         | MasterToNode::Files { .. }
         | MasterToNode::ProjectCreate { .. } => None,
@@ -204,6 +206,8 @@ pub(crate) struct Inner {
     pub(crate) recalls: recall::Pending,
     /// `board` and `board_edit` calls waiting for the master (PLAN.md T78).
     pub(crate) boards: board::Pending,
+    /// Loads of a stored skill waiting for their `skill.result`.
+    pub(crate) stored_skills: stored_skills::Pending,
     /// Room for turn diffs being read ([`DIFF_AT_ONCE`]).
     diffs: Arc<tokio::sync::Semaphore>,
     /// Room for `@` completions being walked (T63), as many as diffs.
@@ -539,6 +543,7 @@ impl NodeRuntime {
             background: harness_tools::background::Registry::new(bg_limits, bg_secrets),
             recalls: Default::default(),
             boards: Default::default(),
+            stored_skills: Default::default(),
             diffs: Arc::new(tokio::sync::Semaphore::new(DIFF_AT_ONCE)),
             file_lists: Arc::new(tokio::sync::Semaphore::new(DIFF_AT_ONCE)),
             projects_made: Default::default(),
@@ -747,6 +752,13 @@ impl NodeRuntime {
             if offers(harness_core::board::READ_TOOL) || offers(harness_core::board::EDIT_TOOL) {
                 capabilities.push(harness_protocol::CAP_BOARD.into());
             }
+            // Stored skills (X.34 step B, PLAN.md T81), in either profile:
+            // where it offers `skill` and node.toml `[skills] from_master`
+            // is on. Without it the master sends no list and answers no
+            // request.
+            if offers(harness_tools::skills::NAME) && self.inner.cfg.policy.skills.from_master {
+                capabilities.push(harness_protocol::CAP_STORED_SKILLS.into());
+            }
             if self.inner.cfg.profile == harness_core::event::Profile::Agentic {
                 // The modes it offers and their gaps (N.10a), as decided at
                 // start.
@@ -856,6 +868,12 @@ impl NodeRuntime {
                         answer,
                         error,
                     } => this.inner.boards.answer(&req_id, answer, error),
+                    // Likewise a stored skill's body (X.34 step B).
+                    MasterToNode::SkillResult {
+                        req_id,
+                        body,
+                        error,
+                    } => this.inner.stored_skills.answer(&req_id, body, error),
                     // Likewise a turn's diff (X.12): a read of two
                     // checkpoints, in a task of its own, never behind a
                     // command of the session (a restore holds its lane).
@@ -1580,6 +1598,14 @@ impl NodeRuntime {
                 error,
             } => {
                 self.inner.boards.answer(&req_id, answer, error);
+                Ok(())
+            }
+            MasterToNode::SkillResult {
+                req_id,
+                body,
+                error,
+            } => {
+                self.inner.stored_skills.answer(&req_id, body, error);
                 Ok(())
             }
             MasterToNode::ArtifactStage {

@@ -43,6 +43,7 @@ pub mod secrets;
 pub mod serve;
 pub mod sniff;
 pub mod storage;
+pub mod stored_skills;
 pub mod voice;
 pub mod workspaces;
 mod ws;
@@ -316,6 +317,8 @@ pub struct MasterInner {
     /// The board tools' counts per turn, calls per node and recent request
     /// ids (PLAN.md T78).
     board: board::Grants,
+    /// Stored skills' loads per turn and per node (PLAN.md T81).
+    stored_skills: stored_skills::Grants,
     /// The routine scheduler, once `start_routines` ran.
     routines: OnceLock<routines::RoutinesHandle>,
     /// The blob store, once `storage::open` ran (before any node links, so
@@ -629,6 +632,8 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::RecallResult { .. }
         // An answer to the node's own board call: nothing is run there.
         | MasterToNode::BoardResult { .. }
+        // A stored skill's text for the node's own load: nothing is run.
+        | MasterToNode::SkillResult { .. }
         // A read of two checkpoints: no event, no work.
         | MasterToNode::Diff { .. }
         // A listing of names for the composer: no event.
@@ -717,6 +722,7 @@ impl Master {
                 notes: Default::default(),
                 recall: Default::default(),
                 board: Default::default(),
+                stored_skills: Default::default(),
                 routines: OnceLock::new(),
                 storage: OnceLock::new(),
                 pulls: Default::default(),
@@ -1493,6 +1499,11 @@ impl Master {
                 session_id,
                 request,
             } => board::handle(self, node_id, req_id, session_id, request),
+            NodeToMaster::Skill {
+                req_id,
+                session_id,
+                name,
+            } => stored_skills::handle(self, node_id, req_id, session_id, name),
             NodeToMaster::ArtifactChunk {
                 req_id,
                 offset,
@@ -1720,6 +1731,11 @@ impl Master {
         // tool withheld instead (X.34, PLAN.md T80): fails closed.
         if !self.node_has(node_id, harness_protocol::CAP_PLUGIN_ACCESS) {
             plugins::fail_closed(&mut msg);
+        }
+        // Nor does one that does not take stored skills get their list
+        // (X.34 step B, PLAN.md T81).
+        if !self.node_has(node_id, harness_protocol::CAP_STORED_SKILLS) {
+            stored_skills::strip(&mut msg);
         }
         let work = writes_to(&msg);
         // A diverged session takes no events, so nothing may make its node
@@ -2739,6 +2755,7 @@ impl Master {
     async fn forget(&self, sid: SessionId) {
         self.inner.recall.forget(sid);
         self.inner.board.forget(sid);
+        self.inner.stored_skills.forget(sid);
         let res = self
             .inner
             .mirror

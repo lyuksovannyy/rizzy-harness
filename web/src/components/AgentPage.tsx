@@ -88,7 +88,7 @@ export const FEATURE_GROUPS: { title: string; items: Feature[] }[] = [
       {
         key: "skills",
         label: "Skills",
-        hint: "Loads the skills it may use in this workspace (Plugins); with file or command access",
+        hint: "Loads the skills it may use in this workspace (Plugins); a node's skill folders only with file or command access",
       },
       {
         key: "mcp",
@@ -151,9 +151,8 @@ export function handleProblem(id: string, agents: Pick<Agent, "id">[]): string |
   return null;
 }
 
-/** A switch that does nothing with the others as they are: read-only commands next to a switch that changes things, skills without file or command access. */
+/** A switch that does nothing with the others as they are: read-only commands next to a switch that changes things. */
 export function moot(f: AgentFeatures, key: keyof AgentFeatures): boolean {
-  if (key === "skills") return !(f.read_files || f.edit_files || f.commands);
   return key === "read_only_commands" && (f.edit_files || f.commands || f.mcp);
 }
 

@@ -1003,3 +1003,133 @@ fn plugin_access_is_per_workspace_bounded_and_cleaned_up() {
     assert!(s.plugin_access(&a).unwrap().is_empty());
     assert_eq!(s.plugin_access(&b).unwrap().len(), 1);
 }
+
+/// X.34 step B (PLAN.md T81): stored skills are per scope; a workspace's go
+/// with it; a workspace skill may not take a server skill's name; caps on
+/// count and bytes hold under concurrent creates and are refused, never
+/// cut; the table refuses what the master's check would.
+#[test]
+fn stored_skills_are_scoped_capped_and_cascade() {
+    use harness_store::stored_skills::{SkillCaps, SkillScope};
+    let s = store();
+    let a = s.create_workspace("A", "a1").unwrap().workspace_id;
+    let b = s.create_workspace("B", "a1").unwrap().workspace_id;
+    let caps = SkillCaps {
+        count: 3,
+        bytes: 4096,
+    };
+    let wa = SkillScope::Workspace(&a);
+    let wb = SkillScope::Workspace(&b);
+    assert!(
+        s.stored_skill_create(wa, "notes", "Take notes", "Do it.", caps)
+            .unwrap()
+    );
+    // The same name again in the scope is refused; in another scope fine.
+    let e = s
+        .stored_skill_create(wa, "notes", "x", "y", caps)
+        .unwrap_err();
+    assert!(matches!(e, StoreError::Refused(_)), "{e}");
+    assert!(s.stored_skill_create(wb, "notes", "x", "y", caps).unwrap());
+    // A server skill may take a name a workspace has (it then wins there);
+    // a workspace skill may not take a server skill's name.
+    assert!(
+        s.stored_skill_create(SkillScope::Server, "notes", "Server notes", "S.", caps)
+            .unwrap()
+    );
+    assert!(
+        s.stored_skill_create(SkillScope::Server, "release", "R", "R.", caps)
+            .unwrap()
+    );
+    let e = s
+        .stored_skill_create(wa, "release", "x", "y", caps)
+        .unwrap_err();
+    assert!(e.to_string().contains("server's own skills"), "{e}");
+    // An unknown workspace stores nothing.
+    assert!(
+        !s.stored_skill_create(SkillScope::Workspace("nope"), "x", "x", "x", caps)
+            .unwrap()
+    );
+    // The table refuses an empty or oversized field itself.
+    assert!(s.stored_skill_create(wa, "", "x", "x", caps).is_err());
+    assert!(s.stored_skill_create(wa, "e", "x", "", caps).is_err());
+    let huge = "x".repeat(24 * 1024 + 1);
+    let big_caps = SkillCaps {
+        count: 9,
+        bytes: 1 << 20,
+    };
+    assert!(
+        s.stored_skill_create(wa, "big", "x", &huge, big_caps)
+            .is_err()
+    );
+    // Bytes: refused past the cap, and an update counts the new size.
+    let e = s
+        .stored_skill_create(wa, "long", "x", &"y".repeat(4090), caps)
+        .unwrap_err();
+    assert!(e.to_string().contains("KiB"), "{e}");
+    assert!(
+        s.stored_skill_update(wa, "notes", "Take notes", &"z".repeat(4090), caps)
+            .is_err()
+    );
+    assert!(
+        s.stored_skill_update(wa, "notes", "Take better notes", "Do it well.", caps)
+            .unwrap()
+    );
+    assert!(!s.stored_skill_update(wa, "gone", "x", "y", caps).unwrap());
+    let got = s.stored_skill(wa, "notes").unwrap().unwrap();
+    assert_eq!(
+        (got.description.as_str(), got.body.as_str()),
+        ("Take better notes", "Do it well.")
+    );
+    assert_eq!(got.workspace_id.as_deref(), Some(a.as_str()));
+    let server = s
+        .stored_skill(SkillScope::Server, "notes")
+        .unwrap()
+        .unwrap();
+    assert_eq!((server.workspace_id, server.body.as_str()), (None, "S."));
+    // Listings carry no bodies and only their own scope.
+    let names = |sc| -> Vec<String> {
+        s.stored_skills(sc)
+            .unwrap()
+            .into_iter()
+            .map(|r| {
+                assert!(r.body.is_empty());
+                r.name
+            })
+            .collect()
+    };
+    assert_eq!(names(wa), ["notes"]);
+    assert_eq!(names(SkillScope::Server), ["notes", "release"]);
+    // Count: concurrent creates never pass the cap.
+    let s = std::sync::Arc::new(s);
+    let made: usize = std::thread::scope(|t| {
+        let hs: Vec<_> = (0..8)
+            .map(|i| {
+                let s = s.clone();
+                let a = a.clone();
+                t.spawn(move || {
+                    s.stored_skill_create(
+                        SkillScope::Workspace(&a),
+                        &format!("c{i}"),
+                        "x",
+                        "y",
+                        caps,
+                    )
+                    .is_ok_and(|ok| ok)
+                })
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap() as usize).sum()
+    });
+    assert_eq!(made, 2, "3 at most, one was there");
+    assert_eq!(s.stored_skills(SkillScope::Workspace(&a)).unwrap().len(), 3);
+    // Deleting the workspace takes its skills; the server's and B's stay.
+    assert!(s.delete_workspace(&a).unwrap());
+    assert!(
+        s.stored_skills(SkillScope::Workspace(&a))
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(s.stored_skills(SkillScope::Workspace(&b)).unwrap().len(), 1);
+    assert!(s.stored_skill_delete(SkillScope::Server, "notes").unwrap());
+    assert!(!s.stored_skill_delete(SkillScope::Server, "notes").unwrap());
+}

@@ -2692,7 +2692,37 @@ impl Session {
     ) -> TurnExtra {
         use crate::instructions::{self as ins, Bounded};
         use harness_tools::skills;
+        let policy = &self.node.cfg.policy;
+        // The `skill` tool here, and the master's stored skills for it
+        // (X.34 step B, PLAN.md T81) where node.toml takes them.
+        let skill_on = agent.is_none_or(|a| a.allows_tool(skills::NAME))
+            && !policy.denies(skills::NAME)
+            && self.node.cfg.backend.has_tool(skills::NAME);
+        let stored: &[harness_core::skills::StoredSkillEntry] =
+            match agent.filter(|_| skill_on && policy.skills.from_master) {
+                Some(a) => &a.stored_skills,
+                None => &[],
+            };
+        let denied = agent.map(|a| a.deny_skills.as_slice()).unwrap_or_default();
+        // A chat on the master has no folder: stored skills only.
         if self.profile != Profile::Agentic {
+            if !stored.is_empty() {
+                let window = agent.and_then(|a| {
+                    let model = a.model.clone().unwrap_or_else(|| self.model.clone());
+                    a.context_windows.get(&model).copied()
+                });
+                let problems = ins::with_skills(
+                    &mut extra,
+                    Bounded::Done(Default::default()),
+                    invoking,
+                    denied,
+                    stored,
+                    skills::cap_for(window),
+                );
+                if !problems.is_empty() {
+                    tracing::info!(session = %self.id, problems = ?problems, "skills: some were not used");
+                }
+            }
             return extra;
         }
         let Ok(dir) = self.checked_folder() else {
@@ -2710,12 +2740,11 @@ impl Session {
             .unwrap_or_else(|| self.model.clone());
         let window = agent.and_then(|a| a.context_windows.get(&model).copied());
         let cap = ins::cap_for(window);
-        let policy = &self.node.cfg.policy;
         let mut roots = Vec::new();
-        if agent.is_none_or(|a| a.allows_tool(skills::NAME))
-            && !policy.denies(skills::NAME)
-            && self.node.cfg.backend.has_tool(skills::NAME)
-        {
+        // The skill folders only for an agent that works on files or runs
+        // commands: a skill folder is files (X.34 step B). One without has
+        // the stored skills, which are text.
+        if skill_on && agent.is_none_or(|a| a.works_on_files()) {
             // Checked when node.toml was loaded; a policy built in code
             // with a bad entry reads none of them.
             roots.extend(
@@ -2788,17 +2817,32 @@ impl Session {
                 extra.instructions_unread = Some(ins::not_read());
             }
         }
-        let skill_problems = if roots.is_empty() {
-            vec![]
-        } else {
+        let skill_problems = if !roots.is_empty() {
             let found = ins::bounded(
                 move || skills::discover(&roots, &protected),
                 cancel,
                 ins::READ_TIMEOUT,
             )
             .await;
-            let denied = agent.map(|a| a.deny_skills.as_slice()).unwrap_or_default();
-            ins::with_skills(&mut extra, found, invoking, denied, skills::cap_for(window))
+            ins::with_skills(
+                &mut extra,
+                found,
+                invoking,
+                denied,
+                stored,
+                skills::cap_for(window),
+            )
+        } else if !stored.is_empty() {
+            ins::with_skills(
+                &mut extra,
+                Bounded::Done(Default::default()),
+                invoking,
+                denied,
+                stored,
+                skills::cap_for(window),
+            )
+        } else {
+            vec![]
         };
         if !problems.is_empty() {
             tracing::info!(
@@ -4923,6 +4967,13 @@ impl TurnHost for Session {
 
     fn board(&self) -> Option<Arc<dyn harness_core::board::BoardSource>> {
         Some(Arc::new(crate::board::LinkBoard {
+            node: self.node.clone(),
+            session: self.id,
+        }))
+    }
+
+    fn stored_skills(&self) -> Option<Arc<dyn harness_core::skills::StoredSkillSource>> {
+        Some(Arc::new(crate::stored_skills::LinkStoredSkills {
             node: self.node.clone(),
             session: self.id,
         }))

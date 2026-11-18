@@ -348,6 +348,9 @@ async fn serve(
     // The project board tools: the master answers them too (PLAN.md T78).
     web_tools.push(Arc::new(harness_tools::Board));
     web_tools.push(Arc::new(harness_tools::BoardEdit));
+    // Skills stored on the server (X.34 step B, PLAN.md T81): text only;
+    // this runtime reads no skill folder (a chat has none).
+    web_tools.push(Arc::new(harness_tools::skills::SkillTool));
     if let Some(k) = web_key {
         secrets.add(k);
     }

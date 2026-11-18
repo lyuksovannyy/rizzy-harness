@@ -1479,6 +1479,7 @@ host = false                         # offer the host shell: commands as this OS
 [skills]
 repository = true                    # read the chat repository's .agents/skills and .claude/skills (see "Skills")
 roots = ["~/.agents/skills", "~/.claude/skills"]  # this machine's skill folders; every chat on the node can read them
+from_master = true                   # take the skills stored on the server (text only, see "Skills stored on the server")
 
 [instructions]
 # user_file = "/srv/rizzy-harness/AGENTS.md"  # the operator's instruction file; default: AGENTS.md in the node's data directory.
@@ -2780,10 +2781,13 @@ folder's path, and the names of the files beside it, which it reads with the
 same tool (`file`) or, inside the chat's folder, with its usual tools. When a
 long chat is summarised, the summary names the skills the work still follows
 so the agent can load them again. The Software Developer, Senior Teamlead,
-Writer, Reviewer and Scout have the tool, as do custom agents with the
-**Skills** switch on and file or command access (the switch is on for a new
-agent and for agents saved before it existed); the Assistant and the
-Researcher do not. A sub-agent with the tool gets the list too. Which skills
+Writer, Reviewer, Scout and the Assistant have the tool, as do custom agents
+with the **Skills** switch on (on for a new agent and for agents saved before
+it existed); the Researcher does not. A skill folder is offered only to an
+agent that reads files, edits them or runs commands; an agent without (the
+Assistant, say) gets the skills stored on the server only (below), and the
+tool only in a message that has one for it. A sub-agent with the tool gets
+the list too. Which skills
 an agent sees is the workspace's choice (Plugins, below): a skill Assigned to
 other agents is not in its list, the tool refuses it with the reason, and
 `/name` of it is answered with a note instead.
@@ -2817,9 +2821,46 @@ out of them, or set `roots = []`.
 sent like the instruction files: with the first message and again only when the
 list changes; a body costs only when it is loaded.
 
+## Skills stored on the server
+
+Skills can also be written on the server, in **Plugins** (below): **Add** →
+**Write a skill** (a name, a description, the instructions) or **Upload
+SKILL.md** (one file, read in your browser and checked on the server). A
+stored skill is **text only**: a name (1 to 64 of `a-z`, `0-9` and `-`, not
+starting or ending with `-`, no `--`), a description of at most 1,024
+characters on one line, and instructions of at most 24 KiB. It has no files
+and runs nothing; an uploaded file's other front-matter keys are listed back
+as not used (`allowed-tools`, `hooks`, `model` and the like do nothing). A
+skill that brings scripts or programs is installed on a node by its owner, in
+`[skills] roots`. Text with hidden or control characters, or over a limit, is
+refused with the reason, never cut.
+
+**Who writes where.** The server's admins write **Built-in** skills, which
+every workspace has; a workspace's owners and admins write that workspace's
+own (in your Personal workspace, you). Members see them and can open them;
+editors of a skill's scope edit and delete it (its name stays). A
+workspace's skill cannot take a Built-in skill's name; one that had it before
+the Built-in one was made is hidden, and the screen tells the workspace's
+editors. Each scope holds at most 75 skills and 1 MiB of text. Deleting a
+workspace deletes its skills.
+
+**How an agent gets one.** With each message the server sends the names and
+descriptions of the stored skills that agent may use in the chat's workspace
+(after Plugins' Shared / Assigned choice), never the instructions; they join
+the node's own list. When the agent loads one (or you start a message with
+`/name`), the node asks the server for that skill's text, and the server
+answers from the chat alone: its workspace, the agent of the running message,
+whether that agent may use it. At most 16 loads per message. An edit or a
+delete counts from the next load on; what was loaded earlier stays in the
+chat's history. A node's own skill of a name wins over a stored one. A node
+whose `node.toml` sets `[skills] from_master = false` takes none: the text is
+of the same kind as the instructions and memory the server sends already, so
+it is on by default.
+
 ## Plugins: who may use which skill and connector
 
 **Plugins** in the sidebar lists, for the workspace you are in, the skills
+stored on the server (above; Built-in or Workspace), and the skills
 and the connectors (MCP servers) this server's nodes have: the skills in each
 node's own `[skills] roots` and the servers in its `[mcp_servers]`, each with
 the nodes that have it (a node sends the names, and a one-line description of
@@ -2836,8 +2877,8 @@ choice is per workspace: another workspace's chats on the same node are not
 touched. It is by name: the same name on two nodes is one item, whatever each
 node's copy says (the screen says when their descriptions differ).
 
-An agent also needs its own switch: **Skills** (with file or command access)
-and **Connectors** on its page. A sub-agent follows its own: a skill Assigned
+An agent also needs its own switch: **Skills** and **Connectors** on its
+page. A sub-agent follows its own: a skill Assigned
 to Scout reaches Scout when another agent hands it a task, and does not reach
 the agent that hands it. Sub-agents get no connectors at all.
 
@@ -2868,8 +2909,9 @@ shell reads (`/usr`, `/etc`, `/opt`): keep `[skills] roots` in a home
 folder. A repository's skill files stay readable as repository files. A
 change of assignment reaches a background sub-agent that is already running,
 and a turn that only picks up messages you queued, one turn late. Chats made
-outside any workspace (through the API token without one) are not narrowed. Adding a skill on the master, custom
-connectors and sub-agents with connectors come later.
+outside any workspace (through the API token without one) are not narrowed,
+and get no stored skills. Custom connectors and sub-agents with connectors
+come later.
 
 ## What goes with each message
 
