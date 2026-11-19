@@ -180,6 +180,10 @@ pub(crate) struct Session {
     /// Rebuilt from the log at load; a sub-agent's chat has none and
     /// takes none from its parent.
     grants: Mutex<HashMap<String, harness_tools::CallKey>>,
+    /// The custom connectors' tools the running turn's spec carried (X.35
+    /// step 2): the approval card names a call's connector and the
+    /// server's own name of the tool from them.
+    connector_tools: Mutex<Vec<harness_core::connectors::ConnectorToolEntry>>,
     /// An append of the running turn failed: the rest of its appends fail
     /// without being tried, so the turn ends (cleared when a turn starts).
     log_failed: AtomicBool,
@@ -566,6 +570,7 @@ impl Session {
             plan_denied: Mutex::new(std::collections::HashSet::new()),
             deny_notes: Mutex::new(HashMap::new()),
             grants: Mutex::new(HashMap::new()),
+            connector_tools: Mutex::new(Vec::new()),
             log_failed: AtomicBool::new(false),
             unclosed: AtomicBool::new(false),
             unresolved: Mutex::new(Vec::new()),
@@ -705,6 +710,7 @@ impl Session {
             plan_denied: Mutex::new(std::collections::HashSet::new()),
             deny_notes: Mutex::new(HashMap::new()),
             grants: Mutex::new(grants),
+            connector_tools: Mutex::new(Vec::new()),
             log_failed: AtomicBool::new(false),
             unclosed: AtomicBool::new(false),
             unresolved: Mutex::new(Vec::new()),
@@ -1875,6 +1881,14 @@ impl Session {
         after: TurnExtra,
         mut ended: String,
     ) {
+        // A turn that only reads queued messages is no send of the master's,
+        // so the master answers none of its connector calls: it is not
+        // offered the custom connectors' tools at all (X.35 step 2, review 3
+        // of PR 157, L10).
+        let agent = agent.map(|mut a| {
+            a.connector_tools.clear();
+            a
+        });
         while matches!(
             reason,
             TurnEndReason::Completed | TurnEndReason::Error | TurnEndReason::Limit
@@ -3130,6 +3144,13 @@ impl Session {
             return (TurnEndReason::Error, None);
         }
 
+        *self
+            .connector_tools
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = agent
+            .as_ref()
+            .map(|a| a.connector_tools.clone())
+            .unwrap_or_default();
         let extra_cause_none = extra.cause.is_none();
         let mut extra = self
             .with_instructions(
@@ -5282,6 +5303,21 @@ impl TurnHost for Session {
         }))
     }
 
+    /// Only where node.toml takes connectors, and only for a turn that gets
+    /// its chat's MCP tools ([`Self::chat_mcp`]'s rule: a chat's own turn,
+    /// or a run the node started for a parent's `delegate` call; never a
+    /// person's message in a sub-agent's chat).
+    fn connectors(&self) -> Option<Arc<dyn harness_core::connectors::ConnectorSource>> {
+        if !self.node.cfg.policy.mcp.master_connectors {
+            return None;
+        }
+        self.chat_table(|_| ())?;
+        Some(Arc::new(crate::connectors::LinkConnectors {
+            node: self.node.clone(),
+            session: self.id,
+        }))
+    }
+
     fn denial_note(&self, call_id: &str) -> Option<String> {
         self.deny_notes
             .lock()
@@ -5396,6 +5432,17 @@ impl TurnHost for Session {
     }
 
     async fn approve(&self, call_id: &str, tool: &str, input: &Value, risk: ToolRisk) -> Decision {
+        self.approve_from(call_id, tool, input, risk, None).await
+    }
+
+    async fn approve_from(
+        &self,
+        call_id: &str,
+        tool: &str,
+        input: &Value,
+        risk: ToolRisk,
+        origin: Option<&str>,
+    ) -> Decision {
         let policy = &self.node.cfg.policy;
         if policy.denies(tool) {
             let approval_id = new_id();
@@ -5453,7 +5500,13 @@ impl TurnHost for Session {
         // `ask` and `accept_edits`: `ask_all` means every call (T51), and
         // `auto` never gets here.
         let grants_apply = mode != ApprovalMode::AskAll && self.node.cfg.policy.chat_grants;
-        let key = harness_tools::call_key(&self.cwd, tool, input);
+        // The origin is part of the key (review of PR 157, M3): a chat grant
+        // for a connector's tool never covers a node server's of that name.
+        let key = harness_tools::call_key(
+            &self.cwd,
+            &harness_tools::approval::keyed(tool, origin),
+            input,
+        );
         if grants_apply
             && !background_start
             && self
@@ -5473,9 +5526,24 @@ impl TurnHost for Session {
             && !self.no_callbacks;
         let approval_id = new_id();
         let mut reason = approval_reason(tool, risk, input, &self.node.cfg.policy, self.exec_mode);
+        // A custom connector's tool (X.35 step 2): its own reason, never the
+        // node server's (review of PR 157, M4).
+        let connector = origin
+            .and_then(|o| o.strip_prefix("connector:"))
+            .map(str::to_string);
+        if let Some(name) = connector {
+            let raw = self
+                .connector_tools
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .iter()
+                .find(|e| e.name == tool && e.connector == name)
+                .map(|e| e.tool.clone());
+            reason = connector_reason(tool, &name, raw.as_deref());
+        }
         // An MCP tool's card names the server and its own name of the tool
         // (review N2): a cleaned or hashed public name says little.
-        if let Some(m) = self
+        else if let Some(m) = self
             .chat_mcp()
             .filter(|_| tool.starts_with(harness_tools::mcp::PREFIX))
             && let Some((server, raw)) = m.origin(tool).await
@@ -5720,6 +5788,19 @@ fn approval_reason(
         );
     }
     reason
+}
+
+/// The card of a custom connector's tool (X.35 step 2): what it is, where
+/// the call goes from and with whose account.
+fn connector_reason(tool: &str, connector: &str, raw: Option<&str>) -> String {
+    let its = raw
+        .map(|r| format!(" (its tool `{}`)", harness_core::event::shown_name(r)))
+        .unwrap_or_default();
+    format!(
+        "`{tool}` is a tool of the connector `{connector}`{its}, an online service this \
+         workspace's admin added; the call is sent from the server with the chat owner's \
+         connected account, and the arguments shown are what is sent"
+    )
 }
 
 fn tool_reason(tool: &str, risk: ToolRisk, input: &Value, policy: &crate::NodePolicy) -> String {

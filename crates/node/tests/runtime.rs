@@ -1460,6 +1460,7 @@ fn agent(
         deny_skills: vec![],
         deny_mcp_servers: vec![],
         stored_skills: vec![],
+        connector_tools: vec![],
         delegates,
         caps: None,
     }

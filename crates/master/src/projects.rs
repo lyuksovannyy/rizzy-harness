@@ -421,6 +421,13 @@ pub async fn turn_memory(m: &Master, row: &SessionRow) -> TurnMemory {
             t.workspace &= crate::memory::workspace_switch(m, row, Some(f)).await;
         }
     }
+    // Read from the store now, not taken from the turn's start: a mark that
+    // lands while the turn runs (the API token's note or queued message)
+    // makes its later calls proposals too (review 5 of PR 157). The
+    // ancestor rule, and a read error counts as marked.
+    if m.chat_foreign(row.session_id).await {
+        t.by_owner = false;
+    }
     t
 }
 

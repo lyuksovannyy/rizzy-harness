@@ -235,6 +235,16 @@ pub struct AgentSpec {
     /// names a file or a program.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stored_skills: Vec<crate::skills::StoredSkillEntry>,
+    /// The custom connectors' tools (X.35 step 2, PLAN.md T85) any spec of
+    /// this message may be offered: on the top spec only (the node gives a
+    /// sub-agent its parent's list, which the sub-agent's own `deny_tools`
+    /// and `deny_mcp_servers` narrow), only for a turn the chat's owner
+    /// sent signed in or a run of the owner's own routine. Names,
+    /// descriptions and schemas as text: the node offers them as MCP tools
+    /// and files a call with the master; nothing here names a program, a
+    /// file or an address.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connector_tools: Vec<crate::connectors::ConnectorToolEntry>,
     /// Agents this one may hand sub-tasks to (`delegate` tool). Resolved by
     /// the master; their own `delegates` are empty, so depth is one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

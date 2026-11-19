@@ -1573,8 +1573,9 @@ async fn own_task<T: Send + 'static>(
 }
 
 /// A call's result as tool output: its text, with every other kind of
-/// content named.
-fn render(server: &str, result: Value) -> ToolOutcome {
+/// content named (the master renders a custom connector's result with it
+/// too, X.35 step 2).
+pub fn render(server: &str, result: Value) -> ToolOutcome {
     let mut out = String::new();
     let budget = crate::MAX_OUTPUT_CHARS * 2;
     let mut push = |s: &str| {
@@ -1679,6 +1680,17 @@ impl Tool for McpTool {
     /// Always: whatever the server says about the tool.
     fn risk(&self) -> ToolRisk {
         ToolRisk::Mutating
+    }
+
+    /// The node server and its source: node.toml or the repository's
+    /// approved `.mcp.json`.
+    fn approval_origin(&self) -> Option<String> {
+        let source = if self.slot.project {
+            "repository"
+        } else {
+            "node.toml"
+        };
+        Some(format!("server:{}:{source}", self.slot.name))
     }
 
     async fn run(&self, ctx: &ToolCtx, input: Value) -> ToolOutcome {

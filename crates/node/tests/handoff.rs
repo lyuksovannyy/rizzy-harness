@@ -405,6 +405,7 @@ fn agent(id: &str, tools: &[&str], delegates: Vec<AgentSpec>) -> AgentSpec {
         deny_skills: vec![],
         deny_mcp_servers: vec![],
         stored_skills: vec![],
+        connector_tools: vec![],
         delegates,
         caps: None,
     }

@@ -241,3 +241,147 @@ fn accounts_go_with_their_connector_membership_person_and_workspace() {
     assert!(s.connectors_of(&team).unwrap().is_empty());
     assert_eq!(s.sealed_count().unwrap(), 0);
 }
+
+fn chat_with_parent(s: &Store, parent: Option<harness_core::SessionId>) -> harness_core::SessionId {
+    let sid = harness_core::SessionId::new();
+    let mut p = serde_json::json!({"title": "t", "cwd": "", "model": "m", "backend": "native",
+        "node_id": "n", "profile": "agentic", "approval_mode": "ask"});
+    if let Some(parent) = parent {
+        p["parent_session"] = serde_json::json!(parent.to_string());
+    }
+    s.append(
+        "n",
+        &harness_core::RawEvent {
+            session_id: sid,
+            seq: 1,
+            ts_ms: 1,
+            kind: "session_created".into(),
+            payload: p,
+        },
+    )
+    .unwrap();
+    sid
+}
+
+/// Review 4 of PR 157 (M2, L6): a mark reaches every ancestor up to the
+/// root, and a chat is foreign when it or any ancestor is marked or holds
+/// external event data, at any depth.
+#[test]
+fn the_mark_and_the_untrusted_data_follow_every_ancestor() {
+    let (s, _, _) = setup();
+    let root = chat_with_parent(&s, None);
+    let kid = chat_with_parent(&s, Some(root));
+    let gk = chat_with_parent(&s, Some(kid));
+    let ggk = chat_with_parent(&s, Some(gk));
+    let other = chat_with_parent(&s, None);
+    // A mark three levels down reaches the root.
+    s.chat_mark_foreign(ggk).unwrap();
+    for c in [ggk, gk, kid, root] {
+        assert!(s.chat_foreign(c).unwrap(), "{c}");
+    }
+    assert!(!s.chat_foreign(other).unwrap());
+    // A sub-agent of a marked root, two levels down, is foreign by its
+    // ancestors alone (nothing marked it).
+    let root2 = chat_with_parent(&s, None);
+    let k2 = chat_with_parent(&s, Some(root2));
+    let gk2 = chat_with_parent(&s, Some(k2));
+    s.chat_mark_foreign(root2).unwrap();
+    assert!(s.chat_foreign(gk2).unwrap(), "by its ancestor");
+    assert_eq!(
+        s.chat_foreign_reason(gk2).unwrap(),
+        Some(harness_store::custom_connectors::ForeignReason::ParentChat)
+    );
+    assert_eq!(
+        s.chat_foreign_reason(root2).unwrap(),
+        Some(harness_store::custom_connectors::ForeignReason::ThisChat)
+    );
+    // External event data on an ancestor two levels up.
+    let root3 = chat_with_parent(&s, None);
+    let k3 = chat_with_parent(&s, Some(root3));
+    let gk3 = chat_with_parent(&s, Some(k3));
+    s.mark_untrusted_for_test(root3).unwrap();
+    assert!(s.chat_untrusted(gk3).unwrap(), "webhook data two levels up");
+    assert!(s.chat_foreign(gk3).unwrap());
+    assert_eq!(
+        s.chat_foreign_reason(gk3).unwrap(),
+        Some(harness_store::custom_connectors::ForeignReason::EventData)
+    );
+    assert!(!s.chat_foreign(other).unwrap());
+    assert_eq!(s.chat_foreign_reason(other).unwrap(), None);
+}
+
+/// Review 5 of PR 157, L1: a chain longer than the walk reads as foreign
+/// all along it from the 16th level down, and a mark in it is written to
+/// every chat the walk reached and then refused, so the caller forwards
+/// nothing (no chain leaves a root unmarked after a forwarded action).
+#[test]
+fn a_chain_too_deep_to_walk_is_foreign_and_its_mark_is_refused() {
+    let (s, _, _) = setup();
+    let mut chain = vec![chat_with_parent(&s, None)];
+    for _ in 0..17 {
+        let up = *chain.last().unwrap();
+        chain.push(chat_with_parent(&s, Some(up)));
+    }
+    assert!(
+        !s.chat_foreign(chain[15]).unwrap(),
+        "15 levels: walked whole"
+    );
+    assert!(s.chat_foreign(chain[16]).unwrap(), "16 levels: too deep");
+    assert!(s.chat_foreign(chain[17]).unwrap());
+    // The clean part of the chain can still be marked.
+    let short = chat_with_parent(&s, Some(chain[3]));
+    s.chat_mark_foreign(short).unwrap();
+    assert!(s.chat_foreign(chain[0]).unwrap());
+    let (s, _, _) = setup();
+    let mut chain = vec![chat_with_parent(&s, None)];
+    for _ in 0..17 {
+        let up = *chain.last().unwrap();
+        chain.push(chat_with_parent(&s, Some(up)));
+    }
+    assert!(s.chat_mark_foreign(chain[17]).is_err(), "refused");
+    assert!(
+        s.chat_foreign_reason(chain[1]).unwrap()
+            == Some(harness_store::custom_connectors::ForeignReason::ThisChat)
+    );
+    assert!(
+        !s.chat_foreign(chain[0]).unwrap(),
+        "the walk never reached it"
+    );
+}
+
+/// Review 5 of PR 157, L2: deleting a chat in the middle of a chain hands
+/// down what its sub-agents' chats inherited through it, by the ancestor
+/// rule: a mark or external event data above the deleted chat.
+#[test]
+fn deleting_a_middle_chat_keeps_what_its_sub_agents_inherited() {
+    let (s, _, _) = setup();
+    // A mark on the root, inherited by the grandchild through the child.
+    let root = chat_with_parent(&s, None);
+    let kid = chat_with_parent(&s, Some(root));
+    let gk = chat_with_parent(&s, Some(kid));
+    s.chat_mark_foreign(root).unwrap();
+    assert!(s.chat_foreign(gk).unwrap());
+    assert!(s.delete_session(kid, false).unwrap());
+    assert!(
+        s.chat_foreign(gk).unwrap(),
+        "the mark above stays inherited"
+    );
+    // External event data on the root, the same.
+    let root = chat_with_parent(&s, None);
+    let kid = chat_with_parent(&s, Some(root));
+    let gk = chat_with_parent(&s, Some(kid));
+    s.mark_untrusted_for_test(root).unwrap();
+    assert!(s.delete_session(kid, false).unwrap());
+    assert!(
+        s.chat_untrusted(gk).unwrap(),
+        "the event data stays inherited"
+    );
+    assert!(s.chat_foreign(gk).unwrap());
+    // A clean chain stays clean.
+    let root = chat_with_parent(&s, None);
+    let kid = chat_with_parent(&s, Some(root));
+    let gk = chat_with_parent(&s, Some(kid));
+    assert!(s.delete_session(kid, false).unwrap());
+    assert!(!s.chat_foreign(gk).unwrap());
+    assert!(!s.chat_untrusted(gk).unwrap());
+}

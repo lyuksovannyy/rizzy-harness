@@ -250,6 +250,11 @@ pub struct IngestCaps {
     pub pending_per_node: u64,
     pub per_owner: u64,
     pub per_workspace: u64,
+    /// A version from a chat someone other than its owner acted in (PLAN.md
+    /// T85): recorded as failed when its lineage is shared with the
+    /// workspace, so such a chat adds nothing other members see without
+    /// the owner's click (a new or private lineage is not affected).
+    pub not_into_shared: bool,
 }
 
 /// What `artifact_ingest` did.
@@ -571,7 +576,24 @@ impl Store {
         }
         let mut failed = fail.map(str::to_string);
         let artifact_id = match lineage(&tx, v)? {
-            Some(id) => id,
+            Some(id) => {
+                if failed.is_none() && caps.not_into_shared {
+                    let shared: bool = tx.query_row(
+                        "SELECT visibility = 'workspace' FROM artifacts WHERE artifact_id = ?1",
+                        params![id],
+                        |r| r.get(0),
+                    )?;
+                    if shared {
+                        failed = Some(
+                            "this chat is one someone other than its owner acted in, so it \
+                             adds nothing to a file shared with the workspace; publish it under \
+                             a new name"
+                                .into(),
+                        );
+                    }
+                }
+                id
+            }
             None => {
                 if failed.is_none() {
                     failed = lineage_cap(&tx, v, caps)?;

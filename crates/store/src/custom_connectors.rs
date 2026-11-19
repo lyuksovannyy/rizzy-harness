@@ -15,7 +15,7 @@
 
 use rusqlite::{OptionalExtension, params};
 
-use crate::{Result, Store};
+use crate::{Result, Store, StoreError};
 
 /// Run by `Store::init`, after the workspaces and their members.
 pub(crate) const SCHEMA: &str = r#"
@@ -47,7 +47,49 @@ CREATE TABLE IF NOT EXISTS connector_accounts (
         REFERENCES workspace_connectors(workspace_id, connector_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS connector_accounts_connector ON connector_accounts(connector_id);
+-- Chats in which someone other than their owner acted (X.35 step 2,
+-- PLAN.md T85): the API token, another person's routine, an approval
+-- answer or a note not the owner's. Set once, never cleared: connectors
+-- are never used in such a chat (its history holds what that someone
+-- wrote). A deleted chat hands its mark to its sub-agents' chats.
+CREATE TABLE IF NOT EXISTS foreign_chats (
+    session_id TEXT PRIMARY KEY,
+    marked_ms  INTEGER NOT NULL
+);
 "#;
+
+/// Chats walked up from a chat to its root (delegation can be several
+/// levels deep); a deeper chain counts as foreign (fails closed).
+pub const MAX_DEPTH: i64 = 16;
+
+/// `up(id, depth)`: chat `?1` and every chat above it, at most
+/// [`MAX_DEPTH`] levels.
+const UP: &str = "up(id, depth) AS (
+        SELECT ?1, 0
+        UNION ALL
+        SELECT s.parent_id, up.depth + 1 FROM sessions s JOIN up ON s.session_id = up.id
+        WHERE s.parent_id IS NOT NULL AND up.depth < 16)";
+
+/// Why connectors are off in a chat (the session's API says it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForeignReason {
+    /// Someone other than its owner acted in this chat.
+    ThisChat,
+    /// ... in a chat above it (it is a sub-agent's chat).
+    ParentChat,
+    /// It, or a chat above it, holds data from an external event.
+    EventData,
+}
+
+impl ForeignReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ForeignReason::ThisChat => "this_chat",
+            ForeignReason::ParentChat => "parent_chat",
+            ForeignReason::EventData => "event_data",
+        }
+    }
+}
 
 /// One connector as listed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +152,85 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectorRow> {
 }
 
 impl Store {
+    /// Mark chat `sid` and every chat above it up to its root: someone
+    /// other than its owner acted in it (for good). Written with a full
+    /// sync for this one write (the master's store runs at `NORMAL`): a
+    /// power cut after the action was forwarded keeps the mark. Once per
+    /// chat (an `INSERT OR IGNORE` of rows that exist writes nothing new).
+    pub fn chat_mark_foreign(&self, sid: harness_core::SessionId) -> Result<()> {
+        let conn = self.lock();
+        let before: String = conn.query_row("PRAGMA synchronous", [], |r| {
+            Ok(r.get::<_, i64>(0)?.to_string())
+        })?;
+        conn.pragma_update(None, "synchronous", "FULL")?;
+        let done = conn
+            .execute(
+                &format!(
+                    "WITH RECURSIVE {UP} INSERT OR IGNORE INTO foreign_chats (session_id, marked_ms)
+                     SELECT id, ?2 FROM up"
+                ),
+                params![sid.to_string(), harness_core::now_ms()],
+            )
+            .and_then(|_| {
+                conn.query_row(
+                    &format!(
+                        "WITH RECURSIVE {UP} SELECT (SELECT MAX(depth) FROM up) >= {MAX_DEPTH}"
+                    ),
+                    params![sid.to_string()],
+                    |r| r.get::<_, bool>(0),
+                )
+            });
+        conn.pragma_update(None, "synchronous", before)?;
+        // A chain the walk did not reach the end of (deeper than
+        // `MAX_DEPTH`; an honest node delegates 4 levels at most): every
+        // chat reached is marked, and the action is refused, so nothing
+        // is forwarded into a chain whose root the mark may have missed.
+        if done? {
+            return Err(StoreError::Refused(
+                "this chat is nested too deep under other chats; nothing was sent".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Whether connectors are never used in chat `sid`: it, or any chat
+    /// above it up to its root, is marked (`chat_mark_foreign`) or holds
+    /// data from an external event (`routine_untrusted_chats`). A chain
+    /// deeper than [`MAX_DEPTH`] counts as foreign.
+    pub fn chat_foreign(&self, sid: harness_core::SessionId) -> Result<bool> {
+        Ok(self.chat_foreign_reason(sid)?.is_some())
+    }
+
+    /// Why connectors are off in chat `sid`, if they are.
+    pub fn chat_foreign_reason(
+        &self,
+        sid: harness_core::SessionId,
+    ) -> Result<Option<ForeignReason>> {
+        let conn = self.lock();
+        let (own, above, event, deep): (bool, bool, bool, bool) = conn.query_row(
+            &format!(
+                "WITH RECURSIVE {UP} SELECT
+                   EXISTS(SELECT 1 FROM foreign_chats WHERE session_id = ?1),
+                   EXISTS(SELECT 1 FROM foreign_chats WHERE session_id IN
+                          (SELECT id FROM up WHERE depth > 0)),
+                   EXISTS(SELECT 1 FROM routine_untrusted_chats WHERE session_id IN
+                          (SELECT id FROM up)),
+                   (SELECT MAX(depth) FROM up) >= {MAX_DEPTH}"
+            ),
+            params![sid.to_string()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
+        Ok(if own {
+            Some(ForeignReason::ThisChat)
+        } else if above || deep {
+            Some(ForeignReason::ParentChat)
+        } else if event {
+            Some(ForeignReason::EventData)
+        } else {
+            None
+        })
+    }
+
     /// Add `c` to its workspace: while it has fewer than `cap`, under a
     /// name it does not have yet.
     pub fn connector_add(&self, c: &ConnectorRow, cap: u64) -> Result<ConnectorAdd> {
@@ -359,4 +480,33 @@ impl Store {
             params![user, ws, id],
         )? > 0)
     }
+}
+
+/// Called by `Store::delete_session` in its transaction while the chat's
+/// row is still there: its sub-agents' chats take over the mark they
+/// inherited through it (it, or any chat above it, marked; or the chain too
+/// deep to walk), since their walk up ends at the deleted chat. External
+/// event data is handed down the same way (`routines::hand_down`).
+pub(crate) fn hand_down(tx: &rusqlite::Transaction, sid: &str) -> crate::Result<()> {
+    tx.execute(
+        &format!(
+            "WITH RECURSIVE {UP} INSERT OR IGNORE INTO foreign_chats (session_id, marked_ms)
+             SELECT session_id, ?2 FROM sessions
+             WHERE parent_id = ?1
+               AND (EXISTS(SELECT 1 FROM foreign_chats WHERE session_id IN (SELECT id FROM up))
+                    OR (SELECT MAX(depth) FROM up) >= {MAX_DEPTH})"
+        ),
+        params![sid, harness_core::now_ms()],
+    )?;
+    Ok(())
+}
+
+/// Called by `Store::delete_session` in its transaction: the chat's own
+/// mark goes with it (`hand_down` ran first).
+pub(crate) fn on_session_deleted(tx: &rusqlite::Transaction, sid: &str) -> crate::Result<()> {
+    tx.execute(
+        "DELETE FROM foreign_chats WHERE session_id = ?1",
+        params![sid],
+    )?;
+    Ok(())
 }

@@ -754,6 +754,9 @@ async fn state_json(
         // Keep applies it where the person may, else sends it on (once).
         "keep": r.decides == "you" || !sent,
         "text": input.get("text"),
+        // The chat (or one above it) is one someone other than its owner
+        // acted in, or holds external event data: the card says so.
+        "from_marked_chat": m.chat_foreign(row.session_id).await,
     });
     if let Some(f) = fact.as_ref().or(target.as_ref()) {
         let (place, personal) = place_of(f);

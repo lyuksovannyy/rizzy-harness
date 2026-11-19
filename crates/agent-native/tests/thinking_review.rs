@@ -213,6 +213,7 @@ fn agent(vision: bool) -> AgentSpec {
         deny_skills: vec![],
         deny_mcp_servers: vec![],
         stored_skills: vec![],
+        connector_tools: vec![],
         delegates: vec![],
         caps: None,
         no_personalisation: false,

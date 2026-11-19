@@ -335,6 +335,7 @@ async fn a_sub_agent_gets_the_files_too() {
         deny_skills: vec![],
         deny_mcp_servers: vec![],
         stored_skills: vec![],
+        connector_tools: vec![],
         delegates,
         caps: None,
     };
@@ -504,6 +505,7 @@ async fn a_sub_agent_gets_the_files_of_the_subfolders_it_touches() {
         deny_skills: vec![],
         deny_mcp_servers: vec![],
         stored_skills: vec![],
+        connector_tools: vec![],
         delegates,
         caps: None,
     };

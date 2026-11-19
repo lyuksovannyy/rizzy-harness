@@ -22,7 +22,7 @@ use harness_core::policy::ApprovalMode;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{ApiResult, agentic_gate, require, require_any, visible_session};
+use super::{ApiResult, acting_session, agentic_gate, require, require_any};
 use crate::Master;
 
 pub(super) fn routes() -> Router<Master> {
@@ -42,7 +42,7 @@ async fn set_mode(
     Json(b): Json<ModeBody>,
 ) -> ApiResult<Json<Value>> {
     let who = require_any(&m, &headers).await?;
-    let row = visible_session(&m, &who, &id).await?;
+    let row = acting_session(&m, &who, &id).await?;
     let now = m.approval_mode_of(row.session_id).await?;
     // Unknown: treated as a raise (checked), never as a lowering.
     let raise = now.is_none_or(|n| b.mode > n);

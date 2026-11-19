@@ -1067,6 +1067,9 @@ export interface MemoryCallState {
   /** The call only drops `target`. */
   forget?: boolean;
   reason?: string | null;
+  /** The chat (or one above it) is one someone other than its owner acted
+   * in, or holds external event data: the card says so. */
+  from_marked_chat?: boolean;
 }
 
 export type Preset = "fast" | "balanced" | "best";

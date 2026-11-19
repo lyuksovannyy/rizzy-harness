@@ -523,6 +523,12 @@ impl Store {
              WHERE sp.project_id = ?1 AND s.owner_id = ?2 AND s.session_id <> ?3
                AND s.incognito = 0 AND s.parent_id IS NULL
                AND p.workspace_id = {EFFECTIVE_WS}
+               -- Never a chat someone other than its owner acted in, nor
+               -- one holding external event data (review 4 of PR 157):
+               -- their text is no part of another chat's harness context.
+               AND NOT EXISTS (SELECT 1 FROM foreign_chats f WHERE f.session_id = s.session_id)
+               AND NOT EXISTS (SELECT 1 FROM routine_untrusted_chats u
+                               WHERE u.session_id = s.session_id)
              ORDER BY s.updated_ms DESC LIMIT ?4"
         );
         let candidates: Vec<(String, String, i64)> = conn

@@ -3069,8 +3069,7 @@ folder. A repository's skill files stay readable as repository files. A
 change of assignment reaches a background sub-agent that is already running,
 and a turn that only picks up messages you queued, one turn late. Chats made
 outside any workspace (through the API token without one) are not narrowed,
-and get no stored skills. Custom connectors and sub-agents with connectors
-come later.
+and get no stored skills.
 
 ## Connections: your own forge accounts
 
@@ -3333,10 +3332,109 @@ of the server's nodes announces (if a node announces it later, the screen
 says so). A skill of the same name is another kind of item and is chosen
 apart.
 
-**In this version agents cannot use a custom connector yet.** It is a
-Plugins item by name, so its Shared / Assigned choice can already be made;
-agents calling its tools through the server, with the chat owner's account,
-come next (ADOPTION_PLAN X.35 step 2).
+**Agents use a custom connector with your own account.** An agent whose
+**Connectors** switch is on (the per-agent MCP switch, see "Plugins" above),
+in a chat of yours, is offered the tools of the workspace's connectors you
+can use: one without sign-in, or one you connected and the server can open
+your token for. They are named like any MCP tool, `mcp__<connector>__<tool>`,
+and described as the server describes them (one line, cleaned, under
+"(MCP server `<connector>`)"). The server makes each call itself, with
+**your** account and nobody else's: never another member's, also when
+another member added the connector, and never in a sub-agent's or routine's
+chat of someone else's.
+
+- **Only in a chat in which nobody but you has acted.** Once anyone else
+  acts in a chat (a message, an approval answer or a note, a Retry, a
+  setting sent with the API token; a run of someone else's routine; a
+  webhook's event in a routine's chat), connectors are off in that chat for
+  good, also after a restart and in its sub-agents' chats: what they wrote
+  stays in the chat's history, which every later turn reads. This holds at
+  any depth of sub-agents: a message to a sub-agent's chat turns them off in
+  every chat above it. The agent is told once, in plain words, why
+  connectors are off in this chat; the session's API says it too
+  (`connectors_off`: `this_chat`, `parent_chat` or `event_data`; `no_owner`
+  for a chat nobody owns, made with the API token, which is never marked
+  because it has no account to use; `unknown` when the server cannot read
+  its records, and connectors are then off). Reading a chat with the API
+  token changes nothing. Such a chat also writes nothing other chats read
+  without your click: every memory or project fact its turns `remember`
+  waits for you to keep or dismiss (its card says it comes from such a
+  chat), its turns change no board, its agent adds nothing to a file shared
+  with the workspace (a new name is published, private), and it is left out
+  of the project's "Earlier chats" (so is a chat holding a webhook's event
+  data). This holds from the moment the other person acts, also for the
+  turn running then and its sub-agents: the server checks the chat at each
+  call, not when the turn started. A chat nested more than 15 sub-agents
+  deep counts as marked, and an action in it is refused; a chat deleted
+  from the middle of a chain hands what it inherited to its sub-agents'
+  chats.
+- **What this does not cover.** The mark covers what others do IN A CHAT.
+  It does not cover text that people with rights write for every chat to
+  read: the server's and the workspace's admins (agent instructions, stored
+  skills, workspace memory), a project's managers (its brief and facts,
+  board cards and columns), the API token wherever it has those rights, and
+  files in a shared project folder that a node reads as instructions
+  (`AGENTS.md`, `CLAUDE.md`). A new chat is not free of their text. Neither
+  are tool results: `recall` can find text of a marked chat, and the
+  board tool shows cards and notes. A connector call such text steers is
+  stopped only by the approval card, and in **Auto** nothing asks.
+  Connector calls follow the chat's approval mode: in Auto they run
+  without asking; switch the chat to Ask to be asked each time.
+- **Which turns.** In such a chat, only a turn the server itself started
+  with your message sent signed in, a run of your own routine, or your
+  Retry of a turn that could use them. A turn started by a background
+  command's end, one that only reads messages you queued while the last one
+  ran (it is offered no connector tool), and any turn the server did not
+  start get none. A sub-agent's calls count as the turn that started it, a
+  background sub-agent's for at most an hour after that turn ended. After
+  the server restarts, the turn running then calls no more.
+- **Shared / Assigned** on the Plugins screen decides which agents get a
+  connector, by name, as for a node's server; a sub-agent follows its own
+  switch and its own assignment and gets the connectors of the chat's owner.
+- **Approvals.** A call is an MCP tool call, asked about as one by the
+  chat's approval mode: **Ask** and **Ask for everything** show a card for
+  each call (it names the connector and its tool, says the server sends it
+  with your connected account, and shows the arguments that are sent);
+  **Accept edits** asks too (a connector call is never a file edit);
+  **Auto** runs it without asking, as it runs a node's MCP tools; **Plan**
+  refuses it. "For this turn" and "for this chat" cover that one exact call
+  of that connector, never a node's MCP server tool of the same name (nor
+  the other way round). A denied call is not sent.
+- **What comes back** is text only (images and other content are named, not
+  passed), at most 256 KiB read from the server and 8,192 JSON values per
+  message, cut to the usual tool-output size, and treated as the server's
+  words: a line in it that looks like the harness's is shown to the model as
+  quoted text.
+- **When it is read.** The list of a connector's tools comes from the last
+  check (yours, or one the server makes in the background); a message never
+  waits for a remote server. The first message after you connect has the
+  tools at once; a connector nobody has checked yet is offered from your
+  next message (the agent is told so). Lists are read again in the
+  background after 10 minutes and not used after an hour; when your
+  connector's background read failed, it is not read for you in the
+  background again for 5 minutes (the agent is told; your own Check still
+  works), and a list read with a token you replaced since is not used.
+- **Limits.** 30 calls per turn (its sub-agents' included, background
+  ones too) and 200 per chat in any hour; 2 at once per person and per
+  connector; the server makes at most 4 calls at once and refuses a fifth
+  at once ("try again in a moment"; a call refused for that, or for a token
+  that does not open, does not count); each call ends after 2 minutes. A
+  stopped turn drops its call; the remote server may still have done what
+  it was asked (as with a node's MCP server).
+- **The node decides.** `[mcp] master_connectors = true` (the default) in
+  `node.toml` offers them on that node: a call runs nothing on the node and
+  the token never reaches it; only the result's text enters the model's
+  context. `false` offers none and asks nothing. `denied_tools` (`mcp`,
+  `mcp__<connector>`, or one tool) still wins, and a node's own MCP server of
+  the same name wins the name.
+- **What is kept.** No token, arguments or results in the server's log or
+  audit (there is no audit line per call); the call and its result are in the
+  chat's history like any tool call.
+
+**Not built yet:** sign-in through a browser (OAuth), an MCP server's
+resources and prompts, messages the server starts itself, showing a call's
+partial results while it runs, a shared workspace account, and connectors
+on a private address (those stay a node's own servers).
 
 ## What goes with each message
 

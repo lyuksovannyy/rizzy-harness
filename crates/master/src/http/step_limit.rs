@@ -20,7 +20,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{ApiResult, agentic_gate, require, require_any, visible_session};
+use super::{ApiResult, acting_session, agentic_gate, require, require_any};
 use crate::Master;
 
 pub(super) fn routes() -> Router<Master> {
@@ -41,7 +41,7 @@ async fn set_limit(
     Json(b): Json<LimitBody>,
 ) -> ApiResult<Json<Value>> {
     let who = require_any(&m, &headers).await?;
-    let row = visible_session(&m, &who, &id).await?;
+    let row = acting_session(&m, &who, &id).await?;
     let (own, max) = m.step_limit_of(row.session_id).await?;
     // Unknown: treated as a raise (checked), never as a lowering.
     let now = own.or(max);

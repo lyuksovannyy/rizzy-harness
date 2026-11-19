@@ -16,7 +16,10 @@ use harness_store::{
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 
-use super::{ApiError, ApiResult, CreateBody, memory_err, memory_store, require, visible_session};
+use super::{
+    ApiError, ApiResult, CreateBody, acting_session, memory_err, memory_store, require,
+    visible_session,
+};
 use crate::auth::Principal;
 use crate::memory::{audience_of, memory_changed};
 use crate::projects::{self as p, ProjectSettings};
@@ -504,7 +507,7 @@ async fn set_chat_project(
     Json(b): Json<ChatProject>,
 ) -> ApiResult<Json<Value>> {
     let who = require(&m, &headers).await?;
-    let row = visible_session(&m, &who, &id).await?;
+    let row = acting_session(&m, &who, &id).await?;
     let sid = row.session_id;
     let project = match b.project_id {
         None => None,

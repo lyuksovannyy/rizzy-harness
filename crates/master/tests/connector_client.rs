@@ -399,7 +399,8 @@ async fn hostile_names_and_text_are_cleaned_and_prefixed() {
         "a tool named like another server's stays this connector's"
     );
     assert!(by.contains_key("evilname"), "{:?}", by.keys());
-    assert_eq!(by["evilname"].description.as_deref(), Some("abcd"));
+    // A line break is a space (X.35 step 2: "a\nb" is two words, one line).
+    assert_eq!(by["evilname"].description.as_deref(), Some("abc d"));
     assert_eq!(
         by["long"].description.as_ref().unwrap().chars().count(),
         512

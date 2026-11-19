@@ -77,6 +77,7 @@ const en = {
   "memory.undoneSave": "is no longer remembered.",
   "memory.undoneBack": "is remembered again.",
   "memory.waitingHint": "Nothing changes until you keep it.",
+  "memory.fromMarked": "This proposal comes from a chat in which something other than you acted; read it before keeping.",
   "memory.savedProject": "Saved in the project:",
   "memory.replacedProject": "Replaced in the project:",
   "memory.forgotProject": "Forgot in the project:",

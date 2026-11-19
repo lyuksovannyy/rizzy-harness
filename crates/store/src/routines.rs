@@ -453,14 +453,19 @@ fn mark_untrusted_chat(tx: &Transaction<'_>, run_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// `Store::chat_untrusted` on an open connection. One hop up is the whole
-/// chain: delegation is one level deep (a delegate's spec has no delegates
-/// of its own), and a deleted parent hands its mark down
-/// (`on_session_deleted`).
+/// `Store::chat_untrusted` on an open connection: the chat and every chat
+/// above it (a deleted parent hands its mark down, `on_session_deleted`).
 fn untrusted(conn: &rusqlite::Connection, sid: &str) -> Result<bool> {
+    // Every chat above it, to its root: delegation can be several levels
+    // deep (review 4 of PR 157); a deeper chain than 16 counts as untrusted.
     Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM routine_untrusted_chats WHERE session_id = ?1
-                OR session_id = (SELECT parent_id FROM sessions WHERE session_id = ?1))",
+        "WITH RECURSIVE up(id, depth) AS (
+             SELECT ?1, 0
+             UNION ALL
+             SELECT s.parent_id, up.depth + 1 FROM sessions s JOIN up ON s.session_id = up.id
+             WHERE s.parent_id IS NOT NULL AND up.depth < 16)
+         SELECT EXISTS(SELECT 1 FROM routine_untrusted_chats WHERE session_id IN (SELECT id FROM up))
+             OR (SELECT MAX(depth) FROM up) >= 16",
         params![sid],
         |r| r.get(0),
     )?)
@@ -1200,6 +1205,15 @@ impl Store {
         )? > 0)
     }
 
+    /// Tests: mark chat `sid` as holding external event data.
+    pub fn mark_untrusted_for_test(&self, sid: SessionId) -> Result<()> {
+        self.lock().execute(
+            "INSERT OR IGNORE INTO routine_untrusted_chats (session_id) VALUES (?1)",
+            params![sid.to_string()],
+        )?;
+        Ok(())
+    }
+
     /// The owner prompted in chat `sid`: mark its run continued. Returns
     /// whether the chat holds data from an external event (`chat_untrusted`),
     /// which stays true after its run is gone (its routine deleted).
@@ -1214,8 +1228,8 @@ impl Store {
     }
 
     /// Whether chat `sid` holds data from an external event: it is marked,
-    /// or it is a sub-agent's chat whose parent is (the parent handed it a
-    /// task written from that data, and the owner can prompt it directly).
+    /// or it is a sub-agent's chat (at any depth) of one that is (it was
+    /// handed a task written from that data, and the owner can prompt it).
     pub fn chat_untrusted(&self, sid: SessionId) -> Result<bool> {
         untrusted(&self.lock(), &sid.to_string())
     }
@@ -1402,23 +1416,35 @@ impl Store {
     }
 }
 
+/// Called by `Store::delete_session` inside its transaction while the
+/// chat's row is still there: its sub-agents' chats are not deleted with
+/// it, and they hold what it handed them, so they take over the external
+/// event data they inherited through it (it, or any chat above it, holds
+/// some), since their walk up ends at the deleted chat.
+pub(crate) fn hand_down(tx: &rusqlite::Transaction, sid: &str) -> crate::Result<()> {
+    tx.execute(
+        "WITH RECURSIVE up(id, depth) AS (
+             SELECT ?1, 0
+             UNION ALL
+             SELECT s.parent_id, up.depth + 1 FROM sessions s JOIN up ON s.session_id = up.id
+             WHERE s.parent_id IS NOT NULL AND up.depth < 16)
+         INSERT OR IGNORE INTO routine_untrusted_chats (session_id)
+         SELECT session_id FROM sessions
+         WHERE parent_id = ?1
+           AND EXISTS(SELECT 1 FROM routine_untrusted_chats WHERE session_id IN (SELECT id FROM up))",
+        params![sid],
+    )?;
+    Ok(())
+}
+
 /// Called by `Store::delete_session` inside its transaction: the run keeps
 /// its status, times, trigger and usage, but no text of the deleted chat;
-/// the chat's untrusted mark goes with it. Its sub-agents' chats are not
-/// deleted with it, and they hold what it handed them, so they take the
-/// mark over first.
+/// the chat's untrusted mark goes with it (`hand_down` ran first).
 pub(crate) fn on_session_deleted(tx: &rusqlite::Transaction, sid: &str) -> crate::Result<()> {
     tx.execute(
         "UPDATE routine_runs SET session_id = NULL, chat_deleted = 1, prompt = NULL,
              event = NULL, warnings = NULL
          WHERE session_id = ?1",
-        params![sid],
-    )?;
-    tx.execute(
-        "INSERT OR IGNORE INTO routine_untrusted_chats (session_id)
-         SELECT session_id FROM sessions
-         WHERE parent_id = ?1
-           AND EXISTS(SELECT 1 FROM routine_untrusted_chats WHERE session_id = ?1)",
         params![sid],
     )?;
     tx.execute(
