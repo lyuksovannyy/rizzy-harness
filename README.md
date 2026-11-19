@@ -116,7 +116,7 @@ send while it works does not change that line. The count runs on this tab's
 clock from when the tab saw the latest event, so a computer clock that is off
 cannot make it wrong; a reload or a tab opened later starts it again from 0.
 Screen readers hear "is waiting for the model" once per turn and "is waiting
-for you" when an approval comes, not every step. Stop is there from the moment the turn starts. If the provider fails
+for you" when an approval comes, not every step. While the page's live link to the server is down (the server stopped, or the network), that line says "The server is not reachable. Reconnecting…" instead, counts no seconds, is read out to screen readers, and goes back to the turn's own words by itself when the link returns. Stop is there from the moment the turn starts. If the provider fails
 for a passing reason the line under it says why and when the next try is
 ("rate limit. Trying again in 3 s (attempt 2 of 3)"); a provider that sends
 nothing is cut off after `[limits] model_first_byte_timeout_s` (600 s by

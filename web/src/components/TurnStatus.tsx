@@ -6,6 +6,7 @@
 // Screen readers hear the wait once per turn, from a region that is always
 // there; the count is never read out.
 import { type ReactNode, useEffect, useState } from "react";
+import type { ConnState } from "../live";
 import { t } from "../lib/i18n";
 import "../lib/i18nPages";
 import type { Item, SessionView } from "../types";
@@ -51,12 +52,16 @@ export function TurnStatus(props: {
   mark?: ReactNode;
   /** Agents the last message called that have not had their turn yet (X.37). */
   left?: number;
+  /** The live link to the server. Not "live": the line says so (the count
+   * and the wait are not true then); it goes back when the link does. */
+  link?: ConnState;
 }) {
   const { state } = props;
   const [now, setNow] = useState(Date.now);
   const [since, setSince] = useState(() => ({ wait: props.wait, at: Date.now() }));
   if (since.wait !== props.wait) setSince({ wait: props.wait, at: Date.now() });
-  const counting = state === "waiting" || state === "sending";
+  const down = !!props.link && props.link !== "live";
+  const counting = !down && (state === "waiting" || state === "sending");
   useEffect(() => {
     if (!counting) return;
     setNow(Date.now());
@@ -79,10 +84,15 @@ export function TurnStatus(props: {
         {said.words}
       </span>
       {state && (
-        <div className={`thinking turn-${state}`} data-testid="turn-status" aria-hidden="true">
+        <div
+          className={`thinking turn-${down ? "down" : state}`}
+          data-testid="turn-status"
+          aria-hidden={down ? undefined : "true"}
+          role={down ? "status" : undefined}
+        >
           {props.mark}
-          <span>{words}</span>
-          {!!props.left && <span className="waited">{t("conv.peersLeft", { n: String(props.left) })}</span>}
+          <span>{down ? t("conv.offline") : words}</span>
+          {!down && !!props.left && <span className="waited">{t("conv.peersLeft", { n: String(props.left) })}</span>}
           {counting && s >= COUNT_FROM_S && <span className="waited">{t("conv.waited", { s: String(s) })}</span>}
         </div>
       )}
