@@ -5297,6 +5297,58 @@ button.pp-row:hover:not(:disabled),
   flex: 1 1 16em;
   min-width: 0;
 }
+/* A project whose folder is being cloned (X.27): a row, never a link. */
+.sidebar-scroll li.pending-project {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: var(--space-1-5);
+  min-width: 0;
+  padding: 4px 10px;
+}
+.pending-project > .ellipsis {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.pending-project > button {
+  flex: none;
+}
+/* "From a repository": the forge's list. Its text is the forge's: one line
+   each, cut, so a long name or description never widens the popup. */
+.rp-list {
+  list-style: none;
+  margin: 0 0 var(--space-2);
+  padding: 0;
+  max-height: 260px;
+  overflow-y: auto;
+}
+.rp-list [role="option"] {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0 var(--space-2);
+  padding: 6px 10px;
+  border-radius: var(--r-md);
+  cursor: pointer;
+}
+.rp-list [role="option"][aria-selected="true"],
+.rp-list [role="option"].active {
+  background: var(--fill);
+}
+.rp-list .rp-name,
+.rp-list .rp-desc {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rp-list .rp-name {
+  font-weight: var(--w-medium);
+}
+.rp-list .rp-desc,
+.rp-list .rp-when {
+  font-size: var(--text-xs);
+  color: var(--fg-2);
+}
 /* The Project button in the agentic row, and the mode where it is not a choice. */
 .project-pick {
   display: inline-flex;

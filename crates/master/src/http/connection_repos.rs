@@ -110,13 +110,8 @@ async fn list(
     // a person's second request never holds one; both are held until the
     // answer is built and given back on every path (they are dropped with
     // this future, a request the client gave up included).
-    let person_slot =
-        forge_repos::take_person(&m.inner.forge.listing_people, &me).ok_or_else(|| {
-            err(
-                StatusCode::TOO_MANY_REQUESTS,
-                "your earlier repository listing is still running; try again when it has finished",
-            )
-        })?;
+    let person_slot = forge_repos::take_person(&m.inner.forge.listing_people, &me)
+        .ok_or_else(|| err(StatusCode::TOO_MANY_REQUESTS, forge_repos::LISTING_BUSY))?;
     let slot = m.inner.forge.in_flight.try_acquire().map_err(|_| {
         err(
             StatusCode::TOO_MANY_REQUESTS,

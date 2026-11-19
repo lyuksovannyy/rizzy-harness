@@ -13,7 +13,7 @@ import { buildSearchUrl } from "../lib/searchUrl";
 import { applyAppearance, writeBackdropMirror } from "../lib/appearance";
 import { newlyWaiting, notifyEnabled, waitingWords } from "../lib/notify";
 import { useFinishedSignal } from "../lib/finished";
-import { projectsApi, type ProjectSummary } from "../lib/projects";
+import { pendingProjects, projectsApi, type ProjectSummary } from "../lib/projects";
 import { useRoutineResults } from "../lib/routineResults";
 import type {
   Agent,
@@ -275,6 +275,7 @@ export function Shell(props: {
       .list(workspaceId)
       .then((r) => {
         setProjects(r.projects);
+        pendingProjects.set(r.pending);
         setCanCreateProject(r.can_create);
       })
       .catch(unauthorized);

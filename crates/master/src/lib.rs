@@ -754,6 +754,14 @@ pub(crate) fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 impl Master {
     pub fn new(mirror: Store, auth: auth::Auth) -> Self {
         let (live, _) = broadcast::channel(4096);
+        // No clone outlives the master that waited for its node (T86): a
+        // project still cloning in the store is failed, for its starter
+        // to read and dismiss.
+        match mirror.fail_running_clones(project_folder::RESTARTED) {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(clones = n, "clones running at the last stop are failed"),
+            Err(e) => tracing::warn!(error = %e, "clones running at the last stop were not failed"),
+        }
         Self {
             inner: Arc::new(MasterInner {
                 mirror,

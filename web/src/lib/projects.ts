@@ -40,8 +40,42 @@ export interface ProjectDetail extends ProjectSummary {
   created_ms: number;
 }
 
+/** A project whose folder a node is cloning, or whose clone failed (X.27,
+ * PLAN.md T86): not a project yet, so nothing can be opened or started in
+ * it; listed apart from `projects`. A failed one reaches its starter only. */
+export interface PendingProject {
+  project_id: string;
+  workspace_id: string;
+  name: string;
+  node_id: string;
+  state: "cloning" | "failed";
+  source: { host: string; full_name: string };
+  started_ms: number;
+  /** Whether the caller started it (only they may dismiss its failure). */
+  mine: boolean;
+  /** Why it failed, in the server's or the node's words. */
+  reason: string | null;
+}
+
+/** The Shell's latest pending projects, for the sidebar (kept here, not in
+ * Shell state); the popup reloads when they change. */
+let pendingNow: PendingProject[] = [];
+const pendingSubs = new Set<() => void>();
+export const pendingProjects = {
+  get: () => pendingNow,
+  set(p: PendingProject[] | undefined) {
+    pendingNow = p ?? [];
+    pendingSubs.forEach((f) => f());
+  },
+  sub(f: () => void) {
+    pendingSubs.add(f);
+    return () => void pendingSubs.delete(f);
+  },
+};
+
 export interface ProjectList {
   projects: ProjectSummary[];
+  pending?: PendingProject[];
   workspace_id: string | null;
   can_create: boolean;
   icons: string[];
@@ -98,6 +132,11 @@ export const projectsApi = {
     /** Make its folder on this node (X.26): the project exists only once the folder does. */
     folder_on?: string;
   }) => call<ProjectDetail>("POST", "/api/projects", b),
+  /** A new project whose folder `folder_on` clones (X.27): answered at once, pending. */
+  clone: (b: { name: string; folder_on: string; connection_id: string; full_name: string; workspace_id?: string }) =>
+    call<PendingProject>("POST", "/api/projects", b),
+  /** Dismiss your own failed clone. */
+  dismissClone: (id: string) => call<{ ok: boolean }>("DELETE", `${base(id)}/clone`),
   /** A project without a folder gets a new one on `node` (X.26). */
   giveFolder: (id: string, node: string) => call<ProjectDetail>("POST", `${base(id)}/folder`, { node_id: node }),
   get: (id: string) => call<ProjectDetail>("GET", base(id)),

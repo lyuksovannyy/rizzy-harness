@@ -4,11 +4,11 @@
 // this browser's (localStorage, inside try/catch). The open chat is never lost:
 // a cap shows it in its place, and a closed group's header carries its mark.
 import { ChevronRight, Cloud, Plus } from "lucide-react";
-import { type ReactNode, useId, useMemo, useState } from "react";
+import { type ReactNode, useId, useMemo, useState, useSyncExternalStore } from "react";
 import { ACCENTS } from "../lib/appearance";
 import { t } from "../lib/i18n";
 import { ProjectIcon } from "../lib/projectIcons";
-import type { ProjectSummary } from "../lib/projects";
+import { type PendingProject, pendingProjects, projectsApi, type ProjectSummary } from "../lib/projects";
 import type { Route } from "../lib/routes";
 import { shownName } from "../md/hiddenChars";
 import type { NodeInfo, SessionRow } from "../types";
@@ -184,6 +184,40 @@ function Box(props: { p: ProjectSummary; chats: SessionRow[]; open: boolean; onT
   );
 }
 
+/** Projects whose folder is being cloned (X.27): shown, never a link (no
+ * chat can start in one); a failed one, its starter's only, with the reason
+ * and Dismiss. */
+function Pending({ list }: { list: PendingProject[] }) {
+  // What the server said when a Dismiss was refused (by project).
+  const [refused, setRefused] = useState<Record<string, string>>({});
+  const dismiss = (id: string) =>
+    projectsApi.dismissClone(id).then(
+      () => setRefused(({ [id]: _, ...rest }) => rest),
+      (e: unknown) => setRefused((r) => ({ ...r, [id]: e instanceof Error ? e.message : String(e) })),
+    );
+  return list.map((p) => {
+    const what = shownName(`${p.source.host}/${p.source.full_name}`);
+    const why = p.reason ? shownName(p.reason) : "";
+    return (
+      <li key={p.project_id} className="pending-project muted small" title={why || what}>
+        <span className="ellipsis grow">
+          {shownName(p.name)} · {why ? `clone failed: ${why}` : `cloning ${what}…`}
+        </span>
+        {why && p.mine && (
+          <button type="button" className="link" onClick={() => void dismiss(p.project_id)}>
+            Dismiss
+          </button>
+        )}
+        {refused[p.project_id] && (
+          <span className="error-text" role="alert">
+            {shownName(refused[p.project_id]!)}
+          </span>
+        )}
+      </li>
+    );
+  });
+}
+
 export function SidebarLists(props: {
   route: Route;
   onNavigate: (r: Route) => void;
@@ -194,6 +228,7 @@ export function SidebarLists(props: {
   canCreateProject: boolean;
 }) {
   const [open, setOpen] = useState(readOpen);
+  const pending = useSyncExternalStore(pendingProjects.sub, pendingProjects.get);
   const body = useId();
   const toggle = (id: string) =>
     setOpen((o) => {
@@ -251,7 +286,8 @@ export function SidebarLists(props: {
         </div>
         {sectionOpen && (
           <ul id={body} role="list" className="projects">
-            {tree.projects.length === 0 && <li className="muted pad small">{t("nav.noProjects")}</li>}
+            {tree.projects.length === 0 && !pending.length && <li className="muted pad small">{t("nav.noProjects")}</li>}
+            <Pending list={pending} />
             <Capped
               items={tree.projects}
               cap={5}
