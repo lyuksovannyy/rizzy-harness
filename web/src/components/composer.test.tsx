@@ -566,3 +566,63 @@ describe("the agent picker while the agent works", () => {
     host.remove();
   });
 });
+
+// A workspace's own agent is written by that workspace's admins, not by the
+// server's (X.33): the picker and the @mention list say which one it is,
+// from the server's `scope`, never from the agent's own text.
+describe("a workspace's own agent is marked where an agent is picked", () => {
+  const base = { builtin: false, default_model: null, main_model: "m", fallbacks: [], unavailable: [], avatar: { shape: "circle" as const, eyes: "round" as const, accent: "blue" as const } };
+  const agents = [
+    { ...base, id: "coder", name: "Coder", description: "codes", builtin: true },
+    { ...base, id: "helper", name: "Helper", description: "a server agent that calls itself a workspace agent", scope: "server" as const },
+    { ...base, id: "ours", name: "Ours", description: "the team's", scope: "workspace" as const },
+    { ...base, id: "ours-down", name: "Ours down", description: "", scope: "workspace" as const, unavailable: ["m"] },
+  ];
+
+  function mountPicker() {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    act(() =>
+      root.render(
+        <Composer where="session" agents={agents} models={[]} workers={[]} agentId="coder" onAgentChange={() => {}} agenticBlocked={null} onSubmit={async () => {}} />,
+      ),
+    );
+    return { host, unmount: () => (act(() => root.unmount()), host.remove()) };
+  }
+
+  test("in the picker's list", () => {
+    const c = mountPicker();
+    act(() => c.host.querySelector<HTMLButtonElement>(".agent-pick .select-button")!.click());
+    const hints = Object.fromEntries(
+      [...c.host.querySelectorAll('.agent-pick [role="option"]')].map((o) => [
+        o.querySelector(".option-label")!.textContent,
+        o.querySelector(".option-hint")?.textContent ?? null,
+      ]),
+    );
+    expect(hints).toEqual({
+      Coder: null,
+      Helper: null,
+      Ours: "workspace agent",
+      "Ours down": "workspace agent · model unavailable",
+    });
+    c.unmount();
+  });
+
+  test("in the @mention list", () => {
+    const c = mountPicker();
+    const textarea = c.host.querySelector("textarea")!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(textarea, "@");
+      textarea.setSelectionRange(1, 1);
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    const rows = Object.fromEntries(
+      [...c.host.querySelectorAll('.mention-popup [role="option"]')].map((o) => [o.querySelector("b")!.textContent, o.querySelector(".option-hint")!.textContent]),
+    );
+    expect(rows["@ours"]).toBe("workspace agent · the team's");
+    expect(rows["@helper"]).toBe("a server agent that calls itself a workspace agent");
+    expect(rows["@coder"]).toBe("codes");
+    c.unmount();
+  });
+});
