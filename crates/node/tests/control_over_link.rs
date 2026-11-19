@@ -216,22 +216,8 @@ impl Master {
         })
         .await;
         self.send(MasterToNode::Prompt(PromptMsg {
-            savings: None,
-            context: None,
-            reply: None,
-            agent: None,
-            attachments: vec![],
-            compare: vec![],
             req_id: format!("prompt-{name}"),
-            session_id: sid,
-            text: text.into(),
-            images: vec![],
-            agent_named: false,
-            files: vec![],
-            owner: None,
-            identity: None,
-            peers: vec![],
-            tags: vec![],
+            ..PromptMsg::test(sid, text)
         }))
         .await;
         (sid, cwd)

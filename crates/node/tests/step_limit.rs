@@ -143,21 +143,7 @@ impl N {
     fn prompt(&self, sid: SessionId, text: &str) {
         self.send(MasterToNode::Prompt(PromptMsg {
             req_id: format!("p-{sid}-{}", harness_core::new_id()),
-            session_id: sid,
-            text: text.into(),
-            agent: None,
-            attachments: vec![],
-            compare: vec![],
-            reply: None,
-            savings: None,
-            context: None,
-            images: vec![],
-            agent_named: false,
-            files: vec![],
-            owner: None,
-            identity: None,
-            peers: vec![],
-            tags: vec![],
+            ..PromptMsg::test(sid, text)
         }));
     }
 

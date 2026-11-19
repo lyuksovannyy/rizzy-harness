@@ -104,22 +104,8 @@ async fn create_in(link: &mut NodeLink, ws: &std::path::Path, mode: ApprovalMode
 fn prompt(link: &NodeLink, sid: SessionId, agent: Option<AgentSpec>, text: String) {
     link.to_node
         .try_send(MasterToNode::Prompt(PromptMsg {
-            savings: None,
-            context: None,
-            reply: None,
             agent,
-            attachments: vec![],
-            compare: vec![],
-            req_id: "p".into(),
-            session_id: sid,
-            text,
-            images: vec![],
-            agent_named: false,
-            files: vec![],
-            owner: None,
-            identity: None,
-            peers: vec![],
-            tags: vec![],
+            ..PromptMsg::test(sid, text)
         }))
         .unwrap();
 }

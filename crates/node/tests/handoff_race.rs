@@ -121,22 +121,8 @@ async fn a_note_never_lands_inside_a_turn_and_never_refuses_a_prompt() {
     let prompt = |link: &NodeLink, i: usize, text: String| {
         link.to_node
             .try_send(MasterToNode::Prompt(PromptMsg {
-                savings: None,
-                context: None,
-                reply: None,
-                agent: None,
-                attachments: vec![],
-                compare: vec![],
                 req_id: format!("p{i}"),
-                session_id: sid,
-                text,
-                images: vec![],
-                agent_named: false,
-                files: vec![],
-                owner: None,
-                identity: None,
-                peers: vec![],
-                tags: vec![],
+                ..PromptMsg::test(sid, text)
             }))
             .unwrap();
     };

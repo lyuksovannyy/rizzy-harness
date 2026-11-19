@@ -327,22 +327,11 @@ fn prompt_with(
 ) {
     link.to_node
         .try_send(MasterToNode::Prompt(PromptMsg {
-            savings: None,
-            context: None,
-            reply: None,
-            agent: None,
             attachments,
-            compare: vec![],
             req_id: req_id.into(),
-            session_id: sid,
-            text: text.into(),
             images,
             files,
-            agent_named: false,
-            owner: None,
-            identity: None,
-            peers: vec![],
-            tags: vec![],
+            ..PromptMsg::test(sid, text)
         }))
         .unwrap();
 }
@@ -355,14 +344,7 @@ fn retry(link: &NodeLink, sid: SessionId, req_id: &str, turn: &str) {
     link.to_node
         .try_send(MasterToNode::Retry(RetryMsg {
             req_id: req_id.into(),
-            session_id: sid,
-            turn_id: turn.into(),
-            agent: None,
-            savings: None,
-            context: None,
-            agent_named: false,
-            owner: None,
-            identity: None,
+            ..RetryMsg::test(sid, turn)
         }))
         .unwrap();
 }

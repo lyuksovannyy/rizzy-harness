@@ -146,21 +146,7 @@ fn create(sid: SessionId, cwd: &std::path::Path, mode: Option<ExecMode>) -> Mast
 fn prompt(sid: SessionId, text: &str) -> MasterToNode {
     MasterToNode::Prompt(PromptMsg {
         req_id: format!("p-{sid}"),
-        session_id: sid,
-        text: text.into(),
-        agent: None,
-        attachments: vec![],
-        compare: vec![],
-        reply: None,
-        savings: None,
-        context: None,
-        images: vec![],
-        agent_named: false,
-        files: vec![],
-        owner: None,
-        identity: None,
-        peers: vec![],
-        tags: vec![],
+        ..PromptMsg::test(sid, text)
     })
 }
 
@@ -389,13 +375,7 @@ async fn a_session_whose_mode_is_no_longer_offered_runs_nothing_after_a_restart(
                 "callback",
                 MasterToNode::Callback(CallbackMsg {
                     req_id: "cb".into(),
-                    session_id: gone,
-                    bg_ids: vec!["bg-1".into()],
-                    agent: None,
-                    savings: None,
-                    context: None,
-                    owner: None,
-                    identity: None,
+                    ..CallbackMsg::test(gone, vec!["bg-1".into()])
                 }),
             ),
             (
@@ -675,8 +655,6 @@ async fn a_sub_agents_mode_is_its_parents() {
         .to_node
         .try_send(MasterToNode::Prompt(PromptMsg {
             req_id,
-            session_id,
-            text,
             agent: Some(lead),
             attachments,
             compare,
@@ -684,12 +662,7 @@ async fn a_sub_agents_mode_is_its_parents() {
             savings,
             context,
             images,
-            agent_named: false,
-            files: vec![],
-            owner: None,
-            identity: None,
-            peers: vec![],
-            tags: vec![],
+            ..PromptMsg::test(session_id, text)
         }))
         .unwrap();
     ack(&mut n).await.unwrap();

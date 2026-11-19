@@ -305,22 +305,8 @@ impl Node {
         self.link
             .to_node
             .try_send(MasterToNode::Prompt(PromptMsg {
-                req_id: "p".into(),
-                session_id: sid,
-                text: text.into(),
                 agent: Some(agent),
-                attachments: vec![],
-                compare: vec![],
-                reply: None,
-                savings: None,
-                context: None,
-                images: vec![],
-                agent_named: false,
-                files: vec![],
-                owner: None,
-                identity: None,
-                peers: vec![],
-                tags: vec![],
+                ..PromptMsg::test(sid, text)
             }))
             .unwrap();
     }
@@ -1157,14 +1143,8 @@ async fn a_person_or_a_retry_in_a_background_sub_agents_chat_during_its_run_gets
         .to_node
         .try_send(MasterToNode::Retry(RetryMsg {
             req_id: "rt".into(),
-            session_id: child,
-            turn_id: turn,
             agent: Some(mcp_helper()),
-            savings: None,
-            context: None,
-            agent_named: false,
-            owner: None,
-            identity: None,
+            ..RetryMsg::test(child, turn)
         }))
         .unwrap();
     assert!(n.ack().await.is_err(), "a retry ran in a sub-agent's chat");

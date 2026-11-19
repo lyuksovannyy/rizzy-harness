@@ -311,24 +311,7 @@ no_callbacks: false,
 
     fn say(&mut self, sid: SessionId, text: String, agent: Option<harness_core::agent::AgentSpec>) {
         self.n += 1;
-        self.send(MasterToNode::Prompt(PromptMsg {
-            savings: None,
-            context: None,
-            reply: None,
-            agent,
-            attachments: vec![],
-            compare: vec![],
-            req_id: format!("p{}", self.n),
-            session_id: sid,
-            text,
-            images: vec![],
-            agent_named: false,
-            files: vec![],
-            owner: None,
-            identity: None,
-    peers: vec![],
-    tags: vec![],
-        }));
+        self.send(MasterToNode::Prompt(PromptMsg { agent, req_id: format!("p{}", self.n), ..PromptMsg::test(sid, text) }));
     }
 
     fn prompt(&mut self, sid: SessionId, calls: Value) {

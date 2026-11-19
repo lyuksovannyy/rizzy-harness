@@ -211,22 +211,8 @@ async fn create(n: &mut Node) -> SessionId {
 fn prompt(link: &NodeLink, sid: SessionId, req_id: &str, text: String) {
     link.to_node
         .try_send(MasterToNode::Prompt(PromptMsg {
-            savings: None,
-            context: None,
-            reply: None,
-            agent: None,
-            attachments: vec![],
-            compare: vec![],
             req_id: req_id.into(),
-            session_id: sid,
-            text,
-            images: vec![],
-            files: vec![],
-            agent_named: false,
-            owner: None,
-            identity: None,
-            peers: vec![],
-            tags: vec![],
+            ..PromptMsg::test(sid, text)
         }))
         .unwrap();
 }

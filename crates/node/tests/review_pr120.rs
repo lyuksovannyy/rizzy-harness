@@ -170,22 +170,8 @@ impl Node {
     async fn turn(&mut self, sid: SessionId, text: &str, files: &[&str]) {
         let before = self.ended(sid);
         self.send(MasterToNode::Prompt(PromptMsg {
-            savings: None,
-            context: None,
-            reply: None,
-            agent: None,
-            attachments: vec![],
-            compare: vec![],
-            req_id: "p".into(),
-            session_id: sid,
-            text: text.into(),
-            images: vec![],
-            agent_named: false,
             files: files.iter().map(|s| s.to_string()).collect(),
-            owner: None,
-            identity: None,
-            peers: vec![],
-            tags: vec![],
+            ..PromptMsg::test(sid, text)
         }))
         .await
         .unwrap();
@@ -376,27 +362,13 @@ async fn r2b_typed_text_and_attachments_reach_the_model_as_the_log_holds_them() 
     let a = n.create("ws1").await;
     let before = n.ended(a);
     n.send(MasterToNode::Prompt(PromptMsg {
-        savings: None,
-        context: None,
-        reply: None,
-        agent: None,
         attachments: vec![harness_core::event::Attachment {
             name: "notes.txt".into(),
             mime: "text/plain".into(),
             text: format!("token {SECRET} in a note"),
             truncated: false,
         }],
-        compare: vec![],
-        req_id: "p".into(),
-        session_id: a,
-        text: format!("typed {SECRET} by mistake"),
-        images: vec![],
-        agent_named: false,
-        files: vec![],
-        owner: None,
-        identity: None,
-        peers: vec![],
-        tags: vec![],
+        ..PromptMsg::test(a, format!("typed {SECRET} by mistake"))
     }))
     .await
     .unwrap();
@@ -454,22 +426,8 @@ async fn r6_a_sub_agents_task_is_scrubbed_like_a_message() {
     let lead = spec("lead", vec!["read".into()], vec![scout]);
     let before = n.ended(a);
     n.send(MasterToNode::Prompt(PromptMsg {
-        savings: None,
-        context: None,
-        reply: None,
         agent: Some(lead),
-        attachments: vec![],
-        compare: vec![],
-        req_id: "p".into(),
-        session_id: a,
-        text: "delegate: scout=check the key @@S@@ please".into(),
-        images: vec![],
-        agent_named: false,
-        files: vec![],
-        owner: None,
-        identity: None,
-        peers: vec![],
-        tags: vec![],
+        ..PromptMsg::test(a, "delegate: scout=check the key @@S@@ please")
     }))
     .await
     .unwrap();

@@ -62,6 +62,8 @@ toml.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# The tests build turn messages with `PromptMsg::test` and friends.
+harness-protocol = { workspace = true, features = ["test-support"] }
 # The fake MCP server of tests/custom_connectors_http.rs speaks TLS (the
 # link's crate, already in the tree).
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["aws_lc_rs", "tls12"] }

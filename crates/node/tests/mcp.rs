@@ -188,22 +188,8 @@ impl Node {
         self.link
             .to_node
             .try_send(MasterToNode::Prompt(PromptMsg {
-                req_id: "p".into(),
-                session_id: sid,
-                text: text.into(),
                 agent,
-                attachments: vec![],
-                compare: vec![],
-                reply: None,
-                savings: None,
-                context: None,
-                images: vec![],
-                agent_named: false,
-                files: vec![],
-                owner: None,
-                identity: None,
-                peers: vec![],
-                tags: vec![],
+                ..PromptMsg::test(sid, text)
             }))
             .unwrap();
         self.ack().await.unwrap();

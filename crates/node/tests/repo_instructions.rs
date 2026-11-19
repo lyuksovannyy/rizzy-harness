@@ -227,26 +227,14 @@ impl Node {
     ) {
         let before = self.ended(sid);
         self.send(MasterToNode::Prompt(PromptMsg {
-            savings: None,
             context: Some(Box::new(harness_core::backend::MasterContext {
                 turn: Some("Person: Ann".into()),
                 standing: vec![],
                 unattended: false,
             })),
-            reply: None,
             agent,
-            attachments: vec![],
-            compare: vec![],
-            req_id: "p".into(),
-            session_id: sid,
-            text: text.into(),
-            images: vec![],
-            agent_named: false,
             files,
-            owner: None,
-            identity: None,
-            peers: vec![],
-            tags: vec![],
+            ..PromptMsg::test(sid, text)
         }))
         .await;
         let by = std::time::Instant::now() + Duration::from_secs(20);

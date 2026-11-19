@@ -268,22 +268,8 @@ impl Node {
         self.link
             .to_node
             .try_send(MasterToNode::Prompt(PromptMsg {
-                savings: None,
-                context: None,
-                reply: None,
                 agent: Some(agent),
-                attachments: vec![],
-                compare: vec![],
-                req_id: "p".into(),
-                session_id: sid,
-                text: text.into(),
-                images: vec![],
-                agent_named: false,
-                files: vec![],
-                owner: None,
-                identity: None,
-                peers: vec![],
-                tags: vec![],
+                ..PromptMsg::test(sid, text)
             }))
             .unwrap();
         let by = std::time::Instant::now() + Duration::from_secs(30);

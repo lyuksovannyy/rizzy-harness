@@ -180,21 +180,10 @@ impl N {
         let id = self.req();
         self.send(MasterToNode::Prompt(PromptMsg {
             req_id: id.clone(),
-            session_id: sid,
-            text: text.into(),
             agent: Some(first.clone()),
-            attachments: vec![],
-            compare: vec![],
-            reply: None,
-            savings: None,
-            context: None,
-            images: vec![],
             agent_named: true,
-            files: vec![],
-            owner: None,
-            identity: None,
             peers,
-            tags: vec![],
+            ..PromptMsg::test(sid, text)
         }));
         self.ack(&id).await
     }
@@ -306,14 +295,8 @@ async fn a_retry_between_two_turns_of_the_list_is_refused() {
     let id = n.req();
     n.send(MasterToNode::Retry(RetryMsg {
         req_id: id.clone(),
-        session_id: sid,
-        turn_id: failed,
         agent: Some(a.clone()),
-        savings: None,
-        context: None,
-        agent_named: false,
-        owner: None,
-        identity: None,
+        ..RetryMsg::test(sid, failed)
     }));
     let r = n.ack(&id).await.unwrap_err();
     assert!(r.contains("still taking their turns"), "{r}");

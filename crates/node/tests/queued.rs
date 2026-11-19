@@ -349,21 +349,7 @@ impl Node {
     fn prompt(&self, sid: SessionId, req_id: &str, text: &str) {
         self.send(MasterToNode::Prompt(PromptMsg {
             req_id: req_id.into(),
-            session_id: sid,
-            text: text.into(),
-            agent: None,
-            attachments: vec![],
-            compare: vec![],
-            savings: None,
-            context: None,
-            reply: None,
-            images: vec![],
-            agent_named: false,
-            files: vec![],
-            owner: None,
-            identity: None,
-            peers: vec![],
-            tags: vec![],
+            ..PromptMsg::test(sid, text)
         }));
     }
 

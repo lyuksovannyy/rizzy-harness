@@ -264,22 +264,8 @@ impl Rig {
     pub fn start_turn(&mut self, cmd: &str) {
         self.n += 1;
         self.send(MasterToNode::Prompt(PromptMsg {
-            savings: None,
-            context: None,
-            reply: None,
-            agent: None,
-            attachments: vec![],
-            compare: vec![],
             req_id: format!("p{}", self.n),
-            session_id: self.sid,
-            text: format!("run: {cmd}"),
-            images: vec![],
-            agent_named: false,
-            files: vec![],
-            owner: None,
-            identity: None,
-            peers: vec![],
-            tags: vec![],
+            ..PromptMsg::test(self.sid, format!("run: {cmd}"))
         }));
     }
 
@@ -373,22 +359,10 @@ impl Rig {
         let mark = self.seen.len();
         self.n += 1;
         self.send(MasterToNode::Prompt(PromptMsg {
-            savings: None,
             context: self.lead_context.clone().map(Box::new),
-            reply: None,
             agent: Some(self.lead()),
-            attachments: vec![],
-            compare: vec![],
             req_id: format!("p{}", self.n),
-            session_id: sid,
-            text: text.into(),
-            images: vec![],
-            agent_named: false,
-            files: vec![],
-            owner: None,
-            identity: None,
-            peers: vec![],
-            tags: vec![],
+            ..PromptMsg::test(sid, text)
         }));
         loop {
             self.until(|k| matches!(k, EventKind::TurnEnded(_))).await;

@@ -514,24 +514,14 @@ async fn a_child_continued_after_the_chat_went_to_ask_asks() {
         .await;
     r.n += 1;
     r.send(MasterToNode::Prompt(PromptMsg {
-        savings: None,
-        context: None,
-        reply: None,
         agent: Some(r.lead()),
-        attachments: vec![],
-        compare: vec![],
         req_id: format!("p{}", r.n),
-        session_id: r.session_id(),
-        text: delegate(&[json!({
-            "agent": "dev", "session": child.to_string(), "task": "run: echo two > b.txt"
-        })]),
-        images: vec![],
-        agent_named: false,
-        files: vec![],
-        owner: None,
-        identity: None,
-        peers: vec![],
-        tags: vec![],
+        ..PromptMsg::test(
+            r.session_id(),
+            delegate(&[json!({
+                "agent": "dev", "session": child.to_string(), "task": "run: echo two > b.txt"
+            })]),
+        )
     }));
     let sid = r.session_id();
     r.until(|k| matches!(k, EventKind::ApprovalRequested(a) if a.tool == "bash"))
@@ -1103,24 +1093,14 @@ async fn entering_plan_mode_denies_a_continued_childs_waiting_card() {
     set_mode(&mut r, ApprovalMode::Ask).await;
     r.n += 1;
     r.send(MasterToNode::Prompt(PromptMsg {
-        savings: None,
-        context: None,
-        reply: None,
         agent: Some(r.lead()),
-        attachments: vec![],
-        compare: vec![],
         req_id: format!("p{}", r.n),
-        session_id: r.session_id(),
-        text: delegate(&[json!({
-            "agent": "dev", "session": child.to_string(), "task": "run: echo two > b.txt"
-        })]),
-        images: vec![],
-        agent_named: false,
-        files: vec![],
-        owner: None,
-        identity: None,
-        peers: vec![],
-        tags: vec![],
+        ..PromptMsg::test(
+            r.session_id(),
+            delegate(&[json!({
+                "agent": "dev", "session": child.to_string(), "task": "run: echo two > b.txt"
+            })]),
+        )
     }));
     r.until(|k| matches!(k, EventKind::ApprovalRequested(a) if a.tool == "bash"))
         .await;

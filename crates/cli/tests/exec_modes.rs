@@ -192,24 +192,7 @@ impl Node {
     async fn run(&mut self, sid: SessionId, text: &str) -> Vec<String> {
         self.link
             .to_node
-            .try_send(MasterToNode::Prompt(PromptMsg {
-                req_id: "p".into(),
-                session_id: sid,
-                text: text.into(),
-                agent: None,
-                attachments: vec![],
-                compare: vec![],
-                reply: None,
-                savings: None,
-                context: None,
-                images: vec![],
-                agent_named: false,
-                files: vec![],
-                owner: None,
-                identity: None,
-                peers: vec![],
-                tags: vec![],
-            }))
+            .try_send(MasterToNode::Prompt(PromptMsg::test(sid, text)))
             .unwrap();
         self.ack().await.unwrap();
         let by = std::time::Instant::now() + Duration::from_secs(30);

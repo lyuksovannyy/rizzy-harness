@@ -150,22 +150,8 @@ impl Node {
 
     fn prompt(sid: SessionId, text: &str, files: &[&str]) -> MasterToNode {
         MasterToNode::Prompt(PromptMsg {
-            savings: None,
-            context: None,
-            reply: None,
-            agent: None,
-            attachments: vec![],
-            compare: vec![],
-            req_id: "p".into(),
-            session_id: sid,
-            text: text.into(),
-            images: vec![],
-            agent_named: false,
             files: files.iter().map(|s| s.to_string()).collect(),
-            owner: None,
-            identity: None,
-            peers: vec![],
-            tags: vec![],
+            ..PromptMsg::test(sid, text)
         })
     }
 

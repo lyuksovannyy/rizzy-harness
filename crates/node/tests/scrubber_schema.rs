@@ -256,22 +256,9 @@ impl Node {
         self.link
             .to_node
             .try_send(MasterToNode::Prompt(PromptMsg {
-                savings: None,
-                context: None,
-                reply: None,
-                agent: None,
-                attachments: vec![],
-                compare: vec![],
                 req_id: harness_core::new_id(),
-                session_id: sid,
-                text: text.into(),
-                images: vec![],
-                agent_named: false,
-                files: vec![],
                 owner: Some(owner.into()),
-                identity: None,
-                peers: vec![],
-                tags: vec![],
+                ..PromptMsg::test(sid, text)
             }))
             .unwrap();
         loop {

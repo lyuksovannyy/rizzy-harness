@@ -255,21 +255,10 @@ impl N {
         let req_id = self.req();
         self.send(MasterToNode::Prompt(PromptMsg {
             req_id: req_id.clone(),
-            session_id: sid,
-            text: text.into(),
             agent: Some(first.clone()),
-            attachments: vec![],
-            compare: vec![],
-            reply: None,
-            savings: None,
-            context: None,
-            images: vec![],
             agent_named: true,
-            files: vec![],
-            owner: None,
-            identity: None,
             peers: peers.iter().map(|a| (*a).clone()).collect(),
-            tags: vec![],
+            ..PromptMsg::test(sid, text)
         }));
         self.ack(&req_id).await
     }
@@ -287,21 +276,11 @@ impl N {
         let req_id = self.req();
         self.send(MasterToNode::Prompt(PromptMsg {
             req_id: req_id.clone(),
-            session_id: sid,
-            text: text.into(),
             agent: Some(first.clone()),
-            attachments: vec![],
-            compare: vec![],
-            reply: None,
-            savings: None,
             context: Some(Box::new(context)),
-            images: vec![],
             agent_named: true,
-            files: vec![],
-            owner: None,
-            identity: None,
             peers: peers.iter().map(|a| (*a).clone()).collect(),
-            tags: vec![],
+            ..PromptMsg::test(sid, text)
         }));
         self.ack(&req_id).await
     }
@@ -319,21 +298,11 @@ impl N {
         let req_id = self.req();
         self.send(MasterToNode::Prompt(PromptMsg {
             req_id: req_id.clone(),
-            session_id: sid,
-            text: text.into(),
             agent: Some(first.clone()),
-            attachments: vec![],
-            compare: vec![],
-            reply: None,
-            savings: None,
-            context: None,
-            images: vec![],
             agent_named: true,
-            files: vec![],
-            owner: None,
-            identity: None,
             peers: peers.iter().map(|a| (*a).clone()).collect(),
             tags: tags.iter().map(|t| t.to_string()).collect(),
+            ..PromptMsg::test(sid, text)
         }));
         self.ack(&req_id).await
     }

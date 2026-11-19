@@ -153,22 +153,8 @@ impl Rig {
     fn script(&mut self, sid: SessionId, steps: serde_json::Value) {
         self.n += 1;
         self.send(MasterToNode::Prompt(PromptMsg {
-            savings: None,
-            context: None,
-            reply: None,
-            agent: None,
-            attachments: vec![],
-            compare: vec![],
             req_id: format!("p{}", self.n),
-            session_id: sid,
-            text: format!("script: {steps}"),
-            images: vec![],
-            agent_named: false,
-            files: vec![],
-            owner: None,
-            identity: None,
-            peers: vec![],
-            tags: vec![],
+            ..PromptMsg::test(sid, format!("script: {steps}"))
         }));
     }
 

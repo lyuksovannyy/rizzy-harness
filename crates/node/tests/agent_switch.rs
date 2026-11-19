@@ -228,21 +228,9 @@ impl N {
         let req_id = self.req();
         self.send(MasterToNode::Prompt(PromptMsg {
             req_id,
-            session_id: sid,
-            text: text.into(),
             agent: Some(a.clone()),
-            attachments: vec![],
-            compare: vec![],
-            reply: None,
-            savings: None,
-            context: None,
-            images: vec![],
             agent_named: named,
-            files: vec![],
-            owner: None,
-            identity: None,
-            peers: vec![],
-            tags: vec![],
+            ..PromptMsg::test(sid, text)
         }));
     }
 
@@ -463,14 +451,8 @@ async fn retry_after_a_switch_runs_the_new_agent_and_notes_it_once() {
     let req_id = n.req();
     n.send(MasterToNode::Retry(RetryMsg {
         req_id,
-        session_id: sid,
-        turn_id: failed,
         agent: Some(b.clone()),
-        savings: None,
-        context: None,
-        agent_named: false,
-        owner: None,
-        identity: None,
+        ..RetryMsg::test(sid, failed)
     }));
     n.until_end(sid).await;
     let switches = n.switches(sid);
@@ -538,14 +520,9 @@ async fn a_retry_of_a_mention_turn_writes_no_switch() {
     let req_id = n.req();
     n.send(MasterToNode::Retry(RetryMsg {
         req_id,
-        session_id: sid,
-        turn_id: failed,
         agent: Some(x.clone()),
-        savings: None,
-        context: None,
         agent_named: true,
-        owner: None,
-        identity: None,
+        ..RetryMsg::test(sid, failed)
     }));
     n.until_end(sid).await;
     n.turn(sid, &a, false, "back to my chat").await;

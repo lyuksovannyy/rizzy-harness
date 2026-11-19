@@ -312,21 +312,8 @@ impl Node {
             .to_node
             .try_send(MasterToNode::Prompt(PromptMsg {
                 req_id: format!("p-{sid}"),
-                session_id: sid,
-                text: text.into(),
-                agent: None,
-                attachments: vec![],
-                compare: vec![],
-                reply: None,
-                savings: None,
-                context: None,
-                images: vec![],
-                agent_named: false,
-                files: vec![],
                 owner: self.owners.get(&sid).cloned().flatten(),
-                identity: None,
-                peers: vec![],
-                tags: vec![],
+                ..PromptMsg::test(sid, text)
             }))
             .unwrap();
         self.ack(&format!("p-{sid}")).await.unwrap();
@@ -804,21 +791,8 @@ async fn a_malformed_owner_on_a_turn_is_refused() {
             .to_node
             .try_send(MasterToNode::Prompt(PromptMsg {
                 req_id: "malformed".into(),
-                session_id: sid,
-                text: "x".into(),
-                agent: None,
-                attachments: vec![],
-                compare: vec![],
-                reply: None,
-                savings: None,
-                context: None,
-                images: vec![],
-                agent_named: false,
-                files: vec![],
                 owner: Some("alice\nINFO forged".into()),
-                identity: None,
-                peers: vec![],
-                tags: vec![],
+                ..PromptMsg::test(sid, "x")
             }))
             .unwrap();
         n.ack("malformed").await.unwrap_err()

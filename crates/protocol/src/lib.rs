@@ -1111,6 +1111,70 @@ pub struct RetryMsg {
     pub identity: Option<harness_core::identity::CommitIdentity>,
 }
 
+/// Test constructors: every field but the ones named is at its empty value
+/// (`None`, no items, `false`). Only for tests (`test-support` feature of
+/// this crate, enabled by the dev-dependencies of the crates whose tests
+/// build these messages): a sender in production code names every field.
+#[cfg(any(test, feature = "test-support"))]
+impl PromptMsg {
+    /// A prompt with `req_id` `"p"`.
+    pub fn test(session_id: SessionId, text: impl Into<String>) -> Self {
+        PromptMsg {
+            req_id: "p".into(),
+            session_id,
+            text: text.into(),
+            agent: None,
+            agent_named: false,
+            attachments: vec![],
+            compare: vec![],
+            savings: None,
+            context: None,
+            reply: None,
+            images: vec![],
+            files: vec![],
+            owner: None,
+            identity: None,
+            peers: vec![],
+            tags: vec![],
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl CallbackMsg {
+    /// A callback with `req_id` `"r"`.
+    pub fn test(session_id: SessionId, bg_ids: Vec<String>) -> Self {
+        CallbackMsg {
+            req_id: "r".into(),
+            session_id,
+            bg_ids,
+            agent: None,
+            savings: None,
+            context: None,
+            owner: None,
+            identity: None,
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl RetryMsg {
+    /// A retry with `req_id` `"r"`.
+    pub fn test(session_id: SessionId, turn_id: impl Into<String>) -> Self {
+        RetryMsg {
+            req_id: "r".into(),
+            session_id,
+            turn_id: turn_id.into(),
+            agent: None,
+            savings: None,
+            context: None,
+            agent_named: false,
+            owner: None,
+            identity: None,
+        }
+    }
+}
+
 // A command is built, sent once and dropped; none is kept in bulk, so the
 // size of its largest variant (`session.prompt`, with its spec and, since
 // X.36, its owner) costs nothing worth boxing every literal for.
@@ -2106,21 +2170,8 @@ mod tests {
         };
         let p = MasterToNode::Prompt(PromptMsg {
             req_id: "r".into(),
-            session_id: sid,
-            text: "look".into(),
-            agent: None,
-            attachments: vec![],
-            compare: vec![],
-            savings: None,
-            context: None,
-            reply: None,
             images: vec![img.clone()],
-            agent_named: false,
-            files: vec![],
-            owner: None,
-            identity: None,
-            peers: vec![],
-            tags: vec![],
+            ..PromptMsg::test(sid, "look")
         });
         let v = serde_json::to_value(&p).unwrap();
         assert_eq!(
@@ -2139,21 +2190,8 @@ mod tests {
         let prompt = |reply| {
             MasterToNode::Prompt(PromptMsg {
                 req_id: "r".into(),
-                session_id: sid,
-                text: String::new(),
-                agent: None,
-                attachments: vec![],
-                compare: vec![],
-                savings: None,
-                context: None,
                 reply,
-                images: vec![],
-                agent_named: false,
-                files: vec![],
-                owner: None,
-                identity: None,
-                peers: vec![],
-                tags: vec![],
+                ..PromptMsg::test(sid, String::new())
             })
         };
         let v = serde_json::to_value(prompt(None)).unwrap();
@@ -2180,16 +2218,7 @@ mod tests {
         // A busy chat's refusal is one that finds nothing to resume now.
         assert!(CALLBACK_BUSY.starts_with(CALLBACK_NOTHING));
         let sid: SessionId = "0193f2a0-0000-7000-8000-000000000001".parse().unwrap();
-        let c = MasterToNode::Callback(CallbackMsg {
-            req_id: "r".into(),
-            session_id: sid,
-            bg_ids: vec!["bg-1".into(), "bg-2".into()],
-            agent: None,
-            savings: None,
-            context: None,
-            owner: None,
-            identity: None,
-        });
+        let c = MasterToNode::Callback(CallbackMsg::test(sid, vec!["bg-1".into(), "bg-2".into()]));
         let v = serde_json::to_value(&c).unwrap();
         assert_eq!(
             v,

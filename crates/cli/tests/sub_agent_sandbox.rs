@@ -695,26 +695,12 @@ async fn a_delegated_sub_agent_gets_its_folder_through_the_node() {
     let task = json!([["delegate", {"agent": "dev", "task": child_calls.to_string()}]]);
     link.to_node
         .try_send(MasterToNode::Prompt(PromptMsg {
-            savings: None,
-            context: None,
-            reply: None,
             agent: Some(spec(
                 "lead",
                 &["bash"],
                 vec![spec("dev", &["write", "bash"], vec![])],
             )),
-            attachments: vec![],
-            compare: vec![],
-            req_id: "p".into(),
-            session_id: sid,
-            text: task.to_string(),
-            images: vec![],
-            agent_named: false,
-            files: vec![],
-            owner: None,
-            identity: None,
-            peers: vec![],
-            tags: vec![],
+            ..PromptMsg::test(sid, task.to_string())
         }))
         .unwrap();
     loop {
