@@ -3334,6 +3334,7 @@ impl Session {
                     crate::git::delete_ref(&repo, &r).await;
                     return None;
                 }
+                self.special_notice(turn_id, &snap.special).await;
                 self.pin_between_turns(turn_id, &repo, &sha).await;
                 Some((repo, sha))
             }
@@ -3361,6 +3362,27 @@ impl Session {
             .await;
     }
 
+    /// Say in the chat which tracked files a snapshot held as gone because
+    /// a named pipe, a socket or a device is there now (`git::add_tracked`).
+    /// Once: the checkpoint index then no longer has them, so the next
+    /// snapshot does not name them again.
+    async fn special_notice(&self, turn_id: &str, special: &crate::git::Names) {
+        if special.is_empty() {
+            return;
+        }
+        let _ = self
+            .emit(EventKind::Error(ErrorEvent {
+                turn_id: Some(turn_id.into()),
+                message: format!(
+                    "Left out of this turn's checkpoint: {} (a named pipe, socket or device \
+                     where a file was; checkpoints hold files, links and folders only, so they \
+                     hold the file as deleted, and an undo cannot bring the pipe back).",
+                    special.listed()
+                ),
+            }))
+            .await;
+    }
+
     async fn checkpoint_after(&self, turn_id: &str, repo: &crate::git::Repo, before: &str) {
         let r = format!("refs/harness/{}/{turn_id}/after", self.id);
         let busy = crate::git::hold(repo).await;
@@ -3377,6 +3399,7 @@ impl Session {
         match res {
             Ok((snap, files)) => {
                 let sha = snap.sha.clone();
+                let special = snap.special.clone();
                 let ignore_changed: Vec<String> = files
                     .iter()
                     .map(|(_, p)| p)
@@ -3394,6 +3417,7 @@ impl Session {
                     }))
                     .await;
                 if recorded.is_ok() {
+                    self.special_notice(turn_id, &special).await;
                     // S-6: files that ignore rules written during this turn
                     // now leave out are in neither snapshot, so an undo of
                     // the turn leaves them; say so.

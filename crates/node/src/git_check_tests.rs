@@ -425,3 +425,386 @@ async fn a_name_with_backticks_reads_as_one_name_in_a_refusal() {
     assert!(!e.contains("`ctl.txt`"), "{e}");
     assert_eq!(e.matches('`').count(), 2, "{e}");
 }
+
+/// What sits where a file was: a named pipe (never opened) or a socket.
+fn special(p: &Path, fifo: bool) -> Option<std::os::unix::net::UnixListener> {
+    let _ = std::fs::remove_file(p);
+    if fifo {
+        nix::unistd::mkfifo(p, nix::sys::stat::Mode::from_bits_truncate(0o644)).unwrap();
+        None
+    } else {
+        Some(std::os::unix::net::UnixListener::bind(p).unwrap())
+    }
+}
+
+/// Review 2 of PR 160, L1 (on main too): a named pipe or a socket where a
+/// tracked file was made `add -u` fail ("can only add regular files"), so
+/// every snapshot failed while it was there: no checkpoint, no Undo. Now
+/// the file counts as gone in that snapshot, which names the path; the
+/// pipe is never opened (a read of it would hang this test).
+#[tokio::test]
+async fn a_pipe_or_socket_where_a_tracked_file_was_is_left_out_and_named() {
+    for fifo in [true, false] {
+        let r = rig().await;
+        r.put(b"p", "v0\n");
+        r.put(b"m", "m old\n");
+        let b = r.snap().await;
+        let _keep = special(&r.at(b"p"), fifo);
+        r.put(b"q", "other\n");
+        // A tracked file changed next to it (review 3 of PR 162): only the
+        // pipe leaves the index, and `add -u` runs again, so `m` is held
+        // with its new content, not as deleted and not as before.
+        r.put(b"m", "m new, longer\n");
+        let s = snapshot_full(&r.repo, "refs/harness/s/x/after", "s")
+            .await
+            .unwrap();
+        assert_eq!(s.special.shown, vec!["p".to_string()], "fifo {fifo}");
+        let ls = run(&r.repo, &["ls-tree", "--name-only", &s.sha], None)
+            .await
+            .unwrap();
+        assert_eq!(
+            ls.lines().collect::<Vec<_>>(),
+            ["ctl.txt", "m", "q"],
+            "fifo {fifo}"
+        );
+        let m = run(
+            &r.repo,
+            &["cat-file", "blob", &format!("{}:m", s.sha)],
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(m, "m new, longer", "fifo {fifo}");
+        // The next snapshot too (the checkpoint index no longer has it).
+        let again = snapshot_full(&r.repo, "refs/harness/s/y/after", "s")
+            .await
+            .unwrap();
+        assert!(again.special.is_empty());
+        // An Undo of that span brings `m`'s old content back (forced: the
+        // pipe is in no checkpoint and in its way).
+        restore_report(&r.repo, &b, &s.sha, true).await.unwrap();
+        assert_eq!(r.get(b"m").as_deref(), Some("m old\n"), "fifo {fifo}");
+        assert_eq!(r.get(b"p").as_deref(), Some("v0\n"), "fifo {fifo}");
+    }
+}
+
+/// Review 3 of PR 162, LOW-2: the fallback looks at a path without
+/// following links on the way (`git::at`): a tracked `d/f` whose folder is
+/// now a link to a folder outside, where `f` is a pipe, is gone by git's
+/// rules (a path through a link), never named, and nothing outside is
+/// touched. A real pipe at `p` makes the fallback run.
+#[tokio::test]
+async fn the_fallback_never_looks_through_a_link_above_a_path() {
+    let r = rig().await;
+    let outside = r.dir.parent().unwrap().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    r.put(b"d/f", "f\n");
+    r.put(b"p", "v0\n");
+    r.snap().await;
+    std::fs::remove_dir_all(r.at(b"d")).unwrap();
+    let _o = special(&outside.join("f"), true);
+    std::os::unix::fs::symlink(&outside, r.at(b"d")).unwrap();
+    let _p = special(&r.at(b"p"), true);
+    let s = snapshot_full(&r.repo, "refs/harness/s/x/after", "s")
+        .await
+        .unwrap();
+    assert_eq!(s.special.shown, vec!["p".to_string()]);
+    let ls = run(&r.repo, &["ls-tree", "-r", "--name-only", &s.sha], None)
+        .await
+        .unwrap();
+    assert_eq!(ls.lines().collect::<Vec<_>>(), ["ctl.txt", "d"]);
+    let m = std::fs::symlink_metadata(outside.join("f")).unwrap();
+    assert!(std::os::unix::fs::FileTypeExt::is_fifo(&m.file_type()));
+}
+
+/// Review 3 of PR 162, MEDIUM-1: asked by name and read from the whole
+/// listing, `not_held` gives the same answer, below, at and above the
+/// switch between them, for names git or a shell would read as something
+/// else, folders and files swapped between `now` and the disk, a link, a
+/// path below a held file, a duplicate and nothing at all.
+#[tokio::test]
+async fn by_name_and_the_listing_agree() {
+    let r = rig().await;
+    let odd: Vec<&[u8]> = vec![
+        b"\xff\xfe",
+        b"nl\nname",
+        b":!q1",
+        b":(attr:zz)k",
+        b"a*",
+        b"[x]",
+        b"-lead",
+        b"abc",
+        b"xx",
+        b"sp ace",
+        b"back\\slash",
+        b"q?",
+    ];
+    // `now` holds every other odd name, `abc` (which `a*` would match as a
+    // pattern), a folder `dirheld/`, files `fileheld` and `heldfile`, a link.
+    for (i, w) in odd.iter().enumerate() {
+        if i % 2 == 0 {
+            r.put(w, "now\n");
+        }
+    }
+    r.put(b"abc", "now\n");
+    r.put(b"dirheld/x", "now\n");
+    r.put(b"fileheld", "now\n");
+    r.put(b"heldfile", "now\n");
+    std::os::unix::fs::symlink("target", r.at(b"lnk")).unwrap();
+    let now = r.snap().await;
+    let mut asked: Vec<Vec<u8>> = odd.iter().map(|w| w.to_vec()).collect();
+    asked.extend([
+        b"dirheld".to_vec(),
+        b"fileheld/y".to_vec(),
+        b"fileheld".to_vec(),
+        b"lnk".to_vec(),
+        b"heldfile/below".to_vec(),
+        b"heldfile".to_vec(),
+        b"a*".to_vec(),
+    ]);
+    let mut want: Vec<Vec<u8>> = odd
+        .iter()
+        .enumerate()
+        .filter(|(i, w)| i % 2 == 1 && **w != b"abc")
+        .map(|(_, w)| w.to_vec())
+        .collect();
+    want.extend([
+        b"dirheld".to_vec(),
+        b"fileheld/y".to_vec(),
+        b"heldfile/below".to_vec(),
+    ]);
+    want.sort();
+    let sorted = |mut v: Vec<Vec<u8>>| {
+        v.sort();
+        v
+    };
+    for by_name in [true, false] {
+        let got = not_held(&r.repo, &now, asked.clone(), by_name)
+            .await
+            .unwrap();
+        assert_eq!(sorted(got), want, "by name {by_name}");
+        assert!(
+            not_held(&r.repo, &now, Vec::new(), by_name)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+    // Paths `now` does not hold push the count over the switch.
+    let n = asked.len();
+    for total in [255usize, 256, 257, 400] {
+        let mut all = asked.clone();
+        all.extend((0..total - n).map(|i| format!("fill/{i:03}").into_bytes()));
+        assert_eq!(by_name(&all), total <= 256, "total {total}");
+        let a = sorted(not_held(&r.repo, &now, all.clone(), true).await.unwrap());
+        let b = sorted(not_held(&r.repo, &now, all.clone(), false).await.unwrap());
+        assert_eq!(a, b, "total {total}");
+        let fill = a.iter().filter(|p| p.starts_with(b"fill/")).count();
+        assert_eq!(fill, total - n, "total {total}");
+        let rest: Vec<Vec<u8>> = a.into_iter().filter(|p| !p.starts_with(b"fill/")).collect();
+        assert_eq!(rest, want, "total {total}");
+    }
+    // Long names: few of them, but many bytes, are read from the listing.
+    let long: Vec<Vec<u8>> = (0..100)
+        .map(|i| format!("{i:03}{}", "l".repeat(1000)).into_bytes())
+        .collect();
+    assert!(!by_name(&long));
+}
+
+/// MEDIUM-1 end to end: more than 256 files in an Undo's way, most of
+/// them ignored (in no checkpoint), five the snapshot holds: the refusal
+/// and the forced Undo's list name exactly the ignored ones.
+#[tokio::test]
+async fn an_undo_with_hundreds_of_ignored_files_in_its_way_names_exactly_those() {
+    let r = rig().await;
+    for i in 0..300 {
+        r.put(format!("g/f{i:03}").as_bytes(), "before\n");
+    }
+    for i in 0..5 {
+        r.put(format!("g/k{i}").as_bytes(), "before\n");
+    }
+    let b = r.snap().await;
+    for i in 0..300 {
+        std::fs::remove_file(r.at(format!("g/f{i:03}").as_bytes())).unwrap();
+    }
+    for i in 0..5 {
+        r.put(format!("g/k{i}").as_bytes(), "turn\n");
+    }
+    r.put(b".gitignore", "/g/f*\n");
+    let a = r.snap().await;
+    for i in 0..300 {
+        r.put(format!("g/f{i:03}").as_bytes(), "person\n");
+    }
+    let e = restore_report(&r.repo, &b, &a, false).await.unwrap_err();
+    assert!(
+        e.contains("in no checkpoint") && e.contains("and 250 more"),
+        "{e}"
+    );
+    assert!(!e.contains("g/k") && !e.contains(".gitignore"), "{e}");
+    let done = restore_report(&r.repo, &b, &a, true).await.unwrap();
+    assert_eq!(done.plan.unsaved.shown.len() + done.plan.unsaved.more, 300);
+    assert!(done.plan.unsaved.shown.iter().all(|n| n.starts_with("g/f")));
+}
+/// A pipe that git never tracked: its walk does not list it, so staging
+/// skips it and nothing is named.
+#[tokio::test]
+async fn an_untracked_pipe_is_neither_listed_nor_staged() {
+    let r = rig().await;
+    let _ = special(&r.at(b"f"), true);
+    let others = run_raw(
+        &r.repo,
+        &["ls-files", "-z", "--others", "--exclude-standard"],
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    // Only the committed file the checkpoint index does not have yet.
+    assert_eq!(
+        others,
+        b"ctl.txt\0",
+        "{:?}",
+        String::from_utf8_lossy(&others)
+    );
+    let s = snapshot_full(&r.repo, "refs/harness/s/x/after", "s")
+        .await
+        .unwrap();
+    assert!(s.special.is_empty());
+    let ls = run(&r.repo, &["ls-tree", "--name-only", &s.sha], None)
+        .await
+        .unwrap();
+    assert_eq!(ls, "ctl.txt");
+}
+
+/// An Undo across a turn that put a pipe where a file was: the pipe is in
+/// no checkpoint and in the Undo's way, so the unforced Undo refuses naming
+/// it and a forced one puts the file back and names it (the rules for a
+/// file in no checkpoint).
+#[tokio::test]
+async fn an_undo_over_a_pipe_the_turn_left_refuses_or_names_it() {
+    let r = rig().await;
+    r.put(b"p", "v0\n");
+    let b = r.snap().await;
+    let _ = special(&r.at(b"p"), true);
+    let a = r.snap().await;
+    let e = restore_report(&r.repo, &b, &a, false).await.unwrap_err();
+    assert!(e.contains("in no checkpoint") && e.contains("`p`"), "{e}");
+    let done = restore_report(&r.repo, &b, &a, true).await.unwrap();
+    assert_eq!(done.plan.unsaved.shown, vec!["p".to_string()]);
+    assert_eq!(r.get(b"p").as_deref(), Some("v0\n"));
+}
+
+/// The delete side of `Top::in_the_way`: the turn made `p`; the person put
+/// a pipe there, which the snapshot before the Undo leaves out. The Undo
+/// deletes `p`: unforced, refused (changed after the turn); forced, it
+/// deletes the pipe and names it as in no checkpoint.
+#[tokio::test]
+async fn a_forced_undo_names_a_pipe_it_deletes() {
+    let r = rig().await;
+    let b = r.snap().await;
+    r.put(b"p", "turn\n");
+    let a = r.snap().await;
+    let _ = special(&r.at(b"p"), true);
+    let e = restore_report(&r.repo, &b, &a, false).await.unwrap_err();
+    assert!(
+        e.contains("changed after the turn") && e.contains("`p`"),
+        "{e}"
+    );
+    let done = restore_report(&r.repo, &b, &a, true).await.unwrap();
+    assert_eq!(done.plan.unsaved.shown, vec!["p".to_string()]);
+    assert!(std::fs::symlink_metadata(r.at(b"p")).is_err());
+}
+
+/// The refusal says what "Undo anyway" does to such files: an Undo also
+/// writes over them, not only deletes.
+#[tokio::test]
+async fn the_refusal_says_undo_anyway_deletes_or_replaces_them() {
+    let r = rig().await;
+    r.put(b".env", "OLD=1\n");
+    let b = r.snap().await;
+    std::fs::remove_file(r.at(b".env")).unwrap();
+    r.put(b".gitignore", ".env\n");
+    let a = r.snap().await;
+    r.put(b".env", "PERSON=2\n");
+    let e = restore_report(&r.repo, &b, &a, false).await.unwrap_err();
+    assert!(
+        e.ends_with("\"Undo anyway\" deletes or replaces them"),
+        "{e}"
+    );
+}
+
+/// A path the snapshot `now` holds as a folder while the disk has a file
+/// there (`now` older than the disk): the file is not held, so it is in no
+/// checkpoint and named.
+#[tokio::test]
+async fn a_file_where_now_holds_a_folder_counts_as_not_held() {
+    let r = rig().await;
+    r.put(b"p", "old\n");
+    let b = r.snap().await;
+    std::fs::remove_file(r.at(b"p")).unwrap();
+    r.put(b"p/q", "turn\n");
+    let a = r.snap().await;
+    std::fs::remove_dir_all(r.at(b"p")).unwrap();
+    r.put(b".gitignore", "/p\n");
+    r.put(b"p", "PERSON\n");
+    let diff = restore_diff(&r.repo, &b, &a).await.unwrap();
+    // `now` = `a`, which holds `p/` as a folder.
+    let plan = restore_plan(&r.repo, &diff, &a, false).await.unwrap();
+    assert_eq!(plan.unsaved.shown, vec!["p".to_string()]);
+}
+
+/// The time of `unsaved_in_the_way` for an Undo of `UNDO_CHANGED` changed
+/// files (default all) in a folder of `UNDO_N` files (default 50,000), in
+/// `UNDO_DIR` (default a temporary folder). Ignored.
+#[tokio::test]
+#[ignore]
+async fn bench_unsaved_in_the_way() {
+    let n: usize = std::env::var("UNDO_N")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50_000);
+    let d = match std::env::var("UNDO_DIR") {
+        Ok(p) => tempfile::tempdir_in(p).unwrap(),
+        Err(_) => tempfile::tempdir().unwrap(),
+    };
+    let dir = d.path().canonicalize().unwrap().join("repo");
+    std::fs::create_dir_all(&dir).unwrap();
+    sh(&dir, &["init", "-q", "-b", "main"]);
+    let repo = repo_for(&dir, Some(&d.path().join("cp"))).await.unwrap();
+    let changed: usize = std::env::var("UNDO_CHANGED")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(n);
+    let put = |t: &str, k: usize| {
+        for i in 0..k {
+            let p = dir.join(format!("d{}/e{}/f{i}", i % 50, i % 7));
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, t).unwrap();
+        }
+    };
+    put("v0\n", n);
+    let b = snapshot(&repo, "refs/harness/s/t/before", "b")
+        .await
+        .unwrap();
+    put("turn\n", changed);
+    let a = snapshot(&repo, "refs/harness/s/t/after", "a")
+        .await
+        .unwrap();
+    let t = std::time::Instant::now();
+    let now = snapshot(&repo, "refs/harness/s/t/now", "n").await.unwrap();
+    eprintln!(
+        "UNDO-WAY n={n}: the snapshot before the undo {:?}",
+        t.elapsed()
+    );
+    let diff = restore_diff(&repo, &b, &a).await.unwrap();
+    let rows: Vec<&DiffRow> = diff.rows.iter().collect();
+    for round in 0..3 {
+        let t = std::time::Instant::now();
+        let found = unsaved_in_the_way(&repo, &rows, &now).await.unwrap();
+        eprintln!(
+            "UNDO-WAY n={n} changed={changed} round {round}: {:?} (unsaved {})",
+            t.elapsed(),
+            found.len()
+        );
+    }
+}
