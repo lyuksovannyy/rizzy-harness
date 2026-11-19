@@ -72,7 +72,49 @@ node" field) opens a popup with:
   of 2026-11-17 replaced it).
 - **Existing folder**: the free path field with the recent folders, as before, for a chat
   without a project; the node bounds it by `workspace_roots` as before.
-- **From a repository**, marked *Later* (X.27): the server side is built (`POST /api/projects` with `connection_id` and `full_name`, PLAN.md T86); the screen is next.
+- **From a repository** (X.27, PLAN.md T86): the person's own forge connection (a select when
+  there are several, a link to Plugins → Connectors when there is none), its repositories most
+  recently updated first in one list with a search (it waits about 300 ms after the last key and
+  cancels the request before; GitHub's within-page search says how many it looked through and
+  offers the next 100), then a name (the repository's) and Create. Its own lazy chunk
+  (`RepoPicker`). The server answers at once with the project **pending**.
+
+**A pending project is not a project** (T77, T86). While its node clones, it is a row of
+`project_clones`, never of `projects`, so no route that takes a project id finds it: no chat
+starts in it, no chat joins it, it has no folder, board, memory or routine. The popup and the
+sidebar draw it as "cloning <host>/<name>…" (a row, never a link or a button) for every member;
+nothing says whose connection it uses beyond its source. When the node answers with the folder,
+the project is written with the same id and the row goes, in one transaction. When it fails, the
+row stays failed with the reason for its starter alone, who dismisses it (Dismiss in both lists;
+the newest ten are kept; failed rows count against no limit). A master that restarts fails every
+running row at start; a folder the node finished meanwhile is left with no project, as above. The
+reasons a row can fail with, all shown to its starter only and cut to 300 characters (an orphaned
+folder's, which keeps its path whole: under 1,500):
+
+- *the node's own refusal* (host not allowed, size or time limit, credential not received), as it
+  wrote it, cleaned of control and hidden format characters, with the token taken out in whatever
+  form it echoes it (the master replaces what it sent with `[REDACTED]`);
+- *the node did not answer in time* (it may still make the folder);
+- *the node's link closed while it was cloning*: the node's clone task goes on, so the clone may
+  still finish; a folder for it that appears in the node's projects folder is opened with
+  *Existing folder* or removed. No retry is advised (a second clone would be the same repository
+  twice);
+- *the server restarted* (as above), or *the server stopped this clone* (a job that ended without
+  writing its end: a drop guard fails the row, so none stays "cloning");
+- *the starter's right is gone*: the right to make the project (membership, the `settings`
+  permission, the account, the level, the node) is checked again when the node answers, since a
+  clone runs for minutes; without it no project is written, and the reason names the folder the
+  node made, to remove or open.
+
+A running clone has its own waiting budget (2 per person, 8 on the server), apart from the plain
+"New project" folder requests', and a request refused for a limit that needs no forge call, or as a
+duplicate, never shows as "cloning". Opening the page of a pending project shows the cloning state
+(its reason, when failed) instead of "no longer exists", and opens it when the clone has finished.
+The search retries only the "your earlier listing is still running" answer, which the API marks with
+`"code": "listing_in_flight"`; every other refusal is shown at once. The
+sidebar reads pending projects from a small store in `lib/projects.ts` that the Shell's project
+refresh fills (no new Shell state); the popup reloads its list when that store changes, which the
+Shell does on every `projects_changed`.
 
 **How the node makes it** (PLAN.md T77): the repository is built in the node's own staging folder
 (`<data>/projects-staging`, which no chat can see) and moved into the projects folder with a

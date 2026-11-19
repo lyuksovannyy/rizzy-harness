@@ -1088,8 +1088,10 @@ async fn floods_meet_the_limit_and_the_cache() {
         "one call was used above"
     );
     let before = t.forge.count();
-    let (st, _) = list(&t, &alice, &id, "?q=more").await;
+    let (st, e) = list(&t, &alice, &id, "?q=more").await;
     assert_eq!(st, StatusCode::TOO_MANY_REQUESTS);
+    // Not the "earlier listing" answer: no code, so nobody retries it.
+    assert!(e.get("code").is_none(), "{e}");
     assert_eq!(t.forge.count(), before);
     // A cached answer still comes while she is limited.
     let (st, _) = list(&t, &alice, &id, "?q=harness").await;
@@ -1545,6 +1547,8 @@ async fn one_listing_in_flight_per_person() {
     let (st, e) = list(&t, &alice, &a, "?q=two").await;
     assert_eq!(st, StatusCode::TOO_MANY_REQUESTS, "{e}");
     assert!(e["error"].as_str().unwrap().contains("your earlier"), "{e}");
+    // The UI retries this one answer, by its code and not its sentence.
+    assert_eq!(e["code"], "listing_in_flight", "{e}");
     assert_eq!(t.forge.count(), before, "no request");
     // Bob still gets the other slot.
     let (st, e) = list(&t, &bob, &b, "?q=bob").await;

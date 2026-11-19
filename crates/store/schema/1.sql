@@ -288,6 +288,29 @@ CREATE TABLE profile_images (
 -- index profile_images_blob on profile_images
 CREATE INDEX profile_images_blob ON profile_images(blob_id);
 
+-- table project_clones on project_clones
+CREATE TABLE project_clones (
+    project_id   TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
+    name         TEXT NOT NULL,
+    node_id      TEXT NOT NULL,
+    host         TEXT NOT NULL,
+    full_name    TEXT NOT NULL,
+    created_by   TEXT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+    started_ms   INTEGER NOT NULL,
+    state        TEXT NOT NULL CHECK (state IN ('cloning', 'failed')),
+    reason       TEXT,
+    ended_ms     INTEGER,
+    CHECK ((state = 'failed') = (reason IS NOT NULL))
+);
+
+-- index project_clones_one on project_clones
+CREATE UNIQUE INDEX project_clones_one
+    ON project_clones(created_by, node_id, host, lower(full_name)) WHERE state = 'cloning';
+
+-- index project_clones_ws on project_clones
+CREATE INDEX project_clones_ws ON project_clones(workspace_id);
+
 -- table projects on projects
 CREATE TABLE projects (
     project_id   TEXT PRIMARY KEY,

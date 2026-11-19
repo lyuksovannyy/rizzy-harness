@@ -1177,6 +1177,15 @@ impl Drop for PersonSlot<'_> {
     }
 }
 
+/// The 429 answer for a person's second listing while the first runs. It
+/// is the only 429 the UI retries, and it knows it by the `code` the API's
+/// error body gets for exactly this sentence (`http.rs`), not by matching
+/// words.
+pub const LISTING_BUSY: &str =
+    "your earlier repository listing is still running; try again when it has finished";
+/// The `code` of that answer's body.
+pub const LISTING_BUSY_CODE: &str = "listing_in_flight";
+
 /// Take `user`'s one listing slot; `None` while their earlier listing is
 /// still in flight.
 pub fn take_person<'a>(set: &'a Mutex<HashSet<String>>, user: &str) -> Option<PersonSlot<'a>> {

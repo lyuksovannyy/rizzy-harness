@@ -818,3 +818,62 @@ fn a_cloned_project_keeps_its_source() {
     project(&s, "plain", &ws);
     assert_eq!(s.project("plain").unwrap().unwrap().source, None);
 }
+
+fn clone_in(id: &str, ws: &str, full: &str) -> harness_store::project_clones::NewClone {
+    harness_store::project_clones::NewClone {
+        project_id: id.into(),
+        workspace_id: ws.into(),
+        name: format!("Project {id}"),
+        node_id: "n1".into(),
+        host: "github.com".into(),
+        full_name: full.into(),
+        created_by: "u1".into(),
+    }
+}
+
+/// A running clone (X.27, T86) counts against the project limit, for a
+/// clone and for a plain project; a failed one does not. It becomes its
+/// project with the same id in one step; it is never a project before.
+#[test]
+fn running_clones_count_against_the_limit_and_become_their_project() {
+    let (s, w) = store();
+    project(&s, "p1", &w);
+    s.start_clone(&clone_in("c1", &w, "ada/a"), 2).unwrap();
+    assert!(s.project("c1").unwrap().is_none(), "a clone is a project");
+    assert!(matches!(
+        s.start_clone(&clone_in("c2", &w, "ada/b"), 2),
+        Err(StoreError::Refused(_))
+    ));
+    assert!(matches!(
+        s.create_project(&new_in("p2", &w), 2),
+        Err(StoreError::Refused(_))
+    ));
+    // The same repository again, in another case: refused while running.
+    assert!(matches!(
+        s.start_clone(&clone_in("c3", &w, "ADA/A"), 9),
+        Err(StoreError::Refused(_))
+    ));
+    assert!(s.fail_clone("c1", "the node refused").unwrap());
+    // Failed: no longer counted, and the repository may be tried again.
+    s.start_clone(&clone_in("c4", &w, "ada/a"), 2).unwrap();
+    assert_eq!(s.clones(Some(&w)).unwrap().len(), 2);
+    let row = s.finish_clone(&new_in("c4", &w), 2).unwrap();
+    assert_eq!(row.project_id, "c4");
+    assert!(s.clone_of("c4").unwrap().is_none());
+    // Ended: finishing again is refused, failing it does nothing.
+    assert!(s.finish_clone(&new_in("c4", &w), 9).is_err());
+    assert!(!s.fail_clone("c4", "late").unwrap());
+    // Dismissed by its starter only, and only once failed.
+    assert!(!s.dismiss_clone("c1", "someone else").unwrap());
+    assert!(s.dismiss_clone("c1", "u1").unwrap());
+    s.start_clone(&clone_in("c5", &w, "ada/c"), 9).unwrap();
+    assert!(
+        !s.dismiss_clone("c5", "u1").unwrap(),
+        "a running clone was dismissed"
+    );
+    assert_eq!(s.fail_running_clones("restarted").unwrap(), 1);
+    assert_eq!(
+        s.clone_of("c5").unwrap().unwrap().failed.as_deref(),
+        Some("restarted")
+    );
+}

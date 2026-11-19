@@ -75,8 +75,10 @@ pub(super) async fn make_on(
 /// A refused or failed folder request, as the HTTP answer.
 pub(super) fn folder_err(e: FolderError) -> ApiError {
     let code = match e {
-        FolderError::Away(_) | FolderError::Timeout(..) => StatusCode::SERVICE_UNAVAILABLE,
-        FolderError::Busy => StatusCode::TOO_MANY_REQUESTS,
+        FolderError::Away(_) | FolderError::Timeout(..) | FolderError::LinkLost(..) => {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+        FolderError::Busy | FolderError::CloneBusy => StatusCode::TOO_MANY_REQUESTS,
         FolderError::NotOffered(_) | FolderError::NoClone(_) | FolderError::Refused(_) => {
             StatusCode::CONFLICT
         }
@@ -84,18 +86,29 @@ pub(super) fn folder_err(e: FolderError) -> ApiError {
     ApiError(code, e.to_string())
 }
 
+/// The free text of an [`orphaned`] reason is cut to this many characters.
+pub(super) const ORPHAN_TEXT_MAX: usize = 300;
+
 /// `e` said with the folder `settings` name, when it names one: it was
 /// made on its node and no project keeps it, so the person can remove it.
+///
+/// Bounded: the free text (`e`'s) is cut to [`ORPHAN_TEXT_MAX`] characters
+/// and the node's id to 64, the path is kept whole (the master takes none
+/// over 1,024 characters, `project_folder::MAX_PATH`), and the fixed words
+/// are about 110: at most 1,500 characters in all.
 pub(super) fn orphaned(settings: &ProjectSettings, e: ApiError) -> ApiError {
     match (&settings.node_id, &settings.cwd) {
-        (Some(node), Some(path)) => ApiError(
-            e.0,
-            format!(
-                "{}; the folder {path} was made on node {node} but no project names it: \
-                 remove it, or open it with Existing folder",
-                e.1
-            ),
-        ),
+        (Some(node), Some(path)) => {
+            let why: String = e.1.chars().take(ORPHAN_TEXT_MAX).collect();
+            let node: String = node.chars().take(64).collect();
+            ApiError(
+                e.0,
+                format!(
+                    "{why}; the folder {path} was made on node {node} but no project names it: \
+                     remove it, or open it with Existing folder"
+                ),
+            )
+        }
         _ => e,
     }
 }
@@ -185,4 +198,40 @@ async fn give_folder(
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
     changed(&m, Audience::Workspace(row.workspace_id.clone()));
     Ok(Json(detail_json(&m, &who, &a, &row).await?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// L6: the free text is cut, the node's id is cut, the path stays whole,
+    /// and the whole is within the bound `orphaned` states.
+    #[test]
+    fn an_orphaned_reason_cuts_the_text_and_keeps_the_path_whole() {
+        let path = format!("/{}", "p".repeat(1023));
+        let settings = ProjectSettings {
+            node_id: Some("n".repeat(500)),
+            cwd: Some(path.clone()),
+            ..ProjectSettings::default()
+        };
+        let long = ApiError(StatusCode::CONFLICT, "Z".repeat(5000));
+        let said = orphaned(&settings, long).1;
+        assert!(said.contains(&path), "the path is whole");
+        assert_eq!(said.matches('Z').count(), ORPHAN_TEXT_MAX, "free text cut");
+        assert!(
+            said.contains(&format!("node {} but", "n".repeat(64))),
+            "node id cut to 64"
+        );
+        assert!(
+            said.chars().count() <= 1500,
+            "{} characters",
+            said.chars().count()
+        );
+        // A reason with no folder is left as it was.
+        let none = ProjectSettings::default();
+        assert_eq!(
+            orphaned(&none, ApiError(StatusCode::CONFLICT, "x".into())).1,
+            "x"
+        );
+    }
 }

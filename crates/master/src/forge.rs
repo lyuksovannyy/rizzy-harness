@@ -262,6 +262,10 @@ pub struct State {
     pub(crate) refusals: crate::forge_repos::Refusals,
     /// People with a listing in flight (one each).
     pub(crate) listing_people: Mutex<std::collections::HashSet<String>>,
+    /// People with a clone's repository lookup in flight (one each): its
+    /// own slot, apart from the listing's, so that choosing a repository
+    /// and pressing Create never fail each other.
+    pub(crate) clone_people: Mutex<std::collections::HashSet<String>>,
 }
 
 impl Default for State {
@@ -277,6 +281,7 @@ impl Default for State {
             in_flight: tokio::sync::Semaphore::new(crate::forge_repos::MAX_IN_FLIGHT),
             refusals: crate::forge_repos::Refusals::default(),
             listing_people: Mutex::default(),
+            clone_people: Mutex::default(),
         }
     }
 }
