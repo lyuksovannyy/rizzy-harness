@@ -1519,27 +1519,27 @@ select.pill {
   text-overflow: ellipsis;
 }
 .conv-meta > .ellipsis {
-  flex: 0 1000000 auto;
+  flex: 0 1000000000000 auto;
   min-width: 5ch;
 }
 .conv-meta > .meta-model {
-  flex: 0 10000 auto;
+  flex: 0 100000000 auto;
   min-width: 7ch;
 }
 .conv-meta > .exec-gaps {
-  flex: 0 10000 auto;
+  flex: 0 100000000 auto;
   min-width: 5ch;
 }
 .conv-meta > .conv-agent {
-  flex: 0 100 auto;
+  flex: 0 10000 auto;
   min-width: 7ch;
 }
 .conv-meta > .meter {
-  flex: 0 5 auto;
+  flex: 0 100 auto;
   min-width: 10ch;
 }
 .conv-meta > .badge {
-  flex: 0 2 auto;
+  flex: 0 20 auto;
   min-width: 5ch;
 }
 .conv-agent > .ellipsis {
