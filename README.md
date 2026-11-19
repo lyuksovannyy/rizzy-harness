@@ -1211,7 +1211,12 @@ change things are `publish` and MCP tools (they write no file directly; a
 filesystem-style MCP server can still write the folder, with its calls'
 own approval); one that can write, edit or run a writable shell gets its
 own copy. Only the latest 10 checkpoints per folder are kept (`checkpoints_keep`
-in `node.toml`). "Rewind" undoes a turn and everything after it. Before an
+in `node.toml`). "Rewind" undoes a turn and everything after it. An undo
+is refused, naming the files, when it would write over anything you
+changed after the turn: a file it puts back or removes, anything inside a
+folder it replaces, or a file or link you put where a folder it puts back
+goes; names are compared byte for byte, so a name with `*`, one starting
+with `:` or one that is not UTF-8 counts like any other. Before an
 undo or rewind changes a file it saves the folder as it is, your own edits
 since the turn included, as a checkpoint of its own, so "Undo anyway" loses
 nothing: restoring that checkpoint (its id is in the chat's log, phase
