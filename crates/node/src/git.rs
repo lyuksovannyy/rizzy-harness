@@ -2900,13 +2900,17 @@ mod tests {
             }
         }
 
+        fn marking(&self, name: &str) -> String {
+            format!(
+                "#!/bin/sh\ntouch '{}'\ncat\n",
+                self.marks.join(name).display()
+            )
+        }
+
         /// An executable script that marks `name` when run.
         pub(super) fn script(&self, name: &str) -> PathBuf {
-            use std::os::unix::fs::PermissionsExt;
             let p = self.marks.parent().unwrap().join(format!("{name}.sh"));
-            let m = self.marks.join(name);
-            std::fs::write(&p, format!("#!/bin/sh\ntouch '{}'\ncat\n", m.display())).unwrap();
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            crate::test_script::script(&p, &self.marking(name));
             p
         }
 
@@ -2915,11 +2919,8 @@ mod tests {
         }
 
         pub(super) fn hook(&self, dir: &Path, name: &str) {
-            use std::os::unix::fs::PermissionsExt;
             std::fs::create_dir_all(dir).unwrap();
-            let p = dir.join(name);
-            std::fs::copy(self.script(name), &p).unwrap();
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            crate::test_script::script(&dir.join(name), &self.marking(name));
         }
 
         pub(super) fn marked(&self) -> Vec<String> {
@@ -3432,10 +3433,8 @@ mod tests {
 
     /// A stand-in `git` that runs `body` (a shell script).
     pub(super) fn fake_git(dir: &Path, body: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         let p = dir.join("git");
-        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::test_script::script(&p, &format!("#!/bin/sh\n{body}\n"));
         p
     }
 

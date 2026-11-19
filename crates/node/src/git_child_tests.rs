@@ -362,7 +362,6 @@ async fn what_only_the_child_changed_is_taken_whatever_it_is() {
 /// merge still works.
 #[tokio::test]
 async fn a_hostile_repository_runs_nothing_and_odd_names_merge() {
-    use std::os::unix::fs::PermissionsExt;
     let l = layout();
     // Committed by the test's own git before the repository turns hostile.
     let names: [&[u8]; 4] = [b"--theirs", b"-p", b"a\nb.txt", b":(glob)*"];
@@ -372,12 +371,10 @@ async fn a_hostile_repository_runs_nothing_and_odd_names_merge() {
     let marks = l.home.join("marks");
     std::fs::create_dir(&marks).unwrap();
     let script = l.home.join("evil.sh");
-    std::fs::write(
+    crate::test_script::script(
         &script,
-        format!("#!/bin/sh\ntouch '{}/ran'\ncat\n", marks.display()),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        &format!("#!/bin/sh\ntouch '{}/ran'\ncat\n", marks.display()),
+    );
     let s = script.display().to_string();
     for (k, v) in [
         ("merge.evil.driver", format!("{s} %O %A %B")),
@@ -1109,7 +1106,6 @@ async fn unnamed_content_cases_merge_correctly_or_conflict() {
 /// outside the folder in its message.
 #[tokio::test]
 async fn an_old_git_makes_a_two_sided_change_a_conflict_without_raw_text() {
-    use std::os::unix::fs::PermissionsExt;
     let l = layout();
     commit_file(&l, b"f.rs", two_functions("a", "z").as_bytes());
     let (sub, base, c) = child_of(&l, "r6").await;
@@ -1117,13 +1113,11 @@ async fn an_old_git_makes_a_two_sided_change_a_conflict_without_raw_text() {
     let result = sub.result(&c, "r6").await.unwrap();
     std::fs::write(l.proj.join("f.rs"), two_functions("FOLDER", "z")).unwrap();
     let fake = l.home.join("oldgit");
-    std::fs::write(
+    crate::test_script::script(
         &fake,
         "#!/bin/sh\nfor a; do if [ \"$a\" = merge-file ]; then echo \"error: unknown option \
          \\`object-id' (/home/someone/private/path)\" >&2; exit 129; fi; done\nexec /usr/bin/git \"$@\"\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     TEST_GIT.with(|g| *g.borrow_mut() = Some(fake));
     let r = sub.apply(&base, &result, "r6").await;
     TEST_GIT.with(|g| *g.borrow_mut() = None);
