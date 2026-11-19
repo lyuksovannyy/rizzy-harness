@@ -890,6 +890,62 @@ pub async fn list(
     })
 }
 
+/// The request for one repository by name (X.27 step 3, T86): GitHub,
+/// Gitea and Forgejo `GET /repos/{owner}/{name}`, GitLab `GET
+/// /projects/{group%2F…%2Fname}`; each part one encoded path segment, the
+/// name checked by [`valid_full_name`] first. `None` for a name of another
+/// shape (nothing the person typed becomes a URL otherwise).
+pub fn repo_url(h: &ForgeHost, full_name: &str) -> Option<reqwest::Url> {
+    if !valid_full_name(h.kind, full_name) {
+        return None;
+    }
+    let mut u = reqwest::Url::parse(&h.api_base).ok()?;
+    {
+        let mut seg = u.path_segments_mut().ok()?;
+        seg.pop_if_empty();
+        match h.kind {
+            ForgeKind::Gitlab => {
+                seg.push("projects").push(full_name);
+            }
+            ForgeKind::Github | ForgeKind::Gitea | ForgeKind::Forgejo => {
+                seg.push("repos");
+                for part in full_name.split('/') {
+                    seg.push(part);
+                }
+            }
+        }
+    }
+    Some(u)
+}
+
+/// One repository's answer, read with the listing's rules ([`entry`]).
+pub fn parse_one(kind: ForgeKind, body: &[u8]) -> Result<Repo, &'static str> {
+    let mut de = serde_json::Deserializer::from_slice(body);
+    let raw = EntrySeed.deserialize(&mut de).map_err(|_| NOT_JSON)?;
+    de.end().map_err(|_| NOT_JSON)?;
+    raw.as_ref()
+        .and_then(|r| entry(kind, r))
+        .ok_or("it is not a repository of a shape this server takes")
+}
+
+/// Ask `h` for the repository `full_name` as `token` sees it: one call,
+/// with the listing's client, headers and answer cap.
+pub async fn get_one(
+    h: &ForgeHost,
+    token: &Secret<String>,
+    full_name: &str,
+    timeout: Duration,
+    lookup: &Lookup,
+) -> Result<Repo, CheckError> {
+    let bad = |what| CheckError::BadAnswer(h.host.clone(), what);
+    let url = repo_url(h, full_name).ok_or_else(|| bad("the repository name is not valid"))?;
+    let c = crate::forge::client(h, timeout, lookup)?;
+    let headers =
+        crate::forge::auth_headers(h.kind, token).map_err(|_| bad("the token cannot be sent"))?;
+    let (_, body) = crate::forge::get_url(&c, h, url, headers, MAX_BODY).await?;
+    parse_one(h.kind, &body).map_err(bad)
+}
+
 /// What a cached answer is kept under: the person, the connection, the
 /// host's `api_base`, a hash of the sealed token as stored (every seal has
 /// a fresh random nonce, so a new token is always a new key, even for an

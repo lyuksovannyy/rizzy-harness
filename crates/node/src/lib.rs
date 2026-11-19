@@ -7,6 +7,7 @@ mod board;
 mod connectors;
 mod environment;
 pub mod exec;
+mod forge_clone;
 mod git;
 mod images;
 mod instructions;
@@ -138,6 +139,7 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::Diff { .. }
         | MasterToNode::Files { .. }
         | MasterToNode::ProjectCreate { .. }
+        | MasterToNode::ProjectClone { .. }
         | MasterToNode::ProjectMcp { .. } => None,
     }
 }
@@ -238,6 +240,9 @@ pub(crate) struct Inner {
     /// ones being made (one at a time).
     projects_made: projects::Made,
     project_slots: Arc<tokio::sync::Semaphore>,
+    /// Room for the clone being run (`project.clone`, T86): one at a time,
+    /// apart from `project.create`'s, which a ten-minute clone must not hold.
+    clone_slots: Arc<tokio::sync::Semaphore>,
     /// A repository's MCP servers (X.36, PLAN.md T82): only where node.toml
     /// says `[mcp] project_servers = "ask"` on an agentic node; `None`
     /// otherwise, and then no `.mcp.json` is ever read.
@@ -604,6 +609,7 @@ impl NodeRuntime {
             file_lists: Arc::new(tokio::sync::Semaphore::new(DIFF_AT_ONCE)),
             projects_made: Default::default(),
             project_slots: Arc::new(tokio::sync::Semaphore::new(1)),
+            clone_slots: Arc::new(tokio::sync::Semaphore::new(1)),
             project_mcp,
         });
         for row in rows {
@@ -860,6 +866,17 @@ impl NodeRuntime {
                     && self.inner.cfg.policy.limits.projects_per_hour > 0
                 {
                     capabilities.push(harness_protocol::CAP_PROJECTS.into());
+                    // Clones into new project folders (X.27, T86): only
+                    // where node.toml lets it clone from some host. The
+                    // time limit, so the master waits long enough; never
+                    // the hosts.
+                    if self.inner.cfg.policy.forge.clones() {
+                        capabilities.push(format!(
+                            "{}{}",
+                            harness_protocol::CAP_FORGE_CLONE_PREFIX,
+                            self.inner.cfg.policy.limits.clone_timeout_s
+                        ));
+                    }
                 }
                 // A repository's MCP servers (X.36, T82): only with node.toml
                 // `[mcp] project_servers = "ask"`.
@@ -972,6 +989,26 @@ impl NodeRuntime {
                     MasterToNode::ProjectCreate { req_id, name } => {
                         this.create_project(req_id, name)
                     }
+                    // A new project's folder cloned from a forge (T86):
+                    // no session, its own task, answered by one
+                    // `project.created`.
+                    MasterToNode::ProjectClone {
+                        req_id,
+                        name,
+                        host,
+                        full_name,
+                        username,
+                        token,
+                    } => this.clone_project(
+                        req_id,
+                        forge_clone::CloneRequest {
+                            name,
+                            host,
+                            full_name,
+                            username,
+                            token,
+                        },
+                    ),
                     // A person's request about a project's `.mcp.json`
                     // (X.36): no session, its own task.
                     MasterToNode::ProjectMcp {
@@ -1264,6 +1301,66 @@ impl NodeRuntime {
                 Err(_) => serde_json::json!({ "ok": false }),
             };
             inner.audit_log.record("project.create", detail.to_string());
+            let msg = match res {
+                Ok(p) => NodeToMaster::ProjectCreated {
+                    req_id,
+                    path: Some(p.to_string_lossy().into_owned()),
+                    error: None,
+                },
+                Err(e) => NodeToMaster::ProjectCreated {
+                    req_id,
+                    path: None,
+                    error: Some(e),
+                },
+            };
+            inner.publish_wait(msg).await;
+        });
+    }
+
+    /// Answer `project.clone` (X.27 step 3, PLAN.md T86) from a task of its
+    /// own; never acked: `project.created` is the answer. Only an agentic
+    /// node whose node.toml lets it clone and names a usable projects
+    /// folder; one clone at a time. The audit line has the outcome, the
+    /// host and repository (when they are of the shape cloned), whether a
+    /// credential came, and the folder made; never the credential.
+    fn clone_project(&self, req_id: String, req: forge_clone::CloneRequest) {
+        let refuse = |error: String| NodeToMaster::ProjectCreated {
+            req_id: req_id.clone(),
+            path: None,
+            error: Some(error),
+        };
+        if self.inner.cfg.profile != harness_core::event::Profile::Agentic {
+            return self.inner.publish(refuse(forge_clone::OFF.into()));
+        }
+        let Ok(permit) = self.inner.clone_slots.clone().try_acquire_owned() else {
+            return self.inner.publish(refuse(
+                "this node is cloning another repository; try again when it has finished".into(),
+            ));
+        };
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            let mut detail = serde_json::json!({ "credential": req.token.is_some() });
+            if crate::policy::valid_forge_host(&req.host)
+                && forge_clone::valid_full_name(&req.full_name)
+            {
+                detail["host"] = req.host.clone().into();
+                detail["full_name"] = req.full_name.clone().into();
+            }
+            let bounds = forge_clone::Bounds::of(&inner.cfg.policy);
+            let res = forge_clone::clone(
+                &inner.cfg.policy,
+                &inner.projects_made,
+                req,
+                bounds,
+                &projects::suffix,
+            )
+            .await;
+            detail["ok"] = res.is_ok().into();
+            if let Ok(p) = &res {
+                detail["folder"] = serde_json::json!(p);
+            }
+            inner.audit_log.record("project.clone", detail.to_string());
             let msg = match res {
                 Ok(p) => NodeToMaster::ProjectCreated {
                     req_id,
@@ -1837,6 +1934,26 @@ impl NodeRuntime {
             }
             MasterToNode::ProjectCreate { req_id, name } => {
                 self.create_project(req_id, name);
+                Ok(())
+            }
+            MasterToNode::ProjectClone {
+                req_id,
+                name,
+                host,
+                full_name,
+                username,
+                token,
+            } => {
+                self.clone_project(
+                    req_id,
+                    forge_clone::CloneRequest {
+                        name,
+                        host,
+                        full_name,
+                        username,
+                        token,
+                    },
+                );
                 Ok(())
             }
             MasterToNode::ProjectMcp {

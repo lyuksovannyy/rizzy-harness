@@ -51,7 +51,7 @@ pub const SLUG_MAX: usize = 48;
 /// The slug of a name with no letter or digit in it.
 pub const EMPTY_SLUG: &str = "project";
 /// New suffixes tried when the name is taken, before giving up.
-const TRIES: usize = 8;
+pub(crate) const TRIES: usize = 8;
 
 /// The folder name's first part, from a display name: ASCII letters
 /// (lower-cased) and digits kept, every other run of characters (spaces,
@@ -122,7 +122,7 @@ impl Made {
     }
 
     /// Whether the hour's allowance has room, or why not.
-    fn room(&self, per_hour: usize) -> Result<(), String> {
+    pub(crate) fn room(&self, per_hour: usize) -> Result<(), String> {
         if self.recent().len() >= per_hour {
             return Err(format!(
                 "this node has made {per_hour} project folders in the last hour, its limit \
@@ -133,7 +133,7 @@ impl Made {
     }
 
     /// One folder made.
-    fn record(&self) {
+    pub(crate) fn record(&self) {
         self.recent().push_back(Instant::now());
     }
 }
@@ -141,6 +141,21 @@ impl Made {
 /// Why a node makes no project folder at all.
 pub const OFF: &str = "this node makes no project folders: its node.toml turns them off \
      ([projects] dir), or the folder it names is not usable (see the node's log)";
+
+/// A display name the folder's name may be made from: at most
+/// [`harness_protocol::MAX_PROJECT_NAME`] bytes, not blank.
+pub(crate) fn check_name(name: &str) -> Result<(), String> {
+    if name.len() > harness_protocol::MAX_PROJECT_NAME {
+        return Err(format!(
+            "a project's name is at most {} bytes",
+            harness_protocol::MAX_PROJECT_NAME
+        ));
+    }
+    if name.trim().is_empty() {
+        return Err("a project needs a name".into());
+    }
+    Ok(())
+}
 
 /// Make a new project's folder for `name` (a display name), with the
 /// node's `policy`; its absolute path. `made` bounds how many per hour.
@@ -158,15 +173,7 @@ pub(crate) async fn create(
     if policy.limits.projects_per_hour == 0 {
         return Err(OFF.into());
     }
-    if name.len() > harness_protocol::MAX_PROJECT_NAME {
-        return Err(format!(
-            "a project's name is at most {} bytes",
-            harness_protocol::MAX_PROJECT_NAME
-        ));
-    }
-    if name.trim().is_empty() {
-        return Err("a project needs a name".into());
-    }
+    check_name(name)?;
     made.room(policy.limits.projects_per_hour)?;
     let base = slug(name);
     let names: Vec<String> = (0..TRIES)
@@ -186,7 +193,7 @@ pub(crate) async fn create(
         let at = build.proc_path();
         crate::git::init_project(&at).await?;
         crate::git::check_first_commit(&at).await?;
-        build.check()
+        build.check(true)
     }
     .await;
     if let Err(e) = built {
@@ -224,7 +231,7 @@ fn io(what: &str, p: &Path, e: Errno) -> String {
 /// link in a missing parent) and opened without following, compared with
 /// the folder recorded at start when it existed then. The rules are
 /// checked again on its path.
-fn open_projects(policy: &NodePolicy, dir: &Path) -> Result<OwnedFd, String> {
+pub(crate) fn open_projects(policy: &NodePolicy, dir: &Path) -> Result<OwnedFd, String> {
     let pp = &policy.projects;
     let (Some(parent), Some(name)) = (dir.parent(), dir.file_name()) else {
         return Err(OFF.into());
@@ -258,7 +265,7 @@ fn open_projects(policy: &NodePolicy, dir: &Path) -> Result<OwnedFd, String> {
 
 /// A new project's folder while it is built: `<staging>/<name>`, made
 /// 0700 by the node in its own data directory and held open.
-struct Build {
+pub(crate) struct Build {
     staging: OwnedFd,
     name: String,
     fd: OwnedFd,
@@ -266,7 +273,7 @@ struct Build {
 }
 
 impl Build {
-    fn new(policy: &NodePolicy) -> Result<Self, String> {
+    pub(crate) fn new(policy: &NodePolicy) -> Result<Self, String> {
         let Some(at) = policy.projects.staging.clone() else {
             return Err(OFF.into());
         };
@@ -288,20 +295,28 @@ impl Build {
     }
 
     /// The folder for a child process: exactly the one held open.
-    fn proc_path(&self) -> PathBuf {
+    pub(crate) fn proc_path(&self) -> PathBuf {
         PathBuf::from(format!("/proc/self/fd/{}", self.fd.as_raw_fd()))
     }
 
-    /// The folder holds `.git` and nothing else; `.git` is a real folder,
-    /// not a git file, and names no other repository (`commondir`).
-    fn check(&self) -> Result<(), String> {
-        let entries: Vec<_> = std::fs::read_dir(self.proc_path())
-            .map_err(|e| e.to_string())?
-            .filter_map(|e| e.ok())
-            .map(|e| e.file_name())
-            .collect();
-        if entries != [std::ffi::OsString::from(".git")] {
-            return Err(format!("the new folder holds {entries:?}"));
+    /// The folder in the staging folder, for the node's own reads.
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// `.git` is a real folder, not a git file, and names no other
+    /// repository (`commondir`); with `only_git` (a new empty repository)
+    /// the folder holds nothing else.
+    pub(crate) fn check(&self, only_git: bool) -> Result<(), String> {
+        if only_git {
+            let entries: Vec<_> = std::fs::read_dir(self.proc_path())
+                .map_err(|e| e.to_string())?
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name())
+                .collect();
+            if entries != [std::ffi::OsString::from(".git")] {
+                return Err(format!("the new folder holds {entries:?}"));
+            }
         }
         let st = nix::sys::stat::fstatat(&self.fd, ".git", AtFlags::AT_SYMLINK_NOFOLLOW)
             .map_err(|e| format!(".git: {}", std::io::Error::from(e)))?;
@@ -317,7 +332,7 @@ impl Build {
 
     /// Remove the build folder (in the node's own staging folder: nothing
     /// else writes there).
-    fn discard(self) {
+    pub(crate) fn discard(self) {
         let _ = std::fs::remove_dir_all(&self.path);
     }
 
@@ -325,7 +340,7 @@ impl Build {
     /// first of `names` that nothing holds, never replacing what is there;
     /// then check, from `top`, that the name holds this very folder with
     /// its real `.git`, and that a session may run at its path. Its path.
-    fn move_into(
+    pub(crate) fn move_into(
         self,
         policy: &NodePolicy,
         top: &OwnedFd,

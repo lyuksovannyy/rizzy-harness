@@ -17,23 +17,59 @@ pub const FIRST_COMMIT: &str = "Start the project";
 /// holds open; passed as `/proc/self/fd/<n>` so git starts in exactly that
 /// folder) a repository on branch `main` with one empty commit.
 pub(crate) async fn init_project(dir: &Path) -> Result<(), String> {
-    for args in [
-        &["init", "--template=", "-b", "main", "-q"][..],
-        &[
-            "commit",
-            "--allow-empty",
-            "--no-verify",
-            "--no-gpg-sign",
-            "-q",
-            "-m",
-            FIRST_COMMIT,
-        ][..],
-    ] {
-        let mut c = hardened(&git_program());
-        c.args(args).current_dir(dir);
-        result(args, exec(c, None, GIT_TIMEOUT).await?)?;
-    }
+    let args = ["init", "--template=", "-b", "main", "-q"];
+    let mut c = hardened(&git_program());
+    c.args(args).current_dir(dir);
+    result(&args, exec(c, None, GIT_TIMEOUT).await?)?;
+    first_commit(dir).await
+}
+
+/// One empty commit by the node's identity on the branch `HEAD` names, in
+/// `dir` (a repository the node made or cloned in its staging folder).
+pub(crate) async fn first_commit(dir: &Path) -> Result<(), String> {
+    let args = [
+        "commit",
+        "--allow-empty",
+        "--no-verify",
+        "--no-gpg-sign",
+        "-q",
+        "-m",
+        FIRST_COMMIT,
+    ];
+    let mut c = hardened(&git_program());
+    c.args(args).current_dir(dir);
+    result(&args, exec(c, None, GIT_TIMEOUT).await?)?;
     Ok(())
+}
+
+/// What a freshly cloned repository's `HEAD` is.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Head {
+    /// It names a commit.
+    Commit,
+    /// The repository has no refs at all (an empty repository).
+    Empty,
+    /// It has refs, but `HEAD` names no commit.
+    Dangling,
+}
+
+/// [`Head`] of the repository in `dir`.
+pub(crate) async fn head_of(dir: &Path) -> Result<Head, String> {
+    let mut c = hardened(&git_program());
+    c.args(["rev-parse", "--verify", "-q", "HEAD^{commit}"])
+        .current_dir(dir);
+    if exec(c, None, GIT_TIMEOUT).await?.status.success() {
+        return Ok(Head::Commit);
+    }
+    let args = ["for-each-ref", "--count=1", "--format=%(refname)"];
+    let mut c = hardened(&git_program());
+    c.args(args).current_dir(dir);
+    let refs = result(&args, exec(c, None, GIT_TIMEOUT).await?)?;
+    Ok(if refs.is_empty() {
+        Head::Empty
+    } else {
+        Head::Dangling
+    })
 }
 
 /// Whether `dir` (the same folder) holds exactly what [`init_project`]

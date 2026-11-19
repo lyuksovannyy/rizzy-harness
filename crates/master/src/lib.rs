@@ -694,6 +694,8 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::Files { .. }
         // A new project's folder: no session at all.
         | MasterToNode::ProjectCreate { .. }
+        // A new project's folder cloned from a forge: no session at all.
+        | MasterToNode::ProjectClone { .. }
         // A person's request about a project's `.mcp.json`: no session.
         | MasterToNode::ProjectMcp { .. } => None,
     }
@@ -1030,6 +1032,14 @@ impl Master {
         lock(&self.inner.nodes)
             .get(node_id)
             .is_some_and(|n| n.capabilities.iter().any(|c| c == cap))
+    }
+
+    /// The clone time limit `node_id` announced (`forge-clone:<s>`, T86):
+    /// `None` for a node that does not clone (or is not known).
+    pub fn node_clone_timeout(&self, node_id: &str) -> Option<u64> {
+        lock(&self.inner.nodes)
+            .get(node_id)
+            .and_then(|n| harness_protocol::clone_timeout_of(&n.capabilities))
     }
 
     /// Start the routine scheduler (after the node links, so the chats it

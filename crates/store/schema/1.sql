@@ -301,7 +301,13 @@ CREATE TABLE projects (
     settings     TEXT NOT NULL DEFAULT '{}',
     created_by   TEXT,
     created_ms   INTEGER NOT NULL,
-    updated_ms   INTEGER NOT NULL
+    updated_ms   INTEGER NOT NULL,
+    -- The forge repository the project's folder was cloned from (X.27 step
+    -- 3, PLAN.md T86): its host and owner/name, both or neither. Set once,
+    -- at the create; no route changes it.
+    source_host  TEXT,
+    source_name  TEXT,
+    CHECK ((source_host IS NULL) = (source_name IS NULL))
 );
 
 -- index projects_ws on projects
