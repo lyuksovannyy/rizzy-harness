@@ -1112,6 +1112,7 @@ async fn on_event(m: &Master, e: &RawEvent) {
         "approval_requested" => approval(m, h, e.session_id, true).await,
         "approval_resolved" => approval(m, h, e.session_id, false).await,
         "turn_ended" => turn_ended(m, h, e).await,
+        "turn_usage" => turn_usage(h, e),
         _ => {}
     }
 }
@@ -1207,6 +1208,23 @@ async fn approval(m: &Master, h: &RoutinesHandle, sid: SessionId, asked: bool) {
     changed(m, &owner);
 }
 
+/// Remember the run's turn's running usage (X.39), for an end without one.
+/// Only the bound turn's counts; each replaces the last (the loop's totals
+/// only rise), so a run holds one small value.
+fn turn_usage(h: &RoutinesHandle, e: &RawEvent) {
+    let (Some(turn), Some(usage)) = (
+        e.payload.get("turn_id").and_then(Value::as_str),
+        e.payload.get("usage").filter(|u| u.is_object()),
+    ) else {
+        return;
+    };
+    if let Some(b) = lock(&h.bound).get_mut(&e.session_id)
+        && b.turn_id.as_deref() == Some(turn)
+    {
+        b.last_usage = Some(usage.to_string());
+    }
+}
+
 async fn turn_ended(m: &Master, h: &RoutinesHandle, e: &RawEvent) {
     let turn = e.payload.get("turn_id").and_then(Value::as_str);
     let b = {
@@ -1225,9 +1243,16 @@ async fn turn_ended(m: &Master, h: &RoutinesHandle, e: &RawEvent) {
 
 /// Record how the run's turn ended (`turn_ended` payload `end`).
 async fn finalize(m: &Master, b: &Bound, end: &Value) {
-    if let Some(usage) = end.get("usage").filter(|u| u.is_object()) {
+    // The end's usage wins; one without (interrupted, stopped) leaves the
+    // last running total, as the chat keeps it.
+    let usage = end
+        .get("usage")
+        .filter(|u| u.is_object())
+        .map(Value::to_string)
+        .or_else(|| b.last_usage.clone());
+    if let Some(usage) = usage {
         let patch = RunPatch {
-            usage: Some(usage.to_string()),
+            usage: Some(usage),
             ..Default::default()
         };
         let id = b.run_id.clone();
