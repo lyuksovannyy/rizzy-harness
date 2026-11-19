@@ -406,7 +406,7 @@ const WEBGUARD_KB = 3.8;
 const X35A_KB = 1.8;
 // The composer's agent picker and @mention list mark a workspace's own
 // agent (X.33's leftover): `marked` in lib/agents.ts, first-load code.
-// Measured 429.12 against origin/main's 429.06 the same day (b9870654), so
+// Measured 429.11 against origin/main's 429.06 the same day (b9870654), so
 // +0.1 as recorded; the first load is 101.4 (was 101.3), under the 104 ceiling.
 const PICKMARK_KB = 0.1;
 
