@@ -11,9 +11,51 @@ import { chooseDemoProvider, ProviderForm, useProviders } from "./ProviderForm";
 import { MemoryCfgForm } from "./Memory";
 
 type Step = "provider" | "memory" | "profile" | "search";
+const ALL: readonly Step[] = ["provider", "memory", "profile", "search"];
+
+// Where this tab got to, kept so a reload lands on the same step of the same
+// count. The server cannot say: once the provider is saved it only reports
+// "configured", the same as a provider set up before the first visit, so the
+// list is rebuilt shorter and Memory is never shown. Per tab, per account,
+// forgotten on Finish; never anything the person typed.
+type Progress = { steps: Step[]; i: number; saved: Step[] };
+const progressKey = (user: string | null) => `harness.onboarding.${user}`;
+const known = (v: unknown): Step[] => (Array.isArray(v) ? v.filter((x): x is Step => ALL.includes(x as Step)) : []);
+
+/** Stored progress is data from the tab, not to be trusted: the list must be
+ * an ordered, duplicate-free selection of the steps, or the run starts over;
+ * the position is only ever clamped into the list. */
+function resume(user: string | null): Progress | null {
+  try {
+    const p = JSON.parse(sessionStorage.getItem(progressKey(user)) ?? "null") as Partial<Progress> | null;
+    const steps = known(p?.steps);
+    if (!Array.isArray(p?.steps) || steps.length === 0 || steps.length !== p.steps.length) return null;
+    let at = -1;
+    for (const s of steps) {
+      const k = ALL.indexOf(s);
+      if (k <= at) return null;
+      at = k;
+    }
+    const i = Number.isInteger(p?.i) ? Math.min(Math.max(p!.i!, 0), steps.length - 1) : 0;
+    return { steps, i, saved: known(p?.saved).filter((s) => steps.includes(s)) };
+  } catch {
+    return null;
+  }
+}
+
+/** The stored run under what this load can still do: a member, or an admin
+ * whose providers could not be read, has no provider or memory step. The
+ * position moves on to the nearest step left, never back. */
+function fit(r: Progress, withServerSteps: boolean): Progress {
+  if (withServerSteps) return r;
+  const steps: Step[] = r.steps.filter((s) => s !== "provider" && s !== "memory");
+  const ahead = r.steps.slice(r.i).find((s) => steps.includes(s));
+  return { steps, i: Math.max(ahead ? steps.indexOf(ahead) : steps.length - 1, 0), saved: r.saved.filter((s) => steps.includes(s)) };
+}
 
 export default function Onboarding(props: { me: Me; prefs: Prefs; onDone: (p: Prefs) => void }) {
   const admin = props.me.role === "admin";
+  const [resumed] = useState(() => resume(props.me.user_id));
   const [steps, setSteps] = useState<Step[] | null>(null);
   const [i, setI] = useState(0);
   const [prefs, setPrefs] = useState<Prefs>(() => ({
@@ -31,12 +73,28 @@ export default function Onboarding(props: { me: Me; prefs: Prefs; onDone: (p: Pr
   useEffect(() => {
     if (steps) return;
     // Admins configure the provider unless one is already set up (e.g. via
-    // config.toml on a headless install).
-    if (!admin || providersErr) setSteps(["profile", "search"]);
-    else if (providers) setSteps(providers.configured ? ["profile", "search"] : ["provider", "memory", "profile", "search"]);
-  }, [admin, providers, providersErr, steps]);
+    // config.toml on a headless install). A stored run goes on as it was, as
+    // far as this load can still do it.
+    const settled = !admin || providersErr || providers;
+    if (!settled) return;
+    if (resumed) {
+      const r = fit(resumed, admin && !providersErr);
+      setSteps(r.steps);
+      setI(r.i);
+      setSaved(r.saved);
+    } else if (!admin || providersErr) setSteps(["profile", "search"]);
+    else setSteps(providers!.configured ? ["profile", "search"] : ["provider", "memory", "profile", "search"]);
+  }, [admin, providers, providersErr, steps, resumed]);
 
   const step = steps?.[i];
+  useEffect(() => {
+    if (!steps) return;
+    try {
+      sessionStorage.setItem(progressKey(props.me.user_id), JSON.stringify({ steps, i, saved }));
+    } catch {
+      /* not kept: a reload starts over */
+    }
+  }, [steps, i, saved, props.me.user_id]);
   useEffect(() => {
     if (step) setSeen((v) => (v.includes(step) ? v : [...v, step]));
   }, [step]);
@@ -51,7 +109,13 @@ export default function Onboarding(props: { me: Me; prefs: Prefs; onDone: (p: Pr
   const finish = async () => {
     setErr(null);
     try {
-      props.onDone(await pageApi.saveSettings({ ...prefs, onboarded: true }));
+      const done = await pageApi.saveSettings({ ...prefs, onboarded: true });
+      try {
+        sessionStorage.removeItem(progressKey(props.me.user_id));
+      } catch {
+        /* nothing kept */
+      }
+      props.onDone(done);
     } catch (x) {
       setErr(x instanceof Error ? x.message : String(x));
     }
@@ -85,7 +149,7 @@ export default function Onboarding(props: { me: Me; prefs: Prefs; onDone: (p: Pr
             ) : (
               <div className="muted">Loading…</div>
             )}
-            {!saved.includes("provider") && (
+            {providers && !providers.configured && !saved.includes("provider") && (
               <button
                 type="button"
                 className="link"

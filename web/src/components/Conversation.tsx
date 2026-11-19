@@ -477,9 +477,9 @@ export default function Conversation(props: {
           <div className="conv-meta">
             <span className={`conv-agent${sessionAgent && agentAlert(sessionAgent) ? " bad" : ""}`}>
               {sessionAgent && <AgentMark agent={sessionAgent} state={answering === activeAgent ? face : "idle"} size={20} />}
-              {agentName(activeAgent)}
+              <span className="ellipsis">{agentName(activeAgent)}</span>
             </span>
-            <span className="muted">{meta?.model}</span>
+            <span className="muted meta-model">{meta?.model}</span>
             {agentic && <NodeBadge node={node} nodeId={nodeId} />}
             {agentic && <ExecBadge mode={meta?.exec_mode} node={node} />}
             {agentic && <span className="mono muted ellipsis">{shownName(meta?.cwd ?? "")}</span>}

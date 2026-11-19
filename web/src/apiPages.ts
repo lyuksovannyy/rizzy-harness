@@ -2,7 +2,7 @@
 // Memory, the workspace panels, the chat's own controls, the login form).
 // They are split from api.ts so the first load does not carry them: that
 // file keeps what the home screen, the sidebar and the composer call.
-import { call, HttpError, keyed, type Scope, scoped, seen } from "./api";
+import { call, HttpError, keyed, reach, type Scope, scoped, seen } from "./api";
 import type {
   ApprovalMode,
   ExecLevel,
@@ -156,7 +156,7 @@ export const pageApi = {
   profileImages: () => call<ProfileImages>("GET", "/api/me/profile-images"),
   /** A picture's bytes (already made small in the browser): its new version. */
   setProfileImage: async (slot: "avatar" | "banner", file: Blob): Promise<ProfileImages> => {
-    const res = await fetch(`/api/me/${slot}`, { method: "PUT", credentials: "same-origin", headers: keyed({ "content-type": file.type }), body: file });
+    const res = await reach(fetch(`/api/me/${slot}`, { method: "PUT", credentials: "same-origin", headers: keyed({ "content-type": file.type }), body: file }));
     let data: unknown = null;
     try {
       data = await res.json();

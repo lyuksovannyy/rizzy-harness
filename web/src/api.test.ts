@@ -99,3 +99,60 @@ describe("settings", () => {
     expect((await api.settings()).accent).toBe("orange");
   });
 });
+
+describe("a request that gets no answer", () => {
+  const calm = "The server is not reachable. Check that it is running, then try again.";
+
+  test("reads as one calm sentence, not the browser's TypeError text", async () => {
+    fetchFn.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    await expect(api.me()).rejects.toThrow(calm);
+    fetchFn.mockRejectedValueOnce(new TypeError("NetworkError when attempting to fetch resource."));
+    await expect(call("GET", "/api/x")).rejects.toThrow(calm);
+  });
+
+  test("never carries the URL or the body", async () => {
+    fetchFn.mockRejectedValueOnce(new TypeError("Failed to fetch https://h/api/x?token=SECRET"));
+    const e = await call("POST", "/api/x", { password: "hunter2" }).catch((x: Error) => x);
+    expect(String((e as Error).message)).not.toMatch(/SECRET|hunter2|https/);
+  });
+
+  test("a real HTTP error keeps its own message", async () => {
+    answers = [{ status: 500, body: { error: "disk full", code: "disk" } }];
+    const e = (await api.me().catch((x: unknown) => x)) as { message: string; status: number; code: string };
+    expect([e.message, e.status, e.code]).toEqual(["disk full", 500, "disk"]);
+    answers = [{ status: 502, body: null }];
+    await expect(api.me()).rejects.toThrow(/^502/);
+  });
+
+  test("a caller's own abort is passed on unchanged", async () => {
+    const abort = new DOMException("aborted", "AbortError");
+    fetchFn.mockRejectedValueOnce(abort);
+    await expect(call("GET", "/api/x")).rejects.toBe(abort);
+  });
+
+  test("keeps the original error reachable as `cause`", async () => {
+    const original = new TypeError("Failed to execute 'fetch': Request with GET/HEAD method cannot have body.");
+    fetchFn.mockRejectedValueOnce(original);
+    const e = (await call("GET", "/api/x").catch((x: unknown) => x)) as Error;
+    expect(e.message).toBe(calm);
+    expect(e.cause).toBe(original);
+  });
+
+  // The three uploads that do not go through call() say the same thing.
+  const uploads: [string, () => Promise<unknown>][] = [
+    ["transcribe", () => api.transcribe(new Blob(["a"], { type: "audio/webm" }))],
+    ["attachment upload", () => api.upload(new File(["a"], "a.txt"))],
+    ["avatar upload", () => pageApi.setProfileImage("avatar", new Blob(["a"], { type: "image/png" }))],
+  ];
+  test.each(uploads)("%s: no answer reads as the calm sentence, with the cause kept", async (_n, run) => {
+    const original = new TypeError("Failed to fetch");
+    fetchFn.mockRejectedValueOnce(original);
+    const e = (await run().catch((x: unknown) => x)) as Error;
+    expect(e.message).toBe(calm);
+    expect(e.cause).toBe(original);
+  });
+  test.each(uploads)("%s: a real HTTP error keeps its own message", async (_n, run) => {
+    answers = [{ status: 413, body: { error: "too big" } }];
+    await expect(run()).rejects.toThrow("too big");
+  });
+});
