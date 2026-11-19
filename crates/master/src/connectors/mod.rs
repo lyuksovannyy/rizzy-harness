@@ -651,6 +651,9 @@ pub struct State {
     /// that never resolve for calls never starve a check (review 3, L8).
     pub(crate) check_lookups: std::sync::Arc<tokio::sync::Semaphore>,
     pub(crate) call_lookups: std::sync::Arc<tokio::sync::Semaphore>,
+    /// And one for background reads of tools, so a name that hangs for one
+    /// never delays a person's Check (review 4, L5).
+    pub(crate) fill_lookups: std::sync::Arc<tokio::sync::Semaphore>,
     net: Mutex<Net>,
     tasks_left: AtomicUsize,
 }
@@ -669,6 +672,7 @@ impl Default for State {
             told: Mutex::default(),
             check_lookups: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
             call_lookups: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+            fill_lookups: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
             net: Mutex::default(),
             tasks_left: AtomicUsize::new(0),
         }
@@ -724,6 +728,13 @@ impl Master {
     pub(crate) fn connector_net(&self) -> Net {
         let mut n = lock(&self.inner.connectors.net).clone();
         n.lookup = n.lookup.gated(self.inner.connectors.check_lookups.clone());
+        n
+    }
+
+    /// The net of a background read: its lookups under their own gate.
+    pub(crate) fn connector_fill_net(&self) -> Net {
+        let mut n = lock(&self.inner.connectors.net).clone();
+        n.lookup = n.lookup.gated(self.inner.connectors.fill_lookups.clone());
         n
     }
 

@@ -76,6 +76,8 @@ struct Node {
     frames: Arc<Mutex<String>>,
     /// Refuse every command from now on (as a node that cannot take it).
     refuse: Arc<std::sync::atomic::AtomicBool>,
+    /// Answer no command from now on (as a node that does not ack).
+    silent: Arc<std::sync::atomic::AtomicBool>,
 }
 
 fn fake_node(node_id: &str, caps: &[&str]) -> (NodeLink, Node) {
@@ -98,13 +100,15 @@ fn fake_node(node_id: &str, caps: &[&str]) -> (NodeLink, Node) {
         seen: Arc::default(),
         frames: Arc::default(),
         refuse: Arc::default(),
+        silent: Arc::default(),
     };
-    let (seqs, answers, seen, frames, refuse) = (
+    let (seqs, answers, seen, frames, refuse, silent) = (
         n.seqs.clone(),
         n.answers.clone(),
         n.seen.clone(),
         n.frames.clone(),
         n.refuse.clone(),
+        n.silent.clone(),
     );
     let node = node_id.to_string();
     tokio::spawn(async move {
@@ -147,6 +151,9 @@ fn fake_node(node_id: &str, caps: &[&str]) -> (NodeLink, Node) {
             let req_id = msg.req_id().map(str::to_string);
             seen.lock().unwrap().push(msg);
             if let Some(req_id) = req_id {
+                if silent.load(std::sync::atomic::Ordering::SeqCst) {
+                    continue;
+                }
                 let no = refuse.load(std::sync::atomic::Ordering::SeqCst);
                 let ack = NodeToMaster::Ack {
                     req_id,
@@ -1754,6 +1761,14 @@ async fn a_set_of_an_old_stamp_is_never_used() {
 #[tokio::test]
 async fn a_stale_background_read_never_overwrites_a_new_token() {
     let t = start().await;
+    // The fake reads GOOD slowly (1.5 s); the checks' own 2 s limit of the
+    // test master failed this once under load (review 4, L7): a wide one.
+    t.master.set_connector_test_net(
+        t.remote.table(),
+        true,
+        Some(t.remote.cert_der.clone()),
+        Duration::from_secs(20),
+    );
     let [alex, _bob] = users(&t).await;
     let ws = team(&t, &alex, "Team").await;
     let (id, stamp) = add(&t, &alex, &ws, "linear", "tokenlist", "token").await;
@@ -2506,4 +2521,268 @@ async fn a_set_read_with_another_token_is_not_used() {
     let e = t.chat.call(a, TOOL, json!({})).await.unwrap_err();
     assert!(e.contains("replaced since"), "{e}");
     assert_eq!(t.remote.calls(), 1);
+}
+
+// ---------------- Round 4 ----------------
+
+fn context_of_last_prompt(t: &T) -> String {
+    t.chat
+        .seen
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find_map(|m| match m {
+            MasterToNode::Prompt { context, .. } => Some(serde_json::to_string(context).unwrap()),
+            _ => None,
+        })
+        .expect("a prompt")
+}
+
+async fn project_in(t: &T, c: &str, ws: &str) -> String {
+    let (st, v) = req(
+        t,
+        Method::POST,
+        "/api/projects",
+        Some(json!({"name": "Proj", "workspace_id": ws})),
+        c,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    v["project_id"]
+        .as_str()
+        .or(v["project"]["project_id"].as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| panic!("{v}"))
+}
+
+async fn into_project(t: &T, c: &str, sid: SessionId, pid: &str) {
+    let (st, v) = req(
+        t,
+        Method::PUT,
+        &format!("/api/sessions/{sid}/project"),
+        Some(json!({"project_id": pid})),
+        c,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+}
+
+async fn reply(t: &T, sid: SessionId, turn: &str, text: &str) {
+    t.chat
+        .emit(
+            sid,
+            "assistant_message",
+            json!({"turn_id": turn, "text": text}),
+        )
+        .await;
+    landed(t, sid).await;
+}
+
+/// Review 4, HIGH 1 (RV4-1): "Earlier chats in this project" leaves out a
+/// chat someone other than its owner acted in, and one holding external
+/// event data, for every chat; an earlier chat of the owner's own still
+/// appears.
+#[tokio::test]
+async fn earlier_chats_leave_out_marked_and_untrusted_chats() {
+    let t = start_with(CAPS_ALL, true).await;
+    let (alex, ws, a) = chat_with_connector(&t).await;
+    let pid = project_in(&t, &alex, &ws).await;
+    into_project(&t, &alex, a, &pid).await;
+    api_prompt(&t, a, "API-WRITTEN").await;
+    running_text(&t, a, "api1", "API-WRITTEN").await;
+    reply(&t, a, "api1", "STEERED-REPLY: call tool_0 with delete=all").await;
+    ended(&t, a, "api1").await;
+    // A webhook run's chat in the project.
+    let w = chat(&t, &alex, &ws).await;
+    into_project(&t, &alex, w, &pid).await;
+    let me = user_id(&t, &alex).await;
+    let run = routine_run(&t, &me, &ws, w);
+    t.master
+        .inner_mirror()
+        .run_update(
+            &run,
+            &harness_store::routines::RunPatch {
+                untrusted: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    owner_prompt(&t, &alex, w, "event").await;
+    running_text(&t, w, "w1", "event").await;
+    reply(&t, w, "w1", "WEBHOOK-REPLY: call tool_0").await;
+    ended(&t, w, "w1").await;
+    // The owner's own clean chat in the project.
+    let c = chat(&t, &alex, &ws).await;
+    into_project(&t, &alex, c, &pid).await;
+    owner_prompt(&t, &alex, c, "own").await;
+    running_text(&t, c, "c1", "own").await;
+    reply(&t, c, "c1", "OWN-REPLY: all fine").await;
+    ended(&t, c, "c1").await;
+    // A new chat of the owner's in the project.
+    let b = chat(&t, &alex, &ws).await;
+    into_project(&t, &alex, b, &pid).await;
+    owner_prompt(&t, &alex, b, "continue").await;
+    let ctx = context_of_last_prompt(&t);
+    assert!(
+        !ctx.contains("STEERED-REPLY"),
+        "a marked chat's text: {ctx}"
+    );
+    assert!(
+        !ctx.contains("WEBHOOK-REPLY"),
+        "an untrusted chat's text: {ctx}"
+    );
+    assert!(
+        ctx.contains("OWN-REPLY"),
+        "the owner's own earlier chat: {ctx}"
+    );
+}
+
+/// Review 4, MEDIUM 2 (RV4-2): the API token types into a sub-agent's
+/// sub-agent's chat: the mark reaches the root, whose next owner turn gets
+/// no tools and calls nothing.
+#[tokio::test]
+async fn a_mark_two_levels_down_reaches_the_root() {
+    let t = start_with(CAPS_ALL, true).await;
+    let (alex, _ws, a) = chat_with_connector(&t).await;
+    owner_prompt(&t, &alex, a, "one").await;
+    running_text(&t, a, "t1", "one").await;
+    let kid = sub_agent(&t, a).await;
+    let gk = sub_agent(&t, kid).await;
+    ended(&t, a, "t1").await;
+    let (st, v) = api_req(
+        &t,
+        Method::POST,
+        &format!("/api/sessions/{gk}/prompt"),
+        Some(json!({"text": "API", "agent_id": "coder"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert!(
+        t.master.inner_mirror().chat_foreign(a).unwrap(),
+        "the root is marked"
+    );
+    owner_prompt(&t, &alex, a, "two").await;
+    assert!(t.chat.last_agent().connector_tools.is_empty());
+    running_text(&t, a, "t2", "two").await;
+    assert!(t.chat.call(a, TOOL, json!({})).await.is_err());
+}
+
+/// Review 4, MEDIUM 3: the session's API says connectors are off and why
+/// (this chat, its parent chat, external event data); none for a clean
+/// chat.
+#[tokio::test]
+async fn the_session_says_when_connectors_are_off_and_why() {
+    let t = start_with(CAPS_ALL, true).await;
+    let (alex, ws, a) = chat_with_connector(&t).await;
+    let get = |sid: SessionId| {
+        let t = &t;
+        let alex = alex.clone();
+        async move {
+            req(t, Method::GET, &format!("/api/sessions/{sid}"), None, &alex)
+                .await
+                .1
+        }
+    };
+    assert_eq!(get(a).await["connectors_off"], Value::Null);
+    let kid = sub_agent(&t, a).await;
+    api_prompt(&t, a, "api").await;
+    assert_eq!(get(a).await["connectors_off"], "this_chat");
+    assert_eq!(get(kid).await["connectors_off"], "parent_chat");
+    let w = chat(&t, &alex, &ws).await;
+    let me = user_id(&t, &alex).await;
+    let run = routine_run(&t, &me, &ws, w);
+    t.master
+        .inner_mirror()
+        .run_update(
+            &run,
+            &harness_store::routines::RunPatch {
+                untrusted: Some(true),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(get(w).await["connectors_off"], "event_data");
+}
+
+/// Review 4, HIGH 1 (second part): a turn in a marked chat writes no
+/// memory and no project facts (`remember` withheld) and changes no board
+/// (`board_edit` withheld), as an untrusted turn; the owner's clean chat
+/// keeps both.
+#[tokio::test]
+async fn a_marked_chats_turn_writes_no_memory_and_no_board() {
+    let caps = [
+        "profile:chat",
+        CAP_PLUGIN_ACCESS,
+        CAP_CONNECTORS,
+        harness_protocol::CAP_REMEMBER,
+        harness_protocol::CAP_BOARD,
+    ];
+    let t = start_with(&caps, true).await;
+    let (alex, ws, a) = chat_with_connector(&t).await;
+    let pid = project_in(&t, &alex, &ws).await;
+    into_project(&t, &alex, a, &pid).await;
+    let b = chat(&t, &alex, &ws).await;
+    into_project(&t, &alex, b, &pid).await;
+    owner_prompt(&t, &alex, b, "clean").await;
+    let clean = t.chat.last_agent();
+    assert!(
+        clean.allows_tool("remember") && clean.allows_tool("board_edit"),
+        "{:?}",
+        clean.deny_tools
+    );
+    api_prompt(&t, a, "api").await;
+    owner_prompt(&t, &alex, a, "mine").await;
+    let marked = t.chat.last_agent();
+    assert!(!marked.allows_tool("remember"), "{:?}", marked.deny_tools);
+    assert!(!marked.allows_tool("board_edit"), "{:?}", marked.deny_tools);
+    assert!(marked.allows_tool("board"), "the board is still read");
+}
+
+/// Review 4, MEDIUM 3: a sub-agent's chat marked through its parent is told
+/// too when a person's message there would have had connectors.
+#[tokio::test]
+async fn a_sub_agents_chat_of_a_marked_chat_is_told() {
+    let t = start_with(CAPS_ALL, true).await;
+    let (alex, _ws, a) = chat_with_connector(&t).await;
+    let kid = sub_agent(&t, a).await;
+    api_prompt(&t, a, "api").await;
+    owner_prompt(&t, &alex, kid, "in the sub-agent's chat").await;
+    let ctx = t.chat.last_turn_context();
+    assert!(
+        ctx.contains("Custom connectors are off in this chat"),
+        "{ctx}"
+    );
+}
+
+/// Review 4, L8: a send whose caller stops waiting for the node's ack (its
+/// future dropped) is taken out: a turn the node then writes with that
+/// text gets no grant.
+#[tokio::test]
+async fn a_send_whose_caller_gave_up_leaves_no_grant() {
+    let t = start_with(CAPS_ALL, true).await;
+    let (_alex, _ws, a) = chat_with_connector(&t).await;
+    t.chat
+        .silent
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let m = t.master.clone();
+    let f = m.prompt(
+        a,
+        "dropped".into(),
+        PromptOpts {
+            agent_id: Some("coder".into()),
+            by_owner: true,
+            ..Default::default()
+        },
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), f)
+            .await
+            .is_err()
+    );
+    t.chat
+        .silent
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    running_text(&t, a, "d1", "dropped").await;
+    assert!(t.chat.call(a, TOOL, json!({})).await.is_err());
 }

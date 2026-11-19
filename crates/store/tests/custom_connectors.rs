@@ -241,3 +241,71 @@ fn accounts_go_with_their_connector_membership_person_and_workspace() {
     assert!(s.connectors_of(&team).unwrap().is_empty());
     assert_eq!(s.sealed_count().unwrap(), 0);
 }
+
+fn chat_with_parent(s: &Store, parent: Option<harness_core::SessionId>) -> harness_core::SessionId {
+    let sid = harness_core::SessionId::new();
+    let mut p = serde_json::json!({"title": "t", "cwd": "", "model": "m", "backend": "native",
+        "node_id": "n", "profile": "agentic", "approval_mode": "ask"});
+    if let Some(parent) = parent {
+        p["parent_session"] = serde_json::json!(parent.to_string());
+    }
+    s.append(
+        "n",
+        &harness_core::RawEvent {
+            session_id: sid,
+            seq: 1,
+            ts_ms: 1,
+            kind: "session_created".into(),
+            payload: p,
+        },
+    )
+    .unwrap();
+    sid
+}
+
+/// Review 4 of PR 157 (M2, L6): a mark reaches every ancestor up to the
+/// root, and a chat is foreign when it or any ancestor is marked or holds
+/// external event data, at any depth.
+#[test]
+fn the_mark_and_the_untrusted_data_follow_every_ancestor() {
+    let (s, _, _) = setup();
+    let root = chat_with_parent(&s, None);
+    let kid = chat_with_parent(&s, Some(root));
+    let gk = chat_with_parent(&s, Some(kid));
+    let ggk = chat_with_parent(&s, Some(gk));
+    let other = chat_with_parent(&s, None);
+    // A mark three levels down reaches the root.
+    s.chat_mark_foreign(ggk).unwrap();
+    for c in [ggk, gk, kid, root] {
+        assert!(s.chat_foreign(c).unwrap(), "{c}");
+    }
+    assert!(!s.chat_foreign(other).unwrap());
+    // A sub-agent of a marked root, two levels down, is foreign by its
+    // ancestors alone (nothing marked it).
+    let root2 = chat_with_parent(&s, None);
+    let k2 = chat_with_parent(&s, Some(root2));
+    let gk2 = chat_with_parent(&s, Some(k2));
+    s.chat_mark_foreign(root2).unwrap();
+    assert!(s.chat_foreign(gk2).unwrap(), "by its ancestor");
+    assert_eq!(
+        s.chat_foreign_reason(gk2).unwrap(),
+        Some(harness_store::custom_connectors::ForeignReason::ParentChat)
+    );
+    assert_eq!(
+        s.chat_foreign_reason(root2).unwrap(),
+        Some(harness_store::custom_connectors::ForeignReason::ThisChat)
+    );
+    // External event data on an ancestor two levels up.
+    let root3 = chat_with_parent(&s, None);
+    let k3 = chat_with_parent(&s, Some(root3));
+    let gk3 = chat_with_parent(&s, Some(k3));
+    s.mark_untrusted_for_test(root3).unwrap();
+    assert!(s.chat_untrusted(gk3).unwrap(), "webhook data two levels up");
+    assert!(s.chat_foreign(gk3).unwrap());
+    assert_eq!(
+        s.chat_foreign_reason(gk3).unwrap(),
+        Some(harness_store::custom_connectors::ForeignReason::EventData)
+    );
+    assert!(!s.chat_foreign(other).unwrap());
+    assert_eq!(s.chat_foreign_reason(other).unwrap(), None);
+}

@@ -3271,10 +3271,25 @@ chat of someone else's.
   setting sent with the API token; a run of someone else's routine; a
   webhook's event in a routine's chat), connectors are off in that chat for
   good, also after a restart and in its sub-agents' chats: what they wrote
-  stays in the chat's history, which every later turn reads. The agent is
-  told once, in plain words, that connectors are off in this chat because
-  someone other than its owner acted in it, and that a new chat has them.
-  Reading a chat with the API token changes nothing.
+  stays in the chat's history, which every later turn reads. This holds at
+  any depth of sub-agents: a message to a sub-agent's chat turns them off in
+  every chat above it. The agent is told once, in plain words, why
+  connectors are off in this chat; the session's API says it too
+  (`connectors_off`: `this_chat`, `parent_chat` or `event_data`). Reading a
+  chat with the API token changes nothing. Such a chat also writes nothing
+  other chats read: its turns propose no memory or project fact and change
+  no board, and it is left out of the project's "Earlier chats" (so is a
+  chat holding a webhook's event data).
+- **What this does not cover.** The mark covers what others do IN A CHAT.
+  It does not cover text that people with rights write for every chat to
+  read: the server's and the workspace's admins (agent instructions, stored
+  skills, workspace memory), a project's managers (its brief and facts,
+  board cards and columns), the API token wherever it has those rights, and
+  files in a shared project folder that a node reads as instructions
+  (`AGENTS.md`, `CLAUDE.md`). A new chat is not free of their text. Neither
+  are tool results: `recall` can find text of a marked chat, and the
+  board tool shows cards and notes. A connector call such text steers is
+  stopped only by the approval card, and in **Auto** nothing asks.
 - **Which turns.** In such a chat, only a turn the server itself started
   with your message sent signed in, a run of your own routine, or your
   Retry of a turn that could use them. A turn started by a background

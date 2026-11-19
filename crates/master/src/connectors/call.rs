@@ -280,15 +280,13 @@ impl Master {
         let (Some(owner), Some(ws)) = (row.owner_id.as_deref(), row.workspace_id.as_deref()) else {
             return Offered::default();
         };
-        let root = row
-            .parent_id
-            .as_deref()
-            .and_then(|p| p.parse().ok())
-            .unwrap_or(row.session_id);
+        // The chat itself (the store walks every chat above it).
+        let root = row.session_id;
         let foreign = self.chat_foreign(root).await;
-        // Told only in a turn that would have had connectors.
-        let would = may && row.parent_id.is_none();
-        let may = would && !foreign;
+        // Told only in a turn that would have had connectors: a chat's own,
+        // or a person's message in a sub-agent's chat of a marked chat.
+        let would = may;
+        let may = would && row.parent_id.is_none() && !foreign;
         let some_spec_may = std::iter::once(&*spec)
             .chain(spec.delegates.iter())
             .any(|s| s.allows_mcp());
@@ -380,21 +378,26 @@ impl Master {
         &self,
         row: &harness_store::SessionRow,
     ) -> Result<(), harness_store::StoreError> {
-        let parent = row
-            .parent_id
-            .as_deref()
-            .and_then(|p| p.parse::<SessionId>().ok());
+        // The store walks up to the root (`chat_mark_foreign`).
         let sid = row.session_id;
         self.inner
             .mirror
-            .call(move |s| {
-                s.chat_mark_foreign(sid)?;
-                if let Some(p) = parent {
-                    s.chat_mark_foreign(p)?;
-                }
-                Ok::<_, harness_store::StoreError>(())
-            })
+            .call(move |s| s.chat_mark_foreign(sid))
             .await
+    }
+
+    /// Why connectors are off in chat `sid`, if they are (`connectors_off`
+    /// in the session's API). A store that cannot be read says so too.
+    pub async fn connectors_off(&self, sid: SessionId) -> Option<&'static str> {
+        match self
+            .inner
+            .mirror
+            .call(move |s| s.chat_foreign_reason(sid))
+            .await
+        {
+            Ok(r) => r.map(|r| r.as_str()),
+            Err(_) => Some("unknown"),
+        }
     }
 
     /// The tools `owner` can be offered of workspace `ws`'s connectors now,
@@ -500,7 +503,7 @@ impl Master {
                 },
                 _ => (None, None),
             };
-            let net = m.connector_net();
+            let net = m.connector_fill_net();
             // Under a key of its own, so it never holds the person's own
             // check (one at a time per person).
             let Ok(checked) = super::check(

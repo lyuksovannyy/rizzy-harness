@@ -58,6 +58,39 @@ CREATE TABLE IF NOT EXISTS foreign_chats (
 );
 "#;
 
+/// Chats walked up from a chat to its root (delegation can be several
+/// levels deep); a deeper chain counts as foreign (fails closed).
+pub const MAX_DEPTH: i64 = 16;
+
+/// `up(id, depth)`: chat `?1` and every chat above it, at most
+/// [`MAX_DEPTH`] levels.
+const UP: &str = "up(id, depth) AS (
+        SELECT ?1, 0
+        UNION ALL
+        SELECT s.parent_id, up.depth + 1 FROM sessions s JOIN up ON s.session_id = up.id
+        WHERE s.parent_id IS NOT NULL AND up.depth < 16)";
+
+/// Why connectors are off in a chat (the session's API says it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForeignReason {
+    /// Someone other than its owner acted in this chat.
+    ThisChat,
+    /// ... in a chat above it (it is a sub-agent's chat).
+    ParentChat,
+    /// It, or a chat above it, holds data from an external event.
+    EventData,
+}
+
+impl ForeignReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ForeignReason::ThisChat => "this_chat",
+            ForeignReason::ParentChat => "parent_chat",
+            ForeignReason::EventData => "event_data",
+        }
+    }
+}
+
 /// One connector as listed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectorRow {
@@ -119,29 +152,65 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectorRow> {
 }
 
 impl Store {
-    /// Mark chat `sid`: someone other than its owner acted in it (for good).
+    /// Mark chat `sid` and every chat above it up to its root: someone
+    /// other than its owner acted in it (for good). Written with a full
+    /// sync for this one write (the master's store runs at `NORMAL`): a
+    /// power cut after the action was forwarded keeps the mark. Once per
+    /// chat (an `INSERT OR IGNORE` of rows that exist writes nothing new).
     pub fn chat_mark_foreign(&self, sid: harness_core::SessionId) -> Result<()> {
-        self.lock().execute(
-            "INSERT OR IGNORE INTO foreign_chats (session_id, marked_ms) VALUES (?1, ?2)",
+        let conn = self.lock();
+        let before: String = conn.query_row("PRAGMA synchronous", [], |r| {
+            Ok(r.get::<_, i64>(0)?.to_string())
+        })?;
+        conn.pragma_update(None, "synchronous", "FULL")?;
+        let done = conn.execute(
+            &format!(
+                "WITH RECURSIVE {UP} INSERT OR IGNORE INTO foreign_chats (session_id, marked_ms)
+                 SELECT id, ?2 FROM up"
+            ),
             params![sid.to_string(), harness_core::now_ms()],
-        )?;
+        );
+        conn.pragma_update(None, "synchronous", before)?;
+        done?;
         Ok(())
     }
 
-    /// Whether connectors are never used in chat `sid`: it, or the chat it
-    /// is a sub-agent of, is marked (`chat_mark_foreign`) or holds data
-    /// from an external event (`chat_untrusted`).
+    /// Whether connectors are never used in chat `sid`: it, or any chat
+    /// above it up to its root, is marked (`chat_mark_foreign`) or holds
+    /// data from an external event (`routine_untrusted_chats`). A chain
+    /// deeper than [`MAX_DEPTH`] counts as foreign.
     pub fn chat_foreign(&self, sid: harness_core::SessionId) -> Result<bool> {
+        Ok(self.chat_foreign_reason(sid)?.is_some())
+    }
+
+    /// Why connectors are off in chat `sid`, if they are.
+    pub fn chat_foreign_reason(
+        &self,
+        sid: harness_core::SessionId,
+    ) -> Result<Option<ForeignReason>> {
         let conn = self.lock();
-        let id = sid.to_string();
-        let marked: bool = conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM foreign_chats WHERE session_id = ?1
-                OR session_id = (SELECT parent_id FROM sessions WHERE session_id = ?1))",
-            params![id],
-            |r| r.get(0),
+        let (own, above, event, deep): (bool, bool, bool, bool) = conn.query_row(
+            &format!(
+                "WITH RECURSIVE {UP} SELECT
+                   EXISTS(SELECT 1 FROM foreign_chats WHERE session_id = ?1),
+                   EXISTS(SELECT 1 FROM foreign_chats WHERE session_id IN
+                          (SELECT id FROM up WHERE depth > 0)),
+                   EXISTS(SELECT 1 FROM routine_untrusted_chats WHERE session_id IN
+                          (SELECT id FROM up)),
+                   (SELECT MAX(depth) FROM up) >= {MAX_DEPTH}"
+            ),
+            params![sid.to_string()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )?;
-        drop(conn);
-        Ok(marked || self.chat_untrusted(sid)?)
+        Ok(if own {
+            Some(ForeignReason::ThisChat)
+        } else if above || deep {
+            Some(ForeignReason::ParentChat)
+        } else if event {
+            Some(ForeignReason::EventData)
+        } else {
+            None
+        })
     }
 
     /// Add `c` to its workspace: while it has fewer than `cap`, under a

@@ -488,6 +488,21 @@ pub(crate) fn too_large_for_link(msg: &MasterToNode) -> Option<CommandError> {
     })
 }
 
+/// A send recorded for the connector grant, taken out when this is dropped
+/// unless it was acked (`send_command_noted`).
+struct SendNote<'a> {
+    master: &'a Master,
+    send: Option<(SessionId, u64)>,
+}
+
+impl Drop for SendNote<'_> {
+    fn drop(&mut self) {
+        if let Some((sid, id)) = self.send.take() {
+            self.master.inner.connectors.calls.unsent(sid, id);
+        }
+    }
+}
+
 fn json_len<T: Serialize + ?Sized>(msg: &T) -> usize {
     struct Count(usize);
     impl std::io::Write for Count {
@@ -1868,7 +1883,12 @@ impl Master {
             master: self,
             req_id: &req_id,
         };
-        let noted = note.and_then(|n| self.inner.connectors.calls.note_send(&msg, n));
+        // Taken out again on every way this ends but an ack, a dropped
+        // caller's future included (the guard's drop).
+        let mut noted = SendNote {
+            master: self,
+            send: note.and_then(|n| self.inner.connectors.calls.note_send(&msg, n)),
+        };
         let sent = {
             let nodes = lock(&self.inner.nodes);
             // A revoked node gets nothing: no prompt, context or image
@@ -1884,28 +1904,18 @@ impl Master {
                     Err(e) => Err(matches!(e, mpsc::error::TrySendError::Full(_))),
                 })
         };
-        let unsent = |m: &Master| {
-            if let Some((sid, id)) = noted {
-                m.inner.connectors.calls.unsent(sid, id);
-            }
-        };
         match sent {
             Some(Ok(())) => {}
             // The node is connected but has `TO_NODE_QUEUE` commands it
             // has not read yet: as good as not answering.
-            Some(Err(true)) => {
-                unsent(self);
-                return Err(CommandError::Timeout);
-            }
-            Some(Err(false)) | None => {
-                unsent(self);
-                return Err(CommandError::NodeOffline(node_id.into()));
-            }
+            Some(Err(true)) => return Err(CommandError::Timeout),
+            Some(Err(false)) | None => return Err(CommandError::NodeOffline(node_id.into())),
         }
         let acked = tokio::time::timeout(ACK_TIMEOUT, rx).await;
-        if !matches!(acked, Ok(Ok(Ok(())))) {
-            unsent(self);
+        if matches!(acked, Ok(Ok(Ok(())))) {
+            noted.send = None;
         }
+        drop(noted);
         match acked {
             Ok(Ok(Ok(()))) => {
                 // Checked again now the node took it (review L2-1): a level
@@ -2221,6 +2231,17 @@ impl Master {
         if ms > 0 {
             tokio::time::sleep(Duration::from_millis(ms)).await;
         }
+        // Someone other than the chat's owner acting here (the API token,
+        // another person's routine) marks the chat and every chat above it
+        // for good, before anything is decided or sent: no connector is used
+        // in it again, and its turns write no memory and change no board
+        // (PLAN.md T85). A callback is the node's own (a command a turn of
+        // this chat started), not an actor.
+        let owners = by_owner || board::routine_turn(self, &row, routine_run.as_deref()).await;
+        if !resume && !owners {
+            self.mark_foreign(&row).await?;
+        }
+        let foreign = self.chat_foreign(row.session_id).await;
         // Agents, models and chains as the chat's workspace sets them.
         let r = self.resolver_for(row.workspace_id.as_deref()).await;
         if let Some(c) = compare.iter().find(|c| r.find_model(c).is_none()) {
@@ -2336,6 +2357,15 @@ impl Master {
         allowed.by_owner &= attended;
         allowed.personal &= attended;
         allowed.project &= attended;
+        // A chat someone other than its owner acted in writes nothing that
+        // other chats read (review 4 of PR 157): no memory, no project
+        // facts, as an untrusted turn; and no board change (below).
+        if foreign {
+            allowed.workspace = false;
+            allowed.personal = false;
+            allowed.project = false;
+            allowed.by_owner = false;
+        }
         projects::offer_remember(r.agents(), &mut agent, allowed);
         if untrusted {
             deny_untrusted(&mut agent);
@@ -2383,6 +2413,9 @@ impl Master {
             }
             _ => board::deny(&mut agent),
         }
+        if foreign {
+            board::deny_edit(&mut agent);
+        }
         // A workspace's custom connectors (X.35 step 2, PLAN.md T85): with
         // the chat owner's own account, so only in a turn the owner sent
         // signed in as themselves or a run of the owner's own routine (the
@@ -2390,15 +2423,6 @@ impl Master {
         // and recorded here for every turn (`connectors::call`), which
         // every call is checked against; the tools come from the master's
         // cache, never fetched on this path.
-        // Someone other than the chat's owner acting here (the API token,
-        // another person's routine) marks the chat for good, before
-        // anything is sent: no connector is used in it again (PLAN.md T85).
-        // A callback is the node's own (a command a turn of this chat
-        // started), not an actor.
-        let owners = by_owner || board::routine_turn(self, &row, routine_run.as_deref()).await;
-        if !resume && !owners {
-            self.mark_foreign(&row).await?;
-        }
         let may_connect = !untrusted && !resume && owners;
         let offered = self.offer_connectors(&row, may_connect, &mut agent).await;
         turn_context.extend(offered.lines.iter().cloned());
