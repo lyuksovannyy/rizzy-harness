@@ -1082,7 +1082,7 @@ async fn a_tool_does_not_run_when_its_event_cannot_be_written() {
     db.busy_timeout(Duration::from_secs(5)).unwrap();
     db.execute_batch(
         "CREATE TRIGGER break_log BEFORE INSERT ON events
-         WHEN NEW.kind NOT IN ('turn_started', 'user_message', 'checkpoint', 'assistant_delta', 'assistant_message')
+         WHEN NEW.kind NOT IN ('turn_started', 'user_message', 'checkpoint', 'assistant_delta', 'assistant_message', 'turn_usage')
          BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END;",
     )
     .unwrap();
@@ -1820,7 +1820,7 @@ async fn an_unclosed_turn_is_closed_once_by_a_restart() {
     db.busy_timeout(Duration::from_secs(5)).unwrap();
     db.execute_batch(
         "CREATE TRIGGER break_log BEFORE INSERT ON events
-         WHEN NEW.kind NOT IN ('turn_started', 'user_message', 'checkpoint', 'assistant_delta', 'assistant_message')
+         WHEN NEW.kind NOT IN ('turn_started', 'user_message', 'checkpoint', 'assistant_delta', 'assistant_message', 'turn_usage')
          BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END;",
     )
     .unwrap();
@@ -3710,7 +3710,7 @@ async fn a_stop_names_a_turn_whose_end_could_not_be_written() {
     db.busy_timeout(Duration::from_secs(5)).unwrap();
     db.execute_batch(
         "CREATE TRIGGER break_log BEFORE INSERT ON events
-         WHEN NEW.kind NOT IN ('turn_started', 'user_message', 'checkpoint', 'assistant_delta', 'assistant_message')
+         WHEN NEW.kind NOT IN ('turn_started', 'user_message', 'checkpoint', 'assistant_delta', 'assistant_message', 'turn_usage')
          BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END;",
     )
     .unwrap();
