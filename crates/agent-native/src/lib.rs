@@ -1113,12 +1113,13 @@ impl NativeBackend {
                         harness_tools::FOREGROUND_DESCRIPTION,
                         read_only,
                         agent,
+                        host,
                     ),
                     schema: harness_tools::foreground_schema(self.config.bash_timeout_max),
                 },
                 ("bash", true) => ToolSpec {
                     name: t.name().to_string(),
-                    description: self.shell_text(t.description(), read_only, agent),
+                    description: self.shell_text(t.description(), read_only, agent, host),
                     schema: t.schema_for(self.config.bash_timeout_max),
                 },
                 _ => ToolSpec {
@@ -1219,6 +1220,7 @@ impl NativeBackend {
         description: &str,
         read_only: bool,
         agent: Option<&harness_core::agent::AgentSpec>,
+        host: &dyn harness_core::backend::TurnHost,
     ) -> String {
         if read_only {
             let size = self.config.sandbox.read_only_tmp();
@@ -1230,7 +1232,28 @@ impl NativeBackend {
                 harness_tools::read_only_note(size, net, web)
             )
         } else {
-            description.to_string()
+            // Only an agent that has the file tools is sent them by name
+            // (the 2026-11-15 trial: every file written through the shell).
+            let names: Vec<String> = ["write", "edit"]
+                .into_iter()
+                .filter(|n| {
+                    agent.is_none_or(|a| a.allows_tool(n))
+                        && !host.tool_denied(n)
+                        && self.tools.iter().any(|t| t.name() == *n)
+                })
+                .map(|n| format!("`{n}`"))
+                .collect();
+            if names.is_empty() {
+                description.to_string()
+            } else {
+                format!(
+                    "{description} To create or change a file use {}, not `cat >`, a heredoc, \
+                     `echo >`, `sed -i`, `tee` or a script run here: only the file tools show \
+                     the person the change as a diff and follow the chat's \"accept edits\" \
+                     setting. Keep this shell for running programs.",
+                    names.join(" or ")
+                )
+            }
         }
     }
 
