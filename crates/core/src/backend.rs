@@ -224,7 +224,7 @@ pub trait TurnHost: Send + Sync {
         None
     }
 
-    /// The identity the agent's `git commit` carries here (T87): the chat
+    /// The identity the agent's `git commit` carries here (T88): the chat
     /// owner's, which a sub-agent's session takes from the chat at the top
     /// of its parents. `None` where there is none to give (tests, a runtime
     /// without a node): the shell then adds nothing for git.

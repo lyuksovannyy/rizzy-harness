@@ -1184,7 +1184,7 @@ pub struct Grants {
     /// session folder, checked again here; the session folder when `None`.
     pub cwd: Option<PathBuf>,
     /// The agent's own shell (`bash`) only: the identity its `git commit`
-    /// carries (T87), and git's global configuration made usable
+    /// carries (T88), and git's global configuration made usable
     /// ([`git_env`]). Unset for every other command.
     pub identity: Option<harness_core::identity::Identity>,
     /// The read-only shell (ADOPTION_PLAN T.7, X.7; docs/read-only-shell.md):
@@ -1575,7 +1575,7 @@ impl Confinement {
 /// owner's default commit identity (`GIT_CONFIG_SYSTEM`).
 pub const IDENTITY_FILE: &str = ".harness-git-identity";
 
-/// Git's settings for the agent's shell (T87, found by the 2026-11-19
+/// Git's settings for the agent's shell (T88, found by the 2026-11-19
 /// readiness trial: every git command in a host chat warned and failed, and
 /// every commit in a sandbox chat lacked an identity).
 ///
@@ -1622,44 +1622,74 @@ fn git_env(
         c.env("GIT_CONFIG_GLOBAL", "/dev/null");
     }
     let Some(dir) = tmp else { return };
-    let file = dir.join(IDENTITY_FILE);
     // Without the file git asks for an identity, as it did before: the agent
     // is told by git itself. Nothing personal is logged.
-    if write_identity(&file, &id.gitconfig()).is_ok() {
-        c.env("GIT_CONFIG_SYSTEM", &file);
+    if let Ok(file) = write_identity(dir, &id.gitconfig()) {
+        c.env("GIT_CONFIG_SYSTEM", file);
     }
 }
 
-/// `text` at `path` in one step: a temporary file made new (never following
-/// a link an agent put there), then renamed over the name.
-fn write_identity(path: &Path, text: &str) -> std::io::Result<()> {
+/// The identity files this process wrote, by session temp folder: the path
+/// and the text it holds, so an unchanged identity is not written again.
+static IDENTITY_FILES: std::sync::Mutex<Vec<(PathBuf, PathBuf, String)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// `text` in a file of its own in `dir`, and its path. Nothing in `dir` is
+/// ever opened, read, listed or statted: the folder is the agent's to write
+/// (a FIFO, a link to `/dev/zero` or to a huge file, a directory planted at a
+/// name would hang the node or eat its memory if the node read it). The file
+/// is made new (`create_new`, which never follows a link) under a name the
+/// agent cannot predict, and the path is remembered in memory; a file the
+/// agent removes or replaces afterwards costs it its own identity default
+/// and nothing else, the node never looks again.
+fn write_identity(dir: &Path, text: &str) -> std::io::Result<PathBuf> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
-    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    if std::fs::read_to_string(path).is_ok_and(|t| t == text) {
-        return Ok(());
+    let mut held = IDENTITY_FILES.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some((_, path, _)) = held.iter().find(|(d, _, t)| d == dir && t == text) {
+        return Ok(path.clone());
     }
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(format!(
-        ".{}.{}",
-        std::process::id(),
-        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
-    let tmp = PathBuf::from(tmp);
+    let mut nonce = [0u8; 12];
+    getrandom::fill(&mut nonce).map_err(|e| std::io::Error::other(e.to_string()))?;
+    let hex: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
+    let path = dir.join(format!("{IDENTITY_FILE}.{hex}"));
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o644)
-        .open(&tmp)?;
-    let done = f.write_all(text.as_bytes()).and_then(|()| f.sync_data());
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+        .open(&path)?;
+    f.write_all(text.as_bytes())?;
     drop(f);
-    match done.and_then(|()| std::fs::rename(&tmp, path)) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp);
-            Err(e)
-        }
+    // Bounded: a few folders at a time are live; the oldest entry goes.
+    held.retain(|(d, _, _)| d != dir);
+    if held.len() >= 256 {
+        held.remove(0);
     }
+    held.push((dir.to_path_buf(), path.clone(), text.to_string()));
+    Ok(path)
+}
+
+/// Whether node.toml's `[sandbox] read` or `write` makes the node user's
+/// own git configuration (`~/.gitconfig`, or the XDG file) readable to the
+/// agents' commands: then every chat on this node, whoever owns it, runs git
+/// with that configuration (its name and e-mail, credential helpers,
+/// `insteadOf` rules, `core.sshCommand`). The file it makes readable, for
+/// the node's start to say so. Read from the configuration and the node's
+/// own environment only; nothing an agent can write is looked at.
+pub fn shared_git_config(settings: &Settings) -> Option<PathBuf> {
+    let home = PathBuf::from(std::env::var_os("HOME")?);
+    let xdg = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".config"))
+        .join("git/config");
+    [home.join(".gitconfig"), xdg].into_iter().find(|f| {
+        settings
+            .read
+            .iter()
+            .chain(&settings.write)
+            .any(|g| f.starts_with(g) || g.canonicalize().is_ok_and(|r| f.starts_with(&r)))
+    })
 }
 
 /// Create `dir` (and parents) with mode 0700.

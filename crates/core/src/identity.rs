@@ -1,4 +1,4 @@
-//! The identity an agent's `git commit` carries (PLAN.md T87, README
+//! The identity an agent's `git commit` carries (PLAN.md T88, README
 //! "What an agent's commits are signed with").
 //!
 //! The owner's decision (2026-11-19): commits made by agents carry the
@@ -158,6 +158,14 @@ pub fn clean_login(login: &str) -> String {
     if kept.is_empty() { "user".into() } else { kept }
 }
 
+/// Whether git would strip every character of `n` (its `crud`: control
+/// characters and spaces, `. , : ; < > " \\ '`): it then refuses every
+/// commit with "name consists only of disallowed characters".
+fn only_crud(n: &str) -> bool {
+    n.chars()
+        .all(|c| c <= ' ' || matches!(c, '.' | ',' | ':' | ';' | '<' | '>' | '"' | '\\' | '\''))
+}
+
 impl CommitIdentity {
     /// The identity commits carry: the display name (the login when there is
     /// none or it does not pass), the e-mail when it passes
@@ -169,6 +177,7 @@ impl CommitIdentity {
             .name
             .as_deref()
             .and_then(clean_name)
+            .filter(|n| !only_crud(n))
             .or_else(|| clean_name(&login))
             .unwrap_or_else(|| "user".into());
         let email = self
@@ -199,10 +208,30 @@ impl Identity {
         format!(
             "# The harness's default commit identity (the chat owner's). Any identity you\n\
              # configure yourself, in the repository or in `git -c`, wins over it.\n\
-             [user]\n\tname = \"{}\"\n\temail = \"{}\"\n",
-            self.name, self.email
+             [user]\n\tname = {}\n\temail = {}\n",
+            quote(&self.name),
+            quote(&self.email)
         )
     }
+}
+
+/// `v` as git's configuration syntax writes a value: in double quotes, with
+/// `\`, `"`, newline and tab escaped. The validators already exclude all of
+/// them from a name and an e-mail; this does not lean on that.
+fn quote(v: &str) -> String {
+    let mut o = String::with_capacity(v.len() + 2);
+    o.push('"');
+    for c in v.chars() {
+        match c {
+            '\\' => o.push_str("\\\\"),
+            '"' => o.push_str("\\\""),
+            '\n' => o.push_str("\\n"),
+            '\t' => o.push_str("\\t"),
+            c => o.push(c),
+        }
+    }
+    o.push('"');
+    o
 }
 
 #[cfg(test)]
@@ -323,5 +352,78 @@ mod tests {
         };
         assert!(!format!("{c:?}").contains("canary-7731"));
         assert!(!format!("{:?}", c.resolve()).contains("canary-7731"));
+    }
+
+    /// The file is written by git's own rules even though the validators
+    /// keep these characters out: read back with git, exactly two entries,
+    /// byte-equal.
+    #[test]
+    fn the_config_file_reads_back_byte_equal() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("c");
+        for name in [
+            "a # b",
+            "x;y",
+            "[user]",
+            "[core]\n\tsshCommand = id",
+            "  lead and trail  ",
+            "q\"uote\\back",
+            "tab\there",
+            "line\nbreak",
+            "Zoë ; # [x]",
+        ] {
+            let id = Identity {
+                name: name.into(),
+                email: "a;b#c@example.org".into(),
+            };
+            std::fs::write(&file, id.gitconfig()).unwrap();
+            let o = std::process::Command::new("git")
+                .arg("config")
+                .arg("-f")
+                .arg(&file)
+                .args(["--list", "-z"])
+                .output()
+                .unwrap();
+            assert!(
+                o.status.success(),
+                "{name:?}: {}",
+                String::from_utf8_lossy(&o.stderr)
+            );
+            let entries: Vec<&[u8]> = o
+                .stdout
+                .split(|b| *b == 0)
+                .filter(|e| !e.is_empty())
+                .collect();
+            let want_name = [b"user.name\n".as_slice(), name.as_bytes()].concat();
+            let want_email = [b"user.email\n".as_slice(), id.email.as_bytes()].concat();
+            assert_eq!(
+                entries,
+                [want_name.as_slice(), want_email.as_slice()],
+                "{name:?}"
+            );
+        }
+    }
+
+    /// A display name git would strip to nothing makes every commit fail
+    /// ("name consists only of disallowed characters"): the login is the
+    /// name then.
+    #[test]
+    fn a_name_git_strips_to_nothing_falls_back_to_the_login() {
+        for crud in [";", "'", ",", ":", ".", "<>", "\"\"", " . ; ' ", "\\"] {
+            let r = CommitIdentity {
+                login: "alex".into(),
+                name: Some(crud.into()),
+                email: None,
+            }
+            .resolve();
+            assert_eq!(r.name, "alex", "{crud:?}");
+        }
+        let r = CommitIdentity {
+            login: "alex".into(),
+            name: Some(".A.".into()),
+            email: None,
+        }
+        .resolve();
+        assert_eq!(r.name, ".A.");
     }
 }

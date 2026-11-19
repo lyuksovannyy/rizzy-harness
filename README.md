@@ -387,22 +387,26 @@ can see everything a commit holds; a commit you push shows it to everyone who
 can read the repository, so use a no-reply address from your forge if that
 matters. This identity is only a **default**: it is the lowest level of git's
 configuration, so an identity set where git looks first wins: the
-repository's `.git/config`, `git -c user.email=…`, and your own `~/.gitconfig`
-in a chat where the shell can read it (below). The node's own git (checkpoints,
+repository's `.git/config`, `git -c user.email=…`, and the node user's `~/.gitconfig`
+where the node lets the shell read it (below). The node's own git (checkpoints,
 snapshots, clones) never takes it. Git 2.32 or newer is needed for the default
 to apply (older versions ignore `GIT_CONFIG_SYSTEM`); with `[sandbox] mode =
 "off"` the node adds nothing and your own git configuration applies.
 
-**Your own `~/.gitconfig` in a chat.** A sandbox chat's file view has no home
+**The node user's `~/.gitconfig` in a chat.** A sandbox chat's file view has no home
 folder, and in a `host` chat Landlock denies the shell reading anything in
-your home folder that no `[sandbox]` entry or the chat's folder covers (the
+the home folder that no `[sandbox]` entry or the chat's folder covers (the
 rule of that mode, unchanged). Git would warn on every command that it
 cannot read `~/.gitconfig` and then refuse to run; so there the node tells
-git (`GIT_CONFIG_GLOBAL`) to use an empty configuration. To have the shell
-read your own `~/.gitconfig` (and your `~/.config/git/config`, if you have
-one), name it in `[sandbox] read` (the list under "Sandbox" below already
-suggests it): git then reads it, and an identity configured there wins over
-the account's.
+git (`GIT_CONFIG_GLOBAL`) to use an empty configuration. The node's operator
+can name the file in `[sandbox] read` (the list under "Sandbox" below already
+suggests it); git then reads it. **"Your own" there means the person who runs
+the node, not the chat's owner:** git in **every** chat on that node, a second
+person's included, reads the operator's configuration, so their name and
+e-mail win over the chat owner's account identity and their credential
+helpers, `insteadOf` rules and `core.sshCommand` apply to everyone's commands.
+On a node only you use, that is what you want; on a shared node leave it out.
+The node writes one warning line at start when its configuration does this.
 
 **Personalisation** (Settings → Account → Personalisation) sets how every
 agent replies to you in your own chats: **Base style and tone** (Default,
@@ -1817,7 +1821,7 @@ a command notices:
   looks for `~/.gitconfig` or `~/.config` finds nothing (`git` works with an
   empty global configuration and commits with the chat owner's name and
   e-mail; see "What an agent's commits are signed with"; a `read` entry for
-  `~/.gitconfig` gives it yours). The host name, `TMPDIR` and the environment are as without it.
+  `~/.gitconfig` gives it the node user's, for every chat on the node). The host name, `TMPDIR` and the environment are as without it.
 
 **Network off.** `network = "off"` is about the node's shell (and
 graphify and the node's own git); the agent's web tools (`web_search`,

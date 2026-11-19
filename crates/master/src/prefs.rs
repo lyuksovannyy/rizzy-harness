@@ -30,6 +30,18 @@ fn check_search_url(what: &str, u: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The e-mail for commits. Personal data: its `Debug` hides it, so no log
+/// line or panic that formats the settings carries it.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CommitEmail(pub String);
+
+impl std::fmt::Debug for CommitEmail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<hidden>")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Prefs {
@@ -82,12 +94,12 @@ pub struct Prefs {
     #[serde(default)]
     pub description: Option<String>,
     /// The e-mail an agent's `git commit` carries for them (Profile,
-    /// PLAN.md T87), checked by `harness_core::identity::check_email`. Only
+    /// PLAN.md T88), checked by `harness_core::identity::check_email`. Only
     /// the person reads or writes it; it goes to the node that runs their
     /// chat, never to the model or into an event. None: a no-reply address
     /// built from their login.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub commit_email: Option<String>,
+    pub commit_email: Option<CommitEmail>,
     /// How agents reply to them and their personal instructions
     /// (Settings → Personalisation). `PUT /api/me/settings` keeps the
     /// stored one: only its own endpoint changes it, so a tab with the
@@ -361,7 +373,7 @@ impl Prefs {
         }
         self.personalisation.validate()?;
         if let Some(e) = &self.commit_email {
-            harness_core::identity::check_email(e).map_err(|why| {
+            harness_core::identity::check_email(&e.0).map_err(|why| {
                 format!("commit_email must be an e-mail address such as name@example.org: {why}")
             })?;
         }
@@ -496,7 +508,7 @@ impl Prefs {
     }
 }
 
-/// The commit identity of the chat owner `owner` for a turn (T87): their
+/// The commit identity of the chat owner `owner` for a turn (T88): their
 /// login, display name and commit e-mail, read at the turn. `None` for a
 /// chat nobody owns (the API token's), and for an owner that no longer
 /// exists; the node then commits as its fallback identity.
@@ -520,7 +532,7 @@ pub async fn commit_identity(
             .display_name
             .map(|n| n.trim().to_string())
             .filter(|n| !n.is_empty()),
-        email: prefs.commit_email.filter(|e| !e.is_empty()),
+        email: prefs.commit_email.map(|e| e.0).filter(|e| !e.is_empty()),
     })
 }
 
@@ -540,6 +552,23 @@ pub async fn personal_part(
         part: harness_core::backend::StandingKey::Personal,
         text,
     })
+}
+
+#[cfg(test)]
+mod commit_email_tests {
+    use super::*;
+
+    /// `Prefs` derives `Debug`; the address must not be in it.
+    #[test]
+    fn the_settings_debug_hides_the_commit_email() {
+        let p = Prefs {
+            commit_email: Some(CommitEmail("canary-dbg-9@example.org".into())),
+            ..Default::default()
+        };
+        let d = format!("{p:?}");
+        assert!(d.contains("<hidden>") && !d.contains("canary-dbg"), "{d}");
+        assert!(serde_json::to_string(&p).unwrap().contains("canary-dbg-9"));
+    }
 }
 
 #[cfg(test)]

@@ -652,7 +652,7 @@ fn set_turn_owner(msg: &mut MasterToNode, who: Option<String>) {
     }
 }
 
-/// Put the chat owner's commit identity on a turn command (T87), as
+/// Put the chat owner's commit identity on a turn command (T88), as
 /// [`set_turn_owner`] puts the owner: the one place every turn passes.
 fn set_turn_identity(msg: &mut MasterToNode, who: Option<harness_core::identity::CommitIdentity>) {
     match msg {
@@ -1904,7 +1904,7 @@ impl Master {
             set_turn_owner(&mut msg, row.owner_id.clone());
             // The same account's commit identity: whoever sent the turn
             // (a routine, a callback, the API token in their chat), the
-            // chat is the owner's, so are its commits (T87).
+            // chat is the owner's, so are its commits (T88).
             if matches!(
                 msg,
                 MasterToNode::Prompt { .. }
@@ -3161,7 +3161,7 @@ mod turn_owner_tests {
         assert_eq!(other, before);
     }
 
-    /// T87: every turn command, a prompt, a retry and a callback, carries
+    /// T88: every turn command, a prompt, a retry and a callback, carries
     /// the chat owner's commit identity, and no other command does; its
     /// `Debug` (what a trace line would print) hides the address.
     #[test]

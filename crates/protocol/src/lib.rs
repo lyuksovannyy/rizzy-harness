@@ -1035,7 +1035,7 @@ pub enum MasterToNode {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         owner: Option<String>,
         /// The chat owner's login, display name and the e-mail they set for
-        /// commits (T87), set by the master beside `owner` and only for the
+        /// commits (T88), set by the master beside `owner` and only for the
         /// node that runs the chat: the agent's `git commit` carries it. The
         /// node checks every field again and falls back to a no-reply
         /// address built from the login; none for a chat nobody owns. Kept
@@ -1076,7 +1076,7 @@ pub enum MasterToNode {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         owner: Option<String>,
         /// The chat owner's login, display name and the e-mail they set for
-        /// commits (T87), set by the master beside `owner` and only for the
+        /// commits (T88), set by the master beside `owner` and only for the
         /// node that runs the chat: the agent's `git commit` carries it. The
         /// node checks every field again and falls back to a no-reply
         /// address built from the login; none for a chat nobody owns. Kept
@@ -1118,7 +1118,7 @@ pub enum MasterToNode {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         owner: Option<String>,
         /// The chat owner's login, display name and the e-mail they set for
-        /// commits (T87), set by the master beside `owner` and only for the
+        /// commits (T88), set by the master beside `owner` and only for the
         /// node that runs the chat: the agent's `git commit` carries it. The
         /// node checks every field again and falls back to a no-reply
         /// address built from the login; none for a chat nobody owns. Kept

@@ -602,7 +602,7 @@ runs, a process of the node's user that can read `/proc` (a host-mode chat, a sa
 `forge-clone`, for a host in its `[forge] hosts`; no `forge.grant` yet (one host, one
 operation, one session) and no `[forge] push`.
 
-**Commit identity.** Built (PLAN.md T87, README "What an agent's commits are signed with"):
+**Commit identity.** Built (PLAN.md T88, README "What an agent's commits are signed with"):
 a `git commit` an agent makes in a chat carries the **person's own name and e-mail**. The
 owner, asked on 2026-11-19 which identity commits made by agents in the harness should carry,
 answered: "My own name and e-mail". The name is the account's display name (the login when
@@ -611,7 +611,7 @@ Profile page (`Prefs::commit_email`, theirs alone to read or write), else
 `<login>@users.noreply.rizzy.invalid` (`.invalid` is reserved, so never a mailbox). The chat
 owner's identity is the identity of every turn of the chat, a sub-agent's and a routine's
 included; the master sends it with each turn and the node checks it again. It is a default
-(git's lowest configuration level), so an identity the person configured wins. The node's own
+(git's lowest configuration level), so an identity configured in the repository, with `git -c`, or in the node user's `~/.gitconfig` (when the node's `[sandbox] read` makes it readable) wins. "The node user" is the person who runs the node, not the chat's owner: on a node shared by several people, every chat then commits with that one configuration, and its credential helpers, `insteadOf` rules and `core.sshCommand` apply to everyone's commands; the node logs one warning at start when its configuration does this. The node's own
 git (checkpoints, snapshots, clones) never takes it.
 
 **Commit identity for autosave (not built).** These rules are my reading of the owner's words

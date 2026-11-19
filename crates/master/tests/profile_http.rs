@@ -1465,7 +1465,7 @@ async fn saves_race_safely_and_refuse_unknown_fields() {
     assert_ne!(v["personalisation"]["instructions"], "PWNED");
 }
 
-// ============ the e-mail for commits (PLAN.md T87) ============
+// ============ the e-mail for commits (PLAN.md T88) ============
 
 const EMAIL: &str = "canary-bob-5521@example.org";
 
@@ -1711,4 +1711,39 @@ async fn a_turn_carries_the_chat_owners_commit_identity() {
         !turn.contains("canary-bob") && !turn.contains("new@example.org"),
         "{turn}"
     );
+}
+
+/// A page loaded before the e-mail was set, saving another setting, must
+/// not wipe it: the e-mail changes only when the request carries the field;
+/// `null` and an empty string clear it.
+#[tokio::test]
+async fn a_save_without_the_field_keeps_the_commit_email() {
+    let t = start().await;
+    let [_, (bob, _), _] = users(&t).await;
+    let put = |b: Value| {
+        let (t, bob) = (&t, bob.clone());
+        async move { req(t, Method::PUT, "/api/me/settings", Some(b), &bob).await }
+    };
+    let (st, _) = put(json!({"search_url": BASE, "commit_email": EMAIL})).await;
+    assert_eq!(st, StatusCode::OK);
+    // A stale page: no such field in what it sends.
+    let (st, v) = put(json!({"search_url": BASE, "display_name": "Stale"})).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["commit_email"], EMAIL, "{v}");
+    let (_, v) = req(&t, Method::GET, "/api/me/settings", None, &bob).await;
+    assert_eq!(
+        (&v["commit_email"], &v["display_name"]),
+        (&json!(EMAIL), &json!("Stale"))
+    );
+    for clear in [json!(null), json!(""), json!("  ")] {
+        let (st, _) = put(json!({"search_url": BASE, "commit_email": EMAIL})).await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, v) = put(json!({"search_url": BASE, "commit_email": clear})).await;
+        assert_eq!(st, StatusCode::OK, "{clear}: {v}");
+        let (_, v) = req(&t, Method::GET, "/api/me/settings", None, &bob).await;
+        assert!(
+            v.get("commit_email").is_none_or(|e| e.is_null()),
+            "{clear}: {v}"
+        );
+    }
 }

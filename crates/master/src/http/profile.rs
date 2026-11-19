@@ -136,16 +136,28 @@ async fn get_settings(State(m): State<Master>, headers: HeaderMap) -> ApiResult<
 async fn put_settings(
     State(m): State<Master>,
     headers: HeaderMap,
-    Json(mut p): Json<Prefs>,
+    Json(body): Json<Value>,
 ) -> ApiResult<Json<Prefs>> {
     let who = require(&m, &headers).await?;
+    // The e-mail for commits changes only when the request carries the
+    // field (`null` or empty clears it): a page loaded before it was set
+    // and saving another setting must not wipe it.
+    let carries_email = body
+        .as_object()
+        .is_some_and(|o| o.contains_key("commit_email"));
+    let mut p: Prefs = serde_json::from_value(body)
+        .map_err(|e| ApiError(StatusCode::UNPROCESSABLE_ENTITY, e.to_string()))?;
     let _g = Prefs::write_lock().await;
-    p.personalisation = Prefs::load(&m, who.user_id.as_deref())
-        .await
-        .personalisation;
+    let stored = Prefs::load(&m, who.user_id.as_deref()).await;
+    if carries_email {
+        p.commit_email = p.commit_email.filter(|e| !e.0.trim().is_empty());
+    } else {
+        p.commit_email = stored.commit_email;
+    }
+    p.personalisation = stored.personalisation;
     p.validate(&m)
         .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?;
-    // Only an account has a commit identity (T87): the API token's
+    // Only an account has a commit identity (T88): the API token's
     // settings hold none, so nothing is stored that no chat could use.
     if who.user_id.is_none() && p.commit_email.is_some() {
         return Err(ApiError(

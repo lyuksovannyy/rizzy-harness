@@ -227,7 +227,7 @@ pub(crate) struct Session {
     /// whose approved repository servers its table takes. In memory only:
     /// after a restart it is learned again from the next turn.
     owner: Mutex<Option<String>>,
-    /// The identity this chat's commits carry (T87), as the master named it
+    /// The identity this chat's commits carry (T88), as the master named it
     /// with the last turn command and this node resolved it: none until a
     /// turn names one (a chat nobody owns never does). In memory only,
     /// never logged. A sub-agent's session reads its chat's

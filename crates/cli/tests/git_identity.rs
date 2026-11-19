@@ -1,5 +1,5 @@
 //! Git works unattended in an agent's shell, with the person's own identity
-//! (PLAN.md T87; the 2026-11-19 readiness trial, item 3).
+//! (PLAN.md T88; the 2026-11-19 readiness trial, item 3).
 //!
 //! Through the real node runtime on a node started as the binary starts
 //! one (`sandbox::start_with_exe`, bubblewrap and Landlock), with a fake
@@ -819,5 +819,221 @@ async fn the_email_is_in_no_event_audit_line_or_log_line() {
                 );
             }
         }
+    }
+}
+
+// ============ review of PR 167 ============
+
+/// The node's peak resident memory so far, in kB.
+fn vm_hwm_kb() -> u64 {
+    std::fs::read_to_string("/proc/self/status")
+        .unwrap()
+        .lines()
+        .find_map(|l| l.strip_prefix("VmHWM:"))
+        .and_then(|v| v.trim().trim_end_matches("kB").trim().parse().ok())
+        .unwrap()
+}
+
+/// A hang fails the run instead of freezing it: a thread of its own (a
+/// blocked runtime cannot starve it) ends the process after `secs`.
+fn watchdog(secs: u64) {
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(secs));
+        eprintln!("WATCHDOG: the test hung for {secs} s");
+        std::process::exit(101);
+    });
+}
+
+/// What an agent can plant at the identity file's old, fixed name, in a
+/// folder its own commands write.
+const PLANTS: [(&str, &str); 4] = [
+    ("a FIFO", "mkfifo $TMPDIR/.harness-git-identity"),
+    (
+        "a link to a 400 MB sparse file",
+        "truncate -s 400M $TMPDIR/big && ln -sf $TMPDIR/big $TMPDIR/.harness-git-identity",
+    ),
+    (
+        "a link to /dev/zero",
+        "ln -sf /dev/zero $TMPDIR/.harness-git-identity",
+    ),
+    ("a directory", "mkdir $TMPDIR/.harness-git-identity"),
+];
+
+/// The node never opens, reads or stats anything at a name in a folder the
+/// agent writes: a FIFO, a link to a huge file or to `/dev/zero`, a
+/// directory planted where the identity file used to be changes nothing:
+/// the next command returns at once with the right identity, and the node's
+/// memory does not jump (the old code read the entry on every `bash` call:
+/// a FIFO hung it, 400 MB of file took 400 MB of the node).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn nothing_planted_at_the_identity_files_name_hangs_or_bloats_the_node() {
+    watchdog(240);
+    let Some(mut n) = node(false).await else {
+        return;
+    };
+    let before = vm_hwm_kb();
+    for (what, plant) in PLANTS {
+        for mode in [ExecMode::Sandbox, ExecMode::Host] {
+            let (sid, _) = n.create(mode, false).await;
+            // One command to plant, then the commit.
+            n.bash(
+                sid,
+                Some("u-alex"),
+                Some(alex()),
+                &format!("run: {plant}; echo planted"),
+            )
+            .await;
+            let out = tokio::time::timeout(
+                Duration::from_secs(60),
+                n.bash(sid, Some("u-alex"), Some(alex()), COMMIT),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{what} in {mode:?}: the next command did not return"));
+            assert_quiet(&out);
+            assert_eq!(
+                author_line(&out),
+                format!("Alex Example|{CANARY}|Alex Example|{CANARY}"),
+                "{what} in {mode:?}"
+            );
+        }
+    }
+    let grew = vm_hwm_kb().saturating_sub(before);
+    assert!(
+        grew < 150 * 1024,
+        "the node's peak memory grew by {grew} kB"
+    );
+}
+
+/// Four chats plant a FIFO and run a command at once: a 4-worker runtime
+/// is not starved (a blocking read on each would hold all four workers).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn four_chats_planting_fifos_do_not_starve_the_runtime() {
+    watchdog(240);
+    let Some(mut n) = node(false).await else {
+        return;
+    };
+    let mut chats = Vec::new();
+    for _ in 0..4 {
+        let (sid, _) = n.create(ExecMode::Sandbox, false).await;
+        n.bash(
+            sid,
+            Some("u-alex"),
+            Some(alex()),
+            "run: mkfifo $TMPDIR/.harness-git-identity; echo planted",
+        )
+        .await;
+        chats.push(sid);
+    }
+    let from: Vec<usize> = chats
+        .iter()
+        .map(|s| n.rt.store().events_after(*s, 0, 10_000).unwrap().len())
+        .collect();
+    for sid in &chats {
+        n.link
+            .to_node
+            .try_send(MasterToNode::Prompt {
+                req_id: "p".into(),
+                session_id: *sid,
+                text: COMMIT.into(),
+                agent: None,
+                attachments: vec![],
+                compare: vec![],
+                reply: None,
+                savings: None,
+                context: None,
+                images: vec![],
+                agent_named: false,
+                files: vec![],
+                owner: Some("u-alex".into()),
+                identity: Some(alex()),
+            })
+            .unwrap();
+    }
+    for _ in 0..4 {
+        n.ack().await.unwrap();
+    }
+    let by = std::time::Instant::now() + Duration::from_secs(90);
+    for (sid, from) in chats.iter().zip(from) {
+        loop {
+            let log = n.rt.store().events_after(*sid, 0, 10_000).unwrap();
+            if log.len() > from && log.last().is_some_and(|e| e.kind == "turn_ended") {
+                break;
+            }
+            assert!(std::time::Instant::now() < by, "a chat did not finish");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
+/// A display name made only of what git strips (`; ' , :`) would make every
+/// commit fail ("name consists only of disallowed characters"): the login is
+/// the name then, through the real node.
+#[tokio::test]
+async fn a_name_git_would_strip_to_nothing_does_not_fail_the_commit() {
+    let Some(mut n) = node(false).await else {
+        return;
+    };
+    for crud in [";", "'", ",", ":"] {
+        let (sid, _) = n.create(ExecMode::Sandbox, false).await;
+        let id = CommitIdentity {
+            name: Some(crud.into()),
+            ..alex()
+        };
+        let out = n.bash(sid, Some("u-alex"), Some(id), COMMIT).await;
+        assert_quiet(&out);
+        assert_eq!(
+            author_line(&out),
+            format!("alex|{CANARY}|alex|{CANARY}"),
+            "{crud:?}"
+        );
+    }
+}
+
+/// On a node whose `[sandbox] read` makes the node user's `~/.gitconfig`
+/// readable, every chat on it reads THAT configuration, whoever owns the
+/// chat: a second person's commits carry the node user's identity, not their
+/// own (documented in the README and §4.7). Pinned here.
+#[tokio::test]
+async fn a_shared_global_config_wins_for_every_chat_on_the_node() {
+    let Some(mut n) = node(true).await else {
+        return;
+    };
+    let bea = CommitIdentity {
+        login: "bea".into(),
+        name: Some("Bea Builder".into()),
+        email: Some("bea@example.net".into()),
+    };
+    for (owner, id) in [("u-alex", alex()), ("u-bea", bea)] {
+        for mode in [ExecMode::Sandbox, ExecMode::Host] {
+            let (sid, _) = n.create(mode, false).await;
+            let out = n.bash(sid, Some(owner), Some(id.clone()), COMMIT).await;
+            assert_quiet(&out);
+            assert_eq!(
+                author_line(&out),
+                format!("{HOME_PERSON}|{HOME_PERSON}"),
+                "{owner} {mode:?}"
+            );
+        }
+    }
+}
+
+/// The node says so at start when its configuration makes the node user's
+/// git configuration readable to the agents' commands: decided from
+/// node.toml and the node's own `HOME`, never from anything an agent writes.
+#[test]
+fn the_node_names_a_readable_git_config_at_start() {
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+    let with = |read: Vec<PathBuf>| harness_tools::sandbox::Settings {
+        read,
+        ..Default::default()
+    };
+    assert!(harness_tools::sandbox::shared_git_config(&with(vec![])).is_none());
+    assert!(
+        harness_tools::sandbox::shared_git_config(&with(vec![PathBuf::from("/usr")])).is_none()
+    );
+    for entry in [home.clone(), home.join(".gitconfig")] {
+        let f = harness_tools::sandbox::shared_git_config(&with(vec![entry.clone()]))
+            .unwrap_or_else(|| panic!("{entry:?} was not named"));
+        assert!(f.starts_with(&home));
     }
 }
