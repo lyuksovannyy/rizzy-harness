@@ -1211,7 +1211,14 @@ change things are `publish` and MCP tools (they write no file directly; a
 filesystem-style MCP server can still write the folder, with its calls'
 own approval); one that can write, edit or run a writable shell gets its
 own copy. Only the latest 10 checkpoints per folder are kept (`checkpoints_keep`
-in `node.toml`). "Rewind" undoes a turn and everything after it. Before an
+in `node.toml`). "Rewind" undoes a turn and everything after it. An undo
+is refused, naming the files, when it would write over anything you
+changed after the turn: a file it puts back or removes, anything inside a
+folder it replaces, or a file or link you put where a folder it puts back
+goes; names are compared byte for byte, so a name with `*`, one starting
+with `:` or one that is not UTF-8 counts like any other. Putting a file
+back the way it was before the turn counts as a change too: the undo is
+refused, and "Undo anyway" goes ahead. Before an
 undo or rewind changes a file it saves the folder as it is, your own edits
 since the turn included, as a checkpoint of its own, so "Undo anyway" loses
 nothing: restoring that checkpoint (its id is in the chat's log, phase
@@ -1229,11 +1236,16 @@ an undo is refused with that reason and your folder is left exactly as it
 was. The private repository's cleanup runs now and then after a turn;
 while it runs, the next turn's checkpoint waits for it. If writing fails partway (a full disk, a read-only
 folder), the error names the checkpoint that holds your folder as it was;
-restoring it puts the folder back. If an undo would replace a folder by a
-file and that folder holds files no checkpoint has (build output your
-`.gitignore` skips, say), it is refused and names the folder; "Undo
-anyway" deletes them and says which. If a checkpoint cannot be taken, the
-chat says that turn cannot be undone.
+restoring it puts the folder back. Files your `.gitignore` skips are in
+no checkpoint. So an undo does not remove an ignored file the turn made,
+and it does not bring back an ignored file the turn changed or deleted.
+If an undo would delete or write over an ignored file (one at a path it
+puts back, one where a folder it puts back goes, or one inside a folder
+it replaces by a file), it is refused and names the file. "Undo anyway"
+goes ahead, deletes or replaces that file, and its note names it again.
+This happens even when the turn wrote the ignored file: the node cannot
+tell whose it is. If a checkpoint cannot be taken, the chat says that
+turn cannot be undone.
 A git repository inside your
 folder (a sub-folder git treats as its own repository: a clone, a
 submodule, a worktree, or one made with `git init`) is not covered by undo
