@@ -1272,6 +1272,38 @@ impl NativeBackend {
             .map(|why| reader_no_shell(tool, &why))
     }
 
+    /// PROTOTYPE: refuse a `bash` command that authors a file in the chat's
+    /// folder from literal text, for an agent that has `write` or `edit` and
+    /// whose shell is not the read-only one (measurement only).
+    fn shell_write_nudge(
+        &self,
+        call: &harness_core::event::ToolCallRef,
+        agent: Option<&harness_core::agent::AgentSpec>,
+        host: &dyn harness_core::backend::TurnHost,
+        cwd: &std::path::Path,
+    ) -> Option<String> {
+        if call.tool != "bash" || self.read_only_turn(agent, host) {
+            return None;
+        }
+        let has_file_tools = ["write", "edit"].iter().any(|n| {
+            agent.is_none_or(|a| a.allows_tool(n))
+                && !host.tool_denied(n)
+                && self.tools.iter().any(|t| t.name() == *n)
+        });
+        if !has_file_tools {
+            return None;
+        }
+        let path = harness_tools::shell_write::literal_file_write(
+            call.input.get("command")?.as_str()?,
+            cwd,
+        )?;
+        Some(format!(
+            "Not run: this command writes `{path}` with literal text through the shell. Create or \
+             change files with `write` or `edit` (read the file first when it exists): the person \
+             sees those as a diff. Run the rest of the command without that part."
+        ))
+    }
+
     /// Whether `d` can change things on this node: the shared rule
     /// ([`harness_core::agent::AgentSpec::changes_things`], PLAN.md T70)
     /// with the node's `denied_tools`. Its `bash` does not make a writer
@@ -4570,7 +4602,9 @@ impl NativeBackend {
                     })
                     .flatten()
                     // A read-only agent's shell where the node has none.
-                    .or_else(|| self.shell_refusal(&call.tool, ctx.agent.as_ref(), host));
+                    .or_else(|| self.shell_refusal(&call.tool, ctx.agent.as_ref(), host))
+                    // PROTOTYPE (exp/shell-write-nudge): a file authored from literal text.
+                    .or_else(|| self.shell_write_nudge(&call, ctx.agent.as_ref(), host, &ctx.cwd));
                 let bad_args = match tools.iter().find(|t| t.name == call.tool) {
                     _ if plan_refused.is_some() => plan_refused,
                     None => Some(unknown_tool(&call.tool, &tools)),

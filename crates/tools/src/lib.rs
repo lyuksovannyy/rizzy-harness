@@ -32,6 +32,7 @@ mod publish;
 pub mod sandbox;
 mod search;
 pub mod seen;
+pub mod shell_write;
 pub mod skills;
 pub mod stream;
 pub mod todo;
