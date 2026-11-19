@@ -783,8 +783,11 @@ into the form, not yet saved, changes neither the listing nor the marks.
 ### What a chat costs (an estimate)
 
 The chat header shows the tokens a chat used and, once the server has prices,
-an estimate of what it cost: `≈ $0.42 (last turn $0.03)`. The chat's figure
-already includes its sub-agents; each sub-agent row in the side panel shows
+an estimate of what it cost: `≈ $0.42 (last turn $0.03)`. The figures move
+after each model reply while a turn runs, not only when it ends (they are an
+estimate: the provider's own count for the whole turn replaces the running
+one when the turn ends, and a turn stopped by a restart keeps what it had
+reached). The chat's figure already includes its sub-agents; each sub-agent row in the side panel shows
 its own share, a breakdown rather than something to add. There is no built-in price table: prices change
 and only you know the deal you have, so a server admin sets them per model in
 Settings → Server → AI providers → Edit → **Prices (optional)**, per million
