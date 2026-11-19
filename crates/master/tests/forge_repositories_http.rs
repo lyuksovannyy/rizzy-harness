@@ -1344,8 +1344,8 @@ async fn listings_in_flight_are_limited_and_always_released() {
     assert_eq!(st, StatusCode::OK, "{e}");
     // Errors give them back too.
     github_at(&t, "/e500");
-    for i in 0..3 {
-        let (st, _) = list(&t, &ids[i].0, &ids[i].1, "?q=err").await;
+    for (c, id) in &ids {
+        let (st, _) = list(&t, c, id, "?q=err").await;
         assert_eq!(st, StatusCode::BAD_GATEWAY);
     }
     // Requests the client gives up on: the slots come back (when the
