@@ -440,6 +440,8 @@ fn history(sid: SessionId, turns: usize, chars: usize) -> Vec<RawEvent> {
             reply: None,
             images: vec![],
             queued: false,
+            triggers: vec![],
+            tags: vec![],
             files: vec![],
         }));
         kinds.push(EventKind::AssistantMessage(AssistantMessage {

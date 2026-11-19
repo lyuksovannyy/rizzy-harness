@@ -25,12 +25,13 @@ export function canRetry(items: readonly Item[], i: number): boolean {
     // A message sent while it ran and never read waits for the turn
     // after the retry: the node accepts the retry (core `retry::check`).
     if (it.type === "user" && it.queued) continue;
-    if (["user", "callback", "retry", "turn_end", "assistant", "tool"].includes(it.type)) return false;
+    if (["user", "callback", "called", "retry", "turn_end", "assistant", "tool"].includes(it.type)) return false;
   }
-  // The item that started it: never a callback turn.
+  // The item that started it: never a callback turn, nor the turn of an
+  // agent a message called after the first (it has no message of its own).
   for (let k = i - 1; k >= 0; k--) {
     if (items[k]!.type === "turn_end") break;
-    if (turnStart(items, k)) return items[k]!.type !== "callback";
+    if (turnStart(items, k)) return items[k]!.type !== "callback" && items[k]!.type !== "called";
   }
   return true;
 }

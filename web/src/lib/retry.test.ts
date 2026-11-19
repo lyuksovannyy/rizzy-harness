@@ -23,6 +23,8 @@ describe("canRetry", () => {
   });
   test("a callback turn no; a failed retry yes", () => {
     expect(canRetry([{ type: "callback", turn_id: "t1", bg_ids: ["bg-1"] }, end("t1", "error")], 1)).toBe(false);
+    // The turn of an agent a message called after the first has no message of its own (X.37).
+    expect(canRetry([user("t1"), end("t1", "completed"), { type: "called", turn_id: "t2", agent: null, message_seq: 2 }, end("t2", "error")], 3)).toBe(false);
     const retried: Item[] = [user("t1"), end("t1", "error"), { type: "retry", turn_id: "t2", of: "t1", reason: "error" }, end("t2", "error")];
     expect(canRetry(retried, 3)).toBe(true);
     expect(canRetry(retried, 1)).toBe(false);

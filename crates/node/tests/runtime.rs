@@ -217,6 +217,8 @@ async fn approval_roundtrip_and_auto_request_is_clamped() {
         files: vec![],
         owner: None,
         identity: None,
+        peers: vec![],
+        tags: vec![],
     });
     let EventKind::ApprovalRequested(a) = h
         .until(|k| matches!(k, EventKind::ApprovalRequested(_)))
@@ -264,6 +266,8 @@ async fn cancel_while_waiting_for_approval_and_while_running() {
         files: vec![],
         owner: None,
         identity: None,
+        peers: vec![],
+        tags: vec![],
     });
     h.until(|k| matches!(k, EventKind::ApprovalRequested(_)))
         .await;
@@ -300,6 +304,8 @@ async fn cancel_while_waiting_for_approval_and_while_running() {
         files: vec![],
         owner: None,
         identity: None,
+        peers: vec![],
+        tags: vec![],
     });
     let EventKind::ApprovalRequested(a) = h
         .until(|k| matches!(k, EventKind::ApprovalRequested(_)))
@@ -368,6 +374,8 @@ async fn cancel_right_after_prompt_stops_that_turn() {
             files: vec![],
             owner: None,
             identity: None,
+            peers: vec![],
+            tags: vec![],
         });
         h.send(MasterToNode::Cancel {
             req_id: format!("x{round}"),
@@ -406,6 +414,8 @@ async fn policy_denied_tool_never_runs() {
         files: vec![],
         owner: None,
         identity: None,
+        peers: vec![],
+        tags: vec![],
     });
     let EventKind::ApprovalResolved(r) = h
         .until(|k| matches!(k, EventKind::ApprovalResolved(_)))
@@ -624,6 +634,8 @@ async fn a_loaded_session_over_the_data_dir_gets_no_turn() {
             files: vec![],
             owner: None,
             identity: None,
+            peers: vec![],
+            tags: vec![],
         })
         .unwrap();
     loop {
@@ -661,6 +673,8 @@ async fn resume_replays_in_batches() {
         files: vec![],
         owner: None,
         identity: None,
+        peers: vec![],
+        tags: vec![],
     });
     h.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
     h.send(MasterToNode::Resume {
@@ -712,6 +726,8 @@ async fn resume_batches_are_limited_by_bytes() {
             files: vec![],
             owner: None,
             identity: None,
+            peers: vec![],
+            tags: vec![],
         });
         h.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
     }
@@ -850,6 +866,8 @@ async fn recovers_interrupted_turn_on_start() {
             files: vec![],
             owner: None,
             identity: None,
+            peers: vec![],
+            tags: vec![],
         })
         .unwrap();
     loop {
@@ -917,6 +935,8 @@ async fn sub_task_sessions_ask_no_questions() {
             files: vec![],
             owner: None,
             identity: None,
+            peers: vec![],
+            tags: vec![],
         })
         .unwrap();
     let blocks = loop {
@@ -984,6 +1004,8 @@ async fn git_checkpoints_and_undo() {
         files: vec![],
         owner: None,
         identity: None,
+        peers: vec![],
+        tags: vec![],
     });
     let EventKind::Checkpoint(after) = h
         .until(|k| matches!(k, EventKind::Checkpoint(c) if c.phase == CheckpointPhase::After))
@@ -1102,6 +1124,8 @@ async fn hostile_repo_config_does_not_run_on_checkpoint_or_undo() {
         files: vec![],
         owner: None,
         identity: None,
+        peers: vec![],
+        tags: vec![],
     });
     let EventKind::Checkpoint(after) = h
         .until(|k| matches!(k, EventKind::Checkpoint(c) if c.phase == CheckpointPhase::After))
@@ -1161,6 +1185,8 @@ async fn shadow_checkpoints_keep_latest_and_rewind() {
             files: vec![],
             owner: None,
             identity: None,
+            peers: vec![],
+            tags: vec![],
         });
         let EventKind::Checkpoint(after) = h
             .until(|k| matches!(k, EventKind::Checkpoint(c) if c.phase == CheckpointPhase::After))
@@ -1268,6 +1294,8 @@ async fn a_tool_does_not_run_when_its_event_cannot_be_written() {
             files: vec![],
             owner: None,
             identity: None,
+            peers: vec![],
+            tags: vec![],
         })
     };
     // The ack for `id`, collecting events on the way.
@@ -1324,6 +1352,8 @@ async fn a_tool_does_not_run_when_its_event_cannot_be_written() {
             files: vec![],
             owner: None,
             identity: None,
+            peers: vec![],
+            tags: vec![],
         });
         match ack(&mut h, &id).await {
             Err(e) if e.contains("already running") => {
@@ -1403,6 +1433,8 @@ async fn an_approval_whose_answer_was_not_written_is_closed_with_the_turn() {
         files: vec![],
         owner: None,
         identity: None,
+        peers: vec![],
+        tags: vec![],
     });
     let EventKind::ApprovalRequested(a) = h
         .until(|k| matches!(k, EventKind::ApprovalRequested(_)))
@@ -1539,6 +1571,8 @@ async fn a_sub_agent_whose_log_failed_changes_nothing_in_the_folder() {
         files: vec![],
         owner: None,
         identity: None,
+        peers: vec![],
+        tags: vec![],
     });
     let EventKind::ToolCallFinished(result) = h
         .until(|k| matches!(k, EventKind::ToolCallFinished(f) if f.output.contains("@dev")))
@@ -1641,6 +1675,8 @@ async fn delegate_as_lead(
         files: vec![],
         owner: None,
         identity: None,
+        peers: vec![],
+        tags: vec![],
     });
     loop {
         h.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
@@ -2020,6 +2056,8 @@ async fn a_failed_append_kills_the_running_command() {
         files: vec![],
         owner: None,
         identity: None,
+        peers: vec![],
+        tags: vec![],
     });
     let EventKind::TurnEnded(t) = h.until(|k| matches!(k, EventKind::TurnEnded(_))).await else {
         unreachable!()
@@ -2072,6 +2110,8 @@ async fn an_unclosed_turn_is_closed_once_by_a_restart() {
         files: vec![],
         owner: None,
         identity: None,
+        peers: vec![],
+        tags: vec![],
     });
     h.until(|k| matches!(k, EventKind::AssistantMessage(_)))
         .await;
@@ -2172,6 +2212,8 @@ async fn ack_time_on_a_long_session() {
                 files: vec![],
                 owner: None,
                 identity: None,
+                peers: vec![],
+                tags: vec![],
             })
             .unwrap();
         loop {
@@ -2275,6 +2317,8 @@ impl Harness {
             files: vec![],
             owner: None,
             identity: None,
+            peers: vec![],
+            tags: vec![],
         });
         let mut asked = vec![];
         loop {
@@ -2417,6 +2461,8 @@ async fn prompt_turn(h: &mut Harness, sid: SessionId, text: &str) -> String {
         files: vec![],
         owner: None,
         identity: None,
+        peers: vec![],
+        tags: vec![],
     });
     let EventKind::Checkpoint(after) = h
         .until(|k| matches!(k, EventKind::Checkpoint(c) if c.phase == CheckpointPhase::After))
@@ -3043,6 +3089,8 @@ async fn start_long_turn(h: &mut Harness, sid: SessionId) {
         files: vec![],
         owner: None,
         identity: None,
+        peers: vec![],
+        tags: vec![],
     });
     until_in(h, sid, |k| matches!(k, EventKind::ToolCallStarted(_))).await;
 }
@@ -3140,6 +3188,8 @@ async fn a_restore_is_refused_when_the_busy_chat_reaches_the_folder_through_a_sy
         files: vec![],
         owner: None,
         identity: None,
+        peers: vec![],
+        tags: vec![],
     });
     let err = ack_for(&mut h, &format!("p-{b}")).await.unwrap_err();
     assert!(err.contains("folder was replaced"), "{err}");
@@ -3346,6 +3396,8 @@ async fn a_session_whose_folder_was_replaced_refuses_to_work() {
             files: vec![],
             owner: None,
             identity: None,
+            peers: vec![],
+            tags: vec![],
         });
         let e = ack_for(&mut h, &format!("p{i}")).await.unwrap_err();
         assert!(e.contains("folder was replaced"), "{target:?}: {e}");
@@ -3402,6 +3454,8 @@ async fn turn_of(
         files: vec![],
         owner: None,
         identity: None,
+        peers: vec![],
+        tags: vec![],
     });
     loop {
         h.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
@@ -3678,6 +3732,8 @@ async fn lead_turn(
         files: vec![],
         owner: None,
         identity: None,
+        peers: vec![],
+        tags: vec![],
     });
     loop {
         let k = h
@@ -3947,6 +4003,8 @@ fn prompt_msg(req_id: &str, sid: SessionId, text: &str) -> MasterToNode {
         files: vec![],
         owner: None,
         identity: None,
+        peers: vec![],
+        tags: vec![],
     }
 }
 
@@ -4197,6 +4255,8 @@ async fn a_sub_agent_started_across_the_stop_never_runs_a_turn_after_it() {
             files: vec![],
             owner: None,
             identity: None,
+            peers: vec![],
+            tags: vec![],
         });
         h.until(|k| matches!(k, EventKind::ToolCallStarted(c) if c.tool == "delegate"))
             .await;

@@ -18,6 +18,16 @@ export function pickable(agents: Agent[], keep?: string): Agent[] {
   return agents.filter((a) => a.features?.as_agent !== false || a.id === keep);
 }
 
+/** An agent that runs only as a sub-agent: it can be mentioned (a tag) but never answers a chat nor is called by a mention (X.37). */
+export function isTag(a: Agent): boolean {
+  return a.features?.as_agent === false && a.features?.as_subagent !== false;
+}
+
+/** Agents the `@` popup offers: the pickable ones and the sub-agent-only ones (marked, as tags). */
+export function mentionable(agents: Agent[]): Agent[] {
+  return agents.filter((a) => a.features?.as_agent !== false || isTag(a));
+}
+
 /**
  * A picker's hint for `a`: says first when it is the workspace's own agent
  * (written by that workspace's admins, X.33), then `rest`. From the server's

@@ -1383,6 +1383,34 @@
         "type": "number"
       }
     ],
+    "peers_skipped": [
+      {
+        "path": "agents",
+        "required": true,
+        "type": "array"
+      },
+      {
+        "path": "agents[]",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "message_seq",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "reason",
+        "required": true,
+        "restricted": true,
+        "type": "string",
+        "values": [
+          "stopped",
+          "restarted",
+          "unavailable"
+        ]
+      }
+    ],
     "queued_delivered": [
       {
         "path": "seqs",
@@ -1860,11 +1888,40 @@
       },
       {
         "path": "cause.callback",
-        "required": true,
+        "required": false,
         "type": "array"
       },
       {
         "path": "cause.callback[]",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "cause.mention",
+        "required": false,
+        "type": "object"
+      },
+      {
+        "path": "cause.mention.by",
+        "required": true,
+        "restricted": true,
+        "type": "string",
+        "values": [
+          "person"
+        ]
+      },
+      {
+        "path": "cause.mention.message_seq",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "cause.mention.tags",
+        "required": false,
+        "type": "array"
+      },
+      {
+        "path": "cause.mention.tags[]",
         "required": true,
         "type": "string"
       },
@@ -2100,7 +2157,27 @@
         "type": "any"
       },
       {
+        "path": "tags",
+        "required": false,
+        "type": "array"
+      },
+      {
+        "path": "tags[]",
+        "required": true,
+        "type": "string"
+      },
+      {
         "path": "text",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "triggers",
+        "required": false,
+        "type": "array"
+      },
+      {
+        "path": "triggers[]",
         "required": true,
         "type": "string"
       },

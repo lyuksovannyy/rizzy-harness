@@ -166,6 +166,8 @@ fn prompt(req: &str, sid: SessionId, text: &str) -> MasterToNode {
         files: vec![],
         owner: None,
         identity: None,
+        peers: vec![],
+        tags: vec![],
     }
 }
 

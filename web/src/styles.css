@@ -3480,6 +3480,35 @@ button.swatch:hover:not(:disabled) {
 .msg.user.failed .bubble { opacity: 0.6; }
 .msg.user .sent-failed .link { font-size: inherit; }
 .composer-wrap > .msg.user.sending { margin-bottom: var(--space-3); }
+/* A mention in a sent message (X.37): one that called its agent is a chip with
+   the agent's mark; a plain one (it called nobody) stays quiet. */
+.mention {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  vertical-align: baseline;
+}
+.mention.called {
+  padding: 0 8px 0 4px;
+  border-radius: var(--r-full);
+  background: var(--fill);
+  font-weight: var(--w-medium);
+}
+.mention.tag {
+  padding: 0 6px;
+  border-radius: var(--r-full);
+  border: 1px dashed var(--fg-2);
+  color: var(--fg-2);
+}
+.chip.tag {
+  background: transparent;
+  border: 1px dashed var(--fg-2);
+}
+.mention.plain {
+  color: var(--fg-2);
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
 /* How long the model has been silent (TurnStatus): quiet, not read out. */
 .thinking .waited {
   color: var(--fg-2);

@@ -225,6 +225,8 @@ fn prompt(link: &NodeLink, sid: SessionId, req_id: &str, text: String) {
             agent_named: false,
             owner: None,
             identity: None,
+            peers: vec![],
+            tags: vec![],
         })
         .unwrap();
 }

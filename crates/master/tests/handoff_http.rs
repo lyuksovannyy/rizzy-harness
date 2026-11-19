@@ -174,6 +174,8 @@ fn turn(id: &str, text: &str, _ts: i64) -> Vec<EventKind> {
             reply: None,
             images: vec![],
             queued: false,
+            triggers: vec![],
+            tags: vec![],
             files: vec![],
         }),
         EventKind::TurnEnded(TurnEnded {
@@ -203,6 +205,8 @@ fn work(id: &str, ask: &str) -> Vec<EventKind> {
             reply: None,
             images: vec![],
             queued: false,
+            triggers: vec![],
+            tags: vec![],
             files: vec![],
         }),
         EventKind::Checkpoint(Checkpoint {

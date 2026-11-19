@@ -319,6 +319,11 @@ impl Grants {
                 let Some(c) = self.chats.get_mut(&sid) else {
                     return;
                 };
+                // A turn the harness started (a callback, or the turn of an
+                // agent a person's message called after the first, X.37
+                // `{"mention": ...}`) is no send of the master's: never
+                // granted, and it takes no recorded send (the first agent's
+                // own turn is the message's, with its `user_message`).
                 let callback = p.get("cause").is_some_and(|c| !c.is_null());
                 let retry_of = p
                     .get("retry")
@@ -636,6 +641,41 @@ mod tests {
         let other = SessionId::new();
         g.on_event(&ev(other, "turn_started", json!({"turn_id": "x"})));
         assert!(!g.chats.contains_key(&other));
+    }
+
+    /// X.37: the turn of an agent a message called after the first is the
+    /// harness's, not the master's send: it is never granted, it takes no
+    /// recorded send (the one waiting is still there for the message that
+    /// carries it), and the message's own turn keeps its grant.
+    #[test]
+    fn a_mention_turn_is_not_granted_and_takes_no_send() {
+        let sid = SessionId::new();
+        let mut g = Grants::default();
+        g.sent(sid, prompt("@a @b hi"), true);
+        let mut l = Log(&mut g, sid);
+        l.started("t1");
+        l.said("t1", "@a @b hi", false);
+        assert!(l.ok("t1"), "the message's own turn keeps today's grant");
+        l.ended("t1");
+        // Another send is waiting when the mention turn starts.
+        l.0.sent(sid, prompt("next"), true);
+        l.0.on_event(&ev(
+            sid,
+            "turn_started",
+            json!({"turn_id": "m1", "cause": {"mention": {"message_seq": 3, "by": "person"}}}),
+        ));
+        assert_eq!(
+            l.0.chats.get(&sid).unwrap().sent.len(),
+            1,
+            "starting it took no recorded send"
+        );
+        let mut l = Log(l.0, sid);
+        assert!(!l.ok("m1"), "no connector in a mention turn");
+        // A hostile node writes the waiting send's message into it: it is
+        // still no grant (the turn was decided when it started).
+        l.said("m1", "next", false);
+        assert!(!l.ok("m1"));
+        l.ended("m1");
     }
 
     /// Counts are per granted turn and per chat per hour, a call not made

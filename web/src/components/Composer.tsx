@@ -1,7 +1,7 @@
 import { ArrowUp, AtSign, CornerDownRight, FileText, Globe, Image, Loader2, Mic, Paperclip, Square, X } from "lucide-react";
 import { type Dispatch, lazy, type SetStateAction, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { t } from "../lib/i18n";
-import { marked, pickable } from "../lib/agents";
+import { isTag, marked, mentionable, pickable } from "../lib/agents";
 import { activeMention, filterAgents, insertMention, isPathToken, leadingMention } from "../lib/mentions";
 import { cycleMode, enabledModes, MODES, type Mode } from "../lib/modes";
 import { modelLabel, offeredModels, resolveModel } from "../lib/models";
@@ -392,6 +392,24 @@ export function Composer(props: {
     };
   }, [text, filesOf, hasPathToken]);
   const attached = found.filter((p) => !dropped.includes(p));
+  // The agents this text calls, when it calls several (X.37): the rule is
+  // loaded when the text holds an `@` (lib/calledNow.ts).
+  const [mentions, setMentions] = useState<{ called: string[]; tags: string[]; over: boolean }>({ called: [], tags: [], over: false });
+  useEffect(() => {
+    if (searching || !text.includes("@")) {
+      setMentions((c) => (c.called.length || c.tags.length || c.over ? { called: [], tags: [], over: false } : c));
+      return;
+    }
+    let live = true;
+    import("../lib/calledNow")
+      .then((m) => m.calledIn(text, props.agents))
+      .then((c) => live && setMentions(c), () => {});
+    return () => {
+      live = false;
+    };
+  }, [text, props.agents, searching]);
+  const { called, tags } = mentions;
+  const several = called.length > 1;
   // On send, the check of the text as sent (a token typed within the
   // debounce, a file made since): waited for at most 2 s, else the chips
   // shown. Never a path the person took off.
@@ -412,7 +430,12 @@ export function Composer(props: {
           .filter((e) => e.id.startsWith(mention.query.toLowerCase()) || e.name.toLowerCase().startsWith(mention.query.toLowerCase()))
           .slice(0, 8)
           .map((e) => ({ id: e.id, title: e.name, hint: abilities(e), origin: engineOrigin(e) }))
-      : filterAgents(pickable(props.agents), mention.query).map((a) => ({ id: a.id, title: a.id, hint: marked(a, a.description || a.name) ?? "", agent: a }));
+      : filterAgents(mentionable(props.agents), mention.query).map((a) => ({
+          id: a.id,
+          title: a.id,
+          hint: [isTag(a) && t("composer.tagHint"), marked(a, a.description || a.name)].filter(Boolean).join(" · "),
+          agent: a,
+        }));
   const popupOpen = suggestions.length > 0;
   const pickedAgent = props.agents.find((a) => a.id === props.agentId);
   const pickedAlert = pickedAgent ? agentAlert(pickedAgent) : null;
@@ -672,8 +695,30 @@ export function Composer(props: {
           onKeyDown={onKeyDown}
           onPaste={(e) => takeImages(e, e.clipboardData.files)}
         />
-        {files.length + pictures.length + attached.length > 0 && (
+        {files.length + pictures.length + attached.length > 0 || several || tags.length > 0 || mentions.over ? (
           <ul className="chips" aria-label={t("composer.attachments")}>
+            {mentions.over && (
+              <li className="chip" role="alert">
+                {t("composer.tooManyMentions")}
+              </li>
+            )}
+            {tags.map((id) => (
+              <li key={`tag-${id}`} className="chip tag" title={t("composer.tagTitle")}>
+                @{id}
+              </li>
+            ))}
+            {several &&
+              (called.length > 4 ? (
+                <li className="chip" role="alert">
+                  {t("composer.tooMany")}
+                </li>
+              ) : (
+                called.map((id, n) => (
+                  <li key={`call-${id}`} className="chip" title={t("composer.calls")}>
+                    {n + 1}. @{id}
+                  </li>
+                ))
+              ))}
             {pictures.map((x) => (
               <li key={x.key} className="chip image-chip">
                 {x.media_id ? (
@@ -712,7 +757,7 @@ export function Composer(props: {
               </li>
             ))}
           </ul>
-        )}
+        ) : null}
         <div className="composer-row">
           {mode !== "search" && (
             <>

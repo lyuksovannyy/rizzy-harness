@@ -341,6 +341,8 @@ fn prompt_with(
             agent_named: false,
             owner: None,
             identity: None,
+            peers: vec![],
+            tags: vec![],
         })
         .unwrap();
 }

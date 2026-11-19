@@ -642,6 +642,18 @@ pub const CAP_APPROVAL_DEFAULT_PREFIX: &str = "approval-default:";
 pub const MODE_NOT_A_LOWERING: &str =
     "this change was sent as a lowering but would raise the chat's approval mode";
 
+/// The node capability that announces it takes `session.prompt.peers`: the
+/// agents a message called after the first, which it asks one after another
+/// (ADOPTION_PLAN X.37). The master sends the field only to a node that
+/// listed it (an older node would ignore it and answer with the first agent
+/// alone) and refuses the message with a sentence otherwise.
+pub const CAP_PEERS: &str = "peers";
+
+/// The most agents after the first that one prompt may carry
+/// ([`harness_core::mention::MAX_CALLED`] less the first). The node refuses
+/// more.
+pub const MAX_PEERS: usize = harness_core::mention::MAX_CALLED - 1;
+
 /// The node capability that announces the person's answers beyond allow
 /// and deny: a note with a denial, `allow_chat` and `session.revoke_allow`.
 /// The master sends `allow_chat` and `session.revoke_allow` only to a node
@@ -1043,6 +1055,24 @@ pub enum MasterToNode {
         /// `Debug` hides the address).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         identity: Option<harness_core::identity::CommitIdentity>,
+        /// The agents this message called after the first, in the order
+        /// they answer (X.37; only to nodes with [`CAP_PEERS`], at most
+        /// [`MAX_PEERS`]): each is resolved by the master as `agent` is,
+        /// with no connector tool, memory tool or master context (their
+        /// turns are no send of the master's). The node keeps them in
+        /// memory only and starts a turn for each, one after another,
+        /// after the turn before it ended; `user_message.triggers` records
+        /// who was called. The first agent is `agent` and answers this
+        /// message's own turn.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        peers: Vec<AgentSpec>,
+        /// The agents that run only as sub-agents this message mentions
+        /// (tags, X.37; only to nodes with [`CAP_PEERS`], at most
+        /// `harness_core::mention::MAX_RESOLVED`): the node records them in
+        /// `user_message.tags` and names the ones each answering agent has
+        /// among its own delegates in that turn's opening. Never a call.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tags: Vec<String>,
     },
     /// Resume an idle chat because background commands ended (a callback
     /// turn, T.8d step 3; only to nodes with `CAP_CALLBACK`). There is no
@@ -2074,6 +2104,8 @@ mod tests {
             files: vec![],
             owner: None,
             identity: None,
+            peers: vec![],
+            tags: vec![],
         };
         let v = serde_json::to_value(&p).unwrap();
         assert_eq!(
@@ -2104,6 +2136,8 @@ mod tests {
             files: vec![],
             owner: None,
             identity: None,
+            peers: vec![],
+            tags: vec![],
         };
         let v = serde_json::to_value(prompt(None)).unwrap();
         assert!(v.get("reply").is_none(), "{v}");

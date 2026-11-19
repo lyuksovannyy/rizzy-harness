@@ -11,6 +11,7 @@ pub mod folder;
 pub mod handoff;
 pub mod identity;
 pub mod image;
+pub mod mention;
 pub mod policy;
 pub mod recall;
 pub mod refs;

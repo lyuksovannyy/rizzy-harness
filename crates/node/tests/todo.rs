@@ -118,6 +118,8 @@ fn prompt(link: &NodeLink, sid: SessionId, agent: Option<AgentSpec>, text: Strin
             files: vec![],
             owner: None,
             identity: None,
+            peers: vec![],
+            tags: vec![],
         })
         .unwrap();
 }

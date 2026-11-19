@@ -74,7 +74,7 @@ fn forged(models: &[&str], each: u64) -> Usage {
 fn events() -> Vec<RawEvent> {
     let sid: SessionId = "01a19bf2-0000-7000-8000-00000000f1f0".parse().unwrap();
     let t = || "t1".to_string();
-    let kinds = vec![
+    let mut kinds = vec![
         EventKind::SessionCreated(SessionCreated {
             // The fold keeps the session's mode (N.10a).
             exec_mode: Some(ExecMode::Sandbox),
@@ -105,6 +105,8 @@ fn events() -> Vec<RawEvent> {
             reply: None,
             images: vec![],
             queued: false,
+            triggers: vec![],
+            tags: vec![],
             files: vec![],
         }),
         EventKind::AssistantDelta(AssistantDelta {
@@ -321,6 +323,8 @@ fn events() -> Vec<RawEvent> {
                 height: 720,
             }],
             queued: false,
+            triggers: vec![],
+            tags: vec![],
             // A mentioned file (T63): the view shows its path, never its text.
             files: vec![FileMention {
                 path: "CHANGELOG.md".into(),
@@ -394,6 +398,8 @@ fn events() -> Vec<RawEvent> {
             reply: None,
             images: vec![],
             queued: true,
+            triggers: vec![],
+            tags: vec![],
             files: vec![],
         }),
         EventKind::UserMessage(UserMessage {
@@ -403,6 +409,8 @@ fn events() -> Vec<RawEvent> {
             reply: None,
             images: vec![],
             queued: true,
+            triggers: vec![],
+            tags: vec![],
             files: vec![],
         }),
         EventKind::QueuedDelivered(QueuedDelivered {
@@ -436,6 +444,8 @@ fn events() -> Vec<RawEvent> {
             }),
             images: vec![],
             queued: false,
+            triggers: vec![],
+            tags: vec![],
             files: vec![],
         }),
         // A `publish` call and the file the node staged for it, then a
@@ -823,6 +833,8 @@ fn events() -> Vec<RawEvent> {
             reply: None,
             images: vec![],
             queued: false,
+            triggers: vec![],
+            tags: vec![],
         }),
         EventKind::Error(ErrorEvent {
             turn_id: Some("t7".into()),
@@ -1013,6 +1025,92 @@ fn events() -> Vec<RawEvent> {
             reason: "Could not process image".into(),
         }),
     ];
+    // X.37: a message that called three agents; the second answers in a turn
+    // of its own (a mention turn), the third was not asked (Stop).
+    let pos = kinds
+        .iter()
+        .position(|k| matches!(k, EventKind::CallbackRefused(_)))
+        .unwrap()
+        + 1;
+    let at = pos as u64 + 2;
+    let agent_ref = |id: &str| AgentRef {
+        agent_id: id.into(),
+        name: id.into(),
+        prompt_hash: "h".into(),
+        withheld: vec![],
+        effort: None,
+    };
+    kinds.splice(
+        pos..pos,
+        [
+            EventKind::TurnStarted(TurnStarted {
+                turn_id: "t70".into(),
+                agent: Some(agent_ref("coder")),
+                cause: None,
+                environment: None,
+                continued_by: None,
+                retry: None,
+            }),
+            EventKind::UserMessage(UserMessage {
+                turn_id: "t70".into(),
+                text: "@coder @writer @editor, yo".into(),
+                attachments: vec![],
+                files: vec![],
+                reply: None,
+                images: vec![],
+                queued: false,
+                triggers: vec!["coder".into(), "writer".into(), "editor".into()],
+                tags: vec!["advisor".into()],
+            }),
+            EventKind::AssistantMessage(AssistantMessage {
+                author: None,
+                variant: None,
+                turn_id: "t70".into(),
+                message_id: "m70".into(),
+                text: "Coder here.".into(),
+                tool_calls: vec![],
+                blocks: vec![],
+                thinking: None,
+            }),
+            EventKind::TurnEnded(TurnEnded {
+                turn_id: "t70".into(),
+                reason: TurnEndReason::Completed,
+                usage: None,
+            }),
+            EventKind::TurnStarted(TurnStarted {
+                turn_id: "t71".into(),
+                agent: Some(agent_ref("writer")),
+                cause: Some(TurnCause::Mention(MentionCall {
+                    message_seq: at,
+                    by: CalledBy::Person,
+                    tags: vec!["advisor".into()],
+                })),
+                environment: None,
+                continued_by: None,
+                retry: None,
+            }),
+            EventKind::AssistantMessage(AssistantMessage {
+                author: None,
+                variant: None,
+                turn_id: "t71".into(),
+                message_id: "m71".into(),
+                text: "Writer here.".into(),
+                tool_calls: vec![],
+                blocks: vec![],
+                thinking: None,
+            }),
+            EventKind::TurnEnded(TurnEnded {
+                turn_id: "t71".into(),
+                reason: TurnEndReason::Cancelled,
+                usage: None,
+            }),
+            EventKind::PeersSkipped(PeersSkipped {
+                message_seq: at,
+                agents: vec!["editor".into()],
+                reason: PeersSkipReason::Stopped,
+            }),
+        ],
+    );
     let mut out: Vec<RawEvent> = kinds
         .into_iter()
         .enumerate()
@@ -1119,6 +1217,36 @@ fn a_callback_turn_and_a_refusal_are_items() {
         .unwrap();
     assert_eq!(r["bg_ids"], json!(["bg-5"]));
     assert!(r["reason"].as_str().unwrap().contains("node limit"));
+}
+
+/// X.37: the message records who it called; the turn of an agent called
+/// after the first is a `called` item (not a callback) where its answer
+/// begins; the agents never asked are one quiet item.
+#[test]
+fn a_mention_turn_and_the_agents_not_asked_are_items() {
+    let view = serde_json::to_value(SessionView::fold(&events()).unwrap()).unwrap();
+    let items = view["items"].as_array().unwrap();
+    let u = items
+        .iter()
+        .find(|i| i["type"] == "user" && i["turn_id"] == "t70")
+        .unwrap();
+    assert_eq!(u["triggers"], json!(["coder", "writer", "editor"]));
+    assert_eq!(u["tags"], json!(["advisor"]));
+    let c = items.iter().position(|i| i["type"] == "called").unwrap();
+    assert_eq!(items[c]["turn_id"], "t71");
+    assert_eq!(items[c]["agent"]["agent_id"], "writer");
+    let evs = events();
+    let msg_seq = evs
+        .iter()
+        .find(|e| e.kind == "user_message" && e.payload["turn_id"] == "t70")
+        .unwrap()
+        .seq;
+    assert_eq!(items[c]["message_seq"], msg_seq);
+    assert_eq!(items[c + 1]["message_id"], "m71");
+    assert_eq!(items.iter().filter(|i| i["type"] == "callback").count(), 1);
+    let p = items.iter().find(|i| i["type"] == "peers_skipped").unwrap();
+    assert_eq!(p["agents"], json!(["editor"]));
+    assert_eq!(p["reason"], "stopped");
 }
 
 /// A retry stands right after the failed turn's end, naming it; the

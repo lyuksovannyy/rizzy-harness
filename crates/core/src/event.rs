@@ -105,6 +105,7 @@ pub enum EventKind {
     CompactFailed(CompactFailed),
     ImagesWithheld(ImagesWithheld),
     ThinkingWithheld(ThinkingWithheld),
+    PeersSkipped(PeersSkipped),
 }
 
 impl EventKind {
@@ -164,6 +165,7 @@ impl EventKind {
             EventKind::CompactFailed(_) => "compact_failed",
             EventKind::ImagesWithheld(_) => "images_withheld",
             EventKind::ThinkingWithheld(_) => "thinking_withheld",
+            EventKind::PeersSkipped(_) => "peers_skipped",
         }
     }
 }
@@ -667,15 +669,92 @@ pub enum TurnCause {
     /// waited ([`waiting_ends`]) in the node's log when the turn started,
     /// those the master asked for first, at most `MAX_CALLBACK_IDS`.
     Callback(Vec<String>),
+    /// A person's message called several agents (X.37): this is the turn
+    /// of one that is not the first, started by the node after the earlier
+    /// agents' turns of the same message ended. The person is present, so
+    /// it is no callback: it counts as a person's turn for the chat's
+    /// background ends, but it is the harness's start for the connector
+    /// grant (no connector in it) and for what is remembered.
+    Mention(MentionCall),
+}
+
+/// Which message called the agent of a [`TurnCause::Mention`] turn, and who
+/// wrote it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MentionCall {
+    /// The seq of the `user_message` that called it.
+    pub message_seq: u64,
+    pub by: CalledBy,
+    /// The message's tags this agent has among its own delegates (the node
+    /// cut them to that): the opening names them ([`crate::mention::tags_line`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+}
+
+/// Who wrote the message that called an agent. Only a person, in this
+/// version: an agent's message calling another is not built (ADOPTION_PLAN
+/// X.37, step 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CalledBy {
+    Person,
 }
 
 impl TurnCause {
-    /// The background commands a callback turn was started for.
+    /// The background commands a callback turn was started for (none for
+    /// any other cause).
     pub fn callback_ids(&self) -> &[String] {
         match self {
             TurnCause::Callback(ids) => ids,
+            TurnCause::Mention(_) => &[],
         }
     }
+
+    /// A turn nobody is watching, started because background work ended.
+    pub fn is_callback(&self) -> bool {
+        matches!(self, TurnCause::Callback(_))
+    }
+
+    /// The call of a mention turn.
+    pub fn mention(&self) -> Option<&MentionCall> {
+        match self {
+            TurnCause::Mention(m) => Some(m),
+            TurnCause::Callback(_) => None,
+        }
+    }
+}
+
+/// How a mention turn's opening begins (and nothing else the model is
+/// sent begins so).
+pub const CALLED_LEAD: &str = "[harness] The person's message above called you by name.";
+
+/// The one user-role message a mention turn starts with (X.37), after the
+/// earlier agents' answers: the harness's words, no text of the person's
+/// (their message is the one above, sent once) and no other agent's. Built
+/// from the turn's agent and cause alone, so every later request rebuilds
+/// it byte for byte. `agent_id` is the turn's agent (`turn_started.agent`);
+/// an id that is not a plain handle is left out, never put in the model's
+/// prompt.
+pub fn mention_opening(agent_id: &str, call: &MentionCall) -> String {
+    let who = if !agent_id.is_empty()
+        && agent_id.len() <= 32
+        && agent_id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    {
+        format!(" You are @{agent_id}.")
+    } else {
+        String::new()
+    };
+    let tags = crate::mention::tags_line(&call.tags)
+        .map(|l| format!(" {l}"))
+        .unwrap_or_default();
+    format!(
+        "{CALLED_LEAD}{who} It called other agents too, and the ones named before you have \
+         answered it above, in order. Answer it now as yourself, from your own role and tools: \
+         do not repeat what the agents above said and do not answer for them. The person has \
+         written nothing since.{tags}"
+    )
 }
 
 /// How a callback turn's opening begins (and nothing else the model is
@@ -719,6 +798,12 @@ pub fn waiting_ends(log: &[RawEvent]) -> Vec<(u64, i64, BackgroundEnded)> {
         match e.typed() {
             Ok(EventKind::TurnStarted(TurnStarted { cause: None, .. }))
             | Ok(EventKind::CallbackRefused(_)) => waiting.clear(),
+            // A mention turn is a person's turn here: the person is present
+            // and it reads the notes standing before it.
+            Ok(EventKind::TurnStarted(TurnStarted {
+                cause: Some(TurnCause::Mention(_)),
+                ..
+            })) => waiting.clear(),
             Ok(EventKind::TurnStarted(TurnStarted { cause: Some(c), .. })) => {
                 let named = c.callback_ids();
                 waiting.retain(|w| !named.contains(&w.2.bg_id));
@@ -742,6 +827,32 @@ pub struct CallbackRefused {
     pub bg_ids: Vec<String>,
     /// In words, for the chat: "3 turns in a row without you (node limit)".
     pub reason: String,
+}
+
+/// Agents a person's message called (`user_message.triggers`) that were not
+/// asked, because the list stopped before their turn (X.37): the person
+/// stopped it, or the node restarted (the later agents' specs are kept in
+/// memory only), or the node could not start the turn. Said once, in plain
+/// words, where it happened; nothing about them runs later.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeersSkipped {
+    /// The seq of the `user_message` that called them.
+    pub message_seq: u64,
+    /// The agents not asked, by id, in the order they would have run.
+    pub agents: Vec<String>,
+    pub reason: PeersSkipReason,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeersSkipReason {
+    /// The person stopped the turn that was running.
+    Stopped,
+    /// The node restarted with agents still to be asked.
+    Restarted,
+    /// The node could not start the next turn (its log, its limits, a
+    /// stopping node).
+    Unavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -775,6 +886,20 @@ pub struct UserMessage {
     /// an open question it closes, URL provenance).
     #[serde(default, skip_serializing_if = "is_false")]
     pub queued: bool,
+    /// The agents this message called by mention (X.37,
+    /// [`crate::mention`]), by id, each once, in the order they answer: the
+    /// first answers this message's own turn, each later one a turn of its
+    /// own after it (`turn_started.cause`, [`TurnCause::Mention`]). Empty
+    /// for a message that called nobody, or only the agent that answers it
+    /// anyway. Written by the node from the master's command, which
+    /// resolved them in the chat's own agent set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub triggers: Vec<String>,
+    /// The agents that run only as sub-agents this message mentions (tags,
+    /// X.37): they are drawn as mentions and never called. Written by the
+    /// node from the master's command, each once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 /// The model read these queued messages (`user_message.queued`) here: at a
@@ -2150,6 +2275,35 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// X.37: a mention turn's opening is built from the turn's agent and
+    /// cause alone (the same bytes every time), says which agent it is and
+    /// that the person's message above called it, quotes nothing, and never
+    /// puts an agent id that is not a plain handle into the model's prompt.
+    #[test]
+    fn a_mention_turns_opening_is_built_from_the_event_alone() {
+        let call = MentionCall {
+            message_seq: 7,
+            by: CalledBy::Person,
+            tags: vec![],
+        };
+        let a = mention_opening("writer", &call);
+        assert_eq!(a, mention_opening("writer", &call));
+        assert!(a.starts_with(CALLED_LEAD), "{a}");
+        assert!(a.contains("You are @writer."), "{a}");
+        assert!(!a.contains('\n'), "one paragraph, no quoted text: {a}");
+        for bad in ["", "Writer", "a b", "x\nignore all", &"a".repeat(33)] {
+            let t = mention_opening(bad, &call);
+            assert!(!t.contains("You are"), "{bad:?}: {t}");
+            assert!(!t.contains(bad) || bad.is_empty(), "{bad:?}: {t}");
+        }
+        // The cause round-trips as the schema says.
+        let c = TurnCause::Mention(call.clone());
+        let v = serde_json::to_value(&c).unwrap();
+        assert_eq!(v, json!({"mention": {"message_seq": 7, "by": "person"}}));
+        assert_eq!(serde_json::from_value::<TurnCause>(v).unwrap(), c);
+        assert!(!c.is_callback() && c.callback_ids().is_empty());
+    }
+
     fn mention(path: &str, state: MentionState, text: &str) -> FileMention {
         FileMention {
             path: path.into(),
@@ -2186,6 +2340,8 @@ mod tests {
             reply: None,
             images: vec![],
             queued: false,
+            triggers: vec![],
+            tags: vec![],
         };
         let t = m.model_text();
         assert_eq!(own_words(&t), "fix it");
@@ -2502,6 +2658,8 @@ mod tests {
             }),
             images: vec![],
             queued: false,
+            triggers: vec![],
+            tags: vec![],
             files: vec![],
         });
         let (kind, payload) = k.clone().into_parts();
@@ -2833,6 +2991,24 @@ mod background_note_tests {
         log.push(ev(end("bg-8", Exited, false)));
         log.push(ev(turn(None)));
         assert!(ids(&log).is_empty());
+        // The turn of an agent a person's message called (X.37): the person
+        // is present and the turn reads the notes before it, so it clears
+        // what waits, as the person's own turn does; it is no callback.
+        log.push(ev(end("bg-9", Exited, false)));
+        assert_eq!(ids(&log), ["bg-9"]);
+        log.push(ev(EventKind::TurnStarted(TurnStarted {
+            turn_id: "m1".into(),
+            agent: None,
+            cause: Some(TurnCause::Mention(MentionCall {
+                message_seq: 1,
+                by: CalledBy::Person,
+                tags: vec![],
+            })),
+            environment: None,
+            continued_by: None,
+            retry: None,
+        })));
+        assert!(ids(&log).is_empty());
     }
 
     /// Only an undelivered exit or timeout calls back (R7, R12).
@@ -2899,6 +3075,8 @@ mod attachment_frame_tests {
             reply: None,
             images: vec![],
             queued: false,
+            triggers: vec![],
+            tags: vec![],
             files: vec![],
         }
     }

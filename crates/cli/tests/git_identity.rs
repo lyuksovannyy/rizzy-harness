@@ -294,6 +294,8 @@ impl Node {
                 files: vec![],
                 owner: owner.map(Into::into),
                 identity,
+                peers: vec![],
+                tags: vec![],
             })
             .unwrap();
         self.ack().await.unwrap();
@@ -946,6 +948,8 @@ async fn four_chats_planting_fifos_do_not_starve_the_runtime() {
                 files: vec![],
                 owner: Some("u-alex".into()),
                 identity: Some(alex()),
+                peers: vec![],
+                tags: vec![],
             })
             .unwrap();
     }

@@ -30,6 +30,7 @@ pub mod nodes;
 pub mod notices;
 pub mod outbound;
 pub mod pdf;
+pub mod peers;
 pub mod plugins;
 pub mod prefs;
 pub mod presets;
@@ -2321,14 +2322,57 @@ impl Master {
         // agent's turn runs (X.5, review ST-5).
         let picked = agent_id.is_some();
         let named = asker.or(agent_id);
+        // The agents the chat's owner's own message calls by mention (X.37):
+        // the opening run and the closing line (`harness_core::mention`).
+        // Not for an API token's, a routine's or a webhook's message, an
+        // answer to a card, an explicit agent, a Retry, a sub-agent's chat
+        // or parallel answers: they keep the single leading mention below.
+        let calls = by_owner
+            && routine_run.is_none()
+            && !untrusted
+            && !resume
+            && reply.is_none()
+            && named.is_none()
+            && retry.is_none()
+            && row.parent_id.is_none()
+            && compare.is_empty();
+        // A leading mention of an agent that runs only as a sub-agent is
+        // refused for those other senders as it always was; in the owner's
+        // own message it is a tag (mentioned, never called).
         let mention = match leading_mention(&text).filter(|_| reply.is_none() && named.is_none()) {
             Some(handle) => match r.top_level(handle) {
                 Ok(a) => Some(a.id.clone()),
-                Err(e @ CommandError::SubagentOnly { .. }) => return Err(e),
+                Err(e @ CommandError::SubagentOnly { .. }) if !calls => return Err(e),
                 Err(_) => None,
             },
             None => None,
         };
+        let mentioned = if calls {
+            self.mentioned(&row, &r, &text).await
+        } else {
+            Default::default()
+        };
+        let called = mentioned.called;
+        if called.len() > harness_core::mention::MAX_CALLED {
+            return Err(peers::too_many());
+        }
+        if mentioned.resolved > harness_core::mention::MAX_RESOLVED {
+            return Err(peers::too_many_mentions());
+        }
+        if called.len() > 1 && !self.node_has(&row.node_id, harness_protocol::CAP_PEERS) {
+            return Err(CommandError::Rejected(peers::OLD_NODE.into()));
+        }
+        // Tags go only to a node that records them and names them to the
+        // answering agent (an older one would ignore them: harmless, but
+        // said nothing of).
+        let tags = if self.node_has(&row.node_id, harness_protocol::CAP_PEERS) {
+            mentioned.tags
+        } else {
+            Vec::new()
+        };
+        // The first agent called answers this message; with one, exactly as
+        // a leading mention always did.
+        let mention = called.first().cloned().or(mention);
         // The chat's own agent; one that is gone or became sub-agent-only
         // refuses the prompt (an explicit agent or a mention still works).
         let picked = picked || mention.is_some();
@@ -2347,12 +2391,31 @@ impl Master {
             session_model.as_deref(),
             effort.as_deref(),
         )?;
+        // The agents after the first, each resolved as the first is, with
+        // what a turn of the harness's own starting has (`peers::for_peer`).
+        let mut peer_specs = Vec::new();
+        for id in called.iter().skip(1) {
+            let mut spec = r.agent_spec_with(
+                Some(id.as_str()),
+                session_model.as_deref(),
+                effort.as_deref(),
+            )?;
+            peers::for_peer(&mut spec, untrusted)?;
+            peer_specs.push(spec);
+        }
         // `media::prompt_images` checked the chat's own model; an @mention or
         // parallel answers may bring others.
         if !images.is_empty() || retry_images {
             let main = turn_model(&agent, session_model.as_deref(), &row);
             if let Some(blind) = blind(&r, &main, &compare) {
                 return Err(CommandError::Rejected(media::blind_message(&blind)));
+            }
+            // Every agent called reads the images in the history.
+            for p in &peer_specs {
+                let m = turn_model(p, session_model.as_deref(), &row);
+                if let Some(blind) = blind(&r, &m, &[]) {
+                    return Err(CommandError::Rejected(media::blind_message(&blind)));
+                }
             }
         }
         // Per-turn context goes after the history, not into the system
@@ -2605,6 +2668,8 @@ impl Master {
                 files,
                 owner: None,
                 identity: None,
+                peers: peer_specs,
+                tags,
             },
         };
         // The link drops a frame over 8 MiB; the margin covers the request

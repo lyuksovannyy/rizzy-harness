@@ -322,6 +322,29 @@ pub fn retry_text(
     parts.join("\n\n")
 }
 
+/// A mention turn's opening (X.37), one [`ChatMsg::Opening`], built as a
+/// retry's is: the notes that stood before it ([`take_notes`]), then the
+/// turn's environment line, its context block and the harness's line
+/// ([`harness_core::event::mention_opening`]) last. Built by the loop for
+/// the turn it runs and by the rebuild at the turn's `turn_started`, from
+/// the log alone, so both are the same bytes.
+pub fn mention_text(
+    notes: &[String],
+    environment: Option<&str>,
+    block: Option<&str>,
+    agent_id: &str,
+    call: &harness_core::event::MentionCall,
+) -> String {
+    let own = crate::context::opening(
+        environment,
+        block,
+        &harness_core::event::mention_opening(agent_id, call),
+    );
+    let mut parts: Vec<&str> = notes.iter().map(String::as_str).collect();
+    parts.push(&own);
+    parts.join("\n\n")
+}
+
 /// The person's own text of a user message [`place_notes`] put notes in
 /// front of. The separator counts only as a line of its own after an empty
 /// line, the way `place_notes` writes it: a note's lines are the harness's
