@@ -29,7 +29,10 @@ use std::time::Duration;
 
 use harness_core::SessionId;
 use harness_core::backend::AgentBackend;
-use harness_protocol::{MasterToNode, NODE_STOPPING, NodeToMaster, PROTOCOL_VERSION, SessionHead};
+use harness_protocol::{
+    CallbackMsg, MasterToNode, NODE_STOPPING, NodeToMaster, PROTOCOL_VERSION, PromptMsg, RetryMsg,
+    SessionHead,
+};
 use harness_store::Store;
 use tokio::sync::mpsc;
 
@@ -44,9 +47,9 @@ fn starts_work(msg: &MasterToNode) -> bool {
     matches!(
         msg,
         MasterToNode::Create { .. }
-            | MasterToNode::Prompt { .. }
-            | MasterToNode::Callback { .. }
-            | MasterToNode::Retry { .. }
+            | MasterToNode::Prompt(_)
+            | MasterToNode::Callback(_)
+            | MasterToNode::Retry(_)
             | MasterToNode::Handoff { .. }
             | MasterToNode::Compact { .. }
             | MasterToNode::Restore { .. }
@@ -116,9 +119,9 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::SelectVariant { session_id, .. }
         | MasterToNode::Restore { session_id, .. }
         | MasterToNode::Delete { session_id, .. }
-        | MasterToNode::Prompt { session_id, .. }
-        | MasterToNode::Callback { session_id, .. }
-        | MasterToNode::Retry { session_id, .. }
+        | MasterToNode::Prompt(PromptMsg { session_id, .. })
+        | MasterToNode::Callback(CallbackMsg { session_id, .. })
+        | MasterToNode::Retry(RetryMsg { session_id, .. })
         | MasterToNode::Handoff { session_id, .. }
         | MasterToNode::Compact { session_id, .. }
         | MasterToNode::SetAgent { session_id, .. }
@@ -1708,7 +1711,7 @@ impl NodeRuntime {
                 self.audit("session.delete", session_id).await;
                 self.delete(session_id).await
             }
-            MasterToNode::Prompt {
+            MasterToNode::Prompt(PromptMsg {
                 session_id,
                 text,
                 agent,
@@ -1725,7 +1728,7 @@ impl NodeRuntime {
                 peers,
                 tags,
                 ..
-            } => {
+            }) => {
                 self.audit("session.prompt", session_id).await;
                 // The master's context: this message's part, and the
                 // standing parts the loop keeps as sections (X.1).
@@ -1757,7 +1760,7 @@ impl NodeRuntime {
                     None => Err("unknown session".into()),
                 }
             }
-            MasterToNode::Callback {
+            MasterToNode::Callback(CallbackMsg {
                 session_id,
                 bg_ids,
                 agent,
@@ -1766,7 +1769,7 @@ impl NodeRuntime {
                 owner,
                 identity,
                 ..
-            } => {
+            }) => {
                 self.audit("session.callback", session_id).await;
                 // The standing parts only; this turn's own line never.
                 let standing = context.map(|c| c.standing);
@@ -1781,7 +1784,7 @@ impl NodeRuntime {
                     None => Err("unknown session".into()),
                 }
             }
-            MasterToNode::Retry {
+            MasterToNode::Retry(RetryMsg {
                 session_id,
                 turn_id,
                 agent,
@@ -1791,7 +1794,7 @@ impl NodeRuntime {
                 owner,
                 identity,
                 ..
-            } => {
+            }) => {
                 self.audit("session.retry", session_id).await;
                 let (context, standing) = match context {
                     Some(c) => (c.turn, Some(c.standing)),

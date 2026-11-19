@@ -25,7 +25,7 @@ use harness_core::{RawEvent, Secret, SessionId};
 use harness_master::auth::{Auth, Claim};
 use harness_master::router;
 use harness_node::NodeLink;
-use harness_protocol::{MasterToNode, NodeToMaster, PROTOCOL_VERSION};
+use harness_protocol::{MasterToNode, NodeToMaster, PROTOCOL_VERSION, PromptMsg, RetryMsg};
 use harness_store::Store;
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
@@ -178,9 +178,9 @@ fn fake(id: &str, profile: Profile, caps: &[&str]) -> (NodeLink, Seen, Children)
                     exec_mode,
                     ..
                 } => f.created(*session_id, None, *exec_mode),
-                MasterToNode::Prompt {
+                MasterToNode::Prompt(PromptMsg {
                     session_id, text, ..
-                } => {
+                }) => {
                     if text.contains("child") {
                         let child = SessionId::new();
                         f.created(
@@ -193,11 +193,11 @@ fn fake(id: &str, profile: Profile, caps: &[&str]) -> (NodeLink, Seen, Children)
                     }
                     f.turn(*session_id, text, None);
                 }
-                MasterToNode::Retry {
+                MasterToNode::Retry(RetryMsg {
                     session_id,
                     turn_id,
                     ..
-                } => {
+                }) => {
                     let r = RetryOf {
                         turn_id: turn_id.clone(),
                         reason: TurnEndReason::Error,
@@ -227,11 +227,11 @@ fn retries(seen: &Seen) -> Vec<(SessionId, String)> {
         .unwrap()
         .iter()
         .filter_map(|m| match m {
-            MasterToNode::Retry {
+            MasterToNode::Retry(RetryMsg {
                 session_id,
                 turn_id,
                 ..
-            } => Some((*session_id, turn_id.clone())),
+            }) => Some((*session_id, turn_id.clone())),
             _ => None,
         })
         .collect()
@@ -432,10 +432,10 @@ async fn the_owner_retries_the_failed_last_turn_once() {
         .unwrap()
         .iter()
         .rev()
-        .find(|m| matches!(m, MasterToNode::Retry { .. }))
+        .find(|m| matches!(m, MasterToNode::Retry(_)))
         .cloned()
         .unwrap();
-    let MasterToNode::Retry { agent, context, .. } = sent else {
+    let MasterToNode::Retry(RetryMsg { agent, context, .. }) = sent else {
         unreachable!()
     };
     assert!(agent.is_some(), "the chat's agent, resolved now");
@@ -706,10 +706,10 @@ async fn a_retry_in_a_webhook_chat_stays_untrusted() {
         .unwrap()
         .iter()
         .rev()
-        .find(|m| matches!(m, MasterToNode::Retry { .. }))
+        .find(|m| matches!(m, MasterToNode::Retry(_)))
         .cloned()
         .expect("the retry went to the chat's node");
-    let MasterToNode::Retry { agent, context, .. } = sent else {
+    let MasterToNode::Retry(RetryMsg { agent, context, .. }) = sent else {
         unreachable!()
     };
     let turn = context.and_then(|c| c.turn).unwrap_or_default();

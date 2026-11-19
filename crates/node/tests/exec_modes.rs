@@ -12,7 +12,7 @@ use harness_core::event::{EventKind, Profile, SessionCreated};
 use harness_core::policy::ExecMode;
 use harness_node::exec::ExecOffers;
 use harness_node::{NodeConfig, NodeLink, NodePolicy, NodeRuntime};
-use harness_protocol::{MasterToNode, NodeToMaster};
+use harness_protocol::{CallbackMsg, MasterToNode, NodeToMaster, PromptMsg};
 use harness_store::{Durability, Store};
 
 fn offers(sandbox: bool, host: bool) -> ExecOffers {
@@ -144,7 +144,7 @@ fn create(sid: SessionId, cwd: &std::path::Path, mode: Option<ExecMode>) -> Mast
 }
 
 fn prompt(sid: SessionId, text: &str) -> MasterToNode {
-    MasterToNode::Prompt {
+    MasterToNode::Prompt(PromptMsg {
         req_id: format!("p-{sid}"),
         session_id: sid,
         text: text.into(),
@@ -161,7 +161,7 @@ fn prompt(sid: SessionId, text: &str) -> MasterToNode {
         identity: None,
         peers: vec![],
         tags: vec![],
-    }
+    })
 }
 
 /// The ack of the next command, skipping events.
@@ -387,7 +387,7 @@ async fn a_session_whose_mode_is_no_longer_offered_runs_nothing_after_a_restart(
             ),
             (
                 "callback",
-                MasterToNode::Callback {
+                MasterToNode::Callback(CallbackMsg {
                     req_id: "cb".into(),
                     session_id: gone,
                     bg_ids: vec!["bg-1".into()],
@@ -396,7 +396,7 @@ async fn a_session_whose_mode_is_no_longer_offered_runs_nothing_after_a_restart(
                     context: None,
                     owner: None,
                     identity: None,
-                },
+                }),
             ),
             (
                 "stage",
@@ -656,7 +656,7 @@ async fn a_sub_agents_mode_is_its_parents() {
     };
     let scout = spec("scout", vec!["read".into()], vec![]);
     let lead = spec("lead", vec!["bash".into()], vec![scout]);
-    let MasterToNode::Prompt {
+    let MasterToNode::Prompt(PromptMsg {
         req_id,
         session_id,
         text,
@@ -667,13 +667,13 @@ async fn a_sub_agents_mode_is_its_parents() {
         context,
         images,
         ..
-    } = prompt(parent, "delegate: scout=read: keep.txt")
+    }) = prompt(parent, "delegate: scout=read: keep.txt")
     else {
         unreachable!()
     };
     n.link
         .to_node
-        .try_send(MasterToNode::Prompt {
+        .try_send(MasterToNode::Prompt(PromptMsg {
             req_id,
             session_id,
             text,
@@ -690,7 +690,7 @@ async fn a_sub_agents_mode_is_its_parents() {
             identity: None,
             peers: vec![],
             tags: vec![],
-        })
+        }))
         .unwrap();
     ack(&mut n).await.unwrap();
     // Until the parent's turn ends.

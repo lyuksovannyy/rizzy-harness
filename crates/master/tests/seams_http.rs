@@ -15,7 +15,7 @@ use harness_master::auth::{Auth, Claim};
 use harness_master::{Master, PromptOpts, router};
 use harness_memory::SqliteMemory;
 use harness_node::NodeLink;
-use harness_protocol::{MasterToNode, NodeToMaster, PROTOCOL_VERSION};
+use harness_protocol::{MasterToNode, NodeToMaster, PROTOCOL_VERSION, PromptMsg};
 use harness_store::Store;
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
@@ -205,7 +205,7 @@ fn last_prompt(t: &T) -> (harness_core::agent::AgentSpec, String) {
     seen.iter()
         .rev()
         .find_map(|m| match m {
-            MasterToNode::Prompt { agent, context, .. } => Some((
+            MasterToNode::Prompt(PromptMsg { agent, context, .. }) => Some((
                 agent.clone().unwrap(),
                 context.as_ref().map(|c| c.joined()).unwrap_or_default(),
             )),

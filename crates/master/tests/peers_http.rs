@@ -602,7 +602,7 @@ async fn another_workspaces_or_a_removed_agent_is_text() {
 
 use harness_core::event::SessionCreated;
 use harness_node::NodeLink;
-use harness_protocol::{MasterToNode, NodeToMaster, PROTOCOL_VERSION};
+use harness_protocol::{MasterToNode, NodeToMaster, PROTOCOL_VERSION, PromptMsg};
 
 type Seen = Arc<Mutex<Vec<MasterToNode>>>;
 
@@ -772,7 +772,7 @@ impl F {
             .unwrap()
             .iter()
             .filter_map(|m| match m {
-                MasterToNode::Prompt { agent, peers, .. } => Some((
+                MasterToNode::Prompt(PromptMsg { agent, peers, .. }) => Some((
                     agent
                         .as_ref()
                         .map(|a| a.agent_id.clone())
@@ -835,10 +835,10 @@ async fn the_list_goes_in_order_and_the_size_guard_holds_with_four_specs() {
     assert_eq!(f.prompts().len(), before);
     {
         let seen = f.seen.lock().unwrap();
-        let MasterToNode::Prompt { peers, .. } = seen
+        let MasterToNode::Prompt(PromptMsg { peers, .. }) = seen
             .iter()
             .rev()
-            .find(|m| matches!(m, MasterToNode::Prompt { .. }))
+            .find(|m| matches!(m, MasterToNode::Prompt(_)))
             .unwrap()
         else {
             unreachable!()
@@ -993,15 +993,15 @@ async fn every_term_of_the_gate_keeps_a_message_to_its_first_mention() {
         let seen = f.seen.lock().unwrap();
         let sent: Vec<&MasterToNode> = seen[before..]
             .iter()
-            .filter(|m| matches!(m, MasterToNode::Prompt { .. } | MasterToNode::Retry { .. }))
+            .filter(|m| matches!(m, MasterToNode::Prompt(_) | MasterToNode::Retry(_)))
             .collect();
         assert_eq!(sent.len(), 1, "{what}");
         match sent[0] {
-            MasterToNode::Prompt { agent, peers, .. } => {
+            MasterToNode::Prompt(PromptMsg { agent, peers, .. }) => {
                 assert!(peers.is_empty(), "{what}: peers were sent");
                 assert!(agent.is_some(), "{what}");
             }
-            MasterToNode::Retry { .. } => {}
+            MasterToNode::Retry(_) => {}
             _ => unreachable!(),
         }
     }
@@ -1054,7 +1054,7 @@ async fn every_term_of_the_gate_keeps_a_message_to_its_first_mention() {
         seen[before..]
             .iter()
             .find_map(|m| match m {
-                MasterToNode::Prompt { peers, .. } => Some(peers.len()),
+                MasterToNode::Prompt(PromptMsg { peers, .. }) => Some(peers.len()),
                 _ => None,
             })
             .expect("a prompt reached the node")

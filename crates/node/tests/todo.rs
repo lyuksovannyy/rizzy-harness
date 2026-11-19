@@ -13,7 +13,7 @@ use harness_core::todo::{TodoItem, TodoStatus};
 use harness_core::view::SessionView;
 use harness_core::{RawEvent, SessionId};
 use harness_node::{NodeConfig, NodeLink, NodePolicy, NodeRuntime};
-use harness_protocol::{MasterToNode, NodeToMaster};
+use harness_protocol::{MasterToNode, NodeToMaster, PromptMsg};
 use harness_store::{Durability, Store};
 
 fn start_config(dir: &std::path::Path) -> NodeConfig {
@@ -103,7 +103,7 @@ async fn create_in(link: &mut NodeLink, ws: &std::path::Path, mode: ApprovalMode
 
 fn prompt(link: &NodeLink, sid: SessionId, agent: Option<AgentSpec>, text: String) {
     link.to_node
-        .try_send(MasterToNode::Prompt {
+        .try_send(MasterToNode::Prompt(PromptMsg {
             savings: None,
             context: None,
             reply: None,
@@ -120,7 +120,7 @@ fn prompt(link: &NodeLink, sid: SessionId, agent: Option<AgentSpec>, text: Strin
             identity: None,
             peers: vec![],
             tags: vec![],
-        })
+        }))
         .unwrap();
 }
 

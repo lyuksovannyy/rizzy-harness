@@ -15,7 +15,7 @@ use harness_core::{RawEvent, Secret, SessionId};
 use harness_master::auth::{Auth, Claim};
 use harness_master::{Master, router};
 use harness_node::NodeLink;
-use harness_protocol::{CAP_FILES, MasterToNode, NodeToMaster, PROTOCOL_VERSION};
+use harness_protocol::{CAP_FILES, MasterToNode, NodeToMaster, PROTOCOL_VERSION, PromptMsg};
 use harness_store::Store;
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
@@ -49,7 +49,7 @@ impl Fake {
             .unwrap()
             .iter()
             .filter_map(|m| match m {
-                MasterToNode::Prompt { files, .. } => Some(files.clone()),
+                MasterToNode::Prompt(PromptMsg { files, .. }) => Some(files.clone()),
                 _ => None,
             })
             .collect()

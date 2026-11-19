@@ -37,7 +37,7 @@ use harness_link::client::{self, Remote};
 use harness_link::wire::{self, Hello, ServerMsg, ServerStream};
 use harness_link::{MasterCert, NodeKey, Timing, server};
 use harness_node::{NodeConfig, NodePolicy, NodeRuntime};
-use harness_protocol::{MasterToNode, NodeToMaster};
+use harness_protocol::{MasterToNode, NodeToMaster, PromptMsg};
 use harness_store::{Durability, Store};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -215,7 +215,7 @@ impl Master {
             approval_mode: Some(ApprovalMode::Auto),
         })
         .await;
-        self.send(MasterToNode::Prompt {
+        self.send(MasterToNode::Prompt(PromptMsg {
             savings: None,
             context: None,
             reply: None,
@@ -232,7 +232,7 @@ impl Master {
             identity: None,
             peers: vec![],
             tags: vec![],
-        })
+        }))
         .await;
         (sid, cwd)
     }

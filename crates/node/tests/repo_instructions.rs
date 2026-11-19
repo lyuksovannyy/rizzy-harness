@@ -12,7 +12,7 @@ use harness_core::SessionId;
 use harness_core::event::{EventKind, ToolCallRef};
 use harness_core::policy::{ApprovalMode, ToolRisk};
 use harness_node::{NodeConfig, NodeLink, NodePolicy, NodeRuntime};
-use harness_protocol::{MasterToNode, NodeToMaster};
+use harness_protocol::{MasterToNode, NodeToMaster, PromptMsg};
 use harness_store::{Durability, Store};
 use serde_json::{Value, json};
 
@@ -226,7 +226,7 @@ impl Node {
         files: Vec<String>,
     ) {
         let before = self.ended(sid);
-        self.send(MasterToNode::Prompt {
+        self.send(MasterToNode::Prompt(PromptMsg {
             savings: None,
             context: Some(Box::new(harness_core::backend::MasterContext {
                 turn: Some("Person: Ann".into()),
@@ -247,7 +247,7 @@ impl Node {
             identity: None,
             peers: vec![],
             tags: vec![],
-        })
+        }))
         .await;
         let by = std::time::Instant::now() + Duration::from_secs(20);
         while self.ended(sid) == before {

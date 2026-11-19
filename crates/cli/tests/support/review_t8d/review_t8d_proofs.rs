@@ -35,7 +35,7 @@ use harness_agent_native::{
 use harness_core::event::*;
 use harness_core::policy::{ApprovalMode, Decision};
 use harness_core::{RawEvent, SessionId};
-use harness_protocol::{MasterToNode, NodeToMaster, StopBackgroundBy};
+use harness_protocol::{MasterToNode, NodeToMaster, PromptMsg, StopBackgroundBy};
 use harness_tools::background::{Access, ENDED_MAX, Limits, Registry, kept_bound};
 use harness_tools::sandbox::{Confinement, Sandbox, Settings};
 use harness_tools::{Bash, BashOutput, Tool, ToolCtx};
@@ -311,7 +311,7 @@ no_callbacks: false,
 
     fn say(&mut self, sid: SessionId, text: String, agent: Option<harness_core::agent::AgentSpec>) {
         self.n += 1;
-        self.send(MasterToNode::Prompt {
+        self.send(MasterToNode::Prompt(PromptMsg {
             savings: None,
             context: None,
             reply: None,
@@ -328,7 +328,7 @@ no_callbacks: false,
             identity: None,
     peers: vec![],
     tags: vec![],
-        });
+        }));
     }
 
     fn prompt(&mut self, sid: SessionId, calls: Value) {

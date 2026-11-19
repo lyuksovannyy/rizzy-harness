@@ -7,7 +7,7 @@ use harness_core::{RawEvent, Secret, SessionId};
 use harness_master::Master;
 use harness_master::auth::Auth;
 use harness_node::NodeLink;
-use harness_protocol::{MasterToNode, NodeToMaster, PROTOCOL_VERSION, SessionHead};
+use harness_protocol::{MasterToNode, NodeToMaster, PROTOCOL_VERSION, PromptMsg, SessionHead};
 use harness_store::Store;
 use tokio::sync::mpsc;
 
@@ -1322,7 +1322,7 @@ async fn a_prompt_checked_before_a_lowering_is_cancelled_once_acked() {
     });
     let req = loop {
         match tokio::time::timeout(Duration::from_secs(30), c.recv()).await {
-            Ok(Some(MasterToNode::Prompt { req_id, .. })) => break req_id,
+            Ok(Some(MasterToNode::Prompt(PromptMsg { req_id, .. }))) => break req_id,
             Ok(Some(_)) => {}
             other => panic!("no prompt: {other:?}"),
         }

@@ -953,6 +953,164 @@ pub enum NodeToMaster {
     },
 }
 
+/// The body of `session.prompt`. Every field is named by every sender: there is no `Default`,
+/// so a new field is a compile error where the master builds the message.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PromptMsg {
+    pub req_id: String,
+    pub session_id: SessionId,
+    pub text: String,
+    /// The agent that runs this turn (the session's agent, or an
+    /// @mention override). Resolved by the master; the node does not
+    /// store agent definitions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentSpec>,
+    /// The person chose `agent` for this message (an explicit agent or
+    /// an @mention), not the chat's own. A message that would wait for
+    /// a running turn of another agent is refused (X.5, review ST-5).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub agent_named: bool,
+    /// Documents with their extracted text (extracted on the master).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<harness_core::event::Attachment>,
+    /// Parallel answers from these models (chat turns, no tools).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compare: Vec<String>,
+    /// Token-saving methods for this turn (absent = all off).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub savings: Option<harness_core::savings::Savings>,
+    /// The master's context for this message (the person's settings,
+    /// memory, the project's brief and board), placed after the history
+    /// so the cached prefix does not change. The loop records what it
+    /// sent of it in the turn's `context_sent` and sends a standing part
+    /// again only when it changed (X.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<Box<harness_core::backend::MasterContext>>,
+    /// An answer to a choices or form block; `text` is then the user's
+    /// note (may be empty). The node checks it against its own log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply: Option<harness_core::event::FormReply>,
+    /// Images for this message; only to nodes with `CAP_IMAGES`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ChatImage>,
+    /// Paths of the chat's folder the person mentioned with `@path`
+    /// (PLAN.md T63; only to nodes with [`CAP_FILES`]). Names only: the
+    /// node reads each under its own `read` rules and records what it
+    /// found in the message; nothing here is file content.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
+    /// The account that owns the chat (its user id; none for the API
+    /// token's), set by the master from the chat's row in
+    /// `send_command` whoever builds the command: the node starts only
+    /// the repository MCP servers this account approved (X.36, PLAN.md
+    /// T82), and refuses a turn whose `owner` is not
+    /// [`valid_user_id`]. Kept in the node's memory, never logged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// The chat owner's login, display name and the e-mail they set for
+    /// commits (T88), set by the master beside `owner` and only for the
+    /// node that runs the chat: the agent's `git commit` carries it. The
+    /// node checks every field again and falls back to a no-reply
+    /// address built from the login; none for a chat nobody owns. Kept
+    /// in the node's memory; never logged, never in an event (its
+    /// `Debug` hides the address).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<harness_core::identity::CommitIdentity>,
+    /// The agents this message called after the first, in the order
+    /// they answer (X.37; only to nodes with [`CAP_PEERS`], at most
+    /// [`MAX_PEERS`]): each is resolved by the master as `agent` is,
+    /// with no connector tool, memory tool or master context (their
+    /// turns are no send of the master's). The node keeps them in
+    /// memory only and starts a turn for each, one after another,
+    /// after the turn before it ended; `user_message.triggers` records
+    /// who was called. The first agent is `agent` and answers this
+    /// message's own turn.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peers: Vec<AgentSpec>,
+    /// The agents that run only as sub-agents this message mentions
+    /// (tags, X.37; only to nodes with [`CAP_PEERS`], at most
+    /// `harness_core::mention::MAX_RESOLVED`): the node records them in
+    /// `user_message.tags` and names the ones each answering agent has
+    /// among its own delegates in that turn's opening. Never a call.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+}
+
+/// The body of `session.callback`. Every field is named by every sender: there is no `Default`,
+/// so a new field is a compile error where the master builds the message.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CallbackMsg {
+    pub req_id: String,
+    pub session_id: SessionId,
+    pub bg_ids: Vec<String>,
+    /// The chat's agent, resolved by the master as for a prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub savings: Option<harness_core::savings::Savings>,
+    /// The standing parts of the master's context for the chat's agent
+    /// and owner (`MasterContext::unattended`, X.1 review M1): the
+    /// turn's request extends the last one when they did not change.
+    /// Absent: the turn reads no memory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<Box<harness_core::backend::MasterContext>>,
+    /// The account that owns the chat (its user id; none for the API
+    /// token's), set by the master from the chat's row in
+    /// `send_command` whoever builds the command: the node starts only
+    /// the repository MCP servers this account approved (X.36, PLAN.md
+    /// T82), and refuses a turn whose `owner` is not
+    /// [`valid_user_id`]. Kept in the node's memory, never logged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// The chat owner's login, display name and the e-mail they set for
+    /// commits (T88), set by the master beside `owner` and only for the
+    /// node that runs the chat: the agent's `git commit` carries it. The
+    /// node checks every field again and falls back to a no-reply
+    /// address built from the login; none for a chat nobody owns. Kept
+    /// in the node's memory; never logged, never in an event (its
+    /// `Debug` hides the address).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<harness_core::identity::CommitIdentity>,
+}
+
+/// The body of `session.retry`. Every field is named by every sender: there is no `Default`,
+/// so a new field is a compile error where the master builds the message.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RetryMsg {
+    pub req_id: String,
+    pub session_id: SessionId,
+    pub turn_id: String,
+    /// The chat's agent, resolved by the master as for a prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub savings: Option<harness_core::savings::Savings>,
+    /// The master's context for the turn, as for a prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<Box<harness_core::backend::MasterContext>>,
+    /// The retried message named its agent (a leading @mention), as
+    /// `session.prompt`'s: the retry is then no switch of the chat's.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub agent_named: bool,
+    /// The account that owns the chat (its user id; none for the API
+    /// token's), set by the master from the chat's row in
+    /// `send_command` whoever builds the command: the node starts only
+    /// the repository MCP servers this account approved (X.36, PLAN.md
+    /// T82), and refuses a turn whose `owner` is not
+    /// [`valid_user_id`]. Kept in the node's memory, never logged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// The chat owner's login, display name and the e-mail they set for
+    /// commits (T88), set by the master beside `owner` and only for the
+    /// node that runs the chat: the agent's `git commit` carries it. The
+    /// node checks every field again and falls back to a no-reply
+    /// address built from the login; none for a chat nobody owns. Kept
+    /// in the node's memory; never logged, never in an event (its
+    /// `Debug` hides the address).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<harness_core::identity::CommitIdentity>,
+}
+
 // A command is built, sent once and dropped; none is kept in bulk, so the
 // size of its largest variant (`session.prompt`, with its spec and, since
 // X.36, its owner) costs nothing worth boxing every literal for.
@@ -995,85 +1153,7 @@ pub enum MasterToNode {
         exec_mode: Option<harness_core::policy::ExecMode>,
     },
     #[serde(rename = "session.prompt")]
-    Prompt {
-        req_id: String,
-        session_id: SessionId,
-        text: String,
-        /// The agent that runs this turn (the session's agent, or an
-        /// @mention override). Resolved by the master; the node does not
-        /// store agent definitions.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        agent: Option<AgentSpec>,
-        /// The person chose `agent` for this message (an explicit agent or
-        /// an @mention), not the chat's own. A message that would wait for
-        /// a running turn of another agent is refused (X.5, review ST-5).
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        agent_named: bool,
-        /// Documents with their extracted text (extracted on the master).
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        attachments: Vec<harness_core::event::Attachment>,
-        /// Parallel answers from these models (chat turns, no tools).
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        compare: Vec<String>,
-        /// Token-saving methods for this turn (absent = all off).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        savings: Option<harness_core::savings::Savings>,
-        /// The master's context for this message (the person's settings,
-        /// memory, the project's brief and board), placed after the history
-        /// so the cached prefix does not change. The loop records what it
-        /// sent of it in the turn's `context_sent` and sends a standing part
-        /// again only when it changed (X.1).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        context: Option<Box<harness_core::backend::MasterContext>>,
-        /// An answer to a choices or form block; `text` is then the user's
-        /// note (may be empty). The node checks it against its own log.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        reply: Option<harness_core::event::FormReply>,
-        /// Images for this message; only to nodes with `CAP_IMAGES`.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        images: Vec<ChatImage>,
-        /// Paths of the chat's folder the person mentioned with `@path`
-        /// (PLAN.md T63; only to nodes with [`CAP_FILES`]). Names only: the
-        /// node reads each under its own `read` rules and records what it
-        /// found in the message; nothing here is file content.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        files: Vec<String>,
-        /// The account that owns the chat (its user id; none for the API
-        /// token's), set by the master from the chat's row in
-        /// `send_command` whoever builds the command: the node starts only
-        /// the repository MCP servers this account approved (X.36, PLAN.md
-        /// T82), and refuses a turn whose `owner` is not
-        /// [`valid_user_id`]. Kept in the node's memory, never logged.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        owner: Option<String>,
-        /// The chat owner's login, display name and the e-mail they set for
-        /// commits (T88), set by the master beside `owner` and only for the
-        /// node that runs the chat: the agent's `git commit` carries it. The
-        /// node checks every field again and falls back to a no-reply
-        /// address built from the login; none for a chat nobody owns. Kept
-        /// in the node's memory; never logged, never in an event (its
-        /// `Debug` hides the address).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        identity: Option<harness_core::identity::CommitIdentity>,
-        /// The agents this message called after the first, in the order
-        /// they answer (X.37; only to nodes with [`CAP_PEERS`], at most
-        /// [`MAX_PEERS`]): each is resolved by the master as `agent` is,
-        /// with no connector tool, memory tool or master context (their
-        /// turns are no send of the master's). The node keeps them in
-        /// memory only and starts a turn for each, one after another,
-        /// after the turn before it ended; `user_message.triggers` records
-        /// who was called. The first agent is `agent` and answers this
-        /// message's own turn.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        peers: Vec<AgentSpec>,
-        /// The agents that run only as sub-agents this message mentions
-        /// (tags, X.37; only to nodes with [`CAP_PEERS`], at most
-        /// `harness_core::mention::MAX_RESOLVED`): the node records them in
-        /// `user_message.tags` and names the ones each answering agent has
-        /// among its own delegates in that turn's opening. Never a call.
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        tags: Vec<String>,
-    },
+    Prompt(PromptMsg),
     /// Resume an idle chat because background commands ended (a callback
     /// turn, T.8d step 3; only to nodes with `CAP_CALLBACK`). There is no
     /// person's text, attachment, image, reply or context: the node opens
@@ -1082,39 +1162,7 @@ pub enum MasterToNode {
     /// an undelivered end in its log with no turn after it, and its own
     /// `[limits]` allow it (`callback_turns`, `callback_max_steps`).
     #[serde(rename = "session.callback")]
-    Callback {
-        req_id: String,
-        session_id: SessionId,
-        bg_ids: Vec<String>,
-        /// The chat's agent, resolved by the master as for a prompt.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        agent: Option<AgentSpec>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        savings: Option<harness_core::savings::Savings>,
-        /// The standing parts of the master's context for the chat's agent
-        /// and owner (`MasterContext::unattended`, X.1 review M1): the
-        /// turn's request extends the last one when they did not change.
-        /// Absent: the turn reads no memory.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        context: Option<Box<harness_core::backend::MasterContext>>,
-        /// The account that owns the chat (its user id; none for the API
-        /// token's), set by the master from the chat's row in
-        /// `send_command` whoever builds the command: the node starts only
-        /// the repository MCP servers this account approved (X.36, PLAN.md
-        /// T82), and refuses a turn whose `owner` is not
-        /// [`valid_user_id`]. Kept in the node's memory, never logged.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        owner: Option<String>,
-        /// The chat owner's login, display name and the e-mail they set for
-        /// commits (T88), set by the master beside `owner` and only for the
-        /// node that runs the chat: the agent's `git commit` carries it. The
-        /// node checks every field again and falls back to a no-reply
-        /// address built from the login; none for a chat nobody owns. Kept
-        /// in the node's memory; never logged, never in an event (its
-        /// `Debug` hides the address).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        identity: Option<harness_core::identity::CommitIdentity>,
-    },
+    Callback(CallbackMsg),
     /// Run the chat's failed last turn again (a person's Retry, X.21; only
     /// to nodes with [`CAP_RETRY`]). Sent only for the chat's owner. No
     /// text, attachment, image or file: the message is the one the failed
@@ -1123,40 +1171,7 @@ pub enum MasterToNode {
     /// `interrupted` or `stopped` with nothing after it, and no turn or
     /// `/compact` runs ([`RETRY_REFUSED`], `TURN_RUNNING`, [`COMPACTING`]).
     #[serde(rename = "session.retry")]
-    Retry {
-        req_id: String,
-        session_id: SessionId,
-        turn_id: String,
-        /// The chat's agent, resolved by the master as for a prompt.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        agent: Option<AgentSpec>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        savings: Option<harness_core::savings::Savings>,
-        /// The master's context for the turn, as for a prompt.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        context: Option<Box<harness_core::backend::MasterContext>>,
-        /// The retried message named its agent (a leading @mention), as
-        /// `session.prompt`'s: the retry is then no switch of the chat's.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        agent_named: bool,
-        /// The account that owns the chat (its user id; none for the API
-        /// token's), set by the master from the chat's row in
-        /// `send_command` whoever builds the command: the node starts only
-        /// the repository MCP servers this account approved (X.36, PLAN.md
-        /// T82), and refuses a turn whose `owner` is not
-        /// [`valid_user_id`]. Kept in the node's memory, never logged.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        owner: Option<String>,
-        /// The chat owner's login, display name and the e-mail they set for
-        /// commits (T88), set by the master beside `owner` and only for the
-        /// node that runs the chat: the agent's `git commit` carries it. The
-        /// node checks every field again and falls back to a no-reply
-        /// address built from the login; none for a chat nobody owns. Kept
-        /// in the node's memory; never logged, never in an event (its
-        /// `Debug` hides the address).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        identity: Option<harness_core::identity::CommitIdentity>,
-    },
+    Retry(RetryMsg),
     /// Write the chat's hand-off note now if one is due (X.16,
     /// docs/handoff-notes.md; only to nodes with [`CAP_HANDOFF`]). A
     /// request only: the node writes it only for a chat of its own that
@@ -1459,9 +1474,9 @@ impl MasterToNode {
     pub fn req_id(&self) -> Option<&str> {
         match self {
             MasterToNode::Create { req_id, .. }
-            | MasterToNode::Prompt { req_id, .. }
-            | MasterToNode::Callback { req_id, .. }
-            | MasterToNode::Retry { req_id, .. }
+            | MasterToNode::Prompt(PromptMsg { req_id, .. })
+            | MasterToNode::Callback(CallbackMsg { req_id, .. })
+            | MasterToNode::Retry(RetryMsg { req_id, .. })
             | MasterToNode::Handoff { req_id, .. }
             | MasterToNode::Compact { req_id, .. }
             | MasterToNode::SetAgent { req_id, .. }
@@ -2089,7 +2104,7 @@ mod tests {
             height: 1,
             data: "aGk=".into(),
         };
-        let p = MasterToNode::Prompt {
+        let p = MasterToNode::Prompt(PromptMsg {
             req_id: "r".into(),
             session_id: sid,
             text: "look".into(),
@@ -2106,7 +2121,7 @@ mod tests {
             identity: None,
             peers: vec![],
             tags: vec![],
-        };
+        });
         let v = serde_json::to_value(&p).unwrap();
         assert_eq!(
             v["images"],
@@ -2121,23 +2136,25 @@ mod tests {
     #[test]
     fn prompt_reply_roundtrips_and_is_omitted_when_absent() {
         let sid: SessionId = "0193f2a0-0000-7000-8000-000000000001".parse().unwrap();
-        let prompt = |reply| MasterToNode::Prompt {
-            req_id: "r".into(),
-            session_id: sid,
-            text: String::new(),
-            agent: None,
-            attachments: vec![],
-            compare: vec![],
-            savings: None,
-            context: None,
-            reply,
-            images: vec![],
-            agent_named: false,
-            files: vec![],
-            owner: None,
-            identity: None,
-            peers: vec![],
-            tags: vec![],
+        let prompt = |reply| {
+            MasterToNode::Prompt(PromptMsg {
+                req_id: "r".into(),
+                session_id: sid,
+                text: String::new(),
+                agent: None,
+                attachments: vec![],
+                compare: vec![],
+                savings: None,
+                context: None,
+                reply,
+                images: vec![],
+                agent_named: false,
+                files: vec![],
+                owner: None,
+                identity: None,
+                peers: vec![],
+                tags: vec![],
+            })
         };
         let v = serde_json::to_value(prompt(None)).unwrap();
         assert!(v.get("reply").is_none(), "{v}");
@@ -2163,7 +2180,7 @@ mod tests {
         // A busy chat's refusal is one that finds nothing to resume now.
         assert!(CALLBACK_BUSY.starts_with(CALLBACK_NOTHING));
         let sid: SessionId = "0193f2a0-0000-7000-8000-000000000001".parse().unwrap();
-        let c = MasterToNode::Callback {
+        let c = MasterToNode::Callback(CallbackMsg {
             req_id: "r".into(),
             session_id: sid,
             bg_ids: vec!["bg-1".into(), "bg-2".into()],
@@ -2172,7 +2189,7 @@ mod tests {
             context: None,
             owner: None,
             identity: None,
-        };
+        });
         let v = serde_json::to_value(&c).unwrap();
         assert_eq!(
             v,
@@ -2185,7 +2202,7 @@ mod tests {
         let extra: MasterToNode = serde_json::from_value(json!({"type": "session.callback",
             "req_id": "r", "session_id": sid, "bg_ids": ["bg-1"], "text": "do it"}))
         .unwrap();
-        assert!(matches!(extra, MasterToNode::Callback { .. }));
+        assert!(matches!(extra, MasterToNode::Callback(_)));
         let create = |no_callbacks| MasterToNode::Create {
             exec_mode: None,
             req_id: "r".into(),

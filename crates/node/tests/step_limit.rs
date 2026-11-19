@@ -14,7 +14,7 @@ use harness_core::event::{EventKind, Profile, StepLimitChanged, TurnEndReason};
 use harness_core::policy::ApprovalMode;
 use harness_core::view::SessionView;
 use harness_node::{NodeConfig, NodeLink, NodePolicy, NodeRuntime};
-use harness_protocol::{MasterToNode, NodeToMaster};
+use harness_protocol::{MasterToNode, NodeToMaster, PromptMsg};
 use harness_store::{Durability, Store};
 use serde_json::{Value, json};
 
@@ -141,7 +141,7 @@ impl N {
     }
 
     fn prompt(&self, sid: SessionId, text: &str) {
-        self.send(MasterToNode::Prompt {
+        self.send(MasterToNode::Prompt(PromptMsg {
             req_id: format!("p-{sid}-{}", harness_core::new_id()),
             session_id: sid,
             text: text.into(),
@@ -158,7 +158,7 @@ impl N {
             identity: None,
             peers: vec![],
             tags: vec![],
-        });
+        }));
     }
 
     /// Run one turn: the tool calls that finished ok, and how it ended.

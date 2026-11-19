@@ -19,7 +19,7 @@ use harness_core::agent::{AgentSpec, ToolSelection};
 use harness_core::event::{EventKind, Profile, TurnEndReason};
 use harness_core::policy::ApprovalMode;
 use harness_node::{NodeConfig, NodeLink, NodePolicy, NodeRuntime};
-use harness_protocol::{MasterToNode, NodeToMaster};
+use harness_protocol::{MasterToNode, NodeToMaster, PromptMsg, RetryMsg};
 use harness_store::{Durability, Store};
 use serde_json::Value;
 
@@ -226,7 +226,7 @@ impl N {
 
     fn prompt(&mut self, sid: SessionId, a: &AgentSpec, named: bool, text: &str) {
         let req_id = self.req();
-        self.send(MasterToNode::Prompt {
+        self.send(MasterToNode::Prompt(PromptMsg {
             req_id,
             session_id: sid,
             text: text.into(),
@@ -243,7 +243,7 @@ impl N {
             identity: None,
             peers: vec![],
             tags: vec![],
-        });
+        }));
     }
 
     /// One turn under `a`, to its end.
@@ -461,7 +461,7 @@ async fn retry_after_a_switch_runs_the_new_agent_and_notes_it_once() {
     assert_eq!(n.until_end(sid).await, TurnEndReason::Error);
     n.set_agent(sid, &b).await.unwrap();
     let req_id = n.req();
-    n.send(MasterToNode::Retry {
+    n.send(MasterToNode::Retry(RetryMsg {
         req_id,
         session_id: sid,
         turn_id: failed,
@@ -471,7 +471,7 @@ async fn retry_after_a_switch_runs_the_new_agent_and_notes_it_once() {
         agent_named: false,
         owner: None,
         identity: None,
-    });
+    }));
     n.until_end(sid).await;
     let switches = n.switches(sid);
     assert_eq!(switches.len(), 1, "{switches:?}");
@@ -536,7 +536,7 @@ async fn a_retry_of_a_mention_turn_writes_no_switch() {
     let failed = n.until_started(sid).await;
     assert_eq!(n.until_end(sid).await, TurnEndReason::Error);
     let req_id = n.req();
-    n.send(MasterToNode::Retry {
+    n.send(MasterToNode::Retry(RetryMsg {
         req_id,
         session_id: sid,
         turn_id: failed,
@@ -546,7 +546,7 @@ async fn a_retry_of_a_mention_turn_writes_no_switch() {
         agent_named: true,
         owner: None,
         identity: None,
-    });
+    }));
     n.until_end(sid).await;
     n.turn(sid, &a, false, "back to my chat").await;
     let switches = n.switches(sid);

@@ -15,7 +15,7 @@ use harness_master::auth::{Auth, Claim};
 use harness_master::{Master, PromptOpts, router};
 use harness_memory::SqliteMemory;
 use harness_node::NodeLink;
-use harness_protocol::{MasterToNode, NodeToMaster, PROTOCOL_VERSION};
+use harness_protocol::{MasterToNode, NodeToMaster, PROTOCOL_VERSION, PromptMsg};
 use harness_store::Store;
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
@@ -338,9 +338,9 @@ async fn start_turn(t: &T, sid: SessionId, turn: &str) {
         .iter()
         .rev()
         .find_map(|m| match m {
-            MasterToNode::Prompt {
+            MasterToNode::Prompt(PromptMsg {
                 session_id, agent, ..
-            } if *session_id == sid => agent.as_ref().map(|a| a.agent_ref()),
+            }) if *session_id == sid => agent.as_ref().map(|a| a.agent_ref()),
             _ => None,
         })
         .expect("no prompt for the session");
@@ -474,7 +474,7 @@ async fn untrusted_turns_temporary_chats_and_agents_without_the_switch() {
             .iter()
             .rev()
             .find_map(|m| match m {
-                MasterToNode::Prompt { agent, context, .. } => Some((
+                MasterToNode::Prompt(PromptMsg { agent, context, .. }) => Some((
                     agent.clone().unwrap(),
                     context.as_ref().map(|c| c.joined()).unwrap_or_default(),
                 )),

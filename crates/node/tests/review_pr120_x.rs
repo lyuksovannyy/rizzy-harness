@@ -13,7 +13,7 @@ use harness_core::SessionId;
 use harness_core::event::{EventKind, Profile};
 use harness_core::policy::ApprovalMode;
 use harness_node::{NodeConfig, NodeLink, NodePolicy, NodeRuntime};
-use harness_protocol::{MasterToNode, NodeToMaster};
+use harness_protocol::{MasterToNode, NodeToMaster, PromptMsg};
 use harness_store::{Durability, Store};
 
 const SECRET: &str = "sk-node-secret-1";
@@ -159,7 +159,7 @@ impl Node {
 
     async fn turn(&mut self, sid: SessionId, text: &str, files: &[&str]) {
         let before = self.ended(sid);
-        self.send(MasterToNode::Prompt {
+        self.send(MasterToNode::Prompt(PromptMsg {
             savings: None,
             context: None,
             reply: None,
@@ -176,7 +176,7 @@ impl Node {
             identity: None,
             peers: vec![],
             tags: vec![],
-        })
+        }))
         .await
         .unwrap();
         let by = std::time::Instant::now() + Duration::from_secs(20);

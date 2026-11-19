@@ -25,7 +25,7 @@ use harness_master::config::{Config, ProviderConfig};
 use harness_master::providers::ProviderRuntime;
 use harness_master::{Master, router};
 use harness_node::{NodeConfig, NodeLink, NodePolicy, NodeRuntime};
-use harness_protocol::{MasterToNode, NodeToMaster, PROTOCOL_VERSION};
+use harness_protocol::{MasterToNode, NodeToMaster, PROTOCOL_VERSION, PromptMsg};
 use harness_store::{Durability, Store};
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
@@ -570,13 +570,13 @@ async fn a_node_without_the_capability_gets_no_images() {
     let seen = seen.lock().unwrap();
     let prompts: Vec<&MasterToNode> = seen
         .iter()
-        .filter(|m| matches!(m, MasterToNode::Prompt { .. }))
+        .filter(|m| matches!(m, MasterToNode::Prompt(_)))
         .collect();
     assert_eq!(prompts.len(), 1);
     assert!(
-        prompts
-            .iter()
-            .all(|m| matches!(m, MasterToNode::Prompt { images, .. } if images.is_empty()))
+        prompts.iter().all(
+            |m| matches!(m, MasterToNode::Prompt(PromptMsg { images, .. }) if images.is_empty())
+        )
     );
 }
 

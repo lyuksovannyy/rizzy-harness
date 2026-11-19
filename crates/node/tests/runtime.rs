@@ -7,7 +7,7 @@ use harness_core::policy::Decision;
 use harness_core::view::{Item, SessionView};
 use harness_core::{RawEvent, SessionId};
 use harness_node::{NodeConfig, NodeLink, NodePolicy, NodeRuntime};
-use harness_protocol::{MasterToNode, NodeToMaster};
+use harness_protocol::{MasterToNode, NodeToMaster, PromptMsg};
 use harness_store::{Durability, Store};
 
 struct Harness {
@@ -202,7 +202,7 @@ async fn approval_roundtrip_and_auto_request_is_clamped() {
     };
     assert_eq!(c.approval_mode, harness_core::policy::ApprovalMode::Ask);
 
-    h.send(MasterToNode::Prompt {
+    h.send(MasterToNode::Prompt(PromptMsg {
         savings: None,
         context: None,
         reply: None,
@@ -219,7 +219,7 @@ async fn approval_roundtrip_and_auto_request_is_clamped() {
         identity: None,
         peers: vec![],
         tags: vec![],
-    });
+    }));
     let EventKind::ApprovalRequested(a) = h
         .until(|k| matches!(k, EventKind::ApprovalRequested(_)))
         .await
@@ -251,7 +251,7 @@ async fn approval_roundtrip_and_auto_request_is_clamped() {
 async fn cancel_while_waiting_for_approval_and_while_running() {
     let mut h = Harness::new(default_policy).await;
     let sid = h.create().await;
-    h.send(MasterToNode::Prompt {
+    h.send(MasterToNode::Prompt(PromptMsg {
         savings: None,
         context: None,
         reply: None,
@@ -268,7 +268,7 @@ async fn cancel_while_waiting_for_approval_and_while_running() {
         identity: None,
         peers: vec![],
         tags: vec![],
-    });
+    }));
     h.until(|k| matches!(k, EventKind::ApprovalRequested(_)))
         .await;
     h.send(MasterToNode::Cancel {
@@ -289,7 +289,7 @@ async fn cancel_while_waiting_for_approval_and_while_running() {
 
     // Now approve a long-running command and cancel it while it runs.
     let pidfile = h.ws.join("pid");
-    h.send(MasterToNode::Prompt {
+    h.send(MasterToNode::Prompt(PromptMsg {
         savings: None,
         context: None,
         reply: None,
@@ -306,7 +306,7 @@ async fn cancel_while_waiting_for_approval_and_while_running() {
         identity: None,
         peers: vec![],
         tags: vec![],
-    });
+    }));
     let EventKind::ApprovalRequested(a) = h
         .until(|k| matches!(k, EventKind::ApprovalRequested(_)))
         .await
@@ -359,7 +359,7 @@ async fn cancel_right_after_prompt_stops_that_turn() {
     let mut h = Harness::new(default_policy).await;
     let sid = h.create().await;
     for round in 0..5 {
-        h.send(MasterToNode::Prompt {
+        h.send(MasterToNode::Prompt(PromptMsg {
             savings: None,
             context: None,
             reply: None,
@@ -376,7 +376,7 @@ async fn cancel_right_after_prompt_stops_that_turn() {
             identity: None,
             peers: vec![],
             tags: vec![],
-        });
+        }));
         h.send(MasterToNode::Cancel {
             req_id: format!("x{round}"),
             session_id: sid,
@@ -399,7 +399,7 @@ async fn policy_denied_tool_never_runs() {
     })
     .await;
     let sid = h.create().await;
-    h.send(MasterToNode::Prompt {
+    h.send(MasterToNode::Prompt(PromptMsg {
         savings: None,
         context: None,
         reply: None,
@@ -416,7 +416,7 @@ async fn policy_denied_tool_never_runs() {
         identity: None,
         peers: vec![],
         tags: vec![],
-    });
+    }));
     let EventKind::ApprovalResolved(r) = h
         .until(|k| matches!(k, EventKind::ApprovalResolved(_)))
         .await
@@ -619,7 +619,7 @@ async fn a_loaded_session_over_the_data_dir_gets_no_turn() {
     .unwrap();
     let mut link = node.attach().await;
     link.to_node
-        .try_send(MasterToNode::Prompt {
+        .try_send(MasterToNode::Prompt(PromptMsg {
             savings: None,
             context: None,
             reply: None,
@@ -636,7 +636,7 @@ async fn a_loaded_session_over_the_data_dir_gets_no_turn() {
             identity: None,
             peers: vec![],
             tags: vec![],
-        })
+        }))
         .unwrap();
     loop {
         match link.from_node.recv().await.unwrap() {
@@ -658,7 +658,7 @@ async fn a_loaded_session_over_the_data_dir_gets_no_turn() {
 async fn resume_replays_in_batches() {
     let mut h = Harness::new(default_policy).await;
     let sid = h.create().await;
-    h.send(MasterToNode::Prompt {
+    h.send(MasterToNode::Prompt(PromptMsg {
         savings: None,
         context: None,
         reply: None,
@@ -675,7 +675,7 @@ async fn resume_replays_in_batches() {
         identity: None,
         peers: vec![],
         tags: vec![],
-    });
+    }));
     h.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
     h.send(MasterToNode::Resume {
         session_id: sid,
@@ -711,7 +711,7 @@ async fn resume_batches_are_limited_by_bytes() {
         .chain([budget + budget / 2])
         .collect::<Vec<_>>();
     for (i, n) in sizes.iter().enumerate() {
-        h.send(MasterToNode::Prompt {
+        h.send(MasterToNode::Prompt(PromptMsg {
             savings: None,
             context: None,
             reply: None,
@@ -728,7 +728,7 @@ async fn resume_batches_are_limited_by_bytes() {
             identity: None,
             peers: vec![],
             tags: vec![],
-        });
+        }));
         h.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
     }
     let head = h.seen.last().unwrap().seq;
@@ -851,7 +851,7 @@ async fn recovers_interrupted_turn_on_start() {
     // And the session accepts a new prompt afterwards.
     let mut link = node.attach().await;
     link.to_node
-        .try_send(MasterToNode::Prompt {
+        .try_send(MasterToNode::Prompt(PromptMsg {
             savings: None,
             context: None,
             reply: None,
@@ -868,7 +868,7 @@ async fn recovers_interrupted_turn_on_start() {
             identity: None,
             peers: vec![],
             tags: vec![],
-        })
+        }))
         .unwrap();
     loop {
         if let Some(NodeToMaster::Event { event }) = link.from_node.recv().await
@@ -920,7 +920,7 @@ async fn sub_task_sessions_ask_no_questions() {
     let node = NodeRuntime::start(config(store, policy)).await.unwrap();
     let mut link = node.attach().await;
     link.to_node
-        .try_send(MasterToNode::Prompt {
+        .try_send(MasterToNode::Prompt(PromptMsg {
             savings: None,
             context: None,
             reply: None,
@@ -937,7 +937,7 @@ async fn sub_task_sessions_ask_no_questions() {
             identity: None,
             peers: vec![],
             tags: vec![],
-        })
+        }))
         .unwrap();
     let blocks = loop {
         if let Some(NodeToMaster::Event { event }) = link.from_node.recv().await
@@ -989,7 +989,7 @@ async fn git_checkpoints_and_undo() {
     git(&["add", "."]);
     git(&["commit", "-qm", "init"]);
     let sid = h.create().await;
-    h.send(MasterToNode::Prompt {
+    h.send(MasterToNode::Prompt(PromptMsg {
         savings: None,
         context: None,
         reply: None,
@@ -1006,7 +1006,7 @@ async fn git_checkpoints_and_undo() {
         identity: None,
         peers: vec![],
         tags: vec![],
-    });
+    }));
     let EventKind::Checkpoint(after) = h
         .until(|k| matches!(k, EventKind::Checkpoint(c) if c.phase == CheckpointPhase::After))
         .await
@@ -1109,7 +1109,7 @@ async fn hostile_repo_config_does_not_run_on_checkpoint_or_undo() {
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
     let sid = h.create().await;
-    h.send(MasterToNode::Prompt {
+    h.send(MasterToNode::Prompt(PromptMsg {
         savings: None,
         context: None,
         reply: None,
@@ -1126,7 +1126,7 @@ async fn hostile_repo_config_does_not_run_on_checkpoint_or_undo() {
         identity: None,
         peers: vec![],
         tags: vec![],
-    });
+    }));
     let EventKind::Checkpoint(after) = h
         .until(|k| matches!(k, EventKind::Checkpoint(c) if c.phase == CheckpointPhase::After))
         .await
@@ -1170,7 +1170,7 @@ async fn shadow_checkpoints_keep_latest_and_rewind() {
     let sid = h.create().await;
     let mut turns = vec![];
     for v in 1..=3 {
-        h.send(MasterToNode::Prompt {
+        h.send(MasterToNode::Prompt(PromptMsg {
             savings: None,
             context: None,
             reply: None,
@@ -1187,7 +1187,7 @@ async fn shadow_checkpoints_keep_latest_and_rewind() {
             identity: None,
             peers: vec![],
             tags: vec![],
-        });
+        }));
         let EventKind::Checkpoint(after) = h
             .until(|k| matches!(k, EventKind::Checkpoint(c) if c.phase == CheckpointPhase::After))
             .await
@@ -1279,7 +1279,7 @@ async fn a_tool_does_not_run_when_its_event_cannot_be_written() {
     .unwrap();
     let marker = h.ws.join("marker");
     let prompt = |h: &Harness, id: &str, text: String| {
-        h.send(MasterToNode::Prompt {
+        h.send(MasterToNode::Prompt(PromptMsg {
             savings: None,
             context: None,
             reply: None,
@@ -1296,7 +1296,7 @@ async fn a_tool_does_not_run_when_its_event_cannot_be_written() {
             identity: None,
             peers: vec![],
             tags: vec![],
-        })
+        }))
     };
     // The ack for `id`, collecting events on the way.
     async fn ack(h: &mut Harness, id: &str) -> Result<(), String> {
@@ -1333,7 +1333,7 @@ async fn a_tool_does_not_run_when_its_event_cannot_be_written() {
     let mut refused = Ok(());
     for i in 0..100 {
         let id = format!("q{i}");
-        h.send(MasterToNode::Prompt {
+        h.send(MasterToNode::Prompt(PromptMsg {
             savings: None,
             context: None,
             reply: Some(FormReply {
@@ -1354,7 +1354,7 @@ async fn a_tool_does_not_run_when_its_event_cannot_be_written() {
             identity: None,
             peers: vec![],
             tags: vec![],
-        });
+        }));
         match ack(&mut h, &id).await {
             Err(e) if e.contains("already running") => {
                 tokio::time::sleep(Duration::from_millis(50)).await
@@ -1418,7 +1418,7 @@ async fn an_approval_whose_answer_was_not_written_is_closed_with_the_turn() {
          BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END;",
     )
     .unwrap();
-    h.send(MasterToNode::Prompt {
+    h.send(MasterToNode::Prompt(PromptMsg {
         savings: None,
         context: None,
         reply: None,
@@ -1435,7 +1435,7 @@ async fn an_approval_whose_answer_was_not_written_is_closed_with_the_turn() {
         identity: None,
         peers: vec![],
         tags: vec![],
-    });
+    }));
     let EventKind::ApprovalRequested(a) = h
         .until(|k| matches!(k, EventKind::ApprovalRequested(_)))
         .await
@@ -1556,7 +1556,7 @@ async fn a_sub_agent_whose_log_failed_changes_nothing_in_the_folder() {
          BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END;"
     ))
     .unwrap();
-    h.send(MasterToNode::Prompt {
+    h.send(MasterToNode::Prompt(PromptMsg {
         savings: None,
         context: None,
         reply: None,
@@ -1573,7 +1573,7 @@ async fn a_sub_agent_whose_log_failed_changes_nothing_in_the_folder() {
         identity: None,
         peers: vec![],
         tags: vec![],
-    });
+    }));
     let EventKind::ToolCallFinished(result) = h
         .until(|k| matches!(k, EventKind::ToolCallFinished(f) if f.output.contains("@dev")))
         .await
@@ -1660,7 +1660,7 @@ async fn delegate_as_lead(
     delegates: Vec<harness_core::agent::AgentSpec>,
     text: &str,
 ) -> Vec<String> {
-    h.send(MasterToNode::Prompt {
+    h.send(MasterToNode::Prompt(PromptMsg {
         savings: None,
         context: None,
         reply: None,
@@ -1677,7 +1677,7 @@ async fn delegate_as_lead(
         identity: None,
         peers: vec![],
         tags: vec![],
-    });
+    }));
     loop {
         h.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
         if h.seen.last().is_some_and(|e| e.session_id == sid) {
@@ -2036,7 +2036,7 @@ async fn a_failed_append_kills_the_running_command() {
     )
     .unwrap();
     let pidfile = h.ws.join("pid");
-    h.send(MasterToNode::Prompt {
+    h.send(MasterToNode::Prompt(PromptMsg {
         savings: None,
         context: None,
         reply: None,
@@ -2058,7 +2058,7 @@ async fn a_failed_append_kills_the_running_command() {
         identity: None,
         peers: vec![],
         tags: vec![],
-    });
+    }));
     let EventKind::TurnEnded(t) = h.until(|k| matches!(k, EventKind::TurnEnded(_))).await else {
         unreachable!()
     };
@@ -2095,7 +2095,7 @@ async fn an_unclosed_turn_is_closed_once_by_a_restart() {
          BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END;",
     )
     .unwrap();
-    h.send(MasterToNode::Prompt {
+    h.send(MasterToNode::Prompt(PromptMsg {
         savings: None,
         context: None,
         reply: None,
@@ -2112,7 +2112,7 @@ async fn an_unclosed_turn_is_closed_once_by_a_restart() {
         identity: None,
         peers: vec![],
         tags: vec![],
-    });
+    }));
     h.until(|k| matches!(k, EventKind::AssistantMessage(_)))
         .await;
     // Let the turn give up on its end.
@@ -2197,7 +2197,7 @@ async fn ack_time_on_a_long_session() {
         let _hello = link.from_node.recv().await;
         let t = std::time::Instant::now();
         link.to_node
-            .try_send(MasterToNode::Prompt {
+            .try_send(MasterToNode::Prompt(PromptMsg {
                 savings: None,
                 context: None,
                 reply: None,
@@ -2214,7 +2214,7 @@ async fn ack_time_on_a_long_session() {
                 identity: None,
                 peers: vec![],
                 tags: vec![],
-            })
+            }))
             .unwrap();
         loop {
             if let Some(NodeToMaster::Ack { req_id, ok, .. }) = link.from_node.recv().await
@@ -2302,7 +2302,7 @@ impl Harness {
         text: String,
         answer: impl Fn(usize) -> Decision,
     ) -> Vec<(SessionId, ApprovalRequested)> {
-        self.send(MasterToNode::Prompt {
+        self.send(MasterToNode::Prompt(PromptMsg {
             savings: None,
             context: None,
             reply: None,
@@ -2319,7 +2319,7 @@ impl Harness {
             identity: None,
             peers: vec![],
             tags: vec![],
-        });
+        }));
         let mut asked = vec![];
         loop {
             let k = self
@@ -2446,7 +2446,7 @@ async fn restore(
 }
 
 async fn prompt_turn(h: &mut Harness, sid: SessionId, text: &str) -> String {
-    h.send(MasterToNode::Prompt {
+    h.send(MasterToNode::Prompt(PromptMsg {
         savings: None,
         context: None,
         reply: None,
@@ -2463,7 +2463,7 @@ async fn prompt_turn(h: &mut Harness, sid: SessionId, text: &str) -> String {
         identity: None,
         peers: vec![],
         tags: vec![],
-    });
+    }));
     let EventKind::Checkpoint(after) = h
         .until(|k| matches!(k, EventKind::Checkpoint(c) if c.phase == CheckpointPhase::After))
         .await
@@ -3074,7 +3074,7 @@ async fn until_in(h: &mut Harness, sid: SessionId, pred: impl Fn(&EventKind) -> 
 
 /// Start a turn in `sid` that keeps running (a long command).
 async fn start_long_turn(h: &mut Harness, sid: SessionId) {
-    h.send(MasterToNode::Prompt {
+    h.send(MasterToNode::Prompt(PromptMsg {
         savings: None,
         context: None,
         reply: None,
@@ -3091,7 +3091,7 @@ async fn start_long_turn(h: &mut Harness, sid: SessionId) {
         identity: None,
         peers: vec![],
         tags: vec![],
-    });
+    }));
     until_in(h, sid, |k| matches!(k, EventKind::ToolCallStarted(_))).await;
 }
 
@@ -3173,7 +3173,7 @@ async fn a_restore_is_refused_when_the_busy_chat_reaches_the_folder_through_a_sy
     // Since R.1 (S-2) a folder is pinned when its chat is made: B's folder
     // was replaced by a link, so B cannot start a turn at all, and so is
     // never busy in A's folder through it.
-    h.send(MasterToNode::Prompt {
+    h.send(MasterToNode::Prompt(PromptMsg {
         savings: None,
         context: None,
         reply: None,
@@ -3190,7 +3190,7 @@ async fn a_restore_is_refused_when_the_busy_chat_reaches_the_folder_through_a_sy
         identity: None,
         peers: vec![],
         tags: vec![],
-    });
+    }));
     let err = ack_for(&mut h, &format!("p-{b}")).await.unwrap_err();
     assert!(err.contains("folder was replaced"), "{err}");
     restore(&mut h, a, "r2", &turn, false).await.unwrap();
@@ -3381,7 +3381,7 @@ async fn a_session_whose_folder_was_replaced_refuses_to_work() {
                 std::fs::write(h.ws.join("id_ed25519"), "SSH-KEY-CANARY\n").unwrap();
             }
         }
-        h.send(MasterToNode::Prompt {
+        h.send(MasterToNode::Prompt(PromptMsg {
             savings: None,
             context: None,
             reply: None,
@@ -3398,7 +3398,7 @@ async fn a_session_whose_folder_was_replaced_refuses_to_work() {
             identity: None,
             peers: vec![],
             tags: vec![],
-        });
+        }));
         let e = ack_for(&mut h, &format!("p{i}")).await.unwrap_err();
         assert!(e.contains("folder was replaced"), "{target:?}: {e}");
         let e = restore(&mut h, sid, &format!("r{i}"), &turn, false)
@@ -3439,7 +3439,7 @@ async fn turn_of(
     agent: Option<harness_core::agent::AgentSpec>,
     text: String,
 ) {
-    h.send(MasterToNode::Prompt {
+    h.send(MasterToNode::Prompt(PromptMsg {
         savings: None,
         context: None,
         reply: None,
@@ -3456,7 +3456,7 @@ async fn turn_of(
         identity: None,
         peers: vec![],
         tags: vec![],
-    });
+    }));
     loop {
         h.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
         if h.seen.last().is_some_and(|e| e.session_id == sid) {
@@ -3717,7 +3717,7 @@ async fn lead_turn(
     text: &str,
     answer: Decision,
 ) {
-    h.send(MasterToNode::Prompt {
+    h.send(MasterToNode::Prompt(PromptMsg {
         savings: None,
         context: None,
         reply: None,
@@ -3734,7 +3734,7 @@ async fn lead_turn(
         identity: None,
         peers: vec![],
         tags: vec![],
-    });
+    }));
     loop {
         let k = h
             .until(|k| matches!(k, EventKind::TurnEnded(_) | EventKind::ApprovalRequested(_)))
@@ -3988,7 +3988,7 @@ async fn a_nested_delegation_reads_in_the_childs_folder_and_never_writes() {
 }
 
 fn prompt_msg(req_id: &str, sid: SessionId, text: &str) -> MasterToNode {
-    MasterToNode::Prompt {
+    MasterToNode::Prompt(PromptMsg {
         savings: None,
         context: None,
         reply: None,
@@ -4005,7 +4005,7 @@ fn prompt_msg(req_id: &str, sid: SessionId, text: &str) -> MasterToNode {
         identity: None,
         peers: vec![],
         tags: vec![],
-    }
+    })
 }
 
 /// A.19: a stop denies a pending approval, ends the turn `stopped` (not
@@ -4240,7 +4240,7 @@ async fn a_sub_agent_started_across_the_stop_never_runs_a_turn_after_it() {
         let mut h = Harness::new(auto_policy).await;
         init_repo(&h.ws);
         let sid = h.create().await;
-        h.send(MasterToNode::Prompt {
+        h.send(MasterToNode::Prompt(PromptMsg {
             savings: None,
             context: None,
             reply: None,
@@ -4257,7 +4257,7 @@ async fn a_sub_agent_started_across_the_stop_never_runs_a_turn_after_it() {
             identity: None,
             peers: vec![],
             tags: vec![],
-        });
+        }));
         h.until(|k| matches!(k, EventKind::ToolCallStarted(c) if c.tool == "delegate"))
             .await;
         tokio::time::sleep(Duration::from_millis(i * 7)).await;

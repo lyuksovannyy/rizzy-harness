@@ -18,7 +18,7 @@ use harness_core::connectors::{ConnectorAnswer, ConnectorToolEntry};
 use harness_core::event::{EventKind, ToolCallRef};
 use harness_core::policy::{ApprovalMode, Decision};
 use harness_node::{NodeConfig, NodeLink, NodePolicy, NodeRuntime};
-use harness_protocol::{CAP_CONNECTORS, MasterToNode, NodeToMaster};
+use harness_protocol::{CAP_CONNECTORS, MasterToNode, NodeToMaster, PromptMsg};
 use harness_store::{Durability, Store};
 use serde_json::{Value, json};
 
@@ -267,7 +267,7 @@ impl Node {
         let mut seen = Seen::default();
         self.link
             .to_node
-            .try_send(MasterToNode::Prompt {
+            .try_send(MasterToNode::Prompt(PromptMsg {
                 savings: None,
                 context: None,
                 reply: None,
@@ -284,7 +284,7 @@ impl Node {
                 identity: None,
                 peers: vec![],
                 tags: vec![],
-            })
+            }))
             .unwrap();
         let by = std::time::Instant::now() + Duration::from_secs(30);
         while self.ended(sid) == before {

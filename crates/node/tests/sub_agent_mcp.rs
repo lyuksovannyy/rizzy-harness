@@ -21,7 +21,7 @@ use harness_core::event::EventKind;
 use harness_core::policy::{ApprovalMode, Decision};
 use harness_core::{RawEvent, SessionId};
 use harness_node::{NodeConfig, NodeLink, NodePolicy, NodeRuntime};
-use harness_protocol::{MasterToNode, NodeToMaster};
+use harness_protocol::{MasterToNode, NodeToMaster, PromptMsg, RetryMsg};
 use harness_store::{Durability, Store};
 use harness_tools::mcp::ServerConfig;
 use serde_json::{Value, json};
@@ -304,7 +304,7 @@ impl Node {
     fn prompt(&mut self, sid: SessionId, text: &str, agent: AgentSpec) {
         self.link
             .to_node
-            .try_send(MasterToNode::Prompt {
+            .try_send(MasterToNode::Prompt(PromptMsg {
                 req_id: "p".into(),
                 session_id: sid,
                 text: text.into(),
@@ -321,7 +321,7 @@ impl Node {
                 identity: None,
                 peers: vec![],
                 tags: vec![],
-            })
+            }))
             .unwrap();
     }
 
@@ -1155,7 +1155,7 @@ async fn a_person_or_a_retry_in_a_background_sub_agents_chat_during_its_run_gets
     let turn = n.turns(child)[0].clone();
     n.link
         .to_node
-        .try_send(MasterToNode::Retry {
+        .try_send(MasterToNode::Retry(RetryMsg {
             req_id: "rt".into(),
             session_id: child,
             turn_id: turn,
@@ -1165,7 +1165,7 @@ async fn a_person_or_a_retry_in_a_background_sub_agents_chat_during_its_run_gets
             agent_named: false,
             owner: None,
             identity: None,
-        })
+        }))
         .unwrap();
     assert!(n.ack().await.is_err(), "a retry ran in a sub-agent's chat");
     n.until(|e| e.session_id == sid && e.kind == "background_ended")

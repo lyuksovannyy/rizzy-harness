@@ -10,7 +10,7 @@ use harness_core::SessionId;
 use harness_core::event::{EventKind, Profile};
 use harness_core::policy::ApprovalMode;
 use harness_node::{NodeConfig, NodeLink, NodePolicy, NodeRuntime};
-use harness_protocol::{MasterToNode, NodeToMaster};
+use harness_protocol::{MasterToNode, NodeToMaster, PromptMsg};
 use harness_store::{Durability, Store};
 
 fn png(pad: usize) -> Vec<u8> {
@@ -165,7 +165,7 @@ async fn the_chat_keeps_the_bytes_the_log_a_reference_and_delete_removes_them() 
     })
     .await
     .unwrap();
-    n.send(MasterToNode::Prompt {
+    n.send(MasterToNode::Prompt(PromptMsg {
         savings: None,
         context: None,
         reply: None,
@@ -182,7 +182,7 @@ async fn the_chat_keeps_the_bytes_the_log_a_reference_and_delete_removes_them() 
         identity: None,
         peers: vec![],
         tags: vec![],
-    })
+    }))
     .await
     .unwrap();
     n.drain_turn(sid).await;

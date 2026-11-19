@@ -22,7 +22,7 @@ use harness_core::SessionId;
 use harness_core::agent::{AgentSpec, ToolSelection};
 use harness_core::event::{EventKind, Profile};
 use harness_core::policy::{ApprovalMode, ExecMode};
-use harness_protocol::{MasterToNode, NodeToMaster};
+use harness_protocol::{MasterToNode, NodeToMaster, PromptMsg};
 use serde_json::json;
 
 const EXE: &str = env!("CARGO_BIN_EXE_rizzy-harness");
@@ -281,7 +281,7 @@ impl Node {
         let from = self.rt.store().events_after(sid, 0, 10_000).unwrap().len();
         self.link
             .to_node
-            .try_send(MasterToNode::Prompt {
+            .try_send(MasterToNode::Prompt(PromptMsg {
                 req_id: "p".into(),
                 session_id: sid,
                 text: text.into(),
@@ -298,7 +298,7 @@ impl Node {
                 identity: None,
                 peers: vec![],
                 tags: vec![],
-            })
+            }))
             .unwrap();
         self.ack().await.unwrap();
         let by = std::time::Instant::now() + Duration::from_secs(60);

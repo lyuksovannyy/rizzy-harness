@@ -17,7 +17,7 @@ use harness_core::event::*;
 use harness_core::policy::ApprovalMode;
 use harness_core::{RawEvent, SessionId};
 use harness_node::{NodeConfig, NodeLink, NodePolicy, NodeRuntime};
-use harness_protocol::{MasterToNode, NodeToMaster};
+use harness_protocol::{MasterToNode, NodeToMaster, PromptMsg, RetryMsg};
 use harness_store::{Durability, Store};
 use tokio::sync::mpsc;
 
@@ -178,7 +178,7 @@ impl N {
         peers: Vec<AgentSpec>,
     ) -> Result<(), String> {
         let id = self.req();
-        self.send(MasterToNode::Prompt {
+        self.send(MasterToNode::Prompt(PromptMsg {
             req_id: id.clone(),
             session_id: sid,
             text: text.into(),
@@ -195,7 +195,7 @@ impl N {
             identity: None,
             peers,
             tags: vec![],
-        });
+        }));
         self.ack(&id).await
     }
 
@@ -304,7 +304,7 @@ async fn a_retry_between_two_turns_of_the_list_is_refused() {
         .expect("the gap was reached");
     let failed = turn_of(&n.log(sid), "a");
     let id = n.req();
-    n.send(MasterToNode::Retry {
+    n.send(MasterToNode::Retry(RetryMsg {
         req_id: id.clone(),
         session_id: sid,
         turn_id: failed,
@@ -314,7 +314,7 @@ async fn a_retry_between_two_turns_of_the_list_is_refused() {
         agent_named: false,
         owner: None,
         identity: None,
-    });
+    }));
     let r = n.ack(&id).await.unwrap_err();
     assert!(r.contains("still taking their turns"), "{r}");
     hold.release();

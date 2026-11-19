@@ -62,7 +62,9 @@ use std::time::Duration;
 use harness_core::event::Profile;
 use harness_core::{RawEvent, SessionId, new_id};
 use harness_node::NodeLink;
-use harness_protocol::{MasterToNode, NodeToMaster, PROTOCOL_VERSION};
+use harness_protocol::{
+    CallbackMsg, MasterToNode, NodeToMaster, PROTOCOL_VERSION, PromptMsg, RetryMsg,
+};
 use harness_store::{AppendOutcome, HelloState, Store};
 use serde::Serialize;
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -646,9 +648,9 @@ const DIVERGED: &str = "this chat's log diverged: two node processes wrote it wi
 /// callback. Every other command starts no turn and carries none.
 fn set_turn_owner(msg: &mut MasterToNode, who: Option<String>) {
     match msg {
-        MasterToNode::Prompt { owner, .. }
-        | MasterToNode::Callback { owner, .. }
-        | MasterToNode::Retry { owner, .. } => *owner = who,
+        MasterToNode::Prompt(PromptMsg { owner, .. })
+        | MasterToNode::Callback(CallbackMsg { owner, .. })
+        | MasterToNode::Retry(RetryMsg { owner, .. }) => *owner = who,
         _ => {}
     }
 }
@@ -657,9 +659,9 @@ fn set_turn_owner(msg: &mut MasterToNode, who: Option<String>) {
 /// [`set_turn_owner`] puts the owner: the one place every turn passes.
 fn set_turn_identity(msg: &mut MasterToNode, who: Option<harness_core::identity::CommitIdentity>) {
     match msg {
-        MasterToNode::Prompt { identity, .. }
-        | MasterToNode::Callback { identity, .. }
-        | MasterToNode::Retry { identity, .. } => *identity = who,
+        MasterToNode::Prompt(PromptMsg { identity, .. })
+        | MasterToNode::Callback(CallbackMsg { identity, .. })
+        | MasterToNode::Retry(RetryMsg { identity, .. }) => *identity = who,
         _ => {}
     }
 }
@@ -667,9 +669,9 @@ fn set_turn_identity(msg: &mut MasterToNode, who: Option<harness_core::identity:
 fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
     match msg {
         MasterToNode::ApprovalRespond { decision, .. } if !decision.allows() => None,
-        MasterToNode::Prompt { session_id, .. }
-        | MasterToNode::Callback { session_id, .. }
-        | MasterToNode::Retry { session_id, .. }
+        MasterToNode::Prompt(PromptMsg { session_id, .. })
+        | MasterToNode::Callback(CallbackMsg { session_id, .. })
+        | MasterToNode::Retry(RetryMsg { session_id, .. })
         | MasterToNode::Handoff { session_id, .. }
         | MasterToNode::Compact { session_id, .. }
         | MasterToNode::SelectVariant { session_id, .. }
@@ -1908,9 +1910,7 @@ impl Master {
             // chat is the owner's, so are its commits (T88).
             if matches!(
                 msg,
-                MasterToNode::Prompt { .. }
-                    | MasterToNode::Callback { .. }
-                    | MasterToNode::Retry { .. }
+                MasterToNode::Prompt(_) | MasterToNode::Callback(_) | MasterToNode::Retry(_)
             ) {
                 let id = prefs::commit_identity(self, row.owner_id.as_deref()).await;
                 set_turn_identity(&mut msg, id);
@@ -2612,7 +2612,7 @@ impl Master {
             // `remember` to describe (`unattended`).
             let mut standing = self.callback_standing(&row, reads, project.as_ref()).await;
             standing.extend(personal);
-            let mut msg = MasterToNode::Callback {
+            let mut msg = MasterToNode::Callback(CallbackMsg {
                 req_id: String::new(),
                 session_id: sid,
                 bg_ids: callback,
@@ -2625,10 +2625,10 @@ impl Master {
                 })),
                 owner: None,
                 identity: None,
-            };
+            });
             return self
                 .send_command(&row.node_id, move |req_id| {
-                    if let MasterToNode::Callback { req_id: r, .. } = &mut msg {
+                    if let MasterToNode::Callback(CallbackMsg { req_id: r, .. }) = &mut msg {
                         *r = req_id;
                     }
                     msg
@@ -2642,7 +2642,7 @@ impl Master {
             unattended: false,
         }));
         let mut msg = match retry {
-            Some(turn_id) => MasterToNode::Retry {
+            Some(turn_id) => MasterToNode::Retry(RetryMsg {
                 req_id: String::new(),
                 session_id: sid,
                 turn_id,
@@ -2652,8 +2652,8 @@ impl Master {
                 agent_named: picked,
                 owner: None,
                 identity: None,
-            },
-            None => MasterToNode::Prompt {
+            }),
+            None => MasterToNode::Prompt(PromptMsg {
                 req_id: String::new(),
                 session_id: sid,
                 text,
@@ -2670,7 +2670,7 @@ impl Master {
                 identity: None,
                 peers: peer_specs,
                 tags,
-            },
+            }),
         };
         // The link drops a frame over 8 MiB; the margin covers the request
         // id and the framing.
@@ -2697,8 +2697,8 @@ impl Master {
             .send_command_noted(
                 &row.node_id,
                 move |req_id| {
-                    if let MasterToNode::Prompt { req_id: r, .. }
-                    | MasterToNode::Retry { req_id: r, .. } = &mut msg
+                    if let MasterToNode::Prompt(PromptMsg { req_id: r, .. })
+                    | MasterToNode::Retry(RetryMsg { req_id: r, .. }) = &mut msg
                     {
                         *r = req_id;
                     }
@@ -3212,9 +3212,9 @@ mod turn_owner_tests {
         for mut m in turns {
             set_turn_owner(&mut m, Some("01ALEX".into()));
             let owner = match &m {
-                MasterToNode::Prompt { owner, .. }
-                | MasterToNode::Retry { owner, .. }
-                | MasterToNode::Callback { owner, .. } => owner.clone(),
+                MasterToNode::Prompt(PromptMsg { owner, .. })
+                | MasterToNode::Retry(RetryMsg { owner, .. })
+                | MasterToNode::Callback(CallbackMsg { owner, .. }) => owner.clone(),
                 _ => None,
             };
             assert_eq!(owner.as_deref(), Some("01ALEX"), "{m:?}");
@@ -3252,9 +3252,9 @@ mod turn_owner_tests {
         for mut m in turns {
             set_turn_identity(&mut m, Some(id.clone()));
             let got = match &m {
-                MasterToNode::Prompt { identity, .. }
-                | MasterToNode::Retry { identity, .. }
-                | MasterToNode::Callback { identity, .. } => identity.clone(),
+                MasterToNode::Prompt(PromptMsg { identity, .. })
+                | MasterToNode::Retry(RetryMsg { identity, .. })
+                | MasterToNode::Callback(CallbackMsg { identity, .. }) => identity.clone(),
                 _ => None,
             };
             assert_eq!(got.as_ref(), Some(&id), "{m:?}");

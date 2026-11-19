@@ -30,7 +30,7 @@ use harness_master::routines::{self, Clock};
 use harness_master::{Master, router};
 use harness_memory::SqliteMemory;
 use harness_node::{NodeConfig, NodeLink, NodePolicy, NodeRuntime};
-use harness_protocol::{MasterToNode, NodeToMaster, PROTOCOL_VERSION};
+use harness_protocol::{MasterToNode, NodeToMaster, PROTOCOL_VERSION, PromptMsg};
 use harness_store::Store;
 use harness_store::routines::{Claimed, NewRun, RunPatch};
 use reqwest::{Method, StatusCode};
@@ -164,7 +164,7 @@ impl Fake {
     fn prompts(&self) -> usize {
         let seen = self.seen.lock().unwrap();
         seen.iter()
-            .filter(|m| matches!(m, MasterToNode::Prompt { .. }))
+            .filter(|m| matches!(m, MasterToNode::Prompt(_)))
             .count()
     }
 }
@@ -841,7 +841,7 @@ async fn last_prompt(t: &T, after: usize) -> (AgentSpec, String) {
             let prompts: Vec<(AgentSpec, String)> = seen
                 .iter()
                 .filter_map(|m| match m {
-                    MasterToNode::Prompt { agent, context, .. } => Some((
+                    MasterToNode::Prompt(PromptMsg { agent, context, .. }) => Some((
                         agent.clone().unwrap(),
                         context.as_ref().map(|c| c.joined()).unwrap_or_default(),
                     )),
@@ -1961,7 +1961,7 @@ fn prompt_session(fake: &Fake, n: usize) -> SessionId {
     let seen = fake.seen.lock().unwrap();
     seen.iter()
         .filter_map(|m| match m {
-            MasterToNode::Prompt { session_id, .. } => Some(*session_id),
+            MasterToNode::Prompt(PromptMsg { session_id, .. }) => Some(*session_id),
             _ => None,
         })
         .nth(n)
@@ -2122,7 +2122,7 @@ async fn a_routines_chat_and_an_untrusted_one_are_never_resumed_by_an_end() {
         .lock()
         .unwrap()
         .iter()
-        .filter(|m| matches!(m, MasterToNode::Callback { .. }))
+        .filter(|m| matches!(m, MasterToNode::Callback(_)))
         .count();
     assert_eq!(asked, 0, "the node was asked to resume it");
 }

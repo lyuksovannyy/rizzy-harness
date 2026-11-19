@@ -14,7 +14,7 @@ use harness_core::policy::ApprovalMode;
 use harness_core::{RawEvent, SessionId};
 use harness_node::artifacts::StageConfig;
 use harness_node::{NodeConfig, NodeLink, NodePolicy, NodeRuntime};
-use harness_protocol::{CAP_ARTIFACTS, MasterToNode, NodeToMaster};
+use harness_protocol::{CAP_ARTIFACTS, MasterToNode, NodeToMaster, PromptMsg};
 use harness_store::Store;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -165,7 +165,7 @@ impl Node {
     }
 
     fn prompt(&self, req_id: &str, sid: SessionId, text: &str) {
-        self.send(MasterToNode::Prompt {
+        self.send(MasterToNode::Prompt(PromptMsg {
             req_id: req_id.into(),
             session_id: sid,
             text: text.into(),
@@ -182,7 +182,7 @@ impl Node {
             identity: None,
             peers: vec![],
             tags: vec![],
-        });
+        }));
     }
 }
 

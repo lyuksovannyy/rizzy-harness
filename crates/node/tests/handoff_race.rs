@@ -15,7 +15,7 @@ use harness_core::event::*;
 use harness_core::policy::ApprovalMode;
 use harness_core::{RawEvent, SessionId};
 use harness_node::{NodeConfig, NodeLink, NodePolicy, NodeRuntime};
-use harness_protocol::{MasterToNode, NodeToMaster};
+use harness_protocol::{MasterToNode, NodeToMaster, PromptMsg};
 use harness_store::{Durability, Store};
 
 fn config(dir: &std::path::Path) -> NodeConfig {
@@ -120,7 +120,7 @@ async fn a_note_never_lands_inside_a_turn_and_never_refuses_a_prompt() {
     .await;
     let prompt = |link: &NodeLink, i: usize, text: String| {
         link.to_node
-            .try_send(MasterToNode::Prompt {
+            .try_send(MasterToNode::Prompt(PromptMsg {
                 savings: None,
                 context: None,
                 reply: None,
@@ -137,7 +137,7 @@ async fn a_note_never_lands_inside_a_turn_and_never_refuses_a_prompt() {
                 identity: None,
                 peers: vec![],
                 tags: vec![],
-            })
+            }))
             .unwrap();
     };
     prompt(&link, 0, work("step 0"));

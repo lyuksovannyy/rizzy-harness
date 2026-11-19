@@ -25,7 +25,7 @@
 use std::collections::BTreeMap;
 
 use harness_core::agent::AgentSpec;
-use harness_protocol::{MasterToNode, NodePlugins};
+use harness_protocol::{CallbackMsg, MasterToNode, NodePlugins, PromptMsg, RetryMsg};
 use sha2::{Digest, Sha256};
 
 use crate::{Master, lock};
@@ -164,9 +164,9 @@ impl Assignments {
 pub fn fail_closed(msg: &mut MasterToNode) {
     let spec = match msg {
         MasterToNode::Create { agent, .. }
-        | MasterToNode::Prompt { agent, .. }
-        | MasterToNode::Callback { agent, .. }
-        | MasterToNode::Retry { agent, .. } => agent.as_mut(),
+        | MasterToNode::Prompt(PromptMsg { agent, .. })
+        | MasterToNode::Callback(CallbackMsg { agent, .. })
+        | MasterToNode::Retry(RetryMsg { agent, .. }) => agent.as_mut(),
         MasterToNode::SetAgent { agent, .. } => Some(agent),
         _ => None,
     };

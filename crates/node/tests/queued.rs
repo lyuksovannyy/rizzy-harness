@@ -13,7 +13,7 @@ use harness_core::policy::{ApprovalMode, Decision};
 use harness_core::view::{Item, SessionView};
 use harness_core::{RawEvent, SessionId};
 use harness_node::{NodeConfig, NodeLink, NodePolicy, NodeRuntime};
-use harness_protocol::{MasterToNode, NodeToMaster};
+use harness_protocol::{MasterToNode, NodeToMaster, PromptMsg};
 use harness_store::{Durability, Store};
 use serde_json::{Value, json};
 use tokio::sync::{Notify, mpsc};
@@ -347,7 +347,7 @@ impl Node {
     }
 
     fn prompt(&self, sid: SessionId, req_id: &str, text: &str) {
-        self.send(MasterToNode::Prompt {
+        self.send(MasterToNode::Prompt(PromptMsg {
             req_id: req_id.into(),
             session_id: sid,
             text: text.into(),
@@ -364,7 +364,7 @@ impl Node {
             identity: None,
             peers: vec![],
             tags: vec![],
-        });
+        }));
     }
 
     fn log(&self, sid: SessionId) -> Vec<RawEvent> {
