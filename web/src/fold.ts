@@ -86,6 +86,38 @@ export function cappedUsage(u: Usage): Usage {
   return c;
 }
 
+/** X.39, as `SessionView::settled` and `live` in crates/core/src/view.rs: what
+ * the finished turns (and every other cost the chat carries) used, apart from
+ * the running turn's latest `turn_usage`; `v.usage` is the two together. Kept
+ * beside the view, not in it, so the view keeps the JSON shape the Rust fold
+ * writes. */
+interface Spent {
+  settled: Usage;
+  turn?: string;
+  live?: Usage;
+}
+const spent = new WeakMap<SessionView, Spent>();
+function spentOf(v: SessionView): Spent {
+  let s = spent.get(v);
+  if (!s) spent.set(v, (s = { settled: v.usage }));
+  return s;
+}
+const sumTokens = (u: Usage) => u.input_tokens + u.output_tokens;
+/** `v.usage` = the settled sums plus the running turn's. */
+function showUsage(v: SessionView, s: Spent) {
+  if (!s.live) return void (v.usage = s.settled);
+  const u = cappedUsage(s.settled);
+  addUsage(u, s.live);
+  v.usage = u;
+}
+/** A cost the chat carries (a hand-off, a summary, a background agent, a
+ * finished turn): settled, whatever turn runs. */
+function settle(v: SessionView, u: Usage) {
+  const s = spentOf(v);
+  addUsage(s.settled, u);
+  showUsage(v, s);
+}
+
 /** `harness_core::event::IMAGE_WITHHELD_ROW`. */
 const IMAGE_WITHHELD_ROW =
   "[image not shown to the model: the provider refused a request that carried it]";
@@ -188,6 +220,7 @@ const KINDS: Record<string, string> = {
   approval_resolved: "approval_id decision:=decision by:=resolvedBy ?note",
   checkpoint: "turn_id phase:=phase git_ref ?files:[s",
   turn_ended: "turn_id reason:=turnEnd ?usage:@usage",
+  turn_usage: "turn_id usage:@usage",
   error: "message",
   agent_changed: "agent:@agent ?model",
   variant_selected: "group message_id",
@@ -417,6 +450,16 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
         if (p.retry.model != null) r.model = p.retry.model;
         v.items.push(r);
       }
+      {
+        // A turn that never ended keeps what it had used.
+        const s = spentOf(v);
+        if (s.live) {
+          addUsage(s.settled, s.live);
+          delete s.live;
+          delete s.turn;
+          showUsage(v, s);
+        }
+      }
       v.running_turn = p.turn_id;
       v.running_agent = p.agent ?? null;
       break;
@@ -428,7 +471,7 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       break;
     case "handoff_written": {
       // Its cost is the chat's, like a turn's (the sums only).
-      if (p.usage) addUsage(v.usage, p.usage);
+      if (p.usage) settle(v, p.usage);
       const it: Extract<Item, { type: "handoff" }> = { type: "handoff", through_seq: p.through_seq };
       if (p.text != null) it.text = p.text;
       if (p.model != null) it.model = p.model;
@@ -561,9 +604,17 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       } else if (p.phase === "restored") c.restored = true;
       break;
     }
-    case "turn_ended":
+    case "turn_ended": {
+      // X.39: the end's usage REPLACES the running figure; one without keeps
+      // the last running one as the turn's own.
+      const s = spentOf(v);
+      const running = s.turn === p.turn_id ? s.live : undefined;
+      if (running) {
+        delete s.live;
+        delete s.turn;
+      }
       if (p.usage) {
-        addUsage(v.usage, p.usage);
+        addUsage(s.settled, p.usage);
         v.context_tokens = p.usage.context_tokens;
         if (p.usage.window != null) v.context_window = p.usage.window;
         else delete v.context_window;
@@ -571,15 +622,32 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
         else delete v.summary_at;
         if (p.usage.model != null) v.context_model = p.usage.model;
         else delete v.context_model;
-      }
+      } else if (running) addUsage(s.settled, running);
+      showUsage(v, s);
       // The turn that ended, also when it reported none (an interrupted
       // one): never an older turn's as the last.
-      if (p.usage) v.turn_usage = cappedUsage(p.usage);
+      const last = p.usage ?? running;
+      if (last) v.turn_usage = cappedUsage(last);
       else delete v.turn_usage;
       v.running_turn = null;
       v.running_agent = null;
       v.items.push({ type: "turn_end", turn_id: p.turn_id, reason: p.reason });
       break;
+    }
+    case "turn_usage": {
+      // X.39: what the running turn has used so far, a running total. Only
+      // the running turn's counts, a total below the last is stale, and a
+      // late one (its turn ended) changes nothing: the fold trusts no order.
+      if (v.running_turn !== p.turn_id) break;
+      const s = spentOf(v);
+      if (s.turn === p.turn_id && s.live && sumTokens(p.usage) < sumTokens(s.live)) break;
+      s.turn = p.turn_id;
+      s.live = cappedUsage(p.usage);
+      v.context_tokens = p.usage.context_tokens;
+      v.turn_usage = cappedUsage(p.usage);
+      showUsage(v, s);
+      break;
+    }
     case "error":
       v.items.push({ type: "error", message: p.message });
       break;
@@ -609,7 +677,7 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
     case "history_summarized": {
       // A person's /compact (X.20): its cost is the chat's, and the meter
       // shows the shorter context until the next turn reports its own.
-      if (p.usage) addUsage(v.usage, p.usage);
+      if (p.usage) settle(v, p.usage);
       if (p.tokens_after != null) v.context_tokens = p.tokens_after;
       const it: Extract<Item, { type: "summary" }> = { type: "summary", through_seq: p.through_seq, text: p.text };
       if (p.manual === true) it.manual = true;
@@ -618,7 +686,7 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       break;
     }
     case "compact_failed":
-      if (p.usage) addUsage(v.usage, p.usage);
+      if (p.usage) settle(v, p.usage);
       v.items.push({ type: "error", message: p.reason });
       break;
     case "context_shortened": {
@@ -662,7 +730,7 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       if (b) b.ended = true;
       const c = p.child;
       // Its cost is the chat's, as a foreground sub-agent's is its turn's.
-      if (c?.usage) addUsage(v.usage, c.usage);
+      if (c?.usage) settle(v, c.usage);
       const it: Extract<Item, { type: "background_ended" }> = {
         type: "background_ended",
         bg_id: p.bg_id,
