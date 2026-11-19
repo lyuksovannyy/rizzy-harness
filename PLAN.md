@@ -1664,12 +1664,12 @@ address, the hostname and `--allowed-host` names (regenerated when they change; 
 Not tested here: a real WireGuard interface (no kernel module in this container); the
 uevent check and the refusal of a real non-WireGuard interface are tested.
 
-**Checkpoints for every folder, latest 10.** Folders inside a repository use its git
+**Checkpoints for every folder, latest 100.** Folders inside a repository use its git
 (refs under `refs/harness/`, index/HEAD/branches untouched; superseded 2026-11-10:
 every folder now uses a shadow repository, see §5 and T19). Other folders get a
 private shadow repository in the node's data dir (`checkpoints/<hash>.git`; nothing
 written into the folder; dependency/build dirs excluded). `node.toml
-checkpoints_keep` (default 10, 0 = off) keeps only the latest N checkpoints per folder;
+checkpoints_keep` (default 100 since the trial of 2026-11-19, which could not undo a turn a dozen short turns later; 0 = off) keeps only the latest N checkpoints per folder;
 order is logged in the git dir because commit dates have one-second resolution (a
 test caught pruning the wrong one). Shadow repos are gc'd right away. **Rewind** undoes a
 turn and every later turn in one step; undo/rewind record the restored state; an

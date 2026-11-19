@@ -1210,8 +1210,9 @@ read work in the folder itself, and so do those whose only tools that
 change things are `publish` and MCP tools (they write no file directly; a
 filesystem-style MCP server can still write the folder, with its calls'
 own approval); one that can write, edit or run a writable shell gets its
-own copy. Only the latest 10 checkpoints per folder are kept (`checkpoints_keep`
-in `node.toml`). "Rewind" undoes a turn and everything after it. An undo
+own copy. Only the latest 100 checkpoints per folder are kept (`checkpoints_keep`
+in `node.toml`; a turn counts one, and so does the saving an undo makes of
+the folder). "Rewind" undoes a turn and everything after it. An undo
 is refused, naming the files, when it would write over anything you
 changed after the turn: a file it puts back or removes, anything inside a
 folder it replaces, or a file or link you put where a folder it puts back

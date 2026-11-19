@@ -261,6 +261,68 @@ a minute) would change what happens. That is a budget on the first snapshot, not
 on every turn, and I measured it on one machine with a slow disk under load. On
 an NVMe drive the line will be elsewhere; I cannot say where from these numbers.
 
+## Keeping 100 checkpoints instead of 10
+
+`checkpoints_keep` was 10 until the readiness trial of 2026-11-19, where a turn
+could neither be undone nor shown about a dozen short turns later (the trial's
+whole checkpoint store was 2.5 MB). It is 100 now. The tables above were
+measured at 10 and say so; **`prune` no longer runs `git gc`**: since A.18
+(`upkeep.rs`) the collection runs in the background when 16 groups were
+dropped since the last one, or git's object or pack limits are passed, and
+never more often than every 5 minutes, so the "gc on every turn" lines in
+"What the numbers mean" describe the code before A.18.
+
+What the number touches, from the code: `prune` lists the refs once and
+compares each with the kept groups (about 2 refs per group, so 200 refs by
+100 groups, microseconds); `release_pins` reads the `.keep` files once. Nothing
+loops over the kept checkpoints per turn otherwise. The kept groups reach more
+objects, so a collection has more to keep, and in a repository folder each
+kept group holds a pack of copies (A.17) that gc leaves alone.
+
+Measured with `checkpoint_keep_cost` (`crates/node/src/git_cost_bench.rs`, an
+ignored test): 130 turns of 10 edited files, in the session's order (snapshot,
+edit, snapshot, `changed`, `pin_changed`, `prune`), kept 10 against kept 100,
+1,000 and 10,000 files, a repository folder (borrowing) and a folder whose
+shadow keeps its own objects. One run each, on a busy shared machine
+(the "Machine" section: a rotational USB disk) (load 2 to 24 during the runs): read the differences as
+"about the same", not as a ranking.
+
+| | turn, last 20 of 130 (median, max ms) | `prune` (median ms) | shadow after the 130 turns, before any gc | one `git gc --prune=now` | shadow after that gc |
+|---|---|---|---|---|---|
+| repo, 1k, keep 10 | 41, 288 | 3 | 34.1 MiB | 1,243 ms | 0.9 MiB (71 files) |
+| repo, 1k, keep 100 | 43, 44 | 5 | 35.6 MiB | 394 ms | 6.6 MiB (431 files) |
+| own objects, 1k, keep 10 | 24, 78 | 3 | 33.6 MiB | 676 ms | 4.1 MiB |
+| own objects, 1k, keep 100 | 24, 25 | 3 | 34.6 MiB | 2,375 ms | 6.3 MiB |
+| repo, 10k, keep 10 | 101, 360 | 3 | 27.2 MiB | 742 ms | 1.8 MiB (71 files) |
+| repo, 10k, keep 100 | 150, 295 | 5 | 28.6 MiB | 406 ms | 7.5 MiB (431 files) |
+| own objects, 10k, keep 10 | 62, 153 | 3 | 68.3 MiB | 1,496 ms | 21.8 MiB |
+| own objects, 10k, keep 100 | 91, 1,264 | 4 | 69.4 MiB | 1,668 ms | 23.8 MiB |
+
+- **A turn costs the same**: the medians differ by the noise (one 1.3 s outlier
+  in a 91 ms series); `prune` is 3 to 5 ms either way.
+- **Objects kept**: 10 groups' unique objects are 1 to 2 MiB; 100 groups' are
+  about 6 to 8 MiB in a repository folder (the pinned copies) and 2 MiB more
+  with the shadow's own objects, for turns of 10 files. Cost grows with what
+  the turns change, not with the folder: the trial's real store was 2.5 MB at
+  10. The shadow is bigger than that, 30 to 70 MiB, before a collection
+  whatever the number is: it is the dropped groups waiting for one.
+- **gc time**: 0.4 to 2.4 s for one run, no consistent difference between 10
+  and 100 here (the first row's 1.2 s against 0.4 s is the machine's load,
+  not the number). A collection holds the shadow while it runs, so a snapshot
+  waits for it.
+- **One dependency on the number being small**: `upkeep::PACK_LIMIT` (50)
+  makes a collection due when the shadow holds 50 packs. In a repository
+  folder each kept group holds one pack that gc never merges (the 431 files
+  after gc at 100, against 71 at 10, are about 100 packs with their index and
+  `.keep` files; not counted separately), so at 100 that limit is passed for
+  good, and a collection is due on any turn that dropped a group, at most once
+  in 5 minutes, instead of every 16 dropped groups. For short, frequent turns
+  that is about the same pace; for a long session of quick turns it is a
+  0.4 to 1.2 s background collection (at these sizes) every 5 minutes. Not
+  changed here; counting only the packs without a `.keep` file would remove it.
+- Not measured: 100,000 files, a cold cache, a real session's turns (the
+  trial's were short).
+
 ## Defects found while measuring
 
 1. **A snapshot that times out leaves lock files in the shadow.** In a run at

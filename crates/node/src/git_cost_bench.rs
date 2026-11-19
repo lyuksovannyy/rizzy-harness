@@ -29,7 +29,9 @@ use std::os::unix::fs::MetadataExt;
 use std::time::Instant;
 
 const FILES_PER_DIR: usize = 50;
-/// `checkpoints_keep` default (policy.rs).
+/// `checkpoints_keep` of the older numbers in `docs/checkpoint-cost.md`; the
+/// default is in policy.rs (100 since the trial of 2026-11-19, which
+/// `checkpoint_keep_cost` measures against this).
 const KEEP: usize = 10;
 
 // ---------------------------------------------------------------- tree
@@ -1118,5 +1120,104 @@ fn print_tables(res: &Results, sizes: &[usize], kinds: &str) {
     eprintln!("\n### notes");
     for n in &res.notes {
         eprintln!("- {n}");
+    }
+}
+
+/// What keeping 100 checkpoints costs against keeping 10 (the default was 10
+/// until the trial of 2026-11-19), in the session's own order: a turn is a
+/// snapshot before, ten edited files, a snapshot after, `changed`, the pinned
+/// copies of a repository folder, `prune`. After `TURNS` turns it reports
+/// the median time of the last twenty, the shadow's size and object counts,
+/// and one `git gc --prune=now` (what `maybe_gc` runs when due).
+///
+/// ```bash
+/// B3_DIR=$(mktemp -d -p /some/real/disk) B3_SIZES=1000,10000 \
+///   cargo test -p harness-node --lib checkpoint_keep_cost -- --ignored --nocapture
+/// ```
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore]
+async fn checkpoint_keep_cost() {
+    let Some(parent) = std::env::var_os("B3_DIR").map(PathBuf::from) else {
+        eprintln!("set B3_DIR to a directory on a real disk");
+        return;
+    };
+    let sizes: Vec<usize> = std::env::var("B3_SIZES")
+        .unwrap_or_else(|_| "1000,10000".into())
+        .split(',')
+        .map(|s| s.trim().parse().unwrap())
+        .collect();
+    let turns: usize = std::env::var("B3_TURNS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(130);
+    let work = parent.join(format!("b3k-{}", harness_core::new_id()));
+    std::fs::create_dir_all(&work).unwrap();
+    let _guard = Cleanup(work.clone());
+    let sn = Snapper::default();
+    for &n in &sizes {
+        let root = work.join(format!("tree{n}"));
+        gen_tree(&root, n);
+        git_user(&root, &["init", "-q", "-b", "main"]);
+        git_user(&root, &["add", "-A"]);
+        git_user(&root, &["commit", "-q", "-m", "init", "--no-gpg-sign"]);
+        for kind in ["repo", "own-objects"] {
+            for keep in [10usize, 100] {
+                let base = work.join(format!("shadow-{kind}-{n}-{keep}"));
+                // A plain folder is the same tree without its repository:
+                // the shadow does not borrow.
+                let repo = fresh_repo(&root, &base, kind == "repo").await;
+                let mut v = 1u64;
+                let mut times = vec![];
+                let mut prune_ms = vec![];
+                for t in 0..turns {
+                    v += 1;
+                    let t0 = Instant::now();
+                    let (b, _) = sn.snap(&repo, &format!("refs/harness/s/t{t}/before")).await;
+                    edit(&root, n, 10, v);
+                    let (a, _) = sn.snap(&repo, &format!("refs/harness/s/t{t}/after")).await;
+                    let _ = changed(&repo, &b, &a).await.unwrap();
+                    {
+                        let _busy = hold(&repo).await;
+                        let _ = pin_changed(&repo, &format!("refs/harness/s/t{t}"), &b, &a).await;
+                    }
+                    let tp = Instant::now();
+                    prune(&repo, keep).await;
+                    let p = ms(tp.elapsed());
+                    if t + 20 >= turns {
+                        times.push(ms(t0.elapsed()));
+                        prune_ms.push(p);
+                    }
+                }
+                let dir = shadow_dir(&repo);
+                let (alloc, _, files) = du(&dir);
+                let count = run(&repo, &["count-objects", "-v"], None).await.unwrap();
+                let field = |k: &str| {
+                    count
+                        .lines()
+                        .find_map(|l| l.strip_prefix(k))
+                        .map_or(0, |x| x.trim().parse::<u64>().unwrap_or(0))
+                };
+                let refs = run(&repo, &["for-each-ref", "refs/harness/"], None)
+                    .await
+                    .unwrap()
+                    .lines()
+                    .count();
+                let tg = Instant::now();
+                let gc = run(&repo, &["gc", "--prune=now", "--quiet"], None).await;
+                let gc_ms = ms(tg.elapsed());
+                let (alloc_after, _, files_after) = du(&dir);
+                let (tm, _, tmax) = stats(&times);
+                let (pm, _, _) = stats(&prune_ms);
+                eprintln!(
+                    "KEEP {kind} {n} files, keep {keep}, {turns} turns: refs {refs}, turn (last 20) median {tm:.0} ms max {tmax:.0}, prune median {pm:.0} ms; \
+                     shadow {} MiB / {files} files, loose {}, packs {}; one gc {gc_ms:.0} ms ({}), then {} MiB / {files_after} files",
+                    mib(alloc),
+                    field("count:"),
+                    field("packs:"),
+                    if gc.is_ok() { "ok" } else { "FAILED" },
+                    mib(alloc_after)
+                );
+            }
+        }
     }
 }
