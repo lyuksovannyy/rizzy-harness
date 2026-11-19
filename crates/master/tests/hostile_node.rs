@@ -793,6 +793,7 @@ async fn a_node_cannot_borrow_another_users_chat_as_parent() {
                 settings: "{}".into(),
                 created_by: Some(t.alex_id.clone()),
                 columns: vec![],
+                source: None,
             },
             10,
         )

@@ -23,6 +23,7 @@ use crate::projects::{self as p, ProjectSettings};
 use crate::workspaces::{Access, WsError};
 use crate::{Audience, Live, Master};
 
+mod clone;
 mod folder;
 mod mcp;
 
@@ -189,6 +190,11 @@ async fn detail_json(m: &Master, who: &Principal, a: &Access, r: &ProjectRow) ->
     v["can_manage"] = json!(p::may_manage(a));
     v["created_by"] = json!(r.created_by);
     v["created_ms"] = json!(r.created_ms);
+    // Where its folder was cloned from (T86), for the later push.
+    v["source"] = match &r.source {
+        Some((host, full_name)) => json!({ "host": host, "full_name": full_name }),
+        None => Value::Null,
+    };
     Ok(v)
 }
 
@@ -257,6 +263,13 @@ struct CreateProject {
     /// the folder does: a node that refuses, or is away, leaves nothing.
     #[serde(default)]
     folder_on: Option<String>,
+    /// With `folder_on`: the folder is a clone of the repository
+    /// `full_name` that the caller's own forge connection `connection_id`
+    /// can see (X.27 step 3, T86). Both or neither.
+    #[serde(default)]
+    connection_id: Option<String>,
+    #[serde(default)]
+    full_name: Option<String>,
 }
 
 async fn create(
@@ -287,8 +300,17 @@ async fn create(
         p::clean("description", &b.description, p::DESCRIPTION_MAX, false).map_err(bad)?;
     let instructions =
         p::clean("instructions", &b.instructions, p::INSTRUCTIONS_MAX, true).map_err(bad)?;
+    let repo = match (&b.connection_id, &b.full_name, &b.folder_on) {
+        (None, None, _) => None,
+        (Some(c), Some(f), Some(_)) => Some((c.clone(), f.clone())),
+        (Some(_), Some(_), None) => {
+            return Err(bad("a clone needs folder_on: the node to clone onto"));
+        }
+        _ => return Err(bad("connection_id and full_name go together")),
+    };
     // The folder first, once every other check passed (here and the
     // workspace's project limit): a refusal leaves no project.
+    let mut cloning = None;
     if let Some(node) = b.folder_on.as_deref() {
         folder::may_make_on(&m, &who, &a, node)?;
         let w = ws.clone();
@@ -304,6 +326,9 @@ async fn create(
                 format!("a workspace has at most {} projects", p::MAX_PROJECTS),
             ));
         }
+        if let Some((conn, full)) = &repo {
+            cloning = Some(clone::check(&m, &who, conn, full, node).await?);
+        }
     }
     let mut new = NewProject {
         project_id: harness_core::new_id(),
@@ -316,6 +341,7 @@ async fn create(
         settings: String::new(),
         created_by: who.user_id.clone(),
         columns,
+        source: cloning.as_ref().map(clone::Checked::recorded),
     };
     // The folder and the row in a task of its own: a client that goes
     // away does not stop it between the two (the node would have made a
@@ -324,9 +350,13 @@ async fn create(
     let task = {
         let (m, who, node) = (m.clone(), who.clone(), b.folder_on.clone());
         async move {
-            let settings = match &node {
-                None => ProjectSettings::default(),
-                Some(node) => {
+            let settings = match (&node, cloning) {
+                (None, _) => ProjectSettings::default(),
+                (Some(node), Some(c)) => {
+                    clone::clone_on(&m, &who, node, &new.name, c, ProjectSettings::default())
+                        .await?
+                }
+                (Some(node), None) => {
                     folder::make_on(&m, &who, node, &new.name, ProjectSettings::default()).await?
                 }
             };

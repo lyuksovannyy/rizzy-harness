@@ -58,6 +58,10 @@ pub struct NodePolicy {
     /// Where the node makes new projects' folders on request (`[projects]`,
     /// ADOPTION_PLAN X.26, PLAN.md T77).
     pub projects: ProjectsPolicy,
+    /// Cloning a forge repository into a new project's folder (`[forge]`,
+    /// ADOPTION_PLAN X.27 step 3, PLAN.md T86): the hosts this node clones
+    /// from. Nothing the master sends adds one.
+    pub forge: ForgePolicy,
     /// Folders no session may include and no file tool may touch, in every
     /// mode: the runtime's own data directory (keys, the API token,
     /// databases). Set by the runtime with [`NodePolicy::protect`], never
@@ -753,6 +757,99 @@ impl Default for ArtifactsPolicy {
     }
 }
 
+/// `[forge]` in node.toml (ADOPTION_PLAN X.27 step 3, PLAN.md T86): which
+/// forge hosts this node clones a new project's repository from. The node
+/// builds the clone's URL itself, `https://<entry>/<owner>/<name>.git`, from
+/// an entry here and a repository name it checks by its own rules; nothing
+/// the master sends names a scheme, a port, a user or a path.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ForgePolicy {
+    /// `false`: this node clones nothing (it does not announce
+    /// `forge-clone`, and refuses `project.clone`).
+    pub clone: bool,
+    /// Host names (lower-case DNS names or IPv4 addresses), each optionally
+    /// with `:<port>`; exactly these, compared as written.
+    pub hosts: Vec<String>,
+}
+
+/// The most `[forge] hosts` entries.
+pub const MAX_FORGE_HOSTS: usize = 64;
+
+impl Default for ForgePolicy {
+    fn default() -> Self {
+        Self {
+            clone: true,
+            hosts: vec!["github.com".into(), "gitlab.com".into()],
+        }
+    }
+}
+
+impl ForgePolicy {
+    /// Whether this node clones from anywhere.
+    pub fn clones(&self) -> bool {
+        self.clone && !self.hosts.is_empty()
+    }
+
+    /// Whether `host` is one of the entries, exactly.
+    pub fn allows(&self, host: &str) -> bool {
+        self.clone && self.hosts.iter().any(|h| h == host)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.hosts.len() > MAX_FORGE_HOSTS {
+            return Err(format!("[forge] hosts: at most {MAX_FORGE_HOSTS} entries"));
+        }
+        for (i, h) in self.hosts.iter().enumerate() {
+            if !valid_forge_host(h) {
+                return Err(format!(
+                    "[forge] hosts {h:?}: must be a lower-case host name or IPv4 address, \
+                     optionally with :<port>; no scheme, user, path or dot at the end"
+                ));
+            }
+            if self.hosts[..i].contains(h) {
+                return Err(format!("[forge] hosts {h:?}: listed twice"));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A `[forge] hosts` entry, and the only shape of `project.clone`'s `host`:
+/// a lower-case DNS name of letters, digits and inner hyphens (labels of 1
+/// to 63, at most 253 in all, at least one letter in the last label) or an
+/// IPv4 address, optionally `:<port>` (1 to 65535, no leading zero).
+pub fn valid_forge_host(h: &str) -> bool {
+    let (name, port) = match h.split_once(':') {
+        Some((n, p)) => (n, Some(p)),
+        None => (h, None),
+    };
+    if let Some(p) = port
+        && !(!p.is_empty()
+            && p.len() <= 5
+            && !p.starts_with('0')
+            && p.bytes().all(|b| b.is_ascii_digit())
+            && p.parse::<u32>().is_ok_and(|n| (1..=65535).contains(&n)))
+    {
+        return false;
+    }
+    if name.parse::<std::net::Ipv4Addr>().is_ok() {
+        return name.split('.').all(|o| o == "0" || !o.starts_with('0'));
+    }
+    let labels: Vec<&str> = name.split('.').collect();
+    (1..=253).contains(&name.len())
+        && labels.iter().all(|l| {
+            (1..=63).contains(&l.len())
+                && !l.starts_with('-')
+                && !l.ends_with('-')
+                && l.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        })
+        && labels
+            .last()
+            .is_some_and(|l| l.bytes().any(|b| b.is_ascii_lowercase()))
+}
+
 /// `[limits]` in node.toml.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -810,9 +907,24 @@ pub struct LimitsPolicy {
     /// cancelled note leaves no event, so the chat stays due.
     pub handoff_notes_per_hour: usize,
     /// New project folders this node makes per hour (`project.create`,
-    /// T77), all requests together; 0 turns making them off.
+    /// T77, and `project.clone`, T86), all requests together; 0 turns
+    /// making them off.
     pub projects_per_hour: usize,
+    /// The longest one clone may run, in seconds (`project.clone`, T86):
+    /// git is then ended and what it fetched removed.
+    pub clone_timeout_s: u64,
+    /// The most one clone may put on disk, in MB (its fetched objects and
+    /// its checkout together), checked while git runs and once after.
+    pub clone_max_mb: u64,
 }
+
+/// `[limits] clone_timeout_s` by default, and its range.
+pub const DEFAULT_CLONE_TIMEOUT_S: u64 = 600;
+pub const MIN_CLONE_TIMEOUT_S: u64 = 10;
+pub const MAX_CLONE_TIMEOUT_S: u64 = 7200;
+/// `[limits] clone_max_mb` by default, and its range.
+pub const DEFAULT_CLONE_MAX_MB: u64 = 2048;
+pub const MAX_CLONE_MAX_MB: u64 = 1024 * 1024;
 
 /// `max_approval_mode` when node.toml does not say: `auto`, so the owner's
 /// default for new chats (`DEFAULT_CHAT_APPROVAL`, 2026-11-14) holds on a
@@ -866,6 +978,8 @@ impl Default for LimitsPolicy {
             callback_max_steps: DEFAULT_CALLBACK_MAX_STEPS,
             handoff_notes_per_hour: DEFAULT_HANDOFF_PER_HOUR,
             projects_per_hour: DEFAULT_PROJECTS_PER_HOUR,
+            clone_timeout_s: DEFAULT_CLONE_TIMEOUT_S,
+            clone_max_mb: DEFAULT_CLONE_MAX_MB,
         }
     }
 }
@@ -960,6 +1074,7 @@ impl Default for NodePolicy {
             mcp_servers: Default::default(),
             mcp: McpPolicy::default(),
             projects: ProjectsPolicy::default(),
+            forge: ForgePolicy::default(),
             protected_dirs: Vec::new(),
             exec: Default::default(),
             sandbox_tmp: None,
@@ -1139,6 +1254,27 @@ impl NodePolicy {
                 ));
             }
         }
+        for (key, n, min, max) in [
+            (
+                "clone_timeout_s",
+                self.limits.clone_timeout_s,
+                MIN_CLONE_TIMEOUT_S,
+                MAX_CLONE_TIMEOUT_S,
+            ),
+            (
+                "clone_max_mb",
+                self.limits.clone_max_mb,
+                1,
+                MAX_CLONE_MAX_MB,
+            ),
+        ] {
+            if !(min..=max).contains(&n) {
+                return Err(format!(
+                    "[limits] {key} = {n}: must be between {min} and {max}"
+                ));
+            }
+        }
+        self.forge.validate()?;
         let n = self.limits.background_agent_timeout_s;
         if !(MIN_AGENT_TIMEOUT_S..=MAX_AGENT_TIMEOUT_S).contains(&n) {
             return Err(format!(

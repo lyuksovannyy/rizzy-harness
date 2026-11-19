@@ -66,17 +66,22 @@ pub(super) async fn make_on(
     let user = who.user_id.as_deref().unwrap_or("api token");
     let path = project_folder::make(m, user, node, name)
         .await
-        .map_err(|e| {
-            let code = match e {
-                FolderError::Away(_) | FolderError::Timeout(..) => StatusCode::SERVICE_UNAVAILABLE,
-                FolderError::Busy => StatusCode::TOO_MANY_REQUESTS,
-                FolderError::NotOffered(_) | FolderError::Refused(_) => StatusCode::CONFLICT,
-            };
-            ApiError(code, e.to_string())
-        })?;
+        .map_err(folder_err)?;
     settings.node_id = Some(node.to_string());
     settings.cwd = Some(path);
     Ok(settings)
+}
+
+/// A refused or failed folder request, as the HTTP answer.
+pub(super) fn folder_err(e: FolderError) -> ApiError {
+    let code = match e {
+        FolderError::Away(_) | FolderError::Timeout(..) => StatusCode::SERVICE_UNAVAILABLE,
+        FolderError::Busy => StatusCode::TOO_MANY_REQUESTS,
+        FolderError::NotOffered(_) | FolderError::NoClone(_) | FolderError::Refused(_) => {
+            StatusCode::CONFLICT
+        }
+    };
+    ApiError(code, e.to_string())
 }
 
 /// `e` said with the folder `settings` name, when it names one: it was

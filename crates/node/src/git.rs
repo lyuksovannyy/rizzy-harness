@@ -183,7 +183,7 @@ impl Repo {
 
 /// A git command with the hardened base: cleared environment, overrides,
 /// no stdin. `program` is `git` except in tests.
-fn hardened(program: &Path) -> Command {
+pub(crate) fn hardened(program: &Path) -> Command {
     let mut c = hardened_std(std::process::Command::new(program));
     overrides(&mut c);
     Command::from(c)
@@ -223,7 +223,7 @@ fn overrides(c: &mut std::process::Command) {
 
 /// Kills a git process group when dropped (timeout, cancelled turn), so
 /// a filter or hook it started does not outlive it either.
-struct Group(Option<u32>);
+pub(crate) struct Group(pub(crate) Option<u32>);
 
 impl Drop for Group {
     fn drop(&mut self) {
@@ -308,7 +308,7 @@ thread_local! {
 }
 
 /// The git program for the checkpoint calls (`git`, found on `PATH`).
-fn git_program() -> PathBuf {
+pub(crate) fn git_program() -> PathBuf {
     #[cfg(test)]
     if let Some(p) = TEST_GIT.with(|g| g.borrow().clone()) {
         return p;

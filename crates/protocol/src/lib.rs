@@ -82,6 +82,54 @@ pub const CAP_PROJECTS: &str = "projects";
 /// refuses a longer one (the master's project names are far shorter).
 pub const MAX_PROJECT_NAME: usize = 256;
 
+/// The node capability that announces `project.clone` (ADOPTION_PLAN X.27
+/// step 3, PLAN.md T86), followed by the node's clone time limit in seconds
+/// (`[limits] clone_timeout_s`): `forge-clone:600`. Announced only where
+/// node.toml lets the node clone at all (`[forge] clone`, a host listed in
+/// `[forge] hosts`, a usable projects folder); never the hosts themselves.
+/// The master waits for the answer longer than that limit.
+pub const CAP_FORGE_CLONE_PREFIX: &str = "forge-clone:";
+
+/// The clone time limit a node announces in [`CAP_FORGE_CLONE_PREFIX`], if
+/// it announces one: `None` for a node that does not clone.
+pub fn clone_timeout_of(capabilities: &[String]) -> Option<u64> {
+    capabilities.iter().find_map(|c| {
+        let n = c.strip_prefix(CAP_FORGE_CLONE_PREFIX)?;
+        (!n.is_empty() && n.len() <= 6 && n.bytes().all(|b| b.is_ascii_digit()))
+            .then(|| n.parse().ok())
+            .flatten()
+    })
+}
+
+/// The longest `full_name` a `project.clone` may carry, in bytes.
+pub const MAX_CLONE_NAME: usize = 512;
+/// The longest `host` a `project.clone` may carry: a DNS name and a port.
+pub const MAX_CLONE_HOST: usize = 260;
+/// The longest token a `project.clone` may carry, in bytes (the master's
+/// forge tokens are at most 512).
+pub const MAX_CLONE_TOKEN: usize = 512;
+
+/// A forge token on the wire (`project.clone`): serialized as its plain
+/// text, since the link is the one place it must travel; `Debug` and
+/// `Display` stay redacted ([`harness_core::Secret`]).
+mod wire_secret {
+    use harness_core::Secret;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &Option<Secret<String>>, s: S) -> Result<S::Ok, S::Error> {
+        match v {
+            Some(t) => s.serialize_some(t.expose()),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<Option<Secret<String>>, D::Error> {
+        Ok(Option::<String>::deserialize(d)?.map(Secret::new))
+    }
+}
+
 /// The node capability that announces `project.mcp` (ADOPTION_PLAN X.36,
 /// PLAN.md T82): its node.toml says `[mcp] project_servers = "ask"`, so a
 /// person may approve the MCP servers a project folder's `.mcp.json`
@@ -1268,6 +1316,29 @@ pub enum MasterToNode {
     /// has no effect. Only to nodes with [`CAP_PROJECTS`].
     #[serde(rename = "project.create")]
     ProjectCreate { req_id: String, name: String },
+    /// Make a new project's folder by cloning a forge repository into it
+    /// (ADOPTION_PLAN X.27 step 3, PLAN.md T86): the display name (the
+    /// folder's name is made from it as for `project.create`), the forge
+    /// host and the repository's `owner/name` (GitLab: `group/…/name`).
+    /// The node clones only from a host its node.toml lists (`[forge]
+    /// hosts`), builds the URL itself (`https://<host>/<full_name>.git`),
+    /// checks both again by rules of its own, and answers with one
+    /// `project.created`, never an ack. `username` and `token` only for a
+    /// private repository: the token is handed to that one git process
+    /// through a pipe and never written anywhere on the node. No field
+    /// names a URL, a scheme or a place. Only to nodes with
+    /// [`CAP_FORGE_CLONE_PREFIX`].
+    #[serde(rename = "project.clone")]
+    ProjectClone {
+        req_id: String,
+        name: String,
+        host: String,
+        full_name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        username: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none", with = "wire_secret")]
+        token: Option<harness_core::Secret<String>>,
+    },
     /// A person's request about a project folder's `.mcp.json` (X.36,
     /// PLAN.md T82): whose request it is, the project's folder (the node
     /// checks it as a chat's folder, `check_cwd`) and what they ask.
@@ -1316,6 +1387,7 @@ impl MasterToNode {
             | MasterToNode::Diff { .. }
             | MasterToNode::Files { .. }
             | MasterToNode::ProjectCreate { .. }
+            | MasterToNode::ProjectClone { .. }
             | MasterToNode::ProjectMcp { .. } => None,
         }
     }
@@ -1439,6 +1511,64 @@ mod tests {
             json!({"type": "project.created", "req_id": "r",
                    "path": "/home/me/rizzy-projects/x-ab1c"})
         );
+    }
+
+    /// `project.clone` (T86): its wire shape, never acked; the token is on
+    /// the wire only when sent, and never in `Debug`; a URL, a scheme or a
+    /// path sent beside it is dropped by the parse.
+    #[test]
+    fn project_clone_carries_names_and_a_redacted_token() {
+        const CANARY: &str = "ghp_CANARYwire000000000000000000000001";
+        let m = MasterToNode::ProjectClone {
+            req_id: "r".into(),
+            name: "Harness".into(),
+            host: "github.com".into(),
+            full_name: "ada/harness".into(),
+            username: Some("ada".into()),
+            token: Some(harness_core::Secret::new(CANARY.into())),
+        };
+        assert_eq!(m.req_id(), None, "answered by project.created, never acked");
+        assert!(!format!("{m:?}").contains(CANARY), "{m:?}");
+        assert_eq!(
+            serde_json::to_value(&m).unwrap(),
+            json!({"type": "project.clone", "req_id": "r", "name": "Harness",
+                   "host": "github.com", "full_name": "ada/harness",
+                   "username": "ada", "token": CANARY})
+        );
+        let back: MasterToNode = serde_json::from_value(serde_json::to_value(&m).unwrap()).unwrap();
+        assert_eq!(back, m);
+        let public = MasterToNode::ProjectClone {
+            req_id: "r".into(),
+            name: "x".into(),
+            host: "gitlab.com".into(),
+            full_name: "g/s/p".into(),
+            username: None,
+            token: None,
+        };
+        let v = serde_json::to_value(&public).unwrap();
+        assert!(
+            v.get("token").is_none() && v.get("username").is_none(),
+            "{v}"
+        );
+        let hostile = json!({"type": "project.clone", "req_id": "r", "name": "x",
+                             "host": "github.com", "full_name": "a/b",
+                             "url": "file:///etc", "scheme": "ext", "path": "/root"});
+        assert!(matches!(
+            serde_json::from_value::<MasterToNode>(hostile).unwrap(),
+            MasterToNode::ProjectClone { token: None, .. }
+        ));
+        assert_eq!(
+            clone_timeout_of(&["x".into(), "forge-clone:600".into()]),
+            Some(600)
+        );
+        for bad in [
+            "forge-clone:",
+            "forge-clone:-1",
+            "forge-clone:1e3",
+            "forge-clone:9999999",
+        ] {
+            assert_eq!(clone_timeout_of(&[bad.into()]), None, "{bad}");
+        }
     }
 
     /// `recall.request` carries words only: a field naming a user, a

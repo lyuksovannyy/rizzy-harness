@@ -43,6 +43,8 @@ harness-link.workspace = true
 harness-memory.workspace = true
 rusqlite.workspace = true
 tempfile.workspace = true
+# Log lines at TRACE searched for a token in `forge_clone` tests (T86).
+tracing-subscriber.workspace = true
 
 [features]
 # The test hooks `crates/cli`'s sandbox tests drive (`testing`); never in
