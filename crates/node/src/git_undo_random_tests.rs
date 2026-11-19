@@ -4,7 +4,9 @@
 //! folders, ignored files and odd names (`*`, pathspec magic, a newline,
 //! bytes that are not UTF-8); a random turn; maybe random changes by the
 //! person after it, at, above and below what the turn changed (and `git
-//! add` / `git rm --cached` by either); then an unforced Undo, a forced
+//! add` / `git rm --cached` by either, ignore rules edited so a path
+//! becomes ignored, a revert to the content before the turn, hard links);
+//! then an unforced Undo, a forced
 //! one where that refused, and an undo of the undo. For every scenario:
 //!
 //! 1. an unforced Undo that goes ahead loses nothing: whatever it changed
@@ -86,9 +88,18 @@ const PATHS: &[&[u8]] = &[
     b"\xc3\xa9/f",
     b"e/f/g",
     b"t.log",
+    b"ab",
+    b"a.b",
+    b"a/b.c",
+    b"m/n/o/p",
 ];
 
-const TARGETS: &[&[u8]] = &[b"keep", b"a", b"nowhere", b"../outside"];
+const TARGETS: &[&[u8]] = &[b"keep", b"a", b"nowhere", b"../outside", b"a/b", b"x", b"."];
+
+thread_local! {
+    /// The folder before the turn (for the person's revert).
+    static START: std::cell::RefCell<Disk> = const { std::cell::RefCell::new(Disk::new()) };
+}
 
 fn at(dir: &Path, p: &[u8]) -> PathBuf {
     dir.join(std::ffi::OsStr::from_bytes(p))
@@ -195,7 +206,40 @@ fn change(dir: &Path, rng: &mut Rng, tag: u8, near: &[Vec<u8>]) {
     let p = pick(rng, near);
     let full = at(dir, &p);
     let old = std::fs::symlink_metadata(&full).ok();
-    match rng.below(9) {
+    match rng.below(12) {
+        9 => {
+            // Change the ignore rules: a name the trees use becomes ignored.
+            const PATTERNS: &[&[u8]] = &[b"a\n", b"x\n", b"a/b\n", b"q1\n", b"e\n", b"ab\n", b".env\n"];
+            let pat = *rng.of(PATTERNS);
+            let gi = dir.join(".gitignore");
+            let mut cur = std::fs::read(&gi).unwrap_or_default();
+            cur.extend_from_slice(pat);
+            // `.gitignore` may be a folder now (a change below it).
+            let _ = std::fs::write(&gi, cur);
+        }
+        10 => {
+            // Put back what the folder held before the turn (a revert).
+            if let Some(E::F(bytes, x)) = START.with(|s| s.borrow().get(&p).cloned()) {
+                clear_for(dir, &p);
+                std::fs::write(&full, bytes).unwrap();
+                set_x(&full, x);
+            }
+        }
+        11 => {
+            // A hard link to another file.
+            let q = pick(rng, near);
+            if old.as_ref().is_some_and(|m| m.is_file())
+                && reachable(dir, &p)
+                && p != q
+                && !q.starts_with(&[&p[..], b"/"].concat())
+                && !p.starts_with(&[&q[..], b"/"].concat())
+            {
+                clear_for(dir, &q);
+                if full.exists() {
+                    let _ = std::fs::hard_link(&full, at(dir, &q));
+                }
+            }
+        }
         0..=2 => {
             // Write a file; over an existing one, sometimes at its length.
             let len = old
@@ -307,9 +351,6 @@ async fn tree(repo: &Repo, sha: &str) -> Disk {
     d
 }
 
-fn is_ignored(p: &[u8]) -> bool {
-    p.ends_with(b".log")
-}
 
 /// Paths whose entry differs between two folders.
 fn differ<'a>(x: &'a Disk, y: &'a Disk) -> Vec<&'a Vec<u8>> {
@@ -369,6 +410,7 @@ async fn scenario(seed: u64) -> Result<&'static str, String> {
         }
     };
     let before_disk = disk(&dir);
+    START.with(|s| *s.borrow_mut() = before_disk.clone());
     let b = snap("refs/harness/s/t/before").await?;
     for _ in 0..1 + rng.below(4) {
         change(&dir, &mut rng, 100, &[]);
@@ -491,25 +533,50 @@ async fn scenario(seed: u64) -> Result<&'static str, String> {
         {
             return fail("4", format!("refused with no change by the person: {e}"));
         }
-        let plain = |d: &Disk| -> Disk {
-            d.iter()
-                .filter(|(p, _)| !is_ignored(p))
-                .map(|(p, e)| (p.clone(), e.clone()))
-                .collect()
-        };
-        if plain(&d1) != plain(&before_disk) {
-            return fail("4", "not the folder before the turn".into());
+        // Exempt exactly what no checkpoint can bring back: a path whose
+        // state before the turn is not in the `before` snapshot, or whose
+        // state after it is not in the `after` one (git ignores it, by the
+        // repository's rules or by rules the turn wrote): an undo neither
+        // removes the turn's ignored file nor restores an ignored file the
+        // turn changed. Everything else must be as before the turn.
+        let after_tree = tree(&repo, &a).await;
+        let off: Vec<String> = differ(&d1, &before_disk)
+            .into_iter()
+            .filter(|p| {
+                before_disk.get(*p) == was.get(*p) && after_disk.get(*p) == after_tree.get(*p)
+            })
+            .filter(|p| !named_unsaved(p))
+            .map(|p| String::from_utf8_lossy(p).into_owned())
+            .collect();
+        if !off.is_empty() {
+            return fail("4", format!("not the folder before the turn at {off:?}"));
         }
     }
     // 5: undoing the undo.
     let here = snap("refs/harness/s/u/after").await?;
+    let here_tree = tree(&repo, &here).await;
     restore_report(&repo, &now, &here, true)
         .await
         .map_err(|e| format!("5: undo of the undo failed: {e}{trees}"))?;
     let d2 = disk(&dir);
+    let now2 = run(&repo, &["rev-parse", "refs/harness/test/now/before"], None)
+        .await
+        .unwrap();
+    let held2 = tree(&repo, &now2).await;
     let back: Vec<String> = differ(&d0, &d2)
         .into_iter()
         .filter(|p| !named_unsaved(p))
+        // Exempt exactly what the first snapshot could not record: a path
+        // whose state before the undo is in no checkpoint (git ignored it
+        // then). The undo of the undo cannot know it, so it may differ
+        // (an undo that removed an ignore rule left the file, now not
+        // ignored, which the undo of the undo then deletes); what it
+        // replaced or removed must then be held by its own snapshot.
+        .filter(|p| !(held.get(*p) != d0.get(*p) && held2.get(*p) == d1.get(*p)))
+        // And what the undo left that its own `after` cannot record (it
+        // wrote a path the person's rules ignore): the undo of the undo
+        // does not see it and leaves it as the undo left it.
+        .filter(|p| !(here_tree.get(*p) != d1.get(*p) && d2.get(*p) == d1.get(*p)))
         .map(|p| String::from_utf8_lossy(p).into_owned())
         .collect();
     if !back.is_empty() {
@@ -539,9 +606,13 @@ async fn undo_invariants_hold_on_random_trees() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(200);
+    let from: u64 = std::env::var("UNDO_SEED_FROM")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
     let mut failed = Vec::new();
     let mut kinds: BTreeMap<&str, u64> = BTreeMap::new();
-    for seed in 0..n {
+    for seed in from..from + n {
         match scenario(seed).await {
             Ok(k) => *kinds.entry(k).or_default() += 1,
             Err(e) => failed.push(format!("seed {seed}: {e}")),

@@ -1148,7 +1148,9 @@ impl Names {
         let mut s = self
             .shown
             .iter()
-            .map(|n| format!("`{n}`"))
+            // A name never writes the backticks that mark names (a file
+            // named "x`, `y" must not read as two).
+            .map(|n| format!("`{}`", n.replace('`', "\u{FFFD}")))
             .collect::<Vec<_>>()
             .join(", ");
         if self.more > 0 {
@@ -1849,30 +1851,44 @@ pub async fn restore_plan(
             ));
         }
     }
-    let unsaved = unsaved_in_replaced_dirs(repo, &written, now).await?;
+    // What the restore would delete or write over that no checkpoint
+    // holds (ignored files, say): files in a folder it replaces by a file,
+    // and a file or link at a path it writes or deletes, or where a folder
+    // of a path it writes goes. One list, one wording.
+    let replaced = unsaved_in_replaced_dirs(repo, &written, now).await?;
+    let mut dirs: Vec<Vec<u8>> = replaced.iter().map(|(d, _)| d.clone()).collect();
+    dirs.dedup(); // sorted by directory first
+    let mut unsaved: Vec<Vec<u8>> = replaced.into_iter().map(|(_, f)| f).collect();
+    unsaved.extend(unsaved_in_the_way(repo, &candidates, now).await?);
+    unsaved.sort();
+    unsaved.dedup();
     if !unsaved.is_empty() {
-        let (mut dirs, files): (Vec<Vec<u8>>, Vec<Vec<u8>>) = unsaved.into_iter().unzip();
-        dirs.dedup(); // sorted by directory first
-        let in_dirs = Names::of(&dirs).listed();
-        if files
+        if unsaved
             .iter()
             .any(|f| f.split(|b| *b == b'/').any(|c| c == b".git"))
         {
             return Err(format!(
-                "nothing was changed: undo would replace the folder {in_dirs} by a file, and it \
-                 holds a git repository, which undo never deletes; move it away first"
+                "nothing was changed: undo would replace the folder {} by a file, and it \
+                 holds a git repository, which undo never deletes; move it away first",
+                Names::of(&dirs).listed()
             ));
         }
         if check {
+            let mut what = Names::of(&unsaved).listed();
+            if !dirs.is_empty() {
+                what.push_str(&format!(
+                    " (in {}, a folder undo replaces by a file)",
+                    Names::of(&dirs).listed()
+                ));
+            }
             return Err(format!(
-                "nothing was changed: undo would replace the folder {in_dirs} by a file, and it \
-                 holds files that are in no checkpoint and would be deleted: {}; \
-                 \"Undo anyway\" deletes them",
-                Names::of(&files).listed()
+                "nothing was changed: undo would delete or write over files that are in no \
+                 checkpoint (git ignores them, say), so nothing could bring them back: {what}; \
+                 \"Undo anyway\" deletes them"
             ));
         }
         return Ok(RestorePlan {
-            unsaved: Names::of(&files),
+            unsaved: Names::of(&unsaved),
             ..plan_of(
                 touched,
                 &nested,
@@ -2018,6 +2034,84 @@ async fn unsaved_in_replaced_dirs(
     }
     out.sort();
     Ok(out)
+}
+
+/// The files and links on disk that a restore of `rows` would delete or
+/// write over and that snapshot `now` does not hold (git ignores them, or
+/// they appeared after it): the entry at each path, and for a path it
+/// writes a file or link where a folder on the way goes. Looked at as the
+/// writer walks (`git::at`, no link followed); a folder at a written path
+/// is [`unsaved_in_replaced_dirs`]'s. Relative, as git's bytes.
+async fn unsaved_in_the_way(
+    repo: &Repo,
+    rows: &[&DiffRow],
+    now: &str,
+) -> Result<Vec<Vec<u8>>, String> {
+    let root = repo.root.clone();
+    let asked: Vec<(Vec<u8>, bool)> = rows
+        .iter()
+        .map(|r| (r.path.clone(), r.status != 'A'))
+        .collect();
+    let found: Vec<Vec<u8>> = tokio::task::spawn_blocking(move || {
+        let top = at::Top::open(&root)?;
+        let mut out = std::collections::BTreeSet::new();
+        for (p, write) in &asked {
+            for f in top.in_the_way(&rel_path(p), *write)? {
+                out.insert(path_bytes(&f));
+            }
+        }
+        Ok::<_, String>(out.into_iter().collect())
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    if found.is_empty() {
+        return Ok(found);
+    }
+    // Which of them `now` holds: `ls-tree` with the names' bytes as literal
+    // pathspecs, a bounded number of argument bytes per call.
+    let mut held = std::collections::HashSet::new();
+    for run in arg_runs(&found, ARGS_MAX) {
+        let mut c = command(repo, None);
+        c.env("GIT_LITERAL_PATHSPECS", "1")
+            .args(["ls-tree", "-r", "-z", "--name-only", "--full-tree", now, "--"]);
+        for p in run {
+            c.arg(rel_path(p));
+        }
+        let listed = exec(c, None, GIT_TIMEOUT).await?;
+        if !listed.status.success() {
+            return Err(result_text(&["ls-tree"], listed));
+        }
+        held.extend(
+            listed
+                .stdout
+                .split(|b| *b == 0)
+                .filter(|p| !p.is_empty())
+                .map(<[u8]>::to_vec),
+        );
+    }
+    Ok(found.into_iter().filter(|p| !held.contains(p)).collect())
+}
+
+/// The most bytes of paths given to one git call as arguments: far under
+/// Linux's 128 KiB for one argument and 2 MiB for all.
+const ARGS_MAX: usize = 64 << 10;
+
+/// `paths` in runs of at most `max` bytes (a longer path is a run of its
+/// own).
+fn arg_runs(paths: &[Vec<u8>], max: usize) -> Vec<&[Vec<u8>]> {
+    let mut out = Vec::new();
+    let (mut start, mut bytes) = (0, 0);
+    for (i, p) in paths.iter().enumerate() {
+        if i > start && bytes + p.len() + 1 > max {
+            out.push(&paths[start..i]);
+            (start, bytes) = (i, 0);
+        }
+        bytes += p.len() + 1;
+    }
+    if start < paths.len() {
+        out.push(&paths[start..]);
+    }
+    out
 }
 
 /// A relative path as git's bytes.

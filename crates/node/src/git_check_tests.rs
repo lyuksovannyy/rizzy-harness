@@ -250,3 +250,169 @@ async fn a_folder_replaced_by_a_looping_link_is_checkpointed_and_undone() {
         assert_eq!(r.get(b"a/x").as_deref(), Some("x\n"));
     }
 }
+
+/// Review of PR 160, P1: the turn stops tracking `.env` (deletes it and
+/// ignores it); the person then writes a new `.env`. Git ignores it, so
+/// the snapshot taken before the undo does not hold it, and the check saw
+/// no change: the undo wrote the old `.env` over the person's, which no
+/// checkpoint held. Now it is a file in no checkpoint in the undo's way:
+/// an unforced undo refuses and names it; a forced one names it again.
+#[tokio::test]
+async fn an_ignored_file_at_a_path_the_undo_writes_is_named_and_refused() {
+    let r = rig().await;
+    r.put(b".env", "OLD=1\n");
+    let b = r.snap().await;
+    std::fs::remove_file(r.at(b".env")).unwrap();
+    r.put(b".gitignore", ".env\n");
+    let a = r.snap().await;
+    r.put(b".env", "PERSON=2\n");
+    let e = restore_report(&r.repo, &b, &a, false).await.unwrap_err();
+    assert!(
+        e.contains("in no checkpoint") && e.contains("`.env`") && e.contains("Undo anyway"),
+        "{e}"
+    );
+    assert_eq!(r.get(b".env").as_deref(), Some("PERSON=2\n"));
+    let done = restore_report(&r.repo, &b, &a, true).await.unwrap();
+    assert_eq!(done.plan.unsaved.shown, vec![".env".to_string()]);
+    assert_eq!(r.get(b".env").as_deref(), Some("OLD=1\n"));
+}
+
+/// P1b: the same with an ignored file where a folder the undo puts back
+/// goes.
+#[tokio::test]
+async fn an_ignored_file_where_a_folder_the_undo_writes_goes_is_named_and_refused() {
+    let r = rig().await;
+    r.put(b"cache/x", "x\n");
+    let b = r.snap().await;
+    std::fs::remove_dir_all(r.at(b"cache")).unwrap();
+    r.put(b".gitignore", "cache\n");
+    let a = r.snap().await;
+    r.put(b"cache", "person's file\n");
+    let e = restore_report(&r.repo, &b, &a, false).await.unwrap_err();
+    assert!(e.contains("in no checkpoint") && e.contains("`cache`"), "{e}");
+    assert_eq!(r.get(b"cache").as_deref(), Some("person's file\n"));
+    let done = restore_report(&r.repo, &b, &a, true).await.unwrap();
+    assert_eq!(done.plan.unsaved.shown, vec!["cache".to_string()]);
+    assert_eq!(r.get(b"cache/x").as_deref(), Some("x\n"));
+}
+
+/// The guard for the two above: ignored files beside what the undo writes
+/// (a sibling, a `target/` next to a written file, one inside a folder it
+/// writes into) are not in its way and do not count.
+#[tokio::test]
+async fn ignored_files_beside_the_paths_the_undo_writes_do_not_count() {
+    let r = rig().await;
+    r.put(b".gitignore", "target/\n*.log\n");
+    r.put(b"a/x", "x\n");
+    r.put(b"y", "y\n");
+    let b = r.snap().await;
+    r.put(b"a/x", "turn\n");
+    std::fs::remove_file(r.at(b"y")).unwrap();
+    let a = r.snap().await;
+    r.put(b"target/out", "build\n");
+    r.put(b"a/z.log", "log\n");
+    r.put(b"y.log", "log\n");
+    restore_report(&r.repo, &b, &a, false).await.unwrap();
+    assert_eq!(r.get(b"a/x").as_deref(), Some("x\n"));
+    assert_eq!(r.get(b"y").as_deref(), Some("y\n"));
+    for p in [&b"target/out"[..], b"a/z.log", b"y.log"] {
+        assert!(r.get(p).is_some(), "{p:?}");
+    }
+}
+
+/// The rule for an ignored file the TURN wrote in the undo's way: the node
+/// cannot tell it from one the person wrote after the turn (neither is in
+/// any checkpoint), so it counts the same: refused, named. It needs a turn
+/// that makes a path ignored and writes a new file there where the tree
+/// before it had a folder (or nothing) at that path: the turn replaces
+/// `cache/` by an ignored file `cache`.
+#[tokio::test]
+async fn an_ignored_file_the_turn_wrote_in_the_undos_way_is_named_and_refused() {
+    let r = rig().await;
+    r.put(b"cache/x", "x\n");
+    let b = r.snap().await;
+    std::fs::remove_dir_all(r.at(b"cache")).unwrap();
+    r.put(b".gitignore", "cache\n");
+    r.put(b"cache", "turn\n");
+    let a = r.snap().await;
+    let e = restore_report(&r.repo, &b, &a, false).await.unwrap_err();
+    assert!(e.contains("in no checkpoint") && e.contains("`cache`"), "{e}");
+    assert_eq!(r.get(b"cache").as_deref(), Some("turn\n"));
+    let done = restore_report(&r.repo, &b, &a, true).await.unwrap();
+    assert_eq!(done.plan.unsaved.shown, vec!["cache".to_string()]);
+    assert_eq!(r.get(b"cache/x").as_deref(), Some("x\n"));
+}
+
+/// The other side of that rule: a file a snapshot held stays in the
+/// checkpoints after it becomes ignored (the checkpoint index tracks it),
+/// so the turn's new `.env` under a new ignore rule is held by the
+/// snapshot before the undo, not in its way, and an undo of the undo
+/// brings it back.
+#[tokio::test]
+async fn an_ignored_file_the_checkpoints_still_hold_is_not_in_the_way() {
+    let r = rig().await;
+    r.put(b".env", "OLD=1\n");
+    let b = r.snap().await;
+    r.put(b".gitignore", ".env\n");
+    r.put(b".env", "TURN=1\n");
+    let a = r.snap().await;
+    let done = restore_report(&r.repo, &b, &a, false).await.unwrap();
+    assert!(done.plan.unsaved.is_empty());
+    assert_eq!(r.get(b".env").as_deref(), Some("OLD=1\n"));
+    let held = run(
+        &r.repo,
+        &["cat-file", "-p", "refs/harness/test/now/before:.env"],
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(held, "TURN=1");
+}
+
+/// The person's change below a path the undo writes a file to (the turn
+/// deleted the file `a/b`, the person made `a/b/c`): refused. Before this
+/// test only one random seed caught a check of "exactly at" instead of "at
+/// or below".
+#[tokio::test]
+async fn a_change_below_a_path_the_undo_writes_is_refused() {
+    let r = rig().await;
+    r.put(b"a/b", "file\n");
+    let b = r.snap().await;
+    std::fs::remove_file(r.at(b"a/b")).unwrap();
+    let a = r.snap().await;
+    r.put(b"a/b/c", "person\n");
+    let e = restore_report(&r.repo, &b, &a, false).await.unwrap_err();
+    assert!(e.contains("changed after the turn") && e.contains("`a/b/c`"), "{e}");
+    assert_eq!(r.get(b"a/b/c").as_deref(), Some("person\n"));
+}
+
+/// A folder named like pathspec magic that the undo replaces by a file:
+/// its files are looked up by the name's bytes as a literal pathspec (with
+/// magic, `ls-tree` failed and so did the undo, forced or not).
+#[tokio::test]
+async fn a_folder_named_like_pathspec_magic_replaced_by_a_file_is_undone() {
+    let r = rig().await;
+    r.put(b":!q1", "file\n");
+    let b = r.snap().await;
+    std::fs::remove_file(r.at(b":!q1")).unwrap();
+    r.put(b":!q1/k", "turn\n");
+    let a = r.snap().await;
+    restore_report(&r.repo, &b, &a, false).await.unwrap();
+    assert_eq!(r.get(b":!q1").as_deref(), Some("file\n"));
+}
+
+/// A name cannot pass for two in a refusal: the backticks that mark names
+/// are never written from a name.
+#[tokio::test]
+async fn a_name_with_backticks_reads_as_one_name_in_a_refusal() {
+    let name = b"x`, `ctl.txt";
+    let r = rig().await;
+    r.put(name, "before\n");
+    let b = r.snap().await;
+    r.put(name, "turn\n");
+    let a = r.snap().await;
+    r.put(name, "person\n");
+    let e = restore_report(&r.repo, &b, &a, false).await.unwrap_err();
+    assert!(!e.contains("`ctl.txt`"), "{e}");
+    assert_eq!(e.matches('`').count(), 2, "{e}");
+}

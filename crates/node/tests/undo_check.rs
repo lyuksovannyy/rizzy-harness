@@ -77,3 +77,36 @@ async fn undo_refuses_over_a_later_change_to_a_name_that_reads_as_pathspec_magic
     assert!(e.contains("changed after the turn"), "{e}");
     assert_eq!(r.read(":(attr:zz)k").as_deref(), Some("person\n"));
 }
+
+/// Review of PR 160, P1, through a node: the turn untracks `.env`, the
+/// person writes a new one (ignored, so in no checkpoint). Undo is refused
+/// naming `.env` before anything is written; "Undo anyway" goes ahead and
+/// its note names it again.
+#[tokio::test]
+async fn undo_refuses_over_an_ignored_file_in_its_way_and_names_it() {
+    let mut r = repo_rig().await;
+    r.write(".env", "OLD=1\n");
+    r.git(&["add", ".env"]);
+    r.git(&["commit", "-qm", "env"]);
+    let turn = r
+        .turn("git rm -q --cached .env && rm .env && echo .env > .gitignore")
+        .await
+        .id
+        .unwrap();
+    r.write(".env", "PERSON=2\n");
+    let e = r.restore(&turn, false).await.result.unwrap_err();
+    assert!(
+        e.contains("in no checkpoint") && e.contains("`.env`") && e.contains("Undo anyway"),
+        "{e}"
+    );
+    assert_eq!(r.read(".env").as_deref(), Some("PERSON=2\n"));
+    let mark = r.seen.len();
+    let forced = r.restore(&turn, true).await;
+    assert_eq!(forced.result, Ok(()));
+    assert_eq!(r.read(".env").as_deref(), Some("OLD=1\n"));
+    let notes = r.notes_since(mark);
+    assert!(
+        notes.iter().any(|n| n.contains("`.env`") && n.contains("not saved")),
+        "{notes:?}"
+    );
+}
