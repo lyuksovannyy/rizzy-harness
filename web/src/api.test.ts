@@ -99,3 +99,34 @@ describe("settings", () => {
     expect((await api.settings()).accent).toBe("orange");
   });
 });
+
+describe("a request that gets no answer", () => {
+  const calm = "The server is not reachable. Check that it is running, then try again.";
+
+  test("reads as one calm sentence, not the browser's TypeError text", async () => {
+    fetchFn.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    await expect(api.me()).rejects.toThrow(calm);
+    fetchFn.mockRejectedValueOnce(new TypeError("NetworkError when attempting to fetch resource."));
+    await expect(call("GET", "/api/x")).rejects.toThrow(calm);
+  });
+
+  test("never carries the URL or the body", async () => {
+    fetchFn.mockRejectedValueOnce(new TypeError("Failed to fetch https://h/api/x?token=SECRET"));
+    const e = await call("POST", "/api/x", { password: "hunter2" }).catch((x: Error) => x);
+    expect(String((e as Error).message)).not.toMatch(/SECRET|hunter2|https/);
+  });
+
+  test("a real HTTP error keeps its own message", async () => {
+    answers = [{ status: 500, body: { error: "disk full", code: "disk" } }];
+    const e = (await api.me().catch((x: unknown) => x)) as { message: string; status: number; code: string };
+    expect([e.message, e.status, e.code]).toEqual(["disk full", 500, "disk"]);
+    answers = [{ status: 502, body: null }];
+    await expect(api.me()).rejects.toThrow(/^502/);
+  });
+
+  test("a caller's own abort is passed on unchanged", async () => {
+    const abort = new DOMException("aborted", "AbortError");
+    fetchFn.mockRejectedValueOnce(abort);
+    await expect(call("GET", "/api/x")).rejects.toBe(abort);
+  });
+});

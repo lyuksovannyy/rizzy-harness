@@ -1,4 +1,5 @@
 import { normalizeAccent } from "./lib/appearance";
+import { t } from "./lib/i18n";
 import type {
   Agent,
   ApprovalMode,
@@ -90,6 +91,11 @@ export async function call<T>(method: string, path: string, body?: unknown, sign
     credentials: "same-origin",
     headers: keyed(body === undefined ? {} : { "content-type": "application/json" }),
     body: body === undefined ? undefined : JSON.stringify(body),
+  }).catch((e: unknown) => {
+    // No HTTP answer at all: browsers throw a TypeError whose text ("Failed to
+    // fetch") says nothing a person can act on and may name the URL. Aborts
+    // (a caller's signal, a timeout) are DOMExceptions and pass unchanged.
+    throw e instanceof TypeError ? new Error(t("error.unreachable")) : e;
   });
   let data: unknown = null;
   try {
