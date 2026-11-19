@@ -121,10 +121,12 @@ async fn undo_refuses_over_an_ignored_file_in_its_way_and_names_it() {
 async fn a_turn_that_leaves_a_pipe_where_a_file_was_is_checkpointed_and_says_so() {
     let mut r = repo_rig().await;
     r.write("p", "v0\n");
-    r.git(&["add", "p"]);
+    r.write("m", "m old\n");
+    r.git(&["add", "p", "m"]);
     r.git(&["commit", "-qm", "p"]);
     let mark = r.seen.len();
-    let turn = r.turn("rm p && mkfifo p").await;
+    // The turn also changes a tracked file next to the pipe.
+    let turn = r.turn("rm p && mkfifo p && echo 'm new' > m").await;
     assert!(turn.id.is_some(), "{:?}", r.notes_since(mark));
     let notes = r.notes_since(mark);
     let said: Vec<&String> = notes.iter().filter(|n| n.contains("`p`")).collect();
@@ -134,6 +136,15 @@ async fn a_turn_that_leaves_a_pipe_where_a_file_was_is_checkpointed_and_says_so(
         !notes.iter().any(|n| n.contains("no checkpoint")),
         "{notes:?}"
     );
+    // The turn's change list names `m` as changed, not deleted, and an
+    // Undo of the turn brings its old content back.
+    let diff = r.diff(turn.id.as_deref().unwrap(), false).await.unwrap();
+    let m = diff.files.iter().find(|f| f.path == "m");
+    assert!(
+        m.is_some_and(|f| f.status == harness_protocol::DiffStatus::Modified),
+        "{:?}",
+        diff.files
+    );
     // A second turn with the pipe still there: nothing new to say.
     let mark = r.seen.len();
     r.turn("true").await;
@@ -142,4 +153,9 @@ async fn a_turn_that_leaves_a_pipe_where_a_file_was_is_checkpointed_and_says_so(
         "{:?}",
         r.notes_since(mark)
     );
+    let undo = r
+        .restore_with(turn.id.as_deref().unwrap(), true, true)
+        .await;
+    assert_eq!(undo.result, Ok(()));
+    assert_eq!(r.read("m").as_deref(), Some("m old\n"));
 }

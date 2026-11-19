@@ -1013,7 +1013,8 @@ async fn stage_without_nested(
 /// cannot stage a named pipe, a socket or a device, and `add -u` fails
 /// outright on a tracked file that became one (every snapshot would fail
 /// while it is there). Only when `add -u` fails, the modified paths are
-/// looked at (`lstat`, nothing opened): those that are no file, link or
+/// looked at (`fstatat` on folders opened without following links, nothing
+/// opened at the path): those that are no file, link or
 /// folder are taken out of the index, so this snapshot holds the file as
 /// gone, and `add -u` runs once more. With none of them, the first error
 /// is returned. Costs nothing when `add -u` succeeds.
@@ -1029,19 +1030,20 @@ async fn add_tracked(repo: &Repo, idx: &Path) -> Result<Vec<Vec<u8>>, String> {
         .filter(|p| !p.is_empty())
         .map(<[u8]>::to_vec)
         .collect();
+    // Walked as the writer walks (`git::at`): a link on the way is never
+    // followed, so nothing outside the folder is looked at.
     let special: Vec<Vec<u8>> = tokio::task::spawn_blocking(move || {
-        paths
-            .into_iter()
-            .filter(|p| {
-                std::fs::symlink_metadata(root.join(rel_path(p))).is_ok_and(|m| {
-                    let t = m.file_type();
-                    !(t.is_file() || t.is_symlink() || t.is_dir())
-                })
-            })
-            .collect()
+        let top = at::Top::open(&root)?;
+        let mut out = Vec::new();
+        for p in paths {
+            if top.is_special(&rel_path(&p))? {
+                out.push(p);
+            }
+        }
+        Ok::<_, String>(out)
     })
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())??;
     if special.is_empty() {
         return Err(first);
     }
@@ -2125,12 +2127,35 @@ async fn unsaved_in_the_way(
     if found.is_empty() {
         return Ok(found);
     }
-    // Which of them `now` holds as a file or link, matched here as bytes.
-    // A path `now` holds as a folder is in neither answer (`-r` lists no
-    // folders), so a file on disk there counts as not held. Few paths: asked
-    // by name (literal pathspecs, the names' bytes); many: one listing of
-    // the whole tree (a pathspec per path cost 0.5 s for 50,000 of them, the
-    // listing 0.15 s; measured in `git_check_tests.rs`, `bench_*`).
+    let ask = by_name(&found);
+    not_held(repo, now, found, ask).await
+}
+
+/// Whether [`not_held`] asks git by name: few paths, and few bytes of
+/// them (an argument list is bounded by the stack limit: a quarter of it,
+/// 512 KiB under `ulimit -s 2048`).
+fn by_name(found: &[Vec<u8>]) -> bool {
+    found.len() <= ASK_BY_NAME_MAX
+        && found.iter().map(|p| p.len() + 1).sum::<usize>() <= ASK_BY_NAME_BYTES
+}
+
+/// Of `found` (relative, as git's bytes), the paths snapshot `now` does
+/// not hold as a file or link, matched here as bytes. A path `now` holds
+/// as a folder is in neither answer (`-r` lists no folders), so a file on
+/// disk there counts as not held. `by_name`: git is asked about those
+/// paths only (literal pathspecs, the names' bytes); otherwise one listing
+/// of the whole tree is read (a pathspec per path cost 0.5 s for 50,000 of
+/// them, the listing 0.15 s; `git_check_tests.rs`, `bench_*`). Both answer
+/// the same (`by_name_and_the_listing_agree`).
+async fn not_held(
+    repo: &Repo,
+    now: &str,
+    found: Vec<Vec<u8>>,
+    by_name: bool,
+) -> Result<Vec<Vec<u8>>, String> {
+    if found.is_empty() {
+        return Ok(found);
+    }
     let mut c = command(repo, None);
     c.env("GIT_LITERAL_PATHSPECS", "1").args([
         "ls-tree",
@@ -2140,7 +2165,7 @@ async fn unsaved_in_the_way(
         "--full-tree",
         now,
     ]);
-    if found.len() <= ASK_BY_NAME_MAX {
+    if by_name {
         c.arg("--");
         for p in &found {
             c.arg(rel_path(p));
@@ -2165,6 +2190,10 @@ async fn unsaved_in_the_way(
 /// above it, it reads the whole listing (measured: by name is cheaper until
 /// a few hundred paths; then the listing wins).
 const ASK_BY_NAME_MAX: usize = 256;
+
+/// And at most this many bytes of them as arguments (far under the 512 KiB
+/// a stack limit of 2 MiB leaves for all arguments).
+const ASK_BY_NAME_BYTES: usize = 64 << 10;
 
 /// A relative path as git's bytes.
 #[cfg(unix)]
