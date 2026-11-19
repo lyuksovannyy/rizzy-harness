@@ -12,8 +12,10 @@
 // counts.
 
 export const MAX_CALLED = 4;
+/** The most resolved mentions one message may hold (the server refuses more). */
+export const MAX_RESOLVED = 16;
 
-/** What a handle names: `agent:<id>` or `person`; null: nothing (text). */
+/** What a handle names: `agent:<id>`, `tag:<id>` (an agent that runs only as a sub-agent: mentioned, never called) or `person`; null: nothing (text). */
 export type Resolve = (name: string) => string | null;
 
 export interface Found {
@@ -148,7 +150,7 @@ export function scanMentions(text: string, resolve: Resolve): Mentions {
   if (trimStart(text) !== "" && !last[1]) for (const s of closingLine(text, last[0], resolve)) marks.add(s);
   const called: string[] = [];
   for (const f of found) {
-    f.trigger = marks.has(f.start);
+    f.trigger = !f.who.startsWith("tag:") && marks.has(f.start);
     if (f.trigger && f.who.startsWith("agent:")) {
       const id = f.who.slice(6);
       if (!called.includes(id)) {
@@ -160,11 +162,19 @@ export function scanMentions(text: string, resolve: Resolve): Mentions {
   return { found, called };
 }
 
-/** The resolver the UI has: the chat's agents by id or alias, and the signed-in person's own login. */
-export function resolver(agents: { id: string; aliases?: string[] }[], login?: string): Resolve {
+/** The sub-agent-only agents `m` mentions, each once, in order. */
+export function tagsOf(m: Mentions): string[] {
+  const out: string[] = [];
+  for (const f of m.found) if (f.who.startsWith("tag:") && !out.includes(f.who.slice(4))) out.push(f.who.slice(4));
+  return out;
+}
+
+/** The resolver the UI has: the chat's agents by id or alias (those that may answer, and those that run only as sub-agents: tags; one that is neither is text), and the signed-in person's own login. */
+export function resolver(agents: { id: string; aliases?: string[]; features?: { as_agent?: boolean; as_subagent?: boolean } }[], login?: string): Resolve {
   const by = new Map<string, string>();
-  for (const a of agents) for (const h of [...(a.aliases ?? []), a.id]) by.set(h, a.id);
+  const kind = (a: (typeof agents)[number]) => (a.features?.as_agent !== false ? "agent" : a.features?.as_subagent !== false ? "tag" : null);
+  for (const a of agents) for (const h of [...(a.aliases ?? []), a.id]) if (kind(a)) by.set(h, `${kind(a)}:${a.id}`);
   // An id beats an alias, as the server's set resolves.
-  for (const a of agents) by.set(a.id, a.id);
-  return (name) => (by.has(name) ? `agent:${by.get(name)}` : name === login ? "person" : null);
+  for (const a of agents) if (kind(a)) by.set(a.id, `${kind(a)}:${a.id}`);
+  return (name) => by.get(name) ?? (name === login ? "person" : null);
 }

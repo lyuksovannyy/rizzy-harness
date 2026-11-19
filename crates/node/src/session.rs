@@ -1649,8 +1649,9 @@ impl Session {
         agent: Option<AgentSpec>,
         agent_named: bool,
         compare: Vec<String>,
-        extra: TurnExtra,
+        mut extra: TurnExtra,
         peers: Vec<AgentSpec>,
+        tags: Vec<String>,
     ) -> Result<(), String> {
         if !compare.is_empty() && (self.profile != Profile::Chat || compare.len() > 4) {
             return Err("parallel answers need a chat and at most 4 models".into());
@@ -1692,6 +1693,19 @@ impl Session {
         let limits = &self.node.cfg.policy.limits;
         let agent = agent.map(|a| limits.bound_delegation(a));
         let peers = self.checked_peers(agent.as_ref(), peers)?;
+        let tags = peers::checked_tags(tags)?;
+        // The agents the message tagged (sub-agent-only names it mentions)
+        // that this agent has among its own delegates: one line in the
+        // turn's context, recorded with it, so a replay is the same bytes.
+        if let Some(line) = agent
+            .as_ref()
+            .and_then(|a| harness_core::mention::tags_line(&peers::allowed_tags(a, &tags)))
+        {
+            extra.context = Some(match extra.context.take() {
+                Some(c) if !c.is_empty() => format!("{c}\n\n{line}"),
+                _ => line,
+            });
+        }
         let turn_id = new_id();
         let cancel = CancellationToken::new();
         let by_stop = Arc::new(AtomicBool::new(false));
@@ -1786,6 +1800,7 @@ impl Session {
             ..Default::default()
         };
         // Who this message called, first agent first (X.37).
+        msg.tags = tags.clone();
         if !peers.is_empty() {
             msg.triggers = agent
                 .iter()
@@ -1812,7 +1827,7 @@ impl Session {
             // message stands leaves seq 0, and the cause then names no
             // message (the chat still shows who was called).
             let at = self.message_seq(seen, &turn_id).await.unwrap_or(0);
-            self.set_peers(at, peers);
+            self.set_peers(at, peers, tags);
         }
         let extra = TurnExtra {
             images: msg.images.clone(),
@@ -2838,6 +2853,7 @@ impl Session {
             images,
             queued: false,
             triggers: vec![],
+            tags: vec![],
             files,
         };
         // Scrubbed here, as the log will store it (`append` scrubs every
@@ -4365,6 +4381,7 @@ impl Session {
             images: vec![],
             queued: false,
             triggers: vec![],
+            tags: vec![],
             files: vec![],
         };
         let extra = TurnExtra {
@@ -4797,6 +4814,7 @@ impl Session {
             images: vec![],
             queued: false,
             triggers: vec![],
+            tags: vec![],
             files: vec![],
         };
         let extra = TurnExtra {
@@ -6115,6 +6133,7 @@ mod callback_budget_tests {
         let mention = TurnCause::Mention(MentionCall {
             message_seq: 1,
             by: CalledBy::Person,
+            tags: vec![],
         });
         let ended = at(
             4,

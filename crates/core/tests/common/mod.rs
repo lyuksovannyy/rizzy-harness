@@ -146,6 +146,7 @@ pub fn every_kind(w: &str) -> Vec<EventKind> {
             }],
             queued: true,
             triggers: vec![s()],
+            tags: vec![s()],
         }),
         EventKind::AssistantDelta(AssistantDelta {
             turn_id: s(),
@@ -463,6 +464,7 @@ pub fn alternatives(w: &str) -> Vec<EventKind> {
         cause: Some(TurnCause::Mention(MentionCall {
             message_seq: 1,
             by: CalledBy::Person,
+            tags: vec![s()],
         })),
         environment: Some(s()),
         continued_by: Some(s()),

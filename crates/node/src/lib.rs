@@ -1699,6 +1699,7 @@ impl NodeRuntime {
                 files,
                 owner,
                 peers,
+                tags,
                 ..
             } => {
                 self.audit("session.prompt", session_id).await;
@@ -1724,7 +1725,7 @@ impl NodeRuntime {
                 match self.session(session_id) {
                     Some(s) => match learn_owner(&s, owner).await {
                         Ok(()) => {
-                            s.prompt(input, agent, agent_named, compare, extra, peers)
+                            s.prompt(input, agent, agent_named, compare, extra, peers, tags)
                                 .await
                         }
                         Err(e) => Err(e),

@@ -130,6 +130,7 @@ impl Node {
                 files: vec![],
                 owner: None,
                 peers: vec![],
+                tags: vec![],
             })
             .unwrap();
         self.ack().await;

@@ -161,6 +161,7 @@ impl Link {
             files: vec![],
             owner: None,
             peers: vec![],
+            tags: vec![],
         });
     }
 }

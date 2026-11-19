@@ -60,6 +60,10 @@ pub enum Item {
         /// in the order they answer.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         triggers: Vec<String>,
+        /// The sub-agent-only agents it mentions (`user_message.tags`):
+        /// tags, never called.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tags: Vec<String>,
     },
     /// Turns before this point reach the model only as a summary.
     Summary {
@@ -474,6 +478,7 @@ impl SessionView {
                 images: m.images,
                 queued: m.queued.then_some(Queued { seq, read: false }),
                 triggers: m.triggers,
+                tags: m.tags,
             }),
             EventKind::PeersSkipped(p) => self.items.push(Item::PeersSkipped {
                 agents: p.agents,
@@ -1085,6 +1090,7 @@ mod tests {
                 images: vec![],
                 queued: false,
                 triggers: vec![],
+                tags: vec![],
                 files: vec![],
             })
         };

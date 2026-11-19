@@ -653,6 +653,172 @@
      "trigger": true
     }
    ]
+  },
+  {
+   "name": "owner (2026-11-19): a sub-agent-only name in the opening is a tag, part of the run",
+   "text": "@coder @advisor, plan this first",
+   "called": [
+    "coder"
+   ],
+   "found": [
+    {
+     "text": "@coder",
+     "who": "agent:coder",
+     "trigger": true
+    },
+    {
+     "text": "@advisor",
+     "who": "tag:advisor",
+     "trigger": false
+    }
+   ]
+  },
+  {
+   "name": "a tag first does not end the run",
+   "text": "@advisor @coder @writer hi",
+   "called": [
+    "coder",
+    "writer"
+   ],
+   "found": [
+    {
+     "text": "@advisor",
+     "who": "tag:advisor",
+     "trigger": false
+    },
+    {
+     "text": "@coder",
+     "who": "agent:coder",
+     "trigger": true
+    },
+    {
+     "text": "@writer",
+     "who": "agent:writer",
+     "trigger": true
+    }
+   ]
+  },
+  {
+   "name": "a tag in the closing line does not make it text",
+   "text": "hi\n@coder @advisor @alex",
+   "called": [
+    "coder"
+   ],
+   "found": [
+    {
+     "text": "@coder",
+     "who": "agent:coder",
+     "trigger": true
+    },
+    {
+     "text": "@advisor",
+     "who": "tag:advisor",
+     "trigger": false
+    },
+    {
+     "text": "@alex",
+     "who": "person",
+     "trigger": true
+    }
+   ]
+  },
+  {
+   "name": "only tags in the trigger positions: nobody is called",
+   "text": "@advisor @scout hi\n@advisor",
+   "called": [],
+   "found": [
+    {
+     "text": "@advisor",
+     "who": "tag:advisor",
+     "trigger": false
+    },
+    {
+     "text": "@scout",
+     "who": "tag:scout",
+     "trigger": false
+    },
+    {
+     "text": "@advisor",
+     "who": "tag:advisor",
+     "trigger": false
+    }
+   ]
+  },
+  {
+   "name": "a tag in the middle is a tag, not plain text",
+   "text": "ask the @advisor about it",
+   "called": [],
+   "found": [
+    {
+     "text": "@advisor",
+     "who": "tag:advisor",
+     "trigger": false
+    }
+   ]
+  },
+  {
+   "name": "a name that is neither pickable nor a sub-agent is text and ends the run",
+   "text": "@ghost @coder hi",
+   "called": [],
+   "found": [
+    {
+     "text": "@coder",
+     "who": "agent:coder",
+     "trigger": false
+    }
+   ]
+  },
+  {
+   "name": "a tag in a code span or fence is nothing",
+   "text": "use `@advisor`\n```\n@advisor\n```",
+   "called": [],
+   "found": []
+  },
+  {
+   "name": "tags are not counted in the limit of agents",
+   "text": "@a @b @c @d @advisor @scout go",
+   "called": [
+    "a",
+    "b",
+    "c",
+    "d"
+   ],
+   "found": [
+    {
+     "text": "@a",
+     "who": "agent:a",
+     "trigger": true
+    },
+    {
+     "text": "@b",
+     "who": "agent:b",
+     "trigger": true
+    },
+    {
+     "text": "@c",
+     "who": "agent:c",
+     "trigger": true
+    },
+    {
+     "text": "@d",
+     "who": "agent:d",
+     "trigger": true
+    },
+    {
+     "text": "@advisor",
+     "who": "tag:advisor",
+     "trigger": false
+    },
+    {
+     "text": "@scout",
+     "who": "tag:scout",
+     "trigger": false
+    }
+   ]
   }
- ]
+ ],
+ "tags": {
+  "advisor": "advisor",
+  "scout": "scout"
+ }
 }

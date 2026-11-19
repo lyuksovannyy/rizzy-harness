@@ -180,6 +180,7 @@ async fn the_chat_keeps_the_bytes_the_log_a_reference_and_delete_removes_them() 
         files: vec![],
         owner: None,
         peers: vec![],
+        tags: vec![],
     })
     .await
     .unwrap();

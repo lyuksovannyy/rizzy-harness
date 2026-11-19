@@ -766,6 +766,9 @@
     {
       "kind": "user_message",
       "payload": {
+        "tags": [
+          "advisor"
+        ],
         "text": "@coder @writer @editor, yo",
         "triggers": [
           "coder",
@@ -811,7 +814,10 @@
         "cause": {
           "mention": {
             "by": "person",
-            "message_seq": 52
+            "message_seq": 52,
+            "tags": [
+              "advisor"
+            ]
           }
         },
         "turn_id": "t71"
@@ -2030,6 +2036,9 @@
         "type": "callback_refused"
       },
       {
+        "tags": [
+          "advisor"
+        ],
         "text": "@coder @writer @editor, yo",
         "triggers": [
           "coder",

@@ -245,6 +245,7 @@ impl Node {
             files,
             owner: None,
             peers: vec![],
+            tags: vec![],
         })
         .await;
         let by = std::time::Instant::now() + Duration::from_secs(20);

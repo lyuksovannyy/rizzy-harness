@@ -589,6 +589,7 @@ async fn a_callback_turn_and_a_queued_message_run_in_plan_mode() {
         images: vec![],
         queued: true,
         triggers: vec![],
+        tags: vec![],
         files: vec![],
     };
     for extra in [

@@ -239,6 +239,8 @@ export type Item =
       queued?: { seq: number; read: boolean };
       /** The agents it called by mention (X.37), in the order they answer; absent unless it called several. */
       triggers?: string[];
+      /** The sub-agent-only agents it mentions (tags): drawn as mentions, never called. */
+      tags?: string[];
     }
   | {
       type: "assistant";

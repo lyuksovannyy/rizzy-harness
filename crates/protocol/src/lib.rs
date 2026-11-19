@@ -1057,6 +1057,13 @@ pub enum MasterToNode {
         /// message's own turn.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         peers: Vec<AgentSpec>,
+        /// The agents that run only as sub-agents this message mentions
+        /// (tags, X.37; only to nodes with [`CAP_PEERS`], at most
+        /// `harness_core::mention::MAX_RESOLVED`): the node records them in
+        /// `user_message.tags` and names the ones each answering agent has
+        /// among its own delegates in that turn's opening. Never a call.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tags: Vec<String>,
     },
     /// Resume an idle chat because background commands ended (a callback
     /// turn, T.8d step 3; only to nodes with `CAP_CALLBACK`). There is no
@@ -2070,6 +2077,7 @@ mod tests {
             files: vec![],
             owner: None,
             peers: vec![],
+            tags: vec![],
         };
         let v = serde_json::to_value(&p).unwrap();
         assert_eq!(
@@ -2100,6 +2108,7 @@ mod tests {
             files: vec![],
             owner: None,
             peers: vec![],
+            tags: vec![],
         };
         let v = serde_json::to_value(prompt(None)).unwrap();
         assert!(v.get("reply").is_none(), "{v}");

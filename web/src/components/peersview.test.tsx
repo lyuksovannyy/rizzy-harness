@@ -102,4 +102,23 @@ describe("a message that called several agents", () => {
     await act(() => new Promise((r) => setTimeout(r, 10)));
     expect([...host.querySelectorAll(".msg.user .mention")].map((m) => m.textContent)).not.toContain("@writer");
   });
+
+  test("a sub-agent-only agent is a third state, a tag; one that runs nowhere is text", async () => {
+    const adv = { ...agent("advisor"), features: { as_agent: false, as_subagent: true } } as unknown as Agent;
+    const off = { ...agent("off"), features: { as_agent: false, as_subagent: false } } as unknown as Agent;
+    const text = "@coder @advisor @off, plan first; the @editor and the @advisor are plain/tag";
+    const events = [
+      ev(1, "session_created", { title: "t", cwd: "/w", model: "m", backend: "native", node_id: "n", approval_mode: "ask", profile: "agentic", agent_id: "general" }),
+      ev(2, "turn_started", { turn_id: "t1", agent: ref("coder") }),
+      ev(3, "user_message", { turn_id: "t1", text, tags: ["advisor"] }),
+      ev(4, "turn_ended", { turn_id: "t1", reason: "completed" }),
+    ];
+    current = fold(events);
+    await act(async () => root.render(<Conversation live={live} sessionId={SID} row={null} nodes={[]} agents={[...AGENTS, adv, off]} models={[]} />));
+    await act(() => new Promise((r) => setTimeout(r, 10)));
+    const kinds = [...host.querySelectorAll(".msg.user .mention")].map((m) => `${m.textContent}:${[...m.classList].filter((c) => c !== "mention").join()}`);
+    // @off is text and ends the run: the later @editor is plain, the later @advisor a tag.
+    expect(kinds).toEqual(["@coder:called", "@advisor:tag", "@editor:plain", "@advisor:tag"]);
+    expect(host.querySelector(".msg.user .bubble")!.textContent).toBe(text);
+  });
 });

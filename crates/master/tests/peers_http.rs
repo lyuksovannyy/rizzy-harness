@@ -331,6 +331,17 @@ fn who_answered(evs: &[RawEvent]) -> Vec<(String, bool)> {
         .collect()
 }
 
+/// The sub-agent-only names the last message mentioned (its tags).
+fn tags_of(evs: &[RawEvent]) -> Vec<String> {
+    evs.iter()
+        .rev()
+        .find_map(|e| match e.typed() {
+            Ok(EventKind::UserMessage(m)) if !m.queued => Some(m.tags),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
 fn triggers_of(evs: &[RawEvent]) -> Vec<Vec<String>> {
     evs.iter()
         .filter_map(|e| match e.typed() {
@@ -459,11 +470,28 @@ async fn who_is_not_called_and_the_limit() {
     )
     .await;
     assert_eq!(last_turns(&evs, 1), [pair("coder", false)]);
-    // A sub-agent-only agent after the first is text.
+    // A sub-agent-only agent is a tag (the owner, 2026-11-19): mentioned,
+    // recorded on the message, never called, in any position; the run goes
+    // on past it.
     let evs = ask(&s, &s.admin, &sid, json!({"text": "@coder @scout hi"}), 1).await;
     assert_eq!(last_turns(&evs, 1), [pair("coder", false)]);
-    // ...and at the front it is refused, as a single mention always was.
-    let (st, v) = prompt(&s, &s.admin, &sid, json!({"text": "@scout @coder hi"})).await;
+    assert_eq!(tags_of(&evs), ["scout"]);
+    let evs = ask(&s, &s.admin, &sid, json!({"text": "@scout @coder hi"}), 1).await;
+    assert_eq!(last_turns(&evs, 1), [pair("coder", false)]);
+    assert_eq!(tags_of(&evs), ["scout"]);
+    // Only tags where a call would be: nobody is called, the chat's own
+    // agent answers (not an error, as a leading sub-agent used to be).
+    let evs = ask(&s, &s.admin, &sid, json!({"text": "@scout hi\n@scout"}), 1).await;
+    assert_eq!(last_turns(&evs, 1), [pair("general", false)]);
+    assert_eq!(tags_of(&evs), ["scout"]);
+    // The API token keeps its refusal of a leading sub-agent.
+    let (st, v) = token(
+        &s,
+        Method::POST,
+        &format!("/api/sessions/{sid}/prompt"),
+        Some(json!({"text": "@scout hi"})),
+    )
+    .await;
     assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
     // An explicit agent (the picker) wins, calls nobody.
     let evs = ask(
@@ -484,11 +512,11 @@ async fn who_is_not_called_and_the_limit() {
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{v}");
-    turns_ended(&s, &s.admin, &sid, 5).await;
+    turns_ended(&s, &s.admin, &sid, 7).await;
     tokio::time::sleep(Duration::from_millis(150)).await;
     let evs = log(&s, &s.admin, &sid).await;
     assert_eq!(last_turns(&evs, 1), [pair("coder", false)]);
-    assert_eq!(evs.iter().filter(|e| e.kind == "turn_ended").count(), 5);
+    assert_eq!(evs.iter().filter(|e| e.kind == "turn_ended").count(), 7);
     // Five agents: refused with the limit, nothing sent.
     let before = s.rec.reqs.lock().unwrap().len();
     let n = log(&s, &s.admin, &sid).await.len();
@@ -849,4 +877,25 @@ async fn the_list_goes_in_order_and_the_size_guard_holds_with_four_specs() {
         "{} bytes",
         last.2
     );
+}
+
+/// A message with more than 16 resolved mentions is refused with a
+/// sentence, before anything is sent. (A definition must be available as an
+/// agent, a sub-agent or both, so a name that is neither does not exist to
+/// be mentioned; the resolver maps it to text all the same.)
+#[tokio::test]
+async fn resolved_mentions_are_bounded() {
+    let s = start().await;
+    let ws = personal_id(&s, &s.admin).await;
+    let sid = chat(&s, &s.admin, &ws, json!({"agent_id": "general"})).await;
+    // 17 mentions of one agent, in the middle of text: refused.
+    let n = log(&s, &s.admin, &sid).await.len();
+    let many = format!("{} go", "see @coder and ".repeat(17));
+    let (st, v) = prompt(&s, &s.admin, &sid, json!({ "text": many })).await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("at most 16"), "{v}");
+    assert_eq!(log(&s, &s.admin, &sid).await.len(), n);
+    let ok = format!("{} go", "see @coder and ".repeat(16));
+    let evs = ask(&s, &s.admin, &sid, json!({ "text": ok }), 1).await;
+    assert_eq!(last_turns(&evs, 1), [pair("general", false)]);
 }

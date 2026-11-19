@@ -28,20 +28,41 @@ pub fn too_many() -> CommandError {
 pub const OLD_NODE: &str = "This node is too old to ask several agents in one message; update \
     it, or call one agent per message";
 
+/// What a person's message mentions in the chat's own agent set.
+#[derive(Debug, Default)]
+pub(crate) struct Mentioned {
+    /// The agents called, in order (at most [`MAX_CALLED`] + 1).
+    pub called: Vec<String>,
+    /// The agents that run only as sub-agents the message mentions, each
+    /// once: tags, never called.
+    pub tags: Vec<String>,
+    /// How many resolved mentions the message holds in all.
+    pub resolved: usize,
+}
+
+/// The sentence for a message with too many resolved mentions.
+pub fn too_many_mentions() -> CommandError {
+    CommandError::Rejected(format!(
+        "One message can mention at most {} agents and names in all; this one has more. Mention fewer.",
+        harness_core::mention::MAX_RESOLVED
+    ))
+}
+
 impl Master {
-    /// The ids of the agents `text` calls in `row`'s chat, in the order
-    /// they answer (at most [`MAX_CALLED`] + 1: more is the caller's
-    /// refusal). `r` is the chat's own resolver (its workspace's agents);
-    /// the chat owner's own login is the person, never resolved to anyone
-    /// else's. Empty when the text has no `@`.
-    pub(crate) async fn called_agents(
+    /// What `text` mentions in `row`'s chat. `r` is the chat's own resolver
+    /// (its workspace's agents): an agent that may run as an agent is
+    /// called when the rule says so; one that runs only as a sub-agent is a
+    /// tag (mentioned, never called, the owner 2026-11-19); one that is
+    /// neither, a removed one and another workspace's are text. The chat
+    /// owner's own login is the person, never anyone else's.
+    pub(crate) async fn mentioned(
         &self,
         row: &harness_store::SessionRow,
         r: &Resolver,
         text: &str,
-    ) -> Vec<String> {
+    ) -> Mentioned {
         if !text.contains('@') {
-            return Vec::new();
+            return Mentioned::default();
         }
         let login = match row.owner_id.clone() {
             Some(id) => self
@@ -54,11 +75,20 @@ impl Master {
                 .map(|u| u.username),
             None => None,
         };
-        scan(text, &|name| match r.top_level(name) {
+        let m = scan(text, &|name| match r.top_level(name) {
             Ok(a) => Some(Who::Agent(a.id.clone())),
+            Err(CommandError::SubagentOnly { id, .. })
+                if r.agents().get(&id).is_some_and(|a| a.features.as_subagent) =>
+            {
+                Some(Who::Tag(id))
+            }
             Err(_) => (login.as_deref() == Some(name)).then_some(Who::Person),
-        })
-        .called
+        });
+        Mentioned {
+            tags: harness_core::mention::tags_of(&m),
+            resolved: m.found.len(),
+            called: m.called,
+        }
     }
 }
 
@@ -121,6 +151,7 @@ mod tests {
             files: vec![],
             owner: None,
             peers,
+            tags: vec![],
         }
     }
 

@@ -361,6 +361,7 @@ async fn run(b: &NativeBackend, host: &Host, cwd: &Path, t: Turn<'_>) -> TurnOut
             images: vec![],
             queued: false,
             triggers: vec![],
+            tags: vec![],
             files: vec![],
         }));
     }
@@ -1548,6 +1549,7 @@ async fn a_queued_mention_brings_its_file_right_after_the_message() {
             images: vec![],
             queued: true,
             triggers: vec![],
+            tags: vec![],
         },
     ));
     // One step, then the model answers: the turn ends after the request

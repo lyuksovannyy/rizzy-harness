@@ -1916,6 +1916,16 @@
         "type": "number"
       },
       {
+        "path": "cause.mention.tags",
+        "required": false,
+        "type": "array"
+      },
+      {
+        "path": "cause.mention.tags[]",
+        "required": true,
+        "type": "string"
+      },
+      {
         "path": "continued_by",
         "required": false,
         "type": "string"
@@ -2145,6 +2155,16 @@
         "path": "reply.values{}",
         "required": true,
         "type": "any"
+      },
+      {
+        "path": "tags",
+        "required": false,
+        "type": "array"
+      },
+      {
+        "path": "tags[]",
+        "required": true,
+        "type": "string"
       },
       {
         "path": "text",

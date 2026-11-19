@@ -172,6 +172,7 @@ fn append(
             images: vec![],
             queued: false,
             triggers: vec![],
+            tags: vec![],
             files: vec![],
         }),
     ];
@@ -889,6 +890,7 @@ async fn a_turn_that_reads_queued_messages_rebuilds_its_opening() {
         images: vec![],
         queued: true,
         triggers: vec![],
+        tags: vec![],
         files: vec![],
     };
     let seq = push(&mut log, sid, EventKind::UserMessage(queued.clone()));
@@ -1236,6 +1238,7 @@ fn user(turn: &str, text: &str) -> EventKind {
         images: vec![],
         queued: false,
         triggers: vec![],
+        tags: vec![],
         files: vec![],
     })
 }

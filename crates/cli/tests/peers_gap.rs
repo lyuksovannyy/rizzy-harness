@@ -186,6 +186,7 @@ impl N {
             files: vec![],
             owner: None,
             peers,
+            tags: vec![],
         });
         self.ack(&id).await
     }

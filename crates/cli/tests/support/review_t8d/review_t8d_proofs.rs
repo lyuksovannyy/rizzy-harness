@@ -326,6 +326,7 @@ no_callbacks: false,
             files: vec![],
             owner: None,
     peers: vec![],
+    tags: vec![],
         });
     }
 

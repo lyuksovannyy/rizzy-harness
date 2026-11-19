@@ -85,6 +85,7 @@ pub const KEPT: &[(&str, &[&str])] = &[
             "turn_id",
             "agent.agent_id",
             "cause.callback[]",
+            "cause.mention.tags[]",
             "retry.turn_id",
         ],
     ),
@@ -98,6 +99,7 @@ pub const KEPT: &[(&str, &[&str])] = &[
             "images[].media_id",
             "images[].sha256",
             "triggers[]",
+            "tags[]",
         ],
     ),
     (

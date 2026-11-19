@@ -3494,6 +3494,16 @@ button.swatch:hover:not(:disabled) {
   background: var(--fill);
   font-weight: var(--w-medium);
 }
+.mention.tag {
+  padding: 0 6px;
+  border-radius: var(--r-full);
+  border: 1px dashed var(--fg-2);
+  color: var(--fg-2);
+}
+.chip.tag {
+  background: transparent;
+  border: 1px dashed var(--fg-2);
+}
 .mention.plain {
   color: var(--fg-2);
   text-decoration: underline dotted;

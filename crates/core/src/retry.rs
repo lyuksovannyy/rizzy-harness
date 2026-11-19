@@ -326,6 +326,7 @@ mod tests {
             Some(TurnCause::Mention(MentionCall {
                 message_seq: 2,
                 by: CalledBy::Person,
+                tags: vec![],
             })),
             None,
         )

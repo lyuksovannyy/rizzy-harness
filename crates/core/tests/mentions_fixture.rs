@@ -16,15 +16,19 @@ fn fixture() -> Value {
 fn every_case_matches_the_fixture() {
     let f = fixture();
     let agents = f["agents"].as_object().unwrap().clone();
+    let tags = f["tags"].as_object().unwrap().clone();
     let person = f["person"].as_str().unwrap().to_string();
     let resolve = move |n: &str| -> Option<Who> {
         if let Some(id) = agents.get(n) {
             return Some(Who::Agent(id.as_str().unwrap().into()));
         }
+        if let Some(id) = tags.get(n) {
+            return Some(Who::Tag(id.as_str().unwrap().into()));
+        }
         (n == person).then_some(Who::Person)
     };
     let cases = f["cases"].as_array().unwrap();
-    assert!(cases.len() >= 40);
+    assert!(cases.len() >= 50);
     for c in cases {
         let text = c["text"].as_str().unwrap();
         let name = c["name"].as_str().unwrap();
@@ -45,6 +49,7 @@ fn every_case_matches_the_fixture() {
                     match &x.who {
                         Who::Agent(id) => format!("agent:{id}"),
                         Who::Person => "person".into(),
+                        Who::Tag(id) => format!("tag:{id}"),
                     },
                     x.trigger,
                 )

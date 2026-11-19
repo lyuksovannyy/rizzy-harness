@@ -106,6 +106,7 @@ fn events() -> Vec<RawEvent> {
             images: vec![],
             queued: false,
             triggers: vec![],
+            tags: vec![],
             files: vec![],
         }),
         EventKind::AssistantDelta(AssistantDelta {
@@ -323,6 +324,7 @@ fn events() -> Vec<RawEvent> {
             }],
             queued: false,
             triggers: vec![],
+            tags: vec![],
             // A mentioned file (T63): the view shows its path, never its text.
             files: vec![FileMention {
                 path: "CHANGELOG.md".into(),
@@ -397,6 +399,7 @@ fn events() -> Vec<RawEvent> {
             images: vec![],
             queued: true,
             triggers: vec![],
+            tags: vec![],
             files: vec![],
         }),
         EventKind::UserMessage(UserMessage {
@@ -407,6 +410,7 @@ fn events() -> Vec<RawEvent> {
             images: vec![],
             queued: true,
             triggers: vec![],
+            tags: vec![],
             files: vec![],
         }),
         EventKind::QueuedDelivered(QueuedDelivered {
@@ -441,6 +445,7 @@ fn events() -> Vec<RawEvent> {
             images: vec![],
             queued: false,
             triggers: vec![],
+            tags: vec![],
             files: vec![],
         }),
         // A `publish` call and the file the node staged for it, then a
@@ -829,6 +834,7 @@ fn events() -> Vec<RawEvent> {
             images: vec![],
             queued: false,
             triggers: vec![],
+            tags: vec![],
         }),
         EventKind::Error(ErrorEvent {
             turn_id: Some("t7".into()),
@@ -1054,6 +1060,7 @@ fn events() -> Vec<RawEvent> {
                 images: vec![],
                 queued: false,
                 triggers: vec!["coder".into(), "writer".into(), "editor".into()],
+                tags: vec!["advisor".into()],
             }),
             EventKind::AssistantMessage(AssistantMessage {
                 author: None,
@@ -1076,6 +1083,7 @@ fn events() -> Vec<RawEvent> {
                 cause: Some(TurnCause::Mention(MentionCall {
                     message_seq: at,
                     by: CalledBy::Person,
+                    tags: vec!["advisor".into()],
                 })),
                 environment: None,
                 continued_by: None,
@@ -1223,6 +1231,7 @@ fn a_mention_turn_and_the_agents_not_asked_are_items() {
         .find(|i| i["type"] == "user" && i["turn_id"] == "t70")
         .unwrap();
     assert_eq!(u["triggers"], json!(["coder", "writer", "editor"]));
+    assert_eq!(u["tags"], json!(["advisor"]));
     let c = items.iter().position(|i| i["type"] == "called").unwrap();
     assert_eq!(items[c]["turn_id"], "t71");
     assert_eq!(items[c]["agent"]["agent_id"], "writer");

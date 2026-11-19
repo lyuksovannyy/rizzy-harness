@@ -258,6 +258,7 @@ async fn run(
             images: vec![],
             queued: false,
             triggers: vec![],
+            tags: vec![],
             files: vec![],
         }));
     }
@@ -482,6 +483,7 @@ async fn r5_with(window: Option<u64>, signed: bool) -> (usize, usize, usize) {
         images: vec![],
         queued: false,
         triggers: vec![],
+        tags: vec![],
         files: vec![],
     }));
     let o = b
@@ -1028,6 +1030,7 @@ async fn turn_with(
         images: vec![],
         queued: false,
         triggers: vec![],
+        tags: vec![],
         files: vec![],
     }));
     let out = b

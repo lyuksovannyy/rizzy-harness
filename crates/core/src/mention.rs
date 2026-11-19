@@ -34,6 +34,11 @@ use crate::event::{EventKind, TurnCause, TurnStarted};
 /// The most agents one message may call.
 pub const MAX_CALLED: usize = 4;
 
+/// The most resolved mentions (agents called, plain, tags and the person's
+/// own name) one message may hold; the master refuses more, so a message
+/// cannot carry unbounded resolved names.
+pub const MAX_RESOLVED: usize = 16;
+
 /// Whom a resolved mention names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Who {
@@ -41,6 +46,13 @@ pub enum Who {
     Agent(String),
     /// The chat's owner, by their own login.
     Person,
+    /// An agent that runs only as a sub-agent, by id: it may be mentioned
+    /// and is drawn as a mention, but never triggers a turn, in any
+    /// position. In the opening run and the closing line it is part of the
+    /// run (it neither ends it nor makes the line "not only mentions"): its
+    /// purpose is to tell the answering agent which agent to run as a
+    /// sub-agent (the owner, 2026-11-19).
+    Tag(String),
 }
 
 /// One resolved mention in the text.
@@ -181,7 +193,7 @@ pub fn scan(text: &str, resolve: &dyn Fn(&str) -> Option<Who>) -> Mentions {
     marks.sort_unstable();
     marks.dedup();
     for f in &mut found {
-        f.trigger = marks.binary_search(&f.start).is_ok();
+        f.trigger = !matches!(f.who, Who::Tag(_)) && marks.binary_search(&f.start).is_ok();
     }
     let mut called: Vec<String> = Vec::new();
     for f in &found {
@@ -260,6 +272,50 @@ fn scan_line(
             }
         }
     }
+}
+
+/// The ids of the tags in `m` (sub-agent-only agents it mentions), each
+/// once, in order.
+pub fn tags_of(m: &Mentions) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for f in &m.found {
+        if let Who::Tag(id) = &f.who
+            && !out.contains(id)
+        {
+            out.push(id.clone());
+        }
+    }
+    out
+}
+
+/// Whether `id` is a plain agent handle (what the harness may name in a
+/// line it writes for the model).
+pub fn valid_handle(id: &str) -> bool {
+    (1..=32).contains(&id.len())
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// The one sentence that tells the answering agent which mentioned names
+/// are agents it can run as sub-agents: `tags` already cut to the ones the
+/// answering agent has among its own delegates (nothing is offered that its
+/// definition does not allow). `None` when none. Pure: the same bytes every
+/// time, so a replay rebuilds it; only plain handles are named. No new right:
+/// `delegate` works as it always did.
+pub fn tags_line(tags: &[String]) -> Option<String> {
+    let names: Vec<String> = tags
+        .iter()
+        .filter(|t| valid_handle(t))
+        .map(|t| format!("@{t}"))
+        .collect();
+    if names.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "The person's message mentions {} as agents you may run as sub-agents (with `delegate`) if the work calls for it; it did not call them.",
+        names.join(", ")
+    ))
 }
 
 /// The agents the last message that called several (`user_message.triggers`)
@@ -401,6 +457,7 @@ mod tests {
                 cause: Some(TurnCause::Mention(crate::event::MentionCall {
                     message_seq: of,
                     by: crate::event::CalledBy::Person,
+                    tags: vec![],
                 })),
                 environment: None,
                 continued_by: None,
@@ -455,5 +512,34 @@ mod tests {
             Some((2, vec!["b".into(), "c".into(), "d".into()]))
         );
         assert_eq!(unasked(&[]), None);
+    }
+
+    /// The tag line is one pure sentence naming only plain handles, nothing
+    /// when there is nothing to name; the opening of a mention turn carries
+    /// it.
+    #[test]
+    fn the_tags_line_is_pure_and_names_plain_handles_only() {
+        assert_eq!(tags_line(&[]), None);
+        assert_eq!(tags_line(&["Bad Name".into(), "x\ny".into()]), None);
+        let l = tags_line(&["advisor".into(), "scout".into(), "no way".into()]).unwrap();
+        assert_eq!(
+            Some(l.clone()),
+            tags_line(&["advisor".into(), "scout".into()])
+        );
+        assert!(l.contains("@advisor, @scout") && !l.contains('\n') && !l.contains("no way"));
+        let call = crate::event::MentionCall {
+            message_seq: 1,
+            by: crate::event::CalledBy::Person,
+            tags: vec!["advisor".into()],
+        };
+        assert!(
+            crate::event::mention_opening("coder", &call)
+                .ends_with(&tags_line(&["advisor".into()]).unwrap())
+        );
+        let none = crate::event::MentionCall {
+            tags: vec![],
+            ..call
+        };
+        assert!(!crate::event::mention_opening("coder", &none).contains("sub-agents"));
     }
 }

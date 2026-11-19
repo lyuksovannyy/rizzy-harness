@@ -331,6 +331,7 @@ fn a_call_cut_off_by_a_restart_reads_as_unknown() {
                 images: vec![],
                 queued: false,
                 triggers: vec![],
+                tags: vec![],
                 files: vec![],
             }),
         ),
@@ -634,6 +635,7 @@ async fn the_next_turn_rebuilds_this_turns_requests_byte_for_byte() {
             images: vec![],
             queued: false,
             triggers: vec![],
+            tags: vec![],
             files: vec![],
         }),
     ];

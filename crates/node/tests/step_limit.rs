@@ -156,6 +156,7 @@ impl N {
             files: vec![],
             owner: None,
             peers: vec![],
+            tags: vec![],
         });
     }
 

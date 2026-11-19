@@ -677,6 +677,36 @@ describe("calling several agents (X.37)", () => {
     c.done();
   });
 
+  test("the popup offers sub-agent-only agents, marked; chips show a tag as a tag and never as called", async () => {
+    const advisor = { ...agentOf("advisor"), features: { as_agent: false, as_subagent: true } };
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    act(() =>
+      root.render(
+        <Composer where="home" agents={[...ids.map(agentOf), advisor] as never} models={[]} workers={[]} agentId="general" onAgentChange={() => {}} agenticBlocked={null} onSubmit={async () => {}} predict={() => "ask"} />,
+      ),
+    );
+    const textarea = host.querySelector("textarea")!;
+    const type = async (value: string) => {
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(textarea, value);
+        textarea.setSelectionRange(value.length, value.length);
+        textarea.dispatchEvent(new Event("input", { bubbles: true }));
+        await new Promise((r) => setTimeout(r, 30));
+      });
+    };
+    await type("@coder @adv");
+    const row = host.querySelector(".mention-popup li")!;
+    expect(row.textContent).toContain("advisor");
+    expect(row.textContent).toContain("sub-agent only");
+    await type("@coder @advisor plan");
+    expect([...host.querySelectorAll(".chips .chip")].map((c) => `${c.textContent}:${c.classList.contains("tag")}`)).toEqual(["@advisor:true"]);
+    await type("@coder @writer @advisor plan");
+    expect([...host.querySelectorAll(".chips .chip")].map((c) => c.textContent)).toEqual(["@advisor", "1. @coder", "2. @writer"]);
+    act(() => root.unmount());
+  });
+
   test("a fifth agent is named as the limit", async () => {
     const c = open();
     await c.type("@general @coder @writer @editor @smol go");

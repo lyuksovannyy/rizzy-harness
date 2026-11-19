@@ -420,6 +420,7 @@ fn an_open_message_names_the_agent_that_wrote_it() {
             images: vec![],
             queued: false,
             triggers: vec![],
+            tags: vec![],
             files: vec![],
         }),
     );
@@ -1113,6 +1114,7 @@ fn a_finished_turn_is_unread_until_seen() {
         Some(TurnCause::Mention(MentionCall {
             message_seq: 2,
             by: CalledBy::Person,
+            tags: vec![],
         })),
         "Here is mine.",
         TurnEndReason::Completed,

@@ -154,7 +154,7 @@ const STRUCTS: Record<string, string> = {
   agent: "agent_id name prompt_hash ?withheld:[s ?effort",
   variant: "group index:n ?model",
   cause: "?callback:[s ?mention:@called",
-  called: "message_seq:n by:=calledBy",
+  called: "message_seq:n by:=calledBy ?tags:[s",
   retry: "turn_id reason:=turnEnd ?failed_model ?model",
   attachment: "name mime text",
   mention: "path state:=mention",
@@ -178,7 +178,7 @@ const KINDS: Record<string, string> = {
   session_created:
     "title cwd model backend node_id approval_mode:=approvalMode profile:=profile ?agent_id ?incognito:b ?parent_session ?no_callbacks:b ?exec_mode:=execMode",
   turn_started: "turn_id ?agent:@agent ?cause:@cause ?continued_by ?retry:@retry",
-  user_message: "turn_id text ?attachments:[@attachment ?files:[@mention ?reply:@reply ?images:[@image ?queued:b ?triggers:[s",
+  user_message: "turn_id text ?attachments:[@attachment ?files:[@mention ?reply:@reply ?images:[@image ?queued:b ?triggers:[s ?tags:[s",
   assistant_delta: "turn_id message_id text ?author ?variant:@variant",
   assistant_message: "turn_id message_id text ?author ?variant:@variant ?blocks:[@ui ?thinking:@thinking",
   tool_call_started: "turn_id call_id tool input:j ?author",
@@ -446,6 +446,7 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       if (p.images?.length) item.images = p.images;
       if (p.queued) item.queued = { seq: e.seq, read: false };
       if (p.triggers?.length) item.triggers = p.triggers;
+      if (p.tags?.length) item.tags = p.tags;
       v.items.push(item);
       break;
     }

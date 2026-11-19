@@ -178,6 +178,7 @@ fn plain(turn: &str, text: &str) -> UserMessage {
         images: vec![],
         queued: false,
         triggers: vec![],
+        tags: vec![],
         files: vec![],
     }
 }

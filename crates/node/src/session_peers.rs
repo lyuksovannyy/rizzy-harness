@@ -52,8 +52,37 @@ pub(crate) struct Peers {
     /// The seq of the person's `user_message` that called them.
     pub message_seq: u64,
     pub rest: VecDeque<AgentSpec>,
+    /// The message's tags: each later agent's opening names the ones it
+    /// has among its delegates.
+    pub tags: Vec<String>,
     /// The person pressed Stop: nothing more of the list starts.
     pub stopped: bool,
+}
+
+/// The tags of a prompt, checked: plain handles, each once, at most
+/// [`harness_core::mention::MAX_RESOLVED`].
+pub(crate) fn checked_tags(tags: Vec<String>) -> Result<Vec<String>, String> {
+    if tags.len() > harness_core::mention::MAX_RESOLVED {
+        return Err("a message mentions at most 16 agents and names".into());
+    }
+    let mut out: Vec<String> = Vec::new();
+    for t in tags {
+        if !harness_core::mention::valid_handle(&t) || out.contains(&t) {
+            return Err("a tag is an agent's plain handle, once".into());
+        }
+        out.push(t);
+    }
+    Ok(out)
+}
+
+/// The tags `agent` has among its own delegates, in the message's order
+/// (after the node's bounds on delegation: nothing is offered that its
+/// definition or this node does not allow).
+pub(crate) fn allowed_tags(agent: &AgentSpec, tags: &[String]) -> Vec<String> {
+    tags.iter()
+        .filter(|t| agent.delegates.iter().any(|d| &d.agent_id == *t))
+        .cloned()
+        .collect()
 }
 
 /// The refusal of a message while the list's turns run.
@@ -107,10 +136,11 @@ impl Session {
 
     /// Keep the agents after the first of the message recorded at
     /// `message_seq`.
-    pub(crate) fn set_peers(&self, message_seq: u64, rest: Vec<AgentSpec>) {
+    pub(crate) fn set_peers(&self, message_seq: u64, rest: Vec<AgentSpec>, tags: Vec<String>) {
         *self.peers.lock().unwrap_or_else(|p| p.into_inner()) = Some(Peers {
             message_seq,
             rest: rest.into(),
+            tags,
             stopped: false,
         });
     }
@@ -178,10 +208,10 @@ impl Session {
             // The slot is free: a test holds the gap open here.
             #[cfg(feature = "testing")]
             crate::testing::peers_hold(self.id).await;
-            let Some((seq, next)) = self.next_peer(reason).await else {
+            let Some((seq, next, tags)) = self.next_peer(reason).await else {
                 break;
             };
-            let started = self.start_mention(seq, next.clone()).await;
+            let started = self.start_mention(seq, next.clone(), tags).await;
             let (turn_id, user_text, history, spec, extra, cancel, by_stop) = match started {
                 Ok(s) => s,
                 Err(why) => {
@@ -227,7 +257,7 @@ impl Session {
     /// The next agent to ask (with the message's seq), or `None` when the
     /// list is over: empty, or ended by `reason`. Records the note for an
     /// agent that will not be asked.
-    async fn next_peer(&self, reason: TurnEndReason) -> Option<(u64, AgentSpec)> {
+    async fn next_peer(&self, reason: TurnEndReason) -> Option<(u64, AgentSpec, Vec<String>)> {
         let mut skipped: Option<(u64, Vec<String>, PeersSkipReason)> = None;
         let next = {
             let mut g = self.peers.lock().unwrap_or_else(|p| p.into_inner());
@@ -252,7 +282,7 @@ impl Session {
                     None
                 }
                 _ => match p.rest.pop_front() {
-                    Some(s) => Some((p.message_seq, s)),
+                    Some(s) => Some((p.message_seq, s, p.tags.clone())),
                     None => {
                         *g = None;
                         None
@@ -274,6 +304,7 @@ impl Session {
         self: &Arc<Self>,
         message_seq: u64,
         spec: AgentSpec,
+        tags: Vec<String>,
     ) -> Result<
         (
             String,
@@ -371,6 +402,7 @@ impl Session {
         let cause = harness_core::event::TurnCause::Mention(MentionCall {
             message_seq,
             by: CalledBy::Person,
+            tags: allowed_tags(&spec, &tags),
         });
         let started = self
             .emit(EventKind::TurnStarted(TurnStarted {

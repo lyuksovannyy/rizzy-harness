@@ -26,6 +26,7 @@ fn msg(text: &str, attachments: Vec<Attachment>) -> UserMessage {
         images: vec![],
         queued: false,
         triggers: vec![],
+        tags: vec![],
         files: vec![],
     }
 }

@@ -569,21 +569,29 @@ fn an_unknown_kind_has_its_values_scrubbed_and_its_keys_kept() {
 #[test]
 fn the_allowlist_names_real_text_positions_of_every_kind() {
     assert_eq!(KEPT.len(), KINDS);
-    for k in every_kind("approval_mode") {
+    // A kind with alternatives (an enum with data) has each alternative's
+    // positions: a name is a text position if any of them has it.
+    let mut by_kind: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for k in every_kind("approval_mode")
+        .into_iter()
+        .chain(common::alternatives("approval_mode"))
+    {
         let (kind, payload) = k.into_parts();
-        let (_, kept) = KEPT
-            .iter()
-            .find(|(n, _)| *n == kind)
-            .unwrap_or_else(|| panic!("KEPT has no entry for {kind}"));
         let pos = positions(&kind, &payload);
-        let text: Vec<String> = pos
-            .iter()
-            .filter_map(|(g, c)| match c {
+        by_kind
+            .entry(kind)
+            .or_default()
+            .extend(pos.iter().filter_map(|(g, c)| match c {
                 Class::Text => Some(g.clone()),
                 Class::Map => Some(format!("{g}.{{}}")),
                 _ => None,
-            })
-            .collect();
+            }));
+    }
+    for (kind, text) in &by_kind {
+        let (_, kept) = KEPT
+            .iter()
+            .find(|(n, _)| n == kind)
+            .unwrap_or_else(|| panic!("KEPT has no entry for {kind}"));
         for g in *kept {
             assert!(
                 text.iter().any(|t| t == g),
@@ -785,6 +793,7 @@ fn scrubbing_twice_is_scrubbing_once() {
             images: vec![],
             queued: false,
             triggers: vec![],
+            tags: vec![],
         })
         .into_parts();
         set.scrub_event(&kind, &mut once);

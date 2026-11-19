@@ -97,6 +97,7 @@ const ITEM: Record<string, Check> = {
     "?images": arr(rec({ media_id: S, sha256: S, mime: S, name: S, width: N, height: N })),
     "?queued": rec({ seq: N, read: B }),
     "?triggers": arr(S),
+    "?tags": arr(S),
   }),
   assistant: rec({
     type: S,

@@ -266,6 +266,7 @@ mod tests {
                 files: vec![],
                 queued: false,
                 triggers: vec![],
+                tags: vec![],
             }),
             EventKind::AssistantMessage(AssistantMessage {
                 turn_id: id.into(),

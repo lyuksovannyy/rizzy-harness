@@ -268,6 +268,38 @@ impl N {
             files: vec![],
             owner: None,
             peers: peers.iter().map(|a| (*a).clone()).collect(),
+            tags: vec![],
+        });
+        self.ack(&req_id).await
+    }
+
+    /// [`Self::say`] for a message that also mentioned `tags` (sub-agent-only
+    /// agents).
+    async fn say_tagged(
+        &mut self,
+        sid: SessionId,
+        text: &str,
+        first: &AgentSpec,
+        peers: &[&AgentSpec],
+        tags: &[&str],
+    ) -> Result<(), String> {
+        let req_id = self.req();
+        self.send(MasterToNode::Prompt {
+            req_id: req_id.clone(),
+            session_id: sid,
+            text: text.into(),
+            agent: Some(first.clone()),
+            attachments: vec![],
+            compare: vec![],
+            reply: None,
+            savings: None,
+            context: None,
+            images: vec![],
+            agent_named: true,
+            files: vec![],
+            owner: None,
+            peers: peers.iter().map(|a| (*a).clone()).collect(),
+            tags: tags.iter().map(|t| t.to_string()).collect(),
         });
         self.ack(&req_id).await
     }
@@ -625,4 +657,101 @@ async fn the_node_refuses_what_it_cannot_run_in_order() {
         .filter(|e| e.kind == "user_message")
         .count();
     assert_eq!(msgs, 1);
+}
+
+/// X.37: sub-agent-only names a message mentions (tags) are recorded on the
+/// message, never start a turn, and the answering agent's turn says, in one
+/// line, which of them it has among its own delegates (and nothing about
+/// the others); a replay rebuilds the same line.
+#[tokio::test]
+async fn tags_are_recorded_and_named_only_to_agents_that_may_delegate_to_them() {
+    let model = Scripted::new(vec![]);
+    let mut n = N::start(model.clone()).await;
+    let mut a = agent("a");
+    a.delegates = vec![agent("advisor")];
+    let mut b = agent("b");
+    b.delegates = vec![agent("advisor"), agent("scout")];
+    let c = agent("c");
+    let sid = n.create(&a).await;
+    n.say_tagged(
+        sid,
+        "@a @b @c @advisor @scout go",
+        &a,
+        &[&b, &c],
+        &["advisor", "scout"],
+    )
+    .await
+    .unwrap();
+    let log = n.until(sid, |l| ended(l) == 3).await;
+    never_two_open(&log);
+    assert_eq!(
+        turns(&log).iter().map(|t| t.0.as_str()).collect::<Vec<_>>(),
+        ["a", "b", "c"],
+        "a tag starts no turn"
+    );
+    let m = log
+        .iter()
+        .find_map(|e| match e.typed() {
+            Ok(EventKind::UserMessage(m)) => Some(m),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(m.tags, ["advisor", "scout"]);
+    let one = harness_core::mention::tags_line(&["advisor".into()]).unwrap();
+    let two = harness_core::mention::tags_line(&["advisor".into(), "scout".into()]).unwrap();
+    let flat = |who: &str| format!("{:?}", model.requests(who)[0].messages);
+    assert_eq!(
+        flat("a").matches(&one).count(),
+        1,
+        "the first agent: in its context, once"
+    );
+    assert!(
+        !flat("a").contains(&two),
+        "a has no delegate scout: not offered"
+    );
+    assert_eq!(
+        flat("b").matches(&two).count(),
+        1,
+        "a later agent: in its opening, once"
+    );
+    // c's history holds a's line and b's (one each); c's own names nothing.
+    assert_eq!(flat("c").matches(&two).count(), 1);
+    assert_eq!(
+        flat("c")
+            .matches("as agents you may run as sub-agents")
+            .count(),
+        2
+    );
+    // The cause records what each later agent was told.
+    let causes: Vec<Vec<String>> = log
+        .iter()
+        .filter_map(|e| match e.typed() {
+            Ok(EventKind::TurnStarted(TurnStarted {
+                cause: Some(TurnCause::Mention(m)),
+                ..
+            })) => Some(m.tags),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        causes,
+        [vec!["advisor".to_string(), "scout".to_string()], vec![]]
+    );
+    // A later message rebuilds the same lines from the log.
+    n.say(sid, "@b again", &b, &[]).await.unwrap();
+    n.until(sid, |l| ended(l) == 4).await;
+    let later = format!("{:?}", model.requests("b")[1].messages);
+    assert_eq!(later.matches(&two).count(), 1, "b's earlier opening, once");
+    let first_b = &model.requests("b")[0].messages;
+    assert_eq!(
+        model.requests("b")[1].messages[..first_b.len()],
+        first_b[..]
+    );
+    // A hostile or confused master: more than 16, a bad handle, a repeat.
+    for bad in [vec!["Bad Name"], vec!["x", "x"]] {
+        assert!(n.say_tagged(sid, "x", &a, &[], &bad).await.is_err());
+    }
+    let many: Vec<String> = (0..17).map(|i| format!("t{i}")).collect();
+    let refs: Vec<&str> = many.iter().map(String::as_str).collect();
+    assert!(n.say_tagged(sid, "x", &a, &[], &refs).await.is_err());
 }

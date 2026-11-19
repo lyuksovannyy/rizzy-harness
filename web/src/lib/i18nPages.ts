@@ -70,6 +70,7 @@ export const pages = {
   "conv.calledBy": "{name}, called by you",
   "conv.mentionCalls": "Called {name}: it answers this message",
   "conv.mentionPlain": "A plain mention: {name} was not called (a mention counts only at the start of the message or alone on its last line)",
+  "conv.mentionTag": "{name} runs only as a sub-agent: tagged for the answering agent, not called",
   "conv.mentionYou": "You: nobody is asked about this",
   "conv.notAsked": "Not asked: {names} ({why})",
   "conv.notAsked.stopped": "you stopped the turn",

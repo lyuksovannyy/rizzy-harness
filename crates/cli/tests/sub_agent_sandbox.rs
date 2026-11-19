@@ -713,6 +713,7 @@ async fn a_delegated_sub_agent_gets_its_folder_through_the_node() {
             files: vec![],
             owner: None,
             peers: vec![],
+            tags: vec![],
         })
         .unwrap();
     loop {

@@ -2291,19 +2291,11 @@ impl Master {
         // agent's turn runs (X.5, review ST-5).
         let picked = agent_id.is_some();
         let named = asker.or(agent_id);
-        let mention = match leading_mention(&text).filter(|_| reply.is_none() && named.is_none()) {
-            Some(handle) => match r.top_level(handle) {
-                Ok(a) => Some(a.id.clone()),
-                Err(e @ CommandError::SubagentOnly { .. }) => return Err(e),
-                Err(_) => None,
-            },
-            None => None,
-        };
         // The agents the chat's owner's own message calls by mention (X.37):
         // the opening run and the closing line (`harness_core::mention`).
         // Not for an API token's, a routine's or a webhook's message, an
         // answer to a card, an explicit agent, a Retry, a sub-agent's chat
-        // or parallel answers: they keep the single leading mention above.
+        // or parallel answers: they keep the single leading mention below.
         let calls = by_owner
             && routine_run.is_none()
             && !untrusted
@@ -2313,17 +2305,40 @@ impl Master {
             && retry.is_none()
             && row.parent_id.is_none()
             && compare.is_empty();
-        let called = if calls {
-            self.called_agents(&row, &r, &text).await
-        } else {
-            Vec::new()
+        // A leading mention of an agent that runs only as a sub-agent is
+        // refused for those other senders as it always was; in the owner's
+        // own message it is a tag (mentioned, never called).
+        let mention = match leading_mention(&text).filter(|_| reply.is_none() && named.is_none()) {
+            Some(handle) => match r.top_level(handle) {
+                Ok(a) => Some(a.id.clone()),
+                Err(e @ CommandError::SubagentOnly { .. }) if !calls => return Err(e),
+                Err(_) => None,
+            },
+            None => None,
         };
+        let mentioned = if calls {
+            self.mentioned(&row, &r, &text).await
+        } else {
+            Default::default()
+        };
+        let called = mentioned.called;
         if called.len() > harness_core::mention::MAX_CALLED {
             return Err(peers::too_many());
+        }
+        if mentioned.resolved > harness_core::mention::MAX_RESOLVED {
+            return Err(peers::too_many_mentions());
         }
         if called.len() > 1 && !self.node_has(&row.node_id, harness_protocol::CAP_PEERS) {
             return Err(CommandError::Rejected(peers::OLD_NODE.into()));
         }
+        // Tags go only to a node that records them and names them to the
+        // answering agent (an older one would ignore them: harmless, but
+        // said nothing of).
+        let tags = if self.node_has(&row.node_id, harness_protocol::CAP_PEERS) {
+            mentioned.tags
+        } else {
+            Vec::new()
+        };
         // The first agent called answers this message; with one, exactly as
         // a leading mention always did.
         let mention = called.first().cloned().or(mention);
@@ -2620,6 +2635,7 @@ impl Master {
                 files,
                 owner: None,
                 peers: peer_specs,
+                tags,
             },
         };
         // The link drops a frame over 8 MiB; the margin covers the request

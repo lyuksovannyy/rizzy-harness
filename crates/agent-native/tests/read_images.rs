@@ -241,6 +241,7 @@ fn open(host: &Host, turn: &str) {
         images: vec![],
         queued: false,
         triggers: vec![],
+        tags: vec![],
         files: vec![],
     }));
 }

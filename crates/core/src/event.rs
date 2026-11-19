@@ -685,6 +685,10 @@ pub struct MentionCall {
     /// The seq of the `user_message` that called it.
     pub message_seq: u64,
     pub by: CalledBy,
+    /// The message's tags this agent has among its own delegates (the node
+    /// cut them to that): the opening names them ([`crate::mention::tags_line`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 /// Who wrote the message that called an agent. Only a person, in this
@@ -731,7 +735,7 @@ pub const CALLED_LEAD: &str = "[harness] The person's message above called you b
 /// it byte for byte. `agent_id` is the turn's agent (`turn_started.agent`);
 /// an id that is not a plain handle is left out, never put in the model's
 /// prompt.
-pub fn mention_opening(agent_id: &str, _call: &MentionCall) -> String {
+pub fn mention_opening(agent_id: &str, call: &MentionCall) -> String {
     let who = if !agent_id.is_empty()
         && agent_id.len() <= 32
         && agent_id
@@ -742,11 +746,14 @@ pub fn mention_opening(agent_id: &str, _call: &MentionCall) -> String {
     } else {
         String::new()
     };
+    let tags = crate::mention::tags_line(&call.tags)
+        .map(|l| format!(" {l}"))
+        .unwrap_or_default();
     format!(
         "{CALLED_LEAD}{who} It called other agents too, and the ones named before you have \
          answered it above, in order. Answer it now as yourself, from your own role and tools: \
          do not repeat what the agents above said and do not answer for them. The person has \
-         written nothing since."
+         written nothing since.{tags}"
     )
 }
 
@@ -888,6 +895,11 @@ pub struct UserMessage {
     /// resolved them in the chat's own agent set.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub triggers: Vec<String>,
+    /// The agents that run only as sub-agents this message mentions (tags,
+    /// X.37): they are drawn as mentions and never called. Written by the
+    /// node from the master's command, each once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 /// The model read these queued messages (`user_message.queued`) here: at a
@@ -2272,6 +2284,7 @@ mod tests {
         let call = MentionCall {
             message_seq: 7,
             by: CalledBy::Person,
+            tags: vec![],
         };
         let a = mention_opening("writer", &call);
         assert_eq!(a, mention_opening("writer", &call));
@@ -2328,6 +2341,7 @@ mod tests {
             images: vec![],
             queued: false,
             triggers: vec![],
+            tags: vec![],
         };
         let t = m.model_text();
         assert_eq!(own_words(&t), "fix it");
@@ -2645,6 +2659,7 @@ mod tests {
             images: vec![],
             queued: false,
             triggers: vec![],
+            tags: vec![],
             files: vec![],
         });
         let (kind, payload) = k.clone().into_parts();
@@ -2987,6 +3002,7 @@ mod background_note_tests {
             cause: Some(TurnCause::Mention(MentionCall {
                 message_seq: 1,
                 by: CalledBy::Person,
+                tags: vec![],
             })),
             environment: None,
             continued_by: None,
@@ -3060,6 +3076,7 @@ mod attachment_frame_tests {
             images: vec![],
             queued: false,
             triggers: vec![],
+            tags: vec![],
             files: vec![],
         }
     }

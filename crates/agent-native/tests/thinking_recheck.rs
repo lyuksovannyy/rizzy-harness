@@ -258,6 +258,7 @@ async fn run(
             images: vec![],
             queued: false,
             triggers: vec![],
+            tags: vec![],
             files: vec![],
         }));
     }
@@ -392,6 +393,7 @@ async fn run_spec(
             images: vec![],
             queued: false,
             triggers: vec![],
+            tags: vec![],
             files: vec![],
         }));
     }

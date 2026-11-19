@@ -174,6 +174,7 @@ impl Node {
             files: files.iter().map(|s| s.to_string()).collect(),
             owner: None,
             peers: vec![],
+            tags: vec![],
         })
         .await
         .unwrap();

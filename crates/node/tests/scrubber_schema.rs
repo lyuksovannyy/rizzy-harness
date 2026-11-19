@@ -270,6 +270,7 @@ impl Node {
                 files: vec![],
                 owner: Some(owner.into()),
                 peers: vec![],
+                tags: vec![],
             })
             .unwrap();
         loop {

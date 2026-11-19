@@ -232,6 +232,7 @@ impl Chat<'_> {
                 images: vec![],
                 queued: false,
                 triggers: vec![],
+                tags: vec![],
                 files: vec![],
             }));
         }

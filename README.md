@@ -181,6 +181,25 @@ ends at the first word that is not a mention (`@coder @nobody @writer` calls
 `@coder` only), and a last line with a word or an unknown name in it is text.
 A mention inside a code block or between backticks never counts.
 
+**Sub-agent-only agents are tags.** An agent that is available only as a
+sub-agent (its definition says `available_as: [subagent]`; the Agents page lists
+it so) can be mentioned in any position, in the opening, in the last line or
+in the middle of the text, and is drawn as a mention (dashed outline: a third
+look beside "called" and "plain"), but it **never answers and is never called**
+by a mention. It is part of the opening or the last line without ending it:
+`@coder @advisor, plan this first` calls `@coder` only, and `@advisor` is a
+tag; if every mention in those places is a tag, nobody is called and the
+chat's own agent answers. A tag tells the answering agent which agent you want
+it to run as a sub-agent: the message text is unchanged, and the answering
+agent's turn gets one extra line naming the tagged agents it has among its own
+delegates (it is told nothing about one its definition does not allow; a tag
+gives no new right, delegation works as before). An agent that is available
+nowhere, a deleted one and another workspace's are text, never a chip. The `@`
+popup offers sub-agent-only agents too, marked "sub-agent only", and the
+composer lists the tags and the agents the text will call, in order. Tags do
+not count toward the limit of 4, but a message holds at most 16 resolved
+mentions in all (agents, tags and your own name); more is refused.
+
 At most **4 agents** per message; a fifth is refused before anything is sent,
 and an agent named twice is called once. The agents answer **one after another,
 in the order they are named, never at the same time**: each in a turn of its
