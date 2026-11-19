@@ -22,22 +22,42 @@ type Progress = { steps: Step[]; i: number; saved: Step[] };
 const progressKey = (user: string | null) => `harness.onboarding.${user}`;
 const known = (v: unknown): Step[] => (Array.isArray(v) ? v.filter((x): x is Step => ALL.includes(x as Step)) : []);
 
+/** Stored progress is data from the tab, not to be trusted: the list must be
+ * an ordered, duplicate-free selection of the steps, or the run starts over;
+ * the position is only ever clamped into the list. */
 function resume(user: string | null): Progress | null {
   try {
     const p = JSON.parse(sessionStorage.getItem(progressKey(user)) ?? "null") as Partial<Progress> | null;
     const steps = known(p?.steps);
-    if (steps.length === 0 || !Number.isInteger(p?.i) || p!.i! < 0 || p!.i! >= steps.length) return null;
-    return { steps, i: p!.i!, saved: known(p?.saved) };
+    if (!Array.isArray(p?.steps) || steps.length === 0 || steps.length !== p.steps.length) return null;
+    let at = -1;
+    for (const s of steps) {
+      const k = ALL.indexOf(s);
+      if (k <= at) return null;
+      at = k;
+    }
+    const i = Number.isInteger(p?.i) ? Math.min(Math.max(p!.i!, 0), steps.length - 1) : 0;
+    return { steps, i, saved: known(p?.saved).filter((s) => steps.includes(s)) };
   } catch {
     return null;
   }
 }
 
+/** The stored run under what this load can still do: a member, or an admin
+ * whose providers could not be read, has no provider or memory step. The
+ * position moves on to the nearest step left, never back. */
+function fit(r: Progress, withServerSteps: boolean): Progress {
+  if (withServerSteps) return r;
+  const steps: Step[] = r.steps.filter((s) => s !== "provider" && s !== "memory");
+  const ahead = r.steps.slice(r.i).find((s) => steps.includes(s));
+  return { steps, i: Math.max(ahead ? steps.indexOf(ahead) : steps.length - 1, 0), saved: r.saved.filter((s) => steps.includes(s)) };
+}
+
 export default function Onboarding(props: { me: Me; prefs: Prefs; onDone: (p: Prefs) => void }) {
   const admin = props.me.role === "admin";
   const [resumed] = useState(() => resume(props.me.user_id));
-  const [steps, setSteps] = useState<Step[] | null>(resumed?.steps ?? null);
-  const [i, setI] = useState(resumed?.i ?? 0);
+  const [steps, setSteps] = useState<Step[] | null>(null);
+  const [i, setI] = useState(0);
   const [prefs, setPrefs] = useState<Prefs>(() => ({
     ...props.prefs,
     timezone: props.prefs.timezone ?? browserTimeZone(),
@@ -45,7 +65,7 @@ export default function Onboarding(props: { me: Me; prefs: Prefs; onDone: (p: Pr
   const [err, setErr] = useState<string | null>(null);
   // Steps saved in this run: once the provider is saved, its demo skip
   // goes; coming Back, Save and continue takes it as it stands.
-  const [saved, setSaved] = useState<Step[]>(resumed?.saved ?? []);
+  const [saved, setSaved] = useState<Step[]>([]);
   const [seen, setSeen] = useState<Step[]>([]);
   // One providers state for both steps that change it.
   const { state: providers, setState: setProviders, agents, err: providersErr } = useProviders(admin);
@@ -53,10 +73,18 @@ export default function Onboarding(props: { me: Me; prefs: Prefs; onDone: (p: Pr
   useEffect(() => {
     if (steps) return;
     // Admins configure the provider unless one is already set up (e.g. via
-    // config.toml on a headless install).
-    if (!admin || providersErr) setSteps(["profile", "search"]);
-    else if (providers) setSteps(providers.configured ? ["profile", "search"] : ["provider", "memory", "profile", "search"]);
-  }, [admin, providers, providersErr, steps]);
+    // config.toml on a headless install). A stored run goes on as it was, as
+    // far as this load can still do it.
+    const settled = !admin || providersErr || providers;
+    if (!settled) return;
+    if (resumed) {
+      const r = fit(resumed, admin && !providersErr);
+      setSteps(r.steps);
+      setI(r.i);
+      setSaved(r.saved);
+    } else if (!admin || providersErr) setSteps(["profile", "search"]);
+    else setSteps(providers!.configured ? ["profile", "search"] : ["provider", "memory", "profile", "search"]);
+  }, [admin, providers, providersErr, steps, resumed]);
 
   const step = steps?.[i];
   useEffect(() => {
@@ -121,7 +149,7 @@ export default function Onboarding(props: { me: Me; prefs: Prefs; onDone: (p: Pr
             ) : (
               <div className="muted">Loading…</div>
             )}
-            {!saved.includes("provider") && (
+            {providers && !providers.configured && !saved.includes("provider") && (
               <button
                 type="button"
                 className="link"
