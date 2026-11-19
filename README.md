@@ -221,11 +221,21 @@ turn is already running") until they have answered. The node holds the later
 agents in memory only: if it restarts in the middle, the agent that was running
 ends as "interrupted" and a line names the ones that were not asked; ask them
 again. A later agent's turn has its own checkpoint, cost line and Undo, and
-the chat's approval mode. **Not yet:** connectors are not used in the later
-agents' turns (they are no send of yours, see "Custom connectors"), nor are
-memory, `recall` or the project board in them; the first agent's turn has all
-it has today. A turn of a later agent cannot be retried: send the message
-again. A message from the API token, a routine or a webhook keeps one leading
+the chat's approval mode. **What an agent called after the first knows:**
+the whole conversation so far (the earlier agents' answers included), your
+personalisation, and the project's brief and board as the first agent got them
+with your message. **What it lacks:** your memory, the memory of the
+workspace and the project, the search of your earlier chats, and the list of
+your earlier chats in the project; it cannot remember anything, search chats,
+change the board or use connectors (their turns are no send of yours, see
+"Custom connectors"). It is not told how `remember` works. The first agent's
+turn has all it has today; one line of what it was told (that it can search
+earlier chats) can still stay in the history the later agents read. A turn of
+a later agent cannot be retried: send the message again. A later agent may
+continue a sub-agent an earlier agent started in this chat, within its own list
+of agents it may run. **Cost:** one message can start up to four full turns,
+each under its own limits and its own system prompt, so it can cost up to four
+times one answer. A message from the API token, a routine or a webhook keeps one leading
 `@agent` (the first only); and an agent's own message can't call anyone yet.
 
 **Retry.** When the chat's last turn ended without an answer — "turn error"
