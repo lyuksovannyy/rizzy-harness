@@ -69,7 +69,7 @@ Short paths: `git.rs` and `session.rs` are in `crates/node/src/`, `event.rs` and
 | Borrowing | `git.rs`, `repo_for_with` | The shadow reads the user's objects through `objects/info/alternates`. |
 | Dropping duplicates | `git.rs`, `prune` (`gc --prune=now`); comment on `secure_blobs` | gc repacks with `-l`, so shadow copies of objects the user's repository has are dropped. |
 | Pre-restore snapshot (A.9) | `session.rs`, `restore`; `CheckpointPhase::BeforeRestore` in `event.rs` | Every undo first saves the folder as `restore-<id>`; restoring that id undoes the undo. Pruned under `checkpoints_keep`. |
-| Unforced check and `force` | `git.rs`, `restore_plan`; `MasterToNode::Restore` in `crates/protocol/src/lib.rs`; "Undo anyway" in `web/src/components/Conversation.tsx` | Refuses when a file the undo writes changed since the expected state; `force` skips the check. |
+| Unforced check and `force` | `git.rs`, `restore_plan`; `MasterToNode::Restore` in `crates/protocol/src/lib.rs`; "Undo anyway" in `web/src/components/Conversation.tsx` | Refuses when anything the undo would write over changed since the expected state: a path it writes or deletes, anything below one, or a file or link put where a folder of one goes (`changed_in_the_way`: every change read once, matched as bytes, no rename detection; a revert to the content before the turn counts as a change). Files and links in no checkpoint (ignored) that the undo would delete or write over refuse it too and are named (`unsaved_in_the_way`, `unsaved_in_replaced_dirs`, one list); `force` skips the check, deletes them and names them in its note. |
 | All or nothing (A.16) | `git.rs`, `restore_diff`, `secure_blobs`, `worktree_tree` | The blobs a restore writes are checked and copied first; a missing one refuses the restore; a broken shadow index is rebuilt. |
 | Nested repositories (A.15) | `git.rs`, `stage_without_nested`, `restore_plan` | Never snapshotted, never touched. |
 | Busy folders | `session.rs`, `claim_folder`, `claim_turn` | No undo while another chat's turn runs in the folder, and no turn while an undo runs. |
@@ -333,10 +333,11 @@ The sub-agent shadow (`<hash>-sub.git`) is a second store, so the folder's compr
 paid twice once a writing sub-agent has run, and each running writing sub-agent holds a full
 copy until it ends. A per-file size cap at snapshot (OpenCode skips untracked files over
 2 MiB, Hermes over 10 MB, Warp marks files over 25 MiB skipped:
-`research/harnesses-round-2-appendix.md` §4.6) was not built: a file skipped before a turn and
-kept after it would read as created, and an undo would delete it, so the skipped paths have to
-reach the restore plan and the chat. The advice to the person is the repository's own
-`.gitignore`.
+`research/harnesses-round-2-appendix.md` §4.6) was built and dropped on 2026-11-19 after three
+independent reviews (pull request 154, closed unmerged): a record of what a snapshot left out
+cannot be compared safely with what the person changed later, because size alone misses an edit
+of the same size, and every review proved a way such a file was lost or deleted. Do not rebuild
+it that way; the advice to the person is the repository's own `.gitignore`.
 
 **Secrets.** A `.env` the repository does not ignore now has its bytes in the node's data
 directory (`checkpoints/`, `sessions/<id>/files` while a sub-agent runs, stashes for up to 30
