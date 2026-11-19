@@ -1472,10 +1472,16 @@ background_agent_timeout_s = 1800    # wall-clock limit of one background sub-ag
 callback_turns = 3                   # turns the agent may run in a row without you when commands end; 0: off (0 .. 20)
 callback_max_steps = 20              # model calls one such turn may make, never above max_steps or the chat's own limit (1 .. 10000)
 handoff_notes_per_hour = 4           # hand-off notes this node writes per chat per hour; 0: off, the server asks for none (0 .. 60)
-projects_per_hour = 20               # new project folders this node makes per hour (only those made count; in memory); 0: off (0 .. 200)
+projects_per_hour = 20               # new project folders this node makes or clones per hour (only those made count; in memory); 0: off (0 .. 200)
+clone_timeout_s = 600                # the longest one clone may run; then git is ended and what it fetched removed (10 .. 7200)
+clone_max_mb = 2048                  # the most one clone may put on disk, objects and checkout together (1 .. 1048576)
 
 [projects]
 dir = "~/rizzy-projects"             # where "New project" makes folders (see "Projects"); inside workspace_roots, its parent existing, on the data directory's file system; "" turns it off
+
+[forge]
+clone = true                         # clone repositories into new project folders (see "Cloning a repository"); false: never
+hosts = ["github.com", "gitlab.com"] # the only hosts this node clones from, exactly as written: a lower-case name or IPv4 address, ":<port>" only where you add one
 
 [sandbox]
 mode = "required"                    # required | best-effort | off
@@ -2702,7 +2708,8 @@ it offers the host shell and you may use it). The button opens a popup:
   made count; a restart starts the count again).
 - **Existing folder**: the path field you had before, with your recent folders,
   for a chat in a checkout you already have (no project).
-- **From a repository**: later (cloning from GitHub, GitLab, Gitea or Forgejo).
+- **From a repository**: the screen comes next; the server side is there
+  (see "Cloning a repository" under "Connections").
 
 A project without a folder offers "Create its folder on <node>". Deleting a
 project leaves its folder on the node.
@@ -3135,8 +3142,64 @@ person; another gets "busy, try again" (or "your earlier listing is still
 running") at once. A forge host the admin removed from the list is not
 called.
 
-**In this version nothing clones or pushes,** and no token is sent to a node
-or a model; that comes next (ADOPTION_PLAN X.27 steps 3 and 4).
+**Cloning a repository into a new project.** `POST /api/projects` with
+`folder_on` (the node), `connection_id` (one of *your* connections) and
+`full_name` (`owner/name`, GitLab `group/…/name`) makes a new project whose
+folder is a clone of that repository (the Project popup's screen for it comes
+next). In order: the connection must be yours (anyone else's id is "no such
+connection", the API token is refused), its host still allowed on this server,
+the name of the shape that forge allows; the node must be one you may use for
+a project folder and must say it clones (an older node, or one whose
+`node.toml` turns cloning off, is never asked); then the server asks the forge
+for that repository by name with your token (one call, under the listing's
+limits). The node is sent the forge's host, the name as the forge spells it
+and, **only when the forge says the repository is private**, your login and
+token; a public repository is cloned with no credential at all. What you type
+never becomes a URL other than through that checked name; no URL is taken
+from you or from the forge.
+
+On the node, `node.toml` decides (`[forge]`): it clones only from a host in
+`[forge] hosts` (default `github.com` and `gitlab.com`; add a self-hosted
+forge there, with `:<port>` if it needs one), and `clone = false` turns it off.
+The node checks the host and the name again by its own rules and builds the
+URL itself, `https://<host>/<owner>/<name>.git`. The token never goes into an
+argument, an environment variable, a file or git's configuration: the node
+hands it to that one git through a pipe, and git's credential helper gives it
+only to exactly that host and path. A redirect is refused (a redirect to
+another host could take the credential along). The clone is made in the
+node's own data directory and moved into the projects folder under a new
+name (as "New project" does), within `[limits] clone_timeout_s` (600) and
+`clone_max_mb` (2048: git is ended and everything it fetched removed), one at
+a time per node, and counts against `projects_per_hour`. git gets an empty
+home folder of the node's own (never the node user's home, so neither your
+`~/.netrc` nor any other personal git or curl setting is used for a clone)
+and only `PATH`, `LANG` and `TMPDIR` from the node's environment (no proxy,
+certificate or `GIT_*` variable). An **empty repository** (a new one on the
+forge, with no commit yet) gets one empty first commit, on the branch the
+forge names as its default, so you can work in it right away; a repository
+whose default branch is missing is refused. The project records
+where its folder came from (`source`: host and name), for the push that comes
+later (ADOPTION_PLAN X.27 step 4).
+
+What a clone brings and what it does not: the repository's default branch and
+its history; `origin` is the clean URL, with no credential in it (nothing of
+the token is anywhere in the folder, `.git/config` included). **No
+submodules** (not fetched, their folders stay empty), **no Git LFS** (no
+filter is configured: LFS files stay pointer files), no hooks and no filters
+run (the repository's `.gitattributes` and hook files are just files), and
+every object is checked (`transfer.fsckObjects`). Nothing fetches or pushes
+afterwards yet; an agent has no forge access.
+
+**What this does not protect against:** while a private clone runs (at most
+`clone_timeout_s`), a process of the node's own OS user that can read
+`/proc`, such as a chat in the host shell, could read the token from that
+git's pipe; and a node you choose receives your token for that clone, so a
+compromised node gets it. Clone private repositories only onto nodes you
+trust with that token. If another process takes the token, the clone fails
+visibly: "git did not receive the credential the node passed it"; if that
+happens again, replace the token under Plugins → Connectors. A node that
+crashes during a clone leaves that git running until it ends by itself (its
+next start removes what it fetched).
 
 **Where the token is kept.** In `master.db`, sealed with AES-256-GCM under a
 key in `<data>/keys/secrets.key` (32 random bytes, mode 0600 in a 0700 folder,

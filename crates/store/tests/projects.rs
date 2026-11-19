@@ -45,6 +45,7 @@ fn new_in(id: &str, ws: &str) -> NewProject {
         settings: "{}".into(),
         created_by: Some("u1".into()),
         columns: cols(&["To do", "In progress", "Done"]),
+        source: None,
     }
 }
 
@@ -137,6 +138,7 @@ fn projects_are_listed_per_workspace_and_capped() {
         settings: "{}".into(),
         created_by: None,
         columns: vec![],
+        source: None,
     };
     s.create_project(&p, 1).unwrap();
     p.project_id = "y".into();
@@ -797,4 +799,22 @@ fn notes_are_appended_and_refused_past_the_limit() {
         "another project's card"
     );
     assert!(!s.append_card_note("p", "nope", "x", 20).unwrap());
+}
+
+/// A cloned project keeps where its folder came from (T86): host and
+/// owner/name, read back as written; a project made otherwise has none;
+/// the table refuses one without the other.
+#[test]
+fn a_cloned_project_keeps_its_source() {
+    let (s, ws) = store();
+    let mut p = new_in("c", &ws);
+    p.source = Some(("github.com".into(), "ada/harness".into()));
+    let row = s.create_project(&p, 10).unwrap();
+    assert_eq!(
+        row.source,
+        Some(("github.com".to_string(), "ada/harness".to_string()))
+    );
+    assert_eq!(s.project("c").unwrap().unwrap().source, row.source);
+    project(&s, "plain", &ws);
+    assert_eq!(s.project("plain").unwrap().unwrap().source, None);
 }

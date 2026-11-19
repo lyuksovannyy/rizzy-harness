@@ -6,11 +6,17 @@
 //! project's settings (`cwd`) and checked by the node again for every chat
 //! started there. Who may ask is the caller's check
 //! (`http/projects.rs`).
+//!
+//! A clone (`project.clone`, X.27 step 3, PLAN.md T86) goes the same way
+//! and is answered the same way; the master waits longer than the clone
+//! time limit the node announced, and the credential it sends (a private
+//! repository's only) is in a `Secret` from the sealed row to the link.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use harness_core::Secret;
 use harness_protocol::{CAP_PROJECTS, MasterToNode};
 use tokio::sync::oneshot;
 
@@ -98,6 +104,9 @@ pub enum FolderError {
     /// It did not announce `projects` (its node.toml turns them off, or it
     /// is older).
     NotOffered(String),
+    /// It did not announce `forge-clone` (its node.toml turns cloning off,
+    /// or it is older): never sent a `project.clone`.
+    NoClone(String),
     Busy,
     /// No answer in time: the node may still make the folder. The node,
     /// and the folder name's first part (the slug of the name).
@@ -116,6 +125,11 @@ impl std::fmt::Display for FolderError {
                 f,
                 "node {n} makes no project folders: its node.toml turns them off ([projects] \
                  dir), or it is an older version. Choose an existing folder instead"
+            ),
+            FolderError::NoClone(n) => write!(
+                f,
+                "node {n} cannot clone repositories: its node.toml turns cloning off ([forge] \
+                 clone or hosts, [projects] dir), or it is an older version"
             ),
             FolderError::Busy => write!(f, "too many folders are being made; try again"),
             FolderError::Timeout(n, slug) => write!(
@@ -149,6 +163,77 @@ pub async fn make(m: &Master, user: &str, node: &str, name: &str) -> Result<Stri
     if !m.node_has(node, CAP_PROJECTS) {
         return Err(FolderError::NotOffered(node.to_string()));
     }
+    let wait = m.inner.project_folders.wait();
+    ask(m, user, node, name, wait, |req_id| {
+        MasterToNode::ProjectCreate {
+            req_id,
+            name: name.to_string(),
+        }
+    })
+    .await
+}
+
+/// A forge repository to clone (T86): checked by the caller against the
+/// person's own connection and the forge.
+pub struct CloneSource {
+    pub host: String,
+    pub full_name: String,
+    /// Both for a private repository only.
+    pub username: Option<String>,
+    pub token: Option<Secret<String>>,
+}
+
+/// How much longer than the node's own clone limit the master waits: the
+/// node ends git at its limit, then removes what it fetched and answers.
+pub const CLONE_GRACE: Duration = Duration::from_secs(60);
+
+/// Whether `node` is connected and clones (an older node, or one whose
+/// node.toml turns cloning off, is never sent a `project.clone`).
+pub fn may_clone_on(m: &Master, node: &str) -> Result<u64, FolderError> {
+    if !m.is_connected(node) {
+        return Err(FolderError::Away(node.to_string()));
+    }
+    m.node_clone_timeout(node)
+        .ok_or_else(|| FolderError::NoClone(node.to_string()))
+}
+
+/// Ask `node` to clone `src` into a new project's folder named after
+/// `name`; `user` is who asks. The folder's absolute path on that node.
+pub async fn clone(
+    m: &Master,
+    user: &str,
+    node: &str,
+    name: &str,
+    src: CloneSource,
+) -> Result<String, FolderError> {
+    let limit = may_clone_on(m, node)?;
+    let wait = match m.inner.project_folders.wait_ms.load(Ordering::Relaxed) {
+        0 => Duration::from_secs(limit) + CLONE_GRACE,
+        ms => Duration::from_millis(ms),
+    };
+    ask(m, user, node, name, wait, move |req_id| {
+        MasterToNode::ProjectClone {
+            req_id,
+            name: name.to_string(),
+            host: src.host,
+            full_name: src.full_name,
+            username: src.username,
+            token: src.token,
+        }
+    })
+    .await
+}
+
+/// Send the message `build` makes for a new request id to `node` and wait
+/// up to `wait` for its `project.created`.
+async fn ask(
+    m: &Master,
+    user: &str,
+    node: &str,
+    name: &str,
+    wait: Duration,
+    build: impl FnOnce(String) -> MasterToNode,
+) -> Result<String, FolderError> {
     let req_id = harness_core::new_id();
     let (tx, rx) = oneshot::channel();
     {
@@ -166,17 +251,11 @@ pub async fn make(m: &Master, user: &str, node: &str, name: &str) -> Result<Stri
         );
     }
     let _entry = Entry { m, req_id: &req_id };
-    let sent = m.send_raw(
-        node,
-        MasterToNode::ProjectCreate {
-            req_id: req_id.clone(),
-            name: name.to_string(),
-        },
-    );
+    let sent = m.send_raw(node, build(req_id.clone()));
     if !sent {
         return Err(FolderError::Away(node.to_string()));
     }
-    match tokio::time::timeout(m.inner.project_folders.wait(), rx).await {
+    match tokio::time::timeout(wait, rx).await {
         Ok(Ok(Ok(p))) => Ok(p),
         Ok(Ok(Err(e))) => Err(FolderError::Refused(e)),
         Ok(Err(_)) => Err(FolderError::Away(node.to_string())),

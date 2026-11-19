@@ -52,7 +52,7 @@ mod user_repo;
 
 #[cfg(test)]
 pub(crate) use init::{FIRST_COMMIT, use_test_git};
-pub(crate) use init::{check_first_commit, init_project};
+pub(crate) use init::{Head, check_first_commit, first_commit, head_of, init_project};
 
 /// Where checkpoints for one working folder are stored.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,7 +183,7 @@ impl Repo {
 
 /// A git command with the hardened base: cleared environment, overrides,
 /// no stdin. `program` is `git` except in tests.
-fn hardened(program: &Path) -> Command {
+pub(crate) fn hardened(program: &Path) -> Command {
     let mut c = hardened_std(std::process::Command::new(program));
     overrides(&mut c);
     Command::from(c)
@@ -223,7 +223,7 @@ fn overrides(c: &mut std::process::Command) {
 
 /// Kills a git process group when dropped (timeout, cancelled turn), so
 /// a filter or hook it started does not outlive it either.
-struct Group(Option<u32>);
+pub(crate) struct Group(pub(crate) Option<u32>);
 
 impl Drop for Group {
     fn drop(&mut self) {
@@ -308,7 +308,7 @@ thread_local! {
 }
 
 /// The git program for the checkpoint calls (`git`, found on `PATH`).
-fn git_program() -> PathBuf {
+pub(crate) fn git_program() -> PathBuf {
     #[cfg(test)]
     if let Some(p) = TEST_GIT.with(|g| g.borrow().clone()) {
         return p;

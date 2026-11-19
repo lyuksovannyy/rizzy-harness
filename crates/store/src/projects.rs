@@ -24,7 +24,13 @@ CREATE TABLE IF NOT EXISTS projects (
     settings     TEXT NOT NULL DEFAULT '{}',
     created_by   TEXT,
     created_ms   INTEGER NOT NULL,
-    updated_ms   INTEGER NOT NULL
+    updated_ms   INTEGER NOT NULL,
+    -- The forge repository the project's folder was cloned from (X.27 step
+    -- 3, PLAN.md T86): its host and owner/name, both or neither. Set once,
+    -- at the create; no route changes it.
+    source_host  TEXT,
+    source_name  TEXT,
+    CHECK ((source_host IS NULL) = (source_name IS NULL))
 );
 CREATE INDEX IF NOT EXISTS projects_ws ON projects(workspace_id);
 -- Which project a chat is in (at most one). No foreign key on session_id: a
@@ -87,6 +93,8 @@ pub struct ProjectRow {
     pub created_by: Option<String>,
     pub created_ms: i64,
     pub updated_ms: i64,
+    /// The repository the folder was cloned from: (host, owner/name).
+    pub source: Option<(String, String)>,
 }
 
 /// A board column to create.
@@ -110,6 +118,8 @@ pub struct NewProject {
     pub settings: String,
     pub created_by: Option<String>,
     pub columns: Vec<NewColumn>,
+    /// The repository the folder was cloned from: (host, owner/name).
+    pub source: Option<(String, String)>,
 }
 
 /// Fields to change; `None` leaves a field as is.
@@ -221,7 +231,7 @@ pub struct TemplateRow {
 }
 
 const PROJECT_COLS: &str = "project_id, workspace_id, name, description, icon, accent, \
-     instructions, settings, created_by, created_ms, updated_ms";
+     instructions, settings, created_by, created_ms, updated_ms, source_host, source_name";
 
 fn project_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectRow> {
     Ok(ProjectRow {
@@ -236,6 +246,13 @@ fn project_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectRow> {
         created_by: r.get(8)?,
         created_ms: r.get(9)?,
         updated_ms: r.get(10)?,
+        source: match (
+            r.get::<_, Option<String>>(11)?,
+            r.get::<_, Option<String>>(12)?,
+        ) {
+            (Some(h), Some(n)) => Some((h, n)),
+            _ => None,
+        },
     })
 }
 
@@ -323,7 +340,7 @@ impl Store {
         }
         let now = harness_core::now_ms();
         tx.execute(
-            &format!("INSERT INTO projects ({PROJECT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)"),
+            &format!("INSERT INTO projects ({PROJECT_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?11, ?12)"),
             params![
                 p.project_id,
                 p.workspace_id,
@@ -334,7 +351,9 @@ impl Store {
                 p.instructions,
                 p.settings,
                 p.created_by,
-                now
+                now,
+                p.source.as_ref().map(|s| &s.0),
+                p.source.as_ref().map(|s| &s.1),
             ],
         )?;
         insert_columns(&tx, &p.project_id, &p.columns)?;
