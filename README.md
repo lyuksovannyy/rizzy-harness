@@ -1218,7 +1218,12 @@ folder it replaces, or a file or link you put where a folder it puts back
 goes; names are compared byte for byte, so a name with `*`, one starting
 with `:` or one that is not UTF-8 counts like any other. Putting a file
 back the way it was before the turn counts as a change too: the undo is
-refused, and "Undo anyway" goes ahead. Before an
+refused, and "Undo anyway" goes ahead. A file the undo puts back over a
+file that is there keeps that file's permission bits (a `.env` at 0600 stays
+0600), with the executable bits taken from the turn's before state (git
+records nothing else about the mode), set only for those who can already read
+it; a file the turn deleted comes back with the default mode (0666 or 0777
+less your umask), as there is nothing to keep. Before an
 undo or rewind changes a file it saves the folder as it is, your own edits
 since the turn included, as a checkpoint of its own, so "Undo anyway" loses
 nothing: restoring that checkpoint (its id is in the chat's log, phase
