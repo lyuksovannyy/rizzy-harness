@@ -42,8 +42,10 @@ interface Listing {
 export const DEBOUNCE_MS = 300;
 /** Repositories GitHub's own page holds when we search within it. */
 const WITHIN_PAGE = 100;
-/** A 429 while an earlier listing of ours still runs: tried again this
- * often before its sentence is shown. */
+/** The one 429 that is retried: our earlier listing still runs on the server
+ * (its error body's `code`; every other 429 is shown at once). Tried again
+ * this often before its sentence is shown. */
+const LISTING_BUSY = "listing_in_flight";
 const RETRY_MS = 600;
 const RETRIES = 5;
 
@@ -78,6 +80,8 @@ export default function RepoPicker(props: Props) {
   const [createErr, setCreateErr] = useState<string | null>(null);
   const ctl = useRef<AbortController | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  // False once the component is gone: nothing answers into it then.
+  const alive = useRef(true);
   const search = useRef<HTMLInputElement>(null);
   const nameField = useRef<HTMLInputElement>(null);
   const ids = useId();
@@ -116,16 +120,22 @@ export default function RepoPicker(props: Props) {
     call<Listing>("GET", path, undefined, c.signal).then(
       (l) => {
         if (c.signal.aborted) return;
-        setList((prev) => (append && prev ? { ...l, repositories: [...prev.repositories, ...l.repositories] } : l));
+        // By id: a repository that moved between pages is listed once.
+        setList((prev) => {
+          if (!(append && prev)) return l;
+          const have = new Set(prev.repositories.map((r) => r.id));
+          return { ...l, repositories: [...prev.repositories, ...l.repositories.filter((r) => !have.has(r.id))] };
+        });
         if (!append) setActive(0);
         setErr(null);
         setLoading(false);
       },
       (e: unknown) => {
         if (c.signal.aborted) return;
-        // Our earlier request is still running on the server (it frees
-        // its slot when it ends): still loading, not an error.
-        if (e instanceof HttpError && e.status === 429 && tries < RETRIES) {
+        // Our earlier listing is still running on the server (it frees
+        // its slot when it ends): still loading, not an error. Any other
+        // 429 says its own sentence now.
+        if (e instanceof HttpError && e.status === 429 && e.code === LISTING_BUSY && tries < RETRIES) {
           timer.current = setTimeout(() => load(page, append, tries + 1), RETRY_MS);
           return;
         }
@@ -142,13 +152,14 @@ export default function RepoPicker(props: Props) {
     timer.current = setTimeout(() => load(1, false), q.trim() ? DEBOUNCE_MS : 0);
     return () => clearTimeout(timer.current);
   }, [connId, q]);
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
       clearTimeout(timer.current);
       ctl.current?.abort();
-    },
-    [],
-  );
+    };
+  }, []);
 
   const pick = (r: Repo) => {
     setPicked(r);
@@ -274,24 +285,24 @@ export default function RepoPicker(props: Props) {
               full_name: picked.full_name,
               ...(props.workspace ? { workspace_id: props.workspace } : {}),
             };
-            // A listing of ours the server still finishes holds our one
-            // repository request: a 429 then started nothing; ask again.
-            const ask = (tries: number): Promise<PendingProject> =>
-              projectsApi.clone(body).catch((e: unknown) => {
-                if (e instanceof HttpError && e.status === 429 && tries < RETRIES)
-                  return new Promise((r) => setTimeout(r, RETRY_MS)).then(() => ask(tries + 1));
-                throw e;
-              });
+            // The listing, and a retry of it that waits, end here: nothing of
+            // ours is left running to answer later. The clone has its own
+            // slot on the server, so a listing never refuses it; any 429 it
+            // does get is a limit, said at once.
+            clearTimeout(timer.current);
             ctl.current?.abort();
-            ask(0)
+            setLoading(false);
+            projectsApi
+              .clone(body)
               .then(
                 (p) => {
+                  if (!alive.current) return;
                   setPicked(null);
                   props.onStarted(p);
                 },
-                (e: unknown) => setCreateErr(e instanceof Error ? e.message : String(e)),
+                (e: unknown) => alive.current && setCreateErr(e instanceof Error ? e.message : String(e)),
               )
-              .finally(() => setBusy(false));
+              .finally(() => alive.current && setBusy(false));
           }}
         >
           <input

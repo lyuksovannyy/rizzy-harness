@@ -56,7 +56,44 @@ fn clone_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<CloneRow> {
     })
 }
 
+/// Refused while `user` clones `host`'s `full_name` (any case) onto `node`.
+fn check_not_cloning(
+    conn: &rusqlite::Connection,
+    user: &str,
+    node: &str,
+    host: &str,
+    full_name: &str,
+) -> Result<()> {
+    let busy: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM project_clones WHERE state = 'cloning' AND created_by = ?1 \
+         AND node_id = ?2 AND host = ?3 AND lower(full_name) = lower(?4))",
+        params![user, node, host, full_name],
+        |r| r.get(0),
+    )?;
+    if busy {
+        return Err(StoreError::Refused(format!(
+            "{host}/{full_name} is being cloned onto this node for you already; it shows as \
+             cloning in your projects until it ends"
+        )));
+    }
+    Ok(())
+}
+
 impl Store {
+    /// `Refused` (said for the person) while `user` clones `full_name` of
+    /// `host` onto `node` already: the read-only form of the check
+    /// [`Store::start_clone`] makes, for the request to make before it takes
+    /// anything else.
+    pub fn check_not_cloning(
+        &self,
+        user: &str,
+        node: &str,
+        host: &str,
+        full_name: &str,
+    ) -> Result<()> {
+        check_not_cloning(&self.lock(), user, node, host, full_name)
+    }
+
     /// Record `c` as cloning. Refused (`StoreError::Refused`, said for the
     /// person) while the same person clones the same repository (host,
     /// name in any case) onto the same node, or when the workspace has
@@ -64,19 +101,7 @@ impl Store {
     pub fn start_clone(&self, c: &NewClone, max: usize) -> Result<()> {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
-        let busy: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM project_clones WHERE state = 'cloning' AND created_by = ?1 \
-             AND node_id = ?2 AND host = ?3 AND lower(full_name) = lower(?4))",
-            params![c.created_by, c.node_id, c.host, c.full_name],
-            |r| r.get(0),
-        )?;
-        if busy {
-            return Err(StoreError::Refused(format!(
-                "{}/{} is being cloned onto this node for you already; it shows as cloning in your \
-                 projects until it ends",
-                c.host, c.full_name
-            )));
-        }
+        check_not_cloning(&tx, &c.created_by, &c.node_id, &c.host, &c.full_name)?;
         let n: i64 = tx.query_row(
             "SELECT (SELECT COUNT(*) FROM projects WHERE workspace_id = ?1) + \
              (SELECT COUNT(*) FROM project_clones WHERE workspace_id = ?1 AND state = 'cloning')",

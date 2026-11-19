@@ -27,6 +27,8 @@ export class HttpError extends Error {
   constructor(
     public status: number,
     message: string,
+    /** The error body's machine-readable `code`, when it has one. */
+    public code?: string,
   ) {
     super(message);
   }
@@ -97,8 +99,8 @@ export async function call<T>(method: string, path: string, body?: unknown, sign
   }
   seen(res.status, data);
   if (!res.ok) {
-    const msg = (data as { error?: string } | null)?.error ?? `${res.status} ${res.statusText}`;
-    throw new HttpError(res.status, msg);
+    const body = data as { error?: string; code?: string } | null;
+    throw new HttpError(res.status, body?.error ?? `${res.status} ${res.statusText}`, body?.code);
   }
   return data as T;
 }

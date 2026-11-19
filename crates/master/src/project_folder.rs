@@ -25,12 +25,21 @@ use crate::{Master, lock};
 /// How long a request waits for its node: `git init` and one empty commit
 /// take well under a second; a node far away or busy gets some room.
 const WAIT: Duration = Duration::from_secs(30);
-/// Requests waiting for nodes at once, all nodes together, and per account.
+/// Folder requests waiting for nodes at once, all nodes together, and per
+/// account. A clone waits up to the node's limit plus 60 s, so clones have a
+/// budget of their own (below): a few people's clones never refuse a plain
+/// "New project" folder.
 const MAX_WAITING: usize = 16;
 const PER_USER: usize = 2;
-/// The longest refusal of a node passed on, in characters; the longest
-/// path taken (the master stores it as a project's `cwd`).
+/// Clones waiting for nodes at once, all nodes together, and per account.
+const MAX_CLONING: usize = 8;
+const PER_USER_CLONING: usize = 2;
+/// The longest refusal of a node shown for a plain folder request, in
+/// characters; the longest path taken (the master stores it as a project's
+/// `cwd`). A clone's refusal is passed on whole up to [`MAX_RAW`] and cut by
+/// whoever stores it, after the credential was taken out of it.
 const MAX_ERROR: usize = 300;
+const MAX_RAW: usize = 2000;
 pub const MAX_PATH: usize = 1024;
 
 type Answer = Result<String, String>;
@@ -93,7 +102,28 @@ pub fn claim(m: &Master, project: &str) -> Option<Claim> {
 struct Wait {
     node: String,
     user: String,
+    /// A `project.clone`, counted against the clone budget.
+    clone: bool,
     tx: oneshot::Sender<Answer>,
+}
+
+/// `text` without control characters and without Unicode format characters
+/// (bidirectional overrides and isolates, zero-width characters, the byte
+/// order mark, tag characters): text a node or a forge wrote, shown to a
+/// person, must not reorder or hide what is around it.
+pub fn clean_text(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_control() && !is_format(*c))
+        .collect()
+}
+
+/// Unicode category Cf, as far as it can hide or reorder text.
+fn is_format(c: char) -> bool {
+    matches!(c,
+        '\u{ad}' | '\u{600}'..='\u{605}' | '\u{61c}' | '\u{6dd}' | '\u{70f}' | '\u{8e2}'
+        | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}'
+        | '\u{2060}'..='\u{206f}' | '\u{feff}' | '\u{fff9}'..='\u{fffb}'
+        | '\u{e0000}'..='\u{e007f}')
 }
 
 /// Why no folder was made, each in words for the person.
@@ -108,6 +138,11 @@ pub enum FolderError {
     /// or it is older): never sent a `project.clone`.
     NoClone(String),
     Busy,
+    /// The clone budget (the server's, or the person's) is used up.
+    CloneBusy,
+    /// The node's link closed while it was cloning: the node's own clone
+    /// task goes on. The node, and the folder name's first part.
+    LinkLost(String, String),
     /// No answer in time: the node may still make the folder. The node,
     /// and the folder name's first part (the slug of the name).
     Timeout(String, String),
@@ -132,6 +167,17 @@ impl std::fmt::Display for FolderError {
                  clone or hosts, [projects] dir), or it is an older version"
             ),
             FolderError::Busy => write!(f, "too many folders are being made; try again"),
+            FolderError::CloneBusy => write!(
+                f,
+                "too many repositories are being cloned right now (you may have two at a time); \
+                 try again when one has finished"
+            ),
+            FolderError::LinkLost(n, slug) => write!(
+                f,
+                "node {n}'s link closed while it was cloning. The clone may still finish there: \
+                 if a folder named {slug}-… appears in its projects folder, open it with \
+                 Existing folder, or remove it"
+            ),
             FolderError::Timeout(n, slug) => write!(
                 f,
                 "node {n} did not answer in time; it may still make the folder: if a folder \
@@ -162,15 +208,23 @@ pub struct Sent {
     wait: Duration,
     node: String,
     slug: String,
+    clone: bool,
 }
 
 impl Sent {
-    /// The folder's absolute path on the node, or why there is none.
+    /// The folder's absolute path on the node, or why there is none. A
+    /// clone's refusal is the node's text cleaned of hidden characters but
+    /// not yet cut (the caller takes the credential out first).
     pub async fn answer(self) -> Result<String, FolderError> {
         let _entry = self.entry;
         match tokio::time::timeout(self.wait, self.rx).await {
             Ok(Ok(Ok(p))) => Ok(p),
-            Ok(Ok(Err(e))) => Err(FolderError::Refused(e)),
+            Ok(Ok(Err(e))) if self.clone => Err(FolderError::Refused(e)),
+            Ok(Ok(Err(e))) => Err(FolderError::Refused(e.chars().take(MAX_ERROR).collect())),
+            // The sender went with the link ([`node_down`]). A folder
+            // request had nothing started that the person could trip over;
+            // a clone goes on at the node.
+            Ok(Err(_)) if self.clone => Err(FolderError::LinkLost(self.node, self.slug)),
             Ok(Err(_)) => Err(FolderError::Away(self.node)),
             Err(_) => Err(FolderError::Timeout(self.node, self.slug)),
         }
@@ -187,7 +241,7 @@ pub async fn make(m: &Master, user: &str, node: &str, name: &str) -> Result<Stri
         return Err(FolderError::NotOffered(node.to_string()));
     }
     let wait = m.inner.project_folders.wait();
-    ask(m, user, node, name, wait, |req_id| {
+    ask(m, user, node, name, wait, false, |req_id| {
         MasterToNode::ProjectCreate {
             req_id,
             name: name.to_string(),
@@ -244,7 +298,7 @@ pub fn clone(
         0 => Duration::from_secs(limit) + CLONE_GRACE,
         ms => Duration::from_millis(ms),
     };
-    send(m, user, node, name, wait, move |req_id| {
+    send(m, user, node, name, wait, true, move |req_id| {
         MasterToNode::ProjectClone {
             req_id,
             name: name.to_string(),
@@ -264,9 +318,12 @@ async fn ask(
     node: &str,
     name: &str,
     wait: Duration,
+    clone: bool,
     build: impl FnOnce(String) -> MasterToNode,
 ) -> Result<String, FolderError> {
-    send(m, user, node, name, wait, build)?.answer().await
+    send(m, user, node, name, wait, clone, build)?
+        .answer()
+        .await
 }
 
 /// Register a new request for `node` among the waiting ones and send it
@@ -277,20 +334,36 @@ fn send(
     node: &str,
     name: &str,
     wait: Duration,
+    clone: bool,
     build: impl FnOnce(String) -> MasterToNode,
 ) -> Result<Sent, FolderError> {
     let req_id = harness_core::new_id();
     let (tx, rx) = oneshot::channel();
     {
+        // Folder requests and clones are counted apart.
         let mut w = lock(&m.inner.project_folders.pending);
-        if w.len() >= MAX_WAITING || w.values().filter(|x| x.user == user).count() >= PER_USER {
-            return Err(FolderError::Busy);
+        let (all, mine) = w
+            .values()
+            .filter(|x| x.clone == clone)
+            .fold((0, 0), |(a, p), x| (a + 1, p + usize::from(x.user == user)));
+        let (max, per_user) = if clone {
+            (MAX_CLONING, PER_USER_CLONING)
+        } else {
+            (MAX_WAITING, PER_USER)
+        };
+        if all >= max || mine >= per_user {
+            return Err(if clone {
+                FolderError::CloneBusy
+            } else {
+                FolderError::Busy
+            });
         }
         w.insert(
             req_id.clone(),
             Wait {
                 node: node.to_string(),
                 user: user.to_string(),
+                clone,
                 tx,
             },
         );
@@ -308,6 +381,7 @@ fn send(
         wait,
         node: node.to_string(),
         slug: harness_node::projects::slug(name),
+        clone,
     })
 }
 
@@ -348,17 +422,14 @@ pub fn on_answer(m: &Master, node_id: &str, req_id: String, answer: Answer) {
                 Ok(p)
             }
             Ok(_) => Err("the node answered with an unusable path".to_string()),
-            Err(e) => Err(e
-                .chars()
-                .filter(|c| !c.is_control())
-                .take(MAX_ERROR)
-                .collect()),
+            Err(e) => Err(clean_text(&e).chars().take(MAX_RAW).collect()),
         };
         let _ = tx.send(answer);
     }
 }
 
-/// The node's link closed: its waiting requests end now, as "away".
+/// The node's link closed: its waiting requests end now, a folder request as
+/// "away", a clone as "the clone may still finish" ([`Sent::answer`]).
 pub fn node_down(m: &Master, node_id: &str) {
     lock(&m.inner.project_folders.pending).retain(|_, x| x.node != node_id);
 }

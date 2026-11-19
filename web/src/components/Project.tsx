@@ -3,7 +3,7 @@
 // server keeps them) and Settings. Also the create form (`#/p/new`).
 // Loaded on demand; the strings live here, not in the first-load catalog.
 import { ArrowLeft, ArrowRight, MessageSquare, Trash2, X } from "lucide-react";
-import { type CSSProperties, type DragEvent, useCallback, useEffect, useRef, useState } from "react";
+import { type CSSProperties, type DragEvent, useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { HttpError } from "../api";
 import { type Artifact, artifactsApi, latestUrl } from "../lib/artifacts";
 import { useFeatures } from "../lib/features";
@@ -14,6 +14,7 @@ import {
   type BoardTemplate,
   dropIndex,
   LIMITS,
+  pendingProjects,
   type ProjectDetail,
   projectsApi,
 } from "../lib/projects";
@@ -80,6 +81,10 @@ export default function Project(props: {
 }) {
   const [project, setProject] = useState<ProjectDetail | null>(null);
   const [gone, setGone] = useState(false);
+  // A project whose folder is still being cloned (or whose clone failed,
+  // for its starter) is not a project yet: the page says so instead of
+  // "no longer exists", and looks again whenever projects change.
+  const pending = useSyncExternalStore(pendingProjects.sub, pendingProjects.get).find((p) => p.project_id === props.id);
   const [tab, setTab] = useState<Tab>(props.tab ?? "chats");
   useEffect(() => {
     if (props.tab) setTab(props.tab);
@@ -96,7 +101,10 @@ export default function Project(props: {
     if (id === "new") return;
     projectsApi
       .get(id)
-      .then(setProject)
+      .then((p) => {
+        setProject(p);
+        setGone(false);
+      })
       .catch((e) => e instanceof HttpError && e.status === 404 && setGone(true));
   }, [id, version]);
   // Like a chat, a project shows in its own workspace: once per target (the
@@ -111,6 +119,16 @@ export default function Project(props: {
   }, [foreign]);
 
   if (id === "new") return <NewProject workspaceId={props.workspaceId} onCreated={props.onOpenProject} />;
+  if (!project && pending)
+    return (
+      <section className="settings">
+        <div className="column wide muted" role="status">
+          {pending.state === "failed"
+            ? `The clone of ${shownName(`${pending.source.host}/${pending.source.full_name}`)} failed: ${shownName(pending.reason ?? "")}`
+            : `${shownName(pending.name)} is still being cloned from ${shownName(`${pending.source.host}/${pending.source.full_name}`)}. It opens here when the clone has finished.`}
+        </div>
+      </section>
+    );
   if (gone) return <section className="settings"><div className="column wide muted">This project no longer exists.</div></section>;
   if (!project) return <section className="settings"><div className="column wide muted">Loading…</div></section>;
 

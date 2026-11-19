@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::workspaces::{self as ws, WsError};
-use crate::{CommandError, Master, auth};
+use crate::{CommandError, Master, auth, forge_repos};
 use memory::{memory_err, memory_store};
 
 mod agent_edits;
@@ -276,7 +276,14 @@ struct ApiError(StatusCode, String);
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let busy = self.0 == StatusCode::TOO_MANY_REQUESTS && self.1 == auth::BUSY;
-        let mut resp = (self.0, Json(json!({ "error": self.1 }))).into_response();
+        // The one 429 a client may retry says so in a field of its own.
+        let body = if self.0 == StatusCode::TOO_MANY_REQUESTS && self.1 == forge_repos::LISTING_BUSY
+        {
+            json!({ "error": self.1, "code": forge_repos::LISTING_BUSY_CODE })
+        } else {
+            json!({ "error": self.1 })
+        };
+        let mut resp = (self.0, Json(body)).into_response();
         if busy {
             // No password-hash permit came free in time (auth::Hasher).
             resp.headers_mut()

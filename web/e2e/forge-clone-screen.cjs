@@ -11,10 +11,12 @@ const { spawn, execFileSync } = require('child_process');
 const net = require('net');
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
 const { claimCode, createOwner, keywordsOnly, keyed, pickAgent } = require('./onboard.cjs');
 const BIN = path.resolve(process.argv[2] || 'target/debug/rizzy-harness');
-const S = path.resolve(process.argv[3] || fs.mkdtempSync(path.join(os.tmpdir(), 'harness-e2e-clone-')));
+// The work directory: the argument, else a new folder under this checkout's
+// target/ (never the system's temp folder).
+const WORK = path.resolve(__dirname, '../../target/e2e-work');
+const S = path.resolve(process.argv[3] || (fs.mkdirSync(WORK, { recursive: true }), fs.mkdtempSync(path.join(WORK, 'clone-'))));
 const D = `${S}/data`, ROOT = `${S}/roots`, PROJECTS = `${S}/roots/projects`;
 fs.mkdirSync(D, { recursive: true });
 fs.mkdirSync(ROOT, { recursive: true });

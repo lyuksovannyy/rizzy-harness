@@ -2724,10 +2724,17 @@ it offers the host shell and you may use it). The button opens a popup:
   it is not a project yet: no chat can start in it and it has no folder. When
   the node is done it becomes a normal project with its folder. If the clone
   fails (the node does not clone from that host, the size or time limit, the
-  credential not received, no answer in time, the server restarted), it shows
-  as **clone failed** with the reason to you alone, with Dismiss; nobody else
-  sees it. Asking for the same repository on the same node again while it
-  clones is refused. Details: "Cloning a repository" under "Connections".
+  credential not received, no answer in time, the node's link closed meanwhile,
+  the server restarted, or you lost your right to make projects in the
+  workspace while it ran), it shows as **clone failed** with the reason to you
+  alone, with Dismiss; nobody else sees it. A reason that says the node's link
+  closed, or that it did not answer in time, means the node may still finish
+  the clone: do not start it again; if a new folder for it appears in the
+  node's projects folder, open it with Existing folder, or remove it. Asking
+  for the same repository on the same node again while it clones is refused.
+  Opening the page of a project that is still cloning says so (it does not say
+  the project no longer exists) and opens the project when the clone has
+  finished. Details: "Cloning a repository" under "Connections".
 
 A project without a folder offers "Create its folder on <node>". Deleting a
 project leaves its folder on the node.
@@ -3157,8 +3164,10 @@ the server cannot read) count against the same budget as failed token checks
 used up, listings from that host are refused with a message saying listing
 is paused. At most two listings run on the server at once and one per
 person; another gets "busy, try again" (or "your earlier listing is still
-running") at once. A forge host the admin removed from the list is not
-called.
+running", whose error body carries `"code": "listing_in_flight"`) at once.
+The screen retries only that one answer (a few times, while its own earlier
+listing finishes) and shows every other refusal, a rate limit included, at
+once. A forge host the admin removed from the list is not called.
 
 **Cloning a repository into a new project.** `POST /api/projects` with
 `folder_on` (the node), `connection_id` (one of *your* connections) and
@@ -3170,7 +3179,12 @@ the name of the shape that forge allows; the node must be one you may use for
 a project folder and must say it clones (an older node, or one whose
 `node.toml` turns cloning off, is never asked); then the server asks the forge
 for that repository by name with your token (one call, under the listing's
-limits). The node is sent the forge's host, the name as the forge spells it
+limits: your forge rate and the server's two slots, but **not** the listing's
+one-per-person slot: a clone's lookup has a slot of its own, and waits up to
+three seconds for your own earlier clone's lookup before it is refused, so a
+listing of yours still running never refuses Create). These limits and the
+duplicate check come before anything is recorded: a request refused for them
+never shows as cloning. The node is sent the forge's host, the name as the forge spells it
 and, **only when the forge says the repository is private**, your login and
 token; a public repository is cloned with no credential at all. What you type
 never becomes a URL other than through that checked name; no URL is taken
@@ -3215,8 +3229,28 @@ the project is written with the same id, its folder and its source, and
 until they dismiss it (`DELETE /api/projects/{id}/clone`; at most the newest
 ten failed ones are kept per person; failed ones count against no limit). The
 same person asking for the same repository (in any case) on the same node
-while one clones gets `409`; a running clone counts against the workspace's
-project limit. If the server restarts while a clone runs, every running one
+while one clones gets `409` (the same answer for a double click, however the
+two requests interleave); a running clone counts against the workspace's
+project limit. Clones have a budget of their own among the requests waiting
+for nodes: two per person and eight on the server, apart from the folders of
+plain "New project" requests, which a running clone never refuses (a clone past
+its budget is refused `429`).
+
+**How a clone ends.** When the node answers with a folder, the server checks
+again that you may still make a project there, as at the request (you are
+still a member of the workspace, may still change its projects, the account is
+not disabled, and your level and the node still allow it): the clone can run
+for ten minutes or more. If not, no project is written in your name: the clone
+shows as failed, with a reason that names the folder the node made (remove it,
+or open it with Existing folder). The reason of a failure is at most 300
+characters of text with the folder's path kept whole (under 1,500 characters in
+all); what the node wrote is cleaned of control, bidirectional and zero-width
+characters, and your token, whatever form a node echoes it in (itself,
+`login:token`, the Basic header's base64), is replaced by `[REDACTED]` before
+it is stored or shown. If the node's link closes while it clones the reason
+says so (the clone may still finish there: nothing to retry); if the server's
+job for a clone stops for any other reason, the clone fails with a plain
+reason instead of staying "cloning". If the server restarts while a clone runs, every running one
 becomes failed at start ("the server restarted…"); the node still ends or
 finishes its git by its own limits, and a folder it finished meanwhile is left
 in its projects folder with no project naming it (remove it, or open it with

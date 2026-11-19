@@ -13,6 +13,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vi
 import { type PendingProject, pendingProjects } from "../lib/projects";
 import type { NodeInfo } from "../types";
 import { Composer } from "./Composer";
+import { DEBOUNCE_MS } from "./RepoPicker";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -63,6 +64,7 @@ let listings: (path: string) => Answer;
 let calls: { method: string; path: string; body: unknown; signal?: AbortSignal | null }[];
 let listBody: { projects: unknown[]; pending: PendingProject[]; can_create: boolean };
 let cloneAnswer: { status: number; body: unknown };
+let dismissAnswer: { status: number; body: unknown };
 
 beforeEach(() => {
   localStorage.clear();
@@ -70,6 +72,7 @@ beforeEach(() => {
   conns = [{ id: "c1", host: "github.com", allowed: true, login: "ada" }];
   listings = () => ({ status: 200, body: { repositories: [repo(1), repo(2)], page: 1, has_more: false, left_out: 0, search: "none" } });
   listBody = { projects: [], pending: [], can_create: true };
+  dismissAnswer = { status: 200, body: { ok: true } };
   cloneAnswer = {
     status: 202,
     body: {
@@ -99,7 +102,7 @@ beforeEach(() => {
       if (init.method === "POST") return json(cloneAnswer.status, cloneAnswer.body);
       return json(200, { ...listBody, workspace_id: "w", icons: [], accents: [] });
     }
-    if (path.endsWith("/clone") && init.method === "DELETE") return json(200, { ok: true });
+    if (path.endsWith("/clone") && init.method === "DELETE") return json(dismissAnswer.status, dismissAnswer.body);
     return json(404, {});
   });
 });
@@ -229,7 +232,7 @@ describe("From a repository", () => {
     listings = (path) => {
       if (path.includes("q=abc") && busyOnce) {
         busyOnce = false;
-        return { status: 429, body: { error: "your earlier repository listing is still running; try again when it has finished" } };
+        return { status: 429, body: { error: "your earlier repository listing is still running; try again when it has finished", code: "listing_in_flight" } };
       }
       if (path.includes("q=slow"))
         return () =>
@@ -258,6 +261,17 @@ describe("From a repository", () => {
     await until(() => listCalls().some((x) => x.path.includes("q=slower2")));
     expect(slow.signal!.aborted).toBe(true);
     (gate as (() => void) | null)?.();
+    c.unmount();
+  });
+
+  test("only the earlier-listing 429 is retried; any other is shown at once, with Retry", async () => {
+    const said = "too many repository listings from your account; try again in a minute";
+    listings = () => ({ status: 429, body: { error: said } });
+    const c = await openRepos();
+    const alert = (await until(() => c.section.querySelector('[role="alert"]')))!;
+    expect(alert.textContent).toContain(said);
+    await new Promise((r) => setTimeout(r, 800));
+    expect(listCalls().length).toBe(1);
     c.unmount();
   });
 
@@ -350,30 +364,18 @@ describe("From a repository", () => {
     c.unmount();
   });
 
-  test("Create while our own listing still holds the server's slot asks again", async () => {
-    const busy = { status: 429, body: { error: "your earlier repository request is still running; try again when it has finished" } };
-    const ok = cloneAnswer;
-    let first = true;
+  test("Create: a 429 is a limit, said at once and never retried", async () => {
+    const said = "too many repository listings from your account; try again in a minute";
+    cloneAnswer = { status: 429, body: { error: said } };
     const c = await openRepos();
     await until(() => c.section.querySelector('[role="option"]'));
     await act(async () => c.section.querySelector<HTMLElement>('[role="option"]')!.click());
     await until(() => c.section.querySelector('button[type="submit"]'));
-    cloneAnswer = busy;
-    const real = globalThis.fetch;
-    vi.stubGlobal("fetch", async (path: string, init: RequestInit) => {
-      if (init.method === "POST" && first) {
-        first = false;
-        calls.push({ method: "POST", path, body: JSON.parse(init.body as string) });
-        return new Response(JSON.stringify(busy.body), { status: 429, headers: { "content-type": "application/json" } });
-      }
-      cloneAnswer = ok;
-      return real(path, init);
-    });
     await act(async () => c.section.querySelector<HTMLButtonElement>('button[type="submit"]')!.click());
-    const status = (await until(() => c.section.querySelector('[role="status"]')))!;
-    expect(status.textContent).toContain("Cloning");
-    expect(calls.filter((x) => x.method === "POST").length).toBe(2);
-    expect(c.section.querySelector('[role="alert"]')).toBeNull();
+    const alert = (await until(() => [...c.section.querySelectorAll('[role="alert"]')].find((a) => a.textContent?.includes("too many"))))!;
+    expect(alert.textContent).toBe(said);
+    await new Promise((r) => setTimeout(r, 900));
+    expect(calls.filter((x) => x.method === "POST").length).toBe(1);
     c.unmount();
   });
 
@@ -440,5 +442,222 @@ describe("the sidebar's projects", () => {
     await until(() => calls.some((x) => x.method === "DELETE"));
     expect(calls.find((x) => x.method === "DELETE")!.path).toBe("/api/projects/f1/clone");
     act(() => root.unmount());
+  });
+});
+
+// ---- review of PR 164, round 2: the cleaning in every place it is applied, and the cleanup ----
+
+/** Text with a bidi override and a zero-width space in it, and what it is
+ * shown as (`shownName`: the code point, in angle brackets). */
+const hot = (t: string) => `${t}\u202e${t.toLowerCase()}\u200bz`;
+const shown = (t: string) => `${t}<U+202E>${t.toLowerCase()}<U+200B>z`;
+const hidden = /[\u202e\u200b]/;
+
+describe("what a forge or a node wrote is shown, not obeyed, in every place", () => {
+  test("the popup's pending rows: name, source, reason (and its title)", async () => {
+    const base = cloneAnswer.body as PendingProject;
+    listBody.pending = [
+      { ...base, project_id: "a", name: hot("NAME"), source: { host: hot("HOST"), full_name: hot("FULL") } },
+      { ...base, project_id: "b", state: "failed", name: hot("FNAME"), reason: hot("WHY") },
+    ];
+    const c = await openRepos();
+    const rows = (await until(() => {
+      const r = [...c.d.querySelectorAll<HTMLElement>(".pp-list li")];
+      return r.length === 2 ? r : null;
+    }))!;
+    expect(rows[0]!.querySelector(".pp-name")!.textContent).toBe(shown("NAME"));
+    expect(rows[0]!.querySelector(".pp-where")!.textContent).toBe(`Cloning ${shown("HOST")}/${shown("FULL")}…`);
+    expect(rows[1]!.querySelector(".pp-name")!.textContent).toBe(shown("FNAME"));
+    expect(rows[1]!.querySelector(".pp-where")!.textContent).toBe(`Clone failed: ${shown("WHY")}`);
+    expect(rows[1]!.querySelector<HTMLElement>(".pp-where")!.title).toBe(shown("WHY"));
+    for (const r of rows) expect(r.outerHTML).not.toMatch(hidden);
+    c.unmount();
+  });
+
+  test("the status line after Create", async () => {
+    cloneAnswer = { status: 202, body: { ...(cloneAnswer.body as PendingProject), source: { host: hot("HOST"), full_name: hot("FULL") } } };
+    const c = await openRepos();
+    await until(() => c.section.querySelector('[role="option"]'));
+    await act(async () => c.section.querySelector<HTMLElement>('[role="option"]')!.click());
+    await until(() => c.section.querySelector('button[type="submit"]'));
+    await act(async () => c.section.querySelector<HTMLButtonElement>('button[type="submit"]')!.click());
+    const status = (await until(() => c.section.querySelector<HTMLElement>('[role="status"]')))!;
+    expect(status.textContent).toContain(`Cloning ${shown("HOST")}/${shown("FULL")}…`);
+    expect(status.textContent).not.toMatch(hidden);
+    c.unmount();
+  });
+
+  test("the connection select's host and login, and a single connection's placeholder", async () => {
+    conns = [
+      { id: "c1", host: hot("HOST"), allowed: true, login: hot("LOGIN") },
+      { id: "c2", host: "git.example.org", allowed: true, login: "ada2" },
+    ];
+    let c = await openRepos();
+    const sel = (await until(() => c.section.querySelector<HTMLSelectElement>('select[aria-label="Forge account"]')))!;
+    expect(sel.options[0]!.textContent).toBe(`${shown("HOST")} · @${shown("LOGIN")}`);
+    expect(sel.outerHTML).not.toMatch(hidden);
+    c.unmount();
+    document.body.innerHTML = "";
+    conns = [{ id: "c1", host: hot("HOST"), allowed: true, login: hot("LOGIN") }];
+    c = await openRepos();
+    const input = (await until(() => c.section.querySelector<HTMLInputElement>('input[aria-label="Search repositories"]')))!;
+    expect(input.placeholder).toBe(`Search ${shown("HOST")} · @${shown("LOGIN")}`);
+    c.unmount();
+  });
+
+  test("the picked repository's name, in the preview and its title", async () => {
+    listings = () => ({
+      status: 200,
+      body: { repositories: [repo(1, { full_name: `ada/${hot("PICK")}` })], page: 1, has_more: false, left_out: 0, search: "none" },
+    });
+    const c = await openRepos();
+    await until(() => c.section.querySelector('[role="option"]'));
+    await act(async () => c.section.querySelector<HTMLElement>('[role="option"]')!.click());
+    const span = (await until(() => c.section.querySelector<HTMLElement>(".pp-preview span")))!;
+    expect(span.textContent).toBe(`ada/${shown("PICK")}`);
+    expect(span.title).toBe(`ada/${shown("PICK")}`);
+    c.unmount();
+  });
+
+  test("the sidebar's pending rows: name, source, reason (and its title)", async () => {
+    const { SidebarLists } = await import("./ProjectNav");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    act(() => root.render(<SidebarLists route={{ kind: "home" }} onNavigate={() => {}} sessions={[]} nodes={[]} projects={[]} canCreateProject />));
+    const base = cloneAnswer.body as PendingProject;
+    act(() =>
+      pendingProjects.set([
+        { ...base, project_id: "a", name: hot("NAME"), source: { host: hot("HOST"), full_name: hot("FULL") } },
+        { ...base, project_id: "b", state: "failed", name: hot("FNAME"), reason: hot("WHY") },
+      ]),
+    );
+    const rows = [...host.querySelectorAll<HTMLElement>(".pending-project")];
+    expect(rows[0]!.querySelector(".ellipsis")!.textContent).toBe(`${shown("NAME")} · cloning ${shown("HOST")}/${shown("FULL")}…`);
+    expect(rows[1]!.querySelector(".ellipsis")!.textContent).toBe(`${shown("FNAME")} · clone failed: ${shown("WHY")}`);
+    expect(rows[1]!.title).toBe(shown("WHY"));
+    expect(rows[0]!.title).toBe(`${shown("HOST")}/${shown("FULL")}`);
+    for (const r of rows) expect(r.outerHTML).not.toMatch(hidden);
+    act(() => root.unmount());
+  });
+
+  test("a refused Dismiss in the sidebar says the server's sentence", async () => {
+    const { SidebarLists } = await import("./ProjectNav");
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    act(() => root.render(<SidebarLists route={{ kind: "home" }} onNavigate={() => {}} sessions={[]} nodes={[]} projects={[]} canCreateProject />));
+    const base = cloneAnswer.body as PendingProject;
+    act(() => pendingProjects.set([{ ...base, project_id: "f1", state: "failed", reason: "x" }]));
+    dismissAnswer = { status: 404, body: { error: "no such failed clone" } };
+    await act(async () => host.querySelector<HTMLButtonElement>(".pending-project button")!.click());
+    const alert = (await until(() => host.querySelector('.pending-project [role="alert"]')))!;
+    expect(alert.textContent).toBe("no such failed clone");
+    act(() => root.unmount());
+  });
+});
+
+describe("the picker when it is gone, and its list", () => {
+  async function mountPicker(onStarted: (p: PendingProject) => void = () => {}) {
+    const RepoPicker = (await import("./RepoPicker")).default;
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    act(() => root.render(<RepoPicker workspace="w" node={node} nodeLabel="box" canCreate onStarted={onStarted} />));
+    return { host, unmount: () => act(() => root.unmount()) };
+  }
+
+  test("a search waiting for the person to stop typing starts nothing once the picker is gone", async () => {
+    const c = await mountPicker();
+    await until(() => listCalls().length === 1);
+    await set(c.host.querySelector<HTMLInputElement>('input[aria-label="Search repositories"]')!, "abc");
+    c.unmount();
+    await new Promise((r) => setTimeout(r, DEBOUNCE_MS + 300));
+    expect(listCalls().length).toBe(1);
+  });
+
+  test("a listing in flight is cancelled when the picker is gone", async () => {
+    let release: () => void = () => {};
+    listings = () => () =>
+      new Promise((r) => {
+        release = () => r({ status: 200, body: { repositories: [], page: 1, has_more: false, left_out: 0, search: "none" } });
+      });
+    const c = await mountPicker();
+    await until(() => listCalls().length === 1);
+    const signal = listCalls()[0]!.signal!;
+    expect(signal.aborted).toBe(false);
+    c.unmount();
+    expect(signal.aborted).toBe(true);
+    release();
+  });
+
+  test("a listing retry waiting after a 429 starts nothing once the picker is gone", async () => {
+    listings = () => ({ status: 429, body: { error: "your earlier repository listing is still running", code: "listing_in_flight" } });
+    const c = await mountPicker();
+    await until(() => listCalls().length === 1);
+    c.unmount();
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(listCalls().length).toBe(1);
+  });
+
+  test("a retry waiting when Create is pressed is cancelled with the listing", async () => {
+    const c = await mountPicker();
+    await until(() => c.host.querySelector('[role="option"]'));
+    await act(async () => c.host.querySelector<HTMLElement>('[role="option"]')!.click());
+    // A new search that meets the busy 429: its retry now waits.
+    listings = () => ({ status: 429, body: { error: "your earlier repository listing is still running", code: "listing_in_flight" } });
+    await set(c.host.querySelector<HTMLInputElement>('input[aria-label="Search repositories"]')!, "q");
+    await until(() => listCalls().length === 2);
+    await new Promise((r) => setTimeout(r, 150));
+    await act(async () => c.host.querySelector<HTMLButtonElement>('button[type="submit"]')!.click());
+    const before = listCalls().length;
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(listCalls().length).toBe(before);
+    c.unmount();
+  });
+
+  test("a clone answered after the picker is gone tells nobody", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => (release = r));
+    const real = globalThis.fetch;
+    vi.stubGlobal("fetch", async (path: string, init: RequestInit) => {
+      if (init.method === "POST") await gate;
+      return real(path, init);
+    });
+    const started = vi.fn();
+    const c = await mountPicker(started);
+    await until(() => c.host.querySelector('[role="option"]'));
+    await act(async () => c.host.querySelector<HTMLElement>('[role="option"]')!.click());
+    await act(async () => c.host.querySelector<HTMLButtonElement>('button[type="submit"]')!.click());
+    c.unmount();
+    release();
+    await new Promise((r) => setTimeout(r, 100));
+    expect(started).not.toHaveBeenCalled();
+  });
+
+  test("a repository on two pages is listed once, with no duplicate key", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    listings = (path) => ({
+      status: 200,
+      body: {
+        repositories: path.includes("page=2") ? [repo(2), repo(3)] : [repo(1), repo(2)],
+        page: path.includes("page=2") ? 2 : 1,
+        has_more: !path.includes("page=2"),
+        left_out: 0,
+        search: "none",
+      },
+    });
+    const c = await mountPicker();
+    await until(() => c.host.querySelectorAll('[role="option"]').length === 2);
+    await act(async () => [...c.host.querySelectorAll("button")].find((b) => b.textContent === "Show more")!.click());
+    await until(() => c.host.querySelectorAll('[role="option"]').length === 3);
+    expect([...c.host.querySelectorAll('[role="option"]')].map((o) => o.querySelector(".rp-name")!.textContent!.trim())).toEqual([
+      "ada/repo-1",
+      "ada/repo-2",
+      "ada/repo-3",
+    ]);
+    expect(errors.mock.calls.filter((a) => String(a[0]).includes("same key"))).toEqual([]);
+    errors.mockRestore();
+    c.unmount();
   });
 });

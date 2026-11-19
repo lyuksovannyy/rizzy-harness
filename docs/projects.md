@@ -88,6 +88,30 @@ the project is written with the same id and the row goes, in one transaction. Wh
 row stays failed with the reason for its starter alone, who dismisses it (Dismiss in both lists;
 the newest ten are kept; failed rows count against no limit). A master that restarts fails every
 running row at start; a folder the node finished meanwhile is left with no project, as above. The
+reasons a row can fail with, all shown to its starter only and cut to 300 characters (an orphaned
+folder's, which keeps its path whole: under 1,500):
+
+- *the node's own refusal* (host not allowed, size or time limit, credential not received), as it
+  wrote it, cleaned of control and hidden format characters, with the token taken out in whatever
+  form it echoes it (the master replaces what it sent with `[REDACTED]`);
+- *the node did not answer in time* (it may still make the folder);
+- *the node's link closed while it was cloning*: the node's clone task goes on, so the clone may
+  still finish; a folder for it that appears in the node's projects folder is opened with
+  *Existing folder* or removed. No retry is advised (a second clone would be the same repository
+  twice);
+- *the server restarted* (as above), or *the server stopped this clone* (a job that ended without
+  writing its end: a drop guard fails the row, so none stays "cloning");
+- *the starter's right is gone*: the right to make the project (membership, the `settings`
+  permission, the account, the level, the node) is checked again when the node answers, since a
+  clone runs for minutes; without it no project is written, and the reason names the folder the
+  node made, to remove or open.
+
+A running clone has its own waiting budget (2 per person, 8 on the server), apart from the plain
+"New project" folder requests', and a request refused for a limit that needs no forge call, or as a
+duplicate, never shows as "cloning". Opening the page of a pending project shows the cloning state
+(its reason, when failed) instead of "no longer exists", and opens it when the clone has finished.
+The search retries only the "your earlier listing is still running" answer, which the API marks with
+`"code": "listing_in_flight"`; every other refusal is shown at once. The
 sidebar reads pending projects from a small store in `lib/projects.ts` that the Shell's project
 refresh fills (no new Shell state); the popup reloads its list when that store changes, which the
 Shell does on every `projects_changed`.
