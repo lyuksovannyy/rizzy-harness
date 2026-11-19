@@ -18,7 +18,7 @@ use std::io::Write;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use fake_mcp::{CANARY, FORGED, Fake as Remote, GOOD};
+use fake_mcp::{CANARY, FORGED, Fake as Remote, GOOD, GOOD2};
 use harness_core::agent::AgentSpec;
 use harness_core::connectors::ConnectorAnswer;
 use harness_core::{RawEvent, Secret, SessionId};
@@ -74,6 +74,8 @@ struct Node {
     answers: Arc<Mutex<HashMap<String, Answer>>>,
     seen: Arc<Mutex<Vec<MasterToNode>>>,
     frames: Arc<Mutex<String>>,
+    /// Refuse every command from now on (as a node that cannot take it).
+    refuse: Arc<std::sync::atomic::AtomicBool>,
 }
 
 fn fake_node(node_id: &str, caps: &[&str]) -> (NodeLink, Node) {
@@ -95,12 +97,14 @@ fn fake_node(node_id: &str, caps: &[&str]) -> (NodeLink, Node) {
         answers: Arc::default(),
         seen: Arc::default(),
         frames: Arc::default(),
+        refuse: Arc::default(),
     };
-    let (seqs, answers, seen, frames) = (
+    let (seqs, answers, seen, frames, refuse) = (
         n.seqs.clone(),
         n.answers.clone(),
         n.seen.clone(),
         n.frames.clone(),
+        n.refuse.clone(),
     );
     let node = node_id.to_string();
     tokio::spawn(async move {
@@ -143,10 +147,11 @@ fn fake_node(node_id: &str, caps: &[&str]) -> (NodeLink, Node) {
             let req_id = msg.req_id().map(str::to_string);
             seen.lock().unwrap().push(msg);
             if let Some(req_id) = req_id {
+                let no = refuse.load(std::sync::atomic::Ordering::SeqCst);
                 let ack = NodeToMaster::Ack {
                     req_id,
-                    ok: true,
-                    error: None,
+                    ok: !no,
+                    error: no.then(|| "refused".to_string()),
                 };
                 to_master.try_send(ack).unwrap();
             }
@@ -511,13 +516,36 @@ async fn turn(t: &T, sid: SessionId, agent: &str) -> AgentSpec {
     .await
 }
 
+/// Mark turn `turn` of `sid` running on the node as agent `agent`, as a
+/// node does for the prompt the master sent last ("hello", recorded as the
+/// turn's `user_message`), or as a callback turn.
 async fn running(t: &T, sid: SessionId, turn: &str, agent: &str, callback: bool) {
+    started(t, sid, turn, agent, callback).await;
+    if !callback {
+        said(t, sid, turn, "hello", false).await;
+    }
+}
+
+async fn started(t: &T, sid: SessionId, turn: &str, agent: &str, callback: bool) {
     let mut p = json!({"turn_id": turn,
         "agent": {"agent_id": agent, "name": agent, "prompt_hash": "h"}});
     if callback {
         p["cause"] = json!({"callback": ["bg-1"]});
     }
     t.chat.emit(sid, "turn_started", p).await;
+    landed(t, sid).await;
+}
+
+/// The node records message `text` in turn `turn` (`queued`: sent while
+/// the turn ran).
+async fn said(t: &T, sid: SessionId, turn: &str, text: &str, queued: bool) {
+    t.chat
+        .emit(
+            sid,
+            "user_message",
+            json!({"turn_id": turn, "text": text, "queued": queued}),
+        )
+        .await;
     landed(t, sid).await;
 }
 
@@ -720,7 +748,7 @@ async fn the_owners_own_signed_in_turns_only() {
     assert!(spec.connector_tools.is_empty());
     running(&t, a, "t3", "coder", false).await;
     let e = t.chat.call(a, TOOL, json!({})).await.unwrap_err();
-    assert!(e.contains("only in a turn the chat's owner sent"), "{e}");
+    assert!(e.contains("only in a turn the chat's owner started"), "{e}");
     ended(&t, a, "t3").await;
     // An untrusted (webhook) turn.
     let spec = turn_with(
@@ -737,7 +765,7 @@ async fn the_owners_own_signed_in_turns_only() {
     assert!(spec.connector_tools.is_empty());
     running(&t, a, "t4", "coder", false).await;
     let e = t.chat.call(a, TOOL, json!({})).await.unwrap_err();
-    assert!(e.contains("only in a turn the chat's owner sent"), "{e}");
+    assert!(e.contains("only in a turn the chat's owner started"), "{e}");
     ended(&t, a, "t4").await;
     // An owner turn again, then a callback turn as the log records it.
     turn(&t, a, "coder").await;
@@ -1356,8 +1384,13 @@ async fn without_the_key_no_token_connector_is_used() {
         Auth::new(Secret::new("api-token-xyz".into()), vec![], false),
     );
     m2.set_sealer(Sealer::new(t.dir.path()));
-    let (link, _node) = fake_node("master", CAPS);
+    let (link, node2) = fake_node("master", CAPS);
     m2.add_link(link, true).await.unwrap();
+    // Nothing granted after a restart: the open turn of before calls nothing.
+    let e = harness_master::connectors::call::answer(&m2, "master", a, TOOL, json!({}))
+        .await
+        .unwrap_err();
+    assert!(e.contains("only in a turn the chat's owner started"), "{e}");
     m2.set_connector_test_net(
         t.remote.table(),
         true,
@@ -1366,7 +1399,7 @@ async fn without_the_key_no_token_connector_is_used() {
     );
     let row = m2.inner_mirror().session(a).unwrap().unwrap();
     let mut spec = t.chat.last_agent();
-    let reading = m2.offer_connectors(&row, true, &mut spec).await;
+    let (_, reading) = m2.offer_connectors(&row, true, &mut spec).await;
     assert!(
         spec.connector_tools.iter().all(|e| e.connector != "linear"),
         "no token connector without the key"
@@ -1392,6 +1425,38 @@ async fn without_the_key_no_token_connector_is_used() {
             raw: "tool_0".into(),
         }];
     m2.connector_tools_put_for_test(&me, &row_c, held);
+    // A new owner turn on the restarted master, as its node records it.
+    ended(&t, a, "t1").await;
+    let head = m2.inner_mirror().head_seq(a).unwrap();
+    node2.seqs.lock().unwrap().insert(a, head);
+    m2.prompt(
+        a,
+        "again".into(),
+        PromptOpts {
+            agent_id: Some("coder".into()),
+            by_owner: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    node2
+        .emit(
+            a,
+            "turn_started",
+            json!({"turn_id": "t2",
+            "agent": {"agent_id": "coder", "name": "coder", "prompt_hash": "h"}}),
+        )
+        .await;
+    node2
+        .emit(a, "user_message", json!({"turn_id": "t2", "text": "again"}))
+        .await;
+    for _ in 0..200 {
+        if m2.inner_mirror().head_seq(a).unwrap() >= head + 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     let before = t.remote.calls();
     let e = harness_master::connectors::call::answer(&m2, "master", a, TOOL, json!({}))
         .await
@@ -1426,4 +1491,349 @@ async fn a_node_without_the_capability_gets_nothing() {
     )
     .await;
     assert_eq!(v["connectors"][0]["agent_tools"], 3, "{v}");
+}
+
+/// Review of PR 157, HIGH 1 (RV1): a grant belongs to the one turn the
+/// master started for the owner and that took no other message. An owner
+/// message queued into a running API-token turn grants nothing; an
+/// API-token message queued into the owner's turn takes its grant away for
+/// good, also when the owner types again; a send the node refused, and a
+/// turn the node wrote on its own, grant nothing.
+#[tokio::test]
+async fn a_grant_is_one_turns_and_nothing_else_may_enter_it() {
+    let t = start().await;
+    let [alex, _bob] = users(&t).await;
+    let ws = team(&t, &alex, "Team").await;
+    let (id, stamp) = add(&t, &alex, &ws, "linear", "auth/linear", "token").await;
+    connect(&t, &alex, &ws, &id, &stamp).await;
+    let a = chat(&t, &alex, &ws).await;
+    let api = |text: &str| (text.to_string(), PromptOpts::default());
+    let send = |text: String, opts: PromptOpts| {
+        let m = t.master.clone();
+        async move {
+            m.prompt(
+                a,
+                text,
+                PromptOpts {
+                    agent_id: Some("coder".into()),
+                    ..opts
+                },
+            )
+            .await
+        }
+    };
+    let owner = PromptOpts {
+        by_owner: true,
+        ..Default::default()
+    };
+    // An API-token turn runs; the owner's message is queued into it.
+    let (txt, o) = api("from the api");
+    send(txt.clone(), o).await.unwrap();
+    started(&t, a, "api1", "coder", false).await;
+    said(&t, a, "api1", &txt, false).await;
+    send("owner while it runs".into(), owner.clone())
+        .await
+        .unwrap();
+    said(&t, a, "api1", "owner while it runs", true).await;
+    let e = t
+        .chat
+        .call(a, TOOL, json!({"from": "api"}))
+        .await
+        .unwrap_err();
+    assert!(e.contains("only in a turn the chat's owner started"), "{e}");
+    ended(&t, a, "api1").await;
+    // The turn that reads the queued owner message: no grant either.
+    started(&t, a, "q1", "coder", false).await;
+    assert!(t.chat.call(a, TOOL, json!({})).await.is_err());
+    ended(&t, a, "q1").await;
+    // The owner's turn runs; an API-token message is queued into it; the
+    // owner types again: the turn never calls again.
+    send("mine".into(), owner.clone()).await.unwrap();
+    started(&t, a, "own2", "coder", false).await;
+    said(&t, a, "own2", "mine", false).await;
+    t.chat.call(a, TOOL, json!({})).await.unwrap();
+    let (txt, o) = api("steer it");
+    send(txt.clone(), o).await.unwrap();
+    said(&t, a, "own2", &txt, true).await;
+    send("mine again".into(), owner.clone()).await.unwrap();
+    said(&t, a, "own2", "mine again", true).await;
+    let e = t
+        .chat
+        .call(a, TOOL, json!({"steered": 1}))
+        .await
+        .unwrap_err();
+    assert!(e.contains("only in a turn the chat's owner started"), "{e}");
+    ended(&t, a, "own2").await;
+    // A send the node refused leaves no grant, even if a turn with that
+    // text shows up.
+    t.chat
+        .refuse
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(send("refused".into(), owner.clone()).await.is_err());
+    t.chat
+        .refuse
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    started(&t, a, "r1", "coder", false).await;
+    said(&t, a, "r1", "refused", false).await;
+    assert!(t.chat.call(a, TOOL, json!({})).await.is_err());
+    ended(&t, a, "r1").await;
+    // A turn and message the node wrote on its own: nothing was sent.
+    started(&t, a, "n1", "coder", false).await;
+    said(&t, a, "n1", "invented", false).await;
+    assert!(t.chat.call(a, TOOL, json!({})).await.is_err());
+    ended(&t, a, "n1").await;
+    // Only the owner turn's call went out.
+    assert_eq!(t.remote.calls(), 1);
+}
+
+/// Review of PR 157, HIGH 2 (RV2, RV5): turns the node invents get no
+/// count of their own (no grant at all), and two background sub-agents of
+/// one turn share its count after it ended.
+#[tokio::test]
+async fn the_per_turn_cap_is_a_bound() {
+    let t = start().await;
+    let [alex, _bob] = users(&t).await;
+    let ws = team(&t, &alex, "Team").await;
+    let (id, stamp) = add(&t, &alex, &ws, "linear", "plain", "none").await;
+    check(&t, &alex, &ws, &id, &stamp).await;
+    let a = chat(&t, &alex, &ws).await;
+    turn(&t, a, "coder").await;
+    running(&t, a, "t1", "coder", false).await;
+    let k1 = sub_agent(&t, a).await;
+    let k2 = sub_agent(&t, a).await;
+    running(&t, k1, "bg1", "coder", false).await;
+    running(&t, k2, "bg2", "coder", false).await;
+    ended(&t, a, "t1").await;
+    let mut ok = 0;
+    for i in 0..70 {
+        let s = if i % 2 == 0 { k1 } else { k2 };
+        if t.chat.call(s, TOOL, json!({})).await.is_ok() {
+            ok += 1;
+        }
+    }
+    assert_eq!(ok, harness_master::connectors::call::PER_TURN);
+    // A turn the sub-agent's node starts on its own is under no grant.
+    ended(&t, k1, "bg1").await;
+    running(&t, k1, "bg-invented", "coder", false).await;
+    assert!(t.chat.call(k1, TOOL, json!({})).await.is_err());
+    // Invented chat turns: none answered.
+    let before = t.remote.calls();
+    for k in 0..4 {
+        let tid = format!("invented-{k}");
+        started(&t, a, &tid, "coder", false).await;
+        said(&t, a, &tid, "hello", false).await;
+        assert!(t.chat.call(a, TOOL, json!({})).await.is_err());
+        ended(&t, a, &tid).await;
+    }
+    assert_eq!(t.remote.calls(), before);
+}
+
+fn row_of(t: &T, ws: &str, id: &str) -> harness_store::custom_connectors::ConnectorRow {
+    t.master.inner_mirror().connector(ws, id).unwrap().unwrap()
+}
+
+/// Review of PR 157, L6 (RV6): the chat's owner disabled, or no longer a
+/// member of the workspace, while their turn runs: refused, nothing sent.
+#[tokio::test]
+async fn an_owner_disabled_or_removed_is_refused() {
+    let t = start().await;
+    let [alex, bob] = users(&t).await;
+    let ws = team(&t, &alex, "Team").await;
+    let (id, stamp) = add(&t, &alex, &ws, "linear", "plain", "none").await;
+    check(&t, &bob, &ws, &id, &stamp).await;
+    let b = chat(&t, &bob, &ws).await;
+    assert_eq!(turn(&t, b, "coder").await.connector_tools.len(), 3);
+    running(&t, b, "b1", "coder", false).await;
+    t.chat.call(b, TOOL, json!({})).await.unwrap();
+    let bob_id = user_id(&t, &bob).await;
+    let (st, v) = req(
+        &t,
+        Method::PATCH,
+        &format!("/api/users/{bob_id}"),
+        Some(json!({"disabled": true})),
+        &alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let e = t.chat.call(b, TOOL, json!({})).await.unwrap_err();
+    assert!(e.contains("disabled or gone"), "{e}");
+    let (st, v) = req(
+        &t,
+        Method::PATCH,
+        &format!("/api/users/{bob_id}"),
+        Some(json!({"disabled": false})),
+        &alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, v) = req(
+        &t,
+        Method::DELETE,
+        &format!("/api/workspaces/{ws}/members/{bob_id}"),
+        None,
+        &alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert!(t.chat.call(b, TOOL, json!({})).await.is_err());
+    assert_eq!(t.remote.calls(), 1);
+}
+
+/// Review of PR 157, L6 and L11: a person's message in a sub-agent's chat
+/// carries no list (the node gives such a turn none either).
+#[tokio::test]
+async fn a_message_in_a_sub_agents_chat_carries_no_list() {
+    let t = start().await;
+    let [alex, _bob] = users(&t).await;
+    let ws = team(&t, &alex, "Team").await;
+    let (id, stamp) = add(&t, &alex, &ws, "linear", "plain", "none").await;
+    check(&t, &alex, &ws, &id, &stamp).await;
+    let a = chat(&t, &alex, &ws).await;
+    assert_eq!(turn(&t, a, "coder").await.connector_tools.len(), 3);
+    let kid = sub_agent(&t, a).await;
+    let spec = turn(&t, kid, "coder").await;
+    assert!(spec.connector_tools.is_empty(), "{:?}", names(&spec));
+}
+
+/// Review of PR 157, L7: a set read for a connector as it was before an
+/// edit (its stamp) is never used for a call, also if it is still held.
+#[tokio::test]
+async fn a_set_of_an_old_stamp_is_never_used() {
+    let t = start().await;
+    let [alex, _bob] = users(&t).await;
+    let ws = team(&t, &alex, "Team").await;
+    let (id, stamp) = add(&t, &alex, &ws, "linear", "plain", "none").await;
+    check(&t, &alex, &ws, &id, &stamp).await;
+    let old = row_of(&t, &ws, &id);
+    let a = chat(&t, &alex, &ws).await;
+    turn(&t, a, "coder").await;
+    running(&t, a, "t1", "coder", false).await;
+    let (st, v) = req(
+        &t,
+        Method::PUT,
+        &format!("/api/workspaces/{ws}/connectors/{id}"),
+        Some(json!({"url": "https://other.test/plain", "auth": "none"})),
+        &alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    // A read of before the edit lands now (a fill that was in flight).
+    let me = user_id(&t, &alex).await;
+    let held = vec![harness_master::connectors::tools::AgentTool {
+        entry: harness_core::connectors::ConnectorToolEntry {
+            connector: "linear".into(),
+            name: TOOL.into(),
+            tool: "tool_0".into(),
+            description: "(MCP server `linear`) d".into(),
+            schema: r#"{"type":"object"}"#.into(),
+        },
+        raw: "tool_0".into(),
+    }];
+    t.master.connector_tools_put_for_test(&me, &old, held);
+    let e = t.chat.call(a, TOOL, json!({})).await.unwrap_err();
+    assert!(e.contains("not among the tools"), "{e}");
+    assert_eq!(t.remote.calls(), 0);
+}
+
+/// Review of PR 157, L8: a background read still in flight with the old
+/// token never replaces the tools read with the token the person put in
+/// since; and it does not hold the person's own Connect.
+#[tokio::test]
+async fn a_stale_background_read_never_overwrites_a_new_token() {
+    let t = start().await;
+    let [alex, _bob] = users(&t).await;
+    let ws = team(&t, &alex, "Team").await;
+    let (id, stamp) = add(&t, &alex, &ws, "linear", "tokenlist", "token").await;
+    connect(&t, &alex, &ws, &id, &stamp).await;
+    let me = user_id(&t, &alex).await;
+    let a = chat(&t, &alex, &ws).await;
+    t.master.connector_tools_forget_for_test(&id);
+    // The turn starts a background read with GOOD (slow) ...
+    turn(&t, a, "coder").await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    // ... and the person replaces the token meanwhile (fast).
+    let (st, v) = req(
+        &t,
+        Method::PUT,
+        &format!("/api/workspaces/{ws}/connectors/{id}/account"),
+        Some(json!({"token": GOOD2, "seen": stamp})),
+        &alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    let row = row_of(&t, &ws, &id);
+    assert_eq!(
+        t.master.connector_tool_names_for_test(&me, &row),
+        ["second_tool"]
+    );
+}
+
+/// Review of PR 157, L9: a connector whose background read failed is not
+/// read in the background again for a while, whoever's turn asks, and the
+/// admin's own Check still runs (its budget is another).
+#[tokio::test]
+async fn failed_background_reads_back_off_and_leave_checks_alone() {
+    let t = start().await;
+    let [alex, bob] = users(&t).await;
+    let ws = team(&t, &alex, "Team").await;
+    let (id, stamp) = add(&t, &alex, &ws, "broken", "e500", "none").await;
+    let inits = |t: &T| {
+        t.remote
+            .seen()
+            .iter()
+            .filter(|s| s.path == "/e500" && s.rpc() == Some("initialize"))
+            .count()
+    };
+    for who in [&alex, &bob, &alex, &bob] {
+        let c = chat(&t, who, &ws).await;
+        turn(&t, c, "coder").await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    assert_eq!(inits(&t), 1, "one background read, then a back-off");
+    let (st, v) = check(&t, &alex, &ws, &id, &stamp).await;
+    assert_eq!(st, StatusCode::BAD_GATEWAY, "the admin's check runs: {v}");
+}
+
+/// Review of PR 157, L10: a request id the node sends again while its
+/// first call runs is refused, and the first stays cancellable.
+#[tokio::test]
+async fn a_reused_request_id_is_refused_and_the_first_still_cancels() {
+    let t = start().await;
+    let [alex, _bob] = users(&t).await;
+    let ws = team(&t, &alex, "Team").await;
+    let (id, stamp) = add(&t, &alex, &ws, "hang", "callhang", "none").await;
+    check(&t, &alex, &ws, &id, &stamp).await;
+    t.master.set_connector_call_timeout(Duration::from_secs(30));
+    let a = chat(&t, &alex, &ws).await;
+    turn(&t, a, "coder").await;
+    running(&t, a, "t1", "coder", false).await;
+    t.chat
+        .send_call(a, "mcp__hang__tool_0", json!({}), "same")
+        .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    t.chat
+        .send_call(a, "mcp__hang__tool_0", json!({}), "same")
+        .await;
+    let e = t.chat.wait("same", 10).await.unwrap_err();
+    assert!(e.contains("already running"), "{e}");
+    assert_eq!(t.master.connector_calls_running(), 1);
+    t.chat
+        .tx
+        .send(NodeToMaster::ConnectorCancel {
+            req_id: "same".into(),
+        })
+        .await
+        .unwrap();
+    for _ in 0..200 {
+        if t.master.connector_calls_running() == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        t.master.connector_calls_running(),
+        0,
+        "the first call was dropped"
+    );
 }

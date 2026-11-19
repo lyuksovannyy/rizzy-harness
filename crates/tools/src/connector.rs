@@ -58,6 +58,11 @@ impl Tool for ConnectorTool {
         ToolRisk::Mutating
     }
 
+    /// The workspace's connector: never a node server of the same name.
+    fn approval_origin(&self) -> Option<String> {
+        Some(format!("connector:{}", self.entry.connector))
+    }
+
     async fn run(&self, ctx: &ToolCtx, input: Value) -> ToolOutcome {
         if !input.is_object() {
             return ToolOutcome::err("the arguments of an MCP tool are a JSON object");

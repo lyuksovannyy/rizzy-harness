@@ -64,6 +64,7 @@ impl Pending {
         }
     }
 
+    #[cfg(test)]
     fn waiting(&self) -> usize {
         self.0.lock().unwrap_or_else(|p| p.into_inner()).len()
     }
@@ -108,9 +109,6 @@ impl ConnectorSource for LinkConnectors {
     ) -> Result<ConnectorAnswer, String> {
         if !self.node.cfg.policy.mcp.master_connectors {
             return Err("this node does not take the server's connectors".into());
-        }
-        if self.node.policy_denies(tool) {
-            return Err(format!("`{tool}` is denied by this node's policy"));
         }
         let size = serde_json::to_string(&arguments).map_or(usize::MAX, |s| s.len());
         if size > MAX_ARGUMENT_BYTES {
@@ -160,18 +158,6 @@ impl ConnectorSource for LinkConnectors {
                 WAIT.as_secs()
             )),
         }
-    }
-}
-
-impl Inner {
-    fn policy_denies(&self, tool: &str) -> bool {
-        self.cfg.policy.denies(tool)
-    }
-
-    /// Connector calls waiting for the master now (tests).
-    #[allow(dead_code)]
-    pub(crate) fn connector_calls_waiting(&self) -> usize {
-        self.connectors.waiting()
     }
 }
 

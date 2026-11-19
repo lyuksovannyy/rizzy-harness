@@ -34,6 +34,24 @@ pub trait TurnHost: Send + Sync {
     /// and only asks the user if policy requires it. Emits the approval events.
     async fn approve(&self, call_id: &str, tool: &str, input: &Value, risk: ToolRisk) -> Decision;
 
+    /// [`Self::approve`] for a tool whose name does not say where it runs:
+    /// `origin` is the tool's own word (`harness_tools::Tool::approval_origin`:
+    /// a node MCP server and its source, or a custom connector), so a grant
+    /// given for one origin never covers a tool of the same name from
+    /// another, and the card describes the right one. A host without the
+    /// distinction asks as [`Self::approve`].
+    async fn approve_from(
+        &self,
+        call_id: &str,
+        tool: &str,
+        input: &Value,
+        risk: ToolRisk,
+        origin: Option<&str>,
+    ) -> Decision {
+        let _ = origin;
+        self.approve(call_id, tool, input, risk).await
+    }
+
     /// The person's note with the denial of `call_id`, if they wrote one;
     /// taken once, right after `approve` returned `Deny`. The loop gives it
     /// to the model quoted after the fixed sentence

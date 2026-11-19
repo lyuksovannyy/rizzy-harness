@@ -47,6 +47,9 @@ pub const MAX_SETS: usize = 256;
 /// Bytes of every set kept ([`AgentTool::weight`]); a set at every cap is
 /// about 70 KB, so at least 100 of those fit.
 pub const MAX_BYTES: usize = 8 * 1024 * 1024;
+/// After a failed background read of a connector, none of it for anyone
+/// for this long (the person's own Check still works).
+pub const BACK_OFF: Duration = Duration::from_secs(5 * 60);
 /// Keys whose last background read is remembered.
 const TRIED: usize = 4096;
 
@@ -160,6 +163,9 @@ impl Collect {
 #[derive(Debug, Clone)]
 pub struct Set {
     pub stamp: String,
+    /// The digest of the sealed token it was read with (`call::blob_hash`);
+    /// `None` for a connector without sign-in.
+    pub token: Option<String>,
     pub at: Instant,
     pub tools: Vec<AgentTool>,
 }
@@ -180,13 +186,23 @@ pub struct Cache {
     order: VecDeque<Key>,
     bytes: usize,
     tried: HashMap<Key, Instant>,
+    /// Connectors whose background read failed lately, and when.
+    failed: HashMap<String, Instant>,
 }
 
 impl Cache {
-    pub fn put(&mut self, user: &str, connector: &str, stamp: &str, tools: Vec<AgentTool>) {
+    pub fn put(
+        &mut self,
+        user: &str,
+        connector: &str,
+        stamp: &str,
+        token: Option<String>,
+        tools: Vec<AgentTool>,
+    ) {
         let k = (user.to_string(), connector.to_string());
         let set = Set {
             stamp: stamp.to_string(),
+            token,
             at: Instant::now(),
             tools,
         };
@@ -226,6 +242,13 @@ impl Cache {
     /// Whether a background read of `user`'s `connector` may start now
     /// (none started within [`FILL_GAP`]); if so it counts as started.
     pub fn may_fill(&mut self, user: &str, connector: &str) -> bool {
+        if self
+            .failed
+            .get(connector)
+            .is_some_and(|t| t.elapsed() < BACK_OFF)
+        {
+            return false;
+        }
         let k = (user.to_string(), connector.to_string());
         if self.tried.get(&k).is_some_and(|t| t.elapsed() < FILL_GAP) {
             return false;
@@ -238,6 +261,18 @@ impl Cache {
         }
         self.tried.insert(k, Instant::now());
         true
+    }
+
+    /// A background read of `connector` failed: none of it for anyone for
+    /// [`BACK_OFF`].
+    pub fn back_off(&mut self, connector: &str) {
+        if self.failed.len() >= TRIED {
+            self.failed.retain(|_, t| t.elapsed() < BACK_OFF);
+            if self.failed.len() >= TRIED {
+                return;
+            }
+        }
+        self.failed.insert(connector.to_string(), Instant::now());
     }
 
     /// Forget one person's set of `connector`, or everyone's (`None`).
@@ -379,13 +414,13 @@ mod tests {
         assert!(w < 90 * 1024, "{w}");
         let mut c = Cache::default();
         for i in 0..MAX_SETS {
-            c.put(&format!("u{i}"), "k", "s1", worst());
+            c.put(&format!("u{i}"), "k", "s1", None, worst());
             assert!(c.bytes() <= MAX_BYTES);
         }
         let held: usize = c.map.values().map(Set::weight).sum();
         assert_eq!(held, c.bytes());
         assert!(c.len() >= 90, "{}", c.len());
-        c.put("alice", "k", "s1", worst());
+        c.put("alice", "k", "s1", None, worst());
         assert!(c.get("alice", "k", "s1").is_some());
         assert!(c.get("alice", "k", "s2").is_none(), "another stamp");
         assert!(c.may_fill("alice", "k"));

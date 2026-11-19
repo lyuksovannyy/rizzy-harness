@@ -1682,6 +1682,17 @@ impl Tool for McpTool {
         ToolRisk::Mutating
     }
 
+    /// The node server and its source: node.toml or the repository's
+    /// approved `.mcp.json`.
+    fn approval_origin(&self) -> Option<String> {
+        let source = if self.slot.project {
+            "repository"
+        } else {
+            "node.toml"
+        };
+        Some(format!("server:{}:{source}", self.slot.name))
+    }
+
     async fn run(&self, ctx: &ToolCtx, input: Value) -> ToolOutcome {
         // A tool of a closed table (the chat deleted, the node stopping)
         // starts nothing: `ensure` checks `closed`.

@@ -1673,6 +1673,8 @@ impl Master {
                 ) {
                     callbacks::on_applied(self, &e);
                 }
+                // Which turn a send of the master's started (X.35 step 2).
+                self.inner.connectors.calls.on_event(&e);
                 let sid = e.session_id;
                 let _ = self.inner.live.send(Live::Event(e));
                 if structural {
@@ -2362,7 +2364,7 @@ impl Master {
         let may_connect = !untrusted
             && !resume
             && (by_owner || board::routine_turn(self, &row, routine_run.as_deref()).await);
-        let reading = self.offer_connectors(&row, may_connect, &mut agent).await;
+        let (may_connect, reading) = self.offer_connectors(&row, may_connect, &mut agent).await;
         if !reading.is_empty() {
             turn_context.push(format!(
                 "The tools of connector(s) {} are being read from the server for the first \
@@ -2464,7 +2466,14 @@ impl Master {
                 })),
                 owner: None,
             };
-            return self
+            // Recorded before it goes, so the log's turn finds it (`connectors::grant`).
+            let send = (row.parent_id.is_none()).then(|| {
+                self.inner
+                    .connectors
+                    .calls
+                    .sent(sid, connectors::grant::What::Callback, false)
+            });
+            let sent = self
                 .send_command(&row.node_id, move |req_id| {
                     if let MasterToNode::Callback { req_id: r, .. } = &mut msg {
                         *r = req_id;
@@ -2472,6 +2481,12 @@ impl Master {
                     msg
                 })
                 .await;
+            if let (Err(e), Some(id)) = (&sent, send)
+                && !matches!(e, CommandError::Timeout)
+            {
+                self.inner.connectors.calls.unsent(sid, id);
+            }
+            return sent;
         }
         let sent_images: Vec<String> = images.iter().map(|i| i.media_id.clone()).collect();
         let context = Some(Box::new(harness_core::backend::MasterContext {
@@ -2479,6 +2494,14 @@ impl Master {
             standing,
             unattended: false,
         }));
+        // What the node will record of this send, for `connectors::grant`.
+        let what = match retry {
+            Some(_) => connectors::grant::What::Retry,
+            None => connectors::grant::What::Prompt {
+                text: text.clone(),
+                reply: reply.is_some(),
+            },
+        };
         let mut msg = match retry {
             Some(turn_id) => MasterToNode::Retry {
                 req_id: String::new(),
@@ -2521,6 +2544,9 @@ impl Master {
         // files nothing from a turn whose `turn_started` has a cause, which
         // the log decides, also after a restart (review S3-1).
         let before = lock(&self.inner.turn_memory).insert(sid, allowed);
+        // Recorded before it goes: the node's log may come back first.
+        let send = (row.parent_id.is_none())
+            .then(|| self.inner.connectors.calls.sent(sid, what, may_connect));
         let sent = self
             .send_command(&row.node_id, move |req_id| {
                 if let MasterToNode::Prompt { req_id: r, .. }
@@ -2536,6 +2562,9 @@ impl Master {
         if let Err(e) = &sent
             && !matches!(e, CommandError::Timeout)
         {
+            if let Some(id) = send {
+                self.inner.connectors.calls.unsent(sid, id);
+            }
             let mut tm = lock(&self.inner.turn_memory);
             match before {
                 Some(b) => tm.insert(sid, b),

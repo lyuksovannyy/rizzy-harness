@@ -5400,6 +5400,17 @@ impl TurnHost for Session {
     }
 
     async fn approve(&self, call_id: &str, tool: &str, input: &Value, risk: ToolRisk) -> Decision {
+        self.approve_from(call_id, tool, input, risk, None).await
+    }
+
+    async fn approve_from(
+        &self,
+        call_id: &str,
+        tool: &str,
+        input: &Value,
+        risk: ToolRisk,
+        origin: Option<&str>,
+    ) -> Decision {
         let policy = &self.node.cfg.policy;
         if policy.denies(tool) {
             let approval_id = new_id();
@@ -5457,7 +5468,13 @@ impl TurnHost for Session {
         // `ask` and `accept_edits`: `ask_all` means every call (T51), and
         // `auto` never gets here.
         let grants_apply = mode != ApprovalMode::AskAll && self.node.cfg.policy.chat_grants;
-        let key = harness_tools::call_key(&self.cwd, tool, input);
+        // The origin is part of the key (review of PR 157, M3): a chat grant
+        // for a connector's tool never covers a node server's of that name.
+        let key = harness_tools::call_key(
+            &self.cwd,
+            &harness_tools::approval::keyed(tool, origin),
+            input,
+        );
         if grants_apply
             && !background_start
             && self
@@ -5477,9 +5494,24 @@ impl TurnHost for Session {
             && !self.no_callbacks;
         let approval_id = new_id();
         let mut reason = approval_reason(tool, risk, input, &self.node.cfg.policy, self.exec_mode);
+        // A custom connector's tool (X.35 step 2): its own reason, never the
+        // node server's (review of PR 157, M4).
+        let connector = origin
+            .and_then(|o| o.strip_prefix("connector:"))
+            .map(str::to_string);
+        if let Some(name) = connector {
+            let raw = self
+                .connector_tools
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .iter()
+                .find(|e| e.name == tool && e.connector == name)
+                .map(|e| e.tool.clone());
+            reason = connector_reason(tool, &name, raw.as_deref());
+        }
         // An MCP tool's card names the server and its own name of the tool
         // (review N2): a cleaned or hashed public name says little.
-        if let Some(m) = self
+        else if let Some(m) = self
             .chat_mcp()
             .filter(|_| tool.starts_with(harness_tools::mcp::PREFIX))
             && let Some((server, raw)) = m.origin(tool).await
@@ -5492,26 +5524,6 @@ impl TurnHost for Session {
             reason = format!(
                 "{reason} (server `{server}`, its tool `{}`{from})",
                 harness_core::event::shown_name(&raw)
-            );
-        }
-        // A custom connector's tool (X.35 step 2): the card names the
-        // connector and says the call goes out from the server with the
-        // chat owner's account. A node server wins a name, so it is looked
-        // up first.
-        else if tool.starts_with(harness_tools::mcp::PREFIX)
-            && let Some(e) = self
-                .connector_tools
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .iter()
-                .find(|e| e.name == tool)
-                .cloned()
-        {
-            reason = format!(
-                "{reason} (connector `{}`, its tool `{}`; the server makes this call with the chat \
-                 owner's account)",
-                e.connector,
-                harness_core::event::shown_name(&e.tool)
             );
         }
         let (tx, rx) = oneshot::channel();
@@ -5744,6 +5756,19 @@ fn approval_reason(
         );
     }
     reason
+}
+
+/// The card of a custom connector's tool (X.35 step 2): what it is, where
+/// the call goes from and with whose account.
+fn connector_reason(tool: &str, connector: &str, raw: Option<&str>) -> String {
+    let its = raw
+        .map(|r| format!(" (its tool `{}`)", harness_core::event::shown_name(r)))
+        .unwrap_or_default();
+    format!(
+        "`{tool}` is a tool of the connector `{connector}`{its}, an online service this \
+         workspace's admin added; the call is sent from the server with the chat owner's \
+         connected account, and the arguments shown are what is sent"
+    )
 }
 
 fn tool_reason(tool: &str, risk: ToolRisk, input: &Value, policy: &crate::NodePolicy) -> String {

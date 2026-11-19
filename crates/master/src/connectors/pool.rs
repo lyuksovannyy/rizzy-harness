@@ -1,46 +1,38 @@
-//! Where connector checks run (PLAN.md T84; review of PR 155, HIGH 1): a
-//! fixed pool of [`WORKERS`] long-lived threads, made on the first check.
-//! Agents' connector calls (X.35 step 2, T85) run on a pool of their own
-//! made the same way ([`Pool::new`]: `super::call::WORKERS` workers, two
-//! calls per person and per connector), so a slow call never holds a
-//! person's check and checks never starve turns.
-//! A thread per check grew the process by hundreds of MB and kept most of
-//! it (each new thread got a new allocator arena); a fixed pool bounds the
-//! threads, the arenas and how many checks run at once.
+//! Where connector checks (PLAN.md T84) and agents' connector calls (X.35
+//! step 2, T85) run: on ONE long-lived thread, made on the first job, with
+//! the no-op log subscriber installed once (rmcp logs what servers send,
+//! at every level, from tasks of its own; they all run on this thread, so
+//! nothing of theirs is written anywhere) and a one-thread runtime with at
+//! most two blocking threads (name lookups). Jobs are local tasks there.
 //!
-//! * Each worker is one thread with the no-op log subscriber installed once
-//!   (rmcp logs what servers send, at every level, from tasks of its own;
-//!   they all run on this thread, so nothing of theirs is written
-//!   anywhere), and a one-thread runtime with at most one blocking thread
-//!   (for name lookups).
-//! * A check goes to an idle worker or is refused at once ([`Busy::Full`]):
-//!   nothing queues behind another check. A person has at most one check
-//!   running ([`Busy::Person`]).
-//! * A stuck worker is bounded by the check's own time limit
-//!   (`Net::timeout`, enforced inside the worker): its future is dropped
-//!   at the limit, the person is told it did not answer in time, and the
-//!   worker is free again. A name lookup stuck in the system resolver
-//!   holds that worker's one blocking thread until the resolver gives up;
-//!   later lookups on that worker wait for it (and fail at their own
-//!   limit) instead of starting more threads. Threads in all: 2 workers and
-//!   at most 2 blocking threads, ever.
-//! * After each check the worker lets closed connections finish closing
-//!   and counts the tasks still alive (tests assert none). The runtime is
-//!   kept, not remade: a new one would bring a new blocking thread while a
-//!   stuck lookup still holds the old one. Anything left runs to its end on
-//!   the worker, which keeps driving the runtime while it waits.
+//! * **Memory** (review of PR 157, M5): a thread per check grew the
+//!   process by hundreds of MB (review of PR 155); a fixed set of worker
+//!   threads (two for checks, four for calls) still kept one allocator
+//!   arena each, at its own peak (+18.8 MB after heavy use, release); one
+//!   thread keeps one (+8.2 MB, of which +5.2 MB is the first use of all:
+//!   the TLS stack and the runtime). `tests/connector_call_memory.rs`.
+//! * **Slots, not workers.** Each pool has its own number of slots (two
+//!   checks, four calls) and its own per-key limit (a person; a
+//!   connector), so calls never take a check's slot. A job goes to a free
+//!   slot or is refused at once ([`Busy`]): nothing queues.
+//! * **Time.** Every job is bounded by its own time limit, enforced inside
+//!   it; one whose caller stops waiting is dropped at once. A name lookup
+//!   stuck in the system resolver holds one of the two blocking threads
+//!   until the resolver gives up; later lookups wait for a free one (and
+//!   fail at their own limit) instead of starting more threads. Threads in
+//!   all: one, and at most two blocking threads, ever.
 
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use futures::FutureExt as _;
 
 use crate::lock;
 
-/// Workers, so checks that may run at once.
+/// Check slots: checks that may run at once.
 pub const WORKERS: usize = 2;
 
 type Job = Box<dyn FnOnce() -> Pin<Box<dyn Future<Output = ()>>> + Send>;
@@ -60,33 +52,26 @@ pub enum Busy {
     Full,
 }
 
-struct Worker {
-    busy: Arc<AtomicBool>,
-    tx: tokio::sync::mpsc::Sender<Job>,
-}
-
-/// The workers, the keys with a job running (how many each) and how many
-/// run.
+/// The keys with a job running (how many each) and how many run, of this
+/// pool; its jobs run on the one shared connector thread ([`shared`]).
 pub struct Pool {
-    name: &'static str,
+    thread: Arc<Thread>,
     size: usize,
     per_key: usize,
-    workers: OnceLock<Vec<Worker>>,
     keys: Arc<Mutex<HashMap<String, usize>>>,
     running: Arc<AtomicUsize>,
     most: Arc<AtomicUsize>,
 }
 
-/// The check workers: [`WORKERS`], one check per person.
+/// The check slots: [`WORKERS`], one check per person.
 impl Default for Pool {
     fn default() -> Self {
         Self::new("connector-check", WORKERS, 1)
     }
 }
 
-/// Frees the worker and the keys when the job ends, however it ends.
+/// Frees the slot and the keys when the job ends, however it ends.
 struct Done {
-    busy: Arc<AtomicBool>,
     keys: Arc<Mutex<HashMap<String, usize>>>,
     held: Vec<String>,
     running: Arc<AtomicUsize>,
@@ -96,7 +81,6 @@ impl Drop for Done {
     fn drop(&mut self) {
         release(&self.keys, &self.held);
         self.running.fetch_sub(1, Ordering::SeqCst);
-        self.busy.store(false, Ordering::SeqCst);
     }
 }
 
@@ -112,47 +96,93 @@ fn release(keys: &Mutex<HashMap<String, usize>>, held: &[String]) {
     }
 }
 
-fn worker(name: &str, i: usize) -> Option<Worker> {
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Job>(1);
-    std::thread::Builder::new()
-        .name(format!("{name}-{i}"))
-        .spawn(move || {
-            let _quiet =
-                tracing::subscriber::set_default(tracing::subscriber::NoSubscriber::default());
-            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .max_blocking_threads(1)
-                .build()
-            else {
-                return;
-            };
-            rt.block_on(async {
-                while let Some(job) = rx.recv().await {
-                    // A panic in a check ends that check, not the worker.
-                    let _ = std::panic::AssertUnwindSafe(job()).catch_unwind().await;
-                }
-            });
-        })
-        .ok()?;
-    Some(Worker {
-        busy: Arc::default(),
-        tx,
-    })
+/// The connector thread: every check and call of the pools that share it
+/// runs here (review of PR 157, M5: one allocator arena for all of them,
+/// instead of one per worker thread, each keeping its own peak). The no-op
+/// log subscriber installed once, a one-thread runtime with at most two
+/// blocking threads (name lookups), its jobs as local tasks. Made on the
+/// first job.
+#[derive(Default)]
+pub struct Thread {
+    tx: OnceLock<Option<tokio::sync::mpsc::UnboundedSender<Job>>>,
+    /// Jobs alive on it now (each is one task of its runtime).
+    live: Arc<AtomicUsize>,
+}
+
+impl Thread {
+    fn sender(&self) -> Option<&tokio::sync::mpsc::UnboundedSender<Job>> {
+        self.tx
+            .get_or_init(|| {
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Job>();
+                let live = self.live.clone();
+                std::thread::Builder::new()
+                    .name("connectors".into())
+                    .spawn(move || {
+                        let _quiet = tracing::subscriber::set_default(
+                            tracing::subscriber::NoSubscriber::default(),
+                        );
+                        let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+                            .enable_all()
+                            .max_blocking_threads(2)
+                            .build()
+                        else {
+                            return;
+                        };
+                        let local = tokio::task::LocalSet::new();
+                        local.block_on(&rt, async {
+                            while let Some(job) = rx.recv().await {
+                                let live = live.clone();
+                                live.fetch_add(1, Ordering::SeqCst);
+                                // A panic in a job ends that job, not the
+                                // thread.
+                                tokio::task::spawn_local(async move {
+                                    let _ =
+                                        std::panic::AssertUnwindSafe(job()).catch_unwind().await;
+                                    live.fetch_sub(1, Ordering::SeqCst);
+                                });
+                            }
+                        });
+                    })
+                    .ok()
+                    .map(|_| tx)
+            })
+            .as_ref()
+    }
+
+    /// Tasks alive on this thread's runtime now, less the jobs themselves:
+    /// what jobs started and left (read from a job, tests assert none).
+    pub fn tasks_beyond_jobs(&self) -> usize {
+        tokio::runtime::Handle::try_current()
+            .map(|h| h.metrics().num_alive_tasks())
+            .unwrap_or(0)
+            .saturating_sub(self.live.load(Ordering::SeqCst))
+    }
 }
 
 impl Pool {
-    /// `size` workers named `name-<i>`, made on the first job; at most
-    /// `per_key` jobs at once of any one key.
-    pub fn new(name: &'static str, size: usize, per_key: usize) -> Self {
+    /// `size` slots (jobs at once) on a connector thread of its own; at
+    /// most `per_key` jobs at once of any one key. `_name` is for reading
+    /// only.
+    pub fn new(_name: &'static str, size: usize, per_key: usize) -> Self {
+        Self::on(Arc::default(), size, per_key)
+    }
+
+    /// `size` slots on `thread`, which other pools share (the master's
+    /// checks and calls: one thread, one arena).
+    pub fn on(thread: Arc<Thread>, size: usize, per_key: usize) -> Self {
         Self {
-            name,
+            thread,
             size,
             per_key,
-            workers: OnceLock::new(),
             keys: Arc::default(),
             running: Arc::default(),
             most: Arc::default(),
         }
+    }
+
+    /// The thread its jobs run on.
+    pub fn thread(&self) -> &Arc<Thread> {
+        &self.thread
     }
 
     /// The most jobs that ran at once so far (tests).
@@ -165,9 +195,9 @@ impl Pool {
         self.running.load(Ordering::SeqCst)
     }
 
-    /// Run `make()`'s future on an idle worker for `who`; refused at once
-    /// when `who` has one running or no worker is idle. The future is made
-    /// on the worker, so it need not be `Send`.
+    /// Run `make()`'s future for `who`; refused at once when `who` has one
+    /// running or no slot is free. The future is made on the connector
+    /// thread, so it need not be `Send`.
     pub async fn run<T, F, Fut>(&self, who: &str, make: F) -> Result<Option<T>, Busy>
     where
         T: Send + 'static,
@@ -179,20 +209,15 @@ impl Pool {
 
     /// [`Self::run`] under every key of `keys` (a person first, then, say,
     /// a connector): refused at once when any of them has `per_key` jobs
-    /// running or no worker is idle; nothing waits in a queue. A job whose
-    /// caller stops waiting (its future dropped: a stopped turn, a closed
-    /// request) is dropped on the worker at once.
+    /// running or every slot is taken; nothing waits in a queue. A job
+    /// whose caller stops waiting (its future dropped: a stopped turn, a
+    /// closed request) is dropped at once.
     pub async fn run_keyed<T, F, Fut>(&self, keys: &[&str], make: F) -> Result<Option<T>, Busy>
     where
         T: Send + 'static,
         F: FnOnce() -> Fut + Send + 'static,
         Fut: Future<Output = T> + 'static,
     {
-        let workers = self.workers.get_or_init(|| {
-            (0..self.size)
-                .filter_map(|i| worker(self.name, i))
-                .collect()
-        });
         let held: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
         {
             let mut k = lock(&self.keys);
@@ -202,47 +227,44 @@ impl Pool {
             {
                 return Err(if i == 0 { Busy::Person } else { Busy::Other });
             }
+            // A slot, taken under the same lock as the keys (a slot is only
+            // ever freed meanwhile, never taken).
+            if self.running.load(Ordering::SeqCst) >= self.size {
+                return Err(Busy::Full);
+            }
+            let before = self.running.fetch_add(1, Ordering::SeqCst);
+            self.most.fetch_max(before + 1, Ordering::SeqCst);
             for h in &held {
                 *k.entry(h.clone()).or_default() += 1;
             }
         }
-        let Some(w) = workers.iter().find(|w| {
-            w.busy
-                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                .is_ok()
-        }) else {
-            release(&self.keys, &held);
-            return Err(Busy::Full);
-        };
-        let now = self.running.fetch_add(1, Ordering::SeqCst) + 1;
-        self.most.fetch_max(now, Ordering::SeqCst);
         let done = Done {
-            busy: w.busy.clone(),
             keys: self.keys.clone(),
             held,
             running: self.running.clone(),
         };
-        let (mut tx, rx) = tokio::sync::oneshot::channel();
+        let Some(tx) = self.thread.sender() else {
+            drop(done);
+            return Err(Busy::Full);
+        };
+        let (mut otx, rx) = tokio::sync::oneshot::channel();
         let job: Job = Box::new(move || {
             Box::pin(async move {
                 let work = make();
                 tokio::select! {
                     v = work => {
-                        // The worker and the keys are free before the
-                        // caller hears: its next job is never refused for
-                        // this one.
+                        // The slot and the keys are free before the caller
+                        // hears: its next job is never refused for this one.
                         drop(done);
-                        let _ = tx.send(v);
+                        let _ = otx.send(v);
                     }
                     // Nobody waits any more: the work is dropped here.
-                    _ = tx.closed() => drop(done),
+                    _ = otx.closed() => drop(done),
                 }
             })
         });
-        if let Err(e) = w.tx.try_send(job) {
-            // The worker is gone (its thread could not start or ended):
-            // dropping the job frees the slot and the keys.
-            drop(e);
+        if tx.send(job).is_err() {
+            // The thread is gone: dropping the job freed the slot and keys.
             return Err(Busy::Full);
         }
         Ok(rx.await.ok())

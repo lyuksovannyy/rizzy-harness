@@ -33,6 +33,7 @@
 
 pub mod call;
 pub mod client;
+pub mod grant;
 pub mod pool;
 pub mod tools;
 
@@ -103,6 +104,19 @@ const LIMITS: remote::Limits = remote::Limits {
     busy: "too many connector checks on this server right now; try again in a few minutes",
     user_over: "too many connector checks from your account; try again in a few minutes",
     target_over: "too many failed checks against this connector; try again in a few minutes",
+};
+
+/// Background reads of a person's tools (X.35 step 2): their own budget,
+/// smaller than a person's checks, so their failures never use up the
+/// budget a person's Connect and an admin's Check need.
+const FILL_LIMITS: remote::Limits = remote::Limits {
+    per_user: PER_USER,
+    per_target: 10,
+    window: WINDOW,
+    max_tracked: 10_000,
+    busy: "too many background reads",
+    user_over: "too many background reads",
+    target_over: "too many failed background reads",
 };
 
 /// Log lines of rmcp's HTTP client transport never reach the server's log
@@ -309,6 +323,7 @@ pub async fn check(
     net: &Net,
 ) -> Result<Checked, Busy> {
     let (name, url, net) = (name.to_string(), url.to_string(), net.clone());
+    let thread = pool.thread().clone();
     let out = pool
         .run(who, move || async move {
             let budget = Budget::new(CHECK_BYTES);
@@ -329,9 +344,7 @@ pub async fn check(
             Checked {
                 result,
                 tools,
-                tasks_left: tokio::runtime::Handle::current()
-                    .metrics()
-                    .num_alive_tasks(),
+                tasks_left: thread.tasks_beyond_jobs(),
                 bytes_read: CHECK_BYTES - budget.left(),
             }
         })
@@ -615,18 +628,23 @@ pub struct State {
     pub(crate) tools: Mutex<tools::Cache>,
     /// Agents' calls (step 2): their own workers, counts and grants.
     pub(crate) calls: call::State,
+    /// Background reads of tools (step 2): a budget of their own.
+    pub(crate) fill_attempts: Attempts,
     net: Mutex<Net>,
     tasks_left: AtomicUsize,
 }
 
 impl Default for State {
     fn default() -> Self {
+        // One connector thread for checks and calls (review of PR 157, M5).
+        let thread = std::sync::Arc::new(pool::Thread::default());
         Self {
             attempts: Attempts::new(LIMITS),
-            pool: Pool::default(),
+            pool: Pool::on(thread.clone(), pool::WORKERS, 1),
             cache: Mutex::default(),
             tools: Mutex::default(),
-            calls: call::State::default(),
+            calls: call::State::on(thread),
+            fill_attempts: Attempts::new(FILL_LIMITS),
             net: Mutex::default(),
             tasks_left: AtomicUsize::new(0),
         }

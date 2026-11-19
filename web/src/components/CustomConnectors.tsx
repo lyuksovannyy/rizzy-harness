@@ -50,7 +50,7 @@ interface List {
 }
 
 const base = (ws: string) => `/api/workspaces/${encodeURIComponent(ws)}/connectors`;
-const AGENTS = "Your agents (with the Connectors switch) use a connector with your own account, in the messages you send and your own routines, and each call is asked about as any MCP tool call; nobody else's agent uses your account.";
+const AGENTS = "Your agents (with the Connectors switch) use a connector with your own account, in the messages you send and your own routines, and your chat's approval mode decides about each call as for any MCP tool; nobody else's agent uses your account.";
 const NO_OAUTH =
   "Sign-in through a browser (OAuth) is not built yet; many hosted MCP servers need it and cannot be added until it is. A connector here signs in with a token you paste, or not at all.";
 

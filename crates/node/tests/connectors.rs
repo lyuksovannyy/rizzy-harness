@@ -96,11 +96,17 @@ struct Node {
 }
 
 async fn start(policy: impl FnOnce(NodePolicy) -> NodePolicy) -> Node {
-    let dir = tempfile::tempdir().unwrap();
+    start_in(tempfile::tempdir().unwrap(), policy).await
+}
+
+/// A node on `dir` (again, after a restart: its store and folders kept).
+async fn start_in(dir: tempfile::TempDir, policy: impl FnOnce(NodePolicy) -> NodePolicy) -> Node {
     let base = dir.path().canonicalize().unwrap();
     let repo = base.join("ws/repo");
     std::fs::create_dir_all(repo.join(".git")).unwrap();
-    std::fs::write(repo.join("keep.txt"), "kept\n").unwrap();
+    if !repo.join("keep.txt").exists() {
+        std::fs::write(repo.join("keep.txt"), "kept\n").unwrap();
+    }
     let sent: Arc<Mutex<Sent>> = Arc::default();
     let spy = Spy(
         Mock {
@@ -398,13 +404,15 @@ async fn ask_asks_and_a_denied_call_is_not_sent() {
     let seen = n
         .turn(sid, &format!("call:{TOOL}"), coder(), "x", Decision::Deny)
         .await;
-    assert_eq!(seen.cards.len(), 1, "{seen:?}");
-    let card = &seen.cards[0];
-    assert!(
-        card.contains("connector `linear`, its tool `create_issue`"),
-        "{card}"
+    assert_eq!(
+        seen.cards,
+        [format!(
+            "`{TOOL}` is a tool of the connector `linear` (its tool `create_issue`), an online \
+             service this workspace's admin added; the call is sent from the server with the \
+             chat owner's connected account, and the arguments shown are what is sent"
+        )],
+        "the connector's own card (review of PR 157, M4)"
     );
-    assert!(card.contains("chat owner's account"), "{card}");
     assert!(seen.calls.is_empty(), "a denied call went out: {seen:?}");
     // Allowed: sent.
     let seen = n
@@ -514,6 +522,20 @@ async fn a_sub_agent_gets_its_parents_list_by_its_own_rule() {
         seen.calls[0].0, sid,
         "the call names the sub-agent's session"
     );
+    // A person's message in the sub-agent's chat gets no connector tool
+    // (the node's `chat_table` rule, as for its own servers).
+    let kid = seen.calls[0].0;
+    let mut direct = spec("helper", &["read", "mcp"], vec![]);
+    direct.connector_tools = vec![entry("linear", "create_issue")];
+    let seen = n
+        .turn(kid, &format!("call:{TOOL}"), direct, "x", Decision::Allow)
+        .await;
+    assert!(seen.calls.is_empty(), "{seen:?}");
+    assert!(
+        !n.offered_last().iter().any(|t| t == TOOL),
+        "{:?}",
+        n.offered_last()
+    );
     // The helper denies the connector itself: nothing.
     let mut helper = spec("helper", &["read", "mcp"], vec![]);
     helper.deny_mcp_servers = vec!["linear".into()];
@@ -529,4 +551,121 @@ async fn a_sub_agent_gets_its_parents_list_by_its_own_rule() {
         )
         .await;
     assert!(seen.calls.is_empty(), "{seen:?}");
+}
+
+const FAKE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../tools/tests/support/fake_mcp.py"
+);
+
+fn server(started: &std::path::Path) -> harness_tools::mcp::ServerConfig {
+    harness_tools::mcp::ServerConfig::new(
+        "python3",
+        &[FAKE, "--started", &started.display().to_string()],
+    )
+}
+
+async fn restart(n: Node, policy: impl FnOnce(NodePolicy) -> NodePolicy) -> Node {
+    n.node.stop(Duration::from_secs(5)).await;
+    let Node {
+        _dir, node, link, ..
+    } = n;
+    drop(link);
+    drop(node);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    start_in(_dir, policy).await
+}
+
+/// Review of PR 157, M3 (RV4): "allow for this chat" given on a
+/// connector's card never covers a node server's tool of the same public
+/// name, and the other way round: each is asked about on its own card. A
+/// node server's card keeps its text (M4).
+#[tokio::test]
+async fn a_grant_for_one_origin_never_covers_the_other() {
+    let dir = tempfile::tempdir().unwrap();
+    let started = dir.path().join("started-linear");
+    let mut n = start_in(dir, |p| p).await;
+    let sid = n.create(ApprovalMode::Ask).await;
+    let mut conn = spec("coder", &["read", "mcp"], vec![]);
+    conn.connector_tools = vec![entry("linear", "echo")];
+    let seen = n
+        .turn(
+            sid,
+            "call:mcp__linear__echo",
+            conn.clone(),
+            "remote ok",
+            Decision::AllowChat,
+        )
+        .await;
+    assert_eq!((seen.cards.len(), seen.calls.len()), (1, 1), "{seen:?}");
+    // node.toml gains a server `linear`: its `echo` is asked about anew.
+    let s = started.clone();
+    let mut n = restart(n, move |mut p| {
+        p.mcp_servers.insert("linear".into(), server(&s));
+        p
+    })
+    .await;
+    let plain = spec("coder", &["read", "mcp"], vec![]);
+    let seen = n
+        .turn(
+            sid,
+            "call:mcp__linear__echo",
+            plain,
+            "unused",
+            Decision::AllowChat,
+        )
+        .await;
+    assert_eq!(
+        seen.cards,
+        [
+            "`mcp__linear__echo` is a tool of an MCP server this node runs: a program the harness \
+          did not write, in this chat's folder; what it does is up to that server (server \
+          `linear`, its tool `echo`; from node.toml)"
+        ],
+        "a node server's call is asked although the connector's was allowed for the chat"
+    );
+    assert!(seen.calls.is_empty());
+    // The other way, in a chat of its own: the server's call allowed for
+    // the chat, then the server gone (it does not start): the connector's
+    // tool of that name is asked about.
+    let other = n.create(ApprovalMode::Ask).await;
+    let plain = spec("coder", &["read", "mcp"], vec![]);
+    let seen = n
+        .turn(
+            other,
+            "call:mcp__linear__echo",
+            plain,
+            "unused",
+            Decision::AllowChat,
+        )
+        .await;
+    assert_eq!(seen.cards.len(), 1, "{seen:?}");
+    let mut n = restart(n, |mut p| {
+        p.mcp_servers.insert(
+            "linear".into(),
+            harness_tools::mcp::ServerConfig::new("/nonexistent/server", &[]),
+        );
+        p
+    })
+    .await;
+    let seen = n
+        .turn(
+            other,
+            "call:mcp__linear__echo",
+            conn,
+            "remote ok",
+            Decision::Deny,
+        )
+        .await;
+    assert_eq!(
+        seen.cards.len(),
+        1,
+        "the connector is asked about: {seen:?}"
+    );
+    assert!(
+        seen.cards[0].contains("is a tool of the connector `linear`"),
+        "{seen:?}"
+    );
+    assert!(seen.calls.is_empty(), "denied: not sent");
+    n.node.stop(Duration::from_secs(5)).await;
 }

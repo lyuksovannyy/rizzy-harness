@@ -256,6 +256,22 @@ impl harness_core::backend::TurnHost for Logged<'_> {
         self.host.approve(call_id, tool, input, risk).await
     }
 
+    async fn approve_from(
+        &self,
+        call_id: &str,
+        tool: &str,
+        input: &serde_json::Value,
+        risk: harness_core::policy::ToolRisk,
+        origin: Option<&str>,
+    ) -> harness_core::policy::Decision {
+        if self.failure().is_some() {
+            return harness_core::policy::Decision::Deny;
+        }
+        self.host
+            .approve_from(call_id, tool, input, risk, origin)
+            .await
+    }
+
     fn denial_note(&self, call_id: &str) -> Option<String> {
         self.host.denial_note(call_id)
     }
@@ -5618,7 +5634,15 @@ impl NativeBackend {
                 ..ToolOutcome::err(r)
             }));
         }
-        let key = harness_tools::call_key(&ctx.cwd, tool.name(), &call.input);
+        // The tool's origin is part of the key (review of PR 157, M3): "for
+        // this turn" on a connector's tool never covers a node server's
+        // tool of the same name.
+        let origin = tool.approval_origin();
+        let key = harness_tools::call_key(
+            &ctx.cwd,
+            &harness_tools::approval::keyed(tool.name(), origin.as_deref()),
+            &call.input,
+        );
         if !allowed_this_turn.contains(&key) {
             // `bash` in the read-only shell is asked about as what it is,
             // a call that changes nothing (PLAN.md T70): unasked in `ask`
@@ -5631,7 +5655,13 @@ impl NativeBackend {
                 tool.risk()
             };
             let decision = host
-                .approve(&call.call_id, tool.name(), &call.input, risk)
+                .approve_from(
+                    &call.call_id,
+                    tool.name(),
+                    &call.input,
+                    risk,
+                    origin.as_deref(),
+                )
                 .await;
             match decision {
                 harness_core::policy::Decision::Deny => {

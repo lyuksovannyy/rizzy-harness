@@ -676,6 +676,14 @@ pub trait Tool: Send + Sync {
         None
     }
     async fn run(&self, ctx: &ToolCtx, input: Value) -> ToolOutcome;
+
+    /// Where the tool runs, when its name does not say it (MCP tools: a
+    /// node server and its source, or a workspace's connector). Part of
+    /// every approval key of its calls ([`approval::keyed`]). `None`, the
+    /// default: the name says it.
+    fn approval_origin(&self) -> Option<String> {
+        None
+    }
 }
 
 /// [`Tool::refusal`] of a tool whose `run` starts by resolving its `path`

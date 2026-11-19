@@ -539,6 +539,7 @@ async fn connect(
     let sealed = sealer
         .seal(&binding(&me, &fields), &token, &st)
         .map_err(sealing_failed)?;
+    let call_blob = connectors::call::blob_hash(&sealed);
     drop(token);
     let (u, w, c, url) = (
         me.clone(),
@@ -576,7 +577,7 @@ async fn connect(
     m.connector_offer_put(&me, &r.connector_id, offer.clone());
     // What this check read is what the person's agents are offered from
     // their next message (X.35 step 2).
-    m.connector_tools_put(&me, &r, tools);
+    m.connector_tools_put(&me, &r, Some(call_blob), tools);
     audit(
         &m,
         json!({"action": action, "user": me, "workspace": r.workspace_id,
@@ -632,6 +633,7 @@ async fn check(
     let b: CheckBody = parse(&body)?;
     let r = row(&m, a.id(), &cid).await?;
     same(&r, &b.seen)?;
+    let mut bound = None;
     let token = if r.auth == "token" {
         let (u, w, c) = (me.clone(), r.workspace_id.clone(), r.connector_id.clone());
         let blob = m
@@ -652,6 +654,7 @@ async fn check(
             r.connector_id.as_str(),
             r.url.as_str(),
         ];
+        bound = Some(connectors::call::blob_hash(&blob));
         Some(match sealer.open(&binding(&me, &fields), &blob, &st) {
             Ok(t) => t,
             Err(crate::sealed::SealError::Damaged) => {
@@ -669,7 +672,7 @@ async fn check(
     let (offer, tools) = run(&m, &me, &r, token.as_ref()).await?;
     drop(token);
     m.connector_offer_put(&me, &r.connector_id, offer.clone());
-    m.connector_tools_put(&me, &r, tools);
+    m.connector_tools_put(&me, &r, bound, tools);
     let connected = (r.auth == "token").then_some(true);
     Ok(Json(row_json(
         &r,

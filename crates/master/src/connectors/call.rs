@@ -2,15 +2,16 @@
 //! PLAN.md T85, README "Custom connectors"): a service the master answers
 //! (PLAN.md §5) with the chat owner's own account.
 //!
-//! **Which turns.** [`Master::offer_connectors`] decides when a turn is
-//! sent: only a turn the chat's owner sent signed in as themselves, or a
-//! run of the owner's own routine (`board::routine_turn`'s rule), never an
-//! API-token, callback or untrusted (webhook) turn, and only on a node
-//! with [`CAP_CONNECTORS`]. The decision is kept here per chat
-//! ([`Grants`]), set by every turn the master sends, so a later turn of
-//! another kind (or a restart, which keeps none) refuses calls whatever the
-//! node says. The turn's list holds the connectors of the chat's
-//! workspace the owner can use: sign-in `none`, or `token` with the
+//! **Which turns.** [`Master::offer_connectors`] decides, for each turn the
+//! master sends, whether it may use connectors: only a message the chat's
+//! owner sent signed in as themselves, a run of the owner's own routine
+//! (`board::routine_turn`'s rule) or the owner's Retry; never an
+//! API-token, callback or untrusted (webhook) turn. The decision goes with
+//! the send into `grant`, which binds it to the ONE turn the node's log
+//! shows that send started, and takes it away for good when anything else
+//! is delivered into that turn; a turn the master sent nothing for, or one
+//! after a restart, has none. The turn's list holds the connectors of the
+//! chat's workspace the owner can use: sign-in `none`, or `token` with the
 //! owner's account connected and the key file usable; each connector's
 //! tools from the person's cached set ([`super::tools`]), never fetched on
 //! the turn's path.
@@ -26,7 +27,8 @@
 //! opened (the key proven) and ONE `tools/call` is made by the step-1
 //! client rules, on a pool of its own ([`WORKERS`], [`PER_KEY`] per person
 //! and per connector, refused when busy), within [`CALL_BYTES`] and the
-//! call's time limit ([`CALL_TIMEOUT`]), [`PER_TURN`] per chat turn. The
+//! call's time limit ([`CALL_TIMEOUT`]), [`PER_TURN`] per granted turn and
+//! [`PER_HOUR`] per chat. The
 //! result is text only (`harness_tools::mcp::render`, as for the node's
 //! own MCP calls). Nothing of the token, the arguments or the result is
 //! logged; no audit line per call.
@@ -52,7 +54,8 @@ use super::tools::REFRESH_AFTER;
 use crate::sealed::Binding;
 use crate::{Master, forge, lock};
 
-/// Call workers: calls that may run at once on this server.
+/// Call slots: calls that may run at once on this server (on the one
+/// connector thread, `pool`).
 pub const WORKERS: usize = 4;
 /// Calls at once of one person, and of one connector (everyone's).
 pub const PER_KEY: usize = 2;
@@ -63,21 +66,17 @@ pub const PER_KEY: usize = 2;
 pub const CALL_BYTES: usize = 256 * 1024;
 /// How long one call may take, connecting included.
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(120);
-/// Calls one turn of a chat may make, its sub-agents' included.
-pub const PER_TURN: u32 = 30;
+/// Calls one granted turn may make, its sub-agents' included, and one
+/// chat in any hour (`grant`).
+pub use super::grant::{AFTER_END, PER_HOUR, PER_TURN};
 /// Calls one node may have in progress on the master; past it, refused.
 pub const PER_NODE: usize = 8;
-/// Chats whose counts and grants are kept; past it they start over (and
-/// grants are then refused until the chat's next turn).
-const KEPT: usize = 4096;
 
 /// Master-side state of agents' connector calls.
 pub struct State {
     pool: Pool,
-    /// Per chat: the turn counted and its calls.
-    turns: Mutex<HashMap<SessionId, (String, u32)>>,
-    /// Per chat: whether the last turn the master sent may use connectors.
-    grants: Mutex<HashMap<SessionId, bool>>,
+    /// Which turns may call, and their counts (`grant`).
+    grants: Mutex<super::grant::Grants>,
     nodes: Mutex<HashMap<String, Arc<tokio::sync::Semaphore>>>,
     /// Calls in progress, by (node, request id), to drop on a cancel.
     cancels: Mutex<HashMap<(String, String), CancellationToken>>,
@@ -86,11 +85,11 @@ pub struct State {
     sent: AtomicUsize,
 }
 
-impl Default for State {
-    fn default() -> Self {
+impl State {
+    /// Calls on `thread` (the checks' too).
+    pub fn on(thread: Arc<super::pool::Thread>) -> Self {
         Self {
-            pool: Pool::new("connector-call", WORKERS, PER_KEY),
-            turns: Mutex::default(),
+            pool: Pool::on(thread, WORKERS, PER_KEY),
             grants: Mutex::default(),
             nodes: Mutex::default(),
             cancels: Mutex::default(),
@@ -101,37 +100,6 @@ impl Default for State {
 }
 
 impl State {
-    fn grant(&self, sid: SessionId, may: bool) {
-        let mut g = lock(&self.grants);
-        if g.len() >= KEPT && !g.contains_key(&sid) {
-            g.clear();
-        }
-        g.insert(sid, may);
-    }
-
-    fn granted(&self, sid: SessionId) -> bool {
-        lock(&self.grants).get(&sid).copied().unwrap_or(false)
-    }
-
-    fn take(&self, sid: SessionId, turn: &str) -> Result<(), String> {
-        let mut t = lock(&self.turns);
-        if t.len() >= KEPT && !t.contains_key(&sid) {
-            t.clear();
-        }
-        let e = t.entry(sid).or_insert_with(|| (turn.to_string(), 0));
-        if e.0 != turn {
-            *e = (turn.to_string(), 0);
-        }
-        if e.1 >= PER_TURN {
-            return Err(format!(
-                "this turn already made {PER_TURN} connector calls, the most one turn may; tell \
-                 the person what else you would do"
-            ));
-        }
-        e.1 += 1;
-        Ok(())
-    }
-
     fn node(&self, node_id: &str) -> Arc<tokio::sync::Semaphore> {
         lock(&self.nodes)
             .entry(node_id.to_string())
@@ -140,8 +108,28 @@ impl State {
     }
 
     pub fn forget(&self, sid: SessionId) {
-        lock(&self.turns).remove(&sid);
-        lock(&self.grants).remove(&sid);
+        lock(&self.grants).forget(sid);
+    }
+
+    /// The master is about to send `what` for chat `sid` (`owner`: a turn
+    /// that may use connectors); the id for [`Self::unsent`].
+    pub fn sent(&self, sid: SessionId, what: super::grant::What, owner: bool) -> u64 {
+        lock(&self.grants).sent(sid, what, owner)
+    }
+
+    /// That send was refused or never made.
+    pub fn unsent(&self, sid: SessionId, id: u64) {
+        lock(&self.grants).unsent(sid, id)
+    }
+
+    /// An event the mirror took.
+    pub fn on_event(&self, e: &harness_core::RawEvent) {
+        if matches!(
+            e.kind.as_str(),
+            "session_created" | "turn_started" | "user_message" | "turn_ended"
+        ) {
+            lock(&self.grants).on_event(e)
+        }
     }
 }
 
@@ -169,6 +157,13 @@ pub fn strip(msg: &mut MasterToNode) {
     }
 }
 
+/// The digest a tool set is bound to: of the sealed value, never the
+/// token.
+pub(crate) fn blob_hash(blob: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(blob))[..32].to_string()
+}
+
 fn binding<'a>(owner: &'a str, fields: &'a [&'a str; 3]) -> Binding<'a> {
     Binding {
         table: super::ACCOUNTS_TABLE,
@@ -178,31 +173,28 @@ fn binding<'a>(owner: &'a str, fields: &'a [&'a str; 3]) -> Binding<'a> {
 }
 
 impl Master {
-    /// Decide whether the turn the master is about to send for chat `row`
-    /// may use connectors (`may`: the owner's own signed-in turn or a run
-    /// of their routine, not untrusted, not a callback, on a node with
-    /// [`CAP_CONNECTORS`]) and record it; when it may, put on `spec` the
-    /// tools any spec of the message may be offered. Returns the names of
-    /// connectors whose tools are not read yet (being read now, in the
-    /// background), for one line the model is told.
+    /// Whether the turn the master is about to send for chat `row` may use
+    /// connectors (`may`: the owner's own signed-in turn, a run of their
+    /// routine or their Retry; not untrusted, not a callback) and, when it
+    /// may, put on `spec` the tools any spec of the message may be offered.
+    /// Returns that decision, which the caller records with the send
+    /// (`State::sent`), and the names of connectors whose tools are not read
+    /// yet (being read now, in the background), for one line the model is
+    /// told. A node without [`CAP_CONNECTORS`] loses the list in
+    /// `send_command` (`strip`) and is told nothing here.
     pub async fn offer_connectors(
         &self,
         row: &harness_store::SessionRow,
         may: bool,
         spec: &mut AgentSpec,
-    ) -> Vec<String> {
+    ) -> (bool, Vec<String>) {
         spec.connector_tools.clear();
-        let may = may
-            && row.parent_id.is_none()
-            && self.node_has(&row.node_id, CAP_CONNECTORS)
-            && row.owner_id.is_some()
-            && row.workspace_id.is_some();
-        self.inner.connectors.calls.grant(row.session_id, may);
+        let may = may && row.parent_id.is_none();
         let (Some(owner), Some(ws)) = (row.owner_id.as_deref(), row.workspace_id.as_deref()) else {
-            return Vec::new();
+            return (false, Vec::new());
         };
         if !may {
-            return Vec::new();
+            return (false, Vec::new());
         }
         let wanted = |e: &ConnectorToolEntry| {
             may_use(spec, e) || spec.delegates.iter().any(|d| may_use(d, e))
@@ -219,8 +211,11 @@ impl Master {
             out.push(e);
         }
         spec.connector_tools = out;
+        if !self.node_has(&row.node_id, CAP_CONNECTORS) {
+            return (true, Vec::new());
+        }
         // Only connectors some spec of the message could use.
-        waiting
+        let reading = waiting
             .into_iter()
             .filter(|name| {
                 let probe = format!("{}{name}__x", harness_core::agent::MCP_PREFIX);
@@ -228,7 +223,8 @@ impl Master {
                     .chain(spec.delegates.iter())
                     .any(|s| s.allows_mcp() && s.allows_tool(&probe))
             })
-            .collect()
+            .collect();
+        (true, reading)
     }
 
     /// The tools `owner` can be offered of workspace `ws`'s connectors now,
@@ -310,49 +306,98 @@ impl Master {
         }
         let (m, owner, r) = (self.clone(), owner.to_string(), r.clone());
         tokio::spawn(async move {
-            if m.connector_attempt(&format!("fill:{owner}"), &r.connector_id)
+            // A budget of their own (review of PR 157, L9): failed
+            // background reads never use up the one a person's Connect and
+            // an admin's Check need.
+            if m.inner
+                .connectors
+                .fill_attempts
+                .admit(&owner, &r.connector_id)
                 .is_err()
             {
                 return;
             }
-            let token = match r.auth.as_str() {
+            let (token, bound) = match r.auth.as_str() {
                 "token" => match m.owner_token(&owner, &r).await {
-                    Ok(t) => Some(t),
+                    Ok((t, b)) => (Some(t), Some(b)),
                     Err(_) => return,
                 },
-                _ => None,
+                _ => (None, None),
             };
             let net = m.connector_net();
-            let Ok(checked) =
-                super::check(m.connector_pool(), &owner, &r.name, &r.url, token, &net).await
+            // Under a key of its own, so it never holds the person's own
+            // check (one at a time per person).
+            let Ok(checked) = super::check(
+                m.connector_pool(),
+                &format!("fill:{owner}"),
+                &r.name,
+                &r.url,
+                token,
+                &net,
+            )
+            .await
             else {
                 return;
             };
             match checked.result {
                 Ok(offer) => {
-                    // Only if the connector is still what it was read for.
+                    // Only if the connector is still what it was read for,
+                    // and the token the one it was read with (review of PR
+                    // 157, L8: a Replace meanwhile wins).
                     let (w, c) = (r.workspace_id.clone(), r.connector_id.clone());
                     let now = m.inner.mirror.call(move |s| s.connector(&w, &c)).await;
+                    let same_token = match &bound {
+                        Some(b) => m.sealed_hash(&owner, &r).await.as_ref() == Some(b),
+                        None => true,
+                    };
                     if let Ok(Some(now)) = now
                         && super::stamp(&now) == super::stamp(&r)
+                        && same_token
                     {
                         lock(&m.inner.connectors.tools).put(
                             &owner,
                             &r.connector_id,
                             &super::stamp(&r),
+                            bound,
                             checked.tools,
                         );
                         m.connector_offer_put(&owner, &r.connector_id, offer);
                     }
                 }
-                Err(_) => m.connector_failed(&r.connector_id),
+                Err(_) => {
+                    m.inner.connectors.fill_attempts.failed(&r.connector_id);
+                    lock(&m.inner.connectors.tools).back_off(&r.connector_id);
+                }
             }
         });
     }
 
+    /// A digest of `owner`'s sealed token for `r` as stored now: what a
+    /// tool set is bound to.
+    pub(crate) async fn sealed_hash(&self, owner: &str, r: &ConnectorRow) -> Option<String> {
+        let (u, w, c) = (
+            owner.to_string(),
+            r.workspace_id.clone(),
+            r.connector_id.clone(),
+        );
+        let blob = self
+            .inner
+            .mirror
+            .call(move |s| s.connector_account_sealed(&u, &w, &c))
+            .await
+            .ok()
+            .flatten()?;
+        Some(blob_hash(&blob))
+    }
+
     /// `owner`'s token for `r` as its header, opened with the key file
-    /// (proven first); the reason in plain words when it cannot be.
-    async fn owner_token(&self, owner: &str, r: &ConnectorRow) -> Result<TokenHeader, String> {
+    /// (proven first), and the digest of the sealed value it came from;
+    /// the reason in plain words when it cannot be.
+    async fn owner_token(
+        &self,
+        owner: &str,
+        r: &ConnectorRow,
+    ) -> Result<(TokenHeader, String), String> {
         let (u, w, c) = (
             owner.to_string(),
             r.workspace_id.clone(),
@@ -393,7 +438,8 @@ impl Master {
                     r.name
                 )
             })?;
-        super::token_header(r.header.as_deref(), &token).map_err(|e| e.to_string())
+        let h = super::token_header(r.header.as_deref(), &token).map_err(|e| e.to_string())?;
+        Ok((h, blob_hash(&blob)))
     }
 
     /// Tests: the time limit of one connector call.
@@ -428,6 +474,19 @@ impl Master {
         lock(&self.inner.connectors.tools).forget(user, id)
     }
 
+    /// Tests: forget every set of connector `id` (as the cache's age would).
+    pub fn connector_tools_forget_for_test(&self, id: &str) {
+        self.connector_tools_forget(None, id)
+    }
+
+    /// Tests: the tools `user`'s set of connector `r` holds now.
+    pub fn connector_tool_names_for_test(&self, user: &str, r: &ConnectorRow) -> Vec<String> {
+        lock(&self.inner.connectors.tools)
+            .get(user, &r.connector_id, &super::stamp(r))
+            .map(|(_, t)| t.iter().map(|t| t.raw.clone()).collect())
+            .unwrap_or_default()
+    }
+
     /// Tests: put `tools` as `user`'s set of connector `r`, as a check
     /// would (the caps are the check's; this does not apply them).
     pub fn connector_tools_put_for_test(
@@ -436,16 +495,23 @@ impl Master {
         r: &ConnectorRow,
         tools: Vec<super::tools::AgentTool>,
     ) {
-        self.connector_tools_put(user, r, tools)
+        self.connector_tools_put(user, r, None, tools)
     }
 
     pub(crate) fn connector_tools_put(
         &self,
         user: &str,
         r: &ConnectorRow,
+        token: Option<String>,
         tools: Vec<super::tools::AgentTool>,
     ) {
-        lock(&self.inner.connectors.tools).put(user, &r.connector_id, &super::stamp(r), tools)
+        lock(&self.inner.connectors.tools).put(
+            user,
+            &r.connector_id,
+            &super::stamp(r),
+            token,
+            tools,
+        )
     }
 }
 
@@ -464,9 +530,20 @@ pub fn handle(
     let permit = st.node(node_id).try_acquire_owned();
     let key = (node_id.to_string(), req_id.clone());
     let cancel = CancellationToken::new();
-    if permit.is_ok() {
-        lock(&st.cancels).insert(key.clone(), cancel.clone());
-    }
+    // A request id this node has in flight already: refused, and the first
+    // call keeps its cancel (review of PR 157, L10).
+    let permit = match permit {
+        Ok(p) => {
+            let mut c = lock(&st.cancels);
+            if c.contains_key(&key) {
+                Err("a connector call with this request id is already running".to_string())
+            } else {
+                c.insert(key.clone(), cancel.clone());
+                Ok(p)
+            }
+        }
+        Err(_) => Err("too many connector calls from this node at once; try again".to_string()),
+    };
     let (m, node_id) = (m.clone(), node_id.to_string());
     tokio::spawn(async move {
         let res = match permit {
@@ -478,9 +555,7 @@ pub fn handle(
                 lock(&m.inner.connectors.calls.cancels).remove(&key);
                 r
             }
-            Err(_) => Some(Err(
-                "too many connector calls from this node at once; try again".into(),
-            )),
+            Err(e) => Some(Err(e)),
         };
         // A cancelled call is answered to nobody: the node stopped waiting.
         let Some(res) = res else { return };
@@ -538,17 +613,10 @@ pub async fn answer(
             "the arguments are over {MAX_ARGUMENT_BYTES} bytes, which a connector call does not take"
         ));
     }
-    let (row, top) = crate::recall::sessions(m, node_id, sid).await?;
+    let (_row, top) = crate::recall::sessions(m, node_id, sid).await?;
     let (Some(ws), Some(owner)) = (top.workspace_id.clone(), top.owner_id.clone()) else {
         return Err("connectors are offered only in a workspace's chats".into());
     };
-    if !st.granted(top.session_id) {
-        return Err(
-            "connectors are used only in a turn the chat's owner sent, or a run of their own \
-             routine; not in this one"
-                .into(),
-        );
-    }
     let open = m
         .inner
         .mirror
@@ -560,6 +628,10 @@ pub async fn answer(
     if open.callback {
         return Err("connectors are not used in a turn started by a command's end".into());
     }
+    // The master's own record: a turn it started for the owner, which has
+    // taken no other message (`grant`); a sub-agent's under the chat turn
+    // that started it.
+    let key = lock(&st.grants).check(sid, top.session_id, &open.turn_id)?;
     // The turn's agent as this workspace has it now, under its Plugins rule
     // (the same deny lists the turn was sent, made again here).
     let r = m.resolver_for(Some(&ws)).await;
@@ -609,24 +681,10 @@ pub async fn answer(
             harness_core::event::shown_name(tool)
         )
     })?;
-    // Counted on the chat's turn, sub-agents included (as stored skills).
-    let counted = match row.parent_id {
-        Some(_) => {
-            let top_sid = top.session_id;
-            m.inner
-                .mirror
-                .call(move |s| s.open_turn(top_sid))
-                .await
-                .ok()
-                .flatten()
-                .map(|t| t.turn_id)
-                .unwrap_or_else(|| format!("{}:{}", row.session_id, open.turn_id))
-        }
-        None => open.turn_id.clone(),
-    };
-    st.take(top.session_id, &counted)?;
+    // Counted under the granted turn and the chat's hour.
+    lock(&st.grants).take(&key)?;
     let token = match c.auth.as_str() {
-        "token" => Some(m.owner_token(&owner, &c).await?),
+        "token" => Some(m.owner_token(&owner, &c).await?.0),
         _ => None,
     };
     let mut net = m.connector_net();
