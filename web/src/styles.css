@@ -1498,23 +1498,94 @@ select.pill {
   font-size: var(--text-sm);
   min-width: 0;
 }
-/* One line: names, badges and the model keep their shape; only the folder
-   path gives way (it already ends in "…"). On a phone the row wraps instead,
-   since nothing fits. */
+/* The meta row (agent, model, node, mode, folder, meter) is never allowed past
+   its column or under the buttons: what can give way does, with an ellipsis
+   and a small floor, in this order: the folder path (gives up the most), the
+   model id, the mode's notes, the agent's name, and only when nothing else is
+   left the meter and the node and mode badges. Weights scale with an item's own
+   width, so these are ratios, not a strict queue; they stay well above 1 so the
+   last ones left still shrink the whole overflow. */
 .conv-meta > * {
   flex: none;
   white-space: nowrap;
 }
-.conv-meta > .ellipsis {
-  flex: 0 1 auto;
+.conv-meta > .ellipsis,
+.conv-meta > .meta-model,
+.conv-meta > .exec-gaps,
+.conv-meta > .conv-agent,
+.conv-meta > .meter,
+.conv-meta > .badge {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
+.conv-meta > .ellipsis {
+  flex: 0 1000000 auto;
+  min-width: 5ch;
+}
+.conv-meta > .meta-model {
+  flex: 0 10000 auto;
+  min-width: 7ch;
+}
+.conv-meta > .exec-gaps {
+  flex: 0 10000 auto;
+  min-width: 5ch;
+}
+.conv-meta > .conv-agent {
+  flex: 0 100 auto;
+  min-width: 7ch;
+}
+.conv-meta > .meter {
+  flex: 0 5 auto;
+  min-width: 10ch;
+}
+.conv-meta > .badge {
+  flex: 0 2 auto;
+  min-width: 5ch;
+}
+.conv-agent > .ellipsis {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.conv-agent > :not(.ellipsis) {
+  flex: none;
+}
+/* Up to 1100px the row drops under the title and the buttons, at full width,
+   still one line. */
+@media (max-width: 1100px) {
+  .conv-head {
+    flex-wrap: wrap;
+  }
+  .conv-title {
+    display: contents;
+  }
+  .conv-title > :not(.conv-meta) {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+  .conv-meta {
+    order: 9;
+    flex: 1 1 100%;
+  }
+}
+/* A phone: the row wraps, several items to a line; one too long for a line
+   gets an ellipsis. */
 @media (max-width: 820px) {
   .conv-meta {
     flex-wrap: wrap;
-    row-gap: var(--space-1);
+    gap: 2px var(--space-2);
   }
-  .conv-meta > .ellipsis {
+  .conv-meta > *,
+  .conv-meta > .ellipsis,
+  .conv-meta > .meta-model,
+  .conv-meta > .exec-gaps,
+  .conv-meta > .conv-agent,
+  .conv-meta > .meter,
+  .conv-meta > .badge {
+    flex: 0 1 auto;
+    min-width: 0;
     max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 }
 .timeline {
