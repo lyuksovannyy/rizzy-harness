@@ -155,7 +155,7 @@ afterEach(() => {
 
 async function show(
   id: string | null,
-  opts: { tab?: "runs"; webhooks?: boolean; projects?: ProjectSummary[]; agentDefaults?: { chat: string; agentic: string | null } } = {},
+  opts: { tab?: "runs"; webhooks?: boolean; projects?: ProjectSummary[]; agentDefaults?: { chat: string; agentic: string | null }; agents?: Agent[] } = {},
 ) {
   await act(async () =>
     root.render(
@@ -167,7 +167,7 @@ async function show(
         features={features(opts.webhooks)}
         id={id}
         tab={opts.tab}
-        agents={AGENTS}
+        agents={opts.agents ?? AGENTS}
         nodes={NODES}
         projects={opts.projects ?? []}
         agentDefaults={opts.agentDefaults ?? { chat: "general", agentic: "coder" }}
@@ -274,6 +274,21 @@ describe("list", () => {
 });
 
 describe("editor", () => {
+  test("the agent list says which agents are the workspace's own", async () => {
+    // A routine runs with nobody watching: the person choosing its agent
+    // sees which ones the workspace's admins wrote (PLAN.md T79).
+    routinesApi.list.mockResolvedValue(LIST());
+    await show("new", { agents: [...AGENTS, { ...agent("ours"), builtin: false, scope: "workspace" }] });
+    act(() => host.querySelector<HTMLButtonElement>('.select-button[aria-label^="Agent:"]')!.click());
+    const hints = Object.fromEntries(
+      [...host.querySelectorAll('[role="listbox"][aria-label="Agent"] [role="option"]')].map((o) => [
+        o.querySelector(".option-label")!.textContent,
+        o.querySelector(".option-hint")?.textContent ?? null,
+      ]),
+    );
+    expect(hints).toEqual({ General: null, Coder: null, Ours: "workspace agent" });
+  });
+
   test("a new chat routine saves its name, spec and a weekday schedule in the user's zone", async () => {
     routinesApi.list.mockResolvedValue(LIST());
     routinesApi.create.mockResolvedValue({ routine: routine({ routine_id: "r9" }), secrets: {} });

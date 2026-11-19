@@ -30,6 +30,7 @@ import { pickerGroups, VariablePicker } from "./VariablePicker";
 import { WebhookCard } from "./WebhookCard";
 import { shownName } from "../md/hiddenChars";
 import { defaultFor, type AgentDefaults } from "../lib/agentDefaults";
+import { marked } from "../lib/agents";
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 /** Typing settles before the server previews the prompt and schedules. */
@@ -206,7 +207,7 @@ export function RoutineEditor(props: {
             <Select
               label="Agent"
               value={spec.agent_id}
-              options={props.agents.map((a) => ({ value: a.id, label: a.name, icon: <AgentMark agent={a} size={18} /> }))}
+              options={props.agents.map((a) => ({ value: a.id, label: a.name, hint: marked(a), icon: <AgentMark agent={a} size={18} /> }))}
               onChange={(v) => {
                 setAgentPicked(true);
                 setSpec({ agent_id: v });
