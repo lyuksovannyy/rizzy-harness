@@ -3724,11 +3724,11 @@ button.icon svg.lucide, .send svg.lucide { vertical-align: middle; }
   background: transparent; box-shadow: none; color: var(--fg-2); font-size: var(--text-sm);
 }
 .select.compact .select-button:hover:not(:disabled) { background: var(--fill); box-shadow: none; color: var(--fg); }
+/* In the top layer; md/anchored.ts sets left and top, under the button or above it. */
 .select-list {
-  position: absolute; z-index: 30; left: 0; top: calc(100% + 4px); min-width: 240px;
-  margin: 0; list-style: none; max-height: 320px; overflow-y: auto;
+  position: fixed; inset: auto; min-width: 240px;
+  margin: 0; list-style: none; max-height: min(320px, calc(100vh - 16px)); overflow-y: auto;
 }
-.composer .select-list { top: auto; bottom: calc(100% + 6px); }
 .select-list li {
   display: flex; justify-content: space-between; align-items: center; gap: var(--space-4);
   padding: 7px 10px; border-radius: var(--r-sm); cursor: pointer; color: var(--fg); font-size: var(--text-md);
@@ -3740,8 +3740,6 @@ button.icon svg.lucide, .send svg.lucide { vertical-align: middle; }
 .side-grant { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; font-size: var(--text-xs); }
 .select.stacked .select-list { min-width: 300px; max-width: min(360px, calc(100vw - 32px)); }
 .select.stacked .select-list .option-hint { white-space: normal; }
-/* The approval picker sits at the composer's right end: its menu opens leftward. */
-.approval-pick .select-list { left: auto; right: 0; }
 /* The chat's step limit (X.14): a pill and a small form under it. */
 .step-pick { position: relative; }
 .step-pop {
