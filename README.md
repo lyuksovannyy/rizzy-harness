@@ -3849,7 +3849,9 @@ it "Earlier chats and memory search" together with commands, MCP servers,
 the web or file edits, so it can search your earlier chats in that workspace
 and your memory (when you share it there) and has a way to send text out.
 The owner chose to allow this (2026-11-18). Such agents are marked
-"workspace", and their page shows what they can do. Their look follows their
+"workspace" on the Agents pages and "workspace agent" where you pick an
+agent for a chat (the picker and the `@mention` list), and their page shows
+what they can do. Their look follows their
 handle (looks are server-wide). Deleting the workspace deletes its agents; deleting one leaves
 its chats readable, needing another agent, and a default or routine that
 names it is refused until changed. A turn that is running keeps the agent it

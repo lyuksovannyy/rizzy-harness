@@ -1,7 +1,7 @@
 import { ArrowUp, AtSign, CornerDownRight, FileText, Globe, Image, Loader2, Mic, Paperclip, Square, X } from "lucide-react";
 import { type Dispatch, lazy, type SetStateAction, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { t } from "../lib/i18n";
-import { pickable } from "../lib/agents";
+import { marked, pickable } from "../lib/agents";
 import { activeMention, filterAgents, insertMention, isPathToken, leadingMention } from "../lib/mentions";
 import { cycleMode, enabledModes, MODES, type Mode } from "../lib/modes";
 import { modelLabel, offeredModels, resolveModel } from "../lib/models";
@@ -412,7 +412,7 @@ export function Composer(props: {
           .filter((e) => e.id.startsWith(mention.query.toLowerCase()) || e.name.toLowerCase().startsWith(mention.query.toLowerCase()))
           .slice(0, 8)
           .map((e) => ({ id: e.id, title: e.name, hint: abilities(e), origin: engineOrigin(e) }))
-      : filterAgents(pickable(props.agents), mention.query).map((a) => ({ id: a.id, title: a.id, hint: a.description || a.name, agent: a }));
+      : filterAgents(pickable(props.agents), mention.query).map((a) => ({ id: a.id, title: a.id, hint: marked(a, a.description || a.name) ?? "", agent: a }));
   const popupOpen = suggestions.length > 0;
   const pickedAgent = props.agents.find((a) => a.id === props.agentId);
   const pickedAlert = pickedAgent ? agentAlert(pickedAgent) : null;
@@ -758,7 +758,7 @@ export function Composer(props: {
                 options={pickable(props.agents, props.agentId).map((a) => ({
                   value: a.id,
                   label: a.name,
-                  hint: agentAlert(a) ? "model unavailable" : undefined,
+                  hint: marked(a, agentAlert(a) ? "model unavailable" : undefined),
                   icon: <AgentMark agent={a} size={18} state={a.id === props.agentId ? props.agentState : undefined} />,
                 }))}
                 onChange={(id) => {

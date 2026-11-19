@@ -319,5 +319,7 @@ fills the field; nothing is saved until the user presses Save.
 - **Accepted by the owner (2026-11-18, "Allow it")**: a workspace's admin may give its agents
   "Earlier chats and memory search" with commands, MCP, the web or file edits and make one the
   default (PLAN.md T79, T55).
-- **Left**: chosen looks for workspace agents; marking workspace agents in the composer's picker
-  (first-load code); per-workspace caps on overlays (bounded by the number of server agents).
+- **Built (2026-11-19)**: the composer's agent picker and its @mention list say "workspace
+  agent" for a workspace's own agent (`marked` in `web/src/lib/agents.ts`).
+- **Left**: chosen looks for workspace agents; per-workspace caps on overlays (bounded by the
+  number of server agents).
