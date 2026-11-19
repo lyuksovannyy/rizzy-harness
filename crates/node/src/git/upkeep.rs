@@ -48,7 +48,8 @@ pub(crate) const GC_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const LOOSE_LIMIT: u64 = 6700;
 
 /// Packs that make a collection due earlier (git's `gc.autoPackLimit`);
-/// each turn in a repository folder adds one (its copies).
+/// each turn in a repository folder adds one (its copies). Packs a `.keep`
+/// file protects are not counted: gc never merges them.
 const PACK_LIMIT: u64 = 50;
 
 /// A lock or private index older than this belongs to no running command
@@ -389,7 +390,28 @@ async fn due(repo: &Repo, s: GcState, now: u64) -> bool {
             .and_then(|v| v.trim().parse().ok())
             .unwrap_or(0)
     };
-    field("count:") >= LOOSE_LIMIT || field("packs:") >= PACK_LIMIT
+    // Packs a `.keep` file protects (every kept group's copies, A.17) are
+    // never merged by gc: with 100 kept groups they would pass the limit for
+    // good and a collection would be due after almost every turn.
+    let kept = match &repo.shadow {
+        Some(d) => kept_packs(d).await,
+        None => 0,
+    };
+    field("count:") >= LOOSE_LIMIT || field("packs:").saturating_sub(kept) >= PACK_LIMIT
+}
+
+/// How many packs in the shadow `dir` a `.keep` file protects.
+async fn kept_packs(dir: &Path) -> u64 {
+    let Ok(mut rd) = tokio::fs::read_dir(dir.join("objects/pack")).await else {
+        return 0;
+    };
+    let mut n = 0;
+    while let Ok(Some(e)) = rd.next_entry().await {
+        if e.path().extension().is_some_and(|x| x == "keep") {
+            n += 1;
+        }
+    }
+    n
 }
 
 /// Run the shadow's garbage collection if the rule says it is due; whether
@@ -478,7 +500,11 @@ pub async fn check_kept_packs(base: &Path) -> usize {
     let Ok(shadows) = std::fs::read_dir(base) else {
         return 0;
     };
-    let mut released = 0;
+    // The checks are independent (one pack, one `.keep` each): a few at a
+    // time, so a node with many folders of 100 kept packs does not start
+    // serially (review of PR 165, M3). A failed check does what it did.
+    let limit = std::sync::Arc::new(tokio::sync::Semaphore::new(CHECKS_AT_ONCE));
+    let mut tasks = tokio::task::JoinSet::new();
     for dir in shadows.filter_map(|e| e.ok()).map(|e| e.path()) {
         if dir.extension().is_none_or(|x| x != "git") || !dir.join("HEAD").is_file() {
             continue;
@@ -498,23 +524,37 @@ pub async fn check_kept_packs(base: &Path) -> usize {
             if !ours {
                 continue;
             }
-            let idx = keep.with_extension("idx");
-            let mut c = super::hardened(&super::git_program());
-            c.arg("--git-dir").arg(&dir).arg("verify-pack").arg(&idx);
-            let ok = super::exec(c, None, GIT_TIMEOUT)
-                .await
-                .is_ok_and(|o| o.status.success());
-            if !ok && std::fs::remove_file(&keep).is_ok() {
-                tracing::warn!(
-                    pack = %idx.display(),
-                    "a damaged checkpoint copy was released (its undo now depends on the folder's repository)"
-                );
-                released += 1;
-            }
+            let (dir, limit) = (dir.clone(), limit.clone());
+            tasks.spawn(async move {
+                let Ok(_slot) = limit.acquire_owned().await else {
+                    return false;
+                };
+                let idx = keep.with_extension("idx");
+                let mut c = super::hardened(&super::git_program());
+                c.arg("--git-dir").arg(&dir).arg("verify-pack").arg(&idx);
+                let ok = super::exec(c, None, GIT_TIMEOUT)
+                    .await
+                    .is_ok_and(|o| o.status.success());
+                if !ok && std::fs::remove_file(&keep).is_ok() {
+                    tracing::warn!(
+                        pack = %idx.display(),
+                        "a damaged checkpoint copy was released (its undo now depends on the folder's repository)"
+                    );
+                    return true;
+                }
+                false
+            });
         }
+    }
+    let mut released = 0;
+    while let Some(done) = tasks.join_next().await {
+        released += usize::from(done.unwrap_or(false));
     }
     released
 }
+
+/// How many `git verify-pack` run at once at start-up.
+const CHECKS_AT_ONCE: usize = 4;
 
 // ---- lock files (A.18) ----
 
@@ -917,6 +957,139 @@ mod tests {
         assert!(!maybe_gc(&repo).await, "ran twice within the interval");
         // After a restart: the state is in the shadow.
         assert_eq!(read_state(&dir).await.dropped, GC_EVERY);
+    }
+
+    /// Review of PR 165: packs a `.keep` file protects are never merged by
+    /// gc, so they do not count toward the pack limit. With 100 kept groups
+    /// (a pack each) and nothing loose no collection is due; with enough
+    /// packs without a `.keep` file one is.
+    #[tokio::test]
+    async fn kept_packs_do_not_make_a_collection_due() {
+        let d = tempfile::tempdir().unwrap();
+        let ws = d.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("a.txt"), "a\n").unwrap();
+        let repo = repo_for(&ws, Some(&d.path().join("cp"))).await.unwrap();
+        snapshot(&repo, "refs/harness/s/t/before", "b")
+            .await
+            .unwrap();
+        let dir = repo.shadow.clone().unwrap();
+        // One dropped group, so the rule looks at the counts.
+        count_dropped(&dir, 1).await;
+        let packs = dir.join("objects/pack");
+        let mut keeps = vec![];
+        for i in 0..(PACK_LIMIT as usize + 10) {
+            let blob = run_with_stdin(
+                &dir,
+                &["hash-object", "-w", "--stdin"],
+                format!("blob {i}\n"),
+            );
+            let out = run_with_stdin(
+                &dir,
+                &["pack-objects", packs.join("pack").to_str().unwrap()],
+                format!("{blob}\n"),
+            );
+            let keep = packs.join(format!("pack-{}.keep", out.trim()));
+            std::fs::write(&keep, format!("{PIN}refs/harness/s/t{i}\n")).unwrap();
+            keeps.push(keep);
+        }
+        let now = now_secs();
+        let state = read_state(&dir).await;
+        assert!(!due(&repo, state, now).await, "all packs kept: due");
+        // The same packs without their `.keep` files: git would merge them.
+        for k in &keeps[..PACK_LIMIT as usize] {
+            std::fs::remove_file(k).unwrap();
+        }
+        assert!(due(&repo, state, now).await, "50 unkept packs: not due");
+    }
+
+    /// A shadow in `base` with `n` kept packs (as `pin_changed` leaves them),
+    /// the `damaged` ones (by index) with a broken pack file.
+    fn shadow_with_kept_packs(base: &Path, n: usize, damaged: &[usize]) -> PathBuf {
+        let dir = base.join("abc.git");
+        sh(base, &["init", "-q", "--bare", dir.to_str().unwrap()]);
+        let packs = dir.join("objects/pack");
+        for i in 0..n {
+            let blob = run_with_stdin(
+                &dir,
+                &["hash-object", "-w", "--stdin"],
+                format!("blob {i}\n"),
+            );
+            let out = run_with_stdin(
+                &dir,
+                &["pack-objects", packs.join("pack").to_str().unwrap()],
+                format!("{blob}\n"),
+            );
+            let name = packs.join(format!("pack-{}", out.trim()));
+            std::fs::write(
+                name.with_extension("keep"),
+                format!("{PIN}refs/harness/s/t{i}\n"),
+            )
+            .unwrap();
+            if damaged.contains(&i) {
+                let pack = name.with_extension("pack");
+                std::fs::remove_file(&pack).unwrap(); // read-only
+                std::fs::write(&pack, b"not a pack").unwrap();
+            }
+        }
+        dir
+    }
+
+    /// The checks run a few at a time, and what a failed one does is as it
+    /// was: its `.keep` goes, the others stay, and the count is right.
+    #[tokio::test]
+    async fn damaged_kept_packs_are_released_when_checks_run_together() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = shadow_with_kept_packs(d.path(), 20, &[1, 7, 8, 19]);
+        let keeps = || {
+            std::fs::read_dir(dir.join("objects/pack"))
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().is_some_and(|x| x == "keep"))
+                .count()
+        };
+        assert_eq!(keeps(), 20);
+        assert_eq!(check_kept_packs(d.path()).await, 4);
+        assert_eq!(keeps(), 16);
+    }
+
+    /// Start-up with 100 kept packs in one folder (review of PR 165, M3):
+    /// `B3_DIR=<dir> cargo test -p harness-node --lib start_up_with_100 -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn start_up_with_100_kept_packs() {
+        let Some(parent) = std::env::var_os("B3_DIR") else {
+            return;
+        };
+        let d = tempfile::tempdir_in(parent).unwrap();
+        shadow_with_kept_packs(d.path(), 100, &[]);
+        for run in 0..3 {
+            let t = std::time::Instant::now();
+            let n = check_kept_packs(d.path()).await;
+            eprintln!(
+                "START-UP check_kept_packs, 100 packs, run {run}: {:?} (released {n})",
+                t.elapsed()
+            );
+        }
+    }
+
+    /// Run git in the bare shadow `dir` with `input` on stdin; its output.
+    fn run_with_stdin(dir: &Path, args: &[&str], input: String) -> String {
+        use std::io::Write;
+        let mut c = std::process::Command::new("git")
+            .arg("--git-dir")
+            .arg(dir)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        c.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
+        let o = c.wait_with_output().unwrap();
+        assert!(o.status.success(), "git {args:?}");
+        String::from_utf8_lossy(&o.stdout).trim().to_string()
     }
 
     /// The collection prunes an unreferenced object only if it is older

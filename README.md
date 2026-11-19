@@ -1258,15 +1258,29 @@ read work in the folder itself, and so do those whose only tools that
 change things are `publish` and MCP tools (they write no file directly; a
 filesystem-style MCP server can still write the folder, with its calls'
 own approval); one that can write, edit or run a writable shell gets its
-own copy. Only the latest 10 checkpoints per folder are kept (`checkpoints_keep`
-in `node.toml`). "Rewind" undoes a turn and everything after it. An undo
+own copy. Only the latest 100 checkpoints per folder are kept (`checkpoints_keep`
+in `node.toml`; a turn counts one, and so does the saving an undo makes of
+the folder). At start-up the node verifies the copies it keeps for each folder (about
+100 packs per repository folder at the default, 4 checked at once; 45 ms warm
+for one folder), and collects garbage in the checkpoint store at most every
+5 minutes, when 16 checkpoints were dropped since the last time. "Rewind" undoes a turn and everything after it. An undo
 is refused, naming the files, when it would write over anything you
 changed after the turn: a file it puts back or removes, anything inside a
 folder it replaces, or a file or link you put where a folder it puts back
 goes; names are compared byte for byte, so a name with `*`, one starting
 with `:` or one that is not UTF-8 counts like any other. Putting a file
 back the way it was before the turn counts as a change too: the undo is
-refused, and "Undo anyway" goes ahead. Before an
+refused, and "Undo anyway" goes ahead. A file the undo puts back over a
+file that is there keeps that file's permission bits (a `.env` at 0600 stays
+0600), with the executable bits taken from the turn's before state (git
+records nothing else about the mode): set for those who can read the file or
+could already execute it, cleared when the file was not executable. The mode
+kept is the file's mode at the moment of the undo, not its mode before the
+turn (git does not record that), so a turn that widened a file leaves it wide;
+set-user-id, set-group-id and sticky bits, ownership and ACLs are not kept.
+A file the turn deleted comes back with the default mode (0666 or 0777 less
+your umask), as there is nothing to keep. A filesystem that refuses a mode
+change (some FUSE mounts) keeps the mode the new file was created with. Before an
 undo or rewind changes a file it saves the folder as it is, your own edits
 since the turn included, as a checkpoint of its own, so "Undo anyway" loses
 nothing: restoring that checkpoint (its id is in the chat's log, phase
@@ -2271,8 +2285,13 @@ shown, asked about or run: required arguments, their types, values from a
 fixed list, and arguments the tool does not take (a misspelt `timeout` is no
 longer silently ignored). A number or `true`/`false` sent as a string
 (`"timeout_secs": "300"`) is read as the number or the boolean, and the call
-card, the approval card and the tool all see the corrected value. Anything else
-is sent back to the agent as the call's result, naming the argument and what
+card, the approval card and the tool all see the corrected value. A call sent
+with empty arguments (a tool that takes none, such as `board`) is read as `{}`.
+`write` and `edit` also read the names other harnesses use: `file_text` for
+`content`, `old_str` and `new_str` for `old_string` and `new_string`. The call
+is then the same call under the real names, for the card, the approval, "allow
+for this turn" and every path rule; sending both names of one argument is
+refused, naming both. Anything else is sent back to the agent as the call's result, naming the argument and what
 it should be, and nothing runs. A call to a tool that is not on offer lists the
 tools that are. Schema rules the check does not implement (for example an MCP
 server's `pattern` or `oneOf`) never refuse a call; the tool checks those
@@ -2719,7 +2738,9 @@ to someone's chat"); a card with an agent's note shows "Noted by an agent".
 - At most 10 changes and 20 lists per turn (sub-agents' included). A note
   that would take a card's notes past 4,000 characters is refused, not cut.
 - Plan mode lists and refuses every change; Ask asks before each change
-  (`board_edit` changes something other people read) and lists unasked;
+  (`board_edit` changes something other people read; its card says it adds
+  a card, moves one or adds a note on the project's task board, touching no
+  file and running nothing) and lists unasked;
   Auto asks for neither. Every change is a line in the server's audit log
   (ids only; a routine's run names the routine and the run).
 - An agent with the Board switch counts as one that changes things even in

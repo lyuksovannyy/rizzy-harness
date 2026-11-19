@@ -6,6 +6,12 @@ use std::path::{Component, Path, PathBuf};
 use harness_core::policy::ApprovalMode;
 use serde::{Deserialize, Serialize};
 
+/// Checkpoints kept per working folder unless `node.toml` says otherwise.
+/// It was 10, which the readiness trial of 2026-11-19 outgrew in about a
+/// dozen short turns (a turn could then be neither undone nor shown); what
+/// 100 costs is in `docs/checkpoint-cost.md`.
+pub const DEFAULT_CHECKPOINTS_KEEP: usize = 100;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct NodePolicy {
@@ -23,7 +29,9 @@ pub struct NodePolicy {
     pub chat_grants: bool,
     /// Allow file tools to touch paths outside the session workspace.
     pub allow_outside_workspace: bool,
-    /// File checkpoints kept per working folder for undo/rewind (0 = off).
+    /// File checkpoints kept per working folder for undo/rewind (0 = off;
+    /// default [`DEFAULT_CHECKPOINTS_KEEP`]). A turn is one, and so is the
+    /// saving an undo makes of the folder.
     pub checkpoints_keep: usize,
     /// Let agents query a graphify knowledge graph (runs the third-party
     /// `graphify` program here; install it with `rizzy-harness graphify install`).
@@ -1081,7 +1089,7 @@ impl Default for NodePolicy {
             denied_tools: Vec::new(),
             chat_grants: true,
             allow_outside_workspace: false,
-            checkpoints_keep: 10,
+            checkpoints_keep: DEFAULT_CHECKPOINTS_KEEP,
             graphify: false,
             artifacts: ArtifactsPolicy::default(),
             env_pass: Vec::new(),
@@ -1437,6 +1445,17 @@ impl NodePolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `checkpoints_keep` is 100 unless the file says otherwise (trial
+    /// 2026-11-19, item 6: 10 was gone after about a dozen short turns).
+    #[test]
+    fn a_node_keeps_the_latest_100_checkpoints_by_default() {
+        let keep = |t: &str| toml::from_str::<NodePolicy>(t).unwrap().checkpoints_keep;
+        assert_eq!(NodePolicy::default().checkpoints_keep, 100);
+        assert_eq!(keep(""), 100);
+        assert_eq!(keep("checkpoints_keep = 7"), 7);
+        assert_eq!(keep("checkpoints_keep = 0"), 0);
+    }
 
     /// `[sandbox] read_only_tmp_mib` (PLAN.md T70): absent is the default,
     /// a value in range is taken in MiB, one outside is refused at load.
