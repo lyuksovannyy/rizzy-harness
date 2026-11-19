@@ -70,6 +70,7 @@ function leaf(t: string, path: string, required: boolean, out: Map<string, Flat>
     case "s":
       return put("string");
     case "n":
+    case "u":
       return put("number");
     case "b":
       return put("boolean");

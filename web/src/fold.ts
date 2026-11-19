@@ -46,21 +46,23 @@ function tokensOf(t: ModelTokens): ModelTokens {
 
 const isObj = (x: unknown): x is Record<string, unknown> => !!x && typeof x == "object" && !Array.isArray(x);
 
+/** Sums stop at the largest integer a browser holds (Rust: `saturating_add`). */
+const sat = (a: number, b: number) => Math.min(a + b, Number.MAX_SAFE_INTEGER);
 function addUsage(to: Usage, u: Usage) {
-  to.input_tokens += u.input_tokens;
-  to.output_tokens += u.output_tokens;
-  if (u.cache_read_tokens) to.cache_read_tokens = (to.cache_read_tokens ?? 0) + u.cache_read_tokens;
-  if (u.cache_write_tokens) to.cache_write_tokens = (to.cache_write_tokens ?? 0) + u.cache_write_tokens;
+  to.input_tokens = sat(to.input_tokens, u.input_tokens);
+  to.output_tokens = sat(to.output_tokens, u.output_tokens);
+  if (u.cache_read_tokens) to.cache_read_tokens = sat(to.cache_read_tokens ?? 0, u.cache_read_tokens);
+  if (u.cache_write_tokens) to.cache_write_tokens = sat(to.cache_write_tokens ?? 0, u.cache_write_tokens);
   const from = u.by_model ?? {};
   for (const model of sortedKeys(from)) {
     const t = own(from, model)!;
     const by = (to.by_model ??= {});
     const mine = own(by, model);
     if (mine) {
-      mine.input_tokens += t.input_tokens;
-      mine.output_tokens += t.output_tokens;
-      if (t.cache_read_tokens) mine.cache_read_tokens = (mine.cache_read_tokens ?? 0) + t.cache_read_tokens;
-      if (t.cache_write_tokens) mine.cache_write_tokens = (mine.cache_write_tokens ?? 0) + t.cache_write_tokens;
+      mine.input_tokens = sat(mine.input_tokens, t.input_tokens);
+      mine.output_tokens = sat(mine.output_tokens, t.output_tokens);
+      if (t.cache_read_tokens) mine.cache_read_tokens = sat(mine.cache_read_tokens ?? 0, t.cache_read_tokens);
+      if (t.cache_write_tokens) mine.cache_write_tokens = sat(mine.cache_write_tokens ?? 0, t.cache_write_tokens);
     } else if (Object.keys(by).length < MAX_USAGE_MODELS) {
       put(by, model, tokensOf(t));
     }
@@ -102,7 +104,7 @@ function spentOf(v: SessionView): Spent {
   if (!s) spent.set(v, (s = { settled: v.usage }));
   return s;
 }
-const sumTokens = (u: Usage) => u.input_tokens + u.output_tokens;
+const sumTokens = (u: Usage) => sat(u.input_tokens, u.output_tokens);
 /** `v.usage` = the settled sums plus the running turn's. */
 function showUsage(v: SessionView, s: Spent) {
   if (!s.live) return void (v.usage = s.settled);
@@ -180,9 +182,9 @@ const ENUMS: Record<string, string> = {
 };
 
 const STRUCTS: Record<string, string> = {
-  tokens: "input_tokens:n output_tokens:n ?cache_read_tokens:n ?cache_write_tokens:n",
+  tokens: "input_tokens:u output_tokens:u ?cache_read_tokens:u ?cache_write_tokens:u",
   usage:
-    "input_tokens:n output_tokens:n context_tokens:n ?cache_read_tokens:n ?cache_write_tokens:n ?window:n ?summary_at:n ?model ?by_model:{@tokens",
+    "input_tokens:u output_tokens:u context_tokens:u ?cache_read_tokens:u ?cache_write_tokens:u ?window:u ?summary_at:u ?model ?by_model:{@tokens",
   agent: "agent_id name prompt_hash ?withheld:[s ?effort",
   variant: "group index:n ?model",
   cause: "?callback:[s ?mention:@called",
@@ -284,6 +286,10 @@ function checked(t: string, x: unknown): unknown {
       return typeof x == "string" ? x : BAD;
     case "n":
       return typeof x == "number" ? x : BAD;
+    // A token count: a non-negative integer a browser holds exactly. Any
+    // other value is one serde's u64 refuses, and it refuses the whole event.
+    case "u":
+      return x === undefined ? BAD : typeof x == "number" && Number.isSafeInteger(x) && x >= 0 ? x : UNKNOWN;
     case "b":
       return typeof x == "boolean" ? x : BAD;
     case "o":
@@ -643,7 +649,16 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       if (s.turn === p.turn_id && s.live && sumTokens(p.usage) < sumTokens(s.live)) break;
       s.turn = p.turn_id;
       s.live = cappedUsage(p.usage);
-      v.context_tokens = p.usage.context_tokens;
+      // A summary call's usage has no context size of its own (0): the
+      // meter keeps the last one. The turn's limits are applied as
+      // `turn_ended` does.
+      if (p.usage.context_tokens > 0) v.context_tokens = p.usage.context_tokens;
+      if (p.usage.window != null) v.context_window = p.usage.window;
+      else delete v.context_window;
+      if (p.usage.summary_at != null) v.summary_at = p.usage.summary_at;
+      else delete v.summary_at;
+      if (p.usage.model != null) v.context_model = p.usage.model;
+      else delete v.context_model;
       v.turn_usage = cappedUsage(p.usage);
       showUsage(v, s);
       break;
