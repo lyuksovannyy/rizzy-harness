@@ -93,37 +93,89 @@ async function show(v: SessionView) {
   await act(async () => root.render(<Conversation live={live} sessionId={SID} row={row} nodes={[]} agents={agents} models={[]} />));
 }
 
+const region = () => host.querySelector(".sr-only[role=status]");
+const advance = (ms: number) => act(async () => void vi.advanceTimersByTime(ms));
+const WAIT = "Assistant is waiting for the model…";
+const OFFLINE = "The server is not reachable. Reconnecting…";
+
 describe("the turn line while the link is down", () => {
-  test("says the server is not reachable instead of waiting for the model, and recovers", async () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
     live.state = "live";
-    await show(running(earlier));
-    expect(status()?.textContent).toContain("Assistant is waiting for the model…");
-    live.state = "offline";
-    await show(running(earlier));
-    expect(status()?.textContent).toContain("The server is not reachable. Reconnecting…");
-    expect(status()?.textContent).not.toContain("waiting for the model");
-    // Reconnect attempts in flight say the same.
-    live.state = "connecting";
-    await show(running(earlier));
-    expect(status()?.textContent).toContain("not reachable");
-    live.state = "live";
-    await show(running(earlier));
-    expect(status()?.textContent).toContain("Assistant is waiting for the model…");
-    expect(status()?.textContent).not.toContain("not reachable");
   });
 
-  test("counts no seconds while down", async () => {
-    vi.useFakeTimers();
+  test("shows the offline words once the link has been down for 2 s, not before", async () => {
+    await show(running(earlier));
+    expect(status()?.textContent).toContain(WAIT);
     live.state = "offline";
     await show(running(earlier));
-    await act(async () => void vi.advanceTimersByTime(12_000));
+    await advance(1900);
+    expect(status()?.textContent).toContain(WAIT);
+    expect(region()?.textContent).not.toContain("not reachable");
+    await advance(100);
+    expect(status()?.textContent).toContain(OFFLINE);
+    expect(status()?.textContent).not.toContain("waiting for the model");
+  });
+
+  test("offline and connecting count as one stretch: the 2 s run across both", async () => {
+    live.state = "offline";
+    await show(running(earlier));
+    await advance(1500);
+    live.state = "connecting";
+    await show(running(earlier));
+    await advance(500);
+    expect(status()?.textContent).toContain(OFFLINE);
+  });
+
+  test("goes back at once when the link is live", async () => {
+    live.state = "offline";
+    await show(running(earlier));
+    await advance(2500);
+    expect(status()?.textContent).toContain(OFFLINE);
+    live.state = "live";
+    await show(running(earlier));
+    expect(status()?.textContent).toContain(WAIT);
+    expect(status()?.textContent).not.toContain("not reachable");
+    expect(region()?.textContent).not.toContain("not reachable");
+  });
+
+  test("a blip of half a second never shows it", async () => {
+    live.state = "offline";
+    await show(running(earlier));
+    await advance(500);
+    live.state = "live";
+    await show(running(earlier));
+    await advance(5000);
+    expect(status()?.textContent).not.toContain("not reachable");
+    expect(region()?.textContent).not.toContain("not reachable");
+  });
+
+  test("the seconds keep counting for those 2 s, and stop once the offline words show", async () => {
+    await show(running(earlier));
+    await advance(4000);
+    live.state = "offline";
+    await show(running(earlier));
+    await advance(1500);
+    expect(status()?.textContent).toContain(WAIT);
+    expect(status()?.textContent).toMatch(/5 s/);
+    await advance(500);
+    expect(status()?.textContent).toContain(OFFLINE);
     expect(status()?.textContent).not.toMatch(/\d+ ?s/);
   });
 
-  test("is read out by a screen reader", async () => {
+  test("a screen reader hears it from the always-present region; the visible line stays hidden from it", async () => {
+    await show(running(earlier));
+    const before = region();
+    expect(before).not.toBeNull();
     live.state = "offline";
     await show(running(earlier));
-    expect(status()?.getAttribute("aria-hidden")).not.toBe("true");
-    expect(status()?.getAttribute("role")).toBe("status");
+    await advance(2000);
+    expect(region()).toBe(before);
+    expect(region()?.textContent).toBe(OFFLINE);
+    expect(status()?.getAttribute("aria-hidden")).toBe("true");
+    expect(status()?.getAttribute("role")).toBeNull();
+    live.state = "live";
+    await show(running(earlier));
+    expect(region()?.textContent).not.toContain("not reachable");
   });
 });
