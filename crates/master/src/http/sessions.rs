@@ -14,7 +14,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{ApiError, ApiResult, require, visible_session};
+use super::{ApiError, ApiResult, acting_session, require};
 use crate::{Audience, Live, Master};
 
 pub(super) fn routes() -> Router<Master> {
@@ -35,7 +35,7 @@ async fn rename(
     Json(b): Json<RenameBody>,
 ) -> ApiResult<Json<Value>> {
     let who = require(&m, &headers).await?;
-    let sid = visible_session(&m, &who, &id).await?.session_id;
+    let sid = acting_session(&m, &who, &id).await?.session_id;
     let title = crate::projects::clean_required("title", &b.title, harness_store::MAX_TITLE_CHARS)
         .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?;
     let t2 = title.clone();

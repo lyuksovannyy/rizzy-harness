@@ -227,6 +227,18 @@ describe("memory saves and proposals", () => {
     await done();
   });
 
+  test("a proposal from a chat someone else acted in says so, once; a clean one does not", async () => {
+    vi.spyOn(pageApi, "memoryCall").mockResolvedValue({ state: "pending", place: "user", from_marked_chat: true, fact: { ...fact("likes tea"), status: "proposed" } });
+    let r = await live(remember("likes tea", proposed));
+    expect(r.host.textContent).toContain("This proposal comes from a chat in which something other than you acted; read it before keeping.");
+    expect(r.host.querySelectorAll(".memory-marked")).toHaveLength(1);
+    await r.done();
+    vi.spyOn(pageApi, "memoryCall").mockResolvedValue({ state: "pending", place: "user", from_marked_chat: false, fact: { ...fact("likes tea"), status: "proposed" } });
+    r = await live(remember("likes tea", proposed));
+    expect(r.host.querySelector(".memory-marked")).toBeNull();
+    await r.done();
+  });
+
   test("a replacement and a forgetting that wait say what they would change", async () => {
     const old = { ...fact("rides tram 7"), id: "f0" };
     vi.spyOn(pageApi, "memoryCall").mockResolvedValue({ state: "pending", fact: { ...fact("rides tram 9"), status: "proposed" }, target: old });

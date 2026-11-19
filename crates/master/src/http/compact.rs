@@ -20,7 +20,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{ApiError, ApiResult, agentic_gate, require, visible_session};
+use super::{ApiError, ApiResult, acting_session, agentic_gate, require};
 use crate::{CommandError, Master};
 
 pub(super) fn routes() -> Router<Master> {
@@ -45,7 +45,7 @@ async fn compact(
     Json(b): Json<CompactBody>,
 ) -> ApiResult<Json<Value>> {
     let who = require(&m, &headers).await?;
-    let row = visible_session(&m, &who, &id).await?;
+    let row = acting_session(&m, &who, &id).await?;
     agentic_gate(&m, &who, &row).await?;
     if b.focus.as_ref().is_some_and(|f| f.len() > FOCUS_MAX_BYTES) {
         return Err(ApiError(

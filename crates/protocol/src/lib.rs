@@ -497,6 +497,14 @@ pub const CAP_PLUGIN_ACCESS: &str = "plugin-access";
 /// from one and sends `skill.result` only to one.
 pub const CAP_STORED_SKILLS: &str = "stored-skills";
 
+/// The node capability that says it offers a workspace's custom
+/// connectors' tools to its turns (X.35 step 2, PLAN.md T85): node.toml
+/// `[mcp] master_connectors` is on (the default), it offers
+/// `AgentSpec::connector_tools` as MCP tools and speaks
+/// `connector.request`. The master sends the list only to such a node,
+/// answers requests only from one and sends `connector.result` only to one.
+pub const CAP_CONNECTORS: &str = "connectors";
+
 /// Skills one `node.plugins` names; more are counted, not named.
 pub const MAX_ANNOUNCED_SKILLS: usize = 300;
 /// MCP servers one `node.plugins` names.
@@ -847,6 +855,24 @@ pub enum NodeToMaster {
         session_id: SessionId,
         name: String,
     },
+    /// A call of a custom connector's tool by a session this node runs
+    /// (X.35 step 2, PLAN.md T85): the public tool name and its arguments,
+    /// nothing else. The master decides from `session_id` alone whose
+    /// account (the chat owner's), which connector (the chat's workspace's,
+    /// by the name in `tool`) and whether the open turn's agent may call
+    /// it, makes the call and answers with one `connector.result`.
+    #[serde(rename = "connector.request")]
+    Connector {
+        req_id: String,
+        session_id: SessionId,
+        tool: String,
+        #[serde(default)]
+        arguments: serde_json::Value,
+    },
+    /// The call `req_id` is no longer waited for (its turn stopped): the
+    /// master drops it if it still runs. Nothing is answered.
+    #[serde(rename = "connector.cancel")]
+    ConnectorCancel { req_id: String },
     /// Bytes of a staged file, answering `artifact.fetch` (pull only: a
     /// node never sends one unasked). `error: "busy"` asks for a retry.
     #[serde(rename = "artifact.chunk")]
@@ -1288,6 +1314,18 @@ pub enum MasterToNode {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// The answer to a `connector.request`: the tool's result as text
+    /// (the server's own error marked `is_error`), or why the call was not
+    /// made or failed. Only to nodes whose hello listed [`CAP_CONNECTORS`];
+    /// never acked.
+    #[serde(rename = "connector.result")]
+    ConnectorResult {
+        req_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answer: Option<harness_core::connectors::ConnectorAnswer>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     /// What one turn changed (X.12): read from the turn's checkpoints,
     /// answered by one `session.diff_result`, never by an ack, handled
     /// outside the node's command loop, and nothing is logged. `rewind`:
@@ -1388,6 +1426,7 @@ impl MasterToNode {
             | MasterToNode::RecallResult { .. }
             | MasterToNode::BoardResult { .. }
             | MasterToNode::SkillResult { .. }
+            | MasterToNode::ConnectorResult { .. }
             | MasterToNode::Diff { .. }
             | MasterToNode::Files { .. }
             | MasterToNode::ProjectCreate { .. }
@@ -1759,6 +1798,52 @@ mod tests {
             json!({"type": "skill.result", "req_id": "r", "body": "Do it."})
         );
         assert_eq!(a.req_id(), None, "never acked");
+    }
+
+    #[test]
+    fn connector_messages_name_no_place() {
+        let sid: SessionId = "0193f2a0-0000-7000-8000-000000000001".parse().unwrap();
+        let r = NodeToMaster::Connector {
+            req_id: "r".into(),
+            session_id: sid,
+            tool: "mcp__linear__create_issue".into(),
+            arguments: json!({"title": "x"}),
+        };
+        assert_eq!(
+            serde_json::to_value(&r).unwrap(),
+            json!({"type": "connector.request", "req_id": "r", "session_id": sid,
+                   "tool": "mcp__linear__create_issue", "arguments": {"title": "x"}})
+        );
+        let v = json!({"type": "connector.request", "req_id": "r", "session_id": sid,
+                       "tool": "mcp__linear__x", "arguments": {}, "workspace_id": "w",
+                       "user_id": "u", "url": "https://evil.example/", "token": "t"});
+        assert_eq!(
+            serde_json::from_value::<NodeToMaster>(v).unwrap(),
+            NodeToMaster::Connector {
+                req_id: "r".into(),
+                session_id: sid,
+                tool: "mcp__linear__x".into(),
+                arguments: json!({}),
+            },
+            "nothing else is kept"
+        );
+        let a = MasterToNode::ConnectorResult {
+            req_id: "r".into(),
+            answer: Some(harness_core::connectors::ConnectorAnswer {
+                text: "done".into(),
+                is_error: false,
+            }),
+            error: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&a).unwrap(),
+            json!({"type": "connector.result", "req_id": "r", "answer": {"text": "done"}})
+        );
+        assert_eq!(a.req_id(), None, "never acked");
+        assert_eq!(
+            serde_json::to_value(NodeToMaster::ConnectorCancel { req_id: "r".into() }).unwrap(),
+            json!({"type": "connector.cancel", "req_id": "r"})
+        );
     }
 
     #[test]

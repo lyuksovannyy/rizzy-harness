@@ -159,7 +159,7 @@ fn deny_tools(spec: &mut harness_core::agent::AgentSpec, tools: &[&str]) {
 }
 
 /// The chat owner's account, if it may still act (not disabled).
-async fn owner(m: &Master, top: &SessionRow) -> Result<Principal, String> {
+pub(crate) async fn owner(m: &Master, top: &SessionRow) -> Result<Principal, String> {
     let Some(id) = top.owner_id.clone() else {
         return Err("this chat has no owner".into());
     };
@@ -305,6 +305,15 @@ pub async fn answer(m: &Master, node_id: &str, sid: SessionId, r: BoardRequest) 
         return Err("a temporary chat has no task board".into());
     }
     let tool = r.tool();
+    // A chat someone other than its owner acted in changes no board, also
+    // in a turn that was clean when it started (the mark landed while it
+    // ran): read from the store at the call, the ancestor rule, a read
+    // error refuses (review 5 of PR 157).
+    if r.writes() && m.chat_foreign(row.session_id).await {
+        return Err(format!(
+            "`{tool}` is not available in this chat: someone other than its owner acted in it"
+        ));
+    }
     let own = turn_may(m, &row, tool, true).await?;
     let parent = match row.parent_id {
         Some(_) => Some(turn_may(m, &top, tool, false).await?),

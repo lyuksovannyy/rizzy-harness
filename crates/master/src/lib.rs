@@ -488,6 +488,21 @@ pub(crate) fn too_large_for_link(msg: &MasterToNode) -> Option<CommandError> {
     })
 }
 
+/// A send recorded for the connector grant, taken out when this is dropped
+/// unless it was acked (`send_command_noted`).
+struct SendNote<'a> {
+    master: &'a Master,
+    send: Option<(SessionId, u64)>,
+}
+
+impl Drop for SendNote<'_> {
+    fn drop(&mut self) {
+        if let Some((sid, id)) = self.send.take() {
+            self.master.inner.connectors.calls.unsent(sid, id);
+        }
+    }
+}
+
 fn json_len<T: Serialize + ?Sized>(msg: &T) -> usize {
     struct Count(usize);
     impl std::io::Write for Count {
@@ -671,6 +686,8 @@ fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
         | MasterToNode::BoardResult { .. }
         // A stored skill's text for the node's own load: nothing is run.
         | MasterToNode::SkillResult { .. }
+        // A connector call's text for the node's own call: nothing is run.
+        | MasterToNode::ConnectorResult { .. }
         // A read of two checkpoints: no event, no work.
         | MasterToNode::Diff { .. }
         // A listing of names for the composer: no event.
@@ -1565,6 +1582,15 @@ impl Master {
                 session_id,
                 name,
             } => stored_skills::handle(self, node_id, req_id, session_id, name),
+            NodeToMaster::Connector {
+                req_id,
+                session_id,
+                tool,
+                arguments,
+            } => connectors::call::handle(self, node_id, req_id, session_id, tool, arguments),
+            NodeToMaster::ConnectorCancel { req_id } => {
+                connectors::call::cancel(self, node_id, &req_id)
+            }
             NodeToMaster::ArtifactChunk {
                 req_id,
                 offset,
@@ -1681,6 +1707,8 @@ impl Master {
                 ) {
                     callbacks::on_applied(self, &e);
                 }
+                // Which turn a send of the master's started (X.35 step 2).
+                self.inner.connectors.calls.on_event(&e);
                 let sid = e.session_id;
                 let _ = self.inner.live.send(Live::Event(e));
                 if structural {
@@ -1799,6 +1827,18 @@ impl Master {
         node_id: &str,
         build: impl FnOnce(String) -> MasterToNode,
     ) -> Result<(), CommandError> {
+        self.send_command_noted(node_id, build, None).await
+    }
+
+    /// [`Self::send_command`], recording a prompt or retry for the
+    /// connector grant (`connectors::grant`) at the moment it is handed to
+    /// the link, and taking it out again on every failure after that.
+    async fn send_command_noted(
+        &self,
+        node_id: &str,
+        build: impl FnOnce(String) -> MasterToNode,
+        note: Option<connectors::call::Note>,
+    ) -> Result<(), CommandError> {
         let req_id = new_id();
         let mut msg = build(req_id.clone());
         // A node that does not read the Plugins deny lists gets the whole
@@ -1810,6 +1850,10 @@ impl Master {
         // (X.34 step B, PLAN.md T81).
         if !self.node_has(node_id, harness_protocol::CAP_STORED_SKILLS) {
             stored_skills::strip(&mut msg);
+        }
+        // Nor a custom connector's tools (X.35 step 2, PLAN.md T85).
+        if !self.node_has(node_id, harness_protocol::CAP_CONNECTORS) {
+            connectors::call::strip(&mut msg);
         }
         // Nothing goes on the link that its frame would refuse: an
         // oversized frame closes the link for every chat of the node
@@ -1857,6 +1901,12 @@ impl Master {
             master: self,
             req_id: &req_id,
         };
+        // Taken out again on every way this ends but an ack, a dropped
+        // caller's future included (the guard's drop).
+        let mut noted = SendNote {
+            master: self,
+            send: note.and_then(|n| self.inner.connectors.calls.note_send(&msg, n)),
+        };
         let sent = {
             let nodes = lock(&self.inner.nodes);
             // A revoked node gets nothing: no prompt, context or image
@@ -1879,7 +1929,12 @@ impl Master {
             Some(Err(true)) => return Err(CommandError::Timeout),
             Some(Err(false)) | None => return Err(CommandError::NodeOffline(node_id.into())),
         }
-        match tokio::time::timeout(ACK_TIMEOUT, rx).await {
+        let acked = tokio::time::timeout(ACK_TIMEOUT, rx).await;
+        if matches!(acked, Ok(Ok(Ok(())))) {
+            noted.send = None;
+        }
+        drop(noted);
+        match acked {
             Ok(Ok(Ok(()))) => {
                 // Checked again now the node took it (review L2-1): a level
                 // lowered between the check above and here was swept while
@@ -1895,6 +1950,12 @@ impl Master {
             Ok(Ok(Err(e))) => Err(CommandError::Rejected(e)),
             Ok(Err(_)) | Err(_) => Err(CommandError::Timeout),
         }
+    }
+
+    /// Tests: whether the last turn recorded for `sid` may save memory
+    /// without the person's click (`TurnMemory::by_owner`).
+    pub fn turn_saves_without_a_click_for_test(&self, sid: SessionId) -> Option<bool> {
+        lock(&self.inner.turn_memory).get(&sid).map(|t| t.by_owner)
     }
 
     /// The level check again for `sid`, after its node acked a command that
@@ -2194,6 +2255,17 @@ impl Master {
         if ms > 0 {
             tokio::time::sleep(Duration::from_millis(ms)).await;
         }
+        // Someone other than the chat's owner acting here (the API token,
+        // another person's routine) marks the chat and every chat above it
+        // for good, before anything is decided or sent: no connector is used
+        // in it again, and its turns write no memory and change no board
+        // (PLAN.md T85). A callback is the node's own (a command a turn of
+        // this chat started), not an actor.
+        let owners = by_owner || board::routine_turn(self, &row, routine_run.as_deref()).await;
+        if !resume && !owners && row.owner_id.is_some() {
+            self.mark_foreign(&row).await?;
+        }
+        let foreign = self.chat_foreign(row.session_id).await;
         // Agents, models and chains as the chat's workspace sets them.
         let r = self.resolver_for(row.workspace_id.as_deref()).await;
         if let Some(c) = compare.iter().find(|c| r.find_model(c).is_none()) {
@@ -2309,6 +2381,14 @@ impl Master {
         allowed.by_owner &= attended;
         allowed.personal &= attended;
         allowed.project &= attended;
+        // A chat someone other than its owner acted in writes nothing that
+        // other chats read without a person's click (review 4 of PR 157):
+        // every `remember` of its turns is a proposal the person keeps or
+        // dismisses (as an API-token turn's always was), and its turns
+        // change no board (below).
+        if foreign {
+            allowed.by_owner = false;
+        }
         projects::offer_remember(r.agents(), &mut agent, allowed);
         if untrusted {
             deny_untrusted(&mut agent);
@@ -2356,6 +2436,19 @@ impl Master {
             }
             _ => board::deny(&mut agent),
         }
+        if foreign {
+            board::deny_edit(&mut agent);
+        }
+        // A workspace's custom connectors (X.35 step 2, PLAN.md T85): with
+        // the chat owner's own account, so only in a turn the owner sent
+        // signed in as themselves or a run of the owner's own routine (the
+        // board's rule), never in an untrusted or a callback turn. Decided
+        // and recorded here for every turn (`connectors::call`), which
+        // every call is checked against; the tools come from the master's
+        // cache, never fetched on this path.
+        let may_connect = !untrusted && !resume && owners;
+        let offered = self.offer_connectors(&row, may_connect, &mut agent).await;
+        turn_context.extend(offered.lines.iter().cloned());
         // The owner's facts, whole while they fit, each with its id
         // (`memory::turn_block`).
         let mut noted = Vec::new();
@@ -2503,15 +2596,25 @@ impl Master {
         // files nothing from a turn whose `turn_started` has a cause, which
         // the log decides, also after a restart (review S3-1).
         let before = lock(&self.inner.turn_memory).insert(sid, allowed);
+        // Recorded at the moment it goes on the link, for a chat that has
+        // connectors (`connectors::grant`).
+        let note = offered.relevant.then_some(match row.parent_id {
+            None => connectors::call::Note::Chat { owner: offered.may },
+            Some(_) => connectors::call::Note::Child,
+        });
         let sent = self
-            .send_command(&row.node_id, move |req_id| {
-                if let MasterToNode::Prompt { req_id: r, .. }
-                | MasterToNode::Retry { req_id: r, .. } = &mut msg
-                {
-                    *r = req_id;
-                }
-                msg
-            })
+            .send_command_noted(
+                &row.node_id,
+                move |req_id| {
+                    if let MasterToNode::Prompt { req_id: r, .. }
+                    | MasterToNode::Retry { req_id: r, .. } = &mut msg
+                    {
+                        *r = req_id;
+                    }
+                    msg
+                },
+                note,
+            )
             .await;
         // Refused or never sent: no turn of this prompt runs. Not after a
         // timeout: the node may have taken it.
@@ -2846,6 +2949,7 @@ impl Master {
         self.inner.recall.forget(sid);
         self.inner.board.forget(sid);
         self.inner.stored_skills.forget(sid);
+        self.inner.connectors.calls.forget(sid);
         let res = self
             .inner
             .mirror

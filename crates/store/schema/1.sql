@@ -199,6 +199,12 @@ CREATE TABLE events (
     PRIMARY KEY (session_id, seq)
 ) WITHOUT ROWID;
 
+-- table foreign_chats on foreign_chats
+CREATE TABLE foreign_chats (
+    session_id TEXT PRIMARY KEY,
+    marked_ms  INTEGER NOT NULL
+);
+
 -- table join_tokens on join_tokens
 CREATE TABLE join_tokens (
     token_hash TEXT PRIMARY KEY,

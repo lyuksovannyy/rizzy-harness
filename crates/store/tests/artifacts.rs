@@ -22,6 +22,7 @@ const CAPS: IngestCaps = IngestCaps {
     pending_per_node: 8,
     per_owner: 200,
     per_workspace: 1000,
+    not_into_shared: false,
 };
 
 fn version(owner: &str, ws: &str, name: &str, n: u32) -> NewVersion {
@@ -131,6 +132,7 @@ fn caps_count_ready_lineages_and_pending_per_node() {
         pending_per_node: 2,
         per_owner: 2,
         per_workspace: 1000,
+        not_into_shared: false,
     };
     for (n, name) in [(1, "a"), (2, "b")] {
         let Ingested::Added { version_id, .. } = s
@@ -415,4 +417,35 @@ fn the_same_bytes_share_one_blob_until_the_last_version_goes() {
     );
     assert_eq!(s.artifact_delete(&b).unwrap().len(), 1);
     assert!(s.known_blob_ids().unwrap().is_empty());
+}
+
+/// Review 5 of PR 157 (PLAN.md T85): a version from a chat someone other
+/// than its owner acted in is recorded as failed when its lineage is shared
+/// with the workspace; a private lineage and a new name are not affected.
+#[test]
+fn a_marked_chats_version_never_lands_in_a_shared_lineage() {
+    let s = Store::open_in_memory().unwrap();
+    for u in ["alex", "bob"] {
+        user(&s, u);
+    }
+    let team = s.create_workspace("Team", "alex").unwrap().workspace_id;
+    s.add_member(&team, "bob", "member").unwrap();
+    let (shared, _) = publish(&s, "alex", &team, "report", 1, "binary");
+    s.artifact_update(&shared, None, Some("workspace")).unwrap();
+    publish(&s, "alex", &team, "mine", 2, "binary");
+    let marked = IngestCaps {
+        not_into_shared: true,
+        ..CAPS
+    };
+    let failed = |name: &str, n: u32, caps: IngestCaps| match s
+        .artifact_ingest(&version("alex", &team, name, n), None, caps)
+        .unwrap()
+    {
+        Ingested::Added { failed, .. } => failed,
+        Ingested::Duplicate => panic!("duplicate"),
+    };
+    assert!(failed("report", 3, marked).is_some(), "the shared lineage");
+    assert_eq!(failed("mine", 4, marked), None, "a private lineage");
+    assert_eq!(failed("fresh", 5, marked), None, "a new name");
+    assert_eq!(failed("report", 6, CAPS), None, "a clean chat");
 }

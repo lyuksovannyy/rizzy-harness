@@ -12,7 +12,7 @@ use axum::routing::delete;
 use axum::{Json, Router};
 use serde_json::{Value, json};
 
-use super::{ApiError, ApiResult, require_any, visible_session};
+use super::{ApiError, ApiResult, acting_session, require_any};
 use crate::Master;
 
 pub(super) fn routes() -> Router<Master> {
@@ -30,7 +30,7 @@ async fn revoke(
     Path((id, grant)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
     let who = require_any(&m, &headers).await?;
-    let row = visible_session(&m, &who, &id).await?;
+    let row = acting_session(&m, &who, &id).await?;
     if !is_grant_id(&grant) {
         return Err(ApiError(StatusCode::BAD_REQUEST, "bad grant id".into()));
     }

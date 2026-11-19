@@ -268,7 +268,7 @@ function Row(props: {
         {described.length > 1 && <div className="muted small">Nodes describe it differently; the setting is by name and holds for each.</div>}
         <div className="muted small">
           {i.custom
-            ? `Custom connector of this workspace at ${i.custom.host ?? "?"}. Agents cannot use it in this version.`
+            ? `Custom connector of this workspace at ${i.custom.host ?? "?"}. Agents use it with their chat owner's own account.`
             : i.stored
             ? i.nodes.length
               ? `Stored on the server. ${i.nodes.map(host).join(", ")} has its own skill of this name and uses that one there.`

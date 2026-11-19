@@ -82,10 +82,19 @@ pub struct NodePolicy {
 }
 
 /// `[mcp]` in node.toml: a repository's own MCP servers (ADOPTION_PLAN
-/// X.36, PLAN.md T82). Nothing the master sends can change it.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+/// X.36, PLAN.md T82) and a workspace's custom connectors (X.35 step 2,
+/// T85). Nothing the master sends can change it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct McpPolicy {
+    /// `true` (default): a workspace's custom connectors, which the master
+    /// speaks to with the chat owner's own account, are offered to this
+    /// node's turns as MCP tools, and a call is filed with the master. A
+    /// call runs nothing on this node and its token never reaches it; only
+    /// the result's text enters the model's context. `false`: the master's
+    /// list is ignored, nothing is asked, and the node does not announce
+    /// the capability (so the master sends no list and answers no call).
+    pub master_connectors: bool,
     /// `"off"` (default): no `.mcp.json` is ever read and every request
     /// about one is refused. `"ask"`: a person may approve, one by one and
     /// for their own chats only, the servers a project folder's
@@ -97,6 +106,16 @@ pub struct McpPolicy {
     /// `"ask"` works as `"off"`.
     #[serde(skip)]
     pub approvals_file: Option<PathBuf>,
+}
+
+impl Default for McpPolicy {
+    fn default() -> Self {
+        Self {
+            master_connectors: true,
+            project_servers: ProjectServers::default(),
+            approvals_file: None,
+        }
+    }
 }
 
 /// `[mcp] project_servers`.
@@ -1702,6 +1721,7 @@ tool_timeout_sec = 120
             deny_skills: vec![],
             deny_mcp_servers: vec![],
             stored_skills: vec![],
+            connector_tools: vec![],
             delegates,
             caps,
         };
@@ -1856,6 +1876,7 @@ tool_timeout_sec = 120
             deny_skills: vec![],
             deny_mcp_servers: vec![],
             stored_skills: vec![],
+            connector_tools: vec![],
             delegates: vec![],
             caps,
         };

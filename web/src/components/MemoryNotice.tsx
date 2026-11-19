@@ -256,6 +256,9 @@ export function MemoryNotice({
       <BookmarkPlus size={14} aria-hidden="true" className="memory-icon" />
       <div className="memory-body">
         <div>{head}</div>
+        {st?.state === "pending" && st.from_marked_chat && (
+          <div className="muted small memory-marked">{rt("memory.fromMarked")}</div>
+        )}
         {foot && <div className="muted small">{foot}</div>}
         {err && <div className="error-text small">{err}</div>}
       </div>

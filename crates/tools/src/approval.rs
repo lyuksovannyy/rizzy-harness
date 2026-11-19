@@ -58,6 +58,17 @@ impl CallKey {
     }
 }
 
+/// The name a call key and a grant are made under: the tool's name, with
+/// its origin in front when it has one (`Tool::approval_origin`), so
+/// "allow" for a connector's `mcp__x__t` never covers a node server's
+/// `mcp__x__t`, nor the other way round (review of PR 157, M3).
+pub fn keyed(tool: &str, origin: Option<&str>) -> String {
+    match origin {
+        Some(o) => format!("{o}\u{0}{tool}"),
+        None => tool.to_string(),
+    }
+}
+
 /// The key of `tool` called with `input` in a session working in `cwd`.
 pub fn call_key(cwd: &Path, tool: &str, input: &Value) -> CallKey {
     let mut h = Sha256::new();
