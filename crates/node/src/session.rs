@@ -5782,7 +5782,11 @@ fn approval_reason(
 ) -> String {
     let reason = tool_reason(tool, risk, input, policy);
     // In a `host` chat the card is the only check (review N-e): it says so.
-    if exec_mode == Some(harness_core::policy::ExecMode::Host) && tool != "publish" {
+    // `publish` and `board_edit` run nothing here: the host shell is not
+    // part of what they do.
+    if exec_mode == Some(harness_core::policy::ExecMode::Host)
+        && !matches!(tool, "publish" | "board_edit")
+    {
         return format!(
             "{reason}; in the host shell: as this node's own user, without the sandbox"
         );
@@ -5802,6 +5806,12 @@ fn connector_reason(tool: &str, connector: &str, raw: Option<&str>) -> String {
          connected account, and the arguments shown are what is sent"
     )
 }
+
+/// What the card of `board_edit` says: it changes this project's task
+/// board and nothing else (trial 2026-11-19, item 15: the general sentence
+/// said it could change files or run programs).
+const BOARD_EDIT_REASON: &str = "`board_edit` adds a card, moves one or adds a note to one on \
+    this project's task board; it touches no file and runs nothing";
 
 fn tool_reason(tool: &str, risk: ToolRisk, input: &Value, policy: &crate::NodePolicy) -> String {
     // A background start says what it is, in words (§4.1): the field alone
@@ -5831,6 +5841,7 @@ fn tool_reason(tool: &str, risk: ToolRisk, input: &Value, policy: &crate::NodePo
     }
     match (tool, risk) {
         ("publish", _) => "`publish` uploads a copy of a file from this folder to Artifacts".into(),
+        ("board_edit", _) => BOARD_EDIT_REASON.into(),
         (_, ToolRisk::Mutating) => format!("`{tool}` can change files or run programs"),
         // `ChatOnly` is never asked about (`needs_approval`).
         (_, ToolRisk::ReadOnly | ToolRisk::ChatOnly) => {
@@ -5927,6 +5938,38 @@ mod tests {
         assert_eq!(
             approval_reason("bash", ToolRisk::Mutating, &none, &p, None),
             "`bash` can change files or run programs"
+        );
+    }
+
+    /// Trial item 15: `board_edit` changes the task board, so its card says
+    /// that, in the host shell too; `board` and every other tool keep theirs.
+    #[test]
+    fn the_board_edit_card_says_what_it_does() {
+        use harness_core::policy::ExecMode;
+        let p = crate::NodePolicy::default();
+        let none = Value::Null;
+        let want = "`board_edit` adds a card, moves one or adds a note to one on this \
+                    project's task board; it touches no file and runs nothing";
+        for mode in [None, Some(ExecMode::Sandbox), Some(ExecMode::Host)] {
+            assert_eq!(
+                approval_reason("board_edit", ToolRisk::Mutating, &none, &p, mode),
+                want
+            );
+        }
+        // Unchanged: the read-only tool, and others of the same risk.
+        assert_eq!(
+            approval_reason("board", ToolRisk::ReadOnly, &none, &p, None),
+            "approval mode requires asking for `board`"
+        );
+        for t in ["write", "edit", "remember"] {
+            assert_eq!(
+                approval_reason(t, ToolRisk::Mutating, &none, &p, None),
+                format!("`{t}` can change files or run programs")
+            );
+        }
+        assert!(
+            approval_reason("write", ToolRisk::Mutating, &none, &p, Some(ExecMode::Host))
+                .contains("in the host shell")
         );
     }
 

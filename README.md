@@ -2675,7 +2675,9 @@ to someone's chat"); a card with an agent's note shows "Noted by an agent".
 - At most 10 changes and 20 lists per turn (sub-agents' included). A note
   that would take a card's notes past 4,000 characters is refused, not cut.
 - Plan mode lists and refuses every change; Ask asks before each change
-  (`board_edit` changes something other people read) and lists unasked;
+  (`board_edit` changes something other people read; its card says it adds
+  a card, moves one or adds a note on the project's task board, touching no
+  file and running nothing) and lists unasked;
   Auto asks for neither. Every change is a line in the server's audit log
   (ids only; a routine's run names the routine and the run).
 - An agent with the Board switch counts as one that changes things even in
