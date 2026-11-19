@@ -92,19 +92,23 @@ pub const CAP_FORGE_CLONE_PREFIX: &str = "forge-clone:";
 
 /// The clone time limit a node announces in [`CAP_FORGE_CLONE_PREFIX`], if
 /// it announces one: `None` for a node that does not clone.
+/// A value over [`MAX_CLONE_TIMEOUT_S`] counts as that maximum, so a node
+/// cannot hold a request on the master longer than any node may be set to.
 pub fn clone_timeout_of(capabilities: &[String]) -> Option<u64> {
     capabilities.iter().find_map(|c| {
         let n = c.strip_prefix(CAP_FORGE_CLONE_PREFIX)?;
         (!n.is_empty() && n.len() <= 6 && n.bytes().all(|b| b.is_ascii_digit()))
-            .then(|| n.parse().ok())
+            .then(|| n.parse::<u64>().ok())
             .flatten()
+            .map(|n| n.min(MAX_CLONE_TIMEOUT_S))
     })
 }
 
+/// The longest `[limits] clone_timeout_s` a node may be set to, in seconds.
+pub const MAX_CLONE_TIMEOUT_S: u64 = 7200;
+
 /// The longest `full_name` a `project.clone` may carry, in bytes.
 pub const MAX_CLONE_NAME: usize = 512;
-/// The longest `host` a `project.clone` may carry: a DNS name and a port.
-pub const MAX_CLONE_HOST: usize = 260;
 /// The longest token a `project.clone` may carry, in bytes (the master's
 /// forge tokens are at most 512).
 pub const MAX_CLONE_TOKEN: usize = 512;
@@ -1569,6 +1573,11 @@ mod tests {
         ] {
             assert_eq!(clone_timeout_of(&[bad.into()]), None, "{bad}");
         }
+        // Review of PR 163, L2: a node cannot make the master wait longer
+        // than the most any node may be set to.
+        assert_eq!(clone_timeout_of(&["forge-clone:999999".into()]), Some(7200));
+        assert_eq!(clone_timeout_of(&["forge-clone:7201".into()]), Some(7200));
+        assert_eq!(clone_timeout_of(&["forge-clone:7200".into()]), Some(7200));
     }
 
     /// `recall.request` carries words only: a field naming a user, a

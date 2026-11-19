@@ -589,7 +589,9 @@ function, answers `get` only for exactly that scheme, host and path
 (`credential.useHttpPath=true`), finds that git among its parents by the pipe's inode and reads
 the token from `/proc/<git>/fd/0` with the shell's own `read`. `http.proactiveAuth=basic` where
 git is 2.46 or later; older git does the 401 round trip. A public repository is cloned with no
-credential at all. Why not the `http.<url>.extraHeader` through `GIT_CONFIG_COUNT`/`KEY`/`VALUE`
+credential at all. git's `HOME` (and `XDG_CONFIG_HOME`, `CURL_HOME`) is an empty folder the node
+makes for the clone: with `HOME` unset libcurl reads the node user's `.netrc` through the password
+database (review of PR 163). Why not the `http.<url>.extraHeader` through `GIT_CONFIG_COUNT`/`KEY`/`VALUE`
 this section first planned: an experiment against a loopback fake with a fake token (git 2.56.1, libcurl 8.23.0;
 `.claude/handoff-2026-11-15/x27-step3/`, outside the repository) showed git sending that header to a redirect's other
 host on the following `POST` (and a header of another name on the redirected `GET` already),

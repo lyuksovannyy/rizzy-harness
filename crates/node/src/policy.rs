@@ -921,7 +921,7 @@ pub struct LimitsPolicy {
 /// `[limits] clone_timeout_s` by default, and its range.
 pub const DEFAULT_CLONE_TIMEOUT_S: u64 = 600;
 pub const MIN_CLONE_TIMEOUT_S: u64 = 10;
-pub const MAX_CLONE_TIMEOUT_S: u64 = 7200;
+pub const MAX_CLONE_TIMEOUT_S: u64 = harness_protocol::MAX_CLONE_TIMEOUT_S;
 /// `[limits] clone_max_mb` by default, and its range.
 pub const DEFAULT_CLONE_MAX_MB: u64 = 2048;
 pub const MAX_CLONE_MAX_MB: u64 = 1024 * 1024;

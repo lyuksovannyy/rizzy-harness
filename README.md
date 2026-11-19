@@ -3156,7 +3156,14 @@ another host could take the credential along). The clone is made in the
 node's own data directory and moved into the projects folder under a new
 name (as "New project" does), within `[limits] clone_timeout_s` (600) and
 `clone_max_mb` (2048: git is ended and everything it fetched removed), one at
-a time per node, and counts against `projects_per_hour`. The project records
+a time per node, and counts against `projects_per_hour`. git gets an empty
+home folder of the node's own (never the node user's home, so neither your
+`~/.netrc` nor any other personal git or curl setting is used for a clone)
+and only `PATH`, `LANG` and `TMPDIR` from the node's environment (no proxy,
+certificate or `GIT_*` variable). An **empty repository** (a new one on the
+forge, with no commit yet) gets one empty first commit, on the branch the
+forge names as its default, so you can work in it right away; a repository
+whose default branch is missing is refused. The project records
 where its folder came from (`source`: host and name), for the push that comes
 later (ADOPTION_PLAN X.27 step 4).
 
@@ -3174,7 +3181,11 @@ afterwards yet; an agent has no forge access.
 `/proc`, such as a chat in the host shell, could read the token from that
 git's pipe; and a node you choose receives your token for that clone, so a
 compromised node gets it. Clone private repositories only onto nodes you
-trust with that token.
+trust with that token. If another process takes the token, the clone fails
+visibly: "git did not receive the credential the node passed it"; if that
+happens again, replace the token under Plugins → Connectors. A node that
+crashes during a clone leaves that git running until it ends by itself (its
+next start removes what it fetched).
 
 **Where the token is kept.** In `master.db`, sealed with AES-256-GCM under a
 key in `<data>/keys/secrets.key` (32 random bytes, mode 0600 in a 0700 folder,

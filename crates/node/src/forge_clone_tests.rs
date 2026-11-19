@@ -999,6 +999,11 @@ async fn the_clone_command_carries_no_token_and_the_hardened_configuration() {
         "core.fsmonitor=false",
         "submodule.recurse=false",
         "transfer.fsckObjects=true",
+        // Review of PR 163, L3: nothing that is off only by git's default
+        // and could send git to another URL.
+        "transfer.bundleURI=false",
+        "fetch.bundleURI=",
+        "fetch.uriProtocols=",
         "http.proactiveAuth=basic",
     ] {
         assert!(cfg.iter().any(|c| c == want), "{want} missing: {cfg:?}");
@@ -1422,4 +1427,258 @@ async fn clones_count_against_the_hour() {
     let e = r.clone(req(&a.host(), "o/pub", false)).await.unwrap_err();
     assert!(e.contains("projects_per_hour"), "{e}");
     assert_eq!(a.seen().len(), asked, "git ran past the cap");
+}
+
+// ------------------------------------------------- review of PR 163
+
+/// The node owner's own `.netrc` (M1): libcurl reads `<home>/.netrc`,
+/// finding the home through the password database when `HOME` is unset. A
+/// fake folder with a `.netrc` is mounted over the node user's real home
+/// for the one git command (a private mount namespace through bwrap; the
+/// real home is never touched), and a public clone, no token, against a
+/// server that asks: the owner's credential must never reach it.
+#[tokio::test]
+async fn the_node_owners_netrc_is_never_used() {
+    let Some(bwrap) = ["/usr/bin/bwrap", "/bin/bwrap"]
+        .into_iter()
+        .find(|p| Path::new(p).exists())
+    else {
+        assert!(
+            std::env::var_os("HARNESS_REQUIRE_BWRAP").is_none(),
+            "bwrap is required"
+        );
+        return;
+    };
+    let me = nix::unistd::User::from_uid(nix::unistd::getuid())
+        .unwrap()
+        .unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    bare(tmp.path(), "o/pub", |_| {});
+    let a = server(
+        tmp.path(),
+        Mode {
+            ask: true,
+            ..Default::default()
+        },
+    );
+    let r = rig(&[a.host()]);
+    let fake_home = r.base.join("fakehome");
+    std::fs::create_dir_all(&fake_home).unwrap();
+    std::fs::write(
+        fake_home.join(".netrc"),
+        "default login nodeowner password NETRC-SECRET-of-the-node-owner\n",
+    )
+    .unwrap();
+    let wrap = r.base.join("git-in-ns");
+    crate::test_script::script(
+        &wrap,
+        &format!(
+            "#!/bin/sh\nexec {bwrap} --dev-bind / / --bind {} {} -- git \"$@\"\n",
+            fake_home.display(),
+            me.dir.display()
+        ),
+    );
+    crate::git::use_test_git(Some(wrap));
+    let res = r.clone(req(&a.host(), "o/pub", false)).await;
+    crate::git::use_test_git(None);
+    use base64::Engine as _;
+    let netrc = base64::engine::general_purpose::STANDARD
+        .encode("nodeowner:NETRC-SECRET-of-the-node-owner");
+    for s in a.seen() {
+        assert!(
+            !s.head.contains(&netrc),
+            "the node owner's .netrc went to the forge: {}",
+            s.head
+        );
+    }
+    assert!(res.is_err(), "the server asks; nobody may answer");
+    r.nothing_kept();
+}
+
+/// The same `.netrc` in the `HOME` git is given would be used: what the
+/// test above guards against is real on this machine's git and curl.
+#[tokio::test]
+async fn a_netrc_in_gits_home_would_be_used() {
+    let tmp = tempfile::tempdir().unwrap();
+    bare(tmp.path(), "o/pub", |_| {});
+    let a = server(
+        tmp.path(),
+        Mode {
+            ask: true,
+            ..Default::default()
+        },
+    );
+    let r = rig(&[a.host()]);
+    let home = r.base.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        home.join(".netrc"),
+        "default login nodeowner password NETRC-SECRET-of-the-node-owner\n",
+    )
+    .unwrap();
+    use_test_home(Some(home));
+    let _ = r.clone(req(&a.host(), "o/pub", false)).await;
+    use_test_home(None);
+    use base64::Engine as _;
+    let netrc = base64::engine::general_purpose::STANDARD
+        .encode("nodeowner:NETRC-SECRET-of-the-node-owner");
+    assert!(
+        a.seen().iter().any(|s| s.head.contains(&netrc)),
+        "curl did not read the .netrc: the guard above proves nothing here"
+    );
+}
+
+/// What the clone's git gets in its environment (M1): exactly an
+/// allow-list; `HOME`, `XDG_CONFIG_HOME` and `CURL_HOME` an empty folder
+/// the node made in its own data directory (0700), removed afterwards.
+#[tokio::test]
+async fn the_clone_gets_an_allow_listed_environment_and_an_empty_home() {
+    let tmp = tempfile::tempdir().unwrap();
+    bare(tmp.path(), "o/pub", |_| {});
+    let a = server(tmp.path(), Mode::default());
+    let r = rig(&[a.host()]);
+    let dump = r.base.join("env.txt");
+    let wrap = r.base.join("git-env");
+    crate::test_script::script(
+        &wrap,
+        &format!(
+            "#!/bin/sh\nfor a in \"$@\"; do [ \"$a\" = clone ] && {{ env > {d}; \
+             ls -A \"$HOME\" > {d}.home; stat -c %a \"$HOME\" > {d}.mode; }}; done\n\
+             exec git \"$@\"\n",
+            d = dump.display()
+        ),
+    );
+    crate::git::use_test_git(Some(wrap));
+    let res = r.clone(req(&a.host(), "o/pub", false)).await;
+    crate::git::use_test_git(None);
+    res.unwrap();
+    let env = std::fs::read_to_string(&dump).unwrap();
+    let vars: std::collections::BTreeMap<String, String> = env
+        .lines()
+        .filter_map(|l| l.split_once('='))
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let allowed = [
+        "PATH",
+        "LANG",
+        "TMPDIR",
+        "HOME",
+        "XDG_CONFIG_HOME",
+        "CURL_HOME",
+        "GIT_CONFIG_NOSYSTEM",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_TERMINAL_PROMPT",
+        "GIT_ASKPASS",
+        "SSH_ASKPASS",
+        "GIT_PAGER",
+        "GIT_NO_LAZY_FETCH",
+        "GIT_OPTIONAL_LOCKS",
+        "GIT_AUTHOR_NAME",
+        "GIT_AUTHOR_EMAIL",
+        "GIT_COMMITTER_NAME",
+        "GIT_COMMITTER_EMAIL",
+        // Set by the shell that reads the list, not by the node.
+        "PWD",
+        "SHLVL",
+        "OLDPWD",
+        "_",
+    ];
+    for k in vars.keys() {
+        assert!(allowed.contains(&k.as_str()), "{k} reached git");
+    }
+    let home = PathBuf::from(vars.get("HOME").expect("HOME is set"));
+    assert!(
+        home.starts_with(r.data.join(ProjectsPolicy::STAGING)),
+        "{}",
+        home.display()
+    );
+    assert_eq!(vars.get("XDG_CONFIG_HOME"), vars.get("HOME"));
+    assert_eq!(vars.get("CURL_HOME"), vars.get("HOME"));
+    assert_eq!(
+        std::fs::read_to_string(format!("{}.home", dump.display())).unwrap(),
+        "",
+        "the home was not empty"
+    );
+    assert_eq!(
+        std::fs::read_to_string(format!("{}.mode", dump.display()))
+            .unwrap()
+            .trim(),
+        "700"
+    );
+    assert!(!home.exists(), "the home is removed after the clone");
+}
+
+/// An empty repository on the forge (L1): the folder gets the same first
+/// empty commit `project.create` makes, on the branch the remote names as
+/// its default, so the harness can work in it and a push can start it.
+#[tokio::test]
+async fn an_empty_repository_gets_a_first_commit_on_its_default_branch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dest = tmp.path().join("o/empty.git");
+    std::fs::create_dir_all(&dest).unwrap();
+    git_in(&dest, &["init", "-q", "--bare", "-b", "trunk"]);
+    let a = server(tmp.path(), Mode::default());
+    let r = rig(&[a.host()]);
+    let p = r.clone(req(&a.host(), "o/empty", false)).await.unwrap();
+    assert_eq!(git_in(&p, &["rev-list", "--count", "HEAD"]), "1");
+    assert_eq!(git_in(&p, &["branch", "--show-current"]), "trunk");
+    assert_eq!(
+        git_in(&p, &["log", "-1", "--format=%an <%ae>|%s"]),
+        format!("harness <harness@localhost>|{}", crate::git::FIRST_COMMIT)
+    );
+    assert_eq!(
+        git_in(&p, &["config", "--get", "remote.origin.url"]),
+        format!("{}/o/empty.git", a.base())
+    );
+    r.nothing_kept_but(&p);
+}
+
+/// A repository with refs whose `HEAD` names no commit (L1): refused, with
+/// an error that says so, nothing kept.
+#[tokio::test]
+async fn a_repository_whose_head_names_no_commit_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    bare(tmp.path(), "o/headless", |_| {});
+    let b = tmp.path().join("o/headless.git");
+    git_in(&b, &["branch", "-m", "main", "dev"]);
+    git_in(&b, &["symbolic-ref", "HEAD", "refs/heads/gone"]);
+    let a = server(tmp.path(), Mode::default());
+    let r = rig(&[a.host()]);
+    let e = r
+        .clone(req(&a.host(), "o/headless", false))
+        .await
+        .unwrap_err();
+    assert!(e.contains("names no commit"), "{e}");
+    r.nothing_kept();
+    assert_eq!(r.made_count(), 0);
+}
+
+/// The token did not reach git (another process took it from the pipe:
+/// here a stand-in git that drains its standard input first) (L4): the
+/// error says what that means and what to do, never the token.
+#[tokio::test]
+async fn a_credential_that_never_arrived_is_said_plainly() {
+    let tmp = tempfile::tempdir().unwrap();
+    bare(tmp.path(), "o/secret", |_| {});
+    let a = server(
+        tmp.path(),
+        Mode {
+            ask: true,
+            ..Default::default()
+        },
+    );
+    let r = rig(&[a.host()]);
+    let wrap = r.base.join("git-thief");
+    crate::test_script::script(
+        &wrap,
+        "#!/bin/sh\nfor a in \"$@\"; do [ \"$a\" = clone ] && cat > /dev/null; done\nexec git \"$@\"\n",
+    );
+    crate::git::use_test_git(Some(wrap));
+    let res = r.clone(req(&a.host(), "o/secret", true)).await;
+    crate::git::use_test_git(None);
+    let e = res.unwrap_err();
+    assert!(e.contains("did not receive the credential"), "{e}");
+    assert!(e.contains("Plugins → Connectors"), "{e}");
+    assert!(!e.contains(CANARY));
+    r.nothing_kept();
 }

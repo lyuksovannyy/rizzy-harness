@@ -308,6 +308,11 @@ fn clone_config(scheme: &str, helper: Option<&str>, proactive: bool) -> Vec<Stri
         // A redirect to another host would take the credential with it
         // (git re-bases on the redirect target; the experiment).
         "http.followRedirects=false",
+        // Off by git's default today; off here whatever a later git does:
+        // a bundle or packfile URI the server advertises is another URL.
+        "transfer.bundleURI=false",
+        "fetch.bundleURI=",
+        "fetch.uriProtocols=",
         "http.proxy=",
         "credential.useHttpPath=true",
         "credential.interactive=false",
@@ -357,7 +362,7 @@ fn token_pipe(token: &Secret<String>) -> Result<(std::os::fd::OwnedFd, u64), Str
 thread_local! {
     /// Tests: behave as a git without `http.proactiveAuth`.
     static OLD_GIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Tests: the `HOME` git gets (the node passes none).
+    /// Tests: the `HOME` git gets instead of the node's empty one.
     static TEST_HOME: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
@@ -372,6 +377,55 @@ pub(crate) fn use_test_home(p: Option<PathBuf>) {
 }
 
 /// Run `git clone` into `build`, within `bounds`.
+/// An empty folder the node makes for one clone, in its staging folder
+/// (0700, made new so it is empty), given to git as `HOME`,
+/// `XDG_CONFIG_HOME` and `CURL_HOME`; removed when dropped. With `HOME`
+/// unset libcurl would find the node user's home through the password
+/// database and read its `.netrc` (review of PR 163).
+struct EmptyHome(PathBuf);
+
+impl EmptyHome {
+    fn new(staging: &Path) -> Result<Self, String> {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut b = [0u8; 8];
+        getrandom::fill(&mut b).expect("OS randomness");
+        let p = staging.join(format!("home-{}", hex::encode(b)));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&p)
+            .map_err(|e| format!("cannot make a folder in the node's staging folder: {e}"))?;
+        let home = Self(p);
+        if std::fs::read_dir(&home.0).map_or(true, |mut d| d.next().is_some()) {
+            return Err("the clone's empty home folder is not empty".into());
+        }
+        Ok(home)
+    }
+}
+
+impl Drop for EmptyHome {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// What git's error output means when a private clone's credential never
+/// reached it (git asked for a user name or password, and nothing answered).
+fn credential_missing(stderr: &str) -> bool {
+    [
+        "could not read Username",
+        "could not read Password",
+        "unable to get password",
+        "terminal prompts disabled",
+    ]
+    .iter()
+    .any(|m| stderr.contains(m))
+}
+
+/// The message for that case.
+pub const CREDENTIAL_MISSING: &str = "git did not receive the credential the node passed it for \
+     this private repository, so nothing was cloned. If this happens again, another process of \
+     this node's user may be reading it: replace the token under Plugins → Connectors";
+
 async fn run_git(build: &Build, req: &CloneRequest, bounds: &Bounds) -> Result<(), String> {
     let path = format!("{}.git", req.full_name);
     let (stdin, helper) = match (&req.username, &req.token) {
@@ -385,14 +439,26 @@ async fn run_git(build: &Build, req: &CloneRequest, bounds: &Bounds) -> Result<(
         _ => (Stdio::null(), None),
     };
     let proactive = helper.is_some() && proactive_auth().await;
+    // The environment is an allow-list (the hardened base clears it and
+    // passes PATH, LANG, TMPDIR and its own GIT_* values; no inherited
+    // GIT_*, SSL_*, CURL_* or proxy variable reaches git); the home, where
+    // libcurl reads `.netrc` and git a user config, is an empty folder of
+    // the node's own, never the node user's.
+    let staging = build
+        .path()
+        .parent()
+        .ok_or("the node's staging folder is missing")?;
+    let home = EmptyHome::new(staging)?;
     let mut c = crate::git::hardened(&crate::git::git_program());
-    // No home: no `~/.netrc` for curl, no `~/.gitconfig` (also off by
-    // `GIT_CONFIG_GLOBAL`), no proxy variables (the environment is cleared).
-    c.env_remove("HOME");
+    #[allow(unused_mut)]
+    let mut home_dir = home.0.clone();
     #[cfg(test)]
     if let Some(h) = TEST_HOME.with(|h| h.borrow().clone()) {
-        c.env("HOME", h);
+        home_dir = h;
     }
+    c.env("HOME", &home_dir)
+        .env("XDG_CONFIG_HOME", &home_dir)
+        .env("CURL_HOME", &home_dir);
     for o in clone_config(SCHEME, helper.as_deref(), proactive) {
         c.arg("-c").arg(o);
     }
@@ -467,15 +533,30 @@ async fn run_git(build: &Build, req: &CloneRequest, bounds: &Bounds) -> Result<(
         None => Vec::new(),
     };
     if !status.success() {
-        return Err(format!(
-            "git clone failed: {}",
-            clean_error(&String::from_utf8_lossy(&stderr), req)
-        ));
+        let text = String::from_utf8_lossy(&stderr);
+        if req.token.is_some() && credential_missing(&text) {
+            return Err(CREDENTIAL_MISSING.into());
+        }
+        return Err(format!("git clone failed: {}", clean_error(&text, req)));
     }
     if over(&at, bounds.max_bytes).await {
         return Err(too_big(bounds));
     }
-    Ok(())
+    drop(home);
+    // An empty repository gets `project.create`'s first commit (on the
+    // branch the remote names as its default), so the harness can work in
+    // it; refs without a commit at `HEAD` are refused.
+    match crate::git::head_of(&build.proc_path()).await? {
+        crate::git::Head::Commit => Ok(()),
+        crate::git::Head::Empty => crate::git::first_commit(&build.proc_path())
+            .await
+            .map_err(|e| format!("making the empty repository's first commit failed: {e}")),
+        crate::git::Head::Dangling => Err(
+            "the repository's HEAD names no commit (its default branch is missing on the \
+             forge); nothing was kept"
+                .into(),
+        ),
+    }
 }
 
 fn too_big(bounds: &Bounds) -> String {
