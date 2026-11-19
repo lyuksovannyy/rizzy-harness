@@ -306,7 +306,8 @@ mod tests {
         assert_eq!(r.email, format!("alex@{NOREPLY_DOMAIN}"));
         // A hostile login cannot reach the no-reply address either.
         let r = id("al\nex <x>@", None, None);
-        assert_eq!(r.email, format!("alex@{NOREPLY_DOMAIN}"));
+        assert_eq!(r.email, format!("alexx@{NOREPLY_DOMAIN}"));
+        assert!(check_email(&r.email).is_ok());
         let r = id("\n", None, None);
         assert_eq!(r.email, format!("user@{NOREPLY_DOMAIN}"));
         assert!(check_email(&r.email).is_ok());
