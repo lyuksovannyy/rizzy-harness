@@ -227,6 +227,12 @@ pub(crate) struct Session {
     /// whose approved repository servers its table takes. In memory only:
     /// after a restart it is learned again from the next turn.
     owner: Mutex<Option<String>>,
+    /// The identity this chat's commits carry (T88), as the master named it
+    /// with the last turn command and this node resolved it: none until a
+    /// turn names one (a chat nobody owns never does). In memory only,
+    /// never logged. A sub-agent's session reads its chat's
+    /// ([`Self::commit_identity`]).
+    identity: Mutex<Option<harness_core::identity::Identity>>,
     /// The chat's folder's `.mcp.json` was read once for this chat (when
     /// its owner was first learned, X.36): never again for it.
     looked: AtomicBool,
@@ -590,6 +596,7 @@ impl Session {
             owned_cell: Mutex::new(owned),
             exec_mode,
             owner: Mutex::new(None),
+            identity: Mutex::new(None),
             looked: AtomicBool::new(false),
         });
         Self::record_ends(&s, ends);
@@ -733,6 +740,7 @@ impl Session {
             // runs nothing (`checked_folder`).
             exec_mode: meta.exec_mode,
             owner: Mutex::new(None),
+            identity: Mutex::new(None),
             looked: AtomicBool::new(false),
         });
         Self::record_ends(&s, ends);
@@ -745,7 +753,14 @@ impl Session {
     /// started), the folder's `.mcp.json` is read once, for the names it
     /// holds; never again for this chat, never per turn. A read that does
     /// not end within `project_mcp::LOOK_WAIT` changes nothing.
-    pub(crate) async fn learn_owner(&self, owner: Option<String>) {
+    pub(crate) async fn learn_owner(
+        &self,
+        owner: Option<String>,
+        identity: Option<harness_core::identity::CommitIdentity>,
+    ) {
+        // The node decides what a commit is signed with: whatever the
+        // master sent is checked here again (`CommitIdentity::resolve`).
+        *self.identity.lock().unwrap_or_else(|p| p.into_inner()) = identity.map(|i| i.resolve());
         *self.owner.lock().unwrap_or_else(|p| p.into_inner()) = owner.clone();
         let (Some(pm), Some(owner), Some(_)) = (&self.node.project_mcp, owner, &self.mcp) else {
             return;
@@ -5514,6 +5529,27 @@ impl TurnHost for Session {
 
     fn exec_mode(&self) -> Option<harness_core::policy::ExecMode> {
         self.exec_mode
+    }
+
+    /// The identity of the chat at the top of this session's parents (a
+    /// sub-agent follows its root chat's owner, never its own turn's
+    /// sender); the node's fallback where the chat has none.
+    fn commit_identity(&self) -> Option<harness_core::identity::Identity> {
+        let mut top = None;
+        let mut up = self.parent_session;
+        for _ in 0..8 {
+            let Some(s) = up.and_then(|p| self.node.session(p)) else {
+                break;
+            };
+            up = s.parent_session;
+            top = Some(s);
+        }
+        let held = |s: &Session| s.identity.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let found = match &top {
+            Some(root) => held(root),
+            None => held(self),
+        };
+        Some(found.unwrap_or_else(harness_core::identity::Identity::fallback))
     }
 
     async fn approve(&self, call_id: &str, tool: &str, input: &Value, risk: ToolRisk) -> Decision {

@@ -134,6 +134,7 @@ async fn a_note_never_lands_inside_a_turn_and_never_refuses_a_prompt() {
                 agent_named: false,
                 files: vec![],
                 owner: None,
+                identity: None,
                 peers: vec![],
                 tags: vec![],
             })

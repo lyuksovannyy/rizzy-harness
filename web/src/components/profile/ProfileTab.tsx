@@ -4,7 +4,7 @@
 // saved together with Save. The server checks every field; its message goes
 // under the field it names.
 import { ImagePlus, Trash2 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import "./profile.css";
 import { pageApi } from "../../apiPages";
 import { savablePrefs } from "../../lib/modelPlan";
@@ -31,6 +31,9 @@ function localErrors(p: Prefs): Partial<Record<ProfileField, string>> {
   }
   return out;
 }
+
+/** What an agent's commits carry until an e-mail is set (README "What an agent's commits are signed with"). */
+const NOREPLY_DOMAIN = "users.noreply.rizzy.invalid";
 
 const message = (x: unknown) => (x instanceof Error ? x.message : String(x));
 
@@ -119,6 +122,8 @@ export default function ProfileTab(props: { me: Me; prefs: Prefs; models: ModelI
   const [err, setErr] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [emailErr, setEmailErr] = useState<string | null>(null);
+  const emailId = useId();
   const [images, setImages] = useState<ProfileImages>({ avatar: null, banner: null });
   const [pictureErr, setPictureErr] = useState<string | null>(null);
   useEffect(() => setP(props.prefs), [props.prefs]);
@@ -132,17 +137,19 @@ export default function ProfileTab(props: { me: Me; prefs: Prefs; models: ModelI
     setErr(null);
     const local = localErrors(p);
     setErrors(local);
+    setEmailErr(null);
     if (Object.keys(local).length > 0) return;
     setBusy(true);
     try {
-      const body = { ...savablePrefs(p, props.models), description: (p.description ?? "").trim() || null };
+      const body = { ...savablePrefs(p, props.models), description: (p.description ?? "").trim() || null, commit_email: (p.commit_email ?? "").trim() || null };
       const saved = await pageApi.saveSettings(body);
       props.onSaved(saved);
       setMsg("Saved.");
     } catch (x) {
       const m = message(x);
       const f = fieldOf(m);
-      if (f) setErrors({ [f]: m.slice(f.length + 1).replace(/^must/, "Must") });
+      if (m.startsWith("commit_email ")) setEmailErr(m.slice("commit_email ".length).replace(/^must/, "Must"));
+      else if (f) setErrors({ [f]: m.slice(f.length + 1).replace(/^must/, "Must") });
       else setErr(m);
     } finally {
       setBusy(false);
@@ -178,6 +185,31 @@ export default function ProfileTab(props: { me: Me; prefs: Prefs; models: ModelI
         withDescription
         errors={errors}
       />
+      {props.me.user_id && (
+        <div className="field">
+          <label className="field-label" htmlFor={`${emailId}-email`}>
+            E-mail for commits <span className="optional">(optional)</span>
+          </label>
+          <input
+            id={`${emailId}-email`}
+            type="email"
+            value={p.commit_email ?? ""}
+            placeholder={`${props.me.username}@${NOREPLY_DOMAIN}`}
+            maxLength={254}
+            autoComplete="off"
+            aria-invalid={!!emailErr}
+            onChange={(e) => {
+              setP({ ...p, commit_email: e.target.value.trim() ? e.target.value : null });
+              setMsg(null);
+            }}
+          />
+          {emailErr ? (
+            <span className="field-hint error-text">{emailErr}</span>
+          ) : (
+            <span className="field-hint">The address your agents' commits carry, with your name. Until you set one they carry {props.me.username}@{NOREPLY_DOMAIN}, which is not a mailbox. Only you can see it; the shell of your agents can.</span>
+          )}
+        </div>
+      )}
       {err && <div className="error-text">{err}</div>}
       <div className="row end">
         {msg && <span className="muted">{msg}</span>}

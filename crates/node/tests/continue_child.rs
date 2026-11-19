@@ -529,6 +529,7 @@ async fn a_child_continued_after_the_chat_went_to_ask_asks() {
         agent_named: false,
         files: vec![],
         owner: None,
+        identity: None,
         peers: vec![],
         tags: vec![],
     });
@@ -1117,6 +1118,7 @@ async fn entering_plan_mode_denies_a_continued_childs_waiting_card() {
         agent_named: false,
         files: vec![],
         owner: None,
+        identity: None,
         peers: vec![],
         tags: vec![],
     });

@@ -244,6 +244,7 @@ impl Node {
             agent_named: false,
             files,
             owner: None,
+            identity: None,
             peers: vec![],
             tags: vec![],
         })

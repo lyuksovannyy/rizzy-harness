@@ -204,6 +204,9 @@ pub struct ToolCtx {
     /// the node's protected sessions folder): paths inside it are not
     /// refused as protected, for this session only.
     pub owned: Option<harness_core::folder::OwnedFolder>,
+    /// The identity the agent's `git commit` carries (T88), as the node's
+    /// session resolved it from the chat owner; `None` adds nothing for git.
+    pub identity: Option<harness_core::identity::Identity>,
     /// This session's background commands (`bash` with `background: true`,
     /// `bash_output`, `bash_stop`), or why there are none here.
     pub background: background::Access,
@@ -259,6 +262,7 @@ impl ToolCtx {
             sandbox: Default::default(),
             pin: None,
             owned: None,
+            identity: None,
             background: Default::default(),
             skills: None,
             seen: Default::default(),

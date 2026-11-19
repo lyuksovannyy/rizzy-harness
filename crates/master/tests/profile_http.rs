@@ -1464,3 +1464,286 @@ async fn saves_race_safely_and_refuse_unknown_fields() {
     let (_, v) = req(&t, Method::GET, "/api/me/settings", None, &alex).await;
     assert_ne!(v["personalisation"]["instructions"], "PWNED");
 }
+
+// ============ the e-mail for commits (PLAN.md T88) ============
+
+const EMAIL: &str = "canary-bob-5521@example.org";
+
+/// `path` as the API token.
+async fn token_req(t: &T, method: Method, path: &str, body: Option<Value>) -> (StatusCode, Value) {
+    let mut rb = auth(
+        reqwest::Client::new().request(method, format!("{}{path}", t.base)),
+        None,
+    );
+    if let Some(b) = body {
+        rb = rb.json(&b);
+    }
+    let r = rb.send().await.unwrap();
+    let st = r.status();
+    (st, r.json().await.unwrap_or(Value::Null))
+}
+
+/// The identity on the newest prompt, retry or callback sent for `sid`.
+fn last_identity(t: &T, sid: SessionId) -> Option<harness_core::identity::CommitIdentity> {
+    t.node
+        .lock()
+        .unwrap()
+        .iter()
+        .rev()
+        .find_map(|m| match m {
+            MasterToNode::Prompt {
+                session_id,
+                identity,
+                ..
+            } if *session_id == sid => Some(identity.clone()),
+            _ => None,
+        })
+        .expect("no prompt reached the node")
+}
+
+/// Hostile values never reach the store: the master checks what the node
+/// checks again (a newline, angle brackets, 300 characters, a control
+/// character, a space, two `@`, non-ASCII). The value is the person's own:
+/// another member, a workspace admin, a server admin and the API token read
+/// none of it.
+#[tokio::test]
+async fn the_commit_email_is_checked_and_is_the_persons_own() {
+    let t = start().await;
+    let [(alex, _), (bob, _), (carol, _)] = users(&t).await;
+    let put = |c: String, e: Value| {
+        let t = &t;
+        async move {
+            req(
+                t,
+                Method::PUT,
+                "/api/me/settings",
+                Some(json!({"search_url": BASE, "commit_email": e})),
+                &c,
+            )
+            .await
+        }
+    };
+    let (st, v) = put(bob.clone(), json!(EMAIL)).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["commit_email"], EMAIL);
+    let long = format!("{}@example.org", "a".repeat(300));
+    for bad in [
+        "a@b.org\nGIT_AUTHOR_NAME: evil",
+        "a@b.org\r",
+        "Bob <bob@example.org>",
+        "bob@example.org>",
+        "two@@example.org",
+        "two@a@example.org",
+        "sp ace@example.org",
+        "ctl\u{1}@example.org",
+        "ünï@example.org",
+        "bob@exämple.org",
+        "nodomain",
+        "a\"b@example.org",
+        long.as_str(),
+    ] {
+        let (st, v) = put(bob.clone(), json!(bad)).await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{bad:?}: {v}");
+        let msg = v["error"].as_str().unwrap_or_default();
+        assert!(msg.starts_with("commit_email must be"), "{msg}");
+        assert!(
+            !msg.contains("evil") && !msg.contains("bob@"),
+            "echoed: {msg}"
+        );
+    }
+    // None of those replaced the stored value.
+    let (_, v) = req(&t, Method::GET, "/api/me/settings", None, &bob).await;
+    assert_eq!(v["commit_email"], EMAIL);
+    // Clearing it is allowed.
+    let (st, v) = put(carol.clone(), json!("carol@example.org")).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, v) = put(carol.clone(), Value::Null).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert!(
+        v.get("commit_email").is_none() || v["commit_email"].is_null(),
+        "{v}"
+    );
+    // The other settings' saves keep it: Personalisation's own endpoint
+    // never touches it.
+    let (st, _) = req(
+        &t,
+        Method::PUT,
+        "/api/me/settings/personalisation",
+        Some(json!({"instructions": "short"})),
+        &bob,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let (_, v) = req(&t, Method::GET, "/api/me/settings", None, &bob).await;
+    assert_eq!(v["commit_email"], EMAIL);
+    // Who else reads it: another member (carol), a workspace admin (carol
+    // owns the workspace bob is a member of), the server admin (alex), the
+    // API token: nowhere in their settings, `me`, the user list or the
+    // members.
+    let ws = team(&t, &carol, &["bob"]).await;
+    for (who, c) in [("member", &carol), ("server admin", &alex)] {
+        for path in [
+            "/api/me/settings".to_string(),
+            "/api/me".to_string(),
+            "/api/users".to_string(),
+            format!("/api/workspaces/{ws}"),
+            format!("/api/workspaces/{ws}/members"),
+        ] {
+            let r = auth(
+                reqwest::Client::new().get(format!("{}{path}", t.base)),
+                Some(c),
+            )
+            .send()
+            .await
+            .unwrap();
+            let body = r.text().await.unwrap();
+            assert!(!body.contains("canary-bob"), "{who} {path}: {body}");
+        }
+    }
+    for path in ["/api/me/settings", "/api/me", "/api/users"] {
+        let r = auth(
+            reqwest::Client::new().get(format!("{}{path}", t.base)),
+            None,
+        )
+        .send()
+        .await
+        .unwrap();
+        let body = r.text().await.unwrap();
+        assert!(!body.contains("canary-bob"), "token {path}: {body}");
+    }
+    // The API token has no profile: it keeps none.
+    let (st, v) = token_req(
+        &t,
+        Method::PUT,
+        "/api/me/settings",
+        Some(json!({"search_url": BASE, "commit_email": "token@example.org"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{v}");
+    let (_, v) = token_req(&t, Method::GET, "/api/me/settings", None).await;
+    assert!(
+        v.get("commit_email").is_none() || v["commit_email"].is_null(),
+        "{v}"
+    );
+}
+
+/// Every turn of a chat carries the chat OWNER's identity: their login, the
+/// display name as the account has it, and the e-mail they set, read at the
+/// turn; the API token's turn in their chat too; another person's chat gets
+/// its own; a changed e-mail applies from the next turn; nothing of it is in
+/// an event of the chat.
+#[tokio::test]
+async fn a_turn_carries_the_chat_owners_commit_identity() {
+    let t = start().await;
+    let [(_, _), (bob, _), (carol, _)] = users(&t).await;
+    let (st, _) = req(
+        &t,
+        Method::PUT,
+        "/api/me/settings",
+        Some(json!({"search_url": BASE, "display_name": "Bob Builder", "commit_email": EMAIL})),
+        &bob,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    let b = chat(&t, &bob).await;
+    let c = chat(&t, &carol).await;
+    prompt_http(&t, b, &bob).await;
+    let id = last_identity(&t, b).expect("the turn named no identity");
+    assert_eq!(
+        (id.login.as_str(), id.name.as_deref(), id.email.as_deref()),
+        ("bob", Some("Bob Builder"), Some(EMAIL))
+    );
+    // Carol has set neither a name nor an e-mail: her login only.
+    prompt_http(&t, c, &carol).await;
+    let id = last_identity(&t, c).unwrap();
+    assert_eq!(
+        (id.login.as_str(), id.name, id.email),
+        ("carol", None, None)
+    );
+    // The API token's turn in Bob's chat is signed as Bob, not as nobody:
+    // the chat is his.
+    let (st, v) = token_req(
+        &t,
+        Method::POST,
+        &format!("/api/sessions/{b}/prompt"),
+        Some(json!({"text": "from the token"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let id = last_identity(&t, b).unwrap();
+    assert_eq!(
+        (id.login.as_str(), id.email.as_deref()),
+        ("bob", Some(EMAIL))
+    );
+    // A change applies from the next turn.
+    let (st, _) = req(
+        &t,
+        Method::PUT,
+        "/api/me/settings",
+        Some(json!({"search_url": BASE, "display_name": "Bob Builder", "commit_email": "new@example.org"})),
+        &bob,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    prompt_http(&t, b, &bob).await;
+    assert_eq!(
+        last_identity(&t, b).unwrap().email.as_deref(),
+        Some("new@example.org")
+    );
+    // Nothing of it in the chats' events, as the owner reads them.
+    for (sid, cookie) in [(b, &bob), (c, &carol)] {
+        let r = auth(
+            reqwest::Client::new().get(format!("{}/api/sessions/{sid}/events", t.base)),
+            Some(cookie),
+        )
+        .send()
+        .await
+        .unwrap();
+        let body = r.text().await.unwrap();
+        assert!(
+            !body.contains("canary-bob") && !body.contains("new@example.org"),
+            "{body}"
+        );
+    }
+    // And not in what the master says to the model: the settings line.
+    let (_, turn) = last_prompt(&t);
+    assert!(
+        !turn.contains("canary-bob") && !turn.contains("new@example.org"),
+        "{turn}"
+    );
+}
+
+/// A page loaded before the e-mail was set, saving another setting, must
+/// not wipe it: the e-mail changes only when the request carries the field;
+/// `null` and an empty string clear it.
+#[tokio::test]
+async fn a_save_without_the_field_keeps_the_commit_email() {
+    let t = start().await;
+    let [_, (bob, _), _] = users(&t).await;
+    let put = |b: Value| {
+        let (t, bob) = (&t, bob.clone());
+        async move { req(t, Method::PUT, "/api/me/settings", Some(b), &bob).await }
+    };
+    let (st, _) = put(json!({"search_url": BASE, "commit_email": EMAIL})).await;
+    assert_eq!(st, StatusCode::OK);
+    // A stale page: no such field in what it sends.
+    let (st, v) = put(json!({"search_url": BASE, "display_name": "Stale"})).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["commit_email"], EMAIL, "{v}");
+    let (_, v) = req(&t, Method::GET, "/api/me/settings", None, &bob).await;
+    assert_eq!(
+        (&v["commit_email"], &v["display_name"]),
+        (&json!(EMAIL), &json!("Stale"))
+    );
+    for clear in [json!(null), json!(""), json!("  ")] {
+        let (st, _) = put(json!({"search_url": BASE, "commit_email": EMAIL})).await;
+        assert_eq!(st, StatusCode::OK);
+        let (st, v) = put(json!({"search_url": BASE, "commit_email": clear})).await;
+        assert_eq!(st, StatusCode::OK, "{clear}: {v}");
+        let (_, v) = req(&t, Method::GET, "/api/me/settings", None, &bob).await;
+        assert!(
+            v.get("commit_email").is_none_or(|e| e.is_null()),
+            "{clear}: {v}"
+        );
+    }
+}

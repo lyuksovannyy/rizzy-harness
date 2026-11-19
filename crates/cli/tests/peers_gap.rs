@@ -192,6 +192,7 @@ impl N {
             agent_named: true,
             files: vec![],
             owner: None,
+            identity: None,
             peers,
             tags: vec![],
         });
@@ -312,6 +313,7 @@ async fn a_retry_between_two_turns_of_the_list_is_refused() {
         context: None,
         agent_named: false,
         owner: None,
+        identity: None,
     });
     let r = n.ack(&id).await.unwrap_err();
     assert!(r.contains("still taking their turns"), "{r}");

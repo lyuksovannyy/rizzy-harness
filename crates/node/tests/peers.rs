@@ -267,6 +267,7 @@ impl N {
             agent_named: true,
             files: vec![],
             owner: None,
+            identity: None,
             peers: peers.iter().map(|a| (*a).clone()).collect(),
             tags: vec![],
         });
@@ -298,6 +299,7 @@ impl N {
             agent_named: true,
             files: vec![],
             owner: None,
+            identity: None,
             peers: peers.iter().map(|a| (*a).clone()).collect(),
             tags: vec![],
         });
@@ -329,6 +331,7 @@ impl N {
             agent_named: true,
             files: vec![],
             owner: None,
+            identity: None,
             peers: peers.iter().map(|a| (*a).clone()).collect(),
             tags: tags.iter().map(|t| t.to_string()).collect(),
         });

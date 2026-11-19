@@ -814,6 +814,16 @@ fn start_sandbox(
     )
     .map_err(anyhow::Error::msg)?;
     let offers = harness_node::exec::ExecOffers::from_start(&s, policy);
+    // The node user's own git configuration, read by every chat (T88).
+    if let Some(f) = harness_tools::sandbox::shared_git_config(&settings) {
+        tracing::warn!(
+            "[sandbox] read/write makes {} readable to the agents' commands: every chat on \
+             this node, whoever owns it, then runs git with that configuration (its name and \
+             e-mail win over the chat owner's, and its credential helpers, insteadOf rules and \
+             core.sshCommand apply)",
+            f.display()
+        );
+    }
     match (&s.refusal, settings.mode) {
         (Some(why), _) if refuse_to_start => bail!("{why}"),
         (Some(_), _) => tracing::error!("shell sandbox: {}", s.summary),

@@ -132,7 +132,7 @@ Terms used below:
 | **Private per-user node** (own confirm code, model access by proxy) is experimental and comes last. **Landlock stays**; containers are a further `Confinement` kind. Since O12 (2026-11-12, B.11) a host session's commands also run in bubblewrap, with Landlock inside where the kernel has it. | Two execution paths to test and document. |
 | **Environments**: the volume is kept; the node builds the invocation; the image comes from an allow-list, plus a setup script; one worktree per session; files are shared within the workspace, chats stay private. | File tools run in the node process and the shell runs in the container, so paths and file ownership must agree (§4.6). Shared files change T10 (§5). |
 | **Deletion**: no migration. Sessions are classified (a)/(b)/(c); other users are named, with their counts; autosave is optional, the deleter's choice. Anything unsafe forces a schedule (7 days by default, at least 1). Sessions are then archived; to continue, fork. **A4 (to confirm):** nothing unsafe may be deleted immediately. **A5 (confirmed):** a repository with no forge remote is class `c`. | Needs Connections (P7), a git path with network access (§4.7), archive and fork (P8). The names and counts in the dialog and autosaving colleagues' files need T10 changed (§5). |
-| **Forge accounts through Connections, per user**, plus one workspace account added by admins. | OAuth needs a registered app per forge and a callback a loopback master often cannot receive. Users have no e-mail today, which the plain fallback needs (§4.7). |
+| **Forge accounts through Connections, per user**, plus one workspace account added by admins. | OAuth needs a registered app per forge and a callback a loopback master often cannot receive. A person can now set an e-mail for commits on their Profile page, which the plain fallback uses (§4.7). |
 | **Model aliases** per workspace: a value with `::` is a concrete model, anything else an alias, never `@`. | "Alias" already means an agent handle (`crates/agents`), so always say "model alias". |
 
 ## 3. What does not change
@@ -602,16 +602,29 @@ runs, a process of the node's user that can read `/proc` (a host-mode chat, a sa
 `forge-clone`, for a host in its `[forge] hosts`; no `forge.grant` yet (one host, one
 operation, one session) and no `[forge] push`.
 
-**Commit identity for autosave.** These rules are my reading of the owner's words: the
-workspace account pushes and commits, and the session owner's account gives the linked
-co-author.
+**Commit identity.** Built (PLAN.md T88, README "What an agent's commits are signed with"):
+a `git commit` an agent makes in a chat carries the **person's own name and e-mail**. The
+owner, asked on 2026-11-19 which identity commits made by agents in the harness should carry,
+answered: "My own name and e-mail". The name is the account's display name (the login when
+there is none); the e-mail is the optional "E-mail for commits" the person sets on their
+Profile page (`Prefs::commit_email`, theirs alone to read or write), else
+`<login>@users.noreply.rizzy.invalid` (`.invalid` is reserved, so never a mailbox). The chat
+owner's identity is the identity of every turn of the chat, a sub-agent's and a routine's
+included; the master sends it with each turn and the node checks it again. It is a default
+(git's lowest configuration level), so an identity configured in the repository, with `git -c`, or in the node user's `~/.gitconfig` (when the node's `[sandbox] read` makes it readable) wins. "The node user" is the person who runs the node, not the chat's owner: on a node shared by several people, every chat then commits with that one configuration, and its credential helpers, `insteadOf` rules and `core.sshCommand` apply to everyone's commands; the node logs one warning at start when its configuration does this. The node's own
+git (checkpoints, snapshots, clones) never takes it.
+
+**Commit identity for autosave (not built).** These rules are my reading of the owner's words
+for the autosave of §4.8: the workspace account pushes and commits, and the session owner's
+account gives the linked co-author. What changed since this was written: the harness now
+stores the person's commit e-mail, so the fallback trailer no longer needs one invented.
 
 | Part | Rule |
 |---|---|
 | Push credential | The workspace forge account's token. No workspace account for that host: no autosave (§9). |
 | Author and committer | The workspace forge account: its display name and the commit e-mail the forge links to it. |
 | `Co-authored-by` trailer | The session owner, from the account chosen in `workspace_connection_choice` for that host: `Co-authored-by: <display name> <commit e-mail>`. |
-| Fallback trailer | No connected account: `Co-authored-by: <harness display name> <e-mail>`. Shown, not linked. The harness stores no e-mail today, so the fallback needs one (§9). |
+| Fallback trailer | No connected account: `Co-authored-by: <display name> <commit e-mail>`, the person's own identity as above (their Profile e-mail, else the no-reply form). Shown, not linked. |
 | Message | `rizzy-harness autosave before environment deletion`, then the trailer. No session title. |
 
 ### 4.8 Deleting an environment

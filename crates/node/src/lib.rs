@@ -147,14 +147,18 @@ fn lane_of(msg: &MasterToNode) -> Option<SessionId> {
 /// A turn command's `owner` (X.36): a malformed one refuses the command
 /// (nothing about it is logged); a well-formed one is kept for the chat's
 /// table.
-async fn learn_owner(s: &Session, owner: Option<String>) -> Result<(), String> {
+async fn learn_owner(
+    s: &Session,
+    owner: Option<String>,
+    identity: Option<harness_core::identity::CommitIdentity>,
+) -> Result<(), String> {
     if owner
         .as_deref()
         .is_some_and(|o| !harness_protocol::valid_user_id(o))
     {
         return Err("the command names a malformed account id as the chat's owner".into());
     }
-    s.learn_owner(owner).await;
+    s.learn_owner(owner, identity).await;
     Ok(())
 }
 
@@ -1717,6 +1721,7 @@ impl NodeRuntime {
                 images,
                 files,
                 owner,
+                identity,
                 peers,
                 tags,
                 ..
@@ -1742,7 +1747,7 @@ impl NodeRuntime {
                     files,
                 };
                 match self.session(session_id) {
-                    Some(s) => match learn_owner(&s, owner).await {
+                    Some(s) => match learn_owner(&s, owner, identity).await {
                         Ok(()) => {
                             s.prompt(input, agent, agent_named, compare, extra, peers, tags)
                                 .await
@@ -1759,13 +1764,14 @@ impl NodeRuntime {
                 savings,
                 context,
                 owner,
+                identity,
                 ..
             } => {
                 self.audit("session.callback", session_id).await;
                 // The standing parts only; this turn's own line never.
                 let standing = context.map(|c| c.standing);
                 match self.session(session_id) {
-                    Some(s) => match learn_owner(&s, owner).await {
+                    Some(s) => match learn_owner(&s, owner, identity).await {
                         Ok(()) => {
                             s.callback(bg_ids, agent, savings.unwrap_or_default(), standing)
                                 .await
@@ -1783,6 +1789,7 @@ impl NodeRuntime {
                 context,
                 agent_named,
                 owner,
+                identity,
                 ..
             } => {
                 self.audit("session.retry", session_id).await;
@@ -1797,7 +1804,7 @@ impl NodeRuntime {
                     ..Default::default()
                 };
                 match self.session(session_id) {
-                    Some(s) => match learn_owner(&s, owner).await {
+                    Some(s) => match learn_owner(&s, owner, identity).await {
                         Ok(()) => s.retry(&turn_id, agent, agent_named, extra).await,
                         Err(e) => Err(e),
                     },

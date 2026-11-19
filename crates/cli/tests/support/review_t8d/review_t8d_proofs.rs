@@ -325,6 +325,7 @@ no_callbacks: false,
             agent_named: false,
             files: vec![],
             owner: None,
+            identity: None,
     peers: vec![],
     tags: vec![],
         });

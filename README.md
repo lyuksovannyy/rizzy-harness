@@ -431,8 +431,8 @@ to choose a PNG, JPEG or WebP; the browser crops it, the avatar to a square of
 at most 256 px and the banner to 3:1 at most 1500 × 500, and re-encodes it,
 so no camera or location data goes along; each has a remove button, which
 asks first), your name, country,
-city and time zone, and **About you**, one paragraph of at most 280
-characters. **Save** saves the fields together; a picture is saved as soon
+city and time zone, **About you**, one paragraph of at most 280
+characters, and **E-mail for commits** (optional, below). **Save** saves the fields together; a picture is saved as soon
 as you pick it. The avatar shows in the account menu and in members lists to
 the people who share a workspace with you; the banner only to you. The
 sidebar's account button keeps your initial. The server checks every
@@ -446,6 +446,54 @@ you (your name, else your username), your time zone (in a plain chat also
 your local time), your city and country if you gave them, and About you, in
 ‹ › marks as your words (not in a turn started by a webhook). Nobody else
 sees About you: not other members, not admins.
+
+**What an agent's commits are signed with.** A `git commit` an agent makes in
+one of your chats carries **your** name and e-mail, with no flags and no
+set-up (the owner's decision of 2026-11-19, asked "which identity should
+commits made by agents in the harness carry?": "My own name and e-mail"):
+the name is your display name (your username when you gave none), the e-mail
+the one you set under **E-mail for commits** on the Profile page. Until you
+set one, commits carry `<your username>@users.noreply.rizzy.invalid`; `.invalid`
+is reserved, so that address can never be a real mailbox, and the Profile
+page says so beside the field. The e-mail is at most 254 characters, ASCII
+only for now (letters, digits and `. _ % + -` before the `@`, a domain after
+it), with no spaces, angle brackets or control characters; the display name
+may hold any letters but no angle brackets, quotes, backslash, control,
+line-separator, zero-width or direction-override characters, and if it does
+not pass, the username is the name. The chat's owner decides, for every turn
+of the chat: yours, your routines' runs, callback turns, and a turn the API
+token sends into your chat; a sub-agent's commits carry the identity of the
+chat it works for. A chat nobody owns commits as `Harness agent`
+(`agent@users.noreply.rizzy.invalid`). Only you read or change the
+e-mail (not other members, workspace admins, server admins or the API token);
+it goes to the node that runs your chat with each turn, and nowhere else:
+not into any chat event, audit line or log line, and not to the model.
+**The agent's shell can see it** (`git log` prints it, `git config user.email`
+too, and the file `$GIT_CONFIG_SYSTEM` names in the chat's temp folder), as it
+can see everything a commit holds; a commit you push shows it to everyone who
+can read the repository, so use a no-reply address from your forge if that
+matters. This identity is only a **default**: it is the lowest level of git's
+configuration, so an identity set where git looks first wins: the
+repository's `.git/config`, `git -c user.email=…`, and the node user's `~/.gitconfig`
+where the node lets the shell read it (below). The node's own git (checkpoints,
+snapshots, clones) never takes it. Git 2.32 or newer is needed for the default
+to apply (older versions ignore `GIT_CONFIG_SYSTEM`); with `[sandbox] mode =
+"off"` the node adds nothing and your own git configuration applies.
+
+**The node user's `~/.gitconfig` in a chat.** A sandbox chat's file view has no home
+folder, and in a `host` chat Landlock denies the shell reading anything in
+the home folder that no `[sandbox]` entry or the chat's folder covers (the
+rule of that mode, unchanged). Git would warn on every command that it
+cannot read `~/.gitconfig` and then refuse to run; so there the node tells
+git (`GIT_CONFIG_GLOBAL`) to use an empty configuration. The node's operator
+can name the file in `[sandbox] read` (the list under "Sandbox" below already
+suggests it); git then reads it. **"Your own" there means the person who runs
+the node, not the chat's owner:** git in **every** chat on that node, a second
+person's included, reads the operator's configuration, so their name and
+e-mail win over the chat owner's account identity and their credential
+helpers, `insteadOf` rules and `core.sshCommand` apply to everyone's commands.
+On a node only you use, that is what you want; on a shared node leave it out.
+The node writes one warning line at start when its configuration does this.
 
 **Personalisation** (Settings → Account → Personalisation) sets how every
 agent replies to you in your own chats: **Base style and tone** (Default,
@@ -1871,9 +1919,10 @@ a command notices:
   chat's temp folder, which compilers, `mktemp` and most tools already
   use). Your home folder is there only as far as a `[sandbox] read` or
   `write` entry or the session folder lies inside it, so a program that
-  looks for `~/.gitconfig` or `~/.config` finds nothing (`git` then works
-  with its defaults; give it `-c user.name=…` or a `read` entry for the
-  file). The host name, `TMPDIR` and the environment are as without it.
+  looks for `~/.gitconfig` or `~/.config` finds nothing (`git` works with an
+  empty global configuration and commits with the chat owner's name and
+  e-mail; see "What an agent's commits are signed with"; a `read` entry for
+  `~/.gitconfig` gives it the node user's, for every chat on the node). The host name, `TMPDIR` and the environment are as without it.
 
 **Network off.** `network = "off"` is about the node's shell (and
 graphify and the node's own git); the agent's web tools (`web_search`,
