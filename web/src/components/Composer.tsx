@@ -392,6 +392,23 @@ export function Composer(props: {
     };
   }, [text, filesOf, hasPathToken]);
   const attached = found.filter((p) => !dropped.includes(p));
+  // The agents this text calls, when it calls several (X.37): the rule is
+  // loaded when the text holds an `@` (lib/calledNow.ts).
+  const [called, setCalled] = useState<string[]>([]);
+  useEffect(() => {
+    if (searching || !text.includes("@")) {
+      setCalled((c) => (c.length ? [] : c));
+      return;
+    }
+    let live = true;
+    import("../lib/calledNow")
+      .then((m) => m.calledIn(text, pickable(props.agents)))
+      .then((c) => live && setCalled(c), () => {});
+    return () => {
+      live = false;
+    };
+  }, [text, props.agents, searching]);
+  const several = called.length > 1;
   // On send, the check of the text as sent (a token typed within the
   // debounce, a file made since): waited for at most 2 s, else the chips
   // shown. Never a path the person took off.
@@ -672,8 +689,20 @@ export function Composer(props: {
           onKeyDown={onKeyDown}
           onPaste={(e) => takeImages(e, e.clipboardData.files)}
         />
-        {files.length + pictures.length + attached.length > 0 && (
+        {files.length + pictures.length + attached.length > 0 || several ? (
           <ul className="chips" aria-label={t("composer.attachments")}>
+            {several &&
+              (called.length > 4 ? (
+                <li className="chip" role="alert">
+                  {t("composer.tooMany")}
+                </li>
+              ) : (
+                called.map((id, n) => (
+                  <li key={`call-${id}`} className="chip" title={t("composer.calls")}>
+                    {n + 1}. @{id}
+                  </li>
+                ))
+              ))}
             {pictures.map((x) => (
               <li key={x.key} className="chip image-chip">
                 {x.media_id ? (
@@ -712,7 +741,7 @@ export function Composer(props: {
               </li>
             ))}
           </ul>
-        )}
+        ) : null}
         <div className="composer-row">
           {mode !== "search" && (
             <>

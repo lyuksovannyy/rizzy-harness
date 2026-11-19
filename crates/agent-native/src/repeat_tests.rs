@@ -575,6 +575,7 @@ async fn the_warning_and_the_refusal_rebuild_from_the_log() {
             reply: None,
             images: vec![],
             queued: false,
+            triggers: vec![],
             files: vec![],
         }),
     )];
@@ -606,6 +607,7 @@ async fn a_new_turn_starts_a_new_count() {
             reply: None,
             images: vec![],
             queued: false,
+            triggers: vec![],
             files: vec![],
         }),
     )];
@@ -909,6 +911,7 @@ fn log_of(sid: SessionId, host: &Host, more: Vec<EventKind>) -> Vec<RawEvent> {
         reply: None,
         images: vec![],
         queued: false,
+        triggers: vec![],
         files: vec![],
     })];
     kinds.extend(host.events.lock().unwrap().iter().cloned());

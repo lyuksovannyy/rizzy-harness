@@ -3151,3 +3151,91 @@ async fn a_send_acked_before_its_caller_gave_up_keeps_its_grant() {
     let r = t.chat.call(a, TOOL, json!({})).await;
     assert!(r.is_ok(), "{r:?}");
 }
+
+/// X.37: a message that calls several agents. The first agent's own turn
+/// keeps today's grant (the owner's signed-in message); the others travel
+/// as `peers` with no connector tool, and their turns (`cause.mention`) are
+/// granted nothing, take no recorded send, and leave the next message of the
+/// owner its own grant.
+#[tokio::test]
+async fn a_mention_turn_is_granted_nothing_and_takes_no_send() {
+    let t = start_with(
+        &[
+            "profile:chat",
+            CAP_PLUGIN_ACCESS,
+            CAP_CONNECTORS,
+            harness_protocol::CAP_PEERS,
+        ],
+        true,
+    )
+    .await;
+    let [alex, _bob] = users(&t).await;
+    let ws = team(&t, &alex, "Team").await;
+    let (id, stamp) = add(&t, &alex, &ws, "linear", "auth/linear", "token").await;
+    connect(&t, &alex, &ws, &id, &stamp).await;
+    let a = chat(&t, &alex, &ws).await;
+    t.master
+        .prompt(
+            a,
+            "@coder @writer hello".into(),
+            PromptOpts {
+                by_owner: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let (first, peers) = {
+        let seen = t.chat.seen.lock().unwrap();
+        match seen
+            .iter()
+            .rev()
+            .find(|m| matches!(m, MasterToNode::Prompt { .. }))
+            .unwrap()
+        {
+            MasterToNode::Prompt { agent, peers, .. } => (agent.clone().unwrap(), peers.clone()),
+            _ => unreachable!(),
+        }
+    };
+    assert_eq!(first.agent_id, "coder");
+    assert_eq!(names(&first).len(), 3, "the first agent keeps its list");
+    assert_eq!(peers.len(), 1);
+    assert_eq!(peers[0].agent_id, "writer");
+    assert!(
+        peers[0].connector_tools.is_empty(),
+        "no connector in later turns"
+    );
+    // The first agent's own turn: granted as before.
+    t.chat
+        .emit(
+            a,
+            "turn_started",
+            json!({"turn_id": "t1", "agent": {"agent_id": "coder", "name": "coder", "prompt_hash": "h"}}),
+        )
+        .await;
+    said(&t, a, "t1", "@coder @writer hello", false).await;
+    let ok = t.chat.call(a, TOOL, json!({"title": "x"})).await.unwrap();
+    assert!(!ok.is_error);
+    ended(&t, a, "t1").await;
+    // The owner's next message is sent and waits for its turn...
+    turn(&t, a, "coder").await;
+    // ...while the called agent's turn starts: no grant, and no send taken.
+    t.chat
+        .emit(
+            a,
+            "turn_started",
+            json!({"turn_id": "m1", "cause": {"mention": {"message_seq": 2, "by": "person"}},
+                   "agent": {"agent_id": "writer", "name": "writer", "prompt_hash": "h"}}),
+        )
+        .await;
+    landed(&t, a).await;
+    let e = t.chat.call(a, TOOL, json!({})).await.unwrap_err();
+    assert!(e.contains("a message called after the first"), "{e}");
+    ended(&t, a, "m1").await;
+    assert_eq!(t.remote.calls(), 1, "only the first agent's call went out");
+    // The waiting send is still there: the owner's message is granted.
+    running(&t, a, "t2", "coder", false).await;
+    let ok = t.chat.call(a, TOOL, json!({"title": "y"})).await.unwrap();
+    assert!(!ok.is_error);
+    assert_eq!(t.remote.calls(), 2);
+}

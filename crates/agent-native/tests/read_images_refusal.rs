@@ -305,6 +305,7 @@ impl Turn<'_> {
                 reply: None,
                 images: vec![],
                 queued: false,
+                triggers: vec![],
                 files: vec![],
             }));
         }

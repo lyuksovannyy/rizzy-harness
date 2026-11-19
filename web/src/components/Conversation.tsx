@@ -42,6 +42,8 @@ import { ThinkingRow } from "./ThinkingRow";
 import { DeleteChat } from "./DeleteChat";
 import { useAvatarState } from "./avatarState";
 import { Markdown } from "./Markdown";
+import { Mentioned } from "./Mentioned";
+import { peersLeft } from "../lib/peers";
 import { NodeBadge } from "./NodeBadge";
 import { ExecBadge } from "./ExecBadge";
 import { compactTokens, ContextMeter } from "./ContextMeter";
@@ -651,7 +653,9 @@ export default function Conversation(props: {
                         {it.reply ? (
                           <ReplyBubble text={it.text} reply={it.reply} block={repliedBlock(view.items, it.reply)} />
                         ) : (
-                          <div className="bubble">{it.text}</div>
+                          <div className="bubble">
+                            <Mentioned text={it.text} agents={props.agents} triggers={it.triggers} />
+                          </div>
                         )}
                         {(it.attachments || it.files) && (
                           <ul className="chips">
@@ -728,6 +732,24 @@ export default function Conversation(props: {
                     return (
                       <div key={i} className="divider callback" role="note">
                         Started by {endWords(view.items.slice(0, i), it.bg_ids)}, not by you
+                      </div>
+                    );
+                  case "called":
+                    // Where the person's message would be: it called this agent
+                    // too (the existing "Switched to" line is the chat's own
+                    // agent changing, which this is not).
+                    return (
+                      <div key={i} className="divider" role="note">
+                        {t("conv.calledBy", { name: it.agent ? `@${it.agent.agent_id}` : "an agent" })}
+                      </div>
+                    );
+                  case "peers_skipped":
+                    return (
+                      <div key={i} className="divider" role="note">
+                        {t("conv.notAsked", {
+                          names: it.agents.map((a) => `@${shownName(a)}`).join(", "),
+                          why: t(`conv.notAsked.${it.reason}`),
+                        })}
                       </div>
                     );
                   case "retry":
@@ -949,6 +971,7 @@ export default function Conversation(props: {
               turn={view?.running_turn ?? (sending.some((o) => !o.failed) ? "sending" : null)}
               name={agentName(answering)}
               mark={facing && <AgentMark agent={facing} state={face} size={22} />}
+              left={peersLeft(view?.items ?? [], !!view?.running_turn)}
             />
             {running && view?.retry && <RetryNote retry={view.retry} />}
             {summarise.compacting && !running && (

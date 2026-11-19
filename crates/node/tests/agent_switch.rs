@@ -240,6 +240,7 @@ impl N {
             agent_named: named,
             files: vec![],
             owner: None,
+            peers: vec![],
         });
     }
 

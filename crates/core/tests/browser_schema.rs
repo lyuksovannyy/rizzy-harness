@@ -12,7 +12,7 @@ mod common;
 
 use std::collections::BTreeMap;
 
-use common::{KINDS, every_kind, slot};
+use common::{KINDS, alternatives, every_kind, slot};
 use harness_core::artifacts::StagedBy;
 use harness_core::event::*;
 use harness_core::policy::{ApprovalMode, Decision, ExecMode};
@@ -361,6 +361,18 @@ fn enums() -> Vec<(&'static [&'static str], Vec<String>)> {
             ),
         ),
         (
+            &["turn_started.cause.mention.by"],
+            variants!(CalledBy::Person),
+        ),
+        (
+            &["peers_skipped.reason"],
+            variants!(
+                PeersSkipReason::Stopped,
+                PeersSkipReason::Restarted,
+                PeersSkipReason::Unavailable
+            ),
+        ),
+        (
             &["context_sent.frame"],
             variants!(
                 ContextFrame::Person,
@@ -408,11 +420,40 @@ const IDS: &[&str] = &[
     "background_ended.child.session",
 ];
 
+/// `a.b[]` and `a.b.c` are under `a.b`; a top-level path has no parent.
+fn parent_path(path: &str) -> &str {
+    if let Some(p) = path.strip_suffix("[]") {
+        return p;
+    }
+    path.rfind('.').map_or("", |i| &path[..i])
+}
+
+/// Whether `path` (`a.b[].c`) leads to a value in `v`.
+fn has_path(v: &Value, path: &str) -> bool {
+    let mut node = v;
+    for seg in path.split('.') {
+        let (name, arr) = seg.strip_suffix("[]").map_or((seg, false), |s| (s, true));
+        let Some(n) = node.get(name) else {
+            return false;
+        };
+        node = n;
+        if arr {
+            let Some(n) = node.get(0) else {
+                return false;
+            };
+            node = n;
+        }
+    }
+    true
+}
+
 fn schema() -> BTreeMap<String, Vec<Field>> {
     let enums = enums();
-    let mut kinds = BTreeMap::new();
+    let mut per_kind: BTreeMap<String, Vec<Vec<Field>>> = BTreeMap::new();
     let mut seen = [false; KINDS];
-    for k in every_kind("x") {
+    // A kind with alternatives (an enum with data) is built once per
+    // alternative; a path found in only some of them is optional.
+    for k in every_kind("x").into_iter().chain(alternatives("x")) {
         seen[slot(&k)] = true;
         let (kind, payload) = k.into_parts();
         let mut out = BTreeMap::new();
@@ -436,7 +477,26 @@ fn schema() -> BTreeMap<String, Vec<Field>> {
                 );
             }
         }
-        kinds.insert(kind, fields);
+        per_kind.entry(kind).or_default().push(fields);
+    }
+    let mut kinds = BTreeMap::new();
+    for (kind, values) in per_kind {
+        let mut all: BTreeMap<String, Field> = BTreeMap::new();
+        for one in &values {
+            for f in one {
+                // Required where its parent exists: a path under an
+                // alternative is required within it, optional as a whole.
+                let parent = parent_path(&f.path);
+                let everywhere = values
+                    .iter()
+                    .filter(|o| parent.is_empty() || o.iter().any(|g| g.path == parent))
+                    .all(|o| o.iter().any(|g| g.path == f.path && g.required));
+                let mut g = f.clone();
+                g.required = everywhere;
+                all.insert(f.path.clone(), g);
+            }
+        }
+        kinds.insert(kind, all.into_values().collect::<Vec<_>>());
     }
     assert!(seen.iter().all(|s| *s), "kinds not built: {seen:?}");
     // Every listed value is one serde takes there (a thinking block's tag
@@ -456,10 +516,12 @@ fn schema() -> BTreeMap<String, Vec<Field>> {
             for v in values {
                 let mut k = every_kind("x")
                     .into_iter()
+                    .chain(alternatives("x"))
                     .map(EventKind::into_parts)
-                    .find(|(n, _)| n == kind)
-                    .unwrap()
-                    .1;
+                    .filter(|(n, _)| n == kind)
+                    .map(|(_, v)| v)
+                    .find(|v| has_path(v, path))
+                    .unwrap();
                 let mut node = &mut k;
                 for seg in path.split('.') {
                     let (name, arr) = seg.strip_suffix("[]").map_or((seg, false), |s| (s, true));

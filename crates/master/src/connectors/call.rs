@@ -824,7 +824,7 @@ pub async fn answer(
         .flatten()
         .ok_or("a connector is called only during a turn")?;
     if open.callback {
-        return Err("connectors are not used in a turn started by a command's end".into());
+        return Err("connectors are not used in a turn the harness started (a command's end, or an agent a message called after the first)".into());
     }
     // The master's own record: a turn it started for the owner, which has
     // taken no other message (`grant`); a sub-agent's under the chat turn

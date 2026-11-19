@@ -22,8 +22,18 @@ pub fn check(history: &[RawEvent], failed: &str) -> Result<RetryOf, String> {
     if t.turn_id != failed {
         return Err("only the chat's last turn can be retried".into());
     }
-    if t.cause.is_some() {
-        return Err("the harness started it, not you".into());
+    match &t.cause {
+        Some(c) if c.is_callback() => return Err("the harness started it, not you".into()),
+        // An agent a message called after the first (X.37): its turn has no
+        // message of its own, so a retry could not say what it answers.
+        Some(_) => {
+            return Err(
+                "it answered a message that called several agents; send that message again \
+                 (or mention the agent in a new one)"
+                    .into(),
+            );
+        }
+        None => {}
     }
     let mut has_message = t.retry.is_some();
     let mut ended: Option<TurnEndReason> = None;
@@ -308,6 +318,20 @@ mod tests {
             .ended("t1", TurnEndReason::Error);
         let e = check(&l.events, "t1").unwrap_err();
         assert!(e.contains("harness started"), "{e}");
+        // A mention turn (X.37): no message of its own either, and the
+        // refusal says what to do.
+        let mut l = Log::new();
+        l.started(
+            "t1",
+            Some(TurnCause::Mention(MentionCall {
+                message_seq: 2,
+                by: CalledBy::Person,
+            })),
+            None,
+        )
+        .ended("t1", TurnEndReason::Error);
+        let e = check(&l.events, "t1").unwrap_err();
+        assert!(e.contains("called several agents"), "{e}");
         // Still open (running, or its end not written).
         let mut l = Log::new();
         l.started("t1", None, None).message("t1", "x", false);

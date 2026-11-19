@@ -60,6 +60,8 @@ const en = {
   "conv.queued": "sent while working",
   "conv.queuedLater": "not read yet: goes with your next message",
   "conv.queuedHint": "The agent reads this at its next step, or when its turn ends.",
+  "composer.calls": "Called, in this order",
+  "composer.tooMany": "A message calls at most 4 agents",
   "conv.followUp": "follow-up from the chat that started this sub-agent",
   "composer.readOnly": "Read-only",
   "agentic.noGrant": "Your account's level is {level}: no agent chats. Ask a server admin.",

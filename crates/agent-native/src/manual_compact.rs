@@ -265,6 +265,7 @@ mod tests {
                 images: vec![],
                 files: vec![],
                 queued: false,
+                triggers: vec![],
             }),
             EventKind::AssistantMessage(AssistantMessage {
                 turn_id: id.into(),

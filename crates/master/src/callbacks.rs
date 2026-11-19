@@ -142,10 +142,13 @@ pub(crate) fn on_applied(m: &Master, e: &RawEvent) {
             let (m, seq, ts) = (m.clone(), e.seq, e.ts_ms);
             tokio::spawn(async move {
                 match t.cause {
-                    Some(c) => resumed(&m, sid, c.callback_ids().to_vec(), seq, ts).await,
-                    // The person's own turn: they are here; what ran without
+                    Some(c) if c.is_callback() => {
+                        resumed(&m, sid, c.callback_ids().to_vec(), seq, ts).await
+                    }
+                    // The person's own turn, or the turn of an agent their
+                    // message called (X.37): they are here; what ran without
                     // them is in the chat above it.
-                    None => {
+                    _ => {
                         let k = key(sid);
                         let _ = m.inner.mirror.call(move |s| s.kv_delete(&k)).await;
                     }

@@ -1,0 +1,658 @@
+{
+ "agents": {
+  "coder": "coder",
+  "dev": "coder",
+  "writer": "writer",
+  "editor": "editor",
+  "a": "a",
+  "b": "b",
+  "c": "c",
+  "d": "d",
+  "e": "e",
+  "src": "src"
+ },
+ "person": "alex",
+ "cases": [
+  {
+   "name": "owner 1: opening run, text after on the same line",
+   "text": "@coder @writer, yo how it is goin?",
+   "called": [
+    "coder",
+    "writer"
+   ],
+   "found": [
+    {
+     "text": "@coder",
+     "who": "agent:coder",
+     "trigger": true
+    },
+    {
+     "text": "@writer",
+     "who": "agent:writer",
+     "trigger": true
+    }
+   ]
+  },
+  {
+   "name": "owner 2: closing line",
+   "text": "have anybody seen the gta6 release?\n@coder @writer @alex",
+   "called": [
+    "coder",
+    "writer"
+   ],
+   "found": [
+    {
+     "text": "@coder",
+     "who": "agent:coder",
+     "trigger": true
+    },
+    {
+     "text": "@writer",
+     "who": "agent:writer",
+     "trigger": true
+    },
+    {
+     "text": "@alex",
+     "who": "person",
+     "trigger": true
+    }
+   ]
+  },
+  {
+   "name": "owner 3: a plain mention in the middle",
+   "text": "my guy, the @coder have done good work, give him a raise",
+   "called": [],
+   "found": [
+    {
+     "text": "@coder",
+     "who": "agent:coder",
+     "trigger": false
+    }
+   ]
+  },
+  {
+   "name": "owner 4: plain in the middle, called in the closing line",
+   "text": "my guy, the @coder have done good work, give him a raise\n@coder @alex",
+   "called": [
+    "coder"
+   ],
+   "found": [
+    {
+     "text": "@coder",
+     "who": "agent:coder",
+     "trigger": false
+    },
+    {
+     "text": "@coder",
+     "who": "agent:coder",
+     "trigger": true
+    },
+    {
+     "text": "@alex",
+     "who": "person",
+     "trigger": true
+    }
+   ]
+  },
+  {
+   "name": "single leading mention",
+   "text": "@writer draft this",
+   "called": [
+    "writer"
+   ],
+   "found": [
+    {
+     "text": "@writer",
+     "who": "agent:writer",
+     "trigger": true
+    }
+   ]
+  },
+  {
+   "name": "leading mention with a colon",
+   "text": "@coder: fix it",
+   "called": [
+    "coder"
+   ],
+   "found": [
+    {
+     "text": "@coder",
+     "who": "agent:coder",
+     "trigger": true
+    }
+   ]
+  },
+  {
+   "name": "a colon ends the run",
+   "text": "@coder: @writer hi",
+   "called": [
+    "coder"
+   ],
+   "found": [
+    {
+     "text": "@coder",
+     "who": "agent:coder",
+     "trigger": true
+    },
+    {
+     "text": "@writer",
+     "who": "agent:writer",
+     "trigger": false
+    }
+   ]
+  },
+  {
+   "name": "an alias calls its agent",
+   "text": "@dev hi",
+   "called": [
+    "coder"
+   ],
+   "found": [
+    {
+     "text": "@dev",
+     "who": "agent:coder",
+     "trigger": true
+    }
+   ]
+  },
+  {
+   "name": "leading white space",
+   "text": "  \n  @coder hi",
+   "called": [
+    "coder"
+   ],
+   "found": [
+    {
+     "text": "@coder",
+     "who": "agent:coder",
+     "trigger": true
+    }
+   ]
+  },
+  {
+   "name": "commas, tabs and several spaces",
+   "text": "@coder,@writer\t@editor   ,  hi",
+   "called": [
+    "coder",
+    "writer",
+    "editor"
+   ],
+   "found": [
+    {
+     "text": "@coder",
+     "who": "agent:coder",
+     "trigger": true
+    },
+    {
+     "text": "@writer",
+     "who": "agent:writer",
+     "trigger": true
+    },
+    {
+     "text": "@editor",
+     "who": "agent:editor",
+     "trigger": true
+    }
+   ]
+  },
+  {
+   "name": "a newline between opening mentions",
+   "text": "@coder\n@writer\nhello",
+   "called": [
+    "coder",
+    "writer"
+   ],
+   "found": [
+    {
+     "text": "@coder",
+     "who": "agent:coder",
+     "trigger": true
+    },
+    {
+     "text": "@writer",
+     "who": "agent:writer",
+     "trigger": true
+    }
+   ]
+  },
+  {
+   "name": "closing line with trailing spaces and a newline",
+   "text": "hi\n@coder @writer  \n\n",
+   "called": [
+    "coder",
+    "writer"
+   ],
+   "found": [
+    {
+     "text": "@coder",
+     "who": "agent:coder",
+     "trigger": true
+    },
+    {
+     "text": "@writer",
+     "who": "agent:writer",
+     "trigger": true
+    }
+   ]
+  },
+  {
+   "name": "closing line with a word is text",
+   "text": "hi\n@coder please",
+   "called": [],
+   "found": [
+    {
+     "text": "@coder",
+     "who": "agent:coder",
+     "trigger": false
+    }
+   ]
+  },
+  {
+   "name": "closing line with an unknown name is text",
+   "text": "hi\n@coder @nobody",
+   "called": [],
+   "found": [
+    {
+     "text": "@coder",
+     "who": "agent:coder",
+     "trigger": false
+    }
+   ]
+  },
+  {
+   "name": "closing line with a colon is text",
+   "text": "hi\n@coder:",
+   "called": [],
+   "found": [
+    {
+     "text": "@coder",
+     "who": "agent:coder",
+     "trigger": false
+    }
+   ]
+  },
+  {
+   "name": "a message of only mentions",
+   "text": "@coder @writer",
+   "called": [
+    "coder",
+    "writer"
+   ],
+   "found": [
+    {
+     "text": "@coder",
+     "who": "agent:coder",
+     "trigger": true
+    },
+    {
+     "text": "@writer",
+     "who": "agent:writer",
+     "trigger": true
+    }
+   ]
+  },
+  {
+   "name": "only the owner's login: calls nobody",
+   "text": "@alex hello",
+   "called": [],
+   "found": [
+    {
+     "text": "@alex",
+     "who": "person",
+     "trigger": true
+    }
+   ]
+  },
+  {
+   "name": "CRLF line ends",
+   "text": "hello\r\n@coder @writer\r\n",
+   "called": [
+    "coder",
+    "writer"
+   ],
+   "found": [
+    {
+     "text": "@coder",
+     "who": "agent:coder",
+     "trigger": true
+    },
+    {
+     "text": "@writer",
+     "who": "agent:writer",
+     "trigger": true
+    }
+   ]
+  },
+  {
+   "name": "CRLF between opening mentions",
+   "text": "@coder\r\n@writer\r\nhello",
+   "called": [
+    "coder",
+    "writer"
+   ],
+   "found": [
+    {
+     "text": "@coder",
+     "who": "agent:coder",
+     "trigger": true
+    },
+    {
+     "text": "@writer",
+     "who": "agent:writer",
+     "trigger": true
+    }
+   ]
+  },
+  {
+   "name": "a full-width at sign is no mention",
+   "text": "＠coder hi",
+   "called": [],
+   "found": []
+  },
+  {
+   "name": "a Cyrillic look-alike name is no mention",
+   "text": "@cоde hi",
+   "called": [],
+   "found": []
+  },
+  {
+   "name": "a zero-width character inside the name",
+   "text": "@co​der hi",
+   "called": [],
+   "found": []
+  },
+  {
+   "name": "an email is no mention",
+   "text": "mail a@coder.io or b@coder now",
+   "called": [],
+   "found": []
+  },
+  {
+   "name": "a file path is no mention",
+   "text": "@src/main.rs please read",
+   "called": [],
+   "found": []
+  },
+  {
+   "name": "a file name is no mention",
+   "text": "@coder.md is a file",
+   "called": [],
+   "found": []
+  },
+  {
+   "name": "a mention in a fenced block opening is no trigger",
+   "text": "```\n@coder\n```",
+   "called": [],
+   "found": []
+  },
+  {
+   "name": "a closing line inside an unclosed fence",
+   "text": "```sh\nls\n@coder @writer",
+   "called": [],
+   "found": []
+  },
+  {
+   "name": "a mention inside a fence in the middle",
+   "text": "text\n```\n@coder\n```\nmore",
+   "called": [],
+   "found": []
+  },
+  {
+   "name": "a mention inside inline code",
+   "text": "use `@coder` for that",
+   "called": [],
+   "found": []
+  },
+  {
+   "name": "a mention after inline code",
+   "text": "use `x` then @coder",
+   "called": [],
+   "found": [
+    {
+     "text": "@coder",
+     "who": "agent:coder",
+     "trigger": false
+    }
+   ]
+  },
+  {
+   "name": "an unmatched backtick is a plain character",
+   "text": "it`s @coder",
+   "called": [],
+   "found": [
+    {
+     "text": "@coder",
+     "who": "agent:coder",
+     "trigger": false
+    }
+   ]
+  },
+  {
+   "name": "a closing line with inline code is text",
+   "text": "hi\n`@coder`",
+   "called": [],
+   "found": []
+  },
+  {
+   "name": "a fenced block then a closing line",
+   "text": "```\ncode\n```\n@coder",
+   "called": [
+    "coder"
+   ],
+   "found": [
+    {
+     "text": "@coder",
+     "who": "agent:coder",
+     "trigger": true
+    }
+   ]
+  },
+  {
+   "name": "the same agent three times is once",
+   "text": "@coder @coder @dev hi",
+   "called": [
+    "coder"
+   ],
+   "found": [
+    {
+     "text": "@coder",
+     "who": "agent:coder",
+     "trigger": true
+    },
+    {
+     "text": "@coder",
+     "who": "agent:coder",
+     "trigger": true
+    },
+    {
+     "text": "@dev",
+     "who": "agent:coder",
+     "trigger": true
+    }
+   ]
+  },
+  {
+   "name": "opening run first, then the closing line",
+   "text": "@writer hi\n@coder @writer",
+   "called": [
+    "writer",
+    "coder"
+   ],
+   "found": [
+    {
+     "text": "@writer",
+     "who": "agent:writer",
+     "trigger": true
+    },
+    {
+     "text": "@coder",
+     "who": "agent:coder",
+     "trigger": true
+    },
+    {
+     "text": "@writer",
+     "who": "agent:writer",
+     "trigger": true
+    }
+   ]
+  },
+  {
+   "name": "an unknown name ends the opening run",
+   "text": "@coder @nobody @writer hi",
+   "called": [
+    "coder"
+   ],
+   "found": [
+    {
+     "text": "@coder",
+     "who": "agent:coder",
+     "trigger": true
+    },
+    {
+     "text": "@writer",
+     "who": "agent:writer",
+     "trigger": false
+    }
+   ]
+  },
+  {
+   "name": "a word ends the opening run",
+   "text": "@coder please ask @writer",
+   "called": [
+    "coder"
+   ],
+   "found": [
+    {
+     "text": "@coder",
+     "who": "agent:coder",
+     "trigger": true
+    },
+    {
+     "text": "@writer",
+     "who": "agent:writer",
+     "trigger": false
+    }
+   ]
+  },
+  {
+   "name": "four agents",
+   "text": "@a @b @c @d go",
+   "called": [
+    "a",
+    "b",
+    "c",
+    "d"
+   ],
+   "found": [
+    {
+     "text": "@a",
+     "who": "agent:a",
+     "trigger": true
+    },
+    {
+     "text": "@b",
+     "who": "agent:b",
+     "trigger": true
+    },
+    {
+     "text": "@c",
+     "who": "agent:c",
+     "trigger": true
+    },
+    {
+     "text": "@d",
+     "who": "agent:d",
+     "trigger": true
+    }
+   ]
+  },
+  {
+   "name": "five agents are kept for the refusal",
+   "text": "@a @b @c @d @e go",
+   "called": [
+    "a",
+    "b",
+    "c",
+    "d",
+    "e"
+   ],
+   "found": [
+    {
+     "text": "@a",
+     "who": "agent:a",
+     "trigger": true
+    },
+    {
+     "text": "@b",
+     "who": "agent:b",
+     "trigger": true
+    },
+    {
+     "text": "@c",
+     "who": "agent:c",
+     "trigger": true
+    },
+    {
+     "text": "@d",
+     "who": "agent:d",
+     "trigger": true
+    },
+    {
+     "text": "@e",
+     "who": "agent:e",
+     "trigger": true
+    }
+   ]
+  },
+  {
+   "name": "a punctuation mark after a mention is no mention",
+   "text": "thanks @coder.\n",
+   "called": [],
+   "found": []
+  },
+  {
+   "name": "an upper-case name is no mention",
+   "text": "@Coder hi",
+   "called": [],
+   "found": []
+  },
+  {
+   "name": "a mention in parentheses is no mention",
+   "text": "(@coder) hi",
+   "called": [],
+   "found": []
+  },
+  {
+   "name": "an empty handle",
+   "text": "@ hi\n@",
+   "called": [],
+   "found": []
+  },
+  {
+   "name": "an empty text",
+   "text": "",
+   "called": [],
+   "found": []
+  },
+  {
+   "name": "white space only",
+   "text": "  \n\t",
+   "called": [],
+   "found": []
+  },
+  {
+   "name": "a bare name that is also an agent id and a folder is the agent",
+   "text": "@src",
+   "called": [
+    "src"
+   ],
+   "found": [
+    {
+     "text": "@src",
+     "who": "agent:src",
+     "trigger": true
+    }
+   ]
+  }
+ ]
+}

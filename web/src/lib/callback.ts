@@ -3,14 +3,14 @@
 // message; the chat shows what started it where the bubble would be.
 import type { Item } from "../types";
 
-/** Whether a turn starts at item `i`: a person's message or a callback. A
+/** Whether a turn starts at item `i`: a person's message, a callback or the turn of an agent a message called after the first (X.37). A
  * message sent while a turn ran (X.5) belongs to that turn; a turn the node
  * started itself for such messages has no item of its own, so the item
  * right after a turn's end starts one too (review ST-4). */
 export function turnStart(items: readonly Item[], i: number): boolean {
   const it = items[i]!;
   return (
-    (it.type === "user" && !it.queued) || it.type === "callback" || it.type === "retry" || (i > 0 && items[i - 1]!.type === "turn_end")
+    (it.type === "user" && !it.queued) || it.type === "callback" || it.type === "called" || it.type === "retry" || (i > 0 && items[i - 1]!.type === "turn_end")
   );
 }
 

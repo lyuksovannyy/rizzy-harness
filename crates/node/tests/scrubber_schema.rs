@@ -269,6 +269,7 @@ impl Node {
                 agent_named: false,
                 files: vec![],
                 owner: Some(owner.into()),
+                peers: vec![],
             })
             .unwrap();
         loop {

@@ -1464,7 +1464,7 @@ impl NativeBackend {
             let switched = agent.caps.is_some_and(|c| c.background);
             let why = if ctx.parent_session.is_some() {
                 Err("a sub-agent cannot start sub-agents in the background".to_string())
-            } else if ctx.extra.cause.is_some() {
+            } else if ctx.extra.cause.as_ref().is_some_and(TurnCause::is_callback) {
                 Err("a turn the harness started starts no background sub-agents".to_string())
             } else if let Err(why) = host.background_agents() {
                 // The node's reason first: it may be why the switch is off.
@@ -2121,13 +2121,13 @@ pub fn rebuild_spans(
             // its block and environment line after it.
             EventKind::TurnStarted(TurnStarted {
                 turn_id,
-                cause: Some(c),
+                cause: Some(TurnCause::Callback(ids)),
                 environment,
                 ..
             }) => {
                 close_open(&mut out, &mut open);
                 opening = None;
-                provider::open_callback(&mut out, c.callback_ids());
+                provider::open_callback(&mut out, &ids);
                 // The opening took the notes before it into itself: the
                 // turn begins where it stands.
                 let at = out.len().saturating_sub(1);
@@ -2138,6 +2138,35 @@ pub fn rebuild_spans(
                 if let Some(ChatMsg::Opening(t)) = out.last_mut() {
                     context::after_callback(t, block(&turn_id).as_deref(), environment.as_deref());
                 }
+                opened = Some((turn_id, false));
+            }
+            // An agent a message called after the first (X.37) has none
+            // either: its opening stands after the earlier agents' answers,
+            // the harness's line built from the event and the turn's
+            // agent, then its block and environment line, as the loop sent
+            // it. The message that called it is above, once.
+            EventKind::TurnStarted(TurnStarted {
+                turn_id,
+                cause: Some(TurnCause::Mention(m)),
+                agent,
+                environment,
+                ..
+            }) => {
+                close_open(&mut out, &mut open);
+                opening = None;
+                let notes = provider::take_notes(&mut out);
+                let at = out.len();
+                while spans.last().is_some_and(|s| s.start >= at) {
+                    spans.pop();
+                }
+                mark(&mut spans, at, &turn_id);
+                out.push(ChatMsg::Opening(provider::mention_text(
+                    &notes,
+                    environment.as_deref(),
+                    block(&turn_id).as_deref(),
+                    agent.as_ref().map_or("", |a| a.agent_id.as_str()),
+                    &m,
+                )));
                 opened = Some((turn_id, false));
             }
             // A person's Retry (X.21) has no `user_message` either: its
@@ -2763,7 +2792,16 @@ impl NativeBackend {
         // no master's context, no images; its block (instruction files and
         // skills) after the opening. Anything the node passed in the
         // others is ignored.
-        let callback = ctx.extra.cause.as_ref().map(|c| c.callback_ids().to_vec());
+        let callback = ctx
+            .extra
+            .cause
+            .as_ref()
+            .filter(|c| c.is_callback())
+            .map(|c| c.callback_ids().to_vec());
+        // An agent a person's message called after the first (X.37): the
+        // person's frame, no message of its own, the harness's line after
+        // the earlier agents' answers, as a retry's is.
+        let called = ctx.extra.cause.as_ref().and_then(|c| c.mention().cloned());
         // A person's Retry of the failed last turn (X.21): the person's
         // frame, no message of its own (it is in the history, once), the
         // harness's retry line after the failed attempt's steps.
@@ -3016,25 +3054,34 @@ impl NativeBackend {
                 _ => String::new(),
             }
         });
-        let retry_notes = retry
-            .as_ref()
-            .map(|_| provider::take_notes(&mut messages))
-            .unwrap_or_default();
+        let retry_notes = if retry.is_some() || called.is_some() {
+            provider::take_notes(&mut messages)
+        } else {
+            Vec::new()
+        };
         // The opening took the notes before it into itself.
-        let harness_opening = callback.is_some() || retry.is_some();
+        let harness_opening = callback.is_some() || retry.is_some() || called.is_some();
+        let called_agent = agent.map(|a| a.agent_id.clone()).unwrap_or_default();
         let opening_msg = |plan: Option<&context::Plan>| {
             let block = plan.and_then(context::Plan::text);
             let block = block.as_deref();
-            match (&callback_base, &retry) {
-                (Some(base), _) => {
+            match (&callback_base, &retry, &called) {
+                (Some(base), _, _) => {
                     let mut t = base.clone();
                     context::after_callback(&mut t, block, environment);
                     ChatMsg::Opening(t)
                 }
-                (None, Some(r)) => {
+                (None, Some(r), _) => {
                     ChatMsg::Opening(provider::retry_text(&retry_notes, environment, block, r))
                 }
-                (None, None) => images::user_msg(
+                (None, None, Some(m)) => ChatMsg::Opening(provider::mention_text(
+                    &retry_notes,
+                    environment,
+                    block,
+                    &called_agent,
+                    m,
+                )),
+                (None, None, None) => images::user_msg(
                     context::opening(environment, block, &ctx.user_text),
                     &ctx.extra.images,
                 ),
@@ -7855,6 +7902,7 @@ mod tests {
                     reply: None,
                     images: vec![],
                     queued: false,
+                    triggers: vec![],
                     files: vec![],
                 }),
             ),
@@ -7884,6 +7932,7 @@ mod tests {
                     reply: None,
                     images: vec![],
                     queued: false,
+                    triggers: vec![],
                     files: vec![],
                 }),
             ),
@@ -7948,6 +7997,7 @@ mod tests {
                 reply: None,
                 images: vec![],
                 queued: false,
+                triggers: vec![],
                 files: vec![],
             }),
             &mut out,
@@ -8031,6 +8081,7 @@ mod tests {
                 reply: None,
                 images: vec![],
                 queued: false,
+                triggers: vec![],
                 files: vec![],
             }));
             for e in host.events.lock().unwrap().drain(..) {
@@ -9048,6 +9099,7 @@ mod background_tests {
                     reply: None,
                     images: vec![],
                     queued: false,
+                    triggers: vec![],
                     files: vec![],
                 }),
             ),

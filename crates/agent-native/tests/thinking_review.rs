@@ -257,6 +257,7 @@ async fn run(
             reply: None,
             images: vec![],
             queued: false,
+            triggers: vec![],
             files: vec![],
         }));
     }
@@ -480,6 +481,7 @@ async fn r5_with(window: Option<u64>, signed: bool) -> (usize, usize, usize) {
         reply: None,
         images: vec![],
         queued: false,
+        triggers: vec![],
         files: vec![],
     }));
     let o = b
@@ -1025,6 +1027,7 @@ async fn turn_with(
         reply: None,
         images: vec![],
         queued: false,
+        triggers: vec![],
         files: vec![],
     }));
     let out = b

@@ -151,6 +151,7 @@ fn held_own_words_after_named_images() {
                     reply: None,
                     images: (0..ni).map(|i| img(&url, i as u8)).collect(),
                     queued: false,
+                    triggers: vec![],
                     files: vec![],
                 };
                 let mut msgs = vec![images::user_msg(m.model_text(), &m.images)];
@@ -289,6 +290,7 @@ fn history(sid: SessionId, image_name: &str) -> Vec<RawEvent> {
             reply: None,
             images: if n == 4 { vec![img(image_name, 9)] } else { vec![] },
             queued: false,
+            triggers: vec![],
             files: vec![],
         }));
         push(EventKind::AssistantMessage(AssistantMessage {
@@ -322,6 +324,7 @@ async fn overflow_run(person: &str, context: &str) -> (String, Vec<ChatRequest>)
         reply: None,
         images: vec![],
         queued: false,
+        triggers: vec![],
         files: vec![],
     };
     let mut ctx = TurnCtx {
@@ -413,6 +416,7 @@ async fn held_demo_provider_takes_no_command_from_any_context() {
                 reply: None,
                 images: vec![],
                 queued: false,
+                triggers: vec![],
                 files: vec![],
             };
             let mut ctx = TurnCtx {

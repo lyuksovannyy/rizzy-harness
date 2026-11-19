@@ -206,6 +206,7 @@ impl Node {
                 agent_named: false,
                 files: vec![],
                 owner: None,
+                peers: vec![],
             })
             .unwrap();
         self.ack().await.unwrap();

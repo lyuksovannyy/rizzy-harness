@@ -169,6 +169,7 @@ const FREE: &[(&str, &[&str])] = &[
     ("compact_failed", &["reason"]),
     ("images_withheld", &["calls.*", "reason"]),
     ("thinking_withheld", &["reason"]),
+    ("peers_skipped", &[]),
 ];
 
 /// `path` (segments; an array index is `*`) is free in `kind`. `deeper`:
@@ -783,6 +784,7 @@ fn scrubbing_twice_is_scrubbing_once() {
             reply: None,
             images: vec![],
             queued: false,
+            triggers: vec![],
         })
         .into_parts();
         set.scrub_event(&kind, &mut once);

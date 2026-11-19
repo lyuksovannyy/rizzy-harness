@@ -213,6 +213,7 @@ fn fake_with(
                                 reply: None,
                                 images: vec![],
                                 queued: false,
+                                triggers: vec![],
                                 files: vec![],
                             }), now);
                             if !*held.lock().unwrap() {

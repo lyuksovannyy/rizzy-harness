@@ -224,6 +224,7 @@ fn prompt(link: &NodeLink, sid: SessionId, req_id: &str, text: String) {
             files: vec![],
             agent_named: false,
             owner: None,
+            peers: vec![],
         })
         .unwrap();
 }

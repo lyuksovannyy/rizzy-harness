@@ -156,6 +156,59 @@ turn's agent and settings: one sent to another agent (the agent picker, or an
 `@mention` of another agent) is refused with the reason, so pick the agent for
 your next message instead.
 
+**Calling several agents.** One message can ask several agents, one after
+another, in the same chat. A message **calls** the agents named in two
+places only:
+
+- **its opening**: the mentions it begins with, separated by spaces or commas,
+  with text after them if you like: `@coder @writer, yo how it is goin?`
+- **its last line**, when that line holds nothing but mentions:
+
+  ```
+  have anybody seen the gta6 release?
+  @coder @writer @alex
+  ```
+
+A mention anywhere else is a **plain mention**: it calls nobody, it only points
+at someone. "my guy, the @coder have done good work, give him a raise" calls
+nobody (the chat's own agent answers); add a last line, `…give him a raise`
+then a new line `@coder @alex`, and `@coder` is called. `@alex` here is you,
+the chat's owner: your own name is skipped (nobody is asked about it) and is
+drawn as a mention; any other person's name is plain text, and a name that is
+not an agent of this chat's workspace (another workspace's agent, a deleted
+one, a typo, `a@b.c`, a file such as `@src/main.rs`) is text too. The opening
+ends at the first word that is not a mention (`@coder @nobody @writer` calls
+`@coder` only), and a last line with a word or an unknown name in it is text.
+A mention inside a code block or between backticks never counts.
+
+At most **4 agents** per message; a fifth is refused before anything is sent,
+and an agent named twice is called once. The agents answer **one after another,
+in the order they are named, never at the same time**: each in a turn of its
+own, with its own model, tools and switches (a mention gives it no right it
+does not have), and each reads the conversation so far, the earlier agents'
+answers to this message included. The chat shows each answer with its own
+avatar and name, a quiet line "@writer, called by you" where a later agent's
+turn begins, and, while they answer, "writer is answering… · 2 more after it".
+In the message you sent, each mention that resolved is a chip (one that called
+its agent with its mark; a plain one, and your own name, quieter), and the
+composer shows the order the text will call them in.
+
+**Stop** ends the turn that runs and the rest of the list: a line names the
+agents that were not asked. A turn that fails (the provider, the step limit)
+does not stop the next agent. A message you send while they answer follows the
+rule for any running turn (it is read at the next model request, whichever
+agent's it is); a message that itself calls several agents waits (refused: "a
+turn is already running") until they have answered. The node holds the later
+agents in memory only: if it restarts in the middle, the agent that was running
+ends as "interrupted" and a line names the ones that were not asked; ask them
+again. A later agent's turn has its own checkpoint, cost line and Undo, and
+the chat's approval mode. **Not yet:** connectors are not used in the later
+agents' turns (they are no send of yours, see "Custom connectors"), nor are
+memory, `recall` or the project board in them; the first agent's turn has all
+it has today. A turn of a later agent cannot be retried: send the message
+again. A message from the API token, a routine or a webhook keeps one leading
+`@agent` (the first only); and an agent's own message can't call anyone yet.
+
 **Retry.** When the chat's last turn ended without an answer — "turn error"
 (the provider gave up after its own retries, an unknown model, a context the
 last resort could not shorten), "turn interrupted" (the node restarted

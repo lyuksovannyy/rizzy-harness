@@ -209,6 +209,7 @@ impl Rig {
                 agent_named: false,
                 files: vec![],
                 owner: None,
+    peers: vec![],
             })
             .unwrap();
         (sid, cwd)

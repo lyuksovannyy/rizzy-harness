@@ -280,6 +280,10 @@ pub(crate) struct Session {
     /// messages pending starts that turn (X.20 review M1). None after a
     /// restart: those messages wait for the person's next one.
     reader: Mutex<Option<(Option<AgentSpec>, TurnExtra)>>,
+    /// The agents a person's message called after the first, still to be
+    /// asked (X.37): in memory only, dropped by a restart (which says so,
+    /// `recover_peers`).
+    peers: Mutex<Option<peers::Peers>>,
 }
 
 /// The most messages that wait at once for the running turn to read them
@@ -348,7 +352,13 @@ fn callback_check(history: &[RawEvent], bg_ids: &[String]) -> Result<(usize, Vec
     let mut in_a_row = 0usize;
     for e in history {
         match e.typed() {
-            Ok(EventKind::TurnStarted(t)) if t.cause.is_some() => in_a_row += 1,
+            // Only callback turns spend the budget: an agent a person's
+            // message called (X.37) is the person's own turn here.
+            Ok(EventKind::TurnStarted(t))
+                if t.cause.as_ref().is_some_and(TurnCause::is_callback) =>
+            {
+                in_a_row += 1
+            }
             Ok(EventKind::UserMessage(_)) => in_a_row = 0,
             _ => {}
         }
@@ -551,6 +561,7 @@ impl Session {
             note_tries: Mutex::default(),
             compacting: Mutex::new(None),
             reader: Mutex::new(None),
+            peers: Mutex::new(None),
             node: node.clone(),
             id,
             head: tokio::sync::Mutex::new(0),
@@ -688,6 +699,7 @@ impl Session {
             note_tries: Mutex::default(),
             compacting: Mutex::new(None),
             reader: Mutex::new(None),
+            peers: Mutex::new(None),
             node,
             id,
             head: tokio::sync::Mutex::new(view.head_seq),
@@ -1121,6 +1133,9 @@ impl Session {
             self.unclosed.store(true, Ordering::SeqCst);
             tracing::error!(session = %self.id, error = %e, "could not close the interrupted turn");
         }
+        // After the turn's end: the agents of a message that were to be
+        // asked next and never were (their specs died with the node).
+        self.recover_peers().await;
     }
 
     /// End the turn the log shows running, if any: deny its pending
@@ -1635,6 +1650,7 @@ impl Session {
         agent_named: bool,
         compare: Vec<String>,
         extra: TurnExtra,
+        peers: Vec<AgentSpec>,
     ) -> Result<(), String> {
         if !compare.is_empty() && (self.profile != Profile::Chat || compare.len() > 4) {
             return Err("parallel answers need a chat and at most 4 models".into());
@@ -1648,6 +1664,17 @@ impl Session {
         }
         if self.incognito && !input.images.is_empty() {
             return Err("images can't go into an incognito chat".into());
+        }
+        // The agents a message called after the first (X.37): this
+        // message's own turn is the first agent's; the node keeps the rest.
+        if !peers.is_empty()
+            && (self.parent_session.is_some() || input.reply.is_some() || !compare.is_empty())
+        {
+            return Err(
+                "a message that calls several agents is a plain message to a chat: no answer to \
+                 a card, no parallel answers, no sub-agent's chat"
+                    .into(),
+            );
         }
         // Named for this message: an @mention, a routine's explicit agent,
         // or the asker an answer goes to (`switch_of` decides the rest).
@@ -1664,6 +1691,7 @@ impl Session {
         // sub-agents' specs come from this one, so they are bounded too.
         let limits = &self.node.cfg.policy.limits;
         let agent = agent.map(|a| limits.bound_delegation(a));
+        let peers = self.checked_peers(agent.as_ref(), peers)?;
         let turn_id = new_id();
         let cancel = CancellationToken::new();
         let by_stop = Arc::new(AtomicBool::new(false));
@@ -1691,6 +1719,11 @@ impl Session {
             // A turn runs: the message waits for it (X.5). One that ended
             // since left the slot to this message's own turn.
             match self.running_turn() {
+                Some(_) if !peers.is_empty() => {
+                    return Err(format!(
+                        "{TURN_RUNNING}: a message that calls several agents waits until it ends"
+                    ));
+                }
                 Some(r) if !r.cancelled => {
                     let running = r.turn_id.clone();
                     let queued = self
@@ -1724,6 +1757,12 @@ impl Session {
             self.release(&turn_id);
             return Err(harness_protocol::NODE_STOPPING.into());
         }
+        // In the instant between two turns of a called list, the next
+        // agent's turn comes first (X.37).
+        if self.peers_pending() {
+            self.release(&turn_id);
+            return Err(format!("{TURN_RUNNING}: {}", peers::PEERS_PENDING));
+        }
         if self.unclosed.load(Ordering::SeqCst) {
             let message = "The session log could not be written, so this turn was stopped.";
             if let Err(e) = self.close_open_turn(message, TurnEndReason::Error).await {
@@ -1732,7 +1771,7 @@ impl Session {
             }
             self.unclosed.store(false, Ordering::SeqCst);
         }
-        let msg = match self.user_message(turn_id.clone(), input).await {
+        let mut msg = match self.user_message(turn_id.clone(), input).await {
             Ok(msg) => msg,
             Err(e) => {
                 self.release(&turn_id);
@@ -1746,8 +1785,17 @@ impl Session {
             savings: extra.savings.clone(),
             ..Default::default()
         };
+        // Who this message called, first agent first (X.37).
+        if !peers.is_empty() {
+            msg.triggers = agent
+                .iter()
+                .chain(peers.iter())
+                .map(|a| a.agent_id.clone())
+                .collect();
+        }
         // Recorded before the prompt is answered, so a log that cannot be
         // written refuses the prompt itself and the sender sees why.
+        let seen = self.head_seq().await;
         let (history, queued) = match self
             .begin(Some(&msg), &turn_id, agent.as_ref(), named)
             .await
@@ -1759,6 +1807,13 @@ impl Session {
             }
         };
         drop(queue);
+        if !peers.is_empty() {
+            // Kept for after this turn; a store that cannot say where the
+            // message stands leaves seq 0, and the cause then names no
+            // message (the chat still shows who was called).
+            let at = self.message_seq(seen, &turn_id).await.unwrap_or(0);
+            self.set_peers(at, peers);
+        }
         let extra = TurnExtra {
             images: msg.images.clone(),
             files_seen: msg.files.iter().filter_map(|f| f.seen.clone()).collect(),
@@ -1781,10 +1836,16 @@ impl Session {
                     by_stop,
                 )
                 .await;
-            this.keep_reader(agent.clone(), after.clone());
-            this.read_queued(reason, agent, after, turn_id).await;
+            // The agents the message called after this one, if any, then the
+            // messages sent meanwhile (X.5, X.37).
+            this.finish_turn(reason, agent, after, turn_id).await;
         });
         Ok(())
+    }
+
+    /// The seq of the last event written.
+    async fn head_seq(&self) -> u64 {
+        *self.head.lock().await
     }
 
     /// The running turn, if any.
@@ -2776,6 +2837,7 @@ impl Session {
             reply,
             images,
             queued: false,
+            triggers: vec![],
             files,
         };
         // Scrubbed here, as the log will store it (`append` scrubs every
@@ -4302,6 +4364,7 @@ impl Session {
             reply: None,
             images: vec![],
             queued: false,
+            triggers: vec![],
             files: vec![],
         };
         let extra = TurnExtra {
@@ -4733,6 +4796,7 @@ impl Session {
             reply: None,
             images: vec![],
             queued: false,
+            triggers: vec![],
             files: vec![],
         };
         let extra = TurnExtra {
@@ -5050,6 +5114,8 @@ impl Session {
     }
 
     pub(crate) fn cancel(&self) {
+        // The rest of a message's called agents (X.37) is not asked.
+        self.stop_peers();
         if let Some(t) = self.turn.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
             t.cancel.cancel();
         }
@@ -5871,6 +5937,8 @@ fn applied_count(a: &crate::git::Applied) -> String {
 mod diff;
 
 /// A person's Retry of the failed last turn (X.21); its own file.
+#[path = "session_peers.rs"]
+mod peers;
 #[path = "session_retry.rs"]
 mod retry;
 
@@ -6004,5 +6072,83 @@ mod queued_context_tests {
         );
         assert!(q(None, "t1").usable("t1", None));
         assert!(!q(None, "t1").usable("t1", Some("coder")));
+    }
+}
+
+#[cfg(test)]
+mod callback_budget_tests {
+    use super::*;
+
+    fn at(seq: u64, k: EventKind) -> RawEvent {
+        let (kind, payload) = k.into_parts();
+        RawEvent {
+            session_id: harness_core::SessionId::new(),
+            seq,
+            ts_ms: 0,
+            kind,
+            payload,
+        }
+    }
+
+    fn started(seq: u64, cause: Option<TurnCause>) -> RawEvent {
+        at(
+            seq,
+            EventKind::TurnStarted(TurnStarted {
+                turn_id: format!("t{seq}"),
+                agent: None,
+                cause,
+                environment: None,
+                continued_by: None,
+                retry: None,
+            }),
+        )
+    }
+
+    /// The callback budget counts callback turns since the person's last
+    /// message; the turns of the agents that message called after the first
+    /// (X.37) are the person's, not "turns without you".
+    #[test]
+    fn a_mention_turn_spends_none_of_the_callback_budget() {
+        use harness_core::event::*;
+        let msg: UserMessage =
+            serde_json::from_value(serde_json::json!({"turn_id": "t1", "text": "x"})).unwrap();
+        let mention = TurnCause::Mention(MentionCall {
+            message_seq: 1,
+            by: CalledBy::Person,
+        });
+        let ended = at(
+            4,
+            EventKind::BackgroundEnded(BackgroundEnded {
+                child: None,
+                bg_id: "bg-1".into(),
+                reason: BackgroundReason::Exited,
+                exit_code: Some(0),
+                signal: None,
+                confirmed: BackgroundConfirmed::Ended,
+                ran_ms: 1,
+                output_bytes: 0,
+                tail: String::new(),
+                tail_cut: false,
+                delivered: false,
+            }),
+        );
+        let log = vec![
+            at(1, EventKind::UserMessage(msg)),
+            started(2, Some(mention.clone())),
+            started(3, Some(mention)),
+            ended,
+        ];
+        let (in_a_row, ids) = callback_check(&log, &["bg-1".into()]).unwrap();
+        assert_eq!(
+            (in_a_row, ids.as_slice()),
+            (0, ["bg-1".to_string()].as_slice())
+        );
+        // A callback turn since the message counts.
+        let mut log = log;
+        log.insert(
+            1,
+            started(9, Some(TurnCause::Callback(vec!["bg-0".into()]))),
+        );
+        assert_eq!(callback_check(&log, &["bg-1".into()]).unwrap().0, 1);
     }
 }

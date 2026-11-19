@@ -96,6 +96,7 @@ const ITEM: Record<string, Check> = {
     "?reply": rec({ message_id: S, block_id: S, values: OBJ }),
     "?images": arr(rec({ media_id: S, sha256: S, mime: S, name: S, width: N, height: N })),
     "?queued": rec({ seq: N, read: B }),
+    "?triggers": arr(S),
   }),
   assistant: rec({
     type: S,
@@ -151,6 +152,8 @@ const ITEM: Record<string, Check> = {
   artifact_failed: rec({ type: S, path: S, name: nul(S), error: S }),
   background_ended: rec({ type: S, bg_id: S, reason: S, exit_code: nul(N), ran_ms: N, tail: S, "?agent": S }),
   callback: rec({ type: S, turn_id: S, bg_ids: arr(S) }),
+  called: rec({ type: S, turn_id: S, agent: nul(agentRef), message_seq: N }),
+  peers_skipped: rec({ type: S, agents: arr(S), reason: S }),
   retry: rec({ type: S, turn_id: S, of: S, reason: S, "?failed_model": S, "?model": S }),
   callback_refused: rec({ type: S, bg_ids: arr(S), reason: S }),
   handoff: rec({ type: S, through_seq: N, "?text": S, "?model": S, "?failed": arr(rec({ model: S, reason: S })) }),

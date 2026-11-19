@@ -67,6 +67,9 @@ use crate::event::EventKind;
 /// - `artifact_staged` `stage_id`, `sha256`: the master's artifact pull
 ///   (`master/src/artifacts.rs`).
 /// - `agent.agent_id`, `agent_changed.model`: the agent switch.
+/// - `user_message.triggers[]`, `peers_skipped.agents[]`: agent ids, which
+///   the node compares with `agent.agent_id` to say which of the agents a
+///   message called were not asked (`session_peers.rs`).
 /// - `thinking.model`, `thinking_withheld.model`: which model's thinking
 ///   is sent back (`agent-native/src/llm.rs`, `withhold_thinking`).
 /// - `usage.model`, `usage.by_model` keys: usage merged by model
@@ -94,6 +97,7 @@ pub const KEPT: &[(&str, &[&str])] = &[
             "files[].seen.base",
             "images[].media_id",
             "images[].sha256",
+            "triggers[]",
         ],
     ),
     (
@@ -150,6 +154,7 @@ pub const KEPT: &[(&str, &[&str])] = &[
     ("compact_failed", &["usage.model", "usage.by_model.{}"]),
     ("images_withheld", &["turn_id"]),
     ("thinking_withheld", &["turn_id", "model"]),
+    ("peers_skipped", &["agents[]"]),
 ];
 
 /// The keys of the harness's own context sections (`agent-native`'s

@@ -49,6 +49,8 @@ export function TurnStatus(props: {
   turn: string | null;
   name: string;
   mark?: ReactNode;
+  /** Agents the last message called that have not had their turn yet (X.37). */
+  left?: number;
 }) {
   const { state } = props;
   const [now, setNow] = useState(Date.now);
@@ -80,6 +82,7 @@ export function TurnStatus(props: {
         <div className={`thinking turn-${state}`} data-testid="turn-status" aria-hidden="true">
           {props.mark}
           <span>{words}</span>
+          {!!props.left && <span className="waited">{t("conv.peersLeft", { n: String(props.left) })}</span>}
           {counting && s >= COUNT_FROM_S && <span className="waited">{t("conv.waited", { s: String(s) })}</span>}
         </div>
       )}

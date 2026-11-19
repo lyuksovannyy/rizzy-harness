@@ -297,6 +297,7 @@ mod tests {
                 reply: None,
                 images: vec![],
                 queued: false,
+                triggers: vec![],
                 files: vec![],
             }),
             EventKind::AssistantMessage(AssistantMessage {

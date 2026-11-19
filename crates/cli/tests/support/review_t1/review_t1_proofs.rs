@@ -317,6 +317,7 @@ async fn f5_the_guards_last_note_moves_into_a_callback_turns_opening() {
         reply: None,
         images: vec![],
         queued: false,
+        triggers: vec![],
         files: vec![],
     })];
     kinds.extend(r.host.0.lock().unwrap().iter().cloned());

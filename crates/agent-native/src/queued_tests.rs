@@ -25,6 +25,7 @@ fn msg(text: &str) -> UserMessage {
         reply: None,
         images: vec![],
         queued: true,
+        triggers: vec![],
         files: vec![],
     }
 }
@@ -206,6 +207,7 @@ fn log(sid: SessionId, own: &str, kinds: Vec<EventKind>) -> Vec<RawEvent> {
         }),
         EventKind::UserMessage(UserMessage {
             queued: false,
+            triggers: vec![],
             ..msg(own)
         }),
     ];
@@ -369,6 +371,7 @@ async fn compaction_keeps_a_message_read_by_the_next_turn_once() {
         EventKind::UserMessage(UserMessage {
             turn_id: "t1".into(),
             queued: false,
+            triggers: vec![],
             ..msg(&format!("question 1 {long}"))
         }),
         EventKind::AssistantMessage(AssistantMessage {
@@ -429,6 +432,7 @@ async fn compaction_keeps_a_message_read_by_the_next_turn_once() {
         EventKind::UserMessage(UserMessage {
             turn_id: "t3".into(),
             queued: false,
+            triggers: vec![],
             ..msg(&format!("question 3 {long}"))
         }),
         EventKind::TurnEnded(TurnEnded {

@@ -591,7 +591,9 @@ pub struct OpenTurn {
     pub agent_id: Option<String>,
     /// The tools the master withheld from the turn (`AgentRef::withheld`).
     pub withheld: Vec<String>,
-    /// A callback turn (`turn_started.cause`).
+    /// A turn the harness started (`turn_started.cause`: a callback turn,
+    /// or the turn of an agent a person's message called after the first,
+    /// X.37): the master answers no connector, recall or board call in it.
     pub callback: bool,
 }
 
@@ -967,7 +969,14 @@ impl Store {
                 )?;
             }
             "turn_started" => {
-                let callback = e.payload.get("cause").is_some_and(|c| !c.is_null());
+                // Only a callback turn is "nobody's": the turn of an agent a
+                // person's message called (`cause.mention`, X.37) finishes
+                // for the person like any other.
+                let callback = e
+                    .payload
+                    .get("cause")
+                    .and_then(|c| c.get("callback"))
+                    .is_some();
                 tx.execute(
                     "UPDATE sessions SET running = 1, asks_user = 0, last_asks = 0, turn_callback = ?2 WHERE session_id = ?1",
                     params![sid, callback],

@@ -795,6 +795,9 @@ impl NodeRuntime {
             // A person's Retry of a failed last turn (X.21), in chats of
             // either profile.
             capabilities.push(harness_protocol::CAP_RETRY.into());
+            // The agents a message called after the first, asked one after
+            // another (X.37).
+            capabilities.push(harness_protocol::CAP_PEERS.into());
             // `remember` where this node offers it: registered, and not
             // refused by its own policy (the master files nothing otherwise).
             if self.inner.cfg.backend.has_tool("remember")
@@ -1676,6 +1679,7 @@ impl NodeRuntime {
                 images,
                 files,
                 owner,
+                peers,
                 ..
             } => {
                 self.audit("session.prompt", session_id).await;
@@ -1700,7 +1704,10 @@ impl NodeRuntime {
                 };
                 match self.session(session_id) {
                     Some(s) => match learn_owner(&s, owner).await {
-                        Ok(()) => s.prompt(input, agent, agent_named, compare, extra).await,
+                        Ok(()) => {
+                            s.prompt(input, agent, agent_named, compare, extra, peers)
+                                .await
+                        }
                         Err(e) => Err(e),
                     },
                     None => Err("unknown session".into()),
