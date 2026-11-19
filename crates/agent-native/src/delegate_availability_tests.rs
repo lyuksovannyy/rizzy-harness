@@ -483,17 +483,24 @@ async fn bash_tells_an_agent_with_file_tools_to_change_files_with_them() {
     );
 }
 
-/// ... and one that has neither (a scout, a reviewer: its shell is
-/// read-only), or whose node denies them, is not told to use tools it
-/// does not have.
+/// ... and one that has neither (it changes things only through `publish`,
+/// so its shell is the writable one and `bash` IS offered), or whose node
+/// denies them, is not told to use tools it does not have. (A scout or a
+/// reviewer gets the read-only shell, or no `bash` where the node has
+/// none: the sentence is only in the writable branch of `shell_text`.)
 #[tokio::test]
 async fn bash_does_not_name_file_tools_an_agent_lacks() {
-    if let Some(d) = bash_for(&["read", "grep", "bash"], vec![]).await {
-        assert!(!d.contains(USE_FILE_TOOLS), "{d}");
-        assert!(!d.contains("`write` or"), "{d}");
-    }
-    let denied = bash_for(&["read", "write", "edit", "bash"], vec!["write", "edit"]).await;
-    if let Some(d) = denied {
-        assert!(!d.contains(USE_FILE_TOOLS), "{d}");
-    }
+    let d = bash_for(&["read", "bash", "publish"], vec![])
+        .await
+        .expect("bash is offered to an agent that has it and changes things");
+    assert!(d.contains("Run a shell command with bash"), "{d}");
+    assert!(!d.contains(USE_FILE_TOOLS), "{d}");
+    assert!(!d.contains("`write` or"), "{d}");
+    let d = bash_for(
+        &["read", "write", "edit", "bash", "publish"],
+        vec!["write", "edit"],
+    )
+    .await
+    .expect("bash is offered when the node denies write and edit");
+    assert!(!d.contains(USE_FILE_TOOLS), "{d}");
 }
