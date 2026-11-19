@@ -17,6 +17,8 @@ pub mod projects;
 mod recall;
 mod session;
 mod stored_skills;
+#[cfg(test)]
+mod test_script;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
