@@ -1049,17 +1049,18 @@ async fn every_term_of_the_gate_keeps_a_message_to_its_first_mention() {
     let before = f.seen.lock().unwrap().len();
     let r = f.master.prompt(child, text.into(), by_owner()).await;
     assert!(r.is_ok(), "a sub-agent's chat: refused: {r:?}");
-    let seen = f.seen.lock().unwrap();
-    let sent = seen[before..]
-        .iter()
-        .find_map(|m| match m {
-            MasterToNode::Prompt { peers, .. } => Some(peers.len()),
-            _ => None,
-        })
-        .expect("a prompt reached the node");
+    let sent = {
+        let seen = f.seen.lock().unwrap();
+        seen[before..]
+            .iter()
+            .find_map(|m| match m {
+                MasterToNode::Prompt { peers, .. } => Some(peers.len()),
+                _ => None,
+            })
+            .expect("a prompt reached the node")
+    };
     assert_eq!(sent, 0, "a sub-agent's chat: peers were sent");
     // And the one term that may call several: the owner's own message.
-    drop(seen);
     let r = f.master.prompt(sid, text.into(), by_owner()).await;
     assert!(
         format!("{r:?}").contains("too old"),
