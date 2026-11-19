@@ -390,7 +390,10 @@ export function Shell(props: {
     if (loaded) writeBackdropMirror(prefs?.backdrop);
   }, [loaded, prefs?.backdrop]);
 
-  useSyncExternalStore((l) => live.subscribe(l), () => live.version);
+  useSyncExternalStore(
+    (l) => live.subscribe(l),
+    () => live.version,
+  );
   useRoutineResults({ route, routines: routineAttention, workspaceId });
 
   const toggleCollapsed = () => {
@@ -404,7 +407,10 @@ export function Shell(props: {
     });
   };
 
-  const logout = () => api.logout().catch(() => {}).then(onLogout);
+  const logout = async () => {
+    await api.logout().catch(() => {});
+    onLogout();
+  };
 
   const listed = useMemo(() => sessions.filter((x) => !x.incognito && !x.parent_id), [sessions]);
   useFinishedSignal(loadedSessions ? listed : null, viewing);
