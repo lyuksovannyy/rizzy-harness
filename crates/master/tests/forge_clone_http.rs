@@ -138,9 +138,13 @@ async fn fake_forge() -> Forge {
 
 // ------------------------------------------------------------ the nodes
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct Node {
     seen: Arc<Mutex<Vec<MasterToNode>>>,
+    /// Requests for a project named `Hold…`, not answered until
+    /// [`Node::answer`].
+    held: Arc<Mutex<Vec<String>>>,
+    tx: mpsc::Sender<NodeToMaster>,
 }
 
 /// What a `project.clone` carried, the token opened for the test.
@@ -153,7 +157,41 @@ struct Asked {
     token: Option<String>,
 }
 
+/// What the node answers a clone of a project named `name` with: a folder,
+/// or its refusal for the `Fail …` names (the node's own words).
+fn node_answer(node: &str, name: &str) -> (Option<String>, Option<String>) {
+    let why = match name {
+        "Fail host" => {
+            "this node does not clone from that host: only from the hosts its \
+                        node.toml lists ([forge] hosts)"
+        }
+        "Fail size" => {
+            "the clone grew past what this node allows ([limits] clone_max_mb = 1 MB); \
+                        git was stopped and its files removed"
+        }
+        "Fail time" => {
+            "the clone took longer than this node allows ([limits] clone_timeout_s = \
+                        1); git was stopped and its files removed"
+        }
+        "Fail credential" => "the repository's credential is malformed; nothing was cloned",
+        _ => return (Some(folder_of(node, name)), None),
+    };
+    (None, Some(why.to_string()))
+}
+
 impl Node {
+    /// Answer the oldest held request with its folder.
+    fn answer(&self, node: &str, name: &str) {
+        let req_id = self.held.lock().unwrap().remove(0);
+        self.tx
+            .try_send(NodeToMaster::ProjectCreated {
+                req_id,
+                path: Some(folder_of(node, name)),
+                error: None,
+            })
+            .unwrap();
+    }
+
     fn clones(&self) -> Vec<Asked> {
         self.seen
             .lock()
@@ -204,19 +242,28 @@ fn fake(id: &str, caps: &[&str]) -> (NodeLink, Node) {
         sessions: vec![],
     })
     .unwrap();
-    let n = Node::default();
-    let (keep, node) = (n.seen.clone(), id.to_string());
+    let n = Node {
+        seen: Arc::default(),
+        held: Arc::default(),
+        tx: tx.clone(),
+    };
+    let (keep, held, node) = (n.seen.clone(), n.held.clone(), id.to_string());
     tokio::spawn(async move {
         while let Some(msg) = commands.recv().await {
             keep.lock().unwrap().push(msg.clone());
             match &msg {
                 MasterToNode::ProjectCreate { req_id, name }
                 | MasterToNode::ProjectClone { req_id, name, .. } => {
-                    let _ = tx.try_send(NodeToMaster::ProjectCreated {
-                        req_id: req_id.clone(),
-                        path: Some(folder_of(&node, name)),
-                        error: None,
-                    });
+                    if name.starts_with("Hold") {
+                        held.lock().unwrap().push(req_id.clone());
+                    } else {
+                        let (path, error) = node_answer(&node, name);
+                        let _ = tx.try_send(NodeToMaster::ProjectCreated {
+                            req_id: req_id.clone(),
+                            path,
+                            error,
+                        });
+                    }
                 }
                 _ => {}
             }
@@ -385,6 +432,92 @@ async fn project_count(t: &T, who: &str) -> usize {
     v["projects"].as_array().map_or(0, Vec::len)
 }
 
+/// `who`'s pending projects (in their current workspace, or `ws`).
+async fn pending(t: &T, who: &str, ws: Option<&str>) -> Vec<Value> {
+    let path = match ws {
+        Some(w) => format!("/api/projects?workspace={w}"),
+        None => "/api/projects".into(),
+    };
+    let (st, v) = req(t, Method::GET, &path, None, who).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    v["pending"].as_array().cloned().unwrap_or_default()
+}
+
+/// Wait until project `id` exists for `who`; its detail.
+async fn ready(t: &T, who: &str, id: &str) -> Value {
+    for _ in 0..200 {
+        let (st, v) = req(t, Method::GET, &format!("/api/projects/{id}"), None, who).await;
+        if st == StatusCode::OK {
+            return v;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("project {id} never became ready");
+}
+
+/// Wait until `who`'s pending project `id` (in `ws`, or their current
+/// workspace) has failed; its entry.
+async fn failed(t: &T, who: &str, id: &str, ws: Option<&str>) -> Value {
+    for _ in 0..200 {
+        let p = pending(t, who, ws).await;
+        if let Some(e) = p
+            .iter()
+            .find(|e| e["project_id"] == id && e["state"] == "failed")
+        {
+            return e.clone();
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("clone {id} never failed");
+}
+
+/// Wait until the held clone count of `n` is `want`.
+async fn held(n: &Node, want: usize) {
+    for _ in 0..200 {
+        if n.held.lock().unwrap().len() == want {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("the node never held {want} clones");
+}
+
+/// A team workspace of Alex's with Alice (admin) and Bob (member), both
+/// at the sandbox level there.
+async fn team(t: &T, alice: &str, bob: &str) -> String {
+    let (st, v) = req(
+        t,
+        Method::POST,
+        "/api/workspaces",
+        Some(json!({"name": "team"})),
+        &t.alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let team = v["workspace_id"].as_str().unwrap().to_string();
+    for (u, id, role) in [("alice", alice, "admin"), ("bob", bob, "member")] {
+        let (st, v) = req(
+            t,
+            Method::POST,
+            &format!("/api/workspaces/{team}/members"),
+            Some(json!({"username": u, "role": role})),
+            &t.alex,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        let (st, v) = req(
+            t,
+            Method::PUT,
+            &format!("/api/workspaces/{team}/members/{id}/exec-level"),
+            Some(json!({"level": "sandbox"})),
+            &t.alex,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+    }
+    team
+}
+
 fn walk(p: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     if let Ok(rd) = std::fs::read_dir(p) {
@@ -453,7 +586,8 @@ async fn a_private_repository_is_cloned_with_its_connections_token() {
         &alice,
     )
     .await;
-    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(st, StatusCode::ACCEPTED, "{v}");
+    let v = ready(&t, &alice, v["project_id"].as_str().unwrap()).await;
     assert_eq!(
         t.remote.clones(),
         vec![Asked {
@@ -522,7 +656,8 @@ async fn a_public_repository_is_cloned_without_a_credential() {
         &alice,
     )
     .await;
-    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(st, StatusCode::ACCEPTED, "{v}");
+    ready(&t, &alice, v["project_id"].as_str().unwrap()).await;
     let asked = t.remote.clones();
     assert_eq!(asked.len(), 1);
     assert_eq!(asked[0].token, None, "a public repository took the token");
@@ -662,6 +797,488 @@ async fn the_forge_must_know_the_repository_by_that_name() {
     let (st, v) = post(clone_body(&conn, "ada/broken", "remote")).await;
     assert_eq!(st, StatusCode::BAD_GATEWAY, "{v}");
     assert!(t.remote.clones().is_empty());
+    // A refusal the request answered leaves no pending project either.
+    assert!(t.master.inner_mirror().clones(None).unwrap().is_empty());
+    assert!(pending(&t, &alice, None).await.is_empty());
     assert_eq!(project_count(&t, &alice).await, 0);
     assert_no_token_anywhere(&t);
+}
+
+// ------------------------------------------------------------ pending
+
+/// The request answers at once (202) with the project pending: stored
+/// (another device's list shows it), `cloning`, with what is cloned, not a
+/// project (no detail, no chat in it); `projects_changed` goes out; once
+/// the node answers, it is a project with its folder and source, and
+/// `projects_changed` goes out again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_clone_answers_at_once_and_becomes_a_project_when_its_node_is_done() {
+    let t = start().await;
+    let (alice, _) = member(&t, "alice").await;
+    let conn = connect(&t, &alice, TOKEN_A).await;
+    let mut live = t.master.subscribe();
+    let mut body = clone_body(&conn, "Ada/Secret", "remote");
+    body["name"] = json!("Hold me");
+    let (st, v) = req(&t, Method::POST, "/api/projects", Some(body), &alice).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{v}");
+    assert_eq!(v["state"], "cloning", "{v}");
+    assert_eq!(
+        v["source"],
+        json!({"host": "127.0.0.1", "full_name": "ada/secret"})
+    );
+    assert_eq!(v["mine"], true);
+    assert_eq!(v["node_id"], "remote");
+    let id = v["project_id"].as_str().unwrap().to_string();
+    held(&t.remote, 1).await;
+    // Stored and listed apart; not a project.
+    let p = pending(&t, &alice, None).await;
+    assert_eq!(p.len(), 1);
+    assert_eq!(p[0]["project_id"], id.as_str());
+    assert_eq!(p[0]["state"], "cloning");
+    assert_eq!(p[0]["reason"], Value::Null);
+    assert_eq!(project_count(&t, &alice).await, 0);
+    let rows = t.master.inner_mirror().clones(None).unwrap();
+    assert_eq!(rows.len(), 1, "the pending project is not stored");
+    let (st, _) = req(
+        &t,
+        Method::GET,
+        &format!("/api/projects/{id}"),
+        None,
+        &alice,
+    )
+    .await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    let changes = |live: &mut tokio::sync::broadcast::Receiver<harness_master::Live>| {
+        let mut n = 0;
+        while let Ok(l) = live.try_recv() {
+            if matches!(l, harness_master::Live::ProjectsChanged(_)) {
+                n += 1;
+            }
+        }
+        n
+    };
+    assert!(changes(&mut live) >= 1, "no projects_changed at the start");
+    t.remote.answer("remote", "Hold me");
+    let d = ready(&t, &alice, &id).await;
+    assert_eq!(
+        d["settings"]["cwd"],
+        folder_of("remote", "Hold me").as_str()
+    );
+    assert_eq!(d["settings"]["node_id"], "remote");
+    assert_eq!(
+        d["source"],
+        json!({"host": "127.0.0.1", "full_name": "ada/secret"})
+    );
+    assert!(pending(&t, &alice, None).await.is_empty());
+    assert!(changes(&mut live) >= 1, "no projects_changed at the end");
+    assert_no_token_anywhere(&t);
+}
+
+/// Two tabs or a double click: one clone. The same person, repository
+/// (in any case) and node while one is pending is 409 with a plain
+/// message and both tabs list the one pending project; at once, exactly
+/// one of two requests starts a clone. Another repository is not held up,
+/// and once the first has failed the same one may be tried again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_same_repository_twice_is_one_clone() {
+    let t = start().await;
+    let (alice, _) = member(&t, "alice").await;
+    let conn = connect(&t, &alice, TOKEN_A).await;
+    let mut body = clone_body(&conn, "ada/secret", "remote");
+    body["name"] = json!("Hold one");
+    let (a, b) = tokio::join!(
+        req(
+            &t,
+            Method::POST,
+            "/api/projects",
+            Some(body.clone()),
+            &alice
+        ),
+        req(
+            &t,
+            Method::POST,
+            "/api/projects",
+            Some(body.clone()),
+            &alice
+        ),
+    );
+    let mut codes = [a.0, b.0];
+    codes.sort();
+    assert_eq!(
+        codes,
+        [StatusCode::ACCEPTED, StatusCode::CONFLICT],
+        "{a:?} {b:?}"
+    );
+    let refused = if a.0 == StatusCode::CONFLICT {
+        &a.1
+    } else {
+        &b.1
+    };
+    assert!(
+        refused["error"]
+            .as_str()
+            .unwrap()
+            .contains("is being cloned onto this node for you already"),
+        "{refused}"
+    );
+    held(&t.remote, 1).await;
+    let mut again = body.clone();
+    again["full_name"] = json!("ADA/SECRET");
+    let (st, _) = req(&t, Method::POST, "/api/projects", Some(again), &alice).await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    assert_eq!(t.remote.clones().len(), 1, "a second clone was sent");
+    assert_eq!(pending(&t, &alice, None).await.len(), 1);
+    let mut other = clone_body(&conn, "ada/open", "remote");
+    other["name"] = json!("Hold two");
+    let (st, v) = req(&t, Method::POST, "/api/projects", Some(other), &alice).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{v}");
+    held(&t.remote, 2).await;
+    // Once the first has ended, the same repository is a new clone.
+    t.remote.answer("remote", "Hold one");
+    for _ in 0..200 {
+        if pending(&t, &alice, None).await.len() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let (st, v) = req(&t, Method::POST, "/api/projects", Some(body), &alice).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{v}");
+}
+
+/// The node refuses (host not allowed, size cap, time limit, credential
+/// not received) or does not answer in time: the pending project ends
+/// `failed` with the node's reason, for its starter only; it is no
+/// project; another member sees nothing of it and cannot dismiss it; its
+/// starter dismisses it; a person keeps at most ten failed ones, and
+/// failed ones count against no limit.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_clone_shows_its_reason_to_its_starter_only() {
+    let t = start().await;
+    let (alice, alice_id) = member(&t, "alice").await;
+    let (bob, bob_id) = member(&t, "bob").await;
+    let ws = team(&t, &alice_id, &bob_id).await;
+    let conn = connect(&t, &alice, TOKEN_A).await;
+    let mut live = t.master.subscribe();
+    let mut ids = Vec::new();
+    for (name, said) in [
+        ("Fail host", "does not clone from that host"),
+        ("Fail size", "clone_max_mb"),
+        ("Fail time", "clone_timeout_s"),
+        ("Fail credential", "credential is malformed"),
+    ] {
+        let mut body = clone_body(&conn, "ada/secret", "remote");
+        body["name"] = json!(name);
+        body["workspace_id"] = json!(ws);
+        let (st, v) = req(&t, Method::POST, "/api/projects", Some(body), &alice).await;
+        assert_eq!(st, StatusCode::ACCEPTED, "{name}: {v}");
+        let id = v["project_id"].as_str().unwrap().to_string();
+        let mut e = Value::Null;
+        for _ in 0..200 {
+            if let Some(x) = pending(&t, &alice, Some(&ws))
+                .await
+                .into_iter()
+                .find(|x| x["project_id"] == id.as_str() && x["state"] == "failed")
+            {
+                e = x;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(
+            e["reason"].as_str().unwrap_or("").contains(said),
+            "{name}: {e}"
+        );
+        ids.push(id);
+    }
+    // No answer in time.
+    t.master.set_project_folder_wait(Duration::from_millis(50));
+    let mut body = clone_body(&conn, "ada/open", "remote");
+    body["name"] = json!("Hold late");
+    body["workspace_id"] = json!(ws);
+    let (st, v) = req(&t, Method::POST, "/api/projects", Some(body), &alice).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{v}");
+    let id = v["project_id"].as_str().unwrap().to_string();
+    let mut e = Value::Null;
+    for _ in 0..200 {
+        if let Some(x) = pending(&t, &alice, Some(&ws))
+            .await
+            .into_iter()
+            .find(|x| x["project_id"] == id.as_str() && x["state"] == "failed")
+        {
+            e = x;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(
+        e["reason"]
+            .as_str()
+            .unwrap()
+            .contains("did not answer in time"),
+        "{e}"
+    );
+    ids.push(id);
+    let mut n = 0;
+    while let Ok(l) = live.try_recv() {
+        if matches!(l, harness_master::Live::ProjectsChanged(_)) {
+            n += 1;
+        }
+    }
+    assert!(n >= 10, "projects_changed at each start and end: {n}");
+    // No project; Bob, a member, sees none of the failures.
+    let (_, v) = req(
+        &t,
+        Method::GET,
+        &format!("/api/projects?workspace={ws}"),
+        None,
+        &alice,
+    )
+    .await;
+    assert_eq!(v["projects"], json!([]));
+    assert!(pending(&t, &bob, Some(&ws)).await.is_empty());
+    for id in &ids {
+        let (st, _) = req(
+            &t,
+            Method::GET,
+            &format!("/api/projects/{id}"),
+            None,
+            &alice,
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND);
+        let (st, _) = req(
+            &t,
+            Method::DELETE,
+            &format!("/api/projects/{id}/clone"),
+            None,
+            &bob,
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND, "Bob dismissed Alice's failure");
+        let (st, _) = req(
+            &t,
+            Method::DELETE,
+            &format!("/api/projects/{id}/clone"),
+            None,
+            &t.alex,
+        )
+        .await;
+        assert_eq!(
+            st,
+            StatusCode::NOT_FOUND,
+            "the workspace's owner dismissed Alice's failure"
+        );
+    }
+    let (st, _) = req(
+        &t,
+        Method::DELETE,
+        &format!("/api/projects/{}/clone", ids[0]),
+        None,
+        &alice,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(pending(&t, &alice, Some(&ws)).await.len(), ids.len() - 1);
+    // At most ten kept per person; the newest stay.
+    t.master.set_project_folder_wait(Duration::from_millis(0));
+    for i in 0..8 {
+        let mut body = clone_body(&conn, "ada/secret", "remote");
+        body["name"] = json!("Fail host");
+        body["workspace_id"] = json!(ws);
+        let (st, v) = req(&t, Method::POST, "/api/projects", Some(body), &alice).await;
+        assert_eq!(st, StatusCode::ACCEPTED, "{i}: {v}");
+        failed(&t, &alice, v["project_id"].as_str().unwrap(), Some(&ws)).await;
+    }
+    let left = t.master.inner_mirror().clones(None).unwrap();
+    assert_eq!(left.len(), 10, "failed clones are not bounded");
+    assert!(left.iter().all(|c| c.failed.is_some()));
+    assert_no_token_anywhere(&t);
+}
+
+/// A master restart while a clone runs: at start every running clone is
+/// failed with a reason that says the server restarted; none stays
+/// cloning.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_master_restart_leaves_no_clone_cloning() {
+    let t = start().await;
+    let (alice, _) = member(&t, "alice").await;
+    let conn = connect(&t, &alice, TOKEN_A).await;
+    let mut body = clone_body(&conn, "ada/secret", "remote");
+    body["name"] = json!("Hold over restart");
+    let (st, v) = req(&t, Method::POST, "/api/projects", Some(body), &alice).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{v}");
+    held(&t.remote, 1).await;
+    // A second master over the same database is what a restart starts.
+    let store = Store::open(&t.dir.path().join("master.db"), Durability::Normal).unwrap();
+    let _again = Master::new(
+        store,
+        Auth::new(Secret::new("api-token-xyz".into()), vec![], false),
+    );
+    let c = rusqlite::Connection::open(t.dir.path().join("master.db")).unwrap();
+    let rows: Vec<(String, Option<String>)> = c
+        .prepare("SELECT state, reason FROM project_clones")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].0, "failed");
+    assert!(
+        rows[0].1.as_deref().unwrap().contains("server restarted"),
+        "{rows:?}"
+    );
+    let e = failed(&t, &alice, v["project_id"].as_str().unwrap(), None).await;
+    assert!(e["reason"].as_str().unwrap().contains("server restarted"));
+}
+
+/// A member who is not the starter sees `cloning` (what is cloned, not
+/// whose connection: no login, no user id) and cannot use it: every route
+/// that takes a project id refuses a pending one, for the starter too;
+/// another workspace's member sees nothing of it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_pending_project_is_no_project_for_anyone() {
+    let t = start().await;
+    let (alice, alice_id) = member(&t, "alice").await;
+    let (bob, bob_id) = member(&t, "bob").await;
+    let (carol, _) = member(&t, "carol").await;
+    let ws = team(&t, &alice_id, &bob_id).await;
+    let conn = connect(&t, &alice, TOKEN_A).await;
+    let mut body = clone_body(&conn, "ada/secret", "remote");
+    body["name"] = json!("Hold pending");
+    body["workspace_id"] = json!(ws);
+    let (st, v) = req(&t, Method::POST, "/api/projects", Some(body), &alice).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "{v}");
+    let id = v["project_id"].as_str().unwrap().to_string();
+    held(&t.remote, 1).await;
+    let seen = pending(&t, &bob, Some(&ws)).await;
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0]["state"], "cloning");
+    assert_eq!(seen[0]["mine"], false);
+    assert_eq!(
+        seen[0]["source"],
+        json!({"host": "127.0.0.1", "full_name": "ada/secret"})
+    );
+    let text = seen[0].to_string();
+    assert!(
+        !text.contains(&alice_id) && !text.contains("\"ada\"") && !text.contains("alice"),
+        "{text}"
+    );
+    // Carol is in no workspace with it.
+    let (st, v) = req(
+        &t,
+        Method::GET,
+        &format!("/api/projects?workspace={ws}"),
+        None,
+        &carol,
+    )
+    .await;
+    assert_ne!(st, StatusCode::OK, "{v}");
+    assert!(pending(&t, &carol, None).await.is_empty());
+    // A chat of Bob's and of Alice's in the team, to try linking.
+    let mut chats = Vec::new();
+    for c in [&alice, &bob] {
+        let (st, v) = req(
+            &t,
+            Method::POST,
+            "/api/sessions",
+            Some(
+                json!({"profile": "agentic", "title": "x", "workspace_id": ws,
+                        "node_id": "remote", "cwd": "/home/remote/work"}),
+            ),
+            c,
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{v}");
+        chats.push(v["session_id"].as_str().unwrap().to_string());
+    }
+    let routes: Vec<(Method, String, Option<Value>)> = vec![
+        (Method::GET, format!("/api/projects/{id}"), None),
+        (
+            Method::PATCH,
+            format!("/api/projects/{id}"),
+            Some(json!({"name": "x"})),
+        ),
+        (Method::DELETE, format!("/api/projects/{id}"), None),
+        (Method::GET, format!("/api/projects/{id}/board"), None),
+        (
+            Method::POST,
+            format!("/api/projects/{id}/board/columns"),
+            Some(json!({"name": "c"})),
+        ),
+        (
+            Method::POST,
+            format!("/api/projects/{id}/board/cards"),
+            Some(json!({"column_id": "c", "title": "t"})),
+        ),
+        (
+            Method::POST,
+            format!("/api/projects/{id}/board/template"),
+            Some(json!({"template_id": "basic"})),
+        ),
+        (Method::GET, format!("/api/projects/{id}/memory"), None),
+        (
+            Method::POST,
+            format!("/api/projects/{id}/memory"),
+            Some(json!({"text": "a fact"})),
+        ),
+        (
+            Method::POST,
+            format!("/api/projects/{id}/folder"),
+            Some(json!({"node_id": "remote"})),
+        ),
+        (Method::GET, format!("/api/projects/{id}/mcp"), None),
+        (
+            Method::POST,
+            "/api/board-templates".into(),
+            Some(json!({"name": "t", "project_id": id})),
+        ),
+        (
+            Method::POST,
+            "/api/sessions".into(),
+            Some(
+                json!({"profile": "agentic", "title": "x", "workspace_id": ws, "project_id": id,
+                        "node_id": "remote", "cwd": "/home/remote/work"}),
+            ),
+        ),
+        (
+            Method::POST,
+            "/api/routines".into(),
+            Some(json!({"name": "r", "workspace_id": ws,
+                        "spec": {"profile": "chat", "agent_id": "general", "prompt": "p", "project_id": id},
+                        "triggers": [{"kind": "schedule", "config": {"type": "interval", "every_minutes": 60}}]})),
+        ),
+    ];
+    for (who, chat) in [(&alice, &chats[0]), (&bob, &chats[1])] {
+        for (method, path, body) in &routes {
+            let (st, v) = req(&t, method.clone(), path, body.clone(), who).await;
+            // Refused for the project, not for anything else in the body.
+            assert!(
+                (st == StatusCode::NOT_FOUND || st == StatusCode::BAD_REQUEST)
+                    && v["error"].as_str().unwrap_or("").contains("project"),
+                "{method} {path}: {st} {v}"
+            );
+        }
+        let (st, v) = req(
+            &t,
+            Method::PUT,
+            &format!("/api/sessions/{chat}/project"),
+            Some(json!({"project_id": id})),
+            who,
+        )
+        .await;
+        assert_eq!(st, StatusCode::NOT_FOUND, "{v}");
+    }
+    // Still pending, never written as a project by any of it.
+    assert!(t.master.inner_mirror().project(&id).unwrap().is_none());
+    assert_eq!(pending(&t, &bob, Some(&ws)).await.len(), 1);
+    let (st, _) = req(
+        &t,
+        Method::DELETE,
+        &format!("/api/projects/{id}/clone"),
+        None,
+        &alice,
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "a running clone was dismissed");
 }

@@ -30,6 +30,7 @@ mod mcp;
 pub(super) fn routes() -> Router<Master> {
     Router::new()
         .merge(folder::routes())
+        .merge(clone::routes())
         .merge(mcp::routes())
         .route("/api/projects", get(list).post(create))
         .route(
@@ -215,7 +216,20 @@ async fn list(
         .await?;
     let counts = own_chats(&m, &who).await?;
     let can_create = scope.as_ref().is_some_and(p::may_manage);
+    // Projects whose folder is being cloned (or whose clone failed, for its
+    // starter): apart from `projects`, so that nothing takes one for a
+    // project before it is one.
+    let filter = ws.clone();
+    let pending: Vec<Value> = m
+        .inner
+        .mirror
+        .call(move |s| s.clones(filter.as_deref()))
+        .await?
+        .iter()
+        .filter_map(|c| clone::pending_json(c, &who))
+        .collect();
     Ok(Json(json!({
+        "pending": pending,
         "projects": rows
             .iter()
             .map(|r| summary(r, counts.get(&r.project_id).copied().unwrap_or(0)))
@@ -276,7 +290,7 @@ async fn create(
     State(m): State<Master>,
     headers: HeaderMap,
     Json(b): Json<CreateProject>,
-) -> ApiResult<Json<Value>> {
+) -> ApiResult<(StatusCode, Json<Value>)> {
     let who = require(&m, &headers).await?;
     let a = p::current_workspace(&m, &who, b.workspace_id.as_deref())
         .await?
@@ -309,25 +323,29 @@ async fn create(
         _ => return Err(bad("connection_id and full_name go together")),
     };
     // The folder first, once every other check passed (here and the
-    // workspace's project limit): a refusal leaves no project.
-    let mut cloning = None;
+    // workspace's project limit, which counts running clones): a refusal
+    // leaves no project.
     if let Some(node) = b.folder_on.as_deref() {
         folder::may_make_on(&m, &who, &a, node)?;
         let w = ws.clone();
         let n = m
             .inner
             .mirror
-            .call(move |s| s.projects(Some(&w)))
-            .await?
-            .len();
+            .call(move |s| {
+                Ok::<_, StoreError>(
+                    s.projects(Some(&w))?.len()
+                        + s.clones(Some(&w))?
+                            .iter()
+                            .filter(|c| c.failed.is_none())
+                            .count(),
+                )
+            })
+            .await?;
         if n >= p::MAX_PROJECTS {
             return Err(ApiError(
                 StatusCode::CONFLICT,
                 format!("a workspace has at most {} projects", p::MAX_PROJECTS),
             ));
-        }
-        if let Some((conn, full)) = &repo {
-            cloning = Some(clone::check(&m, &who, conn, full, node).await?);
         }
     }
     let mut new = NewProject {
@@ -341,8 +359,13 @@ async fn create(
         settings: String::new(),
         created_by: who.user_id.clone(),
         columns,
-        source: cloning.as_ref().map(clone::Checked::recorded),
+        source: None,
     };
+    // A clone answers at once with the pending project; it becomes one
+    // when its node has cloned it (`clone`).
+    if let (Some((conn, full)), Some(node)) = (&repo, b.folder_on.as_deref()) {
+        return clone::start(&m, &who, conn, full, node, new).await;
+    }
     // The folder and the row in a task of its own: a client that goes
     // away does not stop it between the two (the node would have made a
     // folder no project names). A store failure after the folder exists
@@ -350,13 +373,9 @@ async fn create(
     let task = {
         let (m, who, node) = (m.clone(), who.clone(), b.folder_on.clone());
         async move {
-            let settings = match (&node, cloning) {
-                (None, _) => ProjectSettings::default(),
-                (Some(node), Some(c)) => {
-                    clone::clone_on(&m, &who, node, &new.name, c, ProjectSettings::default())
-                        .await?
-                }
-                (Some(node), None) => {
+            let settings = match &node {
+                None => ProjectSettings::default(),
+                Some(node) => {
                     folder::make_on(&m, &who, node, &new.name, ProjectSettings::default()).await?
                 }
             };
@@ -373,7 +392,7 @@ async fn create(
         .await
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
     changed(&m, Audience::Workspace(row.workspace_id.clone()));
-    Ok(Json(detail_json(&m, &who, &a, &row).await?))
+    Ok((StatusCode::OK, Json(detail_json(&m, &who, &a, &row).await?)))
 }
 
 async fn detail(

@@ -20,6 +20,7 @@ pub mod media;
 pub mod migrate;
 pub mod plugin_access;
 pub mod profile_images;
+pub mod project_clones;
 mod projects;
 pub mod routines;
 pub mod session_images;

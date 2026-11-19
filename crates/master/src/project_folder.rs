@@ -143,14 +143,37 @@ impl std::fmt::Display for FolderError {
     }
 }
 
-struct Entry<'a> {
-    m: &'a Master,
-    req_id: &'a str,
+struct Entry {
+    m: Master,
+    req_id: String,
 }
 
-impl Drop for Entry<'_> {
+impl Drop for Entry {
     fn drop(&mut self) {
-        lock(&self.m.inner.project_folders.pending).remove(self.req_id);
+        lock(&self.m.inner.project_folders.pending).remove(&self.req_id);
+    }
+}
+
+/// A request sent to its node: [`Sent::answer`] waits for the answer. Its
+/// place among the waiting requests goes when it is dropped.
+pub struct Sent {
+    entry: Entry,
+    rx: oneshot::Receiver<Answer>,
+    wait: Duration,
+    node: String,
+    slug: String,
+}
+
+impl Sent {
+    /// The folder's absolute path on the node, or why there is none.
+    pub async fn answer(self) -> Result<String, FolderError> {
+        let _entry = self.entry;
+        match tokio::time::timeout(self.wait, self.rx).await {
+            Ok(Ok(Ok(p))) => Ok(p),
+            Ok(Ok(Err(e))) => Err(FolderError::Refused(e)),
+            Ok(Err(_)) => Err(FolderError::Away(self.node)),
+            Err(_) => Err(FolderError::Timeout(self.node, self.slug)),
+        }
     }
 }
 
@@ -183,6 +206,11 @@ pub struct CloneSource {
     pub token: Option<Secret<String>>,
 }
 
+/// Why a clone that was running when the master stopped failed.
+pub const RESTARTED: &str = "the server restarted while this repository was being cloned. The \
+     node may still have made its folder: if a new folder for it appears in that node's projects \
+     folder, remove it, or open it with Existing folder. Then try again";
+
 /// How much longer than the node's own clone limit the master waits: the
 /// node ends git at its limit, then removes what it fetched and answers.
 pub const CLONE_GRACE: Duration = Duration::from_secs(60);
@@ -199,19 +227,24 @@ pub fn may_clone_on(m: &Master, node: &str) -> Result<u64, FolderError> {
 
 /// Ask `node` to clone `src` into a new project's folder named after
 /// `name`; `user` is who asks. The folder's absolute path on that node.
-pub async fn clone(
+///
+/// Sent at once, answered later: the request is among the waiting ones
+/// (and counts against their limits) from the moment this returns, so a
+/// refusal (away, busy, no clone) comes before anything is promised to
+/// the person, and the answer is waited for by whoever holds [`Sent`].
+pub fn clone(
     m: &Master,
     user: &str,
     node: &str,
     name: &str,
     src: CloneSource,
-) -> Result<String, FolderError> {
+) -> Result<Sent, FolderError> {
     let limit = may_clone_on(m, node)?;
     let wait = match m.inner.project_folders.wait_ms.load(Ordering::Relaxed) {
         0 => Duration::from_secs(limit) + CLONE_GRACE,
         ms => Duration::from_millis(ms),
     };
-    ask(m, user, node, name, wait, move |req_id| {
+    send(m, user, node, name, wait, move |req_id| {
         MasterToNode::ProjectClone {
             req_id,
             name: name.to_string(),
@@ -221,7 +254,6 @@ pub async fn clone(
             token: src.token,
         }
     })
-    .await
 }
 
 /// Send the message `build` makes for a new request id to `node` and wait
@@ -234,6 +266,19 @@ async fn ask(
     wait: Duration,
     build: impl FnOnce(String) -> MasterToNode,
 ) -> Result<String, FolderError> {
+    send(m, user, node, name, wait, build)?.answer().await
+}
+
+/// Register a new request for `node` among the waiting ones and send it
+/// the message `build` makes for its id.
+fn send(
+    m: &Master,
+    user: &str,
+    node: &str,
+    name: &str,
+    wait: Duration,
+    build: impl FnOnce(String) -> MasterToNode,
+) -> Result<Sent, FolderError> {
     let req_id = harness_core::new_id();
     let (tx, rx) = oneshot::channel();
     {
@@ -250,20 +295,20 @@ async fn ask(
             },
         );
     }
-    let _entry = Entry { m, req_id: &req_id };
-    let sent = m.send_raw(node, build(req_id.clone()));
-    if !sent {
+    let entry = Entry {
+        m: m.clone(),
+        req_id: req_id.clone(),
+    };
+    if !m.send_raw(node, build(req_id)) {
         return Err(FolderError::Away(node.to_string()));
     }
-    match tokio::time::timeout(wait, rx).await {
-        Ok(Ok(Ok(p))) => Ok(p),
-        Ok(Ok(Err(e))) => Err(FolderError::Refused(e)),
-        Ok(Err(_)) => Err(FolderError::Away(node.to_string())),
-        Err(_) => Err(FolderError::Timeout(
-            node.to_string(),
-            harness_node::projects::slug(name),
-        )),
-    }
+    Ok(Sent {
+        entry,
+        rx,
+        wait,
+        node: node.to_string(),
+        slug: harness_node::projects::slug(name),
+    })
 }
 
 /// A `project.created` from `node_id`: to the request it answers, if that

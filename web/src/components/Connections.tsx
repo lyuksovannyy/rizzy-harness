@@ -164,7 +164,7 @@ export function Paste(props: { host?: Host; hint?: string; label?: string; onCan
     >
       {h && (
         <div className="muted small">
-          {`Make a token at ${h.token_page}. Later steps (listing repositories, clone and push) will need: ${h.scopes_needed}.`}
+          {`Make a token at ${h.token_page}. Listing and cloning repositories, and the push that comes later, need: ${h.scopes_needed}.`}
         </div>
       )}
       {props.hint && <div className="muted small">{props.hint}</div>}

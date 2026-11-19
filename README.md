@@ -2708,8 +2708,26 @@ it offers the host shell and you may use it). The button opens a popup:
   made count; a restart starts the count again).
 - **Existing folder**: the path field you had before, with your recent folders,
   for a chat in a checkout you already have (no project).
-- **From a repository**: the screen comes next; the server side is there
-  (see "Cloning a repository" under "Connections").
+- **From a repository**: clone one of your forge repositories into a new
+  project's folder on the chosen node. It uses your own connection (with
+  several, a select of host and login; with none, a link to Plugins →
+  Connectors) and lists the repositories that account sees, most recently
+  updated first, each with a lock if private, its description on one line and
+  when it last changed. The search waits until you stop typing. On GitHub it
+  looks through the 100 most recently updated repositories and says so, with
+  "Search the next 100" (GitHub has no search by name on that list, so a
+  repository beyond its 1,000 most recently updated is not found). Pick one,
+  keep or change the project's name (the repository's name), and Create: the
+  popup says "Cloning <host>/<name>…" at once and may be closed. Until the node
+  has finished, the project shows as **cloning** in the popup and the sidebar
+  for every member of the workspace (with what is cloned, not whose account);
+  it is not a project yet: no chat can start in it and it has no folder. When
+  the node is done it becomes a normal project with its folder. If the clone
+  fails (the node does not clone from that host, the size or time limit, the
+  credential not received, no answer in time, the server restarted), it shows
+  as **clone failed** with the reason to you alone, with Dismiss; nobody else
+  sees it. Asking for the same repository on the same node again while it
+  clones is refused. Details: "Cloning a repository" under "Connections".
 
 A project without a folder offers "Create its folder on <node>". Deleting a
 project leaves its folder on the node.
@@ -3145,8 +3163,8 @@ called.
 **Cloning a repository into a new project.** `POST /api/projects` with
 `folder_on` (the node), `connection_id` (one of *your* connections) and
 `full_name` (`owner/name`, GitLab `group/…/name`) makes a new project whose
-folder is a clone of that repository (the Project popup's screen for it comes
-next). In order: the connection must be yours (anyone else's id is "no such
+folder is a clone of that repository (the Project popup's "From a repository"
+does it). In order: the connection must be yours (anyone else's id is "no such
 connection", the API token is refused), its host still allowed on this server,
 the name of the shape that forge allows; the node must be one you may use for
 a project folder and must say it clones (an older node, or one whose
@@ -3180,6 +3198,29 @@ forge names as its default, so you can work in it right away; a repository
 whose default branch is missing is refused. The project records
 where its folder came from (`source`: host and name), for the push that comes
 later (ADOPTION_PLAN X.27 step 4).
+
+**Pending while it clones.** Once the checks above and the forge's answer
+passed and the node was sent the request, the server answers at once (`202`)
+with the project **pending**: `{"project_id", "name", "node_id", "state":
+"cloning", "source": {"host", "full_name"}, "started_ms", "mine", "reason"}`.
+`GET /api/projects` lists pending projects apart, under `pending`; every member
+of the workspace sees a cloning one (`mine` says whether it is yours; nothing
+names whose connection it uses). A pending project is not a project: every
+route that takes a project id answers "unknown project" for it (its page, a
+chat in it, linking a chat, its folder, board, memory, `.mcp.json` list, a
+routine or a board template from it). When the node answers with the folder,
+the project is written with the same id, its folder and its source, and
+`projects_changed` goes out. When the clone fails, it stays `"state":
+"failed"` with the node's or the server's reason, shown to its starter only,
+until they dismiss it (`DELETE /api/projects/{id}/clone`; at most the newest
+ten failed ones are kept per person; failed ones count against no limit). The
+same person asking for the same repository (in any case) on the same node
+while one clones gets `409`; a running clone counts against the workspace's
+project limit. If the server restarts while a clone runs, every running one
+becomes failed at start ("the server restarted…"); the node still ends or
+finishes its git by its own limits, and a folder it finished meanwhile is left
+in its projects folder with no project naming it (remove it, or open it with
+Existing folder).
 
 What a clone brings and what it does not: the repository's default branch and
 its history; `origin` is the clean URL, with no credential in it (nothing of

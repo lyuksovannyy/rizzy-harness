@@ -5,8 +5,8 @@
 // choice); its popup lists the workspace's projects with their folders,
 // makes a new project on the node (the API mocked: a name and the node,
 // never a path), keeps today's free folder (whose chat sends exactly what
-// it sent before), shows "From a repository" as Later, and shows names as
-// text.
+// it sent before), has "From a repository" (repopicker.test.tsx), and shows
+// names as text.
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
@@ -249,11 +249,11 @@ describe("the Project button", () => {
     c.unmount();
   });
 
-  test("From a repository is Later; a role that cannot create projects and a node without project folders say so", async () => {
+  test("From a repository is no longer Later; a role that cannot create projects and a node without project folders say so", async () => {
     let c = mount([node()]);
     let d = await c.open();
-    const later = [...d.querySelectorAll<HTMLButtonElement>("button")].find((b) => b.textContent?.includes("Later"))!;
-    expect(later.disabled).toBe(true);
+    expect([...d.querySelectorAll("button")].some((b) => b.textContent?.includes("Later"))).toBe(false);
+    expect(d.querySelector('section[aria-labelledby="pp-repo"]')).not.toBeNull();
     canCreate = false;
     await c.click(d, "Cancel");
     c.unmount();

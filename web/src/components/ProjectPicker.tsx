@@ -2,12 +2,14 @@
 // where a new agentic chat works. A project of the workspace (its node and folder), a
 // new project (the node makes its folder, a git repository, from the name;
 // nothing here names a path), or an existing folder on the node (today's
-// free path, which the node bounds by its workspace_roots). "From a
-// repository" comes later (X.27). Its own lazy chunk, loaded with the
-// agentic row (the composer is first-load code).
-import { ChevronDown, GitBranch, Search } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
-import { LIMITS, type ProjectList, type ProjectSummary, projectsApi } from "../lib/projects";
+// free path, which the node bounds by its workspace_roots), or a clone of a
+// forge repository (X.27: its own lazy chunk, RepoPicker). A project whose
+// folder is being cloned shows as cloning and cannot be picked; a failed
+// one shows its reason, with Dismiss, to its starter. Its own lazy chunk,
+// loaded with the agentic row (the composer is first-load code).
+import { ChevronDown, Search } from "lucide-react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { LIMITS, type PendingProject, type ProjectList, type ProjectSummary, pendingProjects, projectsApi } from "../lib/projects";
 import { ProjectIcon } from "../lib/projectIcons";
 import { projectSlug } from "../lib/projectSlug";
 import { shownName } from "../md/hiddenChars";
@@ -30,6 +32,8 @@ function recentFolders(): string[] {
     return [];
   }
 }
+
+const RepoPicker = lazy(() => import("./RepoPicker"));
 
 const nodeName = (n: NodeInfo) => (n.embedded ? `local (${shownName(n.hostname)})` : shownName(n.hostname));
 
@@ -92,7 +96,13 @@ export function ProjectPicker(props: Props & { onClose: () => void }) {
   const [name, setName] = useState("");
   const [folder, setFolder] = useState(projectId ? "" : props.cwd);
   const [busy, setBusy] = useState<string | null>(null);
+  const [started, setStarted] = useState<PendingProject | null>(null);
+  const startedLine = useRef<HTMLParagraphElement>(null);
   const node = props.workers.find((w) => w.node_id === props.nodeId);
+  // Bumped by the Shell on every `projects_changed`: a clone that ends
+  // shows here too.
+  const changed = useSyncExternalStore(pendingProjects.sub, pendingProjects.get);
+  const [reload, setReload] = useState(0);
   useEffect(() => {
     const d = dialog.current;
     if (d && typeof d.showModal === "function" && !d.open) d.showModal();
@@ -107,7 +117,10 @@ export function ProjectPicker(props: Props & { onClose: () => void }) {
     return () => {
       live = false;
     };
-  }, [props.fixed, props.workspace]);
+  }, [props.fixed, props.workspace, changed, reload]);
+  useEffect(() => {
+    if (started) startedLine.current?.focus();
+  }, [started]);
   const close = () => {
     dialog.current?.close?.();
     props.onClose();
@@ -165,8 +178,35 @@ export function ProjectPicker(props: Props & { onClose: () => void }) {
               />
             </label>
             {!list && !err && <p className="muted">Loading…</p>}
-            {list && !shown.length && <p className="muted">{q.trim() ? "No project matches." : "No projects yet."}</p>}
+            {list && !shown.length && !list.pending?.length && <p className="muted">{q.trim() ? "No project matches." : "No projects yet."}</p>}
             <ul className="pp-list">
+              {list?.pending?.map((c) => (
+                <li key={c.project_id}>
+                  <div className="pp-row">
+                    <span className="pp-name">{shownName(c.name)}</span>
+                    <span className="pp-where muted" title={c.reason ? shownName(c.reason) : undefined}>
+                      {c.state === "failed"
+                        ? `Clone failed: ${shownName(c.reason ?? "")}`
+                        : `Cloning ${shownName(`${c.source.host}/${c.source.full_name}`)}…`}
+                    </span>
+                    {c.state === "failed" && c.mine && (
+                      <button
+                        type="button"
+                        className="pill"
+                        disabled={!!busy}
+                        onClick={() =>
+                          run(c.project_id, async () => {
+                            await projectsApi.dismissClone(c.project_id);
+                            setReload((n) => n + 1);
+                          })
+                        }
+                      >
+                        Dismiss
+                      </button>
+                    )}
+                  </div>
+                </li>
+              ))}
               {shown.map((p) => {
                 const n = usable(p);
                 const here = p.node_id === props.nodeId;
@@ -294,13 +334,27 @@ export function ProjectPicker(props: Props & { onClose: () => void }) {
         {!props.fixed && (
           <section aria-labelledby="pp-repo">
             <h3 id="pp-repo">From a repository</h3>
-            <button type="button" className="pp-row" disabled aria-describedby="pp-later">
-              <GitBranch size={16} aria-hidden />
-              <span className="pp-name">Clone from GitHub, GitLab, Gitea or Forgejo</span>
-              <span id="pp-later" className="badge">
-                Later
-              </span>
-            </button>
+            {started ? (
+              <p ref={startedLine} tabIndex={-1} role="status">
+                Cloning {shownName(`${started.source.host}/${started.source.full_name}`)}… You can close this: the project
+                appears in your list when its node is done.
+              </p>
+            ) : list && !list.can_create ? (
+              <p className="muted">Your role in this workspace cannot create projects.</p>
+            ) : (
+              <Suspense fallback={<p className="muted">Loading…</p>}>
+                <RepoPicker
+                  workspace={props.workspace}
+                  node={node}
+                  nodeLabel={node ? nodeName(node) : "the node"}
+                  canCreate={!!list?.can_create}
+                  onStarted={(p) => {
+                    setStarted(p);
+                    setReload((n) => n + 1);
+                  }}
+                />
+              </Suspense>
+            )}
           </section>
         )}
         {err && (
