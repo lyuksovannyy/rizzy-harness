@@ -14,6 +14,7 @@ mod delegate_availability_tests;
 #[cfg(test)]
 mod edit_guard_tests;
 pub mod images;
+pub mod live_usage;
 pub mod llm;
 pub mod manual_compact;
 pub mod mask;
@@ -4059,10 +4060,18 @@ impl NativeBackend {
             }
             started = true;
             if let Some(u) = &completion.usage {
+                let before = usage.clone();
                 usage.add(u);
                 usage.context_tokens = u.input_tokens;
                 if u.input_tokens > 0 {
                     calib = u.input_tokens as i64 - provider::estimate_tokens(&req.messages) as i64;
+                }
+                // The running total, in the log before the step's message.
+                if live_usage::report(host, &ctx.turn_id, &before, &usage)
+                    .await
+                    .is_err()
+                {
+                    return stopped(usage);
                 }
             }
             // The step's thinking, as the log keeps it (scrubbed, bounded)
@@ -4493,7 +4502,14 @@ impl NativeBackend {
                         sub_tokens -= grants.get(&call.call_id).copied().unwrap_or(0);
                     }
                     sub_tokens += u.input_tokens + u.output_tokens;
+                    let before = usage.clone();
                     usage.add(&u);
+                    if live_usage::report(host, &ctx.turn_id, &before, &usage)
+                        .await
+                        .is_err()
+                    {
+                        return stopped(usage);
+                    }
                     // A sub-agent's work is a change, as an edit is (T.1).
                     if outcome.ok {
                         guard.restart();
@@ -5257,8 +5273,15 @@ impl NativeBackend {
             match r {
                 Ok(Some(u)) => {
                     // The cache counts and the per-model breakdown too.
+                    let before = usage.clone();
                     usage.add(&u);
                     usage.context_tokens = usage.context_tokens.max(u.input_tokens);
+                    if live_usage::report(host, &ctx.turn_id, &before, &usage)
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
                 Ok(None) => {}
                 Err(e) => errors.push(e),
@@ -5391,6 +5414,7 @@ impl NativeBackend {
         mut manual: Option<&mut Manual>,
     ) -> Result<Option<(String, u64)>, harness_core::backend::LogError> {
         let focus = manual.as_ref().and_then(|m| m.focus.clone());
+        let in_turn = manual.is_none();
         let mut miss = |why: &str| {
             if let Some(m) = manual.as_deref_mut() {
                 m.miss.get_or_insert_with(|| why.to_string());
@@ -5525,7 +5549,14 @@ impl NativeBackend {
                     break;
                 }
             };
-            usage.add(&c.usage.unwrap_or_default());
+            if let Some(u) = &c.usage {
+                let before = usage.clone();
+                usage.add(u);
+                // A person's /compact is no turn: its cost is on its event.
+                if in_turn {
+                    live_usage::report(ctx.host, &ctx.turn_id, &before, usage).await?;
+                }
+            }
             let text = c.text.trim().to_string();
             // What the summary replaces: the summary so far and this piece,
             // counted as they sit in the request, by the same estimate that
@@ -5638,7 +5669,12 @@ impl NativeBackend {
                 return None;
             }
         };
-        usage.add(&c.usage.unwrap_or_default());
+        if let Some(u) = &c.usage {
+            let before = usage.clone();
+            usage.add(u);
+            // A failed append is seen by the next emit (`Logged`).
+            let _ = live_usage::report(ctx.host, &ctx.turn_id, &before, usage).await;
+        }
         let text = c.text.trim().to_string();
         if text.is_empty() {
             note_compact_failure(failures, model);

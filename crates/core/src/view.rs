@@ -336,6 +336,14 @@ pub struct SessionView {
     /// turn cost; `usage` above is the whole chat's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_usage: Option<Usage>,
+    /// What the finished turns and every other cost the chat carries (a
+    /// hand-off, a summary, a background agent) used: `usage` is this plus
+    /// `live` (X.39). Not part of the view's wire shape.
+    #[serde(skip)]
+    settled: Usage,
+    /// The running turn's latest `turn_usage` (its id and running total).
+    #[serde(skip)]
+    live: Option<(String, Usage)>,
     /// In a sub-agent's chat: the turns that were follow-ups from the chat
     /// that started it (`turn_started.continued_by`, T68), in order. Its
     /// first run is not one.
@@ -410,6 +418,20 @@ impl SessionView {
         Ok(())
     }
 
+    /// `usage` = the settled sums plus the running turn's (X.39).
+    fn show_usage(&mut self) {
+        self.usage = self.settled.clone();
+        if let Some((_, live)) = &self.live {
+            self.usage.add(live);
+        }
+    }
+
+    /// A cost the chat carries whatever turn runs: settled.
+    fn settle(&mut self, u: &Usage) {
+        self.settled.add(u);
+        self.show_usage();
+    }
+
     fn tool_mut(&mut self, call_id: &str) -> Option<&mut Item> {
         self.items
             .iter_mut()
@@ -465,6 +487,11 @@ impl SessionView {
                         failed_model: r.failed_model.clone(),
                         model: r.model.clone(),
                     });
+                }
+                // A turn that never ended keeps what it had used.
+                if let Some((_, live)) = self.live.take() {
+                    self.settled.add(&live);
+                    self.show_usage();
                 }
                 self.running_turn = Some(t.turn_id);
                 self.running_agent = t.agent;
@@ -652,16 +679,25 @@ impl SessionView {
                 }
             }
             EventKind::TurnEnded(t) => {
+                // X.39: the end's usage REPLACES the running figure; an end
+                // without one keeps the last running figure as the turn's.
+                let running = match &self.live {
+                    Some((id, _)) if *id == t.turn_id => self.live.take().map(|(_, u)| u),
+                    _ => None,
+                };
                 if let Some(u) = &t.usage {
-                    self.usage.add(u);
+                    self.settled.add(u);
                     self.context_tokens = u.context_tokens;
                     self.context_window = u.window;
                     self.summary_at = u.summary_at;
                     self.context_model = u.model.clone();
+                } else if let Some(u) = &running {
+                    self.settled.add(u);
                 }
+                self.show_usage();
                 // The turn that ended, also when it reported none (an
                 // interrupted one): never an older turn's as the last.
-                self.turn_usage = t.usage.as_ref().map(Usage::capped);
+                self.turn_usage = t.usage.as_ref().or(running.as_ref()).map(Usage::capped);
                 self.running_turn = None;
                 self.running_agent = None;
                 self.items.push(Item::TurnEnd {
@@ -669,7 +705,27 @@ impl SessionView {
                     reason: t.reason,
                 });
             }
-            EventKind::TurnUsage(_) => {}
+            EventKind::TurnUsage(t) => {
+                // X.39: what the running turn has used so far, a running
+                // total. Only the running turn's counts, a total below the
+                // last is stale, and a late one (its turn ended) changes
+                // nothing: the fold trusts no order.
+                if self.running_turn.as_deref() != Some(t.turn_id.as_str()) {
+                    return;
+                }
+                let tokens = |u: &Usage| u.input_tokens + u.output_tokens;
+                if let Some((id, last)) = &self.live
+                    && *id == t.turn_id
+                    && tokens(&t.usage) < tokens(last)
+                {
+                    return;
+                }
+                let u = t.usage.capped();
+                self.context_tokens = u.context_tokens;
+                self.turn_usage = Some(u.clone());
+                self.live = Some((t.turn_id, u));
+                self.show_usage();
+            }
             EventKind::Error(e) => self.items.push(Item::Error { message: e.message }),
             EventKind::AgentChanged(a) => {
                 self.items.push(Item::AgentChanged {
@@ -685,7 +741,7 @@ impl SessionView {
                 // hand-off note's, and the meter shows the shorter context
                 // until the next turn reports its own (X.20).
                 if let Some(u) = &h.usage {
-                    self.usage.add(u);
+                    self.settle(u);
                 }
                 if let Some(n) = h.tokens_after {
                     self.context_tokens = n;
@@ -699,7 +755,7 @@ impl SessionView {
             }
             EventKind::CompactFailed(c) => {
                 if let Some(u) = &c.usage {
-                    self.usage.add(u);
+                    self.settle(u);
                 }
                 self.items.push(Item::Error { message: c.reason });
             }
@@ -775,7 +831,7 @@ impl SessionView {
                 // Its cost is the chat's, like a turn's (only the sums: the
                 // context size stays the last turn's).
                 if let Some(u) = &h.usage {
-                    self.usage.add(u);
+                    self.settle(u);
                 }
                 self.items.push(Item::Handoff {
                     through_seq: h.through_seq,
@@ -797,7 +853,7 @@ impl SessionView {
                         // Its cost is the chat's, as a foreground
                         // sub-agent's is its parent turn's.
                         if let Some(u) = &c.usage {
-                            self.usage.add(u);
+                            self.settle(u);
                         }
                         (c.result, Some(c.agent_id))
                     }

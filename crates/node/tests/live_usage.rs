@@ -150,7 +150,6 @@ fn many(n: usize, command: &str) -> String {
     format!("script:{}", Value::Array(steps))
 }
 
-
 fn tokens(u: &Usage) -> u64 {
     u.input_tokens + u.output_tokens
 }
