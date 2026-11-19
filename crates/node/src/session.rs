@@ -1643,6 +1643,7 @@ impl Session {
 
     /// `agent_named`: the person chose the agent for this message (the
     /// picker or an @mention), as the master resolved it.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn prompt(
         self: &Arc<Self>,
         input: Input,
