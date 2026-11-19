@@ -1169,6 +1169,8 @@ async fn checkpoint_keep_cost() {
                 let mut v = 1u64;
                 let mut times = vec![];
                 let mut prune_ms = vec![];
+                let mut collections = 0usize;
+                let mut collect_ms = vec![];
                 for t in 0..turns {
                     v += 1;
                     let t0 = Instant::now();
@@ -1183,6 +1185,23 @@ async fn checkpoint_keep_cost() {
                     let tp = Instant::now();
                     prune(&repo, keep).await;
                     let p = ms(tp.elapsed());
+                    // The collection rule as the session runs it after a
+                    // turn, with the 5-minute floor taken out (the state's
+                    // `last` put back to 0): how often one would be due.
+                    let state = shadow_dir(&repo).join("harness-gc");
+                    if let Ok(text) = std::fs::read_to_string(&state) {
+                        let text: String = text
+                            .lines()
+                            .map(|l| if l.starts_with("last ") { "last 0" } else { l })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        let _ = std::fs::write(&state, text + "\n");
+                    }
+                    let tc = Instant::now();
+                    if upkeep::maybe_gc(&repo).await {
+                        collections += 1;
+                        collect_ms.push(ms(tc.elapsed()));
+                    }
                     if t + 20 >= turns {
                         times.push(ms(t0.elapsed()));
                         prune_ms.push(p);
@@ -1202,6 +1221,14 @@ async fn checkpoint_keep_cost() {
                     .unwrap()
                     .lines()
                     .count();
+                let (cm, _, cmax) = if collect_ms.is_empty() {
+                    (0.0, 0.0, 0.0)
+                } else {
+                    stats(&collect_ms)
+                };
+                eprintln!(
+                    "KEEP-GC {kind} {n} files, keep {keep}: {collections} collections due in {turns} turns, each median {cm:.0} ms max {cmax:.0}"
+                );
                 let tg = Instant::now();
                 let gc = run(&repo, &["gc", "--prune=now", "--quiet"], None).await;
                 let gc_ms = ms(tg.elapsed());

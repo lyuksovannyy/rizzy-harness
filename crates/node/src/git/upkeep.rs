@@ -500,7 +500,11 @@ pub async fn check_kept_packs(base: &Path) -> usize {
     let Ok(shadows) = std::fs::read_dir(base) else {
         return 0;
     };
-    let mut released = 0;
+    // The checks are independent (one pack, one `.keep` each): a few at a
+    // time, so a node with many folders of 100 kept packs does not start
+    // serially (review of PR 165, M3). A failed check does what it did.
+    let limit = std::sync::Arc::new(tokio::sync::Semaphore::new(CHECKS_AT_ONCE));
+    let mut tasks = tokio::task::JoinSet::new();
     for dir in shadows.filter_map(|e| e.ok()).map(|e| e.path()) {
         if dir.extension().is_none_or(|x| x != "git") || !dir.join("HEAD").is_file() {
             continue;
@@ -520,23 +524,37 @@ pub async fn check_kept_packs(base: &Path) -> usize {
             if !ours {
                 continue;
             }
-            let idx = keep.with_extension("idx");
-            let mut c = super::hardened(&super::git_program());
-            c.arg("--git-dir").arg(&dir).arg("verify-pack").arg(&idx);
-            let ok = super::exec(c, None, GIT_TIMEOUT)
-                .await
-                .is_ok_and(|o| o.status.success());
-            if !ok && std::fs::remove_file(&keep).is_ok() {
-                tracing::warn!(
-                    pack = %idx.display(),
-                    "a damaged checkpoint copy was released (its undo now depends on the folder's repository)"
-                );
-                released += 1;
-            }
+            let (dir, limit) = (dir.clone(), limit.clone());
+            tasks.spawn(async move {
+                let Ok(_slot) = limit.acquire_owned().await else {
+                    return false;
+                };
+                let idx = keep.with_extension("idx");
+                let mut c = super::hardened(&super::git_program());
+                c.arg("--git-dir").arg(&dir).arg("verify-pack").arg(&idx);
+                let ok = super::exec(c, None, GIT_TIMEOUT)
+                    .await
+                    .is_ok_and(|o| o.status.success());
+                if !ok && std::fs::remove_file(&keep).is_ok() {
+                    tracing::warn!(
+                        pack = %idx.display(),
+                        "a damaged checkpoint copy was released (its undo now depends on the folder's repository)"
+                    );
+                    return true;
+                }
+                false
+            });
         }
+    }
+    let mut released = 0;
+    while let Some(done) = tasks.join_next().await {
+        released += usize::from(done.unwrap_or(false));
     }
     released
 }
+
+/// How many `git verify-pack` run at once at start-up.
+const CHECKS_AT_ONCE: usize = 4;
 
 // ---- lock files (A.18) ----
 
@@ -983,6 +1001,76 @@ mod tests {
             std::fs::remove_file(k).unwrap();
         }
         assert!(due(&repo, state, now).await, "50 unkept packs: not due");
+    }
+
+    /// A shadow in `base` with `n` kept packs (as `pin_changed` leaves them),
+    /// the `damaged` ones (by index) with a broken pack file.
+    fn shadow_with_kept_packs(base: &Path, n: usize, damaged: &[usize]) -> PathBuf {
+        let dir = base.join("abc.git");
+        sh(base, &["init", "-q", "--bare", dir.to_str().unwrap()]);
+        let packs = dir.join("objects/pack");
+        for i in 0..n {
+            let blob = run_with_stdin(
+                &dir,
+                &["hash-object", "-w", "--stdin"],
+                format!("blob {i}\n"),
+            );
+            let out = run_with_stdin(
+                &dir,
+                &["pack-objects", packs.join("pack").to_str().unwrap()],
+                format!("{blob}\n"),
+            );
+            let name = packs.join(format!("pack-{}", out.trim()));
+            std::fs::write(
+                name.with_extension("keep"),
+                format!("{PIN}refs/harness/s/t{i}\n"),
+            )
+            .unwrap();
+            if damaged.contains(&i) {
+                let pack = name.with_extension("pack");
+                std::fs::remove_file(&pack).unwrap(); // read-only
+                std::fs::write(&pack, b"not a pack").unwrap();
+            }
+        }
+        dir
+    }
+
+    /// The checks run a few at a time, and what a failed one does is as it
+    /// was: its `.keep` goes, the others stay, and the count is right.
+    #[tokio::test]
+    async fn damaged_kept_packs_are_released_when_checks_run_together() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = shadow_with_kept_packs(d.path(), 20, &[1, 7, 8, 19]);
+        let keeps = || {
+            std::fs::read_dir(dir.join("objects/pack"))
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().is_some_and(|x| x == "keep"))
+                .count()
+        };
+        assert_eq!(keeps(), 20);
+        assert_eq!(check_kept_packs(d.path()).await, 4);
+        assert_eq!(keeps(), 16);
+    }
+
+    /// Start-up with 100 kept packs in one folder (review of PR 165, M3):
+    /// `B3_DIR=<dir> cargo test -p harness-node --lib start_up_with_100 -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn start_up_with_100_kept_packs() {
+        let Some(parent) = std::env::var_os("B3_DIR") else {
+            return;
+        };
+        let d = tempfile::tempdir_in(parent).unwrap();
+        shadow_with_kept_packs(d.path(), 100, &[]);
+        for run in 0..3 {
+            let t = std::time::Instant::now();
+            let n = check_kept_packs(d.path()).await;
+            eprintln!(
+                "START-UP check_kept_packs, 100 packs, run {run}: {:?} (released {n})",
+                t.elapsed()
+            );
+        }
     }
 
     /// Run git in the bare shadow `dir` with `input` on stdin; its output.

@@ -1212,7 +1212,10 @@ filesystem-style MCP server can still write the folder, with its calls'
 own approval); one that can write, edit or run a writable shell gets its
 own copy. Only the latest 100 checkpoints per folder are kept (`checkpoints_keep`
 in `node.toml`; a turn counts one, and so does the saving an undo makes of
-the folder). "Rewind" undoes a turn and everything after it. An undo
+the folder). At start-up the node verifies the copies it keeps for each folder (about
+100 packs per repository folder at the default, 4 checked at once; 45 ms warm
+for one folder), and collects garbage in the checkpoint store at most every
+5 minutes, when 16 checkpoints were dropped since the last time. "Rewind" undoes a turn and everything after it. An undo
 is refused, naming the files, when it would write over anything you
 changed after the turn: a file it puts back or removes, anything inside a
 folder it replaces, or a file or link you put where a folder it puts back
