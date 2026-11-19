@@ -2222,8 +2222,13 @@ shown, asked about or run: required arguments, their types, values from a
 fixed list, and arguments the tool does not take (a misspelt `timeout` is no
 longer silently ignored). A number or `true`/`false` sent as a string
 (`"timeout_secs": "300"`) is read as the number or the boolean, and the call
-card, the approval card and the tool all see the corrected value. Anything else
-is sent back to the agent as the call's result, naming the argument and what
+card, the approval card and the tool all see the corrected value. A call sent
+with empty arguments (a tool that takes none, such as `board`) is read as `{}`.
+`write` and `edit` also read the names other harnesses use: `file_text` for
+`content`, `old_str` and `new_str` for `old_string` and `new_string`. The call
+is then the same call under the real names, for the card, the approval, "allow
+for this turn" and every path rule; sending both names of one argument is
+refused, naming both. Anything else is sent back to the agent as the call's result, naming the argument and what
 it should be, and nothing runs. A call to a tool that is not on offer lists the
 tools that are. Schema rules the check does not implement (for example an MCP
 server's `pattern` or `oneOf`) never refuse a call; the tool checks those

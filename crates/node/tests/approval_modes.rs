@@ -537,6 +537,111 @@ async fn accept_edits_covers_edits_inside_the_folder_only() {
     assert!(!ws.join("b.txt").exists());
 }
 
+/// Trial 2026-11-19, item 8, the abuse case: a call spelled with another
+/// harness's argument names (`file_text`, `old_str`, `new_str`) is checked
+/// exactly as the real spelling. Accept edits covers the aliased edit inside
+/// the folder and refuses one outside it, in `.git` or through a link; a
+/// node's `denied_tools` still holds; the card of a call that is asked shows
+/// the real names.
+#[tokio::test]
+async fn aliased_arguments_get_every_check_of_the_real_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let ws = dir.path().join("ws");
+    let out = dir.path().join("out");
+    std::fs::create_dir(&ws).unwrap();
+    std::fs::create_dir(&out).unwrap();
+    std::fs::create_dir(ws.join(".git")).unwrap();
+    std::fs::write(out.join("there.txt"), "x\n").unwrap();
+    std::os::unix::fs::symlink(&out, ws.join("lnk")).unwrap();
+    let mut n = start(
+        &dir.path().join("node.db"),
+        policy(dir.path(), ApprovalMode::Auto),
+    )
+    .await;
+    let sid = n.create(&ws, None, None, false).await;
+    n.set_mode(sid, ApprovalMode::AcceptEdits).await.unwrap();
+    let abs = out.join("there.txt").display().to_string();
+    let asked = n
+        .turn(
+            sid,
+            &script(&[
+                ("write", json!({"path": "a.txt", "file_text": "x\n"})),
+                (
+                    "edit",
+                    json!({"path": "a.txt", "old_str": "x", "new_str": "y"}),
+                ),
+                (
+                    "write",
+                    json!({"path": "../out/escape.txt", "file_text": "e"}),
+                ),
+                ("edit", json!({"path": abs, "old_str": "x", "new_str": "y"})),
+                ("write", json!({"path": "lnk/via.txt", "file_text": "e"})),
+                ("write", json!({"path": ".git/config", "file_text": "e"})),
+                ("bash", json!({"command": "touch b.txt"})),
+            ]),
+            None,
+            deny,
+        )
+        .await;
+    // Only the shell is asked; the rest are the tool's own refusals or
+    // inside the folder, as with the real names.
+    assert_eq!(about(&asked), ["bash touch b.txt"]);
+    let outs = outputs(&n, sid);
+    assert_eq!(
+        outs.iter()
+            .filter(|o| o.contains("outside the session workspace")
+                || o.contains("inside a .git directory"))
+            .count(),
+        4,
+        "{outs:?}"
+    );
+    assert_eq!(std::fs::read_to_string(ws.join("a.txt")).unwrap(), "y\n");
+    assert_eq!(
+        std::fs::read_dir(&out).unwrap().count(),
+        1,
+        "nothing outside"
+    );
+    assert_eq!(
+        std::fs::read_to_string(out.join("there.txt")).unwrap(),
+        "x\n"
+    );
+
+    // In Ask: the card shows the real names, and a deny rule still holds.
+    for (denied, want) in [
+        (vec![], "content"),
+        (vec!["write".to_string()], "denied by"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        std::fs::create_dir(&ws).unwrap();
+        let mut n = start(
+            &dir.path().join("node.db"),
+            NodePolicy {
+                denied_tools: denied.clone(),
+                ..policy(dir.path(), ApprovalMode::Auto)
+            },
+        )
+        .await;
+        let sid = n.create(&ws, Some(ApprovalMode::Ask), None, false).await;
+        let asked = n
+            .turn(
+                sid,
+                &script(&[("write", json!({"path": "in.txt", "file_text": "i"}))]),
+                None,
+                deny,
+            )
+            .await;
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0].input, json!({"path": "in.txt", "content": "i"}));
+        assert!(
+            asked[0].reason.contains(want) || want == "content",
+            "{}",
+            asked[0].reason
+        );
+        assert!(!ws.join("in.txt").exists(), "{denied:?}");
+    }
+}
+
 /// Nothing the model writes and no tool result changes the mode: a file
 /// and a command's output that read as a switch to `auto` leave the chat
 /// in `ask`, and the next call asks.

@@ -215,6 +215,10 @@ impl Tool for Write {
     fn risk(&self) -> ToolRisk {
         ToolRisk::Mutating
     }
+    /// `file_text` is another harness's name for `content`.
+    fn normalize_args(&self, input: &mut Value) -> Result<(), String> {
+        crate::args::alias(input, "file_text", "content")
+    }
     fn refusal(&self, ctx: &ToolCtx, input: &Value) -> Option<String> {
         crate::path_refusal(ctx, input, true).or_else(|| unread_now(ctx, input))
     }
