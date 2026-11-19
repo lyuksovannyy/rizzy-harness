@@ -1,0 +1,1020 @@
+{
+  "_": "Shared by crates/core/tests/live_usage_fixture.rs and web/src/liveusage.test.ts (X.39). Written by hand: after each event `seq` the chat's figures are `expected`. Events 22 on: the limits a turn_usage carries (a summary call's context_tokens 0 keeps the meter), a turn_started that settles an older open figure, and usage that is not a non-negative integer (the event is unknown in both folds; 2^53 and up is not in the file: JSON in a browser cannot hold it).",
+  "events": [
+    {
+      "kind": "session_created",
+      "payload": {
+        "approval_mode": "ask",
+        "backend": "native",
+        "cwd": "/w",
+        "exec_mode": "sandbox",
+        "model": "mock",
+        "node_id": "local",
+        "profile": "agentic",
+        "title": "live usage"
+      },
+      "seq": 1,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f2",
+      "ts_ms": 1700000000000
+    },
+    {
+      "kind": "turn_started",
+      "payload": {
+        "turn_id": "t1"
+      },
+      "seq": 2,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f2",
+      "ts_ms": 1700000000001
+    },
+    {
+      "kind": "user_message",
+      "payload": {
+        "text": "go",
+        "turn_id": "t1"
+      },
+      "seq": 3,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f2",
+      "ts_ms": 1700000000002
+    },
+    {
+      "kind": "turn_usage",
+      "payload": {
+        "turn_id": "t1",
+        "usage": {
+          "input_tokens": 100,
+          "output_tokens": 10,
+          "context_tokens": 100,
+          "model": "p::m",
+          "by_model": {
+            "p::m": {
+              "input_tokens": 100,
+              "output_tokens": 10
+            }
+          }
+        }
+      },
+      "seq": 4,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f2",
+      "ts_ms": 1700000000003
+    },
+    {
+      "kind": "turn_usage",
+      "payload": {
+        "turn_id": "t1",
+        "usage": {
+          "input_tokens": 250,
+          "output_tokens": 30,
+          "context_tokens": 150,
+          "model": "p::m",
+          "by_model": {
+            "p::m": {
+              "input_tokens": 250,
+              "output_tokens": 30
+            }
+          }
+        }
+      },
+      "seq": 5,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f2",
+      "ts_ms": 1700000000004
+    },
+    {
+      "kind": "turn_usage",
+      "payload": {
+        "turn_id": "t1",
+        "usage": {
+          "input_tokens": 250,
+          "output_tokens": 30,
+          "context_tokens": 150,
+          "model": "p::m",
+          "by_model": {
+            "p::m": {
+              "input_tokens": 250,
+              "output_tokens": 30
+            }
+          }
+        }
+      },
+      "seq": 6,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f2",
+      "ts_ms": 1700000000005
+    },
+    {
+      "kind": "turn_usage",
+      "payload": {
+        "turn_id": "t1",
+        "usage": {
+          "input_tokens": 200,
+          "output_tokens": 20,
+          "context_tokens": 120,
+          "model": "p::m",
+          "by_model": {
+            "p::m": {
+              "input_tokens": 200,
+              "output_tokens": 20
+            }
+          }
+        }
+      },
+      "seq": 7,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f2",
+      "ts_ms": 1700000000006
+    },
+    {
+      "kind": "turn_ended",
+      "payload": {
+        "turn_id": "t1",
+        "reason": "completed",
+        "usage": {
+          "input_tokens": 400,
+          "output_tokens": 50,
+          "context_tokens": 200,
+          "model": "p::m",
+          "by_model": {
+            "p::m": {
+              "input_tokens": 400,
+              "output_tokens": 50
+            }
+          }
+        }
+      },
+      "seq": 8,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f2",
+      "ts_ms": 1700000000007
+    },
+    {
+      "kind": "turn_usage",
+      "payload": {
+        "turn_id": "t1",
+        "usage": {
+          "input_tokens": 999,
+          "output_tokens": 99,
+          "context_tokens": 999,
+          "model": "p::m",
+          "by_model": {
+            "p::m": {
+              "input_tokens": 999,
+              "output_tokens": 99
+            }
+          }
+        }
+      },
+      "seq": 9,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f2",
+      "ts_ms": 1700000000008
+    },
+    {
+      "kind": "turn_started",
+      "payload": {
+        "turn_id": "t2"
+      },
+      "seq": 10,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f2",
+      "ts_ms": 1700000000009
+    },
+    {
+      "kind": "turn_usage",
+      "payload": {
+        "turn_id": "other",
+        "usage": {
+          "input_tokens": 5,
+          "output_tokens": 5,
+          "context_tokens": 5,
+          "model": "p::m",
+          "by_model": {
+            "p::m": {
+              "input_tokens": 5,
+              "output_tokens": 5
+            }
+          }
+        }
+      },
+      "seq": 11,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f2",
+      "ts_ms": 1700000000010
+    },
+    {
+      "kind": "turn_usage",
+      "payload": {
+        "turn_id": "t2",
+        "usage": {
+          "input_tokens": 50,
+          "output_tokens": 5,
+          "context_tokens": 50,
+          "model": "p::m",
+          "by_model": {
+            "p::m": {
+              "input_tokens": 50,
+              "output_tokens": 5
+            }
+          }
+        }
+      },
+      "seq": 12,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f2",
+      "ts_ms": 1700000000011
+    },
+    {
+      "kind": "turn_ended",
+      "payload": {
+        "turn_id": "t2",
+        "reason": "interrupted"
+      },
+      "seq": 13,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f2",
+      "ts_ms": 1700000000012
+    },
+    {
+      "kind": "turn_started",
+      "payload": {
+        "turn_id": "t3"
+      },
+      "seq": 14,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f2",
+      "ts_ms": 1700000000013
+    },
+    {
+      "kind": "turn_ended",
+      "payload": {
+        "turn_id": "t3",
+        "reason": "interrupted"
+      },
+      "seq": 15,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f2",
+      "ts_ms": 1700000000014
+    },
+    {
+      "kind": "turn_started",
+      "payload": {
+        "turn_id": "t4"
+      },
+      "seq": 16,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f2",
+      "ts_ms": 1700000000015
+    },
+    {
+      "kind": "turn_usage",
+      "payload": {
+        "turn_id": "t4",
+        "usage": {
+          "input_tokens": 70,
+          "output_tokens": 7,
+          "context_tokens": 70,
+          "model": "p::m",
+          "by_model": {
+            "p::m": {
+              "input_tokens": 70,
+              "output_tokens": 7
+            }
+          }
+        }
+      },
+      "seq": 17,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f2",
+      "ts_ms": 1700000000016
+    },
+    {
+      "kind": "compact_failed",
+      "payload": {
+        "reason": "x",
+        "usage": {
+          "input_tokens": 10,
+          "output_tokens": 1,
+          "context_tokens": 0
+        }
+      },
+      "seq": 18,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f2",
+      "ts_ms": 1700000000017
+    },
+    {
+      "kind": "turn_usage",
+      "payload": {
+        "turn_id": "t4",
+        "usage": {
+          "input_tokens": 90,
+          "output_tokens": 9,
+          "context_tokens": 90,
+          "model": "p::m",
+          "by_model": {
+            "p::m": {
+              "input_tokens": 90,
+              "output_tokens": 9
+            }
+          }
+        }
+      },
+      "seq": 19,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f2",
+      "ts_ms": 1700000000018
+    },
+    {
+      "kind": "turn_ended",
+      "payload": {
+        "turn_id": "t4",
+        "reason": "completed",
+        "usage": {
+          "input_tokens": 100,
+          "output_tokens": 10,
+          "context_tokens": 100,
+          "model": "p::m",
+          "by_model": {
+            "p::m": {
+              "input_tokens": 100,
+              "output_tokens": 10
+            }
+          }
+        }
+      },
+      "seq": 20,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f2",
+      "ts_ms": 1700000000019
+    },
+    {
+      "kind": "turn_usage",
+      "payload": {
+        "turn_id": "t4",
+        "usage": {
+          "input_tokens": 300,
+          "output_tokens": 30,
+          "context_tokens": 300,
+          "model": "p::m",
+          "by_model": {
+            "p::m": {
+              "input_tokens": 300,
+              "output_tokens": 30
+            }
+          }
+        }
+      },
+      "seq": 21,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f2",
+      "ts_ms": 1700000000020
+    },
+    {
+      "kind": "turn_started",
+      "payload": {
+        "turn_id": "t5"
+      },
+      "seq": 22,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f2",
+      "ts_ms": 1700000000021
+    },
+    {
+      "kind": "turn_usage",
+      "payload": {
+        "turn_id": "t5",
+        "usage": {
+          "input_tokens": 30,
+          "output_tokens": 3,
+          "context_tokens": 0,
+          "model": "p::s",
+          "by_model": {
+            "p::m": {
+              "input_tokens": 30,
+              "output_tokens": 3
+            }
+          },
+          "window": 1000,
+          "summary_at": 800
+        }
+      },
+      "seq": 23,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f2",
+      "ts_ms": 1700000000022
+    },
+    {
+      "kind": "turn_usage",
+      "payload": {
+        "turn_id": "t5",
+        "usage": {
+          "input_tokens": 60,
+          "output_tokens": 6,
+          "context_tokens": 45,
+          "model": "p::m",
+          "by_model": {
+            "p::m": {
+              "input_tokens": 60,
+              "output_tokens": 6
+            }
+          },
+          "window": 1000,
+          "summary_at": 800
+        }
+      },
+      "seq": 24,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f2",
+      "ts_ms": 1700000000023
+    },
+    {
+      "kind": "turn_ended",
+      "payload": {
+        "turn_id": "t5",
+        "reason": "completed",
+        "usage": {
+          "input_tokens": 80,
+          "output_tokens": 8,
+          "context_tokens": 50
+        }
+      },
+      "seq": 25,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f2",
+      "ts_ms": 1700000000024
+    },
+    {
+      "kind": "turn_started",
+      "payload": {
+        "turn_id": "t6"
+      },
+      "seq": 26,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f2",
+      "ts_ms": 1700000000025
+    },
+    {
+      "kind": "turn_usage",
+      "payload": {
+        "turn_id": "t6",
+        "usage": {
+          "input_tokens": 10,
+          "output_tokens": 1,
+          "context_tokens": 10,
+          "model": "p::m",
+          "by_model": {
+            "p::m": {
+              "input_tokens": 10,
+              "output_tokens": 1
+            }
+          }
+        }
+      },
+      "seq": 27,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f2",
+      "ts_ms": 1700000000026
+    },
+    {
+      "kind": "turn_started",
+      "payload": {
+        "turn_id": "t7"
+      },
+      "seq": 28,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f2",
+      "ts_ms": 1700000000027
+    },
+    {
+      "kind": "turn_usage",
+      "payload": {
+        "turn_id": "t7",
+        "usage": {
+          "input_tokens": 5,
+          "output_tokens": 1,
+          "context_tokens": 5,
+          "model": "p::m",
+          "by_model": {
+            "p::m": {
+              "input_tokens": 5,
+              "output_tokens": 1
+            }
+          }
+        }
+      },
+      "seq": 29,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f2",
+      "ts_ms": 1700000000028
+    },
+    {
+      "kind": "turn_ended",
+      "payload": {
+        "turn_id": "t7",
+        "reason": "interrupted"
+      },
+      "seq": 30,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f2",
+      "ts_ms": 1700000000029
+    },
+    {
+      "kind": "turn_started",
+      "payload": {
+        "turn_id": "t8"
+      },
+      "seq": 31,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f2",
+      "ts_ms": 1700000000030
+    },
+    {
+      "kind": "turn_usage",
+      "payload": {
+        "turn_id": "t8",
+        "usage": {
+          "input_tokens": -500,
+          "output_tokens": 10,
+          "context_tokens": 1,
+          "model": "p::m",
+          "by_model": {
+            "p::m": {
+              "input_tokens": -500,
+              "output_tokens": 10
+            }
+          }
+        }
+      },
+      "seq": 32,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f2",
+      "ts_ms": 1700000000031
+    },
+    {
+      "kind": "turn_usage",
+      "payload": {
+        "turn_id": "t8",
+        "usage": {
+          "input_tokens": 1.5,
+          "output_tokens": 10,
+          "context_tokens": 1,
+          "model": "p::m",
+          "by_model": {
+            "p::m": {
+              "input_tokens": 1.5,
+              "output_tokens": 10
+            }
+          }
+        }
+      },
+      "seq": 33,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f2",
+      "ts_ms": 1700000000032
+    },
+    {
+      "kind": "turn_usage",
+      "payload": {
+        "turn_id": "t8",
+        "usage": {
+          "input_tokens": 1e+300,
+          "output_tokens": 10,
+          "context_tokens": 1,
+          "model": "p::m",
+          "by_model": {
+            "p::m": {
+              "input_tokens": 1e+300,
+              "output_tokens": 10
+            }
+          }
+        }
+      },
+      "seq": 34,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f2",
+      "ts_ms": 1700000000033
+    },
+    {
+      "kind": "turn_usage",
+      "payload": {
+        "turn_id": "t8",
+        "usage": {
+          "input_tokens": "9",
+          "output_tokens": 1,
+          "context_tokens": 1
+        }
+      },
+      "seq": 35,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f2",
+      "ts_ms": 1700000000034
+    },
+    {
+      "kind": "turn_ended",
+      "payload": {
+        "turn_id": "t8",
+        "reason": "completed",
+        "usage": {
+          "input_tokens": -1,
+          "output_tokens": 1,
+          "context_tokens": 1,
+          "model": "p::m",
+          "by_model": {
+            "p::m": {
+              "input_tokens": -1,
+              "output_tokens": 1
+            }
+          }
+        }
+      },
+      "seq": 36,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f2",
+      "ts_ms": 1700000000035
+    },
+    {
+      "kind": "turn_ended",
+      "payload": {
+        "turn_id": "t8",
+        "reason": "interrupted"
+      },
+      "seq": 37,
+      "session_id": "01a19bf2-0000-7000-8000-00000000f1f2",
+      "ts_ms": 1700000000036
+    }
+  ],
+  "expected": [
+    {
+      "seq": 1,
+      "input": 0,
+      "output": 0,
+      "context": 0,
+      "by_model_input": 0,
+      "turn": null
+    },
+    {
+      "seq": 2,
+      "input": 0,
+      "output": 0,
+      "context": 0,
+      "by_model_input": 0,
+      "turn": null
+    },
+    {
+      "seq": 3,
+      "input": 0,
+      "output": 0,
+      "context": 0,
+      "by_model_input": 0,
+      "turn": null
+    },
+    {
+      "seq": 4,
+      "input": 100,
+      "output": 10,
+      "context": 100,
+      "by_model_input": 100,
+      "turn": [
+        100,
+        10
+      ]
+    },
+    {
+      "seq": 5,
+      "input": 250,
+      "output": 30,
+      "context": 150,
+      "by_model_input": 250,
+      "turn": [
+        250,
+        30
+      ]
+    },
+    {
+      "seq": 6,
+      "input": 250,
+      "output": 30,
+      "context": 150,
+      "by_model_input": 250,
+      "turn": [
+        250,
+        30
+      ]
+    },
+    {
+      "seq": 7,
+      "input": 250,
+      "output": 30,
+      "context": 150,
+      "by_model_input": 250,
+      "turn": [
+        250,
+        30
+      ]
+    },
+    {
+      "seq": 8,
+      "input": 400,
+      "output": 50,
+      "context": 200,
+      "by_model_input": 400,
+      "turn": [
+        400,
+        50
+      ]
+    },
+    {
+      "seq": 9,
+      "input": 400,
+      "output": 50,
+      "context": 200,
+      "by_model_input": 400,
+      "turn": [
+        400,
+        50
+      ]
+    },
+    {
+      "seq": 10,
+      "input": 400,
+      "output": 50,
+      "context": 200,
+      "by_model_input": 400,
+      "turn": [
+        400,
+        50
+      ]
+    },
+    {
+      "seq": 11,
+      "input": 400,
+      "output": 50,
+      "context": 200,
+      "by_model_input": 400,
+      "turn": [
+        400,
+        50
+      ]
+    },
+    {
+      "seq": 12,
+      "input": 450,
+      "output": 55,
+      "context": 50,
+      "by_model_input": 450,
+      "turn": [
+        50,
+        5
+      ]
+    },
+    {
+      "seq": 13,
+      "input": 450,
+      "output": 55,
+      "context": 50,
+      "by_model_input": 450,
+      "turn": [
+        50,
+        5
+      ]
+    },
+    {
+      "seq": 14,
+      "input": 450,
+      "output": 55,
+      "context": 50,
+      "by_model_input": 450,
+      "turn": [
+        50,
+        5
+      ]
+    },
+    {
+      "seq": 15,
+      "input": 450,
+      "output": 55,
+      "context": 50,
+      "by_model_input": 450,
+      "turn": null
+    },
+    {
+      "seq": 16,
+      "input": 450,
+      "output": 55,
+      "context": 50,
+      "by_model_input": 450,
+      "turn": null
+    },
+    {
+      "seq": 17,
+      "input": 520,
+      "output": 62,
+      "context": 70,
+      "by_model_input": 520,
+      "turn": [
+        70,
+        7
+      ]
+    },
+    {
+      "seq": 18,
+      "input": 530,
+      "output": 63,
+      "context": 70,
+      "by_model_input": 520,
+      "turn": [
+        70,
+        7
+      ]
+    },
+    {
+      "seq": 19,
+      "input": 550,
+      "output": 65,
+      "context": 90,
+      "by_model_input": 540,
+      "turn": [
+        90,
+        9
+      ]
+    },
+    {
+      "seq": 20,
+      "input": 560,
+      "output": 66,
+      "context": 100,
+      "by_model_input": 550,
+      "turn": [
+        100,
+        10
+      ]
+    },
+    {
+      "seq": 21,
+      "input": 560,
+      "output": 66,
+      "context": 100,
+      "by_model_input": 550,
+      "turn": [
+        100,
+        10
+      ]
+    },
+    {
+      "seq": 22,
+      "input": 560,
+      "output": 66,
+      "context": 100,
+      "by_model_input": 550,
+      "turn": [
+        100,
+        10
+      ]
+    },
+    {
+      "seq": 23,
+      "input": 590,
+      "output": 69,
+      "context": 100,
+      "by_model_input": 580,
+      "turn": [
+        30,
+        3
+      ],
+      "window": 1000,
+      "summary_at": 800,
+      "context_model": "p::s"
+    },
+    {
+      "seq": 24,
+      "input": 620,
+      "output": 72,
+      "context": 45,
+      "by_model_input": 610,
+      "turn": [
+        60,
+        6
+      ],
+      "window": 1000,
+      "summary_at": 800,
+      "context_model": "p::m"
+    },
+    {
+      "seq": 25,
+      "input": 640,
+      "output": 74,
+      "context": 50,
+      "by_model_input": 550,
+      "turn": [
+        80,
+        8
+      ],
+      "window": null,
+      "summary_at": null,
+      "context_model": null
+    },
+    {
+      "seq": 26,
+      "input": 640,
+      "output": 74,
+      "context": 50,
+      "by_model_input": 550,
+      "turn": [
+        80,
+        8
+      ]
+    },
+    {
+      "seq": 27,
+      "input": 650,
+      "output": 75,
+      "context": 10,
+      "by_model_input": 560,
+      "turn": [
+        10,
+        1
+      ]
+    },
+    {
+      "seq": 28,
+      "input": 650,
+      "output": 75,
+      "context": 10,
+      "by_model_input": 560,
+      "turn": [
+        10,
+        1
+      ]
+    },
+    {
+      "seq": 29,
+      "input": 655,
+      "output": 76,
+      "context": 5,
+      "by_model_input": 565,
+      "turn": [
+        5,
+        1
+      ]
+    },
+    {
+      "seq": 30,
+      "input": 655,
+      "output": 76,
+      "context": 5,
+      "by_model_input": 565,
+      "turn": [
+        5,
+        1
+      ]
+    },
+    {
+      "seq": 31,
+      "input": 655,
+      "output": 76,
+      "context": 5,
+      "by_model_input": 565,
+      "turn": [
+        5,
+        1
+      ],
+      "unknown_events": 0
+    },
+    {
+      "seq": 32,
+      "input": 655,
+      "output": 76,
+      "context": 5,
+      "by_model_input": 565,
+      "turn": [
+        5,
+        1
+      ],
+      "unknown_events": 1
+    },
+    {
+      "seq": 33,
+      "input": 655,
+      "output": 76,
+      "context": 5,
+      "by_model_input": 565,
+      "turn": [
+        5,
+        1
+      ],
+      "unknown_events": 2
+    },
+    {
+      "seq": 34,
+      "input": 655,
+      "output": 76,
+      "context": 5,
+      "by_model_input": 565,
+      "turn": [
+        5,
+        1
+      ],
+      "unknown_events": 3
+    },
+    {
+      "seq": 35,
+      "input": 655,
+      "output": 76,
+      "context": 5,
+      "by_model_input": 565,
+      "turn": [
+        5,
+        1
+      ],
+      "unknown_events": 4
+    },
+    {
+      "seq": 36,
+      "input": 655,
+      "output": 76,
+      "context": 5,
+      "by_model_input": 565,
+      "turn": [
+        5,
+        1
+      ],
+      "unknown_events": 5
+    },
+    {
+      "seq": 37,
+      "input": 655,
+      "output": 76,
+      "context": 5,
+      "by_model_input": 565,
+      "turn": null,
+      "unknown_events": 5
+    }
+  ]
+}

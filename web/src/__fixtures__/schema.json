@@ -1980,6 +1980,88 @@
         "type": "string"
       }
     ],
+    "turn_usage": [
+      {
+        "path": "turn_id",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "usage",
+        "required": true,
+        "type": "object"
+      },
+      {
+        "path": "usage.by_model",
+        "required": false,
+        "type": "map"
+      },
+      {
+        "path": "usage.by_model{}",
+        "required": true,
+        "type": "object"
+      },
+      {
+        "path": "usage.by_model{}.cache_read_tokens",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "usage.by_model{}.cache_write_tokens",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "usage.by_model{}.input_tokens",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "usage.by_model{}.output_tokens",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "usage.cache_read_tokens",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "usage.cache_write_tokens",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "usage.context_tokens",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "usage.input_tokens",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "usage.model",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "usage.output_tokens",
+        "required": true,
+        "type": "number"
+      },
+      {
+        "path": "usage.summary_at",
+        "required": false,
+        "type": "number"
+      },
+      {
+        "path": "usage.window",
+        "required": false,
+        "type": "number"
+      }
+    ],
     "user_message": [
       {
         "path": "attachments",

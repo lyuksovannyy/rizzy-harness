@@ -263,3 +263,15 @@ fn reading_an_event_caps_its_breakdown_in_byte_order() {
         "the sums stay"
     );
 }
+
+/// Sums saturate: a forged or absurd count cannot wrap a chat's total (a
+/// debug build would panic, a release build would start again from zero).
+#[test]
+fn sums_saturate_instead_of_wrapping() {
+    let mut a = call("p::m", u64::MAX - 5, u64::MAX, 0, 0);
+    a.add(&call("p::m", 100, 100, 7, 0));
+    assert_eq!((a.input_tokens, a.output_tokens), (u64::MAX, u64::MAX));
+    assert_eq!(a.cache_read_tokens, 7);
+    let t = &a.by_model["p::m"];
+    assert_eq!((t.input_tokens, t.output_tokens), (u64::MAX, u64::MAX));
+}

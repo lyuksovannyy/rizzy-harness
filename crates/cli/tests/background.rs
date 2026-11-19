@@ -1138,7 +1138,7 @@ async fn ends_reach_the_agent_at_its_next_step_or_message_and_start_nothing() {
     assert!(matches!(
         kinds[at + 1..]
             .iter()
-            .find(|k| !matches!(k, EventKind::AssistantDelta(_))),
+            .find(|k| !matches!(k, EventKind::AssistantDelta(_) | EventKind::TurnUsage(_))),
         Some(EventKind::AssistantMessage(_))
     ));
 

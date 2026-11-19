@@ -123,6 +123,10 @@ pub const KEPT: &[(&str, &[&str])] = &[
         "turn_ended",
         &["turn_id", "usage.model", "usage.by_model.{}"],
     ),
+    (
+        "turn_usage",
+        &["turn_id", "usage.model", "usage.by_model.{}"],
+    ),
     ("error", &["turn_id"]),
     ("agent_changed", &["agent.agent_id", "model"]),
     ("variant_selected", &["group", "message_id"]),
