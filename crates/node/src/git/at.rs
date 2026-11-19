@@ -146,6 +146,19 @@ impl Top {
         }
     }
 
+    /// Whether `rel` is reached without passing a link or a file, and is
+    /// then a named pipe, a socket or a device (nothing git can stage).
+    /// Nothing is opened at `rel` itself; only `fstatat` without following.
+    pub(super) fn is_special(&self, rel: &Path) -> Result<bool, String> {
+        let Some((dir, name)) = self.parent(rel, false)? else {
+            return Ok(false);
+        };
+        Ok(!matches!(
+            kind(&dir, name).map_err(|e| err("cannot look at", rel, e))?,
+            None | Some(SFlag::S_IFREG | SFlag::S_IFLNK | SFlag::S_IFDIR)
+        ))
+    }
+
     /// Delete the file or link at `rel`. Already gone (missing, a parent no
     /// longer a directory or a link) is fine; a directory there now is
     /// someone else's and left alone.
