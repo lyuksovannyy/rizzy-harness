@@ -6,12 +6,17 @@
 // Screen readers hear the wait once per turn, from a region that is always
 // there; the count is never read out.
 import { type ReactNode, useEffect, useState } from "react";
+import type { ConnState } from "../live";
 import { t } from "../lib/i18n";
 import "../lib/i18nPages";
 import type { Item, SessionView } from "../types";
 
 /** Seconds of waiting before the count shows. */
 export const COUNT_FROM_S = 5;
+
+/** How long the link must stay down, without a break, before the line says so:
+ * an ordinary reconnect (about half a second) is not news. */
+export const OFFLINE_AFTER_MS = 2000;
 
 export type TurnState = "sending" | "waiting" | "answering" | "working" | "asking" | null;
 
@@ -51,11 +56,28 @@ export function TurnStatus(props: {
   mark?: ReactNode;
   /** Agents the last message called that have not had their turn yet (X.37). */
   left?: number;
+  /** The live link to the server. Not "live" for OFFLINE_AFTER_MS: the line
+   * and the screen-reader region say so (the wait is not true then); both go
+   * back at once when the link does. */
+  link?: ConnState;
 }) {
   const { state } = props;
   const [now, setNow] = useState(Date.now);
   const [since, setSince] = useState(() => ({ wait: props.wait, at: Date.now() }));
   if (since.wait !== props.wait) setSince({ wait: props.wait, at: Date.now() });
+  const down = !!props.link && props.link !== "live";
+  // Down for a whole OFFLINE_AFTER_MS (offline and connecting count as one
+  // stretch); `offline` is derived, so a live link clears it at once.
+  const [late, setLate] = useState(false);
+  useEffect(() => {
+    if (!down) {
+      setLate(false);
+      return;
+    }
+    const id = setTimeout(() => setLate(true), OFFLINE_AFTER_MS);
+    return () => clearTimeout(id);
+  }, [down]);
+  const offline = down && late && !!state;
   const counting = state === "waiting" || state === "sending";
   useEffect(() => {
     if (!counting) return;
@@ -76,14 +98,14 @@ export function TurnStatus(props: {
       {/* Always there, so a screen reader hears the wait when it begins (a
           live region inserted with its text is often missed). */}
       <span className="sr-only" role="status">
-        {said.words}
+        {offline ? t("conv.offline") : said.words}
       </span>
       {state && (
-        <div className={`thinking turn-${state}`} data-testid="turn-status" aria-hidden="true">
+        <div className={`thinking turn-${offline ? "down" : state}`} data-testid="turn-status" aria-hidden="true">
           {props.mark}
-          <span>{words}</span>
-          {!!props.left && <span className="waited">{t("conv.peersLeft", { n: String(props.left) })}</span>}
-          {counting && s >= COUNT_FROM_S && <span className="waited">{t("conv.waited", { s: String(s) })}</span>}
+          <span>{offline ? t("conv.offline") : words}</span>
+          {!offline && !!props.left && <span className="waited">{t("conv.peersLeft", { n: String(props.left) })}</span>}
+          {counting && !offline && s >= COUNT_FROM_S && <span className="waited">{t("conv.waited", { s: String(s) })}</span>}
         </div>
       )}
     </>

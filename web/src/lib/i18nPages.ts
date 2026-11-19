@@ -66,6 +66,7 @@ export const pages = {
   "conv.asking": "{name} is waiting for you",
   "conv.working": "{name} is working…",
   "conv.answering": "{name} is answering…",
+  "conv.offline": "The server is not reachable. Reconnecting…",
   "conv.peersLeft": "{n} more after it",
   "conv.calledBy": "{name}, called by you",
   "conv.mentionCalls": "Called {name}: it answers this message",

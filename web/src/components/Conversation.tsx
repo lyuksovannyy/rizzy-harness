@@ -972,6 +972,7 @@ export default function Conversation(props: {
               name={agentName(answering)}
               mark={facing && <AgentMark agent={facing} state={face} size={22} />}
               left={peersLeft(view?.items ?? [], !!view?.running_turn)}
+              link={live.state}
             />
             {running && view?.retry && <RetryNote retry={view.retry} />}
             {summarise.compacting && !running && (
