@@ -3303,6 +3303,8 @@ chat of someone else's.
   are tool results: `recall` can find text of a marked chat, and the
   board tool shows cards and notes. A connector call such text steers is
   stopped only by the approval card, and in **Auto** nothing asks.
+  Connector calls follow the chat's approval mode: in Auto they run
+  without asking; switch the chat to Ask to be asked each time.
 - **Which turns.** In such a chat, only a turn the server itself started
   with your message sent signed in, a run of your own routine, or your
   Retry of a turn that could use them. A turn started by a background
