@@ -1550,7 +1550,8 @@ select.pill {
   flex: none;
 }
 /* Up to 1100px the row drops under the title and the buttons, at full width,
-   still one line. */
+   and wraps, several items to a line. Nothing is shortened while it fits on a
+   line of its own; an item wider than the whole row gets an ellipsis. */
 @media (max-width: 1100px) {
   .conv-head {
     flex-wrap: wrap;
@@ -1565,12 +1566,6 @@ select.pill {
   .conv-meta {
     order: 9;
     flex: 1 1 100%;
-  }
-}
-/* A phone: the row wraps, several items to a line; one too long for a line
-   gets an ellipsis. */
-@media (max-width: 820px) {
-  .conv-meta {
     flex-wrap: wrap;
     gap: 2px var(--space-2);
   }
