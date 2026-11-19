@@ -103,6 +103,7 @@ const FREE: &[(&str, &[&str])] = &[
     ("approval_resolved", &["note"]),
     ("checkpoint", &["files.*", "excluded.*"]),
     ("turn_ended", &[]),
+    ("turn_usage", &[]),
     ("error", &["message"]),
     (
         "agent_changed",

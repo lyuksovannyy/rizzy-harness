@@ -669,6 +669,7 @@ impl SessionView {
                     reason: t.reason,
                 });
             }
+            EventKind::TurnUsage(_) => {}
             EventKind::Error(e) => self.items.push(Item::Error { message: e.message }),
             EventKind::AgentChanged(a) => {
                 self.items.push(Item::AgentChanged {

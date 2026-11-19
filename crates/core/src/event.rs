@@ -80,6 +80,7 @@ pub enum EventKind {
     ApprovalResolved(ApprovalResolved),
     Checkpoint(Checkpoint),
     TurnEnded(TurnEnded),
+    TurnUsage(TurnUsage),
     Error(ErrorEvent),
     AgentChanged(AgentChanged),
     VariantSelected(VariantSelected),
@@ -141,6 +142,7 @@ impl EventKind {
             EventKind::ApprovalResolved(_) => "approval_resolved",
             EventKind::Checkpoint(_) => "checkpoint",
             EventKind::TurnEnded(_) => "turn_ended",
+            EventKind::TurnUsage(_) => "turn_usage",
             EventKind::Error(_) => "error",
             EventKind::AgentChanged(_) => "agent_changed",
             EventKind::VariantSelected(_) => "variant_selected",
@@ -2117,6 +2119,19 @@ pub struct TurnEnded {
     pub reason: TurnEndReason,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
+}
+
+/// What the running turn has used so far, written after each model call
+/// that reported usage (X.39) so a chat's figures move while a long turn
+/// runs. `usage` is the turn's RUNNING TOTAL (the same sums, `by_model` and
+/// `context_tokens` as `turn_ended.usage`), not that call's share. The
+/// turn's `turn_ended.usage`, when it has one, replaces it; a turn that ends
+/// without usage keeps the last one. Appended by the session actor only,
+/// from what the loop reports; numbers only, nothing the model wrote.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TurnUsage {
+    pub turn_id: String,
+    pub usage: Usage,
 }
 
 /// The chat's approval mode changed (T50): the owner's change, as the node

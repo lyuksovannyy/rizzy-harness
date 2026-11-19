@@ -677,3 +677,39 @@ describe("rows given what the fold keeps as sent", () => {
 
   // A `ui:` block's spec of the wrong shape: see src/ui/uishapes.test.tsx.
 });
+
+// X.39: the header's tokens and cost estimate follow a turn while it runs.
+describe("usage in the header during a turn", () => {
+  const PRICED = [
+    {
+      id: "p::m", raw: "m", provider: "P", provider_id: "p", name: null, context: null, max_output: null,
+      effort: false, vision: false, tools: false, default: false, unavailable: false,
+      price: { input: 1000, output: 1000, currency: "USD" },
+    },
+  ] as unknown as import("../types").ModelInfo[];
+  const ev = (seq: number, kind: string, payload: object) => ({ session_id: SID, seq, ts_ms: 0, kind, payload }) as import("../types").RawEvent;
+  const use = (input: number, output: number) => ({ input_tokens: input, output_tokens: output, context_tokens: input, model: "p::m", by_model: { "p::m": { input_tokens: input, output_tokens: output } } });
+  const header = () => host.querySelector(".conv-meta .meter")?.textContent ?? "";
+
+  test("moves with each turn_usage, and keeps the figure when the turn ends", async () => {
+    current = emptyView();
+    apply(current, ev(1, "turn_started", { turn_id: "t" }));
+    apply(current, ev(2, "turn_usage", { turn_id: "t", usage: use(1000, 200) }));
+    const draw = async () => {
+      await act(async () => root.render(<Conversation live={live} sessionId={SID} row={sessionRow()} nodes={[]} agents={[]} models={PRICED} />));
+      await act(() => new Promise((r) => setTimeout(r, 0)));
+    };
+    await draw();
+    expect(header()).toContain("1.2k tokens");
+    expect(header()).toContain("≈ $1.20");
+    apply(current, ev(3, "turn_usage", { turn_id: "t", usage: use(3000, 400) }));
+    await draw();
+    expect(header()).toContain("3.4k tokens");
+    expect(header()).toContain("≈ $3.40");
+    // An interrupted turn ends without usage: what it spent stays.
+    apply(current, ev(4, "turn_ended", { turn_id: "t", reason: "interrupted" }));
+    await draw();
+    expect(header()).toContain("3.4k tokens");
+    expect(header()).toContain("≈ $3.40");
+  });
+});

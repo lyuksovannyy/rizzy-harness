@@ -257,6 +257,10 @@ pub fn every_kind(w: &str) -> Vec<EventKind> {
             reason: TurnEndReason::Completed,
             usage: Some(usage(w)),
         }),
+        EventKind::TurnUsage(TurnUsage {
+            turn_id: s(),
+            usage: usage(w),
+        }),
         EventKind::Error(ErrorEvent {
             turn_id: Some(s()),
             message: s(),
@@ -520,6 +524,7 @@ pub fn slot(k: &EventKind) -> usize {
         EventKind::ImagesWithheld(_) => 34,
         EventKind::ThinkingWithheld(_) => 35,
         EventKind::PeersSkipped(_) => 36,
+        EventKind::TurnUsage(_) => 37,
     }
 }
-pub const KINDS: usize = 37;
+pub const KINDS: usize = 38;
