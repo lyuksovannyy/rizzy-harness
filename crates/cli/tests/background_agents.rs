@@ -1140,12 +1140,13 @@ async fn an_end_the_log_refuses_once_is_merged_once_and_recorded_once() {
 /// child waits on is resolved, and nothing is merged without a yes.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_wall_clock_limit_ends_the_child_its_command_and_its_card() {
-    // 30 s, not 10: the limit runs from the child's start, and on a loaded
-    // machine setting the child up took longer than 10 s, so the limit
-    // ended it before its command had started and `appears` then waited for
-    // a process that never came (seen four times on 2026-11-19, in CI-sized
-    // runs beside other builds; alone it passed). Both halves below need
-    // the child to get as far as its command or its card first.
+    // 30 s, not 10: the limit runs from the moment the child's task is
+    // spawned, so it also covers the child's first model call, the tool
+    // dispatch and the start of the sandboxed shell. On a loaded machine
+    // that took longer than 10 s: the limit ended the child before its
+    // command had started, and `appears` then waited for a process that
+    // never came (it passed when run alone). Both halves below need the
+    // child to get as far as its command or its card before the limit.
     let Some(mut n) = node_with(|p| p.limits.background_agent_timeout_s = 30).await else {
         return;
     };
