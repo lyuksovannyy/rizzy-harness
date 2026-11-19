@@ -1577,6 +1577,13 @@ async fn a_grant_is_one_turns_and_nothing_else_may_enter_it() {
     said(&t, a, "r1", "refused", false).await;
     assert!(t.chat.call(a, TOOL, json!({})).await.is_err());
     ended(&t, a, "r1").await;
+    // An owner message the node records as queued (sent while a turn ran)
+    // starts no grant, also as the first message of a turn.
+    send("late".into(), owner.clone()).await.unwrap();
+    started(&t, a, "q2", "coder", false).await;
+    said(&t, a, "q2", "late", true).await;
+    assert!(t.chat.call(a, TOOL, json!({})).await.is_err());
+    ended(&t, a, "q2").await;
     // A turn and message the node wrote on its own: nothing was sent.
     started(&t, a, "n1", "coder", false).await;
     said(&t, a, "n1", "invented", false).await;
