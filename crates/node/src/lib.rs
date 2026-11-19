@@ -397,6 +397,25 @@ pub mod testing {
         wait_on(&QUEUED_HOLD, sid).await;
     }
 
+    static PEERS_HOLD: Holds = std::sync::Mutex::new(Vec::new());
+
+    /// Arm a hold for session `sid`'s next start of a called agent's turn
+    /// (X.37): after the turn before it ended and freed the slot, before
+    /// the next claims it, so a Stop or a message can be sent in that gap.
+    pub fn hold_next_peer_start(sid: harness_core::SessionId) -> Arc<EndHold> {
+        let h = Arc::new(EndHold {
+            held: tokio::sync::Notify::new(),
+            go: tokio::sync::Semaphore::new(0),
+            is_held: Default::default(),
+        });
+        PEERS_HOLD.lock().unwrap().push((sid, h.clone()));
+        h
+    }
+
+    pub(crate) async fn peers_hold(sid: harness_core::SessionId) {
+        wait_on(&PEERS_HOLD, sid).await;
+    }
+
     pub(crate) async fn end_hold(sid: harness_core::SessionId) {
         wait_on(&END_HOLD, sid).await;
     }

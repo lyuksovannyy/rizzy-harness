@@ -174,7 +174,13 @@ impl Session {
         after: TurnExtra,
         mut ended: String,
     ) {
-        while let Some((seq, next)) = self.next_peer(reason).await {
+        loop {
+            // The slot is free: a test holds the gap open here.
+            #[cfg(feature = "testing")]
+            crate::testing::peers_hold(self.id).await;
+            let Some((seq, next)) = self.next_peer(reason).await else {
+                break;
+            };
             let started = self.start_mention(seq, next.clone()).await;
             let (turn_id, user_text, history, spec, extra, cancel, by_stop) = match started {
                 Ok(s) => s,

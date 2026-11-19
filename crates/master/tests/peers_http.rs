@@ -500,7 +500,11 @@ async fn who_is_not_called_and_the_limit() {
     )
     .await;
     assert_eq!(st, StatusCode::CONFLICT, "{v}");
-    assert!(v["error"].as_str().unwrap().contains("at most 4"), "{v}");
+    let e = v["error"].as_str().unwrap();
+    assert!(
+        e.contains("at most 4") && e.contains("Mention fewer"),
+        "{v}"
+    );
     assert_eq!(log(&s, &s.admin, &sid).await.len(), n);
     assert_eq!(s.rec.reqs.lock().unwrap().len(), before);
     // Four are fine.
@@ -772,6 +776,17 @@ async fn the_list_goes_in_order_and_the_size_guard_holds_with_four_specs() {
     assert_eq!(p[0].0, "teamlead");
     assert_eq!(p[0].1, ["coder", "writer", "researcher"]);
     assert!(p[0].2 < 256 * 1024, "{} bytes", p[0].2);
+    // Five agents are refused by the master itself, before anything is sent.
+    let before = f.prompts().len();
+    let (st, v) = f
+        .say(&sid, "@teamlead @coder @writer @researcher @smol go")
+        .await;
+    assert_eq!(st, StatusCode::CONFLICT, "{v}");
+    assert!(
+        v["error"].as_str().unwrap().contains("Mention fewer"),
+        "{v}"
+    );
+    assert_eq!(f.prompts().len(), before);
     {
         let seen = f.seen.lock().unwrap();
         let MasterToNode::Prompt { peers, .. } = seen
