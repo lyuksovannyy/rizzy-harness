@@ -1450,7 +1450,11 @@ with one line saying what runs unasked:
   `allow_outside_workspace = true`; elsewhere the tool refuses it, and so
   does every node for anything in `.git`, without a card (see below). Every
   command, every publish and every other tool still ask. The node judges
-  the path, from the call itself, as the file tool resolves it.
+  the path, from the call itself, as the file tool resolves it. A file
+  written through a command (`cat >`, a heredoc, `sed -i`) is a command to
+  these modes and shows no per-edit diff, so `bash`'s
+  description tells an agent that has `write` or `edit` to change files with
+  them.
 - **Ask**: every command, write, edit and publish waits on a card. Reads,
   searches and the task list never ask.
 - **Plan**: the agent looks and writes a plan; nothing changes. It is not
