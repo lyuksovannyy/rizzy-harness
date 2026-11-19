@@ -153,6 +153,24 @@ async fn run_seen(
     delegates: Vec<AgentSpec>,
     prompt: &str,
 ) -> (Vec<(String, String)>, Vec<String>, usize, Vec<String>) {
+    run_seen_as(
+        ToolSelection::All(AllTools::All),
+        extra,
+        denied,
+        delegates,
+        prompt,
+    )
+    .await
+}
+
+/// [`run_seen`] for a lead that has `lead_tools`.
+async fn run_seen_as(
+    lead_tools: ToolSelection,
+    extra: &[&'static str],
+    denied: Vec<&'static str>,
+    delegates: Vec<AgentSpec>,
+    prompt: &str,
+) -> (Vec<(String, String)>, Vec<String>, usize, Vec<String>) {
     let mut tools = harness_tools::builtin();
     tools.extend(
         extra
@@ -179,7 +197,7 @@ async fn run_seen(
             model: "mock".into(),
             agent: Some(AgentSpec {
                 delegates,
-                ..spec("lead", ToolSelection::All(AllTools::All))
+                ..spec("lead", lead_tools)
             }),
             compare: vec![],
             parent_session: None,
@@ -438,4 +456,44 @@ async fn delegate_offers_follow_ups() {
     let (_, started, outs) = run(&[], vec![], all, &format!("delegate: scout@{id}=more")).await;
     assert_eq!(started, 0);
     assert!(outs[0].contains("not available here"), "{outs:?}");
+}
+
+/// `bash` as a lead with `tools` is offered it, when `denied` are the
+/// node's denied tools.
+async fn bash_for(tools: &[&str], denied: Vec<&'static str>) -> Option<String> {
+    let (seen, ..) = run_seen_as(list(tools), &[], denied, vec![], "hello").await;
+    seen.into_iter().find(|(n, _)| n == "bash").map(|(_, d)| d)
+}
+
+const USE_FILE_TOOLS: &str = "To create or change a file use";
+
+/// The real-use trial (2026-11-15): 0 `write` or `edit` calls in 53 tool
+/// calls, every file written with `cat > f <<EOF` or `python3 -`, so no
+/// diff and an "Accept edits" chat still asked for each command. An agent
+/// that has the file tools is told to change files with them ...
+#[tokio::test]
+async fn bash_tells_an_agent_with_file_tools_to_change_files_with_them() {
+    let all = described("bash").await;
+    assert!(all.contains(USE_FILE_TOOLS), "{all}");
+    assert!(all.contains("`write` or `edit`"), "{all}");
+    let one = bash_for(&["bash", "edit"], vec![]).await.unwrap();
+    assert!(
+        one.contains("`edit`") && !one.contains("`write` or"),
+        "{one}"
+    );
+}
+
+/// ... and one that has neither (a scout, a reviewer: its shell is
+/// read-only), or whose node denies them, is not told to use tools it
+/// does not have.
+#[tokio::test]
+async fn bash_does_not_name_file_tools_an_agent_lacks() {
+    if let Some(d) = bash_for(&["read", "grep", "bash"], vec![]).await {
+        assert!(!d.contains(USE_FILE_TOOLS), "{d}");
+        assert!(!d.contains("`write` or"), "{d}");
+    }
+    let denied = bash_for(&["read", "write", "edit", "bash"], vec!["write", "edit"]).await;
+    if let Some(d) = denied {
+        assert!(!d.contains(USE_FILE_TOOLS), "{d}");
+    }
 }
