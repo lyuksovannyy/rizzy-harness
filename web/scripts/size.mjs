@@ -416,8 +416,15 @@ const PICKMARK_KB = 0.1;
 // 429.2 the same day (a3ef442c merged in), so +0.1; the first load is
 // 101.4, unchanged.
 const X35B_KB = 0.1;
+// "From a repository" in the Project popup (X.27 step 3, PR 164): the
+// repository picker as its own lazy chunk (2.6 KB), the popup's and the
+// project page's pending and failed states, and in the first load the
+// pending-clone store, the sidebar's cloning rows and the dismiss call.
+// Measured 432.53 against the recorded 429.3 the same day (3f0859a3 merged
+// in), so +3.3; the first load is 101.7 (was 101.4), under the 104 ceiling.
+const X27C_KB = 3.3;
 
-const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB + EXPORT_KB + MEMDEF_KB + VISIBILITY_KB + T50_KB + LOOP_KB + DIFF_KB + T51_KB + WSMEM_KB + STEPS_KB + AGENT_SWITCHES_KB + T57_KB + X15_KB + X16_KB + COST_KB + X17_KB + X19_X20_KB + X21_KB + X7_KB + SIDEBAR_KB + X23_T70_KB + X24_KB + X28_KB + WAITING_KB + X29_KB + X25_KB + X26_KB + X32_KB + X33_KB + X34A_KB + X34B_KB + X36_KB + X27A_KB + WEBGUARD_KB + X35A_KB + PICKMARK_KB + X35B_KB) * 100) / 10) / 10;
+const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB + EXPORT_KB + MEMDEF_KB + VISIBILITY_KB + T50_KB + LOOP_KB + DIFF_KB + T51_KB + WSMEM_KB + STEPS_KB + AGENT_SWITCHES_KB + T57_KB + X15_KB + X16_KB + COST_KB + X17_KB + X19_X20_KB + X21_KB + X7_KB + SIDEBAR_KB + X23_T70_KB + X24_KB + X28_KB + WAITING_KB + X29_KB + X25_KB + X26_KB + X32_KB + X33_KB + X34A_KB + X34B_KB + X36_KB + X27A_KB + WEBGUARD_KB + X35A_KB + PICKMARK_KB + X35B_KB + X27C_KB) * 100) / 10) / 10;
 // Raised from 103 to 106 once the Phase A pages merged (103.7 measured: the
 // new sidebar, account button and routine-result rows are on the first
 // screen), then lowered to 104 at Phase B (102.3 measured) once the login
