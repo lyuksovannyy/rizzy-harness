@@ -183,6 +183,36 @@ impl Harness {
     }
 }
 
+/// Whether process `pid` is gone (or a zombie) within the time a stopped
+/// command is given. A stop kills the command's whole process group, but a
+/// kill is delivered, not awaited: only the command itself is waited for,
+/// so its background child can still be listed for a moment after the
+/// turn's end is in the log (seen once on CI: "child survived the failed
+/// append", read at the very instant the turn ended). The loop allows a
+/// cancelled tool 5 s (`TOOL_CANCEL_GRACE`); twice that here, for a loaded
+/// machine. A child nobody killed (`sleep 1000`) still fails the test.
+async fn gone(pid: i32) -> bool {
+    let alive = || {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .map(|s| {
+                !s.rsplit(')')
+                    .next()
+                    .unwrap_or("")
+                    .trim_start()
+                    .starts_with('Z')
+            })
+            .unwrap_or(false)
+    };
+    let by = std::time::Instant::now() + Duration::from_secs(10);
+    while alive() {
+        if std::time::Instant::now() >= by {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    true
+}
+
 fn default_policy(root: &std::path::Path) -> NodePolicy {
     NodePolicy {
         max_approval_mode: harness_core::policy::ApprovalMode::Ask,
@@ -298,16 +328,7 @@ async fn cancel_while_waiting_for_approval_and_while_running() {
         unreachable!()
     };
     assert_eq!(t.reason, TurnEndReason::Cancelled);
-    let alive = std::fs::read_to_string(format!("/proc/{pid}/stat"))
-        .map(|s| {
-            !s.rsplit(')')
-                .next()
-                .unwrap_or("")
-                .trim_start()
-                .starts_with('Z')
-        })
-        .unwrap_or(false);
-    assert!(!alive, "child {pid} survived cancel");
+    assert!(gone(pid).await, "child {pid} survived cancel");
 }
 
 /// A cancel sent right after a prompt stops that prompt's turn, even
@@ -1797,16 +1818,7 @@ async fn a_failed_append_kills_the_running_command() {
         .trim()
         .parse()
         .unwrap();
-    let alive = std::fs::read_to_string(format!("/proc/{pid}/stat"))
-        .map(|s| {
-            !s.rsplit(')')
-                .next()
-                .unwrap_or("")
-                .trim_start()
-                .starts_with('Z')
-        })
-        .unwrap_or(false);
-    assert!(!alive, "child {pid} survived the failed append");
+    assert!(gone(pid).await, "child {pid} survived the failed append");
 }
 
 /// A turn whose end could not be written, then a node restart: the
