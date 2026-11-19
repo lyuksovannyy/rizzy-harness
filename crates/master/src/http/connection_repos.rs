@@ -10,9 +10,13 @@
 //! connection, host API, sealed token, word, page); the limits (the host's shared failure
 //! budget, then the person's listing limit); then the token, opened only
 //! through `Master::connection_token`, which proves the sealing key first
-//! (a missing or wrong key is 503 before any request). A forge that refuses
-//! the token (401, 403) gets a message saying to replace it; the connection
-//! is kept. Listing is a read: no audit line, as for the other reads.
+//! (a missing or wrong key is 503 before any request). Before the limits:
+//! a refusal of this very token in the last minute is answered again
+//! without a call, and at most `forge_repos::MAX_IN_FLIGHT` listings run on
+//! the server at once (one more is 429 at once). A forge that refuses the
+//! token (401, 403) gets a message saying to replace it; the connection is
+//! kept, and the refusal does not count against the host's shared budget.
+//! Listing is a read: no audit line, as for the other reads.
 
 use axum::extract::{Path, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -98,6 +102,18 @@ async fn list(
     if let Some(l) = m.inner.forge.repos.get(&key) {
         return Ok(Json(serde_json::to_value(l).unwrap_or_default()));
     }
+    let token_key = (me.clone(), id.clone(), h.api_base.clone(), sealed);
+    if let Some(msg) = m.inner.forge.refusals.get(&token_key) {
+        return Err(err(StatusCode::BAD_GATEWAY, msg));
+    }
+    // Held until the answer is built; given back on every path (it is
+    // dropped with this future, a request the client gave up included).
+    let slot = m.inner.forge.in_flight.try_acquire().map_err(|_| {
+        err(
+            StatusCode::TOO_MANY_REQUESTS,
+            "this server is busy listing repositories; try again in a moment",
+        )
+    })?;
     m.forge_list_attempt(&me, &h.host)
         .map_err(|e| err(StatusCode::TOO_MANY_REQUESTS, e))?;
     let token = match m.connection_token(&me, &id).await {
@@ -116,21 +132,35 @@ async fn list(
     )
     .await;
     drop(token);
-    let l = got.map_err(|e| {
-        m.forge_failed(&h.host);
-        tracing::info!(host = %h.host, error = %e, "a forge repository listing failed");
-        err(
-            StatusCode::BAD_GATEWAY,
-            match e {
+    let l = match got {
+        Ok(l) => l,
+        Err(e) => {
+            // Only what says the host is failing counts against it; a
+            // refusal of this token is remembered for the token instead.
+            let refused = forge_repos::token_refused(&e);
+            if forge_repos::host_at_fault(&e) {
+                m.forge_failed(&h.host);
+            }
+            tracing::info!(host = %h.host, error = %e, "a forge repository listing failed");
+            let msg = match e {
                 CheckError::Refused(host, code) => format!(
                     "{host} refused this connection's token (HTTP {code}): it was revoked or has \
                      expired, lacks the scope to list repositories, or the forge is limiting the \
                      account; replace the token under Plugins → Connectors"
                 ),
+                CheckError::Status(host, 429) => format!(
+                    "{host} is limiting this account's requests (HTTP 429); try again in a few \
+                     minutes"
+                ),
                 e => e.to_string(),
-            },
-        )
-    })?;
+            };
+            if refused {
+                m.inner.forge.refusals.put(token_key, msg.clone());
+            }
+            return Err(err(StatusCode::BAD_GATEWAY, msg));
+        }
+    };
+    drop(slot);
     m.inner.forge.repos.put(key, l.clone());
     Ok(Json(serde_json::to_value(l).unwrap_or_default()))
 }

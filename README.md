@@ -3095,7 +3095,8 @@ search word each page reads 100 of your repositories, newest update first,
 and keeps the names that contain the word (the word never goes to GitHub;
 page 1 searches your 100 most recently updated, page 2 the next 100, up to
 1,000);
-GitLab `GET /projects?membership=true&search=…`; Gitea and Forgejo
+GitLab `GET /projects?membership=true&search=…&search_namespaces=true`
+(a group's name matches too); Gitea and Forgejo
 `GET /repos/search?uid=<your account id>&q=…`. The server passes on, for each
 repository, only the forge's id, `owner/name`, private or public, the default
 branch, a short description, the last update and whether the forge says you
@@ -3105,8 +3106,11 @@ repositories per page, at most 10 pages (with a search word you narrow
 further). At most 20 calls to forges per person per minute; the same request
 again within a minute is answered from memory, without calling the forge. A
 forge that refuses the token (HTTP 401 or 403) gets a message telling you to
-replace the token; the connection is kept. A forge host the admin removed
-from the list is not called.
+replace the token; the connection is kept, the same answer comes for a
+minute without asking the forge again, and a refusal does not count against
+the forge host (others keep listing and connecting). At most two listings
+run on the server at once; another gets "busy, try again" at once. A forge
+host the admin removed from the list is not called.
 
 **In this version nothing clones or pushes,** and no token is sent to a node
 or a model; that comes next (ADOPTION_PLAN X.27 steps 3 and 4).

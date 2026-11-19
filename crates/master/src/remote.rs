@@ -280,6 +280,17 @@ impl Attempts {
         })
     }
 
+    /// Failures counted against `target` in the window now.
+    pub fn target_len(&self, target: &str) -> usize {
+        let l = self.limits;
+        let now = Instant::now();
+        let mut g = lock(&self.seen);
+        g.1.get_mut(target).map_or(0, |h| {
+            prune(h, now, l.window);
+            h.len()
+        })
+    }
+
     /// A check against `target` failed: it counts against its budget.
     pub fn failed(&self, target: &str) {
         let l = self.limits;
@@ -321,8 +332,10 @@ mod tests {
         a.failed("h");
         a.failed("h");
         assert!(a.target_full("h"));
+        assert_eq!(a.target_len("h"), 2);
         assert!(!a.target_full("other"));
         std::thread::sleep(Duration::from_millis(80));
         assert!(!a.target_full("h"));
+        assert_eq!(a.target_len("h"), 0);
     }
 }

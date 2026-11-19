@@ -256,6 +256,10 @@ pub struct State {
     /// per-person limit on calls.
     pub(crate) repos: crate::forge_repos::Cache,
     listing: Attempts,
+    /// Listings in flight on the server (`forge_repos::MAX_IN_FLIGHT`).
+    pub(crate) in_flight: tokio::sync::Semaphore,
+    /// Tokens a forge refused lately (`forge_repos::Refusals`).
+    pub(crate) refusals: crate::forge_repos::Refusals,
 }
 
 impl Default for State {
@@ -268,6 +272,8 @@ impl Default for State {
             lookup: Mutex::default(),
             repos: crate::forge_repos::Cache::default(),
             listing: Attempts::new(crate::forge_repos::LIMITS),
+            in_flight: tokio::sync::Semaphore::new(crate::forge_repos::MAX_IN_FLIGHT),
+            refusals: crate::forge_repos::Refusals::default(),
         }
     }
 }
@@ -448,6 +454,11 @@ impl Master {
         self.inner.forge.repos.forget(user, id);
     }
 
+    /// Tests: failures counted against `host`'s shared budget now.
+    pub fn forge_host_failures(&self, host: &str) -> usize {
+        self.inner.forge.attempts.target_len(host)
+    }
+
     /// Tests: how many listings are cached.
     pub fn forge_repo_cache_len(&self) -> usize {
         self.inner.forge.repos.len()
@@ -540,19 +551,22 @@ async fn get(
 ) -> Result<(HeaderMap, serde_json::Value), CheckError> {
     let url = reqwest::Url::parse(&format!("{}{path}", h.api_base))
         .map_err(|_| CheckError::Unreachable(h.host.clone(), "bad api_base"))?;
-    get_url(c, h, url, headers, MAX_BODY).await
+    let (headers, body) = get_url(c, h, url, headers, MAX_BODY).await?;
+    let v = serde_json::from_slice(&body)
+        .map_err(|_| CheckError::BadAnswer(h.host.clone(), "it is not JSON"))?;
+    Ok((headers, v))
 }
 
 /// GET `url` (built by the caller from `h`'s `api_base`): the status, the
-/// headers and, on success, at most `max` bytes of JSON. An error body is
-/// never read.
+/// headers and, on success, at most `max` bytes of the body, unparsed (the
+/// caller decides how far to parse it). An error body is never read.
 pub(crate) async fn get_url(
     c: &reqwest::Client,
     h: &ForgeHost,
     url: reqwest::Url,
     headers: HeaderMap,
     max: usize,
-) -> Result<(HeaderMap, serde_json::Value), CheckError> {
+) -> Result<(HeaderMap, Vec<u8>), CheckError> {
     let unreachable = |why| CheckError::Unreachable(h.host.clone(), why);
     let r = c.get(url).headers(headers).send().await.map_err(|e| {
         unreachable(if e.is_timeout() {
@@ -590,9 +604,7 @@ pub(crate) async fn get_url(
         }
         body.extend_from_slice(&chunk);
     }
-    let v = serde_json::from_slice(&body)
-        .map_err(|_| CheckError::BadAnswer(h.host.clone(), "it is not JSON"))?;
-    Ok((headers, v))
+    Ok((headers, body))
 }
 
 /// Ask `h` whom `token` belongs to.

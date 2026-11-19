@@ -34,8 +34,10 @@ use std::time::{Duration, Instant};
 
 use harness_core::Secret;
 use reqwest::header::HeaderMap;
+use std::fmt;
+
 use serde::Serialize;
-use serde_json::Value;
+use serde::de::{self, DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 
 use crate::forge::{CheckError, ForgeHost, ForgeKind};
 use crate::lock;
@@ -45,8 +47,10 @@ use crate::remote::Lookup;
 pub const PER_PAGE: u32 = 30;
 /// The GitHub forge page read for a search word (its maximum).
 pub const GITHUB_SEARCH_PER_PAGE: u32 = 100;
-/// The last page served: at most 300 repositories (1,000 scanned with a
-/// GitHub search) are reachable by paging; a search word finds more.
+/// The last page served: at most 300 repositories are reachable by paging.
+/// On GitLab, Gitea and Forgejo a search word reaches the rest (the forge
+/// searches them all); on GitHub a search filters pages of 100 here, so a
+/// repository beyond the 1,000 most recently updated is never found.
 pub const MAX_PAGE: u32 = 10;
 /// The longest search word, in characters.
 pub const MAX_QUERY: usize = 100;
@@ -66,6 +70,16 @@ pub const CACHE_TTL: Duration = Duration::from_secs(60);
 pub const CACHE_ENTRIES: usize = 256;
 pub const CACHE_PER_USER: usize = 32;
 pub const CACHE_BYTES: usize = 4 * 1024 * 1024;
+/// One person's share of [`CACHE_BYTES`], so nobody's large answers push
+/// everyone else's out.
+pub const CACHE_PER_USER_BYTES: usize = 512 * 1024;
+/// Listings in flight on the whole server, from before the token is opened
+/// until the answer is built; one more is refused at once, not queued.
+pub const MAX_IN_FLIGHT: usize = 2;
+/// How long a forge's refusal of one token is remembered.
+pub const REFUSAL_TTL: Duration = Duration::from_secs(60);
+/// Refusals remembered at once.
+pub const MAX_REFUSALS: usize = 1024;
 /// GitLab's Developer role, the first that may push (GitLab's permissions
 /// documentation); protected branches can still refuse it.
 const GITLAB_DEVELOPER: u64 = 30;
@@ -181,7 +195,10 @@ pub fn request_url(
                     .append_pair("per_page", &per_s)
                     .append_pair("page", &page_s);
                 if let Some(q) = q {
-                    qp.append_pair("search", q);
+                    // Groups' names match too (GitLab: "include ancestor
+                    // namespaces when matching search criteria").
+                    qp.append_pair("search", q)
+                        .append_pair("search_namespaces", "true");
                 }
             }
             ForgeKind::Gitea | ForgeKind::Forgejo => {
@@ -287,62 +304,488 @@ pub fn valid_ref(r: &str) -> bool {
             .all(|p| !p.starts_with('.') && !p.ends_with(".lock"))
 }
 
+/// A JSON value cut down to what a field check needs. Arrays, objects,
+/// floats, negative numbers and null are never a valid field here: they
+/// become `Other` without being kept.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum Loose {
+    #[default]
+    Absent,
+    Bool(bool),
+    U64(u64),
+    Str(String),
+    Other,
+}
+
+impl Loose {
+    fn str(&self) -> Option<&str> {
+        match self {
+            Self::Str(s) => Some(s),
+            _ => None,
+        }
+    }
+    fn bool(&self) -> Option<bool> {
+        match self {
+            Self::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+    fn u64(&self) -> Option<u64> {
+        match self {
+            Self::U64(n) => Some(*n),
+            _ => None,
+        }
+    }
+}
+
+/// A value read and thrown away, keeping nothing. Unlike serde's
+/// `IgnoredAny` (which serde_json skips without a depth limit) it goes
+/// through `deserialize_any`, so the parser's nesting limit (128) holds
+/// for skipped values too and an absurdly deep answer is refused, as the
+/// whole-tree parse refused it.
+struct Skip;
+
+impl<'de> de::Deserialize<'de> for Skip {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Skip, D::Error> {
+        d.deserialize_any(SkipVisitor)
+    }
+}
+
+struct SkipVisitor;
+
+impl<'de> Visitor<'de> for SkipVisitor {
+    type Value = Skip;
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("any JSON value")
+    }
+    fn visit_bool<E: de::Error>(self, _: bool) -> Result<Skip, E> {
+        Ok(Skip)
+    }
+    fn visit_i64<E: de::Error>(self, _: i64) -> Result<Skip, E> {
+        Ok(Skip)
+    }
+    fn visit_u64<E: de::Error>(self, _: u64) -> Result<Skip, E> {
+        Ok(Skip)
+    }
+    fn visit_f64<E: de::Error>(self, _: f64) -> Result<Skip, E> {
+        Ok(Skip)
+    }
+    fn visit_str<E: de::Error>(self, _: &str) -> Result<Skip, E> {
+        Ok(Skip)
+    }
+    fn visit_unit<E: de::Error>(self) -> Result<Skip, E> {
+        Ok(Skip)
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, mut a: A) -> Result<Skip, A::Error> {
+        while a.next_element::<Skip>()?.is_some() {}
+        Ok(Skip)
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut a: A) -> Result<Skip, A::Error> {
+        while a.next_entry::<Skip, Skip>()?.is_some() {}
+        Ok(Skip)
+    }
+}
+
+/// Skip whatever a visitor does not take, keeping nothing of it, and give
+/// the visitor's default value.
+macro_rules! skip_scalars {
+    ($t:ty) => {
+        fn visit_bool<E: de::Error>(self, _: bool) -> Result<$t, E> {
+            Ok(<$t>::default())
+        }
+        fn visit_i64<E: de::Error>(self, _: i64) -> Result<$t, E> {
+            Ok(<$t>::default())
+        }
+        fn visit_u64<E: de::Error>(self, _: u64) -> Result<$t, E> {
+            Ok(<$t>::default())
+        }
+        fn visit_f64<E: de::Error>(self, _: f64) -> Result<$t, E> {
+            Ok(<$t>::default())
+        }
+        fn visit_str<E: de::Error>(self, _: &str) -> Result<$t, E> {
+            Ok(<$t>::default())
+        }
+        fn visit_unit<E: de::Error>(self) -> Result<$t, E> {
+            Ok(<$t>::default())
+        }
+    };
+}
+macro_rules! skip_seq {
+    ($t:ty) => {
+        fn visit_seq<A: SeqAccess<'de>>(self, mut a: A) -> Result<$t, A::Error> {
+            while a.next_element::<Skip>()?.is_some() {}
+            Ok(<$t>::default())
+        }
+    };
+}
+macro_rules! skip_map {
+    ($t:ty) => {
+        fn visit_map<A: MapAccess<'de>>(self, mut a: A) -> Result<$t, A::Error> {
+            while a.next_entry::<Skip, Skip>()?.is_some() {}
+            Ok(<$t>::default())
+        }
+    };
+}
+
+/// One value as a [`Loose`]. A string is kept whole: it is a slice of the
+/// answer already held (at most [`MAX_BODY`]), at most a page of entries is
+/// read, and the checks after refuse what is too long.
+struct LooseSeed;
+
+impl<'de> DeserializeSeed<'de> for LooseSeed {
+    type Value = Loose;
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<Loose, D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for LooseSeed {
+    type Value = Loose;
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a JSON value")
+    }
+    fn visit_bool<E: de::Error>(self, v: bool) -> Result<Loose, E> {
+        Ok(Loose::Bool(v))
+    }
+    fn visit_u64<E: de::Error>(self, v: u64) -> Result<Loose, E> {
+        Ok(Loose::U64(v))
+    }
+    fn visit_i64<E: de::Error>(self, _: i64) -> Result<Loose, E> {
+        Ok(Loose::Other)
+    }
+    fn visit_f64<E: de::Error>(self, _: f64) -> Result<Loose, E> {
+        Ok(Loose::Other)
+    }
+    fn visit_unit<E: de::Error>(self) -> Result<Loose, E> {
+        Ok(Loose::Other)
+    }
+    fn visit_str<E: de::Error>(self, v: &str) -> Result<Loose, E> {
+        Ok(Loose::Str(v.to_string()))
+    }
+    skip_seq!(Loose);
+    skip_map!(Loose);
+}
+
+/// The keys read; any other is skipped.
+enum Field {
+    Id,
+    FullName,
+    PathWithNamespace,
+    Private,
+    Visibility,
+    DefaultBranch,
+    Description,
+    UpdatedAt,
+    LastActivityAt,
+    Permissions,
+    Push,
+    ProjectAccess,
+    GroupAccess,
+    AccessLevel,
+    Ok,
+    Data,
+    Other,
+}
+
+struct FieldSeed;
+
+impl<'de> DeserializeSeed<'de> for FieldSeed {
+    type Value = Field;
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<Field, D::Error> {
+        d.deserialize_str(self)
+    }
+}
+
+impl<'de> Visitor<'de> for FieldSeed {
+    type Value = Field;
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a key")
+    }
+    fn visit_str<E: de::Error>(self, v: &str) -> Result<Field, E> {
+        Ok(match v {
+            "id" => Field::Id,
+            "full_name" => Field::FullName,
+            "path_with_namespace" => Field::PathWithNamespace,
+            "private" => Field::Private,
+            "visibility" => Field::Visibility,
+            "default_branch" => Field::DefaultBranch,
+            "description" => Field::Description,
+            "updated_at" => Field::UpdatedAt,
+            "last_activity_at" => Field::LastActivityAt,
+            "permissions" => Field::Permissions,
+            "push" => Field::Push,
+            "project_access" => Field::ProjectAccess,
+            "group_access" => Field::GroupAccess,
+            "access_level" => Field::AccessLevel,
+            "ok" => Field::Ok,
+            "data" => Field::Data,
+            _ => Field::Other,
+        })
+    }
+}
+
+/// `permissions`: GitHub's and Gitea's `push`, GitLab's two access levels.
+#[derive(Debug, Default)]
+struct Perm {
+    push: Loose,
+    project: Loose,
+    group: Loose,
+}
+
+struct PermSeed;
+
+impl<'de> DeserializeSeed<'de> for PermSeed {
+    type Value = Perm;
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<Perm, D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for PermSeed {
+    type Value = Perm;
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("permissions")
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut a: A) -> Result<Perm, A::Error> {
+        let mut p = Perm::default();
+        while let Some(k) = a.next_key_seed(FieldSeed)? {
+            match k {
+                Field::Push => p.push = a.next_value_seed(LooseSeed)?,
+                Field::ProjectAccess => p.project = a.next_value_seed(LevelSeed)?,
+                Field::GroupAccess => p.group = a.next_value_seed(LevelSeed)?,
+                _ => {
+                    a.next_value::<Skip>()?;
+                }
+            }
+        }
+        Ok(p)
+    }
+    skip_scalars!(Perm);
+    skip_seq!(Perm);
+}
+
+/// GitLab's `{"access_level": n}` (null or anything else: absent).
+struct LevelSeed;
+
+impl<'de> DeserializeSeed<'de> for LevelSeed {
+    type Value = Loose;
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<Loose, D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for LevelSeed {
+    type Value = Loose;
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("an access level")
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut a: A) -> Result<Loose, A::Error> {
+        let mut l = Loose::Absent;
+        while let Some(k) = a.next_key_seed(FieldSeed)? {
+            match k {
+                Field::AccessLevel => l = a.next_value_seed(LooseSeed)?,
+                _ => {
+                    a.next_value::<Skip>()?;
+                }
+            }
+        }
+        Ok(l)
+    }
+    skip_scalars!(Loose);
+    skip_seq!(Loose);
+}
+
+/// One entry as read: only the fields used; a key given
+/// twice keeps its last value (as a parsed JSON object would).
+#[derive(Debug, Default)]
+struct Raw {
+    id: Loose,
+    full_name: Loose,
+    path_with_namespace: Loose,
+    private: Loose,
+    visibility: Loose,
+    default_branch: Loose,
+    description: Loose,
+    updated_at: Loose,
+    last_activity_at: Loose,
+    perm: Perm,
+}
+
+/// An entry: `None` when it is not an object.
+struct EntrySeed;
+
+impl<'de> DeserializeSeed<'de> for EntrySeed {
+    type Value = Option<Raw>;
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<Option<Raw>, D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for EntrySeed {
+    type Value = Option<Raw>;
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a repository")
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut a: A) -> Result<Option<Raw>, A::Error> {
+        let mut r = Raw::default();
+        while let Some(k) = a.next_key_seed(FieldSeed)? {
+            match k {
+                Field::Id => r.id = a.next_value_seed(LooseSeed)?,
+                Field::FullName => r.full_name = a.next_value_seed(LooseSeed)?,
+                Field::PathWithNamespace => r.path_with_namespace = a.next_value_seed(LooseSeed)?,
+                Field::Private => r.private = a.next_value_seed(LooseSeed)?,
+                Field::Visibility => r.visibility = a.next_value_seed(LooseSeed)?,
+                Field::DefaultBranch => r.default_branch = a.next_value_seed(LooseSeed)?,
+                Field::Description => r.description = a.next_value_seed(LooseSeed)?,
+                Field::UpdatedAt => r.updated_at = a.next_value_seed(LooseSeed)?,
+                Field::LastActivityAt => r.last_activity_at = a.next_value_seed(LooseSeed)?,
+                Field::Permissions => r.perm = a.next_value_seed(PermSeed)?,
+                _ => {
+                    a.next_value::<Skip>()?;
+                }
+            }
+        }
+        Ok(Some(r))
+    }
+    skip_scalars!(Option<Raw>);
+    skip_seq!(Option<Raw>);
+}
+
+/// A list's first entries (at most the page size asked for) and how many
+/// more it had (counted, not kept).
+type List = (Vec<Option<Raw>>, usize);
+
+/// A list: `None` when it is not one.
+struct ListSeed {
+    take: usize,
+}
+
+impl<'de> DeserializeSeed<'de> for ListSeed {
+    type Value = Option<List>;
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<Option<List>, D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for ListSeed {
+    type Value = Option<List>;
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a list")
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, mut a: A) -> Result<Option<List>, A::Error> {
+        let mut items = Vec::new();
+        while items.len() < self.take {
+            match a.next_element_seed(EntrySeed)? {
+                Some(e) => items.push(e),
+                None => return Ok(Some((items, 0))),
+            }
+        }
+        let mut more = 0usize;
+        while a.next_element::<Skip>()?.is_some() {
+            more += 1;
+        }
+        Ok(Some((items, more)))
+    }
+    skip_scalars!(Option<List>);
+    skip_map!(Option<List>);
+}
+
+/// The whole answer: a list (GitHub, GitLab) or `{ok, data}` (Gitea,
+/// Forgejo).
+#[derive(Default)]
+enum Top {
+    List(List),
+    Object {
+        ok: Loose,
+        data: Option<List>,
+    },
+    #[default]
+    Other,
+}
+
+struct TopSeed {
+    take: usize,
+}
+
+impl<'de> DeserializeSeed<'de> for TopSeed {
+    type Value = Top;
+    fn deserialize<D: Deserializer<'de>>(self, d: D) -> Result<Top, D::Error> {
+        d.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for TopSeed {
+    type Value = Top;
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("a list of repositories")
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, a: A) -> Result<Top, A::Error> {
+        Ok(ListSeed { take: self.take }
+            .visit_seq(a)?
+            .map_or(Top::Other, Top::List))
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut a: A) -> Result<Top, A::Error> {
+        let (mut ok, mut data) = (Loose::Absent, None);
+        while let Some(k) = a.next_key_seed(FieldSeed)? {
+            match k {
+                Field::Ok => ok = a.next_value_seed(LooseSeed)?,
+                Field::Data => data = a.next_value_seed(ListSeed { take: self.take })?,
+                _ => {
+                    a.next_value::<Skip>()?;
+                }
+            }
+        }
+        Ok(Top::Object { ok, data })
+    }
+    skip_scalars!(Top);
+}
+
 /// A strict RFC 3339 timestamp (with its offset), as ms since the epoch.
-fn timestamp(v: Option<&Value>) -> Option<i64> {
-    v?.as_str()?
+fn timestamp(v: &Loose) -> Option<i64> {
+    v.str()?
         .parse::<jiff::Timestamp>()
         .ok()
         .map(|t| t.as_millisecond())
 }
 
 /// One entry, or `None` to leave it out.
-fn entry(kind: ForgeKind, v: &Value) -> Option<Repo> {
-    let id = v.get("id")?.as_u64().filter(|n| *n > 0)?;
-    let name_key = match kind {
-        ForgeKind::Gitlab => "path_with_namespace",
-        _ => "full_name",
-    };
-    let full_name = v
-        .get(name_key)?
-        .as_str()
-        .filter(|s| valid_full_name(kind, s))?;
+fn entry(kind: ForgeKind, v: &Raw) -> Option<Repo> {
+    let id = v.id.u64().filter(|n| *n > 0)?;
+    let full_name = match kind {
+        ForgeKind::Gitlab => &v.path_with_namespace,
+        _ => &v.full_name,
+    }
+    .str()
+    .filter(|s| valid_full_name(kind, s))?;
     let private = match kind {
-        ForgeKind::Gitlab => match v.get("visibility")?.as_str()? {
+        ForgeKind::Gitlab => match v.visibility.str()? {
             "public" => false,
             "internal" | "private" => true,
             _ => return None,
         },
-        _ => v.get("private")?.as_bool()?,
+        _ => v.private.bool()?,
     };
     let default_branch = v
-        .get("default_branch")
-        .and_then(Value::as_str)
+        .default_branch
+        .str()
         .filter(|b| valid_ref(b))
         .map(str::to_string);
     let description = v
-        .get("description")
-        .and_then(Value::as_str)
+        .description
+        .str()
         .and_then(|d| crate::remote::clean_text(d, MAX_DESCRIPTION));
-    let updated_ms = timestamp(v.get(match kind {
-        ForgeKind::Gitlab => "last_activity_at",
-        _ => "updated_at",
-    }));
+    let updated_ms = timestamp(match kind {
+        ForgeKind::Gitlab => &v.last_activity_at,
+        _ => &v.updated_at,
+    });
     let push = match kind {
-        ForgeKind::Gitlab => {
-            let p = v.get("permissions");
-            let level = |k: &str| {
-                p.and_then(|p| p.get(k))
-                    .and_then(|a| a.get("access_level"))
-                    .and_then(Value::as_u64)
-            };
-            level("project_access")
-                .max(level("group_access"))
-                .map(|l| l >= GITLAB_DEVELOPER)
-        }
-        _ => v
-            .get("permissions")
-            .and_then(|p| p.get("push"))
-            .and_then(Value::as_bool),
+        ForgeKind::Gitlab => v
+            .perm
+            .project
+            .u64()
+            .max(v.perm.group.u64())
+            .map(|l| l >= GITLAB_DEVELOPER),
+        _ => v.perm.push.bool(),
     };
     Some(Repo {
         id: id.to_string(),
@@ -355,31 +798,43 @@ fn entry(kind: ForgeKind, v: &Value) -> Option<Repo> {
     })
 }
 
-/// The entries of an answer: at most `per_page` read, each checked, ids
-/// seen once; with `q` (GitHub), only names containing it (any case).
+const NOT_JSON: &str = "it is not JSON";
+const NOT_LIST: &str = "it is not a list of repositories";
+
+/// The entries of an answer, read in one pass without building the JSON:
+/// at most `per_page` entries are read (each into the few bounded fields
+/// used, the rest skipped with [`Skip`]); later ones are only counted. Each is checked,
+/// ids seen once; with `q` (GitHub), only names containing it (any case).
 pub fn parse_listing(
     kind: ForgeKind,
-    body: &Value,
+    body: &[u8],
     per_page: u32,
     q: Option<&str>,
 ) -> Result<(Vec<Repo>, u32), &'static str> {
-    let items = match kind {
-        ForgeKind::Gitea | ForgeKind::Forgejo => {
-            if body.get("ok").and_then(Value::as_bool) != Some(true) {
+    let mut de = serde_json::Deserializer::from_slice(body);
+    let top = TopSeed {
+        take: per_page as usize,
+    }
+    .deserialize(&mut de)
+    .map_err(|_| NOT_JSON)?;
+    de.end().map_err(|_| NOT_JSON)?;
+    let (items, more) = match (kind, top) {
+        (ForgeKind::Gitea | ForgeKind::Forgejo, Top::Object { ok, data }) => {
+            if ok.bool() != Some(true) {
                 return Err("its search did not succeed");
             }
-            body.get("data").and_then(Value::as_array)
+            data.ok_or(NOT_LIST)?
         }
-        _ => body.as_array(),
-    }
-    .ok_or("it is not a list of repositories")?;
-    let per_page = per_page as usize;
-    let mut left_out = items.len().saturating_sub(per_page);
+        (ForgeKind::Gitea | ForgeKind::Forgejo, _) => return Err("its search did not succeed"),
+        (_, Top::List(l)) => l,
+        _ => return Err(NOT_LIST),
+    };
+    let mut left_out = more;
     let needle = q.map(str::to_lowercase);
     let mut seen = HashSet::new();
     let mut out = Vec::new();
-    for v in items.iter().take(per_page) {
-        match entry(kind, v) {
+    for v in &items {
+        match v.as_ref().and_then(|v| entry(kind, v)) {
             Some(r) if seen.insert(r.id.clone()) => {
                 if needle
                     .as_deref()
@@ -447,8 +902,30 @@ struct Kept {
     listing: Listing,
 }
 
+/// The memory an entry holds, as near as can be told without asking the
+/// allocator: the key's and the entry's own sizes, every string's capacity
+/// and the list's, and a map slot.
+fn held(k: &Key, l: &Listing) -> usize {
+    let o = |x: &Option<String>| x.as_ref().map_or(0, String::capacity);
+    std::mem::size_of::<Key>()
+        + std::mem::size_of::<Kept>()
+        + 64
+        + k.user.capacity()
+        + k.connection.capacity()
+        + k.api_base.capacity()
+        + o(&k.q)
+        + l.repositories.capacity() * std::mem::size_of::<Repo>()
+        + l.repositories
+            .iter()
+            .map(|r| {
+                r.id.capacity() + r.full_name.capacity() + o(&r.default_branch) + o(&r.description)
+            })
+            .sum::<usize>()
+}
+
 /// Recent answers, bounded by entries ([`CACHE_ENTRIES`], [`CACHE_PER_USER`]
-/// each) and bytes ([`CACHE_BYTES`]); the oldest goes first. Never shared
+/// each) and held bytes ([`CACHE_BYTES`], [`CACHE_PER_USER_BYTES`] each);
+/// the oldest goes first. Never shared
 /// between people: the key names the person and the connection, and the
 /// route finds the connection by (person, id) before it looks here.
 #[derive(Default)]
@@ -470,8 +947,8 @@ impl Cache {
     }
 
     pub fn put(&self, k: Key, listing: Listing) {
-        // At most 100 entries of bounded fields: far below CACHE_BYTES.
-        let bytes = serde_json::to_vec(&listing).map_or(CACHE_BYTES, |b| b.len()) + 256;
+        // At most 100 entries of bounded fields: below a person's share.
+        let bytes = held(&k, &listing);
         let mut m = lock(&self.map);
         m.retain(|_, e| e.at.elapsed() < CACHE_TTL);
         m.remove(&k);
@@ -481,7 +958,15 @@ impl Cache {
                 .min_by_key(|(_, e)| e.at)
                 .map(|(k, _)| k.clone())
         };
-        while m.keys().filter(|o| o.user == k.user).count() >= CACHE_PER_USER {
+        let mine = |m: &HashMap<Key, Kept>| {
+            m.iter()
+                .filter(|(o, _)| o.user == k.user)
+                .fold((0, 0), |(n, b), (_, e)| (n + 1, b + e.bytes))
+        };
+        while {
+            let (n, b) = mine(&m);
+            n >= CACHE_PER_USER || (n > 0 && b + bytes > CACHE_PER_USER_BYTES)
+        } {
             let Some(o) = oldest(&m, Some(&k.user)) else {
                 break;
             };
@@ -519,6 +1004,72 @@ impl Cache {
 
     pub fn bytes(&self) -> usize {
         lock(&self.map).values().map(|e| e.bytes).sum()
+    }
+}
+
+/// Whether a failed listing says the forge host is failing (or that we are
+/// hammering it), so that it counts against the host's shared budget:
+/// every failure but the forge refusing this one token (401, 403) or
+/// limiting this one account (429), which say nothing about the host.
+pub fn host_at_fault(e: &CheckError) -> bool {
+    !token_refused(e)
+}
+
+/// The forge refused this token or is limiting its account: remembered
+/// for [`REFUSAL_TTL`], so a retry is answered without a call.
+pub fn token_refused(e: &CheckError) -> bool {
+    matches!(e, CheckError::Refused(..) | CheckError::Status(_, 429))
+}
+
+/// (person, connection, host's `api_base`, hash of the sealed token).
+pub type TokenKey = (String, String, String, [u8; 32]);
+
+/// Refusals by token, bounded ([`MAX_REFUSALS`], the oldest goes first).
+/// A replaced token is a new key, so it is asked at once.
+#[derive(Default)]
+pub struct Refusals {
+    map: Mutex<HashMap<TokenKey, (Instant, String)>>,
+}
+
+impl Refusals {
+    pub fn get(&self, k: &TokenKey) -> Option<String> {
+        let mut m = lock(&self.map);
+        match m.get(k) {
+            Some((at, msg)) if at.elapsed() < REFUSAL_TTL => Some(msg.clone()),
+            Some(_) => {
+                m.remove(k);
+                None
+            }
+            None => None,
+        }
+    }
+
+    pub fn put(&self, k: TokenKey, msg: String) {
+        let mut m = lock(&self.map);
+        m.retain(|_, (at, _)| at.elapsed() < REFUSAL_TTL);
+        while m.len() >= MAX_REFUSALS {
+            let Some(o) = m
+                .iter()
+                .min_by_key(|(_, (at, _))| *at)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            m.remove(&o);
+        }
+        m.insert(k, (Instant::now(), msg));
+    }
+
+    pub fn forget(&self, user: &str, id: &str) {
+        lock(&self.map).retain(|k, _| !(k.0 == user && k.1 == id));
+    }
+
+    pub fn len(&self) -> usize {
+        lock(&self.map).len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
@@ -696,18 +1247,30 @@ mod tests {
 
     #[test]
     fn a_huge_page_is_cut_and_duplicates_counted() {
-        let items: Vec<Value> = (1..=100)
+        let items: Vec<serde_json::Value> = (1..=100)
             .map(|i| serde_json::json!({"id": i % 40 + 1, "full_name": format!("a/r{i}"), "private": false}))
             .collect();
-        let (r, left) = parse_listing(ForgeKind::Github, &Value::Array(items), 30, None).unwrap();
+        let (r, left) = parse_listing(
+            ForgeKind::Github,
+            &serde_json::to_vec(&items).unwrap(),
+            30,
+            None,
+        )
+        .unwrap();
         assert_eq!((r.len(), left), (30, 70));
-        let items: Vec<Value> = (0..30)
+        let items: Vec<serde_json::Value> = (0..30)
             .map(|_| serde_json::json!({"id": 5, "full_name": "a/b", "private": false}))
             .collect();
-        let (r, left) = parse_listing(ForgeKind::Github, &Value::Array(items), 30, None).unwrap();
+        let (r, left) = parse_listing(
+            ForgeKind::Github,
+            &serde_json::to_vec(&items).unwrap(),
+            30,
+            None,
+        )
+        .unwrap();
         assert_eq!((r.len(), left), (1, 29));
-        assert!(parse_listing(ForgeKind::Gitea, &serde_json::json!([]), 30, None).is_err());
-        assert!(parse_listing(ForgeKind::Github, &serde_json::json!({}), 30, None).is_err());
+        assert!(parse_listing(ForgeKind::Gitea, b"[]", 30, None).is_err());
+        assert!(parse_listing(ForgeKind::Github, b"{}", 30, None).is_err());
     }
 
     #[test]
@@ -792,5 +1355,179 @@ mod tests {
         assert!(c.get(&key("carol", 1)).is_none());
         c.forget("alice", "c");
         assert!(c.is_empty());
+    }
+
+    /// The largest listing a page can hold: 100 entries of the longest
+    /// fields kept.
+    fn heavy() -> Listing {
+        Listing {
+            repositories: (0..100)
+                .map(|i| Repo {
+                    id: i.to_string(),
+                    full_name: format!("{}/{i:0>400}", "o".repeat(100)),
+                    private: false,
+                    default_branch: Some("b".repeat(MAX_REF)),
+                    description: Some("\u{1F600}".repeat(MAX_DESCRIPTION)),
+                    updated_ms: None,
+                    push: None,
+                })
+                .collect(),
+            page: 1,
+            has_more: false,
+            left_out: 0,
+            search: Search::None,
+        }
+    }
+
+    #[test]
+    fn refusals_are_remembered_bounded_and_expire() {
+        let r = Refusals::default();
+        let k = |i: usize| (format!("u{i}"), "c".to_string(), "b".to_string(), [0u8; 32]);
+        r.put(k(0), "no".into());
+        assert_eq!(r.get(&k(0)).as_deref(), Some("no"));
+        let mut other = k(0);
+        other.3 = [1; 32];
+        assert_eq!(r.get(&other), None, "another token is asked");
+        for i in 1..=MAX_REFUSALS + 10 {
+            r.put(k(i), "no".into());
+        }
+        assert_eq!(r.len(), MAX_REFUSALS);
+        assert_eq!(r.get(&k(0)), None, "the oldest went");
+        lock(&r.map).get_mut(&k(MAX_REFUSALS)).unwrap().0 =
+            Instant::now().checked_sub(REFUSAL_TTL).unwrap();
+        assert_eq!(r.get(&k(MAX_REFUSALS)), None, "expired");
+        r.forget("u500", "c");
+        assert_eq!(r.get(&k(500)), None);
+        assert!(r.get(&k(501)).is_some());
+        assert!(!r.is_empty());
+    }
+
+    #[test]
+    fn only_host_failures_count_against_the_host() {
+        let h = || "h".to_string();
+        for e in [
+            CheckError::Refused(h(), 401),
+            CheckError::Refused(h(), 403),
+            CheckError::Status(h(), 429),
+        ] {
+            assert!(!host_at_fault(&e) && token_refused(&e), "{e}");
+        }
+        for e in [
+            CheckError::Status(h(), 500),
+            CheckError::Status(h(), 404),
+            CheckError::Status(h(), 302),
+            CheckError::Unreachable(h(), "x"),
+            CheckError::BadAnswer(h(), "x"),
+        ] {
+            assert!(host_at_fault(&e) && !token_refused(&e), "{e}");
+        }
+    }
+
+    /// The parse keeps what a parsed JSON object would: the last of a key
+    /// given twice; ids only as positive integers that fit 64 bits; nesting
+    /// beyond the parser's limit is refused, not followed into.
+    #[test]
+    fn the_bounded_parse_keeps_the_old_outcomes() {
+        let body = br#"[{"id":1,"id":2,"full_name":"a/b","full_name":"a/c","private":false},
+            {"id":9223372036854775808,"full_name":"a/d","private":false},
+            {"id":1.0,"full_name":"a/e","private":false},
+            {"id":-3,"full_name":"a/f","private":false},
+            {"id":"4","full_name":"a/g","private":false},
+            {"id":18446744073709551616,"full_name":"a/h","private":false},
+            {"id":5,"full_name":"a/i","private":false,"permissions":{"push":true},"permissions":[1]},
+            {"id":6,"full_name":"a/j","private":false,"x":{"deep":[[[{"full_name":"z/z"}]]]}}]"#;
+        let (r, left) = parse_listing(ForgeKind::Github, body, 30, None).unwrap();
+        let names: Vec<_> = r
+            .iter()
+            .map(|r| (r.id.as_str(), r.full_name.as_str()))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("2", "a/c"),
+                ("9223372036854775808", "a/d"),
+                ("5", "a/i"),
+                ("6", "a/j")
+            ]
+        );
+        assert_eq!(left, 4);
+        assert_eq!(r[2].push, None, "the later permissions win");
+        // Deeper than the parser allows: an error, quickly, at the top,
+        // inside an entry's skipped field, or past the page.
+        let deep = format!("{}{}", "[".repeat(200_000), "]".repeat(200_000));
+        assert_eq!(
+            parse_listing(ForgeKind::Github, deep.as_bytes(), 30, None),
+            Err(NOT_JSON)
+        );
+        let inner = format!(
+            r#"[{{"id":1,"full_name":"a/b","private":false,"x":{}{}}}]"#,
+            "[".repeat(200_000),
+            "]".repeat(200_000)
+        );
+        assert_eq!(
+            parse_listing(ForgeKind::Github, inner.as_bytes(), 30, None),
+            Err(NOT_JSON)
+        );
+        let past = format!(
+            r#"[{{"id":1,"full_name":"a/b","private":false}},{}{}]"#,
+            "[".repeat(200_000),
+            "]".repeat(200_000)
+        );
+        assert_eq!(
+            parse_listing(ForgeKind::Github, past.as_bytes(), 1, None),
+            Err(NOT_JSON)
+        );
+        // Trailing bytes and a cut answer are not JSON.
+        assert_eq!(
+            parse_listing(ForgeKind::Github, b"[] x", 30, None),
+            Err(NOT_JSON)
+        );
+        assert_eq!(
+            parse_listing(ForgeKind::Github, b"[{\"id\":1", 30, None),
+            Err(NOT_JSON)
+        );
+        // Gitea's ok may come after its data; data that is not a list.
+        let (r, _) = parse_listing(
+            ForgeKind::Gitea,
+            br#"{"data":[{"id":1,"full_name":"a/b","private":true}],"ok":true}"#,
+            30,
+            None,
+        )
+        .unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(
+            parse_listing(ForgeKind::Gitea, br#"{"ok":true,"data":{}}"#, 30, None),
+            Err(NOT_LIST)
+        );
+        // A long description is cut, a long name left out.
+        let long = format!(
+            r#"[{{"id":1,"full_name":"a/b","private":true,"description":"{}"}},{{"id":2,"full_name":"a/{}","private":true}}]"#,
+            "\u{1F600}".repeat(100_000),
+            "n".repeat(100_000)
+        );
+        let (r, left) = parse_listing(ForgeKind::Github, long.as_bytes(), 30, None).unwrap();
+        assert_eq!((r.len(), left), (1, 1));
+        assert_eq!(
+            r[0].description.as_ref().unwrap().chars().count(),
+            MAX_DESCRIPTION
+        );
+    }
+
+    /// Review of PR 158, LOW 8: one person's large answers do not push
+    /// another's out of the cache.
+    #[test]
+    fn one_person_cannot_flush_anothers_cache() {
+        let c = Cache::default();
+        c.put(key("bob", 1), listing(1));
+        for i in 0..CACHE_PER_USER {
+            c.put(key("alice", i), heavy());
+        }
+        assert!(c.get(&key("bob", 1)).is_some(), "bob's entry survives");
+        assert!(
+            c.len() < CACHE_PER_USER,
+            "her bytes, not only her count, bound her: {}",
+            c.len()
+        );
+        assert!(c.get(&key("alice", CACHE_PER_USER - 1)).is_some());
     }
 }

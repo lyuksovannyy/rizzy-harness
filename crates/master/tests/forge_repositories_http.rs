@@ -255,6 +255,7 @@ async fn forge(State(f): State<Fake>, req: Request) -> Response {
             (AxStatus::UNAUTHORIZED, format!("revoked: {auth:?}")).into_response()
         }
         ("e403", "user/repos") => (AxStatus::FORBIDDEN, "scope").into_response(),
+        ("e429", "user/repos") => (AxStatus::TOO_MANY_REQUESTS, "slow down").into_response(),
         ("e500", "user/repos") => (
             AxStatus::INTERNAL_SERVER_ERROR,
             format!("internal error, token was {auth:?}"),
@@ -290,6 +291,21 @@ async fn forge(State(f): State<Fake>, req: Request) -> Response {
             axum::Json(Value::Array(all)).into_response()
         }
         ("names", "user/repos") => axum::Json(hostile_entries()).into_response(),
+        // Review of PR 158, HIGH 1: answers as costly to parse as fit.
+        ("objs", "user/repos") => worst_body("objs").into_response(),
+        ("zeros", "user/repos") => worst_body("zeros").into_response(),
+        ("slowobjs", "user/repos") => {
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            worst_body("objs").into_response()
+        }
+        // HIGH 2: Alice's token is refused for listing; others work.
+        ("reva", "user/repos") => {
+            if auth.as_deref() == Some(&format!("Bearer {TOKEN_A}")) {
+                (AxStatus::UNAUTHORIZED, "revoked").into_response()
+            } else {
+                gh_list(&param(&pq, "page"), &param(&pq, "per_page"))
+            }
+        }
         ("obj", "user/repos") => axum::Json(json!({"repos": []})).into_response(),
         ("notjson", "user/repos") => "<html>hi</html>".into_response(),
         ("redir-in", "user/repos") => (
@@ -304,6 +320,30 @@ async fn forge(State(f): State<Fake>, req: Request) -> Response {
             .into_response(),
         _ => (AxStatus::NOT_FOUND, "no").into_response(),
     }
+}
+
+/// A JSON list just under the answer cap: `objs` is `[{"a":0},…]`,
+/// `zeros` is `[0,0,…]` (review of PR 158, HIGH 1).
+fn worst_body(kind: &str) -> ([(&'static str, &'static str); 1], axum::body::Bytes) {
+    static BODIES: OnceLock<(axum::body::Bytes, axum::body::Bytes)> = OnceLock::new();
+    let (objs, zeros) = BODIES.get_or_init(|| {
+        let cap = forge_repos::MAX_BODY - 16;
+        let mut a = String::from("[");
+        while a.len() + 9 < cap {
+            a.push_str(r#"{"a":0},"#);
+        }
+        a.pop();
+        a.push(']');
+        let mut z = String::from("[");
+        while z.len() + 3 < cap {
+            z.push_str("0,");
+        }
+        z.pop();
+        z.push(']');
+        (a.into(), z.into())
+    });
+    let b = if kind == "objs" { objs } else { zeros };
+    ([("content-type", "application/json")], b.clone())
 }
 
 async fn fake_forge() -> Fake {
@@ -648,9 +688,11 @@ async fn lists_repositories_cleaned_and_the_token_is_nowhere() {
     assert_eq!(t.forge.count(), n + 1, "one request, no link followed");
 
     // The failures, each without the token anywhere.
+    let mut failures = 0;
     for (path, status, needle) in [
         ("/e401", StatusCode::BAD_GATEWAY, "replace the token"),
         ("/e403", StatusCode::BAD_GATEWAY, "replace the token"),
+        ("/e429", StatusCode::BAD_GATEWAY, "limiting this account"),
         ("/e500", StatusCode::BAD_GATEWAY, "HTTP 500"),
         ("/hang", StatusCode::BAD_GATEWAY, "in time"),
         ("/big", StatusCode::BAD_GATEWAY, "too large"),
@@ -672,6 +714,14 @@ async fn lists_repositories_cleaned_and_the_token_is_nowhere() {
         );
         assert!(started.elapsed() < Duration::from_secs(8), "{path}");
         assert_eq!(t.forge.count(), before + 1, "{path}: one request");
+        // Only what says the host is failing counts against it.
+        let host_failed = !matches!(path, "/e401" | "/e403" | "/e429");
+        assert_eq!(
+            t.master.forge_host_failures("127.0.0.1"),
+            failures + usize::from(host_failed),
+            "{path}"
+        );
+        failures = t.master.forge_host_failures("127.0.0.1");
     }
     // An https entry whose server speaks no TLS.
     let port = t.forge.addr.get().unwrap().port();
@@ -712,7 +762,7 @@ async fn each_forge_kind_is_asked_its_documented_way() {
     let seen = t.forge.last();
     assert_eq!(
         seen.path_and_query,
-        "/gl/projects?membership=true&order_by=last_activity_at&sort=desc&per_page=30&page=1&search=proj"
+        "/gl/projects?membership=true&order_by=last_activity_at&sort=desc&per_page=30&page=1&search=proj&search_namespaces=true"
     );
     assert_eq!(seen.auth.as_deref(), Some(TOKEN_A), "PRIVATE-TOKEN header");
     assert_eq!(v["has_more"], true);
@@ -936,7 +986,7 @@ async fn the_search_word_and_page_cannot_change_the_request() {
     assert_eq!(
         seen,
         "/gl/projects?membership=true&order_by=last_activity_at&sort=desc&per_page=30&page=2\
-         &search=a%26b%3Dc%23d%3Fe%252F%2F..%2Fx+y%3Bpage%3D9"
+         &search=a%26b%3Dc%23d%3Fe%252F%2F..%2Fx+y%3Bpage%3D9&search_namespaces=true"
     );
     let q = query_of(&seen);
     assert_eq!(q.iter().filter(|(k, _)| k == "search").count(), 1);
@@ -976,7 +1026,11 @@ async fn the_search_word_and_page_cannot_change_the_request() {
     let (st, v) = list(&t, &alice, &gl, "?q=%20%20").await;
     assert_eq!(st, StatusCode::OK, "{v}");
     assert_eq!(v["search"], "none");
-    assert!(!t.forge.last().path_and_query.contains("search="));
+    let last = t.forge.last().path_and_query;
+    assert!(
+        !last.contains("search=") && !last.contains("search_namespaces"),
+        "{last}"
+    );
 }
 
 fn url_encode(s: &str) -> String {
@@ -1182,4 +1236,226 @@ async fn failed_listings_use_the_hosts_shared_budget() {
     assert_eq!(st, StatusCode::TOO_MANY_REQUESTS, "{e}");
     assert!(e["error"].as_str().unwrap().contains("failed"), "{e}");
     assert_eq!(t.forge.count(), before, "no request");
+}
+
+/// Review of PR 158, HIGH 2: refusals of one person's token do not use up
+/// the host's shared budget (three people, 20 refused listings each, were
+/// 60 failures: everyone's listings and connects to that host were then
+/// refused); a refusal is remembered for its token, so a retry makes no
+/// forge call; a new token is asked at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_token_does_not_lock_the_host_for_others() {
+    let t = start().await;
+    let [(alex, _), (alice, _), (bob, _)] = users(&t).await;
+    let carol = member(&t, &alex, "carol").await;
+    let mut revoked = Vec::new();
+    for c in [&alex, &alice, &carol] {
+        revoked.push((c.clone(), connect(&t, c, "127.0.0.1", TOKEN_A).await));
+    }
+    let bobs = connect(&t, &bob, "127.0.0.1", TOKEN_B).await;
+    github_at(&t, "/reva");
+    let before = t.forge.count();
+    for (c, id) in &revoked {
+        for i in 0..forge_repos::LIST_PER_USER {
+            let (st, e) = list(&t, c, id, &format!("?q=r{i}")).await;
+            assert_eq!(st, StatusCode::BAD_GATEWAY, "{e}");
+            assert!(
+                e["error"].as_str().unwrap().contains("replace the token"),
+                "{e}"
+            );
+        }
+    }
+    assert_eq!(
+        t.forge.count(),
+        before + 3,
+        "one forge call per refused token"
+    );
+    assert_eq!(
+        t.master.forge_host_failures("127.0.0.1"),
+        0,
+        "refusals are not the host's failures"
+    );
+    // Bob lists and connects to that host as before.
+    let (st, e) = list(&t, &bob, &bobs, "?q=bob").await;
+    assert_eq!(st, StatusCode::OK, "{e}");
+    let (st, e) = req(
+        &t,
+        Method::POST,
+        "/api/connections",
+        Some(json!({"host": "127.0.0.1", "token": TOKEN_B})),
+        Some(&bob),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{e}");
+    // Alice's retry: the same refusal, no forge call.
+    let (alice_c, alice_id) = &revoked[1];
+    let before = t.forge.count();
+    let (st, _) = list(&t, alice_c, alice_id, "?q=retry").await;
+    assert_eq!(st, StatusCode::BAD_GATEWAY);
+    assert_eq!(t.forge.count(), before);
+    // A new token is asked at once.
+    let (st, v) = req(
+        &t,
+        Method::PUT,
+        &format!("/api/connections/{alice_id}/token"),
+        Some(json!({"token": TOKEN_A2})),
+        Some(alice_c),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let before = t.forge.count();
+    let (st, e) = list(&t, alice_c, alice_id, "?q=retry").await;
+    assert_eq!(st, StatusCode::OK, "{e}");
+    assert_eq!(t.forge.count(), before + 1);
+}
+
+/// Review of PR 158, HIGH 1: at most two listings are in flight on the
+/// server; a third is refused at once (not queued); a slot is given back
+/// on every path: a timeout, an error, a request the client gave up.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn listings_in_flight_are_limited_and_always_released() {
+    let t = Arc::new(start().await);
+    let [(alex, _), (alice, _), (bob, _)] = users(&t).await;
+    let mut ids = Vec::new();
+    for (c, tok) in [(&alex, TOKEN_A), (&alice, TOKEN_A), (&bob, TOKEN_B)] {
+        ids.push((c.clone(), connect(&t, c, "127.0.0.1", tok).await));
+    }
+    github_at(&t, "/hang");
+    let spawn = |i: usize, q: &str| {
+        let (t, (c, id), q) = (t.clone(), ids[i].clone(), q.to_string());
+        tokio::spawn(async move { list(&t, &c, &id, &q).await })
+    };
+    let (a, b) = (spawn(0, "?q=h1"), spawn(1, "?q=h2"));
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let before = t.forge.count();
+    let started = std::time::Instant::now();
+    let (st, e) = list(&t, &ids[2].0, &ids[2].1, "?q=third").await;
+    assert_eq!(st, StatusCode::TOO_MANY_REQUESTS, "{e}");
+    assert!(e["error"].as_str().unwrap().contains("busy"), "{e}");
+    assert!(started.elapsed() < Duration::from_millis(500), "not queued");
+    assert_eq!(t.forge.count(), before, "no request");
+    // Both time out (2 s here): their slots come back.
+    for h in [a, b] {
+        let (st, e) = h.await.unwrap();
+        assert_eq!(st, StatusCode::BAD_GATEWAY, "{e}");
+    }
+    github_at(&t, "/gh");
+    let (st, e) = list(&t, &ids[2].0, &ids[2].1, "?q=after-timeouts").await;
+    assert_eq!(st, StatusCode::OK, "{e}");
+    // Errors give them back too.
+    github_at(&t, "/e500");
+    for i in 0..3 {
+        let (st, _) = list(&t, &ids[i].0, &ids[i].1, "?q=err").await;
+        assert_eq!(st, StatusCode::BAD_GATEWAY);
+    }
+    // Requests the client gives up on: the slots come back (when the
+    // server drops the request, or at the latest at the call's limit).
+    github_at(&t, "/hang");
+    let (a, b) = (spawn(0, "?q=gone1"), spawn(1, "?q=gone2"));
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    a.abort();
+    b.abort();
+    github_at(&t, "/gh");
+    let started = std::time::Instant::now();
+    let st = loop {
+        let (st, _) = list(&t, &ids[2].0, &ids[2].1, "?q=after-abort").await;
+        if st != StatusCode::TOO_MANY_REQUESTS || started.elapsed() > Duration::from_secs(4) {
+            break st;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(st, StatusCode::OK);
+    eprintln!(
+        "slots back {:?} after the clients gave up",
+        started.elapsed()
+    );
+}
+
+/// Review of PR 158, HIGH 1: memory. Runs in a child process of this test
+/// binary so that no other test shares the measurement.
+#[test]
+fn hostile_answers_cost_little_memory() {
+    let out = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "memory_child", "--ignored", "--nocapture"])
+        .env("FORGE_MEMORY_CHILD", "1")
+        .output()
+        .unwrap();
+    let text =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    eprintln!("{text}");
+    assert!(out.status.success() && text.contains("1 passed"), "{text}");
+}
+
+fn status_kb(field: &str) -> u64 {
+    std::fs::read_to_string("/proc/self/status")
+        .unwrap()
+        .lines()
+        .find(|l| l.starts_with(field))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+/// Peak resident growth (kB) while `f` runs.
+async fn peak_growth<F: std::future::Future>(f: F) -> (F::Output, u64) {
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let before = status_kb("VmRSS:");
+    std::fs::write("/proc/self/clear_refs", "5").unwrap();
+    let out = f.await;
+    (out, status_kb("VmHWM:").saturating_sub(before))
+}
+
+/// One listing's growth, debug build (the bound has room for the
+/// allocator; before the fix one such listing took about 60 MB).
+const ONE_LISTING_KB: u64 = 12 * 1024;
+/// Twenty at once, of which the server runs two.
+const TWENTY_LISTINGS_KB: u64 = 24 * 1024;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "run by hostile_answers_cost_little_memory"]
+async fn memory_child() {
+    if std::env::var("FORGE_MEMORY_CHILD").is_err() {
+        return;
+    }
+    let t = Arc::new(start().await);
+    let [(alex, _), (alice, _), (bob, _)] = users(&t).await;
+    let carol = member(&t, &alex, "carol").await;
+    let mut ids = Vec::new();
+    for c in [&alex, &alice, &bob, &carol] {
+        ids.push((c.clone(), connect(&t, c, "127.0.0.1", TOKEN_A).await));
+    }
+    worst_body("objs");
+    for kind in ["/objs", "/zeros"] {
+        github_at(&t, kind);
+        let ((st, v), kb) =
+            peak_growth(list(&t, &ids[0].0, &ids[0].1, &format!("?q=x{kind}"))).await;
+        eprintln!(
+            "one {kind} listing: {st}, left_out {}, peak growth {kb} kB",
+            v["left_out"]
+        );
+        assert_eq!(st, StatusCode::OK, "{v}");
+        assert!(kb < ONE_LISTING_KB, "{kind}: {kb} kB");
+    }
+    github_at(&t, "/slowobjs");
+    let (codes, kb) = peak_growth(async {
+        let mut hs = Vec::new();
+        for i in 0..20 {
+            let (t, (c, id)) = (t.clone(), ids[i % 4].clone());
+            hs.push(tokio::spawn(async move {
+                list(&t, &c, &id, &format!("?q=p{i}")).await.0
+            }));
+        }
+        let mut codes = std::collections::BTreeMap::new();
+        for h in hs {
+            *codes.entry(h.await.unwrap().as_u16()).or_insert(0) += 1;
+        }
+        codes
+    })
+    .await;
+    let after = status_kb("VmRSS:");
+    eprintln!("20 at once: {codes:?}, peak growth {kb} kB, RSS after {after} kB");
+    assert_eq!(codes.get(&200), Some(&2), "{codes:?}");
+    assert_eq!(codes.get(&429), Some(&18), "{codes:?}");
+    assert!(kb < TWENTY_LISTINGS_KB, "{kb} kB");
 }
