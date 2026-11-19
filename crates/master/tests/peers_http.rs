@@ -607,7 +607,7 @@ use harness_protocol::{MasterToNode, NodeToMaster, PROTOCOL_VERSION};
 type Seen = Arc<Mutex<Vec<MasterToNode>>>;
 
 /// A node that opens chats, acks everything and keeps every command.
-fn fake(caps: &[&str]) -> (NodeLink, Seen) {
+fn fake(caps: &[&str]) -> (NodeLink, Seen, mpsc::Sender<NodeToMaster>) {
     let (to_node, mut commands) = mpsc::channel::<MasterToNode>(1024);
     let (tx, from_node) = mpsc::channel::<NodeToMaster>(1024);
     let mut capabilities = vec![
@@ -627,6 +627,7 @@ fn fake(caps: &[&str]) -> (NodeLink, Seen) {
     .unwrap();
     let seen: Seen = Arc::default();
     let keep = seen.clone();
+    let events = tx.clone();
     tokio::spawn(async move {
         while let Some(msg) = commands.recv().await {
             keep.lock().unwrap().push(msg.clone());
@@ -670,13 +671,15 @@ fn fake(caps: &[&str]) -> (NodeLink, Seen) {
             }
         }
     });
-    (NodeLink { to_node, from_node }, seen)
+    (NodeLink { to_node, from_node }, seen, events)
 }
 
 struct F {
     base: String,
     cookie: String,
     seen: Seen,
+    master: Master,
+    events: mpsc::Sender<NodeToMaster>,
     _dir: tempfile::TempDir,
 }
 
@@ -692,8 +695,21 @@ async fn start_fake(caps: &[&str]) -> F {
             path: claim_path,
         });
     let master = Master::new(Store::open_in_memory().unwrap(), auth);
-    let (link, seen) = fake(caps);
+    let (link, seen, events) = fake(caps);
     master.add_link(link, true).await.unwrap();
+    master.set_models(vec![
+        harness_master::ModelInfo {
+            id: "demo::mock".into(),
+            provider: "demo".into(),
+            default: true,
+            ..Default::default()
+        },
+        harness_master::ModelInfo {
+            id: "demo::other".into(),
+            provider: "demo".into(),
+            ..Default::default()
+        },
+    ]);
     let m2 = master.clone();
     tokio::spawn(async move { axum::serve(listener, router(m2)).await.unwrap() });
     let base = format!("http://{addr}");
@@ -709,6 +725,8 @@ async fn start_fake(caps: &[&str]) -> F {
         base,
         cookie,
         seen,
+        master,
+        events,
         _dir: dir,
     }
 }
@@ -898,4 +916,153 @@ async fn resolved_mentions_are_bounded() {
     let ok = format!("{} go", "see @coder and ".repeat(16));
     let evs = ask(&s, &s.admin, &sid, json!({ "text": ok }), 1).await;
     assert_eq!(last_turns(&evs, 1), [pair("general", false)]);
+}
+
+/// The master's gate (review of PR 166, M3): a multi-mention message calls
+/// several agents only from the chat owner's own signed-in message, and every
+/// other way a message reaches a chat answers as a message with one leading
+/// mention always did. The node here announces no `peers`, so a gate term
+/// that lets a message through as a list shows as a refusal ("too old"),
+/// and the command that reached the node must carry no `peers`. Each row
+/// breaks if its own term of the gate is removed.
+#[tokio::test]
+async fn every_term_of_the_gate_keeps_a_message_to_its_first_mention() {
+    use harness_core::event::FormReply;
+    use harness_master::PromptOpts;
+    let f = start_fake(&[]).await;
+    let sid_s = f.chat().await;
+    let sid: harness_core::SessionId = sid_s.parse().unwrap();
+    let by_owner = || PromptOpts {
+        by_owner: true,
+        ..Default::default()
+    };
+    let text = "@coder @writer hi";
+    let cases: Vec<(&str, PromptOpts)> = vec![
+        ("the API token (not signed in)", PromptOpts::default()),
+        (
+            "a run of a routine",
+            PromptOpts {
+                routine_run: Some("run-1".into()),
+                ..by_owner()
+            },
+        ),
+        (
+            "a chat that holds an automation's event text",
+            PromptOpts {
+                untrusted: true,
+                ..by_owner()
+            },
+        ),
+        (
+            "an answer to a card",
+            PromptOpts {
+                reply: Some(FormReply {
+                    message_id: "m1".into(),
+                    block_id: "b1".into(),
+                    values: Default::default(),
+                }),
+                ..by_owner()
+            },
+        ),
+        (
+            "an explicitly named agent",
+            PromptOpts {
+                agent_id: Some("coder".into()),
+                ..by_owner()
+            },
+        ),
+        (
+            "a Retry",
+            PromptOpts {
+                retry: Some("t1".into()),
+                ..by_owner()
+            },
+        ),
+        (
+            "parallel answers",
+            PromptOpts {
+                compare: vec!["demo::other".into()],
+                ..by_owner()
+            },
+        ),
+    ];
+    for (what, opts) in cases {
+        let before = f.seen.lock().unwrap().len();
+        let r = f.master.prompt(sid, text.into(), opts).await;
+        assert!(r.is_ok(), "{what}: refused: {r:?}");
+        let seen = f.seen.lock().unwrap();
+        let sent: Vec<&MasterToNode> = seen[before..]
+            .iter()
+            .filter(|m| matches!(m, MasterToNode::Prompt { .. } | MasterToNode::Retry { .. }))
+            .collect();
+        assert_eq!(sent.len(), 1, "{what}");
+        match sent[0] {
+            MasterToNode::Prompt { agent, peers, .. } => {
+                assert!(peers.is_empty(), "{what}: peers were sent");
+                assert!(agent.is_some(), "{what}");
+            }
+            MasterToNode::Retry { .. } => {}
+            _ => unreachable!(),
+        }
+    }
+    // A sub-agent's chat: a node-made chat whose parent is this one.
+    let child = harness_core::SessionId::new();
+    let (kind, payload) = EventKind::SessionCreated(SessionCreated {
+        exec_mode: Some(harness_core::policy::ExecMode::Sandbox),
+        no_callbacks: false,
+        title: "c".into(),
+        cwd: "/w".into(),
+        model: "demo::mock".into(),
+        backend: "native".into(),
+        node_id: "fake".into(),
+        approval_mode: harness_core::policy::ApprovalMode::Ask,
+        profile: harness_core::event::Profile::Agentic,
+        agent_id: Some("coder".into()),
+        incognito: false,
+        parent_session: Some(sid),
+    })
+    .into_parts();
+    f.events
+        .send(NodeToMaster::Event {
+            event: RawEvent {
+                session_id: child,
+                seq: 1,
+                ts_ms: harness_core::now_ms(),
+                kind,
+                payload,
+            },
+        })
+        .await
+        .unwrap();
+    for _ in 0..200 {
+        if f.master
+            .inner_mirror()
+            .session(child)
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let before = f.seen.lock().unwrap().len();
+    let r = f.master.prompt(child, text.into(), by_owner()).await;
+    assert!(r.is_ok(), "a sub-agent's chat: refused: {r:?}");
+    let seen = f.seen.lock().unwrap();
+    let sent = seen[before..]
+        .iter()
+        .find_map(|m| match m {
+            MasterToNode::Prompt { peers, .. } => Some(peers.len()),
+            _ => None,
+        })
+        .expect("a prompt reached the node");
+    assert_eq!(sent, 0, "a sub-agent's chat: peers were sent");
+    // And the one term that may call several: the owner's own message.
+    drop(seen);
+    let r = f.master.prompt(sid, text.into(), by_owner()).await;
+    assert!(
+        format!("{r:?}").contains("too old"),
+        "the owner's own message is the list: {r:?}"
+    );
 }

@@ -2377,7 +2377,7 @@ impl Master {
                 session_model.as_deref(),
                 effort.as_deref(),
             )?;
-            peers::for_peer(&mut spec);
+            peers::for_peer(&mut spec, untrusted)?;
             peer_specs.push(spec);
         }
         // `media::prompt_images` checked the chat's own model; an @mention or
