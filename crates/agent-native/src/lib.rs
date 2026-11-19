@@ -8303,7 +8303,9 @@ mod tests {
         c.history = history.clone();
         let out = b.run_turn(c).await;
         assert_eq!(out.reason, TurnEndReason::Completed);
-        let events = host.events.lock().unwrap().clone();
+        // The summary call's running usage (X.39) comes first; skip it.
+        let mut events = host.events.lock().unwrap().clone();
+        events.retain(|e| !matches!(e, EventKind::TurnUsage(_)));
         let EventKind::HistorySummarized(h) = &events[0] else {
             panic!("{events:?}")
         };
@@ -8375,7 +8377,9 @@ mod tests {
         c.history = history;
         let out = b.run_turn(c).await;
         assert_eq!(out.reason, TurnEndReason::Completed);
-        let events = host.events.lock().unwrap().clone();
+        // The summary call's running usage (X.39) comes first; skip it.
+        let mut events = host.events.lock().unwrap().clone();
+        events.retain(|e| !matches!(e, EventKind::TurnUsage(_)));
         let EventKind::HistorySummarized(h) = &events[0] else {
             panic!("{events:?}")
         };
