@@ -24,6 +24,9 @@ export interface AgentRow {
   runs: number;
   /** Running in the background (X.24): its entry, which Stop ends. */
   bg_id?: string;
+  /** Its call stands after the chat's last turn end, so in the turn that
+   * is running now (or the one that just ended and has no end item yet). */
+  current: boolean;
 }
 
 export interface CommandRow extends BgRow {
@@ -62,6 +65,7 @@ export function sideItems(view: SessionView | null | undefined, keep: ReadonlySe
   const items = view.items;
   const from = latestTurn(items);
   const turnRunning = view.running_turn !== null;
+  const lastEnd = items.findLastIndex((x) => x.type === "turn_end");
   const agents: AgentRow[] = [];
   const callIndex = new Map<string, number>();
   const runsOf = new Map<string, number>();
@@ -97,6 +101,7 @@ export function sideItems(view: SessionView | null | undefined, keep: ReadonlySe
       cut,
       state,
       runs: child ? runsOf.get(child)! : 1,
+      current: i > lastEnd,
     };
     if (bg && !bg[1].ended) row.bg_id = bg[0];
     // A follow-up to a child already listed takes its row's place.

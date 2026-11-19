@@ -48,7 +48,7 @@ const isObj = (x: unknown): x is Record<string, unknown> => !!x && typeof x == "
 
 /** Sums stop at the largest integer a browser holds (Rust: `saturating_add`). */
 const sat = (a: number, b: number) => Math.min(a + b, Number.MAX_SAFE_INTEGER);
-function addUsage(to: Usage, u: Usage) {
+export function addUsage(to: Usage, u: Usage) {
   to.input_tokens = sat(to.input_tokens, u.input_tokens);
   to.output_tokens = sat(to.output_tokens, u.output_tokens);
   if (u.cache_read_tokens) to.cache_read_tokens = sat(to.cache_read_tokens ?? 0, u.cache_read_tokens);
@@ -103,6 +103,13 @@ function spentOf(v: SessionView): Spent {
   let s = spent.get(v);
   if (!s) spent.set(v, (s = { settled: v.usage }));
   return s;
+}
+/** What the view's running turn has used so far (its latest `turn_usage`);
+ * undefined when none is running or it has reported none yet. Not
+ * `v.turn_usage`, which also holds the last finished turn's figure. */
+export function runningUsage(v: SessionView): Usage | undefined {
+  const s = spent.get(v);
+  return v.running_turn !== null && s?.turn === v.running_turn ? s.live : undefined;
 }
 const sumTokens = (u: Usage) => sat(u.input_tokens, u.output_tokens);
 /** `v.usage` = the settled sums plus the running turn's. */
