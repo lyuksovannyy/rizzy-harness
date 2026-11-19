@@ -3416,6 +3416,101 @@ mod tests {
         );
     }
 
+    fn put_mode(p: &Path, text: &str, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(p, text).unwrap();
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    fn mode_of(p: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(p).unwrap().permissions().mode() & 0o7777
+    }
+
+    /// Trial 2026-11-19, task 5: an Undo that replaces a file keeps its
+    /// permission bits (a `.env` at 0600, a 0640 file), the executable bit
+    /// follows the snapshot both ways, a file the turn deleted comes back
+    /// with today's mode, and the forced Undo and the undo of an undo do the
+    /// same.
+    #[tokio::test]
+    async fn an_undo_keeps_the_permissions_of_the_file_it_replaces() {
+        let d = tempfile::tempdir().unwrap();
+        let ws = d.path().join("ws");
+        std::fs::create_dir_all(&ws).unwrap();
+        let (secret, group, run, plain, gone) = (
+            ws.join(".env"),
+            ws.join("g.txt"),
+            ws.join("run.sh"),
+            ws.join("plain.sh"),
+            ws.join("gone.txt"),
+        );
+        put_mode(&secret, "KEY=1\n", 0o600);
+        put_mode(&group, "g\n", 0o640);
+        put_mode(&run, "#!/bin/sh\n", 0o755);
+        put_mode(&plain, "p\n", 0o644);
+        put_mode(&gone, "gone\n", 0o644);
+        let repo = repo_for(&ws, Some(&d.path().join("cp"))).await.unwrap();
+        let before = snapshot(&repo, "refs/harness/s/t/before", "b")
+            .await
+            .unwrap();
+        // The turn: changes every file (in place, modes as they are), makes
+        // the script plain and the plain file executable, deletes one.
+        put_mode(&secret, "KEY=2\n", 0o600);
+        put_mode(&group, "g2\n", 0o640);
+        put_mode(&run, "#!/bin/sh\necho\n", 0o644);
+        put_mode(&plain, "p2\n", 0o755);
+        std::fs::remove_file(&gone).unwrap();
+        let after = snapshot(&repo, "refs/harness/s/t/after", "a")
+            .await
+            .unwrap();
+        let check_undone = |what: &str| {
+            assert_eq!(
+                std::fs::read_to_string(&secret).unwrap(),
+                "KEY=1\n",
+                "{what}"
+            );
+            assert_eq!(mode_of(&secret), 0o600, "{what}");
+            assert_eq!(mode_of(&group), 0o640, "{what}");
+            assert_eq!(mode_of(&run), 0o755, "{what}");
+            assert_eq!(mode_of(&plain), 0o644, "{what}");
+            // Nothing was there: the old default.
+            assert_eq!(std::fs::read_to_string(&gone).unwrap(), "gone\n", "{what}");
+            assert_eq!(mode_of(&gone), 0o666 & !at_umask(), "{what}");
+        };
+        let r = restore(&repo, &before, &after, false).await;
+        assert!(r.is_ok(), "{r:?}");
+        check_undone("undo");
+        // The undo of an undo: back to the turn's state, bits kept.
+        let undone = snapshot(&repo, "refs/harness/s/t/undone", "u")
+            .await
+            .unwrap();
+        let r = restore(&repo, &after, &undone, false).await;
+        assert!(r.is_ok(), "{r:?}");
+        assert_eq!(std::fs::read_to_string(&secret).unwrap(), "KEY=2\n");
+        assert_eq!(mode_of(&secret), 0o600);
+        assert_eq!(mode_of(&group), 0o640);
+        assert_eq!(mode_of(&run), 0o644);
+        assert_eq!(mode_of(&plain), 0o755);
+        assert!(!gone.exists());
+        // The forced Undo, over a person's own edit since the turn.
+        put_mode(&secret, "KEY=mine\n", 0o600);
+        let r = restore(&repo, &before, &after, false).await;
+        assert!(r.is_err(), "refused without force");
+        let r = restore(&repo, &before, &after, true).await;
+        assert!(r.is_ok(), "{r:?}");
+        check_undone("forced undo");
+    }
+
+    /// The process's umask, for the expected default.
+    fn at_umask() -> u32 {
+        std::fs::read_to_string("/proc/self/status")
+            .unwrap()
+            .lines()
+            .find_map(|l| l.strip_prefix("Umask:"))
+            .and_then(|v| u32::from_str_radix(v.trim(), 8).ok())
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn plain_folder_round_trip() {
         let d = tempfile::tempdir().unwrap();

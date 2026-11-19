@@ -620,6 +620,17 @@ impl Default for StreamLimits {
     }
 }
 
+/// A call's arguments as the provider sent them: an empty or blank string is
+/// `{}` (a tool that takes no arguments is called that way; trial
+/// 2026-11-19, item 9). Anything else is returned as it is; a value that
+/// is not an object is refused later, with its own text.
+pub fn blank_args_as_object(input: Value) -> Value {
+    match &input {
+        Value::String(s) if s.trim().is_empty() => Value::Object(Default::default()),
+        _ => input,
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Completion {
     pub text: String,

@@ -663,7 +663,7 @@ async fn default_gc_right_after_the_rewrite_keeps_x() {
 /// objects are back-dated 20 days (the test cannot wait). What it shows: a
 /// user who never runs `--prune=now` loses the object too, about a month
 /// after the rewrite, and checkpoints are kept for as many turns, not days
-/// (`checkpoints_keep`, default 10), so an old chat's undo can be that old.
+/// (`checkpoints_keep`, default 100), so an old chat's undo can be that old.
 /// Before A.17 refused; now the copy made at the end of the turn serves.
 #[tokio::test]
 async fn default_gc_after_the_reflog_and_the_grace_period_keeps_the_checkpoint() {

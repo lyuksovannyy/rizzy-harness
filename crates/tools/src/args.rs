@@ -53,6 +53,29 @@ pub fn check(schema: &Value, input: &Value, closed: Closed) -> Result<Value, Str
     Ok(v)
 }
 
+/// Read `alias` as `canonical` in the object `input`: the value moves to
+/// the tool's own name. Accepted only where the tool's own name is absent;
+/// both present is refused, naming both (a spelling never wins over the
+/// real name silently). Anything that is not an object is left to the
+/// schema check.
+pub fn alias(input: &mut Value, alias: &str, canonical: &str) -> Result<(), String> {
+    let Some(o) = input.as_object_mut() else {
+        return Ok(());
+    };
+    if !o.contains_key(alias) {
+        return Ok(());
+    }
+    if o.contains_key(canonical) {
+        return Err(format!(
+            "`{alias}` and `{canonical}` were both sent; send only `{canonical}`"
+        ));
+    }
+    if let Some(v) = o.remove(alias) {
+        o.insert(canonical.to_string(), v);
+    }
+    Ok(())
+}
+
 /// The types `schema` allows, if it says.
 fn types(schema: &Value) -> Option<Vec<&str>> {
     match schema.get("type")? {
@@ -282,6 +305,56 @@ mod tests {
 
     fn check(schema: &Value, input: &Value) -> Result<Value, String> {
         super::check(schema, input, Closed::Builtin)
+    }
+
+    /// `write` and `edit` read other harnesses' names as their own, only
+    /// where their own name is absent; the schema offered does not list them.
+    #[test]
+    fn write_and_edit_read_the_aliases_of_other_harnesses() {
+        use crate::Tool;
+        let norm = |t: &dyn Tool, mut v: Value| t.normalize_args(&mut v).map(|_| v);
+        let (w, e) = (crate::fs::Write, crate::edit::Edit);
+        assert_eq!(
+            norm(&w, json!({"path": "a", "file_text": "x"})),
+            Ok(json!({"path": "a", "content": "x"}))
+        );
+        assert_eq!(
+            norm(&e, json!({"path": "a", "old_str": "x", "new_str": "y"})),
+            Ok(json!({"path": "a", "old_string": "x", "new_string": "y"}))
+        );
+        assert_eq!(
+            norm(&e, json!({"path": "a", "old_string": "x", "new_str": "y"})),
+            Ok(json!({"path": "a", "old_string": "x", "new_string": "y"}))
+        );
+        // Both: refused, naming both. An alias of the other tool is not one.
+        let both = norm(&w, json!({"path": "a", "content": "x", "file_text": "y"}));
+        assert_eq!(
+            both,
+            Err("`file_text` and `content` were both sent; send only `content`".into())
+        );
+        let both = norm(&e, json!({"old_string": "x", "old_str": "y"})).unwrap_err();
+        assert!(
+            both.contains("`old_str`") && both.contains("`old_string`"),
+            "{both}"
+        );
+        assert_eq!(
+            norm(&w, json!({"path": "a", "old_str": "x"})),
+            Ok(json!({"path": "a", "old_str": "x"}))
+        );
+        // Not an object: left to the schema check.
+        assert_eq!(norm(&w, json!("x")), Ok(json!("x")));
+        // The aliases are not in what the model is offered; the real names
+        // are the only ones the closed schema takes.
+        for t in [&w as &dyn Tool, &e] {
+            let schema = t.schema().to_string();
+            assert!(
+                !schema.contains("file_text") && !schema.contains("_str\""),
+                "{schema}"
+            );
+        }
+        let unchecked = json!({"path": "a", "file_text": "x"});
+        let e = super::check(&w.schema(), &unchecked, Closed::Builtin).unwrap_err();
+        assert!(e.contains("file_text") || e.contains("content"), "{e}");
     }
 
     fn bash() -> Value {
