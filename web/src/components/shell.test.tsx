@@ -47,6 +47,14 @@ vi.mock("./Home", () => ({
     return null;
   },
 }));
+// And the project page: the trial's bug was this wiring (no hostRight).
+let projectProps: Record<string, unknown> | null = null;
+vi.mock("./Project", () => ({
+  default: (p: Record<string, unknown>) => {
+    projectProps = p;
+    return null;
+  },
+}));
 let sidebar: SidebarProps | null = null;
 vi.mock("./Sidebar", () => ({
   Sidebar: (p: SidebarProps) => {
@@ -107,6 +115,7 @@ beforeEach(() => {
   stubs.agents.mockReset().mockReturnValue(new Promise(() => {}));
   stubs.settings.mockReset().mockReturnValue(new Promise(() => {}));
   homeProps = null;
+  projectProps = null;
   sidebar = null;
   localStorage.clear();
   history.replaceState(null, "", "#/");
@@ -280,5 +289,23 @@ describe("a screen whose chunk fails to load", () => {
     expect(host.querySelector("main [role=alert]")).toBeNull();
     expect(homeProps).not.toBeNull();
     vi.restoreAllMocks();
+  });
+});
+
+describe("who may pick the host shell, on both screens", () => {
+  test("the project page gets the start screen's right, from the same source", async () => {
+    await render(props());
+    expect(homeProps?.hostRight).toEqual({ level: "host" });
+    history.replaceState(null, "", "#/p/0123456789abcdef0123456789abcdef");
+    await act(async () => window.dispatchEvent(new HashChangeEvent("hashchange")));
+    await vi.waitFor(() => expect(projectProps).not.toBeNull());
+    expect(projectProps?.hostRight).toEqual({ level: "host" });
+  });
+
+  test("a lower level in the workspace is what the project page gets", async () => {
+    history.replaceState(null, "", "#/p/0123456789abcdef0123456789abcdef");
+    await render({ ...props(), me: { ...me, workspace: ws("acme", { exec_level: "sandbox" }) } });
+    await vi.waitFor(() => expect(projectProps).not.toBeNull());
+    expect(projectProps?.hostRight).toEqual({ level: "sandbox" });
   });
 });

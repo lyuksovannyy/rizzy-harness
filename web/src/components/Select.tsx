@@ -1,7 +1,8 @@
 // A dropdown whose options have a secondary line (e.g. an engine's
 // abilities). Keyboard: Enter/Space/↓ open, ↑/↓ move, Enter picks, Esc closes.
-import { type ReactNode, useEffect, useId, useRef, useState } from "react";
+import { type ReactNode, type RefObject, useEffect, useId, useRef, useState } from "react";
 import { ChevronDown } from "lucide-react";
+import { useAnchored } from "../md/anchored";
 
 export interface SelectOption {
   value: string;
@@ -11,6 +12,19 @@ export interface SelectOption {
   icon?: ReactNode;
   /** Shown, not pickable; `hint` says why. */
   disabled?: boolean;
+}
+
+/** The list, in the top layer under its button, or above it where there is
+ * no room below: whole in the window wherever the button is (md/anchored.ts,
+ * as the other menus). Mounted only while open. */
+function List(props: { id: string; label: string; anchor: RefObject<HTMLElement | null>; children: ReactNode }) {
+  const box = useRef<HTMLUListElement>(null);
+  useAnchored(box, props.anchor);
+  return (
+    <ul ref={box} popover="manual" className="select-list" role="listbox" id={props.id} aria-label={props.label}>
+      {props.children}
+    </ul>
+  );
 }
 
 export function Select(props: {
@@ -79,7 +93,7 @@ export function Select(props: {
         <ChevronDown size={14} />
       </button>
       {open && !props.disabled && (
-        <ul className="select-list" role="listbox" id={`${id}-list`} aria-label={props.label}>
+        <List id={`${id}-list`} label={props.label} anchor={root}>
           {props.options.map((o, i) => (
             <li
               key={o.value}
@@ -98,7 +112,7 @@ export function Select(props: {
               {o.hint && <span className="option-hint">{o.hint}</span>}
             </li>
           ))}
-        </ul>
+        </List>
       )}
     </div>
   );
