@@ -1934,6 +1934,12 @@ impl Master {
         }
     }
 
+    /// Tests: whether the last turn recorded for `sid` may save memory
+    /// without the person's click (`TurnMemory::by_owner`).
+    pub fn turn_saves_without_a_click_for_test(&self, sid: SessionId) -> Option<bool> {
+        lock(&self.inner.turn_memory).get(&sid).map(|t| t.by_owner)
+    }
+
     /// The level check again for `sid`, after its node acked a command that
     /// makes it work; if it now refuses, its turn is cancelled and its
     /// background commands stopped, in the background (review L2-1).
@@ -2238,7 +2244,7 @@ impl Master {
         // (PLAN.md T85). A callback is the node's own (a command a turn of
         // this chat started), not an actor.
         let owners = by_owner || board::routine_turn(self, &row, routine_run.as_deref()).await;
-        if !resume && !owners {
+        if !resume && !owners && row.owner_id.is_some() {
             self.mark_foreign(&row).await?;
         }
         let foreign = self.chat_foreign(row.session_id).await;
@@ -2358,12 +2364,11 @@ impl Master {
         allowed.personal &= attended;
         allowed.project &= attended;
         // A chat someone other than its owner acted in writes nothing that
-        // other chats read (review 4 of PR 157): no memory, no project
-        // facts, as an untrusted turn; and no board change (below).
+        // other chats read without a person's click (review 4 of PR 157):
+        // every `remember` of its turns is a proposal the person keeps or
+        // dismisses (as an API-token turn's always was), and its turns
+        // change no board (below).
         if foreign {
-            allowed.workspace = false;
-            allowed.personal = false;
-            allowed.project = false;
             allowed.by_owner = false;
         }
         projects::offer_remember(r.agents(), &mut agent, allowed);

@@ -2710,7 +2710,7 @@ async fn the_session_says_when_connectors_are_off_and_why() {
 /// (`board_edit` withheld), as an untrusted turn; the owner's clean chat
 /// keeps both.
 #[tokio::test]
-async fn a_marked_chats_turn_writes_no_memory_and_no_board() {
+async fn a_marked_chats_turn_saves_nothing_unasked_and_changes_no_board() {
     let caps = [
         "profile:chat",
         CAP_PLUGIN_ACCESS,
@@ -2726,17 +2726,18 @@ async fn a_marked_chats_turn_writes_no_memory_and_no_board() {
     into_project(&t, &alex, b, &pid).await;
     owner_prompt(&t, &alex, b, "clean").await;
     let clean = t.chat.last_agent();
-    assert!(
-        clean.allows_tool("remember") && clean.allows_tool("board_edit"),
-        "{:?}",
-        clean.deny_tools
-    );
+    assert!(clean.allows_tool("board_edit"), "{:?}", clean.deny_tools);
+    assert_eq!(t.master.turn_saves_without_a_click_for_test(b), Some(true));
     api_prompt(&t, a, "api").await;
     owner_prompt(&t, &alex, a, "mine").await;
     let marked = t.chat.last_agent();
-    assert!(!marked.allows_tool("remember"), "{:?}", marked.deny_tools);
     assert!(!marked.allows_tool("board_edit"), "{:?}", marked.deny_tools);
     assert!(marked.allows_tool("board"), "the board is still read");
+    assert_eq!(
+        t.master.turn_saves_without_a_click_for_test(a),
+        Some(false),
+        "the owner's own turn in a marked chat only proposes"
+    );
 }
 
 /// Review 4, MEDIUM 3: a sub-agent's chat marked through its parent is told

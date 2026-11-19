@@ -1031,7 +1031,11 @@ async fn routine_runs_change_the_board_and_api_token_turns_only_list_it() {
         .await
         .unwrap();
     assert!(!last_spec(&t).allows_tool("board_edit"));
-    // A run of the owner's routine, its chat this one.
+    // A run of the owner's routine, in a chat of its own (the API token
+    // and the forged run above marked chat `a`: someone other than its
+    // owner acted there, so its turns change no board, PLAN.md T85).
+    let a = chat(&t, &alex, json!({"project_id": p})).await;
+    landed(&t, a).await;
     let ws = projects_ws(&t, &alex, &p).await;
     let me = user_id(&t, &alex).await;
     let run = routine_run(&t, &me, &ws, a);

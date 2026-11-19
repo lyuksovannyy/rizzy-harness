@@ -405,7 +405,8 @@ async fn acting_session(
     id: &str,
 ) -> ApiResult<harness_store::SessionRow> {
     let row = visible_session(m, who, id).await?;
-    if who.user_id.is_none() || row.owner_id != who.user_id {
+    // A chat nobody owns (made with the API token) has no account to use.
+    if row.owner_id.is_some() && row.owner_id != who.user_id {
         m.mark_foreign(&row).await.map_err(|e| {
             tracing::warn!(error = %e, "could not mark a chat another caller acted in");
             ApiError(

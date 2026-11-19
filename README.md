@@ -3289,8 +3289,9 @@ chat of someone else's.
   connectors are off in this chat; the session's API says it too
   (`connectors_off`: `this_chat`, `parent_chat` or `event_data`). Reading a
   chat with the API token changes nothing. Such a chat also writes nothing
-  other chats read: its turns propose no memory or project fact and change
-  no board, and it is left out of the project's "Earlier chats" (so is a
+  other chats read without your click: every memory or project fact its
+  turns `remember` waits for you to keep or dismiss, its turns change no
+  board, and it is left out of the project's "Earlier chats" (so is a
   chat holding a webhook's event data).
 - **What this does not cover.** The mark covers what others do IN A CHAT.
   It does not cover text that people with rights write for every chat to
