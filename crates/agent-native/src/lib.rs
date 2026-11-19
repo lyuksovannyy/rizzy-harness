@@ -4022,8 +4022,18 @@ impl NativeBackend {
             });
             // Before the log, the next request and every check: a call with
             // empty arguments is a call with `{}`.
+            // The same point for other harnesses' argument names: one input
+            // exists for the call, in the log, in every later request and
+            // in what runs. A call that names both spellings keeps its raw
+            // input and is refused by the check below.
             for c in &mut completion.tool_calls {
                 c.input = provider::blank_args_as_object(std::mem::take(&mut c.input));
+                if let Some(t) = self.tools.iter().find(|t| t.name() == c.tool) {
+                    let mut v = c.input.clone();
+                    if t.normalize_args(&mut v).is_ok() {
+                        c.input = v;
+                    }
+                }
             }
             let ev = self.assistant_message(
                 AssistantMessage {
@@ -8977,6 +8987,59 @@ mod tests {
             std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
             "1 2\n"
         );
+    }
+
+    /// Review of PR 165, L4: one input exists for an aliased call, in the
+    /// logged assistant message (which every later request replays) and in
+    /// `ToolCallStarted`; a call naming both spellings keeps its raw input
+    /// and is refused.
+    #[tokio::test]
+    async fn the_logged_assistant_message_and_the_started_call_agree_on_an_aliased_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = RecHost::new(Decision::Allow);
+        let step = |input: Value| Completion {
+            tool_calls: vec![ToolCallRef {
+                call_id: new_id(),
+                tool: "write".into(),
+                input,
+            }],
+            stop: StopReason::ToolUse,
+            ..Default::default()
+        };
+        let both = json!({"path": "g.txt", "content": "x", "file_text": "y"});
+        let b = NativeBackend::new(
+            Arc::new(Script(Mutex::new(
+                vec![
+                    step(json!({"path": "f.txt", "file_text": "hi\n"})),
+                    step(both.clone()),
+                ]
+                .into(),
+            ))),
+            harness_tools::builtin(),
+            NativeConfig::default(),
+        );
+        b.run_turn(ctx(&host, "go", dir.path())).await;
+        let ev = host.events.lock().unwrap();
+        let logged: Vec<Value> = ev
+            .iter()
+            .filter_map(|e| match e {
+                EventKind::AssistantMessage(m) => {
+                    Some(m.tool_calls.iter().map(|c| c.input.clone()))
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        let started: Vec<Value> = ev
+            .iter()
+            .filter_map(|e| match e {
+                EventKind::ToolCallStarted(s) => Some(s.input.clone()),
+                _ => None,
+            })
+            .collect();
+        let real = json!({"path": "f.txt", "content": "hi\n"});
+        assert_eq!(logged, vec![real.clone(), both.clone()]);
+        assert_eq!(started, vec![real, both]);
     }
 
     /// An alias is read only where the tool's own name is absent: both is a
