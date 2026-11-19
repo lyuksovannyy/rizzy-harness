@@ -1,4 +1,5 @@
 import { normalizeAccent } from "./lib/appearance";
+import { t } from "./lib/i18n";
 import type {
   Agent,
   ApprovalMode,
@@ -83,14 +84,27 @@ export function seen(status: number, data: unknown) {
   }
 }
 
-export async function call<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
-  const res = await fetch(path, {
-    method,
-    signal,
-    credentials: "same-origin",
-    headers: keyed(body === undefined ? {} : { "content-type": "application/json" }),
-    body: body === undefined ? undefined : JSON.stringify(body),
+/** A request that got no HTTP answer at all: browsers throw a `TypeError` whose
+ * text ("Failed to fetch") says nothing a person can act on. They get one calm
+ * sentence (fixed: no URL, no body); the original stays on `cause` for whoever
+ * debugs it, since a malformed URL or a GET with a body is our own bug and
+ * throws the same way. Aborts (a caller's signal, a timeout) are
+ * `DOMException`s and pass unchanged. Used by every request a person starts. */
+export const reach = (req: Promise<Response>): Promise<Response> =>
+  req.catch((e: unknown) => {
+    throw e instanceof TypeError ? new Error(t("error.unreachable"), { cause: e }) : e;
   });
+
+export async function call<T>(method: string, path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+  const res = await reach(
+    fetch(path, {
+      method,
+      signal,
+      credentials: "same-origin",
+      headers: keyed(body === undefined ? {} : { "content-type": "application/json" }),
+      body: body === undefined ? undefined : JSON.stringify(body),
+    }),
+  );
   let data: unknown = null;
   try {
     data = await res.json();
@@ -153,12 +167,14 @@ export const api = {
   /** What the viewer may use in the workspace (the sidebar's areas). */
   features: (scope?: Scope | null) => call<Features>("GET", scoped("/api/features", scope)),
   transcribe: async (audio: Blob): Promise<string> => {
-    const res = await fetch("/api/transcribe", {
-      method: "POST",
-      credentials: "same-origin",
-      headers: keyed({ "content-type": audio.type || "audio/webm" }),
-      body: audio,
-    });
+    const res = await reach(
+      fetch("/api/transcribe", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: keyed({ "content-type": audio.type || "audio/webm" }),
+        body: audio,
+      }),
+    );
     const data = (await res.json().catch(() => null)) as { text?: string; error?: string } | null;
     seen(res.status, data);
     if (!res.ok) throw new HttpError(res.status, data?.error ?? `${res.status} ${res.statusText}`);
@@ -180,12 +196,14 @@ export const api = {
     } = {},
   ) => call("POST", `/api/sessions/${id}/prompt`, { text, ...opts }),
   upload: async (file: File): Promise<UploadedAttachment> => {
-    const res = await fetch(`/api/attachments?name=${encodeURIComponent(file.name)}`, {
-      method: "POST",
-      credentials: "same-origin",
-      headers: keyed({ "content-type": "application/octet-stream" }),
-      body: file,
-    });
+    const res = await reach(
+      fetch(`/api/attachments?name=${encodeURIComponent(file.name)}`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: keyed({ "content-type": "application/octet-stream" }),
+        body: file,
+      }),
+    );
     const data = (await res.json().catch(() => null)) as UploadedAttachment & { error?: string };
     seen(res.status, data);
     if (!res.ok) throw new HttpError(res.status, data?.error ?? `${res.status} ${res.statusText}`);

@@ -86,7 +86,11 @@ const omni: ProviderState = {
 let host: HTMLElement;
 let root: Root;
 
+const ME = { user_id: "u", username: "admin", role: "admin" as "admin" | "member", exec_ceiling: "host" as const, must_change_password: false };
+const PREFS = { search_url: "", default_agent: null, default_model: null };
+
 beforeEach(async () => {
+  sessionStorage.clear();
   for (const f of Object.values(api)) f.mockReset();
   api.providers.mockResolvedValue(STATE);
   api.agents.mockResolvedValue({ agents: [agent("general", "General"), agent("coder", "Coder")], default: "general" });
@@ -162,5 +166,130 @@ describe("onboarding", () => {
     expect(button("Ollama").getAttribute("aria-checked")).toBe("true");
     // Loaded once, when first shown.
     expect(api.memoryCfg).toHaveBeenCalledTimes(1);
+  });
+
+  // A reload is a fresh mount against the server's state, and the server only
+  // knows "a provider is configured" (it cannot tell the one saved a minute
+  // ago from one set up before): the steps must not renumber or skip Memory.
+  test("a reload mid-way lands on the same step of the same count", async () => {
+    const steps = () => host.querySelector(".steps")!.textContent;
+    expect(steps()).toBe("Step 1 of 4");
+    api.demoProvider.mockResolvedValue({ ...STATE, configured: true });
+    await act(async () => button("Skip: use the built-in demo (no real AI) for now").click());
+    expect(steps()).toBe("Step 2 of 4");
+    expect(visible().querySelector("h2")!.textContent).toBe("Memory");
+
+    act(() => root.unmount());
+    api.providers.mockResolvedValue({ ...STATE, configured: true });
+    root = createRoot(host);
+    await act(async () => root.render(<Onboarding me={ME} prefs={PREFS} onDone={() => {}} />));
+    expect(steps()).toBe("Step 2 of 4");
+    expect(visible().querySelector("h2")!.textContent).toBe("Memory");
+
+    // Back to the provider step: it is saved, so no demo skip to overwrite it.
+    act(() => button("Back").click());
+    expect(steps()).toBe("Step 1 of 4");
+    expect(button("Skip: use the built-in demo (no real AI) for now")).toBeUndefined();
+  });
+
+  test("finishing forgets the progress, so a later first run starts at the top", async () => {
+    const mount = async (done: () => void) => {
+      act(() => root.unmount());
+      root = createRoot(host);
+      await act(async () => root.render(<Onboarding me={{ ...ME, role: "member" }} prefs={PREFS} onDone={done} />));
+    };
+    const steps = () => host.querySelector(".steps")!.textContent;
+    sessionStorage.clear(); // the admin mount of beforeEach left its own
+    await mount(() => {});
+    expect(steps()).toBe("Step 1 of 2");
+    act(() => button("Continue").click());
+    await mount(() => {});
+    expect(steps()).toBe("Step 2 of 2");
+    const done = vi.fn();
+    api.saveSettings.mockResolvedValue({ ...PREFS, onboarded: true });
+    await mount(done);
+    await act(async () => button("Finish").click());
+    expect(done).toHaveBeenCalled();
+    await mount(() => {});
+    expect(steps()).toBe("Step 1 of 2");
+  });
+
+  describe("restored progress", () => {
+    const KEY = (u: string) => `harness.onboarding.${u}`;
+    const store = (u: string, v: unknown) => sessionStorage.setItem(KEY(u), JSON.stringify(v));
+    const FOUR = ["provider", "memory", "profile", "search"];
+    const mount = async (me: typeof ME = ME) => {
+      act(() => root.unmount());
+      root = createRoot(host);
+      await act(async () => root.render(<Onboarding me={me} prefs={PREFS} onDone={() => {}} />));
+    };
+    const steps = () => host.querySelector(".steps")!.textContent;
+    const heading = () => visible().querySelector("h2")!.textContent;
+    const skip = "Skip: use the built-in demo (no real AI) for now";
+
+    test("the providers call failing drops provider and memory, and lands on the next step", async () => {
+      sessionStorage.clear();
+      store("u", { steps: FOUR, i: 1, saved: ["provider"] });
+      api.providers.mockRejectedValue(new Error("down"));
+      await mount();
+      expect(steps()).toBe("Step 1 of 2");
+      expect(heading()).toBe("About you");
+      expect(button(skip)).toBeUndefined();
+    });
+
+    test("an account that is no longer an admin gets the member steps, and no demo skip", async () => {
+      sessionStorage.clear();
+      store("u", { steps: FOUR, i: 0, saved: [] });
+      await mount({ ...ME, role: "member" });
+      expect(steps()).toBe("Step 1 of 2");
+      expect(heading()).toBe("About you");
+      expect(host.textContent).not.toContain(skip);
+    });
+
+    test("the demo skip is offered only while the server says no provider is configured", async () => {
+      sessionStorage.clear();
+      store("u", { steps: FOUR, i: 0, saved: [] });
+      api.providers.mockResolvedValue({ ...STATE, providers: [omni], configured: true }); // another admin got there first
+      await mount();
+      expect(heading()).toBe("Connect an AI provider");
+      expect(button(skip)).toBeUndefined();
+      expect(api.demoProvider).not.toHaveBeenCalled();
+    });
+
+    test.each([
+      ["duplicates", ["provider", "provider", "search"]],
+      ["out of order", ["search", "profile"]],
+      ["unknown steps", ["provider", "bogus"]],
+      ["not a list", "provider"],
+      ["empty", []],
+    ])("a stored list that is not an ordered selection of the steps (%s) is discarded", async (_n, bad) => {
+      sessionStorage.clear();
+      store("u", { steps: bad, i: 1, saved: [] });
+      await mount();
+      expect(steps()).toBe("Step 1 of 4");
+    });
+
+    test("a stored position past the end is clamped into the list", async () => {
+      sessionStorage.clear();
+      store("u", { steps: FOUR, i: 99, saved: [] });
+      await mount();
+      expect(steps()).toBe("Step 4 of 4");
+      sessionStorage.clear();
+      store("u", { steps: FOUR, i: -3, saved: [] });
+      await mount();
+      expect(steps()).toBe("Step 1 of 4");
+    });
+
+    test("another account in the same tab does not see this one's progress", async () => {
+      sessionStorage.clear();
+      await mount(); // the account "u" goes on to Memory, which stores its progress
+      api.demoProvider.mockResolvedValue({ ...STATE, configured: true });
+      await act(async () => button(skip).click());
+      expect(steps()).toBe("Step 2 of 4");
+      api.providers.mockResolvedValue(STATE);
+      await mount({ ...ME, user_id: "someone-else" });
+      expect(steps()).toBe("Step 1 of 4");
+      expect(heading()).toBe("Connect an AI provider");
+    });
   });
 });
