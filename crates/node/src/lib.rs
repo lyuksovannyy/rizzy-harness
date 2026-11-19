@@ -416,6 +416,25 @@ pub mod testing {
         wait_on(&PEERS_HOLD, sid).await;
     }
 
+    static PEERS_CLAIM_HOLD: Holds = std::sync::Mutex::new(Vec::new());
+
+    /// Arm a hold for session `sid`'s next called agent, after it was taken
+    /// off the list and before its turn claims the slot (X.37, review of
+    /// PR 166, L6).
+    pub fn hold_next_peer_claim(sid: harness_core::SessionId) -> Arc<EndHold> {
+        let h = Arc::new(EndHold {
+            held: tokio::sync::Notify::new(),
+            go: tokio::sync::Semaphore::new(0),
+            is_held: Default::default(),
+        });
+        PEERS_CLAIM_HOLD.lock().unwrap().push((sid, h.clone()));
+        h
+    }
+
+    pub(crate) async fn peers_claim_hold(sid: harness_core::SessionId) {
+        wait_on(&PEERS_CLAIM_HOLD, sid).await;
+    }
+
     pub(crate) async fn end_hold(sid: harness_core::SessionId) {
         wait_on(&END_HOLD, sid).await;
     }

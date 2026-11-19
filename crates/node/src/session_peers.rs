@@ -57,6 +57,10 @@ pub(crate) struct Peers {
     pub tags: Vec<String>,
     /// The person pressed Stop: nothing more of the list starts.
     pub stopped: bool,
+    /// An agent was taken off the list and its turn is not yet in the log:
+    /// the list is still pending (a message or a Retry arriving in that
+    /// instant is refused, never run in between).
+    pub starting: bool,
 }
 
 /// The tags of a prompt, checked: plain handles, each once, at most
@@ -131,7 +135,7 @@ impl Session {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .as_ref()
-            .is_some_and(|p| !p.rest.is_empty())
+            .is_some_and(|p| !p.rest.is_empty() || p.starting)
     }
 
     /// Keep the agents after the first of the message recorded at
@@ -142,6 +146,7 @@ impl Session {
             rest: rest.into(),
             tags,
             stopped: false,
+            starting: false,
         });
     }
 
@@ -211,6 +216,10 @@ impl Session {
             let Some((seq, next, tags)) = self.next_peer(reason).await else {
                 break;
             };
+            // The agent is off the list and not yet started: a test holds
+            // this instant open.
+            #[cfg(feature = "testing")]
+            crate::testing::peers_claim_hold(self.id).await;
             let started = self.start_mention(seq, next.clone(), tags).await;
             let (turn_id, user_text, history, spec, extra, cancel, by_stop) = match started {
                 Ok(s) => s,
@@ -287,7 +296,10 @@ impl Session {
                     None
                 }
                 _ => match p.rest.pop_front() {
-                    Some(s) => Some((p.message_seq, s, p.tags.clone())),
+                    Some(s) => {
+                        p.starting = true;
+                        Some((p.message_seq, s, p.tags.clone()))
+                    }
                     None => {
                         *g = None;
                         None
@@ -423,6 +435,15 @@ impl Session {
         if let Err(e) = started {
             self.release(&turn_id);
             return Err(e.to_string());
+        }
+        // Its turn is in the log: the slot is taken, nothing is pending.
+        if let Some(p) = self
+            .peers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_mut()
+        {
+            p.starting = false;
         }
         drop(queue);
         let extra = TurnExtra {

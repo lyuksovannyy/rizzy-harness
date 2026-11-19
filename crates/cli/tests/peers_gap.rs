@@ -34,6 +34,13 @@ impl Provider for Model {
         d: mpsc::UnboundedSender<String>,
     ) -> Result<Completion, ProviderError> {
         self.0.lock().unwrap().push(req.model.clone());
+        if req.model == "fail" {
+            return Err(ProviderError::Status {
+                status: 400,
+                body: "refused".into(),
+                hint: Default::default(),
+            });
+        }
         Mock {
             delay: Duration::from_millis(1),
         }
@@ -264,4 +271,90 @@ async fn a_message_or_a_stop_between_two_turns_of_the_list() {
     assert_eq!(skipped.len(), 1);
     assert_eq!(skipped[0].agents, ["b", "c"]);
     assert_eq!(skipped[0].reason, PeersSkipReason::Stopped);
+}
+
+fn turn_of(log: &[RawEvent], agent: &str) -> String {
+    log.iter()
+        .find_map(|e| match e.typed() {
+            Ok(EventKind::TurnStarted(t))
+                if t.agent.as_ref().is_some_and(|a| a.agent_id == agent) =>
+            {
+                Some(t.turn_id)
+            }
+            _ => None,
+        })
+        .unwrap()
+}
+
+/// A Retry of the failed first turn, sent in the gap, is refused like a new
+/// message (review of PR 166, L6): the next agent comes first, and nothing
+/// is skipped.
+#[tokio::test]
+async fn a_retry_between_two_turns_of_the_list_is_refused() {
+    let mut n = N::start().await;
+    let mut a = agent("a");
+    a.model = Some("fail".into());
+    let b = agent("b");
+    let sid = n.create(&a).await;
+    let hold = harness_node::testing::hold_next_peer_start(sid);
+    n.say(sid, "@a @b go", &a, vec![b.clone()]).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), hold.held())
+        .await
+        .expect("the gap was reached");
+    let failed = turn_of(&n.log(sid), "a");
+    let id = n.req();
+    n.send(MasterToNode::Retry {
+        req_id: id.clone(),
+        session_id: sid,
+        turn_id: failed,
+        agent: Some(a.clone()),
+        savings: None,
+        context: None,
+        agent_named: false,
+        owner: None,
+    });
+    let r = n.ack(&id).await.unwrap_err();
+    assert!(r.contains("still taking their turns"), "{r}");
+    hold.release();
+    for _ in 0..500 {
+        if n.log(sid).iter().filter(|e| e.kind == "turn_ended").count() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let log = n.log(sid);
+    assert_eq!(started(&log), ["a", "b"], "b was asked, once");
+    assert!(log.iter().all(|e| e.kind != "peers_skipped"));
+}
+
+/// In the instant after the last agent is taken off the list and before its
+/// turn claims the slot, a new message is refused: it cannot win the slot and
+/// make that agent skipped.
+#[tokio::test]
+async fn a_message_after_the_last_agent_is_chosen_and_before_it_starts_is_refused() {
+    let mut n = N::start().await;
+    let (a, b) = (agent("a"), agent("b"));
+    let sid = n.create(&a).await;
+    let hold = harness_node::testing::hold_next_peer_claim(sid);
+    n.say(sid, "@a @b go", &a, vec![b.clone()]).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), hold.held())
+        .await
+        .expect("the instant was reached");
+    let r = n.say(sid, "me first", &a, vec![]).await.unwrap_err();
+    assert!(r.contains("still taking their turns"), "{r}");
+    hold.release();
+    for _ in 0..500 {
+        if n.log(sid).iter().filter(|e| e.kind == "turn_ended").count() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let log = n.log(sid);
+    assert_eq!(started(&log), ["a", "b"]);
+    assert!(log.iter().all(|e| e.kind != "peers_skipped"));
+    assert_eq!(
+        log.iter().filter(|e| e.kind == "user_message").count(),
+        1,
+        "the refused message was never recorded"
+    );
 }
