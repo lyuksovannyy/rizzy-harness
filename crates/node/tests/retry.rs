@@ -340,6 +340,7 @@ fn prompt_with(
             files,
             agent_named: false,
             owner: None,
+            identity: None,
             peers: vec![],
             tags: vec![],
         })
@@ -361,6 +362,7 @@ fn retry(link: &NodeLink, sid: SessionId, req_id: &str, turn: &str) {
             context: None,
             agent_named: false,
             owner: None,
+            identity: None,
         })
         .unwrap();
 }

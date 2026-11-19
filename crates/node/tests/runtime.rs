@@ -216,6 +216,7 @@ async fn approval_roundtrip_and_auto_request_is_clamped() {
         agent_named: false,
         files: vec![],
         owner: None,
+        identity: None,
         peers: vec![],
         tags: vec![],
     });
@@ -264,6 +265,7 @@ async fn cancel_while_waiting_for_approval_and_while_running() {
         agent_named: false,
         files: vec![],
         owner: None,
+        identity: None,
         peers: vec![],
         tags: vec![],
     });
@@ -301,6 +303,7 @@ async fn cancel_while_waiting_for_approval_and_while_running() {
         agent_named: false,
         files: vec![],
         owner: None,
+        identity: None,
         peers: vec![],
         tags: vec![],
     });
@@ -370,6 +373,7 @@ async fn cancel_right_after_prompt_stops_that_turn() {
             agent_named: false,
             files: vec![],
             owner: None,
+            identity: None,
             peers: vec![],
             tags: vec![],
         });
@@ -409,6 +413,7 @@ async fn policy_denied_tool_never_runs() {
         agent_named: false,
         files: vec![],
         owner: None,
+        identity: None,
         peers: vec![],
         tags: vec![],
     });
@@ -628,6 +633,7 @@ async fn a_loaded_session_over_the_data_dir_gets_no_turn() {
             agent_named: false,
             files: vec![],
             owner: None,
+            identity: None,
             peers: vec![],
             tags: vec![],
         })
@@ -666,6 +672,7 @@ async fn resume_replays_in_batches() {
         agent_named: false,
         files: vec![],
         owner: None,
+        identity: None,
         peers: vec![],
         tags: vec![],
     });
@@ -718,6 +725,7 @@ async fn resume_batches_are_limited_by_bytes() {
             agent_named: false,
             files: vec![],
             owner: None,
+            identity: None,
             peers: vec![],
             tags: vec![],
         });
@@ -857,6 +865,7 @@ async fn recovers_interrupted_turn_on_start() {
             agent_named: false,
             files: vec![],
             owner: None,
+            identity: None,
             peers: vec![],
             tags: vec![],
         })
@@ -925,6 +934,7 @@ async fn sub_task_sessions_ask_no_questions() {
             agent_named: false,
             files: vec![],
             owner: None,
+            identity: None,
             peers: vec![],
             tags: vec![],
         })
@@ -993,6 +1003,7 @@ async fn git_checkpoints_and_undo() {
         agent_named: false,
         files: vec![],
         owner: None,
+        identity: None,
         peers: vec![],
         tags: vec![],
     });
@@ -1112,6 +1123,7 @@ async fn hostile_repo_config_does_not_run_on_checkpoint_or_undo() {
         agent_named: false,
         files: vec![],
         owner: None,
+        identity: None,
         peers: vec![],
         tags: vec![],
     });
@@ -1172,6 +1184,7 @@ async fn shadow_checkpoints_keep_latest_and_rewind() {
             agent_named: false,
             files: vec![],
             owner: None,
+            identity: None,
             peers: vec![],
             tags: vec![],
         });
@@ -1280,6 +1293,7 @@ async fn a_tool_does_not_run_when_its_event_cannot_be_written() {
             agent_named: false,
             files: vec![],
             owner: None,
+            identity: None,
             peers: vec![],
             tags: vec![],
         })
@@ -1337,6 +1351,7 @@ async fn a_tool_does_not_run_when_its_event_cannot_be_written() {
             agent_named: false,
             files: vec![],
             owner: None,
+            identity: None,
             peers: vec![],
             tags: vec![],
         });
@@ -1417,6 +1432,7 @@ async fn an_approval_whose_answer_was_not_written_is_closed_with_the_turn() {
         agent_named: false,
         files: vec![],
         owner: None,
+        identity: None,
         peers: vec![],
         tags: vec![],
     });
@@ -1554,6 +1570,7 @@ async fn a_sub_agent_whose_log_failed_changes_nothing_in_the_folder() {
         agent_named: false,
         files: vec![],
         owner: None,
+        identity: None,
         peers: vec![],
         tags: vec![],
     });
@@ -1657,6 +1674,7 @@ async fn delegate_as_lead(
         agent_named: false,
         files: vec![],
         owner: None,
+        identity: None,
         peers: vec![],
         tags: vec![],
     });
@@ -2037,6 +2055,7 @@ async fn a_failed_append_kills_the_running_command() {
         agent_named: false,
         files: vec![],
         owner: None,
+        identity: None,
         peers: vec![],
         tags: vec![],
     });
@@ -2090,6 +2109,7 @@ async fn an_unclosed_turn_is_closed_once_by_a_restart() {
         agent_named: false,
         files: vec![],
         owner: None,
+        identity: None,
         peers: vec![],
         tags: vec![],
     });
@@ -2191,6 +2211,7 @@ async fn ack_time_on_a_long_session() {
                 agent_named: false,
                 files: vec![],
                 owner: None,
+                identity: None,
                 peers: vec![],
                 tags: vec![],
             })
@@ -2295,6 +2316,7 @@ impl Harness {
             agent_named: false,
             files: vec![],
             owner: None,
+            identity: None,
             peers: vec![],
             tags: vec![],
         });
@@ -2438,6 +2460,7 @@ async fn prompt_turn(h: &mut Harness, sid: SessionId, text: &str) -> String {
         agent_named: false,
         files: vec![],
         owner: None,
+        identity: None,
         peers: vec![],
         tags: vec![],
     });
@@ -3065,6 +3088,7 @@ async fn start_long_turn(h: &mut Harness, sid: SessionId) {
         agent_named: false,
         files: vec![],
         owner: None,
+        identity: None,
         peers: vec![],
         tags: vec![],
     });
@@ -3163,6 +3187,7 @@ async fn a_restore_is_refused_when_the_busy_chat_reaches_the_folder_through_a_sy
         agent_named: false,
         files: vec![],
         owner: None,
+        identity: None,
         peers: vec![],
         tags: vec![],
     });
@@ -3370,6 +3395,7 @@ async fn a_session_whose_folder_was_replaced_refuses_to_work() {
             agent_named: false,
             files: vec![],
             owner: None,
+            identity: None,
             peers: vec![],
             tags: vec![],
         });
@@ -3427,6 +3453,7 @@ async fn turn_of(
         agent_named: false,
         files: vec![],
         owner: None,
+        identity: None,
         peers: vec![],
         tags: vec![],
     });
@@ -3704,6 +3731,7 @@ async fn lead_turn(
         agent_named: false,
         files: vec![],
         owner: None,
+        identity: None,
         peers: vec![],
         tags: vec![],
     });
@@ -3974,6 +4002,7 @@ fn prompt_msg(req_id: &str, sid: SessionId, text: &str) -> MasterToNode {
         agent_named: false,
         files: vec![],
         owner: None,
+        identity: None,
         peers: vec![],
         tags: vec![],
     }
@@ -4225,6 +4254,7 @@ async fn a_sub_agent_started_across_the_stop_never_runs_a_turn_after_it() {
             agent_named: false,
             files: vec![],
             owner: None,
+            identity: None,
             peers: vec![],
             tags: vec![],
         });

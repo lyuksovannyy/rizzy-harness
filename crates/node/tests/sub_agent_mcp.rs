@@ -318,6 +318,7 @@ impl Node {
                 agent_named: false,
                 files: vec![],
                 owner: None,
+                identity: None,
                 peers: vec![],
                 tags: vec![],
             })
@@ -1163,6 +1164,7 @@ async fn a_person_or_a_retry_in_a_background_sub_agents_chat_during_its_run_gets
             context: None,
             agent_named: false,
             owner: None,
+            identity: None,
         })
         .unwrap();
     assert!(n.ack().await.is_err(), "a retry ran in a sub-agent's chat");

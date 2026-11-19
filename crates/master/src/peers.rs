@@ -162,6 +162,7 @@ mod tests {
             agent_named: true,
             files: vec![],
             owner: None,
+            identity: None,
             peers,
             tags: vec![],
         }

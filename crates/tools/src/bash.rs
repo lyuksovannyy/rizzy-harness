@@ -383,6 +383,7 @@ impl Tool for Bash {
                 read_only: ctx.read_only_shell,
                 owned: ctx.owned.clone(),
                 cwd,
+                identity: ctx.identity.clone(),
                 read_identified: crate::skills::shell_reads(ctx),
                 ..Default::default()
             },

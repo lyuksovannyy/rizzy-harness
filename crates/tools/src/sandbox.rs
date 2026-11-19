@@ -867,6 +867,18 @@ impl Sandbox {
         c
     }
 
+    /// Every path a command with these grants may open: the grants, the
+    /// system folders and node.toml's `read` and `write` entries.
+    fn granted_paths<'a>(&'a self, rw: &'a [Grant], ro: &'a [Grant]) -> Vec<&'a Path> {
+        rw.iter()
+            .chain(ro)
+            .map(|g| g.path.as_path())
+            .chain(self.read.iter().map(PathBuf::as_path))
+            .chain(self.extra_read.iter().map(|e| e.real.as_path()))
+            .chain(self.extra_write.iter().map(|e| e.real.as_path()))
+            .collect()
+    }
+
     /// Where the read-only shell's tmpfs goes for these grants:
     /// [`READ_ONLY_TMP`], unless a grant (or node.toml's entries, or a
     /// system folder) lies at or beneath it or above it, then
@@ -874,14 +886,7 @@ impl Sandbox {
     /// the tmpfs must cover nothing granted, or it would lift the
     /// read-only rules beneath it.
     fn read_only_tmp_dir(&self, rw: &[Grant], ro: &[Grant]) -> Result<PathBuf, String> {
-        let granted: Vec<&Path> = rw
-            .iter()
-            .chain(ro)
-            .map(|g| g.path.as_path())
-            .chain(self.read.iter().map(PathBuf::as_path))
-            .chain(self.extra_read.iter().map(|e| e.real.as_path()))
-            .chain(self.extra_write.iter().map(|e| e.real.as_path()))
-            .collect();
+        let granted = self.granted_paths(rw, ro);
         [READ_ONLY_TMP, READ_ONLY_TMP_ELSEWHERE]
             .into_iter()
             .map(PathBuf::from)
@@ -1178,6 +1183,10 @@ pub struct Grants {
     /// Where the command starts (`bash`'s `workdir`): a folder inside the
     /// session folder, checked again here; the session folder when `None`.
     pub cwd: Option<PathBuf>,
+    /// The agent's own shell (`bash`) only: the identity its `git commit`
+    /// carries (T88), and git's global configuration made usable
+    /// ([`git_env`]). Unset for every other command.
+    pub identity: Option<harness_core::identity::Identity>,
     /// The read-only shell (ADOPTION_PLAN T.7, X.7; docs/read-only-shell.md):
     /// every grant read-only, the session's folder and node.toml's `write`
     /// entries included, and nothing writable but a `/tmp` of the command's
@@ -1539,6 +1548,16 @@ impl Confinement {
                 } else if let Some(t) = tmp {
                     c.env("TMPDIR", t);
                 }
+                if shell && let Some(id) = &grants.identity {
+                    let granted = sandbox.granted_paths(&rw, &ro);
+                    git_env(
+                        &mut c,
+                        env,
+                        id,
+                        tmp.as_deref().filter(|_| !grants.read_only),
+                        &granted,
+                    );
+                }
                 c
             }
         };
@@ -1550,6 +1569,127 @@ impl Confinement {
             .current_dir(if contained { Path::new("/") } else { &start });
         Ok((c, contained))
     }
+}
+
+/// The name of the file in a session's temp folder that holds the chat
+/// owner's default commit identity (`GIT_CONFIG_SYSTEM`).
+pub const IDENTITY_FILE: &str = ".harness-git-identity";
+
+/// Git's settings for the agent's shell (T88, found by the 2026-11-19
+/// readiness trial: every git command in a host chat warned and failed, and
+/// every commit in a sandbox chat lacked an identity).
+///
+/// - **The global configuration.** Where the shell cannot open the person's
+///   own (`~/.gitconfig`, or the XDG file when there is one: the home folder
+///   is not in a sandbox chat's view, and Landlock denies it in a host chat
+///   unless `[sandbox] read` names it, which is deliberate and stays), git
+///   would warn on every command and refuse to run (`fatal: unknown error
+///   occurred while reading the configuration files`). `GIT_CONFIG_GLOBAL`
+///   then names `/dev/null`: empty, never writable, always granted. Where
+///   the person's file is granted it is left to git, so their configured
+///   identity and settings apply.
+/// - **The identity**, as a default, never an override: a configuration
+///   file of the node's in the session's temp folder, named by
+///   `GIT_CONFIG_SYSTEM`, the lowest level git reads, so an identity in the
+///   person's global file, in the repository or in `git -c` wins. (The
+///   variables `GIT_AUTHOR_*` would override all of them.) `tmp` is `None`
+///   for the read-only shell, which commits nothing.
+fn git_env(
+    c: &mut std::process::Command,
+    env: &crate::ToolEnv,
+    id: &harness_core::identity::Identity,
+    tmp: Option<&Path>,
+    granted: &[&Path],
+) {
+    // The path itself, or where a link (a dotfile manager's) leads: node.toml
+    // entries are held as the real path.
+    let covered = |p: &Path| {
+        let real = p.canonicalize().ok();
+        granted
+            .iter()
+            .any(|g| p.starts_with(g) || real.as_ref().is_some_and(|r| r.starts_with(g)))
+    };
+    let home = env.var("HOME").map(PathBuf::from);
+    let usable = home.as_ref().is_some_and(|h| {
+        let xdg = env
+            .var("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| h.join(".config"))
+            .join("git/config");
+        covered(&h.join(".gitconfig")) && (!xdg.exists() || covered(&xdg))
+    });
+    if !usable {
+        c.env("GIT_CONFIG_GLOBAL", "/dev/null");
+    }
+    let Some(dir) = tmp else { return };
+    // Without the file git asks for an identity, as it did before: the agent
+    // is told by git itself. Nothing personal is logged.
+    if let Ok(file) = write_identity(dir, &id.gitconfig()) {
+        c.env("GIT_CONFIG_SYSTEM", file);
+    }
+}
+
+/// The identity files this process wrote, by session temp folder: the path
+/// and the text it holds, so an unchanged identity is not written again.
+static IDENTITY_FILES: std::sync::Mutex<Vec<(PathBuf, PathBuf, String)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// `text` in a file of its own in `dir`, and its path. Nothing in `dir` is
+/// ever opened, read, listed or statted: the folder is the agent's to write
+/// (a FIFO, a link to `/dev/zero` or to a huge file, a directory planted at a
+/// name would hang the node or eat its memory if the node read it). The file
+/// is made new (`create_new`, which never follows a link) under a name the
+/// agent cannot predict, and the path is remembered in memory; a file the
+/// agent removes or replaces afterwards costs it its own identity default
+/// and nothing else, the node never looks again.
+fn write_identity(dir: &Path, text: &str) -> std::io::Result<PathBuf> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut held = IDENTITY_FILES.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some((_, path, _)) = held.iter().find(|(d, _, t)| d == dir && t == text) {
+        return Ok(path.clone());
+    }
+    let mut nonce = [0u8; 12];
+    getrandom::fill(&mut nonce).map_err(|e| std::io::Error::other(e.to_string()))?;
+    let hex: String = nonce.iter().map(|b| format!("{b:02x}")).collect();
+    let path = dir.join(format!("{IDENTITY_FILE}.{hex}"));
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o644)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_NONBLOCK)
+        .open(&path)?;
+    f.write_all(text.as_bytes())?;
+    drop(f);
+    // Bounded: a few folders at a time are live; the oldest entry goes.
+    held.retain(|(d, _, _)| d != dir);
+    if held.len() >= 256 {
+        held.remove(0);
+    }
+    held.push((dir.to_path_buf(), path.clone(), text.to_string()));
+    Ok(path)
+}
+
+/// Whether node.toml's `[sandbox] read` or `write` makes the node user's
+/// own git configuration (`~/.gitconfig`, or the XDG file) readable to the
+/// agents' commands: then every chat on this node, whoever owns it, runs git
+/// with that configuration (its name and e-mail, credential helpers,
+/// `insteadOf` rules, `core.sshCommand`). The file it makes readable, for
+/// the node's start to say so. Read from the configuration and the node's
+/// own environment only; nothing an agent can write is looked at.
+pub fn shared_git_config(settings: &Settings) -> Option<PathBuf> {
+    let home = PathBuf::from(std::env::var_os("HOME")?);
+    let xdg = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".config"))
+        .join("git/config");
+    [home.join(".gitconfig"), xdg].into_iter().find(|f| {
+        settings
+            .read
+            .iter()
+            .chain(&settings.write)
+            .any(|g| f.starts_with(g) || g.canonicalize().is_ok_and(|r| f.starts_with(&r)))
+    })
 }
 
 /// Create `dir` (and parents) with mode 0700.

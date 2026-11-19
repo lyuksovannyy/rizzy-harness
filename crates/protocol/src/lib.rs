@@ -1046,6 +1046,15 @@ pub enum MasterToNode {
         /// [`valid_user_id`]. Kept in the node's memory, never logged.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         owner: Option<String>,
+        /// The chat owner's login, display name and the e-mail they set for
+        /// commits (T88), set by the master beside `owner` and only for the
+        /// node that runs the chat: the agent's `git commit` carries it. The
+        /// node checks every field again and falls back to a no-reply
+        /// address built from the login; none for a chat nobody owns. Kept
+        /// in the node's memory; never logged, never in an event (its
+        /// `Debug` hides the address).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        identity: Option<harness_core::identity::CommitIdentity>,
         /// The agents this message called after the first, in the order
         /// they answer (X.37; only to nodes with [`CAP_PEERS`], at most
         /// [`MAX_PEERS`]): each is resolved by the master as `agent` is,
@@ -1096,6 +1105,15 @@ pub enum MasterToNode {
         /// [`valid_user_id`]. Kept in the node's memory, never logged.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         owner: Option<String>,
+        /// The chat owner's login, display name and the e-mail they set for
+        /// commits (T88), set by the master beside `owner` and only for the
+        /// node that runs the chat: the agent's `git commit` carries it. The
+        /// node checks every field again and falls back to a no-reply
+        /// address built from the login; none for a chat nobody owns. Kept
+        /// in the node's memory; never logged, never in an event (its
+        /// `Debug` hides the address).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        identity: Option<harness_core::identity::CommitIdentity>,
     },
     /// Run the chat's failed last turn again (a person's Retry, X.21; only
     /// to nodes with [`CAP_RETRY`]). Sent only for the chat's owner. No
@@ -1129,6 +1147,15 @@ pub enum MasterToNode {
         /// [`valid_user_id`]. Kept in the node's memory, never logged.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         owner: Option<String>,
+        /// The chat owner's login, display name and the e-mail they set for
+        /// commits (T88), set by the master beside `owner` and only for the
+        /// node that runs the chat: the agent's `git commit` carries it. The
+        /// node checks every field again and falls back to a no-reply
+        /// address built from the login; none for a chat nobody owns. Kept
+        /// in the node's memory; never logged, never in an event (its
+        /// `Debug` hides the address).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        identity: Option<harness_core::identity::CommitIdentity>,
     },
     /// Write the chat's hand-off note now if one is due (X.16,
     /// docs/handoff-notes.md; only to nodes with [`CAP_HANDOFF`]). A
@@ -2076,6 +2103,7 @@ mod tests {
             agent_named: false,
             files: vec![],
             owner: None,
+            identity: None,
             peers: vec![],
             tags: vec![],
         };
@@ -2107,6 +2135,7 @@ mod tests {
             agent_named: false,
             files: vec![],
             owner: None,
+            identity: None,
             peers: vec![],
             tags: vec![],
         };
@@ -2142,6 +2171,7 @@ mod tests {
             savings: None,
             context: None,
             owner: None,
+            identity: None,
         };
         let v = serde_json::to_value(&c).unwrap();
         assert_eq!(

@@ -277,6 +277,7 @@ impl Rig {
             agent_named: false,
             files: vec![],
             owner: None,
+            identity: None,
             peers: vec![],
             tags: vec![],
         });
@@ -385,6 +386,7 @@ impl Rig {
             agent_named: false,
             files: vec![],
             owner: None,
+            identity: None,
             peers: vec![],
             tags: vec![],
         });
