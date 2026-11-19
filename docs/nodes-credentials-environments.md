@@ -568,8 +568,10 @@ own forge account (`workspace_forge_accounts`).
 **Built (2026-11-18, X.27 step 1):** a pasted access token only (no device or OAuth sign-in
 yet), checked with the forge's `GET /user`, for the built-in `github.com` and `gitlab.com`
 and the hosts the admin lists in `config.toml` (`[[forge.hosts]]`); shown under Plugins →
-Connectors. Stored and checked only: no `forge.grant`, no clone or push, no workspace forge
-account and no "Use @login" choice yet (README "Connections").
+Connectors. **Step 2 built (2026-11-18):** the master lists the repositories a connection can
+see, from the forge's API, for its owner only (`GET /api/connections/{id}/repositories`, no screen
+yet; PLAN.md T83). No `forge.grant`, no clone or push, no workspace forge account and no "Use
+@login" choice yet (README "Connections").
 
 **Git with network.** The hardened git refuses every transport (`protocol.allow=never`,
 `credential.helper=`; `crates/node/src/git.rs`). Clone, classification fetch and push use a

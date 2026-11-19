@@ -252,6 +252,16 @@ pub struct State {
     timeout_ms: AtomicU64,
     /// How forge names are looked up (tests: a fixed table).
     lookup: Mutex<Lookup>,
+    /// Repository listings (`crate::forge_repos`): recent answers, and the
+    /// per-person limit on calls.
+    pub(crate) repos: crate::forge_repos::Cache,
+    listing: Attempts,
+    /// Listings in flight on the server (`forge_repos::MAX_IN_FLIGHT`).
+    pub(crate) in_flight: tokio::sync::Semaphore,
+    /// Tokens a forge refused lately (`forge_repos::Refusals`).
+    pub(crate) refusals: crate::forge_repos::Refusals,
+    /// People with a listing in flight (one each).
+    pub(crate) listing_people: Mutex<std::collections::HashSet<String>>,
 }
 
 impl Default for State {
@@ -262,6 +272,11 @@ impl Default for State {
             attempts: Attempts::new(LIMITS),
             timeout_ms: AtomicU64::new(0),
             lookup: Mutex::default(),
+            repos: crate::forge_repos::Cache::default(),
+            listing: Attempts::new(crate::forge_repos::LIMITS),
+            in_flight: tokio::sync::Semaphore::new(crate::forge_repos::MAX_IN_FLIGHT),
+            refusals: crate::forge_repos::Refusals::default(),
+            listing_people: Mutex::default(),
         }
     }
 }
@@ -427,6 +442,31 @@ impl Master {
         self.inner.forge.attempts.admit(user, host)
     }
 
+    /// Count one repository listing by `user` against `host`: refused while
+    /// the host's shared budget of failures is used up, or past the
+    /// person's listing limit.
+    pub(crate) fn forge_list_attempt(&self, user: &str, host: &str) -> Result<(), &'static str> {
+        if self.inner.forge.attempts.target_full(host) {
+            return Err(crate::forge_repos::HOST_PAUSED);
+        }
+        self.inner.forge.listing.admit(user, "")
+    }
+
+    /// Forget the cached listings of `user`'s connection `id`.
+    pub(crate) fn forget_repos(&self, user: &str, id: &str) {
+        self.inner.forge.repos.forget(user, id);
+    }
+
+    /// Tests: failures counted against `host`'s shared budget now.
+    pub fn forge_host_failures(&self, host: &str) -> usize {
+        self.inner.forge.attempts.target_len(host)
+    }
+
+    /// Tests: how many listings are cached.
+    pub fn forge_repo_cache_len(&self) -> usize {
+        self.inner.forge.repos.len()
+    }
+
     /// A check against `host` failed: it counts against the host's budget.
     pub(crate) fn forge_failed(&self, host: &str) {
         self.inner.forge.attempts.failed(host)
@@ -451,7 +491,7 @@ pub(crate) const LIMITS: crate::remote::Limits = crate::remote::Limits {
 
 /// The client for `h`: its resolver (public addresses only unless the
 /// entry allows a private one), same-origin redirects, no proxy.
-fn client(
+pub(crate) fn client(
     h: &ForgeHost,
     timeout: Duration,
     lookup: &Lookup,
@@ -477,7 +517,7 @@ fn client(
     .map_err(|_| unreachable("no HTTP client"))
 }
 
-fn auth_headers(kind: ForgeKind, token: &Secret<String>) -> Result<HeaderMap, ()> {
+pub(crate) fn auth_headers(kind: ForgeKind, token: &Secret<String>) -> Result<HeaderMap, ()> {
     let mut hm = HeaderMap::new();
     let (name, value) = match kind {
         ForgeKind::Github => ("authorization", format!("Bearer {}", token.expose())),
@@ -512,21 +552,34 @@ async fn get(
     path: &str,
     headers: HeaderMap,
 ) -> Result<(HeaderMap, serde_json::Value), CheckError> {
+    let url = reqwest::Url::parse(&format!("{}{path}", h.api_base))
+        .map_err(|_| CheckError::Unreachable(h.host.clone(), "bad api_base"))?;
+    let (headers, body) = get_url(c, h, url, headers, MAX_BODY).await?;
+    let v = serde_json::from_slice(&body)
+        .map_err(|_| CheckError::BadAnswer(h.host.clone(), "it is not JSON"))?;
+    Ok((headers, v))
+}
+
+/// GET `url` (built by the caller from `h`'s `api_base`): the status, the
+/// headers and, on success, at most `max` bytes of the body, unparsed (the
+/// caller decides how far to parse it). An error body is never read.
+pub(crate) async fn get_url(
+    c: &reqwest::Client,
+    h: &ForgeHost,
+    url: reqwest::Url,
+    headers: HeaderMap,
+    max: usize,
+) -> Result<(HeaderMap, Vec<u8>), CheckError> {
     let unreachable = |why| CheckError::Unreachable(h.host.clone(), why);
-    let r = c
-        .get(format!("{}{path}", h.api_base))
-        .headers(headers)
-        .send()
-        .await
-        .map_err(|e| {
-            unreachable(if e.is_timeout() {
-                "it did not answer in time"
-            } else if e.is_redirect() {
-                "it redirected too often"
-            } else {
-                "the connection failed (or the address is not allowed)"
-            })
-        })?;
+    let r = c.get(url).headers(headers).send().await.map_err(|e| {
+        unreachable(if e.is_timeout() {
+            "it did not answer in time"
+        } else if e.is_redirect() {
+            "it redirected too often"
+        } else {
+            "the connection failed (or the address is not allowed)"
+        })
+    })?;
     let status = r.status();
     if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
         return Err(CheckError::Refused(h.host.clone(), status.as_u16()));
@@ -535,7 +588,7 @@ async fn get(
         return Err(CheckError::Status(h.host.clone(), status.as_u16()));
     }
     let too_large = || CheckError::BadAnswer(h.host.clone(), "it is too large");
-    if r.content_length().is_some_and(|n| n > MAX_BODY as u64) {
+    if r.content_length().is_some_and(|n| n > max as u64) {
         return Err(too_large());
     }
     let headers = r.headers().clone();
@@ -549,14 +602,12 @@ async fn get(
                 "its answer broke off"
             })
         })?;
-        if body.len() + chunk.len() > MAX_BODY {
+        if body.len() + chunk.len() > max {
             return Err(too_large());
         }
         body.extend_from_slice(&chunk);
     }
-    let v = serde_json::from_slice(&body)
-        .map_err(|_| CheckError::BadAnswer(h.host.clone(), "it is not JSON"))?;
-    Ok((headers, v))
+    Ok((headers, body))
 }
 
 /// Ask `h` whom `token` belongs to.
