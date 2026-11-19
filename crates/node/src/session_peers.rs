@@ -218,13 +218,18 @@ impl Session {
                     // The node's own reason (its log, a restore, its stop):
                     // the person is told who was not asked.
                     let mut rest: Vec<String> = vec![next.agent_id.clone()];
+                    // A Stop that landed after the next agent was chosen and
+                    // before its turn was claimed is a Stop, not a failure.
+                    let mut why_not = PeersSkipReason::Unavailable;
                     if let Some(p) = self.peers.lock().unwrap_or_else(|p| p.into_inner()).take() {
+                        if p.stopped {
+                            why_not = PeersSkipReason::Stopped;
+                        }
                         rest.extend(p.rest.into_iter().map(|s| s.agent_id));
                     }
                     tracing::warn!(session = %self.id, error = %why, "could not start the next called agent's turn");
                     if !self.node.is_stopping() {
-                        self.skip_peers(seq, rest, PeersSkipReason::Unavailable)
-                            .await;
+                        self.skip_peers(seq, rest, why_not).await;
                     }
                     break;
                 }
