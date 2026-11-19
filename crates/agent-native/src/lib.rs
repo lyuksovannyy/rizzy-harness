@@ -4020,6 +4020,11 @@ impl NativeBackend {
                 t.unsent |= refused_thinking.contains(&model);
                 t
             });
+            // Before the log, the next request and every check: a call with
+            // empty arguments is a call with `{}`.
+            for c in &mut completion.tool_calls {
+                c.input = provider::blank_args_as_object(std::mem::take(&mut c.input));
+            }
             let ev = self.assistant_message(
                 AssistantMessage {
                     author: author.clone(),
@@ -6338,6 +6343,97 @@ mod tests {
         assert_eq!(r.len(), 1, "{r:?}");
         assert!(r[0].contains("output limit"), "{}", r[0]);
         assert!(!r[0].contains("maybe only half"), "{}", r[0]);
+    }
+
+    /// A tool with no arguments, recording the input it was run with.
+    struct NoArgs(Arc<Mutex<Vec<Value>>>);
+
+    #[async_trait::async_trait]
+    impl harness_tools::Tool for NoArgs {
+        fn name(&self) -> &'static str {
+            "noargs"
+        }
+        fn description(&self) -> &'static str {
+            "takes nothing"
+        }
+        fn schema(&self) -> Value {
+            json!({"type": "object", "properties": {}})
+        }
+        fn risk(&self) -> ToolRisk {
+            ToolRisk::ReadOnly
+        }
+        async fn run(&self, _ctx: &ToolCtx, input: Value) -> ToolOutcome {
+            self.0.lock().unwrap().push(input);
+            ToolOutcome::ok("ran")
+        }
+    }
+
+    /// One call to `tool` with `input` (as the provider hands it over);
+    /// returns what the tool was run with, and the refusals.
+    async fn call_with(tool: &str, input: Value) -> (Vec<Value>, Vec<String>) {
+        let dir = tempfile::tempdir().unwrap();
+        let host = RecHost::new(Decision::Allow);
+        let seen = Arc::new(Mutex::new(vec![]));
+        let mut tools = harness_tools::builtin();
+        tools.push(Arc::new(NoArgs(seen.clone())));
+        let step = Completion {
+            tool_calls: vec![ToolCallRef {
+                call_id: new_id(),
+                tool: tool.into(),
+                input,
+            }],
+            stop: StopReason::ToolUse,
+            ..Default::default()
+        };
+        let b = NativeBackend::new(
+            Arc::new(Script(Mutex::new(vec![step].into()))),
+            tools,
+            NativeConfig::default(),
+        );
+        let out = b.run_turn(ctx(&host, "go", dir.path())).await;
+        assert_eq!(out.reason, TurnEndReason::Completed, "{:?}", out.error);
+        let ran = seen.lock().unwrap().clone();
+        (ran, refusals(&host))
+    }
+
+    /// Trial 2026-11-19, item 9: a tool that takes no arguments, called
+    /// with an empty argument string, was refused as "not an object".
+    #[tokio::test]
+    async fn empty_or_blank_arguments_are_an_empty_object() {
+        for blank in ["", " ", " \n\t "] {
+            let (ran, refused) = call_with("noargs", json!(blank)).await;
+            assert_eq!(ran, vec![json!({})], "{blank:?}: {refused:?}");
+            assert!(refused.is_empty(), "{blank:?}: {refused:?}");
+        }
+    }
+
+    /// Nothing else is read as `{}`: every other non-object keeps today's
+    /// refusal, text and all.
+    #[tokio::test]
+    async fn other_non_objects_are_still_refused() {
+        for (v, shown) in [
+            (json!("x"), "\"x\""),
+            (json!(3), "3"),
+            (json!([]), "[]"),
+            (Value::Null, "null"),
+        ] {
+            let (ran, refused) = call_with("noargs", v).await;
+            assert!(ran.is_empty(), "{shown} ran");
+            assert_eq!(
+                refused,
+                vec![format!("tool arguments must be a JSON object, got: {shown}")]
+            );
+        }
+    }
+
+    /// A tool with required arguments called with `""` is refused by its
+    /// own check, not by the parser.
+    #[tokio::test]
+    async fn a_tool_with_required_arguments_refuses_blank_arguments_itself() {
+        let (_, refused) = call_with("write", json!("")).await;
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert!(refused[0].contains("is required"), "{}", refused[0]);
+        assert!(!refused[0].contains("JSON object"), "{}", refused[0]);
     }
 
     /// Three cut messages in a row end the turn, naming the cause; two,
