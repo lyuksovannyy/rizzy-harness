@@ -126,7 +126,7 @@ impl State {
     pub fn on_event(&self, e: &harness_core::RawEvent) {
         if matches!(
             e.kind.as_str(),
-            "session_created" | "turn_started" | "user_message" | "turn_ended"
+            "session_created" | "turn_started" | "user_message" | "queued_delivered" | "turn_ended"
         ) {
             lock(&self.grants).on_event(e)
         }

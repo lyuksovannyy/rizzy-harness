@@ -2497,10 +2497,7 @@ impl Master {
         // What the node will record of this send, for `connectors::grant`.
         let what = match retry {
             Some(_) => connectors::grant::What::Retry,
-            None => connectors::grant::What::Prompt {
-                text: text.clone(),
-                reply: reply.is_some(),
-            },
+            None => connectors::grant::What::prompt(&text, reply.is_some()),
         };
         let mut msg = match retry {
             Some(turn_id) => MasterToNode::Retry {

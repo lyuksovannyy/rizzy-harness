@@ -1844,3 +1844,82 @@ async fn a_reused_request_id_is_refused_and_the_first_still_cancels() {
         "the first call was dropped"
     );
 }
+
+/// The node records `queued_delivered` for turn `turn`: it reads the
+/// queued messages at `seqs` there.
+async fn delivered(t: &T, sid: SessionId, turn: &str, seqs: &[u64]) {
+    t.chat
+        .emit(
+            sid,
+            "queued_delivered",
+            json!({"turn_id": turn, "seqs": seqs}),
+        )
+        .await;
+    landed(t, sid).await;
+}
+
+fn head(t: &T, sid: SessionId) -> u64 {
+    *t.chat.seqs.lock().unwrap().get(&sid).unwrap()
+}
+
+/// Coordinator's read of PR 157: an API-token message queued into the
+/// owner's turn that ended before reading it is delivered at the start of
+/// the owner's NEXT turn (`queued_delivered`, as the node's `begin`
+/// writes it: after `turn_started`, before the new message): that turn
+/// never calls connectors. Without such a delivery it does.
+#[tokio::test]
+async fn a_message_delivered_in_a_later_turn_takes_its_grant() {
+    let t = start().await;
+    let [alex, _bob] = users(&t).await;
+    let ws = team(&t, &alex, "Team").await;
+    let (id, stamp) = add(&t, &alex, &ws, "linear", "plain", "none").await;
+    check(&t, &alex, &ws, &id, &stamp).await;
+    let a = chat(&t, &alex, &ws).await;
+    let send = |text: &str, owner: bool| {
+        let (m, text) = (t.master.clone(), text.to_string());
+        async move {
+            m.prompt(
+                a,
+                text,
+                PromptOpts {
+                    agent_id: Some("coder".into()),
+                    by_owner: owner,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+        }
+    };
+    // T1: the owner's; an API-token message is queued into it, unread.
+    send("first", true).await;
+    started(&t, a, "t1", "coder", false).await;
+    said(&t, a, "t1", "first", false).await;
+    send("from the api", false).await;
+    said(&t, a, "t1", "from the api", true).await;
+    let api_seq = head(&t, a);
+    ended(&t, a, "t1").await;
+    // T2: the owner's fresh message; the node delivers the API text first.
+    send("second", true).await;
+    started(&t, a, "t2", "coder", false).await;
+    delivered(&t, a, "t2", &[api_seq]).await;
+    said(&t, a, "t2", "second", false).await;
+    let e = t.chat.call(a, TOOL, json!({})).await.unwrap_err();
+    assert!(e.contains("only in a turn the chat's owner started"), "{e}");
+    ended(&t, a, "t2").await;
+    // T3: the owner's, nothing delivered into it: answered.
+    send("third", true).await;
+    started(&t, a, "t3", "coder", false).await;
+    said(&t, a, "t3", "third", false).await;
+    t.chat.call(a, TOOL, json!({})).await.unwrap();
+    // The owner's own queued message delivered later changes nothing.
+    send("mine, queued", true).await;
+    said(&t, a, "t3", "mine, queued", true).await;
+    let own_seq = head(&t, a);
+    ended(&t, a, "t3").await;
+    send("fourth", true).await;
+    started(&t, a, "t4", "coder", false).await;
+    delivered(&t, a, "t4", &[own_seq]).await;
+    said(&t, a, "t4", "fourth", false).await;
+    t.chat.call(a, TOOL, json!({})).await.unwrap();
+}

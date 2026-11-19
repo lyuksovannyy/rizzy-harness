@@ -52,23 +52,47 @@ pub const PER_HOUR: usize = 200;
 pub const AFTER_END: Duration = Duration::from_secs(60 * 60);
 /// Chats tracked; past it the oldest is forgotten (its turns are then
 /// ungranted: fails closed).
-const KEPT: usize = 4096;
-/// Sends kept per chat, turns per chat, sub-agent turns in all.
-const SENDS: usize = 32;
-const TURNS: usize = 16;
-const CHILDREN: usize = 8192;
+const KEPT: usize = 1024;
+/// Sends kept per chat (a node queues at most 8 messages behind a running
+/// turn), turns per chat, messages whose sender is remembered per chat,
+/// sub-agent turns in all.
+const SENDS: usize = 16;
+const TURNS: usize = 8;
+const SAID: usize = 32;
+const CHILDREN: usize = 2048;
+// What these tables hold at worst, near enough: per chat 16 sends of about
+// 48 bytes, 8 turns of about 100, 32 remembered messages of 16 and up to
+// 200 call times of 16 (3.2 KB, only for a chat that made 200 calls in the
+// hour): about 4.8 KB, so 1,024 chats about 5 MB; 2,048 sub-agent turns
+// (with their parents) of about 150 bytes, 0.3 MB. No prompt's text is
+// kept: a digest of it (review of PR 157).
 
 /// What the master sent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum What {
-    /// A message; `reply`: it answers a form, and the node records its
-    /// own canonical text.
+    /// A message, by the SHA-256 of its text ([`What::prompt`]); `reply`:
+    /// it answers a form, and the node records its own canonical text.
     Prompt {
-        text: String,
+        digest: [u8; 32],
         reply: bool,
     },
     Retry,
     Callback,
+}
+
+impl What {
+    /// A message whose text is `text`.
+    pub fn prompt(text: &str, reply: bool) -> Self {
+        What::Prompt {
+            digest: digest(text),
+            reply,
+        }
+    }
+}
+
+fn digest(text: &str) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(text.as_bytes()).into()
 }
 
 #[derive(Debug, Clone)]
@@ -93,6 +117,9 @@ struct Chat {
     sent: VecDeque<Sent>,
     turns: VecDeque<Turn>,
     hour: VecDeque<Instant>,
+    /// The seqs of the chat's `user_message`s the master saw, and whether
+    /// each was the owner's send.
+    said: VecDeque<(u64, bool)>,
 }
 
 impl Chat {
@@ -237,16 +264,44 @@ impl Grants {
                 let queued = p.get("queued").and_then(|v| v.as_bool()) == Some(true);
                 let reply = p.get("reply").is_some_and(|v| !v.is_null());
                 let c = self.chat(sid);
+                let heard = digest(&said);
                 let sent = c.take(|w| match w {
-                    What::Prompt { text, reply: r } => *text == said || (*r && reply),
+                    What::Prompt { digest, reply: r } => *digest == heard || (*r && reply),
                     _ => false,
                 });
                 let owner = sent.is_some_and(|s| s.owner);
+                if c.said.len() >= SAID {
+                    c.said.pop_front();
+                }
+                c.said.push_back((e.seq, owner));
                 let Some(t) = c.turn(&turn) else { return };
                 t.granted = match t.granted {
                     None => Some(owner && !queued),
                     Some(g) => Some(g && owner),
                 };
+            }
+            // Queued messages read in a turn, maybe a later one than they
+            // were sent in (their turn ended before a step boundary): one
+            // that was not the owner's, or one this table no longer knows,
+            // takes that turn's grant for good, also before its first
+            // message decided it. The owner's own change nothing.
+            "queued_delivered" => {
+                if self.parents.contains_key(&sid) {
+                    return;
+                }
+                let Some(turn) = text("turn_id") else { return };
+                let seqs: Vec<u64> = p
+                    .get("seqs")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_u64()).collect())
+                    .unwrap_or_default();
+                let c = self.chat(sid);
+                let all_owner = seqs
+                    .iter()
+                    .all(|s| c.said.iter().any(|(q, o)| q == s && *o));
+                if !all_owner && let Some(t) = c.turn(&turn) {
+                    t.granted = Some(false);
+                }
             }
             "turn_ended" => {
                 let Some(turn) = text("turn_id") else { return };
@@ -368,10 +423,7 @@ mod tests {
     }
 
     fn prompt(text: &str) -> What {
-        What::Prompt {
-            text: text.into(),
-            reply: false,
-        }
+        What::prompt(text, false)
     }
 
     struct Log<'a>(&'a mut Grants, SessionId);
@@ -547,6 +599,143 @@ mod tests {
             g.check(kid, sid, "k3")
                 .unwrap_err()
                 .contains("ended more than")
+        );
+    }
+
+    /// Coordinator's read of PR 157: a queued message read in a later turn
+    /// (`queued_delivered`) takes that turn's grant unless every message it
+    /// names was the owner's; an unknown or forgotten seq counts as not the
+    /// owner's; the owner's own change nothing, and grant nothing.
+    #[test]
+    fn a_queued_message_read_later_takes_the_grant() {
+        let sid = SessionId::new();
+        let mut g = Grants::default();
+        let at = |seq: u64, kind: &str, p: serde_json::Value| RawEvent {
+            session_id: sid,
+            seq,
+            ts_ms: 0,
+            kind: kind.into(),
+            payload: p,
+        };
+        // T1 the owner's; an API-token message queued at seq 3, unread.
+        g.sent(sid, prompt("one"), true);
+        g.on_event(&at(1, "turn_started", json!({"turn_id": "t1"})));
+        g.on_event(&at(
+            2,
+            "user_message",
+            json!({"turn_id": "t1", "text": "one"}),
+        ));
+        g.sent(sid, prompt("api"), false);
+        g.on_event(&at(
+            3,
+            "user_message",
+            json!({"turn_id": "t1", "text": "api", "queued": true}),
+        ));
+        // Delivered in the turn it was sent in: that turn had lost it anyway.
+        g.on_event(&at(
+            4,
+            "queued_delivered",
+            json!({"turn_id": "t1", "seqs": [3]}),
+        ));
+        assert!(g.check(sid, sid, "t1").is_err());
+        g.on_event(&at(5, "turn_ended", json!({"turn_id": "t1"})));
+        // T2: delivered before its own message decided: never granted.
+        g.sent(sid, prompt("two"), true);
+        g.on_event(&at(6, "turn_started", json!({"turn_id": "t2"})));
+        g.on_event(&at(
+            7,
+            "queued_delivered",
+            json!({"turn_id": "t2", "seqs": [3]}),
+        ));
+        g.on_event(&at(
+            8,
+            "user_message",
+            json!({"turn_id": "t2", "text": "two"}),
+        ));
+        assert!(g.check(sid, sid, "t2").is_err());
+        g.on_event(&at(9, "turn_ended", json!({"turn_id": "t2"})));
+        // T3: granted; then a seq this table never saw is delivered: gone.
+        g.sent(sid, prompt("three"), true);
+        g.on_event(&at(10, "turn_started", json!({"turn_id": "t3"})));
+        g.on_event(&at(
+            11,
+            "user_message",
+            json!({"turn_id": "t3", "text": "three"}),
+        ));
+        assert!(g.check(sid, sid, "t3").is_ok());
+        g.on_event(&at(
+            12,
+            "queued_delivered",
+            json!({"turn_id": "t3", "seqs": [999]}),
+        ));
+        assert!(g.check(sid, sid, "t3").is_err());
+        g.on_event(&at(13, "turn_ended", json!({"turn_id": "t3"})));
+        // The owner's own queued message read later: nothing changes, and
+        // a delivery alone grants nothing.
+        g.sent(sid, prompt("four"), true);
+        g.on_event(&at(14, "turn_started", json!({"turn_id": "t4"})));
+        g.on_event(&at(
+            15,
+            "user_message",
+            json!({"turn_id": "t4", "text": "four"}),
+        ));
+        g.sent(sid, prompt("mine"), true);
+        g.on_event(&at(
+            16,
+            "user_message",
+            json!({"turn_id": "t4", "text": "mine", "queued": true}),
+        ));
+        g.on_event(&at(17, "turn_ended", json!({"turn_id": "t4"})));
+        g.sent(sid, prompt("five"), true);
+        g.on_event(&at(18, "turn_started", json!({"turn_id": "t5"})));
+        g.on_event(&at(
+            19,
+            "queued_delivered",
+            json!({"turn_id": "t5", "seqs": [16]}),
+        ));
+        g.on_event(&at(
+            20,
+            "user_message",
+            json!({"turn_id": "t5", "text": "five"}),
+        ));
+        assert!(g.check(sid, sid, "t5").is_ok(), "the owner's own message");
+        g.on_event(&at(21, "turn_ended", json!({"turn_id": "t5"})));
+        g.on_event(&at(22, "turn_started", json!({"turn_id": "t6"})));
+        g.on_event(&at(
+            23,
+            "queued_delivered",
+            json!({"turn_id": "t6", "seqs": [16]}),
+        ));
+        assert!(
+            g.check(sid, sid, "t6").is_err(),
+            "a delivery grants nothing"
+        );
+        g.on_event(&at(24, "turn_ended", json!({"turn_id": "t6"})));
+        // A seq the table forgot (past SAID messages): not the owner's.
+        for k in 0..SAID as u64 {
+            g.sent(sid, prompt(&format!("m{k}")), true);
+            g.on_event(&at(
+                100 + k,
+                "user_message",
+                json!({"turn_id": "t6", "text": format!("m{k}"), "queued": true}),
+            ));
+        }
+        g.sent(sid, prompt("seven"), true);
+        g.on_event(&at(200, "turn_started", json!({"turn_id": "t7"})));
+        g.on_event(&at(
+            201,
+            "user_message",
+            json!({"turn_id": "t7", "text": "seven"}),
+        ));
+        assert!(g.check(sid, sid, "t7").is_ok());
+        g.on_event(&at(
+            202,
+            "queued_delivered",
+            json!({"turn_id": "t7", "seqs": [16]}),
+        ));
+        assert!(
+            g.check(sid, sid, "t7").is_err(),
+            "forgotten: not the owner's"
         );
     }
 }
