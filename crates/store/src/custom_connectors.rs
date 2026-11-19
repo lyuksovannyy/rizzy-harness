@@ -15,7 +15,7 @@
 
 use rusqlite::{OptionalExtension, params};
 
-use crate::{Result, Store};
+use crate::{Result, Store, StoreError};
 
 /// Run by `Store::init`, after the workspaces and their members.
 pub(crate) const SCHEMA: &str = r#"
@@ -163,15 +163,33 @@ impl Store {
             Ok(r.get::<_, i64>(0)?.to_string())
         })?;
         conn.pragma_update(None, "synchronous", "FULL")?;
-        let done = conn.execute(
-            &format!(
-                "WITH RECURSIVE {UP} INSERT OR IGNORE INTO foreign_chats (session_id, marked_ms)
-                 SELECT id, ?2 FROM up"
-            ),
-            params![sid.to_string(), harness_core::now_ms()],
-        );
+        let done = conn
+            .execute(
+                &format!(
+                    "WITH RECURSIVE {UP} INSERT OR IGNORE INTO foreign_chats (session_id, marked_ms)
+                     SELECT id, ?2 FROM up"
+                ),
+                params![sid.to_string(), harness_core::now_ms()],
+            )
+            .and_then(|_| {
+                conn.query_row(
+                    &format!(
+                        "WITH RECURSIVE {UP} SELECT (SELECT MAX(depth) FROM up) >= {MAX_DEPTH}"
+                    ),
+                    params![sid.to_string()],
+                    |r| r.get::<_, bool>(0),
+                )
+            });
         conn.pragma_update(None, "synchronous", before)?;
-        done?;
+        // A chain the walk did not reach the end of (deeper than
+        // `MAX_DEPTH`; an honest node delegates 4 levels at most): every
+        // chat reached is marked, and the action is refused, so nothing
+        // is forwarded into a chain whose root the mark may have missed.
+        if done? {
+            return Err(StoreError::Refused(
+                "this chat is nested too deep under other chats; nothing was sent".into(),
+            ));
+        }
         Ok(())
     }
 
@@ -464,15 +482,28 @@ impl Store {
     }
 }
 
-/// Called by `Store::delete_session` in its transaction: the mark goes to
-/// the chat's sub-agents' chats first, then with it.
-pub(crate) fn on_session_deleted(tx: &rusqlite::Transaction, sid: &str) -> crate::Result<()> {
+/// Called by `Store::delete_session` in its transaction while the chat's
+/// row is still there: its sub-agents' chats take over the mark they
+/// inherited through it (it, or any chat above it, marked; or the chain too
+/// deep to walk), since their walk up ends at the deleted chat. External
+/// event data is handed down the same way (`routines::hand_down`).
+pub(crate) fn hand_down(tx: &rusqlite::Transaction, sid: &str) -> crate::Result<()> {
     tx.execute(
-        "INSERT OR IGNORE INTO foreign_chats (session_id, marked_ms)
-         SELECT session_id, ?2 FROM sessions
-         WHERE parent_id = ?1 AND EXISTS(SELECT 1 FROM foreign_chats WHERE session_id = ?1)",
+        &format!(
+            "WITH RECURSIVE {UP} INSERT OR IGNORE INTO foreign_chats (session_id, marked_ms)
+             SELECT session_id, ?2 FROM sessions
+             WHERE parent_id = ?1
+               AND (EXISTS(SELECT 1 FROM foreign_chats WHERE session_id IN (SELECT id FROM up))
+                    OR (SELECT MAX(depth) FROM up) >= {MAX_DEPTH})"
+        ),
         params![sid, harness_core::now_ms()],
     )?;
+    Ok(())
+}
+
+/// Called by `Store::delete_session` in its transaction: the chat's own
+/// mark goes with it (`hand_down` ran first).
+pub(crate) fn on_session_deleted(tx: &rusqlite::Transaction, sid: &str) -> crate::Result<()> {
     tx.execute(
         "DELETE FROM foreign_chats WHERE session_id = ?1",
         params![sid],

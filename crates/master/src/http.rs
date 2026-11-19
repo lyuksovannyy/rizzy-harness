@@ -1049,8 +1049,9 @@ async fn get_session(
     crate::routines::annotate_one(&m, &mut v).await?;
     m.annotate_background(std::slice::from_mut(&mut v));
     // Whether custom connectors are off in this chat and why (`this_chat`,
-    // `parent_chat`, `event_data`), so a screen can say it (PLAN.md T85).
-    v["connectors_off"] = json!(m.connectors_off(row.session_id).await);
+    // `parent_chat`, `event_data`, `no_owner`, `unknown`), so a screen can
+    // say it (PLAN.md T85).
+    v["connectors_off"] = json!(m.connectors_off(&row).await);
     Ok(Json(v))
 }
 

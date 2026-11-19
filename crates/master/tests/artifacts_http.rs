@@ -663,3 +663,83 @@ async fn who_sees_shares_and_deletes() {
     .await;
     assert_eq!((st, v["name"].as_str()), (StatusCode::OK, Some("Renamed")));
 }
+
+/// Review 5 of PR 157 (PLAN.md T85): once someone other than the chat's
+/// owner acted in it (here the API token's message), its agent adds
+/// nothing to a file shared with the workspace: that version is recorded
+/// as failed, with the reason. A new name is still published (private).
+#[tokio::test]
+async fn a_chat_someone_else_acted_in_adds_nothing_to_a_shared_file() {
+    let t = start().await;
+    let alex = alex(&t).await;
+    let (_, w) = send(
+        &t,
+        Method::POST,
+        "/api/workspaces",
+        Some(json!({"name": "Acme"})),
+        &alex,
+    )
+    .await;
+    let acme = w["workspace_id"].as_str().unwrap().to_string();
+    std::fs::write(t.work.join("tool"), b"the tool").unwrap();
+    let sid = chat(&t, &alex, Some(&acme)).await;
+    prompt(&t, &alex, &sid, "publish: tool as report").await;
+    settled(&t, &alex, &sid, 1).await;
+    let (_, mine) = send(
+        &t,
+        Method::GET,
+        &format!("/api/artifacts?workspace={acme}"),
+        None,
+        &alex,
+    )
+    .await;
+    let id = mine["artifacts"][0]["artifact_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (st, v) = send(
+        &t,
+        Method::PATCH,
+        &format!("/api/artifacts/{id}"),
+        Some(json!({"visibility": "workspace"})),
+        &alex,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    std::fs::write(t.work.join("tool"), b"PLANTED").unwrap();
+    let (st, v) = send(
+        &t,
+        Method::POST,
+        &format!("/api/sessions/{sid}/prompt"),
+        Some(json!({"text": "publish: tool as report"})),
+        "Bearer tok",
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let rows = settled(&t, &alex, &sid, 2).await;
+    let planted: Vec<_> = rows.iter().filter(|r| r["status"] == "failed").collect();
+    assert_eq!(planted.len(), 1, "{rows:?}");
+    let (_, a) = send(
+        &t,
+        Method::GET,
+        &format!("/api/artifacts/{id}"),
+        None,
+        &alex,
+    )
+    .await;
+    let ready: Vec<_> = a["versions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|v| v["status"] == "ready")
+        .collect();
+    assert_eq!(ready.len(), 1, "only the clean version is ready: {a}");
+    // The owner's own prompt in the marked chat: a new name is published.
+    prompt(&t, &alex, &sid, "publish: tool as fresh").await;
+    let rows = settled(&t, &alex, &sid, 3).await;
+    assert_eq!(
+        rows.iter().filter(|r| r["status"] == "ready").count(),
+        2,
+        "{rows:?}"
+    );
+}

@@ -1016,7 +1016,10 @@ async fn routine_runs_change_the_board_and_api_token_turns_only_list_it() {
         .board(a, add("in the owner's name"))
         .await
         .unwrap_err();
-    assert!(e.contains("not available in this turn"), "{e}");
+    // Refused twice over: the turn has no `board_edit`, and the chat is
+    // one someone other than its owner acted in (checked first, at the
+    // call).
+    assert!(e.contains("not available in this chat"), "{e}");
     t.chat.board(a, list()).await.unwrap();
     t.chat
         .emit(

@@ -3352,12 +3352,22 @@ chat of someone else's.
   any depth of sub-agents: a message to a sub-agent's chat turns them off in
   every chat above it. The agent is told once, in plain words, why
   connectors are off in this chat; the session's API says it too
-  (`connectors_off`: `this_chat`, `parent_chat` or `event_data`). Reading a
-  chat with the API token changes nothing. Such a chat also writes nothing
-  other chats read without your click: every memory or project fact its
-  turns `remember` waits for you to keep or dismiss, its turns change no
-  board, and it is left out of the project's "Earlier chats" (so is a
-  chat holding a webhook's event data).
+  (`connectors_off`: `this_chat`, `parent_chat` or `event_data`; `no_owner`
+  for a chat nobody owns, made with the API token, which is never marked
+  because it has no account to use; `unknown` when the server cannot read
+  its records, and connectors are then off). Reading a chat with the API
+  token changes nothing. Such a chat also writes nothing other chats read
+  without your click: every memory or project fact its turns `remember`
+  waits for you to keep or dismiss (its card says it comes from such a
+  chat), its turns change no board, its agent adds nothing to a file shared
+  with the workspace (a new name is published, private), and it is left out
+  of the project's "Earlier chats" (so is a chat holding a webhook's event
+  data). This holds from the moment the other person acts, also for the
+  turn running then and its sub-agents: the server checks the chat at each
+  call, not when the turn started. A chat nested more than 15 sub-agents
+  deep counts as marked, and an action in it is refused; a chat deleted
+  from the middle of a chain hands what it inherited to its sub-agents'
+  chats.
 - **What this does not cover.** The mark covers what others do IN A CHAT.
   It does not cover text that people with rights write for every chat to
   read: the server's and the workspace's admins (agent instructions, stored

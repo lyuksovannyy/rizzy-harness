@@ -1416,23 +1416,35 @@ impl Store {
     }
 }
 
+/// Called by `Store::delete_session` inside its transaction while the
+/// chat's row is still there: its sub-agents' chats are not deleted with
+/// it, and they hold what it handed them, so they take over the external
+/// event data they inherited through it (it, or any chat above it, holds
+/// some), since their walk up ends at the deleted chat.
+pub(crate) fn hand_down(tx: &rusqlite::Transaction, sid: &str) -> crate::Result<()> {
+    tx.execute(
+        "WITH RECURSIVE up(id, depth) AS (
+             SELECT ?1, 0
+             UNION ALL
+             SELECT s.parent_id, up.depth + 1 FROM sessions s JOIN up ON s.session_id = up.id
+             WHERE s.parent_id IS NOT NULL AND up.depth < 16)
+         INSERT OR IGNORE INTO routine_untrusted_chats (session_id)
+         SELECT session_id FROM sessions
+         WHERE parent_id = ?1
+           AND EXISTS(SELECT 1 FROM routine_untrusted_chats WHERE session_id IN (SELECT id FROM up))",
+        params![sid],
+    )?;
+    Ok(())
+}
+
 /// Called by `Store::delete_session` inside its transaction: the run keeps
 /// its status, times, trigger and usage, but no text of the deleted chat;
-/// the chat's untrusted mark goes with it. Its sub-agents' chats are not
-/// deleted with it, and they hold what it handed them, so they take the
-/// mark over first.
+/// the chat's untrusted mark goes with it (`hand_down` ran first).
 pub(crate) fn on_session_deleted(tx: &rusqlite::Transaction, sid: &str) -> crate::Result<()> {
     tx.execute(
         "UPDATE routine_runs SET session_id = NULL, chat_deleted = 1, prompt = NULL,
              event = NULL, warnings = NULL
          WHERE session_id = ?1",
-        params![sid],
-    )?;
-    tx.execute(
-        "INSERT OR IGNORE INTO routine_untrusted_chats (session_id)
-         SELECT session_id FROM sessions
-         WHERE parent_id = ?1
-           AND EXISTS(SELECT 1 FROM routine_untrusted_chats WHERE session_id = ?1)",
         params![sid],
     )?;
     tx.execute(

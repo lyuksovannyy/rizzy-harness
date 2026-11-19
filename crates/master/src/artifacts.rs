@@ -305,6 +305,12 @@ async fn staged(m: &Master, node_id: &str, e: &RawEvent) {
         pending_per_node: PENDING_PER_NODE,
         per_owner: LINEAGES_PER_OWNER,
         per_workspace: LINEAGES_PER_WORKSPACE,
+        // Read from the store now (the ancestor rule; a read error counts
+        // as marked): an agent of a chat someone other than its owner acted
+        // in adds nothing to a shared file (PLAN.md T85). A person's own
+        // save from the chat is their click.
+        not_into_shared: a.by != harness_core::artifacts::StagedBy::User
+            && m.chat_foreign(row.session_id).await,
     };
     let res = m
         .inner

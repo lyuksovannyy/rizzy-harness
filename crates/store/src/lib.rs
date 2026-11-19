@@ -1308,6 +1308,10 @@ impl Store {
             // FTS5 deletes only add tombstones; merging drops the old terms.
             tx.execute("INSERT INTO chat_fts(chat_fts) VALUES('optimize')", [])?;
         }
+        // What the chat's sub-agents' chats inherited through it, handed
+        // down while its row still links them to the chats above it.
+        routines::hand_down(&tx, &id)?;
+        custom_connectors::hand_down(&tx, &id)?;
         let n = tx.execute("DELETE FROM sessions WHERE session_id = ?1", params![id])?;
         tx.execute(
             "DELETE FROM session_workspaces WHERE session_id = ?1",

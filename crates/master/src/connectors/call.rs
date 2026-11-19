@@ -360,9 +360,10 @@ impl Master {
         out
     }
 
-    /// Whether connectors are never used in chat `sid` (or the chat it is a
-    /// sub-agent of): someone other than its owner acted in it, or it holds
-    /// data from an external event. A store that cannot be read says yes.
+    /// Whether connectors are never used in chat `sid`: someone other than
+    /// its owner acted in it or in any chat above it to its root, or one of
+    /// them holds data from an external event, or the chain is too deep to
+    /// walk (`Store::chat_foreign`). A store that cannot be read says yes.
     pub async fn chat_foreign(&self, sid: SessionId) -> bool {
         self.inner
             .mirror
@@ -371,9 +372,10 @@ impl Master {
             .unwrap_or(true)
     }
 
-    /// Mark chat `row` (and the chat it is a sub-agent of): someone other
+    /// Mark chat `row` and every chat above it to its root: someone other
     /// than its owner acts in it now. Before the action is forwarded; an
-    /// error refuses the action.
+    /// error refuses the action, as does a chain too deep to walk to its
+    /// root (`Store::chat_mark_foreign`).
     pub async fn mark_foreign(
         &self,
         row: &harness_store::SessionRow,
@@ -386,9 +388,16 @@ impl Master {
             .await
     }
 
-    /// Why connectors are off in chat `sid`, if they are (`connectors_off`
-    /// in the session's API). A store that cannot be read says so too.
-    pub async fn connectors_off(&self, sid: SessionId) -> Option<&'static str> {
+    /// Why connectors are off in chat `row`, if they are (`connectors_off`
+    /// in the session's API): `this_chat`, `parent_chat`, `event_data`;
+    /// `no_owner` for a chat nobody owns (the API token's, never marked: it
+    /// has no account to use); `unknown` when the store cannot be read, as
+    /// connectors are then off too (fail closed).
+    pub async fn connectors_off(&self, row: &harness_store::SessionRow) -> Option<&'static str> {
+        if row.owner_id.is_none() {
+            return Some("no_owner");
+        }
+        let sid = row.session_id;
         match self
             .inner
             .mirror
