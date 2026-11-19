@@ -207,18 +207,22 @@ async fn forge(State(f): State<Fake>, req: Request) -> Response {
     let path = req.uri().path().to_string();
     let (prefix, rest) = path[1..].split_once('/').unwrap_or((&path[1..], ""));
     let port = f.addr.get().unwrap().port();
-    if rest == "user" && prefix != "gl" {
+    if rest == "user" && prefix != "gl" && prefix != "gl422" {
         return gh_user(&h);
     }
     match (prefix, rest) {
-        ("gl", "user") => match h.get("private-token").and_then(|v| v.to_str().ok()) {
+        ("gl" | "gl422", "user") => match h.get("private-token").and_then(|v| v.to_str().ok()) {
             Some(TOKEN_A) => axum::Json(json!({"id": 7, "username": "ada.gl"})).into_response(),
             _ => (AxStatus::UNAUTHORIZED, "401").into_response(),
         },
-        ("gl", "personal_access_tokens/self") => {
+        ("gl" | "gl422", "personal_access_tokens/self") => {
             axum::Json(json!({"scopes": ["read_api"]})).into_response()
         }
-        ("gl", "projects") => (
+        // Re-review of PR 158, MEDIUM 1: the forge answers 422 for one word.
+        ("gl422", "projects") if param(&pq, "search") == "boom" => {
+            (AxStatus::UNPROCESSABLE_ENTITY, "bad search").into_response()
+        }
+        ("gl" | "gl422", "projects") => (
             [("x-next-page", "2"), ("x-total-pages", "9")],
             axum::Json(json!([
                 {"id": 70, "path_with_namespace": "grp/sub/proj", "visibility": "internal",
@@ -294,6 +298,11 @@ async fn forge(State(f): State<Fake>, req: Request) -> Response {
         // Review of PR 158, HIGH 1: answers as costly to parse as fit.
         ("objs", "user/repos") => worst_body("objs").into_response(),
         ("zeros", "user/repos") => worst_body("zeros").into_response(),
+        ("descspaces", "user/repos") => worst_body("descspaces").into_response(),
+        ("slowgh", "user/repos") => {
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            gh_list(&param(&pq, "page"), &param(&pq, "per_page"))
+        }
         ("slowobjs", "user/repos") => {
             tokio::time::sleep(Duration::from_millis(700)).await;
             worst_body("objs").into_response()
@@ -323,10 +332,12 @@ async fn forge(State(f): State<Fake>, req: Request) -> Response {
 }
 
 /// A JSON list just under the answer cap: `objs` is `[{"a":0},…]`,
-/// `zeros` is `[0,0,…]` (review of PR 158, HIGH 1).
+/// `zeros` is `[0,0,…]` (review of PR 158, HIGH 1), `descspaces` one
+/// repository whose description is `"a a a …"` (re-review, LOW 1).
 fn worst_body(kind: &str) -> ([(&'static str, &'static str); 1], axum::body::Bytes) {
-    static BODIES: OnceLock<(axum::body::Bytes, axum::body::Bytes)> = OnceLock::new();
-    let (objs, zeros) = BODIES.get_or_init(|| {
+    static BODIES: OnceLock<(axum::body::Bytes, axum::body::Bytes, axum::body::Bytes)> =
+        OnceLock::new();
+    let (objs, zeros, desc) = BODIES.get_or_init(|| {
         let cap = forge_repos::MAX_BODY - 16;
         let mut a = String::from("[");
         while a.len() + 9 < cap {
@@ -340,9 +351,19 @@ fn worst_body(kind: &str) -> ([(&'static str, &'static str); 1], axum::body::Byt
         }
         z.pop();
         z.push(']');
-        (a.into(), z.into())
+        let head = r#"[{"id":1,"full_name":"a/b","private":false,"description":""#;
+        let mut d = String::from(head);
+        while d.len() + 8 < cap {
+            d.push_str("a ");
+        }
+        d.push_str(r#""}]"#);
+        (a.into(), z.into(), d.into())
     });
-    let b = if kind == "objs" { objs } else { zeros };
+    let b = match kind {
+        "objs" => objs,
+        "descspaces" => desc,
+        _ => zeros,
+    };
     ([("content-type", "application/json")], b.clone())
 }
 
@@ -1234,7 +1255,10 @@ async fn failed_listings_use_the_hosts_shared_budget() {
     let (c, id) = &ids[3];
     let (st, e) = list(&t, c, id, "").await;
     assert_eq!(st, StatusCode::TOO_MANY_REQUESTS, "{e}");
-    assert!(e["error"].as_str().unwrap().contains("failed"), "{e}");
+    let msg = e["error"].as_str().unwrap();
+    // Its own words: these people made no token checks (re-review, LOW 2).
+    assert!(msg.contains("failed") && msg.contains("listing"), "{e}");
+    assert!(!msg.contains("token checks"), "{e}");
     assert_eq!(t.forge.count(), before, "no request");
 }
 
@@ -1407,8 +1431,9 @@ async fn peak_growth<F: std::future::Future>(f: F) -> (F::Output, u64) {
 }
 
 /// One listing's growth, debug build (the bound has room for the
-/// allocator; before the fix one such listing took about 60 MB).
-const ONE_LISTING_KB: u64 = 12 * 1024;
+/// allocator; before the fixes one such listing took about 60 MB, and a
+/// description of 1 MiB of "a a a …" about 13 MB).
+const ONE_LISTING_KB: u64 = 8 * 1024;
 /// Twenty at once, of which the server runs two.
 const TWENTY_LISTINGS_KB: u64 = 24 * 1024;
 
@@ -1426,7 +1451,7 @@ async fn memory_child() {
         ids.push((c.clone(), connect(&t, c, "127.0.0.1", TOKEN_A).await));
     }
     worst_body("objs");
-    for kind in ["/objs", "/zeros"] {
+    for kind in ["/objs", "/zeros", "/descspaces"] {
         github_at(&t, kind);
         let ((st, v), kb) =
             peak_growth(list(&t, &ids[0].0, &ids[0].1, &format!("?q=x{kind}"))).await;
@@ -1458,4 +1483,100 @@ async fn memory_child() {
     assert_eq!(codes.get(&200), Some(&2), "{codes:?}");
     assert_eq!(codes.get(&429), Some(&18), "{codes:?}");
     assert!(kb < TWENTY_LISTINGS_KB, "{kb} kB");
+}
+
+/// Re-review of PR 158, MEDIUM 1: a 4xx is the forge's answer to this
+/// request (here: GitLab refusing one search word), not a sign the host is
+/// failing. Alice's tries do not count against the host; Bob lists and
+/// connects; the refusal is remembered for that word and page only, so
+/// Alice's next, different search is asked at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_refused_search_word_does_not_lock_the_host() {
+    let t = start().await;
+    let [_, (alice, _), (bob, _)] = users(&t).await;
+    t.master
+        .set_forge_hosts(vec![t.forge.host("localhost", ForgeKind::Gitlab, "/gl422")]);
+    let a = connect(&t, &alice, "localhost", TOKEN_A).await;
+    let b = connect(&t, &bob, "localhost", TOKEN_A).await;
+    let before = t.forge.count();
+    for _ in 0..60 {
+        let (st, e) = list(&t, &alice, &a, "?q=boom").await;
+        assert_eq!(st, StatusCode::BAD_GATEWAY, "{e}");
+        let msg = e["error"].as_str().unwrap();
+        assert!(msg.contains("HTTP 422 for this search"), "{msg}");
+    }
+    assert_eq!(t.forge.count(), before + 1, "the same word: one call");
+    assert_eq!(t.master.forge_host_failures("localhost"), 0);
+    // Another word is asked at once, and works.
+    let (st, e) = list(&t, &alice, &a, "?q=proj").await;
+    assert_eq!(st, StatusCode::OK, "{e}");
+    assert_eq!(t.forge.count(), before + 2);
+    // Bob lists and connects as before.
+    let (st, e) = list(&t, &bob, &b, "?q=boom2").await;
+    assert_eq!(st, StatusCode::OK, "{e}");
+    let (st, e) = req(
+        &t,
+        Method::POST,
+        "/api/connections",
+        Some(json!({"host": "localhost", "token": TOKEN_A})),
+        Some(&bob),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{e}");
+}
+
+/// Re-review of PR 158, MEDIUM 2: one listing in flight per person, so one
+/// person cannot hold both of the server's slots; the person's slot is
+/// given back on an error, a timeout and a request the client gave up.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn one_listing_in_flight_per_person() {
+    let t = Arc::new(start().await);
+    let [_, (alice, _), (bob, _)] = users(&t).await;
+    let a = connect(&t, &alice, "127.0.0.1", TOKEN_A).await;
+    let b = connect(&t, &bob, "127.0.0.1", TOKEN_B).await;
+    let spawn = |c: &str, id: &str, q: &str| {
+        let (t, c, id, q) = (t.clone(), c.to_string(), id.to_string(), q.to_string());
+        tokio::spawn(async move { list(&t, &c, &id, &q).await })
+    };
+    github_at(&t, "/slowgh");
+    let first = spawn(&alice, &a, "?q=one");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let before = t.forge.count();
+    let (st, e) = list(&t, &alice, &a, "?q=two").await;
+    assert_eq!(st, StatusCode::TOO_MANY_REQUESTS, "{e}");
+    assert!(e["error"].as_str().unwrap().contains("your earlier"), "{e}");
+    assert_eq!(t.forge.count(), before, "no request");
+    // Bob still gets the other slot.
+    let (st, e) = list(&t, &bob, &b, "?q=bob").await;
+    assert_eq!(st, StatusCode::OK, "{e}");
+    let (st, e) = first.await.unwrap();
+    assert_eq!(st, StatusCode::OK, "{e}");
+    // An error gives her slot back.
+    github_at(&t, "/e500");
+    for q in ["?q=e1", "?q=e2"] {
+        let (st, e) = list(&t, &alice, &a, q).await;
+        assert_eq!(st, StatusCode::BAD_GATEWAY, "{e}");
+    }
+    // A timeout does.
+    github_at(&t, "/hang");
+    let (st, e) = list(&t, &alice, &a, "?q=t1").await;
+    assert_eq!(st, StatusCode::BAD_GATEWAY, "{e}");
+    github_at(&t, "/gh");
+    let (st, e) = list(&t, &alice, &a, "?q=t2").await;
+    assert_eq!(st, StatusCode::OK, "{e}");
+    // A request she gave up on does.
+    github_at(&t, "/hang");
+    let gone = spawn(&alice, &a, "?q=gone");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    gone.abort();
+    github_at(&t, "/gh");
+    let started = std::time::Instant::now();
+    let st = loop {
+        let (st, _) = list(&t, &alice, &a, "?q=after").await;
+        if st != StatusCode::TOO_MANY_REQUESTS || started.elapsed() > Duration::from_secs(4) {
+            break st;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(st, StatusCode::OK);
 }

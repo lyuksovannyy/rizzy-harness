@@ -3106,11 +3106,20 @@ repositories per page, at most 10 pages (with a search word you narrow
 further). At most 20 calls to forges per person per minute; the same request
 again within a minute is answered from memory, without calling the forge. A
 forge that refuses the token (HTTP 401 or 403) gets a message telling you to
-replace the token; the connection is kept, the same answer comes for a
-minute without asking the forge again, and a refusal does not count against
-the forge host (others keep listing and connecting). At most two listings
-run on the server at once; another gets "busy, try again" at once. A forge
-host the admin removed from the list is not called.
+replace the token, and one that limits your account (its own HTTP 429) says
+so; the connection is kept, and the same answer comes for a minute without
+asking the forge again. Another refusal (such as HTTP 422 for a search word)
+is remembered for a minute for that word and page only, so a different
+search is asked at once. None of these counts against the forge host.
+Failed listings that mean the host itself is failing (it cannot be reached,
+does not answer in time, answers HTTP 5xx or a redirect, or sends an answer
+the server cannot read) count against the same budget as failed token checks
+(60 per host in 10 minutes from this server, everyone together); while it is
+used up, listings from that host are refused with a message saying listing
+is paused. At most two listings run on the server at once and one per
+person; another gets "busy, try again" (or "your earlier listing is still
+running") at once. A forge host the admin removed from the list is not
+called.
 
 **In this version nothing clones or pushes,** and no token is sent to a node
 or a model; that comes next (ADOPTION_PLAN X.27 steps 3 and 4).

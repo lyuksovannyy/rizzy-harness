@@ -260,6 +260,8 @@ pub struct State {
     pub(crate) in_flight: tokio::sync::Semaphore,
     /// Tokens a forge refused lately (`forge_repos::Refusals`).
     pub(crate) refusals: crate::forge_repos::Refusals,
+    /// People with a listing in flight (one each).
+    pub(crate) listing_people: Mutex<std::collections::HashSet<String>>,
 }
 
 impl Default for State {
@@ -274,6 +276,7 @@ impl Default for State {
             listing: Attempts::new(crate::forge_repos::LIMITS),
             in_flight: tokio::sync::Semaphore::new(crate::forge_repos::MAX_IN_FLIGHT),
             refusals: crate::forge_repos::Refusals::default(),
+            listing_people: Mutex::default(),
         }
     }
 }
@@ -444,7 +447,7 @@ impl Master {
     /// person's listing limit.
     pub(crate) fn forge_list_attempt(&self, user: &str, host: &str) -> Result<(), &'static str> {
         if self.inner.forge.attempts.target_full(host) {
-            return Err(LIMITS.target_over);
+            return Err(crate::forge_repos::HOST_PAUSED);
         }
         self.inner.forge.listing.admit(user, "")
     }

@@ -103,11 +103,20 @@ async fn list(
         return Ok(Json(serde_json::to_value(l).unwrap_or_default()));
     }
     let token_key = (me.clone(), id.clone(), h.api_base.clone(), sealed);
-    if let Some(msg) = m.inner.forge.refusals.get(&token_key) {
+    if let Some(msg) = m.inner.forge.refusals.get(&token_key, &q, page) {
         return Err(err(StatusCode::BAD_GATEWAY, msg));
     }
-    // Held until the answer is built; given back on every path (it is
-    // dropped with this future, a request the client gave up included).
+    // One listing in flight per person, taken before a server slot so that
+    // a person's second request never holds one; both are held until the
+    // answer is built and given back on every path (they are dropped with
+    // this future, a request the client gave up included).
+    let person_slot =
+        forge_repos::take_person(&m.inner.forge.listing_people, &me).ok_or_else(|| {
+            err(
+                StatusCode::TOO_MANY_REQUESTS,
+                "your earlier repository listing is still running; try again when it has finished",
+            )
+        })?;
     let slot = m.inner.forge.in_flight.try_acquire().map_err(|_| {
         err(
             StatusCode::TOO_MANY_REQUESTS,
@@ -138,6 +147,7 @@ async fn list(
             // Only what says the host is failing counts against it; a
             // refusal of this token is remembered for the token instead.
             let refused = forge_repos::token_refused(&e);
+            let request_refused = forge_repos::request_refused(&e);
             if forge_repos::host_at_fault(&e) {
                 m.forge_failed(&h.host);
             }
@@ -152,15 +162,25 @@ async fn list(
                     "{host} is limiting this account's requests (HTTP 429); try again in a few \
                      minutes"
                 ),
+                CheckError::Status(host, code @ 400..=499) => format!(
+                    "{host} answered HTTP {code} for this {}",
+                    if q.is_some() { "search" } else { "page" }
+                ),
                 e => e.to_string(),
             };
             if refused {
-                m.inner.forge.refusals.put(token_key, msg.clone());
+                m.inner.forge.refusals.put(token_key, None, msg.clone());
+            } else if request_refused {
+                m.inner
+                    .forge
+                    .refusals
+                    .put(token_key, Some((q.clone(), page)), msg.clone());
             }
             return Err(err(StatusCode::BAD_GATEWAY, msg));
         }
     };
     drop(slot);
+    drop(person_slot);
     m.inner.forge.repos.put(key, l.clone());
     Ok(Json(serde_json::to_value(l).unwrap_or_default()))
 }

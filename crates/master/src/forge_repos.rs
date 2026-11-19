@@ -740,6 +740,15 @@ impl<'de> Visitor<'de> for TopSeed {
     skip_scalars!(Top);
 }
 
+/// Characters of a description given to the cleaning: 4 × those kept,
+/// with room for the spaces and hidden characters it drops.
+const DESCRIPTION_READ: usize = 4 * MAX_DESCRIPTION;
+
+/// The first `chars` characters of `s`.
+fn prefix(s: &str, chars: usize) -> &str {
+    s.char_indices().nth(chars).map_or(s, |(i, _)| &s[..i])
+}
+
 /// A strict RFC 3339 timestamp (with its offset), as ms since the epoch.
 fn timestamp(v: &Loose) -> Option<i64> {
     v.str()?
@@ -770,10 +779,11 @@ fn entry(kind: ForgeKind, v: &Raw) -> Option<Repo> {
         .str()
         .filter(|b| valid_ref(b))
         .map(str::to_string);
+    // Cut before cleaning, which splits all of what it is given.
     let description = v
         .description
         .str()
-        .and_then(|d| crate::remote::clean_text(d, MAX_DESCRIPTION));
+        .and_then(|d| crate::remote::clean_text(prefix(d, DESCRIPTION_READ), MAX_DESCRIPTION));
     let updated_ms = timestamp(match kind {
         ForgeKind::Gitlab => &v.last_activity_at,
         _ => &v.updated_at,
@@ -1007,44 +1017,70 @@ impl Cache {
     }
 }
 
-/// Whether a failed listing says the forge host is failing (or that we are
-/// hammering it), so that it counts against the host's shared budget:
-/// every failure but the forge refusing this one token (401, 403) or
-/// limiting this one account (429), which say nothing about the host.
+/// Whether a failed listing says the forge host itself is failing, so
+/// that it counts against the host's shared budget: a connection or TLS
+/// failure, a timeout, a body cut off or over the cap, a 5xx, a 3xx that is
+/// not followed, a malformed answer to a 2xx. Every 4xx is the forge's
+/// answer to this request (to the token, the account's rate, the word or
+/// the page) and does not count: the person chose the word, so counting it
+/// would let one person's search lock everyone out of the host.
 pub fn host_at_fault(e: &CheckError) -> bool {
-    !token_refused(e)
+    !matches!(
+        e,
+        CheckError::Refused(..) | CheckError::Status(_, 400..=499)
+    )
 }
 
-/// The forge refused this token or is limiting its account: remembered
-/// for [`REFUSAL_TTL`], so a retry is answered without a call.
+/// The forge refused this token or is limiting its account (401, 403,
+/// 429): remembered for the token, for every word and page.
 pub fn token_refused(e: &CheckError) -> bool {
     matches!(e, CheckError::Refused(..) | CheckError::Status(_, 429))
+}
+
+/// Another 4xx (400, 404, 409, 422 …): the forge's answer to this word and
+/// page; remembered for them only.
+pub fn request_refused(e: &CheckError) -> bool {
+    matches!(e, CheckError::Status(_, 400..=499)) && !token_refused(e)
 }
 
 /// (person, connection, host's `api_base`, hash of the sealed token).
 pub type TokenKey = (String, String, String, [u8; 32]);
 
-/// Refusals by token, bounded ([`MAX_REFUSALS`], the oldest goes first).
-/// A replaced token is a new key, so it is asked at once.
+/// What a refusal is remembered under: the token, and for a refusal of
+/// one request also its word and page.
+type RefusalKey = (TokenKey, Option<(Option<String>, u32)>);
+
+/// Refusals, bounded ([`MAX_REFUSALS`], the oldest goes first). A replaced
+/// token is a new key, so it is asked at once.
 #[derive(Default)]
 pub struct Refusals {
-    map: Mutex<HashMap<TokenKey, (Instant, String)>>,
+    map: Mutex<HashMap<RefusalKey, (Instant, String)>>,
 }
 
 impl Refusals {
-    pub fn get(&self, k: &TokenKey) -> Option<String> {
+    /// A refusal of this token, else of this word and page, within
+    /// [`REFUSAL_TTL`].
+    pub fn get(&self, token: &TokenKey, q: &Option<String>, page: u32) -> Option<String> {
         let mut m = lock(&self.map);
-        match m.get(k) {
-            Some((at, msg)) if at.elapsed() < REFUSAL_TTL => Some(msg.clone()),
-            Some(_) => {
-                m.remove(k);
-                None
+        for k in [
+            (token.clone(), None),
+            (token.clone(), Some((q.clone(), page))),
+        ] {
+            match m.get(&k) {
+                Some((at, msg)) if at.elapsed() < REFUSAL_TTL => return Some(msg.clone()),
+                Some(_) => {
+                    m.remove(&k);
+                }
+                None => {}
             }
-            None => None,
         }
+        None
     }
 
-    pub fn put(&self, k: TokenKey, msg: String) {
+    /// Remember a refusal: of the token (`request` none) or of one word and
+    /// page.
+    pub fn put(&self, token: TokenKey, request: Option<(Option<String>, u32)>, msg: String) {
+        let k = (token, request);
         let mut m = lock(&self.map);
         m.retain(|_, (at, _)| at.elapsed() < REFUSAL_TTL);
         while m.len() >= MAX_REFUSALS {
@@ -1060,10 +1096,6 @@ impl Refusals {
         m.insert(k, (Instant::now(), msg));
     }
 
-    pub fn forget(&self, user: &str, id: &str) {
-        lock(&self.map).retain(|k, _| !(k.0 == user && k.1 == id));
-    }
-
     pub fn len(&self) -> usize {
         lock(&self.map).len()
     }
@@ -1071,6 +1103,34 @@ impl Refusals {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+}
+
+/// What a person is told while the host's shared budget of failures is
+/// used up (the step-1 wording speaks of token checks they did not make).
+pub const HOST_PAUSED: &str = "this forge host failed too many requests from this server lately, so listing its repositories is paused; try again in a few minutes";
+
+/// A person's one listing in flight, given back when dropped.
+pub struct PersonSlot<'a> {
+    set: &'a Mutex<HashSet<String>>,
+    user: String,
+}
+
+impl Drop for PersonSlot<'_> {
+    fn drop(&mut self) {
+        lock(self.set).remove(&self.user);
+    }
+}
+
+/// Take `user`'s one listing slot; `None` while their earlier listing is
+/// still in flight.
+pub fn take_person<'a>(set: &'a Mutex<HashSet<String>>, user: &str) -> Option<PersonSlot<'a>> {
+    if !lock(set).insert(user.to_string()) {
+        return None;
+    }
+    Some(PersonSlot {
+        set,
+        user: user.to_string(),
+    })
 }
 
 /// The per-person listing limit (`crate::remote::Attempts`; its target
@@ -1383,22 +1443,31 @@ mod tests {
     fn refusals_are_remembered_bounded_and_expire() {
         let r = Refusals::default();
         let k = |i: usize| (format!("u{i}"), "c".to_string(), "b".to_string(), [0u8; 32]);
-        r.put(k(0), "no".into());
-        assert_eq!(r.get(&k(0)).as_deref(), Some("no"));
+        let (none, word) = (None::<String>, Some("boom".to_string()));
+        r.put(k(0), None, "no".into());
+        assert_eq!(r.get(&k(0), &none, 1).as_deref(), Some("no"));
+        assert_eq!(
+            r.get(&k(0), &word, 3).as_deref(),
+            Some("no"),
+            "a refused token blocks every word"
+        );
         let mut other = k(0);
         other.3 = [1; 32];
-        assert_eq!(r.get(&other), None, "another token is asked");
-        for i in 1..=MAX_REFUSALS + 10 {
-            r.put(k(i), "no".into());
+        assert_eq!(r.get(&other, &none, 1), None, "another token is asked");
+        // A refused word blocks that word and page only.
+        r.put(k(1), Some((word.clone(), 1)), "422".into());
+        assert_eq!(r.get(&k(1), &word, 1).as_deref(), Some("422"));
+        assert_eq!(r.get(&k(1), &word, 2), None);
+        assert_eq!(r.get(&k(1), &Some("other".into()), 1), None);
+        assert_eq!(r.get(&k(1), &none, 1), None);
+        for i in 2..=MAX_REFUSALS + 10 {
+            r.put(k(i), None, "no".into());
         }
         assert_eq!(r.len(), MAX_REFUSALS);
-        assert_eq!(r.get(&k(0)), None, "the oldest went");
-        lock(&r.map).get_mut(&k(MAX_REFUSALS)).unwrap().0 =
-            Instant::now().checked_sub(REFUSAL_TTL).unwrap();
-        assert_eq!(r.get(&k(MAX_REFUSALS)), None, "expired");
-        r.forget("u500", "c");
-        assert_eq!(r.get(&k(500)), None);
-        assert!(r.get(&k(501)).is_some());
+        assert_eq!(r.get(&k(0), &none, 1), None, "the oldest went");
+        let last = (k(MAX_REFUSALS), None);
+        lock(&r.map).get_mut(&last).unwrap().0 = Instant::now().checked_sub(REFUSAL_TTL).unwrap();
+        assert_eq!(r.get(&k(MAX_REFUSALS), &none, 1), None, "expired");
         assert!(!r.is_empty());
     }
 
@@ -1410,16 +1479,30 @@ mod tests {
             CheckError::Refused(h(), 403),
             CheckError::Status(h(), 429),
         ] {
-            assert!(!host_at_fault(&e) && token_refused(&e), "{e}");
+            assert!(
+                !host_at_fault(&e) && token_refused(&e) && !request_refused(&e),
+                "{e}"
+            );
+        }
+        for code in [400, 404, 409, 422, 499] {
+            let e = CheckError::Status(h(), code);
+            assert!(
+                !host_at_fault(&e) && !token_refused(&e) && request_refused(&e),
+                "{e}"
+            );
         }
         for e in [
             CheckError::Status(h(), 500),
-            CheckError::Status(h(), 404),
+            CheckError::Status(h(), 503),
             CheckError::Status(h(), 302),
+            CheckError::Status(h(), 399),
             CheckError::Unreachable(h(), "x"),
             CheckError::BadAnswer(h(), "x"),
         ] {
-            assert!(host_at_fault(&e) && !token_refused(&e), "{e}");
+            assert!(
+                host_at_fault(&e) && !token_refused(&e) && !request_refused(&e),
+                "{e}"
+            );
         }
     }
 
@@ -1511,6 +1594,31 @@ mod tests {
             r[0].description.as_ref().unwrap().chars().count(),
             MAX_DESCRIPTION
         );
+    }
+
+    #[test]
+    fn a_person_has_one_slot_given_back_when_dropped() {
+        let set = Mutex::default();
+        let a = take_person(&set, "alice").unwrap();
+        assert!(take_person(&set, "alice").is_none());
+        let b = take_person(&set, "bob").unwrap();
+        drop(a);
+        assert!(take_person(&set, "alice").is_some(), "dropped, given back");
+        drop(b);
+        assert!(lock(&set).is_empty());
+    }
+
+    #[test]
+    fn a_description_is_cut_before_it_is_cleaned() {
+        assert_eq!(prefix("abc", 2), "ab");
+        assert_eq!(prefix("äöü", 2), "äö");
+        assert_eq!(prefix("ab", 5), "ab");
+        let body = format!(
+            r#"[{{"id":1,"full_name":"a/b","private":true,"description":"{}x"}}]"#,
+            " ".repeat(2 * DESCRIPTION_READ)
+        );
+        let (r, _) = parse_listing(ForgeKind::Github, body.as_bytes(), 30, None).unwrap();
+        assert_eq!(r[0].description, None, "only the cut part is cleaned");
     }
 
     /// Review of PR 158, LOW 8: one person's large answers do not push
