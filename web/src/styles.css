@@ -1498,6 +1498,25 @@ select.pill {
   font-size: var(--text-sm);
   min-width: 0;
 }
+/* One line: names, badges and the model keep their shape; only the folder
+   path gives way (it already ends in "…"). On a phone the row wraps instead,
+   since nothing fits. */
+.conv-meta > * {
+  flex: none;
+  white-space: nowrap;
+}
+.conv-meta > .ellipsis {
+  flex: 0 1 auto;
+}
+@media (max-width: 820px) {
+  .conv-meta {
+    flex-wrap: wrap;
+    row-gap: var(--space-1);
+  }
+  .conv-meta > .ellipsis {
+    max-width: 100%;
+  }
+}
 .timeline {
   flex: 1;
   overflow-y: auto;

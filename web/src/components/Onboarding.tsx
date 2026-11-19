@@ -19,10 +19,10 @@ const ALL: readonly Step[] = ["provider", "memory", "profile", "search"];
 // list is rebuilt shorter and Memory is never shown. Per tab, per account,
 // forgotten on Finish; never anything the person typed.
 type Progress = { steps: Step[]; i: number; saved: Step[] };
-const progressKey = (user: string) => `harness.onboarding.${user}`;
+const progressKey = (user: string | null) => `harness.onboarding.${user}`;
 const known = (v: unknown): Step[] => (Array.isArray(v) ? v.filter((x): x is Step => ALL.includes(x as Step)) : []);
 
-function resume(user: string): Progress | null {
+function resume(user: string | null): Progress | null {
   try {
     const p = JSON.parse(sessionStorage.getItem(progressKey(user)) ?? "null") as Partial<Progress> | null;
     const steps = known(p?.steps);
