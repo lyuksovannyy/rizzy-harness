@@ -43,11 +43,21 @@ fn umask() -> u32 {
         .unwrap_or(0o022)
 }
 
+/// Whether a failed `fchmod` of the temporary file is let go. The file was
+/// created with `perm` less the umask, never wider than intended, so where
+/// the filesystem does not take a mode change (some FUSE mounts: not
+/// supported, not implemented, not permitted) the restore goes on with the
+/// mode the open gave. Any other error fails the write, as before. (On
+/// Linux `ENOTSUP` is `EOPNOTSUPP`.)
+fn fchmod_is_ignorable(e: Errno) -> bool {
+    matches!(e, Errno::EOPNOTSUPP | Errno::ENOSYS | Errno::EPERM)
+}
+
 /// The permission bits a file written at `name` in `dir` gets. A regular
 /// file there now keeps its bits (a `.env` at 0600 stays 0600; git records
 /// nothing but the executable bit, so the snapshot cannot say more), with
-/// the executable bits taken from the snapshot: set, for those who can read
-/// the old file, when `exec`; cleared otherwise. Set-user-id, set-group-id
+/// the executable bits taken from the snapshot: when `exec`, those who can read
+/// the old file plus those who could already execute it; cleared otherwise. Set-user-id, set-group-id
 /// and sticky are dropped. Nothing there (the turn deleted it), a link, a
 /// folder or anything else gives nothing to keep: the old default, `0666`
 /// or `0777` less the umask. Read with `fstatat` on the directory
@@ -58,7 +68,7 @@ fn restored_perm(dir: &OwnedFd, name: &OsStr, exec: bool) -> u32 {
     match nix::sys::stat::fstatat(dir, name, AtFlags::AT_SYMLINK_NOFOLLOW) {
         Ok(st) if SFlag::from_bits_truncate(st.st_mode) & SFlag::S_IFMT == SFlag::S_IFREG => {
             let old = st.st_mode & 0o777;
-            (old & 0o666) | if exec { (old & 0o444) >> 2 } else { 0 }
+            (old & 0o666) | if exec { ((old & 0o444) >> 2) | (old & 0o111) } else { 0 }
         }
         Ok(_) | Err(Errno::ENOENT) => default,
         Err(_) => default & 0o700,
@@ -267,7 +277,9 @@ impl Top {
             // The mode as chosen, not as the umask leaves it: what was kept
             // from the old file stays whatever the umask is. On the open
             // descriptor, before any content is in it.
-            if let Err(e) = nix::sys::stat::fchmod(&fd, Mode::from_bits_truncate(perm)) {
+            if let Err(e) = nix::sys::stat::fchmod(&fd, Mode::from_bits_truncate(perm))
+                && !fchmod_is_ignorable(e)
+            {
                 let _ = nix::unistd::unlinkat(&dir, tmp.as_str(), UnlinkatFlags::NoRemoveDir);
                 return Err(err("cannot write", rel, e));
             }
@@ -388,6 +400,25 @@ mod tests {
         std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).unwrap();
     }
 
+    /// A failed `fchmod` is let go only where the filesystem does not take a
+    /// mode change; everything else still fails the write.
+    #[test]
+    fn only_a_filesystem_that_takes_no_mode_change_lets_fchmod_fail() {
+        for e in [Errno::EOPNOTSUPP, Errno::ENOTSUP, Errno::ENOSYS, Errno::EPERM] {
+            assert!(fchmod_is_ignorable(e), "{e}");
+        }
+        for e in [
+            Errno::EACCES,
+            Errno::EIO,
+            Errno::EROFS,
+            Errno::EBADF,
+            Errno::ENOSPC,
+            Errno::EINVAL,
+        ] {
+            assert!(!fchmod_is_ignorable(e), "{e}");
+        }
+    }
+
     /// Task-5 notes of the trial, 2026-11-19: a restore that replaces a file
     /// keeps the file's permission bits (a `.env` at 0600 stays 0600); the
     /// snapshot's mode only says whether it is executable.
@@ -409,13 +440,25 @@ mod tests {
             (0o755, "100644", 0o644),
             (0o700, "100644", 0o600),
             (0o750, "100644", 0o640),
-            // Set-user-id and sticky bits are not carried over.
-            (0o4755, "100755", 0o755),
+            // Execute bits the old file had are kept when the snapshot is
+            // executable, even for one that could not read it; cleared when
+            // it is not.
+            (0o100, "100755", 0o100),
+            (0o710, "100755", 0o710),
+            (0o100, "100644", 0o000),
+            // The sticky bit is not carried over: only this code decides it
+            // (set-user-id is not shown here: the kernel strips it when an
+            // unprivileged user writes the file, so a mutant that kept it
+            // would pass).
+            (0o1644, "100644", 0o644),
+            (0o1755, "100755", 0o755),
         ] {
             let f = root.join("f");
             put(&f, "turn\n", old);
             top.write(Path::new("f"), git_mode, b"back\n").unwrap();
-            assert_eq!(std::fs::read_to_string(&f).unwrap(), "back\n");
+            if want & 0o400 != 0 {
+                assert_eq!(std::fs::read_to_string(&f).unwrap(), "back\n");
+            }
             assert_eq!(mode_of(&f), want, "{old:o} + {git_mode}: {:o}", mode_of(&f));
             std::fs::remove_file(&f).unwrap();
         }

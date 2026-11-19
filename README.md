@@ -1222,9 +1222,14 @@ back the way it was before the turn counts as a change too: the undo is
 refused, and "Undo anyway" goes ahead. A file the undo puts back over a
 file that is there keeps that file's permission bits (a `.env` at 0600 stays
 0600), with the executable bits taken from the turn's before state (git
-records nothing else about the mode), set only for those who can already read
-it; a file the turn deleted comes back with the default mode (0666 or 0777
-less your umask), as there is nothing to keep. Before an
+records nothing else about the mode): set for those who can read the file or
+could already execute it, cleared when the file was not executable. The mode
+kept is the file's mode at the moment of the undo, not its mode before the
+turn (git does not record that), so a turn that widened a file leaves it wide;
+set-user-id, set-group-id and sticky bits, ownership and ACLs are not kept.
+A file the turn deleted comes back with the default mode (0666 or 0777 less
+your umask), as there is nothing to keep. A filesystem that refuses a mode
+change (some FUSE mounts) keeps the mode the new file was created with. Before an
 undo or rewind changes a file it saves the folder as it is, your own edits
 since the turn included, as a checkpoint of its own, so "Undo anyway" loses
 nothing: restoring that checkpoint (its id is in the chat's log, phase
