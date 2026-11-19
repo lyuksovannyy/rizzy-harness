@@ -72,7 +72,7 @@ node" field) opens a popup with:
   of 2026-11-17 replaced it).
 - **Existing folder**: the free path field with the recent folders, as before, for a chat
   without a project; the node bounds it by `workspace_roots` as before.
-- **From a repository**, marked *Later* (X.27).
+- **From a repository**, marked *Later* (X.27): the server side is built (`POST /api/projects` with `connection_id` and `full_name`, PLAN.md T86); the screen is next.
 
 **How the node makes it** (PLAN.md T77): the repository is built in the node's own staging folder
 (`<data>/projects-staging`, which no chat can see) and moved into the projects folder with a

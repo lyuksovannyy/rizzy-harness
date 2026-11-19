@@ -43,11 +43,15 @@ struct Mode {
     redirect: Option<(u16, String, bool)>,
     /// Read the request, then never answer.
     stall: bool,
+    /// Send answers slowly: 64 KiB every 50 ms.
+    slow: bool,
 }
 
 struct Server {
     port: u16,
     seen: Arc<Mutex<Vec<Seen>>>,
+    /// Answers written to the end.
+    finished: Arc<Mutex<usize>>,
 }
 
 impl Server {
@@ -79,16 +83,23 @@ fn server(root: &Path, mode: Mode) -> Server {
     let l = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = l.local_addr().unwrap().port();
     let seen: Arc<Mutex<Vec<Seen>>> = Arc::default();
-    let (root, keep) = (root.to_path_buf(), seen.clone());
+    let finished: Arc<Mutex<usize>> = Arc::default();
+    let (root, keep, done) = (root.to_path_buf(), seen.clone(), finished.clone());
     std::thread::spawn(move || {
         for s in l.incoming().flatten() {
-            let (root, keep, mode) = (root.clone(), keep.clone(), mode.clone());
+            let (root, keep, mode, done) = (root.clone(), keep.clone(), mode.clone(), done.clone());
             std::thread::spawn(move || {
-                let _ = answer(s, &root, &keep, &mode);
+                if answer(s, &root, &keep, &mode).is_ok() {
+                    *done.lock().unwrap() += 1;
+                }
             });
         }
     });
-    Server { port, seen }
+    Server {
+        port,
+        seen,
+        finished,
+    }
 }
 
 fn answer(s: TcpStream, root: &Path, seen: &Mutex<Vec<Seen>>, mode: &Mode) -> std::io::Result<()> {
@@ -212,6 +223,14 @@ fn answer(s: TcpStream, root: &Path, seen: &Mutex<Vec<Seen>>, mode: &Mode) -> st
         "HTTP/1.1 {status}\r\n{resp}Content-Length: {}\r\nConnection: close\r\n\r\n",
         rest.len()
     )?;
+    if mode.slow {
+        for c in rest.chunks(64 * 1024) {
+            w.write_all(c)?;
+            w.flush()?;
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        return Ok(());
+    }
     w.write_all(rest)
 }
 
@@ -241,12 +260,28 @@ fn git_in(dir: &Path, args: &[&str]) -> String {
 /// A bare repository `root/<full>.git` on `main`, its one commit made by
 /// `fill` in a work folder.
 fn bare(root: &Path, full: &str, fill: impl FnOnce(&Path)) {
+    bare_with(root, full, fill, &[]);
+}
+
+/// [`bare`], with gitlinks (path, commit) added to the commit.
+fn bare_with(root: &Path, full: &str, fill: impl FnOnce(&Path), links: &[(&str, &str)]) {
     let work = root.join(format!("work-{}", full.replace('/', "-")));
     std::fs::create_dir_all(&work).unwrap();
     git_in(&work, &["init", "-q", "-b", "main"]);
     std::fs::write(work.join("README.md"), "hello\n").unwrap();
     fill(&work);
     git_in(&work, &["add", "-A"]);
+    for (path, sha) in links {
+        git_in(
+            &work,
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{sha},{path}"),
+            ],
+        );
+    }
     git_in(&work, &["commit", "-q", "-m", "first"]);
     let dest = root.join(format!("{full}.git"));
     std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
@@ -743,42 +778,29 @@ async fn a_hostile_repository_runs_and_fetches_nothing() {
         local.display().to_string(),
         sha.clone(),
     );
-    bare(&base, "o/hostile", |w| {
-        std::fs::write(
-            w.join(".gitmodules"),
-            format!(
-                "[submodule \"near\"]\n\tpath = near\n\turl = {l}\n\
+    bare_with(
+        &base,
+        "o/hostile",
+        |w| {
+            std::fs::write(
+                w.join(".gitmodules"),
+                format!(
+                    "[submodule \"near\"]\n\tpath = near\n\turl = {l}\n\
                  [submodule \"far\"]\n\tpath = far\n\turl = {bb}/o/local-sub.git\n"
-            ),
-        )
-        .unwrap();
-        git_in(
-            w,
-            &[
-                "update-index",
-                "--add",
-                "--cacheinfo",
-                &format!("160000,{s},near"),
-            ],
-        );
-        git_in(
-            w,
-            &[
-                "update-index",
-                "--add",
-                "--cacheinfo",
-                &format!("160000,{s},far"),
-            ],
-        );
-        std::fs::write(w.join(".gitattributes"), "* filter=evil\n").unwrap();
-        std::fs::create_dir_all(w.join(".githooks")).unwrap();
-        std::fs::write(
-            w.join(".githooks/post-checkout"),
-            format!("#!/bin/sh\ntouch {m}\n"),
-        )
-        .unwrap();
-        std::os::unix::fs::symlink(&out, w.join("out")).unwrap();
-    });
+                ),
+            )
+            .unwrap();
+            std::fs::write(w.join(".gitattributes"), "* filter=evil\n").unwrap();
+            std::fs::create_dir_all(w.join(".githooks")).unwrap();
+            std::fs::write(
+                w.join(".githooks/post-checkout"),
+                format!("#!/bin/sh\ntouch {m}\n"),
+            )
+            .unwrap();
+            std::os::unix::fs::symlink(&out, w.join("out")).unwrap();
+        },
+        &[("near", &s), ("far", &s)],
+    );
     let a = server(&base, Mode::default());
     let home = base.join("home");
     std::fs::create_dir_all(home.join("hooks")).unwrap();
@@ -821,6 +843,10 @@ async fn a_hostile_repository_runs_and_fetches_nothing() {
         );
     }
     assert!(!p.join(".git/modules").exists());
+    // The submodules are there as gitlinks (the test would prove nothing
+    // otherwise), just not fetched.
+    let links = git_in(&p, &["ls-tree", "HEAD", "near", "far"]);
+    assert_eq!(links.matches("160000 commit").count(), 2, "{links}");
     let link = std::fs::symlink_metadata(p.join("out")).unwrap();
     assert!(link.file_type().is_symlink());
     assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
@@ -856,6 +882,48 @@ async fn a_clone_past_the_size_cap_is_ended_and_removed() {
     assert!(e.contains("clone_max_mb"), "{e}");
     r.nothing_kept();
     assert_eq!(r.made_count(), 0);
+}
+
+/// The cap is checked while git runs, not only after: a repository that
+/// arrives slowly is ended mid-transfer (the server never finishes writing
+/// its pack), not once it is all on disk.
+#[tokio::test]
+async fn the_size_cap_ends_git_while_it_is_still_fetching() {
+    let tmp = tempfile::tempdir().unwrap();
+    bare(tmp.path(), "o/big", |w| {
+        let mut b = vec![0u8; 8 * 1024 * 1024];
+        getrandom::fill(&mut b).unwrap();
+        std::fs::write(w.join("blob.bin"), b).unwrap();
+    });
+    let a = server(
+        tmp.path(),
+        Mode {
+            slow: true,
+            ..Default::default()
+        },
+    );
+    let r = rig(&[a.host()]);
+    let mut b = bounds();
+    b.max_bytes = 1024 * 1024;
+    let e = clone(
+        &r.policy,
+        &r.made,
+        req(&a.host(), "o/big", false),
+        b,
+        &projects::suffix,
+    )
+    .await
+    .unwrap_err();
+    assert!(e.contains("clone_max_mb"), "{e}");
+    // Let the server notice the closed connection.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let posts = a.seen().iter().filter(|s| s.method == "POST").count();
+    assert!(posts >= 1);
+    assert!(
+        *a.finished.lock().unwrap() < a.seen().len(),
+        "every answer was sent to the end: git ran until the pack was all there"
+    );
+    r.nothing_kept();
 }
 
 /// A taken folder name gets the next suffix; nothing is overwritten.
@@ -1338,4 +1406,20 @@ async fn through_the_runtime_the_token_is_nowhere_but_the_server() {
         "{audit:?}"
     );
     assert!(audit.iter().all(|d| !d.contains(CANARY)));
+}
+
+/// Clones count against `[limits] projects_per_hour` with
+/// `project.create`'s folders: at the cap, refused before git starts.
+#[tokio::test]
+async fn clones_count_against_the_hour() {
+    let tmp = tempfile::tempdir().unwrap();
+    bare(tmp.path(), "o/pub", |_| {});
+    let a = server(tmp.path(), Mode::default());
+    let mut r = rig(&[a.host()]);
+    r.policy.limits.projects_per_hour = 1;
+    r.clone(req(&a.host(), "o/pub", false)).await.unwrap();
+    let asked = a.seen().len();
+    let e = r.clone(req(&a.host(), "o/pub", false)).await.unwrap_err();
+    assert!(e.contains("projects_per_hour"), "{e}");
+    assert_eq!(a.seen().len(), asked, "git ran past the cap");
 }

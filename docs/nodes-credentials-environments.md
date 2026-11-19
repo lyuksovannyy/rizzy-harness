@@ -570,17 +570,35 @@ yet), checked with the forge's `GET /user`, for the built-in `github.com` and `g
 and the hosts the admin lists in `config.toml` (`[[forge.hosts]]`); shown under Plugins →
 Connectors. **Step 2 built (2026-11-18):** the master lists the repositories a connection can
 see, from the forge's API, for its owner only (`GET /api/connections/{id}/repositories`, no screen
-yet; PLAN.md T83). No `forge.grant`, no clone or push, no workspace forge account and no "Use
-@login" choice yet (README "Connections").
+yet; PLAN.md T83). **Step 3's API built (2026-11-19):** `POST /api/projects` with
+`connection_id` and `full_name` clones a repository the caller's own connection can see into
+a new project's folder on a node (PLAN.md T86; the Project popup's screen is next). No
+`forge.grant`, no push, no workspace forge account and no "Use @login" choice yet (README
+"Connections").
 
 **Git with network.** The hardened git refuses every transport (`protocol.allow=never`,
-`credential.helper=`; `crates/node/src/git.rs`). Clone, classification fetch and push use a
-separate path: `protocol.https.allow=always` on top of the same overrides, the URL given
-explicitly (never the repository's `remote.*`), and the token as an `http.<url>.extraHeader`
-through `GIT_CONFIG_COUNT`/`KEY`/`VALUE`, never in `argv` (Landlock leaves `/proc` readable,
-`crates/tools/src/sandbox.rs:44-50`). It arrives in a `forge.grant` (one host, one operation,
-one session, so one workspace), only with `[forge] push = true` and the host in `[forge]
-hosts`. The first clone of a project's repository uses the same path (§4.11.2).
+`credential.helper=`; `crates/node/src/git.rs`). Clone (and later push) use a separate path,
+built for the clone (2026-11-19, X.27 step 3, PLAN.md T86, `crates/node/src/forge_clone.rs`):
+`protocol.https.allow=always` on top of the same overrides, the URL built by the node from a
+`[forge] hosts` entry and a checked `owner/name` and given explicitly (never the repository's
+`remote.*`), `http.followRedirects=false`, and the token in no argument, no environment
+variable, no file and no git config: the node writes it into a close-on-exec pipe, hands the
+reading end to that one git as its standard input (put at descriptor 0 in the child, after the
+fork, so no other child of the node inherits it), and git's only credential helper, a shell
+function, answers `get` only for exactly that scheme, host and path
+(`credential.useHttpPath=true`), finds that git among its parents by the pipe's inode and reads
+the token from `/proc/<git>/fd/0` with the shell's own `read`. `http.proactiveAuth=basic` where
+git is 2.46 or later; older git does the 401 round trip. A public repository is cloned with no
+credential at all. Why not the `http.<url>.extraHeader` through `GIT_CONFIG_COUNT`/`KEY`/`VALUE`
+this section first planned: an experiment against a loopback fake with a fake token (git 2.56.1, libcurl 8.23.0;
+`.claude/handoff-2026-11-15/x27-step3/`, outside the repository) showed git sending that header to a redirect's other
+host on the following `POST` (and a header of another name on the redirected `GET` already),
+and the token readable in `/proc/<git>/environ` for the whole clone. What stays: while a clone
+runs, a process of the node's user that can read `/proc` (a host-mode chat, a sandbox sharing
+`/proc`) can read the pipe before the helper does (T86). The token arrives in the
+`project.clone` message, only for a private repository, only to a node that announced
+`forge-clone`, for a host in its `[forge] hosts`; no `forge.grant` yet (one host, one
+operation, one session) and no `[forge] push`.
 
 **Commit identity for autosave.** These rules are my reading of the owner's words: the
 workspace account pushes and commits, and the session owner's account gives the linked
