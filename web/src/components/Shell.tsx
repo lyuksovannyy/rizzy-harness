@@ -6,7 +6,7 @@ import { api, HttpError } from "../api";
 import { Live } from "../live";
 import { t } from "../lib/i18n";
 import { type ClassifierState, decide, emptyState, parseState, record, serialize } from "../lib/classifier";
-import { agenticBlockReason, type Mode } from "../lib/modes";
+import { agenticBlockReason, hostRightOf, type Mode } from "../lib/modes";
 import { parseRoute, type Route, routeHash } from "../lib/routes";
 import { afterChange, followRoute, keepsRoute, switchRoute, workspaceName } from "../lib/workspaces";
 import { buildSearchUrl } from "../lib/searchUrl";
@@ -390,10 +390,7 @@ export function Shell(props: {
     if (loaded) writeBackdropMirror(prefs?.backdrop);
   }, [loaded, prefs?.backdrop]);
 
-  useSyncExternalStore(
-    (l) => live.subscribe(l),
-    () => live.version,
-  );
+  useSyncExternalStore((l) => live.subscribe(l), () => live.version);
   useRoutineResults({ route, routines: routineAttention, workspaceId });
 
   const toggleCollapsed = () => {
@@ -407,10 +404,7 @@ export function Shell(props: {
     });
   };
 
-  const logout = async () => {
-    await api.logout().catch(() => {});
-    onLogout();
-  };
+  const logout = () => api.logout().catch(() => {}).then(onLogout);
 
   const listed = useMemo(() => sessions.filter((x) => !x.incognito && !x.parent_id), [sessions]);
   useFinishedSignal(loadedSessions ? listed : null, viewing);
@@ -658,6 +652,7 @@ export function Shell(props: {
               nodes={nodes}
               prefs={prefs}
               agenticBlocked={agenticBlocked}
+              hostRight={hostRightOf(me)}
               voice={voice}
               onSubmit={submit}
               onOpenChat={(id) => navigate({ kind: "session", id })}
@@ -720,7 +715,7 @@ export function Shell(props: {
               workers={workers}
               prefs={prefs}
               agenticBlocked={agenticBlocked}
-              hostRight={{ level: me.workspace?.exec_level ?? me.exec_ceiling }}
+              hostRight={hostRightOf(me)}
               workspace={workspaceId}
               onSubmit={submit}
               predict={predict}

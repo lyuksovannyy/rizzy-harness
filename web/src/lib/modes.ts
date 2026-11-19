@@ -1,5 +1,6 @@
 import type { ExecLevel, WorkspaceSummary } from "../types";
 import { type Key, t } from "./i18n";
+import type { HostRight } from "./execModes";
 import { workspaceName } from "./workspaces";
 
 export type Mode = "search" | "ask" | "agentic";
@@ -26,6 +27,13 @@ export function agenticBlockReason(
   if (workersOnline === 0) return t("agentic.noWorker");
   return null;
 }
+
+/** Who is asking for a new chat's host shell: the level they have in the
+ * workspace the chat goes in (none: the account's ceiling). One rule for the
+ * start screen and the project page. */
+export const hostRightOf = (me: { exec_ceiling: ExecLevel; workspace?: Pick<WorkspaceSummary, "exec_level"> | null }): HostRight => ({
+  level: me.workspace?.exec_level ?? me.exec_ceiling,
+});
 
 export function enabledModes(agenticBlocked: string | null): Mode[] {
   return MODES.filter((m) => m !== "agentic" || agenticBlocked === null);

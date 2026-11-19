@@ -25,6 +25,7 @@ import { accentColor, ProjectIcon } from "../lib/projectIcons";
 import { radioKeys, radioTab } from "../lib/radios";
 import type { Agent, MemoryFact, ModelInfo, NodeInfo, Prefs, SessionRow } from "../types";
 import { Composer, type Submission } from "./Composer";
+import type { HostRight } from "../lib/execModes";
 import { ACCENTS } from "./forms";
 import { LinkedA } from "./Linked";
 import { shownName } from "../md/hiddenChars";
@@ -69,6 +70,8 @@ export default function Project(props: {
   nodes: NodeInfo[];
   prefs: Prefs | null;
   agenticBlocked: string | null;
+  /** Who may pick the host shell for a new chat: the start screen's rule. */
+  hostRight?: HostRight;
   voice?: boolean;
   onSubmit: (s: Submission, projectId?: string) => Promise<void>;
   onOpenChat: (sessionId: string) => void;
@@ -156,6 +159,7 @@ export default function Project(props: {
           onModeChange={onMode}
           defaultModel={props.prefs?.default_model}
           agenticBlocked={props.agenticBlocked}
+          hostRight={props.hostRight}
           onSubmit={(s) => props.onSubmit(s, project.project_id)}
           voice={props.voice}
           project={{ nodeId: project.settings.node_id, cwd: project.settings.cwd }}

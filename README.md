@@ -2786,7 +2786,8 @@ to someone's chat"); a card with an agent's note shows "Noted by an agent".
 **Starting an agentic chat: the Project button.** On the start screen, Agentic
 shows the node, a **Project** button and how the chat's commands run (always:
 "sandbox" where that is all the node offers, the choice with its warning where
-it offers the host shell and you may use it). The button opens a popup:
+it offers the host shell and you may use it: the project's page has the same
+row and the same rule). The button opens a popup:
 
 - **Projects**: the workspace's projects with their folders, searchable; pick
   one and the chat starts in that project, on its node, in its folder. Every
