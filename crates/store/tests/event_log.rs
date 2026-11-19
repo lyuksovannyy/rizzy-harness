@@ -419,6 +419,8 @@ fn an_open_message_names_the_agent_that_wrote_it() {
             reply: None,
             images: vec![],
             queued: false,
+            triggers: vec![],
+            tags: vec![],
             files: vec![],
         }),
     );
@@ -1102,6 +1104,22 @@ fn a_finished_turn_is_unread_until_seen() {
         TurnEndReason::Completed,
     );
     assert!(!unread(done), "a callback turn");
+    // The turn of an agent a person's message called after the first
+    // (X.37) finishes for the person like any other.
+    s.mark_seen("u1", done, 16).unwrap();
+    assert!(!unread(done));
+    turn(
+        done,
+        17,
+        Some(TurnCause::Mention(MentionCall {
+            message_seq: 2,
+            by: CalledBy::Person,
+            tags: vec![],
+        })),
+        "Here is mine.",
+        TurnEndReason::Completed,
+    );
+    assert!(unread(done), "a mention turn");
 
     // A sub-agent's chat never.
     let child = SessionId::new();

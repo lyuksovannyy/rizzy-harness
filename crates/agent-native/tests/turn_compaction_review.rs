@@ -158,6 +158,8 @@ impl TurnHost for LogHost {
                 reply: None,
                 images: vec![],
                 queued: true,
+                triggers: vec![],
+                tags: vec![],
                 files: vec![],
             })
             .collect();
@@ -467,6 +469,8 @@ fn open_turn(host: &LogHost, queued_seqs: Vec<u64>) {
         reply: None,
         images: vec![],
         queued: false,
+        triggers: vec![],
+        tags: vec![],
         files: vec![],
     }));
 }
@@ -1077,6 +1081,8 @@ fn previous_turn(sid: SessionId) -> (Vec<RawEvent>, u64, UserMessage) {
         reply: None,
         images: vec![],
         queued: false,
+        triggers: vec![],
+        tags: vec![],
         files: vec![],
     }));
     for i in 0..6 {
@@ -1114,6 +1120,8 @@ fn previous_turn(sid: SessionId) -> (Vec<RawEvent>, u64, UserMessage) {
         reply: None,
         images: vec![],
         queued: true,
+        triggers: vec![],
+        tags: vec![],
         files: vec![],
     };
     let qseq = push(EventKind::UserMessage(q.clone()));
@@ -2094,6 +2102,8 @@ async fn a_mentioned_file_survives_an_in_turn_summary() {
         reply: None,
         images: vec![],
         queued: false,
+        triggers: vec![],
+        tags: vec![],
     };
     host.push(EventKind::UserMessage(msg.clone()));
     let out = b
@@ -2180,6 +2190,8 @@ async fn rebuild_matches_live_after_leaving_plan_mode() {
             reply: None,
             images: vec![],
             queued: false,
+            triggers: vec![],
+            tags: vec![],
             files: vec![],
         }));
         if !plan {
@@ -2433,6 +2445,8 @@ async fn nested_turn(
         reply: None,
         images: vec![],
         queued: false,
+        triggers: vec![],
+        tags: vec![],
         files: vec![],
     }));
     let out = b
@@ -3077,6 +3091,8 @@ async fn retry_chains_rebuild_and_keep_the_message() {
             reply: None,
             images: vec![],
             queued: false,
+            triggers: vec![],
+            tags: vec![],
             files: vec![],
         }));
         let _ = one_turn(
@@ -3219,6 +3235,8 @@ async fn retry_chains_rebuild_and_keep_the_message() {
             reply: None,
             images: vec![],
             queued: false,
+            triggers: vec![],
+            tags: vec![],
             files: vec![],
         }));
         let (n2, bad2, _) = one_turn(
@@ -3293,6 +3311,8 @@ fn a_retry_is_told_which_calls_ran() {
             reply: None,
             images: vec![],
             queued: false,
+            triggers: vec![],
+            tags: vec![],
             files: vec![],
         }),
     );

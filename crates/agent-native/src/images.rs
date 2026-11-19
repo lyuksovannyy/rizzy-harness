@@ -429,6 +429,8 @@ mod tests {
                             })
                             .collect(),
                         queued: false,
+                        triggers: vec![],
+                        tags: vec![],
                         files: vec![],
                     };
                     let mut msgs = vec![user_msg(m.model_text(), &m.images)];

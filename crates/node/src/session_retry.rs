@@ -68,6 +68,12 @@ impl Session {
             self.release(&turn_id);
             return Err(harness_protocol::NODE_STOPPING.into());
         }
+        // In the instant between two turns of a called list the next agent
+        // comes first, as for a new message (X.37).
+        if self.peers_pending() {
+            self.release(&turn_id);
+            return Err(format!("{RETRY_REFUSED}: {}", super::peers::PEERS_PENDING));
+        }
         // A failed turn whose end could not be written is closed first:
         // then it is the failed turn this retries.
         if self.unclosed.load(Ordering::SeqCst) {

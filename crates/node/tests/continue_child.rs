@@ -529,6 +529,8 @@ async fn a_child_continued_after_the_chat_went_to_ask_asks() {
         agent_named: false,
         files: vec![],
         owner: None,
+        peers: vec![],
+        tags: vec![],
     });
     let sid = r.session_id();
     r.until(|k| matches!(k, EventKind::ApprovalRequested(a) if a.tool == "bash"))
@@ -1115,6 +1117,8 @@ async fn entering_plan_mode_denies_a_continued_childs_waiting_card() {
         agent_named: false,
         files: vec![],
         owner: None,
+        peers: vec![],
+        tags: vec![],
     });
     r.until(|k| matches!(k, EventKind::ApprovalRequested(a) if a.tool == "bash"))
         .await;

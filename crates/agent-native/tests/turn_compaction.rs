@@ -58,6 +58,8 @@ impl TurnHost for Host {
                 reply: None,
                 images: vec![],
                 queued: true,
+                triggers: vec![],
+                tags: vec![],
                 files: vec![],
             })
             .collect())
@@ -455,6 +457,8 @@ fn logged(
         reply: None,
         images: vec![],
         queued: false,
+        triggers: vec![],
+        tags: vec![],
         files: vec![],
     }));
     for k in emitted {

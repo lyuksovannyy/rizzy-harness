@@ -237,6 +237,10 @@ export type Item =
       images?: ImageRef[];
       /** Sent while a turn ran (X.5): its seq, and whether the agent has read it. */
       queued?: { seq: number; read: boolean };
+      /** The agents it called by mention (X.37), in the order they answer; absent unless it called several. */
+      triggers?: string[];
+      /** The sub-agent-only agents it mentions (tags): drawn as mentions, never called. */
+      tags?: string[];
     }
   | {
       type: "assistant";
@@ -305,6 +309,10 @@ export type Item =
     }
   /** A turn the harness started because these background commands ended while the chat was idle. */
   | { type: "callback"; turn_id: string; bg_ids: string[] }
+  /** The turn of an agent the person's message called after the first (`turn_started.cause.mention`, X.37). */
+  | { type: "called"; turn_id: string; agent: AgentRef | null; message_seq: number }
+  /** Agents a message called that were not asked (`peers_skipped`): Stop, a restart or a node that could not. */
+  | { type: "peers_skipped"; agents: string[]; reason: "stopped" | "restarted" | "unavailable" }
   /** The person's Retry of the failed turn `of` (`turn_started.retry`, X.21): a new turn answering the same message. */
   | { type: "retry"; turn_id: string; of: string; reason: TurnEndReason; failed_model?: string; model?: string }
   /** The node did not resume the agent for these ends (`callback_refused`). */

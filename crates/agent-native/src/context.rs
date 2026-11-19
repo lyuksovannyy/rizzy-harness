@@ -253,7 +253,16 @@ impl Sections {
             let known = match &extra.standing {
                 Some(_) if extra.standing_partial => tied.is_none() && k != StandingKey::Remember,
                 Some(_) => true,
-                None => k.is_memory(),
+                // An agent called after the first (X.37) was given no
+                // context of its own: it has no `remember` tool, so the
+                // instructions the first message carried for it are
+                // withdrawn (recorded, so a replay is the same bytes); the
+                // personalisation, the brief and the board it keeps.
+                None => {
+                    k.is_memory()
+                        || (k == StandingKey::Remember
+                            && extra.cause.as_ref().is_some_and(|c| c.mention().is_some()))
+                }
             };
             standing.push(Standing {
                 key: SectionKey::Master(k),

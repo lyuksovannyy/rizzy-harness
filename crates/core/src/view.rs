@@ -56,6 +56,14 @@ pub enum Item {
         /// sent, and whether the agent has read it yet.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         queued: Option<Queued>,
+        /// The agents it called by mention (`user_message.triggers`, X.37),
+        /// in the order they answer.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        triggers: Vec<String>,
+        /// The sub-agent-only agents it mentions (`user_message.tags`):
+        /// tags, never called.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tags: Vec<String>,
     },
     /// Turns before this point reach the model only as a summary.
     Summary {
@@ -182,6 +190,20 @@ pub enum Item {
     Callback {
         turn_id: String,
         bg_ids: Vec<String>,
+    },
+    /// A turn of an agent the person's message called after the first
+    /// (`turn_started.cause`, X.37): where its answer begins, with who
+    /// called it. No text: the agent's own answer follows.
+    Called {
+        turn_id: String,
+        agent: Option<AgentRef>,
+        /// The seq of the message that called it.
+        message_seq: u64,
+    },
+    /// Agents a message called that were not asked (`peers_skipped`).
+    PeersSkipped {
+        agents: Vec<String>,
+        reason: crate::event::PeersSkipReason,
     },
     /// The person's Retry of the failed turn `of` (`turn_started.retry`,
     /// X.21): a new turn that answers the same message, shown once above
@@ -419,11 +441,21 @@ impl SessionView {
                 if t.continued_by.is_some() {
                     self.follow_ups.push(t.turn_id.clone());
                 }
-                if let Some(c) = &t.cause {
-                    self.items.push(Item::Callback {
+                match &t.cause {
+                    Some(c) if c.is_callback() => self.items.push(Item::Callback {
                         turn_id: t.turn_id.clone(),
                         bg_ids: c.callback_ids().to_vec(),
-                    });
+                    }),
+                    Some(c) => {
+                        if let Some(m) = c.mention() {
+                            self.items.push(Item::Called {
+                                turn_id: t.turn_id.clone(),
+                                agent: t.agent.clone(),
+                                message_seq: m.message_seq,
+                            });
+                        }
+                    }
+                    None => {}
                 }
                 if let Some(r) = &t.retry {
                     self.items.push(Item::Retry {
@@ -445,6 +477,12 @@ impl SessionView {
                 reply: m.reply,
                 images: m.images,
                 queued: m.queued.then_some(Queued { seq, read: false }),
+                triggers: m.triggers,
+                tags: m.tags,
+            }),
+            EventKind::PeersSkipped(p) => self.items.push(Item::PeersSkipped {
+                agents: p.agents,
+                reason: p.reason,
             }),
             EventKind::QueuedDelivered(d) => {
                 for it in &mut self.items {
@@ -1051,6 +1089,8 @@ mod tests {
                 reply,
                 images: vec![],
                 queued: false,
+                triggers: vec![],
+                tags: vec![],
                 files: vec![],
             })
         };

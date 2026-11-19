@@ -340,6 +340,8 @@ fn prompt_with(
             files,
             agent_named: false,
             owner: None,
+            peers: vec![],
+            tags: vec![],
         })
         .unwrap();
 }

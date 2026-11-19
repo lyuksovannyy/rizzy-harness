@@ -145,6 +145,8 @@ pub fn every_kind(w: &str) -> Vec<EventKind> {
                 height: 2,
             }],
             queued: true,
+            triggers: vec![s()],
+            tags: vec![s()],
         }),
         EventKind::AssistantDelta(AssistantDelta {
             turn_id: s(),
@@ -443,7 +445,37 @@ pub fn every_kind(w: &str) -> Vec<EventKind> {
             status: 400,
             reason: s(),
         }),
+        EventKind::PeersSkipped(PeersSkipped {
+            message_seq: 1,
+            agents: vec![s()],
+            reason: PeersSkipReason::Restarted,
+        }),
     ]
+}
+
+/// Values of a kind whose shape has alternatives (an enum with data): the
+/// ones [`every_kind`] does not build. The browser's schema takes a path
+/// found only in some of a kind's values as optional.
+pub fn alternatives(w: &str) -> Vec<EventKind> {
+    let s = || w.to_string();
+    vec![EventKind::TurnStarted(TurnStarted {
+        turn_id: s(),
+        agent: Some(agent(w)),
+        cause: Some(TurnCause::Mention(MentionCall {
+            message_seq: 1,
+            by: CalledBy::Person,
+            tags: vec![s()],
+        })),
+        environment: Some(s()),
+        continued_by: Some(s()),
+        retry: Some(RetryOf {
+            turn_id: s(),
+            reason: TurnEndReason::Interrupted,
+            error: Some(s()),
+            failed_model: Some(s()),
+            model: Some(s()),
+        }),
+    })]
 }
 
 /// One slot per kind. No wildcard arm: a new kind does not compile until
@@ -487,6 +519,7 @@ pub fn slot(k: &EventKind) -> usize {
         EventKind::CompactFailed(_) => 33,
         EventKind::ImagesWithheld(_) => 34,
         EventKind::ThinkingWithheld(_) => 35,
+        EventKind::PeersSkipped(_) => 36,
     }
 }
-pub const KINDS: usize = 36;
+pub const KINDS: usize = 37;

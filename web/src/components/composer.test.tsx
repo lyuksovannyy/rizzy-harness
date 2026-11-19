@@ -6,6 +6,7 @@ import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { describe, expect, test, vi } from "vitest";
 import type { Mode } from "../lib/modes";
+import { api } from "../api";
 import { Composer, type Submission } from "./Composer";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -624,5 +625,92 @@ describe("a workspace's own agent is marked where an agent is picked", () => {
     expect(rows["@helper"]).toBe("a server agent that calls itself a workspace agent");
     expect(rows["@coder"]).toBe("codes");
     c.unmount();
+  });
+});
+
+describe("calling several agents (X.37)", () => {
+  const agentOf = (id: string) => ({ id, name: id, description: "", builtin: true, default_model: null, main_model: null, fallbacks: [], unavailable: [], avatar: { shape: "circle" as const, eyes: "round" as const, accent: "blue" as const } });
+  const ids = ["general", "coder", "writer", "editor", "smol", "researcher"];
+  vi.spyOn(api, "me").mockResolvedValue({ ok: true, app: "x", user: { username: "alex" }, workspace: null } as never);
+  function open() {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    act(() =>
+      root.render(
+        <Composer where="home" agents={ids.map(agentOf)} models={[]} workers={[]} agentId="general" onAgentChange={() => {}} agenticBlocked={null} onSubmit={async () => {}} predict={() => "ask"} />,
+      ),
+    );
+    const textarea = host.querySelector("textarea")!;
+    const type = async (value: string) => {
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(textarea, value);
+        textarea.setSelectionRange(value.length, value.length);
+        textarea.dispatchEvent(new Event("input", { bubbles: true }));
+        await new Promise((r) => setTimeout(r, 30));
+      });
+    };
+    return { host, type, done: () => act(() => root.unmount()) };
+  }
+
+  test("the @ popup works at every position, not only the first", async () => {
+    const c = open();
+    await c.type("@coder @wr");
+    expect([...c.host.querySelectorAll(".mention-popup li")].map((r) => r.textContent)).toEqual([expect.stringContaining("writer")]);
+    await c.type("hello there, and also @ed");
+    expect([...c.host.querySelectorAll(".mention-popup li")].map((r) => r.textContent)).toEqual([expect.stringContaining("editor")]);
+    c.done();
+  });
+
+  test("chips say which agents the text calls, in order; one that calls nobody shows none", async () => {
+    const c = open();
+    await c.type("@coder @writer, how is it going?");
+    const chips = () => [...c.host.querySelectorAll(".chips .chip")].map((x) => x.textContent);
+    expect(chips()).toEqual(["1. @coder", "2. @writer"]);
+    await c.type("the @coder and the @writer are fine");
+    expect(chips()).toEqual([]);
+    await c.type("fine\n@writer @editor");
+    expect(chips()).toEqual(["1. @writer", "2. @editor"]);
+    // Your own name is the person: it is skipped, and the line still counts.
+    await c.type("fine\n@writer @alex @editor");
+    expect(chips()).toEqual(["1. @writer", "2. @editor"]);
+    c.done();
+  });
+
+  test("the popup offers sub-agent-only agents, marked; chips show a tag as a tag and never as called", async () => {
+    const advisor = { ...agentOf("advisor"), features: { as_agent: false, as_subagent: true } };
+    const host = document.createElement("div");
+    document.body.append(host);
+    const root = createRoot(host);
+    act(() =>
+      root.render(
+        <Composer where="home" agents={[...ids.map(agentOf), advisor] as never} models={[]} workers={[]} agentId="general" onAgentChange={() => {}} agenticBlocked={null} onSubmit={async () => {}} predict={() => "ask"} />,
+      ),
+    );
+    const textarea = host.querySelector("textarea")!;
+    const type = async (value: string) => {
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(textarea, value);
+        textarea.setSelectionRange(value.length, value.length);
+        textarea.dispatchEvent(new Event("input", { bubbles: true }));
+        await new Promise((r) => setTimeout(r, 30));
+      });
+    };
+    await type("@coder @adv");
+    const row = host.querySelector(".mention-popup li")!;
+    expect(row.textContent).toContain("advisor");
+    expect(row.textContent).toContain("sub-agent only");
+    await type("@coder @advisor plan");
+    expect([...host.querySelectorAll(".chips .chip")].map((c) => `${c.textContent}:${c.classList.contains("tag")}`)).toEqual(["@advisor:true"]);
+    await type("@coder @writer @advisor plan");
+    expect([...host.querySelectorAll(".chips .chip")].map((c) => c.textContent)).toEqual(["@advisor", "1. @coder", "2. @writer"]);
+    act(() => root.unmount());
+  });
+
+  test("a fifth agent is named as the limit", async () => {
+    const c = open();
+    await c.type("@general @coder @writer @editor @smol go");
+    expect(c.host.querySelector('.chips [role="alert"]')?.textContent).toMatch(/at most 4/);
+    c.done();
   });
 });

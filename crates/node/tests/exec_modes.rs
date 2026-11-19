@@ -158,6 +158,8 @@ fn prompt(sid: SessionId, text: &str) -> MasterToNode {
         agent_named: false,
         files: vec![],
         owner: None,
+        peers: vec![],
+        tags: vec![],
     }
 }
 
@@ -683,6 +685,8 @@ async fn a_sub_agents_mode_is_its_parents() {
             agent_named: false,
             files: vec![],
             owner: None,
+            peers: vec![],
+            tags: vec![],
         })
         .unwrap();
     ack(&mut n).await.unwrap();

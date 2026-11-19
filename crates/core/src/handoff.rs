@@ -293,6 +293,8 @@ mod tests {
             reply: None,
             images: vec![],
             queued: false,
+            triggers: vec![],
+            tags: vec![],
             files: vec![],
         })
     }

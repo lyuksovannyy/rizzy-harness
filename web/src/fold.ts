@@ -143,6 +143,8 @@ const ENUMS: Record<string, string> = {
   stagedBy: "agent user",
   todoStatus: "pending in_progress done",
   frame: "person task callback step",
+  calledBy: "person",
+  peersReason: "stopped restarted unavailable",
 };
 
 const STRUCTS: Record<string, string> = {
@@ -151,7 +153,8 @@ const STRUCTS: Record<string, string> = {
     "input_tokens:n output_tokens:n context_tokens:n ?cache_read_tokens:n ?cache_write_tokens:n ?window:n ?summary_at:n ?model ?by_model:{@tokens",
   agent: "agent_id name prompt_hash ?withheld:[s ?effort",
   variant: "group index:n ?model",
-  cause: "callback:[s",
+  cause: "?callback:[s ?mention:@called",
+  called: "message_seq:n by:=calledBy ?tags:[s",
   retry: "turn_id reason:=turnEnd ?failed_model ?model",
   attachment: "name mime text",
   mention: "path state:=mention",
@@ -175,7 +178,7 @@ const KINDS: Record<string, string> = {
   session_created:
     "title cwd model backend node_id approval_mode:=approvalMode profile:=profile ?agent_id ?incognito:b ?parent_session ?no_callbacks:b ?exec_mode:=execMode",
   turn_started: "turn_id ?agent:@agent ?cause:@cause ?continued_by ?retry:@retry",
-  user_message: "turn_id text ?attachments:[@attachment ?files:[@mention ?reply:@reply ?images:[@image ?queued:b",
+  user_message: "turn_id text ?attachments:[@attachment ?files:[@mention ?reply:@reply ?images:[@image ?queued:b ?triggers:[s ?tags:[s",
   assistant_delta: "turn_id message_id text ?author ?variant:@variant",
   assistant_message: "turn_id message_id text ?author ?variant:@variant ?blocks:[@ui ?thinking:@thinking",
   tool_call_started: "turn_id call_id tool input:j ?author",
@@ -211,6 +214,7 @@ const KINDS: Record<string, string> = {
   compact_failed: "reason ?usage:@usage",
   images_withheld: "turn_id calls:[s status:n",
   thinking_withheld: "turn_id model status:n",
+  peers_skipped: "message_seq:n agents:[s reason:=peersReason",
 };
 
 /** The guard's tables, for the test that compares them with Rust's schema. */
@@ -357,6 +361,11 @@ export function apply(v: SessionView, e: RawEvent): void {
   v.head_seq = e.seq;
   const p = Object.hasOwn(KINDS, e.kind) ? struct(KINDS[e.kind]!, e.payload) : BAD;
   if (p === BAD || p === UNKNOWN) return notShown(v, e);
+  // A cause is one variant (`callback` or `mention`), as serde reads it.
+  if (e.kind === "turn_started" && (p as { cause?: object }).cause) {
+    const c = (p as { cause: { callback?: unknown; mention?: unknown } }).cause;
+    if ((c.callback === undefined) === (c.mention === undefined)) return notShown(v, e);
+  }
   try {
     fold1(v, e, p);
   } catch {
@@ -396,6 +405,9 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
     case "turn_started":
       // A callback turn stands where a person's message would.
       if (p.cause?.callback) v.items.push({ type: "callback", turn_id: p.turn_id, bg_ids: p.cause.callback });
+      // So does the turn of an agent a message called after the first (X.37).
+      if (p.cause?.mention)
+        v.items.push({ type: "called", turn_id: p.turn_id, agent: p.agent ?? null, message_seq: p.cause.mention.message_seq });
       // A sub-agent's follow-up from the chat that started it (T68).
       if (p.continued_by) (v.follow_ups ??= []).push(p.turn_id);
       // A person's Retry (X.21): the failed attempt stays above it.
@@ -410,6 +422,9 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       break;
     case "callback_refused":
       v.items.push({ type: "callback_refused", bg_ids: p.bg_ids, reason: p.reason });
+      break;
+    case "peers_skipped":
+      v.items.push({ type: "peers_skipped", agents: p.agents, reason: p.reason });
       break;
     case "handoff_written": {
       // Its cost is the chat's, like a turn's (the sums only).
@@ -430,6 +445,8 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       if (p.reply != null) item.reply = p.reply;
       if (p.images?.length) item.images = p.images;
       if (p.queued) item.queued = { seq: e.seq, read: false };
+      if (p.triggers?.length) item.triggers = p.triggers;
+      if (p.tags?.length) item.tags = p.tags;
       v.items.push(item);
       break;
     }

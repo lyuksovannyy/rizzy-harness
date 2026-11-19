@@ -315,6 +315,8 @@ impl Node {
             agent_named: false,
             files: vec![],
             owner: None,
+            peers: vec![],
+            tags: vec![],
         })
         .await;
         let by = std::time::Instant::now() + Duration::from_secs(20);
@@ -742,6 +744,8 @@ impl Node {
                 agent_named: false,
                 files: vec![],
                 owner: None,
+                peers: vec![],
+                tags: vec![],
             })
             .unwrap();
         let by = std::time::Instant::now() + Duration::from_secs(20);

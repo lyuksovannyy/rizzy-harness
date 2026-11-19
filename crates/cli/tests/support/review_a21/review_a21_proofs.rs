@@ -199,6 +199,8 @@ impl Node {
             agent_named: false,
             files: vec![],
             owner: None,
+    peers: vec![],
+    tags: vec![],
         })
         .await;
         (sid, cwd)
@@ -468,6 +470,8 @@ async fn a_refusal_past_max_lanes_reaches_the_master_while_the_uplink_is_full() 
             agent_named: false,
             files: vec![],
             owner: None,
+    peers: vec![],
+    tags: vec![],
         })
         .await;
     }

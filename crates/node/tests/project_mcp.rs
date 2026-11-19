@@ -323,6 +323,8 @@ impl Node {
                 agent_named: false,
                 files: vec![],
                 owner: self.owners.get(&sid).cloned().flatten(),
+                peers: vec![],
+                tags: vec![],
             })
             .unwrap();
         self.ack(&format!("p-{sid}")).await.unwrap();
@@ -812,6 +814,8 @@ async fn a_malformed_owner_on_a_turn_is_refused() {
                 agent_named: false,
                 files: vec![],
                 owner: Some("alice\nINFO forged".into()),
+                peers: vec![],
+                tags: vec![],
             })
             .unwrap();
         n.ack("malformed").await.unwrap_err()
