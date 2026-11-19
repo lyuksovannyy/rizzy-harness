@@ -129,4 +129,30 @@ describe("a request that gets no answer", () => {
     fetchFn.mockRejectedValueOnce(abort);
     await expect(call("GET", "/api/x")).rejects.toBe(abort);
   });
+
+  test("keeps the original error reachable as `cause`", async () => {
+    const original = new TypeError("Failed to execute 'fetch': Request with GET/HEAD method cannot have body.");
+    fetchFn.mockRejectedValueOnce(original);
+    const e = (await call("GET", "/api/x").catch((x: unknown) => x)) as Error;
+    expect(e.message).toBe(calm);
+    expect(e.cause).toBe(original);
+  });
+
+  // The three uploads that do not go through call() say the same thing.
+  const uploads: [string, () => Promise<unknown>][] = [
+    ["transcribe", () => api.transcribe(new Blob(["a"], { type: "audio/webm" }))],
+    ["attachment upload", () => api.upload(new File(["a"], "a.txt"))],
+    ["avatar upload", () => pageApi.setProfileImage("avatar", new Blob(["a"], { type: "image/png" }))],
+  ];
+  test.each(uploads)("%s: no answer reads as the calm sentence, with the cause kept", async (_n, run) => {
+    const original = new TypeError("Failed to fetch");
+    fetchFn.mockRejectedValueOnce(original);
+    const e = (await run().catch((x: unknown) => x)) as Error;
+    expect(e.message).toBe(calm);
+    expect(e.cause).toBe(original);
+  });
+  test.each(uploads)("%s: a real HTTP error keeps its own message", async (_n, run) => {
+    answers = [{ status: 413, body: { error: "too big" } }];
+    await expect(run()).rejects.toThrow("too big");
+  });
 });
