@@ -18,6 +18,7 @@ pub mod env;
 mod favicon;
 pub mod files;
 pub mod forge;
+pub mod forge_repos;
 mod handoff;
 mod http;
 pub mod levels;

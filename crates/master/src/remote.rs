@@ -268,6 +268,29 @@ impl Attempts {
         Ok(())
     }
 
+    /// Whether `target`'s budget of failures is used up (another kind of
+    /// call that shares this budget asks before it calls).
+    pub fn target_full(&self, target: &str) -> bool {
+        let l = self.limits;
+        let now = Instant::now();
+        let mut g = lock(&self.seen);
+        g.1.get_mut(target).is_some_and(|h| {
+            prune(h, now, l.window);
+            h.len() >= l.per_target
+        })
+    }
+
+    /// Failures counted against `target` in the window now.
+    pub fn target_len(&self, target: &str) -> usize {
+        let l = self.limits;
+        let now = Instant::now();
+        let mut g = lock(&self.seen);
+        g.1.get_mut(target).map_or(0, |h| {
+            prune(h, now, l.window);
+            h.len()
+        })
+    }
+
     /// A check against `target` failed: it counts against its budget.
     pub fn failed(&self, target: &str) {
         let l = self.limits;
@@ -286,5 +309,33 @@ impl Attempts {
         let h = targets.entry(target.to_string()).or_default();
         prune(h, now, l.window);
         h.push_back(now);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A target's failures leave its budget when the window has passed.
+    #[test]
+    fn a_full_target_frees_up_after_its_window() {
+        let a = Attempts::new(Limits {
+            per_user: 10,
+            per_target: 2,
+            window: Duration::from_millis(50),
+            max_tracked: 10,
+            busy: "busy",
+            user_over: "user",
+            target_over: "target",
+        });
+        assert!(!a.target_full("h"));
+        a.failed("h");
+        a.failed("h");
+        assert!(a.target_full("h"));
+        assert_eq!(a.target_len("h"), 2);
+        assert!(!a.target_full("other"));
+        std::thread::sleep(Duration::from_millis(80));
+        assert!(!a.target_full("h"));
+        assert_eq!(a.target_len("h"), 0);
     }
 }
