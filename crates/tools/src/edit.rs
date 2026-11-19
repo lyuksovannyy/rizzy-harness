@@ -89,6 +89,13 @@ impl Tool for Edit {
     fn risk(&self) -> ToolRisk {
         ToolRisk::Mutating
     }
+    /// `old_str` and `new_str` are other harnesses' names for `old_string`
+    /// and `new_string` (the single form; a batch's items are not read
+    /// this way).
+    fn normalize_args(&self, input: &mut Value) -> Result<(), String> {
+        crate::args::alias(input, "old_str", "old_string")?;
+        crate::args::alias(input, "new_str", "new_string")
+    }
     fn refusal(&self, ctx: &ToolCtx, input: &Value) -> Option<String> {
         crate::path_refusal(ctx, input, true).or_else(|| unread_now(ctx, input))
     }

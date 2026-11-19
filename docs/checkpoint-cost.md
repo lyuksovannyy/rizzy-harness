@@ -261,6 +261,77 @@ a minute) would change what happens. That is a budget on the first snapshot, not
 on every turn, and I measured it on one machine with a slow disk under load. On
 an NVMe drive the line will be elsewhere; I cannot say where from these numbers.
 
+## Keeping 100 checkpoints instead of 10
+
+`checkpoints_keep` was 10 until the readiness trial of 2026-11-19, where a turn
+could neither be undone nor shown about a dozen short turns later (the trial's
+whole checkpoint store was 2.5 MB). It is 100 now. The tables above were
+measured at 10 and say so; **`prune` no longer runs `git gc`**: since A.18
+(`upkeep.rs`) the collection runs in the background when 16 groups were
+dropped since the last one, or git's object or pack limits are passed, and
+never more often than every 5 minutes, so the "gc on every turn" lines in
+"What the numbers mean" describe the code before A.18.
+
+What the number touches, from the code: `prune` lists the refs once and
+compares each with the kept groups (about 2 refs per group, so 200 refs by
+100 groups, microseconds); `release_pins` reads the `.keep` files once. Nothing
+loops over the kept checkpoints per turn otherwise. The kept groups reach more
+objects, so a collection has more to keep, and in a repository folder each
+kept group holds a pack of copies (A.17) that gc leaves alone. Two things did
+depend on the number being small, and are changed (review of the pull
+request that raised it):
+
+- **The pack limit.** `upkeep::PACK_LIMIT` (50) made a collection due when the
+  shadow held 50 packs, counting the `.keep` packs gc never merges. At 100 kept
+  groups the limit was passed for good: in 150 turns of 10 edited files (1,000
+  files, a repository folder, the 5-minute floor taken out) **50 collections
+  were due, against 8 at keep 10**, each 0.5 to 1.9 s and holding the shadow
+  (the next snapshot waits). `due` now counts only packs without a `.keep`
+  file: **3 collections in 150 turns at keep 100, 8 at keep 10**
+  (`m2-bench-old-rule.txt`, `m2-bench-new-rule.txt` in the review folder).
+- **Start-up.** `check_kept_packs` runs one `git verify-pack` per `.keep` pack
+  before any session runs. For one folder with 100 kept packs it took 160 to
+  170 ms warm serially; it now runs 4 at once (what a failed check does is
+  unchanged): **42 to 45 ms**. Cold cache on a loaded disk it was seconds for a
+  reviewer's run, per folder; it scales with the number of kept packs of all
+  folders, divided by 4 now. Not measured cold here.
+
+Measured with `checkpoint_keep_cost` (`crates/node/src/git_cost_bench.rs`, an
+ignored test): 130 turns of 10 edited files, in the session's order (snapshot,
+edit, snapshot, `changed`, `pin_changed`, `prune`, then the collection rule
+with the floor taken out), kept 10 against kept 100, 1,000 and 10,000 files, a
+repository folder (borrowing) and a folder whose shadow keeps its own objects.
+One run each, on a busy shared machine (the "Machine" section: a rotational USB
+disk): read the differences as rough. The turn columns include the collection
+when one ran right after the turn (in the server it runs in the background, but
+the next snapshot waits for it).
+
+| | collections due in 130 turns (each, median ms) | turn, last 20 (median, max ms) | `prune` (median ms) | shadow at the end | after one more gc |
+|---|---|---|---|---|---|
+| repo, 1k, keep 10 | 7 (573) | 263, 658 | 37 | 3.8 MiB | 0.9 MiB |
+| repo, 1k, keep 100 | 1 (525) | 285, 813 | 51 | 11.2 MiB | 6.6 MiB |
+| own objects, 1k, keep 10 | 7 (520) | 266, 623 | 59 | 6.5 MiB | 4.1 MiB |
+| own objects, 1k, keep 100 | 1 (636) | 26, 662 | 3 | 10.1 MiB | 6.3 MiB |
+| repo, 10k, keep 10 | 7 (509) | 153, 726 | 4 | 4.0 MiB | 1.8 MiB |
+| repo, 10k, keep 100 | 1 (436) | 87, 517 | 5 | 11.1 MiB | 7.5 MiB |
+| own objects, 10k, keep 10 | 8 (827) | 157, 1,110 | 4 | 23.4 MiB | 21.8 MiB |
+| own objects, 10k, keep 100 | 2 (1,228) | 94, 869 | 3 | 26.5 MiB | 23.8 MiB |
+
+- **A turn costs about the same**; the differences are the machine's load (the
+  first rows ran while it was busy: `prune` 37 to 59 ms there against 3 to 5 ms
+  in the quiet ones). A quiet earlier run had the same medians at 10 and 100.
+- **Objects kept**: 10 groups' unique objects are 1 to 2 MiB; 100 groups' are
+  about 6 to 8 MiB in a repository folder (the pinned copies) and 2 MiB more
+  with the shadow's own objects, for turns of 10 files. The cost grows with
+  what the turns change, not with the folder; the trial's real store was
+  2.5 MB at 10.
+- **gc time**: 0.4 to 1.5 s for one run in these sizes, and fewer of them at 100
+  (a collection is due every 16 dropped groups, so one per 16 turns once 100
+  are kept, none before).
+- Not measured: 100,000 files, a cold cache, a real session's turns (the
+  trial's were short; collections are not due while fewer than 16 groups were
+  dropped, and a session reaches that only after 116 turns at the default).
+
 ## Defects found while measuring
 
 1. **A snapshot that times out leaves lock files in the shadow.** In a run at

@@ -29,7 +29,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 const TOKEN: &str = "api-secret";
-const PRUNED: &str = "this checkpoint is no longer kept (only the latest 10 changes are), so its \
+const PRUNED: &str = "this checkpoint is no longer kept (only the latest 100 changes are), so its \
                       changes cannot be shown";
 
 fn sample() -> TurnDiff {

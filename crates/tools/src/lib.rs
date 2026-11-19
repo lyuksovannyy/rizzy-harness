@@ -651,6 +651,15 @@ pub trait Tool: Send + Sync {
         self.schema()
     }
     fn risk(&self) -> ToolRisk;
+    /// The call's arguments with other harnesses' names for them read as
+    /// this tool's own (`file_text` for `write`'s `content`), applied once
+    /// by the loop before the schema check, the card, the approval key and
+    /// every policy check, so all of them see the tool's own names only.
+    /// The schema offered to the model does not list the aliases. The
+    /// default changes nothing.
+    fn normalize_args(&self, _input: &mut Value) -> Result<(), String> {
+        Ok(())
+    }
     /// Whether calls of this tool may run at the same time as other such
     /// calls of the same step (the loop's parallel batch, PLAN.md "Event
     /// order of a parallel step"). Only a [`ToolRisk::ReadOnly`] tool's

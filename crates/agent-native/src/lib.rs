@@ -4020,6 +4020,21 @@ impl NativeBackend {
                 t.unsent |= refused_thinking.contains(&model);
                 t
             });
+            // Before the log, the next request and every check: a call with
+            // empty arguments is a call with `{}`.
+            // The same point for other harnesses' argument names: one input
+            // exists for the call, in the log, in every later request and
+            // in what runs. A call that names both spellings keeps its raw
+            // input and is refused by the check below.
+            for c in &mut completion.tool_calls {
+                c.input = provider::blank_args_as_object(std::mem::take(&mut c.input));
+                if let Some(t) = self.tools.iter().find(|t| t.name() == c.tool) {
+                    let mut v = c.input.clone();
+                    if t.normalize_args(&mut v).is_ok() {
+                        c.input = v;
+                    }
+                }
+            }
             let ev = self.assistant_message(
                 AssistantMessage {
                     author: author.clone(),
@@ -4506,7 +4521,18 @@ impl NativeBackend {
                             ),
                             None => (spec.schema.clone(), harness_tools::args::Closed::Schema),
                         };
-                        match harness_tools::args::check(&schema, &call.input, closed) {
+                        // Other harnesses' names for a tool's arguments
+                        // (`file_text`, `old_str`): its own names from here
+                        // on, ahead of the schema check, the card, the call
+                        // key and every policy check.
+                        let mut input = call.input.clone();
+                        let normal = match own {
+                            Some(t) => t.normalize_args(&mut input),
+                            None => Ok(()),
+                        };
+                        match normal
+                            .and_then(|()| harness_tools::args::check(&schema, &input, closed))
+                        {
                             Ok(v) => {
                                 call.input = v;
                                 // Asked once the repeated-call guard admits
@@ -6338,6 +6364,99 @@ mod tests {
         assert_eq!(r.len(), 1, "{r:?}");
         assert!(r[0].contains("output limit"), "{}", r[0]);
         assert!(!r[0].contains("maybe only half"), "{}", r[0]);
+    }
+
+    /// A tool with no arguments, recording the input it was run with.
+    struct NoArgs(Arc<Mutex<Vec<Value>>>);
+
+    #[async_trait::async_trait]
+    impl harness_tools::Tool for NoArgs {
+        fn name(&self) -> &'static str {
+            "noargs"
+        }
+        fn description(&self) -> &'static str {
+            "takes nothing"
+        }
+        fn schema(&self) -> Value {
+            json!({"type": "object", "properties": {}})
+        }
+        fn risk(&self) -> ToolRisk {
+            ToolRisk::ReadOnly
+        }
+        async fn run(&self, _ctx: &ToolCtx, input: Value) -> ToolOutcome {
+            self.0.lock().unwrap().push(input);
+            ToolOutcome::ok("ran")
+        }
+    }
+
+    /// One call to `tool` with `input` (as the provider hands it over);
+    /// returns what the tool was run with, and the refusals.
+    async fn call_with(tool: &str, input: Value) -> (Vec<Value>, Vec<String>) {
+        let dir = tempfile::tempdir().unwrap();
+        let host = RecHost::new(Decision::Allow);
+        let seen = Arc::new(Mutex::new(vec![]));
+        let mut tools = harness_tools::builtin();
+        tools.push(Arc::new(NoArgs(seen.clone())));
+        let step = Completion {
+            tool_calls: vec![ToolCallRef {
+                call_id: new_id(),
+                tool: tool.into(),
+                input,
+            }],
+            stop: StopReason::ToolUse,
+            ..Default::default()
+        };
+        let b = NativeBackend::new(
+            Arc::new(Script(Mutex::new(vec![step].into()))),
+            tools,
+            NativeConfig::default(),
+        );
+        let out = b.run_turn(ctx(&host, "go", dir.path())).await;
+        assert_eq!(out.reason, TurnEndReason::Completed, "{:?}", out.error);
+        let ran = seen.lock().unwrap().clone();
+        (ran, refusals(&host))
+    }
+
+    /// Trial 2026-11-19, item 9: a tool that takes no arguments, called
+    /// with an empty argument string, was refused as "not an object".
+    #[tokio::test]
+    async fn empty_or_blank_arguments_are_an_empty_object() {
+        for blank in ["", " ", " \n\t "] {
+            let (ran, refused) = call_with("noargs", json!(blank)).await;
+            assert_eq!(ran, vec![json!({})], "{blank:?}: {refused:?}");
+            assert!(refused.is_empty(), "{blank:?}: {refused:?}");
+        }
+    }
+
+    /// Nothing else is read as `{}`: every other non-object keeps today's
+    /// refusal, text and all.
+    #[tokio::test]
+    async fn other_non_objects_are_still_refused() {
+        for (v, shown) in [
+            (json!("x"), "\"x\""),
+            (json!(3), "3"),
+            (json!([]), "[]"),
+            (Value::Null, "null"),
+        ] {
+            let (ran, refused) = call_with("noargs", v).await;
+            assert!(ran.is_empty(), "{shown} ran");
+            assert_eq!(
+                refused,
+                vec![format!(
+                    "tool arguments must be a JSON object, got: {shown}"
+                )]
+            );
+        }
+    }
+
+    /// A tool with required arguments called with `""` is refused by its
+    /// own check, not by the parser.
+    #[tokio::test]
+    async fn a_tool_with_required_arguments_refuses_blank_arguments_itself() {
+        let (_, refused) = call_with("write", json!("")).await;
+        assert_eq!(refused.len(), 1, "{refused:?}");
+        assert!(refused[0].contains("is required"), "{}", refused[0]);
+        assert!(!refused[0].contains("JSON object"), "{}", refused[0]);
     }
 
     /// Three cut messages in a row end the turn, naming the cause; two,
@@ -8821,6 +8940,163 @@ mod tests {
         assert_eq!(asked[2]["content"], "three\n");
         assert_eq!(asked[3]["new_string"], "four");
         assert_eq!(asked[4]["new_string"], "five");
+    }
+
+    /// Trial 2026-11-19, item 8: other harnesses' names (`file_text`,
+    /// `old_str`, `new_str`) are read as the tool's own before the card and
+    /// the approval key: the card shows the canonical call, an approval given
+    /// for a call covers the same call spelled either way, and the tool runs
+    /// with the real names.
+    #[tokio::test]
+    async fn aliased_arguments_are_one_call_with_the_canonical_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let asked = asked_in_one_turn(
+            dir.path(),
+            vec![
+                ("write", json!({"path": "f.txt", "file_text": "one two\n"})),
+                // The same call under the real name: covered by that answer.
+                ("write", json!({"path": "f.txt", "content": "one two\n"})),
+                (
+                    "edit",
+                    json!({"path": "f.txt", "old_str": "one", "new_str": "1"}),
+                ),
+                // The same edit in the real names: covered.
+                (
+                    "edit",
+                    json!({"path": "f.txt", "old_string": "one", "new_string": "1"}),
+                ),
+                // A different one, spelled halfway: asked, canonical.
+                (
+                    "edit",
+                    json!({"path": "f.txt", "old_string": "two", "new_str": "2"}),
+                ),
+            ],
+        )
+        .await;
+        assert_eq!(asked.len(), 3, "{asked:?}");
+        assert_eq!(asked[0], json!({"path": "f.txt", "content": "one two\n"}));
+        assert_eq!(
+            asked[1],
+            json!({"path": "f.txt", "old_string": "one", "new_string": "1"})
+        );
+        assert_eq!(
+            asked[2],
+            json!({"path": "f.txt", "old_string": "two", "new_string": "2"})
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+            "1 2\n"
+        );
+    }
+
+    /// Review of PR 165, L4: one input exists for an aliased call, in the
+    /// logged assistant message (which every later request replays) and in
+    /// `ToolCallStarted`; a call naming both spellings keeps its raw input
+    /// and is refused.
+    #[tokio::test]
+    async fn the_logged_assistant_message_and_the_started_call_agree_on_an_aliased_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = RecHost::new(Decision::Allow);
+        let step = |input: Value| Completion {
+            tool_calls: vec![ToolCallRef {
+                call_id: new_id(),
+                tool: "write".into(),
+                input,
+            }],
+            stop: StopReason::ToolUse,
+            ..Default::default()
+        };
+        let both = json!({"path": "g.txt", "content": "x", "file_text": "y"});
+        let b = NativeBackend::new(
+            Arc::new(Script(Mutex::new(
+                vec![
+                    step(json!({"path": "f.txt", "file_text": "hi\n"})),
+                    step(both.clone()),
+                ]
+                .into(),
+            ))),
+            harness_tools::builtin(),
+            NativeConfig::default(),
+        );
+        b.run_turn(ctx(&host, "go", dir.path())).await;
+        let ev = host.events.lock().unwrap();
+        let logged: Vec<Value> = ev
+            .iter()
+            .filter_map(|e| match e {
+                EventKind::AssistantMessage(m) => {
+                    Some(m.tool_calls.iter().map(|c| c.input.clone()))
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        let started: Vec<Value> = ev
+            .iter()
+            .filter_map(|e| match e {
+                EventKind::ToolCallStarted(s) => Some(s.input.clone()),
+                _ => None,
+            })
+            .collect();
+        let real = json!({"path": "f.txt", "content": "hi\n"});
+        assert_eq!(logged, vec![real.clone(), both.clone()]);
+        assert_eq!(started, vec![real, both]);
+    }
+
+    /// An alias is read only where the tool's own name is absent: both is a
+    /// refusal that names both, and nothing runs or is asked.
+    #[tokio::test]
+    async fn an_alias_beside_the_real_name_is_refused_naming_both() {
+        for (tool, input, a, b) in [
+            (
+                "write",
+                json!({"path": "f.txt", "content": "x", "file_text": "y"}),
+                "file_text",
+                "content",
+            ),
+            (
+                "edit",
+                json!({"path": "f.txt", "old_string": "a", "old_str": "b", "new_string": "c"}),
+                "old_str",
+                "old_string",
+            ),
+            (
+                "edit",
+                json!({"path": "f.txt", "old_string": "a", "new_string": "c", "new_str": "d"}),
+                "new_str",
+                "new_string",
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join("f.txt"), "a\n").unwrap();
+            let host = RecHost::new(Decision::Allow);
+            let step = Completion {
+                tool_calls: vec![ToolCallRef {
+                    call_id: new_id(),
+                    tool: tool.into(),
+                    input,
+                }],
+                stop: StopReason::ToolUse,
+                ..Default::default()
+            };
+            let b_ = NativeBackend::new(
+                Arc::new(Script(Mutex::new(vec![step].into()))),
+                harness_tools::builtin(),
+                NativeConfig::default(),
+            );
+            b_.run_turn(ctx(&host, "go", dir.path())).await;
+            let r = refusals(&host);
+            assert_eq!(r.len(), 1, "{r:?}");
+            assert!(
+                r[0].contains(&format!("`{a}` and `{b}` were both sent")),
+                "{}",
+                r[0]
+            );
+            assert!(host.asked.lock().unwrap().is_empty());
+            assert_eq!(
+                std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+                "a\n"
+            );
+        }
     }
 
     #[tokio::test]
