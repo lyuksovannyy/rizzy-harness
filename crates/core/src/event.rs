@@ -2056,10 +2056,10 @@ pub struct ModelTokens {
 
 impl ModelTokens {
     pub fn add(&mut self, t: &ModelTokens) {
-        self.input_tokens += t.input_tokens;
-        self.output_tokens += t.output_tokens;
-        self.cache_read_tokens += t.cache_read_tokens;
-        self.cache_write_tokens += t.cache_write_tokens;
+        self.input_tokens = self.input_tokens.saturating_add(t.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(t.output_tokens);
+        self.cache_read_tokens = self.cache_read_tokens.saturating_add(t.cache_read_tokens);
+        self.cache_write_tokens = self.cache_write_tokens.saturating_add(t.cache_write_tokens);
     }
 }
 
@@ -2072,10 +2072,10 @@ impl Usage {
     /// limits stay this turn's own). Its breakdown is merged; a usage
     /// without one adds to the totals only (unattributed).
     pub fn add(&mut self, u: &Usage) {
-        self.input_tokens += u.input_tokens;
-        self.output_tokens += u.output_tokens;
-        self.cache_read_tokens += u.cache_read_tokens;
-        self.cache_write_tokens += u.cache_write_tokens;
+        self.input_tokens = self.input_tokens.saturating_add(u.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(u.output_tokens);
+        self.cache_read_tokens = self.cache_read_tokens.saturating_add(u.cache_read_tokens);
+        self.cache_write_tokens = self.cache_write_tokens.saturating_add(u.cache_write_tokens);
         for (model, t) in &u.by_model {
             if let Some(mine) = self.by_model.get_mut(model) {
                 mine.add(t);

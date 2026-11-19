@@ -26,6 +26,10 @@ fn figures(v: &SessionView) -> Value {
         "context": v.context_tokens,
         "by_model_input": v.usage.by_model.get("p::m").map_or(0, |t| t.input_tokens),
         "turn": v.turn_usage.as_ref().map(|u| vec![u.input_tokens, u.output_tokens]),
+        "window": v.context_window,
+        "summary_at": v.summary_at,
+        "context_model": v.context_model,
+        "unknown_events": v.unknown_events,
     })
 }
 
@@ -41,7 +45,16 @@ fn the_chats_figures_follow_the_rule_after_every_event() {
         let mut want = want.clone();
         let seq = want.as_object_mut().unwrap().remove("seq").unwrap();
         assert_eq!(seq, e.seq, "the fixture lists its events in order");
-        assert_eq!(figures(&v), want, "after seq {}", e.seq);
+        // Only the figures an entry names are checked.
+        let got = figures(&v);
+        let got: serde_json::Map<String, Value> = got
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(k, _)| want.get(k.as_str()).is_some())
+            .map(|(k, x)| (k.clone(), x.clone()))
+            .collect();
+        assert_eq!(Value::Object(got), want, "after seq {}", e.seq);
     }
 }
 
@@ -53,5 +66,6 @@ fn folding_the_same_events_twice_gives_the_same_view() {
     assert_eq!(a, b);
     // The last turn ended: nothing of it is still "running".
     assert_eq!(a.running_turn, None);
+    assert_eq!(a.unknown_events, 5);
     let _: SessionId = a.session_id.unwrap();
 }

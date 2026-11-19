@@ -284,7 +284,9 @@ pub enum FoldError {
     WrongSession,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+/// Only [`SessionView::fold`] builds a view (it is written to the browser,
+/// never read back: `settled` and `live` are not part of its shape).
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct SessionView {
     pub session_id: Option<SessionId>,
     pub head_seq: u64,
@@ -713,7 +715,7 @@ impl SessionView {
                 if self.running_turn.as_deref() != Some(t.turn_id.as_str()) {
                     return;
                 }
-                let tokens = |u: &Usage| u.input_tokens + u.output_tokens;
+                let tokens = |u: &Usage| u.input_tokens.saturating_add(u.output_tokens);
                 if let Some((id, last)) = &self.live
                     && *id == t.turn_id
                     && tokens(&t.usage) < tokens(last)
@@ -721,7 +723,15 @@ impl SessionView {
                     return;
                 }
                 let u = t.usage.capped();
-                self.context_tokens = u.context_tokens;
+                // A summary call's usage has no context size of its own
+                // (0): the meter keeps the last one. The turn's limits
+                // are applied as `turn_ended` does.
+                if u.context_tokens > 0 {
+                    self.context_tokens = u.context_tokens;
+                }
+                self.context_window = u.window;
+                self.summary_at = u.summary_at;
+                self.context_model = u.model.clone();
                 self.turn_usage = Some(u.clone());
                 self.live = Some((t.turn_id, u));
                 self.show_usage();

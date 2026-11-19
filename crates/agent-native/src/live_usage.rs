@@ -25,3 +25,51 @@ pub async fn report(
     }))
     .await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use harness_core::policy::{Decision, ToolRisk};
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct Rec(Mutex<Vec<EventKind>>);
+
+    #[async_trait::async_trait]
+    impl TurnHost for Rec {
+        async fn emit(&self, kind: EventKind) -> Result<(), LogError> {
+            self.0.lock().unwrap().push(kind);
+            Ok(())
+        }
+        async fn approve(&self, _: &str, _: &str, _: &serde_json::Value, _: ToolRisk) -> Decision {
+            Decision::Allow
+        }
+    }
+
+    fn used(n: u64) -> Usage {
+        Usage {
+            input_tokens: n,
+            output_tokens: 1,
+            ..Default::default()
+        }
+    }
+
+    /// Only when the total changed: the same total writes nothing, a larger
+    /// one writes the running total once, as the turn's own.
+    #[tokio::test]
+    async fn only_a_changed_total_is_written() {
+        let host = Rec::default();
+        let (before, more) = (used(10), used(25));
+        report(&host, "t", &before, &before).await.unwrap();
+        assert!(host.0.lock().unwrap().is_empty());
+        report(&host, "t", &before, &more).await.unwrap();
+        let got = host.0.lock().unwrap().clone();
+        assert_eq!(
+            got,
+            [EventKind::TurnUsage(TurnUsage {
+                turn_id: "t".into(),
+                usage: more
+            })]
+        );
+    }
+}
