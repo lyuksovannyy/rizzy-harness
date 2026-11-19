@@ -1244,7 +1244,9 @@ puts back, one where a folder it puts back goes, or one inside a folder
 it replaces by a file), it is refused and names the file. "Undo anyway"
 goes ahead, deletes or replaces that file, and its note names it again.
 This happens even when the turn wrote the ignored file: the node cannot
-tell whose it is. If a checkpoint cannot be taken, the chat says that
+tell whose it is. A named pipe, socket or device where a tracked file was
+is left out of the checkpoint, which then holds the file as deleted; the
+chat says so once. If a checkpoint cannot be taken, the chat says that
 turn cannot be undone.
 A git repository inside your
 folder (a sub-folder git treats as its own repository: a clone, a

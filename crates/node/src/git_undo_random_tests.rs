@@ -427,6 +427,26 @@ async fn scenario(seed: u64) -> Result<&'static str, String> {
         for _ in 0..1 + rng.below(3) {
             change(&dir, &mut rng, 200, &near);
         }
+        // Often: the person ignores a path the turn deleted or replaced and
+        // writes a new file there (the case of a file in no checkpoint in
+        // the undo's way, which other changes reach about once in 1,000).
+        let gone: Vec<&Vec<u8>> = before_disk
+            .keys()
+            .filter(|p| after_disk.get(*p) != before_disk.get(*p))
+            .filter(|p| !p.iter().any(|b| b"*?[]!\\#\n\r ".contains(b)))
+            .collect();
+        if !gone.is_empty() && rng.chance(60) {
+            let p = rng.of(&gone).to_vec();
+            let gi = dir.join(".gitignore");
+            let mut rules = std::fs::read(&gi).unwrap_or_default();
+            rules.push(b'/');
+            rules.extend_from_slice(&p);
+            rules.push(b'\n');
+            // `.gitignore` may be a folder now (a change below it).
+            let _ = std::fs::write(&gi, rules);
+            clear_for(&dir, &p);
+            std::fs::write(at(&dir, &p), content(&mut rng, 250, None)).unwrap();
+        }
     }
     let d0 = disk(&dir);
     let debug = std::env::var("UNDO_DEBUG").is_ok();
