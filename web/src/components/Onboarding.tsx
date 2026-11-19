@@ -11,11 +11,33 @@ import { chooseDemoProvider, ProviderForm, useProviders } from "./ProviderForm";
 import { MemoryCfgForm } from "./Memory";
 
 type Step = "provider" | "memory" | "profile" | "search";
+const ALL: readonly Step[] = ["provider", "memory", "profile", "search"];
+
+// Where this tab got to, kept so a reload lands on the same step of the same
+// count. The server cannot say: once the provider is saved it only reports
+// "configured", the same as a provider set up before the first visit, so the
+// list is rebuilt shorter and Memory is never shown. Per tab, per account,
+// forgotten on Finish; never anything the person typed.
+type Progress = { steps: Step[]; i: number; saved: Step[] };
+const progressKey = (user: string) => `harness.onboarding.${user}`;
+const known = (v: unknown): Step[] => (Array.isArray(v) ? v.filter((x): x is Step => ALL.includes(x as Step)) : []);
+
+function resume(user: string): Progress | null {
+  try {
+    const p = JSON.parse(sessionStorage.getItem(progressKey(user)) ?? "null") as Partial<Progress> | null;
+    const steps = known(p?.steps);
+    if (steps.length === 0 || !Number.isInteger(p?.i) || p!.i! < 0 || p!.i! >= steps.length) return null;
+    return { steps, i: p!.i!, saved: known(p?.saved) };
+  } catch {
+    return null;
+  }
+}
 
 export default function Onboarding(props: { me: Me; prefs: Prefs; onDone: (p: Prefs) => void }) {
   const admin = props.me.role === "admin";
-  const [steps, setSteps] = useState<Step[] | null>(null);
-  const [i, setI] = useState(0);
+  const [resumed] = useState(() => resume(props.me.user_id));
+  const [steps, setSteps] = useState<Step[] | null>(resumed?.steps ?? null);
+  const [i, setI] = useState(resumed?.i ?? 0);
   const [prefs, setPrefs] = useState<Prefs>(() => ({
     ...props.prefs,
     timezone: props.prefs.timezone ?? browserTimeZone(),
@@ -23,7 +45,7 @@ export default function Onboarding(props: { me: Me; prefs: Prefs; onDone: (p: Pr
   const [err, setErr] = useState<string | null>(null);
   // Steps saved in this run: once the provider is saved, its demo skip
   // goes; coming Back, Save and continue takes it as it stands.
-  const [saved, setSaved] = useState<Step[]>([]);
+  const [saved, setSaved] = useState<Step[]>(resumed?.saved ?? []);
   const [seen, setSeen] = useState<Step[]>([]);
   // One providers state for both steps that change it.
   const { state: providers, setState: setProviders, agents, err: providersErr } = useProviders(admin);
@@ -38,6 +60,14 @@ export default function Onboarding(props: { me: Me; prefs: Prefs; onDone: (p: Pr
 
   const step = steps?.[i];
   useEffect(() => {
+    if (!steps) return;
+    try {
+      sessionStorage.setItem(progressKey(props.me.user_id), JSON.stringify({ steps, i, saved }));
+    } catch {
+      /* not kept: a reload starts over */
+    }
+  }, [steps, i, saved, props.me.user_id]);
+  useEffect(() => {
     if (step) setSeen((v) => (v.includes(step) ? v : [...v, step]));
   }, [step]);
 
@@ -51,7 +81,13 @@ export default function Onboarding(props: { me: Me; prefs: Prefs; onDone: (p: Pr
   const finish = async () => {
     setErr(null);
     try {
-      props.onDone(await pageApi.saveSettings({ ...prefs, onboarded: true }));
+      const done = await pageApi.saveSettings({ ...prefs, onboarded: true });
+      try {
+        sessionStorage.removeItem(progressKey(props.me.user_id));
+      } catch {
+        /* nothing kept */
+      }
+      props.onDone(done);
     } catch (x) {
       setErr(x instanceof Error ? x.message : String(x));
     }

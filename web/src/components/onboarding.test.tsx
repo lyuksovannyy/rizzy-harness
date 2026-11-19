@@ -86,7 +86,11 @@ const omni: ProviderState = {
 let host: HTMLElement;
 let root: Root;
 
+const ME = { user_id: "u", username: "admin", role: "admin" as const, exec_ceiling: "host" as const, must_change_password: false };
+const PREFS = { search_url: "", default_agent: null, default_model: null };
+
 beforeEach(async () => {
+  sessionStorage.clear();
   for (const f of Object.values(api)) f.mockReset();
   api.providers.mockResolvedValue(STATE);
   api.agents.mockResolvedValue({ agents: [agent("general", "General"), agent("coder", "Coder")], default: "general" });
@@ -162,5 +166,51 @@ describe("onboarding", () => {
     expect(button("Ollama").getAttribute("aria-checked")).toBe("true");
     // Loaded once, when first shown.
     expect(api.memoryCfg).toHaveBeenCalledTimes(1);
+  });
+
+  // A reload is a fresh mount against the server's state, and the server only
+  // knows "a provider is configured" (it cannot tell the one saved a minute
+  // ago from one set up before): the steps must not renumber or skip Memory.
+  test("a reload mid-way lands on the same step of the same count", async () => {
+    const steps = () => host.querySelector(".steps")!.textContent;
+    expect(steps()).toBe("Step 1 of 4");
+    api.demoProvider.mockResolvedValue({ ...STATE, configured: true });
+    await act(async () => button("Skip: use the built-in demo (no real AI) for now").click());
+    expect(steps()).toBe("Step 2 of 4");
+    expect(visible().querySelector("h2")!.textContent).toBe("Memory");
+
+    act(() => root.unmount());
+    api.providers.mockResolvedValue({ ...STATE, configured: true });
+    root = createRoot(host);
+    await act(async () => root.render(<Onboarding me={ME} prefs={PREFS} onDone={() => {}} />));
+    expect(steps()).toBe("Step 2 of 4");
+    expect(visible().querySelector("h2")!.textContent).toBe("Memory");
+
+    // Back to the provider step: it is saved, so no demo skip to overwrite it.
+    act(() => button("Back").click());
+    expect(steps()).toBe("Step 1 of 4");
+    expect(button("Skip: use the built-in demo (no real AI) for now")).toBeUndefined();
+  });
+
+  test("finishing forgets the progress, so a later first run starts at the top", async () => {
+    const mount = async (done: () => void) => {
+      act(() => root.unmount());
+      root = createRoot(host);
+      await act(async () => root.render(<Onboarding me={{ ...ME, role: "member" }} prefs={PREFS} onDone={done} />));
+    };
+    const steps = () => host.querySelector(".steps")!.textContent;
+    sessionStorage.clear(); // the admin mount of beforeEach left its own
+    await mount(() => {});
+    expect(steps()).toBe("Step 1 of 2");
+    act(() => button("Continue").click());
+    await mount(() => {});
+    expect(steps()).toBe("Step 2 of 2");
+    const done = vi.fn();
+    api.saveSettings.mockResolvedValue({ ...PREFS, onboarded: true });
+    await mount(done);
+    await act(async () => button("Finish").click());
+    expect(done).toHaveBeenCalled();
+    await mount(() => {});
+    expect(steps()).toBe("Step 1 of 2");
   });
 });
