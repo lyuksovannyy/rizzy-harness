@@ -31,17 +31,33 @@ export interface Mentions {
   called: string[];
 }
 
-// Rust's `char::is_whitespace` (Unicode White_Space), not JavaScript's `\s`.
-const WS = "\\t-\\r \\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000";
-const IS_WS = new RegExp(`^[${WS}]$`);
-const LEAD_WS = new RegExp(`^[${WS}]*`);
-const TRAIL_WS = new RegExp(`[${WS}]*$`);
-const LEAD_SEP = new RegExp(`^[${WS},]*`);
-
-const isWs = (c: string) => IS_WS.test(c);
-const isSep = (c: string) => c === "," || IS_WS.test(c);
-const trimStart = (s: string) => s.slice(LEAD_WS.exec(s)![0].length);
-const trimEnd = (s: string) => s.slice(0, TRAIL_WS.exec(s)!.index);
+// Rust's `char::is_whitespace` (Unicode White_Space), not JavaScript's `\s`
+// or `String.trimEnd` (U+FEFF in, U+0085 out). Loops over the characters, not
+// regular expressions: an `[ws]*$` backtracks over every run of white space
+// (quadratic; a pasted run of 80,000 spaces froze the tab for seconds).
+const WS = new Set(
+  "\t\n\v\f\r \u0085\u00a0\u1680\u2028\u2029\u202f\u205f\u3000".split("").concat(Array.from({ length: 11 }, (_, i) => String.fromCharCode(0x2000 + i))),
+);
+const isWs = (c: string) => WS.has(c);
+const isSep = (c: string) => c === "," || WS.has(c);
+/** The index of the first character at or after `from` that is not white space (`to` at most). */
+function skipWs(s: string, from: number, to = s.length): number {
+  let i = from;
+  while (i < to && WS.has(s[i]!)) i++;
+  return i;
+}
+/** The same for white space and commas. */
+function skipSep(s: string, from: number, to = s.length): number {
+  let i = from;
+  while (i < to && isSep(s[i]!)) i++;
+  return i;
+}
+const trimStart = (s: string) => s.slice(skipWs(s, 0));
+function trimEndLen(s: string): number {
+  let n = s.length;
+  while (n > 0 && WS.has(s[n - 1]!)) n--;
+  return n;
+}
 
 function handleByte(c: number): boolean {
   return (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c === 45;
@@ -59,24 +75,24 @@ function mentionAt(text: string, at: number, resolve: Resolve): [number, string]
 
 function openingRun(text: string, resolve: Resolve): number[] {
   const out: number[] = [];
-  let at = text.length - trimStart(text).length;
+  let at = skipWs(text, 0);
   while (text[at] === "@") {
     const m = mentionAt(text, at, resolve);
     if (!m) break;
     out.push(at);
     const end = m[0];
     if (text[end] === ":") break;
-    at = end + LEAD_SEP.exec(text.slice(end))![0].length;
+    at = skipSep(text, end);
   }
   return out;
 }
 
 function closingLine(text: string, lineStart: number, resolve: Resolve): number[] {
-  const endOfText = trimEnd(text).length;
+  const endOfText = trimEndLen(text);
   const out: number[] = [];
   let at = lineStart;
   for (;;) {
-    at += LEAD_SEP.exec(text.slice(at, endOfText))![0].length;
+    at = skipSep(text, at, endOfText);
     if (at >= endOfText) break;
     if (text[at] !== "@") return [];
     const m = mentionAt(text, at, resolve);
@@ -132,7 +148,7 @@ export function scanMentions(text: string, resolve: Resolve): Mentions {
   let inFence = false;
   let last: [number, boolean] = [0, false];
   let lineStart = 0;
-  const bodyEnd = trimEnd(text).length;
+  const bodyEnd = trimEndLen(text);
   for (const line of text.split(/(?<=\n)/)) {
     const start = lineStart;
     lineStart += line.length;
@@ -147,10 +163,11 @@ export function scanMentions(text: string, resolve: Resolve): Mentions {
     scanLine(text, start, start + line.length, resolve, found);
   }
   const marks = new Set<number>(openingRun(text, resolve));
-  if (trimStart(text) !== "" && !last[1]) for (const s of closingLine(text, last[0], resolve)) marks.add(s);
+  if (skipWs(text, 0) < text.length && !last[1]) for (const s of closingLine(text, last[0], resolve)) marks.add(s);
   const called: string[] = [];
+  // Every mention is flagged, as Rust does; only the list stops at the limit.
+  for (const f of found) f.trigger = !f.who.startsWith("tag:") && marks.has(f.start);
   for (const f of found) {
-    f.trigger = !f.who.startsWith("tag:") && marks.has(f.start);
     if (f.trigger && f.who.startsWith("agent:")) {
       const id = f.who.slice(6);
       if (!called.includes(id)) {

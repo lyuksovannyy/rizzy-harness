@@ -273,6 +273,37 @@ impl N {
         self.ack(&req_id).await
     }
 
+    /// [`Self::say`] for a message the master gave `context` (its standing
+    /// parts), as a person's signed-in message gets.
+    async fn say_with_context(
+        &mut self,
+        sid: SessionId,
+        text: &str,
+        first: &AgentSpec,
+        peers: &[&AgentSpec],
+        context: harness_core::backend::MasterContext,
+    ) -> Result<(), String> {
+        let req_id = self.req();
+        self.send(MasterToNode::Prompt {
+            req_id: req_id.clone(),
+            session_id: sid,
+            text: text.into(),
+            agent: Some(first.clone()),
+            attachments: vec![],
+            compare: vec![],
+            reply: None,
+            savings: None,
+            context: Some(Box::new(context)),
+            images: vec![],
+            agent_named: true,
+            files: vec![],
+            owner: None,
+            peers: peers.iter().map(|a| (*a).clone()).collect(),
+            tags: vec![],
+        });
+        self.ack(&req_id).await
+    }
+
     /// [`Self::say`] for a message that also mentioned `tags` (sub-agent-only
     /// agents).
     async fn say_tagged(
@@ -754,4 +785,64 @@ async fn tags_are_recorded_and_named_only_to_agents_that_may_delegate_to_them() 
     let many: Vec<String> = (0..17).map(|i| format!("t{i}")).collect();
     let refs: Vec<&str> = many.iter().map(String::as_str).collect();
     assert!(n.say_tagged(sid, "x", &a, &[], &refs).await.is_err());
+}
+
+/// What an agent called after the first knows (review of PR 166, M2): the
+/// first message's context as the first agent got it (your personalisation,
+/// the project's brief and board), without the instructions for a tool it
+/// does not have (`remember`: its own spec denies it) and without memory.
+/// The first agent's own request is unchanged, and the mention turn's is
+/// rebuilt byte for byte by a later turn.
+#[tokio::test]
+async fn a_later_agent_is_not_told_how_to_remember() {
+    use harness_core::backend::{MasterContext, StandingKey as K, StandingPart};
+    let part = |part, text: &str| StandingPart {
+        part,
+        text: text.into(),
+    };
+    let ctx = MasterContext {
+        turn: Some("TURN-LINE".into()),
+        standing: vec![
+            part(K::Personal, "PERSONAL-X"),
+            part(K::Memory, "MEMORY-FACTS"),
+            part(K::Remember, "REMEMBER-RULES"),
+            part(K::Project, "BRIEF-Z"),
+            part(K::Board, "BOARD-CARDS"),
+        ],
+        unattended: false,
+    };
+    let model = Scripted::new(vec![]);
+    let mut n = N::start(model.clone()).await;
+    let (a, b) = (agent("a"), agent("b"));
+    let sid = n.create(&a).await;
+    n.say_with_context(sid, "@a @b hi", &a, &[&b], ctx)
+        .await
+        .unwrap();
+    n.until(sid, |l| ended(l) == 2).await;
+    let flat = |who: &str, i: usize| format!("{:?}", model.requests(who)[i].messages);
+    // The first agent: everything it was given.
+    for t in [
+        "TURN-LINE",
+        "PERSONAL-X",
+        "MEMORY-FACTS",
+        "REMEMBER-RULES",
+        "BRIEF-Z",
+        "BOARD-CARDS",
+    ] {
+        assert!(flat("a", 0).contains(t), "a lacks {t}");
+    }
+    // The later agent: personalisation, brief, board and the turn's line;
+    // no memory, and no `remember` instructions.
+    for t in ["TURN-LINE", "PERSONAL-X", "BRIEF-Z", "BOARD-CARDS"] {
+        assert!(flat("b", 0).contains(t), "b lacks {t}");
+    }
+    for t in ["MEMORY-FACTS", "REMEMBER-RULES"] {
+        assert!(!flat("b", 0).contains(t), "b was given {t}");
+    }
+    // Replay: a later message to b rebuilds b's request byte for byte.
+    n.say(sid, "@b again", &b, &[]).await.unwrap();
+    n.until(sid, |l| ended(l) == 3).await;
+    let first_b = &model.requests("b")[0].messages;
+    let later = &model.requests("b")[1].messages;
+    assert_eq!(later[..first_b.len()], first_b[..]);
 }

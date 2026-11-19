@@ -9,7 +9,8 @@
   "c": "c",
   "d": "d",
   "e": "e",
-  "src": "src"
+  "src": "src",
+  "f": "f"
  },
  "person": "alex",
  "cases": [
@@ -815,10 +816,169 @@
      "trigger": false
     }
    ]
+  },
+  {
+   "name": "six agents: every mention is flagged, the list stops at five",
+   "text": "@a @b @c @d @e @f go",
+   "called": [
+    "a",
+    "b",
+    "c",
+    "d",
+    "e"
+   ],
+   "found": [
+    {
+     "text": "@a",
+     "who": "agent:a",
+     "trigger": true
+    },
+    {
+     "text": "@b",
+     "who": "agent:b",
+     "trigger": true
+    },
+    {
+     "text": "@c",
+     "who": "agent:c",
+     "trigger": true
+    },
+    {
+     "text": "@d",
+     "who": "agent:d",
+     "trigger": true
+    },
+    {
+     "text": "@e",
+     "who": "agent:e",
+     "trigger": true
+    },
+    {
+     "text": "@f",
+     "who": "agent:f",
+     "trigger": true
+    }
+   ]
   }
  ],
  "tags": {
   "advisor": "advisor",
   "scout": "scout"
- }
+ },
+ "big": [
+  {
+   "name": "a long run of spaces, then a letter",
+   "parts": [
+    [
+     "@a ",
+     1
+    ],
+    [
+     " ",
+     200000
+    ],
+    [
+     "x",
+     1
+    ]
+   ],
+   "called": [
+    "a"
+   ]
+  },
+  {
+   "name": "a letter, a run, a letter, a run, then a mention",
+   "parts": [
+    [
+     "x",
+     1
+    ],
+    [
+     " ",
+     100000
+    ],
+    [
+     "y",
+     1
+    ],
+    [
+     " ",
+     100000
+    ],
+    [
+     "\n@a",
+     1
+    ]
+   ],
+   "called": [
+    "a"
+   ]
+  },
+  {
+   "name": "a no-break space run in the middle",
+   "parts": [
+    [
+     "@a x",
+     1
+    ],
+    [
+     " ",
+     200000
+    ],
+    [
+     "y @b",
+     1
+    ]
+   ],
+   "called": [
+    "a"
+   ]
+  },
+  {
+   "name": "a million characters of tab and comma separators",
+   "parts": [
+    [
+     "@a",
+     1
+    ],
+    [
+     "\t, ",
+     300000
+    ],
+    [
+     "@b",
+     1
+    ]
+   ],
+   "called": [
+    "a",
+    "b"
+   ]
+  },
+  {
+   "name": "a whitespace run with an at sign after it and a closing line",
+   "parts": [
+    [
+     "hi",
+     1
+    ],
+    [
+     "\n",
+     150000
+    ],
+    [
+     "@a @b",
+     1
+    ],
+    [
+     " \r\n",
+     50000
+    ]
+   ],
+   "called": [
+    "a",
+    "b"
+   ]
+  }
+ ]
 }

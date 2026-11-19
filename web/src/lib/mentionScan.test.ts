@@ -61,3 +61,18 @@ describe("scanMentions", () => {
     expect(scanMentions("@bob hi", r).found).toEqual([]);
   });
 });
+
+describe("long runs of white space (review of PR 166, M1)", () => {
+  const expand = (parts: [string, number][]) => parts.map(([s, n]) => s.repeat(n)).join("");
+  for (const c of (fixture as unknown as { big: { name: string; parts: [string, number][]; called: string[] }[] }).big) {
+    it(`${c.name}: the same answer as Rust's, in linear time`, () => {
+      const text = expand(c.parts);
+      const t0 = performance.now();
+      const m = scanMentions(text, resolve);
+      const ms = performance.now() - t0;
+      expect(m.called).toEqual(c.called);
+      // A linear pass takes tens of milliseconds; the quadratic one took seconds to minutes.
+      expect(ms).toBeLessThan(1500);
+    }, 120_000);
+  }
+});

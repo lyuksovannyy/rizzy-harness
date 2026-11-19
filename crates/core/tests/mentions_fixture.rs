@@ -94,3 +94,42 @@ fn work_is_linear_and_the_list_is_bounded() {
     let m = scan("@a @b @c @d @e @f @g", &five);
     assert_eq!(m.called.len(), MAX_CALLED + 1);
 }
+
+/// Long runs of white space (review of PR 166, M1): the same answers as the
+/// browser's mirror gives (it reads the same `big` cases), in linear time.
+#[test]
+fn long_runs_of_white_space_are_linear_and_agree() {
+    let f = fixture();
+    let agents = f["agents"].as_object().unwrap().clone();
+    let resolve = move |n: &str| {
+        agents
+            .get(n)
+            .map(|id| Who::Agent(id.as_str().unwrap().into()))
+    };
+    for c in f["big"].as_array().unwrap() {
+        let text: String = c["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| {
+                p[0].as_str()
+                    .unwrap()
+                    .repeat(p[1].as_u64().unwrap() as usize)
+            })
+            .collect();
+        let t = std::time::Instant::now();
+        let m = scan(&text, &resolve);
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(2),
+            "{}",
+            c["name"]
+        );
+        let want: Vec<&str> = c["called"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(m.called, want, "{}", c["name"]);
+    }
+}
