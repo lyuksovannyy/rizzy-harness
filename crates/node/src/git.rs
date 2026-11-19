@@ -803,6 +803,8 @@ impl Drop for IndexFiles {
 struct WorkTree {
     id: String,
     nested: Vec<Vec<u8>>,
+    /// Tracked paths left out because they are no file, link or folder now.
+    special: Vec<Vec<u8>>,
 }
 
 /// Tree of the working directory as it is now (tracked + untracked, minus
@@ -856,13 +858,17 @@ async fn worktree_tree_from(repo: &Repo, seed: bool) -> Result<WorkTree, TreeErr
     let (real, idx) = seeded_index(repo, seed).await.map_err(TreeError::Stage)?;
     let _files = IndexFiles(idx.clone());
     let res = async {
-        let nested = stage_without_nested(repo, &idx)
+        let (nested, special) = stage_without_nested(repo, &idx)
             .await
             .map_err(TreeError::Stage)?;
         let id = run(repo, &["write-tree"], Some(&idx))
             .await
             .map_err(TreeError::WriteTree)?;
-        Ok(WorkTree { id, nested })
+        Ok(WorkTree {
+            id,
+            nested,
+            special,
+        })
     }
     .await;
     // The shadow keeps the index git just wrote: the next checkpoint only
@@ -880,7 +886,9 @@ async fn worktree_tree_from(repo: &Repo, seed: bool) -> Result<WorkTree, TreeErr
 }
 
 /// Stage the folder into `idx` without nested repositories; returns them
-/// (relative, minimal: none inside another, sorted).
+/// (relative, minimal: none inside another, sorted), and the tracked paths
+/// left out because they are a named pipe, a socket or a device now
+/// ([`add_tracked`]).
 ///
 /// A nested repository is what git itself treats as one: a directory git's
 /// walk will not enter (`ls-files -o` lists it as `dir/`; git checks for a
@@ -895,7 +903,10 @@ async fn worktree_tree_from(repo: &Repo, seed: bool) -> Result<WorkTree, TreeErr
 /// is entered by git (the index has paths there), so those files stay
 /// recorded and undoable. The folder is walked once, by git; nothing is run
 /// or opened inside a nested repository.
-async fn stage_without_nested(repo: &Repo, idx: &Path) -> Result<Vec<Vec<u8>>, String> {
+async fn stage_without_nested(
+    repo: &Repo,
+    idx: &Path,
+) -> Result<(Vec<Vec<u8>>, Vec<Vec<u8>>), String> {
     use std::collections::{BTreeSet, HashSet};
     let staged = run_raw(repo, &["ls-files", "-z", "--stage"], Some(idx), None).await?;
     let (tracked, gitlinks) = split_stage(&staged);
@@ -931,7 +942,7 @@ async fn stage_without_nested(repo: &Repo, idx: &Path) -> Result<Vec<Vec<u8>>, S
     force_remove(repo, idx, &gone).await?;
     // Tracked files: changes and deletions, no walk. (No pathspec: with
     // none, `-u` is the whole tree, and `.` fails on an empty index.)
-    run(repo, &["add", "-u"], Some(idx)).await?;
+    let special = add_tracked(repo, idx).await?;
     // New files, by name.
     let (_, new) = split_within(&untracked, &set);
     // The second line behind the jail (R1b-2): a new path whose folder now
@@ -995,7 +1006,50 @@ async fn stage_without_nested(repo: &Repo, idx: &Path) -> Result<Vec<Vec<u8>>, S
     .await
     .map_err(|e| e.to_string())?;
     nested.extend(replaced);
-    Ok(outermost(nested))
+    Ok((outermost(nested), special))
+}
+
+/// `add -u` into `idx`, and the tracked paths it had to leave out. Git
+/// cannot stage a named pipe, a socket or a device, and `add -u` fails
+/// outright on a tracked file that became one (every snapshot would fail
+/// while it is there). Only when `add -u` fails, the modified paths are
+/// looked at (`fstatat` on folders opened without following links, nothing
+/// opened at the path): those that are no file, link or
+/// folder are taken out of the index, so this snapshot holds the file as
+/// gone, and `add -u` runs once more. With none of them, the first error
+/// is returned. Costs nothing when `add -u` succeeds.
+async fn add_tracked(repo: &Repo, idx: &Path) -> Result<Vec<Vec<u8>>, String> {
+    let first = match run(repo, &["add", "-u"], Some(idx)).await {
+        Ok(_) => return Ok(Vec::new()),
+        Err(e) => e,
+    };
+    let modified = run_raw(repo, &["ls-files", "-z", "-m"], Some(idx), None).await?;
+    let root = repo.root.clone();
+    let paths: Vec<Vec<u8>> = modified
+        .split(|b| *b == 0)
+        .filter(|p| !p.is_empty())
+        .map(<[u8]>::to_vec)
+        .collect();
+    // Walked as the writer walks (`git::at`): a link on the way is never
+    // followed, so nothing outside the folder is looked at.
+    let special: Vec<Vec<u8>> = tokio::task::spawn_blocking(move || {
+        let top = at::Top::open(&root)?;
+        let mut out = Vec::new();
+        for p in paths {
+            if top.is_special(&rel_path(&p))? {
+                out.push(p);
+            }
+        }
+        Ok::<_, String>(out)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    if special.is_empty() {
+        return Err(first);
+    }
+    force_remove(repo, idx, &special).await?;
+    run(repo, &["add", "-u"], Some(idx)).await?;
+    Ok(special)
 }
 
 /// The paths of `paths` (relative to the folder) whose containing folder
@@ -1149,7 +1203,9 @@ impl Names {
             .shown
             .iter()
             // A name never writes the backticks that mark names (a file
-            // named "x`, `y" must not read as two).
+            // named "x`, `y" must not read as two): a backtick shows as
+            // U+FFFD, as a byte that is not UTF-8 and a control character
+            // do (`shown`), so such names can read alike, never as two.
             .map(|n| format!("`{}`", n.replace('`', "\u{FFFD}")))
             .collect::<Vec<_>>()
             .join(", ");
@@ -1166,6 +1222,9 @@ pub struct Snapshot {
     pub sha: String,
     /// Relative to the checkpoint's folder, sorted, for showing.
     pub nested: Names,
+    /// Tracked files that are now a named pipe, a socket or a device: git
+    /// cannot stage those, so this snapshot holds the file as gone.
+    pub special: Names,
 }
 
 /// Snapshot the working directory into a commit stored at `ref_name`, and
@@ -1214,6 +1273,7 @@ async fn snapshot_within(
         Ok(Snapshot {
             sha,
             nested: Names::of(&tree.nested),
+            special: Names::of(&tree.special),
         })
     })
     .await
@@ -1884,7 +1944,7 @@ pub async fn restore_plan(
             return Err(format!(
                 "nothing was changed: undo would delete or write over files that are in no \
                  checkpoint (git ignores them, say), so nothing could bring them back: {what}; \
-                 \"Undo anyway\" deletes them"
+                 \"Undo anyway\" deletes or replaces them"
             ));
         }
         return Ok(RestorePlan {
@@ -2067,59 +2127,73 @@ async fn unsaved_in_the_way(
     if found.is_empty() {
         return Ok(found);
     }
-    // Which of them `now` holds: `ls-tree` with the names' bytes as literal
-    // pathspecs, a bounded number of argument bytes per call.
-    let mut held = std::collections::HashSet::new();
-    for run in arg_runs(&found, ARGS_MAX) {
-        let mut c = command(repo, None);
-        c.env("GIT_LITERAL_PATHSPECS", "1").args([
-            "ls-tree",
-            "-r",
-            "-z",
-            "--name-only",
-            "--full-tree",
-            now,
-            "--",
-        ]);
-        for p in run {
+    let ask = by_name(&found);
+    not_held(repo, now, found, ask).await
+}
+
+/// Whether [`not_held`] asks git by name: few paths, and few bytes of
+/// them (an argument list is bounded by the stack limit: a quarter of it,
+/// 512 KiB under `ulimit -s 2048`).
+fn by_name(found: &[Vec<u8>]) -> bool {
+    found.len() <= ASK_BY_NAME_MAX
+        && found.iter().map(|p| p.len() + 1).sum::<usize>() <= ASK_BY_NAME_BYTES
+}
+
+/// Of `found` (relative, as git's bytes), the paths snapshot `now` does
+/// not hold as a file or link, matched here as bytes. A path `now` holds
+/// as a folder is in neither answer (`-r` lists no folders), so a file on
+/// disk there counts as not held. `by_name`: git is asked about those
+/// paths only (literal pathspecs, the names' bytes); otherwise one listing
+/// of the whole tree is read (a pathspec per path cost 0.5 s for 50,000 of
+/// them, the listing 0.15 s; `git_check_tests.rs`, `bench_*`). Both answer
+/// the same (`by_name_and_the_listing_agree`).
+async fn not_held(
+    repo: &Repo,
+    now: &str,
+    found: Vec<Vec<u8>>,
+    by_name: bool,
+) -> Result<Vec<Vec<u8>>, String> {
+    if found.is_empty() {
+        return Ok(found);
+    }
+    let mut c = command(repo, None);
+    c.env("GIT_LITERAL_PATHSPECS", "1").args([
+        "ls-tree",
+        "-r",
+        "-z",
+        "--name-only",
+        "--full-tree",
+        now,
+    ]);
+    if by_name {
+        c.arg("--");
+        for p in &found {
             c.arg(rel_path(p));
         }
-        let listed = exec(c, None, GIT_TIMEOUT).await?;
-        if !listed.status.success() {
-            return Err(result_text(&["ls-tree"], listed));
-        }
-        held.extend(
-            listed
-                .stdout
-                .split(|b| *b == 0)
-                .filter(|p| !p.is_empty())
-                .map(<[u8]>::to_vec),
-        );
     }
-    Ok(found.into_iter().filter(|p| !held.contains(p)).collect())
+    let listed = exec(c, None, GIT_TIMEOUT).await?;
+    if !listed.status.success() {
+        return Err(result_text(&["ls-tree"], listed));
+    }
+    let held: std::collections::HashSet<&[u8]> = listed
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|p| !p.is_empty())
+        .collect();
+    Ok(found
+        .into_iter()
+        .filter(|p| !held.contains(p.as_slice()))
+        .collect())
 }
 
-/// The most bytes of paths given to one git call as arguments: far under
-/// Linux's 128 KiB for one argument and 2 MiB for all.
-const ARGS_MAX: usize = 64 << 10;
+/// Up to this many paths [`unsaved_in_the_way`] asks git about by name;
+/// above it, it reads the whole listing (measured: by name is cheaper until
+/// a few hundred paths; then the listing wins).
+const ASK_BY_NAME_MAX: usize = 256;
 
-/// `paths` in runs of at most `max` bytes (a longer path is a run of its
-/// own).
-fn arg_runs(paths: &[Vec<u8>], max: usize) -> Vec<&[Vec<u8>]> {
-    let mut out = Vec::new();
-    let (mut start, mut bytes) = (0, 0);
-    for (i, p) in paths.iter().enumerate() {
-        if i > start && bytes + p.len() + 1 > max {
-            out.push(&paths[start..i]);
-            (start, bytes) = (i, 0);
-        }
-        bytes += p.len() + 1;
-    }
-    if start < paths.len() {
-        out.push(&paths[start..]);
-    }
-    out
-}
+/// And at most this many bytes of them as arguments (far under the 512 KiB
+/// a stack limit of 2 MiB leaves for all arguments).
+const ASK_BY_NAME_BYTES: usize = 64 << 10;
 
 /// A relative path as git's bytes.
 #[cfg(unix)]
