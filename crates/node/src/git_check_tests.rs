@@ -517,22 +517,6 @@ async fn the_fallback_never_looks_through_a_link_above_a_path() {
     assert!(std::os::unix::fs::FileTypeExt::is_fifo(&m.file_type()));
 }
 
-/// Rows for `unsaved_in_the_way` from bare paths.
-fn rows_of(paths: &[Vec<u8>]) -> Vec<DiffRow> {
-    paths
-        .iter()
-        .map(|p| DiffRow {
-            status: 'M',
-            path: p.clone(),
-            gitlink: false,
-            old_mode: "100644".into(),
-            old_id: "0".repeat(40),
-            new_mode: "100644".into(),
-            new_id: "0".repeat(40),
-        })
-        .collect()
-}
-
 /// Review 3 of PR 162, MEDIUM-1: asked by name and read from the whole
 /// listing, `not_held` gives the same answer, below, at and above the
 /// switch between them, for names git or a shell would read as something
