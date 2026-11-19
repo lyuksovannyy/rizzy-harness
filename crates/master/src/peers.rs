@@ -95,11 +95,23 @@ impl Master {
 /// A peer's spec as its turn runs it: what a turn nobody sent from the
 /// master's side has (as a callback's): no recall, no board, no `remember`,
 /// no connector. Its own definition otherwise (model, tools, switches).
-pub fn for_peer(spec: &mut harness_core::agent::AgentSpec) {
+/// Refused in a chat that holds an external event's text (`untrusted`): a
+/// peer's spec does not go through `deny_untrusted`, so the caller's gate is
+/// not the only guard (review of PR 166, M3).
+pub fn for_peer(
+    spec: &mut harness_core::agent::AgentSpec,
+    untrusted: bool,
+) -> Result<(), CommandError> {
+    if untrusted {
+        return Err(CommandError::Rejected(
+            "a chat that holds an automation's event text calls no other agents".into(),
+        ));
+    }
     crate::deny_remember(spec);
     crate::recall::deny(spec);
     crate::board::deny(spec);
     spec.connector_tools.clear();
+    Ok(())
 }
 
 #[cfg(test)]
@@ -179,8 +191,10 @@ mod tests {
             description: String::new(),
             schema: "{}".into(),
         }];
-        for_peer(&mut p);
+        for_peer(&mut p, false).unwrap();
         assert!(p.connector_tools.is_empty());
+        // In a chat with an automation's event text it refuses, by itself.
+        assert!(for_peer(&mut spec("q", 10), true).is_err());
         for t in ["remember", "recall"] {
             assert!(p.deny_tools.iter().any(|d| d == t), "{t}");
         }
