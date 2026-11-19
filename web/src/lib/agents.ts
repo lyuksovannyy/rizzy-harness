@@ -18,5 +18,14 @@ export function pickable(agents: Agent[], keep?: string): Agent[] {
   return agents.filter((a) => a.features?.as_agent !== false || a.id === keep);
 }
 
+/**
+ * A picker's hint for `a`: says first when it is the workspace's own agent
+ * (written by that workspace's admins, X.33), then `rest`. From the server's
+ * `scope`, never from the agent's own text.
+ */
+export function marked(a: Agent, rest?: string): string | undefined {
+  return [a.scope === "workspace" && "workspace agent", rest].filter(Boolean).join(" · ") || undefined;
+}
+
 /** The id `#/agents/new` opens (lib/routes.ts): a new agent. Agents cannot take it. */
 export const NEW_AGENT = "new";
