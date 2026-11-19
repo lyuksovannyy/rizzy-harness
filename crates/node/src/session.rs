@@ -1881,6 +1881,14 @@ impl Session {
         after: TurnExtra,
         mut ended: String,
     ) {
+        // A turn that only reads queued messages is no send of the master's,
+        // so the master answers none of its connector calls: it is not
+        // offered the custom connectors' tools at all (X.35 step 2, review 3
+        // of PR 157, L10).
+        let agent = agent.map(|mut a| {
+            a.connector_tools.clear();
+            a
+        });
         while matches!(
             reason,
             TurnEndReason::Completed | TurnEndReason::Error | TurnEndReason::Limit

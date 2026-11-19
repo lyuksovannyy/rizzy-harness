@@ -16,14 +16,13 @@
 //!   connection), through our own HTTP client for rmcp's transport
 //!   (`client`): one [`CHECK_BYTES`] budget for the whole check, error
 //!   bodies never read, a value count before any parse, our headers only,
-//!   no standalone stream. It runs on one of two long-lived workers
-//!   ([`pool`]) whose log output goes nowhere (rmcp logs what servers send:
-//!   names, instructions, results); a check that finds none idle, or whose
-//!   person has one running, is refused at once. No task or socket of a
-//!   check outlives it ([`Checked::tasks_left`] counts what was still
-//!   there; tests assert none); what it read is freed when it ends (the
-//!   two workers' allocator arenas keep up to about two checks' peak for
-//!   reuse), and only the cleaned offer is kept.
+//!   no standalone stream. It runs on the one long-lived connector thread
+//!   ([`pool`], two check slots) whose log output goes nowhere (rmcp logs
+//!   what servers send: names, instructions, results); a check that finds
+//!   no slot free, or whose person has one running, is refused at once. No
+//!   task or socket of a check outlives it ([`Checked::tasks_left`] counts
+//!   what was still there; tests assert none), and only the cleaned offer
+//!   is kept.
 //! * **What it offers** ([`Offer`]): the server's name and version, its
 //!   instructions and its tools (name, description), cleaned and capped,
 //!   kept only in a small per-person cache in memory ([`Cache`]), bounded
@@ -618,6 +617,21 @@ impl Cache {
 /// The table a person's sealed token is bound to (`crate::sealed`).
 pub const ACCOUNTS_TABLE: &str = "connector_accounts";
 
+/// Chats told once that connectors are off in them (bounded: past it,
+/// told again).
+#[derive(Default)]
+pub struct Told(std::collections::HashSet<harness_core::SessionId>);
+
+impl Told {
+    /// True the first time for `sid`.
+    pub fn told(&mut self, sid: harness_core::SessionId) -> bool {
+        if self.0.len() >= 4096 {
+            self.0.clear();
+        }
+        self.0.insert(sid)
+    }
+}
+
 /// Master-side state: the limits, the caches, the call workers and the
 /// test hooks.
 pub struct State {
@@ -630,6 +644,13 @@ pub struct State {
     pub(crate) calls: call::State,
     /// Background reads of tools (step 2): a budget of their own.
     pub(crate) fill_attempts: Attempts,
+    /// Marked chats already told that connectors are off there.
+    pub(crate) told: Mutex<Told>,
+    /// Name lookups that may block a thread at once: one for checks, one
+    /// for calls (the connector thread has two blocking threads), so names
+    /// that never resolve for calls never starve a check (review 3, L8).
+    pub(crate) check_lookups: std::sync::Arc<tokio::sync::Semaphore>,
+    pub(crate) call_lookups: std::sync::Arc<tokio::sync::Semaphore>,
     net: Mutex<Net>,
     tasks_left: AtomicUsize,
 }
@@ -645,6 +666,9 @@ impl Default for State {
             tools: Mutex::default(),
             calls: call::State::on(thread),
             fill_attempts: Attempts::new(FILL_LIMITS),
+            told: Mutex::default(),
+            check_lookups: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+            call_lookups: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
             net: Mutex::default(),
             tasks_left: AtomicUsize::new(0),
         }
@@ -686,7 +710,7 @@ impl Master {
         lock(&self.inner.connectors.cache).len()
     }
 
-    /// The check workers (`pool`).
+    /// The check slots (`pool`).
     pub fn connector_pool(&self) -> &Pool {
         &self.inner.connectors.pool
     }
@@ -696,8 +720,25 @@ impl Master {
         lock(&self.inner.connectors.cache).bytes()
     }
 
+    /// The net of a check: its lookups under the checks' gate.
     pub(crate) fn connector_net(&self) -> Net {
-        lock(&self.inner.connectors.net).clone()
+        let mut n = lock(&self.inner.connectors.net).clone();
+        n.lookup = n.lookup.gated(self.inner.connectors.check_lookups.clone());
+        n
+    }
+
+    /// The net of a call: its lookups under the calls' gate.
+    pub(crate) fn connector_call_net(&self) -> Net {
+        let mut n = lock(&self.inner.connectors.net).clone();
+        n.lookup = n.lookup.gated(self.inner.connectors.call_lookups.clone());
+        n
+    }
+
+    /// Tests: lookups of `name` block a thread for `d`, as a system
+    /// resolver that never answers does.
+    pub fn set_connector_test_stall(&self, name: &str, d: Duration) {
+        let mut n = lock(&self.inner.connectors.net);
+        n.lookup.stall = Some((name.to_string(), d));
     }
 
     pub(crate) fn connector_attempt(&self, user: &str, id: &str) -> Result<(), &'static str> {

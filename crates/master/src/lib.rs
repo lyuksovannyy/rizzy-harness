@@ -1793,6 +1793,18 @@ impl Master {
         node_id: &str,
         build: impl FnOnce(String) -> MasterToNode,
     ) -> Result<(), CommandError> {
+        self.send_command_noted(node_id, build, None).await
+    }
+
+    /// [`Self::send_command`], recording a prompt or retry for the
+    /// connector grant (`connectors::grant`) at the moment it is handed to
+    /// the link, and taking it out again on every failure after that.
+    async fn send_command_noted(
+        &self,
+        node_id: &str,
+        build: impl FnOnce(String) -> MasterToNode,
+        note: Option<connectors::call::Note>,
+    ) -> Result<(), CommandError> {
         let req_id = new_id();
         let mut msg = build(req_id.clone());
         // A node that does not read the Plugins deny lists gets the whole
@@ -1855,6 +1867,7 @@ impl Master {
             master: self,
             req_id: &req_id,
         };
+        let noted = note.and_then(|n| self.inner.connectors.calls.note_send(&msg, n));
         let sent = {
             let nodes = lock(&self.inner.nodes);
             // A revoked node gets nothing: no prompt, context or image
@@ -1870,14 +1883,29 @@ impl Master {
                     Err(e) => Err(matches!(e, mpsc::error::TrySendError::Full(_))),
                 })
         };
+        let unsent = |m: &Master| {
+            if let Some((sid, id)) = noted {
+                m.inner.connectors.calls.unsent(sid, id);
+            }
+        };
         match sent {
             Some(Ok(())) => {}
             // The node is connected but has `TO_NODE_QUEUE` commands it
             // has not read yet: as good as not answering.
-            Some(Err(true)) => return Err(CommandError::Timeout),
-            Some(Err(false)) | None => return Err(CommandError::NodeOffline(node_id.into())),
+            Some(Err(true)) => {
+                unsent(self);
+                return Err(CommandError::Timeout);
+            }
+            Some(Err(false)) | None => {
+                unsent(self);
+                return Err(CommandError::NodeOffline(node_id.into()));
+            }
         }
-        match tokio::time::timeout(ACK_TIMEOUT, rx).await {
+        let acked = tokio::time::timeout(ACK_TIMEOUT, rx).await;
+        if !matches!(acked, Ok(Ok(Ok(())))) {
+            unsent(self);
+        }
+        match acked {
             Ok(Ok(Ok(()))) => {
                 // Checked again now the node took it (review L2-1): a level
                 // lowered between the check above and here was swept while
@@ -2361,21 +2389,18 @@ impl Master {
         // and recorded here for every turn (`connectors::call`), which
         // every call is checked against; the tools come from the master's
         // cache, never fetched on this path.
-        let may_connect = !untrusted
-            && !resume
-            && (by_owner || board::routine_turn(self, &row, routine_run.as_deref()).await);
-        let (may_connect, reading) = self.offer_connectors(&row, may_connect, &mut agent).await;
-        if !reading.is_empty() {
-            turn_context.push(format!(
-                "The tools of connector(s) {} are being read from the server for the first \
-                 time; they are offered from the person's next message.",
-                reading
-                    .iter()
-                    .map(|n| format!("`{n}`"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
+        // Someone other than the chat's owner acting here (the API token,
+        // another person's routine) marks the chat for good, before
+        // anything is sent: no connector is used in it again (PLAN.md T85).
+        // A callback is the node's own (a command a turn of this chat
+        // started), not an actor.
+        let owners = by_owner || board::routine_turn(self, &row, routine_run.as_deref()).await;
+        if !resume && !owners {
+            self.mark_foreign(&row).await?;
         }
+        let may_connect = !untrusted && !resume && owners;
+        let offered = self.offer_connectors(&row, may_connect, &mut agent).await;
+        turn_context.extend(offered.lines.iter().cloned());
         // The owner's facts, whole while they fit, each with its id
         // (`memory::turn_block`).
         let mut noted = Vec::new();
@@ -2466,14 +2491,7 @@ impl Master {
                 })),
                 owner: None,
             };
-            // Recorded before it goes, so the log's turn finds it (`connectors::grant`).
-            let send = (row.parent_id.is_none()).then(|| {
-                self.inner
-                    .connectors
-                    .calls
-                    .sent(sid, connectors::grant::What::Callback, false)
-            });
-            let sent = self
+            return self
                 .send_command(&row.node_id, move |req_id| {
                     if let MasterToNode::Callback { req_id: r, .. } = &mut msg {
                         *r = req_id;
@@ -2481,12 +2499,6 @@ impl Master {
                     msg
                 })
                 .await;
-            if let (Err(e), Some(id)) = (&sent, send)
-                && !matches!(e, CommandError::Timeout)
-            {
-                self.inner.connectors.calls.unsent(sid, id);
-            }
-            return sent;
         }
         let sent_images: Vec<String> = images.iter().map(|i| i.media_id.clone()).collect();
         let context = Some(Box::new(harness_core::backend::MasterContext {
@@ -2494,11 +2506,6 @@ impl Master {
             standing,
             unattended: false,
         }));
-        // What the node will record of this send, for `connectors::grant`.
-        let what = match retry {
-            Some(_) => connectors::grant::What::Retry,
-            None => connectors::grant::What::prompt(&text, reply.is_some()),
-        };
         let mut msg = match retry {
             Some(turn_id) => MasterToNode::Retry {
                 req_id: String::new(),
@@ -2541,27 +2548,31 @@ impl Master {
         // files nothing from a turn whose `turn_started` has a cause, which
         // the log decides, also after a restart (review S3-1).
         let before = lock(&self.inner.turn_memory).insert(sid, allowed);
-        // Recorded before it goes: the node's log may come back first.
-        let send = (row.parent_id.is_none())
-            .then(|| self.inner.connectors.calls.sent(sid, what, may_connect));
+        // Recorded at the moment it goes on the link, for a chat that has
+        // connectors (`connectors::grant`).
+        let note = offered.relevant.then_some(match row.parent_id {
+            None => connectors::call::Note::Chat { owner: offered.may },
+            Some(_) => connectors::call::Note::Child,
+        });
         let sent = self
-            .send_command(&row.node_id, move |req_id| {
-                if let MasterToNode::Prompt { req_id: r, .. }
-                | MasterToNode::Retry { req_id: r, .. } = &mut msg
-                {
-                    *r = req_id;
-                }
-                msg
-            })
+            .send_command_noted(
+                &row.node_id,
+                move |req_id| {
+                    if let MasterToNode::Prompt { req_id: r, .. }
+                    | MasterToNode::Retry { req_id: r, .. } = &mut msg
+                    {
+                        *r = req_id;
+                    }
+                    msg
+                },
+                note,
+            )
             .await;
         // Refused or never sent: no turn of this prompt runs. Not after a
         // timeout: the node may have taken it.
         if let Err(e) = &sent
             && !matches!(e, CommandError::Timeout)
         {
-            if let Some(id) = send {
-                self.inner.connectors.calls.unsent(sid, id);
-            }
             let mut tm = lock(&self.inner.turn_memory);
             match before {
                 Some(b) => tm.insert(sid, b),

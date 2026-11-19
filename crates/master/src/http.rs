@@ -390,6 +390,31 @@ async fn visible_session(
     }
 }
 
+/// [`visible_session`] for a request that changes the chat or what its
+/// turns read (a message, an answer, a decision, a setting): the ONE place
+/// such requests resolve their caller. A caller who is not the chat's owner
+/// (the API token: a person sees only their own chats) marks the chat
+/// before anything is forwarded, for good: custom connectors are not used
+/// in it again (PLAN.md T85). A mark that cannot be written refuses the
+/// request.
+async fn acting_session(
+    m: &Master,
+    who: &auth::Principal,
+    id: &str,
+) -> ApiResult<harness_store::SessionRow> {
+    let row = visible_session(m, who, id).await?;
+    if who.user_id.is_none() || row.owner_id != who.user_id {
+        m.mark_foreign(&row).await.map_err(|e| {
+            tracing::warn!(error = %e, "could not mark a chat another caller acted in");
+            ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "this action could not be recorded; nothing was sent".into(),
+            )
+        })?;
+    }
+    Ok(row)
+}
+
 /// Refuse (403) to make an agentic chat do work when its owner may no
 /// longer run its mode there: their effective level (N.10a part 2) and the
 /// node rule, checked on every action that starts work, since either can
@@ -1037,7 +1062,7 @@ async fn delete_session(
     Query(q): Query<DeleteSessionQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let who = require(&m, &headers).await?;
-    let sid = visible_session(&m, &who, &id).await?.session_id;
+    let sid = acting_session(&m, &who, &id).await?.session_id;
     // Before the chat goes, while its items still name it.
     if q.media {
         crate::media::on_chat_deleted(&m, &who, sid).await?;
@@ -1309,7 +1334,7 @@ async fn prompt(
             ),
         ));
     }
-    let row = visible_session(&m, &who, &id).await?;
+    let row = acting_session(&m, &who, &id).await?;
     // Before the uploads are taken, so a refusal leaves them for later.
     agentic_gate(&m, &who, &row).await?;
     files::check_mentions(&m, &row, &b.files)?;
@@ -1418,7 +1443,7 @@ async fn cancel(
     // Stopping work is always allowed, even before a pending password
     // change (Gate 3 review P-7): only the owner's own chat, as ever.
     let who = require_any(&m, &headers).await?;
-    let sid = visible_session(&m, &who, &id).await?.session_id;
+    let sid = acting_session(&m, &who, &id).await?.session_id;
     m.cancel(sid).await?;
     Ok(Json(json!({ "ok": true })))
 }
@@ -1435,7 +1460,7 @@ async fn set_agent(
     Json(b): Json<AgentBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let who = require(&m, &headers).await?;
-    let row = visible_session(&m, &who, &id).await?;
+    let row = acting_session(&m, &who, &id).await?;
     agentic_gate(&m, &who, &row).await?;
     m.set_agent(row.session_id, &b.agent_id).await?;
     Ok(Json(json!({ "ok": true })))
@@ -1462,7 +1487,7 @@ async fn approval(
         true => require(&m, &headers).await?,
         false => require_any(&m, &headers).await?,
     };
-    let row = visible_session(&m, &who, &id).await?;
+    let row = acting_session(&m, &who, &id).await?;
     if b.decision.allows() {
         agentic_gate(&m, &who, &row).await?;
     }
@@ -1797,7 +1822,7 @@ async fn restore_turn(
     Json(b): Json<RestoreBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let who = require(&m, &headers).await?;
-    let row = visible_session(&m, &who, &id).await?;
+    let row = acting_session(&m, &who, &id).await?;
     agentic_gate(&m, &who, &row).await?;
     m.restore_turn(row.session_id, turn, b.force, b.rewind)
         .await?;
@@ -1817,7 +1842,7 @@ async fn select_variant(
     Json(b): Json<VariantBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
     let who = require(&m, &headers).await?;
-    let row = visible_session(&m, &who, &id).await?;
+    let row = acting_session(&m, &who, &id).await?;
     agentic_gate(&m, &who, &row).await?;
     m.select_variant(row.session_id, b.group, b.message_id)
         .await?;

@@ -3229,18 +3229,23 @@ and described as the server describes them (one line, cleaned, under
 another member added the connector, and never in a sub-agent's or routine's
 chat of someone else's.
 
-- **Which turns.** Only a turn the server started with a message you sent
-  signed in as yourself, a run of your own routine, or your Retry, and only
-  while nothing else has been put into that turn: a message sent with the
-  API token, a webhook's (untrusted) message, another person's routine or a
-  background command's end that lands in the turn takes connectors away
-  from it for good (your own next message does not give them back; the
-  turn after it decides afresh). A turn started by a background command's
-  end, one that only reads messages queued while the last one ran, and
-  every turn the server did not start itself get none, and a call in one is
-  refused on the server. A sub-agent's calls count as the turn that started
-  it, and a background sub-agent's for at most an hour after that turn
-  ended. After the server restarts, the turn running then calls no more.
+- **Only in a chat in which nobody but you has acted.** Once anyone else
+  acts in a chat (a message, an approval answer or a note, a Retry, a
+  setting sent with the API token; a run of someone else's routine; a
+  webhook's event in a routine's chat), connectors are off in that chat for
+  good, also after a restart and in its sub-agents' chats: what they wrote
+  stays in the chat's history, which every later turn reads. The agent is
+  told once, in plain words, that connectors are off in this chat because
+  someone other than its owner acted in it, and that a new chat has them.
+  Reading a chat with the API token changes nothing.
+- **Which turns.** In such a chat, only a turn the server itself started
+  with your message sent signed in, a run of your own routine, or your
+  Retry of a turn that could use them. A turn started by a background
+  command's end, one that only reads messages you queued while the last one
+  ran (it is offered no connector tool), and any turn the server did not
+  start get none. A sub-agent's calls count as the turn that started it, a
+  background sub-agent's for at most an hour after that turn ended. After
+  the server restarts, the turn running then calls no more.
 - **Shared / Assigned** on the Plugins screen decides which agents get a
   connector, by name, as for a node's server; a sub-agent follows its own
   switch and its own assignment and gets the connectors of the chat's owner.
@@ -3263,13 +3268,15 @@ chat of someone else's.
   waits for a remote server. The first message after you connect has the
   tools at once; a connector nobody has checked yet is offered from your
   next message (the agent is told so). Lists are read again in the
-  background after 10 minutes and not used after an hour; a connector whose
-  background read failed is not read in the background again for 5 minutes
-  (your own Check still works).
+  background after 10 minutes and not used after an hour; when your
+  connector's background read failed, it is not read for you in the
+  background again for 5 minutes (the agent is told; your own Check still
+  works), and a list read with a token you replaced since is not used.
 - **Limits.** 30 calls per turn (its sub-agents' included, background
   ones too) and 200 per chat in any hour; 2 at once per person and per
   connector; the server makes at most 4 calls at once and refuses a fifth
-  at once ("try again in a moment"); each call ends after 2 minutes. A
+  at once ("try again in a moment"; a call refused for that, or for a token
+  that does not open, does not count); each call ends after 2 minutes. A
   stopped turn drops its call; the remote server may still have done what
   it was asked (as with a node's MCP server).
 - **The node decides.** `[mcp] master_connectors = true` (the default) in

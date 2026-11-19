@@ -21,7 +21,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use serde_json::{Value, json};
 
-use super::{ApiError, ApiResult, agentic_gate, require, visible_session};
+use super::{ApiError, ApiResult, acting_session, agentic_gate, require};
 use crate::{CommandError, Master};
 
 pub(super) fn routes() -> Router<Master> {
@@ -51,7 +51,7 @@ async fn retry(
     Path((id, turn)): Path<(String, String)>,
 ) -> ApiResult<Json<Value>> {
     let who = require(&m, &headers).await?;
-    let row = visible_session(&m, &who, &id).await?;
+    let row = acting_session(&m, &who, &id).await?;
     agentic_gate(&m, &who, &row).await?;
     if row.parent_id.is_some() {
         return Err(refused(

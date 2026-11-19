@@ -186,8 +186,8 @@ pub struct Cache {
     order: VecDeque<Key>,
     bytes: usize,
     tried: HashMap<Key, Instant>,
-    /// Connectors whose background read failed lately, and when.
-    failed: HashMap<String, Instant>,
+    /// (person, connector) whose background read failed lately, and when.
+    failed: HashMap<Key, Instant>,
 }
 
 impl Cache {
@@ -242,11 +242,7 @@ impl Cache {
     /// Whether a background read of `user`'s `connector` may start now
     /// (none started within [`FILL_GAP`]); if so it counts as started.
     pub fn may_fill(&mut self, user: &str, connector: &str) -> bool {
-        if self
-            .failed
-            .get(connector)
-            .is_some_and(|t| t.elapsed() < BACK_OFF)
-        {
+        if self.backed_off(user, connector) {
             return false;
         }
         let k = (user.to_string(), connector.to_string());
@@ -263,16 +259,52 @@ impl Cache {
         true
     }
 
-    /// A background read of `connector` failed: none of it for anyone for
+    /// Whether a background read of `user`'s `connector` failed within
     /// [`BACK_OFF`].
-    pub fn back_off(&mut self, connector: &str) {
+    pub fn backed_off(&self, user: &str, connector: &str) -> bool {
+        self.failed
+            .get(&(user.to_string(), connector.to_string()))
+            .is_some_and(|t| t.elapsed() < BACK_OFF)
+    }
+
+    /// A background read of `user`'s `connector` failed: none of it again
+    /// for [`BACK_OFF`] (the person's own Check still runs).
+    pub fn back_off(&mut self, user: &str, connector: &str) {
         if self.failed.len() >= TRIED {
             self.failed.retain(|_, t| t.elapsed() < BACK_OFF);
             if self.failed.len() >= TRIED {
                 return;
             }
         }
-        self.failed.insert(connector.to_string(), Instant::now());
+        self.failed
+            .insert((user.to_string(), connector.to_string()), Instant::now());
+    }
+
+    /// [`Self::put`] for a background read begun at `began`: not when a set
+    /// was put since (a Connect or Check meanwhile wins, with its own
+    /// token).
+    pub fn put_unless_newer(
+        &mut self,
+        user: &str,
+        connector: &str,
+        stamp: &str,
+        token: Option<String>,
+        tools: Vec<AgentTool>,
+        began: Instant,
+    ) -> bool {
+        let k = (user.to_string(), connector.to_string());
+        if self.map.get(&k).is_some_and(|s| s.at > began) {
+            return false;
+        }
+        self.put(user, connector, stamp, token, tools);
+        true
+    }
+
+    /// The token digest `user`'s set of `connector` was read with.
+    pub fn token_of(&self, user: &str, connector: &str) -> Option<Option<String>> {
+        self.map
+            .get(&(user.to_string(), connector.to_string()))
+            .map(|s| s.token.clone())
     }
 
     /// Forget one person's set of `connector`, or everyone's (`None`).
@@ -288,6 +320,7 @@ impl Cache {
         });
         self.order.retain(|(u, c)| !hit(u, c));
         self.tried.retain(|(u, c), _| !hit(u, c));
+        self.failed.retain(|(u, c), _| !hit(u, c));
     }
 
     pub fn len(&self) -> usize {

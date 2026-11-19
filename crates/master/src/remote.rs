@@ -45,6 +45,11 @@ pub struct Lookup {
     /// Tests: this name's lookup blocks a blocking thread for this long,
     /// as a system resolver that does not answer does, then fails.
     pub(crate) stall: Option<(String, Duration)>,
+    /// Lookups that may block a thread at once through this lookup (its
+    /// permit is held by the blocking thread itself, until the system
+    /// resolver returns): connector checks and calls each have one, so
+    /// names that never resolve for one never starve the other.
+    pub(crate) gate: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 impl Lookup {
@@ -54,6 +59,7 @@ impl Lookup {
             fixed: Some(Arc::new(table)),
             asked: Arc::default(),
             stall: None,
+            gate: None,
         }
     }
 
@@ -64,6 +70,12 @@ impl Lookup {
             stall: Some((name.to_string(), d)),
             ..Self::table(table)
         }
+    }
+
+    /// This lookup, at most `gate`'s permits of it blocking at once.
+    pub fn gated(mut self, gate: Arc<tokio::sync::Semaphore>) -> Self {
+        self.gate = Some(gate);
+        self
     }
 
     /// The names looked up so far.
@@ -87,16 +99,37 @@ impl reqwest::dns::Resolve for RemoteResolver {
         let public_only = self.public_only;
         Box::pin(async move {
             lock(&lookup.asked).push(host.clone());
-            if let Some((name, d)) = &lookup.stall
-                && *name == host
-            {
-                let d = *d;
-                let _ = tokio::task::spawn_blocking(move || std::thread::sleep(d)).await;
+            let stalls = lookup.stall.as_ref().is_some_and(|(n, _)| *n == host);
+            let blocks = stalls || lookup.fixed.is_none();
+            // A permit for the thread a lookup may block, held by that
+            // thread: a lookup the caller gave up on keeps it until the
+            // resolver returns.
+            let permit = match (&lookup.gate, blocks) {
+                (Some(g), true) => Some(g.clone().acquire_owned().await?),
+                _ => None,
+            };
+            if stalls {
+                let d = lookup.stall.as_ref().map(|(_, d)| *d).unwrap_or_default();
+                let _ = tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
+                    std::thread::sleep(d)
+                })
+                .await;
                 return Err(format!("{host} did not resolve").into());
             }
             let all: Vec<SocketAddr> = match &lookup.fixed {
                 Some(t) => t.get(&host).cloned().unwrap_or_default(),
-                None => tokio::net::lookup_host((host.as_str(), 0)).await?.collect(),
+                None => {
+                    let h = host.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let _permit = permit;
+                        use std::net::ToSocketAddrs as _;
+                        (h.as_str(), 0)
+                            .to_socket_addrs()
+                            .map(|a| a.collect::<Vec<_>>())
+                    })
+                    .await??
+                }
             };
             let addrs: Vec<SocketAddr> = all
                 .into_iter()
@@ -291,5 +324,56 @@ impl Attempts {
         let h = targets.entry(target.to_string()).or_default();
         prune(h, now, l.window);
         h.push_back(now);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reqwest::dns::Resolve as _;
+
+    /// Review 3 of PR 157, L8: names that never resolve for one gate (the
+    /// calls') hold at most its permits of blocking threads; another gate's
+    /// lookup (a check's) still gets a thread and answers.
+    #[test]
+    fn a_gate_keeps_hung_lookups_from_starving_another() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(2)
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let calls = Arc::new(tokio::sync::Semaphore::new(1));
+            let checks = Arc::new(tokio::sync::Semaphore::new(1));
+            let hung = RemoteResolver {
+                lookup: Lookup::stalling(HashMap::new(), "hang.test", Duration::from_secs(3))
+                    .gated(calls),
+                public_only: false,
+            };
+            let a: SocketAddr = "127.0.0.1:1".parse().unwrap();
+            let slow = RemoteResolver {
+                lookup: Lookup::stalling(
+                    HashMap::from([("ok.test".to_string(), vec![a])]),
+                    "slow.test",
+                    Duration::from_millis(100),
+                )
+                .gated(checks),
+                public_only: false,
+            };
+            // Four lookups of a name that hangs, each given up after 200 ms.
+            for _ in 0..4 {
+                let f = hung.resolve("hang.test".parse().unwrap());
+                let _ = tokio::time::timeout(Duration::from_millis(200), f).await;
+            }
+            // A check's lookup that blocks a thread for a moment answers.
+            let at = std::time::Instant::now();
+            let r = tokio::time::timeout(
+                Duration::from_secs(2),
+                slow.resolve("slow.test".parse().unwrap()),
+            )
+            .await;
+            assert!(r.is_ok(), "the check's lookup got no thread");
+            assert!(at.elapsed() < Duration::from_secs(1), "{:?}", at.elapsed());
+        });
     }
 }

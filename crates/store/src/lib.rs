@@ -1334,6 +1334,7 @@ impl Store {
         routines::on_session_deleted(&tx, &id)?;
         media::on_session_deleted(&tx, &id)?;
         session_images::on_session_deleted(&tx, &id)?;
+        custom_connectors::on_session_deleted(&tx, &id)?;
         tx.commit()?;
         Ok(n > 0)
     }

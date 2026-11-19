@@ -19,7 +19,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::links::require_bytes;
-use super::{ApiError, ApiResult, agentic_gate, query_flag, require, visible_session};
+use super::{
+    ApiError, ApiResult, acting_session, agentic_gate, query_flag, require, visible_session,
+};
 use crate::auth::Principal;
 use crate::workspaces::{self as ws, Perm};
 use crate::{CommandError, Master, artifacts, storage};
@@ -792,7 +794,7 @@ async fn session_save(
     Json(b): Json<SaveBody>,
 ) -> ApiResult<Response> {
     let who = require(&m, &headers).await?;
-    let row = visible_session(&m, &who, &id).await?;
+    let row = acting_session(&m, &who, &id).await?;
     agentic_gate(&m, &who, &row).await?;
     if row.profile.as_deref() != Some("agentic") || row.incognito {
         return Err(conflict("only agentic chats can save files as artifacts"));

@@ -47,6 +47,15 @@ CREATE TABLE IF NOT EXISTS connector_accounts (
         REFERENCES workspace_connectors(workspace_id, connector_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS connector_accounts_connector ON connector_accounts(connector_id);
+-- Chats in which someone other than their owner acted (X.35 step 2,
+-- PLAN.md T85): the API token, another person's routine, an approval
+-- answer or a note not the owner's. Set once, never cleared: connectors
+-- are never used in such a chat (its history holds what that someone
+-- wrote). A deleted chat hands its mark to its sub-agents' chats.
+CREATE TABLE IF NOT EXISTS foreign_chats (
+    session_id TEXT PRIMARY KEY,
+    marked_ms  INTEGER NOT NULL
+);
 "#;
 
 /// One connector as listed.
@@ -110,6 +119,31 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ConnectorRow> {
 }
 
 impl Store {
+    /// Mark chat `sid`: someone other than its owner acted in it (for good).
+    pub fn chat_mark_foreign(&self, sid: harness_core::SessionId) -> Result<()> {
+        self.lock().execute(
+            "INSERT OR IGNORE INTO foreign_chats (session_id, marked_ms) VALUES (?1, ?2)",
+            params![sid.to_string(), harness_core::now_ms()],
+        )?;
+        Ok(())
+    }
+
+    /// Whether connectors are never used in chat `sid`: it, or the chat it
+    /// is a sub-agent of, is marked (`chat_mark_foreign`) or holds data
+    /// from an external event (`chat_untrusted`).
+    pub fn chat_foreign(&self, sid: harness_core::SessionId) -> Result<bool> {
+        let conn = self.lock();
+        let id = sid.to_string();
+        let marked: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM foreign_chats WHERE session_id = ?1
+                OR session_id = (SELECT parent_id FROM sessions WHERE session_id = ?1))",
+            params![id],
+            |r| r.get(0),
+        )?;
+        drop(conn);
+        Ok(marked || self.chat_untrusted(sid)?)
+    }
+
     /// Add `c` to its workspace: while it has fewer than `cap`, under a
     /// name it does not have yet.
     pub fn connector_add(&self, c: &ConnectorRow, cap: u64) -> Result<ConnectorAdd> {
@@ -359,4 +393,20 @@ impl Store {
             params![user, ws, id],
         )? > 0)
     }
+}
+
+/// Called by `Store::delete_session` in its transaction: the mark goes to
+/// the chat's sub-agents' chats first, then with it.
+pub(crate) fn on_session_deleted(tx: &rusqlite::Transaction, sid: &str) -> crate::Result<()> {
+    tx.execute(
+        "INSERT OR IGNORE INTO foreign_chats (session_id, marked_ms)
+         SELECT session_id, ?2 FROM sessions
+         WHERE parent_id = ?1 AND EXISTS(SELECT 1 FROM foreign_chats WHERE session_id = ?1)",
+        params![sid, harness_core::now_ms()],
+    )?;
+    tx.execute(
+        "DELETE FROM foreign_chats WHERE session_id = ?1",
+        params![sid],
+    )?;
+    Ok(())
 }

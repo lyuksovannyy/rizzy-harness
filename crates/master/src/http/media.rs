@@ -235,7 +235,7 @@ async fn upload_origin(
             let Some(id) = q.session.as_deref().filter(|s| !s.is_empty()) else {
                 return Ok((true, None));
             };
-            let row = super::visible_session(m, who, id).await?;
+            let row = super::acting_session(m, who, id).await?;
             if row.incognito {
                 return Err(ApiError(
                     StatusCode::CONFLICT,

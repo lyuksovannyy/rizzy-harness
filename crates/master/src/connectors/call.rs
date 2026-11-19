@@ -25,7 +25,8 @@
 //! tool, and the tool one the master listed for the owner's account and
 //! the connector as it is now (its stamp). Then the owner's sealed token is
 //! opened (the key proven) and ONE `tools/call` is made by the step-1
-//! client rules, on a pool of its own ([`WORKERS`], [`PER_KEY`] per person
+//! client rules, on the one connector thread with slots of its own
+//! ([`WORKERS`] slots, never a check's), [`PER_KEY`] per person
 //! and per connector, refused when busy), within [`CALL_BYTES`] and the
 //! call's time limit ([`CALL_TIMEOUT`]), [`PER_TURN`] per granted turn and
 //! [`PER_HOUR`] per chat. The
@@ -111,13 +112,60 @@ impl State {
         lock(&self.grants).forget(sid);
     }
 
-    /// The master is about to send `what` for chat `sid` (`owner`: a turn
-    /// that may use connectors); the id for [`Self::unsent`].
-    pub fn sent(&self, sid: SessionId, what: super::grant::What, owner: bool) -> u64 {
-        lock(&self.grants).sent(sid, what, owner)
+    /// Record `msg` (a prompt or a retry, as it goes on the link) for the
+    /// grant: the send's id, to take it out again when it fails.
+    pub fn note_send(&self, msg: &MasterToNode, note: Note) -> Option<(SessionId, u64)> {
+        use super::grant::{What, input_digest};
+        let (sid, what) = match msg {
+            MasterToNode::Prompt {
+                session_id,
+                text,
+                attachments,
+                images,
+                files,
+                reply,
+                ..
+            } => {
+                let a: Vec<(&str, &str)> = attachments
+                    .iter()
+                    .map(|x| (x.name.as_str(), x.mime.as_str()))
+                    .collect();
+                let i: Vec<(&str, &str)> = images
+                    .iter()
+                    .map(|x| (x.media_id.as_str(), x.sha256.as_str()))
+                    .collect();
+                let f: Vec<&str> = files.iter().map(String::as_str).collect();
+                let reply = reply.as_ref().map(|r| r.message_id.as_str());
+                (
+                    *session_id,
+                    What::Prompt {
+                        digest: input_digest(text, reply, &a, &i, &f),
+                    },
+                )
+            }
+            MasterToNode::Retry {
+                session_id,
+                turn_id,
+                ..
+            } => (
+                *session_id,
+                What::Retry {
+                    of: turn_id.clone(),
+                },
+            ),
+            _ => return None,
+        };
+        let mut g = lock(&self.grants);
+        match note {
+            Note::Chat { owner } => Some((sid, g.sent(sid, what, owner))),
+            Note::Child => {
+                g.sent_to_child(sid);
+                None
+            }
+        }
     }
 
-    /// That send was refused or never made.
+    /// That send failed: it is gone.
     pub fn unsent(&self, sid: SessionId, id: u64) {
         lock(&self.grants).unsent(sid, id)
     }
@@ -126,12 +174,53 @@ impl State {
     pub fn on_event(&self, e: &harness_core::RawEvent) {
         if matches!(
             e.kind.as_str(),
-            "session_created" | "turn_started" | "user_message" | "queued_delivered" | "turn_ended"
+            "session_created" | "turn_started" | "user_message" | "turn_ended"
         ) {
             lock(&self.grants).on_event(e)
         }
     }
 }
+
+/// What a send means for the grant (`Master::send_command_noted`).
+#[derive(Debug, Clone, Copy)]
+pub enum Note {
+    /// A chat's own message; `owner`: one that may use connectors.
+    Chat { owner: bool },
+    /// A message to a sub-agent's chat: the turn it starts there is not a
+    /// `delegate`'s.
+    Child,
+}
+
+/// What the cache has for a person in a workspace.
+#[derive(Default)]
+struct Found {
+    list: Vec<ConnectorToolEntry>,
+    reading: Vec<String>,
+    failed: Vec<String>,
+    /// A connector the owner can use exists there.
+    usable: bool,
+}
+
+/// What [`Master::offer_connectors`] decided.
+#[derive(Debug, Default)]
+pub struct Offered {
+    /// The turn may use connectors (recorded with its send).
+    pub may: bool,
+    /// The chat's workspace has a connector the owner can use: only then is
+    /// a send recorded at all.
+    pub relevant: bool,
+    /// Lines for the turn's context, in plain words.
+    pub lines: Vec<String>,
+}
+
+/// What a call in a marked chat is answered.
+pub const FOREIGN_REFUSAL: &str = "custom connectors are off in this chat: someone other than its \
+     owner acted in it (the API token, an automation or a webhook); a new chat has them";
+
+/// The line a turn of a marked chat is told, once per chat.
+pub const FOREIGN_LINE: &str = "Custom connectors are off in this chat because someone other \
+     than its owner acted in it (the API token, an automation or a webhook). A new chat has \
+     them.";
 
 /// Whether a spec of this message may be offered `e`: its agent may use
 /// MCP tools and this one (its own `deny_tools`, `deny_mcp_servers`).
@@ -177,65 +266,143 @@ impl Master {
     /// connectors (`may`: the owner's own signed-in turn, a run of their
     /// routine or their Retry; not untrusted, not a callback) and, when it
     /// may, put on `spec` the tools any spec of the message may be offered.
-    /// Returns that decision, which the caller records with the send
-    /// (`State::sent`), and the names of connectors whose tools are not read
-    /// yet (being read now, in the background), for one line the model is
-    /// told. A node without [`CAP_CONNECTORS`] loses the list in
+    /// A chat someone other than its owner acted in ([`Master::chat_foreign`],
+    /// read from the store, failing closed) gets none, and is told why
+    /// once. A node without [`CAP_CONNECTORS`] loses the list in
     /// `send_command` (`strip`) and is told nothing here.
     pub async fn offer_connectors(
         &self,
         row: &harness_store::SessionRow,
         may: bool,
         spec: &mut AgentSpec,
-    ) -> (bool, Vec<String>) {
+    ) -> Offered {
         spec.connector_tools.clear();
-        let may = may && row.parent_id.is_none();
         let (Some(owner), Some(ws)) = (row.owner_id.as_deref(), row.workspace_id.as_deref()) else {
-            return (false, Vec::new());
+            return Offered::default();
         };
+        let root = row
+            .parent_id
+            .as_deref()
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(row.session_id);
+        let foreign = self.chat_foreign(root).await;
+        // Told only in a turn that would have had connectors.
+        let would = may && row.parent_id.is_none();
+        let may = would && !foreign;
+        let some_spec_may = std::iter::once(&*spec)
+            .chain(spec.delegates.iter())
+            .any(|s| s.allows_mcp());
+        let found = self
+            .connector_tools_for(owner, ws, may && some_spec_may)
+            .await;
+        let mut out = Offered {
+            may,
+            relevant: found.usable,
+            lines: Vec::new(),
+        };
+        if foreign {
+            if would
+                && found.usable
+                && some_spec_may
+                && lock(&self.inner.connectors.told).told(root)
+            {
+                out.lines.push(FOREIGN_LINE.into());
+            }
+            return out;
+        }
         if !may {
-            return (false, Vec::new());
+            return out;
         }
         let wanted = |e: &ConnectorToolEntry| {
             may_use(spec, e) || spec.delegates.iter().any(|d| may_use(d, e))
         };
-        let (list, waiting) = self.connector_tools_for(owner, ws).await;
         let mut text = 0usize;
-        let mut out = Vec::new();
-        for e in list.into_iter().filter(|e| wanted(e)) {
+        let mut list = Vec::new();
+        for e in found.list.into_iter().filter(|e| wanted(e)) {
             let size = e.name.len() + e.description.len() + e.schema.len();
-            if out.len() >= MAX_LISTED || text + size > harness_tools::mcp::MAX_TOOL_TEXT {
+            if list.len() >= MAX_LISTED || text + size > harness_tools::mcp::MAX_TOOL_TEXT {
                 break;
             }
             text += size;
-            out.push(e);
+            list.push(e);
         }
-        spec.connector_tools = out;
+        spec.connector_tools = list;
         if !self.node_has(&row.node_id, CAP_CONNECTORS) {
-            return (true, Vec::new());
+            return out;
         }
         // Only connectors some spec of the message could use.
-        let reading = waiting
-            .into_iter()
-            .filter(|name| {
-                let probe = format!("{}{name}__x", harness_core::agent::MCP_PREFIX);
-                std::iter::once(&*spec)
-                    .chain(spec.delegates.iter())
-                    .any(|s| s.allows_mcp() && s.allows_tool(&probe))
+        let usable = |name: &String| {
+            let probe = format!("{}{name}__x", harness_core::agent::MCP_PREFIX);
+            std::iter::once(&*spec)
+                .chain(spec.delegates.iter())
+                .any(|s| s.allows_mcp() && s.allows_tool(&probe))
+        };
+        let names = |v: Vec<String>| {
+            v.iter()
+                .map(|n| format!("`{n}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let reading: Vec<String> = found.reading.into_iter().filter(usable).collect();
+        if !reading.is_empty() {
+            out.lines.push(format!(
+                "The tools of connector(s) {} are being read from the server; they are offered \
+                 from the person's next message.",
+                names(reading)
+            ));
+        }
+        let failed: Vec<String> = found.failed.into_iter().filter(usable).collect();
+        if !failed.is_empty() {
+            out.lines.push(format!(
+                "The tools of connector(s) {} could not be read from the server lately; they \
+                 are not offered now (the person can Check them on the Plugins screen).",
+                names(failed)
+            ));
+        }
+        out
+    }
+
+    /// Whether connectors are never used in chat `sid` (or the chat it is a
+    /// sub-agent of): someone other than its owner acted in it, or it holds
+    /// data from an external event. A store that cannot be read says yes.
+    pub async fn chat_foreign(&self, sid: SessionId) -> bool {
+        self.inner
+            .mirror
+            .call(move |s| s.chat_foreign(sid))
+            .await
+            .unwrap_or(true)
+    }
+
+    /// Mark chat `row` (and the chat it is a sub-agent of): someone other
+    /// than its owner acts in it now. Before the action is forwarded; an
+    /// error refuses the action.
+    pub async fn mark_foreign(
+        &self,
+        row: &harness_store::SessionRow,
+    ) -> Result<(), harness_store::StoreError> {
+        let parent = row
+            .parent_id
+            .as_deref()
+            .and_then(|p| p.parse::<SessionId>().ok());
+        let sid = row.session_id;
+        self.inner
+            .mirror
+            .call(move |s| {
+                s.chat_mark_foreign(sid)?;
+                if let Some(p) = parent {
+                    s.chat_mark_foreign(p)?;
+                }
+                Ok::<_, harness_store::StoreError>(())
             })
-            .collect();
-        (true, reading)
+            .await
     }
 
     /// The tools `owner` can be offered of workspace `ws`'s connectors now,
-    /// from the cache, and the names of those not read yet. Reads that are
-    /// missing or old start in the background; nothing here waits for a
-    /// remote server.
-    async fn connector_tools_for(
-        &self,
-        owner: &str,
-        ws: &str,
-    ) -> (Vec<ConnectorToolEntry>, Vec<String>) {
+    /// from the cache; the names of those being read and of those whose
+    /// background read failed lately. With `fill`, reads that are missing
+    /// or old start in the background; nothing here waits for a remote
+    /// server.
+    async fn connector_tools_for(&self, owner: &str, ws: &str, fill: bool) -> Found {
         let (o, w) = (owner.to_string(), ws.to_string());
         let read = self
             .inner
@@ -247,15 +414,16 @@ impl Master {
                 ))
             })
             .await;
+        let mut found = Found::default();
         let (rows, accounts) = match read {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(error = %e, "could not read a workspace's connectors");
-                return (Vec::new(), Vec::new());
+                return found;
             }
         };
         if rows.is_empty() {
-            return (Vec::new(), Vec::new());
+            return found;
         }
         // The key file must open tokens now: with none, or a wrong one, no
         // token connector is offered.
@@ -266,38 +434,45 @@ impl Master {
             },
             None => false,
         };
-        let mut list = Vec::new();
-        let mut waiting = Vec::new();
         for r in rows {
             if r.auth == "token"
                 && (!keys_ok || !accounts.iter().any(|a| a.connector_id == r.connector_id))
             {
                 continue;
             }
+            found.usable = true;
+            if !fill {
+                continue;
+            }
             let stamp = super::stamp(&r);
-            let cached = {
+            let (cached, backed_off) = {
                 let c = lock(&self.inner.connectors.tools);
-                c.get(owner, &r.connector_id, &stamp)
-                    .map(|(age, t)| (age, t.iter().map(|t| t.entry.clone()).collect::<Vec<_>>()))
+                (
+                    c.get(owner, &r.connector_id, &stamp).map(|(age, t)| {
+                        (age, t.iter().map(|t| t.entry.clone()).collect::<Vec<_>>())
+                    }),
+                    c.backed_off(owner, &r.connector_id),
+                )
             };
             match cached {
                 Some((age, entries)) => {
                     if age >= REFRESH_AFTER {
                         self.fill_connector_tools(owner, &r);
                     }
-                    list.extend(entries);
+                    found.list.extend(entries);
                 }
+                None if backed_off => found.failed.push(r.name.clone()),
                 None => {
                     self.fill_connector_tools(owner, &r);
-                    waiting.push(r.name.clone());
+                    found.reading.push(r.name.clone());
                 }
             }
         }
-        (list, waiting)
+        found
     }
 
     /// Read `owner`'s tools of connector `r` in the background (on the
-    /// check workers, as a check of theirs, under their own budget of
+    /// connector thread, as a check of theirs, under their own budget of
     /// background reads), at most once per `tools::FILL_GAP`. A busy pool
     /// or a failure leaves the cache as it was; the next turn tries again.
     pub(crate) fn fill_connector_tools(&self, owner: &str, r: &ConnectorRow) {
@@ -305,6 +480,7 @@ impl Master {
             return;
         }
         let (m, owner, r) = (self.clone(), owner.to_string(), r.clone());
+        let began = std::time::Instant::now();
         tokio::spawn(async move {
             // A budget of their own (review of PR 157, L9): failed
             // background reads never use up the one a person's Connect and
@@ -354,19 +530,24 @@ impl Master {
                         && super::stamp(&now) == super::stamp(&r)
                         && same_token
                     {
-                        lock(&m.inner.connectors.tools).put(
+                        // Not over a set a Connect or a Check put since this
+                        // read began (review 3, L7: the window between the
+                        // token's digest and the put).
+                        if lock(&m.inner.connectors.tools).put_unless_newer(
                             &owner,
                             &r.connector_id,
                             &super::stamp(&r),
                             bound,
                             checked.tools,
-                        );
-                        m.connector_offer_put(&owner, &r.connector_id, offer);
+                            began,
+                        ) {
+                            m.connector_offer_put(&owner, &r.connector_id, offer);
+                        }
                     }
                 }
                 Err(_) => {
                     m.inner.connectors.fill_attempts.failed(&r.connector_id);
-                    lock(&m.inner.connectors.tools).back_off(&r.connector_id);
+                    lock(&m.inner.connectors.tools).back_off(&owner, &r.connector_id);
                 }
             }
         });
@@ -614,6 +795,11 @@ pub async fn answer(
         ));
     }
     let (_row, top) = crate::recall::sessions(m, node_id, sid).await?;
+    // The chat's mark, from the store (failing closed): someone other than
+    // its owner acted in it, so nothing of the owner's account is used.
+    if m.chat_foreign(top.session_id).await {
+        return Err(FOREIGN_REFUSAL.into());
+    }
     let (Some(ws), Some(owner)) = (top.workspace_id.clone(), top.owner_id.clone()) else {
         return Err("connectors are offered only in a workspace's chats".into());
     };
@@ -681,13 +867,35 @@ pub async fn answer(
             harness_core::event::shown_name(tool)
         )
     })?;
-    // Counted under the granted turn and the chat's hour.
+    // Counted under the granted turn and the chat's hour; a call this
+    // server does not make for a reason of its own (a token that does not
+    // open, no room) gives the count back (review 3, L5).
     lock(&st.grants).take(&key)?;
+    let give_back = || lock(&st.grants).give_back(&key);
     let token = match c.auth.as_str() {
-        "token" => Some(m.owner_token(&owner, &c).await?.0),
+        "token" => match m.owner_token(&owner, &c).await {
+            // A set read with another token than the one stored now is not
+            // used (review 3, L7): it is read again.
+            Ok((h, now)) => {
+                let read_with = lock(&m.inner.connectors.tools).token_of(&owner, &c.connector_id);
+                if read_with != Some(Some(now)) {
+                    give_back();
+                    m.connector_tools_forget(Some(&owner), &c.connector_id);
+                    return Err(format!(
+                        "the tools of connector `{connector}` were read with a token that was \
+                         replaced since; they are read again for the next message"
+                    ));
+                }
+                Some(h)
+            }
+            Err(e) => {
+                give_back();
+                return Err(e);
+            }
+        },
         _ => None,
     };
-    let mut net = m.connector_net();
+    let mut net = m.connector_call_net();
     net.timeout = *lock(&st.timeout);
     let sent = &st.sent;
     sent.fetch_add(1, Ordering::SeqCst);
@@ -711,6 +919,7 @@ pub async fn answer(
         )),
         Err(b) => {
             sent.fetch_sub(1, Ordering::SeqCst);
+            give_back();
             Err(match b {
                 Busy::Person => format!(
                     "the chat's owner has {PER_KEY} connector calls running; wait for one to end"

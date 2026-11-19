@@ -22,7 +22,7 @@ use axum::{Json, Router};
 use harness_protocol::{CAP_BACKGROUND, StopBackgroundBy};
 use serde_json::{Value, json};
 
-use super::{ApiError, ApiResult, require_any, visible_session};
+use super::{ApiError, ApiResult, acting_session, require_any};
 use crate::{CommandError, Master};
 
 pub(super) fn routes() -> Router<Master> {
@@ -73,7 +73,7 @@ async fn stop(
     bg: Option<String>,
 ) -> ApiResult<Json<Value>> {
     let who = require_any(m, headers).await?;
-    let row = visible_session(m, &who, id).await?;
+    let row = acting_session(m, &who, id).await?;
     if let Some(b) = &bg
         && !is_bg_id(b)
     {
