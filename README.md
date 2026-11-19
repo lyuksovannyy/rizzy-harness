@@ -3083,9 +3083,46 @@ with bad tokens; checks that work do not use it up, but a run of failures
 the window moves on. The forge's answer is read as untrusted text (at most 64 KiB, 10
 seconds; its error text is never shown).
 
-**In this version a connection is stored and checked only.** Nothing lists
-repositories, clones or pushes with it, and no token is sent to a node or a
-model; that comes next (ADOPTION_PLAN X.27 steps 2 to 4).
+**Listing your repositories.** The server can list, one page at a time,
+the repositories a connection's account can reach (its own, its
+organisations', and those it collaborates on), newest update first, with a
+search word (`GET /api/connections/{id}/repositories?q=…&page=…`; the
+Project popup will use it when cloning arrives, there is no screen for it
+yet). Only you can list with your connection. What goes to the forge: your
+token in its header, the page number and the search word as one query
+parameter: GitHub `GET /user/repos`; it has no search on its side, so with a
+search word each page reads 100 of your repositories, newest update first,
+and keeps the names that contain the word (the word never goes to GitHub;
+page 1 searches your 100 most recently updated, page 2 the next 100, up to
+1,000);
+GitLab `GET /projects?membership=true&search=…&search_namespaces=true`
+(a group's name matches too); Gitea and Forgejo
+`GET /repos/search?uid=<your account id>&q=…`. The server passes on, for each
+repository, only the forge's id, `owner/name`, private or public, the default
+branch, a short description, the last update and whether the forge says you
+may push; no link the forge sends is followed or shown, and an entry whose
+name or fields do not have the expected shape is left out and counted. 30
+repositories per page, at most 10 pages (with a search word you narrow
+further). At most 20 calls to forges per person per minute; the same request
+again within a minute is answered from memory, without calling the forge. A
+forge that refuses the token (HTTP 401 or 403) gets a message telling you to
+replace the token, and one that limits your account (its own HTTP 429) says
+so; the connection is kept, and the same answer comes for a minute without
+asking the forge again. Another refusal (such as HTTP 422 for a search word)
+is remembered for a minute for that word and page only, so a different
+search is asked at once. None of these counts against the forge host.
+Failed listings that mean the host itself is failing (it cannot be reached,
+does not answer in time, answers HTTP 5xx or a redirect, or sends an answer
+the server cannot read) count against the same budget as failed token checks
+(60 per host in 10 minutes from this server, everyone together); while it is
+used up, listings from that host are refused with a message saying listing
+is paused. At most two listings run on the server at once and one per
+person; another gets "busy, try again" (or "your earlier listing is still
+running") at once. A forge host the admin removed from the list is not
+called.
+
+**In this version nothing clones or pushes,** and no token is sent to a node
+or a model; that comes next (ADOPTION_PLAN X.27 steps 3 and 4).
 
 **Where the token is kept.** In `master.db`, sealed with AES-256-GCM under a
 key in `<data>/keys/secrets.key` (32 random bytes, mode 0600 in a 0700 folder,
