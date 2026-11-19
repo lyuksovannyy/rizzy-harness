@@ -25,7 +25,13 @@ async fn a_stuck_lookup_does_not_pile_up_threads() {
         lookup: harness_master::remote::Lookup::table(fake.table()),
         allow_private: true,
         roots: vec![fake.cert_der.clone()],
-        timeout: Duration::from_secs(5),
+        // The two plain checks below only start the pool's workers, so that
+        // the thread count is settled before the stuck lookups: their limit
+        // is not under test, and 5 s was not enough for a TLS call on a
+        // loaded machine (one failure at `c.result.is_ok()` beside a web
+        // build, 2026-11-19; alone the file passes every time). The stuck
+        // checks set their own 800 ms limit.
+        timeout: Duration::from_secs(30),
     };
     for i in 0..2 {
         let c = connectors::check(
