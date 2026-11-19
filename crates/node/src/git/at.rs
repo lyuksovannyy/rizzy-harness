@@ -68,7 +68,12 @@ fn restored_perm(dir: &OwnedFd, name: &OsStr, exec: bool) -> u32 {
     match nix::sys::stat::fstatat(dir, name, AtFlags::AT_SYMLINK_NOFOLLOW) {
         Ok(st) if SFlag::from_bits_truncate(st.st_mode) & SFlag::S_IFMT == SFlag::S_IFREG => {
             let old = st.st_mode & 0o777;
-            (old & 0o666) | if exec { ((old & 0o444) >> 2) | (old & 0o111) } else { 0 }
+            (old & 0o666)
+                | if exec {
+                    ((old & 0o444) >> 2) | (old & 0o111)
+                } else {
+                    0
+                }
         }
         Ok(_) | Err(Errno::ENOENT) => default,
         Err(_) => default & 0o700,
@@ -404,7 +409,12 @@ mod tests {
     /// mode change; everything else still fails the write.
     #[test]
     fn only_a_filesystem_that_takes_no_mode_change_lets_fchmod_fail() {
-        for e in [Errno::EOPNOTSUPP, Errno::ENOTSUP, Errno::ENOSYS, Errno::EPERM] {
+        for e in [
+            Errno::EOPNOTSUPP,
+            Errno::ENOTSUP,
+            Errno::ENOSYS,
+            Errno::EPERM,
+        ] {
             assert!(fchmod_is_ignorable(e), "{e}");
         }
         for e in [
