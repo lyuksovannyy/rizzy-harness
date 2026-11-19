@@ -867,7 +867,10 @@ fn running_clones_count_against_the_limit_and_become_their_project() {
     assert!(!s.dismiss_clone("c1", "someone else").unwrap());
     assert!(s.dismiss_clone("c1", "u1").unwrap());
     s.start_clone(&clone_in("c5", &w, "ada/c"), 9).unwrap();
-    assert!(!s.dismiss_clone("c5", "u1").unwrap(), "a running clone was dismissed");
+    assert!(
+        !s.dismiss_clone("c5", "u1").unwrap(),
+        "a running clone was dismissed"
+    );
     assert_eq!(s.fail_running_clones("restarted").unwrap(), 1);
     assert_eq!(
         s.clone_of("c5").unwrap().unwrap().failed.as_deref(),
