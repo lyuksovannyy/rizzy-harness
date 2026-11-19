@@ -5723,8 +5723,8 @@ fn restore_notice(
     }
     if !plan.unsaved.is_empty() {
         s.push_str(&format!(
-            " These files were deleted and were not saved (they are in no checkpoint, and \
-             a file replaced the folder that held them): {}.",
+            " These files were deleted or written over and were not saved (they are in no \
+             checkpoint: git ignores them, say): {}.",
             plan.unsaved.listed()
         ));
     }

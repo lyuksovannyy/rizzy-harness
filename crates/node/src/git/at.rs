@@ -16,7 +16,7 @@
 
 use std::ffi::OsStr;
 use std::os::fd::OwnedFd;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use nix::errno::Errno;
 use nix::fcntl::{AtFlags, OFlag};
@@ -107,6 +107,43 @@ impl Top {
             }
         }
         Ok(Some((cur, last)))
+    }
+
+    /// What a write (`write`) or a delete of `rel` would remove that is not
+    /// a folder, walked as [`Self::write_from`] and [`Self::delete`] walk
+    /// (no link followed): the file or link at `rel`, and for a write also
+    /// a file or link where a folder on the way to it goes (the first one;
+    /// nothing beyond it is reached). A folder at `rel` is not named here.
+    pub(super) fn in_the_way(&self, rel: &Path, write: bool) -> Result<Vec<PathBuf>, String> {
+        let comps: Vec<&OsStr> = rel
+            .components()
+            .map(|c| match c {
+                Component::Normal(n) => Ok(n),
+                _ => Err(format!("{}: not a plain path", rel.display())),
+            })
+            .collect::<Result<_, _>>()?;
+        let Some((last, dirs)) = comps.split_last() else {
+            return Err(format!("{}: empty path", rel.display()));
+        };
+        let mut cur = nix::unistd::dup(&self.fd).map_err(|e| err("dup", rel, e))?;
+        let mut at = PathBuf::new();
+        for d in dirs {
+            at.push(d);
+            match nix::fcntl::openat(&cur, *d, dir_flags(), Mode::empty()) {
+                Ok(fd) => cur = fd,
+                Err(Errno::ENOENT) => return Ok(Vec::new()),
+                // A file or a link where a folder goes: a write replaces it,
+                // a delete finds the path already gone.
+                Err(Errno::ENOTDIR | Errno::ELOOP) => {
+                    return Ok(if write { vec![at] } else { Vec::new() });
+                }
+                Err(e) => return Err(err("cannot look at", rel, e)),
+            }
+        }
+        match kind(&cur, last).map_err(|e| err("cannot look at", rel, e))? {
+            None | Some(SFlag::S_IFDIR) => Ok(Vec::new()),
+            Some(_) => Ok(vec![rel.to_path_buf()]),
+        }
     }
 
     /// Delete the file or link at `rel`. Already gone (missing, a parent no
