@@ -9,6 +9,10 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Test constructors (`PromptMsg::test`, …). Off by default; only dev-dependencies turn it on.
+test-support = []
+
 [dependencies]
 harness-core.workspace = true
 serde.workspace = true

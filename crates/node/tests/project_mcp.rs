@@ -23,7 +23,8 @@ use harness_node::exec::ExecOffers;
 use harness_node::policy::{McpPolicy, ProjectServers};
 use harness_node::{NodeConfig, NodeLink, NodePolicy, NodeRuntime};
 use harness_protocol::{
-    CAP_PROJECT_MCP, MasterToNode, NodeToMaster, ProjectMcpList, ProjectMcpRequest, ProjectMcpState,
+    CAP_PROJECT_MCP, MasterToNode, NodeToMaster, ProjectMcpList, ProjectMcpRequest,
+    ProjectMcpState, PromptMsg,
 };
 use harness_store::{Durability, Store};
 use harness_tools::mcp::ServerConfig;
@@ -309,24 +310,11 @@ impl Node {
     async fn run(&mut self, sid: SessionId, text: &str) -> Vec<harness_core::RawEvent> {
         self.link
             .to_node
-            .try_send(MasterToNode::Prompt {
+            .try_send(MasterToNode::Prompt(PromptMsg {
                 req_id: format!("p-{sid}"),
-                session_id: sid,
-                text: text.into(),
-                agent: None,
-                attachments: vec![],
-                compare: vec![],
-                reply: None,
-                savings: None,
-                context: None,
-                images: vec![],
-                agent_named: false,
-                files: vec![],
                 owner: self.owners.get(&sid).cloned().flatten(),
-                identity: None,
-                peers: vec![],
-                tags: vec![],
-            })
+                ..PromptMsg::test(sid, text)
+            }))
             .unwrap();
         self.ack(&format!("p-{sid}")).await.unwrap();
         let by = std::time::Instant::now() + Duration::from_secs(30);
@@ -801,24 +789,11 @@ async fn a_malformed_owner_on_a_turn_is_refused() {
     let e = {
         n.link
             .to_node
-            .try_send(MasterToNode::Prompt {
+            .try_send(MasterToNode::Prompt(PromptMsg {
                 req_id: "malformed".into(),
-                session_id: sid,
-                text: "x".into(),
-                agent: None,
-                attachments: vec![],
-                compare: vec![],
-                reply: None,
-                savings: None,
-                context: None,
-                images: vec![],
-                agent_named: false,
-                files: vec![],
                 owner: Some("alice\nINFO forged".into()),
-                identity: None,
-                peers: vec![],
-                tags: vec![],
-            })
+                ..PromptMsg::test(sid, "x")
+            }))
             .unwrap();
         n.ack("malformed").await.unwrap_err()
     };

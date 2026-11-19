@@ -119,7 +119,7 @@ mod tests {
     use super::*;
     use harness_core::SessionId;
     use harness_core::agent::{AgentSpec, ToolSelection};
-    use harness_protocol::MasterToNode;
+    use harness_protocol::{MasterToNode, PromptMsg};
 
     fn spec(id: &str, prompt: usize) -> AgentSpec {
         AgentSpec {
@@ -148,7 +148,7 @@ mod tests {
     }
 
     fn prompt(peers: Vec<AgentSpec>) -> MasterToNode {
-        MasterToNode::Prompt {
+        MasterToNode::Prompt(PromptMsg {
             req_id: "r".into(),
             session_id: SessionId::new(),
             text: "hi".into(),
@@ -165,7 +165,7 @@ mod tests {
             identity: None,
             peers,
             tags: vec![],
-        }
+        })
     }
 
     /// The link's guard, with four specs: an agent may be at most 64 KiB

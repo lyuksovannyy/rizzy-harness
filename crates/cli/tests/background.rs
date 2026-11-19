@@ -924,24 +924,12 @@ impl Node {
 
     fn prompt(&mut self, text: &str) {
         self.n += 1;
-        self.send(harness_protocol::MasterToNode::Prompt {
-            savings: None,
-            context: None,
-            reply: None,
-            agent: None,
-            attachments: vec![],
-            compare: vec![],
-            req_id: format!("p{}", self.n),
-            session_id: self.sid,
-            text: text.into(),
-            images: vec![],
-            agent_named: false,
-            files: vec![],
-            owner: None,
-            identity: None,
-            peers: vec![],
-            tags: vec![],
-        });
+        self.send(harness_protocol::MasterToNode::Prompt(
+            harness_protocol::PromptMsg {
+                req_id: format!("p{}", self.n),
+                ..harness_protocol::PromptMsg::test(self.sid, text)
+            },
+        ));
     }
 
     fn kinds(&self) -> Vec<EventKind> {

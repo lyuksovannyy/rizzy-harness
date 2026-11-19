@@ -18,7 +18,7 @@ use harness_core::connectors::{ConnectorAnswer, ConnectorToolEntry};
 use harness_core::event::{EventKind, ToolCallRef};
 use harness_core::policy::{ApprovalMode, Decision};
 use harness_node::{NodeConfig, NodeLink, NodePolicy, NodeRuntime};
-use harness_protocol::{CAP_CONNECTORS, MasterToNode, NodeToMaster};
+use harness_protocol::{CAP_CONNECTORS, MasterToNode, NodeToMaster, PromptMsg};
 use harness_store::{Durability, Store};
 use serde_json::{Value, json};
 
@@ -267,24 +267,10 @@ impl Node {
         let mut seen = Seen::default();
         self.link
             .to_node
-            .try_send(MasterToNode::Prompt {
-                savings: None,
-                context: None,
-                reply: None,
+            .try_send(MasterToNode::Prompt(PromptMsg {
                 agent: Some(agent),
-                attachments: vec![],
-                compare: vec![],
-                req_id: "p".into(),
-                session_id: sid,
-                text: text.into(),
-                images: vec![],
-                agent_named: false,
-                files: vec![],
-                owner: None,
-                identity: None,
-                peers: vec![],
-                tags: vec![],
-            })
+                ..PromptMsg::test(sid, text)
+            }))
             .unwrap();
         let by = std::time::Instant::now() + Duration::from_secs(30);
         while self.ended(sid) == before {

@@ -14,7 +14,7 @@ use harness_core::event::EventKind;
 use harness_core::policy::ApprovalMode;
 use harness_core::recall::{HitKind, RecallHit, RecallIn};
 use harness_node::{NodeConfig, NodeLink, NodePolicy, NodeRuntime};
-use harness_protocol::{CAP_RECALL, MasterToNode, NodeToMaster};
+use harness_protocol::{CAP_RECALL, MasterToNode, NodeToMaster, PromptMsg};
 use harness_store::{Durability, Store};
 
 struct Node {
@@ -115,24 +115,7 @@ impl Node {
     async fn prompt(&mut self, sid: SessionId, text: &str) {
         self.link
             .to_node
-            .try_send(MasterToNode::Prompt {
-                req_id: "p".into(),
-                session_id: sid,
-                text: text.into(),
-                agent: None,
-                attachments: vec![],
-                compare: vec![],
-                reply: None,
-                savings: None,
-                context: None,
-                images: vec![],
-                agent_named: false,
-                files: vec![],
-                owner: None,
-                identity: None,
-                peers: vec![],
-                tags: vec![],
-            })
+            .try_send(MasterToNode::Prompt(PromptMsg::test(sid, text)))
             .unwrap();
         self.ack().await;
     }

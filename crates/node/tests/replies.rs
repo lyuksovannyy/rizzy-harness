@@ -8,7 +8,7 @@ use harness_agent_native::{NativeBackend, NativeConfig, mock::Mock};
 use harness_core::SessionId;
 use harness_core::event::*;
 use harness_node::{NodeConfig, NodeLink, NodePolicy, NodeRuntime};
-use harness_protocol::{MasterToNode, NodeToMaster};
+use harness_protocol::{MasterToNode, NodeToMaster, PromptMsg};
 use harness_store::Store;
 use serde_json::{Value, json};
 
@@ -79,24 +79,11 @@ impl Chat {
     }
 
     fn prompt(&self, req_id: &str, text: &str, reply: Option<FormReply>) {
-        self.send(MasterToNode::Prompt {
+        self.send(MasterToNode::Prompt(PromptMsg {
             req_id: req_id.into(),
-            session_id: self.sid,
-            text: text.into(),
-            agent: None,
-            attachments: vec![],
-            compare: vec![],
-            savings: None,
-            context: None,
             reply,
-            images: vec![],
-            agent_named: false,
-            files: vec![],
-            owner: None,
-            identity: None,
-            peers: vec![],
-            tags: vec![],
-        });
+            ..PromptMsg::test(self.sid, text)
+        }));
     }
 
     /// The answer to `req_id`, keeping the events that arrive meanwhile.

@@ -24,7 +24,7 @@ use harness_master::config::Config;
 use harness_master::providers::ProviderRuntime;
 use harness_master::{CreateSpec, Master, router};
 use harness_node::NodeLink;
-use harness_protocol::{CAP_ARTIFACTS, MasterToNode, NodeToMaster, PROTOCOL_VERSION};
+use harness_protocol::{CAP_ARTIFACTS, MasterToNode, NodeToMaster, PROTOCOL_VERSION, PromptMsg};
 use harness_store::artifacts::VersionRow;
 use harness_store::{Durability, Store};
 use reqwest::{Method, StatusCode};
@@ -756,11 +756,11 @@ fn prompt_context(node: &Fake, sid: SessionId) -> Option<String> {
         .iter()
         .rev()
         .find_map(|m| match m {
-            MasterToNode::Prompt {
+            MasterToNode::Prompt(PromptMsg {
                 session_id,
                 context,
                 ..
-            } if *session_id == sid => {
+            }) if *session_id == sid => {
                 Some(context.as_ref().map(|c| c.joined()).unwrap_or_default())
             }
             _ => None,

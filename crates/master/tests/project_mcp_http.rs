@@ -20,7 +20,7 @@ use harness_master::{Master, router};
 use harness_node::NodeLink;
 use harness_protocol::{
     CAP_PROJECT_MCP, MasterToNode, NodeToMaster, PROTOCOL_VERSION, ProjectMcpEntry, ProjectMcpEnv,
-    ProjectMcpList, ProjectMcpRequest, ProjectMcpState,
+    ProjectMcpList, ProjectMcpRequest, ProjectMcpState, PromptMsg,
 };
 use harness_store::Store;
 use reqwest::{Method, StatusCode};
@@ -473,7 +473,7 @@ async fn a_turn_carries_the_chats_owner() {
         .unwrap()
         .iter()
         .filter_map(|m| match m {
-            MasterToNode::Prompt { owner, .. } => Some(owner.clone()),
+            MasterToNode::Prompt(PromptMsg { owner, .. }) => Some(owner.clone()),
             _ => None,
         })
         .collect();

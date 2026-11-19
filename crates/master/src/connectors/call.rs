@@ -44,7 +44,7 @@ use harness_core::agent::{AgentSpec, mcp_server_of};
 use harness_core::connectors::{
     ConnectorAnswer, ConnectorToolEntry, MAX_ARGUMENT_BYTES, MAX_LISTED,
 };
-use harness_protocol::{CAP_CONNECTORS, MasterToNode};
+use harness_protocol::{CAP_CONNECTORS, CallbackMsg, MasterToNode, PromptMsg, RetryMsg};
 use harness_store::custom_connectors::ConnectorRow;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -117,7 +117,7 @@ impl State {
     pub fn note_send(&self, msg: &MasterToNode, note: Note) -> Option<(SessionId, u64)> {
         use super::grant::{What, input_digest};
         let (sid, what) = match msg {
-            MasterToNode::Prompt {
+            MasterToNode::Prompt(PromptMsg {
                 session_id,
                 text,
                 attachments,
@@ -125,7 +125,7 @@ impl State {
                 files,
                 reply,
                 ..
-            } => {
+            }) => {
                 let a: Vec<(&str, &str)> = attachments
                     .iter()
                     .map(|x| (x.name.as_str(), x.mime.as_str()))
@@ -143,11 +143,11 @@ impl State {
                     },
                 )
             }
-            MasterToNode::Retry {
+            MasterToNode::Retry(RetryMsg {
                 session_id,
                 turn_id,
                 ..
-            } => (
+            }) => (
                 *session_id,
                 What::Retry {
                     of: turn_id.clone(),
@@ -232,9 +232,9 @@ fn may_use(s: &AgentSpec, e: &ConnectorToolEntry) -> bool {
 pub fn strip(msg: &mut MasterToNode) {
     let spec = match msg {
         MasterToNode::Create { agent, .. }
-        | MasterToNode::Prompt { agent, .. }
-        | MasterToNode::Callback { agent, .. }
-        | MasterToNode::Retry { agent, .. } => agent.as_mut(),
+        | MasterToNode::Prompt(PromptMsg { agent, .. })
+        | MasterToNode::Callback(CallbackMsg { agent, .. })
+        | MasterToNode::Retry(RetryMsg { agent, .. }) => agent.as_mut(),
         MasterToNode::SetAgent { agent, .. } => Some(agent),
         _ => None,
     };

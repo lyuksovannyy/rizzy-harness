@@ -23,7 +23,7 @@ use std::time::Duration;
 use harness_core::SessionId;
 use harness_core::event::{EventKind, Profile};
 use harness_core::policy::ExecMode;
-use harness_protocol::{MasterToNode, NodeToMaster};
+use harness_protocol::{MasterToNode, NodeToMaster, PromptMsg};
 
 const EXE: &str = env!("CARGO_BIN_EXE_rizzy-harness");
 
@@ -192,24 +192,7 @@ impl Node {
     async fn run(&mut self, sid: SessionId, text: &str) -> Vec<String> {
         self.link
             .to_node
-            .try_send(MasterToNode::Prompt {
-                req_id: "p".into(),
-                session_id: sid,
-                text: text.into(),
-                agent: None,
-                attachments: vec![],
-                compare: vec![],
-                reply: None,
-                savings: None,
-                context: None,
-                images: vec![],
-                agent_named: false,
-                files: vec![],
-                owner: None,
-                identity: None,
-                peers: vec![],
-                tags: vec![],
-            })
+            .try_send(MasterToNode::Prompt(PromptMsg::test(sid, text)))
             .unwrap();
         self.ack().await.unwrap();
         let by = std::time::Instant::now() + Duration::from_secs(30);

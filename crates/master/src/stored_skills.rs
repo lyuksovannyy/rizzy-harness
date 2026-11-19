@@ -35,7 +35,7 @@ use std::sync::{Arc, Mutex};
 use harness_core::SessionId;
 use harness_core::agent::AgentSpec;
 use harness_core::skills::{StoredScope, StoredSkillEntry};
-use harness_protocol::{CAP_STORED_SKILLS, MasterToNode};
+use harness_protocol::{CAP_STORED_SKILLS, CallbackMsg, MasterToNode, PromptMsg, RetryMsg};
 use harness_store::stored_skills::{SkillCaps, SkillScope, StoredSkillRow};
 
 use crate::{Master, lock};
@@ -137,9 +137,9 @@ pub fn layered(
 pub fn strip(msg: &mut MasterToNode) {
     let spec = match msg {
         MasterToNode::Create { agent, .. }
-        | MasterToNode::Prompt { agent, .. }
-        | MasterToNode::Callback { agent, .. }
-        | MasterToNode::Retry { agent, .. } => agent.as_mut(),
+        | MasterToNode::Prompt(PromptMsg { agent, .. })
+        | MasterToNode::Callback(CallbackMsg { agent, .. })
+        | MasterToNode::Retry(RetryMsg { agent, .. }) => agent.as_mut(),
         MasterToNode::SetAgent { agent, .. } => Some(agent),
         _ => None,
     };

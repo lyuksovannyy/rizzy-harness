@@ -16,7 +16,7 @@ use harness_core::{RawEvent, Secret, SessionId};
 use harness_master::auth::{Auth, Claim};
 use harness_master::{Master, PromptOpts, router};
 use harness_node::NodeLink;
-use harness_protocol::{MasterToNode, NodeToMaster, PROTOCOL_VERSION};
+use harness_protocol::{MasterToNode, NodeToMaster, PROTOCOL_VERSION, PromptMsg};
 use harness_store::Store;
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
@@ -331,9 +331,9 @@ async fn start_turn(t: &T, sid: SessionId, turn: &str) {
         .iter()
         .rev()
         .find_map(|m| match m {
-            MasterToNode::Prompt {
+            MasterToNode::Prompt(PromptMsg {
                 session_id, agent, ..
-            } if *session_id == sid => agent.as_ref().map(|a| a.agent_ref()),
+            }) if *session_id == sid => agent.as_ref().map(|a| a.agent_ref()),
             _ => None,
         })
         .expect("no prompt for the session");
@@ -438,7 +438,7 @@ fn last_spec(t: &T) -> harness_core::agent::AgentSpec {
         .iter()
         .rev()
         .find_map(|m| match m {
-            MasterToNode::Prompt { agent, .. } => agent.clone(),
+            MasterToNode::Prompt(PromptMsg { agent, .. }) => agent.clone(),
             _ => None,
         })
         .unwrap()

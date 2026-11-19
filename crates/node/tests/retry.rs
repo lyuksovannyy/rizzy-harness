@@ -24,7 +24,7 @@ use harness_core::event::*;
 use harness_core::policy::ApprovalMode;
 use harness_core::{RawEvent, SessionId};
 use harness_node::{NodeConfig, NodeLink, NodePolicy, NodeRuntime};
-use harness_protocol::{ChatImage, MasterToNode, NodeToMaster, RETRY_REFUSED};
+use harness_protocol::{ChatImage, MasterToNode, NodeToMaster, PromptMsg, RETRY_REFUSED, RetryMsg};
 use harness_store::{Durability, Store};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -326,24 +326,13 @@ fn prompt_with(
     files: Vec<String>,
 ) {
     link.to_node
-        .try_send(MasterToNode::Prompt {
-            savings: None,
-            context: None,
-            reply: None,
-            agent: None,
+        .try_send(MasterToNode::Prompt(PromptMsg {
             attachments,
-            compare: vec![],
             req_id: req_id.into(),
-            session_id: sid,
-            text: text.into(),
             images,
             files,
-            agent_named: false,
-            owner: None,
-            identity: None,
-            peers: vec![],
-            tags: vec![],
-        })
+            ..PromptMsg::test(sid, text)
+        }))
         .unwrap();
 }
 
@@ -353,17 +342,10 @@ fn prompt(link: &NodeLink, sid: SessionId, req_id: &str, text: &str) {
 
 fn retry(link: &NodeLink, sid: SessionId, req_id: &str, turn: &str) {
     link.to_node
-        .try_send(MasterToNode::Retry {
+        .try_send(MasterToNode::Retry(RetryMsg {
             req_id: req_id.into(),
-            session_id: sid,
-            turn_id: turn.into(),
-            agent: None,
-            savings: None,
-            context: None,
-            agent_named: false,
-            owner: None,
-            identity: None,
-        })
+            ..RetryMsg::test(sid, turn)
+        }))
         .unwrap();
 }
 

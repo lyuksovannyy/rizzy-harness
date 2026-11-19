@@ -14,7 +14,7 @@ use harness_agent_native::{NativeBackend, NativeConfig, mock::Mock};
 use harness_core::event::*;
 use harness_core::{RawEvent, SessionId};
 use harness_node::{NodeConfig, NodeLink, NodePolicy, NodeRuntime};
-use harness_protocol::{MasterToNode, NodeToMaster};
+use harness_protocol::{MasterToNode, NodeToMaster, PromptMsg};
 use harness_store::{Durability, Store};
 use serde_json::json;
 
@@ -152,24 +152,10 @@ impl Rig {
     /// Send a prompt whose turn makes one tool call per step.
     fn script(&mut self, sid: SessionId, steps: serde_json::Value) {
         self.n += 1;
-        self.send(MasterToNode::Prompt {
-            savings: None,
-            context: None,
-            reply: None,
-            agent: None,
-            attachments: vec![],
-            compare: vec![],
+        self.send(MasterToNode::Prompt(PromptMsg {
             req_id: format!("p{}", self.n),
-            session_id: sid,
-            text: format!("script: {steps}"),
-            images: vec![],
-            agent_named: false,
-            files: vec![],
-            owner: None,
-            identity: None,
-            peers: vec![],
-            tags: vec![],
-        });
+            ..PromptMsg::test(sid, format!("script: {steps}"))
+        }));
     }
 
     /// A whole turn of `steps`; returns its id.

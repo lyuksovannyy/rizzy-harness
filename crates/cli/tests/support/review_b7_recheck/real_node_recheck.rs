@@ -16,7 +16,7 @@ use harness_core::SessionId;
 use harness_core::event::*;
 use harness_core::policy::ApprovalMode;
 use harness_node::{NodeConfig, NodePolicy, NodeRuntime};
-use harness_protocol::{MasterToNode, NodeToMaster};
+use harness_protocol::{MasterToNode, NodeToMaster, PromptMsg};
 use harness_store::{Durability, Store};
 use tokio::sync::mpsc;
 
@@ -200,24 +200,7 @@ impl Node {
             })
             .await;
         }
-        self.send(MasterToNode::Prompt {
-            savings: None,
-            context: None,
-            reply: None,
-            agent: None,
-            attachments: vec![],
-            compare: vec![],
-            req_id: format!("prompt-{name}"),
-            session_id: sid,
-            text: text.into(),
-            images: vec![],
-            agent_named: false,
-            files: vec![],
-            owner: None,
-            identity: None,
-    peers: vec![],
-    tags: vec![],
-        });
+        self.send(MasterToNode::Prompt(PromptMsg { req_id: format!("prompt-{name}"), ..PromptMsg::test(sid, text) }));
         (sid, cwd)
     }
 

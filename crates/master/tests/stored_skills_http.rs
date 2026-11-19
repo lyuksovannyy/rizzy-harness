@@ -18,7 +18,7 @@ use harness_master::auth::{Auth, Claim};
 use harness_master::{Master, PromptOpts, router};
 use harness_node::NodeLink;
 use harness_protocol::{
-    CAP_PLUGIN_ACCESS, CAP_STORED_SKILLS, MasterToNode, NodeToMaster, PROTOCOL_VERSION,
+    CAP_PLUGIN_ACCESS, CAP_STORED_SKILLS, MasterToNode, NodeToMaster, PROTOCOL_VERSION, PromptMsg,
 };
 use harness_store::Store;
 use reqwest::{Method, StatusCode};
@@ -156,7 +156,7 @@ impl Fake {
             .iter()
             .rev()
             .find_map(|m| match m {
-                MasterToNode::Prompt { agent, .. } => agent.clone(),
+                MasterToNode::Prompt(PromptMsg { agent, .. }) => agent.clone(),
                 _ => None,
             })
             .expect("a prompt")
@@ -947,14 +947,14 @@ async fn the_list_travels_once_and_fits_the_link() {
     let ws = team(&t, &alex, "Team").await;
     let sid = chat(&t, &alex, &ws).await;
     turn_as(&t, sid, "teamlead").await;
-    let (before, _) = command_bytes(&t, |m| matches!(m, MasterToNode::Prompt { .. }));
+    let (before, _) = command_bytes(&t, |m| matches!(m, MasterToNode::Prompt(_)));
     let desc: String = "\u{1F600}".repeat(1024);
     for i in 0..75 {
         write(&t, &alex, &ws, "workspace", &format!("w{i}"), &desc, "b").await;
         write(&t, &alex, &ws, "server", &format!("s{i}"), &desc, "b").await;
     }
     let spec = turn_as(&t, sid, "teamlead").await;
-    let (lead, _) = command_bytes(&t, |m| matches!(m, MasterToNode::Prompt { .. }));
+    let (lead, _) = command_bytes(&t, |m| matches!(m, MasterToNode::Prompt(_)));
     assert!(spec.delegates.len() >= 4, "{}", spec.delegates.len());
     assert_eq!(spec.stored_skills.len(), 150);
     assert!(spec.delegates.iter().all(|d| d.stored_skills.is_empty()));

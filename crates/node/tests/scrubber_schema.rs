@@ -20,7 +20,7 @@ use harness_core::policy::ApprovalMode;
 use harness_core::view::SessionView;
 use harness_core::{RawEvent, SessionId};
 use harness_node::{NodeConfig, NodeLink, NodePolicy, NodeRuntime};
-use harness_protocol::{MasterToNode, NodeToMaster};
+use harness_protocol::{MasterToNode, NodeToMaster, PromptMsg};
 use harness_store::{Durability, Store};
 use harness_tools::mcp::ServerConfig;
 
@@ -255,24 +255,11 @@ impl Node {
     async fn run(&mut self, sid: SessionId, owner: &str, text: &str) {
         self.link
             .to_node
-            .try_send(MasterToNode::Prompt {
-                savings: None,
-                context: None,
-                reply: None,
-                agent: None,
-                attachments: vec![],
-                compare: vec![],
+            .try_send(MasterToNode::Prompt(PromptMsg {
                 req_id: harness_core::new_id(),
-                session_id: sid,
-                text: text.into(),
-                images: vec![],
-                agent_named: false,
-                files: vec![],
                 owner: Some(owner.into()),
-                identity: None,
-                peers: vec![],
-                tags: vec![],
-            })
+                ..PromptMsg::test(sid, text)
+            }))
             .unwrap();
         loop {
             if let NodeToMaster::Event { event } = self.recv().await

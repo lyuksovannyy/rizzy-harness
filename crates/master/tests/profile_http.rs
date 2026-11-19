@@ -17,7 +17,7 @@ use harness_master::config::Config;
 use harness_master::providers::ProviderRuntime;
 use harness_master::{Master, PromptOpts, router};
 use harness_node::NodeLink;
-use harness_protocol::{MasterToNode, NodeToMaster, PROTOCOL_VERSION};
+use harness_protocol::{CallbackMsg, MasterToNode, NodeToMaster, PROTOCOL_VERSION, PromptMsg};
 use harness_store::Store;
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
@@ -249,7 +249,7 @@ fn last_prompt(t: &T) -> (Vec<StandingPart>, String) {
     seen.iter()
         .rev()
         .find_map(|m| match m {
-            MasterToNode::Prompt { context, .. } => Some((
+            MasterToNode::Prompt(PromptMsg { context, .. }) => Some((
                 context
                     .as_ref()
                     .map(|c| c.standing.clone())
@@ -1340,7 +1340,7 @@ async fn framing_holds_and_settings_are_the_owners() {
         .await
         .unwrap();
     let cb = t.node.lock().unwrap()[n..].iter().find_map(|m| match m {
-        MasterToNode::Callback { context, .. } => Some(
+        MasterToNode::Callback(CallbackMsg { context, .. }) => Some(
             context
                 .as_ref()
                 .map(|c| c.standing.clone())
@@ -1491,11 +1491,11 @@ fn last_identity(t: &T, sid: SessionId) -> Option<harness_core::identity::Commit
         .iter()
         .rev()
         .find_map(|m| match m {
-            MasterToNode::Prompt {
+            MasterToNode::Prompt(PromptMsg {
                 session_id,
                 identity,
                 ..
-            } if *session_id == sid => Some(identity.clone()),
+            }) if *session_id == sid => Some(identity.clone()),
             _ => None,
         })
         .expect("no prompt reached the node")

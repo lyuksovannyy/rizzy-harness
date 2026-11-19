@@ -28,7 +28,7 @@ use harness_core::{RawEvent, Secret, SessionId};
 use harness_master::auth::{Auth, Claim};
 use harness_master::{Master, router};
 use harness_node::NodeLink;
-use harness_protocol::{MasterToNode, NodeToMaster, PROTOCOL_VERSION};
+use harness_protocol::{CallbackMsg, MasterToNode, NodeToMaster, PROTOCOL_VERSION, PromptMsg};
 use harness_store::Store;
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
@@ -69,9 +69,9 @@ impl Fake {
             .unwrap()
             .iter()
             .filter_map(|m| match m {
-                MasterToNode::Callback {
+                MasterToNode::Callback(CallbackMsg {
                     session_id, bg_ids, ..
-                } => Some((*session_id, bg_ids.clone())),
+                }) => Some((*session_id, bg_ids.clone())),
                 _ => None,
             })
             .collect()
@@ -177,7 +177,7 @@ fn fake_with(
                         send(&mut seqs, *session_id, created, now);
                     }
                     let mut error = None;
-                    if let MasterToNode::Callback { session_id, bg_ids, .. } = &msg {
+                    if let MasterToNode::Callback(CallbackMsg { session_id, bg_ids, .. }) = &msg {
                         error = no.lock().unwrap().clone();
                         if error.is_none() {
                             send(&mut seqs, *session_id, EventKind::TurnStarted(TurnStarted {
@@ -196,7 +196,7 @@ fn fake_with(
                             }
                         }
                     }
-                    if let MasterToNode::Prompt { session_id, text, .. } = &msg {
+                    if let MasterToNode::Prompt(PromptMsg { session_id, text, .. }) = &msg {
                         error = no_prompt.lock().unwrap().clone();
                         if error.is_none() {
                             send(&mut seqs, *session_id, EventKind::TurnStarted(TurnStarted {
@@ -1425,7 +1425,7 @@ async fn a_callback_turn_gets_the_standing_parts_and_no_grant() {
         .unwrap()
         .iter()
         .find_map(|m| match m {
-            MasterToNode::Callback { agent, context, .. } => {
+            MasterToNode::Callback(CallbackMsg { agent, context, .. }) => {
                 Some((agent.clone().unwrap(), context.clone().unwrap()))
             }
             _ => None,

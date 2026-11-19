@@ -18,7 +18,7 @@ use harness_core::policy::ApprovalMode;
 use harness_core::view::{Item, SessionView};
 use harness_core::{RawEvent, SessionId};
 use harness_node::{NodeConfig, NodeLink, NodePolicy, NodeRuntime};
-use harness_protocol::{COMPACT_TURN_RUNNING, COMPACTING, MasterToNode, NodeToMaster};
+use harness_protocol::{COMPACT_TURN_RUNNING, COMPACTING, MasterToNode, NodeToMaster, PromptMsg};
 use harness_store::{Durability, Store};
 use tokio::sync::mpsc;
 
@@ -210,24 +210,10 @@ async fn create(n: &mut Node) -> SessionId {
 
 fn prompt(link: &NodeLink, sid: SessionId, req_id: &str, text: String) {
     link.to_node
-        .try_send(MasterToNode::Prompt {
-            savings: None,
-            context: None,
-            reply: None,
-            agent: None,
-            attachments: vec![],
-            compare: vec![],
+        .try_send(MasterToNode::Prompt(PromptMsg {
             req_id: req_id.into(),
-            session_id: sid,
-            text,
-            images: vec![],
-            files: vec![],
-            agent_named: false,
-            owner: None,
-            identity: None,
-            peers: vec![],
-            tags: vec![],
-        })
+            ..PromptMsg::test(sid, text)
+        }))
         .unwrap();
 }
 

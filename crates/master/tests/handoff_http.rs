@@ -23,7 +23,7 @@ use harness_master::config::{Config, ModelConfig};
 use harness_master::providers::ProviderRuntime;
 use harness_master::{Master, router};
 use harness_node::NodeLink;
-use harness_protocol::{CAP_HANDOFF, MasterToNode, NodeToMaster, PROTOCOL_VERSION};
+use harness_protocol::{CAP_HANDOFF, MasterToNode, NodeToMaster, PROTOCOL_VERSION, PromptMsg};
 use harness_store::Store;
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
@@ -59,7 +59,7 @@ impl Fake {
     fn earlier(&self) -> Option<String> {
         let seen = self.seen.lock().unwrap();
         let context = seen.iter().rev().find_map(|m| match m {
-            MasterToNode::Prompt { context, .. } => Some(context.clone()),
+            MasterToNode::Prompt(PromptMsg { context, .. }) => Some(context.clone()),
             _ => None,
         })??;
         context
@@ -137,7 +137,7 @@ fn fake_with(id: &str, silent: bool) -> (NodeLink, Fake) {
                             no_callbacks: false,
                         }), now);
                     }
-                    if let MasterToNode::Prompt { session_id, text, .. } = &msg {
+                    if let MasterToNode::Prompt(PromptMsg { session_id, text, .. }) = &msg {
                         for k in turn("p", text, now) {
                             send(&mut seqs, *session_id, k, now);
                         }

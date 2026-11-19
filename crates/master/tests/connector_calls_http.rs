@@ -27,7 +27,7 @@ use harness_master::sealed::Sealer;
 use harness_master::{Master, PromptOpts, router};
 use harness_node::NodeLink;
 use harness_protocol::{
-    CAP_CONNECTORS, CAP_PLUGIN_ACCESS, MasterToNode, NodeToMaster, PROTOCOL_VERSION,
+    CAP_CONNECTORS, CAP_PLUGIN_ACCESS, MasterToNode, NodeToMaster, PROTOCOL_VERSION, PromptMsg,
 };
 use harness_store::{Durability, Store};
 use reqwest::{Method, StatusCode};
@@ -221,7 +221,7 @@ impl Node {
             .iter()
             .rev()
             .find_map(|m| match m {
-                MasterToNode::Prompt { agent, .. } => agent.clone(),
+                MasterToNode::Prompt(PromptMsg { agent, .. }) => agent.clone(),
                 _ => None,
             })
             .expect("a prompt")
@@ -234,7 +234,7 @@ impl Node {
             .iter()
             .rev()
             .find_map(|m| match m {
-                MasterToNode::Prompt { context, .. } => Some(
+                MasterToNode::Prompt(PromptMsg { context, .. }) => Some(
                     context
                         .as_ref()
                         .and_then(|c| c.turn.clone())
@@ -1361,7 +1361,7 @@ fn frame_of_last_prompt(t: &T) -> usize {
     let m = seen
         .iter()
         .rev()
-        .find(|m| matches!(m, MasterToNode::Prompt { .. }))
+        .find(|m| matches!(m, MasterToNode::Prompt(_)))
         .unwrap();
     serde_json::to_vec(m).unwrap().len()
 }
@@ -2533,7 +2533,9 @@ fn context_of_last_prompt(t: &T) -> String {
         .iter()
         .rev()
         .find_map(|m| match m {
-            MasterToNode::Prompt { context, .. } => Some(serde_json::to_string(context).unwrap()),
+            MasterToNode::Prompt(PromptMsg { context, .. }) => {
+                Some(serde_json::to_string(context).unwrap())
+            }
             _ => None,
         })
         .expect("a prompt")
@@ -3080,7 +3082,7 @@ async fn an_action_in_a_chain_too_deep_to_mark_is_refused() {
     assert!(!st.is_success(), "{st} {v}");
     let sent = t.chat.seen.lock().unwrap()[before..]
         .iter()
-        .any(|m| matches!(m, MasterToNode::Prompt { .. }));
+        .any(|m| matches!(m, MasterToNode::Prompt(_)));
     assert!(!sent, "nothing went to the node");
     // The root's own turn still has its connectors: nothing reached it.
     owner_prompt(&t, &alex, root, "mine").await;
@@ -3123,7 +3125,7 @@ async fn a_send_acked_before_its_caller_gave_up_keeps_its_grant() {
         req_id = t.chat.seen.lock().unwrap()[before..]
             .iter()
             .find_map(|m| match m {
-                MasterToNode::Prompt { req_id, .. } => Some(req_id.clone()),
+                MasterToNode::Prompt(PromptMsg { req_id, .. }) => Some(req_id.clone()),
                 _ => None,
             });
         if req_id.is_some() {
@@ -3190,10 +3192,12 @@ async fn a_mention_turn_is_granted_nothing_and_takes_no_send() {
         match seen
             .iter()
             .rev()
-            .find(|m| matches!(m, MasterToNode::Prompt { .. }))
+            .find(|m| matches!(m, MasterToNode::Prompt(_)))
             .unwrap()
         {
-            MasterToNode::Prompt { agent, peers, .. } => (agent.clone().unwrap(), peers.clone()),
+            MasterToNode::Prompt(PromptMsg { agent, peers, .. }) => {
+                (agent.clone().unwrap(), peers.clone())
+            }
             _ => unreachable!(),
         }
     };

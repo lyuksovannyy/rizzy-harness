@@ -17,7 +17,7 @@ use harness_core::SessionId;
 use harness_core::event::EventKind;
 use harness_core::policy::{ApprovalMode, Decision};
 use harness_node::{NodeConfig, NodeLink, NodePolicy, NodeRuntime};
-use harness_protocol::{MasterToNode, NodeToMaster};
+use harness_protocol::{MasterToNode, NodeToMaster, PromptMsg};
 use harness_store::{Durability, Store};
 use harness_tools::mcp::ServerConfig;
 
@@ -187,24 +187,10 @@ impl Node {
     ) -> Vec<harness_core::RawEvent> {
         self.link
             .to_node
-            .try_send(MasterToNode::Prompt {
-                req_id: "p".into(),
-                session_id: sid,
-                text: text.into(),
+            .try_send(MasterToNode::Prompt(PromptMsg {
                 agent,
-                attachments: vec![],
-                compare: vec![],
-                reply: None,
-                savings: None,
-                context: None,
-                images: vec![],
-                agent_named: false,
-                files: vec![],
-                owner: None,
-                identity: None,
-                peers: vec![],
-                tags: vec![],
-            })
+                ..PromptMsg::test(sid, text)
+            }))
             .unwrap();
         self.ack().await.unwrap();
         let by = std::time::Instant::now() + Duration::from_secs(30);

@@ -19,6 +19,7 @@ use harness_master::{Master, PromptOpts, router};
 use harness_node::NodeLink;
 use harness_protocol::{
     AnnouncedSkill, CAP_PLUGIN_ACCESS, MasterToNode, NodePlugins, NodeToMaster, PROTOCOL_VERSION,
+    PromptMsg,
 };
 use harness_store::Store;
 use reqwest::{Method, StatusCode};
@@ -95,7 +96,7 @@ impl Fake {
             .iter()
             .rev()
             .find_map(|m| match m {
-                MasterToNode::Prompt { agent, .. } => agent.clone(),
+                MasterToNode::Prompt(PromptMsg { agent, .. }) => agent.clone(),
                 _ => None,
             })
             .expect("a prompt")

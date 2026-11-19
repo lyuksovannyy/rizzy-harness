@@ -15,7 +15,7 @@ use harness_core::policy::ApprovalMode;
 use harness_core::view::{Item, SessionView};
 use harness_core::{RawEvent, SessionId};
 use harness_node::{NodeConfig, NodeLink, NodePolicy, NodeRuntime};
-use harness_protocol::{MasterToNode, NodeToMaster};
+use harness_protocol::{MasterToNode, NodeToMaster, PromptMsg};
 use harness_store::{Durability, Store};
 use tokio::sync::{Notify, mpsc};
 
@@ -253,24 +253,13 @@ impl N {
         peers: &[&AgentSpec],
     ) -> Result<(), String> {
         let req_id = self.req();
-        self.send(MasterToNode::Prompt {
+        self.send(MasterToNode::Prompt(PromptMsg {
             req_id: req_id.clone(),
-            session_id: sid,
-            text: text.into(),
             agent: Some(first.clone()),
-            attachments: vec![],
-            compare: vec![],
-            reply: None,
-            savings: None,
-            context: None,
-            images: vec![],
             agent_named: true,
-            files: vec![],
-            owner: None,
-            identity: None,
             peers: peers.iter().map(|a| (*a).clone()).collect(),
-            tags: vec![],
-        });
+            ..PromptMsg::test(sid, text)
+        }));
         self.ack(&req_id).await
     }
 
@@ -285,24 +274,14 @@ impl N {
         context: harness_core::backend::MasterContext,
     ) -> Result<(), String> {
         let req_id = self.req();
-        self.send(MasterToNode::Prompt {
+        self.send(MasterToNode::Prompt(PromptMsg {
             req_id: req_id.clone(),
-            session_id: sid,
-            text: text.into(),
             agent: Some(first.clone()),
-            attachments: vec![],
-            compare: vec![],
-            reply: None,
-            savings: None,
             context: Some(Box::new(context)),
-            images: vec![],
             agent_named: true,
-            files: vec![],
-            owner: None,
-            identity: None,
             peers: peers.iter().map(|a| (*a).clone()).collect(),
-            tags: vec![],
-        });
+            ..PromptMsg::test(sid, text)
+        }));
         self.ack(&req_id).await
     }
 
@@ -317,24 +296,14 @@ impl N {
         tags: &[&str],
     ) -> Result<(), String> {
         let req_id = self.req();
-        self.send(MasterToNode::Prompt {
+        self.send(MasterToNode::Prompt(PromptMsg {
             req_id: req_id.clone(),
-            session_id: sid,
-            text: text.into(),
             agent: Some(first.clone()),
-            attachments: vec![],
-            compare: vec![],
-            reply: None,
-            savings: None,
-            context: None,
-            images: vec![],
             agent_named: true,
-            files: vec![],
-            owner: None,
-            identity: None,
             peers: peers.iter().map(|a| (*a).clone()).collect(),
             tags: tags.iter().map(|t| t.to_string()).collect(),
-        });
+            ..PromptMsg::test(sid, text)
+        }));
         self.ack(&req_id).await
     }
 

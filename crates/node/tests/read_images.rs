@@ -10,7 +10,7 @@ use harness_core::SessionId;
 use harness_core::event::{EventKind, Profile};
 use harness_core::policy::ApprovalMode;
 use harness_node::{NodeConfig, NodeLink, NodePolicy, NodeRuntime};
-use harness_protocol::{MasterToNode, NodeToMaster};
+use harness_protocol::{MasterToNode, NodeToMaster, PromptMsg};
 use harness_store::{Durability, Store};
 
 fn png(pad: usize) -> Vec<u8> {
@@ -165,24 +165,13 @@ async fn the_chat_keeps_the_bytes_the_log_a_reference_and_delete_removes_them() 
     })
     .await
     .unwrap();
-    n.send(MasterToNode::Prompt {
-        savings: None,
-        context: None,
-        reply: None,
+    n.send(MasterToNode::Prompt(PromptMsg {
         agent: Some(agent()),
-        attachments: vec![],
-        compare: vec![],
-        req_id: "p".into(),
-        session_id: sid,
-        text: r#"script: [{"tool": "read", "input": {"path": "screen.png"}}]"#.into(),
-        images: vec![],
-        agent_named: false,
-        files: vec![],
-        owner: None,
-        identity: None,
-        peers: vec![],
-        tags: vec![],
-    })
+        ..PromptMsg::test(
+            sid,
+            r#"script: [{"tool": "read", "input": {"path": "screen.png"}}]"#,
+        )
+    }))
     .await
     .unwrap();
     n.drain_turn(sid).await;

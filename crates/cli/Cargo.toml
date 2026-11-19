@@ -45,7 +45,8 @@ flate2.workspace = true
 futures.workspace = true
 harness-core.workspace = true
 harness-node = { workspace = true, features = ["testing"] }
-harness-protocol.workspace = true
+# The tests build turn messages with `PromptMsg::test` and friends.
+harness-protocol = { workspace = true, features = ["test-support"] }
 reqwest.workspace = true
 rusqlite.workspace = true
 serde_json.workspace = true

@@ -22,7 +22,7 @@ use harness_master::auth::{Auth, Claim};
 use harness_master::routines::{self, Clock};
 use harness_master::{Master, router};
 use harness_node::NodeLink;
-use harness_protocol::{MasterToNode, NodeToMaster, PROTOCOL_VERSION};
+use harness_protocol::{MasterToNode, NodeToMaster, PROTOCOL_VERSION, PromptMsg};
 use harness_store::Store;
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
@@ -89,7 +89,7 @@ fn stopping_node() -> (NodeLink, Fake) {
                         "node_id": "master", "profile": "chat", "approval_mode": "ask"});
                     node.emit(*session_id, "session_created", payload).await;
                 }
-                MasterToNode::Prompt { session_id, .. } => {
+                MasterToNode::Prompt(PromptMsg { session_id, .. }) => {
                     *node.prompts.lock().unwrap() += 1;
                     then = Some(*session_id);
                 }

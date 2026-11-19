@@ -15,7 +15,7 @@ use harness_agent_native::{NativeBackend, NativeConfig, mock::Mock};
 use harness_core::event::*;
 use harness_core::{RawEvent, SessionId};
 use harness_node::{NodeConfig, NodeLink, NodePolicy, NodeRuntime};
-use harness_protocol::{MasterToNode, NodeToMaster};
+use harness_protocol::{MasterToNode, NodeToMaster, PromptMsg};
 use harness_store::{Durability, Store};
 
 pub struct Rig {
@@ -263,24 +263,10 @@ impl Rig {
     /// Send the prompt of one agent turn running `cmd`; does not wait.
     pub fn start_turn(&mut self, cmd: &str) {
         self.n += 1;
-        self.send(MasterToNode::Prompt {
-            savings: None,
-            context: None,
-            reply: None,
-            agent: None,
-            attachments: vec![],
-            compare: vec![],
+        self.send(MasterToNode::Prompt(PromptMsg {
             req_id: format!("p{}", self.n),
-            session_id: self.sid,
-            text: format!("run: {cmd}"),
-            images: vec![],
-            agent_named: false,
-            files: vec![],
-            owner: None,
-            identity: None,
-            peers: vec![],
-            tags: vec![],
-        });
+            ..PromptMsg::test(self.sid, format!("run: {cmd}"))
+        }));
     }
 
     /// One turn of a lead agent that may delegate to `dev` (a `bash` and
@@ -372,24 +358,12 @@ impl Rig {
     pub async fn lead_turn_in(&mut self, sid: SessionId, text: &str) -> (Turn, Vec<String>) {
         let mark = self.seen.len();
         self.n += 1;
-        self.send(MasterToNode::Prompt {
-            savings: None,
+        self.send(MasterToNode::Prompt(PromptMsg {
             context: self.lead_context.clone().map(Box::new),
-            reply: None,
             agent: Some(self.lead()),
-            attachments: vec![],
-            compare: vec![],
             req_id: format!("p{}", self.n),
-            session_id: sid,
-            text: text.into(),
-            images: vec![],
-            agent_named: false,
-            files: vec![],
-            owner: None,
-            identity: None,
-            peers: vec![],
-            tags: vec![],
-        });
+            ..PromptMsg::test(sid, text)
+        }));
         loop {
             self.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
             if self.seen.last().is_some_and(|e| e.session_id == sid) {

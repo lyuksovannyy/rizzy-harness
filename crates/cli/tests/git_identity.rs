@@ -24,7 +24,7 @@ use harness_core::agent::{AgentSpec, AllTools, ToolSelection};
 use harness_core::event::{EventKind, Profile};
 use harness_core::identity::CommitIdentity;
 use harness_core::policy::{ApprovalMode, ExecMode};
-use harness_protocol::{MasterToNode, NodeToMaster};
+use harness_protocol::{MasterToNode, NodeToMaster, PromptMsg};
 use serde_json::json;
 
 const EXE: &str = env!("CARGO_BIN_EXE_rizzy-harness");
@@ -279,24 +279,12 @@ impl Node {
         let from = self.rt.store().events_after(sid, 0, 10_000).unwrap().len();
         self.link
             .to_node
-            .try_send(MasterToNode::Prompt {
-                req_id: "p".into(),
-                session_id: sid,
-                text: text.into(),
+            .try_send(MasterToNode::Prompt(PromptMsg {
                 agent,
-                attachments: vec![],
-                compare: vec![],
-                reply: None,
-                savings: None,
-                context: None,
-                images: vec![],
-                agent_named: false,
-                files: vec![],
                 owner: owner.map(Into::into),
                 identity,
-                peers: vec![],
-                tags: vec![],
-            })
+                ..PromptMsg::test(sid, text)
+            }))
             .unwrap();
         self.ack().await.unwrap();
         let by = std::time::Instant::now() + Duration::from_secs(90);
@@ -933,24 +921,11 @@ async fn four_chats_planting_fifos_do_not_starve_the_runtime() {
     for sid in &chats {
         n.link
             .to_node
-            .try_send(MasterToNode::Prompt {
-                req_id: "p".into(),
-                session_id: *sid,
-                text: COMMIT.into(),
-                agent: None,
-                attachments: vec![],
-                compare: vec![],
-                reply: None,
-                savings: None,
-                context: None,
-                images: vec![],
-                agent_named: false,
-                files: vec![],
+            .try_send(MasterToNode::Prompt(PromptMsg {
                 owner: Some("u-alex".into()),
                 identity: Some(alex()),
-                peers: vec![],
-                tags: vec![],
-            })
+                ..PromptMsg::test(*sid, COMMIT)
+            }))
             .unwrap();
     }
     for _ in 0..4 {

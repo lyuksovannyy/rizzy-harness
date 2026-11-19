@@ -34,6 +34,8 @@ tracing.workspace = true
 walkdir.workspace = true
 
 [dev-dependencies]
+# The tests build turn messages with `PromptMsg::test` and friends.
+harness-protocol = { workspace = true, features = ["test-support"] }
 harness-agent-native.workspace = true
 # The built-in agents' definitions in `tests/personal_subagents.rs` (X.31).
 harness-agents.workspace = true

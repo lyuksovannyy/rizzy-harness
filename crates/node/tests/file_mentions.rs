@@ -12,7 +12,7 @@ use harness_core::SessionId;
 use harness_core::event::{EventKind, MentionState, Profile};
 use harness_core::policy::ApprovalMode;
 use harness_node::{NodeConfig, NodeLink, NodePolicy, NodeRuntime};
-use harness_protocol::{MasterToNode, NodeToMaster};
+use harness_protocol::{MasterToNode, NodeToMaster, PromptMsg};
 use harness_store::{Durability, Store};
 
 /// The mock, keeping the last user text of every request.
@@ -149,24 +149,10 @@ impl Node {
     }
 
     fn prompt(sid: SessionId, text: &str, files: &[&str]) -> MasterToNode {
-        MasterToNode::Prompt {
-            savings: None,
-            context: None,
-            reply: None,
-            agent: None,
-            attachments: vec![],
-            compare: vec![],
-            req_id: "p".into(),
-            session_id: sid,
-            text: text.into(),
-            images: vec![],
-            agent_named: false,
+        MasterToNode::Prompt(PromptMsg {
             files: files.iter().map(|s| s.to_string()).collect(),
-            owner: None,
-            identity: None,
-            peers: vec![],
-            tags: vec![],
-        }
+            ..PromptMsg::test(sid, text)
+        })
     }
 
     /// Prompt and wait for the turn's end.

@@ -16,7 +16,7 @@ use harness_core::policy::{ApprovalMode, Decision, ExecMode};
 use harness_core::view::SessionView;
 use harness_node::exec::ExecOffers;
 use harness_node::{NodeConfig, NodeLink, NodePolicy, NodeRuntime};
-use harness_protocol::{MasterToNode, NodeToMaster};
+use harness_protocol::{MasterToNode, NodeToMaster, PromptMsg};
 use harness_store::{Durability, Store};
 use serde_json::{Value, json};
 
@@ -246,24 +246,11 @@ fn prompt(
     text: &str,
     agent: Option<harness_core::agent::AgentSpec>,
 ) -> MasterToNode {
-    MasterToNode::Prompt {
+    MasterToNode::Prompt(PromptMsg {
         req_id: format!("p-{sid}-{}", harness_core::new_id()),
-        session_id: sid,
-        text: text.into(),
         agent,
-        attachments: vec![],
-        compare: vec![],
-        reply: None,
-        savings: None,
-        context: None,
-        images: vec![],
-        agent_named: false,
-        files: vec![],
-        owner: None,
-        identity: None,
-        peers: vec![],
-        tags: vec![],
-    }
+        ..PromptMsg::test(sid, text)
+    })
 }
 
 /// The mock's `script:` of these calls, one per step.
