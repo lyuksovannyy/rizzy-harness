@@ -87,7 +87,7 @@ describe("Profile", () => {
     await profile();
     expect(button("Add banner")).toBeDefined();
     expect(button("Add avatar")!.textContent).toBe("A");
-    expect(labels()).toEqual(["Name", "Country", "City", "Time zone", "About you"]);
+    expect(labels()).toEqual(["Name", "Country", "City", "Time zone", "About you", "E-mail for commits"]);
     // Country, City and Time zone share one row.
     expect(field("Country").closest(".profile-place")).toBe(field("Time zone").closest(".profile-place"));
     expect(host.querySelectorAll("button.primary")).toHaveLength(1);

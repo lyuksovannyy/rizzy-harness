@@ -129,6 +129,7 @@ impl Node {
                 agent_named: false,
                 files: vec![],
                 owner: None,
+                identity: None,
             })
             .unwrap();
         self.ack().await;

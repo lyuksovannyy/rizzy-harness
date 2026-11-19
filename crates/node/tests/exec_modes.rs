@@ -158,6 +158,7 @@ fn prompt(sid: SessionId, text: &str) -> MasterToNode {
         agent_named: false,
         files: vec![],
         owner: None,
+        identity: None,
     }
 }
 
@@ -392,6 +393,7 @@ async fn a_session_whose_mode_is_no_longer_offered_runs_nothing_after_a_restart(
                     savings: None,
                     context: None,
                     owner: None,
+                    identity: None,
                 },
             ),
             (
@@ -683,6 +685,7 @@ async fn a_sub_agents_mode_is_its_parents() {
             agent_named: false,
             files: vec![],
             owner: None,
+            identity: None,
         })
         .unwrap();
     ack(&mut n).await.unwrap();

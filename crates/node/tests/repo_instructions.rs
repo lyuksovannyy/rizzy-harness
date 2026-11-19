@@ -244,6 +244,7 @@ impl Node {
             agent_named: false,
             files,
             owner: None,
+            identity: None,
         })
         .await;
         let by = std::time::Instant::now() + Duration::from_secs(20);

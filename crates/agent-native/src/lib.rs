@@ -394,6 +394,11 @@ impl harness_core::backend::TurnHost for Logged<'_> {
         self.host.exec_mode()
     }
 
+    // Not forwarding it would run every commit with no identity.
+    fn commit_identity(&self) -> Option<harness_core::identity::Identity> {
+        self.host.commit_identity()
+    }
+
     async fn images(&self, sha256: &[String]) -> Vec<harness_core::backend::ImageData> {
         self.host.images(sha256).await
     }
@@ -5761,6 +5766,7 @@ impl NativeBackend {
             .for_session(&ctx.session_id.to_string()),
             pin: host.folder_pin(),
             owned: host.owned_folder(),
+            identity: host.commit_identity(),
             background: background_access(ctx, host),
             skills: ctx.extra.skills.clone(),
             seen: self.seen.session(ctx.session_id),

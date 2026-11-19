@@ -867,6 +867,18 @@ impl Sandbox {
         c
     }
 
+    /// Every path a command with these grants may open: the grants, the
+    /// system folders and node.toml's `read` and `write` entries.
+    fn granted_paths<'a>(&'a self, rw: &'a [Grant], ro: &'a [Grant]) -> Vec<&'a Path> {
+        rw.iter()
+            .chain(ro)
+            .map(|g| g.path.as_path())
+            .chain(self.read.iter().map(PathBuf::as_path))
+            .chain(self.extra_read.iter().map(|e| e.real.as_path()))
+            .chain(self.extra_write.iter().map(|e| e.real.as_path()))
+            .collect()
+    }
+
     /// Where the read-only shell's tmpfs goes for these grants:
     /// [`READ_ONLY_TMP`], unless a grant (or node.toml's entries, or a
     /// system folder) lies at or beneath it or above it, then
@@ -874,14 +886,7 @@ impl Sandbox {
     /// the tmpfs must cover nothing granted, or it would lift the
     /// read-only rules beneath it.
     fn read_only_tmp_dir(&self, rw: &[Grant], ro: &[Grant]) -> Result<PathBuf, String> {
-        let granted: Vec<&Path> = rw
-            .iter()
-            .chain(ro)
-            .map(|g| g.path.as_path())
-            .chain(self.read.iter().map(PathBuf::as_path))
-            .chain(self.extra_read.iter().map(|e| e.real.as_path()))
-            .chain(self.extra_write.iter().map(|e| e.real.as_path()))
-            .collect();
+        let granted = self.granted_paths(rw, ro);
         [READ_ONLY_TMP, READ_ONLY_TMP_ELSEWHERE]
             .into_iter()
             .map(PathBuf::from)
@@ -1178,6 +1183,10 @@ pub struct Grants {
     /// Where the command starts (`bash`'s `workdir`): a folder inside the
     /// session folder, checked again here; the session folder when `None`.
     pub cwd: Option<PathBuf>,
+    /// The agent's own shell (`bash`) only: the identity its `git commit`
+    /// carries (T87), and git's global configuration made usable
+    /// ([`git_env`]). Unset for every other command.
+    pub identity: Option<harness_core::identity::Identity>,
     /// The read-only shell (ADOPTION_PLAN T.7, X.7; docs/read-only-shell.md):
     /// every grant read-only, the session's folder and node.toml's `write`
     /// entries included, and nothing writable but a `/tmp` of the command's
@@ -1539,6 +1548,16 @@ impl Confinement {
                 } else if let Some(t) = tmp {
                     c.env("TMPDIR", t);
                 }
+                if shell && let Some(id) = &grants.identity {
+                    let granted = sandbox.granted_paths(&rw, &ro);
+                    git_env(
+                        &mut c,
+                        env,
+                        id,
+                        tmp.as_deref().filter(|_| !grants.read_only),
+                        &granted,
+                    );
+                }
                 c
             }
         };
@@ -1549,6 +1568,97 @@ impl Confinement {
         c.args(args)
             .current_dir(if contained { Path::new("/") } else { &start });
         Ok((c, contained))
+    }
+}
+
+/// The name of the file in a session's temp folder that holds the chat
+/// owner's default commit identity (`GIT_CONFIG_SYSTEM`).
+pub const IDENTITY_FILE: &str = ".harness-git-identity";
+
+/// Git's settings for the agent's shell (T87, found by the 2026-11-19
+/// readiness trial: every git command in a host chat warned and failed, and
+/// every commit in a sandbox chat lacked an identity).
+///
+/// - **The global configuration.** Where the shell cannot open the person's
+///   own (`~/.gitconfig`, or the XDG file when there is one: the home folder
+///   is not in a sandbox chat's view, and Landlock denies it in a host chat
+///   unless `[sandbox] read` names it, which is deliberate and stays), git
+///   would warn on every command and refuse to run (`fatal: unknown error
+///   occurred while reading the configuration files`). `GIT_CONFIG_GLOBAL`
+///   then names `/dev/null`: empty, never writable, always granted. Where
+///   the person's file is granted it is left to git, so their configured
+///   identity and settings apply.
+/// - **The identity**, as a default, never an override: a configuration
+///   file of the node's in the session's temp folder, named by
+///   `GIT_CONFIG_SYSTEM`, the lowest level git reads, so an identity in the
+///   person's global file, in the repository or in `git -c` wins. (The
+///   variables `GIT_AUTHOR_*` would override all of them.) `tmp` is `None`
+///   for the read-only shell, which commits nothing.
+fn git_env(
+    c: &mut std::process::Command,
+    env: &crate::ToolEnv,
+    id: &harness_core::identity::Identity,
+    tmp: Option<&Path>,
+    granted: &[&Path],
+) {
+    // The path itself, or where a link (a dotfile manager's) leads: node.toml
+    // entries are held as the real path.
+    let covered = |p: &Path| {
+        let real = p.canonicalize().ok();
+        granted
+            .iter()
+            .any(|g| p.starts_with(g) || real.as_ref().is_some_and(|r| r.starts_with(g)))
+    };
+    let home = env.var("HOME").map(PathBuf::from);
+    let usable = home.as_ref().is_some_and(|h| {
+        let xdg = env
+            .var("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| h.join(".config"))
+            .join("git/config");
+        covered(&h.join(".gitconfig")) && (!xdg.exists() || covered(&xdg))
+    });
+    if !usable {
+        c.env("GIT_CONFIG_GLOBAL", "/dev/null");
+    }
+    let Some(dir) = tmp else { return };
+    let file = dir.join(IDENTITY_FILE);
+    // Without the file git asks for an identity, as it did before: the agent
+    // is told by git itself. Nothing personal is logged.
+    if write_identity(&file, &id.gitconfig()).is_ok() {
+        c.env("GIT_CONFIG_SYSTEM", &file);
+    }
+}
+
+/// `text` at `path` in one step: a temporary file made new (never following
+/// a link an agent put there), then renamed over the name.
+fn write_identity(path: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    if std::fs::read_to_string(path).is_ok_and(|t| t == text) {
+        return Ok(());
+    }
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(
+        ".{}.{}",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let tmp = PathBuf::from(tmp);
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o644)
+        .open(&tmp)?;
+    let done = f.write_all(text.as_bytes()).and_then(|()| f.sync_data());
+    drop(f);
+    match done.and_then(|()| std::fs::rename(&tmp, path)) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
     }
 }
 

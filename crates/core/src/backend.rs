@@ -224,6 +224,14 @@ pub trait TurnHost: Send + Sync {
         None
     }
 
+    /// The identity the agent's `git commit` carries here (T87): the chat
+    /// owner's, which a sub-agent's session takes from the chat at the top
+    /// of its parents. `None` where there is none to give (tests, a runtime
+    /// without a node): the shell then adds nothing for git.
+    fn commit_identity(&self) -> Option<crate::identity::Identity> {
+        None
+    }
+
     /// The bytes of this session's images among `sha256` (those it has; an
     /// image it lacks is named to the model instead of shown).
     async fn images(&self, _sha256: &[String]) -> Vec<ImageData> {

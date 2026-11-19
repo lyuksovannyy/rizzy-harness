@@ -663,6 +663,8 @@ export interface Prefs {
   onboarded?: boolean;
   /** About the person (Profile), at most 280 characters; given to the model, shown to nobody else. */
   description?: string | null;
+  /** The e-mail an agent's commits carry for the person (Profile): the server checks it, only they read it, it goes to the node that runs their chat. */
+  commit_email?: string | null;
   /** Settings → Personalisation; saved by its own call (savePersonalisation), never by saveSettings. */
   personalisation?: Personalisation;
 }

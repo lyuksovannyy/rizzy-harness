@@ -281,6 +281,7 @@ impl Node {
                 agent_named: false,
                 files: vec![],
                 owner: None,
+                identity: None,
             })
             .unwrap();
         let by = std::time::Instant::now() + Duration::from_secs(30);

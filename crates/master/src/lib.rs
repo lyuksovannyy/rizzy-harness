@@ -652,6 +652,17 @@ fn set_turn_owner(msg: &mut MasterToNode, who: Option<String>) {
     }
 }
 
+/// Put the chat owner's commit identity on a turn command (T87), as
+/// [`set_turn_owner`] puts the owner: the one place every turn passes.
+fn set_turn_identity(msg: &mut MasterToNode, who: Option<harness_core::identity::CommitIdentity>) {
+    match msg {
+        MasterToNode::Prompt { identity, .. }
+        | MasterToNode::Callback { identity, .. }
+        | MasterToNode::Retry { identity, .. } => *identity = who,
+        _ => {}
+    }
+}
+
 fn writes_to(msg: &MasterToNode) -> Option<SessionId> {
     match msg {
         MasterToNode::ApprovalRespond { decision, .. } if !decision.allows() => None,
@@ -1891,6 +1902,18 @@ impl Master {
             // built the command: the node starts that account's approved
             // repository MCP servers and nobody else's (X.36, PLAN.md T82).
             set_turn_owner(&mut msg, row.owner_id.clone());
+            // The same account's commit identity: whoever sent the turn
+            // (a routine, a callback, the API token in their chat), the
+            // chat is the owner's, so are its commits (T87).
+            if matches!(
+                msg,
+                MasterToNode::Prompt { .. }
+                    | MasterToNode::Callback { .. }
+                    | MasterToNode::Retry { .. }
+            ) {
+                let id = prefs::commit_identity(self, row.owner_id.as_deref()).await;
+                set_turn_identity(&mut msg, id);
+            }
         }
         let (tx, rx) = oneshot::channel();
         lock(&self.inner.acks).insert(req_id.clone(), (node_id.to_string(), tx));
@@ -2538,6 +2561,7 @@ impl Master {
                     unattended: true,
                 })),
                 owner: None,
+                identity: None,
             };
             return self
                 .send_command(&row.node_id, move |req_id| {
@@ -2564,6 +2588,7 @@ impl Master {
                 context,
                 agent_named: picked,
                 owner: None,
+                identity: None,
             },
             None => MasterToNode::Prompt {
                 req_id: String::new(),
@@ -2579,6 +2604,7 @@ impl Master {
                 agent_named: picked,
                 files,
                 owner: None,
+                identity: None,
             },
         };
         // The link drops a frame over 8 MiB; the margin covers the request
@@ -3132,6 +3158,47 @@ mod turn_owner_tests {
             msg(serde_json::json!({"type": "session.cancel", "req_id": "r", "session_id": sid}));
         let before = other.clone();
         set_turn_owner(&mut other, Some("01ALEX".into()));
+        assert_eq!(other, before);
+    }
+
+    /// T87: every turn command, a prompt, a retry and a callback, carries
+    /// the chat owner's commit identity, and no other command does; its
+    /// `Debug` (what a trace line would print) hides the address.
+    #[test]
+    fn every_turn_command_carries_the_commit_identity() {
+        let sid = SessionId::new();
+        let msg = |v: serde_json::Value| -> MasterToNode { serde_json::from_value(v).unwrap() };
+        let id = harness_core::identity::CommitIdentity {
+            login: "alex".into(),
+            name: Some("Alex".into()),
+            email: Some("canary-unit-1@example.org".into()),
+        };
+        let turns = [
+            msg(
+                serde_json::json!({"type": "session.prompt", "req_id": "r", "session_id": sid, "text": "x"}),
+            ),
+            msg(
+                serde_json::json!({"type": "session.retry", "req_id": "r", "session_id": sid, "turn_id": "t"}),
+            ),
+            msg(
+                serde_json::json!({"type": "session.callback", "req_id": "r", "session_id": sid, "bg_ids": ["bg-1"]}),
+            ),
+        ];
+        for mut m in turns {
+            set_turn_identity(&mut m, Some(id.clone()));
+            let got = match &m {
+                MasterToNode::Prompt { identity, .. }
+                | MasterToNode::Retry { identity, .. }
+                | MasterToNode::Callback { identity, .. } => identity.clone(),
+                _ => None,
+            };
+            assert_eq!(got.as_ref(), Some(&id), "{m:?}");
+            assert!(!format!("{m:?}").contains("canary-unit-1"), "{m:?}");
+        }
+        let mut other =
+            msg(serde_json::json!({"type": "session.cancel", "req_id": "r", "session_id": sid}));
+        let before = other.clone();
+        set_turn_identity(&mut other, Some(id));
         assert_eq!(other, before);
     }
 }

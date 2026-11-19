@@ -229,6 +229,7 @@ impl Master {
             agent_named: false,
             files: vec![],
             owner: None,
+            identity: None,
         })
         .await;
         (sid, cwd)

@@ -277,6 +277,7 @@ impl Rig {
             agent_named: false,
             files: vec![],
             owner: None,
+            identity: None,
         });
     }
 
@@ -383,6 +384,7 @@ impl Rig {
             agent_named: false,
             files: vec![],
             owner: None,
+            identity: None,
         });
         loop {
             self.until(|k| matches!(k, EventKind::TurnEnded(_))).await;

@@ -183,6 +183,7 @@ impl Node {
             agent_named: false,
             files: files.iter().map(|s| s.to_string()).collect(),
             owner: None,
+            identity: None,
         })
         .await
         .unwrap();
@@ -391,6 +392,7 @@ async fn r2b_typed_text_and_attachments_reach_the_model_as_the_log_holds_them() 
         agent_named: false,
         files: vec![],
         owner: None,
+        identity: None,
     })
     .await
     .unwrap();
@@ -461,6 +463,7 @@ async fn r6_a_sub_agents_task_is_scrubbed_like_a_message() {
         agent_named: false,
         files: vec![],
         owner: None,
+        identity: None,
     })
     .await
     .unwrap();

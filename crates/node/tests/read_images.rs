@@ -179,6 +179,7 @@ async fn the_chat_keeps_the_bytes_the_log_a_reference_and_delete_removes_them() 
         agent_named: false,
         files: vec![],
         owner: None,
+        identity: None,
     })
     .await
     .unwrap();

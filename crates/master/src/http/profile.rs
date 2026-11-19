@@ -145,6 +145,14 @@ async fn put_settings(
         .personalisation;
     p.validate(&m)
         .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e))?;
+    // Only an account has a commit identity (T87): the API token's
+    // settings hold none, so nothing is stored that no chat could use.
+    if who.user_id.is_none() && p.commit_email.is_some() {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "the API token has no e-mail for commits".into(),
+        ));
+    }
     p.save(&m, who.user_id.as_deref()).await?;
     Ok(Json(p))
 }

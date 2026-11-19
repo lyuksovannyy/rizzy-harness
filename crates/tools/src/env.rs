@@ -45,6 +45,9 @@ struct Inner {
     pass: Vec<String>,
     set: GlobSet,
     deny: Vec<String>,
+    /// Set by the node itself after the allow-list, whatever the process
+    /// has ([`ToolEnv::with_fixed`]).
+    fixed: Vec<(OsString, OsString)>,
 }
 
 impl Default for ToolEnv {
@@ -55,6 +58,7 @@ impl Default for ToolEnv {
                 pass: Vec::new(),
                 set: GlobSet::empty(),
                 deny: Vec::new(),
+                fixed: Vec::new(),
             }),
         }
     }
@@ -103,6 +107,7 @@ impl ToolEnv {
                 pass: pass.to_vec(),
                 set,
                 deny,
+                fixed: Vec::new(),
             }),
         })
     }
@@ -111,6 +116,36 @@ impl ToolEnv {
     /// `env_vars` (node.toml) in place of the node's `env_pass`.
     pub fn with_pass(&self, pass: &[String]) -> Result<Self, String> {
         Self::new(pass, self.inner.deny.iter().cloned())
+    }
+
+    /// The same, with these variables set as given in every child's
+    /// environment, whatever the process has and whatever `env_pass` and the
+    /// deny-list say: for what the node itself decides (a test node's
+    /// `HOME`). Nothing a request or a chat carries reaches it.
+    pub fn with_fixed(&self, vars: &[(&str, &str)]) -> Self {
+        let i = &self.inner;
+        Self {
+            inner: Arc::new(Inner {
+                pass: i.pass.clone(),
+                set: i.set.clone(),
+                deny: i.deny.clone(),
+                fixed: i
+                    .fixed
+                    .iter()
+                    .cloned()
+                    .chain(vars.iter().map(|(k, v)| ((*k).into(), (*v).into())))
+                    .collect(),
+            }),
+        }
+    }
+
+    /// The value a child gets for `name`, if it gets one.
+    pub fn var(&self, name: &str) -> Option<OsString> {
+        self.vars()
+            .into_iter()
+            .rev()
+            .find(|(k, _)| k.to_str() == Some(name))
+            .map(|(_, v)| v)
     }
 
     /// node.toml's `env_pass`, as given.
@@ -142,7 +177,12 @@ impl ToolEnv {
 
     /// The allowed subset of this process's environment.
     pub fn vars(&self) -> Vec<(OsString, OsString)> {
-        self.filter(std::env::vars_os())
+        let mut v = self.filter(std::env::vars_os());
+        for (k, val) in &self.inner.fixed {
+            v.retain(|(n, _)| n != k);
+            v.push((k.clone(), val.clone()));
+        }
+        v
     }
 
     /// Give `cmd` exactly the allowed environment. Variables the caller sets
