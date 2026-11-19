@@ -289,7 +289,10 @@ async fn an_ignored_file_where_a_folder_the_undo_writes_goes_is_named_and_refuse
     let a = r.snap().await;
     r.put(b"cache", "person's file\n");
     let e = restore_report(&r.repo, &b, &a, false).await.unwrap_err();
-    assert!(e.contains("in no checkpoint") && e.contains("`cache`"), "{e}");
+    assert!(
+        e.contains("in no checkpoint") && e.contains("`cache`"),
+        "{e}"
+    );
     assert_eq!(r.get(b"cache").as_deref(), Some("person's file\n"));
     let done = restore_report(&r.repo, &b, &a, true).await.unwrap();
     assert_eq!(done.plan.unsaved.shown, vec!["cache".to_string()]);
@@ -336,7 +339,10 @@ async fn an_ignored_file_the_turn_wrote_in_the_undos_way_is_named_and_refused() 
     r.put(b"cache", "turn\n");
     let a = r.snap().await;
     let e = restore_report(&r.repo, &b, &a, false).await.unwrap_err();
-    assert!(e.contains("in no checkpoint") && e.contains("`cache`"), "{e}");
+    assert!(
+        e.contains("in no checkpoint") && e.contains("`cache`"),
+        "{e}"
+    );
     assert_eq!(r.get(b"cache").as_deref(), Some("turn\n"));
     let done = restore_report(&r.repo, &b, &a, true).await.unwrap();
     assert_eq!(done.plan.unsaved.shown, vec!["cache".to_string()]);
@@ -382,7 +388,10 @@ async fn a_change_below_a_path_the_undo_writes_is_refused() {
     let a = r.snap().await;
     r.put(b"a/b/c", "person\n");
     let e = restore_report(&r.repo, &b, &a, false).await.unwrap_err();
-    assert!(e.contains("changed after the turn") && e.contains("`a/b/c`"), "{e}");
+    assert!(
+        e.contains("changed after the turn") && e.contains("`a/b/c`"),
+        "{e}"
+    );
     assert_eq!(r.get(b"a/b/c").as_deref(), Some("person\n"));
 }
 

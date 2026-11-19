@@ -106,7 +106,9 @@ async fn undo_refuses_over_an_ignored_file_in_its_way_and_names_it() {
     assert_eq!(r.read(".env").as_deref(), Some("OLD=1\n"));
     let notes = r.notes_since(mark);
     assert!(
-        notes.iter().any(|n| n.contains("`.env`") && n.contains("not saved")),
+        notes
+            .iter()
+            .any(|n| n.contains("`.env`") && n.contains("not saved")),
         "{notes:?}"
     );
 }

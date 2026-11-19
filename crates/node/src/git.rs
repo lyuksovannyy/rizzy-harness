@@ -2072,8 +2072,15 @@ async fn unsaved_in_the_way(
     let mut held = std::collections::HashSet::new();
     for run in arg_runs(&found, ARGS_MAX) {
         let mut c = command(repo, None);
-        c.env("GIT_LITERAL_PATHSPECS", "1")
-            .args(["ls-tree", "-r", "-z", "--name-only", "--full-tree", now, "--"]);
+        c.env("GIT_LITERAL_PATHSPECS", "1").args([
+            "ls-tree",
+            "-r",
+            "-z",
+            "--name-only",
+            "--full-tree",
+            now,
+            "--",
+        ]);
         for p in run {
             c.arg(rel_path(p));
         }

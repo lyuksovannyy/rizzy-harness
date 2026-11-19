@@ -209,7 +209,9 @@ fn change(dir: &Path, rng: &mut Rng, tag: u8, near: &[Vec<u8>]) {
     match rng.below(12) {
         9 => {
             // Change the ignore rules: a name the trees use becomes ignored.
-            const PATTERNS: &[&[u8]] = &[b"a\n", b"x\n", b"a/b\n", b"q1\n", b"e\n", b"ab\n", b".env\n"];
+            const PATTERNS: &[&[u8]] = &[
+                b"a\n", b"x\n", b"a/b\n", b"q1\n", b"e\n", b"ab\n", b".env\n",
+            ];
             let pat = *rng.of(PATTERNS);
             let gi = dir.join(".gitignore");
             let mut cur = std::fs::read(&gi).unwrap_or_default();
@@ -350,7 +352,6 @@ async fn tree(repo: &Repo, sha: &str) -> Disk {
     }
     d
 }
-
 
 /// Paths whose entry differs between two folders.
 fn differ<'a>(x: &'a Disk, y: &'a Disk) -> Vec<&'a Vec<u8>> {
