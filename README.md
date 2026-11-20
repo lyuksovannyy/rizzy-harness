@@ -965,7 +965,7 @@ model_first_byte_timeout_s = 600     # Ask chats: wait for a model's first answe
 search = "searxng"                   # none | searxng | brave
 searxng_url = "http://localhost:8888" # JSON format must be enabled in SearXNG
 # brave_key_secret = "brave"         # for search = "brave" ([keys] brave = "..." in secrets.toml)
-fetch = true                         # web_fetch: public addresses only, URLs from you, a search, a page or a file the agent read
+fetch = true                         # web_fetch: public addresses only, URLs from you, a search or a page it fetched
                                      # (this section also gives the server's own node its web tools: see "Web tools in Agentic chats")
 
 [memory]
@@ -1657,7 +1657,7 @@ dir = "~/rizzy-projects"             # where "New project" makes folders (see "P
 clone = true                         # clone repositories into new project folders (see "Cloning a repository"); false: never
 hosts = ["github.com", "gitlab.com"] # the only hosts this node clones from, exactly as written: a lower-case name or IPv4 address, ":<port>" only where you add one
 
-[web]                                # a REMOTE node's web tools for Agentic chats; off unless you say so (see "Web tools in Agentic chats")
+[web]                                # a REMOTE node's web tools for Agentic chats; off unless you say so. On the server's own node a table here only takes away (see "Web tools in Agentic chats")
 search = "none"                      # none | searxng | brave
 # searxng_url = "http://localhost:8888"  # for search = "searxng"
 # brave_key_env = "BRAVE_API_KEY"    # for search = "brave": the variable that holds the key (never write the key here)
@@ -4203,18 +4203,22 @@ turns them on.
 - *The server's own node* (the one inside `serve`) takes the `[web]` section of
   `config.toml`, the same tools and the same one HTTP client as the server's
   chats. With no `[web]` that is `web_fetch` alone (its default is on); add
-  `search` for `web_search`. Restart after changing it.
+  `search` for `web_search`. Restart after changing it. A `[web]` table in
+  this node's `node.toml` can only take away: `fetch = false` removes
+  `web_fetch` and `search = "none"` removes `web_search`, and a key you leave
+  out of that table counts as off. It cannot switch on what `config.toml` has
+  off, and its search backend settings are ignored here (the log says so).
 - *A remote node* (`node run`) takes the `[web]` section of its own
   `node.toml`, with the same keys, and has none until it says so
-  (`search = "none"`, `fetch = false`). For Brave name the key by variable
-  (`brave_key_env`) or by its name in the node's own `secrets.toml`
+  (no table, or `search = "none"`, `fetch = false`). For Brave name the key by
+  variable (`brave_key_env`) or by its name in the node's own `secrets.toml`
   (`brave_key_secret`); never write the key in node.toml. The server's
-  `[web]` has no effect on a remote node, and node.toml's `[web]` has none on the
-  server's own node (the log says so if you set it there).
+  `[web]` has no effect on a remote node.
 - `denied_tools = ["web_fetch"]` (or `"web_search"`) in node.toml switches a
   tool off whatever the section says; a call is refused with the policy's
   words and nobody is asked. `rizzy-harness doctor` and the start-up log say
-  which tools a node's Agentic chats have and from which setting, never a key.
+  for each tool whether it is on and from which file, or off and which file
+  decided, never a key.
 
 The rules are the chats' own. `web_fetch` reads public addresses only
 (loopback, private ranges, link-local and the cloud metadata address are
@@ -4223,14 +4227,22 @@ that you wrote, that a search returned, or that a page it fetched linked: not
 one that stands in a file in the folder and not one a command printed, because
 an agent that can write files could otherwise put a URL with a secret in it into
 a file, read it back and fetch it (paste the link, or let it search). It does
-not fetch one the model put together either (a real host with a secret from a file in its query). `web_search` has no such
-rule: its query is whatever the agent writes and goes to your search engine, so
-it can carry text the agent has read; Ask mode runs both tools without a card
-(they only read), Ask-every-call asks for each, plan mode lets them run.
-Turns nobody attended (a webhook, an API token) and their sub-agents get
-neither tool. Where the shell has no network (`network = "off"`, the read-only
-shell), these two tools are the agent's only way out: that is what you switch
-on, and what `denied_tools` closes.
+not fetch one the model put together either (a real host with a secret from a
+file in its query). A page that lists many links is still a way to send
+something out slowly (which link the agent follows is a signal to whoever wrote
+the page): a turn may fetch at most 20 URLs that only a page vouched for, and
+nothing asks unless the chat is set to Ask every call. `web_search` has no URL
+rule: its query (at most 400 characters, at most 20 searches a turn, shown in
+the chat afterwards) is whatever the agent writes and goes to the search engine
+you configured, so it can carry text the agent has read. Ask mode runs both
+tools without a card (they only read), Ask-every-call asks for each, plan mode
+lets them run. Chats that a routine or webhook run marked untrusted, in every
+later turn too, and their sub-agents get neither tool; a turn sent with the API
+token keeps them, and a URL in its text counts as yours. Where the shell has no
+network (`network = "off"`, the read-only shell), these two tools are the
+agent's only way out: that is what you switch on, and what `denied_tools`
+closes. If a chat reads pages you do not trust beside files you want kept
+secret, set it to Ask every call or turn the tools off.
 
 **Default agents per mode.** A chat gets the Assistant unless you pick
 another; an Agentic chat gets the Software Developer. A workspace overrides
