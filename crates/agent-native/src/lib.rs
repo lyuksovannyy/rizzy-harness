@@ -2243,11 +2243,14 @@ pub fn queued_msg(m: &UserMessage) -> ChatMsg {
 }
 
 /// Tools whose successful output may vouch for a URL (`web_fetch`
-/// provenance). Not `bash` (a `curl` error or an `echo` can plant any
-/// string), not `tool_output` (replays bash), not `grep`/`glob`/`outline`,
-/// not memory, not a sub-agent's answer. A failed call never vouches: some
-/// errors echo model-chosen strings.
-const URL_SOURCES: [&str; 3] = ["web_search", "web_fetch", "read"];
+/// provenance): a search's results and a fetched page's links. Not `read`
+/// (N-6: an agent that can write files composes a URL with a secret in it,
+/// writes it to a file and reads it back, and no step asks in Accept-edits),
+/// not `bash` (a `curl` error or an `echo` can plant any string), not
+/// `tool_output` (replays bash), not `grep`/`glob`/`outline`, not memory, not
+/// a sub-agent's answer. A failed call never vouches: some errors echo
+/// model-chosen strings.
+const URL_SOURCES: [&str; 2] = ["web_search", "web_fetch"];
 
 /// Call ids in `history` that finished ok and ran a [`URL_SOURCES`] tool.
 fn trusted_results(history: &[RawEvent]) -> HashSet<String> {
@@ -8937,9 +8940,12 @@ mod tests {
         assert_eq!(seen, "seen=false");
     }
 
+    /// A successful search vouches for its URLs; a successful `read` does
+    /// not (N-6): an agent that can write files could plant a URL in one
+    /// and read it back.
     #[tokio::test]
-    async fn url_in_a_successful_search_or_read_is_observed() {
-        for name in ["web_search", "read"] {
+    async fn url_in_a_successful_search_is_observed_but_not_one_in_a_read_file() {
+        for (name, want) in [("web_search", "seen=true"), ("read", "seen=false")] {
             let seen = probe_after(
                 vec![
                     fixed(name, true, "result https://laundered.example/path"),
@@ -8951,7 +8957,7 @@ mod tests {
                 false,
             )
             .await;
-            assert_eq!(seen, "seen=true", "{name}");
+            assert_eq!(seen, want, "{name}");
         }
     }
 
@@ -8974,13 +8980,15 @@ mod tests {
     }
 
     #[test]
-    fn only_ok_search_fetch_read_results_in_history_count() {
+    fn only_ok_search_and_fetch_results_in_history_count() {
         let sid = SessionId::new();
         let mut seq = 0;
         let mut history = vec![];
         for (id, tool, ok) in [
             ("c1", "bash", true),
             ("c2", "read", false),
+            // A file that was read, even one that read fine, never vouches.
+            ("c4", "read", true),
             ("c3", "web_search", true),
         ] {
             for kind in [

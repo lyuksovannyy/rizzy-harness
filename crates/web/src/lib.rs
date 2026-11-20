@@ -393,9 +393,10 @@ impl Tool for WebFetch {
         }
         if !provenance_ok(&u, &ctx.observed) {
             return ToolOutcome::err(
-                "this URL did not come from the user's own message or a search result (a link \
-                 that is only inside a file they attached does not count), so it is not fetched. \
-                 Search for it first or ask the user for the link.",
+                "this URL did not come from the user's own message, a search result or a page \
+                 already fetched (a link that is only inside a file, one they attached or one in \
+                 the folder, or that a command printed, does not count), so it is not fetched. \
+                 Search for it first or ask the user to paste the link.",
             );
         }
         let req = self.client.get(u.clone()).send();
