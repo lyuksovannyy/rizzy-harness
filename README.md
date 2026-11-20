@@ -4267,7 +4267,7 @@ secret, set it to Ask every call or turn the tools off.
 
 A page cannot make `web_fetch` hang the node: the page's own parser builds the
 tree once and a page nested more than 512 levels deep (or with more than
-150,000 nodes) is refused with a plain sentence; a page over 1 MiB or with more
+150,000 elements, counted while the tree is built) is refused with a plain sentence; a page that makes more than 30,000 is read as plain text; a page over 1 MiB or with more
 than 25,000 start tags is read as plain text (no layout, no hidden content);
 only two pages are read at a time, and a further one waits at most five seconds
 before the tool says it is busy.
