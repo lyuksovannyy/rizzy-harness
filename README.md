@@ -2523,7 +2523,15 @@ named: use `old_string` for it). A tag the session does not know (a new
 session, a restart, a version dropped from memory), or rows not shown, make
 the call refuse and print those rows, which then count as shown. If the file
 changed since the tag, the edit is made only where the rows it replaces did
-not change. `old_string` and the line form cannot be given together. The tag is
+not change and are still one run of rows (a row someone inserted into the range
+since the tag refuses the call, with the rows as they are: replacing it would
+delete work the agent never saw; a row next to the range is not in it and
+stays). A call holds at most 256 operations and row numbers up to 1,000,000.
+A `lines` that is one object counts as a list of one, and a `text` that is a
+list of strings is joined with newlines; `{from}` without `to` is refused
+(send the same number twice for one row), and so is a missing `text` (`"text":
+""` deletes the rows). A call without `tag` is refused with the rows it names
+and the file's current tag. `old_string` and the line form cannot be given together. The tag is
 a lookup key, not a secret.
 The header names the file as the agent addresses it: relative to the chat's
 folder when the file is inside it. When a line edit asks for approval, its card

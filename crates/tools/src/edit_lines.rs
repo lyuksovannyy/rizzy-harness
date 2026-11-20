@@ -24,10 +24,13 @@
 //!   rows are printed from the tagged version and count as shown; a row
 //!   longer than `read` shows is refused, the old form takes it); the file
 //!   has not changed since the tagged version, or the rows named (and both
-//!   neighbours of an insertion point) did not, mapped with `edit`'s own
-//!   changed-lines logic and accepted only where a diff from the other end
-//!   of the file reads them the same way (a block pasted next to a copy of
-//!   itself is refused, not guessed at); the edit changes something.
+//!   neighbours of an insertion point) did not and each replaced range is
+//!   still one run of rows, the same length, with nothing inserted into it
+//!   (a range that swallowed a row someone inserted into it would delete
+//!   work the model never saw), mapped with `edit`'s own changed-lines logic
+//!   and accepted only where a diff from the other end of the file reads
+//!   them the same way (a block pasted next to a copy of itself is refused,
+//!   not guessed at); the edit changes something.
 
 use std::path::Path;
 
@@ -37,6 +40,13 @@ use crate::edit::{changed, show};
 use crate::fs::{header, is_cut, line_style, number_line, read_nofollow, write_nofollow};
 use crate::seen::{Version, sha256, tag};
 use crate::{ToolCtx, ToolOutcome};
+
+/// The highest row number a call may name: a file the line form handles is
+/// at most [`crate::seen::SNAPSHOT_MAX_FILE`] bytes, so this is far above any
+/// real row, and low enough that no sum of two such numbers can overflow.
+pub(crate) const MAX_ROW: usize = 1_000_000;
+/// Operations one call may hold, at most.
+pub(crate) const MAX_OPS: usize = 256;
 
 /// Rows of context around the rows a refusal prints.
 const CONTEXT: usize = 3;
@@ -75,7 +85,9 @@ impl Op {
 /// A call in the line form.
 #[derive(Debug)]
 pub(crate) struct Call {
-    tag: String,
+    /// `None`: the call named none; it is refused with the rows and the tag
+    /// of the file as it is.
+    tag: Option<String>,
     ops: Vec<Op>,
 }
 
@@ -103,18 +115,17 @@ pub(crate) fn parse(input: &Value) -> Result<Call, String> {
     if old_form {
         return Err("give either old_string/new_string (or `edits`) or tag/lines, not both".into());
     }
-    let Some(raw) = input.get("tag").and_then(|t| t.as_str()) else {
-        return Err(
-            "the line form needs `tag`: the 4 characters after # in the header line \
-                    of the latest `read`, `edit` or `write` result for this file"
-                .into(),
-        );
-    };
-    let Some(tag) = norm_tag(raw) else {
-        return Err(format!(
-            "`tag` must be the 4 hex characters after # in the header line of a `read`, \
-             `edit` or `write` result, not {raw:?}"
-        ));
+    let tag = match input.get("tag") {
+        None | Some(Value::Null) => None,
+        Some(v) => {
+            let Some(tag) = v.as_str().and_then(norm_tag) else {
+                return Err(format!(
+                    "`tag` must be the 4 hex characters after # in the header line of a `read`, \
+                     `edit` or `write` result, not {v}"
+                ));
+            };
+            Some(tag)
+        }
     };
     let list = match input.get("lines") {
         None | Some(Value::Null) => {
@@ -126,19 +137,30 @@ pub(crate) fn parse(input: &Value) -> Result<Call, String> {
             .map_err(|e| format!("`lines` is a string that is not a JSON list: {e}"))?,
         Some(v) => v.clone(),
     };
-    let Value::Array(items) = list else {
+    let Value::Array(items) = shape_lines(list) else {
         return Err("`lines` must be a list of {from, to, text} or {after, text}".into());
     };
     if items.is_empty() {
         return Err("`lines` is empty".into());
     }
+    if items.len() > MAX_OPS {
+        return Err(format!(
+            "{} operations in one call: at most {MAX_OPS} are taken; split them into several \
+             calls, nothing was changed",
+            items.len()
+        ));
+    }
     let num = |v: &Value, k: &str, label: &str| -> Result<Option<usize>, String> {
         match v.get(k) {
             None | Some(Value::Null) => Ok(None),
-            Some(n) => n
-                .as_u64()
-                .map(|n| Some(n as usize))
-                .ok_or_else(|| format!("{label}`{k}` must be a whole number")),
+            Some(n) => match n.as_u64() {
+                Some(n) if n > MAX_ROW as u64 => Err(format!(
+                    "{label}`{k}` is {n}, but a file has at most {MAX_ROW} rows here; use the \
+                     row numbers of the tagged version"
+                )),
+                Some(n) => Ok(Some(n as usize)),
+                None => Err(format!("{label}`{k}` must be a whole number")),
+            },
         }
     };
     let mut ops = Vec::new();
@@ -147,7 +169,7 @@ pub(crate) fn parse(input: &Value) -> Result<Call, String> {
         let text = v
             .get("text")
             .and_then(|t| t.as_str())
-            .ok_or_else(|| format!("{label}missing string `text` (empty to delete the rows)"))?;
+            .ok_or_else(|| text_missing(i))?;
         let text = text_lines(text);
         let (from, to, after) = (
             num(v, "from", &label)?,
@@ -173,8 +195,14 @@ pub(crate) fn parse(input: &Value) -> Result<Call, String> {
                 }
                 Op::Replace { from, to, text }
             }
-            (Some(_), None, None) | (None, Some(_), None) => {
-                return Err(format!("{label}`from` and `to` go together"));
+            (Some(_), None, None) => {
+                return Err(format!(
+                    "{label}`from` needs `to`, the last row; to replace one row send the same \
+                     number as both"
+                ));
+            }
+            (None, Some(_), None) => {
+                return Err(format!("{label}`to` needs `from`, the first row"));
             }
             (None, None, Some(after)) => Op::Insert { after, text },
             (None, None, None) => {
@@ -206,6 +234,58 @@ pub(crate) fn parse(input: &Value) -> Result<Call, String> {
         }
     }
     Ok(Call { tag, ops })
+}
+
+/// The refusal for an operation without `text`.
+fn text_missing(i: usize) -> String {
+    format!(
+        "lines[{i}]: `text` is missing or not a string; to delete the rows send \
+         \"text\": \"\" (an empty string)"
+    )
+}
+
+/// `lines` as the model sent it, in the shapes real models send: one object
+/// is a list of one, and a `text` that is a list of strings is those
+/// strings joined with a newline (an empty list is no text). Anything else
+/// is left as it is, for the checks to refuse.
+fn shape_lines(lines: Value) -> Value {
+    let mut lines = match lines {
+        o @ Value::Object(_) => Value::Array(vec![o]),
+        v => v,
+    };
+    if let Value::Array(items) = &mut lines {
+        for item in items {
+            if let Some(t) = item.get_mut("text")
+                && let Value::Array(parts) = t
+                && parts.iter().all(Value::is_string)
+            {
+                let joined: Vec<&str> = parts.iter().filter_map(Value::as_str).collect();
+                *t = Value::String(joined.join("\n"));
+            }
+        }
+    }
+    lines
+}
+
+/// Before the schema check (`Tool::normalize_args`): the shapes of
+/// [`shape_lines`] made the schema's, and a missing `text` refused in words
+/// that say how to delete rows.
+pub(crate) fn normalize(input: &mut Value) -> Result<(), String> {
+    let Some(lines) = input.get_mut("lines") else {
+        return Ok(());
+    };
+    if lines.is_null() || lines.is_string() {
+        return Ok(());
+    }
+    *lines = shape_lines(lines.take());
+    if let Value::Array(items) = lines {
+        for (i, item) in items.iter().enumerate() {
+            if item.is_object() && item.get("text").is_none_or(Value::is_null) {
+                return Err(text_missing(i));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `text` as whole lines.
@@ -311,9 +391,10 @@ impl Map {
 /// (the longest common tail of rows first). A change next to a copy of
 /// what it added or removed can be read either way, and then the rows next
 /// to it are not told apart: refused, never guessed. `None` too when a row
-/// of `rows` (0-based, replaced) or a place of `boundaries` lies in the
-/// changed part.
-fn map_for(old: &str, live: &str, rows: &[usize], boundaries: &[usize]) -> Option<Mapped> {
+/// of `runs` (0-based inclusive, replaced) or a place of `boundaries` lies in
+/// the changed part, or a run is not one run in the file as it is any more
+/// (rows were inserted between its ends: replacing it would delete them).
+fn map_for(old: &str, live: &str, runs: &[(usize, usize)], boundaries: &[usize]) -> Option<Mapped> {
     let (a, b) = changed(old, live);
     let (_, t) = split_rows(old);
     let (_, l) = split_rows(live);
@@ -350,10 +431,16 @@ fn map_for(old: &str, live: &str, rows: &[usize], boundaries: &[usize]) -> Optio
         n_t,
         n_l,
     };
-    for &r in rows {
-        let m = main.row(r)?;
-        if alt.row(r) != Some(m) {
+    for &(from, to) in runs {
+        // Both ends map and nothing lies between them that was not there.
+        if main.row(to)?.checked_sub(main.row(from)?) != Some(to - from) {
             return None;
+        }
+        for r in from..=to {
+            let m = main.row(r)?;
+            if alt.row(r) != Some(m) {
+                return None;
+            }
         }
     }
     for &n in boundaries {
@@ -393,7 +480,7 @@ fn named_ranges(ops: &[Op]) -> Vec<(usize, usize)> {
     ops.iter()
         .map(|op| match op {
             Op::Replace { from, to, .. } => (*from, *to),
-            Op::Insert { after, .. } => ((*after).max(1), after + 1),
+            Op::Insert { after, .. } => ((*after).max(1), after.saturating_add(1)),
         })
         .collect()
 }
@@ -454,14 +541,26 @@ fn plan(ctx: &ToolCtx, key: &Path, shown: &str, live: &str, call: &Call) -> Resu
     }
     let (max_chars, _) = line_style(ctx);
     let live_sha = sha256(live.as_bytes());
-    let Some(ver) = ctx.seen.version(key, &call.tag) else {
+    let Some(tag_given) = call.tag.as_deref() else {
         let n = split_rows(live).1.len();
         return Err(No::Rows {
             lead: format!(
-                "No version of {shown} tagged {} is known in this session (it was not read here, \
-                 or the node restarted, or it was dropped from memory), so nothing was changed. \
-                 The file has {n} rows.",
-                call.tag
+                "The line form needs `tag`: the 4 characters after # in the `[path#TAG]` header \
+                 line of the latest `read`, `edit` or `write` result for {shown}, so nothing was \
+                 changed. The file has {n} rows."
+            ),
+            version: None,
+            ranges: named_ranges(&call.ops),
+            context: CONTEXT,
+        });
+    };
+    let Some(ver) = ctx.seen.version(key, tag_given) else {
+        let n = split_rows(live).1.len();
+        return Err(No::Rows {
+            lead: format!(
+                "No version of {shown} tagged {tag_given} is known in this session (it was not \
+                 read here, or the node restarted, or it was dropped from memory), so nothing \
+                 was changed. The file has {n} rows."
             ),
             version: None,
             ranges: named_ranges(&call.ops),
@@ -478,9 +577,8 @@ fn plan(ctx: &ToolCtx, key: &Path, shown: &str, live: &str, call: &Call) -> Resu
         };
         if top > n_t {
             return Err(format!(
-                "Row {top} does not exist: the version of {shown} tagged {} has {n_t} rows; \
-                 nothing was changed.",
-                call.tag
+                "Row {top} does not exist: the version of {shown} tagged {tag_given} has {n_t} \
+                 rows; nothing was changed."
             )
             .into());
         }
@@ -517,10 +615,10 @@ fn plan(ctx: &ToolCtx, key: &Path, shown: &str, live: &str, call: &Call) -> Resu
             .collect();
         return Err(No::Rows {
             lead: format!(
-                "Rows {} of the version of {shown} tagged {} were not shown to you (a `read` \
-                 window, an edit's result or a refusal shows rows), so nothing was changed.",
-                list.join(", "),
-                call.tag
+                "Rows {} of the version of {shown} tagged {tag_given} were not shown to you (a \
+                 `read` window, an edit's result or a refusal shows rows), so nothing was \
+                 changed.",
+                list.join(", ")
             ),
             version: Some(ver),
             ranges: unshown,
@@ -535,14 +633,14 @@ fn plan(ctx: &ToolCtx, key: &Path, shown: &str, live: &str, call: &Call) -> Resu
         Map::same(n_t)
     } else {
         let mut bounds = Vec::new();
-        let mut used = Vec::new();
+        let mut runs = Vec::new();
         for op in &call.ops {
             match op {
                 Op::Insert { after, .. } => bounds.push(*after),
-                Op::Replace { from, to, .. } => used.extend(from - 1..*to),
+                Op::Replace { from, to, .. } => runs.push((from - 1, to - 1)),
             }
         }
-        let Some(m) = map_for(&ver.text, live, &used, &bounds) else {
+        let Some(m) = map_for(&ver.text, live, &runs, &bounds) else {
             let (a, b) = changed(&ver.text, live);
             let (lo, hi) = (
                 crate::edit::line_of(live, a),
@@ -550,10 +648,10 @@ fn plan(ctx: &ToolCtx, key: &Path, shown: &str, live: &str, call: &Call) -> Resu
             );
             return Err(No::Rows {
                 lead: format!(
-                    "{shown} is not the version tagged {} any more (the user, a command, another                      session or you changed it) and the rows you name are not where they were, or \
-                     cannot be told from other rows, so nothing was changed. The rows that changed \
-                     now read:",
-                    call.tag
+                    "{shown} is not the version tagged {tag_given} any more (the user, a command, \
+                     another session or you changed it) and the rows you name are not where they \
+                     were, have rows inserted between them, or cannot be told from other rows, so \
+                     nothing was changed. The rows that changed now read:"
                 ),
                 version: None,
                 ranges: vec![(lo, hi.max(lo))],
@@ -702,7 +800,12 @@ fn refuse(ctx: &ToolCtx, key: &Path, shown: &str, live: &str, no: No, print: boo
         ranges
             .iter()
             .filter(|(a, b)| *a >= 1 && a <= b)
-            .map(|(a, b)| (a.saturating_sub(context).max(1), (b + context).min(n)))
+            .map(|(a, b)| {
+                (
+                    a.saturating_sub(context).max(1),
+                    b.saturating_add(context).min(n),
+                )
+            })
             .filter(|(a, b)| a <= b)
             .collect(),
     );
@@ -923,7 +1026,7 @@ pub(crate) async fn run(ctx: &ToolCtx, input: Value) -> ToolOutcome {
         report.push_str(&format!(
             " (the file was not the version tagged {}; the rows you named had not changed since, \
              so the edit was made at the rows of the file as it is now)",
-            call.tag
+            call.tag.as_deref().unwrap_or_default()
         ));
     }
     report.push_str(".\n");

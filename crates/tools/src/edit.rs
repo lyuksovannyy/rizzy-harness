@@ -125,7 +125,9 @@ impl Tool for Edit {
         {
             *t = Value::String(n);
         }
-        Ok(())
+        // `lines` as one object, `text` as a list of strings: the shapes
+        // the schema takes; a missing `text` refused with how to delete.
+        crate::edit_lines::normalize(input)
     }
     fn refusal(&self, ctx: &ToolCtx, input: &Value) -> Option<String> {
         crate::path_refusal(ctx, input, true).or_else(|| {

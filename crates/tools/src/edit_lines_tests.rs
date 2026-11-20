@@ -2,7 +2,7 @@
 //! tell the file's tag, the model names the tag and row numbers and gives only
 //! the new text. Every row it names must have been shown to it; a tag that
 //! names an older version, or a file that changed on disk, is mapped only
-//! where the rows it replaces did not change.
+//! where the rows it replaces did not change and are still one run of rows.
 
 use serde_json::{Value, json};
 
@@ -877,4 +877,374 @@ fn the_schema_and_description_offer_the_line_form_briefly() {
     // Sent every turn: the whole description stays under this many characters.
     let n = Edit.description().chars().count();
     assert!(n < 1_700, "{n}");
+}
+
+// --- a range lands only where it is still one run of rows ----------------
+
+const FOUR: &str = "a\nb\nc\nd\n";
+
+/// Review of PR 187: the rows a stale range names each map to the live file
+/// and the two ends are mapped, but rows inserted between them since the tag
+/// were deleted with them.
+#[tokio::test]
+async fn a_range_never_swallows_rows_inserted_into_it_since_the_tag() {
+    let (dir, ctx) = ws();
+    put(&dir, "a.txt", FOUR);
+    let t = first_tag(&read(&ctx, "a.txt").await.output);
+    let live = "a\nb\nPERSONS WORK\nc\nd\n";
+    put(&dir, "a.txt", live);
+    for text in ["R", ""] {
+        let e = lines(
+            &ctx,
+            "a.txt",
+            &t,
+            json!([{"from": 2, "to": 3, "text": text}]),
+        )
+        .await;
+        assert!(!e.ok, "{text:?}: {}", e.output);
+        assert!(e.output.contains("PERSONS WORK"), "{}", e.output);
+        assert_eq!(get(&dir, "a.txt"), live);
+    }
+    // Rows outside the range still land from the same tag.
+    let e = lines(
+        &ctx,
+        "a.txt",
+        &t,
+        json!([{"from": 4, "to": 4, "text": "D"}]),
+    )
+    .await;
+    assert!(e.ok, "{}", e.output);
+    assert_eq!(get(&dir, "a.txt"), "a\nb\nPERSONS WORK\nc\nD\n");
+}
+
+/// The card is shown for a file that is still the version; a row is inserted
+/// inside the range while it waits.
+#[tokio::test]
+async fn a_row_inserted_inside_a_range_while_the_card_waits_is_not_swallowed() {
+    let (dir, ctx) = ws();
+    put(&dir, "a.txt", FOUR);
+    let t = first_tag(&read(&ctx, "a.txt").await.output);
+    let input = json!({"path": "a.txt", "tag": t, "lines": [{"from": 2, "to": 3, "text": "R"}]});
+    assert!(Edit.refusal(&ctx, &input).is_none());
+    assert!(Edit.preview(&ctx, &input).is_some());
+    let live = "a\nb\nPERSONS WORK\nc\nd\n";
+    put(&dir, "a.txt", live);
+    // The card is asked again, or answered late: the run refuses.
+    assert!(Edit.preview(&ctx, &input).is_none());
+    let e = Edit.run(&ctx, input).await;
+    assert!(!e.ok, "{}", e.output);
+    assert_eq!(get(&dir, "a.txt"), live);
+}
+
+/// The agent's own earlier edit inserted the row, and the first tag is used
+/// again (fuzz seeds 90, 240 and 1208 of the review).
+#[tokio::test]
+async fn a_range_after_an_own_insertion_inside_it_is_refused() {
+    let (dir, ctx) = ws();
+    put(&dir, "a.txt", FOUR);
+    let t1 = first_tag(&read(&ctx, "a.txt").await.output);
+    let e = lines(&ctx, "a.txt", &t1, json!([{"after": 2, "text": "mine"}])).await;
+    assert!(e.ok, "{}", e.output);
+    let after_own = get(&dir, "a.txt");
+    assert_eq!(after_own, "a\nb\nmine\nc\nd\n");
+    let e = lines(
+        &ctx,
+        "a.txt",
+        &t1,
+        json!([{"from": 2, "to": 3, "text": "R"}]),
+    )
+    .await;
+    assert!(!e.ok, "{}", e.output);
+    assert_eq!(get(&dir, "a.txt"), after_own);
+}
+
+#[tokio::test]
+async fn a_range_with_a_row_deleted_inside_it_since_the_tag_is_refused() {
+    let (dir, ctx) = ws();
+    put(&dir, "a.txt", "a\nb\nc\nd\ne\n");
+    let t = first_tag(&read(&ctx, "a.txt").await.output);
+    for live in ["a\nc\nd\ne\n", "a\nb\nd\ne\n", "a\nd\ne\n"] {
+        put(&dir, "a.txt", live);
+        for text in ["R", ""] {
+            let e = lines(
+                &ctx,
+                "a.txt",
+                &t,
+                json!([{"from": 2, "to": 3, "text": text}]),
+            )
+            .await;
+            assert!(!e.ok, "{live:?} {text:?}: {}", e.output);
+            assert_eq!(get(&dir, "a.txt"), live);
+        }
+    }
+}
+
+/// A row inserted right next to the range is not in it: the range is intact
+/// and the row stays.
+#[tokio::test]
+async fn rows_inserted_at_the_edge_of_a_range_stay() {
+    let (dir, ctx) = ws();
+    put(&dir, "a.txt", FOUR);
+    let t = first_tag(&read(&ctx, "a.txt").await.output);
+    put(&dir, "a.txt", "a\nTOP\nb\nc\nd\n");
+    let e = lines(
+        &ctx,
+        "a.txt",
+        &t,
+        json!([{"from": 2, "to": 3, "text": "R"}]),
+    )
+    .await;
+    assert!(e.ok, "{}", e.output);
+    assert_eq!(get(&dir, "a.txt"), "a\nTOP\nR\nd\n");
+    put(&dir, "a.txt", "a\nb\nc\nBOTTOM\nd\n");
+    let e = lines(&ctx, "a.txt", &t, json!([{"from": 2, "to": 3, "text": ""}])).await;
+    assert!(e.ok, "{}", e.output);
+    assert_eq!(get(&dir, "a.txt"), "a\nBOTTOM\nd\n");
+}
+
+// --- numbers and counts the model sends ----------------------------------
+
+/// Review of PR 187: `after + 1` and `b + context` overflowed in a debug
+/// build, inside `Tool::refusal`, for a tag no session knew.
+#[tokio::test]
+async fn huge_row_numbers_are_refused_with_a_sentence_and_never_panic() {
+    let (dir, ctx) = ws();
+    put(&dir, "a.txt", FOUR);
+    let known = first_tag(&read(&ctx, "a.txt").await.output);
+    let big = u64::MAX;
+    for tag in ["0000", known.as_str()] {
+        for op in [
+            json!({"after": big, "text": "x"}),
+            json!({"from": big, "to": big, "text": "x"}),
+            json!({"from": 1, "to": big, "text": "x"}),
+            json!({"after": crate::edit_lines::MAX_ROW + 1, "text": "x"}),
+        ] {
+            let input = json!({"path": "a.txt", "tag": tag, "lines": [op]});
+            let r = Edit.refusal(&ctx, &input).unwrap_or_default();
+            assert!(
+                r.contains(&crate::edit_lines::MAX_ROW.to_string()),
+                "{op}: {r}"
+            );
+            assert!(Edit.preview(&ctx, &input).is_none());
+            let e = Edit.run(&ctx, input).await;
+            assert!(!e.ok && e.output == r, "{op}: {}", e.output);
+        }
+    }
+    assert_eq!(get(&dir, "a.txt"), FOUR);
+}
+
+#[tokio::test]
+async fn too_many_operations_in_one_call_are_refused_before_any_work() {
+    let (dir, ctx) = ws();
+    put(&dir, "a.txt", &numbered(2000));
+    let t = first_tag(&read(&ctx, "a.txt").await.output);
+    let n = crate::edit_lines::MAX_OPS;
+    let ops = |k: usize| -> Value {
+        (0..k)
+            .map(|i| json!({"from": i * 2 + 1, "to": i * 2 + 1, "text": "z"}))
+            .collect()
+    };
+    let many = json!({"path": "a.txt", "tag": t, "lines": ops(n + 1)});
+    let r = Edit.refusal(&ctx, &many).expect("refused");
+    assert!(r.contains(&n.to_string()), "{r}");
+    assert!(Edit.preview(&ctx, &many).is_none());
+    let e = Edit.run(&ctx, many).await;
+    assert!(!e.ok && e.output == r, "{}", e.output);
+    assert_eq!(get(&dir, "a.txt"), numbered(2000));
+    let max = json!({"path": "a.txt", "tag": t, "lines": ops(n)});
+    assert!(Edit.refusal(&ctx, &max).is_none());
+    let e = Edit.run(&ctx, max).await;
+    assert!(e.ok, "{}", e.output);
+}
+
+// --- a refusal on a file never read is not a read ------------------------
+
+/// Review of PR 187: the refusal recorded the printed version as the one the
+/// guard compares, so a `write` over the whole file was then allowed.
+#[tokio::test]
+async fn a_refused_line_edit_on_a_file_never_read_does_not_count_as_a_read() {
+    let (dir, ctx) = ws();
+    put(&dir, "a.txt", &numbered(3000));
+    let e = lines(
+        &ctx,
+        "a.txt",
+        "0000",
+        json!([{"from": 1, "to": 1, "text": "x"}]),
+    )
+    .await;
+    assert!(!e.ok && e.output.contains("\trow 1\n"), "{}", e.output);
+    let w = Write
+        .run(&ctx, json!({"path": "a.txt", "content": "whole\n"}))
+        .await;
+    assert!(!w.ok && w.output.contains("not been read"), "{}", w.output);
+    assert_eq!(get(&dir, "a.txt"), numbered(3000));
+    // The old form is not let in either: it says the file was not read (its
+    // own refusal then counts the file as read, as it always did: another
+    // file here).
+    put(&dir, "b.txt", &numbered(3000));
+    let e = lines(
+        &ctx,
+        "b.txt",
+        "0000",
+        json!([{"from": 1, "to": 1, "text": "x"}]),
+    )
+    .await;
+    assert!(!e.ok, "{}", e.output);
+    let o = Edit
+        .run(
+            &ctx,
+            json!({"path": "b.txt", "old_string": "row 2000\n", "new_string": "x\n"}),
+        )
+        .await;
+    assert!(!o.ok && o.output.contains("not been read"), "{}", o.output);
+    assert_eq!(get(&dir, "b.txt"), numbered(3000));
+    // The printed rows are the rows of the tag it printed: the resend lands.
+    let e = lines(
+        &ctx,
+        "a.txt",
+        "0000",
+        json!([{"from": 1, "to": 1, "text": "x"}]),
+    )
+    .await;
+    assert!(!e.ok);
+    let e = lines(
+        &ctx,
+        "a.txt",
+        &last_tag(&e.output),
+        json!([{"from": 1, "to": 1, "text": "x"}]),
+    )
+    .await;
+    assert!(e.ok, "{}", e.output);
+    assert!(get(&dir, "a.txt").starts_with("x\nrow 2\n"));
+    // The result's tag works, and the file still does not count as read.
+    let e2 = lines(
+        &ctx,
+        "a.txt",
+        &last_tag(&e.output),
+        json!([{"from": 1, "to": 1, "text": "y"}]),
+    )
+    .await;
+    assert!(e2.ok, "{}", e2.output);
+    let w = Write
+        .run(&ctx, json!({"path": "a.txt", "content": "whole\n"}))
+        .await;
+    assert!(!w.ok && w.output.contains("not been read"), "{}", w.output);
+}
+
+/// The same through `Tool::refusal`, which prints rows where a `read` would
+/// run unasked.
+#[tokio::test]
+async fn the_refusal_before_the_card_on_a_file_never_read_is_not_a_read_either() {
+    let (dir, ctx) = ws();
+    put(&dir, "a.txt", &numbered(3000));
+    let input = json!({"path": "a.txt", "tag": "0000",
+                       "lines": [{"from": 1, "to": 1, "text": "x"}]});
+    let r = Edit.refusal(&ctx, &input).expect("refused");
+    assert!(r.contains("\trow 1\n"), "{r}");
+    let w = Write
+        .run(&ctx, json!({"path": "a.txt", "content": "whole\n"}))
+        .await;
+    assert!(!w.ok && w.output.contains("not been read"), "{}", w.output);
+}
+
+// --- argument shapes real models sent -------------------------------------
+
+fn normalized(mut input: Value) -> Result<Value, String> {
+    Edit.normalize_args(&mut input).map(|()| input)
+}
+
+#[tokio::test]
+async fn lines_as_one_object_is_a_list_of_one() {
+    let (dir, ctx) = ws();
+    put(&dir, "a.txt", "one\ntwo\nthree\n");
+    let t = first_tag(&read(&ctx, "a.txt").await.output);
+    let input = normalized(json!({"path": "a.txt", "tag": t,
+                                  "lines": {"from": 2, "to": 2, "text": "TWO"}}))
+    .unwrap();
+    assert!(input["lines"].is_array(), "{input}");
+    let e = Edit.run(&ctx, input).await;
+    assert!(e.ok, "{}", e.output);
+    assert_eq!(get(&dir, "a.txt"), "one\nTWO\nthree\n");
+    // Without the normalisation, too (the same call, run directly).
+    let e = Edit
+        .run(
+            &ctx,
+            json!({"path": "a.txt", "tag": last_tag(&e.output),
+                   "lines": {"after": 3, "text": "four"}}),
+        )
+        .await;
+    assert!(e.ok, "{}", e.output);
+    assert_eq!(get(&dir, "a.txt"), "one\nTWO\nthree\nfour\n");
+}
+
+#[tokio::test]
+async fn text_as_a_list_of_strings_is_joined_with_newlines() {
+    let (dir, ctx) = ws();
+    put(&dir, "a.txt", "one\ntwo\nthree\n");
+    let t = first_tag(&read(&ctx, "a.txt").await.output);
+    let input = normalized(json!({"path": "a.txt", "tag": t,
+                                  "lines": [{"from": 2, "to": 2, "text": ["x", "y"]}]}))
+    .unwrap();
+    assert_eq!(input["lines"][0]["text"], json!("x\ny"));
+    let e = Edit.run(&ctx, input).await;
+    assert!(e.ok, "{}", e.output);
+    assert_eq!(get(&dir, "a.txt"), "one\nx\ny\nthree\n");
+    // A list that is not all strings is left for the schema to refuse.
+    let odd = normalized(json!({"path": "a.txt", "tag": "0000",
+                                "lines": [{"from": 1, "to": 1, "text": ["x", 1]}]}))
+    .unwrap();
+    assert_eq!(odd["lines"][0]["text"], json!(["x", 1]));
+    // An empty list is no text: a deletion, like "".
+    let none = normalized(json!({"path": "a.txt", "tag": "0000",
+                                 "lines": [{"from": 1, "to": 1, "text": []}]}))
+    .unwrap();
+    assert_eq!(none["lines"][0]["text"], json!(""));
+}
+
+#[tokio::test]
+async fn a_missing_text_is_refused_and_the_refusal_says_how_to_delete() {
+    let (dir, ctx) = ws();
+    put(&dir, "a.txt", "one\ntwo\n");
+    let t = first_tag(&read(&ctx, "a.txt").await.output);
+    let input = json!({"path": "a.txt", "tag": t, "lines": [{"from": 1, "to": 1}]});
+    let n = normalized(input.clone()).unwrap_err();
+    assert!(n.contains("\"text\": \"\"") && n.contains("delete"), "{n}");
+    let r = Edit.refusal(&ctx, &input).expect("refused");
+    assert!(r.contains("\"text\": \"\"") && r.contains("delete"), "{r}");
+    let e = Edit.run(&ctx, input).await;
+    assert!(!e.ok && e.output.contains("\"text\": \"\""), "{}", e.output);
+    assert_eq!(get(&dir, "a.txt"), "one\ntwo\n");
+}
+
+#[tokio::test]
+async fn a_missing_tag_names_the_header_line_and_prints_the_current_tag_and_rows() {
+    let (dir, ctx) = ws();
+    put(&dir, "a.txt", &numbered(10));
+    let now = tag_of(&numbered(10));
+    let input = json!({"path": "a.txt", "lines": [{"from": 5, "to": 5, "text": "five"}]});
+    let r = Edit.refusal(&ctx, &input).expect("refused");
+    for out in [r, Edit.run(&ctx, input.clone()).await.output] {
+        assert!(out.contains("[path#TAG]"), "{out}");
+        assert!(out.contains("\trow 5\n"), "{out}");
+        assert!(out.contains(&format!("[a.txt#{now}]")), "{out}");
+    }
+    assert_eq!(get(&dir, "a.txt"), numbered(10));
+    // With the tag the refusal printed, the same call lands.
+    let mut again = input;
+    again["tag"] = json!(now);
+    let e = Edit.run(&ctx, again).await;
+    assert!(e.ok, "{}", e.output);
+}
+
+/// `{from: N, text}` is not taken for one row: a range needs both ends, and
+/// the refusal says how to name one row.
+#[tokio::test]
+async fn from_without_to_is_refused_and_says_how_to_name_one_row() {
+    let (dir, ctx) = ws();
+    put(&dir, "a.txt", "one\ntwo\n");
+    let t = first_tag(&read(&ctx, "a.txt").await.output);
+    let input = json!({"path": "a.txt", "tag": t, "lines": [{"from": 2, "text": "x"}]});
+    let r = Edit.refusal(&ctx, &input).expect("refused");
+    assert!(r.contains("`to`") && r.contains("one row"), "{r}");
+    assert_eq!(get(&dir, "a.txt"), "one\ntwo\n");
 }

@@ -91,45 +91,55 @@ pub fn add_rows(rows: &mut Rows, lo: usize, hi: usize) {
     if lo == 0 || hi < lo {
         return;
     }
-    let (mut lo, mut hi) = (
+    let (lo, hi) = (
         lo.min(u32::MAX as usize) as u32,
         hi.min(u32::MAX as usize) as u32,
     );
     // The common case, rows in order: no rebuild.
     match rows.last_mut() {
-        None => {
-            rows.push((lo, hi));
-            return;
-        }
-        Some(l) if lo > l.1.saturating_add(1) => {
-            rows.push((lo, hi));
-            return;
-        }
-        Some(l) if lo >= l.0 => {
-            l.1 = l.1.max(hi);
-            return;
-        }
-        _ => {}
+        None => rows.push((lo, hi)),
+        Some(l) if lo > l.1.saturating_add(1) => rows.push((lo, hi)),
+        Some(l) if lo >= l.0 => l.1 = l.1.max(hi),
+        _ => merge_in(rows, vec![(lo, hi)]),
     }
-    let mut out = Rows::with_capacity(rows.len() + 1);
-    let mut placed = false;
-    for &(a, b) in rows.iter() {
-        if b.saturating_add(1) < lo {
-            out.push((a, b));
-        } else if hi.saturating_add(1) < a {
-            if !placed {
-                out.push((lo, hi));
-                placed = true;
-            }
-            out.push((a, b));
+}
+
+/// Add every range of `new` (1-based, inclusive; empty and row-0 ranges are
+/// skipped) to `rows`: one sort of `new` and one linear merge, not a rebuild
+/// per range.
+pub fn add_ranges(rows: &mut Rows, new: &[(usize, usize)]) {
+    let clamp = |n: usize| n.min(u32::MAX as usize) as u32;
+    let inc: Vec<(u32, u32)> = new
+        .iter()
+        .filter(|&&(a, b)| a >= 1 && b >= a)
+        .map(|&(a, b)| (clamp(a), clamp(b)))
+        .collect();
+    merge_in(rows, inc);
+}
+
+/// Merge `inc` (any order) into `rows` (sorted and apart), keeping it so.
+fn merge_in(rows: &mut Rows, mut inc: Vec<(u32, u32)>) {
+    if inc.is_empty() {
+        return;
+    }
+    inc.sort_unstable();
+    let mut out = Rows::with_capacity(rows.len() + inc.len());
+    let (mut i, mut j) = (0, 0);
+    while i < rows.len() || j < inc.len() {
+        let next = if j >= inc.len() || (i < rows.len() && rows[i] <= inc[j]) {
+            i += 1;
+            rows[i - 1]
         } else {
-            lo = lo.min(a);
-            hi = hi.max(b);
+            j += 1;
+            inc[j - 1]
+        };
+        if let Some(l) = out.last_mut()
+            && next.0 <= l.1.saturating_add(1)
+        {
+            l.1 = l.1.max(next.1);
+        } else {
+            out.push(next);
         }
-    }
-    if !placed {
-        out.push((lo, hi));
-        out.sort_unstable();
     }
     *rows = out;
 }
@@ -172,6 +182,9 @@ pub struct Seen {
 struct Entry {
     /// The hash the guard compares (the latest `read`, `write` or `edit`).
     sha: Sha,
+    /// The guard holds `sha`: the agent read or wrote the file. An entry
+    /// that only keeps versions a refusal printed is not a read of it.
+    guarded: bool,
     /// Kept versions, the newest last (at most [`MAX_VERSIONS`], at most
     /// one per tag).
     vers: Vec<Version>,
@@ -197,9 +210,7 @@ impl Entry {
     fn keep(&mut self, sha: Sha, text: Arc<String>, mut rows: Rows) {
         if let Some(i) = self.vers.iter().position(|v| v.sha == sha) {
             let old = self.vers.remove(i);
-            for (a, b) in old.shown {
-                add_rows(&mut rows, a as usize, b as usize);
-            }
+            merge_in(&mut rows, old.shown);
         }
         let t = tag(&sha);
         self.vers.retain(|v| tag(&v.sha) != t);
@@ -376,6 +387,7 @@ impl SeenStore {
                 path,
                 Entry {
                     sha,
+                    guarded: true,
                     vers,
                     used: now,
                 },
@@ -415,7 +427,7 @@ impl SessionSeen {
         t.used = now;
         let e = t.files.get_mut(path)?;
         e.used = now;
-        Some(e.seen())
+        e.guarded.then(|| e.seen())
     }
 
     /// The kept version of `path` whose tag is `tag` (any letter case).
@@ -446,13 +458,13 @@ impl SessionSeen {
     }
 
     /// Keep `bytes` as a version of `path` with `rows` shown, without
-    /// changing the hash the guard compares, if the table has one for the
-    /// file (rows shown of a file that changed since it was read must not
-    /// count as reading all of it). With none, it is [`Self::record_shown`].
+    /// changing the hash the guard compares and without making one: rows
+    /// shown of a file that changed since it was read, or of a file never
+    /// read, must not count as reading all of it (`write` and the
+    /// `old_string` form still ask for a `read`).
     pub fn add_version(&self, path: &Path, bytes: &[u8], rows: &[(usize, usize)]) {
         let (sha, snapshot) = Self::snap(bytes);
-        let known = self.get(path).is_some();
-        self.put(path, sha, snapshot, rows, !known);
+        self.put(path, sha, snapshot, rows, false);
     }
 
     /// Count `rows` as shown of the kept version of `path` with hash `sha`.
@@ -469,9 +481,7 @@ impl SessionSeen {
             return;
         };
         let before = v.bytes();
-        for &(a, b) in rows {
-            add_rows(&mut v.shown, a, b);
-        }
+        add_ranges(&mut v.shown, rows);
         let after = v.bytes();
         inner.snap_bytes = (inner.snap_bytes + after).saturating_sub(before);
         inner.evict();
@@ -528,6 +538,7 @@ impl SessionSeen {
         let fresh = !t.files.contains_key(path);
         let e = t.files.entry(path.to_path_buf()).or_insert_with(|| Entry {
             sha,
+            guarded: current,
             vers: Vec::new(),
             used: now,
         });
@@ -535,12 +546,11 @@ impl SessionSeen {
         e.used = now;
         if current {
             e.sha = sha;
+            e.guarded = true;
         }
         if let Some(text) = snapshot {
             let mut shown = Rows::new();
-            for &(a, b) in rows {
-                add_rows(&mut shown, a, b);
-            }
+            add_ranges(&mut shown, rows);
             e.keep(sha, text, shown);
         }
         let after = Inner::snap_len(e);
@@ -792,6 +802,42 @@ mod tests {
         assert_eq!(texts.iter().filter(|t| kept(t)).count(), MAX_VERSIONS);
         // The guard's hash is the newest recorded.
         assert_eq!(s.get(p).unwrap().sha, sha256(last.as_bytes()));
+    }
+
+    /// Review of PR 187: every range added out of order rebuilt the whole
+    /// list (8,000 single rows took 233 ms), so a call with many ranges was
+    /// quadratic.
+    #[test]
+    fn many_ranges_added_out_of_order_are_merged_in_linear_time() {
+        let p = Path::new("/w/big.txt");
+        let n = 20_000usize;
+        // Every other row, last first: none touches another.
+        let ranges: Vec<(usize, usize)> = (1..=n).rev().map(|i| (i * 2, i * 2)).collect();
+        let s = SessionSeen::default();
+        let start = std::time::Instant::now();
+        s.record_shown(p, b"x\n", &ranges);
+        let took = start.elapsed();
+        let sha = sha256(b"x\n");
+        let v = s.version(p, &tag(&sha)).unwrap();
+        assert_eq!(v.shown.len(), n);
+        assert!(
+            v.shown.windows(2).all(|w| w[0].1 + 1 < w[1].0),
+            "sorted, apart"
+        );
+        let start = std::time::Instant::now();
+        s.add_shown(p, &sha, &ranges);
+        let again = start.elapsed();
+        let mut touching: Vec<(usize, usize)> =
+            (1..=n).rev().map(|i| (i * 2 + 1, i * 2 + 1)).collect();
+        touching.push((1, 1));
+        s.add_shown(p, &sha, &touching);
+        let v = s.version(p, &tag(&sha)).unwrap();
+        assert_eq!(v.shown, vec![(1, (n * 2 + 1) as u32)]);
+        assert!(
+            took < std::time::Duration::from_millis(250)
+                && again < std::time::Duration::from_millis(250),
+            "{took:?} {again:?}"
+        );
     }
 
     #[test]
