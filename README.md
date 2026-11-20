@@ -867,6 +867,32 @@ that reports none has its cache writes priced as plain input; and nothing
 limits or stops spending. The provider's own console has the real
 figure.
 
+#### Usage totals for server admins
+
+Settings → Server → **Usage** shows, for a period (this month, last month,
+last 30 days), how many tokens each person used per model (input, output,
+cached input, turns) and what that cost at the prices above, sortable by cost
+or tokens, and a second table per workspace (Personal chats are one row for
+everyone). It is numbers only: nothing says which chat, when a turn ran, how
+many chats there are or on which day; chats are private to their owner, admins
+too. The page prices the token sums with the same functions as the chat
+header, so a model without a price reads `+ unpriced` there as well. The API
+route is `GET /api/admin/usage?from=<ms>&to=<ms>` (from inclusive, to
+exclusive, at most 366 days), for server admins and the API token; a member or
+a workspace admin is refused.
+
+What is counted: each turn's final usage (the provider's count replaces the
+running figures), a turn stopped without one at its last running figure, the
+summaries of `/compact`, hand-off notes and background sub-agents. A
+sub-agent's own chat is not added: its cost is already in its parent's. What is
+not counted: chats that were deleted (their log goes with them, so the totals
+cover only "chats that still exist"); a turn that began before the period and
+ended without a usage record; a sub-agent whose parent turn was interrupted
+before it returned; prices as of today, not as of the call. The scan has a
+time limit (10 s): on a very large server the answer says it read only the
+most recently active share of the chats, and the numbers are then too low.
+Spending limits, caps and alerts are not built.
+
 An agent has one model; one model may serve several agents. A model call
 that fails before any output for a passing reason (rate limit 429, server
 error 500/502/503/504, Anthropic's overloaded 529, no connection, a stream

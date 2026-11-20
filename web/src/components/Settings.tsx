@@ -21,6 +21,7 @@ import { Nodes } from "./Nodes";
 import { Select } from "./Select";
 import { SavingsSettings } from "./Savings";
 import { StorageSettings } from "./StorageSettings";
+import { UsageSettings } from "./UsageSettings";
 import { Users } from "./Users";
 import { ServerWorkspaces } from "./workspace/ServerWorkspaces";
 import { WorkspaceDelete } from "./workspace/WorkspaceDelete";
@@ -254,6 +255,7 @@ export default function Settings(props: {
         {tab === "users" && <Users me={props.me} />}
         {tab === "workspaces" && <ServerWorkspaces me={props.me} onChanged={wsChanged} />}
         {tab === "storage" && <StorageSettings me={props.me} />}
+        {tab === "usage" && <UsageSettings models={props.models} />}
       </div>
     </section>
   );

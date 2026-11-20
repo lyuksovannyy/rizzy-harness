@@ -2377,7 +2377,7 @@ not cached), and misses never evict cached icons.
   own role. While a workspace has other members its last enabled owner stays,
   checked inside the store transaction, and role writes only apply to the role
   the guard saw. The last member leaving deletes the workspace.
-* Chats stay private to their owner in every workspace, except to the static API token (accepted gap, T29). A chat's workspace is a
+* Chats stay private to their owner in every workspace, except to the static API token (accepted gap, T29). What a server admin sees of other people is numbers per person and model, never per chat: the usage totals (`GET /api/admin/usage`) hold an account's id and name, a model id and token sums, a turn count and the period asked, and no session id, title, folder, agent, node, time of a turn, count of chats or per-day series. A chat's workspace is a
   master-side mapping (`session_workspaces`, a new table: the `sessions` schema
   shared by master.db, chat.db and node.db is unchanged), ignored once the owner
   is no longer a member, else the owner's Personal workspace. Leaving, removal and
