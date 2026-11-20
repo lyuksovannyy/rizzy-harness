@@ -98,7 +98,7 @@ where the person does not see it, with no race and no precondition.
   the header is absent).
 - Established: **proven by test**,
   `review_r2_1_a_cookie_alone_takes_every_socket_place`
-  (`crates/master/tests/logs/login_binding_http.rs` in the patch).
+  (`crates/master/tests/login_binding_http.rs` in the patch).
 - Smallest fix: count a socket against the user's eight only once its key was
   accepted; give unkeyed sockets a small separate allowance per login (two) and
   a shorter wait. For the favicon, take the link route the other `<img>`s use.
@@ -268,7 +268,7 @@ strings (`web/src/fold.ts`), once.
 # R2-1, on the fix branch
 git checkout --detach fix/R.2-approval-findings
 git apply docs/security-review/proofs/2026-11-gate3-fixes-2.patch
-cargo test -p harness-master --test logs login_binding_http::review_r2_1
+cargo test -p harness-master --test login_binding_http review_r2_1
 
 # W-1, on the fix branch or on main (the web file applies to either)
 git apply --include='web/*' docs/security-review/proofs/2026-11-gate3-fixes-2.patch
