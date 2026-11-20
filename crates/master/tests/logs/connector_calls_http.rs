@@ -901,6 +901,14 @@ async fn nothing_is_sent_for_a_tool_the_master_did_not_list() {
 #[tokio::test]
 async fn a_list_not_read_yet_is_said_and_read_in_the_background() {
     let t = start().await;
+    // The net's timeout (2 s in `start`) must outlast the server's 3 s, or
+    // the background read would give up before it could be waited for.
+    t.master.set_connector_test_net(
+        t.remote.table(),
+        true,
+        Some(t.remote.cert_der.clone()),
+        Duration::from_secs(20),
+    );
     let [alex, bob] = users(&t).await;
     let ws = team(&t, &alex, "Team").await;
     add(&t, &alex, &ws, "open", "lateinit/open", "none").await;
