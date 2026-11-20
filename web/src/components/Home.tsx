@@ -6,7 +6,7 @@ import type { Agent, ModelInfo, NodeInfo, Notice, Prefs, AttentionItem, RoutineA
 import type { Mode } from "../lib/modes";
 import { Composer, type Submission } from "./Composer";
 import type { HostRight } from "../lib/execModes";
-import { Similar, type SimilarHandle } from "./Similar";
+import type { SimilarHandle } from "./Similar";
 import type { History } from "../bg/topics";
 import { readBackdropMirror } from "../lib/appearance";
 import { useFeatures } from "../lib/features";
@@ -17,6 +17,11 @@ import { useNewChatAgent, type AgentDefaults } from "../lib/agentDefaults";
 const Backdrop = lazy(() => import("../bg/Backdrop"));
 // Problems are rare (a model its provider dropped): their code loads when there is one.
 const Notices = lazy(() => import("./Notices").then((m) => ({ default: m.Notices })));
+// "You may have asked this before": nothing shows until three words are
+// typed, so its code (and the search-result row) loads right after the first
+// paint instead of in it. A suggestion is a ref'd handle: until the chunk
+// has loaded the handle is empty and ArrowDown stays in the bar.
+const Similar = lazy(() => import("./Similar").then((m) => ({ default: m.Similar })));
 // What waits for the person (chats, routine results): loaded when there is
 // some (it renders nothing otherwise), off the first load.
 const Attention = lazy(() => import("./Attention").then((m) => ({ default: m.Attention })));
@@ -136,14 +141,16 @@ export function Home(props: {
             <Notices notices={props.notices} agents={props.agents} />
           </Suspense>
         )}
-        <Similar
-          ref={similar}
-          text={typed.text}
-          mode={typed.mode}
-          workspace={props.workspace}
-          onOpen={props.onOpen}
-          onCount={setSimilarCount}
-        />
+        <Suspense fallback={null}>
+          <Similar
+            ref={similar}
+            text={typed.text}
+            mode={typed.mode}
+            workspace={props.workspace}
+            onOpen={props.onOpen}
+            onCount={setSimilarCount}
+          />
+        </Suspense>
         {similarCount === 0 && (!!props.attention?.length || !!props.routines?.length) && (
           <Suspense fallback={null}>
             <Attention
