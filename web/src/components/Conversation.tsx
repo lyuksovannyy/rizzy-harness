@@ -496,7 +496,7 @@ export default function Conversation(props: {
                 }`}
               >
                 {compact(figures.usage.input_tokens + figures.usage.output_tokens)} {t("conv.tokens")} ·{" "}
-                <CostMeter usage={figures.usage} turn={figures.turn} models={props.models} />
+                <CostMeter usage={figures.costUsage} turn={figures.costTurn} models={props.models} />
                 <ContextMeter used={view.context_tokens} window={view.context_window} summaryAt={view.summary_at} model={view.context_model ?? meta?.model ?? ""} />
               </span>
             )}
