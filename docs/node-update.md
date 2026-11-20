@@ -46,7 +46,7 @@ Claims about code were read on `main` at `e988625`.
 `AUDIT.md` S13, D4, L2) deleted SSH node setup, in which **the master logged in to servers as
 root, uploaded its own binary and rewrote firewall and sshd**, and the HTTP endpoints that
 installed graphify and rewrote `node.toml`. A test keeps those routes gone
-(`crates/master/tests/settings_http.rs:352`). The reasoning stands: no path may let whoever holds
+(`crates/master/tests/it/settings_http.rs:352`). The reasoning stands: no path may let whoever holds
 the master push software or policy onto a node. This design keeps it by direction. **The node
 pulls; the master never pushes.** Only a node whose owner wrote `update_mode = "auto"` into its
 own `node.toml` asks for a build; no setting on the master turns it on.
@@ -538,7 +538,7 @@ master holds one open file, not a copy.
 
 | Step | What | Size | When |
 |---|---|---|---|
-| 1 | **A.19 (built, §7.0):** version check before `Accepted` with the reason; SIGTERM handled like SIGINT; a stop refuses new work, cancels running turns through the normal path with a reason, closes them, exits; README unit (tests 15, 16, 20: `crates/cli/tests/stop_signal.rs`, `crates/master/tests/version_refusal.rs`) | **M** | Done |
+| 1 | **A.19 (built, §7.0):** version check before `Accepted` with the reason; SIGTERM handled like SIGINT; a stop refuses new work, cancels running turns through the normal path with a reason, closes them, exits; README unit (tests 15, 16, 20: `crates/cli/tests/stop_signal.rs`, `crates/master/tests/it/version_refusal.rs`) | **M** | Done |
 | 2 | Build identity: build script, CI arguments, the marked string | **S** | After Gate 3 |
 | 3 | The full drain: phases, the note, `drain_answer`, events, marker, Continue, routines (tests 17 to 26) | **L** | After Gate 3, on step 1 |
 | 4 | Requirement: storage, admin setting, `welcome`, notices; `off`, `notify`, `restart` (tests 1, 23) | **M** | After 3 |

@@ -13,7 +13,7 @@ disk. Format and severity as in the step-1 record.
 The builder's suites at this head, run whole:
 
 ```text
-cargo test -p harness-master --test background_stop_http    6 passed
+cargo test -p harness-master --test it background_stop_http    6 passed
 HARNESS_REQUIRE_BWRAP=1 HARNESS_REQUIRE_FUSE=1 cargo test -p harness --test background    31 passed, 2 ignored, 60.2 s
 web vitest (whole)    24 files, 205 passed
 web/e2e/background.cjs (Playwright, real binary)    strip shows id+command+time, second tab, turn's Stop leaves it, strip's Stop kills it, no page errors
