@@ -16,6 +16,10 @@ dom_smoothie = "0.19.0"
 # it (a test fails if two versions appear): the tree is measured before the
 # readability pass runs. Nothing new enters the tree.
 dom_query = { version = "=0.29.0", default-features = false }
+# The tree builder dom_query drives, for the counting first pass (`budget.rs`),
+# pinned to the version the lock file holds for dom_query (a test fails if two
+# versions appear). Nothing new enters the tree.
+html5ever = { version = "=0.40.1", default-features = false }
 futures.workspace = true
 harness-core.workspace = true
 harness-tools.workspace = true

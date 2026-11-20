@@ -100,3 +100,102 @@ fn parse_cost() {
         }
     }
 }
+
+/// The counting first pass on the worst inputs for the tree builder's
+/// re-opening of formatting elements, and the earlier worst cases: time and
+/// the process's peak memory (release, `--ignored --nocapture`).
+#[test]
+#[ignore]
+fn budget_cost() {
+    let chunk: usize = std::env::var("CHUNK")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2048);
+    let n = 12_500usize;
+    let fmt = |open: &str, close: &str, attr: &str, tag: &str| {
+        let attrs: String = (0..n).map(|i| format!("<{tag} {attr}={i}>")).collect();
+        format!("{}{attrs}{}", open.repeat(n), format!("{close}x").repeat(n))
+    };
+    // Depth stays under the nesting limit (500 formatting elements) while the
+    // paragraphs that follow re-open all of them each time: 500 x 25,000.
+    let pcase = |tag: &str, attr: &str| {
+        let attrs: String = (0..500).map(|i| format!("<{tag} {attr}={i}>")).collect();
+        format!("<p>{attrs}{}", "<p>x".repeat(25_000))
+    };
+    let cases: Vec<(String, String)> = vec![
+        ("div b a".into(), fmt("<div>", "</div>", "a", "b")),
+        ("div a href".into(), fmt("<div>", "</div>", "href", "a")),
+        (
+            "div font color".into(),
+            fmt("<div>", "</div>", "color", "font"),
+        ),
+        ("div i id".into(), fmt("<div>", "</div>", "id", "i")),
+        ("p b (no end tags)".into(), pcase("b", "a")),
+        ("p a".into(), pcase("a", "href")),
+        ("table foster b".into(), {
+            let attrs: String = (0..500).map(|i| format!("<b a={i}>")).collect();
+            format!("<table>{attrs}{}", "<tr><td>x".repeat(25_000))
+        }),
+        ("table foster b/td".into(), {
+            let attrs: String = (0..500).map(|i| format!("<b a={i}>")).collect();
+            format!(
+                "<table><tr><td>{attrs}{}",
+                "</td></tr><tr><td>x".repeat(20_000)
+            )
+        }),
+        ("div b 250x250".into(), {
+            let attrs: String = (0..250).map(|i| format!("<b a={i}>")).collect();
+            format!("{}{attrs}{}", "<div>".repeat(250), "</div>x".repeat(250))
+        }),
+        (
+            "a inside a".into(),
+            "<a href=x>".repeat(2 * n) + &"</p>x".repeat(n),
+        ),
+        ("nested templates".into(), "<template>".repeat(2 * n)),
+        ("template + b".into(), {
+            let attrs: String = (0..n).map(|i| format!("<b a={i}>")).collect();
+            format!(
+                "{}{attrs}{}",
+                "<template>".repeat(100),
+                "</template>x".repeat(100)
+            )
+        }),
+        (
+            "div x 52k".into(),
+            format!("<div>{}x", "<div>".repeat(52_000)),
+        ),
+        (
+            "div x 210k (1 MiB)".into(),
+            format!("<div>{}x", "<div>".repeat(209_000)),
+        ),
+        (
+            "ul x 250k".into(),
+            format!("<ul>{}x", "<ul>".repeat(250_000)),
+        ),
+        (
+            "foreignObject section/".into(),
+            format!("<svg><foreignObject>{}x", "<section/>".repeat(100_000)),
+        ),
+        ("optgroup".into(), "<optgroup>".repeat(100_000)),
+        ("million tiny".into(), "<i></i>".repeat(150_000)),
+        ("text 1MiB".into(), "word ".repeat(200_000)),
+        ("b p pile".into(), "<b><p>".repeat(170_000)),
+    ];
+    for (name, html) in cases {
+        let t = Instant::now();
+        let h = html.clone();
+        let out = std::thread::Builder::new()
+            .stack_size(128 << 20)
+            .spawn(move || harness_web::budget_probe(&h, chunk))
+            .unwrap()
+            .join()
+            .unwrap();
+        println!(
+            "BUDGET chunk {chunk} {name:<26} {:>8} bytes {:>10} {:>10.1?} | {}",
+            html.len(),
+            out,
+            t.elapsed(),
+            hwm()
+        );
+    }
+}

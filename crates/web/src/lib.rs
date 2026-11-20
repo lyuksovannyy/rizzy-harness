@@ -15,10 +15,18 @@
 //! `sources`), recorded with its URL on the tool result so the UI resolves
 //! the model's citations to links it did not write.
 
+mod budget;
 pub mod favicon;
 mod plain;
 mod sources;
 mod tree;
+
+/// The counting first pass (for the cost measurement test): outcome as text.
+#[doc(hidden)]
+pub fn budget_probe(html: &str, chunk: usize) -> String {
+    let (o, n) = budget::run(html, budget::MAX_NODES, tree::MAX_NESTING, chunk);
+    format!("{o:?} {n} nodes")
+}
 
 /// Depth and node count of a parsed tree (for the cost measurement test).
 #[doc(hidden)]
@@ -355,6 +363,30 @@ enum Read {
 /// quadratic in depth on it.
 fn read_tree(body: &[u8], url: &str, readable: bool) -> Read {
     let html = String::from_utf8_lossy(body);
+    // First, the counting pass: the tree builder can make far more nodes
+    // than the page has tags (re-opened formatting elements), and a deep tree
+    // costs it time quadratic in the depth; both are stopped inside it.
+    let (outcome, nodes) = budget::run(&html, budget::MAX_NODES, tree::MAX_NESTING, budget::CHUNK);
+    match outcome {
+        budget::Outcome::Ok => {}
+        budget::Outcome::TooMany => {
+            return Read::Refused(format!(
+                "this page has too many elements to read (more than {})",
+                budget::MAX_NODES
+            ));
+        }
+        budget::Outcome::TooDeep => {
+            return Read::Refused(format!(
+                "this page is nested too deeply to read (more than {} levels of elements)",
+                tree::MAX_NESTING
+            ));
+        }
+    }
+    // The readers that build on a tree hold about 1 MB per 1,000 nodes while
+    // they work: a page with more than `MAX_TREE_NODES` is read as text.
+    if nodes > budget::MAX_TREE_NODES {
+        return Read::Text(plain::plain_text(body), sources::html_title(body));
+    }
     let doc = dom_query::Document::from(&*html);
     match tree::check(&doc) {
         tree::Shape::Ok => {}
@@ -367,7 +399,7 @@ fn read_tree(body: &[u8], url: &str, readable: bool) -> Read {
         tree::Shape::TooMany => {
             return Read::Refused(format!(
                 "this page has too many elements to read (more than {})",
-                tree::MAX_NODES
+                budget::MAX_NODES
             ));
         }
     }

@@ -24,10 +24,9 @@ use dom_query::Document;
 /// corpus here: there is none offline).
 pub const MAX_NESTING: usize = 512;
 
-/// The most nodes a tree may have to be read (elements, text, comments).
-/// Chosen from measurement (PLAN.md T89): a page this size is read in well
-/// under a second.
-pub const MAX_NODES: usize = 150_000;
+/// The most nodes a tree may have to be read: the budget the counting first
+/// pass enforces inside the tree builder (`budget.rs`).
+pub const MAX_NODES: usize = crate::budget::MAX_NODES;
 
 /// The most `<` followed by a letter a page may hold to be handed to the
 /// tree builder. Every start tag the tokenizer makes begins that way, so
@@ -168,5 +167,17 @@ mod tests {
             "pin the exact version"
         );
         assert!(lock.contains("name = \"dom_query\"\nversion = \"0.29.0\""));
+        // The tree builder the counting first pass drives is the one
+        // `dom_query` drives.
+        assert!(
+            toml.contains("html5ever = { version = \"=0.40.1\""),
+            "pin html5ever"
+        );
+        let (_, rest) = lock.split_once("name = \"dom_query\"").unwrap();
+        let block = rest.split("[[package]]").next().unwrap();
+        assert!(
+            block.contains("\"html5ever 0.40.1\""),
+            "dom_query no longer resolves to html5ever 0.40.1: {block}"
+        );
     }
 }
