@@ -522,6 +522,27 @@ describe("a saved provider", () => {
     expect(by("mine").price).toEqual({ input: 0.5, cached_input: 0.05 });
     expect(by("gpt-3.5")).not.toHaveProperty("price");
   });
+
+  test("an input or output price without a cached-input price says its cached tokens stay unpriced", async () => {
+    providerModels.mockResolvedValue({ models: [m("gpt-4o"), m("gpt-3.5")], fetched_ms: Date.now() });
+    await act(async () =>
+      root.render(<ProviderForm key="prices2" state={SAVED} agents={AGENTS} edit={SAVED.providers[1]} onSaved={saved} onState={changed} />),
+    );
+    const price = (label: string) => host.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`)!;
+    const note = "cached tokens will show as unpriced";
+    expect(host.textContent).not.toContain(note);
+    type(price("Input price of gpt-4o"), "2.5");
+    expect(host.textContent).toContain(note);
+    // One line, for the model that has the gap and not for the other.
+    expect(host.textContent!.split(note).length - 1).toBe(1);
+    type(price("Cached input price of gpt-4o"), "0.25");
+    expect(host.textContent).not.toContain(note);
+    // Output alone counts too; clearing the cached price brings it back.
+    type(price("Cached input price of gpt-4o"), "");
+    type(price("Input price of gpt-4o"), "");
+    type(price("Output price of gpt-4o"), "10");
+    expect(host.textContent).toContain(note);
+  });
 });
 
 describe("countdown", () => {

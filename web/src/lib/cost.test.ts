@@ -6,7 +6,7 @@ import { describe, expect, test } from "vitest";
 import { costMeter } from "../components/CostMeter";
 import { fold } from "../fold";
 import type { ModelInfo, ModelPrice, ModelTokens, RawEvent, Usage } from "../types";
-import { costText, estimate, formatCost } from "./cost";
+import { costText, estimate, formatCost, missingPrices, modelCost } from "./cost";
 
 const info = (id: string, price?: ModelPrice, currency = "USD"): ModelInfo => ({
   id,
@@ -169,5 +169,112 @@ describe("the header", () => {
   });
   test("nothing when the server prices no model", () => {
     expect(costMeter(chat, turn, [info("p::big")], "en-US")).toBeNull();
+  });
+
+  describe("the hint names the missing price", () => {
+    const hint = (u: Usage, models = MODELS) => costText(estimate(u, models), "en-US")!.hint;
+
+    test("a model missing only the cached-input price says so", () => {
+      const h = hint(usage({ "p::small": { input_tokens: 1000, output_tokens: 10, cache_read_tokens: 500 } }));
+      expect(h).toContain("p::small (cached input)");
+    });
+
+    test("each missing class is named; a model with no prices says so; a priced one is not listed", () => {
+      const h = hint(
+        usage({
+          "p::small": { input_tokens: 1000, output_tokens: 10, cache_read_tokens: 500, cache_write_tokens: 100 },
+          "p::free": { input_tokens: 5, output_tokens: 5 },
+          "p::big": { input_tokens: 10, output_tokens: 10 },
+        }),
+      );
+      expect(h).toContain("p::small (cached input, cache write)");
+      expect(h).toContain("p::free (no prices)");
+      expect(h).not.toContain("p::big");
+      // Only what the model used: unused classes are not named.
+      const only = hint(usage({ "p::small": { input_tokens: 10, output_tokens: 10, cache_write_tokens: 10 } }));
+      expect(only).toContain("(cache write)");
+      expect(only).not.toContain("cached input");
+    });
+
+    test("input and output are named when they are the gap", () => {
+      const half = info("p::half", { cached_input: 1 });
+      const h = hint(usage({ "p::half": { input_tokens: 100, output_tokens: 10, cache_read_tokens: 50 } }), [BIG, half]);
+      expect(h).toContain("p::half (input, output)");
+    });
+
+    test("a fully priced usage has no such hint", () => {
+      const c = costText(estimate(usage({ "p::big": { input_tokens: 100, output_tokens: 10, cache_read_tokens: 50 } }), MODELS), "en-US")!;
+      expect(c.hint).not.toContain("Not priced");
+    });
+
+    test("the list is capped and says how many more", () => {
+      const ids = ["a", "b", "c", "d", "e"].map((x) => `p::${x}`);
+      const by = Object.fromEntries(ids.map((id) => [id, { input_tokens: 10, output_tokens: 1 }]));
+      const h = hint(usage(by), [BIG, ...ids.map((id) => info(id))]);
+      expect(h).toContain("p::a (no prices), p::b (no prices), p::c (no prices) and 2 more");
+      expect(h).not.toContain("p::d");
+    });
+  });
+
+  describe("a class with no tokens never needs a price", () => {
+    const priced = (price: ModelPrice) => info("p::x", price);
+    const cases: [string, ModelPrice, ModelTokens, number][] = [
+      [
+        "input and cache read, no input price",
+        { cached_input: 1, output: 2 },
+        { input_tokens: 100, output_tokens: 10, cache_read_tokens: 100 },
+        (100 * 1 + 10 * 2) / 1e6,
+      ],
+      ["no output tokens, no output price", { input: 1 }, { input_tokens: 100, output_tokens: 0 }, 100 / 1e6],
+      [
+        "cache write only",
+        { cache_write: 4 },
+        { input_tokens: 50, output_tokens: 0, cache_write_tokens: 50 },
+        (50 * 4) / 1e6,
+      ],
+    ];
+    for (const [name, price, tk, want] of cases) {
+      test(name, () => {
+        const m = priced(price);
+        expect(modelCost(tk, m)).toBeCloseTo(want, 12);
+        const e = estimate(usage({ "p::x": tk }), [m]);
+        expect(Number.isFinite(e.amount)).toBe(true);
+        expect(e.unpricedModels).toEqual([]);
+        expect(e.amount).toBeCloseTo(want, 12);
+      });
+    }
+
+    test("all 16 combinations: null exactly when a used class lacks its price, else finite", () => {
+      const full: ModelPrice = { input: 1, cached_input: 2, cache_write: 3, output: 4 };
+      const keys = ["input", "cached_input", "cache_write", "output"] as const;
+      for (const missing of [null, ...keys]) {
+        const price = { ...full };
+        if (missing) delete price[missing];
+        const m = priced(price);
+        for (let mask = 0; mask < 16; mask++) {
+          // Bit k set: class k has tokens (input counts what is left after the cache classes).
+          const read = mask & 2 ? 10 : 0;
+          const write = mask & 4 ? 10 : 0;
+          const tk: ModelTokens = {
+            input_tokens: (mask & 1 ? 10 : 0) + read + write,
+            output_tokens: mask & 8 ? 10 : 0,
+            cache_read_tokens: read,
+            cache_write_tokens: write,
+          };
+          const c = modelCost(tk, m);
+          const gaps = missingPrices(tk, m);
+          expect(c === null, `${missing} ${mask}`).toBe(gaps.length > 0);
+          if (c !== null) expect(Number.isFinite(c), `${missing} ${mask}`).toBe(true);
+          expect(gaps.length > 0, `${missing} ${mask}`).toBe(missing !== null && keys.indexOf(missing) >= 0 && !!(mask & (1 << keys.indexOf(missing))));
+        }
+      }
+    });
+  });
+
+  test("a long model id is cut in the hint", () => {
+    const long = "p::" + "x".repeat(200);
+    const h = costText(estimate(usage({ [long]: { input_tokens: 10, output_tokens: 1 } }), [BIG, info(long)]), "en-US")!.hint;
+    expect(h).toContain("p::" + "x".repeat(56) + "… (no prices)");
+    expect(h).not.toContain("x".repeat(57));
   });
 });

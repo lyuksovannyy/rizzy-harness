@@ -115,18 +115,30 @@ fn known_hosts(v: &PushView) -> String {
     };
     let file = home.join(".ssh/known_hosts");
     let all: Vec<PathBuf> = v.read.iter().chain(v.write).cloned().collect();
-    let tail = if ssh_command {
-        "; GIT_SSH_COMMAND is passed and may name another file: that one must be granted too"
-    } else {
-        ""
-    };
     if covered(&file, &all) {
-        format!("{who}: {} is readable{tail}", file.display())
+        let tail = if ssh_command {
+            "; GIT_SSH_COMMAND is passed and may name another file: that one must be granted too"
+        } else {
+            ""
+        };
+        return format!("{who}: {} is readable{tail}", file.display());
+    }
+    let grant = "`[sandbox] read = [\"~/.ssh/known_hosts\"]` when the host is already in it";
+    if ssh_command {
+        // Only the name is said, never its value (the user's shell text).
+        // Whether ssh reads the default file depends on that text, which is
+        // not parsed: so the failure is stated as a condition.
+        format!(
+            "{who}: GIT_SSH_COMMAND is passed, so ssh may use another known-hosts file; if it \
+             does, that file must be readable by commands (`[sandbox] read`); if it does not, ssh \
+             stops with `Host key verification failed` because {} is not readable (a command \
+             cannot answer its question); {grant}",
+            file.display()
+        )
     } else {
         format!(
             "{who}: {} is not readable, so ssh stops with `Host key verification failed` \
-             (a command cannot answer its question); `[sandbox] read = [\"~/.ssh/known_hosts\"]` \
-             when the host is already in it{tail}",
+             (a command cannot answer its question); {grant}",
             file.display()
         )
     }
@@ -321,7 +333,29 @@ mod tests {
             &[],
             &[],
         );
-        assert!(line(&l, "ssh known_hosts").contains("GIT_SSH_COMMAND is passed"));
+        let k = line(&l, "ssh known_hosts");
+        // The condition leads; the failure is only what happens if ssh uses
+        // the unreadable default, never asserted as a fact; the value of
+        // the variable is not printed.
+        assert!(
+            k.contains("GIT_SSH_COMMAND is passed, so ssh may use another known-hosts file"),
+            "{k}"
+        );
+        assert!(k.contains("if it does, that file must be readable"), "{k}");
+        assert!(
+            k.contains("if it does not, ssh stops with `Host key verification failed`"),
+            "{k}"
+        );
+        assert!(!k.contains("is not readable, so ssh stops"), "{k}");
+        assert!(!k.contains("X=1"), "{k}");
+        // Without it passed, the line stays the plain statement.
+        let l = run(true, &[], &[], &[], &[]);
+        let k = line(&l, "ssh known_hosts");
+        assert!(
+            k.contains("is not readable, so ssh stops with `Host key verification failed`"),
+            "{k}"
+        );
+        assert!(!k.contains("GIT_SSH_COMMAND"), "{k}");
     }
 
     #[test]
