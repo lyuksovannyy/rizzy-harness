@@ -51,3 +51,18 @@ test("a choice above the node's ceiling is disabled with the reason", async () =
   expect(c.calls).toEqual([]);
   c.unmount();
 });
+
+test("the review button is there only when the chat has a plan to open", () => {
+  const host = document.createElement("div");
+  document.body.append(host);
+  const root = createRoot(host);
+  let opened = 0;
+  act(() => root.render(<PlanBar max="auto" onCarry={async () => {}} />));
+  expect(host.querySelector(".plan-bar-review")).toBeNull();
+  act(() => root.render(<PlanBar max="auto" onCarry={async () => {}} onReview={() => void opened++} />));
+  const b = host.querySelector<HTMLButtonElement>(".plan-bar-review")!;
+  expect(b.textContent).toBe("Review the plan");
+  act(() => b.click());
+  expect(opened).toBe(1);
+  act(() => root.unmount());
+});
