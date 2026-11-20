@@ -14,6 +14,10 @@ use harness_tools::{Tool, ToolCtx};
 use harness_web::WebFetch;
 use serde_json::json;
 
+/// The tests share the process's two parse slots and a debug build parses
+/// slowly: one at a time, so that none waits for a slot another test holds.
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn fetch(html: String, readable: bool) -> (bool, String, Duration) {
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let a = l.local_addr().unwrap();
@@ -106,6 +110,7 @@ fn classes(n: usize) -> Vec<(&'static str, String)> {
 /// deeply, whatever the tag, with and without the readability pass.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_page_nested_too_deeply_is_refused() {
+    let _one_at_a_time = SERIAL.lock().await;
     for (what, html) in classes(3_000) {
         for readable in [false, true] {
             let (ok, out, took) = fetch(html.clone(), readable).await;
@@ -119,6 +124,7 @@ async fn a_page_nested_too_deeply_is_refused() {
 /// given, so they are read as plain text, quickly, with no tree at all.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_same_pages_at_a_megabyte_are_read_as_plain_text() {
+    let _one_at_a_time = SERIAL.lock().await;
     for (what, html) in classes(1024 * 1024 / 40).into_iter().step_by(3) {
         let (ok, out, took) = fetch(html, true).await;
         assert!(ok, "{what}: {out}");
@@ -131,6 +137,7 @@ async fn the_same_pages_at_a_megabyte_are_read_as_plain_text() {
 /// caps. None may take long or overflow the stack.
 #[tokio::test(flavor = "multi_thread")]
 async fn pages_inside_the_caps_are_read_quickly() {
+    let _one_at_a_time = SERIAL.lock().await;
     let max = 500usize;
     let big = 1024 * 1024usize;
     let cases: Vec<(&str, String)> = vec![
@@ -218,8 +225,17 @@ async fn pages_inside_the_caps_are_read_quickly() {
 /// 0.7 s in release) and is then refused as too deep, never read.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_worst_pages_the_tree_builder_is_given_are_refused_in_time() {
+    let _one_at_a_time = SERIAL.lock().await;
+    // A debug build parses about thirty times slower and would overrun the
+    // 15 s backstop at the cap: it takes a quarter of the cap; the release
+    // run is the one that measures the cap itself.
+    let n = if cfg!(debug_assertions) {
+        6_000
+    } else {
+        24_900
+    };
     for open in ["<ul>", "<div>", "<nav>"] {
-        let (ok, out, took) = fetch(page(open, 24_900), true).await;
+        let (ok, out, took) = fetch(page(open, n), true).await;
         assert!(!ok && out.contains("nested too deeply"), "{open}: {out}");
         println!("TIMING cap {open}: {took:?}");
         assert!(took < Duration::from_secs(60), "{open}: {took:?}");
