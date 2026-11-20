@@ -103,6 +103,46 @@ describe("Live.onLoginEnded", () => {
   });
 });
 
+describe("Live.retryAfterLogin", () => {
+  // A cookie that is good while the socket keeps being closed with 4401 (a
+  // lost login key, for one) must not turn into a loop of /api/me and new
+  // sockets: each retry waits, twice as long as the one before.
+  test("waits before each new socket, longer each time, and starts over once a socket delivers", () => {
+    const live = new Live();
+    const last = () => FakeSocket.all.at(-1)!;
+    const close4401 = () => (last().onclose as unknown as (e: { code: number }) => void)({ code: 4401 });
+    const waits: number[] = [];
+    for (let i = 0; i < 4; i++) {
+      close4401();
+      const before = FakeSocket.all.length;
+      live.retryAfterLogin();
+      expect(FakeSocket.all).toHaveLength(before); // never at once
+      let waited = 0;
+      while (FakeSocket.all.length === before && waited < 120_000) {
+        vi.advanceTimersByTime(100);
+        waited += 100;
+      }
+      waits.push(waited);
+    }
+    expect(waits).toEqual([500, 1000, 2000, 4000]);
+    // A socket that delivers a message proves the login: the wait starts over.
+    last().onopen!();
+    last().onmessage!({ data: JSON.stringify({ type: "sessions_changed" }) } as MessageEvent);
+    close4401();
+    const before = FakeSocket.all.length;
+    live.retryAfterLogin();
+    vi.advanceTimersByTime(499);
+    expect(FakeSocket.all).toHaveLength(before);
+    vi.advanceTimersByTime(1);
+    expect(FakeSocket.all).toHaveLength(before + 1);
+    // A second call while one is waiting or open adds no socket.
+    live.retryAfterLogin();
+    vi.advanceTimersByTime(120_000);
+    expect(FakeSocket.all).toHaveLength(before + 1);
+    live.close();
+  });
+});
+
 describe("the login key (Gate 3 P-1)", () => {
   test("is the first thing every socket sends, before any subscribe, and never in its URL", () => {
     const key = "c".repeat(64);

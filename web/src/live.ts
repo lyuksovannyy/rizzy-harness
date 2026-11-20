@@ -23,6 +23,8 @@ export class Live {
   private listeners = new Set<Listener>();
   private topics = new Map<LiveTopic, Set<Listener>>(TOPICS.map((t) => [t, new Set()]));
   private backoff = 500;
+  /** The wait before knocking again after a 4401 whose login proved good. */
+  private endedWait = 500;
   private closed = false;
   private pending = false;
   private opened = false;
@@ -184,7 +186,18 @@ export class Live {
     if (v) this.send({ type: "subscribe", session_id: sessionId, after_seq: v.head_seq });
   }
 
-  /** Also called by the shell after a 4401 whose login proved good. */
+  /** After a 4401 whose login proved good (`/api/me` answered): connect
+   * again, but never at once. A tab whose cookie is good and whose socket is
+   * still refused (a lost login key, a server that keeps closing it) would
+   * otherwise ask `/api/me` and open a socket in a tight loop. The wait
+   * doubles up to a minute and starts over once a socket has delivered a
+   * message. */
+  retryAfterLogin() {
+    if (this.closed || this.ws) return;
+    setTimeout(() => this.connect(), this.endedWait);
+    this.endedWait = Math.min(this.endedWait * 2, 60_000);
+  }
+
   connect() {
     if (this.closed || this.ws) return;
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -216,7 +229,7 @@ export class Live {
       if (ended) this.onLoginEnded();
       this.setState("offline");
       // A signed-out socket does not knock again by itself: the shell checks
-      // the login and calls `connect` if it still holds.
+      // the login and calls `retryAfterLogin` if it still holds.
       if (!this.closed && !ended) {
         setTimeout(() => this.connect(), this.backoff);
         this.backoff = Math.min(this.backoff * 2, 5000);
@@ -230,6 +243,8 @@ export class Live {
   }
 
   private onMessage(msg: { type: string; event?: RawEvent; session_id?: string }) {
+    // A socket that delivers is a socket the server accepted.
+    this.endedWait = 500;
     switch (msg.type) {
       case "error":
         if (msg.session_id) {
