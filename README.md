@@ -1554,6 +1554,22 @@ with one line saying what runs unasked:
   an MCP server, a routine or a webhook does switches it. The plan is the
   agent's last answer, ordinary chat history the next turn reads.
 
+  **Reviewing the plan.** "Review the plan" in the plan bar opens the newest
+  plan over the chat, split into blocks (headings, paragraphs, list items,
+  code, tables) drawn as chat messages are. Add a note to a block, or to text
+  you select in one: a comment, a replacement or a removal. Notes are listed
+  beside the plan and can be edited and deleted; they are kept in this page
+  (per chat) while it stays open, not stored anywhere. With notes, "Send
+  feedback" shows one message, a fixed lead and each note as a quote of its
+  passage followed by what you want, which you can edit before it is sent as
+  your ordinary message (the chat stays in plan mode; the server gets nothing
+  else). "Carry out" is off while you have notes unless you discard them. When
+  the agent answers with a revised plan, the pane shows what was added,
+  changed and removed against the one before; your earlier notes stay with the
+  plan they were written for, listed as sent or not sent, never moved onto new
+  text, and "Carry out" stays off if a newer plan arrived while the pane was
+  open until you have looked at it.
+
 No mode shows a card for a call that cannot happen: a path the file tool
 would refuse whatever you answer (outside the folder on a node with
 `allow_outside_workspace = false`, inside `.git` for a write, the node's data

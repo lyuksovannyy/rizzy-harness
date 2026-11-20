@@ -7,6 +7,8 @@
 // the agent writes reaches it. Its own lazy chunk: loaded on the first chat
 // in plan mode.
 import { own } from "../emptyView";
+import "../lib/i18nPages";
+import { t } from "../lib/i18n";
 import { ClipboardList } from "lucide-react";
 import { useState } from "react";
 import type { ApprovalMode } from "../types";
@@ -14,9 +16,9 @@ import { MODE_WORDS, whyNot } from "./ApprovalModePick";
 import "./planBar.css";
 
 /** The person's message a choice sends with the new mode. */
-const CARRY_OUT = "Carry out the plan.";
+export const CARRY_OUT = "Carry out the plan.";
 
-const CHOICES: { mode: ApprovalMode; label: string }[] = [
+export const CHOICES: { mode: ApprovalMode; label: string }[] = [
   { mode: "auto", label: "Auto" },
   { mode: "accept_edits", label: "Accept edits" },
   { mode: "ask", label: "Ask" },
@@ -27,6 +29,8 @@ export default function PlanBar(props: {
   max: ApprovalMode;
   /** Switch to `m`, then send `text` as the person's message. */
   onCarry: (m: ApprovalMode, text: string) => Promise<void>;
+  /** Open the plan-review pane (PlanReview.tsx); absent where the chat has no plan to show. */
+  onReview?: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -37,6 +41,11 @@ export default function PlanBar(props: {
         <b>Plan mode</b>: the agent looks and plans; nothing is changed. When the plan is right, switch and
         send &ldquo;{CARRY_OUT}&rdquo;:
       </span>
+      {props.onReview && (
+        <button type="button" className="plan-bar-choice plan-bar-review" title={t("planReview.openHint")} onClick={props.onReview}>
+          {t("planReview.open")}
+        </button>
+      )}
       {CHOICES.map((c) => {
         const why = whyNot(c.mode, props.max);
         return (
