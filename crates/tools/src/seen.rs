@@ -11,9 +11,14 @@
 //! Versions and tags (the line form of `edit`, PLAN.md T45): per path the
 //! last [`MAX_VERSIONS`] versions the agent was shown or wrote are kept, each
 //! with the rows of it that were shown. A version's tag is the first four hex
-//! characters of its SHA-256, upper case ([`tag`]): a lookup key, checked
-//! against the kept text, not a security boundary (the guard compares the full
-//! hash). A tag names at most one kept version of a path.
+//! characters of its SHA-256, upper case ([`tag`]), longer when a tag of that
+//! path was issued before with the same characters (the shortest longer
+//! prefix of the hash that was not): a lookup key, checked against the kept
+//! text, not a security boundary (the guard compares the full hash). A tag,
+//! once issued for a path in a session, never names another version of it:
+//! every kept version stores its tag, and the tags of versions that left the
+//! table are remembered per path ([`MAX_GONE_TAGS`]) so no new version takes
+//! one. A tag is compared as a whole string, never as a prefix.
 //!
 //! A snapshot is the text the agent was shown, kept in memory (bounded) so
 //! that a file changed on disk since can still be edited where it did not
@@ -43,6 +48,18 @@ pub const SNAPSHOT_MAX_TOTAL: usize = 8 << 20;
 /// Versions of one file kept per session (the newest this many that had a
 /// snapshot; the one the guard holds is the last to go, then the oldest).
 pub const MAX_VERSIONS: usize = 4;
+/// Tags remembered per path for versions that left the table (the cap of
+/// versions, the memory bounds, a rebuild), each with the hash it named: so
+/// no new version takes a tag the model may still hold, and the same content
+/// seen again gets the same tag back. Past it the oldest is forgotten, and
+/// only then can a new version whose hash starts with that very tag take it:
+/// it takes 33 evicted versions of one path in one session, then a chance of
+/// one in 65,536 per new version, and a model that still holds the forgotten
+/// tag from that long ago (the entry as a whole going, by the bounds below,
+/// forgets all of its tags the same way).
+pub const MAX_GONE_TAGS: usize = 32;
+/// The length of a tag before a collision lengthens it.
+pub const TAG_LEN: usize = 4;
 /// Files remembered per session; past it one nobody read goes first (a
 /// search's or a refusal's), then the least recently used (the agent then
 /// has to read it again).
@@ -52,7 +69,10 @@ pub const MAX_FILES: usize = 1024;
 /// bytes) plus about 200 bytes of entry and map overhead, so 4,096 entries
 /// are at most about 17.6 MB, and with [`SNAPSHOT_MAX_TOTAL`] about 26 MB:
 /// under the 50 MB idle rule even if every path were as long as allowed
-/// (a typical path of 100 bytes makes it about 1.2 MB).
+/// (a typical path of 100 bytes makes it about 1.2 MB). The remembered tags
+/// ([`MAX_GONE_TAGS`], about 2.3 KB for an entry that has used them all) add
+/// at most about 9.4 MB to that worst case, which needs 33 versions of every
+/// one of 4,096 paths; they are not counted in the snapshot bytes.
 pub const MAX_ENTRIES: usize = 4096;
 /// Session tables kept; the least recently used goes (it is rebuilt from
 /// the log on that session's next turn, without snapshots).
@@ -79,10 +99,19 @@ fn unhex(s: &str) -> Option<Sha> {
     Some(out)
 }
 
-/// The tag of a version: the first four hex characters of its SHA-256, upper
-/// case.
+/// The base tag of a version: the first four hex characters of its SHA-256,
+/// upper case. The tag a version really has (it is longer after a collision)
+/// is [`Version::tag`].
 pub fn tag(sha: &Sha) -> String {
-    format!("{:02X}{:02X}", sha[0], sha[1])
+    prefix(sha, TAG_LEN)
+}
+
+/// The first `n` (at most 64) hex characters of `sha`, upper case.
+fn prefix(sha: &Sha, n: usize) -> String {
+    let mut h = hex(sha);
+    h.truncate(n.min(64));
+    h.make_ascii_uppercase();
+    h
 }
 
 /// Row ranges, inclusive and 1-based, sorted and apart (never touching).
@@ -150,6 +179,9 @@ fn merge_in(rows: &mut Rows, mut inc: Vec<(u32, u32)>) {
 #[derive(Debug, Clone)]
 pub struct Version {
     pub sha: Sha,
+    /// Its tag, as printed in headers: unique among the tags issued for the
+    /// path (upper case).
+    pub tag: String,
     /// Its text.
     pub text: Arc<String>,
     /// The rows of it the agent was shown (a row cut with `…` is not one).
@@ -188,9 +220,19 @@ struct Entry {
     /// that only keeps versions a refusal printed is not a read of it.
     guarded: bool,
     /// Kept versions, the newest last (at most [`MAX_VERSIONS`], at most
-    /// one per tag).
+    /// one per hash and one per tag).
     vers: Vec<Version>,
+    /// Tags issued for versions not kept, the oldest first (at most
+    /// [`MAX_GONE_TAGS`]).
+    gone: Vec<Issued>,
     used: u64,
+}
+
+/// A tag issued for a hash.
+#[derive(Debug, Clone)]
+struct Issued {
+    sha: Sha,
+    tag: String,
 }
 
 impl Entry {
@@ -206,24 +248,74 @@ impl Entry {
         }
     }
 
+    fn taken(&self, tag: &str) -> bool {
+        self.vers.iter().any(|v| v.tag == tag) || self.gone.iter().any(|g| g.tag == tag)
+    }
+
+    /// The shortest prefix of `sha` (from `base` characters) that no tag
+    /// issued for this path equals.
+    fn fresh(&self, sha: &Sha, base: usize) -> String {
+        (base.max(1)..=64)
+            .map(|n| prefix(sha, n))
+            .find(|t| !self.taken(t))
+            .unwrap_or_else(|| prefix(sha, 64))
+    }
+
+    /// Remember a tag whose version is not kept, forgetting the oldest past
+    /// the bound.
+    fn remember(&mut self, sha: Sha, tag: String) {
+        self.gone.retain(|g| g.sha != sha);
+        self.gone.push(Issued { sha, tag });
+        if self.gone.len() > MAX_GONE_TAGS {
+            self.gone.remove(0);
+        }
+    }
+
+    /// The tag of `sha` on this path: the one it has (kept or remembered),
+    /// else a new one, remembered at once, so that it is never given to
+    /// another version, whatever is recorded next.
+    fn issue(&mut self, sha: &Sha, base: usize) -> String {
+        if let Some(v) = self.vers.iter().find(|v| v.sha == *sha) {
+            return v.tag.clone();
+        }
+        if let Some(g) = self.gone.iter().find(|g| g.sha == *sha) {
+            return g.tag.clone();
+        }
+        let t = self.fresh(sha, base);
+        self.remember(*sha, t.clone());
+        t
+    }
+
+    /// Take version `i` out (its tag is remembered); the bytes it held.
+    fn drop_version(&mut self, i: usize) -> usize {
+        let v = self.vers.remove(i);
+        let bytes = v.bytes();
+        self.remember(v.sha, v.tag);
+        bytes
+    }
+
     /// Keep `text` (hash `sha`) as the newest version with `rows` shown:
-    /// the same hash kept before has its rows merged in, an older version
-    /// of the same tag goes, and only the newest [`MAX_VERSIONS`] stay.
-    fn keep(&mut self, sha: Sha, text: Arc<String>, mut rows: Rows) {
-        if let Some(i) = self.vers.iter().position(|v| v.sha == sha) {
+    /// the same hash kept before has its rows merged in, it keeps the tag it
+    /// was issued (kept or remembered), and only the newest
+    /// [`MAX_VERSIONS`] stay.
+    fn keep(&mut self, sha: Sha, text: Arc<String>, mut rows: Rows, base: usize) {
+        let tag = if let Some(i) = self.vers.iter().position(|v| v.sha == sha) {
             let old = self.vers.remove(i);
             merge_in(&mut rows, old.shown);
-        }
-        let t = tag(&sha);
-        self.vers.retain(|v| tag(&v.sha) != t);
+            old.tag
+        } else {
+            self.issue(&sha, base)
+        };
+        self.gone.retain(|g| g.sha != sha);
         self.vers.push(Version {
             sha,
+            tag,
             text,
             shown: rows,
         });
         while self.vers.len() > MAX_VERSIONS {
             let i = self.victim().unwrap_or(0);
-            self.vers.remove(i);
+            self.drop_version(i);
         }
     }
 
@@ -310,7 +402,7 @@ impl Inner {
                 .min_by_key(|e| e.used);
             if let Some(e) = spare {
                 let i = e.victim().unwrap_or(0);
-                self.snap_bytes -= e.vers.remove(i).bytes();
+                self.snap_bytes -= e.drop_version(i);
                 continue;
             }
             // Only held texts are left: the least recently used file's oldest.
@@ -321,7 +413,7 @@ impl Inner {
                 .filter(|e| !e.vers.is_empty())
                 .min_by_key(|e| e.used);
             match oldest {
-                Some(e) => self.snap_bytes -= e.vers.remove(0).bytes(),
+                Some(e) => self.snap_bytes -= e.drop_version(0),
                 None => break,
             }
         }
@@ -329,12 +421,33 @@ impl Inner {
 }
 
 /// The tables of every session on this node.
-#[derive(Default)]
 pub struct SeenStore {
     inner: Mutex<Inner>,
+    /// Characters of a tag before a collision lengthens it ([`TAG_LEN`];
+    /// other only in the tests, which make collisions common).
+    tag_len: usize,
+}
+
+impl Default for SeenStore {
+    fn default() -> Self {
+        Self {
+            inner: Mutex::default(),
+            tag_len: TAG_LEN,
+        }
+    }
 }
 
 impl SeenStore {
+    /// A store whose base tags are `n` characters long: collisions in nearly
+    /// every case for a small `n`.
+    #[cfg(test)]
+    pub(crate) fn with_tag_len(n: usize) -> Self {
+        Self {
+            tag_len: n,
+            ..Self::default()
+        }
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(|p| p.into_inner())
     }
@@ -352,10 +465,17 @@ impl SeenStore {
     /// log names.
     pub fn sync(&self, session: SessionId, history: &[RawEvent]) {
         let mut latest: HashMap<PathBuf, (Sha, u64)> = HashMap::new();
+        // Every hash the log names per path, in log order: their tags are
+        // issued again in that order, so a version has the tag it had.
+        let mut named: HashMap<PathBuf, Vec<Sha>> = HashMap::new();
         let mut take = |s: &serde_json::Value, seq: u64| {
             if let Ok(f) = serde_json::from_value::<FileSeen>(s.clone())
                 && let Some(sha) = unhex(&f.sha256)
             {
+                let seq_of = named.entry(PathBuf::from(&f.path)).or_default();
+                if seq_of.last() != Some(&sha) {
+                    seq_of.push(sha);
+                }
                 latest.insert(PathBuf::from(&f.path), (sha, seq));
             }
         };
@@ -384,17 +504,20 @@ impl SeenStore {
                 latest.remove(p);
             }
         }
+        let base = self.tag_len;
         let mut inner = self.lock();
         let now = inner.tick();
         // Kept versions carry over where the log's latest hash of the file
         // is one of them (a version shown but not logged stays with it).
-        let mut old: HashMap<PathBuf, Vec<Version>> = inner
+        // The tags issued before carry over with them, and those of the
+        // versions that do not are remembered.
+        let mut old: HashMap<PathBuf, (Vec<Version>, Vec<Issued>)> = inner
             .sessions
             .get(&session)
             .map(|t| {
                 t.files
                     .iter()
-                    .map(|(p, e)| (p.clone(), e.vers.clone()))
+                    .map(|(p, e)| (p.clone(), (e.vers.clone(), e.gone.clone())))
                     .collect()
             })
             .unwrap_or_default();
@@ -404,19 +527,50 @@ impl SeenStore {
             used: now,
         };
         for (path, (sha, _)) in latest {
-            let vers = old
-                .remove(&path)
-                .filter(|v| v.iter().any(|x| x.sha == sha))
-                .unwrap_or_default();
-            table.files.insert(
-                path,
-                Entry {
-                    sha,
-                    guarded: true,
-                    vers,
-                    used: now,
-                },
-            );
+            let (vers, gone) = old.remove(&path).unwrap_or_default();
+            let mut e = Entry {
+                sha,
+                guarded: true,
+                vers: Vec::new(),
+                gone,
+                used: now,
+            };
+            if vers.iter().any(|x| x.sha == sha) {
+                e.vers = vers;
+            } else {
+                for v in vers {
+                    e.remember(v.sha, v.tag);
+                }
+            }
+            for h in named.remove(&path).unwrap_or_default() {
+                if !e.vers.iter().any(|v| v.sha == h) && !e.gone.iter().any(|g| g.sha == h) {
+                    let t = e.fresh(&h, base);
+                    e.remember(h, t);
+                }
+            }
+            table.files.insert(path, e);
+        }
+        // A file the log does not name (a search's, a refusal's) is not read
+        // as far as the table goes, and its texts go; its tags stay, so no
+        // later version of it takes one the model may still hold.
+        for (path, (vers, gone)) in old {
+            if table.files.len() >= MAX_FILES {
+                break;
+            }
+            let Some(sha) = vers.last().map(|v| v.sha).or(gone.last().map(|g| g.sha)) else {
+                continue;
+            };
+            let mut e = Entry {
+                sha,
+                guarded: false,
+                vers: Vec::new(),
+                gone,
+                used: now,
+            };
+            for v in vers {
+                e.remember(v.sha, v.tag);
+            }
+            table.files.insert(path, e);
         }
         inner.snap_bytes += table.files.values().map(Inner::snap_len).sum::<usize>();
         inner.entries += table.files.len();
@@ -455,7 +609,9 @@ impl SessionSeen {
         e.guarded.then(|| e.seen())
     }
 
-    /// The kept version of `path` whose tag is `tag` (any letter case).
+    /// The kept version of `path` whose tag is `tag` (any letter case), the
+    /// whole string: a prefix of a longer tag, or a longer string that starts
+    /// with a tag, names nothing.
     pub fn version(&self, path: &Path, tag: &str) -> Option<Version> {
         let mut inner = self.store.lock();
         let now = inner.tick();
@@ -465,8 +621,28 @@ impl SessionSeen {
         e.used = now;
         e.vers
             .iter()
-            .find(|v| self::tag(&v.sha).eq_ignore_ascii_case(tag))
+            .find(|v| v.tag.eq_ignore_ascii_case(tag))
             .cloned()
+    }
+
+    /// The kept version of `path` with hash `sha`.
+    pub fn version_of(&self, path: &Path, sha: &Sha) -> Option<Version> {
+        let mut inner = self.store.lock();
+        let now = inner.tick();
+        let t = inner.sessions.get_mut(&self.session)?;
+        t.used = now;
+        let e = t.files.get_mut(path)?;
+        e.used = now;
+        e.vers.iter().find(|v| v.sha == *sha).cloned()
+    }
+
+    /// The tag that `sha` has, or will have once recorded, on `path`: for a
+    /// header printed before the version is. It is issued here for good (a
+    /// later version never takes it), and the version recorded afterwards
+    /// has it.
+    pub fn tag_for(&self, path: &Path, sha: &Sha) -> String {
+        let base = self.store.tag_len;
+        self.update(path, *sha, false, |e| e.issue(sha, base))
     }
 
     /// Record that the agent now knows `path` as `bytes` (a snapshot is
@@ -571,6 +747,28 @@ impl SessionSeen {
     /// `current`: the guard's hash becomes `sha`; otherwise only the
     /// version is kept.
     fn put(&self, path: &Path, sha: Sha, snapshot: Option<Arc<String>>, current: bool) -> FileSeen {
+        let base = self.store.tag_len;
+        self.update(path, sha, current, |e| {
+            if let Some(text) = snapshot {
+                e.keep(sha, text, Rows::new(), base);
+            }
+        });
+        FileSeen {
+            path: path.display().to_string(),
+            sha256: hex(&sha),
+            base: None,
+        }
+    }
+
+    /// Run `f` on `path`'s entry (made if there is none), with the bounds
+    /// applied afterwards.
+    fn update<R>(
+        &self,
+        path: &Path,
+        sha: Sha,
+        current: bool,
+        f: impl FnOnce(&mut Entry) -> R,
+    ) -> R {
         let mut inner = self.store.lock();
         let now = inner.tick();
         let t = inner.sessions.entry(self.session).or_default();
@@ -580,6 +778,7 @@ impl SessionSeen {
             sha,
             guarded: current,
             vers: Vec::new(),
+            gone: Vec::new(),
             used: now,
         });
         let before = Inner::snap_len(e);
@@ -588,9 +787,7 @@ impl SessionSeen {
             e.sha = sha;
             e.guarded = true;
         }
-        if let Some(text) = snapshot {
-            e.keep(sha, text, Rows::new());
-        }
+        let out = f(e);
         let after = Inner::snap_len(e);
         let mut snap = inner.snap_bytes + after - before;
         let mut entries = inner.entries + usize::from(fresh);
@@ -610,11 +807,7 @@ impl SessionSeen {
         inner.snap_bytes = snap;
         inner.entries = entries;
         inner.evict();
-        FileSeen {
-            path: path.display().to_string(),
-            sha256: hex(&sha),
-            base: None,
-        }
+        out
     }
 }
 
@@ -814,8 +1007,18 @@ mod tests {
         unreachable!()
     }
 
+    /// The tag a kept version has.
+    fn tag_now(s: &SessionSeen, p: &Path, text: &str) -> String {
+        s.version_of(p, &sha256(text.as_bytes())).unwrap().tag
+    }
+
+    /// `n` texts that start no tag of `x` and fill the table's versions.
+    fn fillers(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("filler {i}\nrow\n")).collect()
+    }
+
     #[test]
-    fn a_tag_names_at_most_one_kept_version_of_a_path() {
+    fn colliding_versions_both_stay_and_the_later_one_has_a_longer_tag() {
         let (x, y) = colliding();
         assert_ne!(sha256(x.as_bytes()), sha256(y.as_bytes()));
         let t = tag(&sha256(x.as_bytes()));
@@ -824,16 +1027,204 @@ mod tests {
         let p = Path::new("/w/a");
         s.record_rows(p, x.as_bytes(), &[(1, 1)]);
         assert_eq!(*s.version(p, &t).unwrap().text, x);
-        // The newer one of the same tag replaces the older.
         s.record_rows(p, y.as_bytes(), &[]);
+        // The older keeps its tag, rows and place.
         let v = s.version(p, &t).unwrap();
+        assert_eq!(*v.text, x);
+        assert!(v.covers(1, 1));
+        let ty = tag_now(&s, p, &y);
+        assert!(ty.len() == 5 && ty.starts_with(&t), "{ty}");
+        let v = s.version(p, &ty).unwrap();
         assert_eq!(*v.text, y);
         assert!(!v.covers(1, 1), "the older one's rows did not carry over");
-        // Another path may hold either.
-        s.record(Path::new("/w/b"), x.as_bytes());
-        assert_eq!(*s.version(Path::new("/w/b"), &t).unwrap().text, x);
-        // A lower-case tag finds it too.
-        assert!(s.version(p, &t.to_lowercase()).is_some());
+        // Another path may hold either with the short tag.
+        s.record(Path::new("/w/b"), y.as_bytes());
+        assert_eq!(
+            *s.version(Path::new("/w/b"), &t).unwrap().text,
+            y,
+            "the tags of one path bind only that path"
+        );
+        // A lower-case tag finds it too, a prefix or an extension does not.
+        assert!(s.version(p, &ty.to_lowercase()).is_some());
+        assert!(s.version(p, &format!("{ty}0")).is_none());
+    }
+
+    #[test]
+    fn the_same_content_again_has_its_tag_and_a_tag_of_a_gone_version_is_not_reused() {
+        let (x, y) = colliding();
+        let t = tag(&sha256(x.as_bytes()));
+        let s = SessionSeen::default();
+        let p = Path::new("/w/a");
+        s.record_rows(p, x.as_bytes(), &[(1, 1)]);
+        s.record_rows(p, y.as_bytes(), &[]);
+        let ty = tag_now(&s, p, &y);
+        // x -> y -> x: the same tag, the rows merge.
+        s.record_rows(p, x.as_bytes(), &[(2, 2)]);
+        assert_eq!(tag_now(&s, p, &x), t);
+        assert_eq!(tag_now(&s, p, &y), ty);
+        assert!(s.version(p, &t).unwrap().covers(1, 2));
+        // Both leave the table (more versions than are kept).
+        for f in fillers(MAX_VERSIONS) {
+            s.record_rows(p, f.as_bytes(), &[(1, 1)]);
+        }
+        assert!(s.version(p, &t).is_none() && s.version(p, &ty).is_none());
+        // A third text with their base tag: longer than both.
+        let t3 = (0..)
+            .map(|i| format!("third {i}\n"))
+            .find(|z| tag(&sha256(z.as_bytes())) == t)
+            .unwrap();
+        s.record(p, t3.as_bytes());
+        let tz = tag_now(&s, p, &t3);
+        assert!(tz.len() == 5 && tz != ty && tz.starts_with(&t), "{tz} {ty}");
+        assert!(s.version(p, &t).is_none(), "the gone tag names nothing");
+        // The content that left comes back with its own tag, and not the
+        // new one's.
+        s.record(p, x.as_bytes());
+        assert_eq!(tag_now(&s, p, &x), t);
+        assert_eq!(*s.version(p, &t).unwrap().text, x);
+        assert_eq!(*s.version(p, &tz).unwrap().text, t3);
+    }
+
+    #[test]
+    fn the_remembered_tags_are_bounded() {
+        let s = SessionSeen::default();
+        let p = Path::new("/w/a");
+        for i in 0..MAX_VERSIONS + 3 * MAX_GONE_TAGS {
+            s.record(p, format!("v{i}\n").as_bytes());
+        }
+        let g = s.store.lock().sessions[&s.session].files[p].gone.len();
+        assert_eq!(g, MAX_GONE_TAGS);
+    }
+
+    #[test]
+    fn a_tag_is_never_matched_by_prefix_in_either_direction() {
+        let (x, y) = colliding();
+        let t = tag(&sha256(x.as_bytes()));
+        let s = SessionSeen::default();
+        let p = Path::new("/w/a");
+        s.record(p, x.as_bytes());
+        for f in fillers(MAX_VERSIONS) {
+            s.record(p, f.as_bytes());
+        }
+        // `x` is gone; `y` has the longer tag.
+        s.record(p, y.as_bytes());
+        let ty = tag_now(&s, p, &y);
+        assert_eq!(ty.len(), 5);
+        assert!(s.version(p, &t).is_none(), "the first four characters");
+        assert!(s.version(p, &format!("{ty}0")).is_none(), "an extension");
+        assert!(s.version(p, &ty[..4]).is_none());
+        assert!(s.version(p, &ty).is_some());
+    }
+
+    #[test]
+    fn a_rebuild_from_the_log_issues_the_tags_the_versions_had() {
+        let (x, y) = colliding();
+        let t = tag(&sha256(x.as_bytes()));
+        let sid = SessionId::new();
+        let store = Arc::new(SeenStore::default());
+        let s = store.session(sid);
+        let p = Path::new("/w/a");
+        let fx = s.record_rows(p, x.as_bytes(), &[(1, 1)]);
+        let fy = s.record_rows(p, y.as_bytes(), &[(1, 1)]);
+        let ty = tag_now(&s, p, &y);
+        let log = vec![raw(sid, 1, finished(fx)), raw(sid, 2, finished(fy))];
+        // The same process: nothing moves.
+        store.sync(sid, &log);
+        assert_eq!(tag_now(&s, p, &x), t);
+        assert_eq!(tag_now(&s, p, &y), ty);
+        // Again, after the versions left: the tags are still taken.
+        for f in fillers(MAX_VERSIONS + 1) {
+            s.record(p, f.as_bytes());
+        }
+        store.sync(sid, &log);
+        assert!(s.version(p, &t).is_none() && s.version(p, &ty).is_none());
+        for (first, second) in [(&x, &y), (&y, &x)] {
+            // A new process: the log's hashes only. Whichever is seen first,
+            // each has the tag it was issued.
+            let again = Arc::new(SeenStore::default());
+            again.sync(sid, &log);
+            let s2 = again.session(sid);
+            s2.record(p, first.as_bytes());
+            s2.record(p, second.as_bytes());
+            assert_eq!(tag_now(&s2, p, &x), t);
+            assert_eq!(tag_now(&s2, p, &y), ty);
+        }
+    }
+
+    /// Random sequences of reads, searches' versions, and rebuilds from the
+    /// log, over a few texts and one- and two-character base tags (so that
+    /// collisions and evictions are the usual case): a tag, once seen for a
+    /// path, names that text or nothing, never another; and a text has one
+    /// tag for good. With restarts (only logged records) the same holds, as
+    /// the log names every hash.
+    #[test]
+    fn a_tag_issued_never_names_another_version_in_random_sequences() {
+        for seed in 0..1500u64 {
+            for tag_len in [1usize, 2] {
+                for restarts in [false, true] {
+                    let mut x = seed.wrapping_mul(0x9E3779B97F4A7C15) | 1;
+                    let mut next = move |n: usize| {
+                        x ^= x << 13;
+                        x ^= x >> 7;
+                        x ^= x << 17;
+                        (x % n as u64) as usize
+                    };
+                    let sid = SessionId::new();
+                    let mut store = Arc::new(SeenStore::with_tag_len(tag_len));
+                    let paths = [Path::new("/w/a"), Path::new("/w/b")];
+                    let texts: Vec<String> = (0..14).map(|i| format!("text {i}\nrow\n")).collect();
+                    // The tag each (path, text) was seen with.
+                    let mut tags: HashMap<(usize, usize), String> = HashMap::new();
+                    let mut log: Vec<RawEvent> = Vec::new();
+                    let note = |tags: &mut HashMap<(usize, usize), String>,
+                                s: &SessionSeen,
+                                pi: usize,
+                                ti: usize| {
+                        let Some(v) = s.version_of(paths[pi], &sha256(texts[ti].as_bytes())) else {
+                            return;
+                        };
+                        let had = tags.entry((pi, ti)).or_insert_with(|| v.tag.clone());
+                        assert_eq!(*had, v.tag, "seed {seed}: a text changed its tag");
+                    };
+                    for step in 0..60 {
+                        let (pi, ti) = (next(2), next(texts.len()));
+                        let s = store.session(sid);
+                        match next(10) {
+                            0..=4 => {
+                                let f = s.record(paths[pi], texts[ti].as_bytes());
+                                log.push(raw(sid, step as u64 + 1, finished(f)));
+                            }
+                            5..=7 if !restarts => s.add_version(paths[pi], texts[ti].as_bytes()),
+                            8 => store.sync(sid, &log),
+                            9 if restarts => {
+                                store = Arc::new(SeenStore::with_tag_len(tag_len));
+                                store.sync(sid, &log);
+                            }
+                            _ => {}
+                        }
+                        let s = store.session(sid);
+                        note(&mut tags, &s, pi, ti);
+                        // No two texts of a path share a tag, and a tag found
+                        // names the text it was seen with.
+                        for ((p2, t2), tag) in &tags {
+                            if let Some(v) = s.version(paths[*p2], tag) {
+                                assert_eq!(
+                                    v.sha,
+                                    sha256(texts[*t2].as_bytes()),
+                                    "seed {seed} len {tag_len} restarts {restarts} step {step}: tag {tag} of text {t2} names another"
+                                );
+                            }
+                        }
+                        let mut seen_tags: HashMap<(usize, &String), usize> = HashMap::new();
+                        for ((p2, t2), tag) in &tags {
+                            if let Some(o) = seen_tags.insert((*p2, tag), *t2) {
+                                assert_eq!(o, *t2, "seed {seed}: texts {o} and {t2} share {tag}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -912,6 +1303,7 @@ mod tests {
         assert_eq!(r, vec![(1, 9)]);
         let v = Version {
             sha: sha256(b""),
+            tag: String::new(),
             text: Arc::new(String::new()),
             shown: r,
         };

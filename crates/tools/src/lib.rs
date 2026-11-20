@@ -23,6 +23,8 @@ mod edit_lines_tests;
 #[cfg(test)]
 mod edit_preview_tests;
 #[cfg(test)]
+mod edit_tag_unique_tests;
+#[cfg(test)]
 mod edit_tests;
 pub mod env;
 pub mod filter;

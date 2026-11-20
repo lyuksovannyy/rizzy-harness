@@ -26,7 +26,9 @@ use std::path::Path;
 use harness_core::policy::ToolRisk;
 use serde_json::{Value, json};
 
-use crate::fs::{header, is_cut, line_style, number_line, read_nofollow, write_nofollow};
+use crate::fs::{
+    RESERVED_TAG, header, header_of, is_cut, line_style, number_line, read_nofollow, write_nofollow,
+};
 use crate::seen::Seen;
 use crate::{Tool, ToolCtx, ToolOutcome, str_arg};
 
@@ -69,7 +71,7 @@ impl Tool for Edit {
          against the file as it was before this call, they must not overlap, and either all are \
          made or none. The result shows the changed lines numbered as `read` shows them, so you \
          need not read the file again. Refused if the file changed on disk since you read it, \
-         in the lines you are replacing. Or by row, without retyping old text: pass `tag` (the 4 \
+         in the lines you are replacing. Or by row, without retyping old text: pass `tag` (the \
          characters after # in the `[path#TAG]` header of the latest `read`, `edit` or `write` \
          result) and `lines`: {from, to, text} replaces rows from..to (empty text deletes \
          them), {after, text} inserts after row `after` (0 = top); `text` is whole lines. Rows \
@@ -178,7 +180,7 @@ impl Tool for Edit {
             Ok((updated, report, rows)) => match write_nofollow(&path, updated.as_bytes()).await {
                 Ok(()) => {
                     let sha = crate::seen::sha256(updated.as_bytes());
-                    let result = format!("{report}\n{}", header(ctx, &path, &sha));
+                    let result = format!("{report}\n{}", header_of(ctx, &key, &path, &sha));
                     // The rows the result printed count as shown, once its
                     // text is final and the cap does not cut it.
                     let proof = crate::shown::seal(&result);
@@ -799,11 +801,7 @@ fn shown_rows_cover(ctx: &ToolCtx, key: &Path, text: &str, specs: &[Spec]) -> bo
         return false;
     }
     let sha = crate::seen::sha256(text.as_bytes());
-    let Some(v) = ctx
-        .seen
-        .version(key, &crate::seen::tag(&sha))
-        .filter(|v| v.sha == sha)
-    else {
+    let Some(v) = ctx.seen.version_of(key, &sha) else {
         return false;
     };
     let Ok(found) = locate(&View::new(text), &mut None, spec) else {
@@ -1227,7 +1225,7 @@ fn edit(
     // the note of lines that changed on disk gets the rest.
     let mut budget = crate::shown::Budget::new();
     budget.spend(&report);
-    budget.spend_n(header(ctx, path, &[0; 32]).chars().count() + 1);
+    budget.spend_n(header(ctx, path, RESERVED_TAG).chars().count() + 1);
     let (lines, rows) = changed_lines(
         ctx,
         &updated,

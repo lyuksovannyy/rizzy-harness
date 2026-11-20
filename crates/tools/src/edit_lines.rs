@@ -37,8 +37,8 @@ use std::path::Path;
 use serde_json::Value;
 
 use crate::edit::changed;
-use crate::fs::{header, is_cut, line_style, number_line, read_nofollow, write_nofollow};
-use crate::seen::{Version, sha256, tag};
+use crate::fs::{is_cut, line_style, number_line, read_nofollow, write_nofollow};
+use crate::seen::{Version, sha256};
 use crate::{ToolCtx, ToolOutcome};
 
 /// The highest row number a call may name: a file the line form handles is
@@ -98,13 +98,15 @@ pub(crate) fn wants(input: &Value) -> bool {
         .any(|k| input.get(k).is_some_and(|v| !v.is_null()))
 }
 
-/// The four characters of a tag as the model may send them: bare, or the
-/// whole header line, any letter case.
+/// A tag as the model may send it: bare, or the whole header line, any
+/// letter case (hex characters, any length up to a whole hash: tags are
+/// longer than four characters after a collision).
 pub(crate) fn norm_tag(s: &str) -> Option<String> {
     let s = s.trim();
     let s = s.rsplit('#').next().unwrap_or(s);
     let s = s.trim().trim_end_matches(']').trim();
-    (s.len() == 4 && s.bytes().all(|b| b.is_ascii_hexdigit())).then(|| s.to_ascii_uppercase())
+    (!s.is_empty() && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+        .then(|| s.to_ascii_uppercase())
 }
 
 /// What the call says, before any file is looked at.
@@ -120,7 +122,7 @@ pub(crate) fn parse(input: &Value) -> Result<Call, String> {
         Some(v) => {
             let Some(tag) = v.as_str().and_then(norm_tag) else {
                 return Err(format!(
-                    "`tag` must be the 4 hex characters after # in the header line of a `read`, \
+                    "`tag` must be the hex characters after # in the header line of a `read`, \
                      `edit` or `write` result, not {v}"
                 ));
             };
@@ -351,7 +353,7 @@ enum No {
         lead: String,
         /// Print from this older version (and mark it shown), else from the
         /// file as it is.
-        version: Option<Version>,
+        version: Option<Box<Version>>,
         /// Inclusive 1-based row ranges, widened by `context` rows.
         ranges: Vec<(usize, usize)>,
         context: usize,
@@ -566,7 +568,7 @@ fn plan(ctx: &ToolCtx, key: &Path, shown: &str, live: &str, call: &Call) -> Resu
         let n = split_rows(live).1.len();
         return Err(No::Rows {
             lead: format!(
-                "The line form needs `tag`: the 4 characters after # in the `[path#TAG]` header \
+                "The line form needs `tag`: the characters after # in the `[path#TAG]` header \
                  line of the latest `read`, `edit` or `write` result for {shown}, so nothing was \
                  changed. The file has {n} rows."
             ),
@@ -641,7 +643,7 @@ fn plan(ctx: &ToolCtx, key: &Path, shown: &str, live: &str, call: &Call) -> Resu
                  changed.",
                 list.join(", ")
             ),
-            version: Some(ver),
+            version: Some(Box::new(ver)),
             ranges: unshown,
             context: CONTEXT,
         });
@@ -786,7 +788,7 @@ fn plan(ctx: &ToolCtx, key: &Path, shown: &str, live: &str, call: &Call) -> Resu
         return Err(format!(
             "That changes nothing: the rows already read as the text you gave, so nothing was written. \
              {}",
-            header(ctx, Path::new(shown), &live_sha)
+            crate::fs::header_of(ctx, key, Path::new(shown), &live_sha)
         )
         .into());
     }
@@ -835,7 +837,7 @@ fn refuse(ctx: &ToolCtx, key: &Path, shown: &str, live: &str, no: No, print: boo
             v.sha,
             format!(
                 "These rows now count as shown: send the same call again with this tag:\n{}",
-                header(ctx, Path::new(shown), &v.sha)
+                crate::fs::header(ctx, Path::new(shown), &v.tag)
             ),
         ),
         None => {
@@ -845,7 +847,7 @@ fn refuse(ctx: &ToolCtx, key: &Path, shown: &str, live: &str, no: No, print: boo
                 format!(
                     "These rows now count as shown. Send the call again with the tag of the file \
                      as it is, numbering the rows as listed here:\n{}",
-                    header(ctx, Path::new(shown), &sha)
+                    crate::fs::header_of(ctx, key, Path::new(shown), &sha)
                 ),
             )
         }
@@ -1086,7 +1088,7 @@ pub(crate) async fn run(ctx: &ToolCtx, input: Value) -> ToolOutcome {
     // The whole result is under the cap: what is fixed is paid first, the
     // changed lines take what they may, and what is left goes to the
     // replaced rows and the note.
-    let tail = format!("\n{}", header(ctx, &path, &new_sha));
+    let tail = format!("\n{}", crate::fs::header_of(ctx, &key, &path, &new_sha));
     let mut budget = crate::shown::Budget::new();
     budget.spend(&report);
     budget.spend(&tail);
@@ -1131,7 +1133,7 @@ pub(crate) async fn run(ctx: &ToolCtx, input: Value) -> ToolOutcome {
     if let Some((a, b)) = p.changed
         && ctx
             .seen
-            .version(&key, &tag(&live_sha))
+            .version_of(&key, &live_sha)
             .is_none_or(|v| !v.covers(a, b))
     {
         // Rows of the file the agent had not seen.

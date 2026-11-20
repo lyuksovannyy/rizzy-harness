@@ -277,12 +277,8 @@ impl Tool for Grep {
             recorded.push((i, key, crate::seen::sha256(&bytes)));
         }
         for (i, key, sha) in recorded {
-            if ctx
-                .seen
-                .version(&key, &crate::seen::tag(&sha))
-                .is_some_and(|v| v.sha == sha)
-            {
-                hits[i].head = Some(crate::fs::header(ctx, &hits[i].path, &sha));
+            if let Some(v) = ctx.seen.version_of(&key, &sha) {
+                hits[i].head = Some(crate::fs::header(ctx, &hits[i].path, &v.tag));
                 hits[i].version = Some((key, sha));
             }
         }

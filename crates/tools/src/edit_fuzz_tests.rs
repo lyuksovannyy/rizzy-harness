@@ -223,8 +223,23 @@ fn canon(fx: &mut Fx) {
     }
 }
 
+/// A context whose tags start with `tag_len` hex characters: 4 as shipped,
+/// 1 makes a collision of two versions' base tags common (1 in 16), so that
+/// the lengthened and the remembered tags are exercised in most cases.
+fn ctx_with(dir: &std::path::Path, tag_len: usize) -> ToolCtx {
+    let mut ctx = ToolCtx::new(dir);
+    ctx.seen = std::sync::Arc::new(crate::seen::SeenStore::with_tag_len(tag_len))
+        .session(harness_core::SessionId::new());
+    ctx
+}
+
 fn tag_of(out: &str) -> String {
     let l = out.lines().next().unwrap();
+    l[l.rfind('#').unwrap() + 1..l.len() - 1].to_string()
+}
+
+fn tag_of_last(out: &str) -> String {
+    let l = out.lines().last().unwrap();
     l[l.rfind('#').unwrap() + 1..l.len() - 1].to_string()
 }
 
@@ -358,6 +373,9 @@ struct Stats {
     swallowed: usize,
     /// Searches whose output left matched rows out (the result's budget).
     cut: usize,
+    /// First edits whose result showed a tag longer than the base length:
+    /// the version's base tag was taken (collisions, the cause of seed 941788).
+    lengthened: usize,
 }
 
 async fn do_edit(ctx: &ToolCtx, input: &Value) -> (bool, String, Option<String>) {
@@ -370,13 +388,13 @@ async fn do_edit(ctx: &ToolCtx, input: &Value) -> (bool, String, Option<String>)
     (o.ok, o.output, preview)
 }
 
-async fn one(seed: u64, st: &mut Stats) {
+async fn one(seed: u64, st: &mut Stats, tag_len: usize) {
     let mut rng = Rng(seed.wrapping_mul(0x9E3779B97F4A7C15) | 1);
     for _ in 0..3 {
         rng.next();
     }
     let dir = tempfile::tempdir().unwrap();
-    let ctx = ToolCtx::new(dir.path());
+    let ctx = ctx_with(dir.path(), tag_len);
     let fx = gen_fx(&mut rng);
     let text = fx.render();
     let p = dir.path().join("f.txt");
@@ -411,6 +429,9 @@ async fn one(seed: u64, st: &mut Stats) {
             st.bad
                 .push(format!("{} EDIT1 refused but changed {out}", ctxinfo("")));
             return;
+        }
+        if ok && tag_of_last(&out).len() > tag_len {
+            st.lengthened += 1;
         }
         live = parse_fx(&now);
     } else if mode == 2 {
@@ -614,17 +635,17 @@ async fn one(seed: u64, st: &mut Stats) {
     }
 }
 
-async fn run_seeds(start: u64, n: u64) -> Stats {
+async fn run_seeds(start: u64, n: u64, tag_len: usize) -> Stats {
     let mut st = Stats::default();
     for seed in start..start + n {
-        one(seed, &mut st).await;
+        one(seed, &mut st, tag_len).await;
         if st.bad.len() >= 12 {
             break;
         }
     }
     eprintln!(
         "seeds {start}..{} cases {} wrote {} refused {} outside_weak {} false_refusals {} \
-         cardrun {} gap {} swallowed {}",
+         cardrun {} gap {} swallowed {} lengthened {}",
         start + n,
         st.cases,
         st.wrote,
@@ -633,7 +654,8 @@ async fn run_seeds(start: u64, n: u64) -> Stats {
         st.false_refusals,
         st.cardrun_mismatch,
         st.gap,
-        st.swallowed
+        st.swallowed,
+        st.lengthened
     );
     for b in &st.bad {
         eprintln!("---\n{b}");
@@ -650,23 +672,55 @@ fn env_u64(name: &str, default: u64) -> u64 {
 
 #[tokio::test]
 async fn fuzz_line_form() {
+    line_form(crate::seen::TAG_LEN).await;
+}
+
+/// The same with one-character base tags: with 16 of them a collision of two
+/// versions of the file is the usual case.
+#[tokio::test]
+async fn fuzz_line_form_with_one_character_tags() {
+    line_form(1).await;
+}
+
+async fn line_form(tag_len: usize) {
     let st = run_seeds(
         env_u64("HARNESS_EDIT_FUZZ_START", 1),
         env_u64("HARNESS_EDIT_FUZZ_N", 3000),
+        tag_len,
     )
     .await;
     assert!(st.bad.is_empty(), "{} problems", st.bad.len());
     // The generator reaches both outcomes, and the stale modes.
     assert!(st.wrote > 100 && st.refused > 100, "{st:?}");
+    // With one-character tags the first edit's result usually ends in a
+    // lengthened tag: the cases do reach the collision.
+    if tag_len == 1 && n_seeds() >= 1000 {
+        assert!(
+            st.lengthened as u64 * 100 > n_seeds(),
+            "no collisions were reached: {st:?}"
+        );
+    }
+}
+
+fn n_seeds() -> u64 {
+    env_u64("HARNESS_EDIT_FUZZ_N", 3000)
 }
 
 /// Seeds the review found rows swallowed with (a range spanning rows the
 /// agent's own earlier edit inserted, the first tag reused).
 #[tokio::test]
 async fn fuzz_seeds_of_the_review_stay_fixed() {
-    for seed in [90, 240, 1208] {
-        let st = run_seeds(seed, 1).await;
-        assert!(st.bad.is_empty(), "seed {seed}: {} problems", st.bad.len());
+    // 941788: the agent's own edit made a file with the tag it was read
+    // with, and the tag then named the new version.
+    for seed in [90, 240, 1208, 941788] {
+        for tag_len in [crate::seen::TAG_LEN, 1] {
+            let st = run_seeds(seed, 1, tag_len).await;
+            assert!(
+                st.bad.is_empty(),
+                "seed {seed} tag length {tag_len}: {} problems",
+                st.bad.len()
+            );
+        }
     }
 }
 
@@ -677,14 +731,14 @@ async fn fuzz_seeds_of_the_review_stay_fixed() {
 /// equal the reference (the file is the tagged version here, so there is
 /// no staleness to excuse a difference). A search with no match records
 /// nothing: the tag is then unknown and every call is refused.
-async fn one_search(seed: u64, st: &mut Stats) {
+async fn one_search(seed: u64, st: &mut Stats, tag_len: usize) {
     use crate::Grep;
     let mut rng = Rng(seed.wrapping_mul(0x9E3779B97F4A7C15) ^ 0x5EA2C4_u64 | 1);
     for _ in 0..3 {
         rng.next();
     }
     let dir = tempfile::tempdir().unwrap();
-    let ctx = ToolCtx::new(dir.path());
+    let ctx = ctx_with(dir.path(), tag_len);
     let mut fx = gen_fx(&mut rng);
     // Some files are long, with long rows: a search that matches most of
     // them prints more than a result may hold, so that some matched rows
@@ -821,13 +875,22 @@ async fn one_search(seed: u64, st: &mut Stats) {
 
 #[tokio::test]
 async fn fuzz_search_tags() {
+    search_tags(crate::seen::TAG_LEN).await;
+}
+
+#[tokio::test]
+async fn fuzz_search_tags_with_one_character_tags() {
+    search_tags(1).await;
+}
+
+async fn search_tags(tag_len: usize) {
     let (start, n) = (
         env_u64("HARNESS_EDIT_FUZZ_START", 1),
         env_u64("HARNESS_EDIT_FUZZ_N", 3000),
     );
     let mut st = Stats::default();
     for seed in start..start + n {
-        one_search(seed, &mut st).await;
+        one_search(seed, &mut st, tag_len).await;
         if st.bad.len() >= 12 {
             break;
         }
