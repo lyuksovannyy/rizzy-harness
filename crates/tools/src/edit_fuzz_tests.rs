@@ -531,13 +531,23 @@ async fn one(seed: u64, st: &mut Stats) {
                 O::Ins(..) => 0,
             })
             .sum();
-        // Deleting the last row of a file without a final newline, when the
-        // row before it is empty, leaves text that reads as one row fewer
-        // ("b\n" is the rows `b` and an empty one without a final newline,
-        // and `b` with one): one row of slack there.
-        let slack = usize::from(!live.final_nl && after.ends_with('\n'));
-        let kept = lcs_len(&live.rows, &parse_fx(&after).rows);
-        if live.rows.len() > kept + named + slack {
+        // Text that ends with a newline has two readings when the file had
+        // no final newline before: "b\n" is the row `b` with a final
+        // newline, and it is the rows `b` and an empty one without. Deleting
+        // the last row of such a file, when the row before it is empty,
+        // leaves the second reading: the empty row is still there, as the
+        // text's last newline. So the result is also read that way, and the
+        // check holds under one reading or the other, with no slack in
+        // either (review of PR 187, round 2).
+        let got = parse_fx(&after).rows;
+        let kept = lcs_len(&live.rows, &got);
+        let lost = |kept: usize| live.rows.len() > kept + named;
+        let other_reading = || {
+            let mut rows = got.clone();
+            rows.push(String::new());
+            lcs_len(&live.rows, &rows)
+        };
+        if lost(kept) && !(!live.final_nl && after.ends_with('\n') && !lost(other_reading())) {
             st.swallowed += 1;
             st.bad.push(format!(
                 "{} STALE EDIT LOST ROWS IT DID NOT NAME ({} of {} rows kept, {} named)\nT rows {:?}\nL rows {:?}\nops {:?}\ngot {:?}",

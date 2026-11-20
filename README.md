@@ -2528,7 +2528,8 @@ since the tag refuses the call, with the rows as they are: replacing it would
 delete work the agent never saw; a row next to the range is not in it and
 stays). A call holds at most 256 operations and row numbers up to 1,000,000.
 A `lines` that is one object counts as a list of one, and a `text` that is a
-list of strings is joined with newlines; `{from}` without `to` is refused
+list of strings is a list of lines, one per string (an empty list is refused);
+`{from}` without `to` is refused
 (send the same number twice for one row), and so is a missing `text` (`"text":
 ""` deletes the rows). A call without `tag` is refused with the rows it names
 and the file's current tag. `old_string` and the line form cannot be given together. The tag is

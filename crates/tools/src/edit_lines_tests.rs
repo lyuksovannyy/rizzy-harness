@@ -1185,7 +1185,7 @@ async fn text_as_a_list_of_strings_is_joined_with_newlines() {
     let input = normalized(json!({"path": "a.txt", "tag": t,
                                   "lines": [{"from": 2, "to": 2, "text": ["x", "y"]}]}))
     .unwrap();
-    assert_eq!(input["lines"][0]["text"], json!("x\ny"));
+    assert_eq!(input["lines"][0]["text"], json!("x\ny\n"));
     let e = Edit.run(&ctx, input).await;
     assert!(e.ok, "{}", e.output);
     assert_eq!(get(&dir, "a.txt"), "one\nx\ny\nthree\n");
@@ -1194,11 +1194,39 @@ async fn text_as_a_list_of_strings_is_joined_with_newlines() {
                                 "lines": [{"from": 1, "to": 1, "text": ["x", 1]}]}))
     .unwrap();
     assert_eq!(odd["lines"][0]["text"], json!(["x", 1]));
-    // An empty list is no text: a deletion, like "".
+    // An empty list is refused, with the two things it could have meant.
     let none = normalized(json!({"path": "a.txt", "tag": "0000",
                                  "lines": [{"from": 1, "to": 1, "text": []}]}))
-    .unwrap();
-    assert_eq!(none["lines"][0]["text"], json!(""));
+    .unwrap_err();
+    assert!(
+        none.contains("empty list") && none.contains("\"text\": \"\""),
+        "{none}"
+    );
+}
+
+/// Each string of a list is one line, an empty string an empty line: the
+/// list form never means something else than the lines it lists (review of
+/// PR 187, round 2: `["a", ""]` lost its empty line and `[""]` deleted).
+#[tokio::test]
+async fn each_string_of_a_text_list_is_one_line_empty_ones_too() {
+    for (list, file) in [
+        (json!(["a", ""]), "r1\na\n\nr3\n"),
+        (json!(["", ""]), "r1\n\n\nr3\n"),
+        (json!([""]), "r1\n\nr3\n"),
+        (json!(["a\n", "b"]), "r1\na\nb\nr3\n"),
+        (json!(["a\r\n", "b\n"]), "r1\na\nb\nr3\n"),
+        (json!(["a"]), "r1\na\nr3\n"),
+    ] {
+        let (dir, ctx) = ws();
+        put(&dir, "a.txt", "r1\nr2\nr3\n");
+        let t = first_tag(&read(&ctx, "a.txt").await.output);
+        let input = normalized(json!({"path": "a.txt", "tag": t,
+                                      "lines": [{"from": 2, "to": 2, "text": list.clone()}]}))
+        .unwrap();
+        let e = Edit.run(&ctx, input).await;
+        assert!(e.ok, "{list}: {}", e.output);
+        assert_eq!(get(&dir, "a.txt"), file, "{list}");
+    }
 }
 
 #[tokio::test]
@@ -1247,4 +1275,34 @@ async fn from_without_to_is_refused_and_says_how_to_name_one_row() {
     let r = Edit.refusal(&ctx, &input).expect("refused");
     assert!(r.contains("`to`") && r.contains("one row"), "{r}");
     assert_eq!(get(&dir, "a.txt"), "one\ntwo\n");
+}
+
+/// A file without a final newline whose last row is deleted, when the row
+/// before it is empty: the text left ends with a newline, which is that
+/// empty row (rows `a` and an empty one, still without a final newline) and
+/// reads the same as the single row `a` with one. Nothing the call did not
+/// name is removed from the bytes; the next `read` shows one row. Written
+/// down so the behaviour is a decision, not an accident (review of PR 187).
+#[tokio::test]
+async fn deleting_the_last_row_after_an_empty_one_leaves_that_rows_newline() {
+    for (before, after) in [
+        ("a\n\nb", "a\n"),
+        ("a\r\n\r\nb", "a\r\n"),
+        ("a\n\n\nb", "a\n\n"),
+        ("a\nb", "a"),
+    ] {
+        let (dir, ctx) = ws();
+        put(&dir, "a.txt", before);
+        let t = first_tag(&read(&ctx, "a.txt").await.output);
+        let last = before.split('\n').count();
+        let e = Edit
+            .run(
+                &ctx,
+                json!({"path": "a.txt", "tag": t,
+                       "lines": [{"from": last, "to": last, "text": ""}]}),
+            )
+            .await;
+        assert!(e.ok, "{before:?}: {}", e.output);
+        assert_eq!(get(&dir, "a.txt"), after, "{before:?}");
+    }
 }

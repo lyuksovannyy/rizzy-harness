@@ -245,9 +245,14 @@ fn text_missing(i: usize) -> String {
 }
 
 /// `lines` as the model sent it, in the shapes real models send: one object
-/// is a list of one, and a `text` that is a list of strings is those
-/// strings joined with a newline (an empty list is no text). Anything else
-/// is left as it is, for the checks to refuse.
+/// is a list of one, and a `text` that is a list of strings is a list of
+/// lines, one per string: `[""]` is one empty line and `["a", ""]` is two
+/// (a line ending at the end of a string is taken off first). The joined
+/// text ends with a newline, so the string rule that drops one final
+/// newline gives back exactly those lines. An empty list is left as it is
+/// and refused in [`normalize`]: it could mean "no lines" or a mistake, and
+/// `"text": ""` says a deletion without doubt. Anything else is left for
+/// the checks to refuse.
 fn shape_lines(lines: Value) -> Value {
     let mut lines = match lines {
         o @ Value::Object(_) => Value::Array(vec![o]),
@@ -257,10 +262,16 @@ fn shape_lines(lines: Value) -> Value {
         for item in items {
             if let Some(t) = item.get_mut("text")
                 && let Value::Array(parts) = t
+                && !parts.is_empty()
                 && parts.iter().all(Value::is_string)
             {
-                let joined: Vec<&str> = parts.iter().filter_map(Value::as_str).collect();
-                *t = Value::String(joined.join("\n"));
+                let mut joined = String::new();
+                for part in parts.iter().filter_map(Value::as_str) {
+                    let line = part.strip_suffix('\n').unwrap_or(part);
+                    joined.push_str(line.strip_suffix('\r').unwrap_or(line));
+                    joined.push('\n');
+                }
+                *t = Value::String(joined);
             }
         }
     }
@@ -282,6 +293,16 @@ pub(crate) fn normalize(input: &mut Value) -> Result<(), String> {
         for (i, item) in items.iter().enumerate() {
             if item.is_object() && item.get("text").is_none_or(Value::is_null) {
                 return Err(text_missing(i));
+            }
+            if item
+                .get("text")
+                .and_then(Value::as_array)
+                .is_some_and(Vec::is_empty)
+            {
+                return Err(format!(
+                    "lines[{i}]: `text` is an empty list; to delete the rows send \
+                     \"text\": \"\" (an empty string), and for one empty line \"text\": \"\\n\""
+                ));
             }
         }
     }
