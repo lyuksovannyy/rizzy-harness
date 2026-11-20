@@ -33,9 +33,10 @@ use sha2::{Digest, Sha256};
 pub const SNAPSHOT_MAX_FILE: usize = 512 << 10;
 /// Snapshot bytes kept over all sessions of the node, counting every kept
 /// version's text and its shown-row ranges (8 bytes each); past it the
-/// least recently used versions go, the oldest of an entry first (the
-/// hashes stay). A range needs at least one row between it and the next,
-/// and a row is at least one byte, so the ranges of a version are at most
+/// versions of files nobody read go first (kept by a `grep` or a refusal,
+/// never by a `read`, `write` or `edit` of the whole), then the least
+/// recently used versions, the oldest of an entry first (the hashes stay). A range needs at least
+/// one row between it and the next, and a row is at least one byte, so the ranges of a version are at most
 /// 4 bytes per text byte: counted, they cannot add to the worst case, which
 /// stays this constant (plus the entries' overhead below).
 pub const SNAPSHOT_MAX_TOTAL: usize = 8 << 20;
@@ -290,7 +291,10 @@ impl Inner {
                 .iter_mut()
                 .flat_map(|(_, t)| t.files.values_mut())
                 .filter(|e| !e.vers.is_empty())
-                .min_by_key(|e| e.used);
+                // Files nobody read (a search's rows, a refusal's) first:
+                // what the agent really read is worth more than what it
+                // only saw listed.
+                .min_by_key(|e| (e.guarded, e.used));
             match oldest {
                 Some(e) => {
                     // The oldest version of the least recently used file.
@@ -901,6 +905,40 @@ mod tests {
                 .flat_map(|t| t.files.values())
                 .all(|e| e.vers.len() <= MAX_VERSIONS)
         );
+    }
+
+    /// Versions nobody read (a search's, a refusal's) go before any read
+    /// file's when the node's snapshot bound is reached: a wide search must
+    /// not push out what the agent really read.
+    #[test]
+    fn versions_nobody_read_are_evicted_before_read_ones() {
+        let s = Arc::new(SeenStore::default());
+        let sid = SessionId::new();
+        let t = s.session(sid);
+        let reads = SNAPSHOT_MAX_TOTAL / SNAPSHOT_MAX_FILE - 1;
+        for i in 0..reads {
+            t.record(
+                &PathBuf::from(format!("/w/read{i}")),
+                &vec![b'r'; SNAPSHOT_MAX_FILE],
+            );
+        }
+        // More than the room that is left, newer than every read.
+        for i in 0..4 {
+            t.add_version(
+                &PathBuf::from(format!("/w/found{i}")),
+                &vec![b'f'; SNAPSHOT_MAX_FILE],
+                &[(1, 1)],
+            );
+            assert!(s.lock().snap_bytes <= SNAPSHOT_MAX_TOTAL);
+        }
+        for i in 0..reads {
+            let got = t.get(&PathBuf::from(format!("/w/read{i}"))).unwrap();
+            assert!(got.snapshot.is_some(), "read{i} lost its snapshot");
+        }
+        // And the other way: a read of a searched file makes it a read one.
+        let p = PathBuf::from("/w/found3");
+        t.record(&p, &vec![b'f'; SNAPSHOT_MAX_FILE]);
+        assert!(t.get(&p).unwrap().snapshot.is_some());
     }
 
     #[test]

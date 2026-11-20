@@ -38,6 +38,8 @@ pub mod outputs;
 mod publish;
 pub mod sandbox;
 mod search;
+#[cfg(test)]
+mod search_tag_tests;
 pub mod seen;
 pub mod skills;
 pub mod stream;

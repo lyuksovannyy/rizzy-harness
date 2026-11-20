@@ -667,3 +667,132 @@ async fn fuzz_seeds_of_the_review_stay_fixed() {
         assert!(st.bad.is_empty(), "seed {seed}: {} problems", st.bad.len());
     }
 }
+
+/// The same generator, with the tag and the shown rows coming from a search
+/// instead of a `read`: a pattern that matches a random subset of the
+/// file's row values. An edit that names a row the search did not print
+/// must be refused and change nothing; an edit of printed rows only must
+/// equal the reference (the file is the tagged version here, so there is
+/// no staleness to excuse a difference). A search with no match records
+/// nothing: the tag is then unknown and every call is refused.
+async fn one_search(seed: u64, st: &mut Stats) {
+    use crate::Grep;
+    let mut rng = Rng(seed.wrapping_mul(0x9E3779B97F4A7C15) ^ 0x5EA2C4_u64 | 1);
+    for _ in 0..3 {
+        rng.next();
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ToolCtx::new(dir.path());
+    let fx = gen_fx(&mut rng);
+    let text = fx.render();
+    let p = dir.path().join("f.txt");
+    std::fs::write(&p, &text).unwrap();
+    let t = parse_fx(&text);
+    st.cases += 1;
+    let info = |extra: &str| format!("seed {seed} search {extra}\nfile {:?}", text);
+    let mut values: Vec<&String> = t.rows.iter().collect();
+    values.sort();
+    values.dedup();
+    // How much of the file the pattern matches varies, so that calls naming
+    // only matched rows are common as well as calls that do not.
+    let pct = [30, 70, 95][rng.below(3)];
+    let chosen: Vec<&String> = values.into_iter().filter(|_| rng.chance(pct)).collect();
+    let pattern = if chosen.is_empty() {
+        "zzz-no-such-row".to_string()
+    } else {
+        let alt: Vec<String> = chosen.iter().map(|v| regex::escape(v)).collect();
+        format!("^\\x{{feff}}?(?:{})$", alt.join("|"))
+    };
+    let matched: Vec<bool> = t.rows.iter().map(|r| chosen.contains(&r)).collect();
+    let r = Grep.run(&ctx, json!({"pattern": pattern})).await;
+    assert!(r.ok, "{}", r.output);
+    let any = matched.iter().any(|m| *m);
+    let tag = match r.output.lines().next() {
+        Some(l) if l.starts_with("[f.txt#") => tag_of(&r.output),
+        _ => {
+            if any {
+                st.bad.push(format!(
+                    "{} MATCHED BUT NO TAG\n{}",
+                    info(&pattern),
+                    r.output
+                ));
+                return;
+            }
+            crate::seen::tag(&crate::seen::sha256(text.as_bytes()))
+        }
+    };
+    if !any && r.output.lines().next().is_some_and(|l| l.starts_with('[')) {
+        st.bad.push(format!(
+            "{} TAG WITHOUT A MATCH\n{}",
+            info(&pattern),
+            r.output
+        ));
+        return;
+    }
+    let ops = gen_ops(&mut rng, t.rows.len());
+    let named_ok = ops.iter().all(|o| match o {
+        O::Rep(f, to, _) => (*f..=*to).all(|r| matched[r - 1]),
+        O::Ins(a, _) => *a == 0 || matched[a - 1],
+    });
+    let exp = reference(&t, &ops).render();
+    let j = ops_json(&mut rng, &ops);
+    let input = json!({"path": "f.txt", "tag": tag, "lines": j});
+    let (ok, out, _) = do_edit(&ctx, &input).await;
+    let after = std::fs::read_to_string(&p).unwrap();
+    let expect_write = any && named_ok && exp != text;
+    if ok {
+        st.wrote += 1;
+        if !any || !named_ok {
+            st.bad.push(format!(
+                "{} WROTE ROWS THE SEARCH DID NOT SHOW\nmatched {matched:?}\nops {ops:?}\n{out}",
+                info(&pattern)
+            ));
+        } else if after != exp {
+            st.bad.push(format!(
+                "{} WRONG RESULT\nops {ops:?}\ngot {after:?}\nexp {exp:?}",
+                info(&pattern)
+            ));
+        }
+    } else {
+        st.refused += 1;
+        if after != text {
+            st.bad
+                .push(format!("{} REFUSED BUT CHANGED\n{out}", info(&pattern)));
+        }
+        if expect_write {
+            st.false_refusals += 1;
+            st.bad.push(format!(
+                "{} FALSE REFUSAL\nmatched {matched:?}\nops {ops:?}\n{out}",
+                info(&pattern)
+            ));
+        }
+    }
+}
+
+#[tokio::test]
+async fn fuzz_search_tags() {
+    let (start, n) = (
+        env_u64("HARNESS_EDIT_FUZZ_START", 1),
+        env_u64("HARNESS_EDIT_FUZZ_N", 3000),
+    );
+    let mut st = Stats::default();
+    for seed in start..start + n {
+        one_search(seed, &mut st).await;
+        if st.bad.len() >= 12 {
+            break;
+        }
+    }
+    eprintln!(
+        "search seeds {start}..{} cases {} wrote {} refused {} false_refusals {}",
+        start + n,
+        st.cases,
+        st.wrote,
+        st.refused,
+        st.false_refusals
+    );
+    for b in &st.bad {
+        eprintln!("---\n{b}");
+    }
+    assert!(st.bad.is_empty(), "{} problems", st.bad.len());
+    assert!(st.wrote > 50 && st.refused > 50, "{st:?}");
+}
