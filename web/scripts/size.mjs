@@ -510,8 +510,21 @@ const X36_HOST_KB = 0.2;
 // is 100.6 (+0.3: the composer hides its field and the shell reads the
 // flag), under the 104 ceiling.
 const W6_KB = 1.3;
+// The agent avatars drawn as flat blobs with pill eyes (X.45, PR 192): 21
+// body paths with the place for their eyes, five eye styles, twelve colours
+// and the per-colour eye table in the first load (the avatar is in the chat),
+// the grid picker in the Agents chunk. Measured 452.76 against the recorded
+// 451.2, so +1.6; the first load is 101.7 (+1.1), under the 104 ceiling.
+const X45_KB = 1.6;
+// Web batch 2 (PR 197): the request id carried on errors and shown on the
+// generic error displays, plain sentences for a bare 403, 422, 429 or 503,
+// the socket's guarded reconnect after an ended login, aliases in the @
+// popup, the second default-agent picker in Settings. Measured 453.36
+// against the recorded 452.8, so +0.6; the first load is 102.0 (+0.3: the
+// error helper and the socket's retry are in it), under the 104 ceiling.
+const BATCH2_KB = 0.6;
 
-const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB + EXPORT_KB + MEMDEF_KB + VISIBILITY_KB + T50_KB + LOOP_KB + DIFF_KB + T51_KB + WSMEM_KB + STEPS_KB + AGENT_SWITCHES_KB + T57_KB + X15_KB + X16_KB + COST_KB + X17_KB + X19_X20_KB + X21_KB + X7_KB + SIDEBAR_KB + X23_T70_KB + X24_KB + X28_KB + WAITING_KB + X29_KB + X25_KB + X26_KB + X32_KB + X33_KB + X34A_KB + X34B_KB + X36_KB + X27A_KB + WEBGUARD_KB + X35A_KB + PICKMARK_KB + X35B_KB + X27C_KB + X37A_KB + X38_KB + TRIALUI2_KB + X39_KB + X39B_KB + X41_KB + X42_KB + PRICEHINT_KB + X44_KB + X7_REVIEW_KB + DIET_KB + X36_HOST_KB + W6_KB) * 100) / 10) / 10;
+const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB + EXPORT_KB + MEMDEF_KB + VISIBILITY_KB + T50_KB + LOOP_KB + DIFF_KB + T51_KB + WSMEM_KB + STEPS_KB + AGENT_SWITCHES_KB + T57_KB + X15_KB + X16_KB + COST_KB + X17_KB + X19_X20_KB + X21_KB + X7_KB + SIDEBAR_KB + X23_T70_KB + X24_KB + X28_KB + WAITING_KB + X29_KB + X25_KB + X26_KB + X32_KB + X33_KB + X34A_KB + X34B_KB + X36_KB + X27A_KB + WEBGUARD_KB + X35A_KB + PICKMARK_KB + X35B_KB + X27C_KB + X37A_KB + X38_KB + TRIALUI2_KB + X39_KB + X39B_KB + X41_KB + X42_KB + PRICEHINT_KB + X44_KB + X7_REVIEW_KB + DIET_KB + X36_HOST_KB + W6_KB + X45_KB + BATCH2_KB) * 100) / 10) / 10;
 // Raised from 103 to 106 once the Phase A pages merged (103.7 measured: the
 // new sidebar, account button and routine-result rows are on the first
 // screen), then lowered to 104 at Phase B (102.3 measured) once the login

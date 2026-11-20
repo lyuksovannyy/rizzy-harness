@@ -2,6 +2,7 @@
 // new-tab home screen stays small.
 import { own } from "../emptyView";
 import "../lib/i18nPages";
+import { errText } from "../lib/errorText";
 import { AtSign, Download, FileText, Image as ImageIcon, Package, Square, Trash2 } from "lucide-react";
 import { isValidElement, lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { api } from "../api";
@@ -219,7 +220,7 @@ function RetryTurn(props: { sessionId: string; turnId: string }) {
     try {
       await pageApi.retryTurn(props.sessionId, props.turnId);
     } catch (x) {
-      setErr(x instanceof Error ? x.message : String(x));
+      setErr(errText(x));
       setBusy(false);
     }
   };

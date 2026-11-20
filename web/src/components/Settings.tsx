@@ -4,6 +4,7 @@
 import "../lib/i18nPages";
 import { lazy, Suspense, useEffect, useState } from "react";
 import { pageApi } from "../apiPages";
+import { errText } from "../lib/errorText";
 import { t } from "../lib/i18n";
 import { routeHash, settingsHash } from "../lib/routes";
 import { pickTab, type SectionId, type TabId, visibleSections } from "../lib/settings";
@@ -11,6 +12,7 @@ import type { Agent, Me, ModelInfo, NodeInfo, Prefs } from "../types";
 import { ChangePassword } from "./ChangePassword";
 import { modelLabel, offeredModels, resolveModel } from "../lib/models";
 import { savablePrefs } from "../lib/modelPlan";
+import { agenticCapable } from "../lib/agentDefaults";
 import { AgentMark, agentAlert } from "./AgentAvatar";
 import { AppearanceFields } from "./Appearance";
 import { SearchEngineFields } from "./forms";
@@ -75,7 +77,7 @@ function PrefsEditor(props: {
           props.onSaved(saved);
           setMsg("Saved.");
         } catch (x) {
-          setErr(x instanceof Error ? x.message : String(x));
+          setErr(errText(x));
         }
       }}
     >
@@ -211,9 +213,9 @@ export default function Settings(props: {
                 <h3>New chats</h3>
                 <div className="form stack">
                   <div className="field">
-                    Default agent
+                    {t("settings.defaultChat")}
                     <Select
-                      label="Default agent"
+                      label={t("settings.defaultChat")}
                       value={p.default_agent ?? ""}
                       options={[
                         { value: "", label: t("settings.workspaceDefault") },
@@ -225,6 +227,23 @@ export default function Settings(props: {
                         })),
                       ]}
                       onChange={(v) => set({ ...p, default_agent: v || null })}
+                    />
+                  </div>
+                  <div className="field">
+                    {t("settings.defaultAgentic")}
+                    <Select
+                      label={t("settings.defaultAgentic")}
+                      value={p.default_agentic_agent ?? ""}
+                      options={[
+                        { value: "", label: t("settings.workspaceDefault") },
+                        ...agenticCapable(props.agents).map((a) => ({
+                          value: a.id,
+                          label: a.name,
+                          hint: agentAlert(a) ? "model unavailable" : undefined,
+                          icon: <AgentMark agent={a} size={18} />,
+                        })),
+                      ]}
+                      onChange={(v) => set({ ...p, default_agentic_agent: v || null })}
                     />
                   </div>
                   <DefaultModel models={props.models} value={p.default_model} onChange={(v) => set({ ...p, default_model: v })} />

@@ -326,7 +326,7 @@ export function Shell(props: {
     live.onMemoryChanged = () => setMemoryVersion((v) => v + 1);
     live.onWorkspacesChanged = workspacesChanged;
     live.onProjectsChanged = refreshProjects;
-    live.onLoginEnded = () => void api.me().catch(unauthorized);
+    live.onLoginEnded = () => void api.me().then(() => live.retryAfterLogin(), unauthorized);
     refreshProjects();
     refreshSessions();
     refreshNodes();

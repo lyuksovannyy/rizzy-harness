@@ -2,7 +2,7 @@ import { ArrowUp, AtSign, CornerDownRight, FileText, Globe, Image, Loader2, Mic,
 import { type Dispatch, lazy, type SetStateAction, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { t } from "../lib/i18n";
 import { isTag, marked, mentionable, pickable } from "../lib/agents";
-import { activeMention, filterAgents, insertMention, isPathToken, leadingMention } from "../lib/mentions";
+import { activeMention, filterAgents, matchedAlias, insertMention, isPathToken, leadingMention } from "../lib/mentions";
 import { cycleMode, enabledModes, MODES, type Mode } from "../lib/modes";
 import { modelLabel, offeredModels, resolveModel } from "../lib/models";
 import { radioKeys, radioTab } from "../lib/radios";
@@ -459,7 +459,7 @@ export function Composer(props: {
       : filterAgents(mentionable(props.agents), mention.query).map((a) => ({
           id: a.id,
           title: a.id,
-          hint: [isTag(a) && t("composer.tagHint"), marked(a, a.description || a.name)].filter(Boolean).join(" · "),
+          hint: [isTag(a) && t("composer.tagHint"), matchedAlias(a, mention.query) && `@${matchedAlias(a, mention.query)}`, marked(a, a.description || a.name)].filter(Boolean).join(" · "),
           agent: a,
         }));
   const popupOpen = suggestions.length > 0;
