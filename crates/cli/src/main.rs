@@ -1803,5 +1803,11 @@ mod tests {
             line.contains("web_search (brave)") && !line.contains(&path),
             "{line}"
         );
+        // And it is in the node's scrubber, which every event and tool
+        // result passes through.
+        let secrets = harness_core::SecretSet::default();
+        assert_eq!(secrets.scrub(&path), path, "not yet a secret");
+        w.add_key_to(&secrets);
+        assert_eq!(secrets.scrub(&path), "[REDACTED]");
     }
 }

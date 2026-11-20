@@ -136,8 +136,8 @@ async fn fake() -> Fake {
                     "/late" => (
                         "text/html",
                         format!(
-                            "<html><body><p>BEFORECAP</p>{}<p>AFTERCAP</p></body></html>",
-                            " ".repeat(harness_web::MAX_BODY + 10)
+                            "<html><body><p>BEFORECAP</p><!--{}--><p>AFTERCAP</p></body></html>",
+                            "x".repeat(harness_web::MAX_BODY + 10)
                         )
                         .into_bytes(),
                         String::new(),
