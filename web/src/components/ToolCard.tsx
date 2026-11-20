@@ -10,6 +10,7 @@ import { rt } from "../md/strings";
 import type { Decision, Item, Source } from "../types";
 import { CallInput, useOpenFields } from "./CallInput";
 import { PublishCard, SaveAsArtifact } from "./ChatArtifacts";
+import { ChildAnswer, ChildModel } from "./DelegateResult";
 import { MemoryNotice } from "./MemoryNotice";
 
 type Tool = Extract<Item, { type: "tool" }>;
@@ -258,6 +259,7 @@ export function ToolCard({
           <a className="child-link" href={`#/s/${child}`}>
             Open @{shownName(asText(item.input?.agent))} session{status === "running" ? " (approvals for its tools appear there)" : ""}
           </a>
+          <ChildModel sessionId={child} running={status === "running"} />
           {status === "running" && <span className="muted small">· its progress is in the panel on the right</span>}
           {reported && (
             <span
@@ -269,6 +271,7 @@ export function ToolCard({
           )}
         </div>
       )}
+      {child && item.result && <ChildAnswer output={item.result.output} agent={shownName(asText(item.input?.agent))} />}
       {pending && item.approval && (
         <div className="approval">
           {web && <WebInput item={item} />}
