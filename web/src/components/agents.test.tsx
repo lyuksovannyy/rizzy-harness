@@ -460,4 +460,54 @@ describe("an agent's page in a workspace (X.33)", () => {
     await act(async () => button("Delete Mine")!.click());
     expect(api.deleteAgent).toHaveBeenCalledWith("mine", scope);
   });
+
+  describe("may delegate to (X.41)", () => {
+    const scout = agent("scout", { features: { ...ALL, as_subagent: true } });
+    const loner = agent("loner", { features: { ...ALL, as_subagent: false } });
+    const wsOne = agent("wsone", { scope: "workspace", features: ALL });
+    const lead = agent("lead", {
+      builtin: false,
+      origin: "custom",
+      features: { ...NEW_FEATURES, delegate: true },
+      delegates: ["scout"],
+    });
+    const boxes = () => [...host.querySelectorAll<HTMLInputElement>(".delegate-option input")];
+    const labels = () => [...host.querySelectorAll(".delegate-option")].map((l) => l.textContent);
+
+    test("offers sub-agents only, marks the workspace's, picks narrow and save", async () => {
+      api.agent.mockResolvedValue(detail(lead, { prompt: "Lead.", own: true, delegate_to: [] }));
+      await show(admin, "lead", [lead, scout, loner, wsOne, coder]);
+      // Not itself, not an agent that is not offered as a sub-agent.
+      expect(labels().some((t) => t!.includes("@lead") || t!.includes("@loner"))).toBe(false);
+      expect(labels().find((t) => t!.includes("@wsone"))).toContain("workspace agent");
+      expect(host.querySelector(".delegate-picker")!.textContent).toContain("All sub-agents");
+      expect(boxes().every((b) => !b.checked)).toBe(true);
+      act(() => boxes().find((b) => b.closest("label")!.textContent!.includes("@scout"))!.click());
+      expect(host.querySelector(".delegate-picker")!.textContent).toContain("Only the 1 ticked");
+      api.updateAgent.mockResolvedValue(detail(lead, { prompt: "Lead.", own: true, delegate_to: ["scout"] }));
+      await act(async () => button("Save")!.click());
+      expect(api.updateAgent.mock.calls[0]![1]).toMatchObject({ delegate_to: ["scout"] });
+    });
+
+    test("a pick whose agent is gone is marked and can be unticked; off keeps the list but disables it", async () => {
+      api.agent.mockResolvedValue(
+        detail(lead, { prompt: "Lead.", own: true, delegate_to: ["scout", "deleted"], features: { ...NEW_FEATURES, delegate: false } }),
+      );
+      await show(admin, "lead", [lead, scout]);
+      const gone = labels().find((t) => t!.includes("@deleted"));
+      expect(gone).toContain("no longer available");
+      expect(host.querySelector<HTMLFieldSetElement>("fieldset.delegate-picker")!.disabled).toBe(true);
+      expect(boxes().filter((b) => b.checked)).toHaveLength(2);
+    });
+
+    test("a built-in shows its list read-only", async () => {
+      const teamlead = agent("teamlead", { features: { ...ALL, delegate: true }, delegates: ["scout"] });
+      api.agent.mockResolvedValue(detail(teamlead));
+      await show(admin, "teamlead", [teamlead, scout]);
+      expect(boxes()).toHaveLength(0);
+      const list = host.querySelector(".delegate-picker")!;
+      expect(list.textContent).toContain("Scout");
+      expect(list.textContent).toContain("@scout");
+    });
+  });
 });

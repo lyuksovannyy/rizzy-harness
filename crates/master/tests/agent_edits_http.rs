@@ -683,3 +683,137 @@ async fn a_summary_is_written_from_the_instructions() {
     .await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
 }
+
+/// X.41: a custom agent's `delegate_to` list is saved, shown, validated and
+/// only ever narrows what it may delegate to; one that no longer resolves
+/// does not block saving other fields.
+#[tokio::test]
+async fn a_delegate_list_is_saved_validated_and_only_narrows() {
+    let t = start().await;
+    let mut f = features();
+    f["delegate"] = json!(true);
+    let make = |id: &str, extra: Value| {
+        let mut b = json!({"id": id, "name": id, "prompt": "p", "features": features()});
+        b["features"]["delegate"] = json!(true);
+        for (k, v) in extra.as_object().unwrap() {
+            b[k] = v.clone();
+        }
+        b
+    };
+    // A sub-agent of our own, one that is not offered as one.
+    let (st, d) = call(
+        &t,
+        Method::POST,
+        "/api/agents",
+        Some(make("helper", json!({}))),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{d}");
+    let mut hidden = make("loner", json!({}));
+    hidden["features"]["as_subagent"] = json!(false);
+    assert_eq!(
+        call(&t, Method::POST, "/api/agents", Some(hidden)).await.0,
+        StatusCode::OK
+    );
+
+    // Without a list: every sub-agent (today's meaning).
+    let (st, d) = call(
+        &t,
+        Method::POST,
+        "/api/agents",
+        Some(make("lead", json!({}))),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{d}");
+    assert_eq!(d["delegate_to"], json!([]));
+    assert!(d["delegates"].as_array().unwrap().len() > 3, "{d}");
+
+    // A list narrows, the answer and a fresh read say so.
+    let (st, d) = call(
+        &t,
+        Method::PATCH,
+        "/api/agents/lead",
+        Some(json!({"delegate_to": ["scout", "helper"]})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{d}");
+    assert_eq!(d["delegate_to"], json!(["scout", "helper"]));
+    let (_, d) = call(&t, Method::GET, "/api/agents/lead", None).await;
+    assert_eq!(d["delegate_to"], json!(["scout", "helper"]));
+    let mut got: Vec<String> = serde_json::from_value(d["delegates"].clone()).unwrap();
+    got.sort();
+    assert_eq!(got, ["helper", "scout"]);
+    let spec = t.master.agent_spec(Some("lead"), None).unwrap();
+    let mut ids: Vec<_> = spec.delegates.iter().map(|d| d.agent_id.clone()).collect();
+    ids.sort();
+    assert_eq!(ids, ["helper", "scout"]);
+
+    // Refusals: unknown handle, itself, a duplicate, too many, not a handle,
+    // an agent not offered as a sub-agent.
+    let many: Vec<String> = (0..40).map(|i| format!("a{i}")).collect();
+    for bad in [
+        json!(["nobody"]),
+        json!(["lead"]),
+        json!(["scout", "scout"]),
+        json!(many),
+        json!(["Not A Handle"]),
+        json!(["loner"]),
+    ] {
+        let (st, d) = call(
+            &t,
+            Method::PATCH,
+            "/api/agents/lead",
+            Some(json!({"delegate_to": bad})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{bad}: {d}");
+    }
+    let (_, d) = call(&t, Method::GET, "/api/agents/lead", None).await;
+    assert_eq!(d["delegate_to"], json!(["scout", "helper"]));
+
+    // A deleted entry stays stored, is ignored in a turn, and does not block
+    // saving other fields.
+    assert_eq!(
+        call(&t, Method::DELETE, "/api/agents/helper", None).await.0,
+        StatusCode::OK
+    );
+    let (st, d) = call(
+        &t,
+        Method::PATCH,
+        "/api/agents/lead",
+        Some(json!({"summary": "Leads."})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{d}");
+    assert_eq!(d["delegate_to"], json!(["scout", "helper"]));
+    assert_eq!(d["delegates"], json!(["scout"]));
+    let ids: Vec<_> = t
+        .master
+        .agent_spec(Some("lead"), None)
+        .unwrap()
+        .delegates
+        .iter()
+        .map(|d| d.agent_id.clone())
+        .collect();
+    assert_eq!(ids, ["scout"]);
+
+    // Built-ins and file agents have no such list; an empty list clears.
+    let (st, d) = call(
+        &t,
+        Method::PATCH,
+        "/api/agents/lead",
+        Some(json!({"delegate_to": []})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{d}");
+    assert!(d["delegates"].as_array().unwrap().len() > 3);
+    let (st, _) = call(
+        &t,
+        Method::PATCH,
+        "/api/agents/coder",
+        Some(json!({"delegate_to": ["scout"]})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    let _ = f;
+}

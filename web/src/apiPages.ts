@@ -111,7 +111,7 @@ export const pageApi = {
   /** Built-in and file agents take `summary` and `instructions` only. */
   updateAgent: (
     id: string,
-    b: { name?: string; summary?: string; prompt?: string; instructions?: string; features?: AgentFeatures },
+    b: { name?: string; summary?: string; prompt?: string; instructions?: string; features?: AgentFeatures; delegate_to?: string[] },
     scope?: Scope | null,
   ) => call<AgentDetail>("PATCH", scoped(`/api/agents/${encodeURIComponent(id)}`, scope), b),
   /** Writes name their scope: a workspace's own agents, or the server's ("server"). */

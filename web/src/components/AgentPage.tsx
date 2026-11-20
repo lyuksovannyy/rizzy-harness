@@ -16,6 +16,7 @@ import { rawModel } from "../lib/models";
 import type { Agent, AgentDetail, AgentFeatures, NewAgent } from "../types";
 import { AgentAvatar, AgentMark, agentAlert } from "./AgentAvatar";
 import { AvatarEditor } from "./AvatarEditor";
+import { DelegatePicker } from "./DelegatePicker";
 
 /** What the list says after the name: where the agent comes from (built in, the server's, the workspace's), and where it can't be used. */
 export function agentMarkers(a: Agent): string[] {
@@ -204,10 +205,19 @@ interface Draft {
   prompt: string;
   instructions: string;
   features: AgentFeatures;
+  delegate_to: string[];
 }
 
 function draftOf(d: AgentDetail): Draft {
-  return { id: d.id, name: d.name, summary: d.summary, prompt: d.prompt, instructions: d.instructions, features: d.features };
+  return {
+    id: d.id,
+    name: d.name,
+    summary: d.summary,
+    prompt: d.prompt,
+    instructions: d.instructions,
+    features: d.features,
+    delegate_to: d.delegate_to ?? [],
+  };
 }
 
 const same = (a: Draft, b: Draft) => JSON.stringify(a) === JSON.stringify(b);
@@ -285,6 +295,7 @@ export function AgentPage(props: {
         prompt: s?.prompt ?? "",
         instructions: "",
         features: s?.features ?? NEW_FEATURES,
+        delegate_to: s?.delegate_to ?? [],
       };
       setDraft(d);
       setSaved(d);
@@ -345,6 +356,7 @@ export function AgentPage(props: {
             summary: draft.summary,
             prompt: draft.prompt,
             features: draft.features,
+            ...(draft.delegate_to.length ? { delegate_to: draft.delegate_to } : {}),
           },
           writeScope,
         );
@@ -361,6 +373,8 @@ export function AgentPage(props: {
               summary: draft.summary,
               prompt: draft.prompt,
               features: draft.features,
+              // Only a changed list is sent: one with a gone entry never blocks the other fields.
+              ...(JSON.stringify(draft.delegate_to) === JSON.stringify(saved.delegate_to) ? {} : { delegate_to: draft.delegate_to }),
             },
             writeScope,
           );
@@ -413,6 +427,8 @@ export function AgentPage(props: {
       summary: draft.summary || detail?.description_default || "",
       prompt: [draft.prompt, detail?.server_instructions ?? "", draft.instructions].map((t) => t.trim()).filter(Boolean).join("\n\n"),
       features: draft.features,
+      // A built-in's own sub-agents carry over; they stay a plain list the copy's author can narrow or clear.
+      delegate_to: locked && draft.features.delegate ? (detail?.delegates ?? []) : draft.delegate_to,
     });
   };
 
@@ -597,6 +613,17 @@ export function AgentPage(props: {
               <p className="field-hint">No tool of this agent changes files, so its commands run in a read-only shell, without network.</p>
             )}
           </div>
+          {draft.features.delegate || draft.delegate_to.length > 0 || !locked ? (
+            <DelegatePicker
+              agents={props.agents}
+              self={draft.id}
+              picks={draft.delegate_to}
+              active={draft.features.delegate}
+              readOnly={!canEdit || locked}
+              shown={listed?.delegates ?? detail?.delegates}
+              onChange={(delegate_to) => set({ delegate_to })}
+            />
+          ) : null}
           {listed && !creating && (
             <div className="field">
               <span className="field-label">Models</span>

@@ -604,6 +604,7 @@ fn edits_add_summaries_instructions_and_custom_agents() {
             },
             aliases: vec![],
             category: None,
+            delegates: vec![],
         },
     );
     edits.custom.insert(
@@ -618,6 +619,7 @@ fn edits_add_summaries_instructions_and_custom_agents() {
             },
             aliases: vec![],
             category: None,
+            delegates: vec![],
         },
     );
     // A custom agent cannot take a built-in's id.
@@ -630,6 +632,7 @@ fn edits_add_summaries_instructions_and_custom_agents() {
             features: features(),
             aliases: vec![],
             category: None,
+            delegates: vec![],
         },
     );
     let (set, errors) = base.with_edits(&edits);
@@ -779,6 +782,7 @@ fn ids_and_aliases_share_one_namespace() {
         features: features(),
         aliases: aliases.iter().map(|a| a.to_string()).collect(),
         category: None,
+        delegates: vec![],
     };
     let mut edits = Edits::default();
     edits.custom.insert("c1".into(), custom(&["h", "mine"]));
@@ -1236,6 +1240,7 @@ fn a_workspace_layer_goes_on_the_servers() {
         },
         aliases: vec![],
         category: None,
+        delegates: vec![],
     };
     let overlay = |s: &str, i: &str| Overlay {
         summary: s.into(),
@@ -1315,4 +1320,75 @@ fn a_workspace_layer_goes_on_the_servers() {
     // The server's set is the same with or without an empty workspace.
     let (again, _) = base.with_layers(&[&server, &Edits::default()]);
     assert_eq!(again.list(), server_set.list());
+}
+
+/// X.41: a custom agent's `delegates` list only narrows what it may hand
+/// tasks to. Entries that are not offered as sub-agents where it lives, a
+/// workspace's agent for a server agent, a deleted one and the agent itself
+/// never become delegates; with the switch off the list has no effect.
+#[test]
+fn a_delegates_list_narrows_and_never_widens() {
+    use harness_agents::edits::{Custom, Edits};
+    let base = AgentSet::from_agents(builtins(), DEFAULT_AGENT);
+    let custom = |delegate: bool, as_subagent: bool, list: &[&str]| Custom {
+        name: "X".into(),
+        summary: String::new(),
+        prompt: "x".into(),
+        features: harness_agents::Features {
+            delegate,
+            as_subagent,
+            ..features()
+        },
+        aliases: vec![],
+        category: None,
+        delegates: list.iter().map(|s| s.to_string()).collect(),
+    };
+    let mut server = Edits::default();
+    server.custom.insert("all".into(), custom(true, true, &[]));
+    server.custom.insert(
+        "narrow".into(),
+        custom(
+            true,
+            true,
+            &[
+                "scout",   // offered: kept
+                "gone",    // deleted or never made: ignored
+                "narrow",  // itself: ignored
+                "wsonly",  // another layer's, not in the server's: ignored
+                "private", // exists, not offered as a sub-agent: ignored
+            ],
+        ),
+    );
+    server
+        .custom
+        .insert("private".into(), custom(false, false, &[]));
+    server
+        .custom
+        .insert("stale".into(), custom(true, true, &["gone"]));
+    server
+        .custom
+        .insert("off".into(), custom(false, true, &["scout"]));
+    let mut ws = Edits::default();
+    ws.custom.insert("wsonly".into(), custom(false, true, &[]));
+    ws.custom
+        .insert("wslead".into(), custom(true, true, &["wsonly", "scout"]));
+
+    let (set, errors) = base.with_layers(&[&server, &ws]);
+    assert!(errors.is_empty(), "{errors:?}");
+    let ids = |id: &str| set.get(id).unwrap().delegates.clone();
+    assert!(ids("all").contains(&"scout".into()) && ids("all").len() > 3);
+    assert_eq!(ids("narrow"), ["scout"]);
+    // Every entry gone: nothing to hand tasks to, not "everyone".
+    assert!(ids("stale").is_empty());
+    assert!(!set.get("stale").unwrap().spec.allows_tool("delegate"));
+    // Switch off: the list is kept but changes nothing.
+    assert!(ids("off").is_empty());
+    // A workspace agent may list the server's and its own.
+    let mut both = ids("wslead");
+    both.sort();
+    assert_eq!(both, ["scout", "wsonly"]);
+    // The list never reaches a server agent from a workspace: the server's
+    // set alone has no `wsonly`.
+    let (server_set, _) = base.with_edits(&server);
+    assert_eq!(server_set.get("narrow").unwrap().delegates, ["scout"]);
 }

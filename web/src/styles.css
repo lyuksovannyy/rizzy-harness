@@ -5492,3 +5492,9 @@ button.pp-row:hover:not(:disabled),
   overflow: auto;
 }
 
+
+/* X.41: the "may delegate to" list under the Agents page's switches. */
+.delegate-picker { border: 0; padding: 0; margin: 0; min-width: 0; }
+.delegate-picker:disabled { opacity: 0.6; }
+.delegate-list { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 4px; }
+.delegate-option { display: flex; gap: 8px; align-items: baseline; }

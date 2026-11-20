@@ -30,6 +30,8 @@ const WS_CUSTOM: &str = "custom";
 const RESERVED: &[&str] = &["new"];
 const MAX_NAME: usize = 64;
 const MAX_SUMMARY: usize = 300;
+/// Most agents one agent's `delegate_to` list may name.
+pub const MAX_DELEGATE_TO: usize = 32;
 const MAX_PROMPT: usize = 20_000;
 const MAX_INSTRUCTIONS: usize = 8_000;
 /// Agents one workspace may make (PLAN.md T79). Edits of the server's
@@ -457,6 +459,7 @@ impl Master {
         // Aliases and category are checked like a file's (`labels`).
         let (aliases, _) = harness_agents::labels(id, &aliases, Some(&category))
             .map_err(|e| AgentEditError::Bad(e.to_string()))?;
+        let delegates = self.checked_delegate_to(place, id, &c.delegates).await?;
         let c = Custom {
             name,
             summary: text("the summary", &c.summary, MAX_SUMMARY, false)?,
@@ -464,6 +467,7 @@ impl Master {
             features: c.features,
             aliases,
             category: Some(category).filter(|c| !c.is_empty()),
+            delegates,
         };
         // The rest of what a definition must be (an id, a prompt, somewhere
         // to be used) is checked by building it.
@@ -527,6 +531,49 @@ impl Master {
             }
         }
         Ok(())
+    }
+
+    /// A `delegate_to` list as it may be stored for agent `id` of `place`:
+    /// handles, no repeats, not the agent itself, at most
+    /// [`MAX_DELEGATE_TO`]. An entry the agent already had is kept as it
+    /// is (its agent may have gone since: that never blocks another
+    /// change); a new one must be an agent `place` sees, offered as a
+    /// sub-agent. The list only narrows at turn time whatever it holds.
+    async fn checked_delegate_to(
+        &self,
+        place: &Place,
+        id: &str,
+        list: &[String],
+    ) -> Result<Vec<String>, AgentEditError> {
+        let bad = |m: String| Err(AgentEditError::Bad(m));
+        if list.len() > MAX_DELEGATE_TO {
+            return bad(format!(
+                "an agent may name at most {MAX_DELEGATE_TO} agents to delegate to"
+            ));
+        }
+        let (own, seen) = self.place_edits(place).await;
+        let before = own.custom.get(id).map(|o| o.delegates.as_slice());
+        let mut out: Vec<String> = Vec::new();
+        for d in list {
+            let d = d.trim();
+            if !harness_agents::valid_id(d) {
+                return bad(format!("`{d}` is not an agent handle"));
+            }
+            if d == id {
+                return bad("an agent cannot delegate to itself".into());
+            }
+            if out.iter().any(|x| x == d) {
+                return bad(format!("`{d}` is listed twice in the delegates"));
+            }
+            let kept = before.is_some_and(|b| b.iter().any(|x| x == d));
+            if !kept && !seen.get(d).is_some_and(|a| a.features.as_subagent) {
+                return bad(format!(
+                    "`{d}` is not an agent that works as a sub-agent here"
+                ));
+            }
+            out.push(d.to_string());
+        }
+        Ok(out)
     }
 
     /// Why `handle` cannot be a new id or alias for agent `except`: the
