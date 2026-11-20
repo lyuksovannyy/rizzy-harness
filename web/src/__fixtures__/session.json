@@ -276,6 +276,7 @@
         "approval_id": "a2",
         "call_id": "c3",
         "input": {},
+        "preview": "rows 2-3 are replaced:\n     2\t<script>x</script>\n     3\t[a](http://e.test)\n",
         "reason": "changes files",
         "tool": "edit"
       },
@@ -1903,6 +1904,7 @@
           "approval_id": "a2",
           "by": null,
           "decision": null,
+          "preview": "rows 2-3 are replaced:\n     2\t<script>x</script>\n     3\t[a](http://e.test)\n",
           "reason": "changes files"
         },
         "author": null,

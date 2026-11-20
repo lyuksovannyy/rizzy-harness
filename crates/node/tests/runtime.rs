@@ -714,6 +714,7 @@ async fn recovers_interrupted_turn_on_start() {
                 reason: "r".into(),
                 turn_allow: false,
                 chat_allow: false,
+                preview: None,
             }),
         ];
         for (i, k) in kinds.into_iter().enumerate() {

@@ -2513,6 +2513,36 @@ longer silently ignored). A number or `true`/`false` sent as a string
 (`"timeout_secs": "300"`) is read as the number or the boolean, and the call
 card, the approval card and the tool all see the corrected value. A call sent
 with empty arguments (a tool that takes none, such as `board`) is read as `{}`.
+`edit` also has a **line form**: `read` starts its result with a header line
+`[path#TAG]` (and `edit` and `write` end theirs with one), and a call
+`{path, tag, lines}` replaces rows by number without retyping the old text:
+`lines` is a list of `{from, to, text}` (replace rows `from` to `to`; empty
+`text` deletes them) and `{after, text}` (insert after row `after`; 0 is the
+top). Row numbers are those of the tagged version, the operations must not
+overlap, and every row you name must have been shown to the agent (by `read`,
+an edit's result or a refusal; a row `read` showed cut with `…` cannot be
+named: use `old_string` for it). A tag the session does not know (a new
+session, a restart, a version dropped from memory), or rows not shown, make
+the call refuse and print those rows, which then count as shown. If the file
+changed since the tag, the edit is made only where the rows it replaces did
+not change and are still one run of rows (a row someone inserted into the range
+since the tag refuses the call, with the rows as they are: replacing it would
+delete work the agent never saw; a row next to the range is not in it and
+stays). A call holds at most 256 operations and row numbers up to 1,000,000.
+A `lines` that is one object counts as a list of one, and a `text` that is a
+list of strings is a list of lines, one per string (an empty list is refused);
+`{from}` without `to` is refused
+(send the same number twice for one row), and so is a missing `text` (`"text":
+""` deletes the rows). A call without `tag` is refused with the rows it names
+and the file's current tag. `old_string` and the line form cannot be given together. The tag is
+a lookup key, not a secret.
+The header names the file as the agent addresses it: relative to the chat's
+folder when the file is inside it. When a line edit asks for approval, its card
+lists the rows it replaces (or where it inserts) under "Rows this changes",
+numbered as `read` numbers them, as plain text (at most 40 lines): the card
+otherwise holds only the row numbers and the new text. It is shown to you, not
+sent to the model.
+
 `write` and `edit` also read the names other harnesses use: `file_text` for
 `content`, `old_str` and `new_str` for `old_string` and `new_string`. The call
 is then the same call under the real names, for the card, the approval, "allow

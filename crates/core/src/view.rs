@@ -262,6 +262,9 @@ pub struct ApprovalState {
     /// Whether "allow for this chat" may be offered.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub chat_allow: bool,
+    /// What the call would change, for the person (`ApprovalRequested::preview`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
     pub decision: Option<Decision>,
     pub by: Option<ResolvedBy>,
     /// The person's note with a denial.
@@ -664,6 +667,7 @@ impl SessionView {
                         reason: a.reason,
                         turn_allow: a.turn_allow,
                         chat_allow: a.chat_allow,
+                        preview: a.preview,
                         decision: None,
                         by: None,
                         note: None,
@@ -1203,6 +1207,7 @@ mod tests {
                     reason: "r".into(),
                     turn_allow: false,
                     chat_allow: false,
+                    preview: None,
                 }),
             ),
         ];

@@ -98,7 +98,7 @@ const FREE: &[(&str, &[&str])] = &[
     ),
     (
         "approval_requested",
-        &["call_id", "tool", "input.**", "reason"],
+        &["call_id", "tool", "input.**", "reason", "preview"],
     ),
     ("approval_resolved", &["note"]),
     ("checkpoint", &["files.*", "excluded.*"]),

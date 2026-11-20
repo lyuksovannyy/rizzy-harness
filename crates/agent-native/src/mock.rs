@@ -471,7 +471,13 @@ impl Provider for Mock {
             } else if let Some(answer) = delegate_answer(content) {
                 vec!["Sub-agent ".into(), "said: ".into(), answer]
             } else {
-                let first = content.lines().next().unwrap_or("").to_string();
+                // The first line of the result; a `read`'s header line
+                // (`[path#TAG]`) is not the file's text.
+                let first = content
+                    .lines()
+                    .find(|l| !(l.starts_with('[') && l.contains("#") && l.ends_with(']')))
+                    .unwrap_or("")
+                    .to_string();
                 vec!["Tool ".into(), "said: ".into(), first]
             };
             let text = self.stream_words(words, &deltas).await;

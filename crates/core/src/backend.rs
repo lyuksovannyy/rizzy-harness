@@ -39,7 +39,9 @@ pub trait TurnHost: Send + Sync {
     /// a node MCP server and its source, or a custom connector), so a grant
     /// given for one origin never covers a tool of the same name from
     /// another, and the card describes the right one. A host without the
-    /// distinction asks as [`Self::approve`].
+    /// distinction asks as [`Self::approve`]. `preview` is the tool's text
+    /// for the person on the card (`Tool::preview`): shown, logged scrubbed
+    /// with the request, never sent to the model and not part of any key.
     async fn approve_from(
         &self,
         call_id: &str,
@@ -47,8 +49,9 @@ pub trait TurnHost: Send + Sync {
         input: &Value,
         risk: ToolRisk,
         origin: Option<&str>,
+        preview: Option<&str>,
     ) -> Decision {
-        let _ = origin;
+        let _ = (origin, preview);
         self.approve(call_id, tool, input, risk).await
     }
 

@@ -152,6 +152,7 @@ fn events() -> Vec<RawEvent> {
             reason: "runs programs".into(),
             turn_allow: false,
             chat_allow: false,
+            preview: None,
         }),
         EventKind::ApprovalResolved(ApprovalResolved {
             approval_id: "a1".into(),
@@ -243,6 +244,10 @@ fn events() -> Vec<RawEvent> {
             reason: "changes files".into(),
             turn_allow: false,
             chat_allow: false,
+            preview: Some(
+                "rows 2-3 are replaced:\n     2\t<script>x</script>\n     3\t[a](http://e.test)\n"
+                    .into(),
+            ),
         }),
         EventKind::Checkpoint(Checkpoint {
             turn_id: t(),
@@ -680,6 +685,7 @@ fn events() -> Vec<RawEvent> {
             reason: "runs programs".into(),
             turn_allow: true,
             chat_allow: true,
+            preview: None,
         }),
         EventKind::ApprovalResolved(ApprovalResolved {
             approval_id: "a-deny".into(),
@@ -1410,4 +1416,19 @@ fn a_waiting_retry_and_the_turns_limits_are_in_the_view() {
     assert_eq!(view["context_tokens"], 800);
     assert_eq!(view["context_model"], "openai::gpt-4o");
     assert!(view["usage"].get("window").is_none());
+}
+
+/// The card's preview survives the fold, as it is, and only where there is
+/// one (the TypeScript fold reads the same fixture).
+#[test]
+fn the_fold_keeps_an_approvals_preview() {
+    let view = serde_json::to_value(SessionView::fold(&events()).unwrap()).unwrap();
+    let previews: Vec<&str> = view["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|i| i["approval"]["preview"].as_str())
+        .collect();
+    assert_eq!(previews.len(), 1, "{previews:?}");
+    assert!(previews[0].contains("<script>x</script>"));
 }
