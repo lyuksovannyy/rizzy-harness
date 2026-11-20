@@ -771,12 +771,19 @@ async fn a_delegate_list_is_saved_validated_and_only_narrows() {
     let (_, d) = call(&t, Method::GET, "/api/agents/lead", None).await;
     assert_eq!(d["delegate_to"], json!(["scout", "helper"]));
 
-    // A deleted entry stays stored, is ignored in a turn, and does not block
-    // saving other fields.
-    assert_eq!(
-        call(&t, Method::DELETE, "/api/agents/helper", None).await.0,
-        StatusCode::OK
-    );
+    // An entry whose agent stopped being offered as a sub-agent stays stored,
+    // is ignored in a turn, and does not block saving other fields. (A
+    // deleted agent's handle leaves the list instead, see the delete tests.)
+    let mut off = features();
+    off["as_subagent"] = json!(false);
+    let (st, d) = call(
+        &t,
+        Method::PATCH,
+        "/api/agents/helper",
+        Some(json!({"features": off})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{d}");
     let (st, d) = call(
         &t,
         Method::PATCH,
@@ -816,4 +823,48 @@ async fn a_delegate_list_is_saved_validated_and_only_narrows() {
     .await;
     assert_eq!(st, StatusCode::CONFLICT);
     let _ = f;
+}
+
+/// Exactly 32 entries are accepted and 33 are refused; an empty list on a
+/// built-in is a no-op that succeeds (a stale tab), a non-empty one is refused.
+#[tokio::test]
+async fn the_list_bound_and_an_empty_list_on_a_built_in() {
+    let t = start().await;
+    let mut f = features();
+    f["delegate"] = json!(true);
+    // 33 sub-agents to list.
+    for i in 0..33 {
+        let (st, d) = call(
+            &t,
+            Method::POST,
+            "/api/agents",
+            Some(json!({"id": format!("h{i}"), "name": format!("H{i}"), "prompt": "p", "features": features()})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{d}");
+    }
+    let body = |ids: Vec<String>| json!({"id": "boss", "name": "Boss", "prompt": "p", "features": f, "delegate_to": ids});
+    let ids = |n: usize| (0..n).map(|i| format!("h{i}")).collect::<Vec<_>>();
+    let (st, d) = call(&t, Method::POST, "/api/agents", Some(body(ids(33)))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{d}");
+    let (st, d) = call(&t, Method::POST, "/api/agents", Some(body(ids(32)))).await;
+    assert_eq!(st, StatusCode::OK, "{d}");
+    assert_eq!(d["delegate_to"].as_array().unwrap().len(), 32);
+    // Built-in: empty list is accepted and changes nothing.
+    let (st, d) = call(
+        &t,
+        Method::PATCH,
+        "/api/agents/coder",
+        Some(json!({"delegate_to": []})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{d}");
+    let (st, _) = call(
+        &t,
+        Method::PATCH,
+        "/api/agents/coder",
+        Some(json!({"delegate_to": ["scout"]})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT);
 }
