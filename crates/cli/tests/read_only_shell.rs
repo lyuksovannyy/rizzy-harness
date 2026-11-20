@@ -372,7 +372,7 @@ async fn without_a_containment_nothing_runs() {
     let plain = Arc::new(f.plain());
     for (what, conf) in [
         ("landlock alone", confined(plain)),
-        ("no sandbox", Confinement::Unconfined),
+        ("no sandbox", Confinement::default()),
         (
             "refused",
             Confinement::Refused("the sandbox mode is not offered".into()),

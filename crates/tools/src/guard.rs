@@ -428,6 +428,7 @@ fn run(
     // Without bubblewrap (`--host`) there is no view and no server: the
     // command's program is its own, or the node's image through a
     // descriptor (the Landlock wrapper), and its stdin is `/dev/null`.
+    let image_program = host && program == crate::contain::IMAGE_TOKEN;
     let (program, args, view_fds, stdin, env_fd) = if host {
         let mut fds = Vec::new();
         let mut program = program.to_owned();
@@ -460,8 +461,14 @@ fn run(
         (program.to_owned(), args, view_fds, stdin, env_fd)
     };
     let mut command = std::process::Command::new(&program);
-    if host && let Some(a0) = std::env::args_os().next() {
-        // For `ps`: the node's image under its own name, not `/proc/…`.
+    if host
+        && image_program
+        && let Some(a0) = std::env::args_os().next()
+    {
+        // For `ps`: the node's image under its own name, not `/proc/…`. Any
+        // other program (`bash`, for a host chat on a node without its
+        // sandbox wrapper) keeps its own name: `bash` must not believe it is
+        // the node's binary (its `$0`, its error messages).
         command.arg0(a0);
     }
     command

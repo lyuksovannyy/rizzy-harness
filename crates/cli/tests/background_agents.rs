@@ -135,6 +135,8 @@ struct Node {
     seen: Vec<RawEvent>,
     n: u32,
     requests: Arc<std::sync::Mutex<Vec<harness_agent_native::ChatRequest>>>,
+    /// A host test's place among the few that run at once (`host_node_with`).
+    _slot: Option<tokio::sync::SemaphorePermit<'static>>,
 }
 
 struct Spy(
@@ -247,6 +249,7 @@ async fn node_with(edit: impl FnOnce(&mut harness_node::NodePolicy)) -> Option<N
         seen: vec![],
         n: 0,
         requests,
+        _slot: None,
     })
 }
 
@@ -768,44 +771,479 @@ async fn without_the_switch_or_the_nodes_yes_nothing_is_offered_and_a_forged_sta
     assert!(delegate.schema["properties"].get("background").is_some());
 }
 
-/// The owner's decision of 2026-11-20 allowed background COMMANDS in a
-/// `host` chat, and with it the chat has a table; background SUB-AGENTS stay
-/// refused there (as they were while the chat had no table): `delegate`
-/// offers no `background`, and a forged start is refused with the reason
-/// before any child exists.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_host_chat_is_offered_no_background_sub_agent_and_a_forged_start_is_refused() {
-    let Some(mut n) = node_with(|p| {
+// ---- a `host` chat's background sub-agents (the owner, 2026-11-20) ----
+//
+// "dont, like if user selected host project workspace, why do we need to
+// limit it? its his choice": a chat in the host mode gets no limit a
+// sandbox chat does not have. These are the sandbox tests above, run in a
+// host chat, plus what is specific to the host form (the child's foreground
+// command is a plain process group: a `setsid` process survives its stop).
+
+/// A node that offers the `host` mode beside the sandbox one.
+async fn host_node_with(edit: impl FnOnce(&mut harness_node::NodePolicy)) -> Option<Node> {
+    // At most two host tests at once: each starts children and their
+    // commands, and the file's older tests wait on a 7 s bound for a stop
+    // (`bash_stop`) that a loaded machine can miss.
+    static SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+    let slot = SLOTS.acquire().await.ok();
+    let mut n = node_with(|p| {
         p.exec = harness_node::exec::ExecOffers::new(Ok(()), Ok(()), vec![]);
+        edit(p);
     })
-    .await
-    else {
+    .await?;
+    n._slot = slot;
+    Some(n)
+}
+
+async fn host_node() -> Option<Node> {
+    host_node_with(|_| {}).await
+}
+
+/// Kills, by pid, the processes of a test whose command line holds one of
+/// the marks (a failed assertion must not leave a `sleep` behind).
+struct Leftovers(Vec<&'static str>);
+
+impl Drop for Leftovers {
+    fn drop(&mut self) {
+        for m in &self.0 {
+            kill_all(m);
+        }
+    }
+}
+
+fn kill_all(mark: &str) {
+    for pid in procs(mark) {
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+}
+
+fn has_background(request: &harness_agent_native::ChatRequest) -> bool {
+    request
+        .tools
+        .iter()
+        .find(|t| t.name == "delegate")
+        .is_some_and(|d| d.schema["properties"].get("background").is_some())
+}
+
+/// A `host` chat is offered `background` on `delegate`, starts a background
+/// sub-agent, sees it listed (the tool and the side panel's data) and hears
+/// its result once, as a sandbox chat does: this was refused by mode before
+/// the owner's decision of 2026-11-20.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_chat_starts_lists_and_hears_a_background_sub_agent() {
+    let Some(mut n) = host_node().await else {
         return;
     };
     let sid = n.create_in("auto", Some("host")).await;
-    n.prompt_as(sid, lead(true), &[bg_delegate("look", "run: true")]);
+    std::fs::write(n.ws.join("notes.txt"), "the answer is 42\n").unwrap();
+    n.prompt(
+        sid,
+        &[
+            bg_delegate("look", &format!("run: {}", held("go", "cat notes.txt"))),
+            json!({"tool": "bash_output", "input": {}}),
+        ],
+    );
+    n.turns_ended(sid, 1).await;
+    assert!(has_background(&n.requests.lock().unwrap()[0]));
+    let child = n.child(sid, 0);
+    let out = n.outputs(sid, "delegate");
+    assert!(
+        out[0].starts_with(&format!("session: {child}\n"))
+            && out[0].contains("started in the background as bg-1"),
+        "{out:?}"
+    );
+    // Listed: by the tool, and by the fold the side panel is built from.
+    let listed = n.outputs(sid, "bash_output");
+    assert!(
+        listed[0].contains("bg-1: background sub-agent @look, running"),
+        "{listed:?}"
+    );
+    let raw: Vec<RawEvent> = n
+        .seen
+        .iter()
+        .filter(|e| e.session_id == sid)
+        .cloned()
+        .collect();
+    let v = harness_core::view::SessionView::fold(&raw).unwrap();
+    assert!(
+        v.background
+            .get("bg-1")
+            .is_some_and(|b| b.child.is_some() && !b.ended)
+    );
+    std::fs::write(n.ws.join("go"), "").unwrap();
+    let end = n.ended(sid, "bg-1").await;
+    assert_eq!(end.reason, BackgroundReason::Finished, "{end:?}");
+    assert!(end.calls_back());
+    let c = end.child.as_ref().unwrap();
+    assert!(
+        c.result
+            .starts_with(&format!("session: {child}\nSub-agent @look finished: done")),
+        "{}",
+        c.result
+    );
+    let note = end.model_note().unwrap();
+    let before = n.requests.lock().unwrap().len();
+    n.callback(sid, &["bg-1"]).await.unwrap();
+    n.turns_ended(sid, 2).await;
+    let reqs = n.requests.lock().unwrap().clone();
+    let opening = texts(&reqs[before].messages).last().unwrap().clone();
+    assert!(
+        opening.starts_with(CALLBACK_LEAD) && opening.contains(&note),
+        "{opening}"
+    );
+    assert_eq!(n.ends(sid).len(), 1);
+}
+
+/// The child's execution mode is its parent's, read from the parent's
+/// recorded mode: its `session_created` says `host`, its command runs in
+/// this machine's own PID namespace (a sandbox chat's would be in a
+/// namespace of its own), and a `delegate` call that carries an `exec_mode`
+/// (or a `mode`) of its own changes nothing: the tool has no such argument.
+/// (A read-only agent's shell is the sandbox's read-only one in either mode:
+/// the child here can write, so its shell is the host's.)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_chats_background_sub_agent_runs_in_the_host_mode_whatever_the_call_says() {
+    let Some(mut n) = host_node().await else {
+        return;
+    };
+    n.repo();
+    let sid = n.create_in("auto", Some("host")).await;
+    n.prompt(
+        sid,
+        &[
+            json!({"tool": "delegate", "input": {"agent": "dev2",
+                "task": "run: readlink /proc/self/ns/pid > pidns-1.txt",
+                "background": true, "exec_mode": "sandbox", "mode": "sandbox"}}),
+            json!({"tool": "delegate", "input": {"agent": "dev2",
+                "task": "run: readlink /proc/self/ns/pid > pidns-2.txt",
+                "background": true, "exec_mode": "host"}}),
+        ],
+    );
+    n.turns_ended(sid, 1).await;
+    n.ended(sid, "bg-1").await;
+    n.ended(sid, "bg-2").await;
+    for i in 0..2 {
+        let child = n.child(sid, i);
+        assert!(
+            n.of(child).iter().any(|k| matches!(k,
+                EventKind::SessionCreated(c) if c.exec_mode == Some(harness_core::policy::ExecMode::Host)
+                    && c.parent_session == Some(sid))),
+            "child {i} is not in the host mode: {:?}",
+            n.of(child)
+        );
+        // Merged back at its end: where the command ran.
+        let ns = std::fs::read_to_string(n.ws.join(format!("pidns-{}.txt", i + 1)))
+            .unwrap_or_else(|e| panic!("child {i} left no file: {e}"));
+        assert_eq!(
+            ns.trim(),
+            std::fs::read_link("/proc/self/ns/pid")
+                .unwrap()
+                .to_string_lossy(),
+            "child {i} ran in a namespace of its own: not the host mode"
+        );
+    }
+    // The delegate schema has no argument that names a mode.
+    let reqs = n.requests.lock().unwrap().clone();
+    let delegate = reqs[0].tools.iter().find(|t| t.name == "delegate").unwrap();
+    let props = delegate.schema["properties"].as_object().unwrap();
+    assert!(
+        props
+            .keys()
+            .all(|k| !k.contains("mode") && !k.contains("exec")),
+        "{props:?}"
+    );
+}
+
+/// A host chat's background sub-agent runs its commands under the chat's
+/// approval mode, as in a sandbox chat: in `ask` its command stops at a card
+/// in its own chat and does not run until it is answered, and the card says
+/// the command runs in the host shell.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_chats_background_sub_agent_asks_in_the_chats_approval_mode() {
+    let Some(mut n) = host_node().await else {
+        return;
+    };
+    let _left = Leftovers(vec!["sleep 979301"]);
+    n.repo();
+    let sid = n.create_in("ask", Some("host")).await;
+    n.prompt(sid, &[bg_delegate("dev2", "run: sleep 979301")]);
+    n.turns_ended(sid, 1).await;
+    let child = n.child(sid, 0);
+    n.until(move |e, k| e.session_id == child && matches!(k, EventKind::ApprovalRequested(_)))
+        .await;
+    let card = n
+        .of(child)
+        .into_iter()
+        .find_map(|k| match k {
+            EventKind::ApprovalRequested(a) => Some(a),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        format!("{card:?}").contains("host"),
+        "the card does not say the host shell: {card:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(procs("sleep 979301").is_empty(), "ran before the answer");
+    n.send(
+        json!({"type": "session.stop_background", "req_id": "s1", "session_id": sid,
+        "bg_id": "bg-1", "by": "user"}),
+    );
+    n.ended(sid, "bg-1").await;
+    n.drain().await;
+    n.no_child_folders().await;
+}
+
+/// The refusals that stay, in a host chat as in a sandbox one: a sub-agent
+/// gets no background commands (`SUB_AGENT`) and starts no background
+/// sub-agent (one level deep).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_chats_sub_agent_gets_no_background_commands_and_starts_no_sub_agent() {
+    let Some(mut n) = host_node().await else {
+        return;
+    };
+    n.repo();
+    let sid = n.create_in("auto", Some("host")).await;
+    let task = format!(
+        "script: {}",
+        json!([
+            {"tool": "bash", "input": {"command": "true", "background": true, "timeout_secs": 60}},
+            {"tool": "delegate", "input": {"agent": "look", "task": "run: true", "background": true}},
+        ])
+    );
+    n.prompt(sid, &[bg_delegate("dev2", &task)]);
+    n.turns_ended(sid, 1).await;
+    let end = n.ended(sid, "bg-1").await;
+    n.drain().await;
+    let child = n.child(sid, 0);
+    let outs: Vec<String> = n
+        .of(child)
+        .iter()
+        .filter_map(|k| match k {
+            EventKind::ToolCallFinished(f) => Some(f.output.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        outs.iter()
+            .any(|o| o.contains("not available to a sub-agent")),
+        "{outs:?}"
+    );
+    assert!(
+        !n.of(child)
+            .iter()
+            .any(|k| matches!(k, EventKind::BackgroundStarted(_))),
+        "the sub-agent started something in the background"
+    );
+    assert_eq!(n.starts(sid).len(), 1, "{end:?}");
+}
+
+/// Every way a host chat's background sub-agent ends, with its foreground
+/// command running at that moment: the command is killed (by pid); a
+/// process that command detached with `setsid` survives, as with any host
+/// foreground command, and no text of the stop says otherwise. The ends:
+/// the person's Stop of one, `bash_stop`, Stop all, the owner's revocation
+/// and the chat's deletion.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_chats_background_sub_agent_ends_by_every_stop_path_with_its_command() {
+    let Some(mut n) = host_node().await else {
+        return;
+    };
+    let _left = Leftovers(vec![
+        "sleep 979311",
+        "sleep 979312",
+        "sleep 979313",
+        "sleep 979314",
+        "sleep 979315",
+        "sleep 979316",
+    ]);
+    // A writer (`dev2`): its shell is the host's (a reader's is the
+    // sandbox's read-only one in either mode).
+    n.repo();
+    let sid = n.create_in("auto", Some("host")).await;
+    let stop = |n: &Node, id: Option<&str>, by: &str| {
+        n.send(
+            json!({"type": "session.stop_background", "req_id": "sx", "session_id": sid,
+            "bg_id": id, "by": by}),
+        );
+    };
+    // The person's Stop of one: its command goes; a `setsid` process of it
+    // stays, as it does for a foreground host command.
+    n.prompt(
+        sid,
+        &[bg_delegate(
+            "dev2",
+            "run: setsid sleep 979311 </dev/null >/dev/null 2>&1 & sleep 979312",
+        )],
+    );
+    n.turns_ended(sid, 1).await;
+    appears("sleep 979312").await;
+    appears("sleep 979311").await;
+    stop(&n, Some("bg-1"), "user");
+    let end = n.ended(sid, "bg-1").await;
+    assert_eq!(end.reason, BackgroundReason::StoppedByUser);
+    gone("sleep 979312", "the person's stop").await;
+    assert!(
+        !procs("sleep 979311").is_empty(),
+        "a setsid process of a foreground host command is not reached by a stop"
+    );
+    // What the end's texts say must not claim more than that.
+    for w in [end.model_note().unwrap(), end.reason.words().to_string()] {
+        assert!(
+            !w.contains("everything it started") && !w.contains("every process"),
+            "{w}"
+        );
+    }
+    // `bash_stop`.
+    n.prompt(
+        sid,
+        &[
+            bg_delegate("dev2", "run: sleep 979313"),
+            bash("sleep 1"),
+            json!({"tool": "bash_stop", "input": {"id": "bg-2"}}),
+            bash("true"),
+        ],
+    );
+    n.turns_ended(sid, 2).await;
+    let st = n.outputs(sid, "bash_stop");
+    assert!(st[0].contains("bg-2 was stopped by the agent"), "{st:?}");
+    gone("sleep 979313", "bash_stop").await;
+    // Stop all, then the owner's revocation, each over a running child.
+    n.prompt(sid, &[bg_delegate("dev2", "run: sleep 979314")]);
+    n.turns_ended(sid, 3).await;
+    appears("sleep 979314").await;
+    stop(&n, None, "user");
+    n.ended(sid, "bg-3").await;
+    gone("sleep 979314", "Stop all").await;
+    n.prompt(sid, &[bg_delegate("dev2", "run: sleep 979315")]);
+    n.turns_ended(sid, 4).await;
+    appears("sleep 979315").await;
+    stop(&n, None, "access_revoked");
+    let end = n.ended(sid, "bg-4").await;
+    assert_eq!(end.reason, BackgroundReason::AccessRevoked);
+    gone("sleep 979315", "the owner's revocation").await;
+    // The chat's deletion.
+    n.prompt(sid, &[bg_delegate("dev2", "run: sleep 979316")]);
+    n.turns_ended(sid, 5).await;
+    appears("sleep 979316").await;
+    n.send(json!({"type": "session.delete", "req_id": "d1", "session_id": sid}));
+    gone("sleep 979316", "the chat's deletion").await;
+    n.drain().await;
+    // Only the detached one is left; it is killed by its pid here.
+    kill_all("sleep 979311");
+}
+
+/// The wall-clock limit ends a host chat's background sub-agent and its
+/// foreground command, as in a sandbox chat.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_wall_clock_limit_ends_a_host_chats_sub_agent_and_its_command() {
+    let Some(mut n) = host_node_with(|p| p.limits.background_agent_timeout_s = 30).await else {
+        return;
+    };
+    let _left = Leftovers(vec!["sleep 979321"]);
+    n.repo();
+    let sid = n.create_in("auto", Some("host")).await;
+    n.prompt(sid, &[bg_delegate("dev2", "run: sleep 979321")]);
+    n.turns_ended(sid, 1).await;
+    appears("sleep 979321").await;
+    let end = n.ended(sid, "bg-1").await;
+    assert_eq!(end.reason, BackgroundReason::TimedOut);
+    assert!(end.calls_back());
+    gone("sleep 979321", "the wall clock").await;
+}
+
+/// The node's stop ends a host chat's background sub-agent and its
+/// foreground command within its bound, recorded as `node_stopping`.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_node_stop_ends_a_host_chats_sub_agent_and_its_command() {
+    let Some(mut n) = host_node().await else {
+        return;
+    };
+    let _left = Leftovers(vec!["sleep 979331"]);
+    n.repo();
+    let sid = n.create_in("auto", Some("host")).await;
+    n.prompt(sid, &[bg_delegate("dev2", "run: sleep 979331")]);
+    n.turns_ended(sid, 1).await;
+    appears("sleep 979331").await;
+    let t = Instant::now();
+    let left = n._rt.stop(Duration::from_secs(30)).await;
+    assert!(left.is_empty(), "{left:?}");
+    assert!(t.elapsed() < Duration::from_secs(15), "{:?}", t.elapsed());
+    n.drain().await;
+    let end = n.ends(sid).pop().expect("no end recorded");
+    assert_eq!(end.reason, BackgroundReason::NodeStopping, "{end:?}");
+    gone("sleep 979331", "the node's stop").await;
+}
+
+/// The callback budget applies to a host chat's background sub-agents as to
+/// its commands: with `callback_turns = 1` the first end starts a callback
+/// turn and the second is refused (`callback_refused` recorded).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_chats_sub_agent_ends_obey_the_callback_budget() {
+    let Some(mut n) = host_node_with(|p| p.limits.callback_turns = 1).await else {
+        return;
+    };
+    let sid = n.create_in("auto", Some("host")).await;
+    n.prompt(
+        sid,
+        &[
+            bg_delegate("look", &format!("run: {}", held("go1", "true"))),
+            bg_delegate("look", &format!("run: {}", held("go2", "true"))),
+        ],
+    );
+    n.turns_ended(sid, 1).await;
+    std::fs::write(n.ws.join("go1"), "").unwrap();
+    n.ended(sid, "bg-1").await;
+    n.callback(sid, &["bg-1"]).await.unwrap();
+    n.turns_ended(sid, 2).await;
+    std::fs::write(n.ws.join("go2"), "").unwrap();
+    n.ended(sid, "bg-2").await;
+    let e = n.callback(sid, &["bg-2"]).await.unwrap_err();
+    assert!(
+        e.starts_with(harness_protocol::CALLBACK_REFUSED)
+            && e.contains("1 turns in a row without you (node limit)"),
+        "{e}"
+    );
+    assert!(
+        n.of(sid)
+            .iter()
+            .any(|k| matches!(k, EventKind::CallbackRefused(_)))
+    );
+}
+
+/// The node's own switches still decide in a host chat: the cap per chat
+/// and the agent's switch (the per-chat table and `no_callbacks` are the
+/// sandbox tests' above, on the same code).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_chats_sub_agents_still_obey_the_nodes_cap_and_the_agents_switch() {
+    let Some(mut n) = host_node_with(|p| p.limits.background_agents_per_chat = 1).await else {
+        return;
+    };
+    let sid = n.create_in("auto", Some("host")).await;
+    n.prompt(
+        sid,
+        &[
+            bg_delegate("look", &format!("run: {}", held("go", "true"))),
+            bg_delegate("look", "run: true"),
+        ],
+    );
     n.turns_ended(sid, 1).await;
     let out = n.outputs(sid, "delegate");
     assert!(
-        out[0].contains("not available in this chat") && out[0].contains("the host mode"),
-        "{out:?}"
+        out[1].contains("background_agents_per_chat"),
+        "the second start was not refused by the cap: {out:?}"
     );
-    assert!(n.starts(sid).is_empty());
-    assert_eq!(
-        n.seen
-            .iter()
-            .filter(|e| e.kind == "session_created")
-            .count(),
-        1,
-        "a child was made"
-    );
+    std::fs::write(n.ws.join("go"), "").unwrap();
+    n.ended(sid, "bg-1").await;
+    // The agent's switch off: not offered, a forged one refused.
+    n.prompt_as(sid, lead(false), &[bg_delegate("look", "run: true")]);
+    n.turns_ended(sid, 2).await;
     let reqs = n.requests.lock().unwrap().clone();
-    let delegate = reqs[0].tools.iter().find(|t| t.name == "delegate").unwrap();
-    assert!(
-        delegate.schema["properties"].get("background").is_none(),
-        "{:?}",
-        delegate.schema
-    );
+    assert!(!has_background(reqs.last().unwrap()));
+    assert_eq!(n.starts(sid).len(), 1);
 }
 
 /// The person's Stop of one, the agent's `bash_stop`, and the chat's

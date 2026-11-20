@@ -6155,11 +6155,11 @@ fn background_access(
         return Access::Off(SUB_AGENT.into());
     }
     // A `host` session's background command runs under the guard without
-    // bubblewrap (the owner, 2026-11-20; PLAN.md T9). On a node that runs
-    // commands without its sandbox wrapper (`[sandbox] mode = "off"`) there
-    // is no guard to start: the table is off for the chat, so the tools
-    // and the notes follow the off behaviour. Decided from the node's own
-    // state, never from an argument.
+    // bubblewrap (the owner, 2026-11-20; PLAN.md T9), from the node's held
+    // image, with or without its sandbox wrapper (`[sandbox] mode = "off"`).
+    // Where the node holds no image there is no guard to start: the table
+    // is off for the chat, so the tools and the notes follow the off
+    // behaviour. Decided from the node's own state, never from an argument.
     if host.exec_mode() == Some(harness_core::policy::ExecMode::Host)
         && !config.host_shell.can_guard_host()
     {
@@ -9607,7 +9607,7 @@ mod background_tests {
         use harness_core::policy::ExecMode;
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let config = NativeConfig {
-            host_shell: harness_tools::sandbox::Confinement::Unconfined,
+            host_shell: harness_tools::sandbox::Confinement::default(),
             ..Default::default()
         };
         let host = WithTable::new(

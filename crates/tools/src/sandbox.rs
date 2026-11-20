@@ -1165,11 +1165,14 @@ pub const READ_ONLY_NO_SIZE: &str = "this node's bubblewrap cannot limit the siz
      (`--size`), which the read-only shell's /tmp needs";
 
 /// How a tool's child processes are started.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub enum Confinement {
-    /// Directly (sandbox `off`, and unit tests).
-    #[default]
-    Unconfined,
+    /// Directly (sandbox `off`, and unit tests). `image` is the node's own
+    /// running image, held open at start ([`hold_own_image`]), which a `host`
+    /// chat's background command starts its guard from (the owner,
+    /// 2026-11-20); without it (a test, a node that could not hold it) such
+    /// a command is refused. A foreground command never reads it.
+    Unconfined { image: Option<HeldImage> },
     /// Through `sandbox-exec`; `tmp` is the session's temp directory.
     Confined {
         sandbox: Arc<Sandbox>,
@@ -1177,6 +1180,46 @@ pub enum Confinement {
     },
     /// Not at all: the sandbox is required and does not work here.
     Refused(Arc<str>),
+}
+
+impl Default for Confinement {
+    fn default() -> Self {
+        Self::Unconfined { image: None }
+    }
+}
+
+/// The node's own running image as an open descriptor (`/proc/self/fd/<n>`,
+/// held for the process's life by [`hold_own_image`] / [`open_image`]), with
+/// the path it is known as, for `ps`.
+#[derive(Debug, Clone)]
+pub struct HeldImage {
+    fd: std::os::fd::RawFd,
+    exe: PathBuf,
+}
+
+impl HeldImage {
+    /// The image held for `exe` (the node: [`hold_own_image`] first), opened
+    /// once per path.
+    pub fn of(exe: &Path) -> Result<Self, String> {
+        Ok(Self {
+            fd: open_image(exe)?,
+            exe: exe.to_owned(),
+        })
+    }
+
+    /// The guard in its `--host` mode, started from this image, up to and
+    /// including `--`: the caller adds the program and its arguments.
+    fn host_guard(&self) -> std::process::Command {
+        use std::os::unix::process::CommandExt;
+        let mut g = std::process::Command::new(format!("/proc/self/fd/{}", self.fd));
+        g.arg0(&self.exe)
+            .arg(crate::guard::SUBCOMMAND)
+            .arg(crate::guard::NODE)
+            .arg(std::process::id().to_string())
+            .arg(crate::guard::HOST)
+            .arg("--");
+        g
+    }
 }
 
 /// What a command gets on top of the node-wide rules.
@@ -1284,7 +1327,10 @@ impl Confinement {
     /// Whether [`Grants::guard_host`] can be honoured: a shell with the
     /// node's held program to start the guard from.
     pub fn can_guard_host(&self) -> bool {
-        matches!(self, Self::Confined { .. })
+        matches!(
+            self,
+            Self::Confined { .. } | Self::Unconfined { image: Some(_) }
+        )
     }
 
     /// Whether this confinement can run the read-only shell
@@ -1314,7 +1360,7 @@ impl Confinement {
     pub fn read_only_shell(&self) -> Result<(), String> {
         match self {
             Self::Refused(why) => Err(format!("this node has no contained shell for it ({why})")),
-            Self::Unconfined => Err(
+            Self::Unconfined { .. } => Err(
                 "this node runs commands without its sandbox ([sandbox] mode = \"off\"), so \
                  nothing can keep a command from writing"
                     .into(),
@@ -1445,8 +1491,20 @@ impl Confinement {
         let mut guarded = false;
         let std_cmd = match self {
             Self::Refused(why) => return Err(why.to_string()),
-            Self::Unconfined => {
-                let mut c = std::process::Command::new(program);
+            Self::Unconfined { image } => {
+                // A `host` chat's background command on a node without its
+                // sandbox wrapper: the guard alone, from the node's held
+                // image, then the program itself (no `sandbox-exec`, no
+                // `@rizzy-image`). Everything else is started directly.
+                let mut c = match image.as_ref().filter(|_| shell && grants.guard_host) {
+                    Some(img) => {
+                        guarded = true;
+                        let mut g = img.host_guard();
+                        g.arg(program);
+                        g
+                    }
+                    None => std::process::Command::new(program),
+                };
                 env.apply_std(&mut c);
                 c
             }
@@ -1900,13 +1958,31 @@ pub fn start(
              wraps the sandbox's wrapper)",
             node_toml.display()
         );
+        // The node's own running image, held once, before anything starts
+        // from it: a `host` chat's background command starts its guard from
+        // it (T8E-5: never `current_exe` resolved at a spawn). Foreground
+        // commands never use it. Without it that start is refused.
+        let (image, image_line) = match std::env::current_exe()
+            .and_then(|e| e.canonicalize())
+            .map_err(|e| format!("cannot find the harness binary: {e}"))
+            .and_then(|exe| hold_own_image(&exe).and_then(|()| HeldImage::of(&exe)))
+        {
+            Ok(img) => (Some(img), String::new()),
+            Err(e) => (
+                None,
+                format!(
+                    "; a host chat's background commands are refused (no guard can start: \
+                     the node's own image is not held: {e})"
+                ),
+            ),
+        };
         return Ok(Started {
             confinement: Confinement::Refused(why.clone().into()),
-            uncontained: Confinement::Unconfined,
+            uncontained: Confinement::Unconfined { image },
             refusal: None,
             summary: format!(
                 "OFF ([sandbox] mode = \"off\" in {}): a host session's shell runs with every \
-                 right of this OS user",
+                 right of this OS user{image_line}",
                 node_toml.display()
             ),
             contain_summary: format!("NOT OFFERED: {why}"),
@@ -3486,8 +3562,128 @@ mod tests {
             plain.as_std().get_current_dir()
         );
         // No sandbox wrapper: nothing to start a guard from.
-        assert!(!Confinement::Unconfined.can_guard_host());
-        let (cmd, guarded) = shell(&Confinement::Unconfined, true);
+        assert!(!Confinement::default().can_guard_host());
+        let (cmd, guarded) = shell(&Confinement::default(), true);
+        assert!(!guarded);
+        assert_eq!(cmd.as_std().get_program(), "bash");
+    }
+
+    /// The owner's decision of 2026-11-20, on a node without its sandbox
+    /// wrapper (`[sandbox] mode = "off"`) that holds its own image: only a
+    /// `host` chat's background command (`guard_host`) is started under the
+    /// guard, directly (no `sandbox-exec`, no `@rizzy-image`, no mark, no
+    /// bubblewrap). Everything else of that shell is what it was: the
+    /// foreground command is the same program, arguments, folder and
+    /// environment with or without the held image; a non-shell command, the
+    /// read-only shell and the marker are unchanged; without the image a
+    /// background start is still refused.
+    #[test]
+    fn an_unconfined_shell_guards_only_a_host_background_command_and_nothing_else_moves() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().canonicalize().unwrap();
+        let exe = std::env::current_exe().unwrap().canonicalize().unwrap();
+        let with = Confinement::Unconfined {
+            image: Some(HeldImage::of(&exe).unwrap()),
+        };
+        let without = Confinement::default();
+        assert!(with.can_guard_host() && !without.can_guard_host());
+        assert!(!with.contains() && with.mark().is_none() && with.private_root().is_none());
+        assert!(
+            with.read_only_shell().is_err(),
+            "the read-only shell is still refused"
+        );
+        let env: crate::ToolEnv = Default::default();
+        let grants = |guard_host: bool, read_only: bool| Grants {
+            workspace_write: true,
+            guard_host,
+            read_only,
+            ..Default::default()
+        };
+        let shell = |c: &Confinement, g: Grants| {
+            c.shell(
+                OsStr::new("bash"),
+                &[OsStr::new("-c"), OsStr::new("true")],
+                &ws,
+                None,
+                &env,
+                &[],
+                g,
+            )
+        };
+        // What a command is: program, arguments, folder, environment.
+        let sig = |c: &tokio::process::Command| {
+            let c = c.as_std();
+            (
+                c.get_program().to_owned(),
+                c.get_args().map(OsStr::to_owned).collect::<Vec<_>>(),
+                c.get_current_dir().map(Path::to_owned),
+                c.get_envs()
+                    .map(|(k, v)| (k.to_owned(), v.map(OsStr::to_owned)))
+                    .collect::<Vec<_>>(),
+            )
+        };
+        // The foreground command: the same before and after (a node that
+        // holds no image builds the command the old code built).
+        let (fore_with, g1) = shell(&with, grants(false, false)).unwrap();
+        let (fore_without, g2) = shell(&without, grants(false, false)).unwrap();
+        assert!(!g1 && !g2);
+        assert_eq!(sig(&fore_with), sig(&fore_without));
+        assert_eq!(fore_with.as_std().get_program(), "bash");
+        assert_eq!(
+            sig(&fore_with).1,
+            [OsStr::new("-c"), OsStr::new("true")],
+            "the foreground command is `bash -c <command>` and nothing else"
+        );
+        // A non-shell command never takes the guard, whatever the grant says.
+        let plain = with
+            .command(
+                OsStr::new("git"),
+                &[OsStr::new("status")],
+                &ws,
+                None,
+                &env,
+                &[],
+                grants(true, false),
+            )
+            .unwrap();
+        assert_eq!(plain.as_std().get_program(), "git");
+        // The read-only shell is refused, with the grant or without.
+        for guard_host in [false, true] {
+            assert!(shell(&with, grants(guard_host, true)).is_err());
+        }
+        // A host chat's background command: the guard alone.
+        let (cmd, guarded) = shell(&with, grants(true, false)).unwrap();
+        assert!(guarded);
+        let (program, a, cwd, _) = sig(&cmd);
+        assert!(
+            program.to_string_lossy().starts_with("/proc/self/fd/"),
+            "{program:?}"
+        );
+        let a: Vec<String> = a.iter().map(|x| x.to_string_lossy().into_owned()).collect();
+        let me = std::process::id().to_string();
+        assert_eq!(
+            a,
+            [
+                crate::guard::SUBCOMMAND,
+                crate::guard::NODE,
+                me.as_str(),
+                crate::guard::HOST,
+                "--",
+                "bash",
+                "-c",
+                "true"
+            ]
+        );
+        assert!(
+            !a.iter().any(|x| x == crate::guard::MARK
+                || x == crate::contain::IMAGE_TOKEN
+                || x.contains("bwrap")
+                || x == SUBCOMMAND),
+            "no mark, no image token, no wrapper, no bubblewrap: {a:?}"
+        );
+        assert_eq!(cwd.as_deref(), Some(ws.as_path()));
+        // Without the image there is nothing to start the guard from.
+        let (cmd, guarded) = shell(&without, grants(true, false)).unwrap();
         assert!(!guarded);
         assert_eq!(cmd.as_std().get_program(), "bash");
     }
@@ -3702,7 +3898,7 @@ mod tests {
         };
         let s = start(&off(ContainMode::Auto), &data, prot, &[], &toml).unwrap();
         assert!(s.sandbox_refusal().is_some());
-        assert!(matches!(s.uncontained, Confinement::Unconfined));
+        assert!(matches!(s.uncontained, Confinement::Unconfined { .. }));
         let e = start(&off(ContainMode::Strict), &data, prot, &[], &toml).unwrap_err();
         assert!(e.contains("[execution] sandbox = \"strict\""), "{e}");
     }

@@ -59,17 +59,11 @@ impl Session {
                     .into(),
             );
         }
-        // The owner's decision of 2026-11-20 allowed background COMMANDS in a
-        // host chat (their table exists there now); background sub-agents
-        // stay refused there, as they were while a host chat had no table.
-        if self.exec_mode == Some(harness_core::policy::ExecMode::Host) {
-            return Err(
-                "background sub-agents are not available in this chat, which runs its \
-                        commands on this machine without the sandbox (the host mode): delegate in \
-                        the foreground"
-                    .into(),
-            );
-        }
+        // No refusal by execution mode: a `host` chat gets no limit a
+        // `sandbox` chat does not have (the owner, 2026-11-20: "dont, like if
+        // user selected host project workspace, why do we need to limit it?
+        // its his choice"). The child runs in its parent's mode (`start_child`
+        // copies `self.exec_mode`; nothing in a call names one).
         let Some(bg) = &self.bg else {
             return Err("this chat has no background table: delegate in the foreground".into());
         };
