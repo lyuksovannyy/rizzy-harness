@@ -86,6 +86,21 @@ describe("Live.onLoginEnded", () => {
     expect(ended).toHaveBeenCalledTimes(1);
     live.close();
   });
+
+  test("after 4401 the socket does not knock again by itself; any other close does", () => {
+    const live = new Live();
+    const close = (code: number) => (FakeSocket.all.at(-1)!.onclose as unknown as (e: { code: number }) => void)({ code });
+    close(4401);
+    vi.advanceTimersByTime(60_000);
+    expect(FakeSocket.all).toHaveLength(1);
+    // An explicit connect (the shell, once the login is known good) works.
+    live.reconnect();
+    expect(FakeSocket.all).toHaveLength(2);
+    close(1006);
+    vi.advanceTimersByTime(60_000);
+    expect(FakeSocket.all).toHaveLength(3);
+    live.close();
+  });
 });
 
 describe("the login key (Gate 3 P-1)", () => {
