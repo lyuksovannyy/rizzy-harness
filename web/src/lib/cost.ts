@@ -9,7 +9,7 @@
 // unpriced requests separately; OpenCodex warns about coverage).
 import "./i18nPages";
 import { t } from "./i18n";
-import type { ModelInfo, ModelTokens, Usage } from "../types";
+import type { ModelInfo, ModelPrice, ModelTokens, Usage } from "../types";
 
 export interface Estimate {
   /** Sum over the priced models, in `currency`. */
@@ -28,31 +28,42 @@ export interface Estimate {
 
 const PER = 1_000_000;
 
-/** The token classes a model used that it has no price for, in the form's
- * words; ["no prices"] for a model with none. Empty: fully priced. */
-export function missingPrices(t: ModelTokens, info: ModelInfo | undefined): string[] {
-  const p = info?.price;
-  if (!p) return ["no prices"];
+/** The one table of what a model used and what each class costs: [tokens,
+ * price, the form's name for it]. Input is what is left after the cache classes. */
+function classes(t: ModelTokens, p: ModelPrice): [number, number | null | undefined, string][] {
   const read = t.cache_read_tokens ?? 0;
   const write = t.cache_write_tokens ?? 0;
-  const parts: [number, unknown, string][] = [
+  return [
     [Math.max(0, t.input_tokens - read - write), p.input, "input"],
     [read, p.cached_input, "cached input"],
     [write, p.cache_write, "cache write"],
     [t.output_tokens, p.output, "output"],
   ];
-  return parts.filter(([n, price]) => n !== 0 && (price === undefined || price === null)).map(([, , name]) => name);
+}
+
+/** The token classes a model used that it has no price for, in the form's
+ * words; ["no prices"] for a model with none. Empty: fully priced. A class
+ * with no tokens needs no price. */
+export function missingPrices(t: ModelTokens, info: ModelInfo | undefined): string[] {
+  const p = info?.price;
+  if (!p) return ["no prices"];
+  return classes(t, p)
+    .filter(([n, price]) => n !== 0 && (price === undefined || price === null))
+    .map(([, , name]) => name);
 }
 
 /** One model's cost, or null when a class it used has no price (never a
  * guess: a cache read priced as input would overstate some providers tenfold). */
 export function modelCost(t: ModelTokens, info: ModelInfo | undefined): number | null {
   const p = info?.price;
-  if (!p || missingPrices(t, info).length > 0) return null;
-  const read = t.cache_read_tokens ?? 0;
-  const write = t.cache_write_tokens ?? 0;
-  const fresh = Math.max(0, t.input_tokens - read - write);
-  return (fresh * p.input! + read * (p.cached_input ?? 0) + write * (p.cache_write ?? 0) + t.output_tokens * p.output!) / PER;
+  if (!p) return null;
+  let sum = 0;
+  for (const [n, price] of classes(t, p)) {
+    if (n === 0) continue;
+    if (price === undefined || price === null) return null;
+    sum += (n * price) / PER;
+  }
+  return sum;
 }
 
 export function estimate(u: Usage, models: ModelInfo[]): Estimate {
@@ -129,7 +140,7 @@ function unpricedHint(e: Estimate): string {
   const parts: string[] = [];
   const n = e.unpricedModels.length;
   if (n > 0) {
-    const shown = e.unpricedModels.slice(0, 3).map((id, i) => `${id} (${e.unpricedMissing[i]!.join(", ")})`);
+    const shown = e.unpricedModels.slice(0, 3).map((id, i) => `${id.length > 60 ? id.slice(0, 59) + "…" : id} (${e.unpricedMissing[i]!.join(", ")})`);
     const models = n > 3 ? t("cost.andMore", { list: shown.join(", "), n: String(n - 3) }) : shown.join(", ");
     parts.push(t("cost.unpricedModels", { models }));
   }

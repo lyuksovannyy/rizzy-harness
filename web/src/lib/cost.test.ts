@@ -6,7 +6,7 @@ import { describe, expect, test } from "vitest";
 import { costMeter } from "../components/CostMeter";
 import { fold } from "../fold";
 import type { ModelInfo, ModelPrice, ModelTokens, RawEvent, Usage } from "../types";
-import { costText, estimate, formatCost } from "./cost";
+import { costText, estimate, formatCost, missingPrices, modelCost } from "./cost";
 
 const info = (id: string, price?: ModelPrice, currency = "USD"): ModelInfo => ({
   id,
@@ -214,5 +214,67 @@ describe("the header", () => {
       expect(h).toContain("p::a (no prices), p::b (no prices), p::c (no prices) and 2 more");
       expect(h).not.toContain("p::d");
     });
+  });
+
+  describe("a class with no tokens never needs a price", () => {
+    const priced = (price: ModelPrice) => info("p::x", price);
+    const cases: [string, ModelPrice, ModelTokens, number][] = [
+      [
+        "input and cache read, no input price",
+        { cached_input: 1, output: 2 },
+        { input_tokens: 100, output_tokens: 10, cache_read_tokens: 100 },
+        (100 * 1 + 10 * 2) / 1e6,
+      ],
+      ["no output tokens, no output price", { input: 1 }, { input_tokens: 100, output_tokens: 0 }, 100 / 1e6],
+      [
+        "cache write only",
+        { cache_write: 4 },
+        { input_tokens: 50, output_tokens: 0, cache_write_tokens: 50 },
+        (50 * 4) / 1e6,
+      ],
+    ];
+    for (const [name, price, tk, want] of cases) {
+      test(name, () => {
+        const m = priced(price);
+        expect(modelCost(tk, m)).toBeCloseTo(want, 12);
+        const e = estimate(usage({ "p::x": tk }), [m]);
+        expect(Number.isFinite(e.amount)).toBe(true);
+        expect(e.unpricedModels).toEqual([]);
+        expect(e.amount).toBeCloseTo(want, 12);
+      });
+    }
+
+    test("all 16 combinations: null exactly when a used class lacks its price, else finite", () => {
+      const full: ModelPrice = { input: 1, cached_input: 2, cache_write: 3, output: 4 };
+      const keys = ["input", "cached_input", "cache_write", "output"] as const;
+      for (const missing of [null, ...keys]) {
+        const price = { ...full };
+        if (missing) delete price[missing];
+        const m = priced(price);
+        for (let mask = 0; mask < 16; mask++) {
+          // Bit k set: class k has tokens (input counts what is left after the cache classes).
+          const read = mask & 2 ? 10 : 0;
+          const write = mask & 4 ? 10 : 0;
+          const tk: ModelTokens = {
+            input_tokens: (mask & 1 ? 10 : 0) + read + write,
+            output_tokens: mask & 8 ? 10 : 0,
+            cache_read_tokens: read,
+            cache_write_tokens: write,
+          };
+          const c = modelCost(tk, m);
+          const gaps = missingPrices(tk, m);
+          expect(c === null, `${missing} ${mask}`).toBe(gaps.length > 0);
+          if (c !== null) expect(Number.isFinite(c), `${missing} ${mask}`).toBe(true);
+          expect(gaps.length > 0, `${missing} ${mask}`).toBe(missing !== null && keys.indexOf(missing) >= 0 && !!(mask & (1 << keys.indexOf(missing))));
+        }
+      }
+    });
+  });
+
+  test("a long model id is cut in the hint", () => {
+    const long = "p::" + "x".repeat(200);
+    const h = costText(estimate(usage({ [long]: { input_tokens: 10, output_tokens: 1 } }), [BIG, info(long)]), "en-US")!.hint;
+    expect(h).toContain("p::" + "x".repeat(56) + "… (no prices)");
+    expect(h).not.toContain("x".repeat(57));
   });
 });
