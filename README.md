@@ -707,6 +707,13 @@ for keeping the directory secret: whoever can read `master.db` can read every
 file, so use full-disk encryption for that. Old copies of `master.db` pages can
 survive on SSDs and copy-on-write filesystems ([docs/media.md](docs/media.md)).
 
+**A request id on every error.** Every answer from the server carries a
+request id (`x-request-id`, and `request_id` in an error's JSON). Where the
+page shows a failed request (renaming or deleting a chat, saving Settings, the
+account menu, retrying a turn) the message ends in `(request 3f2a…)`: send
+that id to whoever runs the server, who finds the same id on the log line of
+the failure. Errors that have none show nothing extra.
+
 **One process per data directory.** `serve`, `node run` and `node join` hold
 a lock on `<data>/lock` for as long as they run. A second one started on the
 same directory (typing `serve` twice, a `node run` pointed at the server's
@@ -4379,7 +4386,10 @@ before the tool says it is busy.
 **Default agents per mode.** A chat gets the Assistant unless you pick
 another; an Agentic chat gets the Software Developer. A workspace overrides
 each (`default_agent` for chats, `default_agentic_agent` for Agentic), and
-your own preferences override the workspace's in the picker. An agent you
+your own preferences override the workspace's in the picker (Settings →
+Account → Preferences → New chats has one picker for chats and one for coding
+chats on a node, the second listing only agents that can change files or run
+commands). An agent you
 name for the chat always wins. The Agentic default must be able to change
 files or run commands: the Assistant, Smol and Researcher are refused there,
 saying why; so is an agent that runs only as a sub-agent or does not exist,
