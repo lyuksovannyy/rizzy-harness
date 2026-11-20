@@ -5907,7 +5907,7 @@ fn approval_reason(
     policy: &crate::NodePolicy,
     exec_mode: Option<harness_core::policy::ExecMode>,
 ) -> String {
-    let reason = tool_reason(tool, risk, input, policy);
+    let reason = tool_reason(tool, risk, input, policy, exec_mode);
     // In a `host` chat the card is the only check (review N-e): it says so.
     // `publish` and `board_edit` run nothing here: the host shell is not
     // part of what they do.
@@ -5940,7 +5940,13 @@ fn connector_reason(tool: &str, connector: &str, raw: Option<&str>) -> String {
 const BOARD_EDIT_REASON: &str = "`board_edit` adds a card, moves one or adds a note to one on \
     this project's task board; it touches no file and runs nothing";
 
-fn tool_reason(tool: &str, risk: ToolRisk, input: &Value, policy: &crate::NodePolicy) -> String {
+fn tool_reason(
+    tool: &str,
+    risk: ToolRisk,
+    input: &Value,
+    policy: &crate::NodePolicy,
+    exec_mode: Option<harness_core::policy::ExecMode>,
+) -> String {
     // A background start says what it is, in words (§4.1): the field alone
     // is easy to miss.
     if is_background_start(tool, input) {
@@ -5955,7 +5961,18 @@ fn tool_reason(tool: &str, risk: ToolRisk, input: &Value, policy: &crate::NodePo
              with nobody watching, for up to {} (its timeout), unless it ends or is stopped first",
             harness_core::text::duration_words(t.as_millis() as u64)
         );
-        if policy.sandbox.network == harness_tools::sandbox::Network::On {
+        // A sandbox chat's command has its own network namespace when the
+        // network is off. A host chat's has none: only Landlock's TCP rule
+        // (`network = "off"`, where the kernel enforces it) stops it from
+        // listening, and a node that cannot says so in its gaps.
+        let network_on = policy.sandbox.network == harness_tools::sandbox::Network::On;
+        if exec_mode == Some(harness_core::policy::ExecMode::Host) {
+            if network_on || policy.exec.host_net_open() {
+                s.push_str(
+                    "; nothing stops it from accepting connections on this machine's network",
+                );
+            }
+        } else if network_on {
             s.push_str("; the network is on, so it can accept connections");
         }
         return s;
@@ -6143,6 +6160,48 @@ mod tests {
         assert!(r.contains("accept connections"), "{r}");
         let fg = serde_json::json!({"command": "ls", "background": false});
         assert!(!approval_reason("bash", ToolRisk::Mutating, &fg, &p, None).contains("KEEPS"));
+    }
+
+    /// Review of PR 186: in a host chat the card says the command can
+    /// accept connections whenever nothing stops it: the network on, or off
+    /// on a node whose Landlock does not stop TCP (`GAP_HOST_NET_OPEN`);
+    /// never where Landlock denies TCP.
+    #[test]
+    fn a_host_background_start_says_the_network_is_reachable_when_nothing_stops_it() {
+        use harness_core::policy::ExecMode;
+        use harness_tools::sandbox::Network;
+        let input =
+            serde_json::json!({"command": "npm run dev", "background": true, "timeout_secs": 600});
+        let said = |net: Network, gaps: Vec<&'static str>| {
+            let mut p = crate::NodePolicy::default();
+            p.sandbox.network = net;
+            p.exec = crate::exec::ExecOffers::new(Ok(()), Ok(()), gaps);
+            approval_reason("bash", ToolRisk::Mutating, &input, &p, Some(ExecMode::Host))
+                .contains("nothing stops it from accepting connections")
+        };
+        assert!(said(Network::On, vec![]), "the network on");
+        assert!(
+            said(Network::Off, vec![harness_protocol::GAP_HOST_NET_OPEN]),
+            "off, but TCP is not stopped here"
+        );
+        assert!(
+            !said(Network::Off, vec![harness_protocol::GAP_HOST_NETNS]),
+            "off, and Landlock stops TCP"
+        );
+        // The sandbox chat keeps its sentence.
+        let mut p = crate::NodePolicy::default();
+        p.sandbox.network = Network::On;
+        let r = approval_reason(
+            "bash",
+            ToolRisk::Mutating,
+            &input,
+            &p,
+            Some(ExecMode::Sandbox),
+        );
+        assert!(
+            r.contains("the network is on, so it can accept connections"),
+            "{r}"
+        );
     }
 }
 

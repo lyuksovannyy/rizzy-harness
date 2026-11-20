@@ -98,6 +98,10 @@ the gaps of those modes (`harness_protocol::GAPS`):
 * `gap:sandbox:sockets`: below Landlock ABI 9 (a socket in a granted
   folder reaches a service that starts processes outside);
 * `gap:sandbox:proc`: the shared-`/proc` form;
+* Background commands in a `host` chat need `[sandbox] mode` other than
+  `off` (the guard is started from the node's own image, held for the
+  sandbox wrapper): with `off` the chat is not offered `background: true`,
+  `bash_output` or `bash_stop` (a follow-up may start the guard directly);
 * `gap:host:netns`: network off, a `host` chat, Landlock stops TCP (UDP and
   DNS go out);
 * `gap:host:net-open`: network off, a `host` chat where nothing applies it

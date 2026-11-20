@@ -2633,12 +2633,20 @@ decision of 2026-11-20: a steered agent can already leave a process behind
 from a foreground call, and a background command at least is listed, has a
 timeout and a Stop) it runs under the same guard without bubblewrap: a later
 command can see it in `ps` and signal it, but `bash_stop`, its timeout, the
-side panel, the chat's deletion and the node's stop or death end the command
-and every process descended from it, and the harness confirms that end. What
-the command only asked another service to start (a container runtime, a
-systemd unit, an already running tmux server) is not covered, and a guard
-killed with `kill -9` leaves what it ran behind (the node's start sweep does
-not find it). The agent reads it with `bash_output { id }` (no id lists the chat's commands)
+side panel and the chat's deletion end the command and every process
+descended from it, and the guard confirms that end; the node's stop does the
+same and records it, and after the node's death the guard ends it too, but
+nobody confirms it: the next start records `node_restarted`. What the command
+only asked another service to start (a container runtime, a systemd unit, an
+already running tmux server) is not covered. A guard killed with `kill -9`
+leaves what it ran behind (the node's start sweep does not find it): the chat
+then says the command and what it started MAY STILL BE RUNNING on this
+machine, because nothing looked for them. A deep chain of nested processes
+(hundreds of levels) is ended one level per pass, so its end can take
+seconds and the stop's result says "not ended yet" until the guard reports.
+Background commands in a host chat need `[sandbox] mode` other than `off`;
+with `off` the chat is not offered `background: true`, `bash_output` or
+`bash_stop`. The agent reads it with `bash_output { id }` (no id lists the chat's commands)
 and stops it with `bash_stop { id }`. When a foreground call puts a job in
 the background by hand (an unquoted `&`, or `setsid`), the harness sends the agent
 one `[harness]` note after that call's result (recorded with the call, so a

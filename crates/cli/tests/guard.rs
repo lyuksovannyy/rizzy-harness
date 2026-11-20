@@ -2062,3 +2062,79 @@ fn a_graceful_stop_of_a_host_command_is_a_sigterm_to_its_group() {
     );
     none_of(&[m], "graceful stop");
 }
+
+/// Review of PR 186 (fix 3): `ended` is read only when NOTHING of the
+/// command is left, checked at that very instant, without polling. The
+/// other host tests look for survivors after polling for them to go, so a
+/// guard that wrote `ended` at the start of its kill phase, before `kill_all`,
+/// passed all of them. Here the command is a chain of nested processes (each
+/// level a `setsid` shell that waits for the next, the way the review's
+/// `chain.c` builds one), which the guard ends one level per pass: the kill
+/// takes tens of milliseconds, so an `ended` written early is read while the
+/// deepest levels are alive. Every level writes its pid to a file; the check
+/// reads them deepest first and looks at `/proc/<pid>` directly (no scan).
+/// The test kills what it started by pid when it ends.
+#[test]
+fn the_host_guard_writes_ended_only_after_a_deep_chain_is_dead() {
+    const DEPTH: u32 = 400;
+    let m = Mark(977_160);
+    let dir = tempfile::Builder::new()
+        .prefix("host-chain-")
+        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+        .unwrap();
+    let pids_file = dir.path().join("pids");
+    let level = dir.path().join("level.sh");
+    // Level n: record the pid, start level n-1 in a session of its own and
+    // wait for it; level 0 is the marked `sleep`.
+    std::fs::write(
+        &level,
+        "echo $$ >> \"$2\"\n\
+         if [ \"$1\" -gt 0 ]; then setsid sh \"$0\" $(($1 - 1)) \"$2\" \"$3\" & wait; \
+         else exec sleep \"$3\"; fi\n",
+    )
+    .unwrap();
+    let _c = Cleanup(PathBuf::from("/nonexistent-host-guard"), vec![m]);
+    struct Pids(PathBuf);
+    impl Drop for Pids {
+        fn drop(&mut self) {
+            kill_all(&recorded(&self.0));
+        }
+    }
+    fn recorded(f: &Path) -> Vec<i32> {
+        std::fs::read_to_string(f)
+            .unwrap_or_default()
+            .split_whitespace()
+            .filter_map(|p| p.parse().ok())
+            .collect()
+    }
+    let _p = Pids(pids_file.clone());
+    let script = format!(
+        "exec sh {} {DEPTH} {} {m}",
+        level.display(),
+        pids_file.display()
+    );
+    let mut g = host_guard(&script);
+    let by = Instant::now() + GONE_LIMIT;
+    while sleeps(m).is_empty() {
+        assert!(Instant::now() < by, "the chain never reached its end");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let all = recorded(&pids_file);
+    assert_eq!(all.len() as u32, DEPTH + 1, "every level recorded its pid");
+    let (report, took) = g.stop(false);
+    // Read at the instant `ended` was: no polling, deepest level first.
+    let alive_now: Vec<i32> = all.iter().rev().copied().filter(|p| alive(*p)).collect();
+    eprintln!("the kill of {DEPTH} levels took {took:?}");
+    assert!(
+        matches!(report, Some(harness_tools::guard::Report::Ended(_, _))),
+        "{report:?}"
+    );
+    assert!(
+        alive_now.is_empty(),
+        "`ended` was read while {} of {} processes were alive: {}",
+        alive_now.len(),
+        all.len(),
+        describe(&alive_now[..alive_now.len().min(5)])
+    );
+    assert!(exited_within(&mut g.child, Duration::from_secs(5)));
+}

@@ -372,6 +372,54 @@ async fn a_host_session_gets_a_background_command_under_the_guard() {
     assert_eq!(alive(), 0, "bash_stop left the command running");
 }
 
+/// Review of PR 186 (the card of a host background start): with
+/// `[sandbox] network = "off"` the node's gaps say what THIS machine's
+/// Landlock does to a host command's TCP, and the card's sentence about
+/// the network follows exactly that gap (`ExecOffers::host_net_open`):
+/// listening is stopped where the kernel enforces Landlock's TCP rule (ABI
+/// 4 and up) and open where it does not. Skipped, loudly, where the node
+/// has no Landlock shell here.
+#[test]
+fn the_host_gap_for_a_network_off_node_follows_this_machines_landlock() {
+    let dir = tempfile::Builder::new()
+        .prefix("exec-modes-net-")
+        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+        .unwrap();
+    let data = dir.path().canonicalize().unwrap().join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let settings = harness_tools::sandbox::Settings {
+        network: harness_tools::sandbox::Network::Off,
+        ..Default::default()
+    };
+    let s = harness_tools::sandbox::start_with_exe(
+        PathBuf::from(EXE),
+        &settings,
+        &data,
+        std::slice::from_ref(&data),
+        &data.join("node.toml"),
+    )
+    .unwrap();
+    if !matches!(
+        s.uncontained,
+        harness_tools::sandbox::Confinement::Confined { .. }
+    ) {
+        assert!(!bwrap::required(), "no Landlock shell on this machine");
+        eprintln!("SKIPPED: this machine has no Landlock host shell");
+        return;
+    }
+    let mut policy = harness_node::NodePolicy::default();
+    policy.execution.host = true;
+    policy.sandbox.network = harness_tools::sandbox::Network::Off;
+    let offers = harness_node::exec::ExecOffers::from_start(&s, &policy);
+    eprintln!(
+        "Landlock ABI {}: TCP stopped for a host command: {}",
+        s.landlock_abi,
+        s.host_tcp_stopped()
+    );
+    assert_eq!(s.host_tcp_stopped(), s.landlock_abi >= 4);
+    assert_eq!(offers.host_net_open(), !s.host_tcp_stopped());
+}
+
 /// X.2, T62: the node operator's instruction file in its default place,
 /// `AGENTS.md` in the node's data directory, is out of reach of every tool
 /// in both modes, with file tools allowed outside the session folder:

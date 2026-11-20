@@ -137,6 +137,21 @@ async fn pump<R: AsyncRead + Unpin>(
     }
 }
 
+/// Why a host command's end is not confirmed yet after `alive`: without a
+/// namespace the guard ends nested processes one level per pass (about
+/// 0.8 us times depth squared), so a deep chain takes seconds as well as a
+/// process in an uninterruptible read. Names both, claims neither.
+pub(crate) const HOST_STILL_ALIVE: &str = "something it started is still being killed: a \
+     long chain of nested processes, or a process the kernel cannot interrupt); its guard keeps \
+     going, and the end is confirmed when it reports";
+
+/// What a host command's text says when its guard was killed before it
+/// confirmed the end: no namespace, no mark, nothing looked for what the
+/// guard left (the review of PR 186 killed one: the command and its
+/// children ran on).
+pub(crate) const HOST_GUARD_KILLED: &str = "; nothing looked for the command or what it \
+     started: they MAY STILL BE RUNNING on this machine";
+
 /// What [`crate::contain::sweep_session`] found, for the tool result.
 pub(crate) fn sweep_note(found: &[crate::contain::Swept]) -> String {
     if found.is_empty() {
@@ -175,6 +190,32 @@ macro_rules! lead {
          file read with `read`. A command stops at its timeout (60 s when none is given)."
     };
 }
+
+/// `bash`'s description where background commands are on; `$ends` is what
+/// `bash_stop` is said to end and confirm: a sandbox chat's namespace holds
+/// everything it started, a host chat's guard proves only its descendants
+/// (what it asked another service to start is not covered).
+macro_rules! description {
+    ($ends:literal) => {
+        concat!(
+            lead!(),
+            " For a server, a watcher or a long build, set `background: true` with \
+         `timeout_secs` (required then): if it is still running after 3 s you get its id (bg-1) \
+         and its first output, and it keeps running until it exits, its timeout or bash_stop. You \
+         are told when it ends, at your next step or the person's next message: do not poll. \
+         Read it with bash_output and stop it with bash_stop, which ends it and ",
+            $ends,
+            " and confirms that. In a sandbox chat later commands cannot see it in `ps` or \
+         stop it with `kill` (each command has its own process namespace), and where the \
+         node's network is off they cannot connect to it either; in a host chat they can see \
+         and signal it."
+        )
+    };
+}
+
+/// `bash`'s description in a `host` chat: the same, with what the guard
+/// proves of its end.
+pub const HOST_DESCRIPTION: &str = description!("every process descended from it");
 
 /// Added to `bash`'s description where it runs in the read-only shell
 /// (plan mode, an agent that changes nothing else: T.7, PLAN.md T70),
@@ -468,7 +509,8 @@ pub(crate) fn detach_note(contained: bool, background_offered: bool, max_secs: u
         format!(
             "[harness] {truth}. To keep one running, use `background: true` with \
              `timeout_secs` (up to {max_secs} s on this node), then `bash_output` and \
-             `bash_stop`: the harness ends it, and everything it started, when it stops."
+             `bash_stop`: the harness ends it, and every process descended from it, when it \
+             stops."
         )
     } else {
         format!(
@@ -485,18 +527,7 @@ impl Tool for Bash {
     }
 
     fn description(&self) -> &'static str {
-        concat!(
-            lead!(),
-            " For a server, a watcher or a long build, set `background: true` with \
-         `timeout_secs` (required then): if it is still running after 3 s you get its id (bg-1) \
-         and its first output, and it keeps running until it exits, its timeout or bash_stop. You \
-         are told when it ends, at your next step or the person's next message: do not poll. \
-         Read it with bash_output and stop it with bash_stop, which ends it and everything it \
-         started and confirms that. In a sandbox chat later commands cannot see it in `ps` or \
-         stop it with `kill` (each command has its own process namespace), and where the \
-         node's network is off they cannot connect to it either; in a host chat they can see \
-         and signal it."
-        )
+        description!("everything it started")
     }
 
     fn schema(&self) -> Value {
@@ -819,7 +850,8 @@ impl Tool for Bash {
                 }
                 (_, Some(sig)) => {
                     guard_note = Some(format!(
-                        "[its guard was killed (signal {sig}) before it confirmed the end"
+                        "[its guard was killed (signal {sig}) before it confirmed the end{}",
+                        if host_guard { HOST_GUARD_KILLED } else { "" }
                     ));
                 }
                 _ => match c.exit_report().await {
@@ -1000,6 +1032,16 @@ impl Tool for Bash {
                     )
                 };
                 let note = match stopped {
+                    Some(crate::contain::Stopped::StillAlive(d)) if host_guard => format!(
+                        "[{} and killed, but NOT ended: a process of this command is still alive \
+                         {:.1}{STILL_ALIVE_TAIL} ({HOST_STILL_ALIVE}]",
+                        if end == End::Cancelled {
+                            "stop ordered"
+                        } else {
+                            &how
+                        },
+                        d.as_secs_f64()
+                    ),
                     Some(crate::contain::Stopped::StillAlive(d)) => format!(
                         "[{} and killed, but NOT ended: a process of this command is still alive \
                          {:.1}{STILL_ALIVE_TAIL}; the kernel cannot end it yet (it \

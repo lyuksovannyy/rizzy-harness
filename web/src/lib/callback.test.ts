@@ -17,6 +17,11 @@ describe("callback turns", () => {
     expect(endWords([{ ...end("bg-3", "exited", 1), tail: "<b>x</b>" } as Item], ["bg-3"])).not.toContain("<b>");
   });
 
+  test("an end nobody confirmed is not said to have ended (a host guard killed)", () => {
+    const open = { ...end("bg-6", "exited", null), open: true } as Item;
+    expect(endWords([open], ["bg-6"])).toBe("bg-6 may still be running (exited)");
+  });
+
   test("a callback starts a turn like a person's message does", () => {
     expect(turnStart([{ type: "callback", turn_id: "t", bg_ids: ["bg-1"] }], 0)).toBe(true);
     expect(turnStart([{ type: "called", turn_id: "t", agent: null, message_seq: 2 }], 0)).toBe(true);

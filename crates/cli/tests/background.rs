@@ -2093,6 +2093,144 @@ async fn a_host_command_killed_by_a_signal_has_its_children_ended() {
     );
 }
 
+/// The pid of the `sandbox-guard` above `pid` (its nearest ancestor of
+/// that name), or `None`.
+fn guard_above(pid: i32) -> Option<i32> {
+    let mut at = pid;
+    while at > 1 {
+        let stat = std::fs::read_to_string(format!("/proc/{at}/stat")).ok()?;
+        at = stat
+            .rsplit(')')
+            .next()?
+            .split_whitespace()
+            .nth(1)?
+            .parse()
+            .ok()?;
+        let cmd = std::fs::read(format!("/proc/{at}/cmdline")).unwrap_or_default();
+        if String::from_utf8_lossy(&cmd).contains("sandbox-guard") {
+            return Some(at);
+        }
+    }
+    None
+}
+
+fn sigkill(pid: i32) {
+    let _ = nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(pid),
+        nix::sys::signal::Signal::SIGKILL,
+    );
+}
+
+/// What the person and the model are told when a host command's guard is
+/// killed before it confirmed the end: nothing looked for the command, so
+/// it MAY STILL BE RUNNING, and the word "ended" is not used of it.
+fn assert_host_guard_killed_words(where_: &str, text: &str) {
+    assert!(
+        text.contains("its guard was killed")
+            && text.contains("before it confirmed the end")
+            && text.contains("MAY STILL BE RUNNING on this machine")
+            && text.contains("nothing looked for"),
+        "{where_}: {text}"
+    );
+}
+
+/// Review of PR 186 (fix 1): the guard of a host background command is
+/// killed with SIGKILL after the start returned. The command and what it
+/// started keep running (nothing kills them: there is no namespace and no
+/// mark to sweep), and the chat must not say it ended: `bash_output`, the
+/// listing and the end's note say it MAY STILL BE RUNNING. The test cleans
+/// up its own marked processes by pid. On the branch head the text said
+/// only "ended (its guard was killed by signal 9 before it confirmed the
+/// end)".
+#[tokio::test]
+async fn a_killed_host_guard_is_not_reported_as_an_ended_command() {
+    let f = fixture();
+    let Some(sb) = f.host_sandbox() else { return };
+    let (bg, mut ends) = table(on());
+    let ctx = f.ctx(sb, &bg);
+    let m = Mark(976_701);
+    let reaper = Reaper(vec![m]);
+    let r = run(
+        &Bash,
+        &ctx,
+        json!({"command": format!("setsid sleep {m} & sleep {m}"), "background": true, "timeout_secs": 600}),
+    )
+    .await;
+    assert!(r.background.is_some(), "{}", r.output);
+    let pids = sleeps(m);
+    assert!(!pids.is_empty(), "it is not running");
+    let guard = guard_above(pids[0]).expect("a host guard above the command");
+    sigkill(guard);
+    let e = next_end(&mut ends, Duration::from_secs(20)).await;
+    assert_eq!(e.reason, BackgroundReason::Exited, "{e:?}");
+    assert_eq!(e.confirmed, BackgroundConfirmed::Unconfirmed, "{e:?}");
+    assert_eq!(e.signal, Some(9), "{e:?}");
+    // The truth, which the text must carry: nothing killed them.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let left = sleeps(m);
+    assert!(
+        !left.is_empty(),
+        "the command died with its guard: {left:?}"
+    );
+    let o = run(&BashOutput, &ctx, json!({"id": "bg-1"})).await;
+    assert_host_guard_killed_words("bash_output", &o.output);
+    assert!(
+        o.output.contains("the end is NOT confirmed"),
+        "bash_output: {}",
+        o.output
+    );
+    let l = run(&BashOutput, &ctx, json!({})).await;
+    assert_host_guard_killed_words("the listing", &l.output);
+    // What the model is told at its next step.
+    let note = e.event(false).model_note().unwrap();
+    assert!(note.contains("may still be running"), "{note}");
+    // The test's own cleanup, by pid, and the proof it worked.
+    for pid in left {
+        sigkill(pid);
+    }
+    drop(reaper);
+    none_left(&Reaper(vec![m]), "after the test's own kill").await;
+}
+
+/// The same kill inside the first wait: the tool's own result says it.
+#[tokio::test]
+async fn a_host_guard_killed_in_the_first_wait_says_the_command_may_still_run() {
+    let f = fixture();
+    let Some(sb) = f.host_sandbox() else { return };
+    let (bg, _ends) = table(on());
+    let ctx = f.ctx(sb, &bg);
+    let m = Mark(976_711);
+    let reaper = Reaper(vec![m]);
+    // Kill the guard once the command runs, from outside, by pid.
+    let killer = std::thread::spawn(move || {
+        let by = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < by {
+            if let Some(g) = sleeps(m).first().and_then(|p| guard_above(*p)) {
+                sigkill(g);
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    });
+    let r = run(
+        &Bash,
+        &ctx,
+        json!({"command": format!("sleep {m}"), "background": true, "timeout_secs": 600}),
+    )
+    .await;
+    assert!(killer.join().unwrap(), "no guard found");
+    assert!(r.background.is_none() && !r.ok, "{}", r.output);
+    assert_host_guard_killed_words("the start's result", &r.output);
+    let left = sleeps(m);
+    assert!(!left.is_empty(), "the command died with its guard");
+    for pid in left {
+        sigkill(pid);
+    }
+    drop(reaper);
+    none_left(&Reaper(vec![m]), "after the test's own kill").await;
+}
+
 /// `kill -9` of the node: this binary re-run as a helper holds a host
 /// background command with its escapers and is SIGKILLed; the guard sees
 /// the channel close and nothing is left 2 s later.

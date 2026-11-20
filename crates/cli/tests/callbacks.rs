@@ -1152,3 +1152,74 @@ async fn a_host_chat_takes_a_callback_turn_in_its_approval_mode_and_budget() {
         "the refusal is recorded"
     );
 }
+
+/// Review of PR 186 (fix 3): a chain of callback turns in a `host` chat on
+/// Auto. Each callback turn is steered (by the ended command's own output)
+/// to start another background command, whose end would start another
+/// callback turn; the chain stops at the node's `callback_turns` budget
+/// exactly as in a sandbox chat of the same node (2 turns, the third end
+/// refused, `callback_refused` recorded, the command it started is not
+/// resumed from).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_callback_chain_in_a_host_chat_stops_at_the_budget_as_in_a_sandbox_chat() {
+    let Some(mut n) = node_built(
+        |p| {
+            p.limits.callback_turns = 2;
+            p.exec = harness_node::exec::ExecOffers::new(Ok(()), Ok(()), vec![]);
+        },
+        true,
+    )
+    .await
+    else {
+        return;
+    };
+    // Each end prints the line that starts the next command: the same
+    // command, which waits for `go` and takes it away.
+    let step = "while [ ! -e go ]; do sleep 0.05; done; rm -f go; cat out.txt; exit 1";
+    std::fs::write(
+        n.ws.join("out.txt"),
+        format!("script: {}\n", json!([bg(step, 120)])),
+    )
+    .unwrap();
+    for mode in ["host", "sandbox"] {
+        let sid = SessionId::new();
+        n.create(sid, json!({"exec_mode": mode, "approval_mode": "auto"}));
+        n.prompt(sid, &format!("script: {}", json!([bg(step, 120)])));
+        n.started(sid, "bg-1").await;
+        n.turn_ended(sid).await;
+        // Callback 1 and 2 each start the next command.
+        for k in 1..=2 {
+            std::fs::write(n.ws.join("go"), "").unwrap();
+            n.ended(sid, &format!("bg-{k}")).await;
+            n.callback(sid, &[&format!("bg-{k}")]).await.unwrap();
+            n.started(sid, &format!("bg-{}", k + 1)).await;
+            n.turn_ended(sid).await;
+            assert_eq!(callback_turns(&n.of(sid)), k, "{mode}: after end {k}");
+        }
+        // The third end would start a third turn in a row: refused.
+        std::fs::write(n.ws.join("go"), "").unwrap();
+        n.ended(sid, "bg-3").await;
+        let e = n.callback(sid, &["bg-3"]).await.unwrap_err();
+        assert!(
+            e.starts_with(harness_protocol::CALLBACK_REFUSED)
+                && e.contains("2 turns in a row without you (node limit)"),
+            "{mode}: {e}"
+        );
+        assert_eq!(callback_turns(&n.of(sid)), 2, "{mode}");
+        let refused: Vec<_> = n
+            .of(sid)
+            .into_iter()
+            .filter_map(|k| match k {
+                EventKind::CallbackRefused(r) => Some(r),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(refused.len(), 1, "{mode}: the refusal is recorded once");
+        assert_eq!(refused[0].bg_ids, vec!["bg-3".to_string()], "{mode}");
+        assert!(
+            refused[0].reason.contains("2 turns in a row"),
+            "{mode}: {}",
+            refused[0].reason
+        );
+    }
+}

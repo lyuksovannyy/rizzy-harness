@@ -1241,6 +1241,22 @@ impl SessionBg {
     }
 }
 
+/// The text of a stop whose guard reported `alive`. Without a namespace
+/// (`host`) the guard ends nested processes one level per pass, so a long
+/// chain of them takes as long as a process the kernel cannot interrupt:
+/// both causes are named, neither is claimed.
+fn still_alive_text(words: &str, secs: f64, host: bool) -> String {
+    format!(
+        "{words} and killed, but NOT ended: a process of it is still alive {secs:.1} s after \
+         the stop was ordered ({}",
+        if host {
+            crate::bash::HOST_STILL_ALIVE
+        } else {
+            "it waits on I/O the kernel cannot interrupt); its guard keeps killing it"
+        }
+    )
+}
+
 /// How the command's task saw its end.
 enum End {
     Exited(Option<std::process::ExitStatus>),
@@ -1287,6 +1303,10 @@ async fn run(
                     .await
                     .unwrap_or_default();
                     note.push_str(&format!("; {}", crate::bash::sweep_note(&found)));
+                } else if h.host {
+                    // No namespace and no mark: nothing looked for what the
+                    // guard left, so nothing may be said of it but that.
+                    note.push_str(crate::bash::HOST_GUARD_KILLED);
                 }
                 note.push(')');
             } else if let Some(crate::guard::Report::Ended(_, by)) = h.child.exit_report().await {
@@ -1311,6 +1331,12 @@ async fn run(
             };
             let how = match code {
                 Some(c) => format!("exited with code {c}{note}"),
+                // A host command whose guard was killed is not known to
+                // have ended: never the word.
+                None if killed.is_some() && h.host => format!(
+                    "the end is NOT confirmed: {}",
+                    note.trim().trim_start_matches('(').trim_end_matches(')')
+                ),
                 None => format!("ended{note}"),
             };
             (BackgroundReason::Exited, code, killed, confirmed, how)
@@ -1333,13 +1359,7 @@ async fn run(
                 ),
                 Stopped::StillAlive(d) => (
                     BackgroundConfirmed::StillAlive,
-                    format!(
-                        "{} and killed, but NOT ended: a process of it is still alive {:.1} s \
-                         after the stop was ordered (it waits on I/O the kernel cannot \
-                         interrupt); its guard keeps killing it",
-                        reason.words(),
-                        d.as_secs_f64()
-                    ),
+                    still_alive_text(reason.words(), d.as_secs_f64(), h.host),
                 ),
                 Stopped::Unconfirmed(why) => (
                     BackgroundConfirmed::Unconfirmed,
@@ -1612,6 +1632,29 @@ impl Tool for BashStop {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review of PR 186 (fix 2): a host command's `alive` is not blamed on
+    /// I/O alone (a deep chain of nested processes is ended one level per
+    /// pass and takes seconds too); the contained text is unchanged.
+    #[test]
+    fn the_still_alive_text_of_a_host_command_names_both_causes_and_claims_neither() {
+        let host = still_alive_text("stopped by the agent", 2.0, true);
+        assert!(
+            host.contains("long chain of nested processes")
+                && host.contains("a process the kernel cannot interrupt")
+                && host.contains("its guard keeps going")
+                && host.contains("end is confirmed when it reports")
+                && host.contains("NOT ended")
+                && !host.contains("waits on I/O"),
+            "{host}"
+        );
+        let contained = still_alive_text("stopped by the agent", 2.0, false);
+        assert!(
+            contained.contains("it waits on I/O the kernel cannot interrupt")
+                && !contained.contains("nested"),
+            "{contained}"
+        );
+    }
 
     /// X.24: background sub-agents have their own count per chat, beside
     /// the commands' (neither takes the other's places, and an agent holds

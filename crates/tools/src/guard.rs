@@ -57,7 +57,10 @@
 //! reparented here since: the `children` file names only unreaped ones),
 //! and again, every [`REPEAT`], until `waitpid` has nothing to reap. A
 //! process that forks faster than it is killed keeps the loop going; after
-//! [`CONFIRM_BOUND`] it says `alive`, as before. The graceful stop is
+//! [`CONFIRM_BOUND`] it says `alive`, as before; so does a deep chain of
+//! nested processes, which the loop ends one level per pass (about 0.8 us
+//! times depth squared, measured: 2 s near depth 1600), so `alive` there
+//! does not mean a stuck process, and the guard goes on to `ended`. The graceful stop is
 //! SIGTERM to that process group and to the orphans already reparented
 //! here (a descendant in another session whose parent is alive is reached
 //! by the kill only). `ended` is written only at ECHILD. What the guard
@@ -654,6 +657,43 @@ fn term_group(leader: i32, unreaped: bool) {
     }
 }
 
+/// What one `waitpid` answered, for the wait loop.
+#[derive(Debug, PartialEq, Eq)]
+enum Reaped {
+    /// The leader (bubblewrap, or the host command) ended with this code.
+    Leader(i32),
+    /// The leader was killed by a signal; the status to report.
+    LeaderSignaled(i32),
+    /// Another child (an orphan reparented here, an init): reaped, nothing
+    /// to record.
+    Other,
+    /// Children exist, none has ended.
+    NoneYet,
+    /// ECHILD: no child is left; the one proof of the end.
+    NoChild,
+    /// Any other error: nothing is proved.
+    Failed,
+}
+
+/// Read a `waitpid` answer. The leader's status is recorded only while it
+/// is unreaped: a later child that got the same pid number (the kernel
+/// reuses them) is an ordinary one and must not overwrite it. EINTR asks
+/// again at once.
+fn classify(r: nix::Result<WaitStatus>, leader: i32, leader_unreaped: bool) -> Reaped {
+    match r {
+        Ok(WaitStatus::Exited(pid, code)) if leader_unreaped && pid.as_raw() == leader => {
+            Reaped::Leader(code)
+        }
+        Ok(WaitStatus::Signaled(pid, sig, _)) if leader_unreaped && pid.as_raw() == leader => {
+            Reaped::LeaderSignaled(128 + sig as i32)
+        }
+        Ok(WaitStatus::StillAlive) => Reaped::NoneYet,
+        Ok(_) | Err(Errno::EINTR) => Reaped::Other,
+        Err(Errno::ECHILD) => Reaped::NoChild,
+        Err(_) => Reaped::Failed,
+    }
+}
+
 fn watch(
     bwrap: i32,
     mut ctl: UnixStream,
@@ -678,20 +718,27 @@ fn watch(
         // Reap everything that has ended; ECHILD is the proof that nothing
         // is left.
         loop {
-            match waitpid(None, Some(WaitPidFlag::WNOHANG)) {
-                Ok(WaitStatus::Exited(pid, code)) if pid.as_raw() == bwrap => {
+            match classify(
+                waitpid(None, Some(WaitPidFlag::WNOHANG)),
+                bwrap,
+                bwrap_unreaped,
+            ) {
+                Reaped::Leader(code) => {
                     bwrap_unreaped = false;
                     status = code;
                 }
-                Ok(WaitStatus::Signaled(pid, sig, _)) if pid.as_raw() == bwrap => {
+                Reaped::LeaderSignaled(code) => {
                     bwrap_unreaped = false;
                     bwrap_signaled = true;
-                    status = 128 + sig as i32;
+                    status = code;
                 }
-                Ok(WaitStatus::StillAlive) => break,
-                Ok(_) | Err(Errno::EINTR) => {}
-                Err(_) => {
-                    // ECHILD (or a kernel that cannot answer): done.
+                Reaped::Other => {}
+                Reaped::NoneYet => break,
+                // Only ECHILD is the proof; any other error says nothing.
+                // Not "ended": leave the inner loop, keep the kill going,
+                // and ask again at the next pass.
+                Reaped::Failed => break,
+                Reaped::NoChild => {
                     // After a kill order, say so (to a node that is gone,
                     // or stopped listening, this fails, harmlessly).
                     if let Some(at) = ordered {
@@ -816,6 +863,55 @@ fn watch(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    /// Review of PR 186: a later child with the leader's pid number must not
+    /// overwrite the leader's status; only ECHILD ends the loop, EINTR asks
+    /// again, any other error proves nothing.
+    #[test]
+    fn the_wait_loop_reads_waitpid_answers_exactly() {
+        let p = Pid::from_raw;
+        // The leader, while unreaped.
+        assert_eq!(
+            classify(Ok(WaitStatus::Exited(p(7), 3)), 7, true),
+            Reaped::Leader(3)
+        );
+        assert_eq!(
+            classify(
+                Ok(WaitStatus::Signaled(p(7), Signal::SIGKILL, false)),
+                7,
+                true
+            ),
+            Reaped::LeaderSignaled(137)
+        );
+        // After the leader was reaped, a child that got the same number is
+        // an ordinary one (on the old code it overwrote the status).
+        assert_eq!(
+            classify(Ok(WaitStatus::Exited(p(7), 3)), 7, false),
+            Reaped::Other
+        );
+        assert_eq!(
+            classify(
+                Ok(WaitStatus::Signaled(p(7), Signal::SIGKILL, false)),
+                7,
+                false
+            ),
+            Reaped::Other
+        );
+        assert_eq!(
+            classify(Ok(WaitStatus::Exited(p(8), 0)), 7, true),
+            Reaped::Other
+        );
+        assert_eq!(
+            classify(Ok(WaitStatus::StillAlive), 7, true),
+            Reaped::NoneYet
+        );
+        assert_eq!(classify(Err(Errno::EINTR), 7, true), Reaped::Other);
+        assert_eq!(classify(Err(Errno::ECHILD), 7, true), Reaped::NoChild);
+        // Not ECHILD: nothing is proved, so it is never "no child left".
+        for e in [Errno::EINVAL, Errno::EFAULT, Errno::ENOSYS] {
+            assert_eq!(classify(Err(e), 7, true), Reaped::Failed, "{e}");
+        }
+    }
 
     #[test]
     fn reports_round_trip() {
