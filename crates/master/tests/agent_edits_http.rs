@@ -683,3 +683,226 @@ async fn a_summary_is_written_from_the_instructions() {
     .await;
     assert_eq!(st, StatusCode::BAD_REQUEST);
 }
+
+/// X.41: a custom agent's `delegate_to` list is saved, shown, validated and
+/// only ever narrows what it may delegate to; one that no longer resolves
+/// does not block saving other fields.
+#[tokio::test]
+async fn a_delegate_list_is_saved_validated_and_only_narrows() {
+    let t = start().await;
+    let mut f = features();
+    f["delegate"] = json!(true);
+    let make = |id: &str, extra: Value| {
+        let mut b = json!({"id": id, "name": id, "prompt": "p", "features": features()});
+        b["features"]["delegate"] = json!(true);
+        for (k, v) in extra.as_object().unwrap() {
+            b[k] = v.clone();
+        }
+        b
+    };
+    // A sub-agent of our own, one that is not offered as one.
+    let (st, d) = call(
+        &t,
+        Method::POST,
+        "/api/agents",
+        Some(make("helper", json!({}))),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{d}");
+    let mut hidden = make("loner", json!({}));
+    hidden["features"]["as_subagent"] = json!(false);
+    assert_eq!(
+        call(&t, Method::POST, "/api/agents", Some(hidden)).await.0,
+        StatusCode::OK
+    );
+
+    // Without a list: every sub-agent (today's meaning).
+    let (st, d) = call(
+        &t,
+        Method::POST,
+        "/api/agents",
+        Some(make("lead", json!({}))),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{d}");
+    assert_eq!(d["delegate_to"], Value::Null);
+    assert!(d["delegates"].as_array().unwrap().len() > 3, "{d}");
+
+    // A list narrows, the answer and a fresh read say so.
+    let (st, d) = call(
+        &t,
+        Method::PATCH,
+        "/api/agents/lead",
+        Some(json!({"delegate_to": ["scout", "helper"]})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{d}");
+    assert_eq!(d["delegate_to"], json!(["scout", "helper"]));
+    let (_, d) = call(&t, Method::GET, "/api/agents/lead", None).await;
+    assert_eq!(d["delegate_to"], json!(["scout", "helper"]));
+    let mut got: Vec<String> = serde_json::from_value(d["delegates"].clone()).unwrap();
+    got.sort();
+    assert_eq!(got, ["helper", "scout"]);
+    let spec = t.master.agent_spec(Some("lead"), None).unwrap();
+    let mut ids: Vec<_> = spec.delegates.iter().map(|d| d.agent_id.clone()).collect();
+    ids.sort();
+    assert_eq!(ids, ["helper", "scout"]);
+
+    // Refusals: unknown handle, itself, a duplicate, too many, not a handle,
+    // an agent not offered as a sub-agent.
+    let many: Vec<String> = (0..40).map(|i| format!("a{i}")).collect();
+    for bad in [
+        json!(["nobody"]),
+        json!(["lead"]),
+        json!(["scout", "scout"]),
+        json!(many),
+        json!(["Not A Handle"]),
+        json!(["loner"]),
+    ] {
+        let (st, d) = call(
+            &t,
+            Method::PATCH,
+            "/api/agents/lead",
+            Some(json!({"delegate_to": bad})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::BAD_REQUEST, "{bad}: {d}");
+    }
+    let (_, d) = call(&t, Method::GET, "/api/agents/lead", None).await;
+    assert_eq!(d["delegate_to"], json!(["scout", "helper"]));
+
+    // An entry whose agent stopped being offered as a sub-agent stays stored,
+    // is ignored in a turn, and does not block saving other fields. (A
+    // deleted agent's handle leaves the list instead, see the delete tests.)
+    let mut off = features();
+    off["as_subagent"] = json!(false);
+    let (st, d) = call(
+        &t,
+        Method::PATCH,
+        "/api/agents/helper",
+        Some(json!({"features": off})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{d}");
+    let (st, d) = call(
+        &t,
+        Method::PATCH,
+        "/api/agents/lead",
+        Some(json!({"summary": "Leads."})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{d}");
+    assert_eq!(d["delegate_to"], json!(["scout", "helper"]));
+    assert_eq!(d["delegates"], json!(["scout"]));
+    let ids: Vec<_> = t
+        .master
+        .agent_spec(Some("lead"), None)
+        .unwrap()
+        .delegates
+        .iter()
+        .map(|d| d.agent_id.clone())
+        .collect();
+    assert_eq!(ids, ["scout"]);
+
+    // `[]` is "none"; absent keeps the list; null clears it (every sub-agent).
+    let (st, d) = call(
+        &t,
+        Method::PATCH,
+        "/api/agents/lead",
+        Some(json!({"delegate_to": []})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{d}");
+    assert_eq!(d["delegate_to"], json!([]));
+    assert_eq!(d["delegates"], json!([]));
+    let (_, d) = call(
+        &t,
+        Method::PATCH,
+        "/api/agents/lead",
+        Some(json!({"summary": "S2"})),
+    )
+    .await;
+    assert_eq!(d["delegate_to"], json!([]), "absent keeps it");
+    let (st, d) = call(
+        &t,
+        Method::PATCH,
+        "/api/agents/lead",
+        Some(json!({"delegate_to": null})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{d}");
+    assert_eq!(d["delegate_to"], Value::Null);
+    assert!(d["delegates"].as_array().unwrap().len() > 3);
+    let (_, d) = call(
+        &t,
+        Method::PATCH,
+        "/api/agents/lead",
+        Some(json!({"delegate_to": ["scout"]})),
+    )
+    .await;
+    assert_eq!(d["delegates"], json!(["scout"]));
+    let (st, d) = call(&t, Method::POST, "/api/agents", Some(json!({"id": "nul", "name": "Nul", "prompt": "p", "features": features(), "delegate_to": null}))).await;
+    assert_eq!(st, StatusCode::OK, "{d}");
+    assert_eq!(d["delegate_to"], Value::Null);
+    let (st, _) = call(
+        &t,
+        Method::PATCH,
+        "/api/agents/coder",
+        Some(json!({"delegate_to": ["scout"]})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    let _ = f;
+}
+
+/// Exactly 32 entries are accepted and 33 are refused; an empty list on a
+/// built-in is refused like any array (`[]` means none now); null is a no-op.
+#[tokio::test]
+async fn the_list_bound_and_arrays_on_a_built_in() {
+    let t = start().await;
+    let mut f = features();
+    f["delegate"] = json!(true);
+    // 33 sub-agents to list.
+    for i in 0..33 {
+        let (st, d) = call(
+            &t,
+            Method::POST,
+            "/api/agents",
+            Some(json!({"id": format!("h{i}"), "name": format!("H{i}"), "prompt": "p", "features": features()})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::OK, "{d}");
+    }
+    let body = |ids: Vec<String>| json!({"id": "boss", "name": "Boss", "prompt": "p", "features": f, "delegate_to": ids});
+    let ids = |n: usize| (0..n).map(|i| format!("h{i}")).collect::<Vec<_>>();
+    let (st, d) = call(&t, Method::POST, "/api/agents", Some(body(ids(33)))).await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "{d}");
+    let (st, d) = call(&t, Method::POST, "/api/agents", Some(body(ids(32)))).await;
+    assert_eq!(st, StatusCode::OK, "{d}");
+    assert_eq!(d["delegate_to"].as_array().unwrap().len(), 32);
+    // Built-in: null is a no-op; any array, `[]` too, is refused.
+    let (st, d) = call(
+        &t,
+        Method::PATCH,
+        "/api/agents/coder",
+        Some(json!({"delegate_to": null})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{d}");
+    let (st, _) = call(
+        &t,
+        Method::PATCH,
+        "/api/agents/coder",
+        Some(json!({"delegate_to": []})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+    let (st, _) = call(
+        &t,
+        Method::PATCH,
+        "/api/agents/coder",
+        Some(json!({"delegate_to": ["scout"]})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT);
+}

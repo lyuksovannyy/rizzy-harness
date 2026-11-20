@@ -33,6 +33,7 @@ export class Live {
   // before the first event; the hold is for a watch from elsewhere.
   private fold: Fold | null = null;
   private loading: Promise<unknown> | null = null;
+  private refusals = new Set<string>();
   private failed = false;
   /** The fold's chunk (a seam for the tests of a failed load). */
   loadModule: () => Promise<Fold> = () => import("./fold");
@@ -90,9 +91,17 @@ export class Live {
     return this.views.get(sessionId);
   }
 
+  /** The server answered a subscription to `sessionId` with "unknown
+   * session" (crates/master/src/ws.rs): it does not exist or is not ours to
+   * read, and no log will come. Cleared by the next `watch` of it. */
+  refused(sessionId: string): boolean {
+    return this.refusals.has(sessionId);
+  }
+
   /** Follow a session. Counted: the chat and a sub-agent card may follow
    * the same one, and the subscription ends with the last `unwatch`. */
   watch(sessionId: string) {
+    this.refusals.delete(sessionId);
     this.watchers.set(sessionId, (this.watchers.get(sessionId) ?? 0) + 1);
     this.loadFold();
     if (!this.views.has(sessionId)) {
@@ -218,6 +227,12 @@ export class Live {
 
   private onMessage(msg: { type: string; event?: RawEvent; session_id?: string }) {
     switch (msg.type) {
+      case "error":
+        if (msg.session_id) {
+          this.refusals.add(msg.session_id);
+          this.notify();
+        }
+        break;
       case "event":
         this.onEvent(msg.event!);
         break;

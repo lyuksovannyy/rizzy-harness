@@ -30,6 +30,8 @@ const WS_CUSTOM: &str = "custom";
 const RESERVED: &[&str] = &["new"];
 const MAX_NAME: usize = 64;
 const MAX_SUMMARY: usize = 300;
+/// Most agents one agent's `delegate_to` list may name.
+pub const MAX_DELEGATE_TO: usize = 32;
 const MAX_PROMPT: usize = 20_000;
 const MAX_INSTRUCTIONS: usize = 8_000;
 /// Agents one workspace may make (PLAN.md T79). Edits of the server's
@@ -457,6 +459,7 @@ impl Master {
         // Aliases and category are checked like a file's (`labels`).
         let (aliases, _) = harness_agents::labels(id, &aliases, Some(&category))
             .map_err(|e| AgentEditError::Bad(e.to_string()))?;
+        let delegates = self.checked_delegate_to(place, id, &c.delegates).await?;
         let c = Custom {
             name,
             summary: text("the summary", &c.summary, MAX_SUMMARY, false)?,
@@ -464,6 +467,7 @@ impl Master {
             features: c.features,
             aliases,
             category: Some(category).filter(|c| !c.is_empty()),
+            delegates,
         };
         // The rest of what a definition must be (an id, a prompt, somewhere
         // to be used) is checked by building it.
@@ -527,6 +531,50 @@ impl Master {
             }
         }
         Ok(())
+    }
+
+    /// A `delegate_to` list as it may be stored for agent `id` of `place`:
+    /// handles, no repeats, not the agent itself, at most
+    /// [`MAX_DELEGATE_TO`]. An entry the agent already had is kept as it
+    /// is (its agent may have gone since: that never blocks another
+    /// change); a new one must be an agent `place` sees, offered as a
+    /// sub-agent. The list only narrows at turn time whatever it holds.
+    async fn checked_delegate_to(
+        &self,
+        place: &Place,
+        id: &str,
+        list: &Option<Vec<String>>,
+    ) -> Result<Option<Vec<String>>, AgentEditError> {
+        let Some(list) = list else { return Ok(None) };
+        let bad = |m: String| Err(AgentEditError::Bad(m));
+        if list.len() > MAX_DELEGATE_TO {
+            return bad(format!(
+                "an agent may name at most {MAX_DELEGATE_TO} agents to delegate to"
+            ));
+        }
+        let (own, seen) = self.place_edits(place).await;
+        let before = own.custom.get(id).and_then(|o| o.delegates.as_deref());
+        let mut out: Vec<String> = Vec::new();
+        for d in list {
+            let d = d.trim();
+            if !harness_agents::valid_id(d) {
+                return bad(format!("`{d}` is not an agent handle"));
+            }
+            if d == id {
+                return bad("an agent cannot delegate to itself".into());
+            }
+            if out.iter().any(|x| x == d) {
+                return bad(format!("`{d}` is listed twice in the delegates"));
+            }
+            let kept = before.is_some_and(|b| b.iter().any(|x| x == d));
+            if !kept && !seen.get(d).is_some_and(|a| a.features.as_subagent) {
+                return bad(format!(
+                    "`{d}` is not an agent that works as a sub-agent here"
+                ));
+            }
+            out.push(d.to_string());
+        }
+        Ok(Some(out))
     }
 
     /// Why `handle` cannot be a new id or alias for agent `except`: the
@@ -603,17 +651,47 @@ impl Master {
                 // Workspaces' overlays on it go too: they were written for
                 // this agent, not for a later one with its id (T79).
                 let (k, aid) = (key(CUSTOM, id), id.to_string());
-                self.inner
+                let touched = self
+                    .inner
                     .mirror
                     .call(move |s| {
                         s.kv_delete(&k)?;
                         s.delete_workspace_overlays(&aid)?;
                         // Nor what workspaces assigned to it (X.34, T80).
-                        s.plugin_access_forget_agent(None, &aid)
+                        s.plugin_access_forget_agent(None, &aid)?;
+                        // Its handle leaves every `delegate_to` list that
+                        // could name it (the server's agents and every
+                        // workspace's), so a later agent with the handle
+                        // is not a delegate by accident (X.41).
+                        let prefix = format!("{CUSTOM}:{SCOPE}:");
+                        for (k, v) in s.kv_prefix(&prefix)? {
+                            if let Some(d) = without_delegate(&v, &aid) {
+                                s.kv_set(&k, &d)?;
+                            }
+                        }
+                        let mut spaces = Vec::new();
+                        for (w, a, v) in s.workspace_custom_docs_naming(&aid)? {
+                            if let Some(d) = without_delegate(&v, &aid) {
+                                s.workspace_agent_put(&w, &a, WS_CUSTOM, &d, MAX_WORKSPACE_AGENTS)?;
+                                spaces.push(w);
+                            }
+                        }
+                        Ok::<_, harness_store::StoreError>(spaces)
                     })
                     .await?;
                 let mut a = lock(&self.inner.agents);
                 a.edits.custom.remove(id);
+                for l in a
+                    .edits
+                    .custom
+                    .values_mut()
+                    .filter_map(|c| c.delegates.as_mut())
+                {
+                    l.retain(|d| d != id);
+                }
+                for w in &touched {
+                    a.forget(w);
+                }
                 a.compose();
             }
             Place::Workspace(ws) => {
@@ -623,6 +701,14 @@ impl Master {
                     .call(move |s| {
                         s.workspace_agent_delete(&w, &aid, WS_CUSTOM)?;
                         s.plugin_access_forget_agent(Some(&w), &aid)?;
+                        // Only this workspace's agents can have listed it.
+                        for (x, a, v) in s.workspace_custom_docs_naming(&aid)? {
+                            if x == w
+                                && let Some(d) = without_delegate(&v, &aid)
+                            {
+                                s.workspace_agent_put(&x, &a, WS_CUSTOM, &d, MAX_WORKSPACE_AGENTS)?;
+                            }
+                        }
                         crate::workspaces::drop_agent_chain(s, &w, &aid)
                     })
                     .await?;
@@ -645,6 +731,17 @@ impl Master {
             None => AgentEditError::NotFound(id.into()),
         }
     }
+}
+
+/// A stored custom agent (`doc`) without `id` among its `delegates`, when
+/// it was there (X.41); `None` when nothing changes or it is unreadable.
+fn without_delegate(doc: &str, id: &str) -> Option<String> {
+    let mut c: Custom = serde_json::from_str(doc).ok()?;
+    // The list stays present, possibly empty: a delete never widens it.
+    let list = c.delegates.as_mut()?;
+    let before = list.len();
+    list.retain(|d| d != id);
+    (list.len() != before).then(|| serde_json::to_string(&c).expect("serializes"))
 }
 
 /// `name` as names are compared: letters and digits only, case-folded.
