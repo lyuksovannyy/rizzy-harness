@@ -73,6 +73,10 @@ pub use http::{router, router_with};
 pub use resolver::Resolver;
 
 const ACK_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How many sub-agent chats of one depth a delete asks their node about at
+/// once.
+const DELETE_AT_ONCE: usize = 8;
 /// How long a create's intended owner is kept for a chat that comes
 /// late (Gate 3 review P-6; fix review 6 N-2): far past `ACK_TIMEOUT`,
 /// short enough that a create the node never makes leaves no row for good.
@@ -3022,32 +3026,96 @@ impl Master {
     }
 
     /// Delete a session everywhere, and with it the chats of the sub-agents
-    /// it started, at any depth (they have no way in once their parent is
-    /// gone). Those go first, the deepest first, then the chat: a delete
-    /// that fails part way leaves the chat in place with the chats still
-    /// below it, to be deleted again. A turn of the chat that ran until its
-    /// own delete may have started another sub-agent meanwhile, so what is
-    /// below it is looked at once more after; that sweep is best effort.
+    /// it started, at any depth, that belong to the same owner (they have no
+    /// way in once their parent is gone; a chat of another owner is never
+    /// deleted for being below one). When there are any, the chat is stopped
+    /// first, so that its turn does not go on (its delegate calls failing
+    /// under it) while they go. They go deepest first, the chats of one
+    /// depth together, at most `DELETE_AT_ONCE` at a time; then the chat. A
+    /// delete that fails part way (other than "already gone") leaves the chat
+    /// in place with what is still below it, to be deleted again, once the
+    /// others of its depth have finished.
+    ///
+    /// A last look below the chat follows its delete. It finds a chat whose
+    /// `session_created` reached the mirror after the first look and before
+    /// the chat's row was removed (its `parent_id` still names the chat); it
+    /// cannot find one whose row lands after that, which has no parent link
+    /// at all. It is best effort and only logs.
     pub async fn delete_session(&self, sid: SessionId) -> Result<(), CommandError> {
-        for kid in self.sub_sessions(sid).await?.into_iter().rev() {
-            match self.delete_one_session(kid).await {
-                // Gone meanwhile (its own delete, or its parent's).
-                Ok(()) | Err(CommandError::UnknownSession) => {}
+        // The owner is read once, before anything is deleted: the sweep after
+        // the chat's row is gone must use the same one.
+        let owner = self
+            .inner
+            .mirror
+            .call(move |s| s.session(sid))
+            .await?
+            .ok_or(CommandError::UnknownSession)?
+            .owner_id;
+        let levels = self.sub_sessions(sid, owner.as_deref()).await?;
+        if !levels.is_empty() {
+            match self.cancel(sid).await {
+                // Nothing to stop: no turn runs, the node is away or has the
+                // chat no more, or does not answer (the delete below treats
+                // a node that does not answer the same way).
+                Ok(())
+                | Err(CommandError::UnknownSession)
+                | Err(CommandError::NodeOffline(_))
+                | Err(CommandError::Timeout) => {}
+                Err(CommandError::Rejected(e)) if e == "unknown session" => {}
                 Err(e) => return Err(e),
             }
         }
+        for level in levels.into_iter().rev() {
+            self.delete_level(level).await?;
+        }
         self.delete_one_session(sid).await?;
-        for kid in self.sub_sessions(sid).await?.into_iter().rev() {
-            if let Err(e) = self.delete_one_session(kid).await {
-                tracing::warn!(session = %kid, error = %e, "could not delete a sub-agent chat started during its parent's delete");
+        for level in self
+            .sub_sessions(sid, owner.as_deref())
+            .await?
+            .into_iter()
+            .rev()
+        {
+            for kid in level {
+                if let Err(e) = self.delete_one_session(kid).await {
+                    tracing::warn!(session = %kid, error = %e, "could not delete a sub-agent chat started during its parent's delete");
+                }
             }
         }
         Ok(())
     }
 
-    /// The chats below `sid` in the mirror, nearest first.
-    async fn sub_sessions(&self, sid: SessionId) -> Result<Vec<SessionId>, CommandError> {
-        Ok(self.inner.mirror.call(move |s| s.sub_sessions(sid)).await?)
+    /// Delete the chats of one depth, `DELETE_AT_ONCE` at a time. All of
+    /// them are tried; the first failure other than "already gone" (its own
+    /// delete, or its parent's) is returned after.
+    async fn delete_level(&self, level: Vec<SessionId>) -> Result<(), CommandError> {
+        use futures::StreamExt;
+        let results: Vec<_> = futures::stream::iter(level)
+            .map(|kid| async move { self.delete_one_session(kid).await })
+            .buffer_unordered(DELETE_AT_ONCE)
+            .collect()
+            .await;
+        for r in results {
+            match r {
+                Ok(()) | Err(CommandError::UnknownSession) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
+    /// The chats below `sid` that belong to `owner`, one list per depth,
+    /// nearest first.
+    async fn sub_sessions(
+        &self,
+        sid: SessionId,
+        owner: Option<&str>,
+    ) -> Result<Vec<Vec<SessionId>>, CommandError> {
+        let owner = owner.map(str::to_string);
+        Ok(self
+            .inner
+            .mirror
+            .call(move |s| s.sub_sessions(sid, owner.as_deref()))
+            .await?)
     }
 
     /// Delete one session everywhere. The mirror copy goes (with a
