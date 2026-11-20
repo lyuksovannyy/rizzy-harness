@@ -2405,20 +2405,28 @@ lists them for a project with a folder on such a node:
   over 64 KiB, more than 32 servers, not the standard shape) changes
   nothing.
 - **Where it runs:** in your own chats whose folder is the project's
-  folder, sandboxed ones only (a `host` chat starts none and says so; a
-  node that offers only host chats refuses the list), exactly like a
-  node.toml server there: in the chat's containment, its tools asked about
-  in `ask`, the same caps, the idle stop, the Connectors switch and the
-  Plugins and `denied_tools` lists by name. Another person's chat in the
-  same folder starts nothing you approved. **Its environment** is the core
+  folder, exactly like a node.toml server there: in a sandboxed chat
+  inside the chat's containment; in a `host` chat (the owner's decision of
+  2026-11-20: "if user selected host project workspace, why do we need to
+  limit it? its his choice") as the node's own user, **without the
+  sandbox**, with the reach of that user, and it can outlive a `kill -9`
+  of the node as a node.toml server there does (see "It never outlives its
+  chat" above). The project page says so beside the approval where the
+  node offers host chats. Its tools are asked about in `ask`, with the
+  same caps, the idle stop, the Connectors switch and the Plugins and
+  `denied_tools` lists by name. Another person's chat in the same folder
+  starts nothing you approved. **Its environment** is the core
   list only (no `env_pass`, no `env_vars`) and the entry's `env` values.
   Those reach the server's own process and no other: the node hands them
   over in a private file the sandbox's guard passes on as an open
   descriptor, and the sandbox sets them right before it starts the
   server, after it confined itself; they are in no command line and on no
   process that sets the sandbox up. An entry with `env` values therefore
-  runs only where the chat is contained by bubblewrap. They are not
-  secrets of the node: nothing scrubs them from what the server prints.
+  runs only where the chat is contained by bubblewrap: **in a `host` chat
+  it is not started for now**, and the chat is told which server and why;
+  an entry without `env` starts there. Take the values out of the entry
+  and approve it again, or use a sandboxed chat. They are not secrets of
+  the node: nothing scrubs them from what the server prints.
 - **What an approval does not pin:** the files the command runs. An
   approved `./tools/server.py` or `npx some-package` runs whatever that
   file or package is at the time, with the chat's own sandbox and no

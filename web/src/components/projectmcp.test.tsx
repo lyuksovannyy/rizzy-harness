@@ -107,3 +107,26 @@ test("the node's refusal and a project without a folder are said", async () => {
   expect(call).not.toHaveBeenCalled();
   expect(host.textContent).toContain("no folder on a node");
 });
+
+const text = () => host.textContent ?? "";
+
+test("the page says where an approved server runs, by the modes the node offers", async () => {
+  call.mockResolvedValue(list);
+  const shown = async (modes?: ("sandbox" | "host")[]) => {
+    await act(async () => root.render(<ProjectMcp projectId="p1" hasFolder modes={modes} />));
+    return text();
+  };
+  // Sandbox only (or unknown): inside the sandbox, no word of the host.
+  expect(await shown(["sandbox"])).toContain("inside the sandbox");
+  expect(text()).not.toContain("without the sandbox");
+  expect(text()).not.toContain("host chat");
+  expect(await shown(undefined)).not.toContain("without the sandbox");
+  // Both: each chat kind's answer, and the entries with values say theirs.
+  expect(await shown(["sandbox", "host"])).toContain("as the node's own user without the sandbox in a host chat");
+  expect(text()).not.toContain("never in a host chat");
+  // `fs` has values, `db`'s approved copy has one: each says it.
+  expect(text().split("not started while it has environment values").length - 1).toBe(2);
+  // Host only: every chat there is a host chat.
+  expect(await shown(["host"])).toContain("every chat on this node is a host chat");
+  expect(text()).toContain("as the node's own user, without the sandbox");
+});

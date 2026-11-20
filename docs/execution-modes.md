@@ -149,7 +149,9 @@ still shown until the node's next hello.
   contained command (guard, bubblewrap, its file view, its network rule)
   whose stdin is a FIFO the guard hands over (`guard::STDIN_FIFO_ENV`); in
   a `host` session it runs uncontained in its own process group. One per
-  session, never for a sub-agent.
+  session, never for a sub-agent. A repository's approved server (X.36, T82) starts the same way
+  in either mode (the owner, 2026-11-20); one whose entry has `env` values starts only in a
+  `sandbox` session, the only place the values can be kept off the processes before it.
 * The node's `session.create` audit line names the mode asked for (review
   N-d).
 
