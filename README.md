@@ -288,11 +288,12 @@ window it says **window unknown**: hover it for how to set `context` on the
 model. A sub-agent's card in the conversation marks where it was started,
 names the model it runs on, links to its chat and, once it ended, shows its
 report open under the card like a message (cut with "Show all" when long; the
-task stays folded). In the chat of an agent that works only as a sub-agent
-there is no reply box: a line says it only takes tasks from other agents and
-links back to the main chat; its row in the side panel shows what it is doing (its
-latest tool call and how many it made, or that it waits for an approval) and
-its tokens once it ended. Only chats in the open workspace notify, and a
+task stays folded). A sub-agent's row in the side panel shows what it is doing
+(its latest tool call and how many it made, or that it waits for an approval)
+and its tokens once it ended. In the chat of an agent that works only as a
+sub-agent there is no reply box: a line says it only takes tasks from other
+agents (with Stop while its turn runs; the banner above links back to the main
+chat). Only chats in the open workspace notify, and a
 second tab may notify while another tab shows the chat.
 
 A chat is titled from its first message. The pencil next to the title in the
@@ -4258,9 +4259,11 @@ On the Agents page, an agent you made with **Launch sub-agents** on shows
 ("All sub-agents") until you tick some, then only the ticked ones. The list can
 only narrow: an agent that is not offered as a sub-agent, one from another
 workspace and the agent itself are never delegates, whatever the list holds.
-A ticked agent that was deleted since is marked "no longer available" (untick
+A ticked agent that is no longer offered as a sub-agent is marked "no longer available" (untick
 it); if every one is gone, the agent has no sub-agents until you change the
-list. With the switch off the list is kept and does nothing. Built-in and file
+list. Deleting an agent also takes its handle out of every list that could name
+it, so a new agent with that handle is not a delegate by accident (a list that
+this empties means all sub-agents again). With the switch off the list is kept and does nothing. Built-in and file
 agents show their own list, read-only (`delegates:` in a file). The API takes
 `delegate_to` (handles, at most 32) on `POST` and `PATCH /api/agents`.
 
