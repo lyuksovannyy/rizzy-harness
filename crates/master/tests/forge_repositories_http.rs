@@ -1448,17 +1448,34 @@ fn reset_peak_at(path: &std::path::Path) -> bool {
     }
 }
 
-/// Peak resident growth (kB) while `f` runs; `None` for the growth when
-/// the peak could not be reset (the work still runs).
-async fn peak_growth<F: std::future::Future>(f: F) -> (F::Output, Option<u64>) {
+/// What `peak_growth` saw: whether the peak could be reset, and the growth.
+/// `kb` must be `Some` exactly when the reset worked; `within` panics on
+/// any other pairing, so a slip cannot silently drop the memory bound.
+struct Peak {
+    reset: bool,
+    kb: Option<u64>,
+}
+
+impl Peak {
+    /// Assert the growth is under `limit` kB; a refused reset is the only skip.
+    fn within(&self, limit: u64, what: &str) {
+        match (self.reset, self.kb) {
+            (true, Some(kb)) => assert!(kb < limit, "{what}: {kb} kB"),
+            (true, None) => panic!("{what}: the peak was reset but no growth was measured"),
+            (false, _) => {}
+        }
+    }
+}
+
+/// Peak resident growth (kB) while `f` runs (see `Peak`; the work runs
+/// either way).
+async fn peak_growth<F: std::future::Future>(f: F) -> (F::Output, Peak) {
     tokio::time::sleep(Duration::from_millis(200)).await;
     let before = status_kb("VmRSS:");
-    let measured = reset_peak_at(std::path::Path::new("/proc/self/clear_refs"));
+    let reset = reset_peak_at(std::path::Path::new("/proc/self/clear_refs"));
     let out = f.await;
-    (
-        out,
-        measured.then(|| status_kb("VmHWM:").saturating_sub(before)),
-    )
+    let kb = reset.then(|| status_kb("VmHWM:").saturating_sub(before));
+    (out, Peak { reset, kb })
 }
 
 #[test]
@@ -1491,6 +1508,40 @@ fn a_missing_peak_file_still_panics() {
     reset_peak_at(&dir.path().join("missing").join("clear_refs"));
 }
 
+#[test]
+fn a_reset_peak_must_have_a_measurement() {
+    Peak {
+        reset: true,
+        kb: Some(1),
+    }
+    .within(2, "ok");
+    Peak {
+        reset: false,
+        kb: None,
+    }
+    .within(2, "skipped");
+}
+
+#[test]
+#[should_panic(expected = "no growth was measured")]
+fn a_successful_reset_without_a_measurement_fails() {
+    Peak {
+        reset: true,
+        kb: None,
+    }
+    .within(2, "x");
+}
+
+#[test]
+#[should_panic(expected = "9 kB")]
+fn a_measured_growth_over_the_limit_fails() {
+    Peak {
+        reset: true,
+        kb: Some(9),
+    }
+    .within(2, "x");
+}
+
 /// One listing's growth, debug build (the bound has room for the
 /// allocator; before the fixes one such listing took about 60 MB, and a
 /// description of 1 MiB of "a a a …" about 13 MB).
@@ -1514,17 +1565,17 @@ async fn memory_child() {
     worst_body("objs");
     for kind in ["/objs", "/zeros", "/descspaces"] {
         github_at(&t, kind);
-        let ((st, v), kb) =
+        let ((st, v), peak) =
             peak_growth(list(&t, &ids[0].0, &ids[0].1, &format!("?q=x{kind}"))).await;
         eprintln!(
-            "one {kind} listing: {st}, left_out {}, peak growth {kb:?} kB",
-            v["left_out"]
+            "one {kind} listing: {st}, left_out {}, peak growth {:?} kB",
+            v["left_out"], peak.kb
         );
         assert_eq!(st, StatusCode::OK, "{v}");
-        assert!(kb.is_none_or(|kb| kb < ONE_LISTING_KB), "{kind}: {kb:?} kB");
+        peak.within(ONE_LISTING_KB, kind);
     }
     github_at(&t, "/slowobjs");
-    let (codes, kb) = peak_growth(async {
+    let (codes, peak) = peak_growth(async {
         let mut hs = Vec::new();
         for i in 0..20 {
             let (t, (c, id)) = (t.clone(), ids[i % 4].clone());
@@ -1540,10 +1591,13 @@ async fn memory_child() {
     })
     .await;
     let after = status_kb("VmRSS:");
-    eprintln!("20 at once: {codes:?}, peak growth {kb:?} kB, RSS after {after} kB");
+    eprintln!(
+        "20 at once: {codes:?}, peak growth {:?} kB, RSS after {after} kB",
+        peak.kb
+    );
     assert_eq!(codes.get(&200), Some(&2), "{codes:?}");
     assert_eq!(codes.get(&429), Some(&18), "{codes:?}");
-    assert!(kb.is_none_or(|kb| kb < TWENTY_LISTINGS_KB), "{kb:?} kB");
+    peak.within(TWENTY_LISTINGS_KB, "twenty at once");
 }
 
 /// Re-review of PR 158, MEDIUM 1: a 4xx is the forge's answer to this
