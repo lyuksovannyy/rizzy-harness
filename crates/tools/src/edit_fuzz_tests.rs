@@ -280,12 +280,12 @@ fn rec(e: &Emb, ops: &[O], k: usize, min_start: usize, acc: &mut Vec<O>, res: &m
         O::Rep(f, to, text) => {
             let len = to - f + 1;
             if loose {
-                for p in 0..nl {
-                    if p < min_start || l.rows[p] != t.rows[f - 1] {
+                for (p, first) in l.rows.iter().enumerate() {
+                    if p < min_start || *first != t.rows[f - 1] {
                         continue;
                     }
-                    for q in p..nl {
-                        if l.rows[q] == t.rows[to - 1] {
+                    for (q, last) in l.rows.iter().enumerate().skip(p) {
+                        if *last == t.rows[to - 1] {
                             acc.push(O::Rep(p + 1, q + 1, text.clone()));
                             rec(e, ops, k + 1, q + 1, acc, res);
                             acc.pop();
