@@ -103,7 +103,6 @@ async fn lines_shown_by_a_refusal_go_stale_like_a_read() {
     put(&dir, "a.txt", "alpha\nzeta\n");
     let again = edit(&ctx, "a.txt", "beta", "BETA").await;
     assert!(!again.ok, "{}", again.output);
-    assert!(again.output.contains("changed on disk"), "{}", again.output);
     assert_eq!(get(&dir, "a.txt"), "alpha\nzeta\n");
 }
 
@@ -789,4 +788,153 @@ async fn edit_and_write_record_what_they_replaced() {
     assert_eq!(w.seen.expect("record").base.as_deref(), Some(""));
     // A read records no base.
     assert_eq!(read(&ctx, "a.txt").await.seen.expect("record").base, None);
+}
+
+// --- an unread file's refusal shows rows; it does not count as a read -----
+
+/// Found by the review of PR 187: the refusal printed about 7 rows and made the
+/// whole file count as read, so `write` over it and an `old_string` edit
+/// anywhere in it were let through. Now the announced retry lands, and
+/// nothing else changes.
+#[tokio::test]
+async fn the_retry_lands_but_the_refusal_is_not_a_read() {
+    let (dir, ctx) = ws();
+    let body: String = (1..=40).map(|i| format!("line {i}\n")).collect();
+    put(&dir, "a.txt", &body);
+    let e = edit(&ctx, "a.txt", "line 10\n", "ten\n").await;
+    assert!(
+        !e.ok && e.output.contains("send the same edit again"),
+        "{}",
+        e.output
+    );
+    assert!(!e.output.contains("counts as reading"), "{}", e.output);
+    // The retry lands.
+    let again = edit(&ctx, "a.txt", "line 10\n", "ten\n").await;
+    assert!(again.ok, "{}", again.output);
+    assert!(get(&dir, "a.txt").contains("line 9\nten\nline 11\n"));
+    // A `write` over the whole file is still refused as unread.
+    let w = run(&Write, &ctx, json!({"path": "a.txt", "content": "whole\n"})).await;
+    assert!(!w.ok && w.output.contains("not been read"), "{}", w.output);
+    // An edit elsewhere is refused, prints its own rows, and then lands.
+    let far = edit(&ctx, "a.txt", "line 30\n", "thirty\n").await;
+    assert!(
+        !far.ok && far.output.contains("not been read"),
+        "{}",
+        far.output
+    );
+    assert!(far.output.contains("\tline 29\n"), "{}", far.output);
+    assert!(get(&dir, "a.txt").contains("line 30\n"));
+    let far = edit(&ctx, "a.txt", "line 30\n", "thirty\n").await;
+    assert!(far.ok, "{}", far.output);
+    // The result's rows count as shown (a further edit there lands); the
+    // file is still not read: `write` is refused.
+    let next = edit(&ctx, "a.txt", "line 31\n", "t31\n").await;
+    assert!(next.ok, "{}", next.output);
+    let w = run(&Write, &ctx, json!({"path": "a.txt", "content": "whole\n"})).await;
+    assert!(!w.ok && w.output.contains("not been read"), "{}", w.output);
+    // `replace_all` and several edits at once are never let in.
+    for input in [
+        json!({"path": "a.txt", "old_string": "line 9\n", "new_string": "n\n", "replace_all": true}),
+        json!({"path": "a.txt", "edits": [
+            {"old_string": "line 9\n", "new_string": "n\n"},
+            {"old_string": "line 8\n", "new_string": "e\n"}]}),
+    ] {
+        let e = run(&Edit, &ctx, input.clone()).await;
+        assert!(!e.ok, "{}", e.output);
+        let again = run(&Edit, &ctx, input).await;
+        assert!(!again.ok, "{}", again.output);
+    }
+    assert!(get(&dir, "a.txt").contains("line 9\n") && get(&dir, "a.txt").contains("line 8\n"));
+}
+
+#[tokio::test]
+async fn a_match_partly_outside_the_shown_rows_is_refused() {
+    let (dir, ctx) = ws();
+    let body: String = (1..=40).map(|i| format!("line {i}\n")).collect();
+    put(&dir, "a.txt", &body);
+    // Rows 7..=13 are shown.
+    let e = edit(&ctx, "a.txt", "line 10\n", "ten\n").await;
+    assert!(!e.ok);
+    // Rows 13 and 14: 14 was not shown.
+    let two = edit(&ctx, "a.txt", "line 13\nline 14\n", "x\n").await;
+    assert!(
+        !two.ok && two.output.contains("not been read"),
+        "{}",
+        two.output
+    );
+    assert_eq!(get(&dir, "a.txt"), body);
+    // Wholly inside (rows 8-9): lands.
+    let inside = edit(&ctx, "a.txt", "line 8\nline 9\n", "x\n").await;
+    assert!(inside.ok, "{}", inside.output);
+}
+
+#[tokio::test]
+async fn a_file_changed_between_the_refusal_and_the_retry_is_refused() {
+    let (dir, ctx) = ws();
+    let body: String = (1..=20).map(|i| format!("line {i}\n")).collect();
+    put(&dir, "a.txt", &body);
+    let e = edit(&ctx, "a.txt", "line 10\n", "ten\n").await;
+    assert!(!e.ok);
+    let changed = body.replace("line 20\n", "line twenty\n");
+    put(&dir, "a.txt", &changed);
+    let again = edit(&ctx, "a.txt", "line 10\n", "ten\n").await;
+    assert!(
+        !again.ok && again.output.contains("not been read"),
+        "{}",
+        again.output
+    );
+    assert_eq!(get(&dir, "a.txt"), changed);
+    // It printed the rows of the file as it is: the next retry lands.
+    let again = edit(&ctx, "a.txt", "line 10\n", "ten\n").await;
+    assert!(again.ok, "{}", again.output);
+}
+
+/// The same rules through `Tool::refusal` (before any card): a retry that
+/// `run` would take is not refused there; what `run` refuses is.
+#[tokio::test]
+async fn the_refusal_before_the_card_follows_the_same_rule() {
+    let (dir, ctx) = ws();
+    let body: String = (1..=40).map(|i| format!("line {i}\n")).collect();
+    put(&dir, "a.txt", &body);
+    let ten = json!({"path": "a.txt", "old_string": "line 10\n", "new_string": "ten\n"});
+    let far = json!({"path": "a.txt", "old_string": "line 30\n", "new_string": "t\n"});
+    // Unread, and `read` would run unasked here: the lines, before the card.
+    let r = Edit.refusal(&ctx, &ten).expect("refused before the card");
+    assert!(
+        r.contains("\tline 10\n") && r.contains("send the same edit again"),
+        "{r}"
+    );
+    // The retry is not refused before the card; the card then `run`s it.
+    assert!(Edit.refusal(&ctx, &ten).is_none());
+    // Elsewhere in the file: refused (with its own rows), as `run` would.
+    let r = Edit.refusal(&ctx, &far).expect("refused");
+    assert!(r.contains("\tline 30\n"), "{r}");
+    // Not a read: `write` is refused before the card too.
+    assert!(
+        Write
+            .refusal(&ctx, &json!({"path": "a.txt", "content": "w\n"}))
+            .is_some()
+    );
+    let o = run(&Edit, &ctx, ten).await;
+    assert!(o.ok, "{}", o.output);
+    // Where `read` would not run unasked: the plain refusal, nothing shown.
+    let (dir2, mut ctx2) = ws();
+    ctx2.read_unasked = false;
+    put(&dir2, "a.txt", &body);
+    let r = Edit.refusal(&ctx2, &far).expect("refused");
+    assert!(!r.contains("\tline 30\n"), "{r}");
+}
+
+/// A file changed after the refusal and a retry before the card: refused
+/// there too, with the rows as they are.
+#[tokio::test]
+async fn the_refusal_before_the_card_sees_a_change_after_the_rows_were_shown() {
+    let (dir, ctx) = ws();
+    put(&dir, "a.txt", "alpha\nbeta\n");
+    let input = json!({"path": "a.txt", "old_string": "beta\n", "new_string": "B\n"});
+    assert!(Edit.refusal(&ctx, &input).is_some());
+    assert!(Edit.refusal(&ctx, &input).is_none());
+    put(&dir, "a.txt", "alpha\nzeta\nbeta\n");
+    let r = Edit.refusal(&ctx, &input).expect("changed since");
+    assert!(r.contains("\tbeta\n"), "{r}");
 }

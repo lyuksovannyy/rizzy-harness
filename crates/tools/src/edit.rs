@@ -1,7 +1,9 @@
 //! `edit`: replace text in a file the agent has read (ADOPTION_PLAN T.2).
 //!
 //! * **Staleness guard** (research 08 §6.1): a file not read in this session
-//!   is refused; one changed on disk since it was read is edited only where
+//!   is refused, except where its one match lies in rows the agent was shown
+//!   (a search's matched rows, the rows a refusal printed) of the file as it
+//!   is; one changed on disk since it was read is edited only where
 //!   the replaced text lies outside the lines that changed (checked against
 //!   the snapshot of what was shown), otherwise refused with those lines as
 //!   they are now. Without a snapshot (after a restart) any change refuses.
@@ -25,6 +27,7 @@ use harness_core::policy::ToolRisk;
 use serde_json::{Value, json};
 
 use crate::fs::{header, is_cut, line_style, number_line, read_nofollow, write_nofollow};
+use crate::seen::Seen;
 use crate::{Tool, ToolCtx, ToolOutcome, str_arg};
 
 pub struct Edit;
@@ -172,10 +175,17 @@ impl Tool for Edit {
                 Ok(()) => {
                     let sha = crate::seen::sha256(updated.as_bytes());
                     let mut o = ToolOutcome::ok(format!("{report}\n{}", header(ctx, &path, &sha)));
-                    let mut seen = ctx.seen.record_shown(&key, updated.as_bytes(), &rows);
-                    // What this edit replaced (T57).
-                    seen.base = Some(crate::seen::hex(&crate::seen::sha256(text.as_bytes())));
-                    o.seen = Some(seen);
+                    if ctx.seen.get(&key).is_some() {
+                        let mut seen = ctx.seen.record_shown(&key, updated.as_bytes(), &rows);
+                        // What this edit replaced (T57).
+                        seen.base = Some(crate::seen::hex(&crate::seen::sha256(text.as_bytes())));
+                        o.seen = Some(seen);
+                    } else {
+                        // Made on rows a search or a refusal showed: the file
+                        // is still not read, and the rows of the result are
+                        // shown (as for the line form).
+                        ctx.seen.add_version(&key, updated.as_bytes(), &rows);
+                    }
                     o
                 }
                 Err(e) => ToolOutcome::err(e),
@@ -718,6 +728,45 @@ pub(crate) fn stale_refusal(
     }
 }
 
+/// A file the agent did not read may be edited where it was shown (a
+/// search's matched rows, the rows a refusal printed): the call is one
+/// `old_string` edit without `replace_all`, the file is not binary, the
+/// bytes on disk are the very version those rows were shown of (full hash,
+/// not the tag), and the one match lies wholly inside rows shown whole of it.
+/// Anything else is refused as unread. Used by [`edit`] and [`unread_now`], so
+/// the retry that a refusal announces is not refused before its card either.
+fn shown_rows_cover(ctx: &ToolCtx, key: &Path, text: &str, specs: &[Spec]) -> bool {
+    let [spec] = specs else { return false };
+    if spec.all
+        || text
+            .as_bytes()
+            .iter()
+            .take(crate::fs::BINARY_SNIFF)
+            .any(|b| *b == 0)
+    {
+        return false;
+    }
+    let sha = crate::seen::sha256(text.as_bytes());
+    let Some(v) = ctx
+        .seen
+        .version(key, &crate::seen::tag(&sha))
+        .filter(|v| v.sha == sha)
+    else {
+        return false;
+    };
+    let Ok(found) = locate(&View::new(text), &mut None, spec) else {
+        return false;
+    };
+    !found.spans.is_empty()
+        && found.spans.iter().all(|s| {
+            let (lo, hi) = (
+                line_of(text, s.a),
+                line_of(text, s.b.saturating_sub(1).max(s.a)),
+            );
+            v.covers(lo, hi)
+        })
+}
+
 /// Lines of context shown around the first match by [`unread_refusal`].
 const UNREAD_CONTEXT: usize = 3;
 
@@ -725,17 +774,22 @@ const UNREAD_CONTEXT: usize = 3;
 /// parse `bash` commands (a `cat` is not a read; research 08 §6.1), so a
 /// model that looked at the file another way gets the lines around the
 /// first match of its first `old_string`, numbered as `read` numbers them,
-/// and the file counts as read as it is at this moment (hashed now, with
-/// this text as the snapshot): the same edit sent again applies, unless the
-/// file changes on disk first, which the guard then refuses as stale. Like
-/// a `read`'s window, any part shown counts. The record is kept for the
-/// rest of this turn only: the log keeps a call's `seen` when it succeeded,
-/// so the next turn asks for a read again. Text not in the file shows
-/// nothing and counts as nothing. Only for what a `read` would have shown
-/// and only where the retry changes nothing unseen (review F4, F7, F9):
-/// the agent may call `read`; the file is not one `read` refuses as
-/// binary; the call is one edit without `replace_all` (several edits, or
-/// every match, would change lines it was not shown).
+/// and those rows count as shown of the file as it is at this moment (kept
+/// as a version, [`crate::seen::SessionSeen::add_version`]; the file does
+/// NOT count as read): the same edit sent again applies, because its match
+/// lies in the shown rows ([`shown_rows_cover`]), unless the file changes on
+/// disk first (then no version of it holds those rows). `write`, an edit
+/// elsewhere, `replace_all` and several edits still get the unread refusal:
+/// the review of PR 187 found that counting the whole file as read let a
+/// `write` over it, and an edit anywhere, through after about 7 rows were
+/// shown. The record is kept for the rest of this turn only: the log keeps
+/// a call's `seen` when it succeeded, so the next turn asks for a read
+/// again. Text not in the file shows nothing and counts as nothing. Only
+/// for what a `read` would have shown and only where the retry changes
+/// nothing unseen (review F4, F7, F9): the agent may call `read`; the file
+/// is not one `read` refuses as binary; the call is one edit without
+/// `replace_all` (several edits, or every match, would change lines it was
+/// not shown).
 fn unread_refusal(ctx: &ToolCtx, key: &Path, shown: &str, text: &str, specs: &[Spec]) -> String {
     // Only what a `read` of this path would show: not where the node
     // denies `read` or the agent lacks it (`read_offered`), not for a path
@@ -783,22 +837,24 @@ fn unread_refusal(ctx: &ToolCtx, key: &Path, shown: &str, text: &str, specs: &[S
         })
         .map(|n| (n, n))
         .collect();
-    ctx.seen.record_shown(key, text.as_bytes(), &rows);
+    ctx.seen.add_version(key, text.as_bytes(), &rows);
     format!(
         "{shown} has not been read with `read` in this session (reading it with `cat`, `head` \
          or `sed` in `bash` does not count), so nothing was changed. Its lines around \
          the first match of `old_string` read now (numbered as `read` numbers them):\n{}\
-         This counts as reading the file as it is now: send the same edit again to make it \
-         (it is refused if the file changes on disk before then).",
+         These lines now count as shown: send the same edit again to make it (it is refused if \
+         the file changes on disk before then). Changing other lines, or the whole file, still \
+         needs `read`.",
         show(ctx, text, start, end)
     )
 }
 
 /// Before any card (T51): an existing file this session has never read is
-/// refused by `run` whatever anyone answers, so it is refused now. Where a
+/// refused by `run` whatever anyone answers, so it is refused now (unless
+/// `run` would take the call, [`shown_rows_cover`]). Where a
 /// `read` of it would run unasked (`ToolCtx::read_unasked`) and `run`
-/// would show the lines around the match and count the file as read as it
-/// is now, this does the same (a
+/// would show the lines around the match and count them as shown, this does
+/// the same (a
 /// file of at most [`crate::seen::SNAPSHOT_MAX_FILE`] bytes of UTF-8, read
 /// without following a link). Only for a regular file the session's table
 /// has no entry for: a file read before and changed since may be read
@@ -818,35 +874,45 @@ fn unread_now(ctx: &ToolCtx, input: &Value) -> Option<String> {
     }
     // Arguments `run` would refuse first: its own words then.
     let specs = specs(input).ok()?;
-    // The lines are shown, and the file counted as read, only where a
-    // `read` of this same path would run right now with no card and no
-    // refusal (review of PR 118 H1: in Ask all, or where the node denies
-    // `read`, they were shown with no card at all). Otherwise the plain
-    // refusal, and nothing is read or recorded.
+    let text = unread_text(&path);
+    // A retry that `run` takes (the rows were shown under this very version
+    // of the file): not refused here, whatever `read` would do unasked.
+    if let Some(t) = &text
+        && shown_rows_cover(ctx, &key, t, &specs)
+    {
+        return None;
+    }
+    // The lines are shown only where a `read` of this same path would run
+    // right now with no card and no refusal (review of PR 118 H1: in Ask
+    // all, or where the node denies `read`, they were shown with no card at
+    // all). Otherwise the plain refusal, and nothing is recorded.
     if !ctx.read_unasked || ctx.resolve(shown).is_err() {
         return Some(plain_unread(ctx, shown));
     }
-    let text = {
-        use std::io::Read as _;
-        use std::os::unix::fs::OpenOptionsExt;
-        let f = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits() | crate::open_flags())
-            .open(&path)
-            .ok()?;
-        if !f.metadata().ok()?.file_type().is_file() {
-            return None;
-        }
-        let mut bytes = Vec::new();
-        f.take(crate::seen::SNAPSHOT_MAX_FILE as u64 + 1)
-            .read_to_end(&mut bytes)
-            .ok()?;
-        if bytes.len() > crate::seen::SNAPSHOT_MAX_FILE {
-            return None;
-        }
-        String::from_utf8(bytes).ok()?
-    };
-    Some(unread_refusal(ctx, &key, shown, &text, &specs))
+    Some(unread_refusal(ctx, &key, shown, &text?, &specs))
+}
+
+/// The file as UTF-8 text, at most the snapshot size, opened without
+/// following a link.
+fn unread_text(path: &Path) -> Option<String> {
+    use std::io::Read as _;
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::fcntl::OFlag::O_NOFOLLOW.bits() | crate::open_flags())
+        .open(path)
+        .ok()?;
+    if !f.metadata().ok()?.file_type().is_file() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    f.take(crate::seen::SNAPSHOT_MAX_FILE as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > crate::seen::SNAPSHOT_MAX_FILE {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
 }
 
 /// The refusal of an unread file that shows nothing of it.
@@ -875,8 +941,15 @@ fn edit(
     text: &str,
     specs: &[Spec],
 ) -> Result<(String, String, RowRanges), String> {
-    let Some(seen) = ctx.seen.get(key) else {
-        return Err(unread_refusal(ctx, key, shown, text, specs));
+    let seen = match ctx.seen.get(key) {
+        Some(s) => s,
+        // Not read, but the one match lies in rows shown under this very
+        // version of the file: the same as a file read as it is now.
+        None if shown_rows_cover(ctx, key, text, specs) => Seen {
+            sha: crate::seen::sha256(text.as_bytes()),
+            snapshot: None,
+        },
+        None => return Err(unread_refusal(ctx, key, shown, text, specs)),
     };
     let stale = crate::seen::sha256(text.as_bytes()) != seen.sha;
     // Changed on disk, and nothing says what the agent saw: refuse at once
