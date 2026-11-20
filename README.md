@@ -747,10 +747,11 @@ default_model = "openrouter::openai/gpt-4o"   # unset: agent general's, else the
 model = "deepseek::deepseek-chat"
 fallbacks = ["openrouter::openai/gpt-4o"]   # tried in order (see below)
 
-[agent_avatars.coder]                # how the agent looks; unset: derived from its id
-shape = "hexagon"                    # circle | triangle | square | hexagon | diamond | drop
-eyes = "wide"                        # round | long | short | wide | sleepy
-accent = "green"                     # blue | purple | pink | red | orange | yellow | green | graphite
+[agent_avatars.coder]                # how the agent looks; unset: derived from its id (built-in agents have their own)
+shape = "hexagon"                    # circle | triangle | square | hexagon | diamond | drop | cloud | bean | heart | star | flower
+                                     # | ghost | cat | bunny | mushroom | leaf | mug | shield | bubble | hat | rocket
+eyes = "long"                        # long (tall pills, the default) | round | short | wide | sleepy
+accent = "green"                     # blue | purple | pink | red | orange | yellow | green | graphite | white | black | brown | teal
 
 [[providers]]
 id = "openrouter"                    # the prefix: a-z, 0-9, _ and -
