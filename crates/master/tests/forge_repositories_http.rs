@@ -1423,13 +1423,72 @@ fn status_kb(field: &str) -> u64 {
         .unwrap()
 }
 
-/// Peak resident growth (kB) while `f` runs.
-async fn peak_growth<F: std::future::Future>(f: F) -> (F::Output, u64) {
+/// Reset the kernel's peak-RSS mark (`VmHWM`) by writing `5` to `path`
+/// (`/proc/self/clear_refs`). `false` when the write is refused with
+/// `PermissionDenied`: that is a shell sandbox (the harness's own, for an
+/// agent developing the harness in a chat), where the peak cannot be
+/// measured, so the caller skips what depends on it and one line says so.
+/// CI can write the file, so the real measurement runs there. Any other
+/// error is a real fault and panics.
+fn reset_peak_at(path: &std::path::Path) -> bool {
+    match std::fs::write(path, "5") {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            static SAID: std::sync::Once = std::sync::Once::new();
+            SAID.call_once(|| {
+                eprintln!(
+                    "peak-memory measurement skipped: {} is not writable here ({e}); \
+                     a sandboxed shell, not a failure. CI runs the measurement.",
+                    path.display()
+                )
+            });
+            false
+        }
+        Err(e) => panic!("cannot reset the peak at {}: {e}", path.display()),
+    }
+}
+
+/// Peak resident growth (kB) while `f` runs; `None` for the growth when
+/// the peak could not be reset (the work still runs).
+async fn peak_growth<F: std::future::Future>(f: F) -> (F::Output, Option<u64>) {
     tokio::time::sleep(Duration::from_millis(200)).await;
     let before = status_kb("VmRSS:");
-    std::fs::write("/proc/self/clear_refs", "5").unwrap();
+    let measured = reset_peak_at(std::path::Path::new("/proc/self/clear_refs"));
     let out = f.await;
-    (out, status_kb("VmHWM:").saturating_sub(before))
+    (
+        out,
+        measured.then(|| status_kb("VmHWM:").saturating_sub(before)),
+    )
+}
+
+#[test]
+fn an_unwritable_peak_file_is_skipped_and_any_other_error_is_not() {
+    // Running as root, mode 0444 does not stop a write: nothing to prove.
+    let root = std::fs::read_to_string("/proc/self/status")
+        .unwrap()
+        .lines()
+        .any(|l| l.starts_with("Uid:") && l.split_whitespace().nth(1) == Some("0"));
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("clear_refs");
+    std::fs::write(&file, "").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o444)).unwrap();
+    }
+    if !root {
+        assert!(!reset_peak_at(&file), "a refused write is a skip");
+    }
+    let open = dir.path().join("open");
+    std::fs::write(&open, "").unwrap();
+    assert!(reset_peak_at(&open));
+    assert_eq!(std::fs::read_to_string(&open).unwrap(), "5");
+}
+
+#[test]
+#[should_panic(expected = "cannot reset the peak")]
+fn a_missing_peak_file_still_panics() {
+    let dir = tempfile::tempdir().unwrap();
+    reset_peak_at(&dir.path().join("missing").join("clear_refs"));
 }
 
 /// One listing's growth, debug build (the bound has room for the
@@ -1458,11 +1517,11 @@ async fn memory_child() {
         let ((st, v), kb) =
             peak_growth(list(&t, &ids[0].0, &ids[0].1, &format!("?q=x{kind}"))).await;
         eprintln!(
-            "one {kind} listing: {st}, left_out {}, peak growth {kb} kB",
+            "one {kind} listing: {st}, left_out {}, peak growth {kb:?} kB",
             v["left_out"]
         );
         assert_eq!(st, StatusCode::OK, "{v}");
-        assert!(kb < ONE_LISTING_KB, "{kind}: {kb} kB");
+        assert!(kb.is_none_or(|kb| kb < ONE_LISTING_KB), "{kind}: {kb:?} kB");
     }
     github_at(&t, "/slowobjs");
     let (codes, kb) = peak_growth(async {
@@ -1481,10 +1540,10 @@ async fn memory_child() {
     })
     .await;
     let after = status_kb("VmRSS:");
-    eprintln!("20 at once: {codes:?}, peak growth {kb} kB, RSS after {after} kB");
+    eprintln!("20 at once: {codes:?}, peak growth {kb:?} kB, RSS after {after} kB");
     assert_eq!(codes.get(&200), Some(&2), "{codes:?}");
     assert_eq!(codes.get(&429), Some(&18), "{codes:?}");
-    assert!(kb < TWENTY_LISTINGS_KB, "{kb} kB");
+    assert!(kb.is_none_or(|kb| kb < TWENTY_LISTINGS_KB), "{kb:?} kB");
 }
 
 /// Re-review of PR 158, MEDIUM 1: a 4xx is the forge's answer to this
