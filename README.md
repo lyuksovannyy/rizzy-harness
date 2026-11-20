@@ -946,7 +946,8 @@ model_first_byte_timeout_s = 600     # Ask chats: wait for a model's first answe
 search = "searxng"                   # none | searxng | brave
 searxng_url = "http://localhost:8888" # JSON format must be enabled in SearXNG
 # brave_key_secret = "brave"         # for search = "brave" ([keys] brave = "..." in secrets.toml)
-fetch = true                         # web_fetch: public addresses only, URLs from you or a search
+fetch = true                         # web_fetch: public addresses only, URLs from you, a search, a page or a file the agent read
+                                     # (this section also gives the server's own node its web tools: see "Web tools in Agentic chats")
 
 [memory]
 backend = "builtin"                  # builtin | mem0 | off (restart to switch)
@@ -1637,6 +1638,13 @@ dir = "~/rizzy-projects"             # where "New project" makes folders (see "P
 clone = true                         # clone repositories into new project folders (see "Cloning a repository"); false: never
 hosts = ["github.com", "gitlab.com"] # the only hosts this node clones from, exactly as written: a lower-case name or IPv4 address, ":<port>" only where you add one
 
+[web]                                # a REMOTE node's web tools for Agentic chats; off unless you say so (see "Web tools in Agentic chats")
+search = "none"                      # none | searxng | brave
+# searxng_url = "http://localhost:8888"  # for search = "searxng"
+# brave_key_env = "BRAVE_API_KEY"    # for search = "brave": the variable that holds the key (never write the key here)
+# brave_key_secret = "brave"         # or its name in this node's own secrets.toml ([keys] brave = "...")
+fetch = false                        # web_fetch: public addresses only
+
 [sandbox]
 mode = "required"                    # required | best-effort | off
 network = "on"                       # on | off (off: no network for the shell, see "Network off")
@@ -2007,7 +2015,7 @@ a command notices:
 **Network off.** `network = "off"` is about the node's shell (and
 graphify and the node's own git); the agent's web tools (`web_search`,
 `web_fetch`) are not affected: they have their own settings, `[web]` under
-"Chats and web tools" above. With `network = "off"` a contained command
+"Chats and web tools" above and "Web tools in Agentic chats". With `network = "off"` a contained command
 also runs in a network namespace of its own: it has only its own loopback
 (`lo`), so no TCP, UDP or DNS from it reaches this machine's other
 addresses, its loopback services or anywhere else, and it cannot reach
@@ -4157,13 +4165,53 @@ The built-in agents, grouped by category in the picker:
 | Scout (`@scout`) | IT | sub-agent | read and search files; read-only commands (`git log`, `git diff`, `grep` pipelines, in the read-only shell) |
 | Reviewer (`@reviewer`) | IT | agent, sub-agent | read and search files; read-only commands (`git diff`, `git log`, `git blame`, tests that write only to `/tmp`); project memory; earlier chats and memory search |
 
-**Researcher in Agentic sessions.** Web tools exist only in chats, not on
-nodes yet (nodes have `remember` and `recall`, which alone do none of a task's work). In an Agentic session, Researcher is therefore not offered
-to the Senior Teamlead or Software Developer as a sub-agent, and a delegation
-to it by name is refused with the reason, so the lead never believes research
-was done that was not. The rule is general: any sub-agent that lists tools
-of which none is available on the node is treated the same way; one that lists
-no tools on purpose (Smol) or has some of them is unaffected.
+**Researcher in Agentic sessions.** Where the node has web tools (next
+section), Researcher is offered to the Senior Teamlead and the Software
+Developer as a sub-agent, and a delegation to it runs a search or a page
+read. On a node without them it is not offered, and a delegation to it by
+name is refused with the reason, so the lead never believes research was done
+that was not. The rule is general: any sub-agent that lists tools of which
+none is available on the node (not registered, not allowed to it, or in the
+node's `denied_tools`) is treated the same way; one that lists no tools on
+purpose (Smol) or has some of them is unaffected.
+
+**Web tools in Agentic chats.** An agent that lists `web_search` and
+`web_fetch` (the Software Developer, the Senior Teamlead, Researcher and Writer
+do) has them in an Agentic chat when the node it runs on has been set up with
+them. The node decides, never the server's master: nothing the master sends
+turns them on.
+
+- *The server's own node* (the one inside `serve`) takes the `[web]` section of
+  `config.toml`, the same tools and the same one HTTP client as the server's
+  chats. With no `[web]` that is `web_fetch` alone (its default is on); add
+  `search` for `web_search`. Restart after changing it.
+- *A remote node* (`node run`) takes the `[web]` section of its own
+  `node.toml`, with the same keys, and has none until it says so
+  (`search = "none"`, `fetch = false`). For Brave name the key by variable
+  (`brave_key_env`) or by its name in the node's own `secrets.toml`
+  (`brave_key_secret`); never write the key in node.toml. The server's
+  `[web]` has no effect on a remote node, and node.toml's `[web]` has none on the
+  server's own node (the log says so if you set it there).
+- `denied_tools = ["web_fetch"]` (or `"web_search"`) in node.toml switches a
+  tool off whatever the section says; a call is refused with the policy's
+  words and nobody is asked. `rizzy-harness doctor` and the start-up log say
+  which tools a node's Agentic chats have and from which setting, never a key.
+
+The rules are the chats' own. `web_fetch` reads public addresses only
+(loopback, private ranges, link-local and the cloud metadata address are
+refused, after a redirect and after a DNS answer too). It fetches only a URL
+that you wrote, that a search returned, that a page it fetched linked, or that
+stands in a file the agent `read` (so a link in the repository's own docs is
+fetchable, and a hostile file can name a URL the agent may then fetch). It does
+not fetch a URL that only a command printed, nor one the model put together
+(a real host with a secret from a file in its query). `web_search` has no such
+rule: its query is whatever the agent writes and goes to your search engine, so
+it can carry text the agent has read; Ask mode runs both tools without a card
+(they only read), Ask-every-call asks for each, plan mode lets them run.
+Turns nobody attended (a webhook, an API token) and their sub-agents get
+neither tool. Where the shell has no network (`network = "off"`, the read-only
+shell), these two tools are the agent's only way out: that is what you switch
+on, and what `denied_tools` closes.
 
 **Default agents per mode.** A chat gets the Assistant unless you pick
 another; an Agentic chat gets the Software Developer. A workspace overrides
