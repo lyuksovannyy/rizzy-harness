@@ -92,6 +92,11 @@ export function cappedUsage(u: Usage): Usage {
  * crates/core/src/view.rs: the restore whose `restored` events follow it.
  * Beside the view for the same reason as `spent`. */
 const saving = new WeakMap<SessionView, string>();
+/** As `SessionView::undone_before`: for the last MAX_SAVED saved ids, which
+ * turns were undone (and by which saved id; "" for none) just before that
+ * restore. Restoring a saved id returns exactly these flags. */
+const MAX_SAVED = 100;
+const undoneBefore = new WeakMap<SessionView, [string, Map<string, string>][]>();
 
 /** X.39, as `SessionView::settled` and `live` in crates/core/src/view.rs: what
  * the finished turns (and every other cost the chat carries) used, apart from
@@ -621,6 +626,12 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
       else if (p.phase === "before_restore") {
         // A restore's own checkpoint is undone like a turn's.
         c.before = p.git_ref;
+        const now = new Map<string, string>();
+        for (const [k, o] of Object.entries(v.checkpoints)) if (o.restored) now.set(k, o.saved ?? "");
+        const list = (undoneBefore.get(v) ?? []).filter(([k]) => k !== p.turn_id);
+        list.push([p.turn_id, now]);
+        if (list.length > MAX_SAVED) list.shift();
+        undoneBefore.set(v, list);
         saving.set(v, p.turn_id);
       } else if (p.phase === "after") {
         c.after = p.git_ref;
@@ -628,17 +639,26 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
         if (p.head_moved) c.head_moved = p.head_moved;
         else delete c.head_moved;
       } else if (p.phase === "restored") {
-        c.restored = true;
-        const s = saving.get(v);
-        if (s != null) c.saved = s;
-        else delete c.saved;
-        // Restoring a saved checkpoint undoes the undo that saved it: those
-        // turns' changes are back.
-        for (const other of Object.values(v.checkpoints)) {
-          if (other.saved === p.turn_id) {
-            other.restored = false;
-            delete other.saved;
+        const back = undoneBefore.get(v)?.find(([k]) => k === p.turn_id)?.[1];
+        if (back) {
+          // A saved id restored: the folder is as it was just before the
+          // restore that saved it.
+          for (const [k, o] of Object.entries(v.checkpoints)) {
+            const by = back.get(k);
+            if (by !== undefined) {
+              o.restored = true;
+              if (by) o.saved = by;
+              else delete o.saved;
+            } else {
+              o.restored = false;
+              delete o.saved;
+            }
           }
+        } else {
+          c.restored = true;
+          const s = saving.get(v);
+          if (s != null) c.saved = s;
+          else delete c.saved;
         }
       }
       break;
