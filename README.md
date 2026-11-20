@@ -2523,14 +2523,19 @@ overlap, and every row you name must have been shown to the agent (by `read`,
 an edit's result or a refusal; a row `read` showed cut with `…` cannot be
 named: use `old_string` for it). A tag the session does not know (a new
 session, a restart, a version dropped from memory), or rows not shown, make
-the call refuse and print those rows, which then count as shown. The matched
-rows of a `grep` count as shown too: each file with matches is headed
+the call refuse and print those rows, which then count as shown. The rows a
+`grep` printed in full count as shown too: each file with matches is headed
 `[path#TAG]` as `read` heads it, so a row from the results can be changed with
 no `read` (at most 16 files and 1 MiB of file text per search get a tag; a
-file listed without one must be read; a matched row cut for length is not shown;
-the tag holds for the turn, then a refusal prints the rows and the call is
-sent again). A search shows rows, it is not a `read`: `write` over the file
-still asks for one. If the file
+file listed without one must be read; a matched row cut for length is not
+shown; a result holds about 29,000 characters, and matched rows it leaves out,
+which it says it did, are not shown either; the tag holds for the turn, then a
+refusal prints the rows and the call is sent again). The same limit holds for
+every result that prints rows: only rows in the text the model receives count.
+A search shows rows, it is not a `read`: `write` over the file and
+`replace_all` still ask for one, and an agent that has `grep` and `edit` but not
+`read` can now change a file at the rows a search printed (before, only files it
+had written itself). If the file
 changed since the tag, the edit is made only where the rows it replaces did
 not change and are still one run of rows (a row someone inserted into the range
 since the tag refuses the call, with the rows as they are: replacing it would
