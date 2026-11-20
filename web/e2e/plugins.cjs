@@ -6,7 +6,7 @@
 // it Shared again; X.34 step B: the owner writes a skill from the Add menu,
 // opens it (text only), and a chat of the Assistant loads it with the demo
 // provider; the page fits a phone's width. (What a turn then carries is
-// crates/master/tests/plugins_http.rs and stored_skills_http.rs.)
+// crates/master/tests/it/plugins_http.rs and stored_skills_http.rs.)
 // Usage: node web/e2e/plugins.cjs <path-to-harness-binary> [work-dir]
 const { chromium } = require('playwright');
 const { spawn } = require('child_process');

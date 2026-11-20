@@ -307,15 +307,15 @@ earlier build is refused at start as a schema mismatch (fix plan 4.3).
   command runs outside bubblewrap and a `sandbox` session's inside; no
   background command in `host`. `cli/tests/contain.rs`
   `doctor_marks_each_containment_state`, `cli/tests/network_off.rs`.
-* `master/tests/exec_mode_http.rs`: `host` needs the `host` level whatever one owns (H1), and the node list.
+* `master/tests/it/exec_mode_http.rs`: `host` needs the `host` level whatever one owns (H1), and the node list.
 * `web/src/components/execchoice.test.tsx`; `web/e2e/exec-modes.cjs`
   against the real binary.
-* Part 2: `master/tests/exec_levels_http.rs` (every action refused at
+* Part 2: `master/tests/it/exec_levels_http.rs` (every action refused at
   `none`, `set_agent` and `select_variant` included; `sandbox` refused
   `host`; lowering stops only the chats above the level, ceiling and
   workspace level; a demoted server admin; who grants what; a self-made
   owner at a `sandbox` ceiling; Personal; a removed member's turn; audit
-  lines; the API token), `master/tests/routines_http.rs`
+  lines; the API token), `master/tests/it/routines_http.rs`
   `a_routine_fires_at_its_owners_level_on_the_day_it_fires`,
   `store/tests/workspaces.rs`
   `levels_start_at_none_and_change_only_from_what_was_read` (two admins at
@@ -323,12 +323,12 @@ earlier build is refused at start as a schema mismatch (fix plan 4.3).
   `web/src/components/users.test.tsx` and `workspace/workspace.test.tsx`
   (the warning before a grant, cancel saves nothing), `web/e2e/exec-levels.cjs`
   against the real binary.
-* The security review's fixes (2026-11): `master/tests/exec_mode_http.rs`
+* The security review's fixes (2026-11): `master/tests/it/exec_mode_http.rs`
   `host_needs_the_host_level_not_ownership` (was `host_is_for_server_admins_only`), `a_node_that_did_not_announce_the_mode_gets_no_chat`,
   `a_host_chat_whose_owner_is_no_longer_an_admin_does_no_more_work`,
   `the_mode_check_on_a_row_fails_closed_and_refuses_host_to_a_member`,
   `the_modes_are_not_shown_to_an_account_without_the_grant`;
-  `master/tests/routines_http.rs` `a_routines_chat_is_always_in_the_sandbox`;
+  `master/tests/it/routines_http.rs` `a_routines_chat_is_always_in_the_sandbox`;
   `node/tests/exec_modes.rs` `host_is_never_the_default`,
   `a_host_session_takes_auto_within_the_nodes_ceiling` (it replaced `a_host_session_is_never_in_auto`
   with the owner's decision of 2026-11-14), `a_host_session_is_not_offered_background_commands`,

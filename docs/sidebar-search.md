@@ -260,7 +260,7 @@ drawer handling, and `when` through Similar, less the switcher and the inline se
 
 - Rust: `search.rs` units (`mark`, tiers and the All merge, chat rows and their types and
   excerpts, the empty search's visibility); store `search_never_finds_sub_agent_or_incognito_chats`;
-  `crates/master/tests/search_http.rs` (each `in`, paging and the cursor, excerpts only when
+  `crates/master/tests/it/search_http.rs` (each `in`, paging and the cursor, excerpts only when
   needed, newest first, FTS syntax inert, T10 with the server admin, non-members 404, a guest
   finding projects, the API token, `kinds` and features per viewer).
 - Rust, with the other areas merged: a routine run chat found by a query as `type: "routine"`

@@ -1015,7 +1015,7 @@ the budget with a self-restarting command and the refill; the step cap; `callbac
 `ask` parks and the person's message is refused), `cli/tests/callbacks.rs` (the node over the
 protocol: two ends one turn, a second ask, another chat's id, a forged id, a stop, a deleted chat,
 a routine's chat, a revoked chat; the opening at the provider with a forged header, the separator
-and text for the model, rebuilt the same on the next message), `master/tests/callbacks_http.rs`
+and text for the model, rebuilt the same on the next message), `master/tests/it/callbacks_http.rs`
 (ends together, stops and restarts, attention for the owner only, the 60-minute rule, the node's
 refusals, a removed owner, a disabled account, a restart of the master), `master/tests/
 hooks_http.rs` (a routine's chat, an untrusted one after its routine is gone),
