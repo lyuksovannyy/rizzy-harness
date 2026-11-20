@@ -1726,6 +1726,81 @@ script, a `Makefile`, `.git/hooks`), a `host` chat in that folder may run
 with every right of the node's user. See
 [docs/execution-modes.md](docs/execution-modes.md).
 
+**Push and open pull requests from a chat (your own machine).** There is
+no push tool yet (a dedicated one is planned, ADOPTION_PLAN X.27 step 4), but
+an agent in a **host-shell** chat can run `git fetch`, `git pull`, `git push`
+over SSH and `gh` once the node lets its commands reach what those programs
+need. By default none of it works: a command gets no `SSH_AUTH_SOCK`, cannot
+open `~/.ssh`, `~/.gitconfig` or `~/.config/gh`, and (on Linux 7.1 and
+newer) cannot connect to your agent's socket; `git push` ends with `Host key
+verification failed`. The lines below were found by experiment, with a
+throwaway key, a throwaway `ssh-agent` and a throwaway `sshd` on loopback
+(never a real key or forge), and they are the smallest that make a push work:
+
+```toml
+# node.toml, for a node you use yourself
+env_pass = ["SSH_AUTH_SOCK"]            # a command learns where your ssh agent is
+
+[sandbox]
+write = ["/run/user/1000/ssh-agent.socket"]  # your agent's socket FILE: see `echo $SSH_AUTH_SOCK`
+read  = ["~/.ssh/known_hosts"]          # ssh checks the forge's key against this file
+```
+
+- `env_pass = ["SSH_AUTH_SOCK"]` passes the variable. The node must have it:
+  start it from a shell that has your agent (a node started by a service
+  does not).
+- `write` on the **socket file** is what lets a command connect to it. `read`
+  is not enough (tested: `ssh-add -l` says `Permission denied`); a file
+  grant is enough, so do not grant the socket's folder (for
+  `/run/user/1000` that would let commands reach every other socket there,
+  the session bus among them). An agent restarted on the same path keeps
+  working without a node restart. Where the socket path changes at each
+  login (`/tmp/ssh-XXXX/agent.NNN`) the entry must be changed with it; a
+  systemd user agent (`$XDG_RUNTIME_DIR/ssh-agent.socket`) keeps its path.
+- `read` on `~/.ssh/known_hosts` lets ssh find the forge's key. The forge
+  must already be in the file (connect once yourself): a command cannot
+  answer ssh's "are you sure?" and the push fails with `Host key
+  verification failed`. A `write` entry for the file would let ssh add new
+  hosts without asking (`StrictHostKeyChecking=accept-new`): not
+  recommended, nothing then checks the first key.
+- Optional: `read = ["~/.gitconfig"]` applies your own git settings: `url`
+  rewrites (`insteadOf`), `core.sshCommand`, and your `[user]` identity
+  (which wins over the one from your profile). Without it git is given an
+  empty global configuration, and a remote spelled `forge:repo.git` through
+  such a rewrite cannot be resolved. A `url` with a token in it, or a
+  credential helper line, is then readable by the agent.
+  ssh skips a `~/.ssh/config` it cannot open without a message, so `Host`
+  aliases in it do not apply; `read = ["~/.ssh/config"]` applies them (not
+  tried here). To give ssh options without either file, put them in
+  `GIT_SSH_COMMAND` (for example `ssh -o UserKnownHostsFile=/path`), start
+  the node with it set and add it to `env_pass`.
+- `gh`: a token reaches it as `GH_TOKEN` or `GITHUB_TOKEN`, with the token in
+  the node's environment and the name in `env_pass` (provider key names,
+  `HARNESS_*` and names loaded from `.env` are never passed; these two are
+  not refused). Or `gh`'s own folder: `env_pass = ["GH_CONFIG_DIR"]` and
+  `read = ["<that folder>"]` (without the `read`, gh stops with
+  `permission denied`; with neither, `gh` starts with no login). `read =
+  ["~/.config/gh"]` gives it your login as stored there: the token in
+  `hosts.yml` is then readable by every command. Tested locally only
+  (`gh config get`, no network): `gh pr create` against a forge was not run,
+  and a token kept in the system keyring is expected not to work, since
+  the keyring is reached over the session bus, a socket a command cannot
+  open.
+
+**The risk, once:** with these lines an agent in this node's chats can push
+to every repository your keys reach and act as you on your forge. In Auto
+nothing asks, and a page or file the agent reads can steer it. Keep such a
+node for your own use; use Ask for chats you do not watch (a card shows each
+command), or do the push yourself. `rizzy-harness doctor` has a "push from a
+chat" block that says, from node.toml and the node's environment alone
+(nothing is contacted, no key or token is read), whether the agent socket is
+passed and reachable, whether `known_hosts` and `~/.gitconfig` are readable,
+and whether a token variable or `gh`'s folder reaches commands, each with the
+entry that would change it. What still does not work: the sandbox mode
+(commands there have no home folder and no socket; not worked on yet), a
+forge not yet in `known_hosts`, a key that needs a passphrase prompt or a
+touch (`ssh-add -c`: nothing can answer), and a token in the keyring.
+
 **Execution levels.** Who may run which mode is one ordered level, `none` <
 `container` < `sandbox` < `host`; each includes the ones before it.
 
