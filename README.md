@@ -4244,6 +4244,13 @@ agent's only way out: that is what you switch on, and what `denied_tools`
 closes. If a chat reads pages you do not trust beside files you want kept
 secret, set it to Ask every call or turn the tools off.
 
+A page cannot make `web_fetch` hang the node: the page's own parser builds the
+tree once and a page nested more than 512 levels deep (or with more than
+150,000 nodes) is refused with a plain sentence; a page over 1 MiB or with more
+than 25,000 start tags is read as plain text (no layout, no hidden content);
+only two pages are read at a time, and a further one waits at most five seconds
+before the tool says it is busy.
+
 **Default agents per mode.** A chat gets the Assistant unless you pick
 another; an Agentic chat gets the Software Developer. A workspace overrides
 each (`default_agent` for chats, `default_agentic_agent` for Agentic), and
