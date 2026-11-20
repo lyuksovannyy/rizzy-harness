@@ -1588,11 +1588,38 @@ fn main() -> anyhow::Result<()> {
 
 fn init_tracing() {
     use tracing_subscriber::util::SubscriberInitExt as _;
-    let env = tracing_subscriber::EnvFilter::try_from_env("HARNESS_LOG")
-        .unwrap_or_else(|_| "info".into());
+    let env = log_env(std::env::var("HARNESS_LOG").ok().as_deref());
     // No colour codes in `docker logs`, journald or files.
     let ansi = std::io::IsTerminal::is_terminal(&std::io::stderr());
     logger(env, std::io::stderr, ansi).init();
+}
+
+/// The `genai` crate's OpenAI streamer writes `EMPTY CHOICE CONTENT` at
+/// WARN for every stream chunk that carries no text (a role-only first
+/// chunk, a usage-only last one): about one line per model reply with nothing
+/// for a person to do about it (the crate's own code calls it a TODO for
+/// debug). Its other line in that module is an error, which stays.
+const GENAI_EMPTY_CHUNK: &str = "genai::adapter::adapters::openai::streamer";
+
+/// The levels the log runs at: `HARNESS_LOG` (an `EnvFilter` spec; `info`
+/// when unset or unreadable), and that one target down to errors unless the
+/// spec names `genai` itself (`genai=warn`, or the target at `debug`), so a
+/// person who asks for that crate's lines gets them.
+fn log_env(spec: Option<&str>) -> tracing_subscriber::EnvFilter {
+    use tracing_subscriber::EnvFilter;
+    let spec = spec.unwrap_or("info");
+    let (env, named) = match EnvFilter::try_new(spec) {
+        Ok(e) => (e, spec.contains("genai")),
+        Err(_) => (EnvFilter::new("info"), false),
+    };
+    // Logging off stays off: the directive below would print errors.
+    if named || env.max_level_hint() == Some(tracing::level_filters::LevelFilter::OFF) {
+        return env;
+    }
+    match format!("{GENAI_EMPTY_CHUNK}=error").parse() {
+        Ok(d) => env.add_directive(d),
+        Err(_) => env,
+    }
 }
 
 /// The server's log: `env` decides the levels, [`quiet`] drops what no
@@ -1742,6 +1769,56 @@ mod tests {
             out.contains("node line") && out.contains("our line"),
             "{out}"
         );
+    }
+
+    /// The `genai` streamer's per-reply `EMPTY CHOICE CONTENT` warning no
+    /// longer prints at the default level; the same target's errors, the
+    /// crate's other warnings and a person's own `genai` setting still do.
+    #[test]
+    fn the_empty_choice_warning_is_quiet_by_default_only() {
+        use std::sync::{Arc, Mutex};
+        #[derive(Clone, Default)]
+        struct Buf(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Buf {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let run = |spec: Option<&str>| {
+            let buf = Buf::default();
+            let b2 = buf.clone();
+            let sub = logger(log_env(spec), move || b2.clone(), false);
+            tracing::subscriber::with_default(sub, || {
+                tracing::warn!(target: "genai::adapter::adapters::openai::streamer", "EMPTY CHOICE CONTENT");
+                tracing::error!(target: "genai::adapter::adapters::openai::streamer", "stream ERROR-ONE");
+                tracing::warn!(target: "genai::webc::web_stream", "other WARN-TWO");
+                tracing::warn!(target: "harness_node::session", "ours WARN-THREE");
+            });
+            String::from_utf8_lossy(&buf.0.lock().unwrap()).to_string()
+        };
+        for spec in [None, Some("info"), Some("warn"), Some("debug")] {
+            let out = run(spec);
+            assert!(!out.contains("EMPTY CHOICE"), "{spec:?}: {out}");
+            assert!(
+                out.contains("ERROR-ONE") && out.contains("WARN-TWO") && out.contains("WARN-THREE"),
+                "{spec:?}: {out}"
+            );
+        }
+        // Turned off, it stays off: no line of any kind, the target's errors too.
+        for spec in ["off", "OFF", "off,off"] {
+            assert_eq!(run(Some(spec)), "", "{spec}");
+        }
+        for spec in [
+            "info,genai::adapter::adapters::openai::streamer=debug",
+            "warn,genai::adapter::adapters::openai::streamer=warn",
+            "info,genai=warn",
+        ] {
+            assert!(run(Some(spec)).contains("EMPTY CHOICE"), "{spec}");
+        }
     }
 
     /// A coding chat can propose project facts: agentic nodes register

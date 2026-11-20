@@ -1979,6 +1979,32 @@ pub struct Checkpoint {
     pub excluded: Vec<String>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub excluded_more: u64,
+    /// `after` only, and only when it moved (X.42): where the person's
+    /// repository's HEAD pointed when the turn began and where it points
+    /// now. Absent for a folder that is no plain repository directory
+    /// (a gitfile, a link, no repository) and when either end is unreadable
+    /// (an unborn branch). A note for the chat; no undo reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_moved: Option<HeadMoved>,
+}
+
+/// What a repository's HEAD named at one moment.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeadAt {
+    /// The branch, as repository text: at most 200 bytes, control
+    /// characters, line and paragraph separators and bidirectional
+    /// controls replaced. Absent when HEAD was detached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// The commit: 40 or 64 lowercase hex digits.
+    pub commit: String,
+}
+
+/// HEAD at a turn's start and at its end, when they differ.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeadMoved {
+    pub from: HeadAt,
+    pub to: HeadAt,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

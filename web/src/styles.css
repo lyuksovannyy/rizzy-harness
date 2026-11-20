@@ -3709,6 +3709,17 @@ details.summary p {
   margin: 4px 0 0;
   padding-left: 18px;
 }
+.undo-note {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--fg-2);
+}
+.undo-note code {
+  overflow-wrap: anywhere;
+}
+.diff-body .undo-note {
+  margin: 0 0 var(--space-3);
+}
 .variants {
   display: grid;
   gap: var(--space-3);

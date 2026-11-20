@@ -1,0 +1,1200 @@
+[
+  {
+    "after": [
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {
+        "t2": "R1"
+      },
+      {
+        "t2": "R1"
+      },
+      {
+        "t2": "R1"
+      },
+      {
+        "t1": "R2",
+        "t2": "R1"
+      },
+      {
+        "t1": "R2",
+        "t2": "R1"
+      },
+      {
+        "t1": "R2",
+        "t2": "R1"
+      },
+      {}
+    ],
+    "events": [
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref1-b:t1",
+          "phase": "before",
+          "turn_id": "t1"
+        },
+        "seq": 1,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref2-a:t1",
+          "phase": "after",
+          "turn_id": "t1"
+        },
+        "seq": 2,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref3-b:t2",
+          "phase": "before",
+          "turn_id": "t2"
+        },
+        "seq": 3,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref4-a:t2",
+          "phase": "after",
+          "turn_id": "t2"
+        },
+        "seq": 4,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref5-br:R1",
+          "phase": "before_restore",
+          "turn_id": "R1"
+        },
+        "seq": 5,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref6-a:R1",
+          "phase": "after",
+          "turn_id": "R1"
+        },
+        "seq": 6,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref7-r:t2",
+          "phase": "restored",
+          "turn_id": "t2"
+        },
+        "seq": 7,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref8-br:R2",
+          "phase": "before_restore",
+          "turn_id": "R2"
+        },
+        "seq": 8,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref9-a:R2",
+          "phase": "after",
+          "turn_id": "R2"
+        },
+        "seq": 9,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref10-r:t1",
+          "phase": "restored",
+          "turn_id": "t1"
+        },
+        "seq": 10,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref11-br:R3",
+          "phase": "before_restore",
+          "turn_id": "R3"
+        },
+        "seq": 11,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref12-a:R3",
+          "phase": "after",
+          "turn_id": "R3"
+        },
+        "seq": 12,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref13-r:R1",
+          "phase": "restored",
+          "turn_id": "R1"
+        },
+        "seq": 13,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      }
+    ],
+    "name": "S1 undo t2, undo t1, put back R1"
+  },
+  {
+    "after": [
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {
+        "t1": "R1"
+      },
+      {
+        "t1": "R1",
+        "t2": "R1"
+      },
+      {
+        "t1": "R1",
+        "t2": "R1"
+      },
+      {
+        "t1": "R1",
+        "t2": "R1"
+      },
+      {},
+      {},
+      {},
+      {
+        "t1": "R3"
+      }
+    ],
+    "events": [
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref1-b:t1",
+          "phase": "before",
+          "turn_id": "t1"
+        },
+        "seq": 1,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref2-a:t1",
+          "phase": "after",
+          "turn_id": "t1"
+        },
+        "seq": 2,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref3-b:t2",
+          "phase": "before",
+          "turn_id": "t2"
+        },
+        "seq": 3,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref4-a:t2",
+          "phase": "after",
+          "turn_id": "t2"
+        },
+        "seq": 4,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref5-br:R1",
+          "phase": "before_restore",
+          "turn_id": "R1"
+        },
+        "seq": 5,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref6-a:R1",
+          "phase": "after",
+          "turn_id": "R1"
+        },
+        "seq": 6,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref7-r:t1",
+          "phase": "restored",
+          "turn_id": "t1"
+        },
+        "seq": 7,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref8-r:t2",
+          "phase": "restored",
+          "turn_id": "t2"
+        },
+        "seq": 8,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref9-br:R2",
+          "phase": "before_restore",
+          "turn_id": "R2"
+        },
+        "seq": 9,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref10-a:R2",
+          "phase": "after",
+          "turn_id": "R2"
+        },
+        "seq": 10,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref11-r:R1",
+          "phase": "restored",
+          "turn_id": "R1"
+        },
+        "seq": 11,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref12-br:R3",
+          "phase": "before_restore",
+          "turn_id": "R3"
+        },
+        "seq": 12,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref13-a:R3",
+          "phase": "after",
+          "turn_id": "R3"
+        },
+        "seq": 13,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref14-r:t1",
+          "phase": "restored",
+          "turn_id": "t1"
+        },
+        "seq": 14,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      }
+    ],
+    "name": "S2 rewind, put back, undo again"
+  },
+  {
+    "after": [
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {
+        "t1": "R2"
+      }
+    ],
+    "events": [
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref1-b:t1",
+          "phase": "before",
+          "turn_id": "t1"
+        },
+        "seq": 1,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref2-a:t1",
+          "phase": "after",
+          "turn_id": "t1"
+        },
+        "seq": 2,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref3-b:t2",
+          "phase": "before",
+          "turn_id": "t2"
+        },
+        "seq": 3,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref4-a:t2",
+          "phase": "after",
+          "turn_id": "t2"
+        },
+        "seq": 4,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref5-br:Rd",
+          "phase": "before_restore",
+          "turn_id": "Rd"
+        },
+        "seq": 5,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref6-br:R2",
+          "phase": "before_restore",
+          "turn_id": "R2"
+        },
+        "seq": 6,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref7-a:R2",
+          "phase": "after",
+          "turn_id": "R2"
+        },
+        "seq": 7,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref8-r:t1",
+          "phase": "restored",
+          "turn_id": "t1"
+        },
+        "seq": 8,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      }
+    ],
+    "name": "S3 a failed undo saved an id, then an undo"
+  },
+  {
+    "after": [
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {
+        "t1": "R1"
+      },
+      {
+        "t1": "R1"
+      },
+      {
+        "t1": "R1"
+      },
+      {},
+      {},
+      {},
+      {
+        "t1": "R1"
+      }
+    ],
+    "events": [
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref1-b:t1",
+          "phase": "before",
+          "turn_id": "t1"
+        },
+        "seq": 1,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref2-a:t1",
+          "phase": "after",
+          "turn_id": "t1"
+        },
+        "seq": 2,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref3-b:t2",
+          "phase": "before",
+          "turn_id": "t2"
+        },
+        "seq": 3,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref4-a:t2",
+          "phase": "after",
+          "turn_id": "t2"
+        },
+        "seq": 4,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref5-br:R1",
+          "phase": "before_restore",
+          "turn_id": "R1"
+        },
+        "seq": 5,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref6-a:R1",
+          "phase": "after",
+          "turn_id": "R1"
+        },
+        "seq": 6,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref7-r:t1",
+          "phase": "restored",
+          "turn_id": "t1"
+        },
+        "seq": 7,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref8-br:R2",
+          "phase": "before_restore",
+          "turn_id": "R2"
+        },
+        "seq": 8,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref9-a:R2",
+          "phase": "after",
+          "turn_id": "R2"
+        },
+        "seq": 9,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref10-r:R1",
+          "phase": "restored",
+          "turn_id": "R1"
+        },
+        "seq": 10,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref11-br:R3",
+          "phase": "before_restore",
+          "turn_id": "R3"
+        },
+        "seq": 11,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref12-a:R3",
+          "phase": "after",
+          "turn_id": "R3"
+        },
+        "seq": 12,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref13-r:R2",
+          "phase": "restored",
+          "turn_id": "R2"
+        },
+        "seq": 13,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      }
+    ],
+    "name": "S4 put back, then undo the put-back"
+  },
+  {
+    "after": [
+      {},
+      {},
+      {},
+      {},
+      {},
+      {},
+      {
+        "t1": "R1"
+      },
+      {
+        "t1": "R1"
+      },
+      {
+        "t1": "R1"
+      },
+      {
+        "t1": "R1"
+      },
+      {
+        "t1": "R1",
+        "t2": "R2"
+      }
+    ],
+    "events": [
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref1-b:t1",
+          "phase": "before",
+          "turn_id": "t1"
+        },
+        "seq": 1,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref2-a:t1",
+          "phase": "after",
+          "turn_id": "t1"
+        },
+        "seq": 2,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref3-b:t2",
+          "phase": "before",
+          "turn_id": "t2"
+        },
+        "seq": 3,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref4-a:t2",
+          "phase": "after",
+          "turn_id": "t2"
+        },
+        "seq": 4,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref5-br:R1",
+          "phase": "before_restore",
+          "turn_id": "R1"
+        },
+        "seq": 5,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref6-a:R1",
+          "phase": "after",
+          "turn_id": "R1"
+        },
+        "seq": 6,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref7-r:t1",
+          "phase": "restored",
+          "turn_id": "t1"
+        },
+        "seq": 7,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref8-br:Rx",
+          "phase": "before_restore",
+          "turn_id": "Rx"
+        },
+        "seq": 8,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref9-br:R2",
+          "phase": "before_restore",
+          "turn_id": "R2"
+        },
+        "seq": 9,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref10-a:R2",
+          "phase": "after",
+          "turn_id": "R2"
+        },
+        "seq": 10,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref11-r:t2",
+          "phase": "restored",
+          "turn_id": "t2"
+        },
+        "seq": 11,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      }
+    ],
+    "name": "S5 a failed restore between an undo and the next"
+  },
+  {
+    "after": [
+      {},
+      {},
+      {},
+      {},
+      {
+        "t1": "R1"
+      },
+      {
+        "t1": "R1"
+      },
+      {
+        "t1": "R1"
+      },
+      {},
+      {},
+      {},
+      {
+        "t1": "R1"
+      },
+      {
+        "t1": "R1"
+      },
+      {
+        "t1": "R1"
+      },
+      {}
+    ],
+    "events": [
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref1-b:t1",
+          "phase": "before",
+          "turn_id": "t1"
+        },
+        "seq": 1,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref2-a:t1",
+          "phase": "after",
+          "turn_id": "t1"
+        },
+        "seq": 2,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref3-br:R1",
+          "phase": "before_restore",
+          "turn_id": "R1"
+        },
+        "seq": 3,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref4-a:R1",
+          "phase": "after",
+          "turn_id": "R1"
+        },
+        "seq": 4,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref5-r:t1",
+          "phase": "restored",
+          "turn_id": "t1"
+        },
+        "seq": 5,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref6-br:R2",
+          "phase": "before_restore",
+          "turn_id": "R2"
+        },
+        "seq": 6,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref7-a:R2",
+          "phase": "after",
+          "turn_id": "R2"
+        },
+        "seq": 7,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref8-r:R1",
+          "phase": "restored",
+          "turn_id": "R1"
+        },
+        "seq": 8,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref9-br:R3",
+          "phase": "before_restore",
+          "turn_id": "R3"
+        },
+        "seq": 9,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref10-a:R3",
+          "phase": "after",
+          "turn_id": "R3"
+        },
+        "seq": 10,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref11-r:R2",
+          "phase": "restored",
+          "turn_id": "R2"
+        },
+        "seq": 11,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref12-br:R4",
+          "phase": "before_restore",
+          "turn_id": "R4"
+        },
+        "seq": 12,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref13-a:R4",
+          "phase": "after",
+          "turn_id": "R4"
+        },
+        "seq": 13,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      },
+      {
+        "kind": "checkpoint",
+        "payload": {
+          "files": [
+            "a"
+          ],
+          "git_ref": "ref14-r:R3",
+          "phase": "restored",
+          "turn_id": "R3"
+        },
+        "seq": 14,
+        "session_id": "01a19bf2-0000-7000-8000-00000000f1f0",
+        "ts_ms": 0
+      }
+    ],
+    "name": "C undo, put back, undo the put-back, put it back again"
+  }
+]
