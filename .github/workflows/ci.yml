@@ -10,7 +10,8 @@ on:
 # A newer commit on a pull request replaces the run of the one before it:
 # without this every push queued a full run, and on a day with six pull
 # requests open the runs for commits already replaced held the runners.
-# Runs on main and on tags are never cancelled: each of those publishes.
+# Runs on main and on tags are never cancelled: each of those publishes,
+# and a cancelled one would leave its commit without an image.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
