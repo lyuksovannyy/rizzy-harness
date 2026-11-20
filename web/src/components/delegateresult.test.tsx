@@ -9,7 +9,7 @@ import { emptyView } from "../fold";
 import { LiveCtx } from "../lib/liveCtx";
 import type { Live } from "../live";
 import type { Item, SessionView } from "../types";
-import { childReport } from "./DelegateResult";
+import { childReport, GIVE_UP_MS } from "./DelegateResult";
 import { ToolCard } from "./ToolCard";
 
 type Tool = Extract<Item, { type: "tool" }>;
@@ -126,13 +126,94 @@ describe("the delegate card", () => {
 });
 
 describe("childReport", () => {
-  test("takes the quoted report only: not the status, a cut note's words, a note or unapplied text", () => {
-    const head = "session: x\nSub-agent @a finished: done. Its own report follows, every line behind \"| \"; the harness did not check it.\n";
-    expect(childReport(`${head}| one\n| two\n[a harness note]\n| unapplied diff\n`).text).toBe("one\ntwo");
-    const cut = childReport(`${head}| head\n(The report was cut: 5 of its 9 characters, after the first 2, are left out; the last 2 follow.)\n| tail\n`);
-    expect(cut.text).toBe("head\ntail");
-    expect(cut.cut).toContain("The report was cut");
-    expect(childReport(`${head}(It wrote no report.)\n`).text).toBe("");
-    expect(childReport("session: x\nold result without a quote\n").text).toBe("");
+  const head = "session: x\nSub-agent @a finished: done. Its own report follows, every line behind \"| \"; the harness did not check it.\n";
+  test("takes the quoted report only: not the status, a note or unapplied text", () => {
+    expect(childReport(`${head}| one\n| two\n[a harness note]\n| unapplied diff\n`)).toEqual({ head: "one\ntwo", tail: null, cut: null });
+    expect(childReport(`${head}(It wrote no report.)\n`).head).toBe("");
+    expect(childReport("session: x\nold result without a quote\n").head).toBe("");
+  });
+
+  test("a cut report keeps its halves apart, the harness's note between them", () => {
+    const r = childReport(`${head}| | a | b |\n| |---|---|\n(The report was cut: 5 of its 9 characters, after the first 2, are left out; the last 2 follow.)\n| | c | d |\n`);
+    expect(r.head).toBe("| a | b |\n|---|---|");
+    expect(r.tail).toBe("| c | d |");
+    expect(r.cut).toContain("The report was cut");
+  });
+
+  test("leading blank lines go, an indented first line keeps its indentation", () => {
+    expect(childReport(`${head}| \n| \n|     code()\n| text\n`).head).toBe("    code()\ntext");
+  });
+});
+
+describe("a cut and a long report in the card", () => {
+  test("the note sits between two rendered halves, written by the harness (a paragraph of its own)", async () => {
+    const out = `session: ${CHILD}\nSub-agent @advisor finished: done. Its own report follows, every line behind "| "; the harness did not check it.\n| first half\n(The report was cut: 1 of its 9 characters, after the first 2, are left out; the last 2 follow.)\n| second half\n`;
+    await show(delegate(out));
+    const kids = [...host.querySelector(".child-answer-text")!.children].map((c) => c.className || c.tagName);
+    expect(kids).toEqual(["md", "muted small child-cut", "md"]);
+    expect(host.querySelector(".child-cut")!.tagName).toBe("P");
+  });
+
+  test("what is cut off is inert (no focus order into it) until Show all, which is a real button", async () => {
+    const long = Array.from({ length: 40 }, (_, i) => `line ${i} [link](https://docs.example/${i})`).join("\n\n");
+    await show(delegate(output(long)));
+    const text = host.querySelector(".child-answer-text") as HTMLElement;
+    expect(text.hasAttribute("inert")).toBe(true);
+    const more = [...host.querySelectorAll("button")].find((b) => b.textContent === "Show all")!;
+    expect(more.tagName).toBe("BUTTON");
+    expect(more.getAttribute("aria-expanded")).toBe("false");
+    await act(async () => more.click());
+    expect(text.hasAttribute("inert")).toBe(false);
+    expect(more.getAttribute("aria-expanded")).toBe("true");
+  });
+});
+
+describe("the model's watch on the child's log", () => {
+  /** A stub that counts the page's follows of each session. */
+  function counting(viewOf: (watched: boolean) => SessionView | undefined) {
+    let n = 0;
+    const live = {
+      watch: vi.fn(() => void n++),
+      unwatch: vi.fn(() => void n--),
+      view: () => viewOf(n > 0),
+      subscribe: () => () => {},
+      version: 1,
+    } as unknown as Live;
+    return { live, count: () => n };
+  }
+  const tree = (live: Live) => (
+    <LiveCtx.Provider value={live}>
+      <ToolCard sessionId="s" item={delegate(output("answer"))} />
+    </LiveCtx.Provider>
+  );
+
+  test("returns to zero once the model is known", async () => {
+    const { live, count } = counting((w) => (w ? childView("m1") : undefined));
+    await act(async () => root.render(tree(live)));
+    await act(async () => root.render(tree(live)));
+    expect(host.querySelector(".child-model")!.textContent).toBe("m1");
+    expect(count()).toBe(0);
+  });
+
+  test("unmounting before the model is known releases the watch", async () => {
+    const { live, count } = counting(() => undefined);
+    await act(async () => root.render(tree(live)));
+    expect(count()).toBe(1);
+    act(() => root.render(<div />));
+    expect(count()).toBe(0);
+  });
+
+  test("a child the server does not know is let go after a while, not forever", async () => {
+    vi.useFakeTimers();
+    try {
+      const { live, count } = counting((w) => (w ? emptyView() : undefined));
+      await act(async () => root.render(tree(live)));
+      expect(count()).toBe(1);
+      await act(async () => void vi.advanceTimersByTime(GIVE_UP_MS + 100));
+      expect(count()).toBe(0);
+      expect(host.querySelector(".child-model")!.textContent).toBe("");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
