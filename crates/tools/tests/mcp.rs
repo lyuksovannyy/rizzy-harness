@@ -732,3 +732,204 @@ async fn two_tools_with_one_public_name_keep_the_first() {
     );
     assert!(all.contains(&twin), "{all}");
 }
+
+const GONE: &str = "no longer one of this chat's servers";
+
+fn project_table(dir: &tempfile::TempDir) -> Arc<SessionMcp> {
+    SessionMcp::at_always(
+        &BTreeMap::new(),
+        mcp::Home {
+            key: "k".into(),
+            workspace: dir.path().to_path_buf(),
+            pin: None,
+        },
+    )
+}
+
+/// A call in flight when its server is taken out of the table gets the
+/// removal's answer, not "the server ended ... started again at its next
+/// use": the stop was ours, nothing is counted against the restart limit
+/// and no restart is announced; later calls answer the same and the server
+/// is started once. A server that was NOT removed keeps all its restarts.
+#[tokio::test]
+async fn a_call_in_flight_when_its_server_is_removed_gets_the_removal_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = project_table(&dir);
+    let started = dir.path().join("started");
+    let other_started = dir.path().join("other-started");
+    let proj = server(&["--started", started.to_str().unwrap()]);
+    let other = server(&["--started", other_started.to_str().unwrap()]);
+    let mut given = BTreeMap::new();
+    given.insert("proj".to_string(), proj);
+    given.insert("other".to_string(), other.clone());
+    s.set_project(&given, vec![]);
+    let l = s.load(&ctx(&dir), &[]).await;
+    let held = tool(&l.tools, "mcp__proj__hang").clone();
+    let echo = tool(&l.tools, "mcp__proj__echo").clone();
+    let die = tool(&l.tools, "mcp__other__die").clone();
+    let d = dir.path().to_path_buf();
+    let h = tokio::spawn(async move { held.run(&ToolCtx::new(&d), json!({})).await });
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let mut kept = BTreeMap::new();
+    kept.insert("other".to_string(), other);
+    s.set_project(&kept, vec![]);
+    let r = h.await.unwrap();
+    assert!(!r.ok && r.output.contains(GONE), "in flight: {}", r.output);
+    assert!(
+        !r.output.contains("started again") && !r.output.contains("restart"),
+        "an ordered stop was announced as a failure: {}",
+        r.output
+    );
+    for _ in 0..3 {
+        let r = echo.run(&ctx(&dir), json!({"text": "x"})).await;
+        assert!(!r.ok && r.output.contains(GONE), "after: {}", r.output);
+        assert!(!r.output.contains("restart"), "{}", r.output);
+    }
+    assert_eq!(pids(&started).len(), 1, "a removed server started again");
+    // A crash of a server that stayed is still counted from the start.
+    let r = die.run(&ctx(&dir), json!({})).await;
+    assert!(
+        !r.ok && r.output.contains("restart 1 of the 3"),
+        "the other server's count moved: {}",
+        r.output
+    );
+    s.close();
+    assert!(s.wait_gone(mcp::STOP_WAIT).await);
+}
+
+/// A call issued once `set_project` has returned must not reach the
+/// removed server, also while its process is still up for an instant (its
+/// exit is published a moment after the stop order). The server's own log
+/// of received calls shows none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_call_after_the_removal_never_reaches_the_server() {
+    let dir = tempfile::tempdir().unwrap();
+    for round in 0..12 {
+        let s = project_table(&dir);
+        let calls = dir.path().join(format!("calls-{round}"));
+        let started = dir.path().join(format!("started-{round}"));
+        let mut given = BTreeMap::new();
+        given.insert(
+            "proj".to_string(),
+            server(&[
+                "--started",
+                started.to_str().unwrap(),
+                "--calls",
+                calls.to_str().unwrap(),
+            ]),
+        );
+        s.set_project(&given, vec![]);
+        let l = s.load(&ctx(&dir), &[]).await;
+        let echo = tool(&l.tools, "mcp__proj__echo").clone();
+        let ok = echo.run(&ctx(&dir), json!({"text": "first"})).await;
+        assert!(ok.ok, "{}", ok.output);
+        s.set_project(&BTreeMap::new(), vec![]);
+        let r = echo.run(&ctx(&dir), json!({"text": "late"})).await;
+        assert!(
+            !r.ok && r.output.contains(GONE) && !r.output.contains("restart"),
+            "round {round}: {}",
+            r.output
+        );
+        let by = Instant::now() + Duration::from_secs(10);
+        while alive(pids(&started)[0]) {
+            assert!(Instant::now() < by, "the removed server still runs");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let log = std::fs::read_to_string(&calls).unwrap_or_default();
+        assert_eq!(
+            log.lines().count(),
+            1,
+            "round {round}: the server saw {log:?}"
+        );
+        s.close();
+    }
+}
+
+/// A removal that lands while the server starts (slow to answer
+/// `initialize`): afterwards no process of it is alive and the call that
+/// started it got the removal's answer (the stop is ordered under the
+/// lock `retire` takes, so a process cannot be published after it).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_removal_during_a_start_leaves_no_process_and_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = project_table(&dir);
+    let started = dir.path().join("started");
+    let mut given = BTreeMap::new();
+    given.insert(
+        "slow".to_string(),
+        server(&[
+            "--slow-init",
+            "1200",
+            "--started",
+            started.to_str().unwrap(),
+        ]),
+    );
+    s.set_project(&given, vec![]);
+    let c = ctx(&dir);
+    let load = s.load(&c, &[]);
+    let taker = async {
+        while pids(&started).is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        s.set_project(&BTreeMap::new(), vec![]);
+    };
+    let (l, ()) = tokio::join!(load, taker);
+    assert!(l.tools.is_empty(), "{:?}", l.tools.len());
+    assert!(
+        l.notes.iter().any(|n| n.contains(GONE)),
+        "the start's call was not told: {:?}",
+        l.notes
+    );
+    assert!(
+        !l.notes.iter().any(|n| n.contains("restart")),
+        "{:?}",
+        l.notes
+    );
+    let pid = pids(&started)[0];
+    let by = Instant::now() + Duration::from_secs(10);
+    while alive(pid) {
+        assert!(Instant::now() < by, "the server of a removed slot runs");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(pids(&started).len(), 1);
+}
+
+/// The window between the start arm's check and its publishing the
+/// process: removals racing starts on many threads leave no process
+/// behind. (The window is a few instructions wide, so this is a stress, not
+/// a proof; the argument is in the comment on `Slot::retire`.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn removals_racing_starts_leave_nothing_running() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut all = Vec::new();
+    for round in 0..30u64 {
+        let s = project_table(&dir);
+        let started = dir.path().join(format!("race-{round}"));
+        let mut given = BTreeMap::new();
+        given.insert(
+            "r".to_string(),
+            server(&["--started", started.to_str().unwrap()]),
+        );
+        s.set_project(&given, vec![]);
+        let c = ctx(&dir);
+        let load = s.load(&c, &[]);
+        let taker = async {
+            tokio::time::sleep(Duration::from_millis(40 + (round % 8) * 12)).await;
+            s.set_project(&BTreeMap::new(), vec![]);
+        };
+        let _ = tokio::join!(load, taker);
+        all.push(started);
+    }
+    let by = Instant::now() + Duration::from_secs(15);
+    for started in &all {
+        for pid in pids(started) {
+            while alive(pid) {
+                assert!(
+                    Instant::now() < by,
+                    "a removed server's process runs: {pid}"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+    }
+}

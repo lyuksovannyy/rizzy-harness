@@ -763,9 +763,36 @@ impl Slot {
     }
 
     /// Out of its table for good: stopped, and never started again.
+    ///
+    /// The flag is stored BEFORE `kill` takes the `live` lock;
+    /// [`Self::publish`] checks the flag INSIDE that same lock. Either
+    /// `publish` holds the lock first (then `kill` waits for it, finds the
+    /// process it published and stops it), or `kill` has had the lock
+    /// first (then the flag was stored before that, and `publish` sees it
+    /// and stops its own process). No order leaves a process started for a
+    /// retired slot that nobody stops.
     fn retire(&self) {
         self.retired.store(true, Ordering::SeqCst);
         self.kill();
+    }
+
+    /// What every call of a retired slot is told.
+    fn removed_text() -> String {
+        "it is no longer one of this chat's servers (its approval was removed or changed, or it \
+         left the repository's .mcp.json)"
+            .into()
+    }
+
+    /// Make a started process the slot's live one, unless the slot was
+    /// retired or its table closed meanwhile (see [`Self::retire`]): then
+    /// nothing is published and the caller stops the process.
+    fn publish(&self, live: &Live, closed: &AtomicBool) -> bool {
+        let mut slot = self.live.lock().unwrap_or_else(|p| p.into_inner());
+        if self.retired.load(Ordering::SeqCst) || closed.load(Ordering::SeqCst) {
+            return false;
+        }
+        *slot = Some(live.clone());
+        true
     }
 
     /// Where its timeouts are set, for the words of a failure.
@@ -830,6 +857,12 @@ impl Slot {
     /// Running, or started now: its listing.
     async fn ensure(&self, ctx: &ToolCtx, closed: &AtomicBool) -> Result<Listing, String> {
         let mut st = self.state.lock().await;
+        // Before anything else, also for a process that is still up (its
+        // exit is published a moment after the stop order): a removed
+        // server answers nothing.
+        if self.retired.load(Ordering::SeqCst) {
+            return Err(Self::removed_text());
+        }
         let ended = match &*st {
             State::Up(up) => {
                 let exit = up.live.exited.borrow().clone();
@@ -860,13 +893,6 @@ impl Slot {
         if let State::Failed(why) = &*st {
             return Err(why.clone());
         }
-        if self.retired.load(Ordering::SeqCst) {
-            return Err(
-                "it is no longer one of this chat's servers (its approval was removed or \
-                 changed, or it left the repository's .mcp.json)"
-                    .into(),
-            );
-        }
         if closed.load(Ordering::SeqCst) {
             return Err("the chat's servers were stopped".into());
         }
@@ -875,20 +901,20 @@ impl Slot {
             _ = ctx.cancel.cancelled() => return Err("the turn was stopped".into()),
         };
         match started {
-            // Taken out of the table, or the chat's servers stopped, while
-            // it started (a removal does not wait for a start): it does not
-            // stay up, and no call runs on it.
-            Ok(Ok(up)) if self.retired.load(Ordering::SeqCst) || closed.load(Ordering::SeqCst) => {
-                up.live.kill.cancel();
-                Err(
-                    "it is no longer one of this chat's servers (it was taken out while it \
-                     started)"
-                        .into(),
-                )
-            }
             Ok(Ok(mut up)) => {
                 up.live.generation = self.generations.fetch_add(1, Ordering::SeqCst) + 1;
-                *self.live.lock().unwrap_or_else(|p| p.into_inner()) = Some(up.live.clone());
+                // Taken out of the table, or the chat's servers stopped,
+                // while it started (a removal does not wait for a start):
+                // it does not stay up, and no call runs on it. The check
+                // is under the lock `retire` takes ([`Self::publish`]).
+                if !self.publish(&up.live, closed) {
+                    up.live.kill.cancel();
+                    return Err(
+                        "it is no longer one of this chat's servers (it was taken out while it \
+                         started)"
+                            .into(),
+                    );
+                }
                 let listed = up.listed.clone();
                 *st = State::Up(Box::new(up));
                 self.touch();
@@ -984,6 +1010,15 @@ impl Slot {
                 // Stopped by the harness (the chat closed, the node
                 // stopping): not the server's failure.
                 if exit.as_ref().is_some_and(|e| e.ordered) {
+                    // Taken out of the table: not the chat's servers any
+                    // more, and the stop was ours (nothing counted).
+                    if self.retired.load(Ordering::SeqCst) {
+                        return ToolOutcome::err(format!(
+                            "MCP server `{}` is not available: {}",
+                            self.name,
+                            Self::removed_text()
+                        ));
+                    }
                     self.take_down(generation, "").await;
                     return ToolOutcome::err(format!(
                         "MCP server `{}` was stopped by the harness during the call",
@@ -1019,6 +1054,15 @@ impl Slot {
                     exited.wait_for(Option::is_some),
                 )
                 .await;
+                // The removal closed the transport under this call: its
+                // answer is the removal's, and it counts nothing.
+                if self.retired.load(Ordering::SeqCst) {
+                    return ToolOutcome::err(format!(
+                        "MCP server `{}` is not available: {}",
+                        self.name,
+                        Self::removed_text()
+                    ));
+                }
                 let why = if oversize.load(Ordering::SeqCst) {
                     over_cap()
                 } else {

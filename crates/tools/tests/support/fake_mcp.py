@@ -11,6 +11,8 @@ other request with "method not found". Flags:
   --hang-init      never answer `initialize`
   --slow-init MS   answer `initialize` after MS milliseconds
   --started PATH   append "started <pid>" to PATH when it starts
+  --calls PATH     append "call <tool>" to PATH for every `tools/call` it
+                   receives (before it answers)
   --marker WORD    ignored (lets a test find the process in /proc)
   --say-env NAME   print "token <value of NAME>" to stderr and exit 1 at once
   --tool-names A,B the tools are these (echo's behaviour), no others
@@ -145,6 +147,11 @@ def call(name, arguments):
 
 page = int(value("--page", "0"))
 
+
+def log_call(params):
+    with open(value("--calls"), "a") as f:
+        f.write("call %s\n" % params.get("name"))
+
 for line in sys.stdin.buffer:
     try:
         msg = json.loads(line)
@@ -153,6 +160,8 @@ for line in sys.stdin.buffer:
     if "id" not in msg or "method" not in msg:
         continue  # a notification, or an answer to us
     mid, method, params = msg["id"], msg["method"], msg.get("params") or {}
+    if method == "tools/call" and value("--calls"):
+        log_call(params)
     if method == "initialize":
         if flag("--hang-init"):
             continue
