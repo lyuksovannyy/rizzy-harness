@@ -2511,6 +2511,21 @@ longer silently ignored). A number or `true`/`false` sent as a string
 (`"timeout_secs": "300"`) is read as the number or the boolean, and the call
 card, the approval card and the tool all see the corrected value. A call sent
 with empty arguments (a tool that takes none, such as `board`) is read as `{}`.
+`edit` also has a **line form**: `read` starts its result with a header line
+`[path#TAG]` (and `edit` and `write` end theirs with one), and a call
+`{path, tag, lines}` replaces rows by number without retyping the old text:
+`lines` is a list of `{from, to, text}` (replace rows `from` to `to`; empty
+`text` deletes them) and `{after, text}` (insert after row `after`; 0 is the
+top). Row numbers are those of the tagged version, the operations must not
+overlap, and every row you name must have been shown to the agent (by `read`,
+an edit's result or a refusal; a row `read` showed cut with `…` cannot be
+named: use `old_string` for it). A tag the session does not know (a new
+session, a restart, a version dropped from memory), or rows not shown, make
+the call refuse and print those rows, which then count as shown. If the file
+changed since the tag, the edit is made only where the rows it replaces did
+not change. `old_string` and the line form cannot be given together. The tag is
+a lookup key, not a secret.
+
 `write` and `edit` also read the names other harnesses use: `file_text` for
 `content`, `old_str` and `new_str` for `old_string` and `new_string`. The call
 is then the same call under the real names, for the card, the approval, "allow

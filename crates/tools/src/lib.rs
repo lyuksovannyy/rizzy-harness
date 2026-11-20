@@ -15,6 +15,9 @@ pub use bash::{
     DEFAULT_TIMEOUT_MAX_S, MAX_TIMEOUT_MAX_S, MIN_TIMEOUT_MAX_S, workdir as bash_workdir,
 };
 mod edit;
+mod edit_lines;
+#[cfg(test)]
+mod edit_lines_tests;
 #[cfg(test)]
 mod edit_tests;
 pub mod env;

@@ -250,3 +250,156 @@ async fn a_deleted_session_is_forgotten() {
     b.forget_session(sid);
     assert!(b.seen.session(sid).get(&f).is_none());
 }
+
+/// A host where a `read` runs unasked (an "accept all" chat): refusals
+/// before the card may print rows.
+#[derive(Default)]
+struct OpenHost(Mutex<Vec<EventKind>>);
+
+#[async_trait::async_trait]
+impl TurnHost for OpenHost {
+    async fn emit(&self, kind: EventKind) -> Result<(), harness_core::backend::LogError> {
+        self.0.lock().unwrap().push(kind);
+        Ok(())
+    }
+    async fn approve(&self, _: &str, _: &str, _: &Value, _: ToolRisk) -> Decision {
+        Decision::Allow
+    }
+    fn runs_unasked(&self, _: &str, _: ToolRisk) -> bool {
+        true
+    }
+}
+
+async fn turn_open(
+    b: &NativeBackend,
+    sid: harness_core::SessionId,
+    history: &[harness_core::RawEvent],
+    dir: &std::path::Path,
+    script: Value,
+) -> Vec<EventKind> {
+    let host = OpenHost::default();
+    b.run_turn(TurnCtx {
+        session_id: sid,
+        turn_id: "t".into(),
+        history: history.to_vec(),
+        user_text: format!("script: {script}"),
+        cwd: dir.to_path_buf(),
+        model: "mock".into(),
+        agent: None,
+        compare: vec![],
+        parent_session: None,
+        extra: Default::default(),
+        cancel: Default::default(),
+        host: &host,
+    })
+    .await;
+    host.0.into_inner().unwrap()
+}
+
+/// The line form of `edit` through the loop: a `read` in one turn gives the
+/// tag, a line-form edit in the next works from the same backend's memory;
+/// after a restart (the table rebuilt from the log alone, no snapshot) the
+/// call is refused with the rows, and the resend with the printed tag works.
+#[tokio::test]
+async fn a_line_form_edit_works_across_turns_and_after_a_restart_is_refused_with_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("f.txt");
+    std::fs::write(&f, "one\ntwo\nthree\nfour\n").unwrap();
+    let tag = |t: &str| {
+        let h = harness_tools::seen::sha256(t.as_bytes());
+        harness_tools::seen::tag(&h)
+    };
+    let sid = harness_core::SessionId::new();
+    let b = backend();
+    let mut log = Vec::new();
+    let ev = turn(
+        &b,
+        sid,
+        &log,
+        dir.path(),
+        json!([call("read", json!({"path": "f.txt"}))]),
+    )
+    .await;
+    let r = results(&ev);
+    assert!(
+        r[0].output.starts_with('[')
+            && r[0]
+                .output
+                .contains(&format!("#{}]", tag("one\ntwo\nthree\nfour\n")))
+    );
+    append(&mut log, sid, ev);
+
+    // Next turn, same backend: the snapshot is there.
+    let ev = turn(
+        &b,
+        sid,
+        &log,
+        dir.path(),
+        json!([call(
+            "edit",
+            json!({"path": "f.txt", "tag": tag("one\ntwo\nthree\nfour\n"),
+                   "lines": [{"from": 2, "to": 2, "text": "TWO"}]})
+        )]),
+    )
+    .await;
+    let r = results(&ev);
+    assert!(r[0].ok, "{}", r[0].output);
+    assert_eq!(
+        std::fs::read_to_string(&f).unwrap(),
+        "one\nTWO\nthree\nfour\n"
+    );
+    append(&mut log, sid, ev);
+
+    // A new backend: the log gives the hash, not the text. The tag is
+    // unknown, the rows are printed, and the resend works.
+    let new_tag = tag("one\nTWO\nthree\nfour\n");
+    let ev = turn_open(
+        &backend(),
+        sid,
+        &log,
+        dir.path(),
+        json!([call(
+            "edit",
+            json!({"path": "f.txt", "tag": new_tag,
+                   "lines": [{"from": 3, "to": 3, "text": "THREE"}]})
+        )]),
+    )
+    .await;
+    let r = results(&ev);
+    assert!(
+        !r[0].ok && r[0].output.contains("\tthree\n"),
+        "{}",
+        r[0].output
+    );
+    assert_eq!(
+        std::fs::read_to_string(&f).unwrap(),
+        "one\nTWO\nthree\nfour\n"
+    );
+    let ev = turn_open(
+        &backend(),
+        sid,
+        &log,
+        dir.path(),
+        json!([
+            call(
+                "edit",
+                json!({"path": "f.txt", "tag": new_tag,
+                       "lines": [{"from": 3, "to": 3, "text": "THREE"}]})
+            ),
+            call(
+                "edit",
+                json!({"path": "f.txt", "tag": new_tag,
+                       "lines": [{"from": 3, "to": 3, "text": "THREE"}]})
+            ),
+        ]),
+    )
+    .await;
+    let r = results(&ev);
+    // Within one turn the refusal's rows count; the second call is the
+    // resend (the first only printed them).
+    assert!(!r[0].ok && r[1].ok, "{} / {}", r[0].output, r[1].output);
+    assert_eq!(
+        std::fs::read_to_string(&f).unwrap(),
+        "one\nTWO\nTHREE\nfour\n"
+    );
+}
