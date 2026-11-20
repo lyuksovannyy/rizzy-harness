@@ -4214,11 +4214,11 @@ turns them on.
 The rules are the chats' own. `web_fetch` reads public addresses only
 (loopback, private ranges, link-local and the cloud metadata address are
 refused, after a redirect and after a DNS answer too). It fetches only a URL
-that you wrote, that a search returned, that a page it fetched linked, or that
-stands in a file the agent `read` (so a link in the repository's own docs is
-fetchable, and a hostile file can name a URL the agent may then fetch). It does
-not fetch a URL that only a command printed, nor one the model put together
-(a real host with a secret from a file in its query). `web_search` has no such
+that you wrote, that a search returned, or that a page it fetched linked: not
+one that stands in a file in the folder and not one a command printed, because
+an agent that can write files could otherwise put a URL with a secret in it into
+a file, read it back and fetch it (paste the link, or let it search). It does
+not fetch one the model put together either (a real host with a secret from a file in its query). `web_search` has no such
 rule: its query is whatever the agent writes and goes to your search engine, so
 it can carry text the agent has read; Ask mode runs both tools without a card
 (they only read), Ask-every-call asks for each, plan mode lets them run.
