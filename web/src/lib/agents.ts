@@ -23,6 +23,15 @@ export function isTag(a: Agent): boolean {
   return a.features?.as_agent === false && a.features?.as_subagent !== false;
 }
 
+/**
+ * The server refuses a message in a chat whose agent runs only as a
+ * sub-agent (`Resolver::top_level` in crates/master/src/resolver.rs:
+ * `SubagentOnly`). The same fact, for a chat's reply box (X.41).
+ */
+export function takesNoChat(a: Agent | undefined): boolean {
+  return a?.features?.as_agent === false;
+}
+
 /** Agents the `@` popup offers: the pickable ones and the sub-agent-only ones (marked, as tags). */
 export function mentionable(agents: Agent[]): Agent[] {
   return agents.filter((a) => a.features?.as_agent !== false || isTag(a));

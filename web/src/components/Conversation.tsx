@@ -2,7 +2,7 @@
 // new-tab home screen stays small.
 import { own } from "../emptyView";
 import "../lib/i18nPages";
-import { AtSign, Download, FileText, Image as ImageIcon, Package, Trash2 } from "lucide-react";
+import { AtSign, Download, FileText, Image as ImageIcon, Package, Square, Trash2 } from "lucide-react";
 import { isValidElement, lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { api } from "../api";
 import { pageApi } from "../apiPages";
@@ -41,6 +41,7 @@ import { ChatTitle } from "./ChatTitle";
 import { ThinkingRow } from "./ThinkingRow";
 import { DeleteChat } from "./DeleteChat";
 import { useAvatarState } from "./avatarState";
+import { useSubagentOnly } from "../lib/useSubagentOnly";
 import { Markdown } from "./Markdown";
 import { Mentioned } from "./Mentioned";
 import { peersLeft } from "../lib/peers";
@@ -425,6 +426,7 @@ export default function Conversation(props: {
   const answering = view?.running_agent?.agent_id ?? activeAgent;
   const facing = props.agents.find((a) => a.id === answering);
   const sessionAgent = props.agents.find((a) => a.id === activeAgent);
+  const subagentOnly = useSubagentOnly(!!props.row?.parent_id, props.row?.workspace_id ?? null, activeAgent);
   const notes = fallbackNotes(items);
   const routine = props.row?.routine;
   useRunSeen(routine);
@@ -1013,6 +1015,19 @@ export default function Conversation(props: {
           )}
           {carryErr && <div className="error-text">{carryErr}</div>}
           {pickErr && <div className="error-text">{pickErr}</div>}
+          {subagentOnly ? (
+            <div className="tag-only-row">
+              <p className="muted small tag-only" role="note">
+                {agentName(activeAgent)} only takes tasks from other agents, so there is nobody to answer here.
+              </p>
+              {/* The composer's Stop, for a sub-agent that goes on after its parent's turn ended. */}
+              {running && (
+                <button type="button" className="send stop" onClick={() => void pageApi.cancel(sessionId)} aria-label={t("composer.stop")}>
+                  <Square size={16} fill="currentColor" />
+                </button>
+              )}
+            </div>
+          ) : (
           <Composer
             where="session"
             agents={props.agents}
@@ -1077,6 +1092,7 @@ export default function Conversation(props: {
             held={held.map((o) => o.text).join("\n")}
             onSubmit={(s) => send(s)}
           />
+          )}
         </div>
       </div>
         </div>

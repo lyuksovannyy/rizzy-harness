@@ -1305,3 +1305,136 @@ async fn tool_prompt(s: &Server, ws: &str) -> Option<String> {
         .get("tool")
         .map(|t| t.spec.system_prompt.clone())
 }
+
+/// X.41: deleting an agent takes its handle out of every `delegate_to` list
+/// that could name it, so a new agent with the same handle is not a delegate
+/// by accident. A workspace agent's deletion touches that workspace's lists
+/// only; the server's deletion touches the server's and every workspace's.
+#[tokio::test]
+async fn deleting_an_agent_removes_its_handle_from_delegate_lists() {
+    let s = start().await;
+    let bo = user(&s, "bo").await;
+    let a = team(&s, &bo, "Acme").await;
+    let named = |id: &str| json!({"id": id, "name": format!("Agent {id}"), "prompt": "p", "features": features()});
+    let lead = |id: &str, list: Value| {
+        let mut f = features();
+        f["delegate"] = json!(true);
+        json!({"id": id, "name": format!("Lead {id}"), "prompt": "p", "features": f, "delegate_to": list})
+    };
+    let delegates =
+        |v: &Value| -> Vec<String> { serde_json::from_value(v["delegates"].clone()).unwrap() };
+    // Workspace scope: W lists the workspace's X; the server has its own X-handle agent "twin".
+    let (st, v) = token(
+        &s,
+        Method::POST,
+        "/api/agents?scope=server",
+        Some(named("twin")),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (st, v) = token(
+        &s,
+        Method::POST,
+        "/api/agents?scope=server",
+        Some(lead("slead", json!(["twin"]))),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(create(&s, &bo, &a, named("x")).await.0, StatusCode::OK);
+    let (st, v) = create(&s, &bo, &a, lead("w", json!(["x", "twin"]))).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert_eq!(v["delegate_to"], json!(["x", "twin"]));
+    // A server agent with the same handle as the workspace's x, listing it too.
+    let (st, v) = call(
+        &s,
+        Method::DELETE,
+        &format!("/api/agents/x?workspace={a}"),
+        None,
+        &bo,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let w = get(&s, &format!("/api/agents/w?workspace={a}"), &bo).await;
+    assert_eq!(w["delegate_to"], json!(["twin"]), "{w}");
+    // A new x is not a delegate of w.
+    assert_eq!(create(&s, &bo, &a, named("x")).await.0, StatusCode::OK);
+    let w = get(&s, &format!("/api/agents/w?workspace={a}"), &bo).await;
+    assert_eq!(delegates(&w), ["twin"], "{w}");
+
+    // Server scope: deleting "twin" clears it from the server's list and from w's.
+    let (st, v) = token(&s, Method::DELETE, "/api/agents/twin?scope=server", None).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let (_, sl) = token(&s, Method::GET, "/api/agents/slead", None).await;
+    assert_eq!(sl["delegate_to"], json!([]), "{sl}");
+    let w = get(&s, &format!("/api/agents/w?workspace={a}"), &bo).await;
+    // Narrowed stays narrowed: present and empty means NO sub-agents, never all.
+    assert_eq!(w["delegate_to"], json!([]), "{w}");
+    assert!(delegates(&w).is_empty(), "{w}");
+    // A new "twin" is in nobody's stored list, and w still hands work to nobody.
+    assert_eq!(
+        token(
+            &s,
+            Method::POST,
+            "/api/agents?scope=server",
+            Some(named("twin"))
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let w = get(&s, &format!("/api/agents/w?workspace={a}"), &bo).await;
+    assert_eq!(w["delegate_to"], json!([]));
+    assert!(delegates(&w).is_empty(), "{w}");
+    let (_, sl) = token(&s, Method::GET, "/api/agents/slead", None).await;
+    assert!(delegates(&sl).is_empty(), "{sl}");
+}
+
+/// A workspace agent's deletion leaves a server agent's list alone, even
+/// when the server's list holds the same handle.
+#[tokio::test]
+async fn a_workspace_deletion_leaves_the_servers_lists() {
+    let s = start().await;
+    let bo = user(&s, "bo").await;
+    let a = team(&s, &bo, "Acme").await;
+    let named = |id: &str| json!({"id": id, "name": format!("Agent {id}"), "prompt": "p", "features": features()});
+    let mut f = features();
+    f["delegate"] = json!(true);
+    assert_eq!(
+        token(
+            &s,
+            Method::POST,
+            "/api/agents?scope=server",
+            Some(named("x"))
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (st, v) = token(
+        &s,
+        Method::POST,
+        "/api/agents?scope=server",
+        Some(
+            json!({"id": "slead", "name": "S", "prompt": "p", "features": f, "delegate_to": ["x"]}),
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    // The workspace cannot make an "x" (a server agent has the handle), so
+    // use another workspace agent and delete it: nothing of the server's moves.
+    assert_eq!(create(&s, &bo, &a, named("y")).await.0, StatusCode::OK);
+    assert_eq!(
+        call(
+            &s,
+            Method::DELETE,
+            &format!("/api/agents/y?workspace={a}"),
+            None,
+            &bo
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (_, sl) = token(&s, Method::GET, "/api/agents/slead", None).await;
+    assert_eq!(sl["delegate_to"], json!(["x"]), "{sl}");
+}

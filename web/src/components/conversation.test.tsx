@@ -18,8 +18,9 @@ import type { Features, Item, RoutineMark, SessionRow, SessionView } from "../ty
 const prompted = vi.fn((..._a: unknown[]) => Promise.resolve({ ok: true }));
 const call = vi.fn((..._a: unknown[]) => Promise.resolve({ ok: true }));
 const features = vi.fn<(scope: unknown) => Promise<Features>>();
+const agentsOf = vi.fn<(scope: unknown) => Promise<{ agents: unknown[] }>>(() => Promise.resolve({ agents: [] }));
 vi.mock("../api", () => ({
-  api: { features: (s: unknown) => features(s), prompt: (...a: unknown[]) => prompted(...a) },
+  api: { features: (s: unknown) => features(s), prompt: (...a: unknown[]) => prompted(...a), agents: (s: unknown) => agentsOf(s) },
   call: (...a: unknown[]) => call(...a),
   HttpError: Error,
 }));
@@ -31,6 +32,7 @@ vi.mock("../apiPages", () => ({
     restoreTurn: vi.fn(() => Promise.resolve({ ok: true })),
     retryTurn: vi.fn(() => Promise.resolve({ ok: true })),
     setAgent: vi.fn(),
+    cancel: vi.fn(() => Promise.resolve({ ok: true })),
   },
 }));
 const artifactsApi = { forSession: vi.fn(() => Promise.resolve([])), save: vi.fn(() => Promise.resolve({ requested: true })) };
@@ -752,5 +754,61 @@ describe("usage in the header during a turn", () => {
     push(parent, SID, "turn_ended", { turn_id: "t", reason: "completed" });
     await draw();
     expect(header()).toContain("3.7k tokens");
+  });
+});
+
+describe("a sub-agent's chat (X.41)", () => {
+  const agent = (id: string, as_agent: boolean) =>
+    ({ id, name: id === "advisor" ? "Advisor" : "General", features: { as_agent, as_subagent: true }, avatar: { shape: "circle", eyes: "round", accent: "blue" }, unavailable: [], fallbacks: [] }) as unknown as import("../types").Agent;
+  // The chat's own workspace's agents decide, not the page's list (which may be another workspace's).
+  const render = async (row: SessionRow, listed: import("../types").Agent[], running = false, page: import("../types").Agent[] = listed) => {
+    agentsOf.mockResolvedValue({ agents: listed });
+    current = { ...view([]), running_turn: running ? "t1" : null };
+    await act(async () => root.render(<Conversation live={live} sessionId={SID} row={row} nodes={[]} agents={page} models={[]} />));
+    await act(() => new Promise((r) => setTimeout(r, 0)));
+  };
+  const stop = () => host.querySelector<HTMLButtonElement>("button.stop");
+
+  test("an agent that works only as a sub-agent has no reply box, only a line", async () => {
+    await render(sessionRow({ agent_id: "advisor", parent_id: "parent-1" }), [agent("advisor", false), agent("general", true)]);
+    expect(host.querySelector("textarea")).toBeNull();
+    const line = host.querySelector(".tag-only")!;
+    expect(line.textContent).toContain("Advisor only takes tasks from other agents");
+    // The banner at the top is the one link back.
+    expect(line.querySelector("a")).toBeNull();
+    expect(host.querySelectorAll('a[href="#/s/parent-1"]')).toHaveLength(1);
+    expect(stop()).toBeNull();
+  });
+
+  test("while its turn runs the line has the composer's Stop, which cancels it", async () => {
+    await render(sessionRow({ agent_id: "advisor", parent_id: "parent-1" }), [agent("advisor", false)], true);
+    expect(host.querySelector("textarea")).toBeNull();
+    expect(stop()!.getAttribute("aria-label")).toBe("Stop");
+    await act(async () => stop()!.click());
+    expect(api.cancel).toHaveBeenCalledWith(SID);
+  });
+
+  test("a sub-agent chat whose agent can also answer a person keeps its reply box", async () => {
+    await render(sessionRow({ agent_id: "general", parent_id: "parent-1" }), [agent("advisor", false), agent("general", true)]);
+    expect(host.querySelector("textarea")).not.toBeNull();
+    expect(host.querySelector(".tag-only")).toBeNull();
+  });
+
+  test("an ordinary chat, an agent not known in the chat's workspace, and a failed lookup keep the box", async () => {
+    await render(sessionRow({ agent_id: "advisor", parent_id: null }), [agent("advisor", false)]);
+    expect(host.querySelector("textarea")).not.toBeNull();
+    await render(sessionRow({ agent_id: "advisor", parent_id: "parent-1" }), []);
+    expect(host.querySelector("textarea")).not.toBeNull();
+    agentsOf.mockRejectedValue(new Error("no"));
+    await act(async () => root.render(<Conversation live={live} sessionId={SID} row={sessionRow({ agent_id: "advisor", parent_id: "p" })} nodes={[]} agents={[]} models={[]} />));
+    await act(() => new Promise((r) => setTimeout(r, 0)));
+    expect(host.querySelector("textarea")).not.toBeNull();
+  });
+
+  test("the page's own list (another workspace's) does not lock a chat out", async () => {
+    // The page holds a list where @advisor is sub-agent-only; the chat's workspace says it can answer.
+    await render(sessionRow({ agent_id: "advisor", parent_id: "parent-1", workspace_id: "w2" }), [agent("advisor", true)], false, [agent("advisor", false)]);
+    expect(host.querySelector("textarea")).not.toBeNull();
+    expect(agentsOf).toHaveBeenCalledWith({ workspace: "w2" });
   });
 });

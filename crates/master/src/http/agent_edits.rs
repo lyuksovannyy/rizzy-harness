@@ -134,6 +134,9 @@ async fn detail(
     let (own, _) = m.place_edits(place).await;
     let server = m.agent_edits();
     v["own"] = json!(own.custom.contains_key(id));
+    // The stored "may delegate to" list (the resolved delegates are
+    // `delegates`); entries may name agents that are gone.
+    v["delegate_to"] = json!(own.custom.get(id).and_then(|c| c.delegates.as_ref()));
     v["server_instructions"] = json!("");
     match own.custom.get(id) {
         Some(c) => {
@@ -208,6 +211,9 @@ pub(super) struct NewAgent {
     aliases: Vec<String>,
     #[serde(default)]
     category: Option<String>,
+    /// Who it may delegate to; absent or null: every sub-agent; `[]`: none.
+    #[serde(default)]
+    delegate_to: Option<Vec<String>>,
 }
 
 pub(super) async fn create_agent(
@@ -225,6 +231,7 @@ pub(super) async fn create_agent(
         features: b.features,
         aliases: b.aliases,
         category: b.category,
+        delegates: b.delegate_to,
     };
     m.save_custom_agent(&place, &id, c, true).await?;
     Ok(Json(
@@ -246,6 +253,16 @@ pub(super) struct AgentChange {
     features: Option<Features>,
     aliases: Option<Vec<String>>,
     category: Option<String>,
+    /// Absent: keep; null: every sub-agent again; an array: only these (`[]`: none).
+    #[serde(default, deserialize_with = "present")]
+    delegate_to: Option<Option<Vec<String>>>,
+}
+
+/// A field that is there (null or not) as `Some`, so absent and null differ.
+fn present<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Option<Vec<String>>>, D::Error> {
+    Option::<Vec<String>>::deserialize(d).map(Some)
 }
 
 pub(super) async fn update_agent(
@@ -276,6 +293,7 @@ pub(super) async fn update_agent(
                 features: b.features.unwrap_or(old.features),
                 aliases: b.aliases.unwrap_or(old.aliases),
                 category: b.category.or(old.category),
+                delegates: b.delegate_to.unwrap_or(old.delegates),
             };
             m.save_custom_agent(&place, &id, c, false).await?;
         }
@@ -294,6 +312,8 @@ pub(super) async fn update_agent(
                 || b.category
                     .as_ref()
                     .is_some_and(|c| c.trim() != def.category)
+                // Any array means something now (`[]`: none), so it is refused here too.
+                || matches!(b.delegate_to, Some(Some(_)))
             {
                 return Err(m.edit_refusal(&place, &id).await.into());
             }

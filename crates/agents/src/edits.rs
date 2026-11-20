@@ -40,6 +40,13 @@ pub struct Custom {
     /// The UI's grouping; none is [`crate::DEFAULT_CATEGORY`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
+    /// Which agents this one may hand tasks to. Absent: every agent offered
+    /// as a sub-agent where it lives. Present: only these, and an empty
+    /// list means none (a delete never widens it). It only narrows (an
+    /// entry is kept when that agent would have been offered anyway) and
+    /// has no effect with the `delegate` switch off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegates: Option<Vec<String>>,
 }
 
 /// Every edit of one scope (the server, or one workspace), by agent id.
@@ -98,7 +105,7 @@ impl AgentSet {
     /// wider one**: a built-in, a file or a server agent never gets a
     /// workspace's agent as a sub-agent, even one with a name it lists, and
     /// a custom agent that delegates may call all the sub-agents it can
-    /// see from its own layer.
+    /// see from its own layer, or the ones of those its `delegates` names.
     pub fn with_layers(&self, layers: &[&Edits]) -> (AgentSet, Vec<AgentError>) {
         let mut agents = self.agents.clone();
         let mut errors = Vec::new();
@@ -138,7 +145,12 @@ impl AgentSet {
         // (layer of the agent, agent); the definitions count as layer 0.
         let mut made: Vec<(usize, Agent)> = Vec::new();
         for (layer, id, c) in &customs {
-            let delegates = subagents(*layer).into_iter().filter(|d| d != *id).collect();
+            // The list only narrows: an entry counts when that agent is
+            // among the sub-agents this layer sees; the rest are ignored.
+            let delegates = subagents(*layer)
+                .into_iter()
+                .filter(|d| d != *id && c.delegates.as_ref().is_none_or(|l| l.contains(d)))
+                .collect();
             let built = crate::custom(id, &c.name, &c.summary, &c.prompt, c.features, delegates)
                 .and_then(|mut a| {
                     (a.aliases, a.category) = crate::labels(id, &c.aliases, c.category.as_deref())?;
