@@ -12,7 +12,8 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
-  rust:
+  # Formatting and lints, once for the whole workspace.
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,8 +21,49 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: lint
+          # Pull requests read main's cache and write none of their own.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # The tests, in parallel groups. Run in one job they took 26 to 37
+  # minutes, nearly all of it the tests themselves (measured on main,
+  # 2026-11-20: the CLI crate 503 s, the master 431 s, the node 315 s and
+  # again 328 s as it ships, everything else about 190 s), so each of the
+  # long ones gets a runner of its own. Together the groups run exactly what
+  # `cargo test --workspace` and `cargo test -p harness-node` ran.
+  test:
+    name: test (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The CLI's dev-dependency turns on harness-node's `testing` hooks,
+          # as it did for the whole workspace build.
+          - name: cli
+            run: cargo test -p harness
+          - name: master
+            run: cargo test -p harness-master
+          # The node with the `testing` hooks, as the workspace build had it.
+          - name: node
+            run: cargo test -p harness-node --features testing
+          # The node as it ships: its own suite once more without the hooks
+          # (plan mode, approvals, the node's policy), so a difference
+          # between the two cannot hide.
+          - name: node-shipped
+            run: cargo test -p harness-node
+          - name: rest
+            run: cargo test --workspace --exclude harness --exclude harness-master --exclude harness-node
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: test-${{ matrix.name }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # The shell's containment (T.8a) needs bubblewrap and unprivileged
       # user namespaces; Ubuntu 24.04 and later deny those through AppArmor
       # unless this sysctl is 0. The last line proves the form the node
@@ -37,20 +79,23 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
           bwrap --die-with-parent --new-session --unshare-pid --dev-bind / / --proc /proc -- true
-      - run: cargo test --workspace
+      - run: ${{ matrix.run }}
         env:
           # A containment test that cannot run fails instead of skipping.
           HARNESS_REQUIRE_BWRAP: "1"
           HARNESS_REQUIRE_FUSE: "1"
-      # The node as it ships: `crates/cli`'s dev-dependency turns on
-      # harness-node's `testing` hooks for the whole workspace test build,
-      # so the step above never builds the node without them. Its own suite
-      # once more in the shipped feature set (plan mode, approvals, the
-      # node's policy), so a difference between the two cannot hide.
-      - run: cargo test -p harness-node
-        env:
-          HARNESS_REQUIRE_BWRAP: "1"
-          HARNESS_REQUIRE_FUSE: "1"
+
+  # The one check the branch rule and `publish` wait for. It runs whatever
+  # happened above and fails unless every part passed: a job skipped because
+  # one it needs failed would otherwise count as passed.
+  rust:
+    needs: [lint, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          test "${{ needs.lint.result }}" = success
+          test "${{ needs.test.result }}" = success
 
   deny:
     runs-on: ubuntu-latest
