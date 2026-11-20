@@ -37,6 +37,39 @@
 //! [`CONFIRM_BOUND`] after the kill (a process stuck in I/O the kernel will
 //! not interrupt), it writes `alive <ms>` once and keeps going.
 //!
+//! **Without bubblewrap (`--host`, PLAN.md T9, the owner's decision of
+//! 2026-11-20).** A `host` chat's background command runs under the same
+//! guard with no PID namespace: `rizzy-harness sandbox-guard --node <pid>
+//! --host -- <program> <args…>`, the program (the node's own image,
+//! [`crate::contain::IMAGE_TOKEN`], for the Landlock wrapper) started in
+//! its own process group, nothing else changed in the loop's frame. The
+//! proof is a different one and rests on the subreaper alone. Every
+//! descendant of the command is in the guard's subtree, whatever session
+//! or process group it joined (`setsid`, a double fork): when its parent
+//! dies the kernel reparents it to the nearest ancestor that is a child
+//! subreaper, and that is this process (a service a command only *asks*
+//! to start, such as a container runtime, a systemd unit or an already
+//! running tmux server, is not its descendant and is not covered). So "no
+//! child left" (ECHILD) still means "no descendant left", provided the
+//! kill loop does what it does: SIGKILL to the command's process group
+//! while its leader is unreaped (the number is then still the group's),
+//! SIGKILL to each of its own children (the command, and every orphan
+//! reparented here since: the `children` file names only unreaped ones),
+//! and again, every [`REPEAT`], until `waitpid` has nothing to reap. A
+//! process that forks faster than it is killed keeps the loop going; after
+//! [`CONFIRM_BOUND`] it says `alive`, as before; so does a deep chain of
+//! nested processes, which the loop ends one level per pass (about 0.8 us
+//! times depth squared, measured: 2 s near depth 1600), so `alive` there
+//! does not mean a stuck process, and the guard goes on to `ended`. The graceful stop is
+//! SIGTERM to that process group and to the orphans already reparented
+//! here (a descendant in another session whose parent is alive is reached
+//! by the kill only). `ended` is written only at ECHILD. What the guard
+//! cannot do without a namespace: if it is itself killed (SIGKILL), its
+//! children are reparented to the user's manager and nothing kills them
+//! (bubblewrap's `--die-with-parent` is the second line of the contained
+//! path); and a `host` guard carries no `--mark`, so the node's sweep does
+//! not know it. PLAN.md T9 names this leftover.
+//!
 //! **One thread.** bubblewrap's `--die-with-parent` (`PR_SET_PDEATHSIG`)
 //! names the thread that forked it; the guard has only its main thread, so
 //! bubblewrap dies exactly when the guard does: the second line for a guard
@@ -91,6 +124,11 @@ const REPEAT_STUCK: Duration = Duration::from_millis(500);
 /// (review T8E-1): the node's death is noticed within this, even when a
 /// child of the node holds a copy of the channel.
 pub const PARENT_LOOK: Duration = Duration::from_millis(500);
+
+/// The guard's argument for a command run without bubblewrap (a `host`
+/// chat's background command): no PID namespace, the program is started
+/// directly, in a process group of its own. Never taken from the command.
+pub const HOST: &str = "--host";
 
 /// The node's pid, in the guard's arguments: `getppid()` other than this
 /// is the kill order (review T8E-1).
@@ -245,6 +283,9 @@ pub enum By {
     Parent,
     /// bubblewrap died before its init: the guard ended what was left.
     Bwrap,
+    /// (`--host`) the command itself was killed by a signal while
+    /// something it started was left: the guard ended that.
+    Command,
 }
 
 impl By {
@@ -254,6 +295,7 @@ impl By {
             Self::Signal => "signal",
             Self::Parent => "parent",
             Self::Bwrap => "bwrap",
+            Self::Command => "command",
         }
     }
 }
@@ -285,6 +327,7 @@ impl Report {
                     Some("signal") => By::Signal,
                     Some("parent") => By::Parent,
                     Some("bwrap") => By::Bwrap,
+                    Some("command") => By::Command,
                     _ => By::Node,
                 };
                 Some(Self::Ended(d, by))
@@ -302,8 +345,8 @@ pub fn main() -> i32 {
     let args: Vec<OsString> = std::env::args_os().skip(2).collect();
     let Some(at) = args.iter().position(|a| a == "--") else {
         eprintln!(
-            "{SUBCOMMAND}: usage: {SUBCOMMAND} [--node PID] [--mark DIR --mark-session KEY] -- \
-             PROGRAM ARGS…"
+            "{SUBCOMMAND}: usage: {SUBCOMMAND} [--node PID] [--mark DIR --mark-session KEY] \
+             [--host] -- PROGRAM ARGS…"
         );
         return 125;
     };
@@ -321,7 +364,8 @@ pub fn main() -> i32 {
         .windows(2)
         .find(|w| w[0] == MARK)
         .map(|w| std::path::PathBuf::from(&w[1]));
-    match run(program, &args[at + 2..], node, root.as_deref()) {
+    let host = args[..at].iter().any(|a| a == HOST);
+    match run(program, &args[at + 2..], node, root.as_deref(), host) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("{SUBCOMMAND}: {e}");
@@ -344,6 +388,7 @@ fn run(
     args: &[OsString],
     node: Option<i32>,
     root: Option<&std::path::Path>,
+    host: bool,
 ) -> Result<i32, String> {
     // A node that died before this ran: start nothing.
     if let Some(n) = node
@@ -380,20 +425,45 @@ fn run(
     // The file view's descriptors (T.8c): opened here, inherited by
     // bubblewrap alone (this process has one thread and starts nothing
     // else), closed here once it has started.
-    let (args, view_fds) = open_view(args)?;
-    // The command's stdin: `/dev/null`, or the FIFO the node named for an
-    // MCP server's requests ([`STDIN_FIFO_ENV`]); the name is not passed on.
-    let stdin = match std::env::var_os(STDIN_FIFO_ENV) {
-        Some(p) => Stdio::from(open_stdin_fifo(std::path::Path::new(&p))?),
-        None => Stdio::null(),
+    // Without bubblewrap (`--host`) there is no view and no server: the
+    // command's program is its own, or the node's image through a
+    // descriptor (the Landlock wrapper), and its stdin is `/dev/null`.
+    let (program, args, view_fds, stdin, env_fd) = if host {
+        let mut fds = Vec::new();
+        let mut program = program.to_owned();
+        if program == crate::contain::IMAGE_TOKEN {
+            let fd = nix::fcntl::open(
+                "/proc/self/exe",
+                nix::fcntl::OFlag::O_PATH,
+                nix::sys::stat::Mode::empty(),
+            )
+            .map_err(|e| format!("its own image (/proc/self/exe): {e}"))?;
+            program = format!("/proc/self/fd/{}", std::os::fd::AsRawFd::as_raw_fd(&fd)).into();
+            fds.push(fd);
+        }
+        (program, args.to_vec(), fds, Stdio::null(), None)
+    } else {
+        let (args, view_fds) = open_view(args)?;
+        // The command's stdin: `/dev/null`, or the FIFO the node named for
+        // an MCP server's requests ([`STDIN_FIFO_ENV`]); the name is not
+        // passed on.
+        let stdin = match std::env::var_os(STDIN_FIFO_ENV) {
+            Some(p) => Stdio::from(open_stdin_fifo(std::path::Path::new(&p))?),
+            None => Stdio::null(),
+        };
+        // A repository's server's environment, as a descriptor bubblewrap
+        // passes on ([`ENV_FILE_ENV`]): its number only, never its content.
+        let env_fd = match std::env::var_os(ENV_FILE_ENV) {
+            Some(p) => Some(open_env_file(std::path::Path::new(&p), root)?),
+            None => None,
+        };
+        (program.to_owned(), args, view_fds, stdin, env_fd)
     };
-    // A repository's server's environment, as a descriptor bubblewrap
-    // passes on ([`ENV_FILE_ENV`]): its number only, never its content.
-    let env_fd = match std::env::var_os(ENV_FILE_ENV) {
-        Some(p) => Some(open_env_file(std::path::Path::new(&p), root)?),
-        None => None,
-    };
-    let mut command = std::process::Command::new(program);
+    let mut command = std::process::Command::new(&program);
+    if host && let Some(a0) = std::env::args_os().next() {
+        // For `ps`: the node's image under its own name, not `/proc/…`.
+        command.arg0(a0);
+    }
     command
         .args(&args)
         .env_remove(STDIN_FIFO_ENV)
@@ -432,7 +502,7 @@ fn run(
         let _ = nix::unistd::dup2_stdout(&null);
         let _ = nix::unistd::dup2_stderr(&null);
     }
-    Ok(watch(bwrap, ctl, &sfd, node, !blocked))
+    Ok(watch(bwrap, ctl, &sfd, node, !blocked, !host))
 }
 
 /// The file view's descriptors (T.8c, [`crate::contain`]): in bubblewrap's
@@ -530,9 +600,16 @@ fn open_view(args: &[OsString]) -> Result<(Vec<OsString>, Vec<std::os::fd::Owned
 /// unreaped (so its number is still its own), then each of the guard's own
 /// children (an init reparented here). Only pids that are this process's
 /// unreaped children, or that bubblewrap names as its own, are signalled.
-fn kill_all(bwrap: Option<i32>) {
+/// Without a namespace (`--host`): the command's process group while its
+/// leader is unreaped (the group's number is then still its own), then
+/// each child, which is every orphan reparented here.
+fn kill_all(bwrap: Option<i32>, namespace: bool) {
     if let Some(b) = bwrap {
-        crate::contain::kill_namespace(b);
+        if namespace {
+            crate::contain::kill_namespace(b);
+        } else {
+            let _ = nix::sys::signal::killpg(Pid::from_raw(b), Signal::SIGKILL);
+        }
     }
     for pid in own_children() {
         let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
@@ -566,12 +643,64 @@ fn own_children() -> Vec<i32> {
         .collect()
 }
 
+/// The graceful stop without a namespace: SIGTERM to the command's process
+/// group while its leader is unreaped, and to each orphan already
+/// reparented to the guard.
+fn term_group(leader: i32, unreaped: bool) {
+    if unreaped {
+        let _ = nix::sys::signal::killpg(Pid::from_raw(leader), Signal::SIGTERM);
+    }
+    for pid in own_children() {
+        if pid != leader {
+            let _ = kill(Pid::from_raw(pid), Signal::SIGTERM);
+        }
+    }
+}
+
+/// What one `waitpid` answered, for the wait loop.
+#[derive(Debug, PartialEq, Eq)]
+enum Reaped {
+    /// The leader (bubblewrap, or the host command) ended with this code.
+    Leader(i32),
+    /// The leader was killed by a signal; the status to report.
+    LeaderSignaled(i32),
+    /// Another child (an orphan reparented here, an init): reaped, nothing
+    /// to record.
+    Other,
+    /// Children exist, none has ended.
+    NoneYet,
+    /// ECHILD: no child is left; the one proof of the end.
+    NoChild,
+    /// Any other error: nothing is proved.
+    Failed,
+}
+
+/// Read a `waitpid` answer. The leader's status is recorded only while it
+/// is unreaped: a later child that got the same pid number (the kernel
+/// reuses them) is an ordinary one and must not overwrite it. EINTR asks
+/// again at once.
+fn classify(r: nix::Result<WaitStatus>, leader: i32, leader_unreaped: bool) -> Reaped {
+    match r {
+        Ok(WaitStatus::Exited(pid, code)) if leader_unreaped && pid.as_raw() == leader => {
+            Reaped::Leader(code)
+        }
+        Ok(WaitStatus::Signaled(pid, sig, _)) if leader_unreaped && pid.as_raw() == leader => {
+            Reaped::LeaderSignaled(128 + sig as i32)
+        }
+        Ok(WaitStatus::StillAlive) => Reaped::NoneYet,
+        Ok(_) | Err(Errno::EINTR) => Reaped::Other,
+        Err(Errno::ECHILD) => Reaped::NoChild,
+        Err(_) => Reaped::Failed,
+    }
+}
+
 fn watch(
     bwrap: i32,
     mut ctl: UnixStream,
     sfd: &SignalFd,
     node: Option<i32>,
     kill_now: bool,
+    namespace: bool,
 ) -> i32 {
     let mut phase = Phase::Running;
     let mut ordered: Option<Instant> = None;
@@ -589,20 +718,27 @@ fn watch(
         // Reap everything that has ended; ECHILD is the proof that nothing
         // is left.
         loop {
-            match waitpid(None, Some(WaitPidFlag::WNOHANG)) {
-                Ok(WaitStatus::Exited(pid, code)) if pid.as_raw() == bwrap => {
+            match classify(
+                waitpid(None, Some(WaitPidFlag::WNOHANG)),
+                bwrap,
+                bwrap_unreaped,
+            ) {
+                Reaped::Leader(code) => {
                     bwrap_unreaped = false;
                     status = code;
                 }
-                Ok(WaitStatus::Signaled(pid, sig, _)) if pid.as_raw() == bwrap => {
+                Reaped::LeaderSignaled(code) => {
                     bwrap_unreaped = false;
                     bwrap_signaled = true;
-                    status = 128 + sig as i32;
+                    status = code;
                 }
-                Ok(WaitStatus::StillAlive) => break,
-                Ok(_) | Err(Errno::EINTR) => {}
-                Err(_) => {
-                    // ECHILD (or a kernel that cannot answer): done.
+                Reaped::Other => {}
+                Reaped::NoneYet => break,
+                // Only ECHILD is the proof; any other error says nothing.
+                // Not "ended": leave the inner loop, keep the kill going,
+                // and ask again at the next pass.
+                Reaped::Failed => break,
+                Reaped::NoChild => {
                     // After a kill order, say so (to a node that is gone,
                     // or stopped listening, this fails, harmlessly).
                     if let Some(at) = ordered {
@@ -622,7 +758,7 @@ fn watch(
             phase = Phase::Killing(now, false);
             if ordered.is_none() && bwrap_signaled {
                 ordered = Some(now);
-                by = By::Bwrap;
+                by = if namespace { By::Bwrap } else { By::Command };
             }
         }
         // The node is gone though the channel is open (a child of the node
@@ -641,7 +777,7 @@ fn watch(
             phase = Phase::Killing(now, false);
         }
         if let Phase::Killing(at, reported) = phase {
-            kill_all(bwrap_unreaped.then_some(bwrap));
+            kill_all(bwrap_unreaped.then_some(bwrap), namespace);
             if !reported && now.duration_since(at) >= CONFIRM_BOUND {
                 let since = ordered.map_or(Duration::ZERO, |o| o.elapsed());
                 let _ = ctl.write_all(Report::StillAlive(since).line().as_bytes());
@@ -691,11 +827,13 @@ fn watch(
                 Ok(n) => {
                     if buf[..n].contains(&TERM) && matches!(phase, Phase::Running) {
                         ordered.get_or_insert_with(Instant::now);
-                        if bwrap_unreaped {
+                        if bwrap_unreaped && namespace {
                             crate::contain::term_namespace_with(
                                 bwrap,
                                 crate::contain::sandbox_init,
                             );
+                        } else if !namespace {
+                            term_group(bwrap, bwrap_unreaped);
                         }
                         phase = Phase::Grace(Instant::now());
                     }
@@ -726,6 +864,55 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// Review of PR 186: a later child with the leader's pid number must not
+    /// overwrite the leader's status; only ECHILD ends the loop, EINTR asks
+    /// again, any other error proves nothing.
+    #[test]
+    fn the_wait_loop_reads_waitpid_answers_exactly() {
+        let p = Pid::from_raw;
+        // The leader, while unreaped.
+        assert_eq!(
+            classify(Ok(WaitStatus::Exited(p(7), 3)), 7, true),
+            Reaped::Leader(3)
+        );
+        assert_eq!(
+            classify(
+                Ok(WaitStatus::Signaled(p(7), Signal::SIGKILL, false)),
+                7,
+                true
+            ),
+            Reaped::LeaderSignaled(137)
+        );
+        // After the leader was reaped, a child that got the same number is
+        // an ordinary one (on the old code it overwrote the status).
+        assert_eq!(
+            classify(Ok(WaitStatus::Exited(p(7), 3)), 7, false),
+            Reaped::Other
+        );
+        assert_eq!(
+            classify(
+                Ok(WaitStatus::Signaled(p(7), Signal::SIGKILL, false)),
+                7,
+                false
+            ),
+            Reaped::Other
+        );
+        assert_eq!(
+            classify(Ok(WaitStatus::Exited(p(8), 0)), 7, true),
+            Reaped::Other
+        );
+        assert_eq!(
+            classify(Ok(WaitStatus::StillAlive), 7, true),
+            Reaped::NoneYet
+        );
+        assert_eq!(classify(Err(Errno::EINTR), 7, true), Reaped::Other);
+        assert_eq!(classify(Err(Errno::ECHILD), 7, true), Reaped::NoChild);
+        // Not ECHILD: nothing is proved, so it is never "no child left".
+        for e in [Errno::EINVAL, Errno::EFAULT, Errno::ENOSYS] {
+            assert_eq!(classify(Err(e), 7, true), Reaped::Failed, "{e}");
+        }
+    }
+
     #[test]
     fn reports_round_trip() {
         for r in [
@@ -733,6 +920,7 @@ mod tests {
             Report::Ended(Duration::from_millis(3), By::Signal),
             Report::Ended(Duration::from_millis(3), By::Parent),
             Report::Ended(Duration::from_millis(3), By::Bwrap),
+            Report::Ended(Duration::from_millis(3), By::Command),
             Report::StillAlive(Duration::from_millis(2001)),
         ] {
             assert_eq!(Report::parse(&r.line()), Some(r));

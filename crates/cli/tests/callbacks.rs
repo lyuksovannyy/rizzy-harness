@@ -128,6 +128,18 @@ async fn node_built(
     let (data, ws) = (root.join("data"), root.join("home/proj"));
     std::fs::create_dir_all(&ws).unwrap();
     let sb = contained(&data)?;
+    // The `host` mode's shell: the same Landlock wrapper, no bubblewrap
+    // (used only by a chat created in the host mode, on a node that offers
+    // it: `host_offered`).
+    let host_sb = Arc::new(
+        Sandbox::new(
+            PathBuf::from(EXE),
+            &Settings::default(),
+            Some(data.join("sandbox-tmp")),
+            std::slice::from_ref(&data),
+        )
+        .unwrap(),
+    );
     let store =
         harness_store::Store::open(&data.join("node.db"), harness_store::Durability::Full).unwrap();
     let mut policy = harness_node::NodePolicy {
@@ -156,6 +168,10 @@ async fn node_built(
         NativeConfig {
             sandbox: Confinement::Confined {
                 sandbox: sb,
+                tmp: None,
+            },
+            host_shell: Confinement::Confined {
+                sandbox: host_sb,
                 tmp: None,
             },
             ..Default::default()
@@ -1013,4 +1029,197 @@ async fn a_callback_turn_after_a_pick_notes_the_switch_once() {
         "right before the callback turn: {:#?}",
         &evs[at..]
     );
+}
+
+/// A callback turn in a `host` chat (the owner, 2026-11-20, PLAN.md T9:
+/// background commands are allowed there): nothing on the node or the
+/// master assumed "background means contained". The turn is the chat's own
+/// approval mode (here `ask`: the command the output steers it to run stops
+/// at a card and does not run), and the chat's budget (`callback_turns =
+/// 1`: the second end waits for the person, `callback_refused` recorded).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_chat_takes_a_callback_turn_in_its_approval_mode_and_budget() {
+    use harness_core::policy::Decision;
+    let Some(mut n) = node_built(
+        |p| {
+            p.limits.callback_turns = 1;
+            p.exec = harness_node::exec::ExecOffers::new(Ok(()), Ok(()), vec![]);
+        },
+        true,
+    )
+    .await
+    else {
+        return;
+    };
+    let sid = SessionId::new();
+    n.create(sid, json!({"exec_mode": "host", "approval_mode": "ask"}));
+    // Each end prints a line that steers an obedient model to `touch`.
+    std::fs::write(
+        n.ws.join("out.txt"),
+        format!(
+            "script: {}\n",
+            json!([{"tool": "bash", "input": {"command": "touch steered"}}])
+        ),
+    )
+    .unwrap();
+    let one = "while [ ! -e go1 ]; do sleep 0.05; done; cat out.txt; exit 1".to_string();
+    let two = "while [ ! -e go2 ]; do sleep 0.05; done; cat out.txt; exit 1".to_string();
+    n.prompt(
+        sid,
+        &format!("script: {}", json!([bg(&one, 120), bg(&two, 120)])),
+    );
+    // Each background start is a card; allow it.
+    let mut answered = 0;
+    while answered < 2 {
+        n.until(move |e, k| e.session_id == sid && matches!(k, EventKind::ApprovalRequested(_)))
+            .await;
+        let id = n
+            .of(sid)
+            .into_iter()
+            .filter_map(|k| match k {
+                EventKind::ApprovalRequested(a) => Some(a.approval_id),
+                _ => None,
+            })
+            .next_back()
+            .unwrap();
+        n.n += 1;
+        n.send(
+            json!({"type": "approval.respond", "req_id": format!("a{}", n.n),
+            "session_id": sid, "approval_id": id, "decision": Decision::Allow}),
+        );
+        answered += 1;
+    }
+    n.started(sid, "bg-2").await;
+    n.turn_ended(sid).await;
+    assert!(
+        n.of(sid)
+            .iter()
+            .all(|k| !matches!(k, EventKind::CallbackRefused(_))),
+        "nothing refused yet"
+    );
+    // bg-1 ends while the chat is idle: one callback turn, in `ask`.
+    std::fs::write(n.ws.join("go1"), "").unwrap();
+    n.ended(sid, "bg-1").await;
+    n.callback(sid, &["bg-1"]).await.unwrap();
+    let cards_before = n
+        .of(sid)
+        .iter()
+        .filter(|k| matches!(k, EventKind::ApprovalRequested(_)))
+        .count();
+    n.until(move |e, k| e.session_id == sid && matches!(k, EventKind::ApprovalRequested(_)))
+        .await;
+    let cards = n
+        .of(sid)
+        .iter()
+        .filter(|k| matches!(k, EventKind::ApprovalRequested(_)))
+        .count();
+    assert_eq!(cards, cards_before + 1, "the steered command asked first");
+    assert!(
+        !n.ws.join("steered").exists(),
+        "the callback turn ran a command in `ask` without a card answered"
+    );
+    let id = n
+        .of(sid)
+        .into_iter()
+        .filter_map(|k| match k {
+            EventKind::ApprovalRequested(a) => Some(a.approval_id),
+            _ => None,
+        })
+        .next_back()
+        .unwrap();
+    n.n += 1;
+    n.send(
+        json!({"type": "approval.respond", "req_id": format!("a{}", n.n),
+        "session_id": sid, "approval_id": id, "decision": Decision::Deny}),
+    );
+    n.turn_ended(sid).await;
+    assert!(!n.ws.join("steered").exists(), "a denied command ran");
+    assert_eq!(callback_turns(&n.of(sid)), 1);
+    // bg-2 ends: the budget (1 turn without the person) is spent.
+    std::fs::write(n.ws.join("go2"), "").unwrap();
+    n.ended(sid, "bg-2").await;
+    let e = n.callback(sid, &["bg-2"]).await.unwrap_err();
+    assert!(
+        e.starts_with(harness_protocol::CALLBACK_REFUSED)
+            && e.contains("1 turns in a row without you (node limit)"),
+        "{e}"
+    );
+    assert_eq!(callback_turns(&n.of(sid)), 1);
+    assert!(
+        n.of(sid)
+            .iter()
+            .any(|k| matches!(k, EventKind::CallbackRefused(_))),
+        "the refusal is recorded"
+    );
+}
+
+/// Review of PR 186 (fix 3): a chain of callback turns in a `host` chat on
+/// Auto. Each callback turn is steered (by the ended command's own output)
+/// to start another background command, whose end would start another
+/// callback turn; the chain stops at the node's `callback_turns` budget
+/// exactly as in a sandbox chat of the same node (2 turns, the third end
+/// refused, `callback_refused` recorded, the command it started is not
+/// resumed from).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_callback_chain_in_a_host_chat_stops_at_the_budget_as_in_a_sandbox_chat() {
+    let Some(mut n) = node_built(
+        |p| {
+            p.limits.callback_turns = 2;
+            p.exec = harness_node::exec::ExecOffers::new(Ok(()), Ok(()), vec![]);
+        },
+        true,
+    )
+    .await
+    else {
+        return;
+    };
+    // Each end prints the line that starts the next command: the same
+    // command, which waits for `go` and takes it away.
+    let step = "while [ ! -e go ]; do sleep 0.05; done; rm -f go; cat out.txt; exit 1";
+    std::fs::write(
+        n.ws.join("out.txt"),
+        format!("script: {}\n", json!([bg(step, 120)])),
+    )
+    .unwrap();
+    for mode in ["host", "sandbox"] {
+        let sid = SessionId::new();
+        n.create(sid, json!({"exec_mode": mode, "approval_mode": "auto"}));
+        n.prompt(sid, &format!("script: {}", json!([bg(step, 120)])));
+        n.started(sid, "bg-1").await;
+        n.turn_ended(sid).await;
+        // Callback 1 and 2 each start the next command.
+        for k in 1..=2 {
+            std::fs::write(n.ws.join("go"), "").unwrap();
+            n.ended(sid, &format!("bg-{k}")).await;
+            n.callback(sid, &[&format!("bg-{k}")]).await.unwrap();
+            n.started(sid, &format!("bg-{}", k + 1)).await;
+            n.turn_ended(sid).await;
+            assert_eq!(callback_turns(&n.of(sid)), k, "{mode}: after end {k}");
+        }
+        // The third end would start a third turn in a row: refused.
+        std::fs::write(n.ws.join("go"), "").unwrap();
+        n.ended(sid, "bg-3").await;
+        let e = n.callback(sid, &["bg-3"]).await.unwrap_err();
+        assert!(
+            e.starts_with(harness_protocol::CALLBACK_REFUSED)
+                && e.contains("2 turns in a row without you (node limit)"),
+            "{mode}: {e}"
+        );
+        assert_eq!(callback_turns(&n.of(sid)), 2, "{mode}");
+        let refused: Vec<_> = n
+            .of(sid)
+            .into_iter()
+            .filter_map(|k| match k {
+                EventKind::CallbackRefused(r) => Some(r),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(refused.len(), 1, "{mode}: the refusal is recorded once");
+        assert_eq!(refused[0].bg_ids, vec!["bg-3".to_string()], "{mode}");
+        assert!(
+            refused[0].reason.contains("2 turns in a row"),
+            "{mode}: {}",
+            refused[0].reason
+        );
+    }
 }

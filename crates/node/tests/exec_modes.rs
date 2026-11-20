@@ -33,8 +33,13 @@ fn policy(root: &std::path::Path, o: ExecOffers) -> NodePolicy {
     }
 }
 
-/// The mock, keeping the tools of every request it is sent.
-struct Spy(Mock, Arc<std::sync::Mutex<Vec<Vec<String>>>>);
+/// The mock, keeping the tools of every request it is sent (and, of the
+/// latest, the bash tool's description and schema).
+struct Spy(
+    Mock,
+    Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+    Arc<std::sync::Mutex<String>>,
+);
 
 #[async_trait::async_trait]
 impl harness_agent_native::Provider for Spy {
@@ -50,6 +55,9 @@ impl harness_agent_native::Provider for Spy {
             .lock()
             .unwrap()
             .push(req.tools.iter().map(|t| t.name.clone()).collect());
+        if let Some(b) = req.tools.iter().find(|t| t.name == "bash") {
+            *self.2.lock().unwrap() = format!("{}\n{}", b.description, b.schema);
+        }
         self.0.complete(req, deltas).await
     }
 }
@@ -57,14 +65,39 @@ impl harness_agent_native::Provider for Spy {
 type Seen = Arc<std::sync::Mutex<Vec<Vec<String>>>>;
 
 fn spied() -> (Arc<Spy>, Seen) {
+    let (spy, seen, _) = spied_bash();
+    (spy, seen)
+}
+
+/// Also the latest bash tool spec the model was sent.
+fn spied_bash() -> (Arc<Spy>, Seen, Arc<std::sync::Mutex<String>>) {
     let seen: Seen = Arc::default();
+    let bash: Arc<std::sync::Mutex<String>> = Arc::default();
     let spy = Spy(
         Mock {
             delay: Duration::from_millis(5),
         },
         seen.clone(),
+        bash.clone(),
     );
-    (Arc::new(spy), seen)
+    (Arc::new(spy), seen, bash)
+}
+
+/// A host shell the guard can be started from: Landlock's wrapper without
+/// bubblewrap (no probe: nothing is run in these tests).
+fn guardable_host_shell(dir: &std::path::Path) -> harness_tools::sandbox::Confinement {
+    harness_tools::sandbox::Confinement::Confined {
+        sandbox: Arc::new(
+            harness_tools::sandbox::Sandbox::new(
+                "/bin/true".into(),
+                &harness_tools::sandbox::Settings::default(),
+                Some(dir.join("sandbox-tmp")),
+                &[],
+            )
+            .unwrap(),
+        ),
+        tmp: None,
+    }
 }
 
 fn config(store: Store, policy: NodePolicy, profile: Profile) -> NodeConfig {
@@ -78,6 +111,24 @@ fn config_with(
     provider: Arc<Spy>,
     artifacts: Option<std::path::PathBuf>,
 ) -> NodeConfig {
+    config_host(
+        store,
+        policy,
+        profile,
+        provider,
+        artifacts,
+        NativeConfig::default().host_shell,
+    )
+}
+
+fn config_host(
+    store: Store,
+    policy: NodePolicy,
+    profile: Profile,
+    provider: Arc<Spy>,
+    artifacts: Option<std::path::PathBuf>,
+    host_shell: harness_tools::sandbox::Confinement,
+) -> NodeConfig {
     NodeConfig {
         node_id: "n".into(),
         hostname: "test".into(),
@@ -86,7 +137,10 @@ fn config_with(
         backend: Arc::new(NativeBackend::new(
             provider,
             harness_tools::builtin(),
-            NativeConfig::default(),
+            NativeConfig {
+                host_shell,
+                ..Default::default()
+            },
         )),
         default_model: "mock".into(),
         secrets: Default::default(),
@@ -390,11 +444,10 @@ async fn a_session_whose_mode_is_no_longer_offered_runs_nothing_after_a_restart(
         ] {
             n.link.to_node.try_send(m).unwrap();
             let e = ack(&mut n).await.unwrap_err();
-            // A host chat has no background table, so its callback is
-            // refused for that before the mode is looked at.
-            let ok = e.contains(&format!("runs in the {} mode", lost.id()))
-                || (what == "callback" && lost == ExecMode::Host && e.contains("no background"));
-            assert!(ok, "{lost:?} {what}: {e}");
+            assert!(
+                e.contains(&format!("runs in the {} mode", lost.id())),
+                "{lost:?} {what}: {e}"
+            );
         }
         n.link.to_node.try_send(prompt(stays, "hello")).unwrap();
         ack(&mut n).await.unwrap();
@@ -532,22 +585,23 @@ async fn a_host_session_takes_auto_within_the_nodes_ceiling() {
     assert!(!marker.exists(), "ran without the card");
 }
 
-/// Review N-c: a `host` session has no background table, so its model is
-/// not offered `bash_output` or `bash_stop` (nor `background` on bash); a
-/// `sandbox` session is.
+/// The owner's decision of 2026-11-20 (PLAN.md T9; review N-c before it): a
+/// `host` session has a background table like a `sandbox` session, so its
+/// model is offered `bash_output` and `bash_stop`.
 #[tokio::test]
-async fn a_host_session_is_not_offered_background_commands() {
+async fn a_host_session_is_offered_background_commands() {
     let dir = tempfile::tempdir().unwrap();
     let (spy, seen) = spied();
-    let mut n = start_cfg(config_with(
+    let mut n = start_cfg(config_host(
         Store::open(&dir.path().join("node.db"), Durability::Full).unwrap(),
         policy(dir.path(), offers(true, true)),
         Profile::Agentic,
         spy,
         None,
+        guardable_host_shell(dir.path()),
     ))
     .await;
-    for (mode, offered) in [(ExecMode::Host, false), (ExecMode::Sandbox, true)] {
+    for (mode, offered) in [(ExecMode::Host, true), (ExecMode::Sandbox, true)] {
         let sid = SessionId::new();
         n.link
             .to_node
@@ -575,6 +629,70 @@ async fn a_host_session_is_not_offered_background_commands() {
             "{mode:?}: {tools:?}"
         );
         // Until the turn ends, so the next session's request is its own.
+        let by = std::time::Instant::now() + Duration::from_secs(20);
+        while !n
+            .node
+            .store()
+            .events_after(sid, 0, 1000)
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "turn_ended")
+        {
+            assert!(std::time::Instant::now() < by, "the turn did not end");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+}
+
+/// Review of PR 186: on a node that runs commands without its sandbox
+/// wrapper (`[sandbox] mode = "off"`: the host shell is not confined) every
+/// background start is refused (`NO_GUARD`), so a host chat is not offered
+/// `background: true`, `bash_output` or `bash_stop`; decided from the node's
+/// own shell, not from an argument. A sandbox chat of the same node keeps
+/// them.
+#[tokio::test]
+async fn a_host_session_on_a_node_without_the_wrapper_is_not_offered_background() {
+    let dir = tempfile::tempdir().unwrap();
+    let (spy, seen, bash) = spied_bash();
+    let mut n = start_cfg(config_host(
+        Store::open(&dir.path().join("node.db"), Durability::Full).unwrap(),
+        policy(dir.path(), offers(true, true)),
+        Profile::Agentic,
+        spy,
+        None,
+        harness_tools::sandbox::Confinement::Unconfined,
+    ))
+    .await;
+    for (mode, offered) in [(ExecMode::Host, false), (ExecMode::Sandbox, true)] {
+        let sid = SessionId::new();
+        n.link
+            .to_node
+            .try_send(create(sid, dir.path(), Some(mode)))
+            .unwrap();
+        ack(&mut n).await.unwrap();
+        seen.lock().unwrap().clear();
+        n.link.to_node.try_send(prompt(sid, "hello")).unwrap();
+        ack(&mut n).await.unwrap();
+        let by = std::time::Instant::now() + Duration::from_secs(20);
+        while seen.lock().unwrap().is_empty() {
+            assert!(std::time::Instant::now() < by, "no model call");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let tools = seen.lock().unwrap()[0].clone();
+        assert!(tools.contains(&"bash".to_string()), "{tools:?}");
+        for t in ["bash_output", "bash_stop"] {
+            assert_eq!(
+                tools.contains(&t.to_string()),
+                offered,
+                "{mode:?} {t}: {tools:?}"
+            );
+        }
+        let spec = bash.lock().unwrap().clone();
+        assert_eq!(
+            spec.contains("background"),
+            offered,
+            "{mode:?}: the bash spec: {spec}"
+        );
         let by = std::time::Instant::now() + Duration::from_secs(20);
         while !n
             .node

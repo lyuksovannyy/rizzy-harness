@@ -350,7 +350,9 @@ impl BackgroundEnded {
             BackgroundConfirmed::StillAlive => {
                 " (a process of it was still alive after the kill; its guard keeps killing it)"
             }
-            BackgroundConfirmed::Unconfirmed => " (its end is not confirmed)",
+            BackgroundConfirmed::Unconfirmed => {
+                " (its end is not confirmed: it, or something it started, may still be running)"
+            }
             BackgroundConfirmed::Unknown => "",
         };
         let ran = crate::text::duration_words(self.ran_ms);

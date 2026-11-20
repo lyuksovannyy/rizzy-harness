@@ -809,6 +809,7 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
         tail: (c ? c.result : p.tail) ?? "",
       };
       if (c) it.agent = c.agent_id;
+      if (p.confirmed === "still_alive" || p.confirmed === "unconfirmed") it.open = true;
       v.items.push(it);
       break;
     }

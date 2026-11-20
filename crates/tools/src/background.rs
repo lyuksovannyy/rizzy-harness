@@ -1,7 +1,8 @@
 //! Background commands (ADOPTION_PLAN T.8d step 1, docs/background-commands.md
 //! §4.3): a `bash` call with `background: true` that is still running after
-//! its first wait is moved, as the same contained command (bubblewrap, its
-//! guard, its file view and network namespace), from the call into its
+//! its first wait is moved, as the same guarded command (in a sandbox chat
+//! bubblewrap, its guard, its file view and network namespace; in a host
+//! chat the guard alone, [`crate::guard::HOST`]), from the call into its
 //! session's table here. One task per command owns it from then on: it
 //! reads the pipes into a bounded ring (a head, then a tail), waits for the
 //! exit, the timeout or a stop, and hands the end to the session actor
@@ -658,6 +659,9 @@ pub(crate) struct Handover {
     pub started: Instant,
     pub command: String,
     pub mark: Option<crate::contain::Mark>,
+    /// The command runs under the guard without bubblewrap (a `host`
+    /// chat's): what its end text may claim is what that guard proves.
+    pub host: bool,
 }
 
 impl SessionBg {
@@ -1237,6 +1241,22 @@ impl SessionBg {
     }
 }
 
+/// The text of a stop whose guard reported `alive`. Without a namespace
+/// (`host`) the guard ends nested processes one level per pass, so a long
+/// chain of them takes as long as a process the kernel cannot interrupt:
+/// both causes are named, neither is claimed.
+fn still_alive_text(words: &str, secs: f64, host: bool) -> String {
+    format!(
+        "{words} and killed, but NOT ended: a process of it is still alive {secs:.1} s after \
+         the stop was ordered ({}",
+        if host {
+            crate::bash::HOST_STILL_ALIVE
+        } else {
+            "it waits on I/O the kernel cannot interrupt); its guard keeps killing it"
+        }
+    )
+}
+
 /// How the command's task saw its end.
 enum End {
     Exited(Option<std::process::ExitStatus>),
@@ -1283,6 +1303,10 @@ async fn run(
                     .await
                     .unwrap_or_default();
                     note.push_str(&format!("; {}", crate::bash::sweep_note(&found)));
+                } else if h.host {
+                    // No namespace and no mark: nothing looked for what the
+                    // guard left, so nothing may be said of it but that.
+                    note.push_str(crate::bash::HOST_GUARD_KILLED);
                 }
                 note.push(')');
             } else if let Some(crate::guard::Report::Ended(_, by)) = h.child.exit_report().await {
@@ -1292,6 +1316,10 @@ async fn run(
                         .into(),
                     crate::guard::By::Bwrap => " (bubblewrap was killed before its command ended; \
                                                  the guard killed what was left)"
+                        .into(),
+                    crate::guard::By::Command => " (the command was killed by a signal while \
+                                                   something it started was left; the guard \
+                                                   killed what was left)"
                         .into(),
                     _ => String::new(),
                 };
@@ -1303,6 +1331,12 @@ async fn run(
             };
             let how = match code {
                 Some(c) => format!("exited with code {c}{note}"),
+                // A host command whose guard was killed is not known to
+                // have ended: never the word.
+                None if killed.is_some() && h.host => format!(
+                    "the end is NOT confirmed: {}",
+                    note.trim().trim_start_matches('(').trim_end_matches(')')
+                ),
                 None => format!("ended{note}"),
             };
             (BackgroundReason::Exited, code, killed, confirmed, how)
@@ -1313,21 +1347,19 @@ async fn run(
                 Stopped::Ended(d) => (
                     BackgroundConfirmed::Ended,
                     format!(
-                        "{}: the command and everything it started were killed; its guard \
-                         confirmed the end ({} ms)",
+                        "{}: {}; its guard confirmed the end ({} ms)",
                         reason.words(),
+                        if h.host {
+                            HOST_KILLED
+                        } else {
+                            "the command and everything it started were killed"
+                        },
                         d.as_millis()
                     ),
                 ),
                 Stopped::StillAlive(d) => (
                     BackgroundConfirmed::StillAlive,
-                    format!(
-                        "{} and killed, but NOT ended: a process of it is still alive {:.1} s \
-                         after the stop was ordered (it waits on I/O the kernel cannot \
-                         interrupt); its guard keeps killing it",
-                        reason.words(),
-                        d.as_secs_f64()
-                    ),
+                    still_alive_text(reason.words(), d.as_secs_f64(), h.host),
                 ),
                 Stopped::Unconfirmed(why) => (
                     BackgroundConfirmed::Unconfirmed,
@@ -1480,10 +1512,23 @@ impl Default for Access {
 pub const SUB_AGENT: &str = "background commands are not available to a sub-agent: its session \
      ends when it returns. Return, and the agent that delegated can start it";
 
-/// The refusal where the shell is not contained (R16).
-pub const NOT_CONTAINED: &str = "background commands need the shell's containment (bubblewrap \
-     and its guard), and this chat runs its commands without it (the host mode): nothing could \
-     confirm the command's end or stop what it starts. Run it in the foreground with a timeout";
+/// The refusal where there is no guard to hold the command: the node runs
+/// commands without its sandbox wrapper (`[sandbox] mode = "off"`), which
+/// holds the copy of the node's program the guard starts from. A `host`
+/// chat on a node with the sandbox on gets one without bubblewrap (the
+/// owner's decision of 2026-11-20, PLAN.md T9); a `sandbox` chat has the
+/// containment.
+pub const NO_GUARD: &str = "background commands need the node's guard (bubblewrap's containment, \
+     or in a host chat the guard alone), and this node runs commands without its sandbox \
+     wrapper ([sandbox] mode = \"off\"), which the guard starts from: nothing could confirm the \
+     command's end or stop what it starts. Run it in the foreground with a timeout";
+
+/// What the guard proves of a `host` chat's background command, in its end
+/// text (the same words everywhere it is told): descendants only. Another
+/// service the command asked to start is not its descendant.
+pub const HOST_KILLED: &str = "the command and every process descended from it were killed, and \
+     that end is confirmed; what it asked another service to start (a container runtime, a \
+     systemd unit, an already running tmux or similar server) is not covered";
 
 /// `bash_output { id? }`: read a background command's output, or list them.
 pub struct BashOutput;
@@ -1539,8 +1584,8 @@ impl Tool for BashStop {
 
     fn description(&self) -> &'static str {
         "Stop one background command of this chat (`id`, e.g. bg-1): SIGTERM, then after 2 s the \
-         kill of everything it started. Returns how it ended. The only way to stop one: later \
-         commands cannot see it."
+         kill of it and every process descended from it. Returns how it ended. The way to stop one and have its \
+         end confirmed (in a sandbox chat the only way: later commands cannot see it)."
     }
 
     fn schema(&self) -> Value {
@@ -1587,6 +1632,29 @@ impl Tool for BashStop {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Review of PR 186 (fix 2): a host command's `alive` is not blamed on
+    /// I/O alone (a deep chain of nested processes is ended one level per
+    /// pass and takes seconds too); the contained text is unchanged.
+    #[test]
+    fn the_still_alive_text_of_a_host_command_names_both_causes_and_claims_neither() {
+        let host = still_alive_text("stopped by the agent", 2.0, true);
+        assert!(
+            host.contains("long chain of nested processes")
+                && host.contains("a process the kernel cannot interrupt")
+                && host.contains("its guard keeps going")
+                && host.contains("end is confirmed when it reports")
+                && host.contains("NOT ended")
+                && !host.contains("waits on I/O"),
+            "{host}"
+        );
+        let contained = still_alive_text("stopped by the agent", 2.0, false);
+        assert!(
+            contained.contains("it waits on I/O the kernel cannot interrupt")
+                && !contained.contains("nested"),
+            "{contained}"
+        );
+    }
 
     /// X.24: background sub-agents have their own count per chat, beside
     /// the commands' (neither takes the other's places, and an agent holds

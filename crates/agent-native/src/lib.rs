@@ -1121,7 +1121,17 @@ impl NativeBackend {
                 },
                 ("bash", true) => ToolSpec {
                     name: t.name().to_string(),
-                    description: self.shell_text(t.description(), read_only, agent, host),
+                    description: self.shell_text(
+                        // A host chat's guard proves descendants only.
+                        if host.exec_mode() == Some(harness_core::policy::ExecMode::Host) {
+                            harness_tools::HOST_DESCRIPTION
+                        } else {
+                            t.description()
+                        },
+                        read_only,
+                        agent,
+                        host,
+                    ),
                     schema: t.schema_for(self.config.bash_timeout_max),
                 },
                 _ => ToolSpec {
@@ -1542,7 +1552,7 @@ impl NativeBackend {
                         .is_err()
                     {
                         if let harness_tools::background::Access::On(bg) =
-                            background_access(ctx, host)
+                            background_access(&self.config, ctx, host)
                         {
                             bg.discard(&d.bg_id);
                         }
@@ -3200,7 +3210,7 @@ impl NativeBackend {
             return self.compare(&ctx, sent, usage, author, ui).await;
         }
         let background_on = matches!(
-            background_access(&ctx, host),
+            background_access(&self.config, &ctx, host),
             harness_tools::background::Access::On(b) if b.limits().per_session > 0
         );
         // Background sub-agents (X.24): this agent's switch, in a person's
@@ -4945,7 +4955,7 @@ impl NativeBackend {
                         // Nothing in the log names it: it is stopped, and its end
                         // is not recorded either.
                         if let harness_tools::background::Access::On(bg) =
-                            background_access(&ctx, host)
+                            background_access(&self.config, &ctx, host)
                         {
                             bg.discard(&b.bg_id);
                         }
@@ -5959,7 +5969,7 @@ impl NativeBackend {
             pin: host.folder_pin(),
             owned: host.owned_folder(),
             identity: host.commit_identity(),
-            background: background_access(ctx, host),
+            background: background_access(&self.config, ctx, host),
             skills: ctx.extra.skills.clone(),
             seen: self.seen.session(ctx.session_id),
             recall: host.recall(),
@@ -6136,6 +6146,7 @@ impl NativeBackend {
 /// The background table a turn's tools get: none for a sub-agent (R14),
 /// whatever its host offers.
 fn background_access(
+    config: &NativeConfig,
     ctx: &TurnCtx<'_>,
     host: &dyn harness_core::backend::TurnHost,
 ) -> harness_tools::background::Access {
@@ -6143,9 +6154,16 @@ fn background_access(
     if ctx.parent_session.is_some() {
         return Access::Off(SUB_AGENT.into());
     }
-    // A `host` session's commands are never contained (review N-c).
-    if host.exec_mode() == Some(harness_core::policy::ExecMode::Host) {
-        return Access::Off(harness_tools::background::NOT_CONTAINED.into());
+    // A `host` session's background command runs under the guard without
+    // bubblewrap (the owner, 2026-11-20; PLAN.md T9). On a node that runs
+    // commands without its sandbox wrapper (`[sandbox] mode = "off"`) there
+    // is no guard to start: the table is off for the chat, so the tools
+    // and the notes follow the off behaviour. Decided from the node's own
+    // state, never from an argument.
+    if host.exec_mode() == Some(harness_core::policy::ExecMode::Host)
+        && !config.host_shell.can_guard_host()
+    {
+        return Access::Off(harness_tools::background::NO_GUARD.into());
     }
     match host
         .background()
@@ -9433,11 +9451,17 @@ mod background_tests {
         Arc<harness_tools::background::SessionBg>,
         std::sync::Mutex<Vec<EventKind>>,
         std::sync::atomic::AtomicUsize,
+        Option<harness_core::policy::ExecMode>,
     );
 
     impl WithTable {
         fn new(t: Arc<harness_tools::background::SessionBg>) -> Self {
-            Self(t, Default::default(), Default::default())
+            Self(t, Default::default(), Default::default(), None)
+        }
+
+        fn in_mode(mut self, mode: harness_core::policy::ExecMode) -> Self {
+            self.3 = Some(mode);
+            self
         }
     }
 
@@ -9482,6 +9506,9 @@ mod background_tests {
         fn background(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
             Some(self.0.clone())
         }
+        fn exec_mode(&self) -> Option<harness_core::policy::ExecMode> {
+            self.3
+        }
     }
 
     fn ctx<'a>(host: &'a dyn TurnHost, parent: Option<harness_core::SessionId>) -> TurnCtx<'a> {
@@ -9510,12 +9537,96 @@ mod background_tests {
             harness_tools::background::Registry::new(Default::default(), Default::default())
                 .session(1, tx),
         );
-        let sub = background_access(&ctx(&host, Some(harness_core::SessionId::new())), &host);
+        let config = NativeConfig::default();
+        let sub = background_access(
+            &config,
+            &ctx(&host, Some(harness_core::SessionId::new())),
+            &host,
+        );
         assert!(
             matches!(&sub, harness_tools::background::Access::Off(w) if w.contains("sub-agent")),
             "{sub:?}"
         );
-        let own = background_access(&ctx(&host, None), &host);
+        let own = background_access(&config, &ctx(&host, None), &host);
+        assert!(matches!(own, harness_tools::background::Access::On(_)));
+    }
+
+    /// The owner's decision of 2026-11-20 (PLAN.md T9): a `host` session's
+    /// own turn gets the table too (it was refused before: review N-c); a
+    /// host session's sub-agent still gets none.
+    #[test]
+    fn a_host_sessions_turn_gets_the_background_table_and_its_sub_agent_none() {
+        use harness_core::policy::ExecMode;
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let dir = tempfile::tempdir().unwrap();
+        let config = NativeConfig {
+            host_shell: harness_tools::sandbox::Confinement::Confined {
+                sandbox: Arc::new(
+                    harness_tools::sandbox::Sandbox::new(
+                        "/bin/true".into(),
+                        &harness_tools::sandbox::Settings::default(),
+                        Some(dir.path().join("sandbox-tmp")),
+                        &[],
+                    )
+                    .unwrap(),
+                ),
+                tmp: None,
+            },
+            ..Default::default()
+        };
+        for mode in [ExecMode::Host, ExecMode::Sandbox] {
+            let host = WithTable::new(
+                harness_tools::background::Registry::new(Default::default(), Default::default())
+                    .session(1, tx.clone()),
+            )
+            .in_mode(mode);
+            let own = background_access(&config, &ctx(&host, None), &host);
+            assert!(
+                matches!(own, harness_tools::background::Access::On(_)),
+                "{mode:?}: {own:?}"
+            );
+            let sub = background_access(
+                &config,
+                &ctx(&host, Some(harness_core::SessionId::new())),
+                &host,
+            );
+            assert!(
+                matches!(&sub, harness_tools::background::Access::Off(w) if w.contains("sub-agent")),
+                "{mode:?}: {sub:?}"
+            );
+        }
+    }
+
+    /// Review of PR 186: a host session on a node with no guard to start
+    /// from (the host shell is not confined: `[sandbox] mode = "off"`) gets
+    /// no table, with the reason every refused start gives; a sandbox
+    /// session of that node is unchanged. The shell comes from the node's
+    /// config, never from the turn.
+    #[test]
+    fn a_host_session_without_a_guardable_shell_gets_no_background_table() {
+        use harness_core::policy::ExecMode;
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let config = NativeConfig {
+            host_shell: harness_tools::sandbox::Confinement::Unconfined,
+            ..Default::default()
+        };
+        let host = WithTable::new(
+            harness_tools::background::Registry::new(Default::default(), Default::default())
+                .session(1, tx.clone()),
+        )
+        .in_mode(ExecMode::Host);
+        let own = background_access(&config, &ctx(&host, None), &host);
+        assert!(
+            matches!(&own, harness_tools::background::Access::Off(w)
+                if &**w == harness_tools::background::NO_GUARD),
+            "{own:?}"
+        );
+        let sandbox = WithTable::new(
+            harness_tools::background::Registry::new(Default::default(), Default::default())
+                .session(2, tx),
+        )
+        .in_mode(ExecMode::Sandbox);
+        let own = background_access(&config, &ctx(&sandbox, None), &sandbox);
         assert!(matches!(own, harness_tools::background::Access::On(_)));
     }
 
