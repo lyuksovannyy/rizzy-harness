@@ -1769,6 +1769,44 @@ mod run_usage_tests {
         assert_eq!(recorded(&m), Some((300, 40)));
     }
 
+    /// A `turn_usage` whose usage is not an object is ignored: the last
+    /// good value stays.
+    #[tokio::test]
+    async fn a_usage_that_is_not_an_object_keeps_the_last_good_one() {
+        let (m, sid) = rig().await;
+        emit(&m, sid, 2, "turn_started", json!({"turn_id": "t"})).await;
+        emit(
+            &m,
+            sid,
+            3,
+            "turn_usage",
+            json!({"turn_id": "t", "usage": usage(250, 30)}),
+        )
+        .await;
+        for (seq, bad) in [json!("lots"), json!(null), json!([1, 2]), json!(7)]
+            .into_iter()
+            .enumerate()
+        {
+            emit(
+                &m,
+                sid,
+                4 + seq as u64,
+                "turn_usage",
+                json!({"turn_id": "t", "usage": bad}),
+            )
+            .await;
+        }
+        emit(
+            &m,
+            sid,
+            9,
+            "turn_ended",
+            json!({"turn_id": "t", "reason": "interrupted"}),
+        )
+        .await;
+        assert_eq!(recorded(&m), Some((250, 30)));
+    }
+
     #[tokio::test]
     async fn a_turn_that_reported_nothing_records_no_usage() {
         let (m, sid) = rig().await;

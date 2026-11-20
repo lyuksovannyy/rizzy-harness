@@ -108,7 +108,7 @@ All routine time comes from one clock in the scheduler's handle (`Clock::wall()`
   in between is missed. A run's turn is the first turn of the chat it started: `turn_started`
   binds it, `approval_requested` parks it as `waiting` (also when the approval is in a sub-agent
   session the chat delegated to: found through the session's `parent_id`), the resolution of the
-  last pending approval makes it `running` again, and its `turn_ended` finishes it with its usage (a turn that ends without one, interrupted or stopped, leaves the last running total the chat shows: the watcher keeps the latest `turn_usage` of the run's turn, one value per run, and an end that carries usage wins).
+  last pending approval makes it `running` again, and its `turn_ended` finishes it with its usage (a turn that ends without one, interrupted or stopped, leaves the last running total the chat shows: the watcher keeps the latest `turn_usage` of the run's turn, one value per run, and an end that carries usage wins; a run closed after a server crash, by the reconcile path, still records no usage when its turn ended without one).
   Later turns, the owner continuing the chat, are not the run's. When the watcher falls behind it
   reconciles every active run from the mirror.
 - **Timeouts** (every 60 s): a run waiting for an approval longer than `approval_timeout_hours`
