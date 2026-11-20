@@ -34,6 +34,18 @@ use sources::cite_hint;
 pub const MAX_BODY: usize = 2 * 1024 * 1024;
 /// Largest text handed to the model from one page.
 pub const MAX_PAGE_CHARS: usize = 20_000;
+/// `web_fetch` calls per turn whose URL is vouched only by the links of a
+/// page that was fetched (not by the person's words, not by a search
+/// result). Which of a page's links the agent follows is a channel of about
+/// one byte per fetch to whoever wrote the page; this bounds it (PLAN.md
+/// T89). A sub-agent's turn has its own count.
+pub const MAX_PAGE_VOUCHED_FETCHES: usize = 20;
+/// `web_search` calls per turn (same counting as the fetches above).
+pub const MAX_SEARCHES_PER_TURN: usize = 20;
+/// The longest `web_search` query, in characters: longer is refused, never
+/// cut. The query goes to the backend the node's owner configured and is
+/// shown in the chat afterwards.
+pub const MAX_QUERY_CHARS: usize = 400;
 /// The most bytes of a page handed to the readability pass (it is the
 /// slowest parser; a larger page is read by `html2text`).
 const READABILITY_MAX: usize = 256 * 1024;
@@ -132,7 +144,11 @@ fn check_url(u: &url::Url, allow_private: bool) -> Result<(), String> {
             Err("private and local addresses are not fetched".into())
         }
         Some(url::Host::Domain(d))
-            if !allow_private && (d == "localhost" || d.ends_with(".localhost")) =>
+            if !allow_private && {
+                // `localhost.` is `localhost`.
+                let d = d.trim_end_matches('.');
+                d == "localhost" || d.ends_with(".localhost")
+            } =>
         {
             Err("private and local addresses are not fetched".into())
         }
@@ -444,7 +460,19 @@ impl Tool for WebFetch {
         if let Err(e) = check_url(&u, self.allow_private) {
             return ToolOutcome::err(e);
         }
-        if !provenance_ok(&u, &ctx.observed) {
+        let (given, from_pages) = harness_tools::split_observed(&ctx.observed);
+        let page_only = !provenance_ok(&u, given) && provenance_ok(&u, from_pages);
+        if page_only
+            && !harness_tools::TurnBudget::take(&ctx.budget.page_fetches, MAX_PAGE_VOUCHED_FETCHES)
+        {
+            return ToolOutcome::err(format!(
+                "this turn has already fetched {MAX_PAGE_VOUCHED_FETCHES} pages only because \
+                 another page linked them, which is the most it may: a page that lists many \
+                 links must not be able to tell which one was followed. Ask the user for the \
+                 link, or search for it."
+            ));
+        }
+        if !page_only && !provenance_ok(&u, given) {
             return ToolOutcome::err(
                 "this URL did not come from the user's own message, a search result or a page \
                  already fetched (a link that is only inside a file, one they attached or one in \
@@ -525,9 +553,12 @@ impl WebSearch {
     pub fn new(backend: SearchBackend) -> Self {
         Self {
             backend,
+            // No redirect is ever followed: the Brave key header could
+            // otherwise go to a second origin.
             client: reqwest::Client::builder()
                 .timeout(TIMEOUT)
                 .user_agent(USER_AGENT)
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("static client config"),
             brave_url: "https://api.search.brave.com/res/v1/web/search".into(),
@@ -537,6 +568,24 @@ impl WebSearch {
     pub fn with_brave_url(mut self, url: &str) -> Self {
         self.brave_url = url.into();
         self
+    }
+
+    /// The backend as an error may name it to the model: scheme, host and
+    /// port, never the path, query or userinfo of the address the owner
+    /// configured.
+    fn backend_label(&self) -> String {
+        let raw = match &self.backend {
+            SearchBackend::Searxng { base_url } => base_url.as_str(),
+            SearchBackend::Brave { .. } => self.brave_url.as_str(),
+        };
+        match url::Url::parse(raw) {
+            Ok(u) => match (u.host_str(), u.port()) {
+                (Some(h), Some(p)) => format!("{}://{h}:{p}", u.scheme()),
+                (Some(h), None) => format!("{}://{h}", u.scheme()),
+                _ => "the search backend".into(),
+            },
+            Err(_) => "the search backend".into(),
+        }
     }
 
     pub async fn search(&self, q: &str, count: usize) -> Result<Vec<SearchResult>, String> {
@@ -580,12 +629,24 @@ impl WebSearch {
         }
         .send()
         .await
-        .map_err(|e| format!("search failed: {}", root_cause(&e)))?;
+        .map_err(|e| {
+            format!(
+                "search failed ({}): {}",
+                self.backend_label(),
+                root_cause(&e.without_url())
+            )
+        })?;
         let status = resp.status();
         if !status.is_success() {
-            return Err(format!("search engine answered {status}"));
+            return Err(format!(
+                "search engine {} answered {status}",
+                self.backend_label()
+            ));
         }
-        let v: Value = resp.json().await.map_err(|e| format!("search: {e}"))?;
+        let v: Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("search ({}): {}", self.backend_label(), e.without_url()))?;
         Ok(match &self.backend {
             SearchBackend::Searxng { .. } => take(&v["results"], "title", "url", "content"),
             SearchBackend::Brave { .. } => {
@@ -640,6 +701,19 @@ impl Tool for WebSearch {
         let Some(q) = input.get("query").and_then(|v| v.as_str()) else {
             return ToolOutcome::err("missing string argument `query`");
         };
+        let chars = q.chars().count();
+        if chars > MAX_QUERY_CHARS {
+            return ToolOutcome::err(format!(
+                "this query is {chars} characters; a search query may have at most \
+                 {MAX_QUERY_CHARS}. Search for fewer words."
+            ));
+        }
+        if !harness_tools::TurnBudget::take(&ctx.budget.searches, MAX_SEARCHES_PER_TURN) {
+            return ToolOutcome::err(format!(
+                "this turn has already made {MAX_SEARCHES_PER_TURN} searches, which is the \
+                 most it may. Use what was found, or ask the user."
+            ));
+        }
         let count = input
             .get("count")
             .and_then(|v| v.as_u64())

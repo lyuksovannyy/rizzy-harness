@@ -236,3 +236,206 @@ async fn fetch_readable_markdown_vs_all_text() {
     assert!(md.output.contains("first item"), "{}", md.output);
     assert!(md.output.len() < all.output.len());
 }
+
+// ---- review of PR 179: caps, redirects, error text ----------------------
+
+fn ctx_with_pages(strong: &[&str], pages: &[&str]) -> ToolCtx {
+    let mut c = ToolCtx::new(std::env::temp_dir());
+    let all: Vec<String> = strong
+        .iter()
+        .map(|s| s.to_string())
+        .chain(std::iter::once(harness_tools::PAGE_MARK.to_string()))
+        .chain(pages.iter().map(|s| s.to_string()))
+        .collect();
+    c.observed = Arc::new(all);
+    c
+}
+
+/// A URL that only a fetched page lists counts against the turn's cap of
+/// `MAX_PAGE_VOUCHED_FETCHES`; the person's own URL and a search result's
+/// do not; a turn's counter is shared by its calls, and a new turn starts
+/// at zero.
+#[tokio::test]
+async fn fetches_vouched_only_by_a_page_are_capped_per_turn() {
+    let base = server().await;
+    let f = WebFetch::allowing_private();
+    let page = format!("{base}/page");
+    let mine = format!("{base}/page?mine=1");
+    let found = format!("{base}/page?found=1");
+    let c = ctx_with_pages(&[&format!("see {mine}"), &format!("hit {found}")], &[&page]);
+    for i in 0..harness_web::MAX_PAGE_VOUCHED_FETCHES {
+        let o = f.run(&c, json!({"url": page})).await;
+        assert!(o.ok, "fetch {i}: {}", o.output);
+    }
+    let o = f.run(&c, json!({"url": page})).await;
+    assert!(
+        !o.ok && o.output.contains("only because another page linked"),
+        "{}",
+        o.output
+    );
+    // Not counted: the person's URL, a search result's.
+    for u in [&mine, &found] {
+        let o = f.run(&c, json!({"url": u})).await;
+        assert!(o.ok, "{u}: {}", o.output);
+    }
+    // A URL no source vouches for keeps the old refusal.
+    let o = f.run(&c, json!({"url": format!("{base}/bin")})).await;
+    assert!(o.output.contains("did not come from"), "{}", o.output);
+    // A new turn (a new counter) starts again.
+    let again = ToolCtx {
+        observed: c.observed.clone(),
+        ..ToolCtx::new(std::env::temp_dir())
+    };
+    assert!(f.run(&again, json!({"url": page})).await.ok);
+}
+
+/// A search query may have at most `MAX_QUERY_CHARS` characters (longer is
+/// refused, not cut) and a turn at most `MAX_SEARCHES_PER_TURN` searches.
+#[tokio::test]
+async fn searches_are_bounded_in_length_and_number() {
+    let base = server().await;
+    let s = WebSearch::new(SearchBackend::Searxng { base_url: base });
+    let c = ctx(&[]);
+    let long = "q".repeat(harness_web::MAX_QUERY_CHARS + 1);
+    let o = s.run(&c, json!({"query": long})).await;
+    assert!(!o.ok && o.output.contains("at most 400"), "{}", o.output);
+    let edge = "q".repeat(harness_web::MAX_QUERY_CHARS);
+    assert!(s.run(&c, json!({"query": edge})).await.ok);
+    // A refused query used no search (one was spent above on the edge).
+    for i in 1..harness_web::MAX_SEARCHES_PER_TURN {
+        let o = s.run(&c, json!({"query": format!("q{i}")})).await;
+        assert!(o.ok, "search {i}: {}", o.output);
+    }
+    let o = s.run(&c, json!({"query": "one more"})).await;
+    assert!(
+        !o.ok && o.output.contains("already made 20 searches"),
+        "{}",
+        o.output
+    );
+    assert!(s.run(&ctx(&[]), json!({"query": "new turn"})).await.ok);
+}
+
+/// The search client follows no redirect: the Brave key header never goes
+/// to a second origin.
+#[tokio::test]
+async fn the_search_client_follows_no_redirect() {
+    let hits: Arc<std::sync::Mutex<Vec<Option<String>>>> = Arc::default();
+    let h2 = hits.clone();
+    let second = Router::new().route(
+        "/x",
+        get(move |headers: axum::http::HeaderMap| async move {
+            h2.lock().unwrap().push(
+                headers
+                    .get("x-subscription-token")
+                    .map(|v| v.to_str().unwrap().to_string()),
+            );
+            axum::Json(json!({"web": {"results": []}}))
+        }),
+    );
+    let l2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let a2 = l2.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(l2, second).await.unwrap() });
+    let target = format!("http://{a2}/x");
+    let first = Router::new().route(
+        "/brave",
+        get(move || {
+            let t = target.clone();
+            async move { Redirect::temporary(&t) }
+        }),
+    );
+    let l1 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let a1 = l1.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(l1, first).await.unwrap() });
+    let b = WebSearch::new(SearchBackend::Brave {
+        api_key: harness_core::Secret::new("bk-redirect-key".into()),
+    })
+    .with_brave_url(&format!("http://{a1}/brave"));
+    let o = b.run(&ctx(&[]), json!({"query": "x"})).await;
+    assert!(!o.ok && o.output.contains("307"), "{}", o.output);
+    assert!(
+        hits.lock().unwrap().is_empty(),
+        "the second origin was asked"
+    );
+}
+
+/// A backend error names the backend by scheme, host and port only: not the
+/// path, query or credentials of the address the owner configured.
+#[tokio::test]
+async fn a_search_error_names_the_backend_by_host_only() {
+    let s = WebSearch::new(SearchBackend::Searxng {
+        base_url: "http://user:hunter2@127.0.0.1:9/secret/path?token=abc123".into(),
+    });
+    let o = s.run(&ctx(&[]), json!({"query": "x"})).await;
+    assert!(!o.ok, "{}", o.output);
+    assert!(o.output.contains("http://127.0.0.1:9"), "{}", o.output);
+    for leak in ["hunter2", "user", "secret", "path", "token", "abc123"] {
+        assert!(!o.output.contains(leak), "{leak} in: {}", o.output);
+    }
+    // And the status error of a backend that answers.
+    let base = server().await;
+    let s = WebSearch::new(SearchBackend::Searxng {
+        base_url: format!("{base}/nope?k=v"),
+    });
+    let o = s.run(&ctx(&[]), json!({"query": "x"})).await;
+    assert!(
+        !o.ok && !o.output.contains("nope") && !o.output.contains("k=v"),
+        "{}",
+        o.output
+    );
+}
+
+/// `localhost.` is `localhost`.
+#[test]
+fn a_trailing_dot_does_not_hide_localhost() {
+    for u in [
+        "http://localhost./",
+        "http://LOCALHOST./x",
+        "http://app.localhost./",
+        "http://localhost../",
+    ] {
+        assert!(
+            harness_web::check_public_url(&url::Url::parse(u).unwrap()).is_err(),
+            "{u}"
+        );
+    }
+    assert!(
+        harness_web::check_public_url(&url::Url::parse("http://example.com./").unwrap()).is_ok()
+    );
+}
+
+/// The client allows five requests in a chain (the policy refuses the
+/// redirect that would be the fifth): a chain of that length is followed, one
+/// redirect longer is refused with the existing message.
+#[tokio::test]
+async fn the_redirect_hop_limit_is_five() {
+    let app = Router::new().route(
+        "/c/{n}",
+        get(
+            |axum::extract::Path(n): axum::extract::Path<u32>| async move {
+                if n == 0 {
+                    Html("<html><body>end of the chain</body></html>").into_response()
+                } else {
+                    Redirect::temporary(&format!("/c/{}", n - 1)).into_response()
+                }
+            },
+        ),
+    );
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let a = l.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(l, app).await.unwrap() });
+    let f = WebFetch::allowing_private();
+    let ok = format!("http://{a}/c/4");
+    let o = f.run(&ctx(&[&ok]), json!({"url": ok})).await;
+    assert!(
+        o.ok && o.output.contains("end of the chain"),
+        "{}",
+        o.output
+    );
+    let too_far = format!("http://{a}/c/5");
+    let o = f.run(&ctx(&[&too_far]), json!({"url": too_far})).await;
+    assert!(
+        !o.ok && o.output.contains("too many redirects"),
+        "{}",
+        o.output
+    );
+}

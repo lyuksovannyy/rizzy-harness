@@ -169,6 +169,23 @@ async fn fake() -> Fake {
                         .into_bytes(),
                         String::new(),
                     ),
+                    // A page that lists thirty URLs of its own.
+                    "/alpha" => (
+                        "text/html",
+                        format!(
+                            "<html><head><title>Alpha</title></head><body><p>links:</p>{}</body></html>",
+                            (0..30)
+                                .map(|i| format!("<p>http://{addr}/b/{i:02}</p>"))
+                                .collect::<String>()
+                        )
+                        .into_bytes(),
+                        String::new(),
+                    ),
+                    p if p.starts_with("/b/") => (
+                        "text/html",
+                        b"<html><body>leaf</body></html>".to_vec(),
+                        String::new(),
+                    ),
                     _ => ("text/plain", b"not found".to_vec(), String::new()),
                 };
                 let status = if path.starts_with("/hop") {
@@ -1268,4 +1285,174 @@ async fn researcher_is_offered_where_its_tools_exist() {
         d.output
     );
     assert!(t.of("web_search").is_empty());
+}
+
+/// A page that lists many URLs is a data channel: which of them the agent
+/// fetches is a symbol it chooses, and nothing asks (Ask, every card denied).
+/// A turn may fetch at most 20 URLs that only a fetched page vouched for; the
+/// 21st is refused with the reason. The person's own URL and a search
+/// result's are not counted. (Review of PR 179, H1; PLAN.md T89 says what
+/// the cap does and does not bound.)
+#[tokio::test]
+async fn a_page_that_lists_many_links_is_followed_twenty_times_a_turn() {
+    let f = fake().await;
+    let alpha = f.url("/alpha");
+    let mine = f.url("/linked");
+    let mut st: Vec<Vec<(&str, Value)>> = vec![
+        vec![("web_search", json!({"query": "docs"}))],
+        vec![fetch(&alpha)],
+    ];
+    let leaf = |i: usize| fetch(&f.url(&format!("/b/{i:02}")));
+    for i in 0..20 {
+        st.push(vec![leaf(i)]);
+    }
+    // At the cap: the search result's URL and the person's own still work;
+    // then five more leaves are refused.
+    st.push(vec![fetch(&f.url("/page"))]);
+    st.push(vec![fetch(&mine)]);
+    for i in 20..25 {
+        st.push(vec![leaf(i)]);
+    }
+    let mut n = node(steps(st), web_for_tests(&f), vec![], |_| {}).await;
+    let t = n
+        .turn(
+            ApprovalMode::Ask,
+            None,
+            &format!("read {alpha} and {mine}"),
+            Decision::Deny,
+        )
+        .await;
+    assert_eq!(t.cards, 0, "no card in Ask: the cap is the only bound");
+    let w = t.of("web_fetch");
+    // [alpha, 20 leaves, the search result, the person's own, 5 leaves]
+    assert_eq!(w.len(), 28);
+    assert!(w[..=20].iter().all(|c| c.ok), "the first twenty leaves");
+    assert!(w[21].ok && w[22].ok, "{} / {}", w[21].output, w[22].output);
+    for c in &w[23..] {
+        assert!(
+            !c.ok && c.output.contains("only because another page linked"),
+            "{}",
+            c.output
+        );
+    }
+    let leaves = f
+        .hits
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(p, _)| p.starts_with("/b/"))
+        .count();
+    assert_eq!(
+        leaves, 20,
+        "the attacker's server saw twenty symbols, not twenty-five"
+    );
+}
+
+/// `web_search` is bounded too: a query of at most 400 characters, 20
+/// searches in a turn; the query is in the call's event afterwards.
+#[tokio::test]
+async fn searches_are_capped_per_turn_and_by_length() {
+    let f = fake().await;
+    let mut st: Vec<Vec<(&str, Value)>> =
+        vec![vec![("web_search", json!({"query": "x".repeat(401)}))]];
+    for i in 0..22 {
+        st.push(vec![(
+            "web_search",
+            json!({"query": format!("visible query {i}")}),
+        )]);
+    }
+    let mut n = node(steps(st), web_for_tests(&f), vec![], |_| {}).await;
+    let t = n.turn(ApprovalMode::Ask, None, "go", Decision::Deny).await;
+    let s = t.of("web_search");
+    assert_eq!(s.len(), 23);
+    assert!(
+        !s[0].ok && s[0].output.contains("at most 400"),
+        "{}",
+        s[0].output
+    );
+    for (i, c) in s[1..].iter().enumerate() {
+        assert_eq!(c.ok, i < 20, "search {i}: {}", c.output);
+    }
+    assert!(
+        s[21].output.contains("already made 20 searches"),
+        "{}",
+        s[21].output
+    );
+    let n_hits = f
+        .hits
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(p, _)| p.starts_with("/search"))
+        .count();
+    assert_eq!(n_hits, 20);
+    // What was asked is in the chat: the query is in the call's event.
+    assert!(n.everything().contains("visible query 3"));
+}
+
+/// The cap survives a summary in the middle of a turn, and a sub-agent's
+/// fetches count against its own turn.
+#[tokio::test]
+async fn the_cap_is_per_turn_and_a_sub_agent_has_its_own() {
+    let f = fake().await;
+    let alpha = f.url("/alpha");
+    // The lead fetches the page and 12 leaves, delegates (the child fetches
+    // the page and 12 leaves in its own turn: 12 < 20 for each), then the
+    // lead fetches 12 more: 24 > 20 in the lead's turn.
+    let script: Box<Script> = {
+        let alpha = alpha.clone();
+        let base = f.url("");
+        Box::new(move |_, req| {
+            let lead = req.tools.iter().any(|t| t.name == "delegate");
+            let results = req
+                .messages
+                .iter()
+                .filter(|m| matches!(m, ChatMsg::Tool { .. }))
+                .count();
+            let leaf = |i: usize| {
+                (
+                    "web_fetch".to_string(),
+                    json!({"url": format!("{base}/b/{:02}", i % 30)}),
+                )
+            };
+            match (lead, results) {
+                (true, 0) => vec![("web_fetch".into(), json!({"url": alpha}))],
+                (true, r) if (1..=12).contains(&r) => vec![leaf(r - 1)],
+                (true, 13) => vec![(
+                    "delegate".into(),
+                    json!({"agent": "child", "task": "read the leaves"}),
+                )],
+                (true, r) if (14..=25).contains(&r) => vec![leaf(r - 2)],
+                (false, 0) => vec![("web_fetch".into(), json!({"url": alpha}))],
+                (false, r) if (1..=12).contains(&r) => vec![leaf(r - 1)],
+                _ => vec![],
+            }
+        })
+    };
+    let child = spec(
+        "child",
+        ToolSelection::List(vec!["web_fetch".into()]),
+        vec![],
+    );
+    let lead = spec("lead", all_tools(), vec![child]);
+    let mut n = node(script, web_for_tests(&f), vec![], |_| {}).await;
+    let t = n
+        .turn(
+            ApprovalMode::Auto,
+            Some(lead),
+            &format!("read {alpha}"),
+            Decision::Allow,
+        )
+        .await;
+    let w = t.of("web_fetch");
+    // Lead: 1 + 12 + 12 fetches; child: 1 + 12. The child's 12 all ran: its
+    // own count. The lead's page-vouched count reached 20 after 8 of the
+    // last 12 (12 + 8) and refused the other 4.
+    let refused = w.iter().filter(|c| !c.ok).count();
+    assert_eq!(
+        refused,
+        4,
+        "{:?}",
+        w.iter().map(|c| c.ok).collect::<Vec<_>>()
+    );
 }
