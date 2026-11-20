@@ -11,6 +11,7 @@ import { AgentAvatar, AgentMark, agentAlert, AVATAR_ACCENTS, EYES, SHAPES, STATE
 import { DONE_MS, sessionFace, useAvatarState } from "./avatarState";
 import { Composer } from "./Composer";
 import css from "../styles.css?raw";
+import { bbox, edgeDistance, inside, pill, polygons, type Pt } from "./avatarGeometry";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -123,6 +124,65 @@ describe("AgentAvatar", () => {
     expect(seen.wide!.w).toBeGreaterThan(seen.wide!.h);
     expect([seen.long!.glints, seen.sleepy!.glints]).toEqual([2, 0]);
     expect(host.innerHTML).not.toMatch(/Gradient|av-shine|av-side/);
+  });
+
+  // The eyes, read from the drawing: each pill's centre and radii.
+  const eyesOf = () =>
+    [...svg().querySelectorAll<SVGGElement>(".av-eye")].map((g) => {
+      const [x, y] = g.getAttribute("transform")!.match(/-?[\d.]+/g)!.map(Number) as [number, number];
+      const r = g.querySelector(".av-pupil")!;
+      return { c: [x, y] as Pt, rx: Number(r.getAttribute("width")) / 2, ry: Number(r.getAttribute("height")) / 2 };
+    });
+  // How far the CSS moves the eyes: the pointer's reach and the thinking glance.
+  const reach = {
+    gx: Number(css.match(/--av-gx, 0\) \* ([\d.]+)px/)![1]),
+    gy: Number(css.match(/--av-gy, 0\) \* ([\d.]+)px/)![1]),
+    tx: Number(css.match(/"thinking"\] \.av-look \{ transform: translate\(([\d.]+)px, -([\d.]+)px/)![1]),
+    ty: Number(css.match(/"thinking"\] \.av-look \{ transform: translate\(([\d.]+)px, -([\d.]+)px/)![2]),
+  };
+
+  test("the eyes lie well inside every body: a margin at rest, and still inside when glancing and following the pointer", () => {
+    for (const shape of SHAPES) {
+      render(<AgentAvatar avatar={{ shape, eyes: "long", accent: "blue" }} />);
+      const body = polygons(svg().querySelector(".av-face")!.getAttribute("d")!);
+      for (const eyes of EYES) {
+        render(<AgentAvatar avatar={{ shape, eyes, accent: "blue" }} />);
+        for (const e of eyesOf()) {
+          // The default look keeps 0.8 units (of 36) clear of the edge; the others 0.3.
+          const margin = eyes === "long" ? 0.8 : 0.3;
+          for (const p of pill(e.c, e.rx + margin, e.ry + margin)) {
+            expect(inside(body, p), `${shape}/${eyes} at rest`).toBe(true);
+          }
+          if (eyes !== "long") continue;
+          // Looking up and aside while the pointer pulls the same way: the worst case.
+          for (const p of pill([e.c[0] + reach.tx + reach.gx, e.c[1] - reach.ty - reach.gy], e.rx, e.ry)) {
+            expect(inside(body, p), `${shape} thinking + pointer`).toBe(true);
+          }
+          for (const p of pill([e.c[0] - reach.gx, e.c[1] + reach.gy], e.rx, e.ry)) {
+            expect(inside(body, p), `${shape} pointer below`).toBe(true);
+          }
+          // The brow (error, unsure) stays on the body too.
+          const brow = e.c[1] - e.ry - 3.7;
+          expect(inside(body, [e.c[0], brow]), `${shape} brow`).toBe(true);
+        }
+      }
+    }
+  });
+
+  test("the default eyes are big: more than a quarter of the body's height, and the two stay apart", () => {
+    for (const shape of SHAPES) {
+      render(<AgentAvatar avatar={{ shape, eyes: "long", accent: "blue" }} />);
+      const box = bbox(polygons(svg().querySelector(".av-face")!.getAttribute("d")!));
+      // The mug's handle is not the body: its height is the cup's.
+      const height = shape === "mug" ? 27 : box.y1 - box.y0;
+      const [l, r] = eyesOf();
+      expect((2 * l!.ry) / height, shape).toBeGreaterThanOrEqual(0.29);
+      expect((2 * l!.rx) / (box.x1 - box.x0), shape).toBeGreaterThan(0.1);
+      // Two eyes, not one blob: a clear gap (3.1 units of 36 or more).
+      const gap = r!.c[0] - l!.c[0] - 2 * l!.rx;
+      expect(gap, shape).toBeGreaterThanOrEqual(3.1);
+      expect(edgeDistance(polygons(svg().querySelector(".av-face")!.getAttribute("d")!), l!.c), shape).toBeGreaterThan(l!.rx + 0.8);
+    }
   });
 
   test("the flat body has no gradient, and eyes are dark where white would not read", () => {

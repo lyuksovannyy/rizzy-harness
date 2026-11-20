@@ -3922,7 +3922,7 @@ button.icon svg.lucide, .send svg.lucide { vertical-align: middle; }
 .agent-avatar .av-pupil { fill: var(--av-on, var(--on-light-accent)); }
 .agent-avatar .av-glint { fill: var(--av-c); }
 .agent-avatar .av-happy,
-.agent-avatar .av-brow { fill: none; stroke: var(--av-on, var(--on-light-accent)); stroke-width: 1.5; stroke-linecap: round; opacity: 0; }
+.agent-avatar .av-brow { fill: none; stroke: var(--av-on, var(--on-light-accent)); stroke-width: 1.7; stroke-linecap: round; opacity: 0; }
 .agent-avatar .av-pupil,
 .agent-avatar .av-happy,
 .agent-avatar .av-brow { transition: opacity var(--dur-2) var(--ease-standard); }
@@ -3931,13 +3931,13 @@ button.icon svg.lucide, .send svg.lucide { vertical-align: middle; }
 .agent-avatar .av-look { transition: transform var(--dur-4) var(--ease-spring); }
 /* The eyes follow a pointer over the avatar (AgentAvatar sets --av-gx/gy). */
 .agent-avatar .av-gaze {
-  transform: translate(calc(var(--av-gx, 0) * 1.6px), calc(var(--av-gy, 0) * 1.2px));
+  transform: translate(calc(var(--av-gx, 0) * 1.2px), calc(var(--av-gy, 0) * 0.9px));
   transition: transform var(--dur-3) var(--ease-out);
 }
 /* Thinking: eyes up and aside. Working: narrowed, on the task. Unsure: one
    eye small, one brow up, the body tilted. Done: closed happy arcs. Error:
    worried brows, the face sinking a little. */
-.agent-avatar[data-state="thinking"] .av-look { transform: translate(1.4px, -1.7px); }
+.agent-avatar[data-state="thinking"] .av-look { transform: translate(1.1px, -1.3px); }
 .agent-avatar[data-state="working"] .av-look { transform: translateY(0.5px) scale(1.12, 0.5); }
 .agent-avatar[data-state="unsure"] .av-figure { transform: rotate(-7deg); }
 .agent-avatar[data-state="unsure"] .l .av-look { transform: scale(0.75); }
