@@ -608,12 +608,35 @@ async fn a_hand_detached_job_is_told_what_happens_to_it() {
     )
     .await;
     assert!(!r.output.contains("[harness]"), "{}", r.output);
+    // The timeout note offers `background: true` where it is on.
+    let r = run(
+        &Bash,
+        &ctx,
+        json!({"command": "sleep 30", "timeout_secs": 5}),
+    )
+    .await;
+    assert!(
+        r.output.contains("or run it with `background: true`)"),
+        "{}",
+        r.output
+    );
     // A session without the table: the truth, no way out.
     let mut ctx = f.ctx(sb, &bg);
     ctx.background = Access::Off(harness_tools::background::SUB_AGENT.into());
     let r = run(&Bash, &ctx, json!({"command": "nohup sleep 30 &"})).await;
     assert!(
         r.output.contains("is killed when this call returns") && !r.output.contains("bash_stop"),
+        "{}",
+        r.output
+    );
+    let r = run(
+        &Bash,
+        &ctx,
+        json!({"command": "sleep 30", "timeout_secs": 5}),
+    )
+    .await;
+    assert!(
+        r.output.contains("timed out after 5s") && !r.output.contains("background: true"),
         "{}",
         r.output
     );

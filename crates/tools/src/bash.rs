@@ -346,7 +346,7 @@ pub(crate) fn detaches_job(command: &str) -> bool {
 /// The harness line for a foreground call that detaches a job. The mode's
 /// own truth first; the way out only where `background: true` is offered
 /// (a contained shell, a person's chat, the node's table not at zero).
-pub(crate) fn detach_note(contained: bool, background_offered: bool) -> String {
+pub(crate) fn detach_note(contained: bool, background_offered: bool, max_secs: u64) -> String {
     let (truth, way) = if contained {
         (
             "a job this command detaches (`&`, `nohup`, `setsid`, `disown`) is killed when this \
@@ -359,14 +359,16 @@ pub(crate) fn detach_note(contained: bool, background_offered: bool) -> String {
             "in this chat a job started with `&` ends when this call returns, and one that left \
              its process group (`setsid`) can outlive it, but a later command may not be able to \
              stop it",
-            " Run it in the foreground with `timeout_secs`.",
+            "",
         )
     };
-    let way = if background_offered || !contained {
-        way
-    } else {
-        ""
-    };
+    if !contained {
+        return format!(
+            "[harness] {truth}. Run it in the foreground with `timeout_secs` (up to {max_secs} s \
+             on this node)."
+        );
+    }
+    let way = if background_offered { way } else { "" };
     format!("[harness] {truth}.{way}")
 }
 
@@ -505,11 +507,11 @@ impl Tool for Bash {
         // A foreground call that detaches a job by hand: one harness line
         // in its result (a sentence in the description did not change the
         // habit, a line in the result does).
-        let detach_line = (!background && detaches_job(&command)).then(|| {
-            let offered = matches!(&ctx.background,
+        let offered = contained
+            && matches!(&ctx.background,
                 crate::background::Access::On(bg) if bg.limits().per_session > 0);
-            detach_note(contained, offered)
-        });
+        let detach_line = (!background && detaches_job(&command))
+            .then(|| detach_note(contained, offered, ctx.bash_timeout_max.as_secs()));
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -857,10 +859,14 @@ impl Tool for Bash {
                     "cancelled".to_string()
                 } else {
                     format!(
-                        "timed out after {}s (state `timeout_secs`, up to {} on this node, or \
-                         run it with `background: true`)",
+                        "timed out after {}s (state `timeout_secs`, up to {} on this node{})",
                         timeout.as_secs(),
-                        ctx.bash_timeout_max.as_secs()
+                        ctx.bash_timeout_max.as_secs(),
+                        if offered {
+                            ", or run it with `background: true`"
+                        } else {
+                            ""
+                        }
                     )
                 };
                 let note = match stopped {
@@ -957,6 +963,30 @@ mod tests {
         for c in no {
             assert!(!detaches_job(c), "should not match: {c:?}");
         }
+    }
+
+    /// The timeout note names `background: true` only where it is offered.
+    #[tokio::test]
+    async fn the_timeout_note_names_background_only_where_it_is_offered() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolCtx::new(dir.path()); // not contained, background off
+        let r = Bash
+            .run(&ctx, json!({"command": "sleep 30", "timeout_secs": 5}))
+            .await;
+        assert!(r.output.contains("timed out after 5s"), "{}", r.output);
+        assert!(!r.output.contains("background: true"), "{}", r.output);
+        assert!(r.output.contains("on this node)"), "{}", r.output);
+    }
+
+    /// The host sentence names the node's ceiling.
+    #[test]
+    fn the_host_line_names_the_ceiling() {
+        let n = detach_note(false, false, 600);
+        assert!(
+            n.contains("`timeout_secs` (up to 600 s on this node)"),
+            "{n}"
+        );
+        assert!(!n.contains("background: true"), "{n}");
     }
 
     fn note_of(r: &ToolOutcome) -> bool {
