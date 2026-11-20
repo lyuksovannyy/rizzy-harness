@@ -317,23 +317,19 @@ type BgEnds = tokio::sync::mpsc::UnboundedReceiver<harness_tools::background::En
 
 /// A session's background table and the receiver of its ends, where it
 /// gets one; `next` is the number its next id takes. A `host` session gets
-/// none (review N-c): its commands are never contained, so a background
-/// start could only be refused, and without a table the model is not
-/// offered the background tools at all.
+/// one too (the owner, 2026-11-20, PLAN.md T9): its background command runs
+/// under the guard without bubblewrap. A sub-agent's and a chat's (not
+/// agentic) session gets none.
 fn background_table(
     node: &Inner,
     profile: Profile,
     parent: Option<SessionId>,
-    exec_mode: Option<harness_core::policy::ExecMode>,
     next: u64,
 ) -> (
     Option<Arc<harness_tools::background::SessionBg>>,
     Option<BgEnds>,
 ) {
-    if profile != Profile::Agentic
-        || parent.is_some()
-        || exec_mode == Some(harness_core::policy::ExecMode::Host)
-    {
+    if profile != Profile::Agentic || parent.is_some() {
         return (None, None);
     }
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -543,7 +539,7 @@ impl Session {
             no_callbacks,
             exec_mode,
         } = new;
-        let (bg, ends) = background_table(&node, profile, parent_session, exec_mode, 1);
+        let (bg, ends) = background_table(&node, profile, parent_session, 1);
         let s = Arc::new(Self {
             bg,
             mcp: mcp_servers(
@@ -674,13 +670,7 @@ impl Session {
                 _ => {}
             }
         }
-        let (bg, ends) = background_table(
-            &node,
-            meta.profile,
-            meta.parent_session,
-            meta.exec_mode,
-            next,
-        );
+        let (bg, ends) = background_table(&node, meta.profile, meta.parent_session, next);
         let s = Arc::new(Self {
             bg,
             mcp: mcp_servers(

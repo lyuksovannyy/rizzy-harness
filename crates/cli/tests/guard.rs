@@ -1813,3 +1813,252 @@ fn copy_exe(from: impl AsRef<std::path::Path>, to: &std::path::Path) {
         .expect("cp");
     assert!(st.success(), "cp to {}", to.display());
 }
+
+// ---- the guard without bubblewrap (`--host`, PLAN.md T9) ----
+
+/// A guard in its `--host` mode running `sh -c <script>` (no bubblewrap, no
+/// namespace), the control channel's node end held here. This process is its
+/// `--node`.
+struct HostGuard {
+    child: std::process::Child,
+    ctl: std::os::unix::net::UnixStream,
+}
+
+fn host_guard(script: &str) -> HostGuard {
+    let (ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+    ours.set_read_timeout(Some(GONE_LIMIT)).unwrap();
+    let child = std::process::Command::new(EXE)
+        .args(["sandbox-guard", "--node"])
+        .arg(std::process::id().to_string())
+        .args(["--host", "--", "sh", "-c", script])
+        .stdin(std::process::Stdio::from(std::os::fd::OwnedFd::from(
+            theirs,
+        )))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    HostGuard { child, ctl: ours }
+}
+
+impl HostGuard {
+    /// Order the stop (`graceful`: SIGTERM first) and read the guard's
+    /// report; how long it took.
+    fn stop(&mut self, graceful: bool) -> (Option<harness_tools::guard::Report>, Duration) {
+        let t = Instant::now();
+        if graceful {
+            self.ctl.write_all(&[harness_tools::guard::TERM]).unwrap();
+        }
+        self.ctl.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut report = None;
+        for l in std::io::BufReader::new(&self.ctl)
+            .lines()
+            .map_while(Result::ok)
+        {
+            if let Some(r) = harness_tools::guard::Report::parse(&l) {
+                report = Some(r);
+                break;
+            }
+        }
+        (report, t.elapsed())
+    }
+}
+
+impl Drop for HostGuard {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// The escapers a host command leaves: `setsid`, `setsid` in a double fork,
+/// a pure double fork, a child that ignores SIGTERM, a plain child; the
+/// command itself ignores SIGTERM too, so only the kill ends it (a leader
+/// that dies of SIGTERM ends the rest at once, as a contained command's
+/// init does).
+fn host_script(base: u32) -> (String, Vec<Mark>) {
+    let s: Vec<Mark> = (0..5).map(|i| Mark(base + i)).collect();
+    (
+        format!(
+            "trap '' TERM; setsid sleep {} & ( setsid sleep {} & ) ; ( ( sleep {} & ) & ) ; \
+             sh -c 'trap \"\" TERM; exec sleep {}' & sleep {}",
+            s[0], s[1], s[2], s[3], s[4]
+        ),
+        s,
+    )
+}
+
+fn started_all(secs: &[Mark]) {
+    let by = Instant::now() + GONE_LIMIT;
+    while secs.iter().any(|s| sleeps(*s).is_empty()) {
+        assert!(Instant::now() < by, "the children never started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn none_of(secs: &[Mark], what: &str) {
+    let by = Instant::now() + Duration::from_secs(2);
+    loop {
+        let alive: Vec<i32> = secs.iter().flat_map(|s| sleeps(*s)).collect();
+        if alive.is_empty() {
+            return;
+        }
+        assert!(
+            Instant::now() < by,
+            "{what}: still alive: {}",
+            describe(&alive)
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// With a graceful stop the guard sends SIGTERM to the command's group, waits
+/// out the grace for the one child that ignores it, kills every descendant
+/// (the `setsid` ones and the reparented ones: they are its own children
+/// once their parents die), and writes `ended` only when `waitpid` has
+/// nothing left to reap: so every child is gone when the report is read, and
+/// the guard has exited.
+#[test]
+fn the_host_guard_reports_the_end_only_when_no_descendant_is_left() {
+    let (script, secs) = host_script(977_100);
+    let _c = Cleanup(PathBuf::from("/nonexistent-host-guard"), secs.clone());
+    let mut g = host_guard(&script);
+    started_all(&secs);
+    let (report, took) = g.stop(true);
+    assert!(
+        matches!(report, Some(harness_tools::guard::Report::Ended(_, _))),
+        "{report:?}"
+    );
+    // The report is the proof: nothing is left at that instant.
+    let alive: Vec<i32> = secs.iter().flat_map(|s| sleeps(*s)).collect();
+    assert!(alive.is_empty(), "ended, yet: {}", describe(&alive));
+    assert!(
+        took >= Duration::from_millis(1800),
+        "the SIGTERM-ignoring child was killed before the grace: {took:?}"
+    );
+    assert!(exited_within(&mut g.child, Duration::from_secs(5)));
+}
+
+/// The channel closing (the node died, or cancelled without a graceful
+/// byte) is the same order without the grace: the kill is at once.
+#[test]
+fn a_closed_channel_kills_a_host_command_and_what_it_started_at_once() {
+    let (script, secs) = host_script(977_110);
+    let _c = Cleanup(PathBuf::from("/nonexistent-host-guard"), secs.clone());
+    let mut g = host_guard(&script);
+    started_all(&secs);
+    let (report, took) = g.stop(false);
+    assert!(
+        matches!(report, Some(harness_tools::guard::Report::Ended(_, _))),
+        "{report:?}"
+    );
+    assert!(
+        took < Duration::from_secs(5),
+        "no grace was asked: {took:?}"
+    );
+    none_of(&secs, "closed channel");
+    assert!(exited_within(&mut g.child, Duration::from_secs(5)));
+}
+
+/// What forks faster than it is killed: a loop that starts a child in a new
+/// session over and over. Each round of the kill takes the command's group
+/// and every child, and the orphans reparented here the next; the guard
+/// ends, confirmed, and nothing of it is left (pid by pid).
+#[test]
+fn a_host_command_that_keeps_forking_is_ended_and_confirmed() {
+    let m = Mark(977_120);
+    let _c = Cleanup(PathBuf::from("/nonexistent-host-guard"), vec![m]);
+    let script = format!("while :; do setsid sleep {m} & sleep 0.005; done");
+    let mut g = host_guard(&script);
+    let by = Instant::now() + GONE_LIMIT;
+    while sleeps(m).len() < 20 {
+        assert!(Instant::now() < by, "it never forked");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let (report, _) = g.stop(false);
+    assert!(
+        matches!(report, Some(harness_tools::guard::Report::Ended(_, _))),
+        "{report:?}"
+    );
+    none_of(&[m], "a forking command");
+    assert!(exited_within(&mut g.child, Duration::from_secs(5)));
+}
+
+/// A command that ends by itself while something it started keeps running is
+/// ended with it, as in a contained chat: the guard's end is the end of
+/// everything (no report: nobody ordered it), its exit code the command's.
+#[test]
+fn a_host_command_that_exits_leaves_nothing_behind_it() {
+    let m = Mark(977_130);
+    let _c = Cleanup(PathBuf::from("/nonexistent-host-guard"), vec![m]);
+    let mut g = host_guard(&format!("setsid sleep {m} & sleep 1; exit 7"));
+    let by = Instant::now() + GONE_LIMIT;
+    let status = loop {
+        if let Some(st) = g.child.try_wait().unwrap() {
+            break st;
+        }
+        assert!(Instant::now() < by, "the guard did not exit");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    // The command's own code.
+    assert_eq!(status.code(), Some(7), "{status:?}");
+    none_of(&[m], "after the command exited");
+}
+
+/// A guard whose node is gone (the parent is no longer `--node`) starts
+/// nothing: nothing is run for a node that died before this ran.
+#[test]
+fn a_host_guard_of_a_dead_node_starts_nothing() {
+    let m = Mark(977_140);
+    let _c = Cleanup(PathBuf::from("/nonexistent-host-guard"), vec![m]);
+    let (ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+    let mut child = std::process::Command::new(EXE)
+        .args(["sandbox-guard", "--node", "999999", "--host", "--", "sleep"])
+        .arg(m.to_string())
+        .stdin(std::process::Stdio::from(std::os::fd::OwnedFd::from(
+            theirs,
+        )))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    assert!(exited_within(&mut child, GONE_LIMIT));
+    assert!(sleeps(m).is_empty());
+    drop(ours);
+}
+
+/// The graceful stop reaches the command: SIGTERM goes to its process group,
+/// so a command that handles it (writes a file, ends) is not killed, and the
+/// stop does not wait out the grace. (The guard of a contained command
+/// sends SIGTERM to the namespace's init session; with no namespace the
+/// number it must use is the command's own, which is its group's.)
+#[test]
+fn a_graceful_stop_of_a_host_command_is_a_sigterm_to_its_group() {
+    let m = Mark(977_150);
+    let _c = Cleanup(PathBuf::from("/nonexistent-host-guard"), vec![m]);
+    let dir = tempfile::tempdir().unwrap();
+    let done = dir.path().join("term-handled");
+    let script = format!(
+        "trap 'echo ok > {}; exit 0' TERM; sleep {m} & wait",
+        done.display()
+    );
+    let mut g = host_guard(&script);
+    let by = Instant::now() + GONE_LIMIT;
+    while sleeps(m).is_empty() {
+        assert!(Instant::now() < by, "it never started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // The shell has installed its trap once `sleep` runs (it is a later
+    // command of the same script).
+    let (report, took) = g.stop(true);
+    assert!(
+        matches!(report, Some(harness_tools::guard::Report::Ended(_, _))),
+        "{report:?}"
+    );
+    assert!(done.exists(), "the command never got SIGTERM");
+    assert!(
+        took < Duration::from_millis(1800),
+        "the stop waited for the grace: {took:?}"
+    );
+    none_of(&[m], "graceful stop");
+}

@@ -1,7 +1,8 @@
 //! Background commands (ADOPTION_PLAN T.8d step 1, docs/background-commands.md
 //! §4.3): a `bash` call with `background: true` that is still running after
-//! its first wait is moved, as the same contained command (bubblewrap, its
-//! guard, its file view and network namespace), from the call into its
+//! its first wait is moved, as the same guarded command (in a sandbox chat
+//! bubblewrap, its guard, its file view and network namespace; in a host
+//! chat the guard alone, [`crate::guard::HOST`]), from the call into its
 //! session's table here. One task per command owns it from then on: it
 //! reads the pipes into a bounded ring (a head, then a tail), waits for the
 //! exit, the timeout or a stop, and hands the end to the session actor
@@ -658,6 +659,9 @@ pub(crate) struct Handover {
     pub started: Instant,
     pub command: String,
     pub mark: Option<crate::contain::Mark>,
+    /// The command runs under the guard without bubblewrap (a `host`
+    /// chat's): what its end text may claim is what that guard proves.
+    pub host: bool,
 }
 
 impl SessionBg {
@@ -1293,6 +1297,10 @@ async fn run(
                     crate::guard::By::Bwrap => " (bubblewrap was killed before its command ended; \
                                                  the guard killed what was left)"
                         .into(),
+                    crate::guard::By::Command => " (the command was killed by a signal while \
+                                                   something it started was left; the guard \
+                                                   killed what was left)"
+                        .into(),
                     _ => String::new(),
                 };
             }
@@ -1313,9 +1321,13 @@ async fn run(
                 Stopped::Ended(d) => (
                     BackgroundConfirmed::Ended,
                     format!(
-                        "{}: the command and everything it started were killed; its guard \
-                         confirmed the end ({} ms)",
+                        "{}: {}; its guard confirmed the end ({} ms)",
                         reason.words(),
+                        if h.host {
+                            HOST_KILLED
+                        } else {
+                            "the command and everything it started were killed"
+                        },
                         d.as_millis()
                     ),
                 ),
@@ -1480,10 +1492,23 @@ impl Default for Access {
 pub const SUB_AGENT: &str = "background commands are not available to a sub-agent: its session \
      ends when it returns. Return, and the agent that delegated can start it";
 
-/// The refusal where the shell is not contained (R16).
-pub const NOT_CONTAINED: &str = "background commands need the shell's containment (bubblewrap \
-     and its guard), and this chat runs its commands without it (the host mode): nothing could \
-     confirm the command's end or stop what it starts. Run it in the foreground with a timeout";
+/// The refusal where there is no guard to hold the command: the node runs
+/// commands without its sandbox wrapper (`[sandbox] mode = "off"`), which
+/// holds the copy of the node's program the guard starts from. A `host`
+/// chat on a node with the sandbox on gets one without bubblewrap (the
+/// owner's decision of 2026-11-20, PLAN.md T9); a `sandbox` chat has the
+/// containment.
+pub const NO_GUARD: &str = "background commands need the node's guard (bubblewrap's containment, \
+     or in a host chat the guard alone), and this node runs commands without its sandbox \
+     wrapper ([sandbox] mode = \"off\"), which the guard starts from: nothing could confirm the \
+     command's end or stop what it starts. Run it in the foreground with a timeout";
+
+/// What the guard proves of a `host` chat's background command, in its end
+/// text (the same words everywhere it is told): descendants only. Another
+/// service the command asked to start is not its descendant.
+pub const HOST_KILLED: &str = "the command and every process descended from it were killed, and \
+     that end is confirmed; what it asked another service to start (a container runtime, a \
+     systemd unit, an already running tmux or similar server) is not covered";
 
 /// `bash_output { id? }`: read a background command's output, or list them.
 pub struct BashOutput;
@@ -1539,8 +1564,8 @@ impl Tool for BashStop {
 
     fn description(&self) -> &'static str {
         "Stop one background command of this chat (`id`, e.g. bg-1): SIGTERM, then after 2 s the \
-         kill of everything it started. Returns how it ended. The only way to stop one: later \
-         commands cannot see it."
+         kill of everything it started. Returns how it ended. The way to stop one and have its \
+         end confirmed (in a sandbox chat the only way: later commands cannot see it)."
     }
 
     fn schema(&self) -> Value {

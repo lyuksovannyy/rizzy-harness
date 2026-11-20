@@ -6134,10 +6134,9 @@ fn background_access(
     if ctx.parent_session.is_some() {
         return Access::Off(SUB_AGENT.into());
     }
-    // A `host` session's commands are never contained (review N-c).
-    if host.exec_mode() == Some(harness_core::policy::ExecMode::Host) {
-        return Access::Off(harness_tools::background::NOT_CONTAINED.into());
-    }
+    // A `host` session's background command runs under the guard without
+    // bubblewrap (the owner, 2026-11-20; PLAN.md T9): the tool refuses it
+    // where the node has no guard to start (`NO_GUARD`).
     match host
         .background()
         .and_then(|a| a.downcast::<SessionBg>().ok())
@@ -9424,11 +9423,17 @@ mod background_tests {
         Arc<harness_tools::background::SessionBg>,
         std::sync::Mutex<Vec<EventKind>>,
         std::sync::atomic::AtomicUsize,
+        Option<harness_core::policy::ExecMode>,
     );
 
     impl WithTable {
         fn new(t: Arc<harness_tools::background::SessionBg>) -> Self {
-            Self(t, Default::default(), Default::default())
+            Self(t, Default::default(), Default::default(), None)
+        }
+
+        fn in_mode(mut self, mode: harness_core::policy::ExecMode) -> Self {
+            self.3 = Some(mode);
+            self
         }
     }
 
@@ -9473,6 +9478,9 @@ mod background_tests {
         fn background(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
             Some(self.0.clone())
         }
+        fn exec_mode(&self) -> Option<harness_core::policy::ExecMode> {
+            self.3
+        }
     }
 
     fn ctx<'a>(host: &'a dyn TurnHost, parent: Option<harness_core::SessionId>) -> TurnCtx<'a> {
@@ -9508,6 +9516,32 @@ mod background_tests {
         );
         let own = background_access(&ctx(&host, None), &host);
         assert!(matches!(own, harness_tools::background::Access::On(_)));
+    }
+
+    /// The owner's decision of 2026-11-20 (PLAN.md T9): a `host` session's
+    /// own turn gets the table too (it was refused before: review N-c); a
+    /// host session's sub-agent still gets none.
+    #[test]
+    fn a_host_sessions_turn_gets_the_background_table_and_its_sub_agent_none() {
+        use harness_core::policy::ExecMode;
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        for mode in [ExecMode::Host, ExecMode::Sandbox] {
+            let host = WithTable::new(
+                harness_tools::background::Registry::new(Default::default(), Default::default())
+                    .session(1, tx.clone()),
+            )
+            .in_mode(mode);
+            let own = background_access(&ctx(&host, None), &host);
+            assert!(
+                matches!(own, harness_tools::background::Access::On(_)),
+                "{mode:?}: {own:?}"
+            );
+            let sub = background_access(&ctx(&host, Some(harness_core::SessionId::new())), &host);
+            assert!(
+                matches!(&sub, harness_tools::background::Access::Off(w) if w.contains("sub-agent")),
+                "{mode:?}: {sub:?}"
+            );
+        }
     }
 
     /// Through `run_turn` (the loop's `Logged` wrapper between it and the

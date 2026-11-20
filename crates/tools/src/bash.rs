@@ -445,31 +445,37 @@ pub(crate) fn detaches_job(command: &str) -> bool {
 
 /// The harness line for a foreground call that detaches a job. The mode's
 /// own truth first; the way out only where `background: true` is offered
-/// (a contained shell, a person's chat, the node's table not at zero).
+/// (a person's chat, the node's table not at zero, and a shell the guard can
+/// hold: a contained one, or the `host` mode's under the guard without
+/// bubblewrap, PLAN.md T9).
 pub(crate) fn detach_note(contained: bool, background_offered: bool, max_secs: u64) -> String {
-    let (truth, way) = if contained {
-        (
-            "a job this command detaches (`&`, `setsid`) is killed when this \
-             call returns",
+    if contained {
+        let way = if background_offered {
             " To keep one running, use `background: true` with `timeout_secs`, then \
-             `bash_output` and `bash_stop`.",
-        )
-    } else {
-        (
-            "in this chat a job started with `&` ends when this call returns, and one that left \
-             its process group (`setsid`) can outlive it, but a later command may not be able to \
-             stop it",
-            "",
-        )
-    };
-    if !contained {
+             `bash_output` and `bash_stop`."
+        } else {
+            ""
+        };
         return format!(
-            "[harness] {truth}. Run it in the foreground with `timeout_secs` (up to {max_secs} s \
-             on this node)."
+            "[harness] a job this command detaches (`&`, `setsid`) is killed when this \
+             call returns.{way}"
         );
     }
-    let way = if background_offered { way } else { "" };
-    format!("[harness] {truth}.{way}")
+    let truth = "in this chat a job started with `&` ends when this call returns, and one that \
+                 left its process group (`setsid`) can outlive it, but a later command may not \
+                 be able to stop it";
+    if background_offered {
+        format!(
+            "[harness] {truth}. To keep one running, use `background: true` with \
+             `timeout_secs` (up to {max_secs} s on this node), then `bash_output` and \
+             `bash_stop`: the harness ends it, and everything it started, when it stops."
+        )
+    } else {
+        format!(
+            "[harness] {truth}. Run it in the foreground with `timeout_secs` (up to {max_secs} s \
+             on this node)."
+        )
+    }
 }
 
 #[async_trait::async_trait]
@@ -485,9 +491,11 @@ impl Tool for Bash {
          `timeout_secs` (required then): if it is still running after 3 s you get its id (bg-1) \
          and its first output, and it keeps running until it exits, its timeout or bash_stop. You \
          are told when it ends, at your next step or the person's next message: do not poll. \
-         Later commands cannot see it in `ps` or stop it with `kill` (each command has its own \
-         process namespace); use bash_output and bash_stop. Where the node's network is off, a \
-         later command cannot connect to it either."
+         Read it with bash_output and stop it with bash_stop, which ends it and everything it \
+         started and confirms that. In a sandbox chat later commands cannot see it in `ps` or \
+         stop it with `kill` (each command has its own process namespace), and where the \
+         node's network is off they cannot connect to it either; in a host chat they can see \
+         and signal it."
         )
     }
 
@@ -593,21 +601,26 @@ impl Tool for Bash {
                 cwd,
                 identity: ctx.identity.clone(),
                 read_identified: crate::skills::shell_reads(ctx),
+                guard_host: background,
                 ..Default::default()
             },
         ) {
             Ok(c) => c,
             Err(e) => return ToolOutcome::err(e),
         };
-        // Only a contained command can outlive its call: its guard confirms
-        // its end and nothing it starts escapes (R16).
+        // Only a command under the node's guard can outlive its call: the
+        // guard confirms its end (R16). The `host` mode's background command
+        // runs under it without bubblewrap (the owner, 2026-11-20; PLAN.md
+        // T9). `contained` here: guarded; `host_guard`: guarded by the
+        // guard alone.
         if background && !contained {
-            return ToolOutcome::err(crate::background::NOT_CONTAINED);
+            return ToolOutcome::err(crate::background::NO_GUARD);
         }
+        let host_guard = contained && !ctx.sandbox.contains();
         // A foreground call that detaches a job by hand: one harness line
         // in its result (a sentence in the description did not change the
         // habit, a line in the result does).
-        let offered = contained
+        let offered = (contained || ctx.sandbox.can_guard_host())
             && matches!(&ctx.background,
                 crate::background::Access::On(bg) if bg.limits().per_session > 0);
         let detach_line = (!background && detaches_job(&command))
@@ -716,9 +729,10 @@ impl Tool for Bash {
             else {
                 return ToolOutcome::err("internal error: a background start lost its slot");
             };
-            let net_off = matches!(&ctx.sandbox,
-                crate::sandbox::Confinement::Confined { sandbox, .. }
-                    if sandbox.network() == crate::sandbox::Network::Off);
+            let net_off = !host_guard
+                && matches!(&ctx.sandbox,
+                    crate::sandbox::Confinement::Confined { sandbox, .. }
+                        if sandbox.network() == crate::sandbox::Network::Off);
             // From the ring: scrubbed, without a possible secret's start
             // that the first wait cut (R-4).
             let (so_far, truncated) = {
@@ -737,7 +751,10 @@ impl Tool for Bash {
                     timeout,
                     started,
                     command: command.clone(),
-                    mark: ctx.sandbox.mark(),
+                    // A guard without bubblewrap holds no namespace for the
+                    // sweep to find.
+                    mark: ctx.sandbox.mark().filter(|_| !host_guard),
+                    host: host_guard,
                 },
             );
             let mut note = format!(
@@ -745,14 +762,19 @@ impl Tool for Bash {
                  stopped at its timeout in {left} at the latest ({t} s; timeout_secs, up to {max} \
                  s on this node). You will be told when it ends, at your next step or at the \
                  person's next message: do not poll. bash_output {{\"id\": \"{id}\"}} reads its \
-                 output; bash_stop {{\"id\": \"{id}\"}} stops it. Later commands cannot see it in \
-                 `ps` or signal it.]",
+                 output; bash_stop {{\"id\": \"{id}\"}} stops it. {visible}]",
                 id = st.bg_id,
                 left = harness_core::text::duration_words(
                     timeout.saturating_sub(started.elapsed()).as_millis() as u64
                 ),
                 t = timeout.as_secs(),
                 max = ctx.bash_timeout_max.as_secs(),
+                visible = if host_guard {
+                    "This chat runs on the host: a later command can see it in `ps` and signal \
+                     it; bash_stop ends it and everything descended from it, and confirms that."
+                } else {
+                    "Later commands cannot see it in `ps` or signal it."
+                },
             );
             if net_off {
                 note.push_str(
@@ -816,6 +838,13 @@ impl Tool for Bash {
                                 .into(),
                         );
                     }
+                    Some(Report::Ended(_, By::Command)) => {
+                        guard_note = Some(
+                            "[the command was killed by a signal while something it started was \
+                             left; its guard killed what was left]"
+                                .into(),
+                        );
+                    }
                     _ => {}
                 },
             }
@@ -830,7 +859,8 @@ impl Tool for Bash {
             } else {
                 None
             };
-            if let (Some(within), Some(mark)) = (within, ctx.sandbox.mark()) {
+            if let (Some(within), Some(mark)) = (within, ctx.sandbox.mark().filter(|_| !host_guard))
+            {
                 let found = tokio::task::spawn_blocking(move || {
                     crate::contain::sweep_session(&mark, within)
                 })
@@ -992,9 +1022,16 @@ impl Tool for Bash {
                         }
                     ),
                     // Contained: a namespace, killed, and its end confirmed.
+                    // Under the guard alone (a `host` chat's background
+                    // start that ended in its first wait): what the guard
+                    // proves, no more.
                     Some(crate::contain::Stopped::Ended(d)) => format!(
-                        "[{how}: the command and everything it started were killed; \
-                         {ENDED_MS_LEAD}{} ms)]",
+                        "[{how}: {}; {ENDED_MS_LEAD}{} ms)]",
+                        if host_guard {
+                            crate::background::HOST_KILLED
+                        } else {
+                            "the command and everything it started were killed"
+                        },
                         d.as_millis()
                     ),
                     // Not contained: a process group, unconfirmed.

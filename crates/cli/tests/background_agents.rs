@@ -168,6 +168,17 @@ async fn node_with(edit: impl FnOnce(&mut harness_node::NodePolicy)) -> Option<N
     let (data, ws) = (root.join("data"), root.join("home/proj"));
     std::fs::create_dir_all(&ws).unwrap();
     let sb = contained(&data)?;
+    // The `host` mode's shell, for a chat created in it on a node that
+    // offers it.
+    let host_sb = Arc::new(
+        Sandbox::new(
+            PathBuf::from(EXE),
+            &Settings::default(),
+            Some(data.join("sandbox-tmp")),
+            std::slice::from_ref(&data),
+        )
+        .unwrap(),
+    );
     let store =
         harness_store::Store::open(&data.join("node.db"), harness_store::Durability::Full).unwrap();
     let mut policy = harness_node::NodePolicy {
@@ -197,6 +208,10 @@ async fn node_with(edit: impl FnOnce(&mut harness_node::NodePolicy)) -> Option<N
         NativeConfig {
             sandbox: Confinement::Confined {
                 sandbox: sb,
+                tmp: None,
+            },
+            host_shell: Confinement::Confined {
+                sandbox: host_sb,
                 tmp: None,
             },
             ..Default::default()
@@ -242,13 +257,20 @@ impl Node {
     }
 
     async fn create(&mut self, mode: &str) -> SessionId {
+        self.create_in(mode, None).await
+    }
+
+    /// A chat in the execution mode `exec` (`"host"`), when the node offers it.
+    async fn create_in(&mut self, mode: &str, exec: Option<&str>) -> SessionId {
         let sid = SessionId::new();
         self.n += 1;
-        self.send(
-            json!({"type": "session.create", "req_id": format!("c{}", self.n),
+        let mut m = json!({"type": "session.create", "req_id": format!("c{}", self.n),
             "session_id": sid, "title": "t", "cwd": self.ws.display().to_string(),
-            "approval_mode": mode}),
-        );
+            "approval_mode": mode});
+        if let Some(e) = exec {
+            m["exec_mode"] = json!(e);
+        }
+        self.send(m);
         self.until(move |e, k| e.session_id == sid && matches!(k, EventKind::SessionCreated(_)))
             .await;
         sid
@@ -744,6 +766,46 @@ async fn without_the_switch_or_the_nodes_yes_nothing_is_offered_and_a_forged_sta
     let reqs = n.requests.lock().unwrap().clone();
     let delegate = reqs[0].tools.iter().find(|t| t.name == "delegate").unwrap();
     assert!(delegate.schema["properties"].get("background").is_some());
+}
+
+/// The owner's decision of 2026-11-20 allowed background COMMANDS in a
+/// `host` chat, and with it the chat has a table; background SUB-AGENTS stay
+/// refused there (as they were while the chat had no table): `delegate`
+/// offers no `background`, and a forged start is refused with the reason
+/// before any child exists.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_chat_is_offered_no_background_sub_agent_and_a_forged_start_is_refused() {
+    let Some(mut n) = node_with(|p| {
+        p.exec = harness_node::exec::ExecOffers::new(Ok(()), Ok(()), vec![]);
+    })
+    .await
+    else {
+        return;
+    };
+    let sid = n.create_in("auto", Some("host")).await;
+    n.prompt_as(sid, lead(true), &[bg_delegate("look", "run: true")]);
+    n.turns_ended(sid, 1).await;
+    let out = n.outputs(sid, "delegate");
+    assert!(
+        out[0].contains("not available in this chat") && out[0].contains("the host mode"),
+        "{out:?}"
+    );
+    assert!(n.starts(sid).is_empty());
+    assert_eq!(
+        n.seen
+            .iter()
+            .filter(|e| e.kind == "session_created")
+            .count(),
+        1,
+        "a child was made"
+    );
+    let reqs = n.requests.lock().unwrap().clone();
+    let delegate = reqs[0].tools.iter().find(|t| t.name == "delegate").unwrap();
+    assert!(
+        delegate.schema["properties"].get("background").is_none(),
+        "{:?}",
+        delegate.schema
+    );
 }
 
 /// The person's Stop of one, the agent's `bash_stop`, and the chat's

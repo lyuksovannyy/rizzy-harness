@@ -59,12 +59,19 @@ impl Session {
                     .into(),
             );
         }
-        let Some(bg) = &self.bg else {
+        // The owner's decision of 2026-11-20 allowed background COMMANDS in a
+        // host chat (their table exists there now); background sub-agents
+        // stay refused there, as they were while a host chat had no table.
+        if self.exec_mode == Some(harness_core::policy::ExecMode::Host) {
             return Err(
-                "this chat has no background table (it runs its commands on this \
-                        machine without the sandbox, the host mode): delegate in the foreground"
+                "background sub-agents are not available in this chat, which runs its \
+                        commands on this machine without the sandbox (the host mode): delegate in \
+                        the foreground"
                     .into(),
             );
+        }
+        let Some(bg) = &self.bg else {
+            return Err("this chat has no background table: delegate in the foreground".into());
         };
         if self.node.cfg.policy.limits.background_agents_per_chat == 0 {
             return Err("background sub-agents are off on this node ([limits] \

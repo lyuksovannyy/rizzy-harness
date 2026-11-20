@@ -390,11 +390,10 @@ async fn a_session_whose_mode_is_no_longer_offered_runs_nothing_after_a_restart(
         ] {
             n.link.to_node.try_send(m).unwrap();
             let e = ack(&mut n).await.unwrap_err();
-            // A host chat has no background table, so its callback is
-            // refused for that before the mode is looked at.
-            let ok = e.contains(&format!("runs in the {} mode", lost.id()))
-                || (what == "callback" && lost == ExecMode::Host && e.contains("no background"));
-            assert!(ok, "{lost:?} {what}: {e}");
+            assert!(
+                e.contains(&format!("runs in the {} mode", lost.id())),
+                "{lost:?} {what}: {e}"
+            );
         }
         n.link.to_node.try_send(prompt(stays, "hello")).unwrap();
         ack(&mut n).await.unwrap();
@@ -532,11 +531,11 @@ async fn a_host_session_takes_auto_within_the_nodes_ceiling() {
     assert!(!marker.exists(), "ran without the card");
 }
 
-/// Review N-c: a `host` session has no background table, so its model is
-/// not offered `bash_output` or `bash_stop` (nor `background` on bash); a
-/// `sandbox` session is.
+/// The owner's decision of 2026-11-20 (PLAN.md T9; review N-c before it): a
+/// `host` session has a background table like a `sandbox` session, so its
+/// model is offered `bash_output` and `bash_stop`.
 #[tokio::test]
-async fn a_host_session_is_not_offered_background_commands() {
+async fn a_host_session_is_offered_background_commands() {
     let dir = tempfile::tempdir().unwrap();
     let (spy, seen) = spied();
     let mut n = start_cfg(config_with(
@@ -547,7 +546,7 @@ async fn a_host_session_is_not_offered_background_commands() {
         None,
     ))
     .await;
-    for (mode, offered) in [(ExecMode::Host, false), (ExecMode::Sandbox, true)] {
+    for (mode, offered) in [(ExecMode::Host, true), (ExecMode::Sandbox, true)] {
         let sid = SessionId::new();
         n.link
             .to_node

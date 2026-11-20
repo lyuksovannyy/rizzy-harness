@@ -916,6 +916,23 @@ impl Sandbox {
         }
     }
 
+    /// `inner` (this sandbox's own wrapper line, up to the command) under
+    /// the node's guard without bubblewrap: `<image> sandbox-guard --node
+    /// <pid> --host -- @rizzy-image <inner's arguments>`. No `--mark`: the
+    /// sweep looks for bubblewrap's namespaces, and a guard of this kind
+    /// holds none ([`crate::guard`]'s comment, PLAN.md T9).
+    fn host_guard(&self, inner: &std::process::Command) -> std::process::Command {
+        let mut g = self.own_program();
+        g.arg(crate::guard::SUBCOMMAND)
+            .arg(crate::guard::NODE)
+            .arg(std::process::id().to_string())
+            .arg(crate::guard::HOST)
+            .arg("--")
+            .arg(crate::contain::IMAGE_TOKEN)
+            .args(inner.get_args());
+        g
+    }
+
     /// The wrapper for one of the node's own helpers (its git for
     /// checkpoints, R.1 R1b-2), up to and including `--`: exactly `rw` and
     /// `ro` on top of the system folders ([`SYSTEM_READ`]) and the device
@@ -1199,6 +1216,15 @@ pub struct Grants {
     /// extended attributes open. Overrides `workspace_write` and
     /// `owned_write`.
     pub read_only: bool,
+    /// The agent's shell only (`bash` with `background: true`): where the
+    /// shell is not contained (a `host` chat's), start the command under
+    /// the node's guard without bubblewrap ([`crate::guard::HOST`], PLAN.md
+    /// T9), so a table can hold it and confirm its end. Ignored where the
+    /// shell is contained (it always has the guard) and for the
+    /// unconfined shell, which has no held copy of the node's program to
+    /// start a guard from ([`Confinement::shell`] then returns it as it
+    /// is, unguarded).
+    pub guard_host: bool,
 }
 
 /// The read-only shell's only writable folder: a tmpfs at this path in the
@@ -1246,6 +1272,19 @@ impl Confinement {
             Self::Confined { sandbox, .. } => sandbox.tmp_root.as_deref(),
             _ => None,
         }
+    }
+
+    /// Whether the shell is inside bubblewrap here (its own PID namespace,
+    /// the guard's proof by the namespace), as opposed to the `host`
+    /// mode's shell.
+    pub fn contains(&self) -> bool {
+        matches!(self, Self::Confined { sandbox, .. } if sandbox.contain.get().is_some())
+    }
+
+    /// Whether [`Grants::guard_host`] can be honoured: a shell with the
+    /// node's held program to start the guard from.
+    pub fn can_guard_host(&self) -> bool {
+        matches!(self, Self::Confined { .. })
     }
 
     /// Whether this confinement can run the read-only shell
@@ -1327,10 +1366,11 @@ impl Confinement {
     }
 
     /// The agent's shell: as [`Self::command`], inside the node's process
-    /// containment when it has one (T.8a). Returns whether it is contained;
-    /// a contained command must be started with [`Self::spawn`]. Whether
-    /// there is a containment is the node's alone: nothing a call or a
-    /// session passes reaches this decision.
+    /// containment when it has one (T.8a). Returns whether it is guarded
+    /// (contained, or [`Grants::guard_host`] on a sandboxed shell without
+    /// containment); a guarded command must be started with
+    /// [`Self::spawn`]. Whether there is a containment is the node's
+    /// alone: nothing a call or a session passes reaches this decision.
     #[allow(clippy::too_many_arguments)]
     pub fn shell(
         &self,
@@ -1402,6 +1442,7 @@ impl Confinement {
             None => ws.clone(),
         };
         let mut contained = false;
+        let mut guarded = false;
         let std_cmd = match self {
             Self::Refused(why) => return Err(why.to_string()),
             Self::Unconfined => {
@@ -1538,6 +1579,12 @@ impl Confinement {
                     ro_tmp.as_deref(),
                 );
                 c.arg(program);
+                // A `host` chat's background command: the same wrapper
+                // under the node's guard, started without bubblewrap.
+                if shell && grants.guard_host && contain.is_none() {
+                    c = sandbox.host_guard(&c);
+                    guarded = true;
+                }
                 env.apply_std(&mut c);
                 if let Some(t) = &ro_tmp {
                     c.env("TMPDIR", t);
@@ -1567,7 +1614,7 @@ impl Confinement {
         // mount) stalls the guard, never the node's spawn (review N-2).
         c.args(args)
             .current_dir(if contained { Path::new("/") } else { &start });
-        Ok((c, contained))
+        Ok((c, contained || guarded))
     }
 }
 
@@ -3358,6 +3405,91 @@ mod tests {
                 Path::new("/.harness-tmp")
             );
         }
+    }
+
+    /// PLAN.md T9 (the owner, 2026-11-20): a `host` chat's background command
+    /// is the same wrapper line under the node's guard in its `--host` mode,
+    /// no `--mark`, no bubblewrap; a foreground call, and any call without
+    /// `guard_host`, is exactly what it was; the unconfined shell has no
+    /// image to start a guard from and is returned unguarded.
+    #[test]
+    fn a_host_background_command_is_the_wrapper_under_the_guard_without_bubblewrap() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().canonicalize().unwrap();
+        let sb = Arc::new(
+            Sandbox::new(
+                "/bin/true".into(),
+                &Settings::default(),
+                Some(ws.join("sandbox-tmp")),
+                &[],
+            )
+            .unwrap(),
+        );
+        let conf = Confinement::Confined {
+            sandbox: sb,
+            tmp: None,
+        };
+        assert!(!conf.contains() && conf.can_guard_host());
+        let shell = |c: &Confinement, guard_host: bool| {
+            c.shell(
+                OsStr::new("bash"),
+                &[OsStr::new("-c"), OsStr::new("true")],
+                &ws,
+                None,
+                &Default::default(),
+                &[],
+                Grants {
+                    workspace_write: true,
+                    guard_host,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        let args = |c: &tokio::process::Command| -> Vec<String> {
+            c.as_std()
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        // Without `guard_host`: the wrapper, not guarded.
+        let (plain, guarded) = shell(&conf, false);
+        assert!(!guarded);
+        assert_eq!(args(&plain)[0], SUBCOMMAND);
+        // With it: the guard, in `--host` mode, then the wrapper, then bash.
+        let (cmd, guarded) = shell(&conf, true);
+        assert!(guarded);
+        let a = args(&cmd);
+        let me = std::process::id().to_string();
+        assert_eq!(
+            a[..6],
+            [
+                crate::guard::SUBCOMMAND,
+                crate::guard::NODE,
+                me.as_str(),
+                crate::guard::HOST,
+                "--",
+                crate::contain::IMAGE_TOKEN
+            ]
+        );
+        assert_eq!(a[6], SUBCOMMAND, "{a:?}");
+        let tail = &a[a.len() - 3..];
+        assert_eq!(tail, ["bash", "-c", "true"], "{a:?}");
+        assert!(
+            !a.iter()
+                .any(|x| x == crate::guard::MARK || x.contains("bwrap")),
+            "a host guard carries no mark and no bubblewrap: {a:?}"
+        );
+        // The command's own directory is the session's, as for a plain one.
+        assert_eq!(
+            cmd.as_std().get_current_dir(),
+            plain.as_std().get_current_dir()
+        );
+        // No sandbox wrapper: nothing to start a guard from.
+        assert!(!Confinement::Unconfined.can_guard_host());
+        let (cmd, guarded) = shell(&Confinement::Unconfined, true);
+        assert!(!guarded);
+        assert_eq!(cmd.as_std().get_program(), "bash");
     }
 
     /// The `<expect>` the wrapper is given for `path`, if it is granted.

@@ -83,6 +83,19 @@ impl Fixture {
         self.sandbox_with(&Settings::default())
     }
 
+    /// The `host` mode's shell: the node's Landlock wrapper without
+    /// bubblewrap (`Sandbox::uncontained` in the node), or `None` where
+    /// Landlock does not work here.
+    fn host_sandbox(&self) -> Option<Arc<Sandbox>> {
+        let sb = self.plain(&Settings::default());
+        if let Err(e) = sb.probe(&self.data.join("sandbox-tmp/probe-host"), &self.data) {
+            assert!(!bwrap::required(), "Landlock does not work here: {e}");
+            eprintln!("SKIPPED: Landlock does not work here: {e}");
+            return None;
+        }
+        Some(Arc::new(sb))
+    }
+
     fn ctx(&self, sb: Arc<Sandbox>, bg: &Arc<SessionBg>) -> ToolCtx {
         let mut ctx = ToolCtx::new(&self.ws);
         ctx.protected = Arc::new(vec![self.data.clone()]);
@@ -892,6 +905,23 @@ async fn node_opts(
     edit: impl FnOnce(&mut harness_node::NodePolicy),
     mode: &str,
 ) -> Node {
+    node_inner(f, sb, secrets, edit, mode, false).await
+}
+
+/// A node whose one chat is a `host` chat (the node offers `host`; its
+/// shell is `sb`, the Landlock wrapper without bubblewrap), in `auto`.
+async fn node_host(f: Fixture, sb: Arc<Sandbox>) -> Node {
+    node_inner(f, sb, vec![], |_| {}, "auto", true).await
+}
+
+async fn node_inner(
+    f: Fixture,
+    sb: Arc<Sandbox>,
+    secrets: Vec<String>,
+    edit: impl FnOnce(&mut harness_node::NodePolicy),
+    mode: &str,
+    host: bool,
+) -> Node {
     use harness_agent_native::{NativeBackend, NativeConfig, mock::Mock};
     use harness_protocol::{MasterToNode, NodeToMaster};
     let store =
@@ -904,6 +934,9 @@ async fn node_opts(
         max_approval_mode: harness_core::policy::ApprovalMode::Auto,
         ..Default::default()
     };
+    if host {
+        policy.exec = harness_node::exec::ExecOffers::new(Ok(()), Ok(()), vec![]);
+    }
     edit(&mut policy);
     policy.validate().unwrap();
     let requests: Arc<std::sync::Mutex<Vec<harness_agent_native::ChatRequest>>> = Arc::default();
@@ -917,6 +950,10 @@ async fn node_opts(
         harness_tools::builtin(),
         NativeConfig {
             sandbox: Confinement::Confined {
+                sandbox: sb.clone(),
+                tmp: None,
+            },
+            host_shell: Confinement::Confined {
                 sandbox: sb,
                 tmp: None,
             },
@@ -959,7 +996,7 @@ async fn node_opts(
     };
     let mode: harness_core::policy::ApprovalMode = serde_json::from_value(json!(mode)).unwrap();
     node.send(MasterToNode::Create {
-        exec_mode: None,
+        exec_mode: host.then_some(harness_core::policy::ExecMode::Host),
         no_callbacks: false,
         profile: None,
         incognito: false,
@@ -1825,6 +1862,711 @@ async fn one_click_starts_one_background_command() {
     n.rt.delete(n.sid).await.unwrap();
 }
 
+// ---- the `host` mode's background commands (PLAN.md T9; the owner,
+// 2026-11-20: "Yes, allow"): under the guard, without bubblewrap ----
+
+/// The T.8a escapers and a pure double fork (`( ( sleep & ) & )`, no
+/// `setsid`: reparented, never in another group or session).
+fn host_detached(base: u32) -> (String, Reaper) {
+    let (cmd, mut r) = detached(base);
+    let extra = Mark(base + 5);
+    r.0.push(extra);
+    (format!("{cmd} ( ( sleep {extra} & ) & ) ; "), r)
+}
+
+/// The command lines of `pid`'s ancestors, nearest first, up to the first
+/// that is this process (or init).
+fn ancestors(pid: i32) -> Vec<String> {
+    let me = std::process::id() as i32;
+    let mut out = Vec::new();
+    let mut at = pid;
+    while at > 1 && at != me {
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{at}/stat")) else {
+            break;
+        };
+        let Some(ppid) = stat
+            .rsplit(')')
+            .next()
+            .and_then(|f| f.split_whitespace().nth(1))
+            .and_then(|p| p.parse::<i32>().ok())
+        else {
+            break;
+        };
+        at = ppid;
+        let cmd = std::fs::read(format!("/proc/{at}/cmdline")).unwrap_or_default();
+        out.push(String::from_utf8_lossy(&cmd).replace('\0', " "));
+    }
+    out
+}
+
+/// What a stop of a host command says it proved.
+fn assert_host_end_words(how: &str, text: &str) {
+    assert!(
+        text.contains("every process descended from it were killed")
+            && text.contains("its guard confirmed the end")
+            && text.contains("is not covered")
+            && !text.contains("everything it started were killed"),
+        "{how}: {text}"
+    );
+}
+
+/// A host chat's background start is accepted, listed and read, and what it
+/// says is true for the host: a later command can see it (no PID
+/// namespace of its own). On the branch head the start was refused
+/// (`NOT_CONTAINED`).
+#[tokio::test]
+async fn a_host_background_start_is_accepted_listed_read_and_stopped() {
+    let f = fixture();
+    let Some(sb) = f.host_sandbox() else { return };
+    let (bg, mut ends) = table(on());
+    let ctx = f.ctx(sb, &bg);
+    let _r = Reaper(vec![Mark(976_501)]);
+    let r = run(
+        &Bash,
+        &ctx,
+        json!({"command": format!("echo first; sleep {}", Mark(976_501)), "background": true, "timeout_secs": 600}),
+    )
+    .await;
+    assert!(r.ok && r.background.is_some(), "{}", r.output);
+    assert!(
+        r.output.contains("first")
+            && r.output.contains("bg-1")
+            && r.output.contains("This chat runs on the host")
+            && r.output.contains("can see it in `ps` and signal it")
+            && !r.output.contains("Later commands cannot see it")
+            && !r.output.contains("network namespace"),
+        "{}",
+        r.output
+    );
+    let pids = sleeps(Mark(976_501));
+    assert_eq!(pids.len(), 1, "it is not running");
+    // No namespace of its own: the same PID namespace as this process, so a
+    // later command sees it and can signal it; and under the guard in its
+    // `--host` mode, no bubblewrap anywhere above it.
+    assert_eq!(
+        std::fs::read_link(format!("/proc/{}/ns/pid", pids[0])).unwrap(),
+        std::fs::read_link("/proc/self/ns/pid").unwrap()
+    );
+    let above = ancestors(pids[0]);
+    assert!(
+        above
+            .iter()
+            .any(|c| c.contains("sandbox-guard") && c.contains("--host")),
+        "no host guard above the command: {above:?}"
+    );
+    assert!(!above.iter().any(|c| c.contains("bwrap")), "{above:?}");
+    let o = run(&BashOutput, &ctx, json!({"id": "bg-1"})).await;
+    assert!(
+        o.ok && o.output.contains("first") && o.output.contains("running"),
+        "{}",
+        o.output
+    );
+    let l = run(&BashOutput, &ctx, json!({})).await;
+    assert!(
+        l.output.contains("bg-1") && l.output.contains(&format!("sleep {}", Mark(976_501))),
+        "{}",
+        l.output
+    );
+    let s = run(&BashStop, &ctx, json!({"id": "bg-1"})).await;
+    assert!(s.ok, "{}", s.output);
+    assert_host_end_words("bash_stop", &s.output);
+    let e = next_end(&mut ends, Duration::from_secs(10)).await;
+    assert_eq!(e.reason, BackgroundReason::StoppedByAgent);
+    assert_eq!(e.confirmed, BackgroundConfirmed::Ended);
+    assert!(sleeps(Mark(976_501)).is_empty());
+}
+
+/// §7 test 1 for a host chat: the escapers (`setsid`, `nohup`, a `setsid`
+/// double fork, a pure double fork, a child ignoring SIGTERM, a plain
+/// background child) are all gone, by pid, 2 s after the stop, the
+/// timeout and the table going (a session's deletion); the end is
+/// confirmed, and the words claim descendants only.
+#[tokio::test]
+async fn host_escapers_end_with_a_background_stop_timeout_and_delete() {
+    let f = fixture();
+    let Some(sb) = f.host_sandbox() else { return };
+    for (how, base) in [("stop", 976_510), ("timeout", 976_520), ("delete", 976_530)] {
+        let (bg, mut ends) = table(on());
+        let ctx = f.ctx(sb.clone(), &bg);
+        let (cmd, reaper) = host_detached(base);
+        let timeout = if how == "timeout" { 5 } else { 600 };
+        let r = run(
+            &Bash,
+            &ctx,
+            json!({"command": format!("{cmd} sleep 1000"), "background": true, "timeout_secs": timeout}),
+        )
+        .await;
+        assert!(r.background.is_some(), "{how}: {}", r.output);
+        all_started(&reaper).await;
+        let e = match how {
+            "stop" => {
+                let s = run(&BashStop, &ctx, json!({"id": "bg-1"})).await;
+                assert!(s.ok, "{}", s.output);
+                assert_host_end_words(how, &s.output);
+                next_end(&mut ends, Duration::from_secs(10)).await
+            }
+            "timeout" => next_end(&mut ends, Duration::from_secs(20)).await,
+            _ => {
+                drop(ctx);
+                let w = Arc::downgrade(&bg);
+                drop(bg);
+                assert!(w.upgrade().is_none());
+                let got = tokio::time::timeout(Duration::from_secs(10), ends.recv()).await;
+                assert!(matches!(got, Ok(None)), "{got:?}");
+                none_left(&reaper, how).await;
+                continue;
+            }
+        };
+        if how == "timeout" {
+            assert_eq!(e.reason, BackgroundReason::TimedOut, "{e:?}");
+        }
+        assert_eq!(e.confirmed, BackgroundConfirmed::Ended, "{how}: {e:?}");
+        none_left(&reaper, how).await;
+    }
+}
+
+/// A command that ignores SIGTERM (and starts a child that does) is killed
+/// after the grace, not before it, and nothing is left.
+#[tokio::test]
+async fn a_host_command_that_ignores_sigterm_is_killed_after_the_grace() {
+    let f = fixture();
+    let Some(sb) = f.host_sandbox() else { return };
+    let (bg, mut ends) = table(on());
+    let ctx = f.ctx(sb, &bg);
+    let reaper = Reaper(vec![Mark(976_541), Mark(976_542)]);
+    let cmd = format!(
+        "trap '' TERM; sleep {} & sleep {}",
+        Mark(976_541),
+        Mark(976_542)
+    );
+    let r = run(
+        &Bash,
+        &ctx,
+        json!({"command": cmd, "background": true, "timeout_secs": 600}),
+    )
+    .await;
+    assert!(r.background.is_some(), "{}", r.output);
+    all_started(&reaper).await;
+    let t = Instant::now();
+    let s = run(&BashStop, &ctx, json!({"id": "bg-1"})).await;
+    let took = t.elapsed();
+    assert!(s.ok, "{}", s.output);
+    assert_host_end_words("sigterm ignored", &s.output);
+    assert!(
+        took >= Duration::from_millis(1800),
+        "killed before the grace was over: {took:?}"
+    );
+    assert_eq!(
+        next_end(&mut ends, Duration::from_secs(10)).await.confirmed,
+        BackgroundConfirmed::Ended
+    );
+    none_left(&reaper, "SIGTERM ignored").await;
+}
+
+/// A command that is killed by a signal of its own while a child it started
+/// lives on: the guard ends the child and says so in its own words, not
+/// bubblewrap's.
+#[tokio::test]
+async fn a_host_command_killed_by_a_signal_has_its_children_ended() {
+    let f = fixture();
+    let Some(sb) = f.host_sandbox() else { return };
+    let (bg, mut ends) = table(on());
+    let ctx = f.ctx(sb, &bg);
+    let reaper = Reaper(vec![Mark(976_551)]);
+    // The shell kills itself after starting a child in another session.
+    let cmd = format!("setsid sleep {} & sleep 4; kill -9 $$", Mark(976_551));
+    let r = run(
+        &Bash,
+        &ctx,
+        json!({"command": cmd, "background": true, "timeout_secs": 600}),
+    )
+    .await;
+    assert!(r.background.is_some(), "{}", r.output);
+    let e = next_end(&mut ends, Duration::from_secs(20)).await;
+    assert_eq!(e.reason, BackgroundReason::Exited, "{e:?}");
+    none_left(&reaper, "the command killed itself").await;
+    let o = run(&BashOutput, &ctx, json!({"id": "bg-1"})).await;
+    assert!(
+        o.output.contains("the command was killed by a signal") && !o.output.contains("bubblewrap"),
+        "{}",
+        o.output
+    );
+}
+
+/// `kill -9` of the node: this binary re-run as a helper holds a host
+/// background command with its escapers and is SIGKILLed; the guard sees
+/// the channel close and nothing is left 2 s later.
+#[tokio::test]
+async fn escapers_of_a_host_background_command_end_when_the_node_is_killed() {
+    let f = fixture();
+    if f.host_sandbox().is_none() {
+        return;
+    }
+    let (_, reaper) = host_detached(976_560);
+    let mut helper = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "helper_holds_a_host_background_command",
+            "--nocapture",
+        ])
+        .env("T9_HOST_HELPER", "1")
+        .env(Mark::for_helper().0, Mark::for_helper().1)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    all_started(&reaper).await;
+    helper.kill().unwrap(); // SIGKILL, by the pid this test started
+    let _ = helper.wait();
+    none_left(&reaper, "kill -9 of the node, host chat").await;
+}
+
+#[tokio::test]
+async fn helper_holds_a_host_background_command() {
+    if std::env::var_os("T9_HOST_HELPER").is_none() {
+        return;
+    }
+    let f = fixture();
+    let sb = f.host_sandbox().expect("checked by the parent");
+    let (bg, _ends) = table(on());
+    let ctx = f.ctx(sb, &bg);
+    let (cmd, reaper) = host_detached(976_560);
+    std::mem::forget(reaper);
+    let r = run(
+        &Bash,
+        &ctx,
+        json!({"command": format!("{cmd} sleep 1000"), "background": true, "timeout_secs": 600}),
+    )
+    .await;
+    assert!(r.background.is_some(), "{}", r.output);
+    tokio::time::sleep(Duration::from_secs(600)).await;
+}
+
+/// The refusals stay in a host chat: a sub-agent's session (no table),
+/// `background_per_session = 0`, and a shell with no sandbox wrapper to
+/// start the guard from (`[sandbox] mode = "off"`), whose text says so.
+#[tokio::test]
+async fn a_host_chat_still_refuses_for_a_sub_agent_a_zero_table_and_no_wrapper() {
+    let f = fixture();
+    let Some(sb) = f.host_sandbox() else { return };
+    let _r = Reaper(vec![Mark(976_571)]);
+    let input = json!({"command": format!("sleep {}", Mark(976_571)), "background": true, "timeout_secs": 60});
+    let (bg, _e) = table(on());
+    let mut ctx = f.ctx(sb.clone(), &bg);
+    ctx.background = Access::Off(harness_tools::background::SUB_AGENT.into());
+    let r = run(&Bash, &ctx, input.clone()).await;
+    assert!(!r.ok && r.output.contains("sub-agent"), "{}", r.output);
+    let (off, _e) = table(Limits {
+        per_session: 0,
+        ..Default::default()
+    });
+    let r = run(&Bash, &f.ctx(sb, &off), input.clone()).await;
+    assert!(
+        !r.ok && r.output.contains("background_per_session = 0"),
+        "{}",
+        r.output
+    );
+    // `[sandbox] mode = "off"`: Confinement::Unconfined.
+    let (bg, _e) = table(on());
+    let mut ctx = ToolCtx::new(&f.ws);
+    ctx.background = Access::On(bg.clone());
+    let r = run(&Bash, &ctx, input).await;
+    assert!(
+        !r.ok
+            && r.output.contains("mode = \"off\"")
+            && r.output.contains("without its sandbox wrapper"),
+        "{}",
+        r.output
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(sleeps(Mark(976_571)).is_empty());
+    assert!(bg.running().is_empty());
+}
+
+/// The foreground note in a host chat: it keeps its true sentence about `&`
+/// and `setsid`, and now offers `background: true` with `timeout_secs`
+/// where the table is on, as the timeout note does; with the table off
+/// neither names it. The foreground call itself is still the plain process
+/// group (no guard: its command line has no `sandbox-guard`).
+#[tokio::test]
+async fn the_host_foreground_notes_offer_background_where_the_table_is_on() {
+    let f = fixture();
+    let Some(sb) = f.host_sandbox() else { return };
+    let (bg, _e) = table(on());
+    let ctx = f.ctx(sb.clone(), &bg);
+    let r = run(
+        &Bash,
+        &ctx,
+        json!({"command": "sleep 30 &", "timeout_secs": 20}),
+    )
+    .await;
+    let note = r.note.clone().unwrap_or_default();
+    assert!(
+        note.starts_with(
+            "[harness] in this chat a job started with `&` ends when this call returns"
+        ) && note.contains("`setsid`")
+            && note.contains("`background: true` with `timeout_secs`")
+            && note.contains("`bash_stop`")
+            && !r.output.contains("[harness]"),
+        "{r:?}"
+    );
+    // A foreground call is the plain process group: no guard above it.
+    let _r = Reaper(vec![Mark(976_581)]);
+    let c2 = f.ctx(sb.clone(), &bg);
+    let call = tokio::spawn(async move {
+        Bash.run(
+            &c2,
+            json!({"command": format!("sleep {}", Mark(976_581)), "timeout_secs": 20}),
+        )
+        .await
+    });
+    let by = Instant::now() + Duration::from_secs(20);
+    while sleeps(Mark(976_581)).is_empty() {
+        assert!(Instant::now() < by, "the foreground command never started");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let above = ancestors(sleeps(Mark(976_581))[0]);
+    assert!(
+        !above.iter().any(|c| c.contains("sandbox-guard")),
+        "a foreground host call runs under the guard: {above:?}"
+    );
+    for pid in sleeps(Mark(976_581)) {
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+    let _ = call.await;
+    let r = run(
+        &Bash,
+        &ctx,
+        json!({"command": "sleep 30", "timeout_secs": 5}),
+    )
+    .await;
+    assert!(
+        r.output.contains("or run it with `background: true`)"),
+        "{}",
+        r.output
+    );
+    // The table at zero: the truth and the old way out, no `background`.
+    let (off, _e) = table(Limits {
+        per_session: 0,
+        ..Default::default()
+    });
+    let ctx = f.ctx(sb, &off);
+    let r = run(&Bash, &ctx, json!({"command": "sleep 30 &"})).await;
+    let note = r.note.clone().unwrap_or_default();
+    assert!(
+        note.contains("`setsid`")
+            && note.contains("Run it in the foreground with `timeout_secs`")
+            && !note.contains("background: true")
+            && !note.contains("bash_stop"),
+        "{r:?}"
+    );
+    let r = run(
+        &Bash,
+        &ctx,
+        json!({"command": "sleep 30", "timeout_secs": 5}),
+    )
+    .await;
+    assert!(
+        r.output.contains("timed out after 5s") && !r.output.contains("background: true"),
+        "{}",
+        r.output
+    );
+}
+
+/// A host chat on a node, driven by the scripted agent: its model is
+/// offered the tools, a turn's cancel leaves its command running, and the
+/// revocation sweep's stop, the person's stop (one, then Stop all), the
+/// session's deletion and the node's stop each end it with the escapers
+/// gone, by pid, and the end recorded with its reason and a confirmed end.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_chats_background_commands_end_by_every_stop_path() {
+    use harness_protocol::{MasterToNode, StopBackgroundBy};
+    let f = fixture();
+    let Some(sb) = f.host_sandbox() else { return };
+    let mut n = node_host(f, sb).await;
+    let start = |cmd: &str| json!([bg(&format!("{cmd} sleep 1000"), 600)]);
+    // A turn's cancel leaves it running (as in a sandbox chat).
+    let (cmd, reaper) = host_detached(976_600);
+    n.turn(start(&cmd)).await;
+    assert!(
+        n.results()[0].contains("This chat runs on the host"),
+        "{:?}",
+        n.results()
+    );
+    all_started(&reaper).await;
+    n.prompt(&format!(
+        "script: {}",
+        json!([{"tool": "bash", "input": {"command": format!("sleep {}", Mark(976_699))}}])
+    ));
+    let _foreground = Reaper(vec![Mark(976_699)]);
+    let by = Instant::now() + Duration::from_secs(20);
+    while sleeps(Mark(976_699)).is_empty() {
+        assert!(Instant::now() < by);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    n.send(MasterToNode::Cancel {
+        req_id: "x1".into(),
+        session_id: n.sid,
+    });
+    n.until(|k| matches!(k, EventKind::TurnEnded(_))).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        reaper.0.iter().all(|s| !sleeps(*s).is_empty()),
+        "the cancel stopped it"
+    );
+    // The revocation sweep's stop.
+    n.send(MasterToNode::StopBackground {
+        req_id: "s1".into(),
+        session_id: n.sid,
+        bg_id: None,
+        by: StopBackgroundBy::AccessRevoked,
+    });
+    n.until(|k| matches!(k, EventKind::BackgroundEnded(_)))
+        .await;
+    let e = n.ends().pop().unwrap();
+    assert_eq!(
+        (e.reason, e.confirmed),
+        (BackgroundReason::AccessRevoked, BackgroundConfirmed::Ended)
+    );
+    none_left(&reaper, "the revocation's stop").await;
+    // The person's stop of one (what `POST .../background/<id>/stop` sends)
+    // and Stop all.
+    let (c1, one) = host_detached(976_610);
+    let (c2, two) = host_detached(976_620);
+    n.turn(json!([
+        bg(&format!("{c1} sleep 1000"), 600),
+        bg(&format!("{c2} sleep 1000"), 600)
+    ]))
+    .await;
+    all_started(&one).await;
+    all_started(&two).await;
+    n.send(MasterToNode::StopBackground {
+        req_id: "s2".into(),
+        session_id: n.sid,
+        bg_id: Some("bg-2".into()),
+        by: StopBackgroundBy::User,
+    });
+    n.until(|k| matches!(k, EventKind::BackgroundEnded(b) if b.bg_id == "bg-2"))
+        .await;
+    none_left(&one, "the person's stop of one").await;
+    assert!(
+        two.0.iter().all(|s| !sleeps(*s).is_empty()),
+        "the stop of bg-2 ended bg-3"
+    );
+    n.send(MasterToNode::StopBackground {
+        req_id: "s3".into(),
+        session_id: n.sid,
+        bg_id: None,
+        by: StopBackgroundBy::User,
+    });
+    n.until(|k| matches!(k, EventKind::BackgroundEnded(b) if b.bg_id == "bg-3"))
+        .await;
+    none_left(&two, "Stop all").await;
+    assert!(
+        n.ends()
+            .iter()
+            .filter(|e| e.reason == BackgroundReason::StoppedByUser)
+            .all(|e| e.confirmed == BackgroundConfirmed::Ended),
+        "{:?}",
+        n.ends()
+    );
+    // Delete, with one running.
+    let (c4, four) = host_detached(976_630);
+    n.turn(start(&c4)).await;
+    all_started(&four).await;
+    n.rt.delete(n.sid).await.unwrap();
+    none_left(&four, "the session's deletion").await;
+}
+
+/// The node's stop does not wait for a host chat's background commands: it
+/// stops them, records `node_stopping` with a confirmed end, within its
+/// bound, escapers gone.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_node_stop_ends_a_host_chats_background_commands() {
+    let f = fixture();
+    let Some(sb) = f.host_sandbox() else { return };
+    let mut n = node_host(f, sb).await;
+    let (cmd, reaper) = host_detached(976_640);
+    n.turn(json!([
+        bg(&format!("{cmd} sleep 1000"), 3600),
+        bg("trap '' TERM; sleep 1000", 3600),
+    ]))
+    .await;
+    all_started(&reaper).await;
+    let t = Instant::now();
+    let left = n.rt.stop(Duration::from_secs(30)).await;
+    let took = t.elapsed();
+    assert!(left.is_empty(), "{left:?}");
+    assert!(took < Duration::from_secs(10), "the stop took {took:?}");
+    n.drain().await;
+    let ends = n.ends();
+    assert_eq!(ends.len(), 2, "{ends:?}");
+    assert!(
+        ends.iter()
+            .all(|e| e.reason == BackgroundReason::NodeStopping
+                && e.confirmed == BackgroundConfirmed::Ended),
+        "{ends:?}"
+    );
+    none_left(&reaper, "the node's stop, host chat").await;
+}
+
+/// With the table at zero a host chat's model is offered neither tool and a
+/// start is refused, over a node (the tool's own refusals are
+/// `a_host_chat_still_refuses…`; a sub-agent's session never has a table).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_node_with_the_table_at_zero_refuses_and_offers_no_tools() {
+    let f = fixture();
+    let Some(sb) = f.host_sandbox() else { return };
+    let mut n = node_inner(
+        f,
+        sb,
+        vec![],
+        |p| p.limits.background_per_session = 0,
+        "auto",
+        true,
+    )
+    .await;
+    n.turn(json!([bg(&format!("sleep {}", Mark(976_651)), 60)]))
+        .await;
+    let reqs = n.requests.lock().unwrap().clone();
+    let names: Vec<String> = reqs[0].tools.iter().map(|t| t.name.clone()).collect();
+    assert!(
+        names.contains(&"bash".to_string())
+            && !names.iter().any(|t| t == "bash_output" || t == "bash_stop"),
+        "{names:?}"
+    );
+    assert!(
+        n.results()[0].contains("background_per_session = 0"),
+        "{}",
+        n.results()[0]
+    );
+    assert!(sleeps(Mark(976_651)).is_empty());
+}
+
+/// A host chat on the real binary (`serve`, `[execution] host = true`): the
+/// person's stop over HTTP, one and Stop all (`stopped_by_user`, escapers
+/// gone, by pid); `kill -9` of the server leaves nothing and its next start
+/// records `node_restarted` with no turn started; SIGTERM ends one with
+/// `node_stopping`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_chat_on_the_real_binary_stops_by_http_kill_9_and_sigterm() {
+    let (_dir, data, ws) = real::setup_host();
+    let f = fixture();
+    if f.host_sandbox().is_none() {
+        return;
+    }
+    let mut s = real::serve(&data);
+    let (c1, one) = host_detached(976_700);
+    let sid = s
+        .with_background_in(&ws, &format!("{c1} sleep 1000"), Some("host"))
+        .await;
+    all_started(&one).await;
+    let (st, v) = s
+        .try_post(&format!("/api/sessions/{sid}/background/bg-1/stop"))
+        .await;
+    assert_eq!(st, reqwest::StatusCode::OK, "{v}");
+    let evs = s.wait_for(&sid, |e| e["kind"] == "background_ended").await;
+    assert_eq!(real::ends(&evs), vec!["stopped_by_user"], "{evs:#?}");
+    none_left(&one, "the person's stop, host chat").await;
+    // Two more, then Stop all.
+    let (c2, two) = host_detached(976_710);
+    let (c3, three) = host_detached(976_720);
+    let script = json!([
+        bg(&format!("{c2} sleep 1000"), 3600),
+        bg(&format!("{c3} sleep 1000"), 3600)
+    ]);
+    s.post(
+        &format!("/api/sessions/{sid}/prompt"),
+        json!({"text": format!("script: {script}")}),
+    )
+    .await;
+    s.wait_for(&sid, |e| {
+        e["kind"] == "background_started" && e["payload"]["bg_id"] == "bg-3"
+    })
+    .await;
+    all_started(&two).await;
+    all_started(&three).await;
+    let (st, v) = s
+        .try_post(&format!("/api/sessions/{sid}/background/stop"))
+        .await;
+    assert_eq!(st, reqwest::StatusCode::OK, "{v}");
+    let mut evs = s.events(&sid).await;
+    let by = Instant::now() + Duration::from_secs(30);
+    while real::ends(&evs).len() < 3 {
+        assert!(Instant::now() < by, "{evs:#?}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        evs = s.events(&sid).await;
+    }
+    assert_eq!(real::ends(&evs), vec!["stopped_by_user"; 3], "{evs:#?}");
+    none_left(&two, "Stop all, host chat").await;
+    none_left(&three, "Stop all, host chat").await;
+    // kill -9 with one running.
+    let (c4, four) = host_detached(976_730);
+    s.post(
+        &format!("/api/sessions/{sid}/prompt"),
+        json!({"text": format!("script: {}", json!([bg(&format!("{c4} sleep 1000"), 3600)]))}),
+    )
+    .await;
+    s.wait_for(&sid, |e| {
+        e["kind"] == "background_started" && e["payload"]["bg_id"] == "bg-4"
+    })
+    .await;
+    all_started(&four).await;
+    s.wait_for(&sid, |e| e["kind"] == "turn_ended").await;
+    let turns_before = s
+        .events(&sid)
+        .await
+        .iter()
+        .filter(|e| e["kind"] == "turn_started")
+        .count();
+    s.signal(nix::sys::signal::Signal::SIGKILL);
+    assert!(s.exited_within(Duration::from_secs(10)).is_some());
+    none_left(&four, "kill -9 of serve, host chat").await;
+    let mut s2 = real::serve(&data);
+    s2.wait_for(&sid, |e| {
+        e["kind"] == "background_ended" && e["payload"]["bg_id"] == "bg-4"
+    })
+    .await;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let evs = s2.events(&sid).await;
+    assert_eq!(
+        real::ends(&evs).last().map(String::as_str),
+        Some("node_restarted"),
+        "{evs:#?}"
+    );
+    assert_eq!(
+        evs.iter().filter(|e| e["kind"] == "turn_started").count(),
+        turns_before,
+        "a turn started after the restart"
+    );
+    // SIGTERM with one running.
+    let (c5, five) = host_detached(976_740);
+    s2.post(
+        &format!("/api/sessions/{sid}/prompt"),
+        json!({"text": format!("script: {}", json!([bg(&format!("{c5} sleep 1000"), 3600)]))}),
+    )
+    .await;
+    s2.wait_for(&sid, |e| {
+        e["kind"] == "background_started" && e["payload"]["bg_id"] == "bg-5"
+    })
+    .await;
+    all_started(&five).await;
+    s2.signal(nix::sys::signal::Signal::SIGTERM);
+    let status = s2.exited_within(Duration::from_secs(60));
+    assert_eq!(status.and_then(|s| s.code()), Some(0), "{}", s2.log());
+    none_left(&five, "SIGTERM of serve, host chat").await;
+    let s3 = real::serve(&data);
+    let evs = s3.events(&sid).await;
+    assert_eq!(
+        real::ends(&evs).last().map(String::as_str),
+        Some("node_stopping"),
+        "{evs:#?}"
+    );
+}
+
 // ---- measurements (run by hand: `--ignored --nocapture`) ----
 
 fn processes() -> usize {
@@ -1992,6 +2734,15 @@ mod real {
         }
     }
 
+    /// As [`setup`], and the node offers the `host` mode too.
+    pub fn setup_host() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let (dir, data, ws) = setup();
+        let mut toml = std::fs::read_to_string(data.join("node.toml")).unwrap();
+        toml.push_str("\n[execution]\nhost = true\n");
+        std::fs::write(data.join("node.toml"), toml).unwrap();
+        (dir, data, ws)
+    }
+
     pub fn setup() -> (tempfile::TempDir, PathBuf, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
@@ -2144,12 +2895,16 @@ mod real {
 
         /// A session running one background command (the T.8a escapers).
         pub async fn with_background(&self, ws: &Path, cmd: &str) -> String {
-            let sid = self
-                .post(
-                    "/api/sessions",
-                    json!({"cwd": ws.display().to_string(), "approval_mode": "auto"}),
-                )
-                .await["session_id"]
+            self.with_background_in(ws, cmd, None).await
+        }
+
+        /// The same in the execution mode `mode` (`"host"`).
+        pub async fn with_background_in(&self, ws: &Path, cmd: &str, mode: Option<&str>) -> String {
+            let mut body = json!({"cwd": ws.display().to_string(), "approval_mode": "auto"});
+            if let Some(m) = mode {
+                body["exec_mode"] = json!(m);
+            }
+            let sid = self.post("/api/sessions", body).await["session_id"]
                 .as_str()
                 .unwrap()
                 .to_string();
