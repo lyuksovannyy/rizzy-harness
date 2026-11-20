@@ -61,6 +61,10 @@ use crate::event::EventKind;
 ///   next id (`session.rs`), callbacks (`master/src/callbacks.rs`), undo.
 /// - `checkpoint.git_ref`: restore and undo (`session.rs`, `others.rs`,
 ///   `view.rs`).
+/// - `checkpoint.head_moved.*.commit`: hex ids the node read from the
+///   repository, shown short on the turn's note (X.42); a configured value
+///   that is a run of hex digits must not rewrite them. The branch names stay
+///   free text, scrubbed like any other.
 /// - `seen.sha256`, `seen.base`: undo's changed-since check (`others.rs`).
 /// - images' `media_id`, `sha256`: the loop attaches the bytes by hash
 ///   (`agent-native/src/images.rs`).
@@ -118,7 +122,15 @@ pub const KEPT: &[(&str, &[&str])] = &[
     ),
     ("approval_requested", &["approval_id"]),
     ("approval_resolved", &["approval_id"]),
-    ("checkpoint", &["turn_id", "git_ref"]),
+    (
+        "checkpoint",
+        &[
+            "turn_id",
+            "git_ref",
+            "head_moved.from.commit",
+            "head_moved.to.commit",
+        ],
+    ),
     (
         "turn_ended",
         &["turn_id", "usage.model", "usage.by_model.{}"],

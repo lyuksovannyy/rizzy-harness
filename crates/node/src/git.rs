@@ -38,6 +38,7 @@
 
 use std::path::{Path, PathBuf};
 
+use harness_core::event::{HeadAt, HeadMoved};
 use harness_core::folder::Identity;
 use std::time::Duration;
 
@@ -1301,12 +1302,66 @@ async fn nested_in(repo: &Repo, sha: &str) -> Vec<Vec<u8>> {
 }
 
 /// A relative path from git's `-z` output, for showing: lossy UTF-8, and
-/// control characters (a newline, an escape sequence) replaced.
+/// control characters (a newline, an escape sequence), the line and
+/// paragraph separators and the bidirectional controls (which reorder what
+/// is around them) replaced.
 fn shown(p: &[u8]) -> String {
     String::from_utf8_lossy(p)
         .chars()
-        .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
+        .map(|c| if hides_text(c) { '\u{FFFD}' } else { c })
         .collect()
+}
+
+/// A character a shown name never carries: it could break a line or reorder
+/// the text around it.
+fn hides_text(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{2028}' | '\u{2029}' | '\u{061C}' | '\u{200E}' | '\u{200F}'
+                | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+        )
+}
+
+/// The most bytes of a branch name an event holds.
+pub const BRANCH_MAX: usize = 200;
+
+/// A branch name from the repository, for an event: cleaned like a shown
+/// path, then cut to [`BRANCH_MAX`] bytes on a character boundary.
+fn shown_branch(name: &str) -> String {
+    let mut out = shown(name.as_bytes());
+    if out.len() > BRANCH_MAX {
+        let mut end = BRANCH_MAX;
+        while !out.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.truncate(end);
+    }
+    out
+}
+
+/// Where the person's repository's HEAD points now (X.42), when the
+/// checkpointed folder is that repository's top: read from its files by
+/// [`user_repo::head_at`], with no git process. `None` for a plain folder
+/// (none, a gitfile, a repository above the folder) and for anything
+/// unreadable.
+pub async fn head_now(repo: &Repo) -> Option<HeadAt> {
+    let root = repo.root.clone();
+    let at = tokio::task::spawn_blocking(move || user_repo::head_at(&root))
+        .await
+        .ok()??;
+    Some(HeadAt {
+        branch: at.branch.as_deref().map(shown_branch),
+        commit: at.commit,
+    })
+}
+
+/// How HEAD moved between two readings, when both exist and differ.
+pub fn head_moved(from: Option<HeadAt>, to: Option<HeadAt>) -> Option<HeadMoved> {
+    match (from, to) {
+        (Some(from), Some(to)) if from != to => Some(HeadMoved { from, to }),
+        _ => None,
+    }
 }
 
 /// A relative path from git's `-z` output, as a path (any bytes on Unix).
@@ -2930,6 +2985,42 @@ pub(crate) fn sessions_of(base: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// X.42: a branch name for an event is cleaned like a shown path (also
+    /// the separators and bidirectional controls) and cut on a character
+    /// boundary.
+    #[test]
+    fn a_branch_name_is_cleaned_and_cut_to_200_bytes() {
+        let n = shown_branch("a\u{1b}[31m\u{2028}b\u{2029}c\u{202E}d\u{2066}e\u{200F}f\nZ");
+        assert_eq!(
+            n,
+            "a\u{FFFD}[31m\u{FFFD}b\u{FFFD}c\u{FFFD}d\u{FFFD}e\u{FFFD}f\u{FFFD}Z"
+        );
+        assert_eq!(shown_branch("feature/\u{fc}ber-x"), "feature/\u{fc}ber-x");
+        assert_eq!(shown_branch(&"q".repeat(5000)).len(), BRANCH_MAX);
+        let two = "\u{fc}".repeat(300);
+        let cut = shown_branch(&two);
+        assert!(cut.len() <= BRANCH_MAX && cut.len().is_multiple_of(2) && two.starts_with(&cut));
+        let three = format!("a{}", "\u{20ac}".repeat(100));
+        let cut = shown_branch(&three);
+        assert_eq!(cut.len(), 1 + 3 * 66);
+    }
+
+    #[test]
+    fn head_moved_needs_both_readings_and_a_difference() {
+        let at = |b: Option<&str>, c: &str| HeadAt {
+            branch: b.map(Into::into),
+            commit: c.repeat(40),
+        };
+        assert_eq!(head_moved(None, Some(at(None, "a"))), None);
+        assert_eq!(head_moved(Some(at(None, "a")), None), None);
+        assert_eq!(
+            head_moved(Some(at(Some("m"), "a")), Some(at(Some("m"), "a"))),
+            None
+        );
+        assert!(head_moved(Some(at(Some("m"), "a")), Some(at(Some("m"), "b"))).is_some());
+        assert!(head_moved(Some(at(Some("m"), "a")), Some(at(None, "a"))).is_some());
+    }
 
     pub(super) fn sh(dir: &Path, args: &[&str]) {
         let ok = std::process::Command::new("git")

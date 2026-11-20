@@ -1,7 +1,7 @@
 # Undo and stash: design note
 
 Status: **decided by the owner on 2026-11-12, Q1 (the two-choice prompt, §3.3) included.**
-Nothing built. Nothing blocks the build
+Mostly not built (the HEAD note and the "put back" action of §2.2 are, as X.42). Nothing blocks the build
 after Gate 3 of `FIX_PLAN.md` (feature freeze), and task A.17 (§2.4), a fix to built behaviour,
 may land earlier. Task C.13 of `ADOPTION_PLAN.md`, answering decision O11. Costs come from
 experiment B.3, `docs/checkpoint-cost.md` (cited as "B.3"). **B.3 measured on a rotational USB
@@ -173,6 +173,45 @@ base (`git.rs`, `hardened`: cleared environment, no system or global config,
 `HEAD`, the ref store and one commit, and it runs no hook, filter, fsmonitor or transport. It is
 the only new call in the user's repository: the trees of those commits are read in the shadow,
 through the alternates.
+
+**Built first, as X.42 (2026-11-20): the note when HEAD moved.** A trial found a
+turn's "files changed" holding what `git checkout` changed (13 files, 8 its own),
+with nothing on the Undo block saying an undo would rewrite another branch's
+files. What was built is smaller than the design above and differs from it in
+two ways, both on purpose:
+
+- **No `head` on every event.** Only the `after` checkpoint carries
+  `head_moved: {from, to}`, each `{branch?, commit}`, and only when the branch
+  or the commit differs from the turn's start (the node keeps the start in
+  memory for the turn; a restart mid-turn ends it without an `after`, so no
+  note). The "held by a commit made since" message of §2.1, which needs HEAD at
+  every checkpoint, is still to build and still wants the per-event `head`.
+- **No `rev-parse`.** The node reads HEAD from the repository's files
+  (`git/user_repo.rs`, `head_at`): `<folder>/.git` a real directory with no
+  `commondir`, `HEAD` a small regular file, one `refs/heads/<name>` ref (loose
+  file, else `packed-refs`), every read bounded and with no link followed. No
+  git process runs for it, so there is nothing to harden and a hostile
+  `.git/config` is never read. A plain folder, a gitfile, a link, an unborn
+  branch and a repository above the folder record nothing.
+
+Branch names are repository text: at most 200 bytes, control characters, line
+and paragraph separators and bidirectional controls replaced. The chat shows one
+sentence on the turn's Undo block (and, for a rewind, the later turns' moves, a
+sentence each, most recent last) and in the changes panel: the checked-out
+branch changed; a branch moved to another commit (a commit, a reset); and the
+detached variants. The readings are of the folder's HEAD, so the words say what
+changed while the turn ran, not who did it (another chat in the folder counts).
+Nothing is recorded for a turn cut off by a restart (a Stop still gets a note),
+when HEAD ends where it began, for an unborn branch's first commit, `git init`,
+`rm -rf .git` or `git worktree add` in the turn; two names that differ only in
+characters the cleaner replaces read as one. It is a note: undo does what it did and
+refuses when it did, and it never moves HEAD. After an undo the turn's row also
+offers **Put back what this undo replaced**, which restores the checkpoint the
+undo saved first (`before_restore`, the pre-restore snapshot, A.9) through
+the same route with the same checks. The fold remembers, per saved id (the
+last 100), which turns were undone just before that restore; restoring a saved
+id returns those flags, because it returns the folder to just before the
+restore that saved it.
 
 ### 2.3 The storage rule: the shadow holds only fresh edits
 

@@ -779,6 +779,7 @@ fn seed_other_chat(store: &Store, ws: &Path, turns: u64, age_ms: i64) {
             files: vec![],
             excluded: vec![],
             excluded_more: 0,
+            head_moved: None,
         }));
         for _ in 0..20 {
             put(EventKind::AssistantDelta(
@@ -820,6 +821,7 @@ fn seed_other_chat(store: &Store, ws: &Path, turns: u64, age_ms: i64) {
             files: vec!["f.txt".into()],
             excluded: vec![],
             excluded_more: 0,
+            head_moved: None,
         }));
         put(EventKind::TurnEnded(
             serde_json::from_value(json!({"turn_id": turn_id, "reason": "completed"})).unwrap(),

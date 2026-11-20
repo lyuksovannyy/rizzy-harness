@@ -138,22 +138,81 @@ fn head_of(git: &Path) -> (Option<String>, String) {
     let Some(branch) = branch_ref(name) else {
         return (None, "HEAD".into());
     };
+    (resolve(git, name), branch.into())
+}
+
+/// The commit the ref `name` names in the git directory `git`: its loose
+/// ref file (read with no link followed anywhere on the path), else its
+/// line in `packed-refs` (`<id> <ref>` lines, `#` and `^` lines skipped).
+fn resolve(git: &Path, name: &str) -> Option<String> {
     let loose = git.join(name);
     if plain(&loose)
         && let Some(id) = read_small(&loose, REF_MAX).and_then(|t| object_id(&t))
     {
-        return (Some(id), branch.into());
+        return Some(id);
     }
-    // `packed-refs`: `<id> <ref>` lines (`#` and `^` lines skipped).
-    let id = read_small(&git.join("packed-refs"), PACKED_REFS_MAX).and_then(|t| {
+    read_small(&git.join("packed-refs"), PACKED_REFS_MAX).and_then(|t| {
         t.lines()
             .filter(|l| !l.starts_with('#') && !l.starts_with('^'))
             .find_map(|l| match l.split_once(' ') {
                 Some((id, r)) if r == name => object_id(id),
                 _ => None,
             })
-    });
-    (id, branch.into())
+    })
+}
+
+/// The most a `HEAD` read for [`head_at`] may hold: a branch name of a few
+/// kilobytes is cut when shown, not refused (a person's own branch is a
+/// name; a hostile one is bounded text).
+const HEAD_AT_MAX: u64 = 8192;
+
+/// Where a repository's `HEAD` pointed, for the note on a turn that moved
+/// it (X.42): the branch name as the repository holds it (`None` when
+/// detached) and the commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HeadPoint {
+    pub branch: Option<String>,
+    pub commit: String,
+}
+
+/// [`HeadPoint`] of the repository whose top folder is `top` (canonical),
+/// from its files alone and by the rules of [`find`]: `<top>/.git` is a
+/// real directory (no gitfile, no link, no `commondir`), `HEAD` is a small
+/// regular file, a branch is `refs/heads/<name>` with plain path components
+/// (a name may hold any other character: it is only ever shown, after
+/// cleaning), the ref is read like [`head_of`] reads it. `None` for
+/// anything else, including an unborn branch.
+pub(crate) fn head_at(top: &Path) -> Option<HeadPoint> {
+    let git = top.join(".git");
+    if !std::fs::symlink_metadata(&git).ok()?.is_dir()
+        || git.join("commondir").exists()
+        || std::fs::symlink_metadata(git.join("gitdir")).is_ok()
+        || !plain(&git)
+    {
+        return None;
+    }
+    let text = read_small(&git.join("HEAD"), HEAD_AT_MAX)?;
+    let text = text.trim_end_matches('\n');
+    if let Some(commit) = object_id(text) {
+        return Some(HeadPoint {
+            branch: None,
+            commit,
+        });
+    }
+    let name = text.strip_prefix("ref: ")?.trim();
+    let branch = name.strip_prefix("refs/heads/")?;
+    let ok = !branch.is_empty()
+        && !name.contains('\0')
+        && branch
+            .split('/')
+            .all(|c| !c.is_empty() && c != "." && c != "..");
+    if !ok {
+        return None;
+    }
+    Some(HeadPoint {
+        branch: Some(branch.to_string()),
+        commit: resolve(&git, name)?,
+    })
 }
 
 /// What `<top>/.git` (a real directory) says.
@@ -281,5 +340,79 @@ mod tests {
         // An oversized HEAD is unknown too.
         std::fs::write(git.join("HEAD"), "x".repeat(REF_MAX as usize + 1)).unwrap();
         assert_eq!(head_of(&git).0, None);
+    }
+
+    /// X.42: HEAD for the turn's note is read from files, by the same rules:
+    /// no link, no gitfile, no `commondir`, no way out of `refs/heads`, a
+    /// bounded `HEAD`.
+    #[test]
+    fn head_at_reads_files_and_refuses_redirects() {
+        use std::os::unix::fs::symlink;
+        let d = tempfile::tempdir().unwrap();
+        let top = d.path().canonicalize().unwrap();
+        let git = top.join(".git");
+        std::fs::create_dir_all(git.join("refs/heads")).unwrap();
+        let (a, b) = ("a".repeat(40), "b".repeat(64));
+        let put = |name: &str, text: &str| std::fs::write(git.join(name), text).unwrap();
+        // A branch, loose; a branch only in packed-refs; detached.
+        put("HEAD", "ref: refs/heads/main\n");
+        put("refs/heads/main", &format!("{a}\n"));
+        let at = head_at(&top).unwrap();
+        assert_eq!(
+            (at.branch.as_deref(), at.commit.as_str()),
+            (Some("main"), a.as_str())
+        );
+        put("HEAD", "ref: refs/heads/feat/x\n");
+        put("packed-refs", &format!("# pack\n{b} refs/heads/feat/x\n"));
+        assert_eq!(head_at(&top).unwrap().commit, b);
+        put("HEAD", &format!("{a}\n"));
+        let at = head_at(&top).unwrap();
+        assert_eq!((at.branch, at.commit), (None, a.clone()));
+        // Unborn, a ref outside refs/heads, a way out of it, NUL, no commit.
+        for head in [
+            "ref: refs/heads/unborn\n",
+            "ref: refs/remotes/origin/main\n",
+            "ref: refs/heads/../../HEAD\n",
+            "ref: refs/heads/a//b\n",
+            "ref: refs/heads/\n",
+            "ref: refs/heads/x\0y\n",
+            "garbage\n",
+        ] {
+            put("HEAD", head);
+            assert_eq!(head_at(&top), None, "{head:?}");
+        }
+        // A ref file that is a link is not followed (the packed line is).
+        put("HEAD", "ref: refs/heads/l\n");
+        put("packed-refs", "");
+        std::fs::write(top.join("target"), format!("{a}\n")).unwrap();
+        symlink(top.join("target"), git.join("refs/heads/l")).unwrap();
+        assert_eq!(head_at(&top), None);
+        // A linked directory on the ref's path is not followed either.
+        let outside = d.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("x"), format!("{a}\n")).unwrap();
+        symlink(&outside, git.join("refs/heads/feat")).unwrap();
+        put("HEAD", "ref: refs/heads/feat/x\n");
+        assert_eq!(head_at(&top), None);
+        std::fs::remove_file(git.join("refs/heads/feat")).unwrap();
+        // An oversized HEAD is unknown.
+        put("HEAD", &"x".repeat(HEAD_AT_MAX as usize + 1));
+        assert_eq!(head_at(&top), None);
+        // A commondir, a gitfile, a linked `.git`.
+        put("HEAD", &format!("{a}\n"));
+        put("commondir", "..\n");
+        assert_eq!(head_at(&top), None);
+        std::fs::remove_file(git.join("commondir")).unwrap();
+        assert!(head_at(&top).is_some());
+        let linked = d.path().join("linked");
+        std::fs::create_dir(&linked).unwrap();
+        let linked = linked.canonicalize().unwrap();
+        symlink(&git, linked.join(".git")).unwrap();
+        assert_eq!(head_at(&linked), None);
+        let filed = d.path().join("filed");
+        std::fs::create_dir(&filed).unwrap();
+        let filed = filed.canonicalize().unwrap();
+        std::fs::write(filed.join(".git"), format!("gitdir: {}\n", git.display())).unwrap();
+        assert_eq!(head_at(&filed), None);
     }
 }

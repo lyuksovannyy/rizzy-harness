@@ -3300,10 +3300,10 @@ impl Session {
             ),
         };
         let mut collect = None;
-        if let Some((root, before)) = checkpoint
+        if let Some((root, before, head)) = checkpoint
             && !self.log_failed.load(Ordering::SeqCst)
         {
-            self.checkpoint_after(&turn_id, &root, &before).await;
+            self.checkpoint_after(&turn_id, &root, &before, head).await;
             collect = Some(root);
         }
         // The end is decided by who cancelled (review N-7): the node's stop
@@ -3396,7 +3396,7 @@ impl Session {
         &self,
         turn_id: &str,
         phase: CheckpointPhase,
-    ) -> Option<(crate::git::Repo, String)> {
+    ) -> Option<(crate::git::Repo, String, Option<HeadAt>)> {
         let repo = match self.checkpoint_repo().await {
             Ok(r) => r?,
             Err(e) => {
@@ -3422,6 +3422,7 @@ impl Session {
                         files: vec![],
                         excluded: snap.nested.shown,
                         excluded_more: snap.nested.more as u64,
+                        head_moved: None,
                     }))
                     .await;
                 if recorded.is_err() {
@@ -3430,7 +3431,11 @@ impl Session {
                 }
                 self.special_notice(turn_id, &snap.special).await;
                 self.pin_between_turns(turn_id, &repo, &sha).await;
-                Some((repo, sha))
+                // Where HEAD points as the turn begins (X.42): kept in
+                // memory for the `after` checkpoint, which says whether it
+                // moved.
+                let head = crate::git::head_now(&repo).await;
+                Some((repo, sha, head))
             }
             Err(e) => {
                 tracing::warn!(session = %self.id, error = %e, "checkpoint failed");
@@ -3477,7 +3482,13 @@ impl Session {
             .await;
     }
 
-    async fn checkpoint_after(&self, turn_id: &str, repo: &crate::git::Repo, before: &str) {
+    async fn checkpoint_after(
+        &self,
+        turn_id: &str,
+        repo: &crate::git::Repo,
+        before: &str,
+        head_before: Option<HeadAt>,
+    ) {
         let r = format!("refs/harness/{}/{turn_id}/after", self.id);
         let busy = crate::git::hold(repo).await;
         let res = async {
@@ -3486,12 +3497,13 @@ impl Session {
             self.checked_folder()?;
             let snap = crate::git::snapshot_full(repo, &r, "harness: after turn").await?;
             let files = crate::git::changed(repo, before, &snap.sha).await?;
-            Ok::<_, String>((snap, files))
+            let head_moved = crate::git::head_moved(head_before, crate::git::head_now(repo).await);
+            Ok::<_, String>((snap, files, head_moved))
         }
         .await;
         drop(busy);
         match res {
-            Ok((snap, files)) => {
+            Ok((snap, files, head_moved)) => {
                 let sha = snap.sha.clone();
                 let special = snap.special.clone();
                 let ignore_changed: Vec<String> = files
@@ -3508,6 +3520,7 @@ impl Session {
                         files: files.into_iter().map(|(_, p)| p).collect(),
                         excluded: snap.nested.shown,
                         excluded_more: snap.nested.more as u64,
+                        head_moved,
                     }))
                     .await;
                 if recorded.is_ok() {
@@ -3887,6 +3900,7 @@ impl Session {
                 files: files.clone(),
                 excluded: now.nested.shown,
                 excluded_more: now.nested.more as u64,
+                head_moved: None,
             }))
             .await
         {
@@ -3932,6 +3946,7 @@ impl Session {
             files: files.clone(),
             excluded: state.nested.shown,
             excluded_more: state.nested.more as u64,
+            head_moved: None,
         }))
         .await
         .map_err(|e| kept(LogError(e.to_string()).to_string()))?;
@@ -3951,6 +3966,7 @@ impl Session {
                 files: files.clone(),
                 excluded: plan.nested.shown.clone(),
                 excluded_more: plan.nested.more as u64,
+                head_moved: None,
             }))
             .await
             .map_err(|e| kept(LogError(e.to_string()).to_string()))?;

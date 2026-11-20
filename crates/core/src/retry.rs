@@ -361,6 +361,7 @@ mod tests {
                 files: vec!["a.txt".into()],
                 excluded: vec![],
                 excluded_more: 0,
+                head_moved: None,
             }));
         let e = check(&l.events, "t1").unwrap_err();
         assert!(e.contains("undone"), "{e}");

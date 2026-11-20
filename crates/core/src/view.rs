@@ -346,6 +346,17 @@ pub struct SessionView {
     /// The running turn's latest `turn_usage` (its id and running total).
     #[serde(skip)]
     live: Option<(String, Usage)>,
+    /// The latest `before_restore`'s id: the restore whose `restored`
+    /// events follow it (a failed restore leaves one with none, and the
+    /// next restore writes its own). Not part of the view's wire shape.
+    #[serde(skip)]
+    saving: Option<String>,
+    /// For the last [`MAX_SAVED`] `before_restore` ids: which turns were
+    /// undone (and by which saved id) just before that restore. Restoring a
+    /// saved id returns the folder to that moment, so it returns these flags
+    /// (X.42). Not part of the view's wire shape.
+    #[serde(skip)]
+    undone_before: Vec<(String, BTreeMap<String, String>)>,
     /// In a sub-agent's chat: the turns that were follow-ups from the chat
     /// that started it (`turn_started.continued_by`, T68), in order. Its
     /// first run is not one.
@@ -383,7 +394,21 @@ pub struct CheckpointState {
     /// The most any of its events said it did not name.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub excluded_more: u64,
+    /// How the person's repository's HEAD moved during the turn, when it
+    /// did (X.42): the `after` event's note.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_moved: Option<crate::event::HeadMoved>,
+    /// While `restored`: the checkpoint the folder was saved as just before
+    /// the undo that restored this turn (its `before_restore`). Restoring
+    /// that id puts back what the undo replaced. Dropped, with `restored`,
+    /// when that restore is itself undone (X.42).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved: Option<String>,
 }
+
+/// How many saved ids' undone flags the fold remembers: the checkpoints a
+/// folder keeps. A restore of an older one fails on the node and changes none.
+pub const MAX_SAVED: usize = 100;
 
 fn is_zero(n: &u64) -> bool {
     *n == 0
@@ -661,6 +686,7 @@ impl SessionView {
                 }
             }
             EventKind::Checkpoint(c) => {
+                let turn = c.turn_id.clone();
                 let st = self.checkpoints.entry(c.turn_id).or_default();
                 if !c.excluded.is_empty() {
                     st.excluded.extend(c.excluded);
@@ -670,14 +696,57 @@ impl SessionView {
                 st.excluded_more = st.excluded_more.max(c.excluded_more);
                 match c.phase {
                     // A restore's own checkpoint is undone like a turn's.
-                    CheckpointPhase::Before | CheckpointPhase::BeforeRestore => {
-                        st.before = Some(c.git_ref)
+                    CheckpointPhase::Before => st.before = Some(c.git_ref),
+                    CheckpointPhase::BeforeRestore => {
+                        st.before = Some(c.git_ref);
+                        // The flags as they are just before this restore.
+                        let now: BTreeMap<String, String> = self
+                            .checkpoints
+                            .iter()
+                            .filter(|(_, c)| c.restored)
+                            .map(|(k, c)| (k.clone(), c.saved.clone().unwrap_or_default()))
+                            .collect();
+                        self.undone_before.retain(|(k, _)| *k != turn);
+                        self.undone_before.push((turn.clone(), now));
+                        if self.undone_before.len() > MAX_SAVED {
+                            self.undone_before.remove(0);
+                        }
+                        self.saving = Some(turn);
                     }
                     CheckpointPhase::After => {
                         st.after = Some(c.git_ref);
                         st.files = c.files;
+                        st.head_moved = c.head_moved;
                     }
-                    CheckpointPhase::Restored => st.restored = true,
+                    CheckpointPhase::Restored => {
+                        let back = self
+                            .undone_before
+                            .iter()
+                            .find(|(k, _)| *k == turn)
+                            .map(|(_, f)| f.clone());
+                        if let Some(flags) = back {
+                            // A saved id restored: the folder is as it was
+                            // just before the restore that saved it.
+                            for (k, c) in self.checkpoints.iter_mut() {
+                                match flags.get(k) {
+                                    Some(by) => {
+                                        c.restored = true;
+                                        c.saved = (!by.is_empty()).then(|| by.clone());
+                                    }
+                                    None => {
+                                        c.restored = false;
+                                        c.saved = None;
+                                    }
+                                }
+                            }
+                        } else {
+                            let saving = self.saving.clone();
+                            if let Some(c) = self.checkpoints.get_mut(&turn) {
+                                c.restored = true;
+                                c.saved = saving;
+                            }
+                        }
+                    }
                 }
             }
             EventKind::TurnEnded(t) => {
@@ -918,6 +987,111 @@ mod tests {
             kind,
             payload,
         }
+    }
+
+    /// X.42: the `after` checkpoint's `head_moved` is the turn's; a turn
+    /// whose HEAD did not move has none; a restore's events never add one.
+    #[test]
+    fn a_turns_head_move_is_kept_per_turn() {
+        use crate::event::{Checkpoint, CheckpointPhase, HeadAt, HeadMoved};
+        let sid = SessionId::new();
+        let cp = |turn: &str, phase, moved| {
+            EventKind::Checkpoint(Checkpoint {
+                turn_id: turn.into(),
+                phase,
+                git_ref: "r".into(),
+                files: vec![],
+                excluded: vec![],
+                excluded_more: 0,
+                head_moved: moved,
+            })
+        };
+        let moved = HeadMoved {
+            from: HeadAt {
+                branch: Some("main".into()),
+                commit: "a".repeat(40),
+            },
+            to: HeadAt {
+                branch: None,
+                commit: "b".repeat(40),
+            },
+        };
+        let evs = vec![
+            ev(sid, 1, cp("t1", CheckpointPhase::Before, None)),
+            ev(
+                sid,
+                2,
+                cp("t1", CheckpointPhase::After, Some(moved.clone())),
+            ),
+            ev(sid, 3, cp("t2", CheckpointPhase::Before, None)),
+            ev(sid, 4, cp("t2", CheckpointPhase::After, None)),
+            ev(sid, 5, cp("t1", CheckpointPhase::Restored, None)),
+        ];
+        let v = SessionView::fold(&evs).unwrap();
+        assert_eq!(v.checkpoints["t1"].head_moved, Some(moved));
+        assert_eq!(v.checkpoints["t2"].head_moved, None);
+    }
+
+    /// X.42: an undo's `restored` turns remember the checkpoint the folder
+    /// was saved as first; restoring that one undoes the undo, and the turns
+    /// are no longer undone. A restore that failed after saving leaves its
+    /// id unused: the next undo's own is the one kept.
+    #[test]
+    fn an_undo_remembers_what_it_saved_and_a_put_back_clears_it() {
+        use crate::event::{Checkpoint, CheckpointPhase as P};
+        let sid = SessionId::new();
+        let cp = |turn: &str, phase| {
+            EventKind::Checkpoint(Checkpoint {
+                turn_id: turn.into(),
+                phase,
+                git_ref: format!("{turn}-{phase:?}"),
+                files: vec!["a".into()],
+                excluded: vec![],
+                excluded_more: 0,
+                head_moved: None,
+            })
+        };
+        let mut evs = vec![
+            cp("t1", P::Before),
+            cp("t1", P::After),
+            cp("t2", P::Before),
+            cp("t2", P::After),
+            // A restore that failed after saving.
+            cp("restore-dead", P::BeforeRestore),
+            // A rewind of both turns.
+            cp("restore-a", P::BeforeRestore),
+            cp("restore-a", P::After),
+            cp("t1", P::Restored),
+            cp("t2", P::Restored),
+        ];
+        let fold = |evs: &[EventKind]| {
+            let raw: Vec<RawEvent> = evs
+                .iter()
+                .enumerate()
+                .map(|(i, k)| ev(sid, i as u64 + 1, k.clone()))
+                .collect();
+            SessionView::fold(&raw).unwrap()
+        };
+        let v = fold(&evs);
+        for t in ["t1", "t2"] {
+            assert!(v.checkpoints[t].restored, "{t}");
+            assert_eq!(v.checkpoints[t].saved.as_deref(), Some("restore-a"), "{t}");
+        }
+        // Putting it back: its own save, its after, and `restored` on it.
+        evs.extend([
+            cp("restore-b", P::BeforeRestore),
+            cp("restore-b", P::After),
+            cp("restore-a", P::Restored),
+        ]);
+        let v = fold(&evs);
+        for t in ["t1", "t2"] {
+            assert!(!v.checkpoints[t].restored, "{t}");
+            assert_eq!(v.checkpoints[t].saved, None, "{t}");
+        }
+        // A saved id's checkpoint keeps its own before and after.
+        let a = &v.checkpoints["restore-a"];
+        assert_eq!(a.before.as_deref(), Some("restore-a-BeforeRestore"));
+        assert_eq!(a.after.as_deref(), Some("restore-a-After"));
     }
 
     /// T50: the latest `approval_mode_changed` is the chat's mode, and the

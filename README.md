@@ -1303,6 +1303,23 @@ the turn changed beside the chat: each file with its added and removed lines
 (three lines of context, line numbers, `+` and `−`), renames as renames,
 binary files and files over 512 KiB named with their sizes, hidden characters
 shown as `<U+…>` codes. "Include later turns" shows what "Rewind" would undo.
+When your repository's `HEAD` moved while a turn ran (a `git checkout`, a
+commit, a reset), the turn's row and the changes panel say so in one sentence:
+for example "While this turn ran, the checked-out branch changed from `main`
+to `feature-x`. The file count includes what that switch changed. Undo puts the
+files back as they were before the turn, on whichever branch is checked out
+now; it does not switch back." Moving a branch to another commit, leaving a
+branch for a commit and back, and a detached HEAD have their own sentences;
+rewinding from an earlier turn names the later turns that moved it. It is a
+note: Undo works and refuses exactly as before. The node compares `HEAD` from
+the repository's files (no git process) at the turn's start and end, so it
+says what changed while the turn ran, not who changed it (another chat in the
+same folder counts). It says nothing for a folder that is not a plain
+repository directory, for a turn cut off by a restart (a Stop still gets one),
+when `HEAD` ends where it began (out and back), for an unborn branch's first
+commit, for a `git init`, `rm -rf .git` or `git worktree add` during the turn,
+and two branch names that differ only in characters the node replaces (control
+and direction characters) read as one.
 Changes made by shell commands show like any other. The node reads them from
 the turn's checkpoints when you ask; nothing is stored on the server. A very
 large turn is shown in part, marked "Cut" (at most 1,000 files are listed and
@@ -1396,7 +1413,11 @@ undo or rewind changes a file it saves the folder as it is, your own edits
 since the turn included, as a checkpoint of its own, so "Undo anyway" loses
 nothing: restoring that checkpoint (its id is in the chat's log, phase
 `before_restore`; `POST /api/sessions/<id>/turns/<that id>/restore`) undoes
-the undo. The chat has no button for it yet. At the end of each turn the
+the undo. The turn's row offers it after an undo as **Put back what this
+undo replaced**: the same restore, with the same checks and refusals (and
+"Undo anyway"); the row then reads as it did just before that undo (earlier
+undos of other turns stay as they were). If the node no longer keeps that checkpoint it says so and the button goes.
+At the end of each turn the
 old versions of the files it changed are copied into the private
 repository, and at the start of each turn so are your own changes since
 the previous one, so you can commit, rewrite history and `git gc`
