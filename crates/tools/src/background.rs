@@ -1584,7 +1584,7 @@ impl Tool for BashStop {
 
     fn description(&self) -> &'static str {
         "Stop one background command of this chat (`id`, e.g. bg-1): SIGTERM, then after 2 s the \
-         kill of everything it started. Returns how it ended. The way to stop one and have its \
+         kill of it and every process descended from it. Returns how it ended. The way to stop one and have its \
          end confirmed (in a sandbox chat the only way: later commands cannot see it)."
     }
 
