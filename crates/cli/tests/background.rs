@@ -2148,7 +2148,7 @@ async fn a_killed_host_guard_is_not_reported_as_an_ended_command() {
     let Some(sb) = f.host_sandbox() else { return };
     let (bg, mut ends) = table(on());
     let ctx = f.ctx(sb, &bg);
-    let m = Mark(976_701);
+    let m = Mark(977_901);
     let reaper = Reaper(vec![m]);
     let r = run(
         &Bash,
@@ -2199,7 +2199,7 @@ async fn a_host_guard_killed_in_the_first_wait_says_the_command_may_still_run() 
     let Some(sb) = f.host_sandbox() else { return };
     let (bg, _ends) = table(on());
     let ctx = f.ctx(sb, &bg);
-    let m = Mark(976_711);
+    let m = Mark(977_911);
     let reaper = Reaper(vec![m]);
     // Kill the guard once the command runs, from outside, by pid.
     let killer = std::thread::spawn(move || {
