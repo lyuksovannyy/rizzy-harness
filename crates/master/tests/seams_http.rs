@@ -352,6 +352,60 @@ async fn untrusted_agentic_turns_get_no_web_tools() {
     }
 }
 
+/// **Pins a residual, on purpose** (review of PR 179, M1; PLAN.md T89): a
+/// turn sent with the API token (`by_owner = false`, not marked untrusted)
+/// keeps both web tools, and a URL in its text counts as the person's own
+/// words, so text piped through the token from elsewhere can vouch a URL.
+/// Only chats a routine or webhook run marked untrusted lose them (the
+/// test above). If this rule changes, change it deliberately: this test and
+/// T89's residual say so.
+#[tokio::test]
+async fn r_api_token_turn_keeps_the_web_tools() {
+    let t = start().await;
+    let [(alex, _), _] = users(&t).await;
+    let body = json!({"cwd": "/w", "title": "t", "node_id": "bare"});
+    let (st, v) = req(&t, Method::POST, "/api/sessions", Some(body), &alex).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let sid: SessionId = v["session_id"].as_str().unwrap().parse().unwrap();
+    t.master
+        .prompt(
+            sid,
+            "look at this".into(),
+            PromptOpts {
+                agent_id: Some("teamlead".into()),
+                untrusted: false,
+                by_owner: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let spec = {
+        let seen = t.agentic_node.lock().unwrap();
+        seen.iter()
+            .rev()
+            .find_map(|m| match m {
+                MasterToNode::Prompt(PromptMsg { agent, .. }) => agent.clone(),
+                _ => None,
+            })
+            .expect("no prompt reached the node")
+    };
+    for tool in ["web_fetch", "web_search"] {
+        assert!(
+            spec.allows_tool(tool),
+            "{tool} is withheld from an API-token turn"
+        );
+    }
+    for d in &spec.delegates {
+        assert!(
+            !d.deny_tools.iter().any(|x| x == "web_fetch"),
+            "{}: {:?}",
+            d.agent_id,
+            d.deny_tools
+        );
+    }
+}
+
 #[tokio::test]
 async fn node_capabilities_come_from_its_hello() {
     let t = start().await;
