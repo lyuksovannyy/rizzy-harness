@@ -318,10 +318,15 @@ async fn serve(
     if added > 0 {
         tracing::info!(added, "created missing Personal workspaces and memberships");
     }
+    // The web tools of `[web]`, built once: the master's own chat runtime
+    // and the embedded node register the same tools (one HTTP client), and
+    // the search key is in both scrubbers.
+    let (web_tools, web_key) = harness_master::providers::web_tools(&cfg, dir)?;
     let node = if no_local_node {
         tracing::info!("no local node: agentic sessions run on remote nodes");
         None
     } else {
+        let node_web = NodeWeb::embedded(web_tools.clone(), web_key.clone(), &cfg.web, &policy);
         Some(
             agentic_node(
                 dir,
@@ -332,6 +337,7 @@ async fn serve(
                 &secrets,
                 "local",
                 false,
+                node_web,
             )
             .await?,
         )
@@ -339,7 +345,7 @@ async fn serve(
 
     // The master's own chat runtime: same session code, no workspace and no
     // file or shell tools; only the web tools from `[web]`.
-    let (mut web_tools, web_key) = harness_master::providers::web_tools(&cfg, dir)?;
+    let mut web_tools = web_tools;
     let (memory, builtin_memory) = harness_master::providers::memory(&cfg, dir, &secrets)?;
     if memory.is_some() {
         web_tools.push(Arc::new(harness_memory::Remember));
@@ -606,6 +612,140 @@ fn tool_env(
         .map_err(|e| anyhow::anyhow!("node.toml: {e}"))
 }
 
+/// The web tools a node's agentic runtime registers, and where they come
+/// from (ADOPTION_PLAN T.3, PLAN.md T89): the server's `[web]` for the
+/// embedded node, node.toml's own `[web]` for a remote one. Never anything
+/// the master sends.
+struct NodeWeb {
+    tools: harness_tools::ToolSet,
+    /// The search key, for the node's scrubber.
+    key: Option<harness_core::Secret<String>>,
+    /// Where what is on was decided, in words for the log and `doctor`.
+    on_from: &'static str,
+    /// The search engine, for the line.
+    search: harness_core::policy::SearchKind,
+    /// Each tool that is off here and the file that decided it.
+    off: Vec<(&'static str, String)>,
+}
+
+impl NodeWeb {
+    /// A remote node's: node.toml's `[web]` is the only source; no table, or
+    /// a table that leaves a tool out, means off.
+    fn of_node_toml(policy: &NodePolicy, dir: &Path) -> anyhow::Result<Self> {
+        let w = policy.web.clone();
+        let config = harness_master::config::WebConfig::from(&w.clone().unwrap_or_default());
+        let (tools, key) = harness_master::providers::web_tools_from(&config, dir)
+            .map_err(|e| anyhow::anyhow!("node.toml [web]: {e}"))?;
+        let why = |what: &str| match &w {
+            None => "no [web] in node.toml".to_string(),
+            Some(_) => format!("node.toml [web] {what}"),
+        };
+        let mut off = Vec::new();
+        if config.search == harness_core::policy::SearchKind::None {
+            off.push(("web_search", why("search = \"none\"")));
+        }
+        if !config.fetch {
+            off.push(("web_fetch", why("fetch = false")));
+        }
+        Ok(Self {
+            tools,
+            key,
+            on_from: "[web] in node.toml",
+            search: config.search,
+            off,
+        })
+    }
+
+    /// The server's own node: config.toml's `[web]` decides what exists; a
+    /// `[web]` table in node.toml can only take away (`fetch = false`,
+    /// `search = "none"`; a key it leaves out counts as off), never switch
+    /// on what config.toml has off, and its backend settings are ignored here.
+    fn embedded(
+        tools: harness_tools::ToolSet,
+        key: Option<harness_core::Secret<String>>,
+        config: &harness_master::config::WebConfig,
+        policy: &NodePolicy,
+    ) -> Self {
+        use harness_core::policy::SearchKind;
+        let nt = policy.web.as_ref();
+        let mut off: Vec<(&'static str, String)> = Vec::new();
+        let mut keep = Vec::new();
+        for t in tools {
+            match t.name() {
+                "web_fetch" if nt.is_some_and(|w| !w.fetch) => {
+                    off.push(("web_fetch", "node.toml [web] fetch = false".into()));
+                    continue;
+                }
+                "web_search" if nt.is_some_and(|w| w.search == SearchKind::None) => {
+                    off.push(("web_search", "node.toml [web] search = \"none\"".into()));
+                    continue;
+                }
+                _ => keep.push(t),
+            }
+        }
+        if config.search == SearchKind::None {
+            off.push(("web_search", "config.toml [web] search = \"none\"".into()));
+        }
+        if !config.fetch {
+            off.push(("web_fetch", "config.toml [web] fetch = false".into()));
+        }
+        if let Some(w) = nt
+            && (!w.searxng_url.is_empty()
+                || w.brave_key_env.is_some()
+                || w.brave_key_secret.is_some())
+        {
+            tracing::info!(
+                "node.toml [web]: its search backend settings are ignored on this server's own \
+                 node (config.toml's are used); only search = \"none\" and fetch = false apply"
+            );
+        }
+        Self {
+            tools: keep,
+            key,
+            on_from: "[web] in config.toml",
+            search: config.search,
+            off,
+        }
+    }
+
+    /// The search key is a secret of this node like a provider key: it
+    /// reaches no event, no log line and no tool result.
+    fn add_key_to(&self, secrets: &harness_core::SecretSet) {
+        if let Some(k) = &self.key {
+            secrets.add(k.clone());
+        }
+    }
+
+    /// The one line for the log and `doctor`: each tool, on from which
+    /// setting or off by which file, the engine, and `denied_tools`. No key.
+    fn line(&self, policy: &NodePolicy) -> String {
+        use harness_core::policy::SearchKind;
+        let mut parts: Vec<String> = Vec::new();
+        for name in ["web_search", "web_fetch"] {
+            if self.tools.iter().any(|t| t.name() == name) {
+                let mut p = match (name, self.search) {
+                    ("web_search", SearchKind::Searxng) => "web_search (searxng)".to_string(),
+                    ("web_search", SearchKind::Brave) => "web_search (brave)".to_string(),
+                    _ => name.to_string(),
+                };
+                p.push_str(&format!(" from {}", self.on_from));
+                if policy.denies(name) {
+                    p.push_str(" [refused by node.toml denied_tools]");
+                }
+                parts.push(p);
+            } else {
+                let why = self
+                    .off
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .map_or("not set up", |(_, w)| w.as_str());
+                parts.push(format!("{name} off ({why})"));
+            }
+        }
+        parts.join("; ")
+    }
+}
+
 /// The worker runtime (embedded `local` node, or a remote node).
 #[allow(clippy::too_many_arguments)]
 async fn agentic_node(
@@ -617,6 +757,7 @@ async fn agentic_node(
     secrets: &harness_core::SecretSet,
     node_id: &str,
     refuse_without_sandbox: bool,
+    web: NodeWeb,
 ) -> anyhow::Result<(NodeRuntime, Arc<harness_tools::graphify::GraphifyState>)> {
     // No session may include this runtime's data directory (for the
     // embedded node, the master's: keys, the API token, every chat), and
@@ -675,9 +816,11 @@ async fn agentic_node(
     // graphify: only if this node's own policy allows it (node.toml).
     let graphify =
         harness_tools::graphify::GraphifyState::new(policy.graphify, dir.join("graphify"));
+    web.add_key_to(secrets);
+    tracing::info!("web tools in agentic chats: {}", web.line(&policy));
     let backend = NativeBackend::new(
         provider,
-        agentic_tools(&graphify),
+        agentic_tools(&graphify, &web.tools),
         NativeConfig {
             tool_env,
             tool_stream_bytes: policy.limits.tool_stream_bytes,
@@ -726,12 +869,19 @@ async fn agentic_node(
     Ok((rt, graphify))
 }
 
-/// The tools an agentic node registers: the built-in ones, `graph_query`,
+/// The tools an agentic node registers: the built-in ones, the web tools
+/// its own configuration enables, `graph_query`,
 /// `recall`, `board`, `board_edit` and `remember` (it runs nothing here: the master files the mirrored call
 /// as a proposal the person confirms; `denied_tools` turns it off). Each
 /// turn offers those its agent allows; node policy still gates every call.
-fn agentic_tools(graphify: &Arc<harness_tools::graphify::GraphifyState>) -> harness_tools::ToolSet {
+fn agentic_tools(
+    graphify: &Arc<harness_tools::graphify::GraphifyState>,
+    web: &harness_tools::ToolSet,
+) -> harness_tools::ToolSet {
     let mut tools = harness_tools::builtin();
+    // `web_search` and `web_fetch`, when this node's own configuration has
+    // them (T.3): they run here, in this process, never on the master.
+    tools.extend(web.iter().cloned());
     tools.push(Arc::new(harness_tools::graphify::GraphQuery::new(
         graphify.clone(),
     )));
@@ -939,6 +1089,9 @@ async fn node_run(dir: &Path, dotenv_names: &[String]) -> anyhow::Result<()> {
     let (runtime, provider_env) = ProviderRuntime::start(cfg.clone(), dir, secrets.clone())?;
     let child_env = tool_env(&policy, provider_env, dotenv_names)?;
     let provider: Arc<dyn Provider> = runtime.provider.clone();
+    // This node's own `[web]` (node.toml), off unless it says otherwise;
+    // nothing the master sends turns it on.
+    let web = NodeWeb::of_node_toml(&policy, dir)?;
     let (node, _graphify) = agentic_node(
         dir,
         &cfg,
@@ -948,6 +1101,7 @@ async fn node_run(dir: &Path, dotenv_names: &[String]) -> anyhow::Result<()> {
         &secrets,
         &remote.node_id,
         true,
+        web,
     )
     .await?;
     let mut signals = stop::Signals::install().context("catching stop signals")?;
@@ -1065,6 +1219,27 @@ async fn doctor(dir: &Path) -> anyhow::Result<()> {
                 )
             })
             .map_err(|e| e.to_string()),
+    );
+    // The web tools this node's agentic chats have, and from which setting
+    // (ADOPTION_PLAN T.3, PLAN.md T89): a directory that has joined a master
+    // is a remote node and reads node.toml's `[web]`; any other is a server,
+    // whose embedded node takes config.toml's. A missing key is a failure
+    // naming the variable or secret, never its value.
+    check(
+        "web tools (agentic chats)",
+        NodePolicy::load(&dir.join("node.toml"))
+            .map_err(|e| e.to_string())
+            .and_then(|p| {
+                let web = if dir.join("remote.toml").exists() {
+                    NodeWeb::of_node_toml(&p, dir).map_err(|e| format!("{e:#}"))?
+                } else {
+                    let cfg = Config::load(&dir.join(CONFIG_FILE)).map_err(|e| format!("{e:#}"))?;
+                    let (tools, key) = harness_master::providers::web_tools(&cfg, dir)
+                        .map_err(|e| format!("{e:#}"))?;
+                    NodeWeb::embedded(tools, key, &cfg.web, &p)
+                };
+                Ok(web.line(&p))
+            }),
     );
     // The sandbox's start, once, as the node makes it (its own data
     // directory protected), and the modes it lets the node offer (N.10a).
@@ -1652,7 +1827,7 @@ mod tests {
     #[test]
     fn agentic_nodes_register_remember() {
         let graphify = harness_tools::graphify::GraphifyState::new(false, PathBuf::from("unused"));
-        let tools = agentic_tools(&graphify);
+        let tools = agentic_tools(&graphify, &Vec::new());
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(names.contains(&"remember"), "{names:?}");
         assert!(names.contains(&"graph_query"), "{names:?}");
@@ -1663,5 +1838,198 @@ mod tests {
             names.contains(&"board") && names.contains(&"board_edit"),
             "{names:?}"
         );
+    }
+    /// A node registers the web tools its own configuration built, and
+    /// nothing else of the sort: the chat runtime's `[web]` default
+    /// (`fetch` on, no search) and an engine in config.toml, then none.
+    #[test]
+    fn agentic_nodes_register_the_web_tools_they_were_given() {
+        use harness_master::config::{SearchKind, WebConfig};
+        let graphify = harness_tools::graphify::GraphifyState::new(false, PathBuf::from("unused"));
+        let names = |w: &WebConfig| -> Vec<String> {
+            let (web, _) =
+                harness_master::providers::web_tools_from(w, Path::new("unused")).unwrap();
+            agentic_tools(&graphify, &web)
+                .iter()
+                .map(|t| t.name().to_string())
+                .filter(|n| n.starts_with("web_"))
+                .collect()
+        };
+        assert_eq!(names(&WebConfig::default()), ["web_fetch"]);
+        let both = WebConfig {
+            search: SearchKind::Searxng,
+            searxng_url: "http://127.0.0.1:8888".into(),
+            ..Default::default()
+        };
+        assert_eq!(names(&both), ["web_search", "web_fetch"]);
+        let off = WebConfig {
+            fetch: false,
+            ..Default::default()
+        };
+        assert!(names(&off).is_empty());
+        assert!(
+            agentic_tools(&graphify, &Vec::new())
+                .iter()
+                .all(|t| !t.name().starts_with("web_")),
+            "a node given none registers none"
+        );
+    }
+
+    /// A remote node has no web tools until its own node.toml says so, and
+    /// the master has no say: `[web]` is read from that file alone.
+    #[test]
+    fn a_remote_nodes_web_tools_are_off_until_node_toml_turns_them_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let load = |toml: &str| {
+            let p = dir.path().join("node.toml");
+            std::fs::write(&p, toml).unwrap();
+            NodePolicy::load(&p)
+        };
+        let names = |p: &NodePolicy| -> Vec<String> {
+            let w = NodeWeb::of_node_toml(p, dir.path()).unwrap();
+            w.tools.iter().map(|t| t.name().to_string()).collect()
+        };
+        let p = load("").unwrap();
+        assert!(names(&p).is_empty());
+        let line = NodeWeb::of_node_toml(&p, dir.path()).unwrap().line(&p);
+        assert!(
+            line.contains("web_search off") && line.contains("web_fetch off"),
+            "{line}"
+        );
+        assert!(line.contains("no [web] in node.toml"), "{line}");
+        let p = load("[web]\nfetch = true\n").unwrap();
+        assert_eq!(names(&p), ["web_fetch"]);
+        let p =
+            load("[web]\nsearch = \"searxng\"\nsearxng_url = \"http://127.0.0.1:1\"\n").unwrap();
+        assert_eq!(names(&p), ["web_search"]);
+        // `denied_tools` shows in the line (and the loop refuses the call).
+        let p = load("denied_tools = [\"web_fetch\"]\n[web]\nfetch = true\n").unwrap();
+        let line = NodeWeb::of_node_toml(&p, dir.path()).unwrap().line(&p);
+        assert!(
+            line.contains("web_fetch from [web] in node.toml [refused by node.toml denied_tools]"),
+            "{line}"
+        );
+        // An engine without its address or key is refused when the file is
+        // read; an unset key variable names the variable, not a value.
+        let e = load("[web]\nsearch = \"searxng\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("needs searxng_url"), "{e}");
+        let e = load("[web]\nsearch = \"brave\"\n").unwrap_err().to_string();
+        assert!(e.contains("brave_key_env or brave_key_secret"), "{e}");
+        let p = load("[web]\nsearch = \"brave\"\nbrave_key_env = \"HARNESS_NO_SUCH_KEY_VAR\"\n")
+            .unwrap();
+        let e = NodeWeb::of_node_toml(&p, dir.path())
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(e.contains("HARNESS_NO_SUCH_KEY_VAR"), "{e}");
+        // Unknown keys are refused, like everywhere in node.toml.
+        assert!(load("[web]\nfetchh = true\n").is_err());
+        // A key found in the environment is returned for the scrubber and
+        // is in no line (any variable that is set will do: `PATH`).
+        let p = load("[web]\nsearch = \"brave\"\nbrave_key_env = \"PATH\"\n").unwrap();
+        let w = NodeWeb::of_node_toml(&p, dir.path()).unwrap();
+        let path = std::env::var("PATH").unwrap();
+        assert_eq!(
+            w.key.as_ref().map(|k| k.expose().clone()),
+            Some(path.clone())
+        );
+        let line = w.line(&p);
+        assert!(
+            line.contains("web_search (brave)") && !line.contains(&path),
+            "{line}"
+        );
+        // And it is in the node's scrubber, which every event and tool
+        // result passes through.
+        let secrets = harness_core::SecretSet::default();
+        assert_eq!(secrets.scrub(&path), path, "not yet a secret");
+        w.add_key_to(&secrets);
+        assert_eq!(secrets.scrub(&path), "[REDACTED]");
+    }
+
+    /// The server's own node: config.toml decides what exists, and a `[web]`
+    /// table in node.toml can only take away. Four combinations per tool, and
+    /// the line says which file decided.
+    #[test]
+    fn node_toml_can_only_take_web_tools_away_from_the_servers_own_node() {
+        use harness_master::config::{SearchKind, WebConfig};
+        let dir = tempfile::tempdir().unwrap();
+        let load = |toml: &str| {
+            let p = dir.path().join("node.toml");
+            std::fs::write(&p, toml).unwrap();
+            NodePolicy::load(&p).unwrap()
+        };
+        let names = |cfg_fetch: bool, cfg_search: bool, node_toml: &str| -> (Vec<String>, String) {
+            let cfg = WebConfig {
+                fetch: cfg_fetch,
+                search: if cfg_search {
+                    SearchKind::Searxng
+                } else {
+                    SearchKind::None
+                },
+                searxng_url: "http://127.0.0.1:8888".into(),
+                ..Default::default()
+            };
+            let (tools, key) = harness_master::providers::web_tools_from(&cfg, dir.path()).unwrap();
+            let p = load(node_toml);
+            let w = NodeWeb::embedded(tools, key, &cfg, &p);
+            let line = w.line(&p);
+            (w.tools.iter().map(|t| t.name().to_string()).collect(), line)
+        };
+        let url = "searxng_url = \"http://127.0.0.1:1\"\n";
+        let allow = format!("[web]\nsearch = \"searxng\"\n{url}fetch = true\n");
+        let no_fetch = format!("[web]\nsearch = \"searxng\"\n{url}fetch = false\n");
+        let no_search = "[web]\nsearch = \"none\"\nfetch = true\n".to_string();
+        // fetch: config on/off x node.toml absent / allows / takes away.
+        for (cfg, nt, want) in [
+            (true, "", true),
+            (true, &allow, true),
+            (true, &no_fetch, false),
+            (false, "", false),
+            (false, &allow, false),
+        ] {
+            let (n, line) = names(cfg, true, nt);
+            assert_eq!(n.contains(&"web_fetch".to_string()), want, "{cfg} {nt:?}");
+            if !want {
+                let file = if cfg && !nt.is_empty() {
+                    "node.toml"
+                } else {
+                    "config.toml"
+                };
+                assert!(
+                    line.contains(&format!("web_fetch off ({file} [web] fetch = false")),
+                    "{line}"
+                );
+            }
+        }
+        // search: the same.
+        for (cfg, nt, want) in [
+            (true, "", true),
+            (true, &allow, true),
+            (true, &no_search, false),
+            (false, "", false),
+            (false, &allow, false),
+        ] {
+            let (n, line) = names(true, cfg, nt);
+            assert_eq!(n.contains(&"web_search".to_string()), want, "{cfg} {nt:?}");
+            if !want {
+                let file = if cfg && !nt.is_empty() {
+                    "node.toml"
+                } else {
+                    "config.toml"
+                };
+                assert!(
+                    line.contains(&format!("web_search off ({file} [web] search = \"none\"")),
+                    "{line}"
+                );
+            }
+        }
+        // A table that leaves a key out takes that tool away (off by default).
+        let (n, _) = names(true, true, "[web]\nfetch = true\n");
+        assert_eq!(n, ["web_fetch"]);
+        // `fetch = false` equal to the default is still a restriction.
+        let (n, _) = names(true, true, &no_fetch);
+        assert_eq!(n, ["web_search"]);
     }
 }

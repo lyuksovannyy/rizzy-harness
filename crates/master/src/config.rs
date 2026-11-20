@@ -381,16 +381,8 @@ impl MemoryConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SearchKind {
-    #[default]
-    None,
-    /// Self-hosted SearXNG (JSON format enabled). Keeps queries local.
-    Searxng,
-    /// Brave Search API (key required).
-    Brave,
-}
+// Shared with node.toml's `[web]` (ADOPTION_PLAN T.3).
+pub use harness_core::policy::SearchKind;
 
 /// Web tools for chats. Changing them needs a restart.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -415,6 +407,20 @@ impl Default for WebConfig {
             brave_key_env: None,
             brave_key_secret: None,
             fetch: true,
+        }
+    }
+}
+
+/// A node's own `[web]` (node.toml), as the builder of the web tools reads
+/// it.
+impl From<&harness_node::WebPolicy> for WebConfig {
+    fn from(p: &harness_node::WebPolicy) -> Self {
+        Self {
+            search: p.search,
+            searxng_url: p.searxng_url.clone(),
+            brave_key_env: p.brave_key_env.clone(),
+            brave_key_secret: p.brave_key_secret.clone(),
+            fetch: p.fetch,
         }
     }
 }

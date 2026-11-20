@@ -180,6 +180,9 @@ pub struct ToolCtx {
     /// the model wrote. Network tools only follow URLs found here, so injected
     /// instructions cannot make the model smuggle data out in a URL it builds.
     pub observed: Arc<Vec<String>>,
+    /// What the web tools have done in this turn (a sub-agent's turn has its
+    /// own): the loop makes one per turn and shares it by every call.
+    pub budget: Arc<TurnBudget>,
     /// Token-saving methods in effect for this call.
     pub savings: harness_core::savings::Savings,
     /// Where full outputs of filtered commands are kept (`tool_output`).
@@ -242,6 +245,56 @@ pub struct ToolCtx {
     pub read_only_shell: bool,
 }
 
+/// The marker entry in [`ToolCtx::observed`] after which the entries are
+/// text of pages `web_fetch` returned: a URL they list is vouched, but only
+/// by a page, and the web tools count what is fetched on that word alone
+/// (review of PR 179, H1). Before it: the person's words and search results.
+pub const PAGE_MARK: &str = "\u{1}pages\u{1}";
+
+/// `observed` in two parts: what the person and a search gave, and what
+/// fetched pages said.
+pub fn split_observed(observed: &[String]) -> (&[String], &[String]) {
+    match observed.iter().position(|t| t == PAGE_MARK) {
+        Some(i) => (&observed[..i], &observed[i + 1..]),
+        None => (observed, &[]),
+    }
+}
+
+/// `strong` and `pages` as one `observed` list ([`split_observed`] undoes it).
+pub fn join_observed(mut strong: Vec<String>, pages: Vec<String>) -> Vec<String> {
+    if !pages.is_empty() {
+        strong.push(PAGE_MARK.to_string());
+        strong.extend(pages);
+    }
+    strong
+}
+
+/// Counts of what the web tools did in one turn, for the per-turn caps.
+#[derive(Debug, Default)]
+pub struct TurnBudget {
+    /// `web_fetch` calls whose URL only a fetched page vouched for.
+    pub page_fetches: std::sync::atomic::AtomicUsize,
+    /// `web_search` calls.
+    pub searches: std::sync::atomic::AtomicUsize,
+}
+
+impl TurnBudget {
+    /// Take one from `counter` if it is below `cap`; says whether it did.
+    pub fn take(counter: &std::sync::atomic::AtomicUsize, cap: usize) -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        let mut n = counter.load(SeqCst);
+        loop {
+            if n >= cap {
+                return false;
+            }
+            match counter.compare_exchange(n, n + 1, SeqCst, SeqCst) {
+                Ok(_) => return true,
+                Err(now) => n = now,
+            }
+        }
+    }
+}
+
 impl ToolCtx {
     pub fn new(workspace: impl Into<PathBuf>) -> Self {
         Self {
@@ -254,6 +307,7 @@ impl ToolCtx {
             bash_timeout_max: Duration::from_secs(bash::DEFAULT_TIMEOUT_MAX_S),
             env: ToolEnv::default(),
             observed: Arc::default(),
+            budget: Arc::default(),
             savings: Default::default(),
             outputs: None,
             refs: Arc::default(),

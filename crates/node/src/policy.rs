@@ -70,6 +70,14 @@ pub struct NodePolicy {
     /// ADOPTION_PLAN X.27 step 3, PLAN.md T86): the hosts this node clones
     /// from. Nothing the master sends adds one.
     pub forge: ForgePolicy,
+    /// The web tools this node's agentic chats have (`[web]`, ADOPTION_PLAN
+    /// T.3, PLAN.md T89). A remote node: this file is the only source, and no
+    /// table (or a key left out of it) means off. The server's own node: the
+    /// server's `[web]` decides what exists, and a table here can only take
+    /// away (`fetch = false`, `search = "none"`; a key left out counts as
+    /// off) and never switches on what the server has off. Nothing the
+    /// master sends switches either on.
+    pub web: Option<WebPolicy>,
     /// Folders no session may include and no file tool may touch, in every
     /// mode: the runtime's own data directory (keys, the API token,
     /// databases). Set by the runtime with [`NodePolicy::protect`], never
@@ -784,6 +792,45 @@ impl Default for ArtifactsPolicy {
     }
 }
 
+/// `[web]` in node.toml (ADOPTION_PLAN T.3, PLAN.md T89): the same keys as
+/// the server's `[web]` in config.toml, with the opposite default: a node
+/// has no web tools until its own file says so. A key is named, never
+/// written here (`brave_key_env`, or `brave_key_secret` in the node's own
+/// 0600 `secrets.toml`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WebPolicy {
+    /// `web_search`'s engine: `none` (default), `searxng` or `brave`.
+    pub search: harness_core::policy::SearchKind,
+    /// The SearXNG address, for `search = "searxng"`.
+    pub searxng_url: String,
+    /// The environment variable holding the Brave key.
+    pub brave_key_env: Option<String>,
+    /// The Brave key's name in this node's `secrets.toml`.
+    pub brave_key_secret: Option<String>,
+    /// `web_fetch`: public addresses only, URLs from the person, a search
+    /// or a page it fetched (never a file the agent read).
+    pub fetch: bool,
+}
+
+impl WebPolicy {
+    /// What serde cannot check: an engine without its address or key.
+    pub fn validate(&self) -> Result<(), String> {
+        use harness_core::policy::SearchKind;
+        match self.search {
+            SearchKind::Searxng if self.searxng_url.is_empty() => {
+                Err("[web] search = \"searxng\" needs searxng_url".into())
+            }
+            SearchKind::Brave
+                if self.brave_key_env.is_none() && self.brave_key_secret.is_none() =>
+            {
+                Err("[web] search = \"brave\" needs brave_key_env or brave_key_secret".into())
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
 /// `[forge]` in node.toml (ADOPTION_PLAN X.27 step 3, PLAN.md T86): which
 /// forge hosts this node clones a new project's repository from. The node
 /// builds the clone's URL itself, `https://<entry>/<owner>/<name>.git`, from
@@ -1102,6 +1149,7 @@ impl Default for NodePolicy {
             mcp: McpPolicy::default(),
             projects: ProjectsPolicy::default(),
             forge: ForgePolicy::default(),
+            web: None,
             protected_dirs: Vec::new(),
             exec: Default::default(),
             sandbox_tmp: None,
@@ -1165,6 +1213,9 @@ impl NodePolicy {
         self.skills.roots()?;
         self.instructions.user_file()?;
         self.projects.configured()?;
+        if let Some(w) = &self.web {
+            w.validate()?;
+        }
         let n = self.limits.tool_stream_bytes;
         let (min, max) = (
             harness_tools::stream::MIN_STREAM_BYTES,

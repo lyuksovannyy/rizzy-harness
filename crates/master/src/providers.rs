@@ -63,9 +63,19 @@ pub fn web_tools(
     cfg: &Config,
     data_dir: &Path,
 ) -> anyhow::Result<(harness_tools::ToolSet, Option<Secret<String>>)> {
+    web_tools_from(&cfg.web, data_dir)
+}
+
+/// The web tools one `[web]` section asks for (config.toml's, or a remote
+/// node's in node.toml: ADOPTION_PLAN T.3), and the key to add to the
+/// redaction set of whatever runs them. A key that cannot be found is an
+/// error naming the variable or the secret, never its value.
+pub fn web_tools_from(
+    w: &crate::config::WebConfig,
+    data_dir: &Path,
+) -> anyhow::Result<(harness_tools::ToolSet, Option<Secret<String>>)> {
     use crate::config::SearchKind;
     use harness_web::{SearchBackend, WebFetch, WebSearch};
-    let w = &cfg.web;
     let mut tools: harness_tools::ToolSet = Vec::new();
     let mut key = None;
     match w.search {

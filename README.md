@@ -965,7 +965,8 @@ model_first_byte_timeout_s = 600     # Ask chats: wait for a model's first answe
 search = "searxng"                   # none | searxng | brave
 searxng_url = "http://localhost:8888" # JSON format must be enabled in SearXNG
 # brave_key_secret = "brave"         # for search = "brave" ([keys] brave = "..." in secrets.toml)
-fetch = true                         # web_fetch: public addresses only, URLs from you or a search
+fetch = true                         # web_fetch: public addresses only, URLs from you, a search or a page it fetched
+                                     # (this section also gives the server's own node its web tools: see "Web tools in Agentic chats")
 
 [memory]
 backend = "builtin"                  # builtin | mem0 | off (restart to switch)
@@ -1677,6 +1678,13 @@ dir = "~/rizzy-projects"             # where "New project" makes folders (see "P
 clone = true                         # clone repositories into new project folders (see "Cloning a repository"); false: never
 hosts = ["github.com", "gitlab.com"] # the only hosts this node clones from, exactly as written: a lower-case name or IPv4 address, ":<port>" only where you add one
 
+[web]                                # a REMOTE node's web tools for Agentic chats; off unless you say so. On the server's own node a table here only takes away (see "Web tools in Agentic chats")
+search = "none"                      # none | searxng | brave
+# searxng_url = "http://localhost:8888"  # for search = "searxng"
+# brave_key_env = "BRAVE_API_KEY"    # for search = "brave": the variable that holds the key (never write the key here)
+# brave_key_secret = "brave"         # or its name in this node's own secrets.toml ([keys] brave = "...")
+fetch = false                        # web_fetch: public addresses only
+
 [sandbox]
 mode = "required"                    # required | best-effort | off
 network = "on"                       # on | off (off: no network for the shell, see "Network off")
@@ -2047,7 +2055,7 @@ a command notices:
 **Network off.** `network = "off"` is about the node's shell (and
 graphify and the node's own git); the agent's web tools (`web_search`,
 `web_fetch`) are not affected: they have their own settings, `[web]` under
-"Chats and web tools" above. With `network = "off"` a contained command
+"Chats and web tools" above and "Web tools in Agentic chats". With `network = "off"` a contained command
 also runs in a network namespace of its own: it has only its own loopback
 (`lo`), so no TCP, UDP or DNS from it reaches this machine's other
 addresses, its loopback services or anywhere else, and it cannot reach
@@ -4197,13 +4205,72 @@ The built-in agents, grouped by category in the picker:
 | Scout (`@scout`) | IT | sub-agent | read and search files; read-only commands (`git log`, `git diff`, `grep` pipelines, in the read-only shell) |
 | Reviewer (`@reviewer`) | IT | agent, sub-agent | read and search files; read-only commands (`git diff`, `git log`, `git blame`, tests that write only to `/tmp`); project memory; earlier chats and memory search |
 
-**Researcher in Agentic sessions.** Web tools exist only in chats, not on
-nodes yet (nodes have `remember` and `recall`, which alone do none of a task's work). In an Agentic session, Researcher is therefore not offered
-to the Senior Teamlead or Software Developer as a sub-agent, and a delegation
-to it by name is refused with the reason, so the lead never believes research
-was done that was not. The rule is general: any sub-agent that lists tools
-of which none is available on the node is treated the same way; one that lists
-no tools on purpose (Smol) or has some of them is unaffected.
+**Researcher in Agentic sessions.** Where the node has web tools (next
+section), Researcher is offered to the Senior Teamlead and the Software
+Developer as a sub-agent, and a delegation to it runs a search or a page
+read. On a node without them it is not offered, and a delegation to it by
+name is refused with the reason, so the lead never believes research was done
+that was not. The rule is general: any sub-agent that lists tools of which
+none is available on the node (not registered, not allowed to it, or in the
+node's `denied_tools`) is treated the same way; one that lists no tools on
+purpose (Smol) or has some of them is unaffected.
+
+**Web tools in Agentic chats.** An agent that lists `web_search` and
+`web_fetch` (the Software Developer, the Senior Teamlead, Researcher and Writer
+do) has them in an Agentic chat when the node it runs on has been set up with
+them. The node decides, never the server's master: nothing the master sends
+turns them on.
+
+- *The server's own node* (the one inside `serve`) takes the `[web]` section of
+  `config.toml`, the same tools and the same one HTTP client as the server's
+  chats. With no `[web]` that is `web_fetch` alone (its default is on); add
+  `search` for `web_search`. Restart after changing it. A `[web]` table in
+  this node's `node.toml` can only take away: `fetch = false` removes
+  `web_fetch` and `search = "none"` removes `web_search`, and a key you leave
+  out of that table counts as off. It cannot switch on what `config.toml` has
+  off, and its search backend settings are ignored here (the log says so).
+- *A remote node* (`node run`) takes the `[web]` section of its own
+  `node.toml`, with the same keys, and has none until it says so
+  (no table, or `search = "none"`, `fetch = false`). For Brave name the key by
+  variable (`brave_key_env`) or by its name in the node's own `secrets.toml`
+  (`brave_key_secret`); never write the key in node.toml. The server's
+  `[web]` has no effect on a remote node.
+- `denied_tools = ["web_fetch"]` (or `"web_search"`) in node.toml switches a
+  tool off whatever the section says; a call is refused with the policy's
+  words and nobody is asked. `rizzy-harness doctor` and the start-up log say
+  for each tool whether it is on and from which file, or off and which file
+  decided, never a key.
+
+The rules are the chats' own. `web_fetch` reads public addresses only
+(loopback, private ranges, link-local and the cloud metadata address are
+refused, after a redirect and after a DNS answer too). It fetches only a URL
+that you wrote, that a search returned, or that a page it fetched linked: not
+one that stands in a file in the folder and not one a command printed, because
+an agent that can write files could otherwise put a URL with a secret in it into
+a file, read it back and fetch it (paste the link, or let it search). It does
+not fetch one the model put together either (a real host with a secret from a
+file in its query). A page that lists many links is still a way to send
+something out slowly (which link the agent follows is a signal to whoever wrote
+the page): a turn may fetch at most 20 URLs that only a page vouched for, and
+nothing asks unless the chat is set to Ask every call. `web_search` has no URL
+rule: its query (at most 400 characters, at most 20 searches a turn, shown in
+the chat afterwards) is whatever the agent writes and goes to the search engine
+you configured, so it can carry text the agent has read. Ask mode runs both
+tools without a card (they only read), Ask-every-call asks for each, plan mode
+lets them run. Chats that a routine or webhook run marked untrusted, in every
+later turn too, and their sub-agents get neither tool; a turn sent with the API
+token keeps them, and a URL in its text counts as yours. Where the shell has no
+network (`network = "off"`, the read-only shell), these two tools are the
+agent's only way out: that is what you switch on, and what `denied_tools`
+closes. If a chat reads pages you do not trust beside files you want kept
+secret, set it to Ask every call or turn the tools off.
+
+A page cannot make `web_fetch` hang the node: the page's own parser builds the
+tree once and a page nested more than 512 levels deep (or with more than
+150,000 elements, counted while the tree is built) is refused with a plain sentence; a page that makes more than 30,000 is read as plain text; a page over 1 MiB or with more
+than 25,000 start tags is read as plain text (no layout, no hidden content);
+only two pages are read at a time, and a further one waits at most five seconds
+before the tool says it is busy.
 
 **Default agents per mode.** A chat gets the Assistant unless you pick
 another; an Agentic chat gets the Software Developer. A workspace overrides

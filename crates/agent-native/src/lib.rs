@@ -1114,12 +1114,13 @@ impl NativeBackend {
                         harness_tools::FOREGROUND_DESCRIPTION,
                         read_only,
                         agent,
+                        host,
                     ),
                     schema: harness_tools::foreground_schema(self.config.bash_timeout_max),
                 },
                 ("bash", true) => ToolSpec {
                     name: t.name().to_string(),
-                    description: self.shell_text(t.description(), read_only, agent),
+                    description: self.shell_text(t.description(), read_only, agent, host),
                     schema: t.schema_for(self.config.bash_timeout_max),
                 },
                 _ => ToolSpec {
@@ -1213,6 +1214,20 @@ impl NativeBackend {
         self.config.sandbox.read_only_shell()
     }
 
+    /// Whether `web_fetch` is offered to this agent in this turn: on the
+    /// node, in the agent's own list and not denied to it, and not refused
+    /// by node.toml's `denied_tools`. What the read-only shell's note may
+    /// send an agent to.
+    fn offers_web_fetch(
+        &self,
+        agent: Option<&harness_core::agent::AgentSpec>,
+        host: &dyn harness_core::backend::TurnHost,
+    ) -> bool {
+        agent.is_none_or(|a| a.allows_tool("web_fetch"))
+            && self.tools.iter().any(|t| t.name() == "web_fetch")
+            && !host.tool_denied("web_fetch")
+    }
+
     /// `bash`'s description, with what the read-only shell means (and its
     /// size on this node) added where it runs there.
     fn shell_text(
@@ -1220,12 +1235,12 @@ impl NativeBackend {
         description: &str,
         read_only: bool,
         agent: Option<&harness_core::agent::AgentSpec>,
+        host: &dyn harness_core::backend::TurnHost,
     ) -> String {
         if read_only {
             let size = self.config.sandbox.read_only_tmp();
             let net = self.config.sandbox.read_only_network();
-            let web = agent.is_none_or(|a| a.allows_tool("web_fetch"))
-                && self.tools.iter().any(|t| t.name() == "web_fetch");
+            let web = self.offers_web_fetch(agent, host);
             format!(
                 "{description} {}",
                 harness_tools::read_only_note(size, net, web)
@@ -2228,16 +2243,38 @@ pub fn queued_msg(m: &UserMessage) -> ChatMsg {
 }
 
 /// Tools whose successful output may vouch for a URL (`web_fetch`
-/// provenance). Not `bash` (a `curl` error or an `echo` can plant any
-/// string), not `tool_output` (replays bash), not `grep`/`glob`/`outline`,
-/// not memory, not a sub-agent's answer. A failed call never vouches: some
-/// errors echo model-chosen strings.
-const URL_SOURCES: [&str; 3] = ["web_search", "web_fetch", "read"];
+/// provenance): a search's results and a fetched page's links. Not `read`
+/// (N-6: an agent that can write files composes a URL with a secret in it,
+/// writes it to a file and reads it back, and no step asks in Accept-edits),
+/// not `bash` (a `curl` error or an `echo` can plant any string), not
+/// `tool_output` (replays bash), not `grep`/`glob`/`outline`, not memory, not
+/// a sub-agent's answer. A failed call never vouches: some errors echo
+/// model-chosen strings.
+const URL_SOURCES: [&str; 2] = ["web_search", "web_fetch"];
+
+/// Call ids that vouch for URLs: those of searches, and those of page
+/// fetches apart (a URL only a page lists is counted by the web tools,
+/// `TurnBudget`).
+#[derive(Default, Clone)]
+struct Trusted {
+    search: HashSet<String>,
+    pages: HashSet<String>,
+}
+
+impl Trusted {
+    fn insert(&mut self, call_id: String, tool: &str) {
+        if tool == "web_fetch" {
+            self.pages.insert(call_id);
+        } else {
+            self.search.insert(call_id);
+        }
+    }
+}
 
 /// Call ids in `history` that finished ok and ran a [`URL_SOURCES`] tool.
-fn trusted_results(history: &[RawEvent]) -> HashSet<String> {
+fn trusted_results(history: &[RawEvent]) -> Trusted {
     let mut tool_of: std::collections::HashMap<String, String> = Default::default();
-    let mut out = HashSet::new();
+    let mut out = Trusted::default();
     for e in history {
         match e.typed() {
             Ok(EventKind::AssistantMessage(m)) => {
@@ -2245,13 +2282,13 @@ fn trusted_results(history: &[RawEvent]) -> HashSet<String> {
                     tool_of.insert(c.call_id, c.tool);
                 }
             }
-            Ok(EventKind::ToolCallFinished(f))
-                if f.ok
-                    && tool_of
-                        .get(&f.call_id)
-                        .is_some_and(|t| URL_SOURCES.contains(&t.as_str())) =>
-            {
-                out.insert(f.call_id);
+            Ok(EventKind::ToolCallFinished(f)) if f.ok => {
+                if let Some(t) = tool_of
+                    .get(&f.call_id)
+                    .filter(|t| URL_SOURCES.contains(&t.as_str()))
+                {
+                    out.insert(f.call_id, t);
+                }
             }
             _ => {}
         }
@@ -2271,27 +2308,46 @@ fn trusted_results(history: &[RawEvent]) -> HashSet<String> {
 /// shown, ride in the same message and are not theirs.
 fn observed_text(
     messages: &[ChatMsg],
-    trusted: &HashSet<String>,
+    trusted: &Trusted,
     current: Option<(usize, &str)>,
     child: bool,
 ) -> Vec<String> {
-    messages
-        .iter()
-        .enumerate()
-        .filter_map(|(i, m)| match m {
+    let mut strong = Vec::new();
+    let mut pages = Vec::new();
+    for (i, m) in messages.iter().enumerate() {
+        match m {
             ChatMsg::Tool { call_id, content } => {
-                trusted.contains(call_id).then(|| content.clone())
+                if trusted.search.contains(call_id) {
+                    strong.push(content.clone());
+                } else if trusted.pages.contains(call_id) {
+                    pages.push(content.clone());
+                }
             }
-            other => other.user_text().and_then(|t| match current {
-                Some((idx, own)) if idx == i => Some(own.to_string()),
-                // In a sub-agent's session every "user" message is a task
-                // from the agent that delegated, never the person's words
-                // (review R7).
-                _ if child => None,
-                _ => Some(context::earlier_own_words(t).to_string()),
-            }),
-        })
-        .collect()
+            other => {
+                if let Some(t) = other.user_text().and_then(|t| match current {
+                    Some((idx, own)) if idx == i => Some(own.to_string()),
+                    // In a sub-agent's session every "user" message is a task
+                    // from the agent that delegated, never the person's words
+                    // (review R7).
+                    _ if child => None,
+                    _ => Some(context::earlier_own_words(t).to_string()),
+                }) {
+                    strong.push(t);
+                }
+            }
+        }
+    }
+    harness_tools::join_observed(strong, pages)
+}
+
+/// What a sub-agent may follow: what its parent handed it, then its own.
+fn merge_observed(inherited: &[String], own: Vec<String>) -> Vec<String> {
+    let (is, ip) = harness_tools::split_observed(inherited);
+    let (os, op) = harness_tools::split_observed(&own);
+    harness_tools::join_observed(
+        is.iter().chain(os).cloned().collect(),
+        ip.iter().chain(op).cloned().collect(),
+    )
 }
 
 enum Step<T> {
@@ -3196,6 +3252,10 @@ impl NativeBackend {
             .refs
             .clone()
             .unwrap_or_else(|| Arc::new(std::sync::Mutex::new(RefBook::seed(&ctx.history))));
+        // What the web tools may still do in this turn: counted for the
+        // turn (a summary in the middle of it does not reset it; a retry is
+        // a new turn; a sub-agent's turn has its own).
+        let budget: Arc<harness_tools::TurnBudget> = Arc::default();
 
         // Why the turn's own model is not the one answering: it is
         // unavailable, or the first error it gave; a later fallback's own
@@ -4738,7 +4798,7 @@ impl NativeBackend {
                     observed =
                         observed_text(&messages, &trusted, Some((user_idx, &own_words)), child);
                     if let Some(inh) = &ctx.extra.observed {
-                        observed.splice(0..0, inh.iter().cloned());
+                        observed = merge_observed(inh, observed);
                     }
                 }
                 // A batch's calls run together, at most
@@ -4756,6 +4816,7 @@ impl NativeBackend {
                             tool.clone(),
                             &observed,
                             &refs,
+                            &budget,
                             false,
                         )),
                         _ => None,
@@ -4783,6 +4844,7 @@ impl NativeBackend {
                                 &mut allowed_this_turn,
                                 &observed,
                                 &refs,
+                                &budget,
                                 &mcp_tools,
                             )
                             .await,
@@ -4924,7 +4986,7 @@ impl NativeBackend {
                         return stopped(usage);
                     }
                     if outcome.ok && URL_SOURCES.contains(&call.tool.as_str()) {
-                        trusted.insert(call.call_id.clone());
+                        trusted.insert(call.call_id.clone(), &call.tool);
                     }
                     // A file a call touched, as the log has it: the folders
                     // above it are looked in after the step (B.9).
@@ -5695,6 +5757,7 @@ impl NativeBackend {
         allowed_this_turn: &mut HashSet<harness_tools::CallKey>,
         observed: &[String],
         refs: &SharedRefs,
+        budget: &Arc<harness_tools::TurnBudget>,
         mcp: &[Arc<dyn harness_tools::Tool>],
     ) -> ToolOutcome {
         match self
@@ -5702,7 +5765,7 @@ impl NativeBackend {
             .await
         {
             Ok(tool) => {
-                self.execute(ctx, host, call, tool, observed, refs, true)
+                self.execute(ctx, host, call, tool, observed, refs, budget, true)
                     .await
             }
             Err(o) => *o,
@@ -5829,6 +5892,7 @@ impl NativeBackend {
         tool: Arc<dyn harness_tools::Tool>,
         observed: &[String],
         refs: &SharedRefs,
+        budget: &Arc<harness_tools::TurnBudget>,
         stream: bool,
     ) -> ToolOutcome {
         use futures::FutureExt as _;
@@ -5865,6 +5929,7 @@ impl NativeBackend {
             bash_timeout_max: self.config.bash_timeout_max,
             env: self.config.tool_env.clone(),
             observed: Arc::new(observed.to_vec()),
+            budget: budget.clone(),
             savings: ctx.extra.savings.clone(),
             outputs: Some(self.outputs.session(ctx.session_id)),
             refs: refs.clone(),
@@ -8922,9 +8987,12 @@ mod tests {
         assert_eq!(seen, "seen=false");
     }
 
+    /// A successful search vouches for its URLs; a successful `read` does
+    /// not (N-6): an agent that can write files could plant a URL in one
+    /// and read it back.
     #[tokio::test]
-    async fn url_in_a_successful_search_or_read_is_observed() {
-        for name in ["web_search", "read"] {
+    async fn url_in_a_successful_search_is_observed_but_not_one_in_a_read_file() {
+        for (name, want) in [("web_search", "seen=true"), ("read", "seen=false")] {
             let seen = probe_after(
                 vec![
                     fixed(name, true, "result https://laundered.example/path"),
@@ -8936,7 +9004,7 @@ mod tests {
                 false,
             )
             .await;
-            assert_eq!(seen, "seen=true", "{name}");
+            assert_eq!(seen, want, "{name}");
         }
     }
 
@@ -8959,13 +9027,15 @@ mod tests {
     }
 
     #[test]
-    fn only_ok_search_fetch_read_results_in_history_count() {
+    fn only_ok_search_and_fetch_results_in_history_count() {
         let sid = SessionId::new();
         let mut seq = 0;
         let mut history = vec![];
         for (id, tool, ok) in [
             ("c1", "bash", true),
             ("c2", "read", false),
+            // A file that was read, even one that read fine, never vouches.
+            ("c4", "read", true),
             ("c3", "web_search", true),
         ] {
             for kind in [

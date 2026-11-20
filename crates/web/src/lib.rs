@@ -15,8 +15,24 @@
 //! `sources`), recorded with its URL on the tool result so the UI resolves
 //! the model's citations to links it did not write.
 
+mod budget;
 pub mod favicon;
+mod plain;
 mod sources;
+mod tree;
+
+/// The counting first pass (for the cost measurement test): outcome as text.
+#[doc(hidden)]
+pub fn budget_probe(html: &str, chunk: usize) -> String {
+    let (o, n) = budget::run(html, budget::MAX_NODES, tree::MAX_NESTING, chunk);
+    format!("{o:?} {n} nodes")
+}
+
+/// Depth and node count of a parsed tree (for the cost measurement test).
+#[doc(hidden)]
+pub fn tree_measure(doc: &dom_query::Document) -> (usize, usize) {
+    tree::measure(doc, usize::MAX, usize::MAX)
+}
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -33,6 +49,37 @@ use sources::cite_hint;
 pub const MAX_BODY: usize = 2 * 1024 * 1024;
 /// Largest text handed to the model from one page.
 pub const MAX_PAGE_CHARS: usize = 20_000;
+/// `web_fetch` calls per turn whose URL is vouched only by the links of a
+/// page that was fetched (not by the person's words, not by a search
+/// result). Which of a page's links the agent follows is a channel of about
+/// one byte per fetch to whoever wrote the page; this bounds it (PLAN.md
+/// T89). A sub-agent's turn has its own count.
+pub const MAX_PAGE_VOUCHED_FETCHES: usize = 20;
+/// `web_search` calls per turn (same counting as the fetches above).
+pub const MAX_SEARCHES_PER_TURN: usize = 20;
+/// The longest `web_search` query, in characters: longer is refused, never
+/// cut. The query goes to the backend the node's owner configured and is
+/// shown in the chat afterwards.
+pub const MAX_QUERY_CHARS: usize = 400;
+/// The most bytes of a page handed to the readability pass (it is the
+/// slowest parser; a larger page is read by `html2text`).
+const READABILITY_MAX: usize = 256 * 1024;
+/// The most bytes of a page handed to any tree-building parser (memory); a
+/// larger page, or one with too many start tags, is read as plain text.
+const DOM_MAX: usize = 1024 * 1024;
+/// How long the caller waits for a parse. The depth and node limits and the
+/// caps above keep a parse far under this; it is a backstop only: a parse
+/// that overruns it is abandoned, and keeps its slot until its thread ends.
+const PARSE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Pages that may be parsed at once, in the whole process. The slot belongs
+/// to the parse thread and is freed when that thread ends, never when a
+/// caller stops waiting, so abandoned parses cannot pile up.
+const PARSE_SLOTS: usize = 2;
+/// How long a fetch waits for a slot before it says the node is busy.
+const SLOT_WAIT: Duration = Duration::from_secs(5);
+/// Parsers recurse per level of nesting: they run on a thread with a stack
+/// of their own, never on an async worker.
+const PARSE_STACK: usize = 128 * 1024 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(20);
 const USER_AGENT: &str = concat!("harness/", env!("CARGO_PKG_VERSION"), " (web_fetch)");
 
@@ -118,7 +165,11 @@ fn check_url(u: &url::Url, allow_private: bool) -> Result<(), String> {
             Err("private and local addresses are not fetched".into())
         }
         Some(url::Host::Domain(d))
-            if !allow_private && (d == "localhost" || d.ends_with(".localhost")) =>
+            if !allow_private && {
+                // `localhost.` is `localhost`.
+                let d = d.trim_end_matches('.');
+                d == "localhost" || d.ends_with(".localhost")
+            } =>
         {
             Err("private and local addresses are not fetched".into())
         }
@@ -244,6 +295,137 @@ pub fn readable_markdown(html: &str, url: &str) -> Option<(String, String)> {
     Some((md.to_string(), article.title.trim().to_string()))
 }
 
+static SLOTS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(PARSE_SLOTS)));
+
+/// Test hooks (milliseconds; 0 = the real value): a delay inside the parse
+/// thread, the wait for a result, and the wait for a slot. Never set outside
+/// tests of the slot limit.
+#[doc(hidden)]
+pub static TEST_PARSE_DELAY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[doc(hidden)]
+pub static TEST_PARSE_WAIT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[doc(hidden)]
+pub static TEST_SLOT_WAIT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn hooked(hook: &std::sync::atomic::AtomicU64, real: Duration) -> Duration {
+    match hook.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => real,
+        ms => Duration::from_millis(ms),
+    }
+}
+
+/// Run a parse on a thread of its own with a large stack, in one of
+/// [`PARSE_SLOTS`] slots, and wait for it for at most [`PARSE_TIMEOUT`]. The
+/// slot is moved into the thread: it is freed when the parse really ends.
+async fn on_parse_thread<T: Send + 'static>(
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    let permit = match tokio::time::timeout(
+        hooked(&TEST_SLOT_WAIT_MS, SLOT_WAIT),
+        SLOTS.clone().acquire_owned(),
+    )
+    .await
+    {
+        Ok(Ok(p)) => p,
+        _ => {
+            return Err("busy reading other pages; try this page again in a moment".into());
+        }
+    };
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("page-parse".into())
+        .stack_size(PARSE_STACK)
+        .spawn(move || {
+            let _slot = permit;
+            let delay = TEST_PARSE_DELAY_MS.load(std::sync::atomic::Ordering::Relaxed);
+            if delay > 0 {
+                std::thread::sleep(Duration::from_millis(delay));
+            }
+            let _ = tx.send(f());
+        })
+        .map_err(|e| format!("cannot read this page: {e}"))?;
+    match tokio::time::timeout(hooked(&TEST_PARSE_WAIT_MS, PARSE_TIMEOUT), rx).await {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(_)) => Err("this page could not be read".into()),
+        Err(_) => Err("this page took too long to read".into()),
+    }
+}
+
+/// A page's text, or why it is not read.
+enum Read {
+    Text(String, Option<String>),
+    Refused(String),
+}
+
+/// A page that fits a tree: parse it once with the readability pass's own
+/// parser, measure the finished tree, and only then run anything that is
+/// quadratic in depth on it.
+fn read_tree(body: &[u8], url: &str, readable: bool) -> Read {
+    let html = String::from_utf8_lossy(body);
+    // First, the counting pass: the tree builder can make far more nodes
+    // than the page has tags (re-opened formatting elements), and a deep tree
+    // costs it time quadratic in the depth; both are stopped inside it.
+    let (outcome, nodes) = budget::run(&html, budget::MAX_NODES, tree::MAX_NESTING, budget::CHUNK);
+    match outcome {
+        budget::Outcome::Ok => {}
+        budget::Outcome::TooMany => {
+            return Read::Refused(format!(
+                "this page has too many elements to read (more than {})",
+                budget::MAX_NODES
+            ));
+        }
+        budget::Outcome::TooDeep => {
+            return Read::Refused(format!(
+                "this page is nested too deeply to read (more than {} levels of elements)",
+                tree::MAX_NESTING
+            ));
+        }
+    }
+    // The readers that build on a tree hold about 1 MB per 1,000 nodes while
+    // they work: a page with more than `MAX_TREE_NODES` is read as text.
+    if nodes > budget::MAX_TREE_NODES {
+        return Read::Text(plain::plain_text(body), sources::html_title(body));
+    }
+    let doc = dom_query::Document::from(&*html);
+    match tree::check(&doc) {
+        tree::Shape::Ok => {}
+        tree::Shape::TooDeep => {
+            return Read::Refused(format!(
+                "this page is nested too deeply to read (more than {} levels of elements)",
+                tree::MAX_NESTING
+            ));
+        }
+        tree::Shape::TooMany => {
+            return Read::Refused(format!(
+                "this page has too many elements to read (more than {})",
+                budget::MAX_NODES
+            ));
+        }
+    }
+    if readable
+        && body.len() <= READABILITY_MAX
+        && let Some((md, title)) = readable_from_doc(doc, url)
+    {
+        return Read::Text(md, Some(title));
+    }
+    // Rendering fails where nesting leaves no width for the text: read it as
+    // plain text then.
+    let text = html2text::from_read(body, 100).unwrap_or_else(|_| plain::plain_text(body));
+    Read::Text(text, sources::html_title(body))
+}
+
+fn readable_from_doc(doc: dom_query::Document, url: &str) -> Option<(String, String)> {
+    let mut r = dom_smoothie::Readability::with_document(doc, Some(url), None).ok()?;
+    let article = r.parse().ok()?;
+    let md = htmd::convert(&article.content).ok()?;
+    let md = md.trim();
+    if md.chars().count() < 200 {
+        return None;
+    }
+    Some((md.to_string(), article.title.trim().to_string()))
+}
+
 /// A page as text, with the title the page gives itself (if any).
 struct Page {
     text: String,
@@ -281,24 +463,20 @@ async fn read_page(resp: reqwest::Response, readable: bool) -> Result<Page, Stri
         body.extend_from_slice(&chunk);
     }
     let (text, title) = if html {
-        let extracted = if readable {
-            let (b, u) = (
-                String::from_utf8_lossy(&body).into_owned(),
-                page_url.clone(),
-            );
-            tokio::task::spawn_blocking(move || readable_markdown(&b, &u))
-                .await
-                .ok()
-                .flatten()
+        let (b, u) = (body.clone(), page_url.clone());
+        // Handed to the tree builder only if it holds no more start tags than
+        // its worst-case time allows (`tree::MAX_START_TAGS`).
+        let read = if body.len() <= DOM_MAX && tree::start_tag_bound(&body) <= tree::MAX_START_TAGS
+        {
+            on_parse_thread(move || read_tree(&b, &u, readable)).await?
         } else {
-            None
+            // Too large for a tree: plain text, no parser at all.
+            on_parse_thread(move || Read::Text(plain::plain_text(&b), sources::html_title(&b)))
+                .await?
         };
-        match extracted {
-            Some((md, title)) => (md, Some(title)),
-            None => (
-                html2text::from_read(&body[..], 100).map_err(|e| e.to_string())?,
-                sources::html_title(&body),
-            ),
+        match read {
+            Read::Text(text, title) => (text, title),
+            Read::Refused(why) => return Err(why),
         }
     } else {
         (String::from_utf8_lossy(&body).into_owned(), None)
@@ -391,11 +569,24 @@ impl Tool for WebFetch {
         if let Err(e) = check_url(&u, self.allow_private) {
             return ToolOutcome::err(e);
         }
-        if !provenance_ok(&u, &ctx.observed) {
+        let (given, from_pages) = harness_tools::split_observed(&ctx.observed);
+        let page_only = !provenance_ok(&u, given) && provenance_ok(&u, from_pages);
+        if page_only
+            && !harness_tools::TurnBudget::take(&ctx.budget.page_fetches, MAX_PAGE_VOUCHED_FETCHES)
+        {
+            return ToolOutcome::err(format!(
+                "this turn has already fetched {MAX_PAGE_VOUCHED_FETCHES} pages only because \
+                 another page linked them, which is the most it may: a page that lists many \
+                 links must not be able to tell which one was followed. Ask the user for the \
+                 link, or search for it."
+            ));
+        }
+        if !page_only && !provenance_ok(&u, given) {
             return ToolOutcome::err(
-                "this URL did not come from the user's own message or a search result (a link \
-                 that is only inside a file they attached does not count), so it is not fetched. \
-                 Search for it first or ask the user for the link.",
+                "this URL did not come from the user's own message, a search result or a page \
+                 already fetched (a link that is only inside a file, one they attached or one in \
+                 the folder, or that a command printed, does not count), so it is not fetched. \
+                 Search for it first or ask the user to paste the link.",
             );
         }
         let req = self.client.get(u.clone()).send();
@@ -471,9 +662,12 @@ impl WebSearch {
     pub fn new(backend: SearchBackend) -> Self {
         Self {
             backend,
+            // No redirect is ever followed: the Brave key header could
+            // otherwise go to a second origin.
             client: reqwest::Client::builder()
                 .timeout(TIMEOUT)
                 .user_agent(USER_AGENT)
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("static client config"),
             brave_url: "https://api.search.brave.com/res/v1/web/search".into(),
@@ -483,6 +677,24 @@ impl WebSearch {
     pub fn with_brave_url(mut self, url: &str) -> Self {
         self.brave_url = url.into();
         self
+    }
+
+    /// The backend as an error may name it to the model: scheme, host and
+    /// port, never the path, query or userinfo of the address the owner
+    /// configured.
+    fn backend_label(&self) -> String {
+        let raw = match &self.backend {
+            SearchBackend::Searxng { base_url } => base_url.as_str(),
+            SearchBackend::Brave { .. } => self.brave_url.as_str(),
+        };
+        match url::Url::parse(raw) {
+            Ok(u) => match (u.host_str(), u.port()) {
+                (Some(h), Some(p)) => format!("{}://{h}:{p}", u.scheme()),
+                (Some(h), None) => format!("{}://{h}", u.scheme()),
+                _ => "the search backend".into(),
+            },
+            Err(_) => "the search backend".into(),
+        }
     }
 
     pub async fn search(&self, q: &str, count: usize) -> Result<Vec<SearchResult>, String> {
@@ -526,12 +738,24 @@ impl WebSearch {
         }
         .send()
         .await
-        .map_err(|e| format!("search failed: {}", root_cause(&e)))?;
+        .map_err(|e| {
+            format!(
+                "search failed ({}): {}",
+                self.backend_label(),
+                root_cause(&e.without_url())
+            )
+        })?;
         let status = resp.status();
         if !status.is_success() {
-            return Err(format!("search engine answered {status}"));
+            return Err(format!(
+                "search engine {} answered {status}",
+                self.backend_label()
+            ));
         }
-        let v: Value = resp.json().await.map_err(|e| format!("search: {e}"))?;
+        let v: Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("search ({}): {}", self.backend_label(), e.without_url()))?;
         Ok(match &self.backend {
             SearchBackend::Searxng { .. } => take(&v["results"], "title", "url", "content"),
             SearchBackend::Brave { .. } => {
@@ -586,6 +810,19 @@ impl Tool for WebSearch {
         let Some(q) = input.get("query").and_then(|v| v.as_str()) else {
             return ToolOutcome::err("missing string argument `query`");
         };
+        let chars = q.chars().count();
+        if chars > MAX_QUERY_CHARS {
+            return ToolOutcome::err(format!(
+                "this query is {chars} characters; a search query may have at most \
+                 {MAX_QUERY_CHARS}. Search for fewer words."
+            ));
+        }
+        if !harness_tools::TurnBudget::take(&ctx.budget.searches, MAX_SEARCHES_PER_TURN) {
+            return ToolOutcome::err(format!(
+                "this turn has already made {MAX_SEARCHES_PER_TURN} searches, which is the \
+                 most it may. Use what was found, or ask the user."
+            ));
+        }
         let count = input
             .get("count")
             .and_then(|v| v.as_u64())

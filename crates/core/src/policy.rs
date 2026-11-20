@@ -257,6 +257,20 @@ mod level_tests {
     }
 }
 
+/// Which search engine `web_search` asks: `[web] search` in config.toml
+/// (the server's chats and its embedded node) and in node.toml (a remote
+/// node).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchKind {
+    #[default]
+    None,
+    /// Self-hosted SearXNG (JSON format enabled). Keeps queries local.
+    Searxng,
+    /// Brave Search API (key required).
+    Brave,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolRisk {

@@ -43,6 +43,8 @@ harness-agents.workspace = true
 harness-link.workspace = true
 # `recall`, the tool, in `tests/recall.rs`.
 harness-memory.workspace = true
+# The real web tools on a node, in `tests/web_tools.rs` (T.3).
+harness-web.workspace = true
 rusqlite.workspace = true
 tempfile.workspace = true
 # Log lines at TRACE searched for a token in `forge_clone` tests (T86).
