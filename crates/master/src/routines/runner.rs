@@ -1629,6 +1629,23 @@ mod run_usage_tests {
                 "node_id": "n", "profile": "chat", "approval_mode": "ask"}),
         };
         store.append("n", &created).unwrap();
+        let m = Master::new(
+            store,
+            Auth::new(Secret::new("tok".into()), vec!["127.0.0.1:1".into()], false),
+        );
+        routines::start_with(&m, Clock::manual(Arc::new(AtomicI64::new(100))), false);
+        // The watcher's start-up pass looks at every stored running run. For
+        // one whose chat never started a turn it takes the run's entry out
+        // of `bound` and ends the run as "not started", so the events these
+        // tests send afterwards find nothing bound and no usage is recorded.
+        // It runs on its own task: when it came between the insert below
+        // and a test's `turn_ended`, the test read no usage at all (seen
+        // once on CI; a 100 ms pause after the insert makes three of the
+        // four tests fail every time). So the run is stored only once that
+        // pass is over; nothing else here looks at stored runs (no loops).
+        let mut ready = handle(&m).unwrap().ready.clone();
+        ready.wait_for(|r| *r).await.unwrap();
+        let store = m.inner_mirror();
         store
             .run_start(&NewRun {
                 run_id: RUN.into(),
@@ -1653,11 +1670,6 @@ mod run_usage_tests {
                 },
             )
             .unwrap();
-        let m = Master::new(
-            store,
-            Auth::new(Secret::new("tok".into()), vec!["127.0.0.1:1".into()], false),
-        );
-        routines::start_with(&m, Clock::manual(Arc::new(AtomicI64::new(100))), false);
         lock(&handle(&m).unwrap().bound).insert(
             sid,
             Bound {
