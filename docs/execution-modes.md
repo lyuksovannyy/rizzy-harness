@@ -299,6 +299,22 @@ earlier build is refused at start as a schema mismatch (fix plan 4.3).
   the warning and the README say it. C.8's read-only `.git` binds (O13,
   change 4) are what narrows it.
 
+## `[sandbox] mode = "off"` and a host chat
+
+With `mode = "off"` a `host` chat's shell is the node's own OS user with no
+file rule: it can read and change the node's data directory: other people's
+chats kept on this node, the store of approved repository MCP servers (so it
+can approve a server for anyone, and the server then starts in their chats,
+sandboxed ones too, after the node restarts; PLAN.md T82, T39), the node's
+keys and its token. This is a property of that configuration, not a defect to
+patch around: use `mode = "off"` with `[execution] host = true` only where
+everyone who may open a host chat is trusted like the node's owner. The node's
+start and `doctor` print one warning for the combination (`host chats: ...`;
+`cli/tests/contain.rs` `doctor_warns_where_a_host_chat_can_reach_the_data_directory`).
+With the default `mode = "required"` Landlock keeps the data directory out of
+a host chat's reach (`cli/tests/exec_modes.rs`
+`a_host_chats_shell_cannot_read_or_change_the_data_directory`).
+
 ## Tests
 
 * `tools/src/sandbox.rs`: `without_bubblewrap_the_sandbox_mode_is_not_offered`,
@@ -315,7 +331,8 @@ earlier build is refused at start as a schema mismatch (fix plan 4.3).
   command runs outside bubblewrap and a `sandbox` session's inside; a
   background command in `host` is accepted and ended with the guard's
   confirmation (`a_host_session_gets_a_background_command_under_the_guard`). `cli/tests/contain.rs`
-  `doctor_marks_each_containment_state`, `cli/tests/network_off.rs`.
+  `doctor_marks_each_containment_state`, `doctor_warns_where_a_host_chat_can_reach_the_data_directory`,
+  `cli/tests/network_off.rs`.
 * `master/tests/it/exec_mode_http.rs`: `host` needs the `host` level whatever one owns (H1), and the node list.
 * `web/src/components/execchoice.test.tsx`; `web/e2e/exec-modes.cjs`
   against the real binary.

@@ -116,11 +116,19 @@ test("the page says where an approved server runs, by the modes the node offers"
     await act(async () => root.render(<ProjectMcp projectId="p1" hasFolder modes={modes} />));
     return text();
   };
-  // Sandbox only (or unknown): inside the sandbox, no word of the host.
+  // Sandbox only: inside the sandbox, no word of the host.
   expect(await shown(["sandbox"])).toContain("inside the sandbox");
   expect(text()).not.toContain("without the sandbox");
   expect(text()).not.toContain("host chat");
-  expect(await shown(undefined)).not.toContain("without the sandbox");
+  // Not known (the node list has not loaded, the node is not in it, or the
+  // master blanked the modes): said so, and never the sandbox sentence next
+  // to an Approve button.
+  for (const unknown of [undefined, []] as ("sandbox" | "host")[][] | undefined[]) {
+    const t = await shown(unknown);
+    expect(t).toContain("Where an approved server runs is not known yet: this node's modes have not loaded");
+    expect(t).not.toContain("inside the sandbox");
+    expect(t).not.toContain("without the sandbox");
+  }
   // Both: each chat kind's answer, and the entries with values say theirs.
   expect(await shown(["sandbox", "host"])).toContain("as the node's own user without the sandbox in a host chat");
   expect(text()).not.toContain("never in a host chat");

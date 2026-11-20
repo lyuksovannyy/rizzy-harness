@@ -166,7 +166,9 @@ reads them for the person looking. Only on a node whose node.toml says `[mcp] pr
   host chat for now (the chat is told which and why); it starts in a sandboxed one. The page says,
   where the node offers host chats, that an approved server runs there without the sandbox. Like a
   node.toml server's, a host chat's repository server is stopped with its chat, at the node's
-  stop and after 10 idle minutes, and can outlive a `kill -9` of the node (PLAN.md T47).
+  stop and after 10 idle minutes: in a host chat the stop kills the server's own process group, a
+  process it detached (`setsid`, a double fork) is not reached, and the server can outlive a
+  `kill -9` of the node (PLAN.md T47); in a sandbox chat everything it started ends with it.
   **Remove** takes the person's approval away (always allowed; its server stops at once).
   **Reload** reads the file again; nothing else does but opening the list, an approve or a remove
   and, once per chat, its first turn since the node started (to leave out an entry gone from the

@@ -54,10 +54,14 @@ const LABEL: Record<McpState, string> = {
   hidden: "Hidden",
 };
 
-/** Where an approved server runs, by the execution modes the node offers
- * (unknown: the sandbox, as before host chats were allowed). */
+/** Where an approved server runs, by the execution modes the node offers.
+ * Not known (no list yet, the node not in it, modes blanked): says so, never
+ * the sandbox, next to an Approve button. */
 export function whereItRuns(modes?: ExecMode[]): string {
-  if (!modes?.includes("host")) return "An approved server runs in your chats in this folder, inside the sandbox.";
+  if (!modes || modes.length === 0) {
+    return "Where an approved server runs is not known yet: this node's modes have not loaded.";
+  }
+  if (!modes.includes("host")) return "An approved server runs in your chats in this folder, inside the sandbox.";
   if (!modes.includes("sandbox")) {
     return "An approved server runs in your chats in this folder as the node's own user, without the sandbox: every chat on this node is a host chat.";
   }
