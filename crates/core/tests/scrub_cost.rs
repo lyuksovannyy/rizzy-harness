@@ -89,7 +89,13 @@ fn status_kb(field: &str) -> u64 {
 
 /// The peak resident memory one scrub adds (VmHWM reset first).
 fn peak_kb(f: &mut dyn FnMut()) -> u64 {
-    let _ = std::fs::write("/proc/self/clear_refs", "5");
+    if let Err(e) = std::fs::write("/proc/self/clear_refs", "5") {
+        // Without the reset VmHWM is the process's all-time peak: the kB
+        // columns would be wrong, not just missing. Say so once (a
+        // sandboxed shell refuses this write; CI and a plain shell do not).
+        static SAID: std::sync::Once = std::sync::Once::new();
+        SAID.call_once(|| eprintln!("peak-memory columns are NOT valid: cannot reset VmHWM ({e})"));
+    }
     let base = status_kb("VmRSS");
     f();
     status_kb("VmHWM").saturating_sub(base)

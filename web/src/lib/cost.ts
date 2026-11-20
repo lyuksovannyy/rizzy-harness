@@ -9,7 +9,7 @@
 // unpriced requests separately; OpenCodex warns about coverage).
 import "./i18nPages";
 import { t } from "./i18n";
-import type { ModelInfo, ModelTokens, Usage } from "../types";
+import type { ModelInfo, ModelPrice, ModelTokens, Usage } from "../types";
 
 export interface Estimate {
   /** Sum over the priced models, in `currency`. */
@@ -20,27 +20,45 @@ export interface Estimate {
   unpricedTokens: number;
   /** Models used with a class they have no price for (or none at all). */
   unpricedModels: string[];
+  /** For each of those, what it lacks (`missingPrices`), in the same order. */
+  unpricedMissing: string[][];
   /** Tokens recorded under no model (chats from before the breakdown). */
   unattributed: number;
 }
 
 const PER = 1_000_000;
 
-/** One model's cost, or null when a class it used has no price. */
+/** The one table of what a model used and what each class costs: [tokens,
+ * price, the form's name for it]. Input is what is left after the cache classes. */
+function classes(t: ModelTokens, p: ModelPrice): [number, number | null | undefined, string][] {
+  const read = t.cache_read_tokens ?? 0;
+  const write = t.cache_write_tokens ?? 0;
+  return [
+    [Math.max(0, t.input_tokens - read - write), p.input, "input"],
+    [read, p.cached_input, "cached input"],
+    [write, p.cache_write, "cache write"],
+    [t.output_tokens, p.output, "output"],
+  ];
+}
+
+/** The token classes a model used that it has no price for, in the form's
+ * words; ["no prices"] for a model with none. Empty: fully priced. A class
+ * with no tokens needs no price. */
+export function missingPrices(t: ModelTokens, info: ModelInfo | undefined): string[] {
+  const p = info?.price;
+  if (!p) return ["no prices"];
+  return classes(t, p)
+    .filter(([n, price]) => n !== 0 && (price === undefined || price === null))
+    .map(([, , name]) => name);
+}
+
+/** One model's cost, or null when a class it used has no price (never a
+ * guess: a cache read priced as input would overstate some providers tenfold). */
 export function modelCost(t: ModelTokens, info: ModelInfo | undefined): number | null {
   const p = info?.price;
   if (!p) return null;
-  const read = t.cache_read_tokens ?? 0;
-  const write = t.cache_write_tokens ?? 0;
-  const fresh = Math.max(0, t.input_tokens - read - write);
-  const parts: [number, number | undefined][] = [
-    [fresh, p.input],
-    [read, p.cached_input],
-    [write, p.cache_write],
-    [t.output_tokens, p.output],
-  ];
   let sum = 0;
-  for (const [n, price] of parts) {
+  for (const [n, price] of classes(t, p)) {
     if (n === 0) continue;
     if (price === undefined || price === null) return null;
     sum += (n * price) / PER;
@@ -49,7 +67,7 @@ export function modelCost(t: ModelTokens, info: ModelInfo | undefined): number |
 }
 
 export function estimate(u: Usage, models: ModelInfo[]): Estimate {
-  const out: Estimate = { amount: 0, currency: null, unpricedTokens: 0, unpricedModels: [], unattributed: 0 };
+  const out: Estimate = { amount: 0, currency: null, unpricedTokens: 0, unpricedModels: [], unpricedMissing: [], unattributed: 0 };
   let input = 0;
   let output = 0;
   for (const [id, tk] of Object.entries(u.by_model ?? {})) {
@@ -60,6 +78,7 @@ export function estimate(u: Usage, models: ModelInfo[]): Estimate {
     if (c === null) {
       out.unpricedTokens += tk.input_tokens + tk.output_tokens;
       out.unpricedModels.push(id);
+      out.unpricedMissing.push(missingPrices(tk, info));
     } else {
       out.amount += c;
       out.currency ??= info?.price?.currency ?? null;
@@ -119,7 +138,12 @@ export function costText(e: Estimate, locale?: string): CostText | null {
 
 function unpricedHint(e: Estimate): string {
   const parts: string[] = [];
-  if (e.unpricedModels.length > 0) parts.push(t("cost.unpricedModels", { models: e.unpricedModels.join(", ") }));
+  const n = e.unpricedModels.length;
+  if (n > 0) {
+    const shown = e.unpricedModels.slice(0, 3).map((id, i) => `${id.length > 60 ? id.slice(0, 59) + "…" : id} (${e.unpricedMissing[i]!.join(", ")})`);
+    const models = n > 3 ? t("cost.andMore", { list: shown.join(", "), n: String(n - 3) }) : shown.join(", ");
+    parts.push(t("cost.unpricedModels", { models }));
+  }
   if (e.unattributed > 0) parts.push(t("cost.unattributed", { n: e.unattributed.toLocaleString() }));
   return parts.join(" ");
 }
