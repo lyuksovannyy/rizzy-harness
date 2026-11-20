@@ -72,10 +72,17 @@ pub(crate) fn within(text: &str) -> bool {
 #[derive(Debug)]
 pub(crate) struct Sealed(());
 
-/// Seal `text`, the finished output of a result.
+/// Seal `text`, the finished output of a result. Text the cap would cut is
+/// not sealed, so its rows are not recorded: the model is then shown them
+/// again when it names them, which is slower and never wrong. In this
+/// crate's own tests that case fails loudly, since it means a producer
+/// printed past its budget; outside them it must not, because a server
+/// built for development (`cargo run`) would crash a turn on a file with an
+/// unusual shape instead of asking for one more read.
 pub(crate) fn seal(text: &str) -> Option<Sealed> {
     let ok = within(text);
-    debug_assert!(
+    #[cfg(test)]
+    assert!(
         ok,
         "a result that records rows as shown is over the cap: {} characters",
         text.chars().count()
