@@ -270,8 +270,9 @@ stay untrusted.
 the same owner and holds the task the parent wrote from the event. The owner can open and prompt
 it directly, so it counts as untrusted when its parent is marked (delegation is one level deep, so
 one hop up is the whole chain). Deleting the parent chat, by the owner or by retention, deletes the
-delegates' chats with it (`Master::delete_session`), so there is none left to prompt without the
-mark.
+delegates' chats with it (`Master::delete_session`: the parent first, the delegates' chats in the
+background right after). In that short window a delegate's chat is still there and still marked: it
+takes the mark over in the parent's delete, in the same transaction. None is left to prompt without it.
 
 **Every way a chat goes on keeps it.** The mark belongs to the chat, not to the run, the routine,
 the agent, the project or the workspace, and every turn the owner starts passes through

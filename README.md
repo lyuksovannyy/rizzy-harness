@@ -407,10 +407,12 @@ all; this browser remembers both). Chats in no project follow below the
 projects. A chat that handed work to sub-agents shows their sessions nested
 under it; click one to read it. **Deleting a chat deletes the sessions of
 its sub-agents with it** (and those of their own sub-agents, if any), on the
-server and on the node, with their logs and working copies. A chat that is
-still running is stopped first, before any of them goes. The dialog says so
-without a count: the sidebar's list can leave some out. Nothing in the sidebar leads to a
-sub-agent's session once its parent is gone, so none is left behind. The
+server and on the node, with their logs and working copies. The chat goes at
+once and stops if it was running; its sub-agents' sessions follow within
+moments, also when their node is away or refuses: then when it returns. The
+dialog says so without a count: the sidebar's list can leave some out. Nothing
+in the sidebar leads to a sub-agent's session once its parent is gone, so none
+is left behind. The
 "also delete the Media files" box of the dialog covers the chat you delete,
 not its sub-agents' sessions. An agent chat (one that works in a folder on a
 node) has a small square with a cloud on its right: hover it, or tab to the
