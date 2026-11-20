@@ -3491,6 +3491,7 @@ impl Session {
             Ok((snap, files, head_moved)) => {
                 let sha = snap.sha.clone();
                 let special = snap.special.clone();
+                let changed_count = files.len();
                 let ignore_changed: Vec<String> = files
                     .iter()
                     .map(|(_, p)| p)
@@ -3510,6 +3511,14 @@ impl Session {
                     .await;
                 if recorded.is_ok() {
                     self.special_notice(turn_id, &special).await;
+                    if let Some(message) = large_turn_note(changed_count) {
+                        let _ = self
+                            .emit(EventKind::Error(ErrorEvent {
+                                turn_id: Some(turn_id.into()),
+                                message,
+                            }))
+                            .await;
+                    }
                     // S-6: files that ignore rules written during this turn
                     // now leave out are in neither snapshot, so an undo of
                     // the turn leaves them; say so.
@@ -3960,6 +3969,14 @@ impl Session {
         // chat shows today (pre-existing ones are in `excluded` alone).
         let safety = interrupted.as_ref().map(|_| saved.as_str());
         if let Some(message) = restore_notice(files.len(), &plan, safety) {
+            self.append(EventKind::Error(ErrorEvent {
+                turn_id: None,
+                message,
+            }))
+            .await
+            .map_err(|e| kept(LogError(e.to_string()).to_string()))?;
+        }
+        if let Some(message) = large_undo_note(files.len()) {
             self.append(EventKind::Error(ErrorEvent {
                 turn_id: None,
                 message,
@@ -5839,6 +5856,26 @@ fn real_path(p: &std::path::Path) -> PathBuf {
 /// The same folder, or one inside the other.
 fn overlaps(a: &std::path::Path, b: &std::path::Path) -> bool {
     a.starts_with(b) || b.starts_with(a)
+}
+
+/// The note at the end of a turn that changed more files than
+/// `RECOMMENDED_MAX_FILES_PER_TURN` (T.9): a count and what an undo will do,
+/// nothing else. `None` at or under the limit.
+fn large_turn_note(files: usize) -> Option<String> {
+    let max = harness_core::policy::RECOMMENDED_MAX_FILES_PER_TURN;
+    (files > max).then(|| {
+        format!(
+            "This turn changed {files} files, more than the recommended {max}. \
+             Undoing it will put back {files} files."
+        )
+    })
+}
+
+/// The same for an undo that put back more files than the limit.
+fn large_undo_note(files: usize) -> Option<String> {
+    let max = harness_core::policy::RECOMMENDED_MAX_FILES_PER_TURN;
+    (files > max)
+        .then(|| format!("This undo put back {files} files, more than the recommended {max}."))
 }
 
 /// The chat's note after an undo, only when repositories inside the folder

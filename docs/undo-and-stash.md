@@ -293,6 +293,13 @@ borrowing and no pin. After it, they are no longer a place for agentic sessions.
 
 ### 2.6 A soft limit of 100 changed files per turn (owner's rule)
 
+**Built (T.9, branch `feat/changed-files-warning`).** The constant is
+`RECOMMENDED_MAX_FILES_PER_TURN` in `crates/core/src/policy.rs`. The node adds two chat notes
+(`error` events, `session.rs`: `large_turn_note` after the `after` checkpoint, with the turn's
+id; `large_undo_note` after an undo, counting the files the undo wrote). There is no undo
+card or plan with a count yet, so the second note after the undo is the "undo" warning; the UI
+adds nothing. Tests: `crates/node/tests/many_files.rs`.
+
 **What is counted.** The files a turn changed (added, modified or deleted), as the `after`
 checkpoint already lists them: `changed(before, after)` into `Checkpoint.files`
 (`session.rs`, `checkpoint_after`).

@@ -1313,6 +1313,10 @@ the turn changed beside the chat: each file with its added and removed lines
 (three lines of context, line numbers, `+` and `−`), renames as renames,
 binary files and files over 512 KiB named with their sizes, hidden characters
 shown as `<U+…>` codes. "Include later turns" shows what "Rewind" would undo.
+A turn that changed more than 100 files adds a note at its end ("This turn changed
+143 files, more than the recommended 100. Undoing it will put back 143 files."), and
+its undo adds one too; nothing is blocked (nested repositories and ignored files are not
+counted).
 When your repository's `HEAD` moved while a turn ran (a `git checkout`, a
 commit, a reset), the turn's row and the changes panel say so in one sentence:
 for example "While this turn ran, the checked-out branch changed from `main`
