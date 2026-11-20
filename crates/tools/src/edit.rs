@@ -128,9 +128,14 @@ impl Tool for Edit {
         crate::args::alias(input, "old_str", "old_string")?;
         crate::args::alias(input, "new_str", "new_string")?;
         // A tag pasted as the whole header line, or in lower case: the
-        // card and the approval key see the four characters.
+        // card and the approval key see the bare tag. A header whose path
+        // is not the call's is left as it was, for the line form to refuse
+        // (it also resolves the paths: `./a.txt` and an absolute one are the
+        // same file).
+        let own = input.get("path").and_then(Value::as_str).map(str::to_owned);
         if let Some(t) = input.get_mut("tag")
-            && let Some(n) = t.as_str().and_then(crate::edit_lines::norm_tag)
+            && let Some((from, n)) = t.as_str().and_then(crate::edit_lines::split_tag)
+            && from.is_none_or(|f| Some(f) == own)
         {
             *t = Value::String(n);
         }
