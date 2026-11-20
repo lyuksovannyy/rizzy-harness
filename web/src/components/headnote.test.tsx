@@ -120,32 +120,45 @@ const sha = (c: string) => c.repeat(40);
 const note = () => host.querySelector(".undo .undo-note")?.textContent ?? null;
 
 describe("a turn that moved HEAD (X.42)", () => {
+  const A = "abc1234" + "0".repeat(33);
+  const B = "def5678" + "0".repeat(33);
   const cases: [string, { branch?: string; commit: string }, { branch?: string; commit: string }, string][] = [
     [
-      "the branch changed",
-      { branch: "main", commit: sha("a") },
-      { branch: "feature-x", commit: sha("a") },
-      "This turn switched the branch from main to feature-x. The file count includes what the switch changed. Undo puts the files back as they were before the turn, on whichever branch is checked out now; it does not switch the branch back.",
+      "the branch and the commit changed",
+      { branch: "main", commit: A },
+      { branch: "feature-x", commit: B },
+      "While this turn ran, the checked-out branch changed from main to feature-x. The file count includes what that switch changed. Undo puts the files back as they were before the turn, on whichever branch is checked out now; it does not switch back.",
+    ],
+    [
+      "the branch changed at the same commit",
+      { branch: "main", commit: A },
+      { branch: "y", commit: A },
+      "While this turn ran, the checked-out branch changed from main to y at the same commit. Undo does not switch back.",
     ],
     [
       "the commit moved on the same branch",
-      { branch: "main", commit: "abc1234" + "0".repeat(33) },
-      { branch: "main", commit: "def5678" + "0".repeat(33) },
-      "This turn made or moved commits on main (abc1234 → def5678). Undo puts the files back; the commits stay.",
+      { branch: "main", commit: A },
+      { branch: "main", commit: B },
+      "While this turn ran, main moved from abc1234 to def5678 (a commit, a reset or the like). Undo puts the files back as they were before the turn; it does not move the branch.",
     ],
     [
-      "the branch was left for a detached HEAD",
-      { branch: "main", commit: sha("a") },
-      { commit: sha("b") },
-      "This turn left the branch main and detached HEAD at bbbbbbb. The file count includes what that changed. Undo puts the files back as they were before the turn, on whatever is checked out now; it does not switch the branch back.",
+      "the branch was left for a commit",
+      { branch: "main", commit: A },
+      { commit: B },
+      "While this turn ran, main was left for the commit def5678. The file count includes what that changed. Undo puts the files back as they were before the turn, on whatever is checked out now; it does not switch back.",
     ],
     [
-      "a detached HEAD was put on a branch",
-      { commit: sha("a") },
-      { branch: "main", commit: sha("b") },
-      "This turn switched from a detached HEAD (aaaaaaa) to the branch main. The file count includes what the switch changed. Undo puts the files back as they were before the turn, on whatever is checked out now; it does not switch the branch back.",
+      "a commit was left for a branch",
+      { commit: A },
+      { branch: "main", commit: B },
+      "While this turn ran, the commit abc1234 was left for main. The file count includes what that changed. Undo puts the files back as they were before the turn, on whatever is checked out now; it does not switch back.",
     ],
-    ["a detached HEAD moved", { commit: sha("a") }, { commit: sha("b") }, "This turn moved a detached HEAD (aaaaaaa → bbbbbbb). Undo puts the files back; the commits stay."],
+    [
+      "a detached HEAD moved",
+      { commit: A },
+      { commit: B },
+      "While this turn ran, the checked-out commit changed from abc1234 to def5678. Undo puts the files back as they were before the turn; it does not move HEAD.",
+    ],
   ];
   for (const [name, from, to, text] of cases) {
     test(`the Undo block says so when ${name}`, async () => {
@@ -170,16 +183,28 @@ describe("a turn that moved HEAD (X.42)", () => {
     expect(code.textContent).not.toContain("\u202E");
   });
 
-  test("a rewind also names the later turn that moved it", async () => {
-    await show([turnEnd("t1"), turnEnd("t2")], sessionRow(), "agentic", {
-      t1: done(),
-      t2: done({ head_moved: { from: { branch: "main", commit: sha("a") }, to: { branch: "x", commit: sha("a") } } }),
-    });
-    const notes = [...host.querySelectorAll(".undo-note")].map((n) => n.textContent);
-    // The first turn's block names the later move before its Rewind button;
-    // the second turn's block names its own.
-    expect(notes.filter((n) => n?.startsWith("Rewinding also covers a later turn. This turn switched the branch from main to x"))).toHaveLength(1);
-    expect(notes.filter((n) => n?.startsWith("This turn switched the branch"))).toHaveLength(1);
+  const mv = (b: string) => ({ from: { branch: "main", commit: sha("a") }, to: { branch: b, commit: sha("b") } });
+  const notes = () => [...host.querySelectorAll(".undo-note")].map((n) => n.textContent);
+
+  test("a rewind names the later turn that moved it as a later turn, and each block its own", async () => {
+    await show([turnEnd("t1"), turnEnd("t2")], sessionRow(), "agentic", { t1: done(), t2: done({ head_moved: mv("x") }) });
+    expect(notes().filter((n) => n?.startsWith("A later turn is covered by rewinding to here: while it ran, the checked-out branch changed from main to x."))).toHaveLength(1);
+    expect(notes().filter((n) => n?.startsWith("While this turn ran, the checked-out branch changed from main to x."))).toHaveLength(1);
+  });
+
+  test("a later turn that is already undone is not listed; past three, two and a count", async () => {
+    // t3 keeps a rewind on offer; t2's move was undone with it.
+    await show([turnEnd("t1"), turnEnd("t2"), turnEnd("t3")], sessionRow(), "agentic", { t1: done(), t2: done({ restored: true, head_moved: mv("x") }), t3: done() });
+    expect(notes().some((n) => n?.startsWith("A later turn"))).toBe(false);
+    const ids = ["t2", "t3", "t4", "t5", "t6"];
+    const cps = Object.fromEntries(ids.map((t, i) => [t, done({ head_moved: mv(`b${i}`) })]));
+    await show([turnEnd("t1"), ...ids.map(turnEnd)], sessionRow(), "agentic", { t1: done(), ...cps });
+    const first = [...host.querySelectorAll(".undo")][0]!;
+    const own = [...first.querySelectorAll(".undo-note")].map((n) => n.textContent ?? "");
+    expect(own.filter((n) => n.startsWith("A later turn"))).toHaveLength(2);
+    expect(own.at(-1)).toBe("and 3 more.");
+    expect(own[0]).toContain("main to b0");
+    expect(own[1]).toContain("main to b1");
   });
 
   test("the changes panel says so too", async () => {
@@ -189,7 +214,7 @@ describe("a turn that moved HEAD (X.42)", () => {
     const open = [...host.querySelectorAll("button")].find((b) => b.textContent === "Show changes")!;
     await act(async () => open.click());
     await until(() => host.querySelector(".diff-panel"));
-    expect(host.querySelector(".diff-panel .undo-note")!.textContent).toContain("This turn switched the branch from main to x.");
+    expect(host.querySelector(".diff-panel .undo-note")!.textContent).toContain("While this turn ran, the checked-out branch changed from main to x at the same commit.");
   });
 });
 

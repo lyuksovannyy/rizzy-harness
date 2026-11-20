@@ -38,7 +38,7 @@ import { AgentMark, agentAlert } from "./AgentAvatar";
 import { ChatArtifactsCtx, SaveAsArtifact, SavedItem, stagedKeys, useChatArtifacts } from "./ChatArtifacts";
 import { BubbleImages } from "./ChatImages";
 import { ChatTitle } from "./ChatTitle";
-import { HeadNote } from "./HeadNote";
+import { HeadNote, LaterNotes } from "./HeadNote";
 import { ThinkingRow } from "./ThinkingRow";
 import { DeleteChat } from "./DeleteChat";
 import { useAvatarState } from "./avatarState";
@@ -153,13 +153,7 @@ function Undo(props: {
         </ul>
       </details>
       {props.headMoved && <HeadNote moved={props.headMoved} />}
-      {!!props.laterMoves?.length && props.laterChanges && !props.blocked && (
-        <>
-          {props.laterMoves.map((m, i) => (
-            <HeadNote key={i} moved={m} lead="Rewinding also covers a later turn. " />
-          ))}
-        </>
-      )}
+      {!!props.laterMoves?.length && props.laterChanges && !props.blocked && <LaterNotes moves={props.laterMoves} />}
       <button
         type="button"
         className="link"
@@ -1160,7 +1154,8 @@ export default function Conversation(props: {
                   turnId={diffOf.turn}
                   rewind={diffOf.rewind}
                   laterChanges={laterChanges}
-                  headMoves={[...(cp?.head_moved ? [cp.head_moved] : []), ...(diffOf.rewind && view ? laterMoves(view, at) : [])]}
+                  headMove={cp?.head_moved}
+                  laterMoves={diffOf.rewind && view ? laterMoves(view, at) : []}
                   canUndo={!blocked && (diffOf.rewind ? laterChanges || !!cp?.files.length : !!cp && !cp.restored && cp.files.length > 0)}
                   running={running}
                   onRewind={(rewind) => setDiffOf({ ...diffOf, rewind })}

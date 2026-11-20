@@ -24,7 +24,7 @@ import { marks, type Seg } from "../lib/callText";
 import { codeOf, SHOWN_SRC } from "../md/hiddenChars";
 import { showHidden } from "../md/hidden";
 import type { DiffFile, DiffHunk, HeadMoved, TurnDiff } from "../types";
-import { HeadNote } from "./HeadNote";
+import { HeadNote, LaterNotes } from "./HeadNote";
 import "./diffPanel.css";
 
 /** Files whose lines show at first; the rest open on a click. */
@@ -227,7 +227,9 @@ export default function DiffPanel(props: {
   laterChanges: boolean;
   /** How HEAD moved in the turns shown, when it did (X.42): the file counts
    * hold what a branch switch changed, and an undo does not switch back. */
-  headMoves?: HeadMoved[];
+  headMove?: HeadMoved;
+  /** The same for each later turn shown (the wider view). */
+  laterMoves?: HeadMoved[];
   /** The turn's changes were undone already, or the viewer may not undo here. */
   canUndo: boolean;
   running: boolean;
@@ -315,7 +317,8 @@ export default function DiffPanel(props: {
         {undo.err && <span className="error-text">{showHidden(undo.err)}</span>}
       </div>
       <div className="diff-body">
-        {props.headMoves?.map((m, i) => <HeadNote key={i} moved={m} />)}
+        {props.headMove && <HeadNote moved={props.headMove} />}
+        {!!props.laterMoves?.length && <LaterNotes moves={props.laterMoves} />}
         {!diff && !err && (
           <p className="muted small" role="status">
             Reading the changes…
