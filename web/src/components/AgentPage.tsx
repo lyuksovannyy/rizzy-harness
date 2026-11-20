@@ -205,7 +205,7 @@ interface Draft {
   prompt: string;
   instructions: string;
   features: AgentFeatures;
-  delegate_to: string[];
+  delegate_to: string[] | null;
 }
 
 function draftOf(d: AgentDetail): Draft {
@@ -216,7 +216,7 @@ function draftOf(d: AgentDetail): Draft {
     prompt: d.prompt,
     instructions: d.instructions,
     features: d.features,
-    delegate_to: d.delegate_to ?? [],
+    delegate_to: d.delegate_to ?? null,
   };
 }
 
@@ -295,7 +295,7 @@ export function AgentPage(props: {
         prompt: s?.prompt ?? "",
         instructions: "",
         features: s?.features ?? NEW_FEATURES,
-        delegate_to: s?.delegate_to ?? [],
+        delegate_to: s?.delegate_to ?? null,
       };
       setDraft(d);
       setSaved(d);
@@ -356,7 +356,7 @@ export function AgentPage(props: {
             summary: draft.summary,
             prompt: draft.prompt,
             features: draft.features,
-            ...(draft.delegate_to.length ? { delegate_to: draft.delegate_to } : {}),
+            ...(draft.delegate_to !== null ? { delegate_to: draft.delegate_to } : {}),
           },
           writeScope,
         );
@@ -613,7 +613,7 @@ export function AgentPage(props: {
               <p className="field-hint">No tool of this agent changes files, so its commands run in a read-only shell, without network.</p>
             )}
           </div>
-          {draft.features.delegate || draft.delegate_to.length > 0 || !locked ? (
+          {draft.features.delegate || draft.delegate_to !== null || !locked ? (
             <DelegatePicker
               agents={props.agents}
               self={draft.id}

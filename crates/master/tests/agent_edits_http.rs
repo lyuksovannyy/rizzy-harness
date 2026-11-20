@@ -725,7 +725,7 @@ async fn a_delegate_list_is_saved_validated_and_only_narrows() {
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{d}");
-    assert_eq!(d["delegate_to"], json!([]));
+    assert_eq!(d["delegate_to"], Value::Null);
     assert!(d["delegates"].as_array().unwrap().len() > 3, "{d}");
 
     // A list narrows, the answer and a fresh read say so.
@@ -804,7 +804,7 @@ async fn a_delegate_list_is_saved_validated_and_only_narrows() {
         .collect();
     assert_eq!(ids, ["scout"]);
 
-    // Built-ins and file agents have no such list; an empty list clears.
+    // `[]` is "none"; absent keeps the list; null clears it (every sub-agent).
     let (st, d) = call(
         &t,
         Method::PATCH,
@@ -813,7 +813,37 @@ async fn a_delegate_list_is_saved_validated_and_only_narrows() {
     )
     .await;
     assert_eq!(st, StatusCode::OK, "{d}");
+    assert_eq!(d["delegate_to"], json!([]));
+    assert_eq!(d["delegates"], json!([]));
+    let (_, d) = call(
+        &t,
+        Method::PATCH,
+        "/api/agents/lead",
+        Some(json!({"summary": "S2"})),
+    )
+    .await;
+    assert_eq!(d["delegate_to"], json!([]), "absent keeps it");
+    let (st, d) = call(
+        &t,
+        Method::PATCH,
+        "/api/agents/lead",
+        Some(json!({"delegate_to": null})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{d}");
+    assert_eq!(d["delegate_to"], Value::Null);
     assert!(d["delegates"].as_array().unwrap().len() > 3);
+    let (_, d) = call(
+        &t,
+        Method::PATCH,
+        "/api/agents/lead",
+        Some(json!({"delegate_to": ["scout"]})),
+    )
+    .await;
+    assert_eq!(d["delegates"], json!(["scout"]));
+    let (st, d) = call(&t, Method::POST, "/api/agents", Some(json!({"id": "nul", "name": "Nul", "prompt": "p", "features": features(), "delegate_to": null}))).await;
+    assert_eq!(st, StatusCode::OK, "{d}");
+    assert_eq!(d["delegate_to"], Value::Null);
     let (st, _) = call(
         &t,
         Method::PATCH,
@@ -826,9 +856,9 @@ async fn a_delegate_list_is_saved_validated_and_only_narrows() {
 }
 
 /// Exactly 32 entries are accepted and 33 are refused; an empty list on a
-/// built-in is a no-op that succeeds (a stale tab), a non-empty one is refused.
+/// built-in is refused like any array (`[]` means none now); null is a no-op.
 #[tokio::test]
-async fn the_list_bound_and_an_empty_list_on_a_built_in() {
+async fn the_list_bound_and_arrays_on_a_built_in() {
     let t = start().await;
     let mut f = features();
     f["delegate"] = json!(true);
@@ -850,15 +880,23 @@ async fn the_list_bound_and_an_empty_list_on_a_built_in() {
     let (st, d) = call(&t, Method::POST, "/api/agents", Some(body(ids(32)))).await;
     assert_eq!(st, StatusCode::OK, "{d}");
     assert_eq!(d["delegate_to"].as_array().unwrap().len(), 32);
-    // Built-in: empty list is accepted and changes nothing.
+    // Built-in: null is a no-op; any array, `[]` too, is refused.
     let (st, d) = call(
+        &t,
+        Method::PATCH,
+        "/api/agents/coder",
+        Some(json!({"delegate_to": null})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{d}");
+    let (st, _) = call(
         &t,
         Method::PATCH,
         "/api/agents/coder",
         Some(json!({"delegate_to": []})),
     )
     .await;
-    assert_eq!(st, StatusCode::OK, "{d}");
+    assert_eq!(st, StatusCode::CONFLICT);
     let (st, _) = call(
         &t,
         Method::PATCH,

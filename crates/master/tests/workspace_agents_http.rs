@@ -1367,10 +1367,10 @@ async fn deleting_an_agent_removes_its_handle_from_delegate_lists() {
     let (_, sl) = token(&s, Method::GET, "/api/agents/slead", None).await;
     assert_eq!(sl["delegate_to"], json!([]), "{sl}");
     let w = get(&s, &format!("/api/agents/w?workspace={a}"), &bo).await;
+    // Narrowed stays narrowed: present and empty means NO sub-agents, never all.
     assert_eq!(w["delegate_to"], json!([]), "{w}");
-    // The empty list means "all sub-agents" again: that is what a person who
-    // unticked nothing meant; it never names the deleted handle.
-    // A new "twin" is in nobody's stored list.
+    assert!(delegates(&w).is_empty(), "{w}");
+    // A new "twin" is in nobody's stored list, and w still hands work to nobody.
     assert_eq!(
         token(
             &s,
@@ -1384,6 +1384,9 @@ async fn deleting_an_agent_removes_its_handle_from_delegate_lists() {
     );
     let w = get(&s, &format!("/api/agents/w?workspace={a}"), &bo).await;
     assert_eq!(w["delegate_to"], json!([]));
+    assert!(delegates(&w).is_empty(), "{w}");
+    let (_, sl) = token(&s, Method::GET, "/api/agents/slead", None).await;
+    assert!(delegates(&sl).is_empty(), "{sl}");
 }
 
 /// A workspace agent's deletion leaves a server agent's list alone, even

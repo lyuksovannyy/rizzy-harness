@@ -565,8 +565,8 @@ export interface AgentDetail extends Agent {
   server_instructions?: string;
   /** Whether the caller may change agents in the scope it was read in. */
   may_edit?: boolean;
-  /** The stored "may delegate to" list of an agent made here (X.41): empty means every sub-agent; entries may name agents that are gone. */
-  delegate_to?: string[];
+  /** The stored "may delegate to" list of an agent made here (X.41): null means every sub-agent, a list only those (empty: none); entries may name agents that are gone. */
+  delegate_to?: string[] | null;
 }
 
 /** A new agent made on the Agents page. */
@@ -577,7 +577,7 @@ export interface NewAgent {
   prompt: string;
   features: AgentFeatures;
   /** Who it may delegate to; empty or absent: every sub-agent. */
-  delegate_to?: string[];
+  delegate_to?: string[] | null;
 }
 
 export type AvatarShape = "circle" | "triangle" | "square" | "hexagon" | "diamond" | "drop";

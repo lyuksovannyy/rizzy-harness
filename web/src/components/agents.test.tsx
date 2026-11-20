@@ -471,24 +471,39 @@ describe("an agent's page in a workspace (X.33)", () => {
       features: { ...NEW_FEATURES, delegate: true },
       delegates: ["scout"],
     });
-    const boxes = () => [...host.querySelectorAll<HTMLInputElement>(".delegate-option input")];
+    const boxes = () => [...host.querySelectorAll<HTMLInputElement>(".delegate-option input[type=checkbox]")];
+    const radio = (text: string) => [...host.querySelectorAll<HTMLInputElement>(".delegate-option input[type=radio]")].find((r) => r.closest("label")!.textContent === text)!;
     const labels = () => [...host.querySelectorAll(".delegate-option")].map((l) => l.textContent);
 
-    test("offers sub-agents only, marks the workspace's, picks narrow and save", async () => {
-      api.agent.mockResolvedValue(detail(lead, { prompt: "Lead.", own: true, delegate_to: [] }));
+    test("absent list: Every sub-agent; Only these offers sub-agents only and narrows on save", async () => {
+      api.agent.mockResolvedValue(detail(lead, { prompt: "Lead.", own: true, delegate_to: null }));
       await show(admin, "lead", [lead, scout, loner, wsOne, coder]);
+      expect(radio("Every sub-agent").checked).toBe(true);
+      expect(boxes()).toHaveLength(0);
+      act(() => radio("Only these:").click());
+      // Nothing ticked is allowed and said plainly.
+      expect(host.querySelector(".delegate-picker")!.textContent).toContain("hands work to nobody");
       // Not itself, not an agent that is not offered as a sub-agent.
       expect(labels().some((t) => t!.includes("@lead") || t!.includes("@loner"))).toBe(false);
-      expect(host.querySelector(".delegate-picker")!.textContent).toContain("All sub-agents");
-      expect(boxes().every((b) => !b.checked)).toBe(true);
       act(() => boxes().find((b) => b.closest("label")!.textContent!.includes("@scout"))!.click());
-      expect(host.querySelector(".delegate-picker")!.textContent).toContain("Only the 1 ticked");
+      expect(host.querySelector(".delegate-picker")!.textContent).not.toContain("hands work to nobody");
       api.updateAgent.mockResolvedValue(detail(lead, { prompt: "Lead.", own: true, delegate_to: ["scout"] }));
       await act(async () => button("Save")!.click());
       expect(api.updateAgent.mock.calls[0]![1]).toMatchObject({ delegate_to: ["scout"] });
     });
 
-    test("a pick whose agent is gone is marked and can be unticked; off keeps the list but disables it", async () => {
+    test("an emptied list shows Only these with nobody, saves as [] and Every sub-agent saves null", async () => {
+      api.agent.mockResolvedValue(detail(lead, { prompt: "Lead.", own: true, delegate_to: [] }));
+      await show(admin, "lead", [lead, scout]);
+      expect(radio("Only these:").checked).toBe(true);
+      expect(host.querySelector(".delegate-picker")!.textContent).toContain("hands work to nobody");
+      act(() => radio("Every sub-agent").click());
+      api.updateAgent.mockResolvedValue(detail(lead, { prompt: "Lead.", own: true, delegate_to: null }));
+      await act(async () => button("Save")!.click());
+      expect(api.updateAgent.mock.calls[0]![1]).toMatchObject({ delegate_to: null });
+    });
+
+    test("a pick whose agent is no longer offered is marked and can be unticked; off keeps the list but disables it", async () => {
       api.agent.mockResolvedValue(
         detail(lead, { prompt: "Lead.", own: true, delegate_to: ["scout", "deleted"], features: { ...NEW_FEATURES, delegate: false } }),
       );

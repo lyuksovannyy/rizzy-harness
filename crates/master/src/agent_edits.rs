@@ -543,8 +543,9 @@ impl Master {
         &self,
         place: &Place,
         id: &str,
-        list: &[String],
-    ) -> Result<Vec<String>, AgentEditError> {
+        list: &Option<Vec<String>>,
+    ) -> Result<Option<Vec<String>>, AgentEditError> {
+        let Some(list) = list else { return Ok(None) };
         let bad = |m: String| Err(AgentEditError::Bad(m));
         if list.len() > MAX_DELEGATE_TO {
             return bad(format!(
@@ -552,7 +553,7 @@ impl Master {
             ));
         }
         let (own, seen) = self.place_edits(place).await;
-        let before = own.custom.get(id).map(|o| o.delegates.as_slice());
+        let before = own.custom.get(id).and_then(|o| o.delegates.as_deref());
         let mut out: Vec<String> = Vec::new();
         for d in list {
             let d = d.trim();
@@ -573,7 +574,7 @@ impl Master {
             }
             out.push(d.to_string());
         }
-        Ok(out)
+        Ok(Some(out))
     }
 
     /// Why `handle` cannot be a new id or alias for agent `except`: the
@@ -680,8 +681,13 @@ impl Master {
                     .await?;
                 let mut a = lock(&self.inner.agents);
                 a.edits.custom.remove(id);
-                for c in a.edits.custom.values_mut() {
-                    c.delegates.retain(|d| d != id);
+                for l in a
+                    .edits
+                    .custom
+                    .values_mut()
+                    .filter_map(|c| c.delegates.as_mut())
+                {
+                    l.retain(|d| d != id);
                 }
                 for w in &touched {
                     a.forget(w);
@@ -731,9 +737,11 @@ impl Master {
 /// it was there (X.41); `None` when nothing changes or it is unreadable.
 fn without_delegate(doc: &str, id: &str) -> Option<String> {
     let mut c: Custom = serde_json::from_str(doc).ok()?;
-    let before = c.delegates.len();
-    c.delegates.retain(|d| d != id);
-    (c.delegates.len() != before).then(|| serde_json::to_string(&c).expect("serializes"))
+    // The list stays present, possibly empty: a delete never widens it.
+    let list = c.delegates.as_mut()?;
+    let before = list.len();
+    list.retain(|d| d != id);
+    (list.len() != before).then(|| serde_json::to_string(&c).expect("serializes"))
 }
 
 /// `name` as names are compared: letters and digits only, case-folded.

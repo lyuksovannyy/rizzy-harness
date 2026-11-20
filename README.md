@@ -4255,17 +4255,20 @@ and 200k tokens by default; set `delegates`, `max_subagents` and
 sub-agent never delegates further.
 
 On the Agents page, an agent you made with **Launch sub-agents** on shows
-**May delegate to** under its switches: every agent offered as a sub-agent
-("All sub-agents") until you tick some, then only the ticked ones. The list can
-only narrow: an agent that is not offered as a sub-agent, one from another
+**May delegate to** under its switches: **Every sub-agent** (every agent offered
+as a sub-agent, the default) or **Only these**, with the agents ticked. The list
+can only narrow: an agent that is not offered as a sub-agent, one from another
 workspace and the agent itself are never delegates, whatever the list holds.
-A ticked agent that is no longer offered as a sub-agent is marked "no longer available" (untick
-it); if every one is gone, the agent has no sub-agents until you change the
-list. Deleting an agent also takes its handle out of every list that could name
-it, so a new agent with that handle is not a delegate by accident (a list that
-this empties means all sub-agents again). With the switch off the list is kept and does nothing. Built-in and file
-agents show their own list, read-only (`delegates:` in a file). The API takes
-`delegate_to` (handles, at most 32) on `POST` and `PATCH /api/agents`.
+"Only these" with nothing ticked is allowed: the agent hands work to nobody.
+A ticked agent that is no longer offered as a sub-agent is marked "no longer
+available" (untick it). Deleting an agent takes its handle out of every list
+that could name it, and the list stays a list: a list this empties means
+nobody, never everyone again. With the switch off the list is kept and does
+nothing. Built-in and file agents show their own list, read-only (`delegates:`
+in a file). The API takes `delegate_to` on `POST` and `PATCH /api/agents`:
+absent keeps what is stored (on create: every sub-agent), `null` is every
+sub-agent, an array (at most 32 handles) is only those, `[]` is nobody; a
+built-in or file agent refuses any array.
 
 What a sub-agent gets: the task its parent wrote, the repository's instruction
 files, and the context the parent's message had (your settings, memory
