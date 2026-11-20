@@ -48,6 +48,11 @@ fn fake_node(node_id: &str, caps: &[&str]) -> (NodeLink, Seen) {
     let seen: Seen = Arc::default();
     let rec = seen.clone();
     let node = node_id.to_string();
+    let profile = if caps.contains(&"profile:chat") {
+        "chat"
+    } else {
+        "agentic"
+    };
     tokio::spawn(async move {
         while let Some(msg) = commands.recv().await {
             if let MasterToNode::Create {
@@ -58,7 +63,8 @@ fn fake_node(node_id: &str, caps: &[&str]) -> (NodeLink, Seen) {
             } = &msg
             {
                 let payload = json!({"title": title, "cwd": cwd, "model": "m", "backend": "native",
-                    "node_id": node, "profile": "chat", "approval_mode": "ask"});
+                    "node_id": node, "profile": profile, "approval_mode": "ask",
+                    "exec_mode": "sandbox"});
                 let event = RawEvent {
                     session_id: *session_id,
                     seq: 1,
@@ -89,6 +95,8 @@ struct T {
     addr: std::net::SocketAddr,
     master: Master,
     chat_node: Seen,
+    /// The second fake node, an agentic one (it announces no chat profile).
+    agentic_node: Seen,
     _dir: tempfile::TempDir,
 }
 
@@ -110,7 +118,7 @@ async fn start() -> T {
     master.set_memory(Arc::new(SqliteMemory::open_in_memory().unwrap()));
     let (link, chat_node) = fake_node("master", &["profile:chat", harness_protocol::CAP_REMEMBER]);
     master.add_link(link, true).await.unwrap();
-    let (bare, _) = fake_node("bare", &[]);
+    let (bare, agentic_node) = fake_node("bare", &[]);
     master.add_link(bare, false).await.unwrap();
     let m2 = master.clone();
     tokio::spawn(async move { axum::serve(listener, router(m2)).await.unwrap() });
@@ -119,6 +127,7 @@ async fn start() -> T {
         addr,
         master,
         chat_node,
+        agentic_node,
         _dir: dir,
     }
 }
@@ -290,6 +299,57 @@ async fn untrusted_turns_get_no_memory_no_web_tools_and_a_note() {
     }
     let once = spec.deny_tools.iter().filter(|d| *d == "remember").count();
     assert_eq!(once, 1, "each tool is denied once");
+}
+
+/// The same holds on an agentic node (ADOPTION_PLAN T.3, PLAN.md T89):
+/// an untrusted turn of a coding chat, and each of its sub-agents, carries
+/// the denial of both web tools in the spec the node gets, and the node
+/// that has them honours it (`crates/node/tests/web_tools.rs`); a trusted
+/// turn carries none.
+#[tokio::test]
+async fn untrusted_agentic_turns_get_no_web_tools() {
+    let t = start().await;
+    let [(alex, _), _] = users(&t).await;
+    let body = json!({"cwd": "/w", "title": "t", "node_id": "bare"});
+    let (st, v) = req(&t, Method::POST, "/api/sessions", Some(body), &alex).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    let sid: SessionId = v["session_id"].as_str().unwrap().parse().unwrap();
+    let last = |t: &T| {
+        let seen = t.agentic_node.lock().unwrap();
+        seen.iter()
+            .rev()
+            .find_map(|m| match m {
+                MasterToNode::Prompt(PromptMsg { agent, .. }) => agent.clone(),
+                _ => None,
+            })
+            .expect("no prompt reached the node")
+    };
+    let opts = |untrusted| PromptOpts {
+        agent_id: Some("teamlead".into()),
+        untrusted,
+        ..Default::default()
+    };
+    t.master
+        .prompt(sid, "look at this".into(), opts(false))
+        .await
+        .unwrap();
+    let spec = last(&t);
+    assert!(!spec.deny_tools.iter().any(|d| d == "web_fetch"));
+    assert!(!spec.delegates.is_empty());
+    t.master
+        .prompt(sid, "look at this".into(), opts(true))
+        .await
+        .unwrap();
+    let spec = last(&t);
+    assert!(denies_all(&spec.deny_tools), "{:?}", spec.deny_tools);
+    for d in &spec.delegates {
+        assert!(
+            denies_all(&d.deny_tools),
+            "{}: {:?}",
+            d.agent_id,
+            d.deny_tools
+        );
+    }
 }
 
 #[tokio::test]

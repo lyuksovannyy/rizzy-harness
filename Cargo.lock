@@ -1620,6 +1620,7 @@ dependencies = [
  "harness-protocol",
  "harness-store",
  "harness-tools",
+ "harness-web",
  "hex",
  "jiff",
  "nix",
