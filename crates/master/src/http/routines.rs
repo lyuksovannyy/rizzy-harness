@@ -797,6 +797,12 @@ async fn run_now(
                 r::STOPPING.into(),
             ));
         }
+        runner::Manual::NotReady => {
+            return Err(ApiError(
+                StatusCode::SERVICE_UNAVAILABLE,
+                r::NOT_READY.into(),
+            ));
+        }
         runner::Manual::Failed => {
             return Err(ApiError(
                 StatusCode::INTERNAL_SERVER_ERROR,

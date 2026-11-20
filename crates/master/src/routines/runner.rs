@@ -946,6 +946,9 @@ async fn block(m: &Master, r: &RoutineRow, run_id: Option<&str>, why: &str, now:
     changed(m, &r.owner_id);
 }
 
+/// How long "run now" waits for the start-up pass before it answers 503.
+const READY_WAIT: Duration = Duration::from_secs(5);
+
 /// Run now: start a run of `r` that no trigger owns.
 pub(crate) enum Manual {
     Started(String),
@@ -954,6 +957,9 @@ pub(crate) enum Manual {
     /// `overlap` or `cap`.
     Skipped(&'static str),
     Blocked(String),
+    /// The start-up pass is not over after [`READY_WAIT`]: nothing is
+    /// recorded.
+    NotReady,
     Failed,
 }
 
@@ -965,6 +971,16 @@ pub(crate) async fn run_now(m: &Master, r: &RoutineRow, sample: Option<Event>) -
     };
     if m.is_stopping() {
         return Manual::Stopping;
+    }
+    // The start-up pass ends every pending run as restarted: a run recorded
+    // before it is over could be taken by it. Nothing is recorded until it
+    // is (the tick waits the same way).
+    let mut ready = h.ready.clone();
+    if !matches!(
+        tokio::time::timeout(READY_WAIT, ready.wait_for(|r| *r)).await,
+        Ok(Ok(_))
+    ) {
+        return Manual::NotReady;
     }
     let run = NewRun {
         run_id: new_id(),
@@ -1832,5 +1848,101 @@ mod run_usage_tests {
         )
         .await;
         assert_eq!(recorded(&m), None);
+    }
+}
+
+#[cfg(test)]
+mod run_now_ready_tests {
+    use super::*;
+    use std::sync::atomic::AtomicI64;
+
+    use harness_core::Secret;
+    use harness_store::routines::{NewRoutine, RoutineCaps};
+    use harness_store::{NewUser, Role, Store};
+
+    use crate::auth::Auth;
+    use crate::routines::Clock;
+
+    /// A master with one routine "r" and a scheduler that is installed but
+    /// whose start-up pass has not run: the instant after a start. The
+    /// returned sender is that pass's "done".
+    fn rig() -> (Master, RoutineRow, watch::Sender<bool>) {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .create_user(&NewUser {
+                user_id: "u1".into(),
+                username: "u1".into(),
+                password_hash: "$argon2id$x".into(),
+                role: Role::Admin,
+                exec_ceiling: harness_core::policy::ExecLevel::None,
+                must_change_password: false,
+            })
+            .unwrap();
+        let ws = store.create_workspace("Team", "u1").unwrap().workspace_id;
+        store
+            .routine_create(
+                &NewRoutine {
+                    routine_id: "r".into(),
+                    workspace_id: ws,
+                    owner_id: "u1".into(),
+                    name: "R".into(),
+                    enabled: true,
+                    spec: r#"{"notify":"always"}"#.into(),
+                    triggers: vec![],
+                },
+                RoutineCaps {
+                    per_user: 25,
+                    per_workspace: 100,
+                },
+                1,
+            )
+            .unwrap();
+        let row = store.routine("r").unwrap().unwrap();
+        let m = Master::new(
+            store,
+            Auth::new(Secret::new("tok".into()), vec!["127.0.0.1:1".into()], false),
+        );
+        let ready = crate::routines::install(&m, Clock::manual(Arc::new(AtomicI64::new(100))))
+            .expect("installed once");
+        (m, row, ready)
+    }
+
+    /// "Run now" in the instant after a start: the handle is set, the
+    /// start-up pass has not run. The run must not be written until that
+    /// pass is over, or the pass takes it (it ends every pending run as
+    /// "the server restarted before the run started").
+    #[tokio::test]
+    async fn run_now_writes_nothing_until_the_startup_pass_is_over() {
+        let (m, row, ready) = rig();
+        let (m2, row2) = (m.clone(), row.clone());
+        let call = tokio::spawn(async move { run_now(&m2, &row2, None).await });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let runs = m.inner_mirror().runs_page("r", None, 10).unwrap();
+        assert!(
+            runs.is_empty(),
+            "a run was written before the start-up pass: {runs:?}"
+        );
+        // The pass runs and ends; the call goes on.
+        reconcile(&m, true).await;
+        ready.send(true).unwrap();
+        let _ = call.await.unwrap();
+        let rows = m.inner_mirror().runs_page("r", None, 10).unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_ne!(
+            rows[0].reason.as_deref(),
+            Some(RESTARTED),
+            "the start-up pass ended the fresh run: {:?}",
+            rows[0]
+        );
+    }
+
+    /// A start-up pass that does not end: "run now" answers that routines
+    /// are not running yet after a bounded wait, and writes nothing.
+    #[tokio::test(start_paused = true)]
+    async fn run_now_answers_not_ready_after_a_bounded_wait() {
+        let (m, row, _ready) = rig();
+        let out = run_now(&m, &row, None).await;
+        assert!(matches!(out, Manual::NotReady));
+        assert_eq!(m.inner_mirror().run_count("r").unwrap(), 0);
     }
 }

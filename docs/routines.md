@@ -130,7 +130,9 @@ All routine time comes from one clock in the scheduler's handle (`Clock::wall()`
   A run waiting for an absent or stopping remote node is retried as for any offline node and
   ends `failed`, counted, when the retries run out. While the server stops, the scheduler
   starts nothing and **Run now** and webhook calls are answered 503 ("the server is stopping:
-  try again once it is back") with no run recorded.
+  try again once it is back") with no run recorded. In the first moments after a start,
+  **Run now** waits (up to five seconds) for the start-up pass that ends interrupted runs
+  and answers 503 ("routines are not running yet, try again") if it is not over.
 - **Losing access mid-run.** Agentic turns are cancelled by the existing revocation sweep and the
   run records `cancelled`; a chat-profile run finishes its current turn. Either way the next fire
   is blocked and pauses the routine.
