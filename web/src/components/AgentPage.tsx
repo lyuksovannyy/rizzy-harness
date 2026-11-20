@@ -617,6 +617,7 @@ export function AgentPage(props: {
             <DelegatePicker
               agents={props.agents}
               self={draft.id}
+              serverScope={!inWorkspace}
               picks={draft.delegate_to}
               active={draft.features.delegate}
               readOnly={!canEdit || locked}

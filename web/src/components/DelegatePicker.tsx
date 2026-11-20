@@ -7,14 +7,18 @@ import { marked } from "../lib/agents";
 import type { Agent } from "../types";
 
 /** The agents `self` may be given as sub-agents: offered as one, and not itself. */
-export function delegateOptions(agents: Agent[], self: string): Agent[] {
-  return agents.filter((a) => a.id !== self && a.features?.as_subagent !== false);
+export function delegateOptions(agents: Agent[], self: string, serverScope = false): Agent[] {
+  // A server agent never gets a workspace's agent as a sub-agent, and the
+  // server refuses the save: the viewer's list holds both, offer what it takes.
+  return agents.filter((a) => a.id !== self && a.features?.as_subagent !== false && !(serverScope && a.scope === "workspace"));
 }
 
 export function DelegatePicker(props: {
   agents: Agent[];
   self: string;
   picks: string[];
+  /** The agent is the server's: only the server's own agents are offered. */
+  serverScope?: boolean;
   /** The switch above: off keeps the list but it does nothing. */
   active: boolean;
   /** Not editable here: shows `shown` (the agent's resolved delegates) instead. */
@@ -22,7 +26,7 @@ export function DelegatePicker(props: {
   shown?: string[];
   onChange: (picks: string[]) => void;
 }) {
-  const options = delegateOptions(props.agents, props.self);
+  const options = delegateOptions(props.agents, props.self, props.serverScope);
   const known = new Set(options.map((a) => a.id));
   if (props.readOnly) {
     const by = new Map(props.agents.map((a) => [a.id, a]));

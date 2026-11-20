@@ -479,7 +479,6 @@ describe("an agent's page in a workspace (X.33)", () => {
       await show(admin, "lead", [lead, scout, loner, wsOne, coder]);
       // Not itself, not an agent that is not offered as a sub-agent.
       expect(labels().some((t) => t!.includes("@lead") || t!.includes("@loner"))).toBe(false);
-      expect(labels().find((t) => t!.includes("@wsone"))).toContain("workspace agent");
       expect(host.querySelector(".delegate-picker")!.textContent).toContain("All sub-agents");
       expect(boxes().every((b) => !b.checked)).toBe(true);
       act(() => boxes().find((b) => b.closest("label")!.textContent!.includes("@scout"))!.click());
@@ -498,6 +497,24 @@ describe("an agent's page in a workspace (X.33)", () => {
       expect(gone).toContain("no longer available");
       expect(host.querySelector<HTMLFieldSetElement>("fieldset.delegate-picker")!.disabled).toBe(true);
       expect(boxes().filter((b) => b.checked)).toHaveLength(2);
+    });
+
+    test("a server agent is offered the server's agents only, not a workspace's", async () => {
+      api.agent.mockResolvedValue(detail(lead, { prompt: "Lead.", own: true, delegate_to: [] }));
+      await show(admin, "lead", [lead, scout, wsOne]);
+      expect(labels().some((t) => t!.includes("@wsone"))).toBe(false);
+      expect(labels().some((t) => t!.includes("@scout"))).toBe(true);
+    });
+
+    test("in a workspace the workspace's agents are offered too, marked", async () => {
+      const { AgentPage } = await import("./AgentPage");
+      const mine = agent("wlead", { builtin: false, origin: "custom", scope: "workspace", features: { ...NEW_FEATURES, delegate: true } });
+      api.agent.mockResolvedValue(detail(mine, { prompt: "Mine.", own: true, delegate_to: [] }));
+      await act(async () =>
+        root.render(<AgentPage id="wlead" agents={[mine, scout, wsOne]} editable seed={null} onOpen={onOpen} onDuplicate={() => {}} onChanged={onChanged} scope={{ workspace: "w1" }} />),
+      );
+      expect(labels().find((t) => t!.includes("@wsone"))).toContain("workspace agent");
+      expect(labels().some((t) => t!.includes("@scout"))).toBe(true);
     });
 
     test("a built-in shows its list read-only", async () => {
