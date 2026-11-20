@@ -2,7 +2,7 @@
 // Memory, the workspace panels, the chat's own controls, the login form).
 // They are split from api.ts so the first load does not carry them: that
 // file keeps what the home screen, the sidebar and the composer call.
-import { call, HttpError, keyed, reach, type Scope, scoped, seen } from "./api";
+import { call, httpError, keyed, reach, type Scope, scoped, seen } from "./api";
 import type {
   ApprovalMode,
   ExecLevel,
@@ -164,7 +164,7 @@ export const pageApi = {
       /* non-JSON */
     }
     seen(res.status, data);
-    if (!res.ok) throw new HttpError(res.status, (data as { error?: string } | null)?.error ?? `${res.status} ${res.statusText}`);
+    if (!res.ok) throw httpError(res, data);
     return data as ProfileImages;
   },
   removeProfileImage: (slot: "avatar" | "banner") => call<ProfileImages>("DELETE", `/api/me/${slot}`),

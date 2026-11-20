@@ -1,5 +1,6 @@
 import { Menu } from "lucide-react";
 import { APP_TITLE } from "../lib/brand";
+import { choiceUp } from "../lib/choiceGuard";
 import { pruneDrafts, writeDraft } from "../lib/drafts";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { api, HttpError } from "../api";
@@ -115,11 +116,13 @@ function useNarrow(): boolean {
 }
 
 /** Whether a key press opens search: Ctrl/Cmd+K anywhere (the composer
- * too), "/" only outside text fields. */
+ * too; a chord is not typing), "/" only outside text fields, and never while
+ * a call's choice is up in the open chat (a typing burst must not land in
+ * the search box, whose Enter leaves the chat). */
 export function opensSearch(e: KeyboardEvent): boolean {
   if (e.altKey) return false;
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") return true;
-  if (e.key !== "/" || e.ctrlKey || e.metaKey) return false;
+  if (e.key !== "/" || e.ctrlKey || e.metaKey || choiceUp()) return false;
   const el = e.target instanceof HTMLElement ? e.target : null;
   return !(el && (el.isContentEditable || el.closest("input, textarea, select")));
 }
@@ -323,7 +326,7 @@ export function Shell(props: {
     live.onMemoryChanged = () => setMemoryVersion((v) => v + 1);
     live.onWorkspacesChanged = workspacesChanged;
     live.onProjectsChanged = refreshProjects;
-    live.onLoginEnded = () => void api.me().catch(unauthorized);
+    live.onLoginEnded = () => void api.me().then(() => live.retryAfterLogin(), unauthorized);
     refreshProjects();
     refreshSessions();
     refreshNodes();

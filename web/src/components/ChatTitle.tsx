@@ -2,6 +2,7 @@
 // turns it into a field; Enter or Save keeps it, Escape or Cancel leaves it.
 // The server cleans and caps it (control and hidden characters dropped).
 import "../lib/i18nPages";
+import { errText } from "../lib/errorText";
 import { Pencil } from "lucide-react";
 import { useState } from "react";
 import { pageApi } from "../apiPages";
@@ -34,7 +35,7 @@ export function ChatTitle(props: { sessionId: string; title: string; canRename: 
       setSaved(r.title);
       setDraft(null);
     } catch (x) {
-      setErr(x instanceof Error ? x.message : String(x));
+      setErr(errText(x));
     } finally {
       setBusy(false);
     }

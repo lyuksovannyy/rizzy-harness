@@ -88,6 +88,9 @@ pub(crate) struct Call {
     /// `None`: the call named none; it is refused with the rows and the tag
     /// of the file as it is.
     tag: Option<String>,
+    /// The path part of a tag sent as a whole header line (`[path#TAG]`):
+    /// it must name the file the call is for ([`plan`]).
+    tag_from: Option<String>,
     ops: Vec<Op>,
 }
 
@@ -98,15 +101,30 @@ pub(crate) fn wants(input: &Value) -> bool {
         .any(|k| input.get(k).is_some_and(|v| !v.is_null()))
 }
 
-/// A tag as the model may send it: bare, or the whole header line, any
-/// letter case (hex characters, any length up to a whole hash: tags are
-/// longer than four characters after a collision).
-pub(crate) fn norm_tag(s: &str) -> Option<String> {
+/// A tag as the model may send it: bare, `#TAG`, or the whole header line
+/// `[path#TAG]`, any letter case (hex characters, any length up to a whole
+/// hash: tags are longer than six characters after a collision). The path
+/// part of a header, if there is one, comes back too.
+pub(crate) fn split_tag(s: &str) -> Option<(Option<String>, String)> {
     let s = s.trim();
-    let s = s.rsplit('#').next().unwrap_or(s);
-    let s = s.trim().trim_end_matches(']').trim();
-    (!s.is_empty() && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
-        .then(|| s.to_ascii_uppercase())
+    // A whole header loses its one opening bracket; every bracket after it
+    // is the path's own (`[[id].tsx#TAG]` is the header of `[id].tsx`). A
+    // string that does not end with `]` is not a header: `[id].tsx#TAG`
+    // names `[id].tsx` as it stands.
+    let s = match s.strip_prefix('[') {
+        Some(inner) if s.ends_with(']') => inner,
+        _ => s,
+    };
+    let (from, tag) = match s.rsplit_once('#') {
+        Some((head, tail)) => {
+            let head = head.trim();
+            ((!head.is_empty()).then(|| head.to_string()), tail)
+        }
+        None => (None, s),
+    };
+    let tag = tag.trim().trim_end_matches(']').trim();
+    (!tag.is_empty() && tag.len() <= 64 && tag.bytes().all(|b| b.is_ascii_hexdigit()))
+        .then(|| (from, tag.to_ascii_uppercase()))
 }
 
 /// What the call says, before any file is looked at.
@@ -117,16 +135,16 @@ pub(crate) fn parse(input: &Value) -> Result<Call, String> {
     if old_form {
         return Err("give either old_string/new_string (or `edits`) or tag/lines, not both".into());
     }
-    let tag = match input.get("tag") {
-        None | Some(Value::Null) => None,
+    let (tag, tag_from) = match input.get("tag") {
+        None | Some(Value::Null) => (None, None),
         Some(v) => {
-            let Some(tag) = v.as_str().and_then(norm_tag) else {
+            let Some((from, tag)) = v.as_str().and_then(split_tag) else {
                 return Err(format!(
                     "`tag` must be the hex characters after # in the header line of a `read`, \
                      `edit` or `write` result, not {v}"
                 ));
             };
-            Some(tag)
+            (Some(tag), from)
         }
     };
     let list = match input.get("lines") {
@@ -235,7 +253,7 @@ pub(crate) fn parse(input: &Value) -> Result<Call, String> {
             return Err(format!("operations overlap: {c}; nothing was changed"));
         }
     }
-    Ok(Call { tag, ops })
+    Ok(Call { tag, tag_from, ops })
 }
 
 /// The refusal for an operation without `text`.
@@ -577,6 +595,21 @@ fn plan(ctx: &ToolCtx, key: &Path, shown: &str, live: &str, call: &Call) -> Resu
             context: CONTEXT,
         });
     };
+    // A header pasted whole names a file: it must be this one (a tag is a
+    // lookup key per path, and the same text has the same tag in two files).
+    if let Some(from) = call.tag_from.as_deref()
+        && from != shown
+        && !ctx
+            .resolve_for_write(from)
+            .is_ok_and(|p| ctx.seen_key(&p) == key)
+    {
+        return Err(format!(
+            "`tag` is the header of another file ({from}), not of {shown}: send the tag from \
+             the `[path#TAG]` header line of {shown} (the characters after #). Nothing was \
+             changed."
+        )
+        .into());
+    }
     let Some(ver) = ctx.seen.version(key, tag_given) else {
         let n = split_rows(live).1.len();
         return Err(No::Rows {
@@ -786,9 +819,14 @@ fn plan(ctx: &ToolCtx, key: &Path, shown: &str, live: &str, call: &Call) -> Resu
     }
     if updated == live {
         return Err(format!(
-            "That changes nothing: the rows already read as the text you gave, so nothing was written. \
-             {}",
-            crate::fs::header_of(ctx, key, Path::new(shown), &live_sha)
+            "That changes nothing: the rows already read as the text you gave, so nothing was \
+             written.{}",
+            // `plan` is also the card's preview and the refusal before it:
+            // it records nothing, so only a tag the version already has.
+            ctx.seen
+                .peek_tag(key, &live_sha)
+                .map(|t| format!(" {}", crate::fs::header(ctx, Path::new(shown), &t)))
+                .unwrap_or_default()
         )
         .into());
     }

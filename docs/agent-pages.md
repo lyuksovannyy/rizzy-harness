@@ -204,6 +204,10 @@ read-only.
 - **Looks**: avatars stay in `config.toml` `[agent_avatars]` (one mechanism, server-wide, changed
   at the server's scope only). A workspace's own agent has the look its id gives
   (`AgentAvatar::default_for`); carrying a chosen look in its doc is left for later.
+  The look is a flat blob (one of 21 shapes) with two pill eyes in one of 12 colours, drawn in
+  `AgentAvatar.tsx`; the picker (`AvatarEditor.tsx`) is a grid of the shapes over a row of round
+  swatches and the eye styles. The built-in agents have a hand-picked look in `avatars.rs`; every
+  other id derives one from all shapes and colours (black is left to a deliberate choice).
 
 ## Permissions
 

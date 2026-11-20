@@ -11,9 +11,10 @@
 //!    get them), so the rows it printed are a prefix of what it had;
 //! 2. recording takes a [`Sealed`], which only [`seal`] makes, from the
 //!    finished text of the result, and only when the cap would not cut it.
-//!    In a debug build (every test) text over the cap panics: a producer
-//!    that forgot its budget fails the first test that prints enough rows,
-//!    not silently at a user's.
+//!    In this crate's own tests (`cfg(test)`, which no other crate's build
+//!    sets, debug or release) text over the cap panics: a producer that
+//!    forgot its budget fails the first test that prints enough rows, not
+//!    silently at a user's.
 
 use crate::MAX_OUTPUT_CHARS;
 

@@ -132,12 +132,18 @@
   --mag-side: color-mix(in srgb, var(--fg) 9%, var(--bg));
   --mag-glint: rgb(255 255 255 / 0.22);
   --mag-shadow: rgb(0 0 0 / 0.45);
-  /* Agent avatars (AgentAvatar.tsx): light on the face, its shading, the
-     side under it (mixed into the accent) and the shadow on the ground. */
-  --av-shine: rgb(255 255 255 / 0.55);
-  --av-shade: rgb(0 0 0 / 0.3);
-  --av-depth: rgb(0 0 0);
-  --av-ground: rgb(0 0 0 / 0.5);
+  /* Agent avatars (AgentAvatar.tsx): the colours the UI accents lack, the
+     hairline white and black need on a ground of their own tone, and the
+     soft shadow on the ground. */
+  --av-c-white: #f1f1f4;
+  --av-c-black: #2b2b2f;
+  --av-c-brown: #a8754a;
+  --av-c-teal: #1d9a8d;
+  --av-c-yellow: #ffd60a;
+  --av-c-green: #3f9a22;
+  --av-edge-white: transparent;
+  --av-edge-black: rgb(255 255 255 / 0.35);
+  --av-ground: rgb(0 0 0 / 0.35);
   /* Elevation: resting (cards, the composer), then floating (menus,
      dialogs, toasts); always after the edge-hi and hairline insets. */
   --shadow-1: 0 1px 2px #0000004d, 0 10px 30px -10px #0000008c;
@@ -231,10 +237,15 @@
     --art-peak: 0.24;
     --mag-glint: rgb(255 255 255 / 0.75);
     --mag-shadow: rgb(17 17 19 / 0.12);
-    --av-shine: rgb(255 255 255 / 0.4);
-    --av-shade: rgb(17 17 19 / 0.22);
-    --av-depth: rgb(70 70 78);
-    --av-ground: rgb(17 17 19 / 0.16);
+    --av-c-white: #ffffff;
+    --av-c-black: #26262a;
+    --av-c-brown: #8f5c36;
+    --av-c-teal: #168a7f;
+    --av-c-yellow: #e6b800;
+    --av-c-green: #399213;
+    --av-edge-white: rgb(17 17 19 / 0.3);
+    --av-edge-black: transparent;
+    --av-ground: rgb(17 17 19 / 0.12);
     --shadow-1: 0 1px 2px #0000000f, 0 8px 28px -10px #0000002e;
     --shadow-2: 0 2px 6px #00000012, 0 18px 48px -14px #00000042;
     --scrim-tint: #00000038;
@@ -319,10 +330,15 @@
   --art-peak: 0.24;
   --mag-glint: rgb(255 255 255 / 0.75);
   --mag-shadow: rgb(17 17 19 / 0.12);
-  --av-shine: rgb(255 255 255 / 0.4);
-  --av-shade: rgb(17 17 19 / 0.22);
-  --av-depth: rgb(70 70 78);
-  --av-ground: rgb(17 17 19 / 0.16);
+  --av-c-white: #ffffff;
+  --av-c-black: #26262a;
+  --av-c-brown: #8f5c36;
+  --av-c-teal: #168a7f;
+  --av-c-yellow: #e6b800;
+  --av-c-green: #399213;
+  --av-edge-white: rgb(17 17 19 / 0.3);
+  --av-edge-black: transparent;
+  --av-ground: rgb(17 17 19 / 0.12);
   --shadow-1: 0 1px 2px #0000000f, 0 8px 28px -10px #0000002e;
   --shadow-2: 0 2px 6px #00000012, 0 18px 48px -14px #00000042;
   --scrim-tint: #00000038;
@@ -3891,30 +3907,22 @@ button.icon svg.lucide, .send svg.lucide { vertical-align: middle; }
 .custom-engine { padding: 14px 16px; border-radius: var(--r-md); background: var(--glass-thin); box-shadow: inset 0 0 0 1px var(--hairline), inset 0 1px 0 var(--edge-hi); }
 .custom-engine .row input:not([type]) { flex: 1; }
 
-/* Agent avatars (AgentAvatar.tsx): the face is the agent's accent, lit and
-   shaded by the --av-* tokens with its side showing below, so it reads as
-   a small solid in either theme. data-state sets the expression; the loops
-   run only under data-motion="live", and reduced motion keeps the faces
-   still. SVG transforms turn about each part's own origin (an eye's centre). */
+/* Agent avatars (AgentAvatar.tsx): a flat body in the agent's colour, two
+   pill eyes with a glint, a soft shadow on the ground. data-state sets the
+   expression; the loops run only under data-motion="live", and reduced
+   motion keeps the faces still. SVG transforms turn about each part's own
+   origin (an eye's centre). */
 .agent-avatar { flex: none; display: inline-block; vertical-align: middle; overflow: visible; }
-.agent-avatar .av-face,
-.agent-avatar .av-side,
-.agent-avatar .av-layer { stroke-width: 2.5; stroke-linejoin: round; }
-/* Orange and Yellow are too light for white marks. */
-.agent-avatar:is([data-accent="orange"], [data-accent="yellow"]) { --av-on: var(--on-dark-accent); }
-.agent-avatar .av-face { fill: var(--av-c); stroke: var(--av-c); }
-.agent-avatar .av-side {
-  fill: color-mix(in srgb, var(--av-c) 62%, var(--av-depth));
-  stroke: color-mix(in srgb, var(--av-c) 62%, var(--av-depth));
-}
-.agent-avatar .av-shine-0 { stop-color: var(--av-shine); }
-.agent-avatar .av-shine-1 { stop-color: var(--av-shine); stop-opacity: 0; }
-.agent-avatar .av-shade-0 { stop-color: var(--av-shade); stop-opacity: 0; }
-.agent-avatar .av-shade-1 { stop-color: var(--av-shade); }
+/* Eyes are white on a coloured body and dark where white would not read. */
+.agent-avatar:is([data-accent="orange"], [data-accent="yellow"], [data-accent="white"], [data-accent="graphite"]) { --av-on: var(--on-dark-accent); }
+.agent-avatar[data-accent="white"] { --av-edge: var(--av-edge-white); }
+.agent-avatar[data-accent="black"] { --av-edge: var(--av-edge-black); }
+.agent-avatar .av-face { fill: var(--av-c); stroke: var(--av-edge, transparent); stroke-width: 1; stroke-linejoin: round; }
 .agent-avatar .av-ground { fill: var(--av-ground); transform-origin: 20px 36px; }
 .agent-avatar .av-pupil { fill: var(--av-on, var(--on-light-accent)); }
+.agent-avatar .av-glint { fill: var(--av-c); }
 .agent-avatar .av-happy,
-.agent-avatar .av-brow { fill: none; stroke: var(--av-on, var(--on-light-accent)); stroke-width: 1.5; stroke-linecap: round; opacity: 0; }
+.agent-avatar .av-brow { fill: none; stroke: var(--av-on, var(--on-light-accent)); stroke-width: 1.7; stroke-linecap: round; opacity: 0; }
 .agent-avatar .av-pupil,
 .agent-avatar .av-happy,
 .agent-avatar .av-brow { transition: opacity var(--dur-2) var(--ease-standard); }
@@ -3923,13 +3931,13 @@ button.icon svg.lucide, .send svg.lucide { vertical-align: middle; }
 .agent-avatar .av-look { transition: transform var(--dur-4) var(--ease-spring); }
 /* The eyes follow a pointer over the avatar (AgentAvatar sets --av-gx/gy). */
 .agent-avatar .av-gaze {
-  transform: translate(calc(var(--av-gx, 0) * 1.6px), calc(var(--av-gy, 0) * 1.2px));
+  transform: translate(calc(var(--av-gx, 0) * 1.2px), calc(var(--av-gy, 0) * 0.9px));
   transition: transform var(--dur-3) var(--ease-out);
 }
 /* Thinking: eyes up and aside. Working: narrowed, on the task. Unsure: one
    eye small, one brow up, the body tilted. Done: closed happy arcs. Error:
    worried brows, the face sinking a little. */
-.agent-avatar[data-state="thinking"] .av-look { transform: translate(1.4px, -1.7px); }
+.agent-avatar[data-state="thinking"] .av-look { transform: translate(1.1px, -1.3px); }
 .agent-avatar[data-state="working"] .av-look { transform: translateY(0.5px) scale(1.12, 0.5); }
 .agent-avatar[data-state="unsure"] .av-figure { transform: rotate(-7deg); }
 .agent-avatar[data-state="unsure"] .l .av-look { transform: scale(0.75); }
@@ -4024,9 +4032,20 @@ button.icon svg.lucide, .send svg.lucide { vertical-align: middle; }
 .avatar-picks { gap: var(--space-1-5); }
 .avatar-picks button {
   display: inline-flex; align-items: center; justify-content: center; min-height: 0; padding: 4px;
-  border: 1px solid var(--line); border-radius: var(--r-md); background: var(--bg);
+  border: 1px solid transparent; border-radius: var(--r-md); background: transparent;
 }
+.avatar-picks button:hover:not(:disabled) { background: var(--bg-hover); }
 .avatar-picks button.on { border-color: var(--focus); background: var(--accent-soft); }
+.avatar-shapes { display: grid; grid-template-columns: repeat(auto-fill, minmax(50px, 1fr)); gap: var(--space-1); }
+.avatar-shapes button { padding: 5px 0; }
+/* The colours: round swatches in one row; a white one needs its hairline. */
+.avatar-swatches { gap: 2px; }
+.avatar-swatches button { padding: 2px; border-radius: var(--r-full); }
+.avatar-swatch {
+  width: 20px; height: 20px; border-radius: var(--r-full); background: var(--sw);
+  box-shadow: inset 0 0 0 1px var(--hairline);
+}
+.avatar-swatch[data-accent="black"] { box-shadow: inset 0 0 0 1px var(--av-edge-black, var(--hairline)); }
 
 /* ---------- Workspaces ---------- */
 .workspace-badge {

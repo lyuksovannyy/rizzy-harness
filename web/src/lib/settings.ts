@@ -26,7 +26,8 @@ export type TabId =
   | "nodes"
   | "users"
   | "workspaces"
-  | "storage";
+  | "storage"
+  | "usage";
 
 type Viewer = Pick<Me, "user_id" | "role" | "workspace">;
 type Show = (v: Viewer) => boolean;
@@ -77,7 +78,7 @@ const SECTIONS: { id: SectionId; show: Show; tabs: { id: TabId; show: Show }[] }
     id: "server",
     show: (v) => v.role === "admin",
     // Storage: the limits on stored files and each account's usage (docs/media.md).
-    tabs: ["providers", "recall", "savings", "nodes", "users", "workspaces", "storage"].map((id) => ({
+    tabs: ["providers", "recall", "savings", "nodes", "users", "workspaces", "storage", "usage"].map((id) => ({
       id: id as TabId,
       show: always,
     })),

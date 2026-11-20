@@ -64,10 +64,11 @@ pub(crate) fn header(ctx: &ToolCtx, path: &std::path::Path, tag: &str) -> String
     format!("[{p}#{tag}]")
 }
 
-/// A tag as long as a tag can reasonably be, to reserve room for a header
-/// before its version has a tag: a header that comes out longer is cut by the
-/// result cap, and its rows then do not count as shown ([`crate::shown`]).
-pub(crate) const RESERVED_TAG: &str = "00000000";
+/// A tag as long as a tag can reasonably be (the base tag, six characters,
+/// and four more for collisions), to reserve room for a header before its
+/// version has a tag: a header that comes out longer is cut by the result
+/// cap, and its rows then do not count as shown ([`crate::shown`]).
+pub(crate) const RESERVED_TAG: &str = "0000000000";
 
 /// The header of the version of `path` (the table's `key`) with hash `sha`,
 /// with the tag that version has or is issued here.
