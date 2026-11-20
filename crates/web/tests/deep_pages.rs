@@ -19,6 +19,12 @@ use serde_json::json;
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 async fn fetch(html: String, readable: bool) -> (bool, String, Duration) {
+    // The tool abandons a parse after 15 s. A debug build on a loaded runner
+    // needs about that for the heaviest page inside the caps (7-10 s on a
+    // quiet machine), and the tool then answers "took too long" for a page
+    // that is merely slow. This file bounds time itself: keep the tool's
+    // backstop out of the way (it is the hook the slot tests use).
+    harness_web::TEST_PARSE_WAIT_MS.store(120_000, std::sync::atomic::Ordering::Relaxed);
     let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let a = l.local_addr().unwrap();
     let app = Router::new().route(
@@ -214,10 +220,69 @@ async fn pages_inside_the_caps_are_read_quickly() {
         for readable in [false, true] {
             let (ok, out, took) = fetch(html.clone(), readable).await;
             assert!(ok, "{what} (readable={readable}): {out}");
-            assert!(took < Duration::from_secs(20), "{what}: {took:?}");
+            // A hang backstop only: that the work is not super-linear is
+            // proved by `reading_time_grows_in_step_with_the_page`, which
+            // compares two sizes and so does not depend on the machine.
+            assert!(took < Duration::from_secs(90), "{what}: {took:?}");
             println!("TIMING {what} readable={readable}: {took:?}");
         }
     }
+}
+
+/// CPU seconds this process has used (user + system), from `/proc`; on a
+/// system without it, wall-clock time since the first call. A busy machine
+/// stretches a read in wall-clock time by an amount that changes from one
+/// second to the next; the CPU the read uses does not move with it.
+fn cpu_seconds() -> f64 {
+    let stat = std::fs::read_to_string("/proc/self/stat").ok();
+    // The command name is in parentheses and may hold spaces: count after it.
+    let ticks = stat.as_deref().and_then(|s| {
+        let rest = s.get(s.rfind(')')? + 2..)?;
+        let f: Vec<&str> = rest.split(' ').collect();
+        // `rest` starts at field 3 (state); utime and stime are 14 and 15.
+        Some(f.get(11)?.parse::<f64>().ok()? + f.get(12)?.parse::<f64>().ok()?)
+    });
+    match ticks {
+        Some(t) => t / 100.0, // USER_HZ is 100 on every Linux target we build for
+        None => {
+            static START: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(Instant::now);
+            START.elapsed().as_secs_f64()
+        }
+    }
+}
+
+/// What the wall-clock bounds above cannot say: the cost of the readability
+/// pass (the slowest parser, and the one that walks each node's ancestors)
+/// grows in step with the page. The same page at two sizes is read in one run
+/// and the ratio of the CPU used is bounded: twice the page is twice the
+/// work when it is linear (about 2), four times when it is quadratic.
+#[tokio::test(flavor = "multi_thread")]
+async fn reading_time_grows_in_step_with_the_page() {
+    let _one_at_a_time = SERIAL.lock().await;
+    let at = |k: usize| {
+        format!(
+            "<html><body>{}{}x</body></html>",
+            "<div>".repeat(100),
+            "<i>w</i>".repeat(k)
+        )
+    };
+    let mut used = Vec::new();
+    for k in [6_000, 12_000] {
+        let before = cpu_seconds();
+        let (ok, out, took) = fetch(at(k), true).await;
+        assert!(ok, "{out}");
+        used.push((cpu_seconds() - before, took));
+    }
+    let ratio = used[1].0 / used[0].0;
+    println!("TIMING ratio {ratio:.2} ({used:?})");
+    assert!(
+        used[0].0 > 0.2,
+        "too little CPU measured to compare: {used:?}"
+    );
+    assert!(
+        ratio < 3.2,
+        "twice the page used {ratio:.2} times the CPU ({used:?})"
+    );
 }
 
 /// The worst the tree builder is ever given: as many start tags as the cap

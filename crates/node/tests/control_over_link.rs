@@ -495,8 +495,9 @@ async fn a_stop_and_an_approval_answer_are_acknowledged_within_the_ack_timeout_o
     m.cancel("stop", sid).await;
     let r0 = rounds(&beat);
     // A limit on waiting, not a bound: the Stop's effect is checked below
-    // by what the tool recorded.
-    let stopped = stopped_after(&beat, t0, Duration::from_secs(60)).await;
+    // by what the tool recorded. Far past a loaded machine: it costs nothing
+    // when the node is prompt.
+    let stopped = stopped_after(&beat, t0, Duration::from_secs(180)).await;
     let ran = rounds(&beat) - r0;
     m.wait("both acks", Duration::from_secs(120), |s| {
         s.acks.contains_key("stop") && s.acks.contains_key("approval")
@@ -541,7 +542,7 @@ async fn a_stop_and_an_approval_answer_are_acknowledged_within_the_ack_timeout_o
         .get(&sid)
         .cloned()
         .unwrap_or_default();
-    assert!(stopped.is_some(), "still running 60 s after the Stop");
+    assert!(stopped.is_some(), "still running 180 s after the Stop");
     eprintln!("A.21 over the link: {ran} rounds after the Stop");
     assert!(
         ran <= STOP_ROUNDS,
