@@ -450,8 +450,15 @@ const TRIALUI2_KB = 0.5;
 // chunk. Measured 436.28 against the recorded 436.1 the same day (a5dd27a3
 // merged in), so +0.2; the first load stays 102.5, under the 104 ceiling.
 const X39_KB = 0.2;
+// The header's running sub-agents (X.39 follow-up, PR 176): the rule that
+// counts a turn's foreground sub-agents while their call has no result, the
+// per-turn floor and the watches on their logs, in the lazy conversation
+// chunk. Measured 436.98 against the recorded 436.3 the same day (56809cfd
+// merged in), so +0.7; the first load is 102.56 (was 102.54), under the 104
+// ceiling.
+const X39B_KB = 0.7;
 
-const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB + EXPORT_KB + MEMDEF_KB + VISIBILITY_KB + T50_KB + LOOP_KB + DIFF_KB + T51_KB + WSMEM_KB + STEPS_KB + AGENT_SWITCHES_KB + T57_KB + X15_KB + X16_KB + COST_KB + X17_KB + X19_X20_KB + X21_KB + X7_KB + SIDEBAR_KB + X23_T70_KB + X24_KB + X28_KB + WAITING_KB + X29_KB + X25_KB + X26_KB + X32_KB + X33_KB + X34A_KB + X34B_KB + X36_KB + X27A_KB + WEBGUARD_KB + X35A_KB + PICKMARK_KB + X35B_KB + X27C_KB + X37A_KB + X38_KB + TRIALUI2_KB + X39_KB) * 100) / 10) / 10;
+const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB + EXPORT_KB + MEMDEF_KB + VISIBILITY_KB + T50_KB + LOOP_KB + DIFF_KB + T51_KB + WSMEM_KB + STEPS_KB + AGENT_SWITCHES_KB + T57_KB + X15_KB + X16_KB + COST_KB + X17_KB + X19_X20_KB + X21_KB + X7_KB + SIDEBAR_KB + X23_T70_KB + X24_KB + X28_KB + WAITING_KB + X29_KB + X25_KB + X26_KB + X32_KB + X33_KB + X34A_KB + X34B_KB + X36_KB + X27A_KB + WEBGUARD_KB + X35A_KB + PICKMARK_KB + X35B_KB + X27C_KB + X37A_KB + X38_KB + TRIALUI2_KB + X39_KB + X39B_KB) * 100) / 10) / 10;
 // Raised from 103 to 106 once the Phase A pages merged (103.7 measured: the
 // new sidebar, account button and routine-result rows are on the first
 // screen), then lowered to 104 at Phase B (102.3 measured) once the login
