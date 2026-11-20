@@ -439,3 +439,48 @@ async fn delegate_offers_follow_ups() {
     assert_eq!(started, 0);
     assert!(outs[0].contains("not available here"), "{outs:?}");
 }
+
+// ---- the read-only shell's note about the web (T.3) ----------------------
+
+/// The read-only shell tells an agent without a network to read a page with
+/// `web_fetch` only where that tool is really there for this agent in this
+/// turn: registered on the node, in the agent's own list and not denied to
+/// it, and not refused by node.toml's `denied_tools`. A note naming a tool
+/// the agent cannot call would send it into an "unknown tool" refusal.
+#[test]
+fn the_shells_web_note_is_made_only_where_web_fetch_is_offered() {
+    let with = |tools: &[&'static str]| {
+        let mut all = harness_tools::builtin();
+        all.extend(
+            tools
+                .iter()
+                .map(|n| Arc::new(Fake(n)) as Arc<dyn harness_tools::Tool>),
+        );
+        NativeBackend::new(
+            Arc::new(Rec {
+                reqs: Mutex::default(),
+            }),
+            all,
+            NativeConfig::default(),
+        )
+    };
+    let host = |denied: Vec<&'static str>| Host {
+        events: Mutex::default(),
+        started: AtomicUsize::new(0),
+        denied,
+    };
+    let all = spec("a", ToolSelection::All(AllTools::All));
+    let on = with(&["web_fetch"]);
+    assert!(on.offers_web_fetch(Some(&all), &host(vec![])));
+    assert!(on.offers_web_fetch(None, &host(vec![])));
+    // Not registered on this node.
+    assert!(!with(&[]).offers_web_fetch(Some(&all), &host(vec![])));
+    // The node's own policy refuses it.
+    assert!(!on.offers_web_fetch(Some(&all), &host(vec!["web_fetch"])));
+    // Not in this agent's list, or denied to it (an untrusted turn).
+    let reads = spec("r", list(&["read"]));
+    assert!(!on.offers_web_fetch(Some(&reads), &host(vec![])));
+    let mut denied = all.clone();
+    denied.deny_tools = vec!["web_fetch".into()];
+    assert!(!on.offers_web_fetch(Some(&denied), &host(vec![])));
+}

@@ -1114,12 +1114,13 @@ impl NativeBackend {
                         harness_tools::FOREGROUND_DESCRIPTION,
                         read_only,
                         agent,
+                        host,
                     ),
                     schema: harness_tools::foreground_schema(self.config.bash_timeout_max),
                 },
                 ("bash", true) => ToolSpec {
                     name: t.name().to_string(),
-                    description: self.shell_text(t.description(), read_only, agent),
+                    description: self.shell_text(t.description(), read_only, agent, host),
                     schema: t.schema_for(self.config.bash_timeout_max),
                 },
                 _ => ToolSpec {
@@ -1213,6 +1214,20 @@ impl NativeBackend {
         self.config.sandbox.read_only_shell()
     }
 
+    /// Whether `web_fetch` is offered to this agent in this turn: on the
+    /// node, in the agent's own list and not denied to it, and not refused
+    /// by node.toml's `denied_tools`. What the read-only shell's note may
+    /// send an agent to.
+    fn offers_web_fetch(
+        &self,
+        agent: Option<&harness_core::agent::AgentSpec>,
+        host: &dyn harness_core::backend::TurnHost,
+    ) -> bool {
+        agent.is_none_or(|a| a.allows_tool("web_fetch"))
+            && self.tools.iter().any(|t| t.name() == "web_fetch")
+            && !host.tool_denied("web_fetch")
+    }
+
     /// `bash`'s description, with what the read-only shell means (and its
     /// size on this node) added where it runs there.
     fn shell_text(
@@ -1220,12 +1235,12 @@ impl NativeBackend {
         description: &str,
         read_only: bool,
         agent: Option<&harness_core::agent::AgentSpec>,
+        host: &dyn harness_core::backend::TurnHost,
     ) -> String {
         if read_only {
             let size = self.config.sandbox.read_only_tmp();
             let net = self.config.sandbox.read_only_network();
-            let web = agent.is_none_or(|a| a.allows_tool("web_fetch"))
-                && self.tools.iter().any(|t| t.name() == "web_fetch");
+            let web = self.offers_web_fetch(agent, host);
             format!(
                 "{description} {}",
                 harness_tools::read_only_note(size, net, web)
