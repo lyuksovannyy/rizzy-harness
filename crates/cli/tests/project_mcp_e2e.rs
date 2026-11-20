@@ -10,7 +10,8 @@
 //! is repository content and part of what runs); the harness writes it
 //! into no event and no line of the server's log. The chat's shell can
 //! neither read nor write the node's approved copies; a `host` chat starts
-//! nothing.
+//! an entry without `env` values as the node's user (the owner, 2026-11-20)
+//! and refuses one with values.
 //!
 //! Needs bubblewrap and python3; with `HARNESS_REQUIRE_BWRAP=1` a node that
 //! offers no sandboxed chats fails the test.
@@ -220,7 +221,8 @@ async fn an_approved_repository_server_runs_inside_the_chats_sandbox() {
         "the chat wrote the approved copies"
     );
 
-    // A host chat starts nothing of the repository.
+    // A host chat has no bubblewrap: the entry with `env` values is not
+    // started there, and the chat is told which server and why.
     let host = s.post("/api/sessions", chat("host")).await["session_id"]
         .as_str()
         .unwrap()
@@ -240,7 +242,7 @@ async fn an_approved_repository_server_runs_inside_the_chats_sandbox() {
         e["kind"] == "error"
             && e["payload"]["message"]
                 .as_str()
-                .is_some_and(|m| m.contains("runs on the host"))
+                .is_some_and(|m| m.contains("`envy`") && m.contains("a host chat never has one"))
     }));
 
     // Nothing of the value in any event or in the server's log.
@@ -261,4 +263,122 @@ async fn an_approved_repository_server_runs_inside_the_chats_sandbox() {
         assert!(std::time::Instant::now() < by, "{:#?}", processes(&marker));
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
+}
+
+/// The owner's decision of 2026-11-20: a `host` chat starts an approved
+/// repository server, as the node's user, in the node's own PID namespace.
+/// What it leaves behind is what T47 says for node.toml's servers: the
+/// node's `kill -9` closes its input, so a server that reads its input
+/// ends with it, and one that does not stays (until stopped here by its
+/// pid); nothing of ours reaps it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_chat_runs_an_approved_repository_server_and_what_it_leaves() {
+    let (_dir, data, ws) = real::setup();
+    let toml = std::fs::read_to_string(data.join("node.toml")).unwrap();
+    std::fs::write(
+        data.join("node.toml"),
+        format!("{toml}\n[mcp]\nproject_servers = \"ask\"\n\n[execution]\nhost = true\n"),
+    )
+    .unwrap();
+    std::fs::copy(FAKE, ws.join("fake_mcp.py")).unwrap();
+    let id = harness_core::new_id();
+    let (ends, stays) = (format!("pmcp-ends-{id}"), format!("pmcp-stays-{id}"));
+    std::fs::write(
+        ws.join(".mcp.json"),
+        json!({"mcpServers": {
+            "ends": {"command": "python3", "args": ["fake_mcp.py", "--marker", ends]},
+            "stays": {"command": "python3",
+                      "args": ["fake_mcp.py", "--marker", stays, "--linger", "120"]},
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    let mut s = real::serve(&data);
+    s.as_member("owner").await;
+    let p = s.post("/api/projects", json!({"name": "Repo"})).await;
+    let pid = p["project_id"].as_str().unwrap().to_string();
+    s.patch(
+        &format!("/api/projects/{pid}"),
+        json!({"settings": {"node_id": "local", "cwd": ws.display().to_string()}}),
+    )
+    .await;
+    let l = s.get(&format!("/api/projects/{pid}/mcp")).await;
+    for e in l["entries"].as_array().unwrap() {
+        let (st, text) = s
+            .raw(
+                reqwest::Method::POST,
+                &format!("/api/projects/{pid}/mcp/approve"),
+                Some(json!({"name": e["name"], "digest": e["digest"]})),
+            )
+            .await;
+        assert!(st.is_success(), "{st} {text}\n{}", s.log());
+    }
+    let host = s
+        .post(
+            "/api/sessions",
+            json!({"project_id": pid, "profile": "agentic", "node_id": "local",
+                   "cwd": ws.display().to_string(), "exec_mode": "host",
+                   "approval_mode": "auto"}),
+        )
+        .await["session_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    // A turn that offers MCP tools starts the chat's servers.
+    s.post(
+        &format!("/api/sessions/{host}/prompt"),
+        json!({"text": "hello"}),
+    )
+    .await;
+    let evs = s
+        .wait_for(&host, |e| e.iter().any(|e| e["kind"] == "turn_ended"))
+        .await;
+    assert!(
+        !evs.iter().any(|e| e["kind"] == "error"),
+        "{evs:#?}\n{}",
+        s.log()
+    );
+    let by = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while processes(&ends).is_empty() || processes(&stays).is_empty() {
+        assert!(
+            std::time::Instant::now() < by,
+            "a host chat did not start both: {:#?}\n{}",
+            (processes(&ends), processes(&stays)),
+            s.log()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    // As the node's user, in no sandbox: no bubblewrap or guard above it.
+    for m in [&ends, &stays] {
+        let procs = processes(m);
+        assert_eq!(procs.len(), 1, "{procs:#?}");
+        assert!(procs[0].1.starts_with("python3 "), "{procs:#?}");
+    }
+    let stay = processes(&stays)[0].0;
+    // `kill -9` of the node (the test's own `serve` child, by its handle).
+    drop(s);
+    let by = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !processes(&ends).is_empty() {
+        assert!(
+            std::time::Instant::now() < by,
+            "a server that reads its input outlived the node: {:#?}",
+            processes(&ends)
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    let left = processes(&stays);
+    // Stopped by its pid, which this test read from /proc, before it asserts.
+    if let Some(l) = left.first() {
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(l.0),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+    assert_eq!(
+        left.iter().map(|l| l.0).collect::<Vec<_>>(),
+        vec![stay],
+        "T47 says a host chat's server can outlive a kill -9 of the node: one that does \
+         not read its input did not"
+    );
 }

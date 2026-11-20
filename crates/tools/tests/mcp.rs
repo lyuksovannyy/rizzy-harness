@@ -504,7 +504,7 @@ async fn a_repositorys_servers_come_and_go_through_set_project() {
     assert!(
         l.notes
             .iter()
-            .any(|n| n.contains("only in a contained sandbox")),
+            .any(|n| n.contains("env values") && n.contains("a host chat never has one")),
         "{:?}",
         l.notes
     );
@@ -515,6 +515,104 @@ async fn a_repositorys_servers_come_and_go_through_set_project() {
     );
     s.close();
     assert!(s.wait_gone(mcp::STOP_WAIT).await);
+}
+
+/// A refusal that nothing about the process can change (a repository's
+/// `env` values with no bubblewrap) is raised before anything is spawned:
+/// the note does not announce a restart, a second turn does not retry (the
+/// count stays where it was), and no process of the server ever ran.
+#[tokio::test]
+async fn a_refusal_that_will_not_change_is_not_counted_or_announced_as_a_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = SessionMcp::at_always(
+        &BTreeMap::new(),
+        mcp::Home {
+            key: "k".into(),
+            workspace: dir.path().to_path_buf(),
+            pin: None,
+        },
+    );
+    let started = dir.path().join("started");
+    let mut inside = server(&[
+        "--marker",
+        "norestart-refused",
+        "--started",
+        started.to_str().unwrap(),
+    ]);
+    inside.env = serde_json::from_value(json!({"PROJ_VALUE": "inside-only"})).unwrap();
+    inside.env_inside = true;
+    let mut given = BTreeMap::new();
+    given.insert("inside".to_string(), inside);
+    s.set_project(&given, vec![]);
+    let first = s.load(&ctx(&dir), &[]).await.notes;
+    let second = s.load(&ctx(&dir), &[]).await.notes;
+    let n = first
+        .iter()
+        .find(|n| n.contains("env values"))
+        .unwrap_or_else(|| panic!("no refusal note: {first:?}"));
+    assert!(
+        n.contains("Take the env values out of the entry")
+            && n.contains("will not change until the entry or the chat does"),
+        "{n}"
+    );
+    assert!(
+        !n.contains("started again") && !n.contains("restart"),
+        "a permanent refusal was announced as a restart: {n}"
+    );
+    // Told once: the second turn says nothing more and starts nothing.
+    assert!(second.is_empty(), "{second:?}");
+    assert!(pids(&started).is_empty(), "a refused server was spawned");
+    s.close();
+    assert!(s.wait_gone(mcp::STOP_WAIT).await);
+}
+
+/// What a server's stop reaches without a sandbox (a `host` chat's, and a
+/// node with no bubblewrap): its own process group. A process it detached
+/// (`setsid`, a double fork) is in a group of its own and survives the stop;
+/// the README and PLAN T47 and T82 say so. This test documents it (the
+/// reviewer's case of PR 190), and removes the survivor itself.
+#[tokio::test]
+async fn a_process_the_server_detached_survives_its_stop() {
+    let dir = tempfile::tempdir().unwrap();
+    let pidfile = dir.path().join("detached.pid");
+    let started = dir.path().join("started");
+    let launch = format!(
+        "setsid sh -c 'echo $$ > {pid}; exec sleep 7731' & exec python3 {fake} --started {started}",
+        pid = pidfile.display(),
+        fake = script(),
+        started = started.display(),
+    );
+    let cfg = ServerConfig {
+        args: vec!["-c".into(), launch],
+        ..ServerConfig::new("sh", &[])
+    };
+    let s = set(cfg);
+    let l = s.load(&ctx(&dir), &[]).await;
+    assert!(l.notes.is_empty(), "{:?}", l.notes);
+    let server_pid = pids(&started)[0];
+    let by = Instant::now() + Duration::from_secs(10);
+    let survivor = loop {
+        if let Some(p) = std::fs::read_to_string(&pidfile)
+            .ok()
+            .and_then(|t| t.trim().parse::<i32>().ok())
+        {
+            break p;
+        }
+        assert!(Instant::now() < by, "the detached process never started");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    s.close();
+    assert!(s.wait_gone(mcp::STOP_WAIT).await);
+    let survived = alive(survivor);
+    let server_gone = !alive(server_pid);
+    let _ = std::process::Command::new("kill")
+        .args(["-9", &survivor.to_string()])
+        .status();
+    assert!(server_gone, "the server itself outlived its stop");
+    assert!(
+        survived,
+        "a detached descendant was reached: this note and the README say it is not"
+    );
 }
 
 /// Review of PR 150 (LOW): a repository server taken out of the table
