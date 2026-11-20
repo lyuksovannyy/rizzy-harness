@@ -5,6 +5,7 @@ import "../lib/i18nPages";
 import { AtSign, Download, FileText, Image as ImageIcon, Package, Square, Trash2 } from "lucide-react";
 import { isValidElement, lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { api } from "../api";
+import { plansOf } from "../lib/planReview";
 import { pageApi } from "../apiPages";
 import { endWords, turnStart } from "../lib/callback";
 import { useCompact } from "../lib/compact";
@@ -75,6 +76,7 @@ const ExportChat = lazy(() => import("./ExportChat"));
 const TodoPanel = lazy(() => import("./TodoPanel"));
 // Plan mode's bar (X.7), loaded on the first chat in plan mode.
 const PlanBar = lazy(() => import("./PlanBar"));
+const PlanReview = lazy(() => import("./PlanReview"));
 
 /** Whether the chat has anything the side panel could list: its chunk loads
  * on the first sub-agent or background command. Cheap; builds no rows. */
@@ -490,6 +492,26 @@ export default function Conversation(props: {
   // that opened them (focus goes back to it on close).
   // Plan mode's bar: a send that failed after the mode changed.
   const [carryErr, setCarryErr] = useState<string | null>(null);
+  // The plan-review pane (PlanReview.tsx) over the chat, and what to focus when it closes.
+  const [reviewing, setReviewing] = useState(false);
+  const reviewOpener = useRef<HTMLElement | null>(null);
+  useEffect(() => setReviewing(false), [sessionId]);
+  const closePlanReview = () => {
+    setReviewing(false);
+    reviewOpener.current?.focus();
+  };
+  const plans = useMemo(() => plansOf(items, meta?.approval_mode), [items, meta?.approval_mode]);
+  // Switch the mode, then send the person's message (plan bar and review pane).
+  const carryOut = async (m: ApprovalMode, text: string) => {
+    setCarryErr(null);
+    await pageApi.setApprovalMode(sessionId, m);
+    stick.current = true;
+    // The bar is gone once the mode changed: a failed send is
+    // said here, where it stays.
+    await api.prompt(sessionId, text, {}).catch((x) => {
+      setCarryErr(`The mode changed, but "${text}" was not sent: ${x instanceof Error ? x.message : String(x)}`);
+    });
+  };
   // The person's pick: shown at once and held (the picker disabled) until
   // the server answered, one at a time so the last pick wins; dropped on a
   // refusal (said under the bar) or once the chat's row names an agent.
@@ -1041,20 +1063,46 @@ export default function Conversation(props: {
             <Suspense fallback={null}>
               <PlanBar
                 max={node.max_approval}
-                onCarry={async (m, text) => {
-                  setCarryErr(null);
-                  await pageApi.setApprovalMode(sessionId, m);
-                  stick.current = true;
-                  // The bar is gone once the mode changed: a failed send is
-                  // said here, where it stays.
-                  await api.prompt(sessionId, text, {}).catch((x) => {
-                    setCarryErr(`The mode changed, but "${text}" was not sent: ${x instanceof Error ? x.message : String(x)}`);
-                  });
-                }}
+                onCarry={carryOut}
+                onReview={
+                  plans.length
+                    ? () => {
+                        reviewOpener.current = document.activeElement as HTMLElement | null;
+                        setReviewing(true);
+                      }
+                    : undefined
+                }
               />
             </Suspense>
           )}
           {carryErr && <div className="error-text">{carryErr}</div>}
+          {reviewing && meta?.approval_mode === "plan" && node?.max_approval && (
+            <Suspense fallback={null}>
+              <PlanReview
+                key={sessionId}
+                sessionId={sessionId}
+                plans={plans}
+                running={running}
+                max={node.max_approval}
+                onCarry={carryOut}
+                onSend={(text) =>
+                  send({
+                    text,
+                    mode: "agentic",
+                    agentId: activeAgent,
+                    model: meta.model ?? "",
+                    effort: null,
+                    nodeId,
+                    cwd: meta.cwd ?? "",
+                    incognito: false,
+                    attachments: [],
+                    compareWith: null,
+                  })
+                }
+                onClose={closePlanReview}
+              />
+            </Suspense>
+          )}
           {pickErr && <div className="error-text">{pickErr}</div>}
           {subagentOnly ? (
             <div className="tag-only-row">
