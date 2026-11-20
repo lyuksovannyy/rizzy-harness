@@ -1353,31 +1353,46 @@ impl Store {
         Ok(n > 0)
     }
 
-    /// Every chat below `sid` (the sub-agents' chats it started, theirs in
-    /// turn, and so on), nearest first. Works from the children's own
-    /// `parent_id`, so it still answers once `sid`'s row is deleted. A node
-    /// cannot make a cycle (a parent is an earlier session of the node),
-    /// but the walk is bounded anyway. No index on `parent_id`: it runs
-    /// once per deleted chat, over one small row per chat.
-    pub fn sub_sessions(&self, sid: SessionId) -> Result<Vec<SessionId>> {
+    /// The chats below `sid` (the sub-agents' chats it started, theirs in
+    /// turn, and so on) that belong to `owner`, one list per depth, nearest
+    /// first. A chat with another owner is left out and so is everything
+    /// below it: `parent_id` alone says whose chat is whose only as far as
+    /// the node goes, and a delete cannot be undone. `owner` is `sid`'s own,
+    /// read by the caller before anything is deleted (`IS`: no owner matches
+    /// only chats with none). Works from the children's own `parent_id`, so
+    /// it still answers once `sid`'s row is deleted. A node cannot make a
+    /// cycle (a parent is an earlier session of the node), but the walk is
+    /// bounded anyway. No index on `parent_id`: before the first tagged
+    /// release a schema change makes every existing data directory unusable
+    /// (`migrate.rs`), and this is one query per deleted chat.
+    pub fn sub_sessions(&self, sid: SessionId, owner: Option<&str>) -> Result<Vec<Vec<SessionId>>> {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(
             "WITH RECURSIVE down(id, depth) AS (
-                 SELECT session_id, 1 FROM sessions WHERE parent_id = ?1
+                 SELECT session_id, 1 FROM sessions WHERE parent_id = ?1 AND owner_id IS ?2
                  UNION ALL
                  SELECT s.session_id, down.depth + 1 FROM sessions s JOIN down ON s.parent_id = down.id
-                 WHERE down.depth < 64)
-             SELECT id FROM down WHERE id != ?1 GROUP BY id ORDER BY MIN(depth), id",
+                 WHERE down.depth < 64 AND s.owner_id IS ?2)
+             SELECT id, MIN(depth) FROM down WHERE id != ?1 GROUP BY id ORDER BY MIN(depth), id",
         )?;
-        let ids = stmt
-            .query_map(params![sid.to_string()], |r| r.get::<_, String>(0))?
+        let rows = stmt
+            .query_map(params![sid.to_string(), owner], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        ids.into_iter()
-            .map(|s| {
-                s.parse()
-                    .map_err(|_| StoreError::Corrupt(format!("session id {s}")))
-            })
-            .collect()
+        let mut levels: Vec<Vec<SessionId>> = Vec::new();
+        let mut last = 0;
+        for (id, depth) in rows {
+            let id = id
+                .parse()
+                .map_err(|_| StoreError::Corrupt(format!("session id {id}")))?;
+            if depth != last {
+                levels.push(Vec::new());
+                last = depth;
+            }
+            levels.last_mut().expect("a level was just pushed").push(id);
+        }
+        Ok(levels)
     }
 
     /// The `seq` at which a second writer was caught, if one was.

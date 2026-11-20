@@ -738,14 +738,70 @@ fn sub_sessions_are_every_chat_below_one_also_once_it_is_deleted() {
         v
     };
 
-    let below = sorted(s.sub_sessions(top).unwrap());
-    assert_eq!(below, sorted(vec![kid, other_kid, grandkid]));
-    assert!(s.sub_sessions(grandkid).unwrap().is_empty());
-    assert_eq!(s.sub_sessions(plain).unwrap(), vec![strangers_kid]);
+    let levels = s.sub_sessions(top, Some("alice")).unwrap();
+    assert_eq!(levels.len(), 2, "one list per depth");
+    assert_eq!(sorted(levels[0].clone()), sorted(vec![kid, other_kid]));
+    assert_eq!(levels[1], vec![grandkid]);
+    assert!(s.sub_sessions(grandkid, Some("alice")).unwrap().is_empty());
+    assert_eq!(
+        s.sub_sessions(plain, Some("alice")).unwrap(),
+        vec![vec![strangers_kid]]
+    );
 
     // Its own row gone, the children still name it.
     assert!(s.delete_session(top, true).unwrap());
-    assert_eq!(sorted(s.sub_sessions(top).unwrap()), below);
+    assert_eq!(s.sub_sessions(top, Some("alice")).unwrap(), levels);
+}
+
+/// The cascade deletes by owner as well as by `parent_id`: a row planted
+/// under a chat with another owner (the parent link rests on the node alone,
+/// the owner on other code) is not listed, and the walk does not pass through
+/// it to the chats below it. It stays readable by its own owner after the
+/// parent is deleted.
+#[test]
+fn sub_sessions_skip_a_chat_of_another_owner_and_what_is_below_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("h.db");
+    let s = Store::open(&path, Durability::Full).unwrap();
+    let child_of = |parent: SessionId| {
+        let sid = SessionId::new();
+        s.append(
+            "n1",
+            &raw(sid, 1, "session_created", created_json("t", Some(parent))),
+        )
+        .unwrap();
+        sid
+    };
+    let top = chat_of(&s, "n1", "alice");
+    let kid = child_of(top);
+    let planted = child_of(top);
+    let below_planted = child_of(planted);
+    drop(s);
+    let rawdb = rusqlite::Connection::open(&path).unwrap();
+    for sid in [planted, below_planted] {
+        rawdb
+            .execute(
+                "UPDATE sessions SET owner_id = 'bob' WHERE session_id = ?1",
+                [sid.to_string()],
+            )
+            .unwrap();
+    }
+    drop(rawdb);
+    let s = Store::open(&path, Durability::Full).unwrap();
+
+    let flat = |v: Vec<Vec<SessionId>>| v.into_iter().flatten().collect::<Vec<_>>();
+    assert_eq!(flat(s.sub_sessions(top, Some("alice")).unwrap()), vec![kid]);
+    // Asked with the owner the root had, also once its row is gone.
+    assert!(s.delete_session(top, true).unwrap());
+    assert_eq!(flat(s.sub_sessions(top, Some("alice")).unwrap()), vec![kid]);
+    // A chat with no owner matches only chats with none.
+    assert!(s.sub_sessions(top, None).unwrap().is_empty());
+    for stays in [planted, below_planted] {
+        assert_eq!(
+            s.session(stays).unwrap().unwrap().owner_id.as_deref(),
+            Some("bob")
+        );
+    }
 }
 
 /// L-3. A node's title is cut to a few hundred characters in the row, so
