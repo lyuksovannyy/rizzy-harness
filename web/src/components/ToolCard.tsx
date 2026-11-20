@@ -259,7 +259,7 @@ export function ToolCard({
           <a className="child-link" href={`#/s/${child}`}>
             Open @{shownName(asText(item.input?.agent))} session{status === "running" ? " (approvals for its tools appear there)" : ""}
           </a>
-          <ChildModel sessionId={child} running={status === "running"} />
+          <ChildModel sessionId={child} running={status === "running"} done={!!item.result} />
           {status === "running" && <span className="muted small">· its progress is in the panel on the right</span>}
           {reported && (
             <span

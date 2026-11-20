@@ -38,29 +38,33 @@ export function childReport(output: string): { head: string; tail: string | null
   return { head: only === "(It wrote no report.)" ? "" : only, tail: null, cut: null };
 }
 
-/** How long a child's log may stay silent before it is let go: a session
- * the server does not know (or refuses) never answers, and must not stay
- * watched for as long as the card is on screen. */
+/** How long a child's log may stay silent, once its call has a result,
+ * before it is let go. While the call still runs the card keeps following
+ * (a slow model's first reply can take minutes); a session the server says
+ * it does not know (`Live.refused`) is let go at once. */
 export const GIVE_UP_MS = 10_000;
 
 /** The sub-agent's model, as its own chat's header names it: from the log
- * of that chat, read until the first event names it. */
-export function ChildModel({ sessionId, running }: { sessionId: string; running: boolean }) {
+ * of that chat, read until the first event names it. `done`: the delegate
+ * call has its result. */
+export function ChildModel({ sessionId, running, done }: { sessionId: string; running: boolean; done: boolean }) {
   const live = useContext(LiveCtx);
   const [model, setModel] = useState<string | null>(null);
   const [ref, wanted] = useFollow(running);
   const [gaveUp, setGaveUp] = useState(false);
-  const follow = wanted && model === null && !gaveUp;
+  const refused = !!live?.refused?.(sessionId);
+  const follow = wanted && model === null && !gaveUp && !refused;
   useEffect(() => {
     if (!live || !follow) return;
     live.watch(sessionId);
     return () => live.unwatch(sessionId);
   }, [live, follow, sessionId]);
+  // The timer runs only for a finished call whose child is still silent.
   useEffect(() => {
-    if (!follow) return;
+    if (!follow || !done) return;
     const id = setTimeout(() => setGaveUp(true), GIVE_UP_MS);
     return () => clearTimeout(id);
-  }, [follow]);
+  }, [follow, done]);
   const version = () => live?.version ?? 0;
   useSyncExternalStore((l) => (live ? live.subscribe(l) : () => {}), version, version);
   const seen = follow ? live?.view(sessionId)?.meta?.model : undefined;
@@ -79,7 +83,7 @@ const LONG_CHARS = 900;
 const LONG_LINES = 14;
 
 /** The report as an open message, cut with "Show all" when long. What is cut
- * off is `inert` (no focus, no links to tab to) until it is shown. */
+ * off cannot hold focus: a focus inside the clipped answer opens it. */
 export function ChildAnswer({ output, agent }: { output: string; agent: string }) {
   const { head, tail, cut } = childReport(output);
   const [all, setAll] = useState(false);
@@ -89,7 +93,8 @@ export function ChildAnswer({ output, agent }: { output: string; agent: string }
   const clipped = long && !all;
   return (
     <div className="child-answer">
-      <div className={`child-answer-text${clipped ? " clipped" : ""}`} inert={clipped}>
+      {/* Focus moving into what is cut off (a link reached by Tab) opens it. */}
+      <div className={`child-answer-text${clipped ? " clipped" : ""}`} onFocus={() => setAll(true)}>
         <Markdown text={head} done from={agent} />
         {/* The harness's words, apart from both halves of the report. */}
         {cut && <p className="muted small child-cut">{cut}</p>}

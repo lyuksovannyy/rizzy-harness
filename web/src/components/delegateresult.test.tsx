@@ -154,16 +154,27 @@ describe("a cut and a long report in the card", () => {
     expect(host.querySelector(".child-cut")!.tagName).toBe("P");
   });
 
-  test("what is cut off is inert (no focus order into it) until Show all, which is a real button", async () => {
+  test("nothing is inert while clipped; focus moving into the answer opens it; Show all is a real button", async () => {
     const long = Array.from({ length: 40 }, (_, i) => `line ${i} [link](https://docs.example/${i})`).join("\n\n");
     await show(delegate(output(long)));
     const text = host.querySelector(".child-answer-text") as HTMLElement;
-    expect(text.hasAttribute("inert")).toBe(true);
+    expect(text.classList.contains("clipped")).toBe(true);
+    expect(text.hasAttribute("inert")).toBe(false);
     const more = [...host.querySelectorAll("button")].find((b) => b.textContent === "Show all")!;
     expect(more.tagName).toBe("BUTTON");
     expect(more.getAttribute("aria-expanded")).toBe("false");
-    await act(async () => more.click());
-    expect(text.hasAttribute("inert")).toBe(false);
+    // A visible link still works while clipped (a click is not swallowed).
+    const link = text.querySelector("a")!;
+    const seen: Element[] = [];
+    const stop = (e: Event) => (seen.push(e.target as Element), e.preventDefault());
+    document.addEventListener("click", stop);
+    link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    document.removeEventListener("click", stop);
+    expect(seen).toEqual([link]);
+    expect(text.classList.contains("clipped")).toBe(true);
+    // Tab into a link: the answer opens, so nothing invisible holds focus.
+    await act(async () => void link.focus());
+    expect(text.classList.contains("clipped")).toBe(false);
     expect(more.getAttribute("aria-expanded")).toBe("true");
   });
 });
@@ -172,18 +183,35 @@ describe("the model's watch on the child's log", () => {
   /** A stub that counts the page's follows of each session. */
   function counting(viewOf: (watched: boolean) => SessionView | undefined) {
     let n = 0;
+    let refusing = false;
+    let ver = 1;
+    const listeners = new Set<() => void>();
     const live = {
       watch: vi.fn(() => void n++),
       unwatch: vi.fn(() => void n--),
       view: () => viewOf(n > 0),
-      subscribe: () => () => {},
-      version: 1,
+      refused: () => refusing,
+      subscribe: (l: () => void) => {
+        listeners.add(l);
+        return () => listeners.delete(l);
+      },
+      get version() {
+        return ver;
+      },
     } as unknown as Live;
-    return { live, count: () => n };
+    return {
+      live,
+      count: () => n,
+      refuse: () => {
+        refusing = true;
+        ver++;
+        listeners.forEach((l) => l());
+      },
+    };
   }
-  const tree = (live: Live) => (
+  const tree = (live: Live, item = delegate(output("answer"))) => (
     <LiveCtx.Provider value={live}>
-      <ToolCard sessionId="s" item={delegate(output("answer"))} />
+      <ToolCard sessionId="s" item={item} />
     </LiveCtx.Provider>
   );
 
@@ -215,5 +243,51 @@ describe("the model's watch on the child's log", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  test("a running call keeps following a slow child, which is named when it answers after 30 s", async () => {
+    vi.useFakeTimers();
+    try {
+      let at = 0;
+      const { live, count } = counting((w) => (w && at >= 30_000 ? childView("slow-model") : w ? emptyView() : undefined));
+      const running = delegate(null);
+      await act(async () => root.render(tree(live, running)));
+      for (const t of [10_000, 20_000, 29_000]) {
+        at = t;
+        await act(async () => void vi.advanceTimersByTime(t === 10_000 ? 10_000 : 10_000));
+      }
+      expect(count()).toBe(1);
+      expect(host.querySelector(".child-model")!.textContent).toBe("");
+      at = 30_000;
+      // A new render (the live layer notifies) reads the log that has arrived.
+      await act(async () => root.render(tree(live, { ...running, live_output: `session: ${CHILD}\nx` })));
+      await act(async () => root.render(tree(live, { ...running, live_output: `session: ${CHILD}\nxy` })));
+      expect(host.querySelector(".child-model")!.textContent).toBe("slow-model");
+      expect(count()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("a running call is never let go, however long the child is silent", async () => {
+    vi.useFakeTimers();
+    try {
+      const { live, count } = counting((w) => (w ? emptyView() : undefined));
+      await act(async () => root.render(tree(live, delegate(null))));
+      await act(async () => void vi.advanceTimersByTime(5 * 60_000));
+      expect(count()).toBe(1);
+      act(() => root.render(<div />));
+      expect(count()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("a chat the server says it does not know is let go at once, even while the call runs", async () => {
+    const { live, count, refuse } = counting((w) => (w ? emptyView() : undefined));
+    await act(async () => root.render(tree(live, delegate(null))));
+    expect(count()).toBe(1);
+    await act(async () => refuse());
+    expect(count()).toBe(0);
   });
 });
