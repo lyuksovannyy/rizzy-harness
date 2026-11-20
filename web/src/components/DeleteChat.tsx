@@ -25,6 +25,7 @@ export function DeleteChat(props: {
   const [files, setFiles] = useState<FromChat | null>(null);
   const [withMedia, setWithMedia] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
     const d = dialog.current;
@@ -50,11 +51,17 @@ export function DeleteChat(props: {
   };
   const confirm = async () => {
     setBusy(true);
-    // Its unsent draft goes with it (other tabs: pruneDrafts).
-    await pageApi
-      .deleteSession(sessionId, { media: withMedia && !!files?.n })
-      .then(() => dropDraft(sessionId))
-      .catch(() => {});
+    setErr(null);
+    // Its unsent draft goes with it (other tabs: pruneDrafts). A delete the
+    // server refused stays here with its reason: going home would look done.
+    try {
+      await pageApi.deleteSession(sessionId, { media: withMedia && !!files?.n });
+    } catch (x) {
+      setErr(x instanceof Error ? x.message : String(x));
+      setBusy(false);
+      return;
+    }
+    dropDraft(sessionId);
     location.hash = "#/";
   };
 
@@ -76,6 +83,11 @@ export function DeleteChat(props: {
             <input type="checkbox" checked={withMedia} onChange={(e) => setWithMedia(e.target.checked)} />
             <span>{mediaLine(files)}</span>
           </label>
+        )}
+        {err && (
+          <p className="error-text" role="alert">
+            {err}
+          </p>
         )}
         <div className="row end">
           <button type="button" autoFocus onClick={close}>
