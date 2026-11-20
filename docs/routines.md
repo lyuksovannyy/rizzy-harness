@@ -131,8 +131,10 @@ All routine time comes from one clock in the scheduler's handle (`Clock::wall()`
   ends `failed`, counted, when the retries run out. While the server stops, the scheduler
   starts nothing and **Run now** and webhook calls are answered 503 ("the server is stopping:
   try again once it is back") with no run recorded. In the first moments after a start,
-  **Run now** waits (up to five seconds) for the start-up pass that ends interrupted runs
-  and answers 503 ("routines are not running yet, try again") if it is not over.
+  **Run now** and a webhook call wait (up to five seconds) for the start-up pass that ends
+  interrupted runs and answer 503 ("routines are not running yet, try again") if it is not
+  over, with no run recorded and the call's `Idempotency-Key` unspent, so a sender that retries
+  is served.
 - **Losing access mid-run.** Agentic turns are cancelled by the existing revocation sweep and the
   run records `cancelled`; a chat-profile run finishes its current turn. Either way the next fire
   is blocked and pauses the routine.
@@ -229,7 +231,8 @@ curl -X POST 'http://127.0.0.1:7777/api/hooks/<trigger_id>' \
   | 5 | the routine disabled or paused, or webhooks off on the server | 409 |
   | 6 | the content type and body | 415, 400 |
   | 7 | the `Idempotency-Key` (at most 200 characters, kept as its SHA-256 for 24 h) | a repeat answers 202 `{run_id, duplicate: true}` with the first call's run |
-  | 8 | overlap and caps | 202 `{skipped: "overlap" \| "cap"}`, else 202 `{run_id}` |
+  | 8 | the start-up pass after a server start, waited for up to 5 s | 503 "routines are not running yet, try again"; nothing recorded, the sender retries |
+  | 9 | overlap and caps | 202 `{skipped: "overlap" \| "cap"}`, else 202 `{run_id}` |
 
   Every 429 has `Retry-After`. An unknown id and a wrong secret get the same 401 body. A key is
   remembered once its call started a run; a call skipped for overlap left nothing to repeat, so a

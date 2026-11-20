@@ -946,8 +946,18 @@ async fn block(m: &Master, r: &RoutineRow, run_id: Option<&str>, why: &str, now:
     changed(m, &r.owner_id);
 }
 
-/// How long "run now" waits for the start-up pass before it answers 503.
+/// How long "run now" and a webhook call wait for the start-up pass before
+/// they answer 503.
 const READY_WAIT: Duration = Duration::from_secs(5);
+
+/// Whether the start-up pass is over, waiting up to [`READY_WAIT`] for it.
+async fn wait_ready(h: &RoutinesHandle) -> bool {
+    let mut ready = h.ready.clone();
+    matches!(
+        tokio::time::timeout(READY_WAIT, ready.wait_for(|r| *r)).await,
+        Ok(Ok(_))
+    )
+}
 
 /// Run now: start a run of `r` that no trigger owns.
 pub(crate) enum Manual {
@@ -975,11 +985,7 @@ pub(crate) async fn run_now(m: &Master, r: &RoutineRow, sample: Option<Event>) -
     // The start-up pass ends every pending run as restarted: a run recorded
     // before it is over could be taken by it. Nothing is recorded until it
     // is (the tick waits the same way).
-    let mut ready = h.ready.clone();
-    if !matches!(
-        tokio::time::timeout(READY_WAIT, ready.wait_for(|r| *r)).await,
-        Ok(Ok(_))
-    ) {
+    if !wait_ready(h).await {
         return Manual::NotReady;
     }
     let run = NewRun {
@@ -1037,6 +1043,9 @@ pub enum Fired {
     Paused,
     /// The server is stopping: no run is recorded (review A19-2).
     Stopping,
+    /// The start-up pass is not over after [`READY_WAIT`]: nothing is
+    /// recorded, so the sender may call again.
+    NotReady,
     Failed,
 }
 
@@ -1048,6 +1057,12 @@ pub(crate) async fn fire_event(m: &Master, t: &TriggerRow, r: &RoutineRow, event
     };
     if m.is_stopping() {
         return Fired::Stopping;
+    }
+    // As in `run_now`: a run recorded before the start-up pass is over
+    // could be taken by it, and the call's `Idempotency-Key` would then
+    // be spent on a run that never ran.
+    if !wait_ready(h).await {
+        return Fired::NotReady;
     }
     let now = h.clock.now();
     let claim = NewRun {
@@ -1857,7 +1872,7 @@ mod run_now_ready_tests {
     use std::sync::atomic::AtomicI64;
 
     use harness_core::Secret;
-    use harness_store::routines::{NewRoutine, RoutineCaps};
+    use harness_store::routines::{NewRoutine, RoutineCaps, TriggerRow};
     use harness_store::{NewUser, Role, Store};
 
     use crate::auth::Auth;
@@ -1888,7 +1903,13 @@ mod run_now_ready_tests {
                     name: "R".into(),
                     enabled: true,
                     spec: r#"{"notify":"always"}"#.into(),
-                    triggers: vec![],
+                    triggers: vec![harness_store::routines::NewTrigger {
+                        trigger_id: "t1".into(),
+                        kind: "webhook".into(),
+                        config: "{}".into(),
+                        next_run_ms: None,
+                        secret_hash: Some("00".into()),
+                    }],
                 },
                 RoutineCaps {
                     per_user: 25,
@@ -1943,6 +1964,56 @@ mod run_now_ready_tests {
         let (m, row, _ready) = rig();
         let out = run_now(&m, &row, None).await;
         assert!(matches!(out, Manual::NotReady));
+        assert_eq!(m.inner_mirror().run_count("r").unwrap(), 0);
+    }
+
+    fn hook(m: &Master) -> (TriggerRow, RoutineRow) {
+        let store = m.inner_mirror();
+        let t = store.triggers("r").unwrap().remove(0);
+        (t, store.routine("r").unwrap().unwrap())
+    }
+
+    fn call() -> Event {
+        Event {
+            kind: "webhook",
+            data: json!({"body": {"text": "hi"}}),
+            dedupe_key: None,
+            size: 2,
+            sha256: "00".into(),
+        }
+    }
+
+    /// The webhook path has the same window as "Run now": a call in the
+    /// instant after a start must not write its run before the start-up
+    /// pass is over either.
+    #[tokio::test]
+    async fn a_webhook_writes_nothing_until_the_startup_pass_is_over() {
+        let (m, _row, ready) = rig();
+        let (m2, (t, r)) = (m.clone(), hook(&m));
+        let fired = tokio::spawn(async move { fire_event(&m2, &t, &r, call()).await });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let runs = m.inner_mirror().runs_page("r", None, 10).unwrap();
+        assert!(
+            runs.is_empty(),
+            "a run was written before the start-up pass: {runs:?}"
+        );
+        reconcile(&m, true).await;
+        ready.send(true).unwrap();
+        let _ = fired.await.unwrap();
+        let rows = m.inner_mirror().runs_page("r", None, 10).unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_ne!(rows[0].reason.as_deref(), Some(RESTARTED), "{:?}", rows[0]);
+    }
+
+    /// A start-up pass that does not end: the webhook answers not ready
+    /// after the bounded wait (the route makes it a 503 the sender retries)
+    /// and writes nothing.
+    #[tokio::test(start_paused = true)]
+    async fn a_webhook_answers_not_ready_after_a_bounded_wait() {
+        let (m, _row, _ready) = rig();
+        let (t, r) = hook(&m);
+        let out = fire_event(&m, &t, &r, call()).await;
+        assert!(matches!(out, Fired::NotReady));
         assert_eq!(m.inner_mirror().run_count("r").unwrap(), 0);
     }
 }

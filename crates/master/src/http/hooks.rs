@@ -144,6 +144,7 @@ async fn hook(
         Fired::Skipped(why) => answer(StatusCode::ACCEPTED, json!({ "skipped": why })),
         Fired::Paused => error(StatusCode::CONFLICT, PAUSED),
         Fired::Stopping => error(StatusCode::SERVICE_UNAVAILABLE, routines::STOPPING),
+        Fired::NotReady => error(StatusCode::SERVICE_UNAVAILABLE, routines::NOT_READY),
         Fired::Failed => error(StatusCode::INTERNAL_SERVER_ERROR, "could not start the run"),
     }
 }
