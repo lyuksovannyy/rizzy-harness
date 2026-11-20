@@ -787,10 +787,18 @@ an estimate of what it cost: `≈ $0.42 (last turn $0.03)`. The figures move
 after each model reply while a turn runs, not only when it ends (they are an
 estimate: the provider's own count for the whole turn replaces the running
 one when the turn ends, and a turn stopped by a restart keeps what it had
-reached). The chat's figure includes its sub-agents, but a foreground
-sub-agent's cost reaches the chat's header only when that sub-agent ends, not
-while it works (its own row in the side panel moves while it runs, and a row's
-share is a breakdown of what the header holds, not something to add). There is no built-in price table: prices change
+reached). The chat's figure includes its sub-agents. A foreground
+sub-agent's cost is written into the chat's own log only when that sub-agent
+ends, but the header already adds the running total of each foreground
+sub-agent of the turn that is working now (read from its own log, which this
+tab follows for the side panel), so a long delegate moves the header instead
+of freezing it and then jumping. Once the sub-agent has ended its cost comes
+through the chat's own figure and is not counted twice, and within a running
+turn the header never shows less than it showed (an instant where one log is
+ahead of the other holds the figure). Background sub-agents are not part of
+the turn and are not added while they run. A sub-agent's own sub-agents are
+not added while they run. A row in the side panel shows that sub-agent's own
+share, not something to add to the header. There is no built-in price table: prices change
 and only you know the deal you have, so a server admin sets them per model in
 Settings → Server → AI providers → Edit → **Prices (optional)**, per million
 tokens: input, cached input (read from the provider's prompt cache), cache
