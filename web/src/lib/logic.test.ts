@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { bucket, greeting } from "./greeting";
-import { activeMention, filterAgents, insertMention, isPathToken, leadingMention } from "./mentions";
+import { scanMentions, resolver } from "./mentionScan";
+import { matchedAlias, activeMention, filterAgents, insertMention, isPathToken, leadingMention } from "./mentions";
 import { fileMentions } from "./fileMentions";
 import { agenticBlockReason, cycleMode, enabledModes } from "./modes";
 import { buildSearchUrl } from "./searchUrl";
@@ -50,6 +51,27 @@ describe("mentions", () => {
     expect(filterAgents(agents, "w").map((a) => a.id)).toEqual(["writer"]);
     expect(filterAgents(agents, "").length).toBe(4);
     expect(filterAgents(agents, "SCO").map((a) => a.id)).toEqual(["scout"]);
+  });
+  it("finds an agent by an alias prefix; a name beats an alias of another agent", () => {
+    const list = [
+      { id: "coder", name: "Software Developer", aliases: ["dev", "swe"] },
+      { id: "writer", name: "Writer", aliases: ["scribe"] },
+      { id: "devops", name: "Ops", aliases: [] },
+      { id: "helper", name: "Dev Helper", aliases: ["devh"] },
+    ];
+    expect(filterAgents(list, "swe").map((a) => a.id)).toEqual(["coder"]);
+    expect(filterAgents(list, "SCR").map((a) => a.id)).toEqual(["writer"]);
+    // `dev`: an id prefix (devops), a name (Dev Helper, Software Developer), an alias (coder's own).
+    expect(filterAgents(list, "dev").map((a) => a.id)).toEqual(["devops", "coder", "helper"]);
+    expect(matchedAlias(list[0]!, "swe")).toBe("swe");
+    expect(matchedAlias(list[0]!, "soft")).toBeNull();
+    expect(matchedAlias(list[2]!, "dev")).toBeNull();
+  });
+  it("what a picked alias match inserts resolves to that agent in a message", () => {
+    const list = [{ id: "coder", name: "Software Developer", aliases: ["dev"] }];
+    const a = filterAgents(list, "de")[0]!;
+    const r = insertMention("@de", 0, 3, a.id);
+    expect(scanMentions(r.text + "hi", resolver(list)).called).toEqual(["coder"]);
   });
   it("inserts and places the caret after the mention", () => {
     expect(insertMention("@wr", 0, 3, "writer")).toEqual({ text: "@writer ", caret: 8 });

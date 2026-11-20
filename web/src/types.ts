@@ -511,6 +511,10 @@ export interface Agent {
   id: string;
   name: string;
   description: string;
+  /** More `@handles` beside the id (absent in older fixtures). */
+  aliases?: string[];
+  /** A short label the UI could group agents by (the server sends it; nothing groups by it yet). */
+  category?: string;
   builtin: boolean;
   /** The admin's default model for this agent (prefixed); null when it has no chain of its own. */
   default_model: string | null;
