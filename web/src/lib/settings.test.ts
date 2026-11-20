@@ -52,13 +52,13 @@ describe("visibleSections", () => {
   it("a harness admin gets Server, and no workspace powers from it", () => {
     const s = shape(viewer({ role: "admin" }));
     expect(Object.keys(s)).toEqual(["account", "workspace", "server"]);
-    expect(s.server).toEqual(["providers", "recall", "savings", "nodes", "users", "workspaces", "storage"]);
+    expect(s.server).toEqual(["providers", "recall", "savings", "nodes", "users", "workspaces", "storage", "usage"]);
   });
 
   it("the API token: no password, no workspace", () => {
     expect(shape(viewer({ user_id: null, role: "admin", workspace: null }))).toEqual({
       account: ["profile", "personalisation", "preferences", "memory"],
-      server: ["providers", "recall", "savings", "nodes", "users", "workspaces", "storage"],
+      server: ["providers", "recall", "savings", "nodes", "users", "workspaces", "storage", "usage"],
     });
   });
 });
