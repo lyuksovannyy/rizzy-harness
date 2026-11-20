@@ -1437,7 +1437,8 @@ fn log_env(spec: Option<&str>) -> tracing_subscriber::EnvFilter {
         Ok(e) => (e, spec.contains("genai")),
         Err(_) => (EnvFilter::new("info"), false),
     };
-    if named {
+    // Logging off stays off: the directive below would print errors.
+    if named || env.max_level_hint() == Some(tracing::level_filters::LevelFilter::OFF) {
         return env;
     }
     match format!("{GENAI_EMPTY_CHUNK}=error").parse() {
@@ -1631,6 +1632,10 @@ mod tests {
                 out.contains("ERROR-ONE") && out.contains("WARN-TWO") && out.contains("WARN-THREE"),
                 "{spec:?}: {out}"
             );
+        }
+        // Turned off, it stays off: no line of any kind, the target's errors too.
+        for spec in ["off", "OFF", "off,off"] {
+            assert_eq!(run(Some(spec)), "", "{spec}");
         }
         for spec in [
             "info,genai::adapter::adapters::openai::streamer=debug",

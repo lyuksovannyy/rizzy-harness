@@ -387,6 +387,14 @@ mod tests {
         std::fs::write(top.join("target"), format!("{a}\n")).unwrap();
         symlink(top.join("target"), git.join("refs/heads/l")).unwrap();
         assert_eq!(head_at(&top), None);
+        // A linked directory on the ref's path is not followed either.
+        let outside = d.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("x"), format!("{a}\n")).unwrap();
+        symlink(&outside, git.join("refs/heads/feat")).unwrap();
+        put("HEAD", "ref: refs/heads/feat/x\n");
+        assert_eq!(head_at(&top), None);
+        std::fs::remove_file(git.join("refs/heads/feat")).unwrap();
         // An oversized HEAD is unknown.
         put("HEAD", &"x".repeat(HEAD_AT_MAX as usize + 1));
         assert_eq!(head_at(&top), None);
