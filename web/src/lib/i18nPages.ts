@@ -46,7 +46,8 @@ export const pages = {
   "cost.hint":
     "An estimate at the prices the server's admin set, as they are now: not the bill. Price changes since, and discounts or charges only the provider knows of, are not in it.",
   "cost.noPrices": "No model this chat used has a price set.",
-  "cost.unpricedModels": "Not priced: {models} (no price set for a kind of token it used).",
+  "cost.unpricedModels": "Not priced, missing price in brackets: {models}.",
+  "cost.andMore": "{list} and {n} more",
   "cost.unattributed":
     "{n} tokens were not recorded under a model (a chat from an older version, or past the 16 models a chat tracks) and are not priced.",
   "conv.context": "context",

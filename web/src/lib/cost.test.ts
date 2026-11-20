@@ -170,4 +170,49 @@ describe("the header", () => {
   test("nothing when the server prices no model", () => {
     expect(costMeter(chat, turn, [info("p::big")], "en-US")).toBeNull();
   });
+
+  describe("the hint names the missing price", () => {
+    const hint = (u: Usage, models = MODELS) => costText(estimate(u, models), "en-US")!.hint;
+
+    test("a model missing only the cached-input price says so", () => {
+      const h = hint(usage({ "p::small": { input_tokens: 1000, output_tokens: 10, cache_read_tokens: 500 } }));
+      expect(h).toContain("p::small (cached input)");
+    });
+
+    test("each missing class is named; a model with no prices says so; a priced one is not listed", () => {
+      const h = hint(
+        usage({
+          "p::small": { input_tokens: 1000, output_tokens: 10, cache_read_tokens: 500, cache_write_tokens: 100 },
+          "p::free": { input_tokens: 5, output_tokens: 5 },
+          "p::big": { input_tokens: 10, output_tokens: 10 },
+        }),
+      );
+      expect(h).toContain("p::small (cached input, cache write)");
+      expect(h).toContain("p::free (no prices)");
+      expect(h).not.toContain("p::big");
+      // Only what the model used: unused classes are not named.
+      const only = hint(usage({ "p::small": { input_tokens: 10, output_tokens: 10, cache_write_tokens: 10 } }));
+      expect(only).toContain("(cache write)");
+      expect(only).not.toContain("cached input");
+    });
+
+    test("input and output are named when they are the gap", () => {
+      const half = info("p::half", { cached_input: 1 });
+      const h = hint(usage({ "p::half": { input_tokens: 100, output_tokens: 10, cache_read_tokens: 50 } }), [BIG, half]);
+      expect(h).toContain("p::half (input, output)");
+    });
+
+    test("a fully priced usage has no such hint", () => {
+      const c = costText(estimate(usage({ "p::big": { input_tokens: 100, output_tokens: 10, cache_read_tokens: 50 } }), MODELS), "en-US")!;
+      expect(c.hint).not.toContain("Not priced");
+    });
+
+    test("the list is capped and says how many more", () => {
+      const ids = ["a", "b", "c", "d", "e"].map((x) => `p::${x}`);
+      const by = Object.fromEntries(ids.map((id) => [id, { input_tokens: 10, output_tokens: 1 }]));
+      const h = hint(usage(by), [BIG, ...ids.map((id) => info(id))]);
+      expect(h).toContain("p::a (no prices), p::b (no prices), p::c (no prices) and 2 more");
+      expect(h).not.toContain("p::d");
+    });
+  });
 });

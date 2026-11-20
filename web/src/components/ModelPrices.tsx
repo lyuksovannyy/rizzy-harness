@@ -78,6 +78,7 @@ export function ModelPrices(props: {
           {props.models.map((id) => {
             const d = props.drafts[id] ?? draftOf(null);
             const r = priceOf(d);
+            const gap = (d.input.trim() !== "" || d.output.trim() !== "") && d.cached_input.trim() === "";
             return (
               <tr key={id}>
                 <th scope="row" className="mono small ellipsis">
@@ -93,6 +94,7 @@ export function ModelPrices(props: {
                       placeholder="—"
                       onChange={(e) => props.onChange(id, { ...d, [k]: e.target.value })}
                     />
+                    {k === "cached_input" && gap && <p className="muted small">Its cached tokens will show as unpriced until this is set.</p>}
                   </td>
                 ))}
                 {"error" in r && <td className="error-text small">{r.error}</td>}
