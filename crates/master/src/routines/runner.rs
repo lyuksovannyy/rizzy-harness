@@ -71,6 +71,10 @@ pub(crate) struct Bound {
     max_runtime_ms: i64,
     /// Recorded as timed out; its end only adds usage.
     timed_out: bool,
+    /// The latest `turn_usage` of this run's turn (its running total, as
+    /// JSON): the run's usage when the turn ends without one (interrupted,
+    /// stopped). One small value, dropped with the run.
+    last_usage: Option<String>,
 }
 
 /// A run waiting to try again after its node was offline: when, and the
@@ -686,6 +690,7 @@ async fn launch(m: Master, a: Admitted) {
             running_since: now,
             max_runtime_ms: i64::from(a.spec.max_runtime_min) * MINUTE,
             timed_out: false,
+            last_usage: None,
         },
     );
     let patch = RunPatch {
@@ -1107,6 +1112,7 @@ async fn on_event(m: &Master, e: &RawEvent) {
         "approval_requested" => approval(m, h, e.session_id, true).await,
         "approval_resolved" => approval(m, h, e.session_id, false).await,
         "turn_ended" => turn_ended(m, h, e).await,
+        "turn_usage" => turn_usage(h, e),
         _ => {}
     }
 }
@@ -1202,6 +1208,23 @@ async fn approval(m: &Master, h: &RoutinesHandle, sid: SessionId, asked: bool) {
     changed(m, &owner);
 }
 
+/// Remember the run's turn's running usage (X.39), for an end without one.
+/// Only the bound turn's counts; each replaces the last (the loop's totals
+/// only rise), so a run holds one small value.
+fn turn_usage(h: &RoutinesHandle, e: &RawEvent) {
+    let (Some(turn), Some(usage)) = (
+        e.payload.get("turn_id").and_then(Value::as_str),
+        e.payload.get("usage").filter(|u| u.is_object()),
+    ) else {
+        return;
+    };
+    if let Some(b) = lock(&h.bound).get_mut(&e.session_id)
+        && b.turn_id.as_deref() == Some(turn)
+    {
+        b.last_usage = Some(usage.to_string());
+    }
+}
+
 async fn turn_ended(m: &Master, h: &RoutinesHandle, e: &RawEvent) {
     let turn = e.payload.get("turn_id").and_then(Value::as_str);
     let b = {
@@ -1220,9 +1243,16 @@ async fn turn_ended(m: &Master, h: &RoutinesHandle, e: &RawEvent) {
 
 /// Record how the run's turn ended (`turn_ended` payload `end`).
 async fn finalize(m: &Master, b: &Bound, end: &Value) {
-    if let Some(usage) = end.get("usage").filter(|u| u.is_object()) {
+    // The end's usage wins; one without (interrupted, stopped) leaves the
+    // last running total, as the chat keeps it.
+    let usage = end
+        .get("usage")
+        .filter(|u| u.is_object())
+        .map(Value::to_string)
+        .or_else(|| b.last_usage.clone());
+    if let Some(usage) = usage {
         let patch = RunPatch {
-            usage: Some(usage.to_string()),
+            usage: Some(usage),
             ..Default::default()
         };
         let id = b.run_id.clone();
@@ -1387,6 +1417,7 @@ async fn reconcile_run(m: &Master, h: &RoutinesHandle, run: &RunRow, all: bool) 
         running_since: now,
         max_runtime_ms: i64::from(spec.max_runtime_min) * MINUTE,
         timed_out: false,
+        last_usage: None,
     });
     if b.turn_id.is_none() {
         b.turn_id = start
@@ -1535,5 +1566,259 @@ mod approval_tests {
             run_mode(ApprovalMode::Auto, false, false).min(ApprovalMode::Ask),
             ApprovalMode::Ask
         );
+    }
+}
+
+#[cfg(test)]
+mod run_usage_tests {
+    use super::*;
+    use std::sync::atomic::AtomicI64;
+
+    use harness_core::Secret;
+    use harness_store::routines::{NewRoutine, RoutineCaps};
+    use harness_store::{NewUser, Role, Store};
+
+    use crate::auth::Auth;
+    use crate::routines::{self, Clock};
+
+    const RUN: &str = "0193f1c2a4b57d6e8f90123456780001";
+
+    fn usage(input: u64, output: u64) -> Value {
+        json!({"input_tokens": input, "output_tokens": output, "context_tokens": input})
+    }
+
+    /// A master with one run bound to a chat whose turn `t` has started.
+    async fn rig() -> (Master, SessionId) {
+        let store = Store::open_in_memory().unwrap();
+        store
+            .create_user(&NewUser {
+                user_id: "u1".into(),
+                username: "u1".into(),
+                password_hash: "$argon2id$x".into(),
+                role: Role::Admin,
+                exec_ceiling: harness_core::policy::ExecLevel::None,
+                must_change_password: false,
+            })
+            .unwrap();
+        let ws = store.create_workspace("Team", "u1").unwrap().workspace_id;
+        store
+            .routine_create(
+                &NewRoutine {
+                    routine_id: "r".into(),
+                    workspace_id: ws,
+                    owner_id: "u1".into(),
+                    name: "R".into(),
+                    enabled: true,
+                    spec: r#"{"notify":"always"}"#.into(),
+                    triggers: vec![],
+                },
+                RoutineCaps {
+                    per_user: 25,
+                    per_workspace: 100,
+                },
+                1,
+            )
+            .unwrap();
+        let sid = SessionId::new();
+        let created = RawEvent {
+            session_id: sid,
+            seq: 1,
+            ts_ms: 0,
+            kind: "session_created".into(),
+            payload: json!({"title": "t", "cwd": "", "model": "m", "backend": "native",
+                "node_id": "n", "profile": "chat", "approval_mode": "ask"}),
+        };
+        store.append("n", &created).unwrap();
+        store
+            .run_start(&NewRun {
+                run_id: RUN.into(),
+                routine_id: "r".into(),
+                trigger_id: None,
+                trigger_kind: "manual".into(),
+                scheduled_ms: None,
+                started_ms: 10,
+                status: "pending".into(),
+                reason: None,
+                repeats: 1,
+                event: None,
+            })
+            .unwrap();
+        store
+            .run_update(
+                RUN,
+                &RunPatch {
+                    status: Some("running".into()),
+                    session_id: Some(sid.to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let m = Master::new(
+            store,
+            Auth::new(Secret::new("tok".into()), vec!["127.0.0.1:1".into()], false),
+        );
+        routines::start_with(&m, Clock::manual(Arc::new(AtomicI64::new(100))), false);
+        lock(&handle(&m).unwrap().bound).insert(
+            sid,
+            Bound {
+                run_id: RUN.into(),
+                routine_id: "r".into(),
+                owner: "u1".into(),
+                turn_id: None,
+                slot: None,
+                waiting_since: None,
+                running_since: 100,
+                max_runtime_ms: 60 * MINUTE,
+                timed_out: false,
+                last_usage: None,
+            },
+        );
+        (m, sid)
+    }
+
+    async fn emit(m: &Master, sid: SessionId, seq: u64, kind: &str, payload: Value) {
+        let e = RawEvent {
+            session_id: sid,
+            seq,
+            ts_ms: 0,
+            kind: kind.into(),
+            payload,
+        };
+        on_event(m, &e).await;
+    }
+
+    /// The run's usage as the record has it, as (input, output).
+    fn recorded(m: &Master) -> Option<(u64, u64)> {
+        let u = m.inner_mirror().run(RUN).unwrap().unwrap().usage?;
+        let u: Value = serde_json::from_str(&u).unwrap();
+        Some((
+            u["input_tokens"].as_u64().unwrap(),
+            u["output_tokens"].as_u64().unwrap(),
+        ))
+    }
+
+    /// A turn that ends without usage (interrupted, stopped) leaves the run
+    /// the last running total, as the chat keeps it (X.39); an end that
+    /// carries usage wins, as before.
+    #[tokio::test]
+    async fn a_run_keeps_the_last_running_usage_of_a_turn_that_ended_without_one() {
+        for reason in ["interrupted", "stopped", "cancelled"] {
+            let (m, sid) = rig().await;
+            emit(&m, sid, 2, "turn_started", json!({"turn_id": "t"})).await;
+            emit(
+                &m,
+                sid,
+                3,
+                "turn_usage",
+                json!({"turn_id": "t", "usage": usage(100, 10)}),
+            )
+            .await;
+            emit(
+                &m,
+                sid,
+                4,
+                "turn_usage",
+                json!({"turn_id": "t", "usage": usage(250, 30)}),
+            )
+            .await;
+            // Another turn's figure is not this run's.
+            emit(
+                &m,
+                sid,
+                5,
+                "turn_usage",
+                json!({"turn_id": "other", "usage": usage(9000, 900)}),
+            )
+            .await;
+            emit(
+                &m,
+                sid,
+                6,
+                "turn_ended",
+                json!({"turn_id": "t", "reason": reason}),
+            )
+            .await;
+            assert_eq!(recorded(&m), Some((250, 30)), "{reason}");
+            assert!(
+                lock(&handle(&m).unwrap().bound).is_empty(),
+                "dropped with the run"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_end_with_usage_wins_over_the_running_figure() {
+        let (m, sid) = rig().await;
+        emit(&m, sid, 2, "turn_started", json!({"turn_id": "t"})).await;
+        emit(
+            &m,
+            sid,
+            3,
+            "turn_usage",
+            json!({"turn_id": "t", "usage": usage(250, 30)}),
+        )
+        .await;
+        emit(
+            &m,
+            sid,
+            4,
+            "turn_ended",
+            json!({"turn_id": "t", "reason": "completed", "usage": usage(300, 40)}),
+        )
+        .await;
+        assert_eq!(recorded(&m), Some((300, 40)));
+    }
+
+    /// A `turn_usage` whose usage is not an object is ignored: the last
+    /// good value stays.
+    #[tokio::test]
+    async fn a_usage_that_is_not_an_object_keeps_the_last_good_one() {
+        let (m, sid) = rig().await;
+        emit(&m, sid, 2, "turn_started", json!({"turn_id": "t"})).await;
+        emit(
+            &m,
+            sid,
+            3,
+            "turn_usage",
+            json!({"turn_id": "t", "usage": usage(250, 30)}),
+        )
+        .await;
+        for (seq, bad) in [json!("lots"), json!(null), json!([1, 2]), json!(7)]
+            .into_iter()
+            .enumerate()
+        {
+            emit(
+                &m,
+                sid,
+                4 + seq as u64,
+                "turn_usage",
+                json!({"turn_id": "t", "usage": bad}),
+            )
+            .await;
+        }
+        emit(
+            &m,
+            sid,
+            9,
+            "turn_ended",
+            json!({"turn_id": "t", "reason": "interrupted"}),
+        )
+        .await;
+        assert_eq!(recorded(&m), Some((250, 30)));
+    }
+
+    #[tokio::test]
+    async fn a_turn_that_reported_nothing_records_no_usage() {
+        let (m, sid) = rig().await;
+        emit(&m, sid, 2, "turn_started", json!({"turn_id": "t"})).await;
+        emit(
+            &m,
+            sid,
+            3,
+            "turn_ended",
+            json!({"turn_id": "t", "reason": "interrupted"}),
+        )
+        .await;
+        assert_eq!(recorded(&m), None);
     }
 }

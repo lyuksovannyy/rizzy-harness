@@ -51,6 +51,7 @@ import { CostMeter } from "./CostMeter";
 import { RetryNote } from "./RetryNote";
 import { TurnStatus, turnState } from "./TurnStatus";
 import { type Outgoing, outbox } from "../lib/outbox";
+import { useHeaderFigures } from "../lib/childcost";
 import { LiveCtx } from "../lib/liveCtx";
 import { repliedBlock, ReplyBubble } from "./ReplyBubble";
 import { ToolCard, WebGroupCard } from "./ToolCard";
@@ -279,6 +280,8 @@ export default function Conversation(props: {
     return () => live.unwatch(sessionId);
   }, [live, sessionId]);
   const view = live.view(sessionId);
+  // The header's figures: the log's, plus the running foreground sub-agents'.
+  const figures = useHeaderFigures(live, sessionId, view, props.models);
   /** One item, in its own boundary: a row that throws costs that row, not the chat (RowBoundary). */
   const row = (it: Item, i: number, draw: () => ReactNode) => {
     let el: ReactNode;
@@ -483,17 +486,17 @@ export default function Conversation(props: {
             {agentic && <NodeBadge node={node} nodeId={nodeId} />}
             {agentic && <ExecBadge mode={meta?.exec_mode} node={node} />}
             {agentic && <span className="mono muted ellipsis">{shownName(meta?.cwd ?? "")}</span>}
-            {view && view.usage.input_tokens + view.usage.output_tokens > 0 && (
+            {view && figures && figures.usage.input_tokens + figures.usage.output_tokens > 0 && (
               <span
                 className="muted meter"
-                title={`${view.usage.input_tokens.toLocaleString()} in · ${view.usage.output_tokens.toLocaleString()} out${
-                  view.usage.cache_read_tokens
-                    ? ` · ${view.usage.cache_read_tokens.toLocaleString()} of the input read from the provider's cache`
+                title={`${figures.usage.input_tokens.toLocaleString()} in · ${figures.usage.output_tokens.toLocaleString()} out${
+                  figures.usage.cache_read_tokens
+                    ? ` · ${figures.usage.cache_read_tokens.toLocaleString()} of the input read from the provider's cache`
                     : ""
                 }`}
               >
-                {compact(view.usage.input_tokens + view.usage.output_tokens)} {t("conv.tokens")} ·{" "}
-                <CostMeter usage={view.usage} turn={view.turn_usage} models={props.models} />
+                {compact(figures.usage.input_tokens + figures.usage.output_tokens)} {t("conv.tokens")} ·{" "}
+                <CostMeter usage={figures.costUsage} turn={figures.costTurn} models={props.models} />
                 <ContextMeter used={view.context_tokens} window={view.context_window} summaryAt={view.summary_at} model={view.context_model ?? meta?.model ?? ""} />
               </span>
             )}
