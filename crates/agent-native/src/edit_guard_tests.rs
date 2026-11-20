@@ -404,6 +404,77 @@ async fn a_line_form_edit_works_across_turns_and_after_a_restart_is_refused_with
     );
 }
 
+/// A search's tag holds within the turn: the line edit of a matched row lands
+/// with no `read`. The next turn's table is rebuilt from the log, which names
+/// no hash for a search, so the tag is unknown then: the rows are printed and
+/// the resend works (the same as after a restart).
+#[tokio::test]
+async fn a_search_tag_holds_within_the_turn_and_is_unknown_in_the_next() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("f.txt");
+    let text = "one\ntwo\nthree\nfour\n";
+    std::fs::write(&f, text).unwrap();
+    let tag = harness_tools::seen::tag(&harness_tools::seen::sha256(text.as_bytes()));
+    let sid = harness_core::SessionId::new();
+    let b = backend();
+    let mut log = Vec::new();
+    let edit = |n: usize, to: &str| {
+        call(
+            "edit",
+            json!({"path": "f.txt", "tag": tag, "lines": [{"from": n, "to": n, "text": to}]}),
+        )
+    };
+    let ev = turn(
+        &b,
+        sid,
+        &log,
+        dir.path(),
+        json!([call("grep", json!({"pattern": "two"})), edit(2, "TWO")]),
+    )
+    .await;
+    let r = results(&ev);
+    assert!(
+        r[0].output.contains(&format!("[f.txt#{tag}]")),
+        "{}",
+        r[0].output
+    );
+    assert!(r[1].ok, "{}", r[1].output);
+    assert_eq!(
+        std::fs::read_to_string(&f).unwrap(),
+        "one\nTWO\nthree\nfour\n"
+    );
+    append(&mut log, sid, ev);
+    // The next turn: the table is the log's, and the log holds no search.
+    std::fs::write(&f, text).unwrap();
+    let ev = turn(
+        &b,
+        sid,
+        &log,
+        dir.path(),
+        json!([call("grep", json!({"pattern": "two"}))]),
+    )
+    .await;
+    append(&mut log, sid, ev);
+    let ev = turn_open(&b, sid, &log, dir.path(), json!([edit(2, "TWO")])).await;
+    let r = results(&ev);
+    assert!(
+        !r[0].ok && r[0].output.contains("\ttwo\n"),
+        "{}",
+        r[0].output
+    );
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), text);
+    let ev = turn_open(
+        &b,
+        sid,
+        &log,
+        dir.path(),
+        json!([edit(2, "TWO"), edit(2, "TWO")]),
+    )
+    .await;
+    let r = results(&ev);
+    assert!(!r[0].ok && r[1].ok, "{} / {}", r[0].output, r[1].output);
+}
+
 /// A host that asks (no call runs unasked) and keeps what it was given with
 /// each request: the preview of the person's card.
 #[derive(Default)]

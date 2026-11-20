@@ -2524,7 +2524,19 @@ overlap, and every row you name must have been shown to the agent (by `read`,
 an edit's result or a refusal; a row `read` showed cut with `…` cannot be
 named: use `old_string` for it). A tag the session does not know (a new
 session, a restart, a version dropped from memory), or rows not shown, make
-the call refuse and print those rows, which then count as shown. If the file
+the call refuse and print those rows, which then count as shown. The rows a
+`grep` printed in full count as shown too: each file with matches is headed
+`[path#TAG]` as `read` heads it, so a row from the results can be changed with
+no `read` (at most 16 files and 1 MiB of file text per search get a tag; a
+file listed without one must be read; a matched row cut for length is not
+shown; a result holds about 29,000 characters, and matched rows it leaves out,
+which it says it did, are not shown either; the tag holds for the turn, then a
+refusal prints the rows and the call is sent again). The same limit holds for
+every result that prints rows: only rows in the text the model receives count.
+A search shows rows, it is not a `read`: `write` over the file and
+`replace_all` still ask for one, and an agent that has `grep` and `edit` but not
+`read` can now change a file at the rows a search printed (before, only files it
+had written itself). If the file
 changed since the tag, the edit is made only where the rows it replaces did
 not change and are still one run of rows (a row someone inserted into the range
 since the tag refuses the call, with the rows as they are: replacing it would
@@ -2536,7 +2548,11 @@ list of strings is a list of lines, one per string (an empty list is refused);
 (send the same number twice for one row), and so is a missing `text` (`"text":
 ""` deletes the rows). A call without `tag` is refused with the rows it names
 and the file's current tag. `old_string` and the line form cannot be given together. The tag is
-a lookup key, not a secret.
+a lookup key, not a secret. It is normally four hex characters; when two versions of one
+file in a session would have the same four, the later one's is longer (five or more), and
+the tag is sent whole, as the header printed it. A tag names the version it was printed
+for, never another one, for the whole session: a version that was dropped from memory is
+unknown, not mistaken for a newer one.
 The header names the file as the agent addresses it: relative to the chat's
 folder when the file is inside it. When a line edit asks for approval, its card
 lists the rows it replaces (or where it inserts) under "Rows this changes",
@@ -2806,9 +2822,11 @@ delays Stop or an approval answer, in that chat or any other.
   nothing. The agent's own edits and writes count as seen. Viewing a file
   with `cat` in `bash` does not count (commands are not parsed), but an
   `edit` of a file not read yet is answered with the lines around the
-  first match of its `old_string`, numbered as `read` shows them, and that
-  counts as having read the file as it was at that moment: the same edit
-  sent again goes through, unless the file changes first. This holds for
+  first match of its `old_string`, numbered as `read` shows them, and those
+  lines count as shown (the file does not count as read): the same edit
+  sent again goes through if its text lies in them, unless the file changes
+  first; `write` over the file, an edit elsewhere in it, `replace_all` and
+  several edits still ask for a `read`. This holds for
   the rest of the turn; the next turn asks for a `read` again. Only for
   one edit without `replace_all` (several edits or every match would change
   lines the agent was not shown), for a file `read` would show (not one it
