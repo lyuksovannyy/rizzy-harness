@@ -263,7 +263,7 @@ async fn fetches_vouched_only_by_a_page_are_capped_per_turn() {
     let mine = format!("{base}/page?mine=1");
     let found = format!("{base}/page?found=1");
     let c = ctx_with_pages(&[&format!("see {mine}"), &format!("hit {found}")], &[&page]);
-    for i in 0..harness_web::MAX_PAGE_VOUCHED_FETCHES {
+    for i in 0..20 {
         let o = f.run(&c, json!({"url": page})).await;
         assert!(o.ok, "fetch {i}: {}", o.output);
     }
