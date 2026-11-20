@@ -43,6 +43,8 @@ export interface Activity {
   waiting: boolean;
   /** Its cost estimate's words, when the server prices models (and given). */
   cost?: string | null;
+  /** Why part of it is not priced (the chat header's hover words); null when fully priced. */
+  costHint?: string | null;
 }
 
 /** Pure, for tests. */
@@ -56,13 +58,16 @@ export function activityOf(v: SessionView, models?: ModelInfo[]): Activity {
     }
   }
   const tokens = v.usage.input_tokens + v.usage.output_tokens;
+  const priced = models && tokens > 0 && pricesSet(models) ? estimate(v.usage, models) : null;
+  const cost = priced ? costText(priced) : null;
   return {
     tools,
     tokens: tokens > 0 ? tokens : null,
     last: last ? callWords(last) : null,
     running: v.running_turn !== null,
     waiting: v.pending_approvals.length > 0,
-    cost: models && tokens > 0 && pricesSet(models) ? (costText(estimate(v.usage, models))?.text ?? null) : null,
+    cost: cost?.text ?? null,
+    costHint: priced && priced.unpricedTokens > 0 ? (cost?.hint ?? null) : null,
   };
 }
 
@@ -121,7 +126,7 @@ export function SubagentActivity({
   models?: ModelInfo[];
 }) {
   const live = useContext(LiveCtx);
-  const [frozen, setFrozen] = useState<string | null>(null);
+  const [frozen, setFrozen] = useState<{ words: string; hint: string | null } | null>(null);
   const [ref, wanted] = useFollow(running);
   const follow = wanted && frozen === null;
   useEffect(() => {
@@ -133,23 +138,25 @@ export function SubagentActivity({
   useSyncExternalStore((l) => (live ? live.subscribe(l) : () => {}), version, version);
   const v = follow ? live?.view(sessionId) : undefined;
   // Nothing until its log arrives: an unknown or refused session shows no line.
-  const words = v && v.head_seq > 0 ? activityWords(activityOf(v, models)) : null;
+  const act = v && v.head_seq > 0 ? activityOf(v, models) : null;
+  const words = act ? activityWords(act) : null;
+  const hint = act?.costHint ?? null;
   const loaded = !running && !!v && v.head_seq > 0;
   const head = v?.head_seq ?? 0;
   useEffect(() => {
     if (!loaded || words === null) return;
     if (v && settled(v)) {
-      setFrozen(words);
+      setFrozen({ words, hint });
       return;
     }
     // A child whose log never shows its end (its turn was cut off): once
     // the replay has stopped moving, what it shows is all there is.
-    const id = setTimeout(() => setFrozen(words), QUIET_MS);
+    const id = setTimeout(() => setFrozen({ words, hint }), QUIET_MS);
     return () => clearTimeout(id);
   }, [loaded, words, head]);
   return (
-    <span ref={ref} className="child-activity muted" aria-live="polite">
-      {frozen ?? words}
+    <span ref={ref} className="child-activity muted" aria-live="polite" title={(frozen ? frozen.hint : hint) ?? undefined}>
+      {frozen ? frozen.words : words}
     </span>
   );
 }
