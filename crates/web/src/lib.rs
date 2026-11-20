@@ -16,8 +16,15 @@
 //! the model's citations to links it did not write.
 
 pub mod favicon;
-mod scan;
+mod plain;
 mod sources;
+mod tree;
+
+/// Depth and node count of a parsed tree (for the cost measurement test).
+#[doc(hidden)]
+pub fn tree_measure(doc: &dom_query::Document) -> (usize, usize) {
+    tree::measure(doc, usize::MAX, usize::MAX)
+}
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -49,13 +56,19 @@ pub const MAX_QUERY_CHARS: usize = 400;
 /// The most bytes of a page handed to the readability pass (it is the
 /// slowest parser; a larger page is read by `html2text`).
 const READABILITY_MAX: usize = 256 * 1024;
-/// The most bytes of a page handed to any tree-building parser; a larger
-/// page is read as plain text.
+/// The most bytes of a page handed to any tree-building parser (memory); a
+/// larger page, or one with too many start tags, is read as plain text.
 const DOM_MAX: usize = 1024 * 1024;
-/// How long the caller waits for a parse. The scan and the caps above keep a
-/// parse far under this; it is the last guard, and a parse that overruns it
-/// is abandoned (its thread ends when it ends).
+/// How long the caller waits for a parse. The depth and node limits and the
+/// caps above keep a parse far under this; it is a backstop only: a parse
+/// that overruns it is abandoned, and keeps its slot until its thread ends.
 const PARSE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Pages that may be parsed at once, in the whole process. The slot belongs
+/// to the parse thread and is freed when that thread ends, never when a
+/// caller stops waiting, so abandoned parses cannot pile up.
+const PARSE_SLOTS: usize = 2;
+/// How long a fetch waits for a slot before it says the node is busy.
+const SLOT_WAIT: Duration = Duration::from_secs(5);
 /// Parsers recurse per level of nesting: they run on a thread with a stack
 /// of their own, never on an async worker.
 const PARSE_STACK: usize = 128 * 1024 * 1024;
@@ -274,24 +287,111 @@ pub fn readable_markdown(html: &str, url: &str) -> Option<(String, String)> {
     Some((md.to_string(), article.title.trim().to_string()))
 }
 
-/// Run a parse on a thread of its own with a large stack, and wait for it
-/// for at most [`PARSE_TIMEOUT`].
+static SLOTS: std::sync::LazyLock<Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| Arc::new(tokio::sync::Semaphore::new(PARSE_SLOTS)));
+
+/// Test hooks (milliseconds; 0 = the real value): a delay inside the parse
+/// thread, the wait for a result, and the wait for a slot. Never set outside
+/// tests of the slot limit.
+#[doc(hidden)]
+pub static TEST_PARSE_DELAY_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[doc(hidden)]
+pub static TEST_PARSE_WAIT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[doc(hidden)]
+pub static TEST_SLOT_WAIT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn hooked(hook: &std::sync::atomic::AtomicU64, real: Duration) -> Duration {
+    match hook.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => real,
+        ms => Duration::from_millis(ms),
+    }
+}
+
+/// Run a parse on a thread of its own with a large stack, in one of
+/// [`PARSE_SLOTS`] slots, and wait for it for at most [`PARSE_TIMEOUT`]. The
+/// slot is moved into the thread: it is freed when the parse really ends.
 async fn on_parse_thread<T: Send + 'static>(
     f: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, String> {
+    let permit = match tokio::time::timeout(
+        hooked(&TEST_SLOT_WAIT_MS, SLOT_WAIT),
+        SLOTS.clone().acquire_owned(),
+    )
+    .await
+    {
+        Ok(Ok(p)) => p,
+        _ => {
+            return Err("busy reading other pages; try this page again in a moment".into());
+        }
+    };
     let (tx, rx) = tokio::sync::oneshot::channel();
     std::thread::Builder::new()
         .name("page-parse".into())
         .stack_size(PARSE_STACK)
         .spawn(move || {
+            let _slot = permit;
+            let delay = TEST_PARSE_DELAY_MS.load(std::sync::atomic::Ordering::Relaxed);
+            if delay > 0 {
+                std::thread::sleep(Duration::from_millis(delay));
+            }
             let _ = tx.send(f());
         })
         .map_err(|e| format!("cannot read this page: {e}"))?;
-    match tokio::time::timeout(PARSE_TIMEOUT, rx).await {
+    match tokio::time::timeout(hooked(&TEST_PARSE_WAIT_MS, PARSE_TIMEOUT), rx).await {
         Ok(Ok(v)) => Ok(v),
         Ok(Err(_)) => Err("this page could not be read".into()),
         Err(_) => Err("this page took too long to read".into()),
     }
+}
+
+/// A page's text, or why it is not read.
+enum Read {
+    Text(String, Option<String>),
+    Refused(String),
+}
+
+/// A page that fits a tree: parse it once with the readability pass's own
+/// parser, measure the finished tree, and only then run anything that is
+/// quadratic in depth on it.
+fn read_tree(body: &[u8], url: &str, readable: bool) -> Read {
+    let html = String::from_utf8_lossy(body);
+    let doc = dom_query::Document::from(&*html);
+    match tree::check(&doc) {
+        tree::Shape::Ok => {}
+        tree::Shape::TooDeep => {
+            return Read::Refused(format!(
+                "this page is nested too deeply to read (more than {} levels of elements)",
+                tree::MAX_NESTING
+            ));
+        }
+        tree::Shape::TooMany => {
+            return Read::Refused(format!(
+                "this page has too many elements to read (more than {})",
+                tree::MAX_NODES
+            ));
+        }
+    }
+    if readable
+        && body.len() <= READABILITY_MAX
+        && let Some((md, title)) = readable_from_doc(doc, url)
+    {
+        return Read::Text(md, Some(title));
+    }
+    // Rendering fails where nesting leaves no width for the text: read it as
+    // plain text then.
+    let text = html2text::from_read(body, 100).unwrap_or_else(|_| plain::plain_text(body));
+    Read::Text(text, sources::html_title(body))
+}
+
+fn readable_from_doc(doc: dom_query::Document, url: &str) -> Option<(String, String)> {
+    let mut r = dom_smoothie::Readability::with_document(doc, Some(url), None).ok()?;
+    let article = r.parse().ok()?;
+    let md = htmd::convert(&article.content).ok()?;
+    let md = md.trim();
+    if md.chars().count() < 200 {
+        return None;
+    }
+    Some((md.to_string(), article.title.trim().to_string()))
 }
 
 /// A page as text, with the title the page gives itself (if any).
@@ -331,43 +431,20 @@ async fn read_page(resp: reqwest::Response, readable: bool) -> Result<Page, Stri
         body.extend_from_slice(&chunk);
     }
     let (text, title) = if html {
-        // Before any parser: a page nested deeper than a parser can bear is
-        // refused; one that is too large for a tree, or built to confuse
-        // the scan, is read as plain text (no tree).
-        let verdict = scan::check(&body);
-        if verdict == scan::Verdict::TooDeep {
-            return Err(format!(
-                "this page is nested too deeply to read (more than {} levels of elements)",
-                scan::MAX_NESTING
-            ));
-        }
-        let tree = verdict == scan::Verdict::Ok && body.len() <= DOM_MAX;
-        let extracted = if readable && tree && body.len() <= READABILITY_MAX {
-            let (b, u) = (
-                String::from_utf8_lossy(&body).into_owned(),
-                page_url.clone(),
-            );
-            on_parse_thread(move || readable_markdown(&b, &u)).await?
+        let (b, u) = (body.clone(), page_url.clone());
+        // Handed to the tree builder only if it holds no more start tags than
+        // its worst-case time allows (`tree::MAX_START_TAGS`).
+        let read = if body.len() <= DOM_MAX && tree::start_tag_bound(&body) <= tree::MAX_START_TAGS
+        {
+            on_parse_thread(move || read_tree(&b, &u, readable)).await?
         } else {
-            None
+            // Too large for a tree: plain text, no parser at all.
+            on_parse_thread(move || Read::Text(plain::plain_text(&b), sources::html_title(&b)))
+                .await?
         };
-        match extracted {
-            Some((md, title)) => (md, Some(title)),
-            None => {
-                let b = body.clone();
-                let text = on_parse_thread(move || {
-                    // A tree that cannot be rendered (nesting that leaves no
-                    // width for the text) is read as plain text instead.
-                    let rendered = if tree {
-                        html2text::from_read(&b[..], 100).ok()
-                    } else {
-                        None
-                    };
-                    Ok::<String, String>(rendered.unwrap_or_else(|| scan::plain_text(&b)))
-                })
-                .await??;
-                (text, sources::html_title(&body))
-            }
+        match read {
+            Read::Text(text, title) => (text, title),
+            Read::Refused(why) => return Err(why),
         }
     } else {
         (String::from_utf8_lossy(&body).into_owned(), None)

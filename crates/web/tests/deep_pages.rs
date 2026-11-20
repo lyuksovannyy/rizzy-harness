@@ -40,32 +40,90 @@ fn page(open: &str, n: usize) -> String {
     format!("<html><body>{}text</body></html>", open.repeat(n))
 }
 
-/// Deep nesting is refused with a plain sentence, whatever the tag, for the
-/// all-text path and the readability path; the time is generous (assert on
-/// the refusal, not the speed).
+/// Documents that hide their depth from any reading of the markup but the
+/// real tree builder's: each class is a reduced reproducer of how a
+/// hand-written scan disagreed with html5ever (review of PR 179, round 2).
+/// `n` repeats the unit; the tree is thousands of levels deep at `n` = 3,000.
+fn classes(n: usize) -> Vec<(&'static str, String)> {
+    let r = |pre: &str, unit: &str| format!("<html><body>{pre}{}x</body></html>", unit.repeat(n));
+    vec![
+        ("plain divs", r("", "<div>")),
+        (
+            "noscript is markup with scripting off",
+            r("<noscript>", "<div>"),
+        ),
+        (
+            "foreignObject is an integration point",
+            r("<svg><foreignObject>", "<section/>"),
+        ),
+        (
+            "math mi is an integration point",
+            r("<math><mi>", "<article/>"),
+        ),
+        ("math mtext", r("<math><mtext>", "<section/>")),
+        ("svg desc", r("<svg><desc>", "<span/>")),
+        (
+            "foreignObject self-closing",
+            r("<svg><foreignObject>", "<div/>"),
+        ),
+        ("optgroup nests", r("", "<optgroup>")),
+        ("tbody in math nests", r("<math>", "<tbody>")),
+        ("td in svg nests", r("<svg>", "<td>")),
+        ("option in svg nests", r("<svg>", "<option>")),
+        (
+            "raw-text elements ignored in some modes",
+            format!("<frameset><xmp>{}", "<frameset>".repeat(n)),
+        ),
+        (
+            "frameset iframe",
+            format!("<frameset><iframe>{}", "<frameset>".repeat(n)),
+        ),
+        (
+            "font breaks out only with attributes",
+            r("<svg><font><style>", "<g>"),
+        ),
+        ("math font iframe", r("<math><font><iframe>", "<mrow>")),
+        ("close svg truncating too far", r("", "<svg><div></svg>")),
+        ("math ul", r("", "<math><ul><ul></math>")),
+        ("table td nest", r("", "<table><tr><td>")),
+        (
+            "closer hidden in an attribute value",
+            r("", "<div><br t=\"> </div> \">"),
+        ),
+        ("closer hidden in a comment", r("", "<div><!-- </div> -->")),
+        (
+            "closer hidden in a script",
+            r("", "<div><script></div></script>"),
+        ),
+        (
+            "closer hidden in a textarea",
+            r("", "<div><textarea></div></textarea>"),
+        ),
+    ]
+}
+
+/// Every class, through the tool's real entry point: refused as nested too
+/// deeply, whatever the tag, with and without the readability pass.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_page_nested_too_deeply_is_refused() {
-    for open in [
-        "<div>",
-        "<span>",
-        "<b>",
-        "<blockquote>",
-        "<ul><li>",
-        "<table><tr><td>",
-    ] {
+    for (what, html) in classes(3_000) {
         for readable in [false, true] {
-            let (ok, out, took) = fetch(page(open, 20_000), readable).await;
-            assert!(!ok && out.contains("nested too deeply"), "{open}: {out}");
-            assert!(took < Duration::from_secs(10), "{open}: {took:?}");
+            let (ok, out, took) = fetch(html.clone(), readable).await;
+            assert!(!ok && out.contains("nested too deeply"), "{what}: {out}");
+            assert!(took < Duration::from_secs(60), "{what}: {took:?}");
         }
     }
-    // Depth hidden behind an attribute value that holds a `>` and a closer.
-    let hidden = format!(
-        "<html><body>{}x</body></html>",
-        "<div><br t=\"> </div> \">".repeat(20_000)
-    );
-    let (ok, out, _) = fetch(hidden, false).await;
-    assert!(!ok && out.contains("nested too deeply"), "{out}");
+}
+
+/// The same classes at a megabyte: more start tags than the tree builder is
+/// given, so they are read as plain text, quickly, with no tree at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_same_pages_at_a_megabyte_are_read_as_plain_text() {
+    for (what, html) in classes(1024 * 1024 / 40).into_iter().step_by(3) {
+        let (ok, out, took) = fetch(html, true).await;
+        assert!(ok, "{what}: {out}");
+        assert!(took < Duration::from_secs(20), "{what}: {took:?}");
+    }
 }
 
 /// Pages inside the limits are read: at the deepest nesting allowed, with
@@ -77,7 +135,18 @@ async fn pages_inside_the_caps_are_read_quickly() {
     let big = 1024 * 1024usize;
     let cases: Vec<(&str, String)> = vec![
         ("deepest allowed div", page("<div>", max)),
-        ("deepest allowed table", page("<table><tr><td>", max / 3)),
+        (
+            "deepest allowed div, 24k other start tags",
+            format!(
+                "<html><body>{}{}x</body></html>",
+                "<div>".repeat(max),
+                "<i>w</i>".repeat(12_000)
+            ),
+        ),
+        (
+            "deepest allowed table",
+            page("<table><tr><td>", max / 4 - 1),
+        ),
         ("deepest allowed blockquote", page("<blockquote>", max)),
         (
             "an article at the readability cap",
@@ -141,5 +210,18 @@ async fn pages_inside_the_caps_are_read_quickly() {
             assert!(took < Duration::from_secs(20), "{what}: {took:?}");
             println!("TIMING {what} readable={readable}: {took:?}");
         }
+    }
+}
+
+/// The worst the tree builder is ever given: as many start tags as the cap
+/// allows, nested as deep as its stack walks hurt most. It parses (about
+/// 0.7 s in release) and is then refused as too deep, never read.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_worst_pages_the_tree_builder_is_given_are_refused_in_time() {
+    for open in ["<ul>", "<div>", "<nav>"] {
+        let (ok, out, took) = fetch(page(open, 24_900), true).await;
+        assert!(!ok && out.contains("nested too deeply"), "{open}: {out}");
+        println!("TIMING cap {open}: {took:?}");
+        assert!(took < Duration::from_secs(60), "{open}: {took:?}");
     }
 }
