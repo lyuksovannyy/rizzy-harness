@@ -41,12 +41,13 @@ pub const SNAPSHOT_MAX_FILE: usize = 512 << 10;
 /// stays this constant (plus the entries' overhead below).
 pub const SNAPSHOT_MAX_TOTAL: usize = 8 << 20;
 /// Versions of one file kept per session (the newest this many that had a
-/// snapshot).
+/// snapshot; the one the guard holds is the last to go, then the oldest).
 pub const MAX_VERSIONS: usize = 4;
-/// Files remembered per session; past it the least recently used is
-/// forgotten (the agent then has to read it again).
+/// Files remembered per session; past it one nobody read goes first (a
+/// search's or a refusal's), then the least recently used (the agent then
+/// has to read it again).
 pub const MAX_FILES: usize = 1024;
-/// Files remembered over all sessions of the node, least recently used
+/// Files remembered over all sessions of the node, those nobody read and then the least recently used
 /// forgotten first. Worst case per entry: a path of `PATH_MAX` (4,096
 /// bytes) plus about 200 bytes of entry and map overhead, so 4,096 entries
 /// are at most about 17.6 MB, and with [`SNAPSHOT_MAX_TOTAL`] about 26 MB:
@@ -221,8 +222,18 @@ impl Entry {
             shown: rows,
         });
         while self.vers.len() > MAX_VERSIONS {
-            self.vers.remove(0);
+            let i = self.victim().unwrap_or(0);
+            self.vers.remove(i);
         }
+    }
+
+    /// The oldest version that is not the one the guard holds (a file nobody
+    /// read has none such held): a version nobody read goes before the text
+    /// of what the agent really read, whatever bound is acting.
+    fn victim(&self) -> Option<usize> {
+        self.vers
+            .iter()
+            .position(|v| !(self.guarded && v.sha == self.sha))
     }
 }
 
@@ -271,12 +282,13 @@ impl Inner {
             self.drop_table(oldest);
         }
         while self.entries > MAX_ENTRIES {
+            // Entries nobody read first, then the least recently used.
             let oldest = self
                 .sessions
                 .iter()
-                .flat_map(|(s, t)| t.files.iter().map(move |(p, e)| (e.used, *s, p)))
-                .min_by_key(|(used, _, _)| *used)
-                .map(|(_, s, p)| (s, p.clone()));
+                .flat_map(|(s, t)| t.files.iter().map(move |(p, e)| (e.guarded, e.used, *s, p)))
+                .min_by_key(|(guarded, used, _, _)| (*guarded, *used))
+                .map(|(_, _, s, p)| (s, p.clone()));
             let Some((sid, path)) = oldest else { break };
             if let Some(t) = self.sessions.get_mut(&sid)
                 && let Some(e) = t.files.remove(&path)
@@ -286,21 +298,30 @@ impl Inner {
             }
         }
         while self.snap_bytes > SNAPSHOT_MAX_TOTAL {
+            // A version nobody read (a search's rows, a refusal's, an older
+            // text of a file) goes before any text the guard holds: what the
+            // agent really read is worth more than what it only saw listed.
+            // Among those, the oldest of the least recently used file.
+            let spare = self
+                .sessions
+                .values_mut()
+                .flat_map(|t| t.files.values_mut())
+                .filter(|e| e.victim().is_some())
+                .min_by_key(|e| e.used);
+            if let Some(e) = spare {
+                let i = e.victim().unwrap_or(0);
+                self.snap_bytes -= e.vers.remove(i).bytes();
+                continue;
+            }
+            // Only held texts are left: the least recently used file's oldest.
             let oldest = self
                 .sessions
-                .iter_mut()
-                .flat_map(|(_, t)| t.files.values_mut())
+                .values_mut()
+                .flat_map(|t| t.files.values_mut())
                 .filter(|e| !e.vers.is_empty())
-                // Files nobody read (a search's rows, a refusal's) first:
-                // what the agent really read is worth more than what it
-                // only saw listed.
-                .min_by_key(|e| (e.guarded, e.used));
+                .min_by_key(|e| e.used);
             match oldest {
-                Some(e) => {
-                    // The oldest version of the least recently used file.
-                    let n = e.vers.remove(0).bytes();
-                    self.snap_bytes -= n;
-                }
+                Some(e) => self.snap_bytes -= e.vers.remove(0).bytes(),
                 None => break,
             }
         }
@@ -450,29 +471,34 @@ impl SessionSeen {
 
     /// Record that the agent now knows `path` as `bytes` (a snapshot is
     /// kept when it is small text). Returns the event's record of it. No
-    /// row of it counts as shown.
+    /// row of it counts as shown: [`Self::add_shown`] says which.
     pub fn record(&self, path: &Path, bytes: &[u8]) -> FileSeen {
-        self.record_shown(path, bytes, &[])
-    }
-
-    /// [`Self::record`] with the rows `rows` (1-based, inclusive) of it shown.
-    pub fn record_shown(&self, path: &Path, bytes: &[u8], rows: &[(usize, usize)]) -> FileSeen {
         let (sha, snapshot) = Self::snap(bytes);
-        self.put(path, sha, snapshot, rows, true)
+        self.put(path, sha, snapshot, true)
     }
 
-    /// Keep `bytes` as a version of `path` with `rows` shown, without
-    /// changing the hash the guard compares and without making one: rows
-    /// shown of a file that changed since it was read, or of a file never
-    /// read, must not count as reading all of it (`write` and the
-    /// `old_string` form still ask for a `read`).
-    pub fn add_version(&self, path: &Path, bytes: &[u8], rows: &[(usize, usize)]) {
+    /// Keep `bytes` as a version of `path`, without changing the hash the
+    /// guard compares and without making one: rows shown of a file that
+    /// changed since it was read, or of a file never read, must not count as
+    /// reading all of it (`write` and the `old_string` form still ask for a
+    /// `read`).
+    pub fn add_version(&self, path: &Path, bytes: &[u8]) {
         let (sha, snapshot) = Self::snap(bytes);
-        self.put(path, sha, snapshot, rows, false);
+        self.put(path, sha, snapshot, false);
     }
 
-    /// Count `rows` as shown of the kept version of `path` with hash `sha`.
-    pub fn add_shown(&self, path: &Path, sha: &Sha, rows: &[(usize, usize)]) {
+    /// Count `rows` (1-based, inclusive) as shown of the kept version of
+    /// `path` with hash `sha`. The proof is the finished text of the result
+    /// that printed them, which the result cap does not cut
+    /// ([`crate::shown::seal`]): a row that is not in the text the model
+    /// receives is not one it was shown.
+    pub(crate) fn add_shown(
+        &self,
+        path: &Path,
+        sha: &Sha,
+        rows: &[(usize, usize)],
+        _proof: &crate::shown::Sealed,
+    ) {
         let mut inner = self.store.lock();
         let Some(e) = inner
             .sessions
@@ -491,6 +517,23 @@ impl SessionSeen {
         inner.evict();
     }
 
+    /// The newest kept version of `path` that has rows shown, if any: what
+    /// the agent last saw of a file it never read (a search's rows, a
+    /// refusal's).
+    pub fn shown_version(&self, path: &Path) -> Option<Version> {
+        let inner = self.store.lock();
+        inner
+            .sessions
+            .get(&self.session)?
+            .files
+            .get(path)?
+            .vers
+            .iter()
+            .rev()
+            .find(|v| !v.shown.is_empty())
+            .cloned()
+    }
+
     fn snap(bytes: &[u8]) -> (Sha, Option<Arc<String>>) {
         let snapshot = (bytes.len() <= SNAPSHOT_MAX_FILE)
             .then(|| std::str::from_utf8(bytes).ok())
@@ -505,7 +548,7 @@ impl SessionSeen {
     /// start. A record that does not parse is skipped.
     pub fn note(&self, f: &FileSeen) {
         if let Some(sha) = unhex(&f.sha256) {
-            self.put(Path::new(&f.path), sha, None, &[], true);
+            self.put(Path::new(&f.path), sha, None, true);
         }
     }
 
@@ -522,19 +565,12 @@ impl SessionSeen {
 
     /// [`Self::record`] for a file too large to hold: its hash only.
     pub fn record_hash(&self, path: &Path, sha: Sha) -> FileSeen {
-        self.put(path, sha, None, &[], true)
+        self.put(path, sha, None, true)
     }
 
     /// `current`: the guard's hash becomes `sha`; otherwise only the
     /// version is kept.
-    fn put(
-        &self,
-        path: &Path,
-        sha: Sha,
-        snapshot: Option<Arc<String>>,
-        rows: &[(usize, usize)],
-        current: bool,
-    ) -> FileSeen {
+    fn put(&self, path: &Path, sha: Sha, snapshot: Option<Arc<String>>, current: bool) -> FileSeen {
         let mut inner = self.store.lock();
         let now = inner.tick();
         let t = inner.sessions.entry(self.session).or_default();
@@ -553,19 +589,18 @@ impl SessionSeen {
             e.guarded = true;
         }
         if let Some(text) = snapshot {
-            let mut shown = Rows::new();
-            add_ranges(&mut shown, rows);
-            e.keep(sha, text, shown);
+            e.keep(sha, text, Rows::new());
         }
         let after = Inner::snap_len(e);
         let mut snap = inner.snap_bytes + after - before;
         let mut entries = inner.entries + usize::from(fresh);
         let t = inner.sessions.get_mut(&self.session).expect("just made");
         if t.files.len() > MAX_FILES
+            // Entries nobody read first, then the least recently used.
             && let Some(p) = t
                 .files
                 .iter()
-                .min_by_key(|(_, e)| e.used)
+                .min_by_key(|(_, e)| (e.guarded, e.used))
                 .map(|(p, _)| p.clone())
             && let Some(e) = t.files.remove(&p)
         {
@@ -625,6 +660,23 @@ impl Drop for PathLock {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    impl SessionSeen {
+        fn mark(&self, p: &Path, sha: &Sha, rows: &[(usize, usize)]) {
+            self.add_shown(p, sha, rows, &crate::shown::Sealed::model_wrote());
+        }
+
+        fn record_rows(&self, p: &Path, bytes: &[u8], rows: &[(usize, usize)]) -> FileSeen {
+            let f = self.record(p, bytes);
+            self.mark(p, &sha256(bytes), rows);
+            f
+        }
+
+        fn version_rows(&self, p: &Path, bytes: &[u8], rows: &[(usize, usize)]) {
+            self.add_version(p, bytes);
+            self.mark(p, &sha256(bytes), rows);
+        }
+    }
 
     /// Review of PR 120: a queued message's older hash of a file does not
     /// replace a newer record of it; the turn's own message's does.
@@ -770,10 +822,10 @@ mod tests {
         assert_eq!(t, tag(&sha256(y.as_bytes())));
         let s = SessionSeen::default();
         let p = Path::new("/w/a");
-        s.record_shown(p, x.as_bytes(), &[(1, 1)]);
+        s.record_rows(p, x.as_bytes(), &[(1, 1)]);
         assert_eq!(*s.version(p, &t).unwrap().text, x);
         // The newer one of the same tag replaces the older.
-        s.record_shown(p, y.as_bytes(), &[]);
+        s.record_rows(p, y.as_bytes(), &[]);
         let v = s.version(p, &t).unwrap();
         assert_eq!(*v.text, y);
         assert!(!v.covers(1, 1), "the older one's rows did not carry over");
@@ -792,7 +844,7 @@ mod tests {
             .map(|i| format!("v{i}\nrow\n"))
             .collect();
         for t in &texts {
-            s.record_shown(p, t.as_bytes(), &[(1, 1)]);
+            s.record_rows(p, t.as_bytes(), &[(1, 1)]);
         }
         let kept = |t: &String| s.version(p, &tag(&sha256(t.as_bytes()))).is_some();
         let n = texts.iter().filter(|t| kept(t)).count();
@@ -800,7 +852,7 @@ mod tests {
         assert!(texts[texts.len() - MAX_VERSIONS..].iter().all(kept));
         // The same text again merges its rows instead of taking a slot.
         let last = texts.last().unwrap();
-        s.record_shown(p, last.as_bytes(), &[(2, 2)]);
+        s.record_rows(p, last.as_bytes(), &[(2, 2)]);
         let v = s.version(p, &tag(&sha256(last.as_bytes()))).unwrap();
         assert!(v.covers(1, 2) && !v.covers(1, 3));
         assert_eq!(texts.iter().filter(|t| kept(t)).count(), MAX_VERSIONS);
@@ -819,7 +871,7 @@ mod tests {
         let ranges: Vec<(usize, usize)> = (1..=n).rev().map(|i| (i * 2, i * 2)).collect();
         let s = SessionSeen::default();
         let start = std::time::Instant::now();
-        s.record_shown(p, b"x\n", &ranges);
+        s.record_rows(p, b"x\n", &ranges);
         let took = start.elapsed();
         let sha = sha256(b"x\n");
         let v = s.version(p, &tag(&sha)).unwrap();
@@ -829,12 +881,12 @@ mod tests {
             "sorted, apart"
         );
         let start = std::time::Instant::now();
-        s.add_shown(p, &sha, &ranges);
+        s.mark(p, &sha, &ranges);
         let again = start.elapsed();
         let mut touching: Vec<(usize, usize)> =
             (1..=n).rev().map(|i| (i * 2 + 1, i * 2 + 1)).collect();
         touching.push((1, 1));
-        s.add_shown(p, &sha, &touching);
+        s.mark(p, &sha, &touching);
         let v = s.version(p, &tag(&sha)).unwrap();
         assert_eq!(v.shown, vec![(1, (n * 2 + 1) as u32)]);
         assert!(
@@ -880,7 +932,7 @@ mod tests {
                 }
                 text.push_str(&format!("{f} {v}\n"));
                 let scattered: Vec<(usize, usize)> = (1..rows).step_by(2).map(|r| (r, r)).collect();
-                s.session(sid).record_shown(
+                s.session(sid).record_rows(
                     &PathBuf::from(format!("/w/{f}")),
                     text.as_bytes(),
                     &scattered,
@@ -924,7 +976,7 @@ mod tests {
         }
         // More than the room that is left, newer than every read.
         for i in 0..4 {
-            t.add_version(
+            t.version_rows(
                 &PathBuf::from(format!("/w/found{i}")),
                 &vec![b'f'; SNAPSHOT_MAX_FILE],
                 &[(1, 1)],
@@ -941,14 +993,71 @@ mod tests {
         assert!(t.get(&p).unwrap().snapshot.is_some());
     }
 
+    /// Review of PR 188: one read file, then 1,029 entries a search had
+    /// added, and the read file was unknown: the per-session bound took the
+    /// least recently used entry whatever it was.
+    #[test]
+    fn a_flood_of_unread_entries_does_not_push_out_a_read_file() {
+        let s = SessionSeen::default();
+        let p = PathBuf::from("/w/read_me");
+        s.record(&p, b"hello\n");
+        for i in 0..MAX_FILES + 5 {
+            s.version_rows(&PathBuf::from(format!("/w/found{i}")), b"x\n", &[(1, 1)]);
+        }
+        assert!(s.get(&p).is_some(), "the read file's guard was dropped");
+        // The same over the node's bound on entries.
+        let store = Arc::new(SeenStore::default());
+        let reader = store.session(SessionId::new());
+        reader.record(&p, b"hello\n");
+        for _ in 0..8 {
+            let t = store.session(SessionId::new());
+            for i in 0..MAX_ENTRIES / 4 {
+                t.version_rows(&PathBuf::from(format!("/w/found{i}")), b"x\n", &[(1, 1)]);
+            }
+        }
+        assert!(store.lock().entries <= MAX_ENTRIES);
+        assert!(
+            reader.get(&p).is_some(),
+            "the read file's guard was dropped"
+        );
+    }
+
+    /// Review of PR 188: with four versions kept per path, a read file's own
+    /// snapshot was the first to go while versions nobody read stayed.
+    #[test]
+    fn the_cap_of_versions_does_not_drop_the_guards_snapshot() {
+        let s = SessionSeen::default();
+        let p = PathBuf::from("/w/a");
+        s.record(&p, b"orig\n");
+        for i in 0..MAX_VERSIONS + 3 {
+            s.version_rows(&p, format!("changed {i}\n").as_bytes(), &[(1, 1)]);
+            let g = s.get(&p).unwrap();
+            assert!(g.snapshot.is_some(), "lost after {i} other versions");
+        }
+        // The byte bound takes the same order: a version nobody read first.
+        let store = Arc::new(SeenStore::default());
+        let t = store.session(SessionId::new());
+        let (big1, big2) = (vec![b'1'; 400_000], vec![b'2'; 400_000]);
+        t.record(&p, &big1);
+        t.version_rows(&p, &big2, &[(1, 1)]);
+        for i in 0..19 {
+            t.record(&PathBuf::from(format!("/w/other{i}")), &vec![b'o'; 400_000]);
+        }
+        assert!(store.lock().snap_bytes <= SNAPSHOT_MAX_TOTAL);
+        assert!(
+            t.get(&p).unwrap().snapshot.is_some(),
+            "the byte bound dropped the guard's snapshot"
+        );
+    }
+
     #[test]
     fn a_rebuild_from_the_log_keeps_the_versions_of_a_file_the_log_names() {
         let sid = SessionId::new();
         let store = Arc::new(SeenStore::default());
         let t = store.session(sid);
         let p = Path::new("/w/a");
-        let first = t.record_shown(p, b"one\n", &[(1, 1)]);
-        t.record_shown(p, b"two\n", &[(1, 1)]);
+        let first = t.record_rows(p, b"one\n", &[(1, 1)]);
+        t.record_rows(p, b"two\n", &[(1, 1)]);
         // The log holds only the first (the second's append failed, or it was a refusal's).
         store.sync(sid, &[raw(sid, 1, finished(first))]);
         let got = store.session(sid).get(p).unwrap();

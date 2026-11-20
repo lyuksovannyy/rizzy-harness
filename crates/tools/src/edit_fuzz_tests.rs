@@ -356,6 +356,8 @@ struct Stats {
     cardrun_mismatch: usize,
     gap: usize,
     swallowed: usize,
+    /// Searches whose output left matched rows out (the result's budget).
+    cut: usize,
 }
 
 async fn do_edit(ctx: &ToolCtx, input: &Value) -> (bool, String, Option<String>) {
@@ -683,7 +685,23 @@ async fn one_search(seed: u64, st: &mut Stats) {
     }
     let dir = tempfile::tempdir().unwrap();
     let ctx = ToolCtx::new(dir.path());
-    let fx = gen_fx(&mut rng);
+    let mut fx = gen_fx(&mut rng);
+    // Some files are long, with long rows: a search that matches most of
+    // them prints more than a result may hold, so that some matched rows
+    // are left out of the output (the review of PR 188).
+    if rng.chance(15) {
+        let n = 80 + rng.below(160);
+        fx.rows = (0..n)
+            .map(|i| {
+                format!(
+                    "{}{i}{}",
+                    ALPHA[1 + rng.below(ALPHA.len() - 1)],
+                    "q".repeat(120 + rng.below(170))
+                )
+            })
+            .collect();
+        canon(&mut fx);
+    }
     let text = fx.render();
     let p = dir.path().join("f.txt");
     std::fs::write(&p, &text).unwrap();
@@ -729,6 +747,38 @@ async fn one_search(seed: u64, st: &mut Stats) {
         ));
         return;
     }
+    // The rows the output prints (`N:text` lines), which is what counts as
+    // shown: every matched row unless the output says it left some out, and
+    // then a prefix of them; never more, and never cut by the result cap.
+    let printed: Vec<bool> = {
+        let nums: std::collections::BTreeSet<usize> = r
+            .output
+            .lines()
+            .filter_map(|l| l.split_once(':')?.0.parse::<usize>().ok())
+            .collect();
+        (1..=t.rows.len()).map(|n| nums.contains(&n)).collect()
+    };
+    if r.truncated || r.output.chars().count() > crate::MAX_OUTPUT_CHARS {
+        st.bad
+            .push(format!("{} OUTPUT CUT BY THE CAP", info(&pattern)));
+        return;
+    }
+    let left_out = r.output.contains(" not shown: the result is limited");
+    st.cut += usize::from(left_out);
+    let last = printed.iter().rposition(|p| *p).map_or(0, |i| i + 1);
+    let expect: Vec<bool> = (1..=t.rows.len())
+        .map(|n| matched[n - 1] && (!left_out || n <= last))
+        .collect();
+    if printed != expect || (left_out && last == 0) {
+        st.bad.push(format!(
+            "{} PRINTED ROWS ARE NOT THE MATCHED ROWS (left out: {left_out})\nprinted {} matched {}",
+            info(&pattern),
+            printed.iter().filter(|p| **p).count(),
+            matched.iter().filter(|p| **p).count()
+        ));
+        return;
+    }
+    let matched = printed;
     let ops = gen_ops(&mut rng, t.rows.len());
     let named_ok = ops.iter().all(|o| match o {
         O::Rep(f, to, _) => (*f..=*to).all(|r| matched[r - 1]),
@@ -783,16 +833,20 @@ async fn fuzz_search_tags() {
         }
     }
     eprintln!(
-        "search seeds {start}..{} cases {} wrote {} refused {} false_refusals {}",
+        "search seeds {start}..{} cases {} wrote {} refused {} false_refusals {} cut {}",
         start + n,
         st.cases,
         st.wrote,
         st.refused,
-        st.false_refusals
+        st.false_refusals,
+        st.cut
     );
     for b in &st.bad {
         eprintln!("---\n{b}");
     }
     assert!(st.bad.is_empty(), "{} problems", st.bad.len());
     assert!(st.wrote > 50 && st.refused > 50, "{st:?}");
+    if n >= 1000 {
+        assert!(st.cut > 5, "no search left rows out: {st:?}");
+    }
 }

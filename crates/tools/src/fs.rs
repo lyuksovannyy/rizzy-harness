@@ -158,12 +158,15 @@ impl Tool for Read {
         let (max_chars, compact) = line_style(ctx);
         let cancel = ctx.cancel.clone();
         let p = path.clone();
+        // The header line is part of the result (a path can be thousands of
+        // characters long): the rows get what it leaves.
+        let head_chars = header(ctx, &path, &[0; 32]).chars().count() + 1;
         let window = Window {
             first: offset,
             limit,
             max_chars,
             compact,
-            budget: READ_BUDGET_CHARS,
+            budget: READ_BUDGET_CHARS.saturating_sub(head_chars),
         };
         let res = tokio::task::spawn_blocking(move || {
             read_window(&p, &window, crate::MAX_READ_BYTES, &cancel)
@@ -205,14 +208,16 @@ impl Tool for Read {
         // file cut at the byte cap has no hash of all of it: not recorded.
         let mut seen = None;
         let mut tagged = false;
+        let mut kept = false;
+        let key = ctx.seen_key(&path);
         if !capped {
-            let key = ctx.seen_key(&path);
             seen = Some(match bytes {
                 Some(b) => {
-                    let f = ctx.seen.record_shown(&key, &b, &rows);
+                    let f = ctx.seen.record(&key, &b);
                     // The header names a version the node keeps: a file too
                     // large or not UTF-8 has none, so no tag is offered.
                     tagged = ctx.seen.version(&key, &crate::seen::tag(&sha)).is_some();
+                    kept = true;
                     f
                 }
                 None => ctx.seen.record_hash(&key, sha),
@@ -220,6 +225,11 @@ impl Tool for Read {
         }
         if tagged {
             out.insert_str(0, &format!("{}\n", header(ctx, &path, &sha)));
+        }
+        // The rows count as shown once the text that holds them is final and
+        // the cap does not cut it (`shown`).
+        if kept && let Some(proof) = crate::shown::seal(&out) {
+            ctx.seen.add_shown(&key, &sha, &rows, &proof);
         }
         let mut o = ToolOutcome::ok(out);
         o.seen = seen;
@@ -288,10 +298,14 @@ impl Tool for Write {
                     content.lines().count()
                 );
                 // All of it was written by the agent, so all of it is shown.
-                let mut seen = ctx
-                    .seen
-                    .record_shown(&key, content.as_bytes(), &[(1, usize::MAX)]);
+                let mut seen = ctx.seen.record(&key, content.as_bytes());
                 let sha = crate::seen::sha256(content.as_bytes());
+                ctx.seen.add_shown(
+                    &key,
+                    &sha,
+                    &[(1, usize::MAX)],
+                    &crate::shown::Sealed::model_wrote(),
+                );
                 if ctx.seen.version(&key, &crate::seen::tag(&sha)).is_some() {
                     report.push_str(&format!("\n{}", header(ctx, &path, &sha)));
                 }

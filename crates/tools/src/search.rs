@@ -102,7 +102,7 @@ impl Tool for Grep {
         "grep"
     }
     fn description(&self) -> &'static str {
-        "Search file contents with a regular expression (Rust regex syntax). Respects .gitignore. Returns path:line:text, or rows under a [path#TAG] header: `edit` takes that tag and `lines` for those rows with no `read`."
+        "Search file contents with a regular expression (Rust regex syntax). Respects .gitignore. Prints `[path#TAG]` then `line:text` rows, or `path:line:text` if untagged; `edit` takes the tag and `lines` for those rows with no `read`."
     }
     fn schema(&self) -> Value {
         json!({
@@ -203,8 +203,8 @@ impl Tool for Grep {
                     path: path.to_path_buf(),
                     rel: rel.display().to_string(),
                     rows: Vec::new(),
-                    whole: Vec::new(),
                     bytes: None,
+                    version: None,
                     head: None,
                 };
                 let utf8 = {
@@ -220,16 +220,12 @@ impl Tool for Grep {
                         }
                         let n = i + 1;
                         let mut shown: String = row.chars().take(cap_chars).collect();
-                        if crate::fs::is_cut(row, cap_chars) {
-                            // Not shown whole: no edit may rest on it.
+                        // A row cut is not shown whole: no edit may rest on it.
+                        let whole = !crate::fs::is_cut(row, cap_chars);
+                        if !whole {
                             shown.push('…');
-                        } else {
-                            match hit.whole.last_mut() {
-                                Some(r) if r.1 + 1 == n => r.1 = n,
-                                _ => hit.whole.push((n, n)),
-                            }
                         }
-                        hit.rows.push((n, shown));
+                        hit.rows.push((n, shown, whole));
                         count += 1;
                         if count >= max_results {
                             stopped = true;
@@ -242,7 +238,7 @@ impl Tool for Grep {
                     // A version is recorded only where `read` would keep one
                     // (UTF-8, at most the snapshot size) and the search's own
                     // bounds allow it.
-                    if !hit.whole.is_empty()
+                    if hit.rows.iter().any(|r| r.2)
                         && utf8
                         && bytes.len() <= crate::seen::SNAPSHOT_MAX_FILE
                         && tagged < MAX_TAGGED_FILES
@@ -267,7 +263,8 @@ impl Tool for Grep {
             Err(e) => return ToolOutcome::err(format!("grep failed: {e}")),
         };
         // The versions the model may name: recorded first, headed after, so
-        // a version the store dropped meanwhile is not offered.
+        // a version the store dropped meanwhile is not offered. No row counts
+        // as shown yet: the rows the output holds do, once it is final.
         let mut recorded: Vec<(usize, PathBuf, crate::seen::Sha)> = Vec::new();
         for (i, h) in hits.iter_mut().enumerate() {
             let Some(bytes) = h.bytes.take() else {
@@ -276,7 +273,7 @@ impl Tool for Grep {
             let Some(key) = tag_key(ctx, &h.path) else {
                 continue;
             };
-            ctx.seen.add_version(&key, &bytes, &h.whole);
+            ctx.seen.add_version(&key, &bytes);
             recorded.push((i, key, crate::seen::sha256(&bytes)));
         }
         for (i, key, sha) in recorded {
@@ -286,12 +283,25 @@ impl Tool for Grep {
                 .is_some_and(|v| v.sha == sha)
             {
                 hits[i].head = Some(crate::fs::header(ctx, &hits[i].path, &sha));
+                hits[i].version = Some((key, sha));
             }
         }
+        let mut printed: Vec<crate::edit::RowRanges> = vec![Vec::new(); hits.len()];
         let mut text = if hits.is_empty() {
             "No matches.".to_string()
         } else {
-            render(&hits, bounded)
+            let mut budget = crate::shown::Budget::new();
+            let (text, left) = render(&hits, bounded, &mut budget, &mut printed);
+            let mut text = text;
+            if left > 0 {
+                text.push_str(&format!(
+                    "\n[{left} more matched row{} not shown: the result is limited to about {} \
+                     characters; narrow the pattern or the path]",
+                    if left == 1 { "" } else { "s" },
+                    crate::shown::RESULT_BUDGET
+                ));
+            }
+            text
         };
         if stopped {
             text.push_str(&format!(
@@ -304,6 +314,15 @@ impl Tool for Grep {
                 if skipped == 1 { "" } else { "s" },
                 crate::MAX_GREP_FILE_BYTES
             ));
+        }
+        // The rows printed in full count as shown, of the version their
+        // heading names (the file does not count as read).
+        if let Some(proof) = crate::shown::seal(&text) {
+            for (h, rows) in hits.iter().zip(&printed) {
+                if let Some((key, sha)) = &h.version {
+                    ctx.seen.add_shown(key, sha, rows, &proof);
+                }
+            }
         }
         ToolOutcome::ok(text)
     }
@@ -428,12 +447,13 @@ struct FileHit {
     path: PathBuf,
     /// As the search has always printed it.
     rel: String,
-    /// The matched rows: number and text as printed (a cut row ends in `…`).
-    rows: Vec<(usize, String)>,
-    /// The rows printed in full, as inclusive ranges.
-    whole: Vec<(usize, usize)>,
+    /// The matched rows: number, text as printed (a cut row ends in `…`) and
+    /// whether it is printed in full.
+    rows: Vec<(usize, String, bool)>,
     /// The file's bytes, while a version may still be recorded.
     bytes: Option<Vec<u8>>,
+    /// The version recorded for the file, if one is kept.
+    version: Option<(PathBuf, crate::seen::Sha)>,
     /// The `[path#TAG]` header, when a version was recorded and is kept.
     head: Option<String>,
 }
@@ -456,29 +476,57 @@ fn tag_key(ctx: &ToolCtx, path: &Path) -> Option<PathBuf> {
 /// row, fewer characters than `path:N:text` for every file with two matches
 /// or more, and about the same for one. A file without one is printed as it
 /// always was.
-fn render(hits: &[FileHit], bounded: bool) -> String {
+///
+/// Printing stops at the first row that does not fit `budget` (a header
+/// goes with its first row): `printed` then holds, per file, the rows
+/// printed in full, as inclusive ranges, and the count of matched rows left
+/// out is returned. Only the final newline is dropped: the last row ends as
+/// it is, as the rows before it do.
+fn render(
+    hits: &[FileHit],
+    bounded: bool,
+    budget: &mut crate::shown::Budget,
+    printed: &mut [crate::edit::RowRanges],
+) -> (String, usize) {
     let mut out = String::new();
-    for h in hits {
-        match (&h.head, bounded) {
-            (Some(head), _) => {
-                out.push_str(head);
-                out.push('\n');
+    let mut left = 0;
+    let mut full = false;
+    for (h, ranges) in hits.iter().zip(printed.iter_mut()) {
+        let mut lead = match (&h.head, bounded) {
+            (Some(head), _) => format!("{head}\n"),
+            (None, true) => format!("{}:\n", h.rel),
+            (None, false) => String::new(),
+        };
+        for (n, t, whole) in &h.rows {
+            if full {
+                left += 1;
+                continue;
             }
-            (None, true) => {
-                out.push_str(&h.rel);
-                out.push_str(":\n");
+            let row = match (&h.head, bounded) {
+                (_, true) => format!("  {n}: {t}\n"),
+                (Some(_), false) => format!("{n}:{t}\n"),
+                (None, false) => format!("{}:{n}:{t}\n", h.rel),
+            };
+            let piece = format!("{lead}{row}");
+            if !budget.take(&piece) {
+                full = true;
+                left += 1;
+                continue;
             }
-            (None, false) => {}
-        }
-        for (n, t) in &h.rows {
-            match (&h.head, bounded) {
-                (_, true) => out.push_str(&format!("  {n}: {t}\n")),
-                (Some(_), false) => out.push_str(&format!("{n}:{t}\n")),
-                (None, false) => out.push_str(&format!("{}:{n}:{t}\n", h.rel)),
+            lead.clear();
+            out.push_str(&piece);
+            if *whole {
+                match ranges.last_mut() {
+                    Some(r) if r.1 + 1 == *n => r.1 = *n,
+                    _ => ranges.push((*n, *n)),
+                }
             }
         }
     }
-    out.trim_end().to_string()
+    if out.ends_with('\n') {
+        out.pop();
+    }
+    (out, left)
 }
 
 #[cfg(test)]

@@ -33,12 +33,16 @@ use crate::{Tool, ToolCtx, ToolOutcome, str_arg};
 pub struct Edit;
 
 /// Inclusive 1-based row ranges.
-type RowRanges = Vec<(usize, usize)>;
+pub(crate) type RowRanges = Vec<(usize, usize)>;
 
 /// Lines of context around each change in the result.
 const CONTEXT: usize = 2;
 /// Lines the result shows of the changes, at most.
 const MAX_RESULT_LINES: usize = 60;
+/// Characters of a result that the changed lines may take: the rest is for
+/// what the person may need around them (a note of lines that changed on
+/// disk, the replaced rows).
+pub(crate) const RESULT_ROWS_BUDGET: usize = 20_000;
 /// Lines a refusal or note shows of what changed on disk, at most.
 const MAX_CHANGED_LINES: usize = 40;
 /// The nearest text on a miss: at most this many lines, each cut here.
@@ -174,18 +178,27 @@ impl Tool for Edit {
             Ok((updated, report, rows)) => match write_nofollow(&path, updated.as_bytes()).await {
                 Ok(()) => {
                     let sha = crate::seen::sha256(updated.as_bytes());
-                    let mut o = ToolOutcome::ok(format!("{report}\n{}", header(ctx, &path, &sha)));
+                    let result = format!("{report}\n{}", header(ctx, &path, &sha));
+                    // The rows the result printed count as shown, once its
+                    // text is final and the cap does not cut it.
+                    let proof = crate::shown::seal(&result);
+                    let mut seen = None;
                     if ctx.seen.get(&key).is_some() {
-                        let mut seen = ctx.seen.record_shown(&key, updated.as_bytes(), &rows);
+                        let mut f = ctx.seen.record(&key, updated.as_bytes());
                         // What this edit replaced (T57).
-                        seen.base = Some(crate::seen::hex(&crate::seen::sha256(text.as_bytes())));
-                        o.seen = Some(seen);
+                        f.base = Some(crate::seen::hex(&crate::seen::sha256(text.as_bytes())));
+                        seen = Some(f);
                     } else {
                         // Made on rows a search or a refusal showed: the file
                         // is still not read, and the rows of the result are
                         // shown (as for the line form).
-                        ctx.seen.add_version(&key, updated.as_bytes(), &rows);
+                        ctx.seen.add_version(&key, updated.as_bytes());
                     }
+                    if let Some(proof) = proof {
+                        ctx.seen.add_shown(&key, &sha, &rows, &proof);
+                    }
+                    let mut o = ToolOutcome::ok(result);
+                    o.seen = seen;
                     o
                 }
                 Err(e) => ToolOutcome::err(e),
@@ -672,9 +685,33 @@ pub(crate) fn changed(snapshot: &str, live: &str) -> (usize, usize) {
     (start, end.max(start))
 }
 
+/// Characters [`show`] may print.
+const SHOW_BUDGET: usize = 12_000;
+
 /// Lines `[start, end)` (byte range on line boundaries) of `text`, numbered
-/// as `read` numbers them, at most [`MAX_CHANGED_LINES`].
+/// as `read` numbers them, at most [`MAX_CHANGED_LINES`] and
+/// [`SHOW_BUDGET`] characters. Nothing it prints counts as shown.
 pub(crate) fn show(ctx: &ToolCtx, text: &str, start: usize, end: usize) -> String {
+    show_in(
+        ctx,
+        text,
+        start,
+        end,
+        &mut crate::shown::Budget::of(SHOW_BUDGET),
+    )
+    .0
+}
+
+/// [`show`] within `budget`, with the rows it printed in full (a row cut at
+/// the line cap is not one), as inclusive ranges. It stops at the first row
+/// that does not fit and says how many it left out.
+pub(crate) fn show_in(
+    ctx: &ToolCtx,
+    text: &str,
+    start: usize,
+    end: usize,
+    budget: &mut crate::shown::Budget,
+) -> (String, RowRanges) {
     let (max_chars, compact) = line_style(ctx);
     let first = line_of(text, start);
     let part = &text[start..end];
@@ -685,17 +722,32 @@ pub(crate) fn show(ctx: &ToolCtx, text: &str, start: usize, end: usize) -> Strin
         Vec::new()
     };
     let mut out = String::new();
+    let mut rows: RowRanges = Vec::new();
+    let mut done = 0;
     for (i, l) in lines.iter().take(MAX_CHANGED_LINES).enumerate() {
-        out.push_str(&number_line(first + i, l, max_chars, compact));
+        let row = number_line(first + i, l, max_chars, compact);
+        if !budget.take(&row) {
+            break;
+        }
+        out.push_str(&row);
+        done += 1;
+        if !is_cut(l, max_chars) {
+            match rows.last_mut() {
+                Some(r) if r.1 + 1 == first + i => r.1 = first + i,
+                _ => rows.push((first + i, first + i)),
+            }
+        }
     }
-    if lines.len() > MAX_CHANGED_LINES {
-        out.push_str(&format!(
+    if done < lines.len() {
+        let more = format!(
             "[{} more changed lines, to line {}: read them]\n",
-            lines.len() - MAX_CHANGED_LINES,
+            lines.len() - done,
             first + lines.len() - 1
-        ));
+        );
+        budget.spend(&more);
+        out.push_str(&more);
     }
-    out
+    (out, rows)
 }
 
 /// The refusal for a file changed since the agent read it: what changed,
@@ -757,13 +809,24 @@ fn shown_rows_cover(ctx: &ToolCtx, key: &Path, text: &str, specs: &[Spec]) -> bo
     let Ok(found) = locate(&View::new(text), &mut None, spec) else {
         return false;
     };
+    let total = text.matches('\n').count() + usize::from(!text.is_empty() && !text.ends_with('\n'));
     !found.spans.is_empty()
         && found.spans.iter().all(|s| {
             let (lo, hi) = (
                 line_of(text, s.a),
                 line_of(text, s.b.saturating_sub(1).max(s.a)),
             );
-            v.covers(lo, hi)
+            // A match that ends with a row's newline, replaced by text that
+            // does not end with one, joins the row after it to the line the
+            // replacement ends: that row is part of the change, and must
+            // have been shown too (the review of PR 188: `A\n` for `A `
+            // joined an unseen row to a shown one). A newline is its own
+            // row's, so a match that starts with one is covered by `lo`.
+            let joins = s.b > s.a
+                && text.as_bytes()[s.b - 1] == b'\n'
+                && hi < total
+                && !found.new.ends_with('\n');
+            v.covers(lo, hi + usize::from(joins))
         })
 }
 
@@ -774,22 +837,27 @@ const UNREAD_CONTEXT: usize = 3;
 /// parse `bash` commands (a `cat` is not a read; research 08 §6.1), so a
 /// model that looked at the file another way gets the lines around the
 /// first match of its first `old_string`, numbered as `read` numbers them,
-/// and those rows count as shown of the file as it is at this moment (kept
-/// as a version, [`crate::seen::SessionSeen::add_version`]; the file does
-/// NOT count as read): the same edit sent again applies, because its match
-/// lies in the shown rows ([`shown_rows_cover`]), unless the file changes on
-/// disk first (then no version of it holds those rows). `write`, an edit
-/// elsewhere, `replace_all` and several edits still get the unread refusal:
-/// the review of PR 187 found that counting the whole file as read let a
-/// `write` over it, and an edit anywhere, through after about 7 rows were
-/// shown. The record is kept for the rest of this turn only: the log keeps
-/// a call's `seen` when it succeeded, so the next turn asks for a read
+/// and the rows printed count as shown of the file as it is at this moment
+/// (kept as a version, [`crate::seen::SessionSeen::add_version`]; the file
+/// does NOT count as read): the same edit sent again applies, because its
+/// match lies in the shown rows ([`shown_rows_cover`]), unless the file
+/// changes on disk first (then no version of it holds those rows). `write`,
+/// an edit elsewhere, `replace_all` and several edits still get the unread
+/// refusal: the review of PR 187 found that counting the whole file as read
+/// let a `write` over it, and an edit anywhere, through after about 7 rows
+/// were shown. The record is kept for the rest of this turn only: the log
+/// keeps a call's `seen` when it succeeded, so the next turn asks for a read
 /// again. Text not in the file shows nothing and counts as nothing. Only
 /// for what a `read` would have shown and only where the retry changes
 /// nothing unseen (review F4, F7, F9): the agent may call `read`; the file
 /// is not one `read` refuses as binary; the call is one edit without
 /// `replace_all` (several edits, or every match, would change lines it was
 /// not shown).
+///
+/// The rows are printed within the result's budget, the match first and its
+/// context where it fits (the review of PR 188: forty rows of 2,000
+/// characters were cut by the cap and counted as shown). A match that does
+/// not fit is not announced as a retry: its rows are to be read.
 fn unread_refusal(ctx: &ToolCtx, key: &Path, shown: &str, text: &str, specs: &[Spec]) -> String {
     // Only what a `read` of this path would show: not where the node
     // denies `read` or the agent lacks it (`read_offered`), not for a path
@@ -809,44 +877,120 @@ fn unread_refusal(ctx: &ToolCtx, key: &Path, shown: &str, text: &str, specs: &[S
     if binary || spec.all {
         return plain();
     }
+    // Rows of this file were shown (a search's, a refusal's) and it is not
+    // the version they were shown of: say so.
+    let sha = crate::seen::sha256(text.as_bytes());
+    let earlier = ctx.seen.shown_version(key).filter(|v| v.sha != sha);
+    let lead = match &earlier {
+        Some(_) => format!(
+            "{shown} has changed on disk since rows of it were shown to you in this session \
+             (the user, a command or another session changed it), and it has not been read \
+             with `read` (reading it with `cat`, `head` or `sed` in `bash` does not count), so \
+             nothing was changed."
+        ),
+        None => format!(
+            "{shown} has not been read with `read` in this session (reading it with `cat`, \
+             `head` or `sed` in `bash` does not count), so nothing was changed."
+        ),
+    };
     let at = locate(&View::new(text), &mut None, spec)
         .ok()
         .and_then(|found| found.spans.first().map(|s| (s.a, s.b)));
     let Some((a, b)) = at else {
-        return plain();
+        return match earlier {
+            Some(old) => {
+                let (x, y) = changed(&old.text, text);
+                if y > x {
+                    format!(
+                        "{lead} The changed lines now read:\n{}Read the part you want to \
+                         change with `read` and retry with the text as it is now.",
+                        show(ctx, text, x, y)
+                    )
+                } else {
+                    format!(
+                        "{lead} Lines were removed at its end. Read the part you want to change."
+                    )
+                }
+            }
+            None => plain(),
+        };
     };
     let mut starts = vec![0];
     starts.extend(text.match_indices('\n').map(|(i, _)| i + 1));
     if text.ends_with('\n') {
         starts.pop();
     }
+    let total = starts.len();
     let (lo, hi) = (line_of(text, a), line_of(text, b.saturating_sub(1).max(a)));
-    let first = lo.saturating_sub(UNREAD_CONTEXT).max(1);
-    let last = (hi + UNREAD_CONTEXT)
-        .min(starts.len())
-        .min(first + MAX_CHANGED_LINES - 1)
-        .max(first);
-    let start = starts[first - 1];
-    let end = starts.get(last).copied().unwrap_or(text.len());
-    let (max_chars, _) = line_style(ctx);
-    let rows: Vec<(usize, usize)> = (first..=last)
-        .filter(|n| {
-            let a = starts[n - 1];
-            let b = starts.get(*n).copied().unwrap_or(text.len());
-            !is_cut(text[a..b].trim_end_matches('\n'), max_chars)
-        })
-        .map(|n| (n, n))
-        .collect();
-    ctx.seen.add_version(key, text.as_bytes(), &rows);
-    format!(
-        "{shown} has not been read with `read` in this session (reading it with `cat`, `head` \
-         or `sed` in `bash` does not count), so nothing was changed. Its lines around \
-         the first match of `old_string` read now (numbered as `read` numbers them):\n{}\
-         These lines now count as shown: send the same edit again to make it (it is refused if \
-         the file changes on disk before then). Changing other lines, or the whole file, still \
-         needs `read`.",
-        show(ctx, text, start, end)
-    )
+    let (max_chars, compact) = line_style(ctx);
+    let row_at = |n: usize| {
+        let a = starts[n - 1];
+        let b = starts.get(n).copied().unwrap_or(text.len());
+        number_line(n, text[a..b].trim_end_matches('\n'), max_chars, compact)
+    };
+    let cost = |n: usize| row_at(n).chars().count();
+    let tail_ok = "These lines now count as shown: send the same edit again to make it (it is \
+         refused if the file changes on disk before then). Changing other lines, or the whole \
+         file, still needs `read`.";
+    let tail_long = format!(
+        "The text `old_string` matches (rows {lo}-{hi}) is more than one result can show, so \
+         no retry of it can be accepted here: `read` those rows, or change it in parts, each \
+         inside rows printed above."
+    );
+    let lead_line = format!(
+        "{lead} Its lines around the first match of `old_string` read now (numbered as `read` numbers them):\n"
+    );
+    let mut budget = crate::shown::Budget::new();
+    budget.spend(&lead_line);
+    budget.spend_n(tail_ok.chars().count().max(tail_long.chars().count()) + 200);
+    let avail = budget.left();
+    // The match first; its context where it fits (after, then before).
+    let (mut first, mut last, mut used) = (lo, lo - 1, 0);
+    let mut core = true;
+    for n in lo..=hi {
+        let c = cost(n);
+        if used + c > avail || n - lo >= MAX_CHANGED_LINES {
+            core = false;
+            break;
+        }
+        used += c;
+        last = n;
+    }
+    if core {
+        for _ in 0..UNREAD_CONTEXT {
+            if last >= total
+                || last - first + 1 >= MAX_CHANGED_LINES
+                || used + cost(last + 1) > avail
+            {
+                break;
+            }
+            last += 1;
+            used += cost(last);
+        }
+        for _ in 0..UNREAD_CONTEXT {
+            if first <= 1 || last - first + 1 >= MAX_CHANGED_LINES || used + cost(first - 1) > avail
+            {
+                break;
+            }
+            first -= 1;
+            used += cost(first);
+        }
+    }
+    ctx.seen.add_version(key, text.as_bytes());
+    let mut out = lead_line;
+    let mut rows = RowRanges::new();
+    if last >= first {
+        let start = starts[first - 1];
+        let end = starts.get(last).copied().unwrap_or(text.len());
+        let (printed, r) = show_in(ctx, text, start, end, &mut crate::shown::Budget::of(avail));
+        out.push_str(&printed);
+        rows = r;
+    }
+    out.push_str(if core { tail_ok } else { &tail_long });
+    if let Some(proof) = crate::shown::seal(&out) {
+        ctx.seen.add_shown(key, &sha, &rows, &proof);
+    }
+    out
 }
 
 /// Before any card (T51): an existing file this session has never read is
@@ -1078,26 +1222,43 @@ fn edit(
         report.push_str(&format!(" ({})", notes.join("; ")));
     }
     report.push_str(".\n");
-    let (lines, rows) = changed_lines(ctx, &updated, &landed);
+    // The whole result is under the cap: the report so far and the header
+    // `run` adds are paid first, the changed lines take what they may, and
+    // the note of lines that changed on disk gets the rest.
+    let mut budget = crate::shown::Budget::new();
+    budget.spend(&report);
+    budget.spend_n(header(ctx, path, &[0; 32]).chars().count() + 1);
+    let (lines, rows) = changed_lines(
+        ctx,
+        &updated,
+        &landed,
+        budget.left().min(RESULT_ROWS_BUDGET),
+    );
+    budget.spend(&lines);
     report.push_str(&lines);
     if let Some((ra, rb)) = region {
         let a = (ra as isize + region_shift) as usize;
         let b = (rb as isize + region_shift) as usize;
-        report.push_str(
-            "\nNote: the file had changed on disk since you last read it, in lines your edit \
-             did not touch. They now read:\n",
-        );
-        report.push_str(&show(ctx, &updated, a, b));
+        let note = "\nNote: the file had changed on disk since you last read it, in lines your \
+                    edit did not touch. They now read:\n";
+        budget.spend(note);
+        report.push_str(note);
+        report.push_str(&show_in(ctx, &updated, a, b, &mut budget).0);
     }
     Ok((updated, report, rows))
 }
 
 /// The lines around each replacement in `text` (the new file), numbered as
-/// `read` numbers them, nearby ones merged.
+/// `read` numbers them, nearby ones merged, at most [`MAX_RESULT_LINES`] and
+/// `allow` characters (the text it returns included). It stops at the first
+/// row that does not fit, says what it left out, and returns the rows it
+/// printed in full: those count as shown, and the rest of the result must
+/// still fit under the cap with them.
 pub(crate) fn changed_lines(
     ctx: &ToolCtx,
     text: &str,
     landed: &[(usize, usize)],
+    allow: usize,
 ) -> (String, RowRanges) {
     let (max_chars, compact) = line_style(ctx);
     let mut starts = vec![0];
@@ -1128,35 +1289,50 @@ pub(crate) fn changed_lines(
             .unwrap_or(&text[a..b.max(a)])
     };
     let mut out = String::from("The changed lines now read (numbered as `read` numbers them):\n");
+    // Room for the footer that says what was left out.
+    let mut budget = crate::shown::Budget::of(allow.saturating_sub(FOOTER_ROOM));
+    budget.spend(&out);
     let mut shown: Vec<(usize, usize)> = Vec::new();
     let mut used = 0;
+    let mut full = false;
     for (k, (lo, hi)) in ranges.iter().enumerate() {
-        if used >= MAX_RESULT_LINES {
+        if full {
             let rest: Vec<String> = ranges[k..]
                 .iter()
+                .take(20)
                 .map(|(a, b)| format!("{a}-{b}"))
                 .collect();
             out.push_str(&format!(
-                "[more changes not shown, at lines {}: read them if you need to]\n",
-                rest.join(", ")
+                "[more changes not shown, at lines {}{}: read them if you need to]\n",
+                rest.join(", "),
+                if ranges.len() - k > 20 { ", ..." } else { "" }
             ));
             break;
         }
         if k > 0 {
+            budget.spend("--\n");
             out.push_str("--\n");
         }
         for n in *lo..=*hi {
-            if used >= MAX_RESULT_LINES {
+            let row = number_line(n, text_of(n), max_chars, compact);
+            if used >= MAX_RESULT_LINES || !budget.take(&row) {
                 out.push_str(&format!("[lines {n}-{hi} not shown]\n"));
+                full = true;
                 break;
             }
-            out.push_str(&number_line(n, text_of(n), max_chars, compact));
+            out.push_str(&row);
             used += 1;
             // A row shown cut is not a row the agent has seen.
             if !is_cut(text_of(n), max_chars) {
-                shown.push((n, n));
+                match shown.last_mut() {
+                    Some(r) if r.1 + 1 == n => r.1 = n,
+                    _ => shown.push((n, n)),
+                }
             }
         }
     }
     (out, shown)
 }
+
+/// What [`changed_lines`] keeps free for its footers.
+const FOOTER_ROOM: usize = 600;

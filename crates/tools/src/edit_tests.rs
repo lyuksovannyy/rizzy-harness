@@ -103,6 +103,15 @@ async fn lines_shown_by_a_refusal_go_stale_like_a_read() {
     put(&dir, "a.txt", "alpha\nzeta\n");
     let again = edit(&ctx, "a.txt", "beta", "BETA").await;
     assert!(!again.ok, "{}", again.output);
+    // Rows of it were shown, and it is not what they were shown of: said so.
+    assert!(
+        again
+            .output
+            .contains("changed on disk since rows of it were shown"),
+        "{}",
+        again.output
+    );
+    assert!(again.output.contains("\tzeta"), "{}", again.output);
     assert_eq!(get(&dir, "a.txt"), "alpha\nzeta\n");
 }
 

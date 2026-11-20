@@ -41,6 +41,9 @@ mod search;
 #[cfg(test)]
 mod search_tag_tests;
 pub mod seen;
+mod shown;
+#[cfg(test)]
+mod shown_tests;
 pub mod skills;
 pub mod stream;
 pub mod todo;

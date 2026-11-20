@@ -564,7 +564,86 @@ async fn glob_prints_no_tags() {
 
 #[test]
 fn the_description_stays_short() {
-    // Measured before the change: 112 characters.
+    // Measured before tags: 112 characters; with both forms said: 228.
     let d = Grep.description();
-    assert!(d.contains("#TAG") && d.chars().count() <= 260, "{d}");
+    assert!(
+        d.contains("#TAG") && d.contains("path:line:text") && d.chars().count() <= 260,
+        "{d}"
+    );
+}
+
+// --- review of PR 188: newlines at the edge of a shown row, trailing space --
+
+/// An `old_string` that ends with a shown row's newline takes the next row's
+/// start into the line it makes: the next row must have been shown too (a
+/// replacement that ends with a newline keeps the rows apart and needs
+/// nothing more). The match ends with a row's newline at the end of the file:
+/// no next row.
+#[tokio::test]
+async fn an_old_string_ending_in_a_shown_rows_newline_needs_the_next_row_shown() {
+    let join = |old: &'static str, new: &'static str| json!({"path": "f.txt", "old_string": old, "new_string": new});
+    for eol in ["\n", "\r\n"] {
+        let t = format!("foo A{eol}bar{eol}foo{eol}baz{eol}");
+        let (dir, ctx) = ws();
+        put(&dir, "f.txt", &t);
+        // Only row 1 was shown.
+        let out = grep(&ctx, "foo A").await;
+        assert!(out.contains("1:foo A"), "{out}");
+        let o = Edit.run(&ctx, join("A\n", "A ")).await;
+        assert!(
+            !o.ok && o.output.contains("not been read"),
+            "{eol:?}: {}",
+            o.output
+        );
+        assert_eq!(get(&dir, "f.txt"), t);
+    }
+    // The newline alone (it is the only one in the file).
+    let (dir, ctx) = ws();
+    put(&dir, "f.txt", "foo A\nbar");
+    grep(&ctx, "foo A").await;
+    let o = Edit.run(&ctx, join("\n", " ")).await;
+    assert!(!o.ok, "{}", o.output);
+    assert_eq!(get(&dir, "f.txt"), "foo A\nbar");
+    // Starting with the previous row's newline: that row was not shown.
+    let (dir, ctx) = ws();
+    put(&dir, "f.txt", "x\nfoo A\nbar\n");
+    grep(&ctx, "foo A").await;
+    let o = Edit.run(&ctx, join("\nfoo A", "\nfoo B")).await;
+    assert!(!o.ok, "{}", o.output);
+    assert_eq!(get(&dir, "f.txt"), "x\nfoo A\nbar\n");
+    // A replacement that ends with a newline keeps the rows apart: lands.
+    let (dir, ctx) = ws();
+    put(&dir, "f.txt", "foo A\nbar\nbaz\n");
+    grep(&ctx, "foo A").await;
+    let o = Edit.run(&ctx, join("foo A\n", "foo B\n")).await;
+    assert!(o.ok, "{}", o.output);
+    assert_eq!(get(&dir, "f.txt"), "foo B\nbar\nbaz\n");
+    // The last row's newline, nothing after it: lands.
+    let (dir, ctx) = ws();
+    put(&dir, "f.txt", "bar\nfoo A\n");
+    grep(&ctx, "foo A").await;
+    let o = Edit.run(&ctx, join("foo A\n", "foo B")).await;
+    assert!(o.ok, "{}", o.output);
+    assert_eq!(get(&dir, "f.txt"), "bar\nfoo B");
+    // The next row shown too: lands.
+    let (dir, ctx) = ws();
+    put(&dir, "f.txt", "foo A\nbar\nbaz\n");
+    grep(&ctx, "foo A|bar").await;
+    let o = Edit.run(&ctx, join("A\n", "A ")).await;
+    assert!(o.ok, "{}", o.output);
+    assert_eq!(get(&dir, "f.txt"), "foo A bar\nbaz\n");
+}
+
+/// The last printed row keeps its trailing whitespace: the row counts as
+/// shown, so what the model sees must be the row.
+#[tokio::test]
+async fn the_last_printed_row_keeps_its_trailing_whitespace() {
+    let (dir, ctx) = ws();
+    put(&dir, "a.txt", "alpha\nneedle  \t \n");
+    let out = grep(&ctx, "needle").await;
+    assert!(out.ends_with("2:needle  \t "), "{out:?}");
+    let mut bounded = ToolCtx::new(dir.path());
+    bounded.savings.bounded_reads = true;
+    let out = grep(&bounded, "needle").await;
+    assert!(out.ends_with("  2: needle  \t "), "{out:?}");
 }
