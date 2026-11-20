@@ -24,6 +24,10 @@ row opens the agent page read-only.
    - **Web**: Web search
    - **Available as**: Agent · Sub-agent
    - **Tools**: Read files · Change files · Run commands · Read-only commands · Skills · Connectors (MCP servers) · Launch sub-agents · Manage workspace
+5. **May delegate to** (under the switches, X.41): for an agent made on the page, a multi-select
+   of the agents offered as sub-agents; none ticked means all of them. It only narrows what the
+   agent is offered (the stored `delegates`, API `delegate_to`); built-in and file agents show
+   their resolved list read-only.
 
 ## Built-in agents
 

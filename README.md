@@ -285,8 +285,12 @@ not get one; neither does a turn you stopped. The chat header shows the
 context of the last request as a share of the model's window and where older
 turns will be summarised ("62% of 128k · summary at 80%"). Without a known
 window it says **window unknown**: hover it for how to set `context` on the
-model. A sub-agent's card in the conversation marks where it was started
-and links to its chat; its row in the side panel shows what it is doing (its
+model. A sub-agent's card in the conversation marks where it was started,
+names the model it runs on, links to its chat and, once it ended, shows its
+report open under the card like a message (cut with "Show all" when long; the
+task stays folded). In the chat of an agent that works only as a sub-agent
+there is no reply box: a line says it only takes tasks from other agents and
+links back to the main chat; its row in the side panel shows what it is doing (its
 latest tool call and how many it made, or that it waits for an approval) and
 its tokens once it ended. Only chats in the open workspace notify, and a
 second tab may notify while another tab shows the chat.
@@ -4173,6 +4177,17 @@ Delegating agents split big jobs into parallel sub-tasks (at most 4 per turn
 and 200k tokens by default; set `delegates`, `max_subagents` and
 `max_subagent_tokens` in an agent file). Delegation is one level deep: a
 sub-agent never delegates further.
+
+On the Agents page, an agent you made with **Launch sub-agents** on shows
+**May delegate to** under its switches: every agent offered as a sub-agent
+("All sub-agents") until you tick some, then only the ticked ones. The list can
+only narrow: an agent that is not offered as a sub-agent, one from another
+workspace and the agent itself are never delegates, whatever the list holds.
+A ticked agent that was deleted since is marked "no longer available" (untick
+it); if every one is gone, the agent has no sub-agents until you change the
+list. With the switch off the list is kept and does nothing. Built-in and file
+agents show their own list, read-only (`delegates:` in a file). The API takes
+`delegate_to` (handles, at most 32) on `POST` and `PATCH /api/agents`.
 
 What a sub-agent gets: the task its parent wrote, the repository's instruction
 files, and the context the parent's message had (your settings, memory
