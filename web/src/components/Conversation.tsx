@@ -58,6 +58,7 @@ import { type Outgoing, outbox } from "../lib/outbox";
 import { useHeaderFigures } from "../lib/childcost";
 import { LiveCtx } from "../lib/liveCtx";
 import { repliedBlock, ReplyBubble } from "./ReplyBubble";
+import { ApprovalChoice, Held } from "./ApprovalChoice";
 import { ToolCard, WebGroupCard } from "./ToolCard";
 import { RowBoundary, RowFailed } from "./RowBoundary";
 import { canJoinProject, ProjectChip } from "./ProjectChip";
@@ -469,6 +470,13 @@ export default function Conversation(props: {
   const sessionAgent = props.agents.find((a) => a.id === activeAgent);
   const subagentOnly = useSubagentOnly(!!props.row?.parent_id, props.row?.workspace_id ?? null, activeAgent);
   const notes = fallbackNotes(items);
+  // Calls waiting for an answer, in the order the node asked: the first
+  // one's choice takes the composer's place (row W.6). Where there is no
+  // composer (a sub-agent that takes tasks only) the cards keep their buttons.
+  const holding = subagentOnly
+    ? []
+    : (view?.pending_approvals ?? []).flatMap((id) => items.filter((x): x is Extract<typeof x, { type: "tool" }> => x.type === "tool" && x.approval?.approval_id === id));
+  const choiceBox = useRef<HTMLDivElement>(null);
   const routine = props.row?.routine;
   useRunSeen(routine);
   // What the server offers here: "Save as artifact" in agentic chats, images in any.
@@ -645,6 +653,7 @@ export default function Conversation(props: {
           if (el) stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
         }}
       >
+        <Held.Provider value={holding[0]?.approval?.approval_id ?? null}>
         <BlockCtx slots={slots} inputs={inputs}>
           <div className="column">
             {!view || view.head_seq === 0 ? (
@@ -1051,6 +1060,7 @@ export default function Conversation(props: {
             )}
           </div>
         </BlockCtx>
+        </Held.Provider>
       </div>
 
       <div className="bottom">
@@ -1105,6 +1115,17 @@ export default function Conversation(props: {
             </Suspense>
           )}
           {pickErr && <div className="error-text">{pickErr}</div>}
+          {holding[0] && (
+            <ApprovalChoice
+              key={holding[0].approval!.approval_id}
+              sessionId={sessionId}
+              item={holding[0]}
+              blocked={!!blocked}
+              cwd={meta?.cwd}
+              place={{ n: 1, of: holding.length }}
+              boxRef={choiceBox}
+            />
+          )}
           {subagentOnly ? (
             <div className="tag-only-row">
               <p className="muted small tag-only" role="note">
@@ -1171,6 +1192,9 @@ export default function Conversation(props: {
             agenticBlocked={null}
             readOnly={blocked}
             running={running}
+            choosing={!!holding[0]}
+            choiceBox={choiceBox}
+            modeNote={t("approval.modeNote")}
             // While a /compact runs, Stop cancels it (the same route).
             compacting={summarise.compacting && !running}
             draft={keepsDraft ? sessionId : undefined}

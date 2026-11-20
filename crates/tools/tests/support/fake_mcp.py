@@ -14,6 +14,8 @@ other request with "method not found". Flags:
   --marker WORD    ignored (lets a test find the process in /proc)
   --say-env NAME   print "token <value of NAME>" to stderr and exit 1 at once
   --tool-names A,B the tools are these (echo's behaviour), no others
+  --linger SEC     after its input ends, keep running SEC seconds (a server
+                   that does not stop with its pipe)
 
 Tools: echo, env, hang, huge, flood, die, image, fail, pid, cwd, slow
 (answers after `ms` milliseconds from a thread of its own, so answers can
@@ -192,3 +194,6 @@ for line in sys.stdin.buffer:
             send({"jsonrpc": "2.0", "id": mid, "result": r})
     else:
         send({"jsonrpc": "2.0", "id": mid, "error": {"code": -32601, "message": "method not found"}})
+
+if value("--linger"):
+    time.sleep(float(value("--linger")))

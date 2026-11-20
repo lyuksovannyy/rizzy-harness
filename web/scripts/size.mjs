@@ -497,8 +497,27 @@ const X7_REVIEW_KB = 7.3;
 // 100.3; the total pays for six more chunks: measured 449.62 against the
 // recorded 447.6, so +2.1 to clear it.
 const DIET_KB = 2.1;
+// The project page says where a repository's approved MCP server will run
+// (in the sandbox, on the host, or not known yet) and which entries a host
+// chat does not start (X.36 in host chats, PR 190, lazy chunk). Measured
+// 449.89 against the recorded 449.7, so +0.2; the first load is 100.3,
+// unchanged.
+const X36_HOST_KB = 0.2;
+// A waiting call's choice takes the composer's place (W.6, PR 194): the
+// choice component with its key guard, the scroll box with its cue, and the
+// flag that silences the page's typing shortcuts, in the conversation's
+// chunk. Measured 451.15 against the recorded 449.9, so +1.3; the first load
+// is 100.6 (+0.3: the composer hides its field and the shell reads the
+// flag), under the 104 ceiling.
+const W6_KB = 1.3;
+// The agent avatars drawn as flat blobs with pill eyes (X.45, PR 192): 21
+// body paths with the place for their eyes, five eye styles, twelve colours
+// and the per-colour eye table in the first load (the avatar is in the chat),
+// the grid picker in the Agents chunk. Measured 452.76 against the recorded
+// 451.2, so +1.6; the first load is 101.7 (+1.1), under the 104 ceiling.
+const X45_KB = 1.6;
 
-const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB + EXPORT_KB + MEMDEF_KB + VISIBILITY_KB + T50_KB + LOOP_KB + DIFF_KB + T51_KB + WSMEM_KB + STEPS_KB + AGENT_SWITCHES_KB + T57_KB + X15_KB + X16_KB + COST_KB + X17_KB + X19_X20_KB + X21_KB + X7_KB + SIDEBAR_KB + X23_T70_KB + X24_KB + X28_KB + WAITING_KB + X29_KB + X25_KB + X26_KB + X32_KB + X33_KB + X34A_KB + X34B_KB + X36_KB + X27A_KB + WEBGUARD_KB + X35A_KB + PICKMARK_KB + X35B_KB + X27C_KB + X37A_KB + X38_KB + TRIALUI2_KB + X39_KB + X39B_KB + X41_KB + X42_KB + PRICEHINT_KB + X44_KB + X7_REVIEW_KB + DIET_KB) * 100) / 10) / 10;
+const TOTAL_KB = Math.ceil(Math.round((BASE_KB + I2_KB + I3_KB + I4_KB + L14_KB + P1_KB + R6_KB + SPLIT_KB + T8D_KB + GLASS_KB + N10A_KB + N10A2_KB + TODO_KB + X5_KB + SUBAGENT_KB + EXPORT_KB + MEMDEF_KB + VISIBILITY_KB + T50_KB + LOOP_KB + DIFF_KB + T51_KB + WSMEM_KB + STEPS_KB + AGENT_SWITCHES_KB + T57_KB + X15_KB + X16_KB + COST_KB + X17_KB + X19_X20_KB + X21_KB + X7_KB + SIDEBAR_KB + X23_T70_KB + X24_KB + X28_KB + WAITING_KB + X29_KB + X25_KB + X26_KB + X32_KB + X33_KB + X34A_KB + X34B_KB + X36_KB + X27A_KB + WEBGUARD_KB + X35A_KB + PICKMARK_KB + X35B_KB + X27C_KB + X37A_KB + X38_KB + TRIALUI2_KB + X39_KB + X39B_KB + X41_KB + X42_KB + PRICEHINT_KB + X44_KB + X7_REVIEW_KB + DIET_KB + X36_HOST_KB + W6_KB + X45_KB) * 100) / 10) / 10;
 // Raised from 103 to 106 once the Phase A pages merged (103.7 measured: the
 // new sidebar, account button and routine-result rows are on the first
 // screen), then lowered to 104 at Phase B (102.3 measured) once the login

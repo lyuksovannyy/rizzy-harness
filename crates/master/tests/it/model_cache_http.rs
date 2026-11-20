@@ -1003,7 +1003,7 @@ async fn agent_avatars() {
         assert!(before[k].is_string(), "{before}");
     }
 
-    let mine = json!({"shape": "hexagon", "eyes": "sleepy", "accent": "green"});
+    let mine = json!({"shape": "rocket", "eyes": "sleepy", "accent": "teal"});
     let (st, v) = call(
         &t,
         Method::PUT,
@@ -1017,12 +1017,12 @@ async fn agent_avatars() {
     assert_eq!(agent(&agents, "coder")["avatar"], mine);
     let file = std::fs::read_to_string(t.dir.path().join("config.toml")).unwrap();
     assert!(file.contains("[agent_avatars.coder]"), "{file}");
-    assert!(file.contains("shape = \"hexagon\""), "{file}");
+    assert!(file.contains("shape = \"rocket\""), "{file}");
 
     for (path, body, want) in [
         (
             "coder",
-            json!({"shape": "star", "eyes": "round", "accent": "blue"}),
+            json!({"shape": "sun", "eyes": "round", "accent": "blue"}),
             StatusCode::BAD_REQUEST,
         ),
         (
@@ -1032,7 +1032,7 @@ async fn agent_avatars() {
         ),
         (
             "coder",
-            json!({"shape": "circle", "eyes": "round", "accent": "teal"}),
+            json!({"shape": "circle", "eyes": "round", "accent": "magenta"}),
             StatusCode::BAD_REQUEST,
         ),
         ("nobody", mine.clone(), StatusCode::NOT_FOUND),
