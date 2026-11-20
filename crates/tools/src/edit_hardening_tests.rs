@@ -273,3 +273,52 @@ async fn a_preview_and_a_refusal_that_print_nothing_leave_the_table_as_it_was() 
     assert!(refusal.contains("changes nothing"), "{refusal}");
     assert_eq!(state(), before, "a plan that changes nothing");
 }
+
+/// A file whose own name starts with a bracket (`[id].tsx`, common in web
+/// projects): the header the tool prints for it is accepted, and so is the
+/// bare `path#TAG` form (review of PR 196: every leading bracket was
+/// stripped, so the tool's own header was refused as another file's).
+#[tokio::test]
+async fn the_header_of_a_file_whose_name_starts_with_a_bracket_is_accepted() {
+    for name in ["[id].tsx", "[[x]].txt", "a].txt"] {
+        let (dir, ctx) = ws();
+        let t = tag_of(ABCD);
+        for (n, tag) in [format!("[{name}#{t}]"), format!("{name}#{t}"), t.clone()]
+            .into_iter()
+            .enumerate()
+        {
+            put(&dir, name, ABCD);
+            let r = Read.run(&ctx, json!({"path": name})).await;
+            assert!(r.ok, "{}", r.output);
+            assert!(
+                r.output.starts_with(&format!("[{name}#{t}]")),
+                "{}",
+                r.output
+            );
+            let (refusal, out) = send(
+                &ctx,
+                json!({"path": name, "tag": tag,
+                       "lines": [{"from": 2, "to": 2, "text": format!("X{n}")}]}),
+            )
+            .await;
+            assert!(refusal.is_none(), "{name} {tag}: {refusal:?}");
+            assert!(out.ok, "{name} {tag}: {}", out.output);
+            assert_eq!(get(&dir, name), format!("alpha\nX{n}\ngamma\ndelta\n"));
+        }
+    }
+    // Another file's header is still refused, with one clean sentence.
+    let (dir, ctx) = ws();
+    put(&dir, "[id].tsx", ABCD);
+    put(&dir, "b.txt", ABCD);
+    Read.run(&ctx, json!({"path": "[id].tsx"})).await;
+    let (refusal, out) = send(
+        &ctx,
+        json!({"path": "[id].tsx", "tag": format!("[b.txt#{}]", tag_of(ABCD)),
+               "lines": [{"from": 1, "to": 1, "text": "x"}]}),
+    )
+    .await;
+    let said = refusal.unwrap_or(out.output);
+    assert!(said.contains("header of another file"), "{said}");
+    assert!(!said.contains("  "), "a gap in the sentence: {said}");
+    assert_eq!(get(&dir, "[id].tsx"), ABCD);
+}

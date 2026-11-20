@@ -199,6 +199,11 @@ fn merge_in(rows: &mut Rows, mut inc: Vec<(u32, u32)>) {
             out.push(next);
         }
     }
+    // The room asked for above is the most the merge can need; what it did
+    // not use is given back, so a version's rows hold what
+    // [`Version::bytes`] counts (review of PR 196: 4,000 ranges that one
+    // read then joined into one left room for 4,001).
+    out.shrink_to_fit();
     *rows = out;
 }
 
@@ -961,6 +966,20 @@ impl Drop for PathLock {
 
 #[cfg(test)]
 mod tests {
+    /// Ranges that later join into one must not leave their room behind.
+    #[test]
+    fn merged_rows_hold_no_more_than_they_count() {
+        let mut rows: Rows = Vec::new();
+        for i in 0..4_000u32 {
+            merge_in(&mut rows, vec![(2 * i + 1, 2 * i + 1)]);
+        }
+        assert_eq!(rows.len(), 4_000);
+        assert_eq!(rows.capacity(), rows.len());
+        merge_in(&mut rows, vec![(1, 8_000)]);
+        assert_eq!(rows, vec![(1, 8_000)]);
+        assert_eq!(rows.capacity(), 1);
+    }
+
     use super::*;
 
     impl SessionSeen {

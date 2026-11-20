@@ -107,9 +107,17 @@ pub(crate) fn wants(input: &Value) -> bool {
 /// part of a header, if there is one, comes back too.
 pub(crate) fn split_tag(s: &str) -> Option<(Option<String>, String)> {
     let s = s.trim();
+    // A whole header loses its one opening bracket; every bracket after it
+    // is the path's own (`[[id].tsx#TAG]` is the header of `[id].tsx`). A
+    // string that does not end with `]` is not a header: `[id].tsx#TAG`
+    // names `[id].tsx` as it stands.
+    let s = match s.strip_prefix('[') {
+        Some(inner) if s.ends_with(']') => inner,
+        _ => s,
+    };
     let (from, tag) = match s.rsplit_once('#') {
         Some((head, tail)) => {
-            let head = head.trim().trim_start_matches('[').trim();
+            let head = head.trim();
             ((!head.is_empty()).then(|| head.to_string()), tail)
         }
         None => (None, s),
@@ -596,7 +604,8 @@ fn plan(ctx: &ToolCtx, key: &Path, shown: &str, live: &str, call: &Call) -> Resu
             .is_ok_and(|p| ctx.seen_key(&p) == key)
     {
         return Err(format!(
-            "`tag` is the header of another file ({from}), not of {shown}: send the tag from              the `[path#TAG]` header line of {shown} (the characters after #), so nothing was \
+            "`tag` is the header of another file ({from}), not of {shown}: send the tag from \
+             the `[path#TAG]` header line of {shown} (the characters after #). Nothing was \
              changed."
         )
         .into());
