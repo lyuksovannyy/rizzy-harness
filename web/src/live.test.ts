@@ -94,7 +94,7 @@ describe("Live.onLoginEnded", () => {
     vi.advanceTimersByTime(60_000);
     expect(FakeSocket.all).toHaveLength(1);
     // An explicit connect (the shell, once the login is known good) works.
-    live.reconnect();
+    live.connect();
     expect(FakeSocket.all).toHaveLength(2);
     close(1006);
     vi.advanceTimersByTime(60_000);

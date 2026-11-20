@@ -184,13 +184,9 @@ export class Live {
     if (v) this.send({ type: "subscribe", session_id: sessionId, after_seq: v.head_seq });
   }
 
-  /** Connect again if not connected (after a 4401 whose login proved good). */
-  reconnect() {
-    if (!this.ws) this.connect();
-  }
-
-  private connect() {
-    if (this.closed) return;
+  /** Also called by the shell after a 4401 whose login proved good. */
+  connect() {
+    if (this.closed || this.ws) return;
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     const ws = new WebSocket(`${proto}//${location.host}/api/ws`);
     this.ws = ws;
@@ -220,7 +216,7 @@ export class Live {
       if (ended) this.onLoginEnded();
       this.setState("offline");
       // A signed-out socket does not knock again by itself: the shell checks
-      // the login and calls `reconnect` if it still holds.
+      // the login and calls `connect` if it still holds.
       if (!this.closed && !ended) {
         setTimeout(() => this.connect(), this.backoff);
         this.backoff = Math.min(this.backoff * 2, 5000);
