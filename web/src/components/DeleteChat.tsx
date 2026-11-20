@@ -4,6 +4,7 @@ import "../lib/i18nPages";
 import { useEffect, useRef, useState } from "react";
 import { pageApi } from "../apiPages";
 import { dropDraft } from "../lib/drafts";
+import { errText } from "../lib/errorText";
 import { t } from "../lib/i18n";
 import { mediaApi } from "../lib/media";
 
@@ -57,7 +58,7 @@ export function DeleteChat(props: {
     try {
       await pageApi.deleteSession(sessionId, { media: withMedia && !!files?.n });
     } catch (x) {
-      setErr(x instanceof Error ? x.message : String(x));
+      setErr(errText(x));
       setBusy(false);
       return;
     }

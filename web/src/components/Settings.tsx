@@ -4,6 +4,7 @@
 import "../lib/i18nPages";
 import { lazy, Suspense, useEffect, useState } from "react";
 import { pageApi } from "../apiPages";
+import { errText } from "../lib/errorText";
 import { t } from "../lib/i18n";
 import { routeHash, settingsHash } from "../lib/routes";
 import { pickTab, type SectionId, type TabId, visibleSections } from "../lib/settings";
@@ -75,7 +76,7 @@ function PrefsEditor(props: {
           props.onSaved(saved);
           setMsg("Saved.");
         } catch (x) {
-          setErr(x instanceof Error ? x.message : String(x));
+          setErr(errText(x));
         }
       }}
     >
@@ -213,7 +214,7 @@ export default function Settings(props: {
                   <div className="field">
                     Default agent
                     <Select
-                      label="Default agent"
+                      label=Default agent
                       value={p.default_agent ?? ""}
                       options={[
                         { value: "", label: t("settings.workspaceDefault") },

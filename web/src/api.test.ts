@@ -156,3 +156,25 @@ describe("a request that gets no answer", () => {
     await expect(run()).rejects.toThrow("too big");
   });
 });
+
+describe("the request id on an error", () => {
+  const withHeaders = (status: number, body: unknown, headers: Record<string, string>) =>
+    fetchFn.mockResolvedValueOnce(new Response(JSON.stringify(body), { status, headers }));
+  test("is read from the body", async () => {
+    answers = [{ status: 409, body: { error: "taken", request_id: "3f2a9c0e11223344" } }];
+    const e = (await api.me().catch((x: unknown) => x)) as { id?: string };
+    expect(e.id).toBe("3f2a9c0e11223344");
+  });
+  test("is read from the header when the body has none (a plain-text refusal too)", async () => {
+    withHeaders(403, { error: "no" }, { "x-request-id": "aaaabbbbccccdddd" });
+    expect(((await api.me().catch((x: unknown) => x)) as { id?: string }).id).toBe("aaaabbbbccccdddd");
+    fetchFn.mockResolvedValueOnce(new Response("origin required", { status: 403, headers: { "x-request-id": "1111222233334444" } }));
+    expect(((await api.me().catch((x: unknown) => x)) as { id?: string }).id).toBe("1111222233334444");
+  });
+  test("an error without one has none, and a 429 carries its Retry-After", async () => {
+    answers = [{ status: 409, body: { error: "taken" } }];
+    expect(((await api.me().catch((x: unknown) => x)) as { id?: string }).id).toBeUndefined();
+    withHeaders(429, { error: "slow down" }, { "retry-after": "5" });
+    expect(((await api.me().catch((x: unknown) => x)) as { retry?: number }).retry).toBe(5);
+  });
+});
