@@ -990,7 +990,7 @@ impl Session {
     /// approved copies of the repository's servers for the chat's folder
     /// as the node holds them now (X.36, PLAN.md T82: an approval taken or
     /// removed since, a name the last read of the file did not find, a
-    /// `host` chat). Nothing is read from disk here.
+    /// `host` chat's, which starts them too). Nothing is read from disk here.
     fn chat_mcp_for_turn(&self) -> Option<Arc<harness_tools::mcp::SessionMcp>> {
         self.chat_table(|root| {
             root.sync_project_mcp();
@@ -1008,12 +1008,7 @@ impl Session {
             return;
         };
         let owner = self.owner.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        let (servers, notes) = pm.servers_for(
-            &self.node.cfg.policy,
-            owner.as_deref(),
-            &self.cwd,
-            self.exec_mode,
-        );
+        let (servers, notes) = pm.servers_for(&self.node.cfg.policy, owner.as_deref(), &self.cwd);
         m.set_project(&servers, notes);
     }
 

@@ -504,7 +504,7 @@ async fn a_repositorys_servers_come_and_go_through_set_project() {
     assert!(
         l.notes
             .iter()
-            .any(|n| n.contains("only in a contained sandbox")),
+            .any(|n| n.contains("env values") && n.contains("a host chat never has one")),
         "{:?}",
         l.notes
     );

@@ -1177,13 +1177,19 @@ async fn start(
     // is its control channel); the folder holding it is the node's own.
     let mut fifo_dir = None;
     // A repository's server (X.36) with `env` values runs contained or
-    // not at all: the values reach only its own process, set by
+    // not at all (a `host` chat's is never contained: the owner's
+    // 2026-11-20 decision lets it start without values, and this refuses
+    // the rest until the values can be kept off our own wrapper, see the
+    // design note in docs/projects.md): the values reach only its own process, set by
     // `sandbox-exec` after the confinement (see below); no other way of
     // starting it keeps them off the processes before it.
     if cfg.env_inside && !cfg.env.0.is_empty() && !contained {
         return Err(
-            "a repository's server with env values runs only in a contained sandbox \
-                    (bubblewrap), which this chat does not have"
+            "its .mcp.json entry has env values, which reach a repository's server only \
+             inside a bubblewrap sandbox, and this chat has none (a host chat never has \
+             one): no other way of starting it keeps the values off the processes before \
+             it. Take the env values out of the entry and approve it again, or use a \
+             sandboxed chat"
                 .into(),
         );
     }

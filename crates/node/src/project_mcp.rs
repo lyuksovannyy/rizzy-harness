@@ -22,9 +22,13 @@
 //! from the file at the node's last read of it (removing narrows, so it
 //! counts at once); a changed entry runs its approved copy until the new
 //! one is approved; a new entry runs nothing; an unreadable file (a link,
-//! a FIFO, a folder, over the cap, not JSON) changes nothing. Never in a
-//! `host` chat. Every rule of node.toml's servers holds (PLAN.md T47): the
-//! chat's own confinement, the caps, the idle stop, the approval of calls.
+//! a FIFO, a folder, over the cap, not JSON) changes nothing. A `host`
+//! chat starts them too (the owner, 2026-11-20: "if user selected host
+//! project workspace, why do we need to limit it? its his choice"), as
+//! the node's user without a sandbox; only an entry with `env` values does
+//! not start there (below). Every rule of node.toml's servers holds
+//! (PLAN.md T47): the chat's own confinement, the caps, the idle stop, the
+//! approval of calls.
 //!
 //! **What the person sees is what runs.** An entry is approvable only if
 //! every string of it (the command, each argument, each `env` name and
@@ -44,7 +48,9 @@
 //! private file the guard hands to bubblewrap as a descriptor, and
 //! `sandbox-exec` sets them after it confined itself, right before the
 //! `exec` (`ServerConfig::env_inside`); they are in no command line and
-//! not on the guard, bubblewrap or `sandbox-exec` itself. They are
+//! not on the guard, bubblewrap or `sandbox-exec` itself. That exists only
+//! with bubblewrap, so an entry with values is not started in a chat
+//! without it (a `host` chat's): the chat is told which and why. They are
 //! repository content the chat's agent can read anyway, so they join no
 //! scrubber; they are never written to an event, a log or an audit line by
 //! the harness, and only the asking person's answer carries them.
@@ -99,12 +105,6 @@ pub const LOOK_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 /// The refusal of every request on a node whose node.toml keeps it off.
 pub const OFF: &str = "this node does not run a repository's MCP servers: its node.toml has \
      no [mcp] project_servers = \"ask\"";
-/// The refusal on a node that offers no sandboxed chats.
-pub const HOST_ONLY: &str = "this node runs only host chats, and a repository's MCP servers \
-     never run in one: they run only in sandboxed chats";
-/// What a `host` chat is told when its owner approved servers here.
-pub const HOST_NOTE: &str = "The repository's approved MCP servers (.mcp.json) are not \
-     started in this chat: it runs on the host, and they run only in sandboxed chats";
 
 /// One server of a `.mcp.json` as the node runs it.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -683,14 +683,14 @@ impl ProjectMcp {
     /// The servers a chat of `owner` in `folder` starts from now on, and
     /// what to tell it: `owner`'s approved copies for that folder, less a
     /// name the file did not hold at the node's last read of it, less a
-    /// name node.toml has (node.toml wins); none in a `host` chat. Nothing
+    /// name node.toml has (node.toml wins), in a `host` chat as in a sandboxed
+    /// one. Nothing
     /// is read here.
     pub(crate) fn servers_for(
         &self,
         policy: &NodePolicy,
         owner: Option<&str>,
         folder: &Path,
-        exec_mode: Option<harness_core::policy::ExecMode>,
     ) -> (BTreeMap<String, ServerConfig>, Vec<String>) {
         let Some(owner) = owner else {
             return Default::default();
@@ -698,9 +698,6 @@ impl ProjectMcp {
         let approved = self.approved_in(owner, &folder_key(folder));
         if approved.is_empty() {
             return Default::default();
-        }
-        if exec_mode != Some(harness_core::policy::ExecMode::Sandbox) {
-            return (BTreeMap::new(), vec![HOST_NOTE.to_string()]);
         }
         let present = self
             .seen
@@ -759,13 +756,6 @@ impl ProjectMcp {
         };
         if !valid_user_id(user) {
             return refuse("the request names no valid account".into());
-        }
-        if policy
-            .exec
-            .check_session(Some(harness_core::policy::ExecMode::Sandbox))
-            .is_err()
-        {
-            return refuse(HOST_ONLY.into());
         }
         let real = policy.check_cwd(folder);
         if let ProjectMcpRequest::Remove { name } = req {
