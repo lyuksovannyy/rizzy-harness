@@ -387,7 +387,7 @@ fn drive(
         Outcome::Ok
     };
     if outcome == Outcome::Ok {
-        let _ = parser.finish();
+        parser.finish();
         if state.too_many.get() {
             return Outcome::TooMany;
         }
