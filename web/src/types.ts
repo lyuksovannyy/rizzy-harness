@@ -404,6 +404,22 @@ export interface CheckpointState {
   after: string | null;
   files: string[];
   restored: boolean;
+  /** How the person's repository's HEAD moved during the turn, when it did
+   * (X.42): the branch (absent when detached) and the commit, each end. */
+  head_moved?: HeadMoved;
+  /** While `restored`: the checkpoint the folder was saved as just before
+   * the undo; restoring that id puts back what the undo replaced. */
+  saved?: string;
+}
+
+export interface HeadAt {
+  branch?: string;
+  commit: string;
+}
+
+export interface HeadMoved {
+  from: HeadAt;
+  to: HeadAt;
 }
 
 /** What one turn changed, read by the node from its checkpoints (X.12;

@@ -31,13 +31,14 @@ import { CopyMessage } from "../md/CopyMessage";
 import { rt } from "../md/strings";
 import { showHidden, shownName } from "../md/hidden";
 import type { History } from "../bg/topics";
-import type { Agent, ApprovalMode, Item, ModelInfo, NodeInfo, RoutineMark, SessionRow, SessionView } from "../types";
+import type { Agent, ApprovalMode, HeadMoved, Item, ModelInfo, NodeInfo, RoutineMark, SessionRow, SessionView } from "../types";
 import { inputBlock, inputState, progressSignature, progressSlots, type ProgressSlots } from "../ui/blocks";
 import { Composer, type ComposerHandle, type Submission } from "./Composer";
 import { AgentMark, agentAlert } from "./AgentAvatar";
 import { ChatArtifactsCtx, SaveAsArtifact, SavedItem, stagedKeys, useChatArtifacts } from "./ChatArtifacts";
 import { BubbleImages } from "./ChatImages";
 import { ChatTitle } from "./ChatTitle";
+import { HeadNote } from "./HeadNote";
 import { ThinkingRow } from "./ThinkingRow";
 import { DeleteChat } from "./DeleteChat";
 import { useAvatarState } from "./avatarState";
@@ -84,6 +85,17 @@ function mayHaveSideItems(view: SessionView | undefined): boolean {
   return view.items.some((it) => it.type === "tool" && it.tool === "delegate");
 }
 
+/** How HEAD moved in each turn after item `i` that a rewind would undo. */
+function laterMoves(view: SessionView, i: number): HeadMoved[] {
+  const out: HeadMoved[] = [];
+  for (const x of view.items.slice(i + 1)) {
+    if (x.type !== "turn_end") continue;
+    const c = own(view.checkpoints, x.turn_id);
+    if (c?.head_moved && !c.restored) out.push(c.head_moved);
+  }
+  return out;
+}
+
 function Undo(props: {
   sessionId: string;
   turnId: string;
@@ -98,22 +110,35 @@ function Undo(props: {
   /** Open the turn's changes beside the chat (this turn's, or with
    * `rewind` this one's and every later one's). */
   onShow: (rewind: boolean, from: HTMLElement) => void;
+  /** How the repository's HEAD moved in this turn, when it did (X.42). */
+  headMoved?: HeadMoved;
+  /** The same for each later turn a rewind would also undo. */
+  laterMoves?: HeadMoved[];
+  /** After an undo: the checkpoint it saved first. Restoring it puts back
+   * what the undo replaced (an undo of the undo: the node's same checks). */
+  saved?: string;
 }) {
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [lastRewind, setLastRewind] = useState(false);
-  const run = async (force: boolean, rewind = lastRewind) => {
+  // What the last click asked, so "Undo anyway" repeats exactly that.
+  const [last, setLast] = useState<{ turn: string; rewind: boolean }>({ turn: props.turnId, rewind: false });
+  // The node said the saved checkpoint is not kept any more.
+  const [gone, setGone] = useState(false);
+  const run = async (force: boolean, ask = last) => {
     setBusy(true);
     setErr(null);
-    setLastRewind(rewind);
+    setLast(ask);
     try {
-      await pageApi.restoreTurn(props.sessionId, props.turnId, force, rewind);
+      await pageApi.restoreTurn(props.sessionId, ask.turn, force, ask.rewind);
     } catch (x) {
-      setErr(x instanceof Error ? x.message : String(x));
+      const m = x instanceof Error ? x.message : String(x);
+      if (ask.turn !== props.turnId && m.includes("no longer kept")) setGone(true);
+      setErr(m);
     } finally {
       setBusy(false);
     }
   };
+  const mine = { turn: props.turnId, rewind: false };
   return (
     <div className="undo small">
       <details>
@@ -126,6 +151,14 @@ function Undo(props: {
           ))}
         </ul>
       </details>
+      {props.headMoved && <HeadNote moved={props.headMoved} />}
+      {!!props.laterMoves?.length && props.laterChanges && !props.blocked && (
+        <>
+          {props.laterMoves.map((m, i) => (
+            <HeadNote key={i} moved={m} lead="Rewinding also covers a later turn. " />
+          ))}
+        </>
+      )}
       <button
         type="button"
         className="link"
@@ -135,8 +168,19 @@ function Undo(props: {
         Show changes
       </button>
       {!props.restored && !props.blocked && (
-        <button type="button" className="link" disabled={busy || props.running} onClick={() => void run(false, false)}>
+        <button type="button" className="link" disabled={busy || props.running} onClick={() => void run(false, mine)}>
           Undo file changes
+        </button>
+      )}
+      {props.restored && props.saved && !gone && !props.blocked && (
+        <button
+          type="button"
+          className="link"
+          disabled={busy || props.running}
+          title="Restore the folder as it was just before the undo: the files it replaced come back, with the same checks as any undo"
+          onClick={() => void run(false, { turn: props.saved!, rewind: false })}
+        >
+          Put back what this undo replaced
         </button>
       )}
       {props.laterChanges && !props.blocked && (
@@ -145,7 +189,7 @@ function Undo(props: {
           className="link"
           disabled={busy || props.running}
           title="Undo this turn and every later turn's file changes"
-          onClick={() => void run(false, true)}
+          onClick={() => void run(false, { turn: props.turnId, rewind: true })}
         >
           Rewind files to before this turn
         </button>
@@ -876,6 +920,9 @@ export default function Conversation(props: {
                           running={running}
                           laterChanges={laterChanges}
                           blocked={!!blocked}
+                          headMoved={cp.head_moved}
+                          laterMoves={laterMoves(view, i)}
+                          saved={cp.restored ? cp.saved : undefined}
                           onShow={(rewind, from) => {
                             diffOpener.current = from;
                             setDiffOf({ session: sessionId, turn: it.turn_id, rewind });
@@ -1097,6 +1144,7 @@ export default function Conversation(props: {
                   turnId={diffOf.turn}
                   rewind={diffOf.rewind}
                   laterChanges={laterChanges}
+                  headMoves={[...(cp?.head_moved ? [cp.head_moved] : []), ...(diffOf.rewind && view ? laterMoves(view, at) : [])]}
                   canUndo={!blocked && (diffOf.rewind ? laterChanges || !!cp?.files.length : !!cp && !cp.restored && cp.files.length > 0)}
                   running={running}
                   onRewind={(rewind) => setDiffOf({ ...diffOf, rewind })}

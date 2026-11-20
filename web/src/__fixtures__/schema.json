@@ -822,6 +822,41 @@
         "type": "string"
       },
       {
+        "path": "head_moved",
+        "required": false,
+        "type": "object"
+      },
+      {
+        "path": "head_moved.from",
+        "required": true,
+        "type": "object"
+      },
+      {
+        "path": "head_moved.from.branch",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "head_moved.from.commit",
+        "required": true,
+        "type": "string"
+      },
+      {
+        "path": "head_moved.to",
+        "required": true,
+        "type": "object"
+      },
+      {
+        "path": "head_moved.to.branch",
+        "required": false,
+        "type": "string"
+      },
+      {
+        "path": "head_moved.to.commit",
+        "required": true,
+        "type": "string"
+      },
+      {
         "path": "phase",
         "required": true,
         "restricted": true,

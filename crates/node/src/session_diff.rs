@@ -202,6 +202,7 @@ mod tests {
             files: vec![],
             excluded: vec![],
             excluded_more: 0,
+            head_moved: None,
         }
     }
 

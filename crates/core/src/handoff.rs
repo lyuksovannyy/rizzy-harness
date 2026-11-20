@@ -315,6 +315,7 @@ mod tests {
             files: files.iter().map(|f| f.to_string()).collect(),
             excluded: vec![],
             excluded_more: 0,
+            head_moved: None,
         })
     }
 
@@ -371,6 +372,7 @@ mod tests {
                 files: vec![],
                 excluded: vec![],
                 excluded_more: 0,
+                head_moved: None,
             }),
             ended("t2", TurnEndReason::Limit),
         ]);

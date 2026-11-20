@@ -88,6 +88,11 @@ export function cappedUsage(u: Usage): Usage {
   return c;
 }
 
+/** The latest `before_restore`'s id, as `SessionView::saving` in
+ * crates/core/src/view.rs: the restore whose `restored` events follow it.
+ * Beside the view for the same reason as `spent`. */
+const saving = new WeakMap<SessionView, string>();
+
 /** X.39, as `SessionView::settled` and `live` in crates/core/src/view.rs: what
  * the finished turns (and every other cost the chat carries) used, apart from
  * the running turn's latest `turn_usage`; `v.usage` is the two together. Kept
@@ -212,6 +217,8 @@ const STRUCTS: Record<string, string> = {
   ended: "session agent_id ?result ?usage:@usage",
   failure: "model reason",
   todo: "content status:=todoStatus",
+  headAt: "?branch commit",
+  headMoved: "from:@headAt to:@headAt",
 };
 
 // Every kind the fold handles.
@@ -227,7 +234,7 @@ const KINDS: Record<string, string> = {
   tool_call_finished: "call_id ok:b output ?exit_code:n ?sources:[@source",
   approval_requested: "approval_id call_id tool input:j reason ?turn_allow:b ?chat_allow:b",
   approval_resolved: "approval_id decision:=decision by:=resolvedBy ?note",
-  checkpoint: "turn_id phase:=phase git_ref ?files:[s",
+  checkpoint: "turn_id phase:=phase git_ref ?files:[s ?head_moved:@headMoved",
   turn_ended: "turn_id reason:=turnEnd ?usage:@usage",
   turn_usage: "turn_id usage:@usage",
   error: "message",
@@ -611,10 +618,29 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
     case "checkpoint": {
       const c = own(v.checkpoints, p.turn_id) ?? put(v.checkpoints, p.turn_id, { before: null, after: null, files: [], restored: false });
       if (p.phase === "before") c.before = p.git_ref;
-      else if (p.phase === "after") {
+      else if (p.phase === "before_restore") {
+        // A restore's own checkpoint is undone like a turn's.
+        c.before = p.git_ref;
+        saving.set(v, p.turn_id);
+      } else if (p.phase === "after") {
         c.after = p.git_ref;
         c.files = p.files ?? [];
-      } else if (p.phase === "restored") c.restored = true;
+        if (p.head_moved) c.head_moved = p.head_moved;
+        else delete c.head_moved;
+      } else if (p.phase === "restored") {
+        c.restored = true;
+        const s = saving.get(v);
+        if (s != null) c.saved = s;
+        else delete c.saved;
+        // Restoring a saved checkpoint undoes the undo that saved it: those
+        // turns' changes are back.
+        for (const other of Object.values(v.checkpoints)) {
+          if (other.saved === p.turn_id) {
+            other.restored = false;
+            delete other.saved;
+          }
+        }
+      }
       break;
     }
     case "turn_ended": {

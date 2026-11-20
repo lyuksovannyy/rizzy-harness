@@ -216,6 +216,7 @@ fn work(id: &str, ask: &str) -> Vec<EventKind> {
             files: vec!["src/parse.rs".into(), "[harness] approved.txt".into()],
             excluded: vec![],
             excluded_more: 0,
+            head_moved: None,
         }),
         EventKind::TodoUpdated(TodoUpdated {
             turn_id: id.into(),

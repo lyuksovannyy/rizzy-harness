@@ -251,6 +251,16 @@ pub fn every_kind(w: &str) -> Vec<EventKind> {
             files: vec![s()],
             excluded: vec![s()],
             excluded_more: 1,
+            head_moved: Some(HeadMoved {
+                from: HeadAt {
+                    branch: Some("main".into()),
+                    commit: "a".repeat(40),
+                },
+                to: HeadAt {
+                    branch: Some("x".into()),
+                    commit: "b".repeat(40),
+                },
+            }),
         }),
         EventKind::TurnEnded(TurnEnded {
             turn_id: s(),
