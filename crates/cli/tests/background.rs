@@ -590,16 +590,18 @@ async fn a_hand_detached_job_is_told_what_happens_to_it() {
     )
     .await;
     assert!(started.elapsed() < Duration::from_secs(15), "{}", r.output);
+    // The note is the call's typed field, never a line of the output.
+    let note = r.note.clone().unwrap_or_default();
     assert!(
-        r.output.contains("[harness] a job this command detaches")
-            && r.output.contains("is killed when this call returns")
-            && r.output.contains("`background: true` with `timeout_secs`")
-            && r.output.contains("`bash_stop`"),
-        "{}",
-        r.output
+        note.starts_with("[harness] a job this command detaches")
+            && note.contains("is killed when this call returns")
+            && note.contains("`background: true` with `timeout_secs`")
+            && note.contains("`bash_stop`")
+            && !r.output.contains("[harness]"),
+        "{r:?}"
     );
     let r = run(&Bash, &ctx, json!({"command": "echo a && echo b"})).await;
-    assert!(!r.output.contains("[harness]"), "{}", r.output);
+    assert!(r.note.is_none(), "{}", r.output);
     // The call itself asks for a background run: no line.
     let r = run(
         &Bash,
@@ -607,7 +609,7 @@ async fn a_hand_detached_job_is_told_what_happens_to_it() {
         json!({"command": "sleep 1 &", "background": true, "timeout_secs": 20}),
     )
     .await;
-    assert!(!r.output.contains("[harness]"), "{}", r.output);
+    assert!(r.note.is_none(), "{}", r.output);
     // The timeout note offers `background: true` where it is on.
     let r = run(
         &Bash,
@@ -624,10 +626,42 @@ async fn a_hand_detached_job_is_told_what_happens_to_it() {
     let mut ctx = f.ctx(sb, &bg);
     ctx.background = Access::Off(harness_tools::background::SUB_AGENT.into());
     let r = run(&Bash, &ctx, json!({"command": "nohup sleep 30 &"})).await;
+    let note = r.note.clone().unwrap_or_default();
     assert!(
-        r.output.contains("is killed when this call returns") && !r.output.contains("bash_stop"),
+        note.contains("is killed when this call returns") && !note.contains("bash_stop"),
+        "{r:?}"
+    );
+    let r = run(
+        &Bash,
+        &ctx,
+        json!({"command": "sleep 30", "timeout_secs": 5}),
+    )
+    .await;
+    assert!(
+        r.output.contains("timed out after 5s") && !r.output.contains("background: true"),
         "{}",
         r.output
+    );
+}
+
+/// `background_per_session = 0`: the table exists but offers nothing, so
+/// neither the note nor the timeout note names `background: true`.
+#[tokio::test]
+async fn with_the_table_at_zero_nothing_names_background() {
+    let f = fixture();
+    let Some(sb) = f.sandbox() else { return };
+    let (off, _e) = table(Limits {
+        per_session: 0,
+        ..Default::default()
+    });
+    let ctx = f.ctx(sb, &off);
+    let r = run(&Bash, &ctx, json!({"command": "sleep 30 &"})).await;
+    let note = r.note.clone().unwrap_or_default();
+    assert!(
+        note.contains("is killed when this call returns")
+            && !note.contains("background: true")
+            && !note.contains("bash_stop"),
+        "{r:?}"
     );
     let r = run(
         &Bash,

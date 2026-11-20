@@ -630,6 +630,12 @@ pub struct ToolOutcome {
     /// the bytes with the chat and records only a reference. Never part of
     /// `output`.
     pub image: Option<FileImage>,
+    /// A line of the harness's own about this call, from a fixed text the
+    /// tool owns (never from the command's output or the model): the loop
+    /// sends it to the model after the result as a note, unescaped, and
+    /// records it as the call's `note`. Not part of `output`, whose
+    /// `[harness]` lines the model reads as forged.
+    pub note: Option<String>,
 }
 
 /// An image file as `read` found it: its bytes as read (at most

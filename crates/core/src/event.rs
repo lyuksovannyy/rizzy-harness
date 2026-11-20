@@ -1737,7 +1737,9 @@ pub struct ToolCallFinished {
     /// The harness's own line about this call (the repeated-call guard,
     /// T.1), sent to the model after the result's text as a note: the
     /// result's own lines are escaped (`NOTE_LEAD`), this one is not. Only
-    /// the node's loop writes it, never from the tool or the model.
+    /// the node's loop writes it, from its own text or a typed field of the
+    /// tool's outcome (`ToolOutcome::note`, a fixed sentence), never from the
+    /// model or a command's output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
     /// The file this call read or wrote, as the file tools' staleness guard
