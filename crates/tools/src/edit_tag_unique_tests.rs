@@ -12,7 +12,11 @@ use crate::{Edit, Grep, Read, Tool, ToolCtx, ToolOutcome};
 
 fn ws() -> (tempfile::TempDir, ToolCtx) {
     let dir = tempfile::tempdir().unwrap();
-    let ctx = ToolCtx::new(dir.path());
+    // 4-character base tags: a collision of two versions is found by
+    // counting (1 in 65,536); at the shipped length it is not.
+    let mut ctx = ToolCtx::new(dir.path());
+    ctx.seen = std::sync::Arc::new(crate::seen::SeenStore::with_tag_len(4))
+        .session(harness_core::SessionId::new());
     (dir, ctx)
 }
 
@@ -42,7 +46,7 @@ fn last_tag(out: &str) -> String {
 }
 
 fn base(text: &str) -> String {
-    crate::seen::tag(&crate::seen::sha256(text.as_bytes()))
+    crate::seen::prefix(&crate::seen::sha256(text.as_bytes()), 4)
 }
 
 async fn read(ctx: &ToolCtx) -> ToolOutcome {
@@ -59,7 +63,7 @@ async fn lines(ctx: &ToolCtx, tag: &str, ops: Value) -> ToolOutcome {
 const A: &str = "alpha\nbeta\ngamma\ndelta\n";
 
 /// The text `A` has with row 2 replaced by `beta {i}`, for the first `i`
-/// whose four-character tag is `A`'s (found by counting: 1 in 65,536).
+/// whose four-character tag is `A`'s (found by counting: 1 in 65,536; the context's tags are 4 characters long here).
 fn b_of_a() -> (usize, String) {
     let t = base(A);
     (0usize..)

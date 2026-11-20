@@ -17,6 +17,8 @@ pub use bash::{
 mod edit;
 #[cfg(test)]
 mod edit_fuzz_tests;
+#[cfg(test)]
+mod edit_hardening_tests;
 mod edit_lines;
 #[cfg(test)]
 mod edit_lines_tests;

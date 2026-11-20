@@ -2614,11 +2614,17 @@ list of strings is a list of lines, one per string (an empty list is refused);
 (send the same number twice for one row), and so is a missing `text` (`"text":
 ""` deletes the rows). A call without `tag` is refused with the rows it names
 and the file's current tag. `old_string` and the line form cannot be given together. The tag is
-a lookup key, not a secret. It is normally four hex characters; when two versions of one
-file in a session would have the same four, the later one's is longer (five or more), and
-the tag is sent whole, as the header printed it. A tag names the version it was printed
-for, never another one, for the whole session: a version that was dropped from memory is
-unknown, not mistaken for a newer one.
+a lookup key, not a secret. It is normally six hex characters; when two versions of one
+file in a session would have the same six, the later one's is longer (seven or more), and
+the tag is sent whole, as the header printed it (or as `#TAG`, or as the whole header line of
+the same file: a header of another file is refused). A tag names the version it was printed
+for, never another one, while the file's entry is in the table and the node has not restarted:
+a version that was dropped from memory is unknown, not mistaken for a newer one. Two cases are
+not covered, each with a chance of 1 in 16,777,216 per later version that an old tag names a
+newer version by chance (its row numbers would then land on that version's rows): a file whose
+entry was dropped whole when the table was full (1,024 files in a chat, 4,096 on the node), and,
+after a node restart, a version that only a search, a refusal or a line edit on a file changed
+since had printed.
 The header names the file as the agent addresses it: relative to the chat's
 folder when the file is inside it. When a line edit asks for approval, its card
 lists the rows it replaces (or where it inserts) under "Rows this changes",

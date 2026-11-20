@@ -130,7 +130,7 @@ async fn read_starts_with_the_header_and_the_tag_is_the_hash_prefix() {
         r.output
     );
     assert_eq!(first_tag(&r.output), tag_of("one\ntwo\n"));
-    assert_eq!(first_tag(&r.output).len(), 4);
+    assert_eq!(first_tag(&r.output).len(), 6);
     assert!(
         first_tag(&r.output)
             .chars()
@@ -348,7 +348,7 @@ async fn bad_operations_are_refused_and_nothing_is_written() {
         );
         assert_eq!(get(&dir, "a.txt"), "one\ntwo\nthree\n", "{ops}");
     }
-    // A tag that is not four hex characters is told so.
+    // A tag that is not hex characters is told so.
     let e = lines(&ctx, "a.txt", "nope!", json!([{"after": 0, "text": "x"}])).await;
     assert!(!e.ok && e.output.contains("tag"), "{}", e.output);
     // Pasting the whole header line is accepted for the tag.

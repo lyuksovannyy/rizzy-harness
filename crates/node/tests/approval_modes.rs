@@ -2993,12 +2993,12 @@ async fn a_lowered_ceiling_is_recorded_at_the_next_turn() {
 // ---- The card of a line edit shows the rows it replaces (T45, the
 // approval card): `Tool::preview` -> `approve_from` -> `approval_requested`.
 
-/// The tag `read` and `edit` give for `text`: four upper-case hex characters
+/// The tag `read` and `edit` give for `text`: six upper-case hex characters
 /// of its SHA-256.
 fn tag_of(text: &str) -> String {
     use sha2::{Digest, Sha256};
     let d = Sha256::digest(text.as_bytes());
-    format!("{:02X}{:02X}", d[0], d[1])
+    format!("{:02X}{:02X}{:02X}", d[0], d[1], d[2])
 }
 
 fn rows(n: usize) -> String {

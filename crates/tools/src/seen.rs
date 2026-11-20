@@ -10,7 +10,7 @@
 //!
 //! Versions and tags (the line form of `edit`, PLAN.md T45): per path the
 //! last [`MAX_VERSIONS`] versions the agent was shown or wrote are kept, each
-//! with the rows of it that were shown. A version's tag is the first four hex
+//! with the rows of it that were shown. A version's tag is the first six hex
 //! characters of its SHA-256, upper case ([`tag`]), longer when a tag of that
 //! path was issued before with the same characters (the shortest longer
 //! prefix of the hash that was not): a lookup key, checked against the kept
@@ -19,6 +19,13 @@
 //! every kept version stores its tag, and the tags of versions that left the
 //! table are remembered per path ([`MAX_GONE_TAGS`]) so no new version takes
 //! one. A tag is compared as a whole string, never as a prefix.
+//!
+//! What this does not cover: the guarantee holds while the file's entry is in
+//! the table and the node has not restarted. An entry dropped whole by the
+//! bounds below forgets its tags, and after a restart the versions the log
+//! does not hold (a search's, a refusal's) are forgotten: an old tag can then
+//! equal a newer version's tag by chance, 1 in 16,777,216 per later version
+//! (six hex characters), and its row numbers would land on that version.
 //!
 //! A snapshot is the text the agent was shown, kept in memory (bounded) so
 //! that a file changed on disk since can still be edited where it did not
@@ -53,27 +60,39 @@ pub const MAX_VERSIONS: usize = 4;
 /// no new version takes a tag the model may still hold, and the same content
 /// seen again gets the same tag back. Past it the oldest is forgotten, and
 /// only then can a new version whose hash starts with that very tag take it:
-/// it takes 33 evicted versions of one path in one session, then a chance of
-/// one in 65,536 per new version, and a model that still holds the forgotten
-/// tag from that long ago (the entry as a whole going, by the bounds below,
-/// forgets all of its tags the same way).
-pub const MAX_GONE_TAGS: usize = 32;
-/// The length of a tag before a collision lengthens it.
-pub const TAG_LEN: usize = 4;
+/// it takes 17 evicted versions of one path in one session, then a chance of
+/// one in 16,777,216 per new version, and a model that still holds the
+/// forgotten tag from that long ago (the entry as a whole going, by the
+/// bounds below, forgets all of its tags the same way). One is 33 bytes (the
+/// hash and the tag's length: the tag is a prefix of the hash), so a full
+/// list is 528 bytes, the `Vec` kept at exactly that capacity.
+pub const MAX_GONE_TAGS: usize = 16;
+/// The length of a tag before a collision lengthens it: six hex characters,
+/// 1 in 16,777,216 for two versions to share one (about one token in a
+/// header; four characters were 1 in 65,536).
+pub const TAG_LEN: usize = 6;
 /// Files remembered per session; past it one nobody read goes first (a
 /// search's or a refusal's), then the least recently used (the agent then
 /// has to read it again).
 pub const MAX_FILES: usize = 1024;
-/// Files remembered over all sessions of the node, those nobody read and then the least recently used
-/// forgotten first. Worst case per entry: a path of `PATH_MAX` (4,096
-/// bytes) plus about 200 bytes of entry and map overhead, so 4,096 entries
-/// are at most about 17.6 MB, and with [`SNAPSHOT_MAX_TOTAL`] about 26 MB:
-/// under the 50 MB idle rule even if every path were as long as allowed
-/// (a typical path of 100 bytes makes it about 1.2 MB). The remembered tags
-/// ([`MAX_GONE_TAGS`], about 2.3 KB for an entry that has used them all) add
-/// at most about 9.4 MB to that worst case, which needs 33 versions of every
-/// one of 4,096 paths; they are not counted in the snapshot bytes.
+/// Files remembered over all sessions of the node, those nobody read and
+/// then the least recently used forgotten first. Worst case per entry: a
+/// path of `PATH_MAX` (4,096 bytes) plus [`ENTRY_OVERHEAD`], so 4,096
+/// entries are at most about 22.1 MB, and with [`SNAPSHOT_MAX_TOTAL`] about
+/// 30.5 MB (`the_worst_case_of_the_table_is_under_the_idle_rule` prints and
+/// bounds it): about 19 MB under the 50 MB idle rule even if every path were
+/// as long as allowed, every entry kept four versions and had used all its
+/// remembered tags (a typical path of 100 bytes makes it about 6 MB).
 pub const MAX_ENTRIES: usize = 4096;
+/// Bytes of one entry besides its path and its snapshot text, at the worst:
+/// its map bucket (a `PathBuf`, the `Entry` of 96 bytes and a control byte,
+/// at the worst load of 16/7 buckets per entry: 276), the four kept versions
+/// (`Version` is 88 bytes: 352) with their tags (32 each as the allocator
+/// gives them: 128), and the remembered tags (16 of 33 bytes: 528), 1,284
+/// bytes; this constant is the sum rounded up. Checked against the real
+/// `size_of` values by `the_worst_case_entry_is_accounted_as_the_comments_say`,
+/// which fails when either side moves.
+pub const ENTRY_OVERHEAD: usize = 1_300;
 /// Session tables kept; the least recently used goes (it is rebuilt from
 /// the log on that session's next turn, without snapshots).
 pub const MAX_SESSIONS: usize = 256;
@@ -99,19 +118,27 @@ fn unhex(s: &str) -> Option<Sha> {
     Some(out)
 }
 
-/// The base tag of a version: the first four hex characters of its SHA-256,
+/// The base tag of a version: the first six hex characters of its SHA-256,
 /// upper case. The tag a version really has (it is longer after a collision)
 /// is [`Version::tag`].
 pub fn tag(sha: &Sha) -> String {
     prefix(sha, TAG_LEN)
 }
 
-/// The first `n` (at most 64) hex characters of `sha`, upper case.
-fn prefix(sha: &Sha, n: usize) -> String {
-    let mut h = hex(sha);
-    h.truncate(n.min(64));
-    h.make_ascii_uppercase();
-    h
+/// Hex character `i` (0-based) of `sha`, upper case.
+fn digit(sha: &Sha, i: usize) -> char {
+    let b = sha[i / 2];
+    let v = if i.is_multiple_of(2) { b >> 4 } else { b & 15 };
+    char::from(b"0123456789ABCDEF"[usize::from(v)])
+}
+
+/// The first `n` (at most 64) hex characters of `sha`, upper case, in a
+/// string of exactly that capacity (a tag is kept for as long as its entry).
+pub(crate) fn prefix(sha: &Sha, n: usize) -> String {
+    let n = n.min(64);
+    let mut out = String::with_capacity(n);
+    out.extend((0..n).map(|i| digit(sha, i)));
+    out
 }
 
 /// Row ranges, inclusive and 1-based, sorted and apart (never touching).
@@ -172,6 +199,11 @@ fn merge_in(rows: &mut Rows, mut inc: Vec<(u32, u32)>) {
             out.push(next);
         }
     }
+    // The room asked for above is the most the merge can need; what it did
+    // not use is given back, so a version's rows hold what
+    // [`Version::bytes`] counts (review of PR 196: 4,000 ranges that one
+    // read then joined into one left room for 4,001).
+    out.shrink_to_fit();
     *rows = out;
 }
 
@@ -228,11 +260,36 @@ struct Entry {
     used: u64,
 }
 
-/// A tag issued for a hash.
+/// A tag issued for a hash: the tag is the first `len` hex characters of
+/// the hash, so the length is all that is stored (33 bytes, no allocation).
 #[derive(Debug, Clone)]
 struct Issued {
     sha: Sha,
-    tag: String,
+    len: u8,
+}
+
+impl Issued {
+    fn tag(&self) -> String {
+        prefix(&self.sha, usize::from(self.len))
+    }
+
+    /// The tag is exactly `tag` (upper case), compared without making it.
+    fn is(&self, tag: &str) -> bool {
+        tag.len() == usize::from(self.len)
+            && tag
+                .bytes()
+                .enumerate()
+                .all(|(i, c)| digit(&self.sha, i) as u8 == c)
+    }
+}
+
+/// Push to a `Vec` that is kept at its exact capacity: a push that must grow
+/// asks for one place, not for twice the room.
+fn push_exact<T>(v: &mut Vec<T>, x: T) {
+    if v.len() == v.capacity() {
+        v.reserve_exact(1);
+    }
+    v.push(x);
 }
 
 impl Entry {
@@ -249,7 +306,7 @@ impl Entry {
     }
 
     fn taken(&self, tag: &str) -> bool {
-        self.vers.iter().any(|v| v.tag == tag) || self.gone.iter().any(|g| g.tag == tag)
+        self.vers.iter().any(|v| v.tag == tag) || self.gone.iter().any(|g| g.is(tag))
     }
 
     /// The shortest prefix of `sha` (from `base` characters) that no tag
@@ -261,14 +318,21 @@ impl Entry {
             .unwrap_or_else(|| prefix(sha, 64))
     }
 
-    /// Remember a tag whose version is not kept, forgetting the oldest past
-    /// the bound.
-    fn remember(&mut self, sha: Sha, tag: String) {
+    /// Remember a tag of `len` characters whose version is not kept,
+    /// forgetting the oldest past the bound (before the push: the `Vec` never
+    /// holds more than the bound, nor room for more).
+    fn remember(&mut self, sha: Sha, len: usize) {
         self.gone.retain(|g| g.sha != sha);
-        self.gone.push(Issued { sha, tag });
-        if self.gone.len() > MAX_GONE_TAGS {
+        if self.gone.len() >= MAX_GONE_TAGS {
             self.gone.remove(0);
         }
+        push_exact(
+            &mut self.gone,
+            Issued {
+                sha,
+                len: len.min(64) as u8,
+            },
+        );
     }
 
     /// The tag of `sha` on this path: the one it has (kept or remembered),
@@ -279,10 +343,10 @@ impl Entry {
             return v.tag.clone();
         }
         if let Some(g) = self.gone.iter().find(|g| g.sha == *sha) {
-            return g.tag.clone();
+            return g.tag();
         }
         let t = self.fresh(sha, base);
-        self.remember(*sha, t.clone());
+        self.remember(*sha, t.len());
         t
     }
 
@@ -290,7 +354,7 @@ impl Entry {
     fn drop_version(&mut self, i: usize) -> usize {
         let v = self.vers.remove(i);
         let bytes = v.bytes();
-        self.remember(v.sha, v.tag);
+        self.remember(v.sha, v.tag.len());
         bytes
     }
 
@@ -307,16 +371,21 @@ impl Entry {
             self.issue(&sha, base)
         };
         self.gone.retain(|g| g.sha != sha);
-        self.vers.push(Version {
-            sha,
-            tag,
-            text,
-            shown: rows,
-        });
-        while self.vers.len() > MAX_VERSIONS {
+        // Room first: the `Vec` never holds more than the bound, nor room
+        // for more.
+        while self.vers.len() >= MAX_VERSIONS {
             let i = self.victim().unwrap_or(0);
             self.drop_version(i);
         }
+        push_exact(
+            &mut self.vers,
+            Version {
+                sha,
+                tag,
+                text,
+                shown: rows,
+            },
+        );
     }
 
     /// The oldest version that is not the one the guard holds (a file nobody
@@ -361,7 +430,11 @@ impl Inner {
         e.vers.iter().map(Version::bytes).sum()
     }
 
-    fn evict(&mut self) {
+    /// Apply the bounds. `keep` is the entry the current call made or
+    /// touched: it is never the victim of the bounds on entries (a search's
+    /// or a refusal's entry is unread, so it had the lowest key and went
+    /// before the call returned: its retry got the same refusal for ever).
+    fn evict(&mut self, keep: Option<(SessionId, &Path)>) {
         while self.sessions.len() > MAX_SESSIONS {
             let Some(oldest) = self
                 .sessions
@@ -379,6 +452,7 @@ impl Inner {
                 .sessions
                 .iter()
                 .flat_map(|(s, t)| t.files.iter().map(move |(p, e)| (e.guarded, e.used, *s, p)))
+                .filter(|(_, _, s, p)| keep != Some((*s, p.as_path())))
                 .min_by_key(|(guarded, used, _, _)| (*guarded, *used))
                 .map(|(_, _, s, p)| (s, p.clone()));
             let Some((sid, path)) = oldest else { break };
@@ -417,6 +491,29 @@ impl Inner {
                 None => break,
             }
         }
+    }
+}
+
+#[cfg(test)]
+impl SessionSeen {
+    /// `n` files read in this session (paths `/fill/N`).
+    pub(crate) fn fill_read(&self, n: usize) {
+        for i in 0..n {
+            self.record(&PathBuf::from(format!("/fill/{i}")), b"x\n");
+        }
+    }
+
+    /// Entries, snapshot bytes and tags issued, over the whole store: what a
+    /// call that must record nothing leaves as it was.
+    pub(crate) fn table_state(&self) -> (usize, usize, usize) {
+        let inner = self.store.lock();
+        let tags = inner
+            .sessions
+            .values()
+            .flat_map(|t| t.files.values())
+            .map(|e| e.vers.len() + e.gone.len())
+            .sum();
+        (inner.entries, inner.snap_bytes, tags)
     }
 }
 
@@ -539,13 +636,13 @@ impl SeenStore {
                 e.vers = vers;
             } else {
                 for v in vers {
-                    e.remember(v.sha, v.tag);
+                    e.remember(v.sha, v.tag.len());
                 }
             }
             for h in named.remove(&path).unwrap_or_default() {
                 if !e.vers.iter().any(|v| v.sha == h) && !e.gone.iter().any(|g| g.sha == h) {
                     let t = e.fresh(&h, base);
-                    e.remember(h, t);
+                    e.remember(h, t.len());
                 }
             }
             table.files.insert(path, e);
@@ -568,14 +665,14 @@ impl SeenStore {
                 used: now,
             };
             for v in vers {
-                e.remember(v.sha, v.tag);
+                e.remember(v.sha, v.tag.len());
             }
             table.files.insert(path, e);
         }
         inner.snap_bytes += table.files.values().map(Inner::snap_len).sum::<usize>();
         inner.entries += table.files.len();
         inner.sessions.insert(session, table);
-        inner.evict();
+        inner.evict(None);
     }
 
     /// Drop everything kept for `session` (it was deleted).
@@ -645,6 +742,22 @@ impl SessionSeen {
         self.update(path, *sha, false, |e| e.issue(sha, base))
     }
 
+    /// The tag the kept version of `path` with hash `sha` has, if there is
+    /// one: nothing is issued or recorded (for what a person's card, or a
+    /// refusal that prints no rows, may say).
+    pub fn peek_tag(&self, path: &Path, sha: &Sha) -> Option<String> {
+        let inner = self.store.lock();
+        inner
+            .sessions
+            .get(&self.session)?
+            .files
+            .get(path)?
+            .vers
+            .iter()
+            .find(|v| v.sha == *sha)
+            .map(|v| v.tag.clone())
+    }
+
     /// Record that the agent now knows `path` as `bytes` (a snapshot is
     /// kept when it is small text). Returns the event's record of it. No
     /// row of it counts as shown: [`Self::add_shown`] says which.
@@ -690,7 +803,7 @@ impl SessionSeen {
         add_ranges(&mut v.shown, rows);
         let after = v.bytes();
         inner.snap_bytes = (inner.snap_bytes + after).saturating_sub(before);
-        inner.evict();
+        inner.evict(Some((self.session, path)));
     }
 
     /// The newest kept version of `path` that has rows shown, if any: what
@@ -797,6 +910,7 @@ impl SessionSeen {
             && let Some(p) = t
                 .files
                 .iter()
+                .filter(|(p, _)| p.as_path() != path)
                 .min_by_key(|(_, e)| (e.guarded, e.used))
                 .map(|(p, _)| p.clone())
             && let Some(e) = t.files.remove(&p)
@@ -806,7 +920,7 @@ impl SessionSeen {
         }
         inner.snap_bytes = snap;
         inner.entries = entries;
-        inner.evict();
+        inner.evict(Some((self.session, path)));
         out
     }
 }
@@ -852,6 +966,20 @@ impl Drop for PathLock {
 
 #[cfg(test)]
 mod tests {
+    /// Ranges that later join into one must not leave their room behind.
+    #[test]
+    fn merged_rows_hold_no_more_than_they_count() {
+        let mut rows: Rows = Vec::new();
+        for i in 0..4_000u32 {
+            merge_in(&mut rows, vec![(2 * i + 1, 2 * i + 1)]);
+        }
+        assert_eq!(rows.len(), 4_000);
+        assert_eq!(rows.capacity(), rows.len());
+        merge_in(&mut rows, vec![(1, 8_000)]);
+        assert_eq!(rows, vec![(1, 8_000)]);
+        assert_eq!(rows.capacity(), 1);
+    }
+
     use super::*;
 
     impl SessionSeen {
@@ -994,12 +1122,24 @@ mod tests {
         assert!(e.snapshot.is_none() && e.sha == sha256(&huge));
     }
 
-    /// Two texts whose tags are the same (16 bits: found by counting).
+    /// The base tag at the 4 characters these tests use (a collision of
+    /// two versions is then found by counting; at [`TAG_LEN`] it is not).
+    fn tag4(sha: &Sha) -> String {
+        prefix(sha, 4)
+    }
+
+    /// A table whose base tags are 4 characters long.
+    fn short() -> SessionSeen {
+        Arc::new(SeenStore::with_tag_len(4)).session(SessionId::new())
+    }
+
+    /// Two texts whose 4-character tags are the same (16 bits: found by
+    /// counting).
     fn colliding() -> (String, String) {
         let mut seen: HashMap<String, String> = HashMap::new();
         for i in 0.. {
             let t = format!("text {i}\n");
-            let k = tag(&sha256(t.as_bytes()));
+            let k = tag4(&sha256(t.as_bytes()));
             if let Some(o) = seen.insert(k, t.clone()) {
                 return (o, t);
             }
@@ -1021,9 +1161,9 @@ mod tests {
     fn colliding_versions_both_stay_and_the_later_one_has_a_longer_tag() {
         let (x, y) = colliding();
         assert_ne!(sha256(x.as_bytes()), sha256(y.as_bytes()));
-        let t = tag(&sha256(x.as_bytes()));
-        assert_eq!(t, tag(&sha256(y.as_bytes())));
-        let s = SessionSeen::default();
+        let t = tag4(&sha256(x.as_bytes()));
+        assert_eq!(t, tag4(&sha256(y.as_bytes())));
+        let s = short();
         let p = Path::new("/w/a");
         s.record_rows(p, x.as_bytes(), &[(1, 1)]);
         assert_eq!(*s.version(p, &t).unwrap().text, x);
@@ -1052,8 +1192,8 @@ mod tests {
     #[test]
     fn the_same_content_again_has_its_tag_and_a_tag_of_a_gone_version_is_not_reused() {
         let (x, y) = colliding();
-        let t = tag(&sha256(x.as_bytes()));
-        let s = SessionSeen::default();
+        let t = tag4(&sha256(x.as_bytes()));
+        let s = short();
         let p = Path::new("/w/a");
         s.record_rows(p, x.as_bytes(), &[(1, 1)]);
         s.record_rows(p, y.as_bytes(), &[]);
@@ -1071,7 +1211,7 @@ mod tests {
         // A third text with their base tag: longer than both.
         let t3 = (0..)
             .map(|i| format!("third {i}\n"))
-            .find(|z| tag(&sha256(z.as_bytes())) == t)
+            .find(|z| tag4(&sha256(z.as_bytes())) == t)
             .unwrap();
         s.record(p, t3.as_bytes());
         let tz = tag_now(&s, p, &t3);
@@ -1099,8 +1239,8 @@ mod tests {
     #[test]
     fn a_tag_is_never_matched_by_prefix_in_either_direction() {
         let (x, y) = colliding();
-        let t = tag(&sha256(x.as_bytes()));
-        let s = SessionSeen::default();
+        let t = tag4(&sha256(x.as_bytes()));
+        let s = short();
         let p = Path::new("/w/a");
         s.record(p, x.as_bytes());
         for f in fillers(MAX_VERSIONS) {
@@ -1119,9 +1259,9 @@ mod tests {
     #[test]
     fn a_rebuild_from_the_log_issues_the_tags_the_versions_had() {
         let (x, y) = colliding();
-        let t = tag(&sha256(x.as_bytes()));
+        let t = tag4(&sha256(x.as_bytes()));
         let sid = SessionId::new();
-        let store = Arc::new(SeenStore::default());
+        let store = Arc::new(SeenStore::with_tag_len(4));
         let s = store.session(sid);
         let p = Path::new("/w/a");
         let fx = s.record_rows(p, x.as_bytes(), &[(1, 1)]);
@@ -1141,7 +1281,7 @@ mod tests {
         for (first, second) in [(&x, &y), (&y, &x)] {
             // A new process: the log's hashes only. Whichever is seen first,
             // each has the tag it was issued.
-            let again = Arc::new(SeenStore::default());
+            let again = Arc::new(SeenStore::with_tag_len(4));
             again.sync(sid, &log);
             let s2 = again.session(sid);
             s2.record(p, first.as_bytes());
@@ -1459,6 +1599,127 @@ mod tests {
             v.is_some_and(|v| v.covers(1, 1)),
             "rows shown stay with the version"
         );
+    }
+
+    #[test]
+    fn the_base_tag_is_six_hex_characters() {
+        assert_eq!(TAG_LEN, 6);
+        let t = tag(&sha256(b"anything\n"));
+        assert!(
+            t.len() == 6
+                && t.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'A'..=b'F').contains(&b))
+        );
+        let s = SessionSeen::default();
+        let p = Path::new("/w/a");
+        s.record(p, b"anything\n");
+        assert_eq!(tag_now(&s, p, "anything\n"), t);
+    }
+
+    /// Audit of PR 188: at the cap of entries a session holds, the entry a
+    /// search or a refusal had just made had the lowest key and was the
+    /// victim before the call returned: the refusal's retry got the same
+    /// refusal for ever.
+    #[test]
+    fn a_new_entry_is_not_its_own_victim_at_the_session_cap() {
+        let s = SessionSeen::default();
+        s.fill_read(MAX_FILES);
+        let p = Path::new("/w/found");
+        s.version_rows(p, b"one\ntwo\n", &[(1, 2)]);
+        let v = s.shown_version(p).expect("the new entry was evicted");
+        assert!(v.covers(1, 2));
+        // A tag issued for a header that is printed before the version is.
+        let q = Path::new("/w/other");
+        let sha = sha256(b"x\n");
+        let t = s.tag_for(q, &sha);
+        s.add_version(q, b"x\n");
+        assert_eq!(s.version(q, &t).expect("evicted").sha, sha);
+        assert_eq!(s.table_state().0, MAX_FILES);
+        // Among the others the order is: unread first, then least recently
+        // used: the first new entry took the oldest read one, the second the
+        // unread first one.
+        assert!(s.get(Path::new("/fill/0")).is_none());
+        assert!(s.get(Path::new("/fill/1")).is_some());
+        assert!(s.shown_version(p).is_none());
+    }
+
+    #[test]
+    fn a_new_entry_is_not_its_own_victim_at_the_node_cap() {
+        let store = Arc::new(SeenStore::default());
+        for _ in 0..MAX_ENTRIES / MAX_FILES {
+            store.session(SessionId::new()).fill_read(MAX_FILES);
+        }
+        let s = store.session(SessionId::new());
+        let p = Path::new("/w/found");
+        s.version_rows(p, b"one\ntwo\n", &[(1, 2)]);
+        assert!(s.shown_version(p).is_some(), "the new entry was evicted");
+        let q = Path::new("/w/other");
+        let t = s.tag_for(q, &sha256(b"x\n"));
+        s.add_version(q, b"x\n");
+        assert!(s.version(q, &t).is_some());
+        assert!(store.lock().entries <= MAX_ENTRIES);
+    }
+
+    /// Audit of PR 188: `remember` pushed the 33rd tag before removing the
+    /// oldest (the `Vec` grew to twice the bound), a tag was a `String`
+    /// that kept the capacity of the whole hash (64 bytes), so a full entry
+    /// held about 4.6 KB, not the 2.3 KB the comments said.
+    #[test]
+    fn the_worst_case_entry_is_accounted_as_the_comments_say() {
+        let s = SessionSeen::default();
+        let p = Path::new("/w/a");
+        for i in 0..MAX_VERSIONS + 3 * MAX_GONE_TAGS {
+            s.record_rows(p, format!("v{i}\nrow\n").as_bytes(), &[(1, 1)]);
+        }
+        let inner = s.store.lock();
+        let e = &inner.sessions[&s.session].files[p];
+        assert_eq!(e.vers.len(), MAX_VERSIONS);
+        assert_eq!(e.gone.len(), MAX_GONE_TAGS);
+        let (issued, version, entry) = (
+            std::mem::size_of::<Issued>(),
+            std::mem::size_of::<Version>(),
+            std::mem::size_of::<Entry>(),
+        );
+        eprintln!(
+            "size_of Issued {issued}, Version {version}, Entry {entry}, PathBuf {}; \
+             capacities: gone {}, vers {}",
+            std::mem::size_of::<PathBuf>(),
+            e.gone.capacity(),
+            e.vers.capacity()
+        );
+        assert_eq!(issued, 33, "a hash and a length, no heap string");
+        assert_eq!(e.gone.capacity(), MAX_GONE_TAGS, "removed after pushing");
+        assert_eq!(e.vers.capacity(), MAX_VERSIONS, "removed after pushing");
+        for v in &e.vers {
+            assert_eq!(v.tag.capacity(), v.tag.len(), "a tag keeps no spare room");
+        }
+        // The map's bucket for the entry at its worst load (hashbrown grows
+        // at 7/8 full: 16/7 buckets per entry after a growth), the kept
+        // versions and their tags (32 bytes each, as the allocator gives
+        // them), the remembered tags.
+        let bucket = (std::mem::size_of::<PathBuf>() + entry + 1) * 16 / 7;
+        let accounted =
+            bucket + e.vers.capacity() * version + e.vers.len() * 32 + e.gone.capacity() * issued;
+        eprintln!("accounted {accounted} bytes of {ENTRY_OVERHEAD}");
+        assert!(
+            accounted <= ENTRY_OVERHEAD,
+            "{accounted} > {ENTRY_OVERHEAD}"
+        );
+        assert!(
+            ENTRY_OVERHEAD < accounted + 100,
+            "ENTRY_OVERHEAD says {ENTRY_OVERHEAD}, the entry is {accounted}: update the comments"
+        );
+        assert_eq!(MAX_GONE_TAGS * issued, 528);
+    }
+
+    /// The comments of [`MAX_ENTRIES`] and PLAN.md T45 state this total.
+    #[test]
+    fn the_worst_case_of_the_table_is_under_the_idle_rule() {
+        let path_max = 4096;
+        let total = MAX_ENTRIES * (path_max + ENTRY_OVERHEAD) + SNAPSHOT_MAX_TOTAL;
+        eprintln!("worst case of the table: {total} bytes");
+        assert!(total <= 31 << 20, "{total}");
+        assert!(total < 50 << 20);
     }
 
     #[tokio::test]
