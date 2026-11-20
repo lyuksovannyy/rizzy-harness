@@ -132,6 +132,16 @@ async fn fake() -> Fake {
                         .into_bytes(),
                         String::new(),
                     ),
+                    // Text only after the byte cap: never read.
+                    "/late" => (
+                        "text/html",
+                        format!(
+                            "<html><body><p>BEFORECAP</p>{}<p>AFTERCAP</p></body></html>",
+                            " ".repeat(harness_web::MAX_BODY + 10)
+                        )
+                        .into_bytes(),
+                        String::new(),
+                    ),
                     "/hop" => (
                         "text/html",
                         vec![],
@@ -1064,8 +1074,8 @@ async fn denied_tools_switches_each_web_tool_off() {
     }
 }
 
-/// Size limits are the tool's own: a long page is cut at the page limit, a
-/// body past the byte limit is cut too and never read whole.
+/// Size limits are the tool's own: a long page is cut at the page limit, and
+/// a body is read only up to the byte limit (text after it is never seen).
 #[tokio::test]
 async fn pages_are_cut_at_the_limits() {
     let f = fake().await;
@@ -1095,6 +1105,26 @@ async fn pages_are_cut_at_the_limits() {
         );
         assert!(c.output.contains("[... page truncated ...]"), "{path}");
     }
+    let url = f.url("/late");
+    let mut n = node(
+        steps(vec![vec![fetch(&url)]]),
+        web_for_tests(&f),
+        vec![],
+        |_| {},
+    )
+    .await;
+    let t = n
+        .turn(
+            ApprovalMode::Auto,
+            None,
+            &format!("read {url}"),
+            Decision::Allow,
+        )
+        .await;
+    let c = &t.of("web_fetch")[0];
+    assert!(c.ok, "{}", c.output);
+    assert!(c.output.contains("BEFORECAP"), "{}", c.output);
+    assert!(!c.output.contains("AFTERCAP"), "read past the byte limit");
 }
 
 /// The software developer is offered Researcher on a node that has its
