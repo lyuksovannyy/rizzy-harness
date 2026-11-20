@@ -65,7 +65,7 @@ use harness_node::NodeLink;
 use harness_protocol::{
     CallbackMsg, MasterToNode, NodeToMaster, PROTOCOL_VERSION, PromptMsg, RetryMsg,
 };
-use harness_store::{AppendOutcome, HelloState, Store};
+use harness_store::{AppendOutcome, HelloState, Store, SubSessions};
 use serde::Serialize;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
@@ -299,6 +299,9 @@ pub struct MasterInner {
     /// Sessions with a re-sent `session.delete` in flight, by node: one
     /// node's resend never stands in for, or blocks, another's.
     redeleting: Mutex<HashSet<(String, SessionId)>>,
+    /// How long a command waits for its node's answer (`ACK_TIMEOUT`;
+    /// tests shorten it).
+    ack_timeout: Mutex<Duration>,
     /// Diverged sessions with a `session.cancel` in flight.
     stopping: Mutex<HashSet<SessionId>>,
     memory: Mutex<Option<Arc<dyn harness_memory::MemoryStore>>>,
@@ -793,6 +796,7 @@ impl Master {
                 providers: Mutex::new(None),
                 graphify: Mutex::new(None),
                 redeleting: Mutex::new(HashSet::new()),
+                ack_timeout: Mutex::new(ACK_TIMEOUT),
                 stopping: Mutex::new(HashSet::new()),
                 memory: Mutex::new(None),
                 builtin_memory: Mutex::new(None),
@@ -1957,7 +1961,8 @@ impl Master {
             Some(Err(true)) => return Err(CommandError::Timeout),
             Some(Err(false)) | None => return Err(CommandError::NodeOffline(node_id.into())),
         }
-        let acked = tokio::time::timeout(ACK_TIMEOUT, rx).await;
+        let ack_timeout = *lock(&self.inner.ack_timeout);
+        let acked = tokio::time::timeout(ack_timeout, rx).await;
         if matches!(acked, Ok(Ok(Ok(())))) {
             noted.send = None;
         }
@@ -1978,6 +1983,11 @@ impl Master {
             Ok(Ok(Err(e))) => Err(CommandError::Rejected(e)),
             Ok(Err(_)) | Err(_) => Err(CommandError::Timeout),
         }
+    }
+
+    /// Tests: how long a command waits for its node's answer.
+    pub fn set_ack_timeout_for_test(&self, wait: Duration) {
+        *lock(&self.inner.ack_timeout) = wait;
     }
 
     /// Tests: whether the last turn recorded for `sid` may save memory
@@ -3028,22 +3038,22 @@ impl Master {
     /// Delete a session everywhere, and with it the chats of the sub-agents
     /// it started, at any depth, that belong to the same owner (they have no
     /// way in once their parent is gone; a chat of another owner is never
-    /// deleted for being below one). When there are any, the chat is stopped
-    /// first, so that its turn does not go on (its delegate calls failing
-    /// under it) while they go. They go deepest first, the chats of one
-    /// depth together, at most `DELETE_AT_ONCE` at a time; then the chat. A
-    /// delete that fails part way (other than "already gone") leaves the chat
-    /// in place with what is still below it, to be deleted again, once the
-    /// others of its depth have finished.
+    /// deleted for being below one).
     ///
-    /// A last look below the chat follows its delete. It finds a chat whose
-    /// `session_created` reached the mirror after the first look and before
-    /// the chat's row was removed (its `parent_id` still names the chat); it
-    /// cannot find one whose row lands after that, which has no parent link
-    /// at all. It is best effort and only logs.
+    /// The chat goes first, through [`Self::delete_one_session`] exactly as
+    /// a chat with no sub-agents does: its node's `Delete` stops its turn, a
+    /// refusal leaves it in place and is returned (nothing below it has been
+    /// touched, so a retry starts from the same state), and the caller gets
+    /// the answer without waiting for the rest. The chats below are deleted
+    /// after, in the background (`delete_below`).
+    ///
+    /// What a master killed between the chat's delete and its sub-agents'
+    /// leaves behind: their chats, whose parent is gone: no way in from the
+    /// sidebar, still visible to the API token. Nothing sweeps them at start
+    /// (before this, every delete left all of them).
     pub async fn delete_session(&self, sid: SessionId) -> Result<(), CommandError> {
-        // The owner is read once, before anything is deleted: the sweep after
-        // the chat's row is gone must use the same one.
+        // The owner is read once, before anything is deleted: the sweep
+        // after the chat's row is gone must use the same one.
         let owner = self
             .inner
             .mirror
@@ -3051,65 +3061,86 @@ impl Master {
             .await?
             .ok_or(CommandError::UnknownSession)?
             .owner_id;
-        let levels = self.sub_sessions(sid, owner.as_deref()).await?;
-        if !levels.is_empty() {
-            match self.cancel(sid).await {
-                // Nothing to stop: no turn runs, the node is away or has the
-                // chat no more, or does not answer (the delete below treats
-                // a node that does not answer the same way).
-                Ok(())
-                | Err(CommandError::UnknownSession)
-                | Err(CommandError::NodeOffline(_))
-                | Err(CommandError::Timeout) => {}
-                Err(CommandError::Rejected(e)) if e == "unknown session" => {}
-                Err(e) => return Err(e),
-            }
-        }
-        for level in levels.into_iter().rev() {
-            self.delete_level(level).await?;
-        }
+        let below = self.sub_sessions(sid, owner.as_deref()).await?;
         self.delete_one_session(sid).await?;
-        for level in self
-            .sub_sessions(sid, owner.as_deref())
-            .await?
-            .into_iter()
-            .rev()
-        {
-            for kid in level {
-                if let Err(e) = self.delete_one_session(kid).await {
-                    tracing::warn!(session = %kid, error = %e, "could not delete a sub-agent chat started during its parent's delete");
-                }
-            }
-        }
+        let this = self.clone();
+        tokio::spawn(async move { this.delete_below(sid, owner, below).await });
         Ok(())
     }
 
-    /// Delete the chats of one depth, `DELETE_AT_ONCE` at a time. All of
-    /// them are tried; the first failure other than "already gone" (its own
-    /// delete, or its parent's) is returned after.
-    async fn delete_level(&self, level: Vec<SessionId>) -> Result<(), CommandError> {
+    /// Delete the chats below the deleted chat `sid`: those listed before it
+    /// went (`first`), deepest first, the chats of one depth together,
+    /// `DELETE_AT_ONCE` at a time; then a second listing with the same
+    /// owner, for chats that were added meanwhile.
+    ///
+    /// Each chat below loses its mirror copy whatever its node answers (it
+    /// is done, offline, silent or refusing): the node is told again when it
+    /// next says hello with the chat, or sends an event of it
+    /// (`redelete`), as for every deleted chat. The second listing finds a
+    /// chat whose `session_created` reached the mirror after the first
+    /// listing and before the chat's row was removed (its `parent_id` still
+    /// names the chat); it cannot find one whose row lands after that, which
+    /// has no parent link at all.
+    async fn delete_below(&self, sid: SessionId, owner: Option<String>, first: SubSessions) {
+        for pass in [Some(first), None] {
+            let found = match pass {
+                Some(f) => f,
+                None => match self.sub_sessions(sid, owner.as_deref()).await {
+                    Ok(f) => f,
+                    Err(e) => {
+                        tracing::warn!(session = %sid, error = %e, "could not look for sub-agent chats after a delete");
+                        return;
+                    }
+                },
+            };
+            if found.truncated {
+                let n: usize = found.levels.iter().map(Vec::len).sum();
+                tracing::warn!(session = %sid, found = n, "a chat has more sub-agent chats than one delete takes; the rest are taken by the sweep");
+            }
+            for level in found.levels.into_iter().rev() {
+                self.delete_level(level).await;
+            }
+        }
+    }
+
+    /// Delete the chats of one depth, `DELETE_AT_ONCE` at a time.
+    async fn delete_level(&self, level: Vec<SessionId>) {
         use futures::StreamExt;
-        let results: Vec<_> = futures::stream::iter(level)
-            .map(|kid| async move { self.delete_one_session(kid).await })
+        futures::stream::iter(level)
+            .map(|kid| async move { self.delete_below_one(kid).await })
             .buffer_unordered(DELETE_AT_ONCE)
-            .collect()
+            .collect::<Vec<()>>()
             .await;
-        for r in results {
-            match r {
-                Ok(()) | Err(CommandError::UnknownSession) => {}
-                Err(e) => return Err(e),
-            }
-        }
-        Ok(())
     }
 
-    /// The chats below `sid` that belong to `owner`, one list per depth,
-    /// nearest first.
+    /// One chat below a deleted one: its node is told, and the mirror copy
+    /// goes whatever the answer (the tombstone makes the node be told again).
+    async fn delete_below_one(&self, sid: SessionId) {
+        let Ok(node) = self.owner(sid).await else {
+            return; // already gone
+        };
+        let res = self
+            .send_command(&node, |req_id| MasterToNode::Delete {
+                req_id,
+                session_id: sid,
+            })
+            .await;
+        match res {
+            Ok(()) | Err(CommandError::NodeOffline(_)) | Err(CommandError::Timeout) => {}
+            Err(e) => {
+                tracing::warn!(session = %sid, error = %e, "a sub-agent chat's node did not delete it; it is told again when it returns")
+            }
+        }
+        self.forget(sid).await;
+    }
+
+    /// The chats below `sid` that belong to `owner` (see
+    /// `Store::sub_sessions`).
     async fn sub_sessions(
         &self,
         sid: SessionId,
         owner: Option<&str>,
-    ) -> Result<Vec<Vec<SessionId>>, CommandError> {
+    ) -> Result<SubSessions, CommandError> {
         let owner = owner.map(str::to_string);
         Ok(self
             .inner

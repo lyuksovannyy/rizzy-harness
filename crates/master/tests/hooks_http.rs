@@ -111,6 +111,11 @@ struct Fake {
     /// How long this node takes to answer a `Delete` (a slow disk, a turn
     /// that stops late); the answers of several overlap.
     delete_delay: Arc<Mutex<std::time::Duration>>,
+    /// Chats whose `Delete` this node never answers.
+    mute_delete: Arc<Mutex<std::collections::HashSet<SessionId>>>,
+    /// A chat this node creates (as a sub-agent of the chat in the second
+    /// place) when it sees that chat's `Delete`, before it answers.
+    create_on_delete: Arc<Mutex<Vec<(SessionId, SessionId, String)>>>,
 }
 
 impl Fake {
@@ -175,6 +180,11 @@ impl Fake {
 }
 
 fn fake_chat_node() -> (NodeLink, Fake) {
+    fake_chat_node_with(vec![])
+}
+
+/// A fake chat node whose hello lists `sessions`.
+fn fake_chat_node_with(sessions: Vec<harness_protocol::SessionHead>) -> (NodeLink, Fake) {
     let (to_node, mut commands) = mpsc::channel::<MasterToNode>(1024);
     let (to_master, from_node) = mpsc::channel::<NodeToMaster>(1024);
     to_master
@@ -186,7 +196,7 @@ fn fake_chat_node() -> (NodeLink, Fake) {
             // `callback`: so a run's chat is seen not to be resumed
             // because of the master's rules, not for want of the node's.
             capabilities: vec!["profile:chat".into(), harness_protocol::CAP_CALLBACK.into()],
-            sessions: vec![],
+            sessions,
         })
         .unwrap();
     let fake = Fake {
@@ -195,6 +205,8 @@ fn fake_chat_node() -> (NodeLink, Fake) {
         seqs: Arc::default(),
         refuse_delete: Arc::default(),
         delete_delay: Arc::default(),
+        mute_delete: Arc::default(),
+        create_on_delete: Arc::default(),
     };
     let node = fake.clone();
     tokio::spawn(async move {
@@ -208,11 +220,24 @@ fn fake_chat_node() -> (NodeLink, Fake) {
             let req_id = msg.req_id().map(str::to_string);
             let refused = matches!(&msg, MasterToNode::Delete { session_id, .. }
                 if node.refuse_delete.lock().unwrap().contains(session_id));
+            if let MasterToNode::Delete { session_id, .. } = &msg {
+                let kids: Vec<_> = node.create_on_delete.lock().unwrap().clone();
+                for (parent, kid, title) in kids {
+                    if parent == *session_id {
+                        node.created(kid, &title, Some(&parent.to_string()));
+                    }
+                }
+            }
+            let muted = matches!(&msg, MasterToNode::Delete { session_id, .. }
+                if node.mute_delete.lock().unwrap().contains(session_id));
             let delay = match &msg {
                 MasterToNode::Delete { .. } => *node.delete_delay.lock().unwrap(),
                 _ => std::time::Duration::ZERO,
             };
             node.seen.lock().unwrap().push(msg);
+            if muted {
+                continue;
+            }
             if let Some(req_id) = req_id {
                 let ack = NodeToMaster::Ack {
                     req_id,
@@ -1285,6 +1310,19 @@ async fn wait_row(t: &T, c: &str, sid: &str, ok: impl Fn(&Value) -> bool) -> Val
     panic!("chat {sid} never got there");
 }
 
+/// Wait until chat `sid` is gone from the mirror (the sub-agents' chats of a
+/// deleted chat go in the background).
+async fn wait_gone(t: &T, c: &str, sid: &str) {
+    let path = format!("/api/sessions/{sid}");
+    for _ in 0..1000 {
+        if req(t, Method::GET, &path, None, c).await.0 == StatusCode::NOT_FOUND {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("chat {sid} was never deleted");
+}
+
 /// The untrusted mark is the chat's, so nothing that continues, reshapes or
 /// moves an untrusted chat lets event data out: undoing a turn, choosing a
 /// parallel answer, switching the agent, moving the chat into a project and
@@ -1427,11 +1465,9 @@ async fn every_way_of_continuing_an_untrusted_chat_stays_untrusted() {
         StatusCode::NOT_FOUND
     );
     let kid_url = format!("/api/sessions/{kid}");
-    assert_eq!(
-        req(&t, Method::GET, &kid_url, None, &alex).await.0,
-        StatusCode::NOT_FOUND,
-        "the delegate's chat outlived its parent"
-    );
+    // (In the background: for a moment it is still there, and still holds
+    // the mark: it was handed down in the parent's delete.)
+    wait_gone(&t, &alex, &kid).await;
     let ask_again = json!({"text": ask});
     let prompt = format!("{kid_url}/prompt");
     assert_eq!(
@@ -1444,11 +1480,10 @@ async fn every_way_of_continuing_an_untrusted_chat_stays_untrusted() {
 }
 
 /// Deleting a chat deletes the chats of the sub-agents it started, at any
-/// depth, and only those: each is deleted on its node too (a `Delete`
-/// command, so a running turn stops and its files go), the deepest first and
-/// the chat last, so that a child that cannot be deleted leaves the chat
-/// there to delete again; the chat of another parent, and its delegate's,
-/// stay.
+/// depth, and only those: the chat goes first (the request is answered
+/// then), each of the chats below is deleted on its node too (a `Delete`
+/// command, so a running turn stops and its files go), the deepest first, in
+/// the background; the chat of another parent, and its delegate's, stay.
 #[tokio::test]
 async fn deleting_a_chat_deletes_its_sub_agents_chats_with_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -1471,15 +1506,7 @@ async fn deleting_a_chat_deletes_its_sub_agents_chats_with_it() {
         StatusCode::OK
     );
     for gone in [parent.clone(), kid.to_string(), grandkid.to_string()] {
-        let (st, v) = req(
-            &t,
-            Method::GET,
-            &format!("/api/sessions/{gone}"),
-            None,
-            &alex,
-        )
-        .await;
-        assert_eq!(st, StatusCode::NOT_FOUND, "{gone} stayed: {v}");
+        wait_gone(&t, &alex, &gone).await;
     }
     for stays in [bystander.clone(), bystanders_kid.to_string()] {
         let path = format!("/api/sessions/{stays}");
@@ -1489,9 +1516,14 @@ async fn deleting_a_chat_deletes_its_sub_agents_chats_with_it() {
             "{stays} went with a chat that is not its parent"
         );
     }
-    // The node was told, the deepest first.
-    let told: Vec<SessionId> = fake
-        .seen
+    // The node was told: the chat first, then the deepest of those below.
+    let parent_id: SessionId = parent.parse().unwrap();
+    assert_eq!(deletes_seen(&fake), vec![parent_id, grandkid, kid]);
+}
+
+/// The `Delete` commands a fake node has seen, in order.
+fn deletes_seen(fake: &Fake) -> Vec<SessionId> {
+    fake.seen
         .lock()
         .unwrap()
         .iter()
@@ -1499,37 +1531,31 @@ async fn deleting_a_chat_deletes_its_sub_agents_chats_with_it() {
             MasterToNode::Delete { session_id, .. } => Some(*session_id),
             _ => None,
         })
-        .collect();
-    let parent_id: SessionId = parent.parse().unwrap();
-    assert_eq!(told, vec![grandkid, kid, parent_id]);
+        .collect()
 }
 
-/// Pressing Delete on a chat that is running stops it first: the node gets
-/// the chat's cancel before the first delete of a sub-agent's chat, so the
-/// turn does not go on (its delegate calls failing under it, the model
-/// reacting, in Auto running more commands) for as long as the children take
-/// to go. A chat with no sub-agent is deleted by the one `Delete` as before.
+/// Pressing Delete on a chat that is running stops it at once, as it did
+/// before sub-agents' chats went with it: the chat's own `Delete` reaches the
+/// node before any delete of a chat below it, so its turn does not go on
+/// (its delegate calls failing under it, the model reacting, in Auto running
+/// more commands) while they go. No separate cancel is sent.
 #[tokio::test]
-async fn deleting_a_chat_with_sub_agents_stops_it_before_the_first_child_goes() {
+async fn the_chats_own_delete_reaches_its_node_before_any_child_s() {
     let dir = tempfile::tempdir().unwrap();
     let t = start(dir.path(), true).await;
     let fake = t.fake.clone().unwrap();
     let alex = alex(&t).await;
     let parent = plain_chat(&t, &alex, json!({"profile": "chat"})).await;
-    let alone = plain_chat(&t, &alex, json!({"profile": "chat"})).await;
     let kid = SessionId::new();
     fake.created(kid, "@scout: look", Some(&parent));
     wait_row(&t, &alex, &kid.to_string(), |_| true).await;
+    let path = format!("/api/sessions/{parent}");
+    assert_eq!(
+        req(&t, Method::DELETE, &path, None, &alex).await.0,
+        StatusCode::OK
+    );
+    wait_gone(&t, &alex, &kid.to_string()).await;
     let parent_id: SessionId = parent.parse().unwrap();
-    let alone_id: SessionId = alone.parse().unwrap();
-
-    for sid in [&alone, &parent] {
-        let path = format!("/api/sessions/{sid}");
-        assert_eq!(
-            req(&t, Method::DELETE, &path, None, &alex).await.0,
-            StatusCode::OK
-        );
-    }
     let order: Vec<(&str, SessionId)> = fake
         .seen
         .lock()
@@ -1541,24 +1567,16 @@ async fn deleting_a_chat_with_sub_agents_stops_it_before_the_first_child_goes() 
             _ => None,
         })
         .collect();
-    assert_eq!(
-        order,
-        vec![
-            ("delete", alone_id),
-            ("cancel", parent_id),
-            ("delete", kid),
-            ("delete", parent_id)
-        ]
-    );
+    assert_eq!(order, vec![("delete", parent_id), ("delete", kid)]);
 }
 
-/// The sub-agents' chats of one depth are deleted together (eight at a
-/// time), not one after the other: a node that is slow to answer each delete
-/// must not make the request, and the dialog's greyed button, last for the
-/// sum. Ten chats and a node that takes 300 ms per delete would need 3.3 s in
-/// a row (more on a node that does not answer: 15 s each); together it is
-/// about 0.9 s. The bound leaves slack for a loaded machine and still fails
-/// the serial version.
+/// The chats below one depth are deleted together (eight at a time), not one
+/// after the other: a node that is slow to answer each delete must not make
+/// the whole last for the sum. Ten chats and a node that takes 300 ms per
+/// delete would need 3.3 s in a row; together it is about 0.9 s (the chat's
+/// own delete, then two waves). Measured on the background work's end, as the
+/// request itself returns after the chat's delete. The bound leaves slack for
+/// a loaded machine and still fails the serial version.
 #[tokio::test]
 async fn sub_agent_chats_are_deleted_concurrently_not_one_after_the_other() {
     let dir = tempfile::tempdir().unwrap();
@@ -1573,7 +1591,7 @@ async fn sub_agent_chats_are_deleted_concurrently_not_one_after_the_other() {
         wait_row(&t, &alex, &kid.to_string(), |_| true).await;
         kids.push(kid);
     }
-    *fake.delete_delay.lock().unwrap() = std::time::Duration::from_millis(300);
+    *fake.delete_delay.lock().unwrap() = Duration::from_millis(300);
 
     let path = format!("/api/sessions/{parent}");
     let started = std::time::Instant::now();
@@ -1581,77 +1599,120 @@ async fn sub_agent_chats_are_deleted_concurrently_not_one_after_the_other() {
         req(&t, Method::DELETE, &path, None, &alex).await.0,
         StatusCode::OK
     );
+    for kid in &kids {
+        wait_gone(&t, &alex, &kid.to_string()).await;
+    }
     let took = started.elapsed();
     assert!(
-        took < std::time::Duration::from_millis(2000),
+        took < Duration::from_millis(2000),
         "the delete took {took:?}: the chats went one after the other"
     );
-    for kid in kids {
-        let path = format!("/api/sessions/{kid}");
-        assert_eq!(
-            req(&t, Method::GET, &path, None, &alex).await.0,
-            StatusCode::NOT_FOUND
-        );
-    }
 }
 
-/// A sub-agent's chat whose delete its node refuses (its turn did not stop)
-/// leaves the chat, and the chats between, in place, so the delete can be
-/// repeated: the one that went stays gone, and the second try, with the node
-/// willing, deletes the rest. Nothing is deleted from the top down, which
-/// would strand a child with no parent to lead to it.
+/// A node that acks the chat's delete and never answers those of its 16
+/// sub-agents' chats does not hold the request: it returns after the chat's
+/// delete, and all 17 are gone from the mirror afterwards (two waves of eight
+/// that each wait out the ack timeout, shortened here). Before, the person's
+/// delete answered 504 after two ack timeouts with the chat still there, and
+/// retention and the incognito purge stalled the same way.
 #[tokio::test]
-async fn a_sub_agent_chat_the_node_will_not_delete_leaves_its_parent_to_delete_again() {
+async fn a_node_that_never_answers_for_the_children_does_not_hold_the_delete() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = start(dir.path(), true).await;
+    t.master.set_ack_timeout_for_test(Duration::from_secs(1));
+    let fake = t.fake.clone().unwrap();
+    let alex = alex(&t).await;
+    let parent = plain_chat(&t, &alex, json!({"profile": "chat"})).await;
+    let mut kids = Vec::new();
+    for i in 0..16 {
+        let kid = SessionId::new();
+        fake.created(kid, &format!("@scout: {i}"), Some(&parent));
+        wait_row(&t, &alex, &kid.to_string(), |_| true).await;
+        fake.mute_delete.lock().unwrap().insert(kid);
+        kids.push(kid);
+    }
+    let path = format!("/api/sessions/{parent}");
+    let started = std::time::Instant::now();
+    let (st, v) = req(&t, Method::DELETE, &path, None, &alex).await;
+    assert_eq!(st, StatusCode::OK, "{v}");
+    assert!(
+        started.elapsed() < Duration::from_millis(900),
+        "the request waited for the children: {:?}",
+        started.elapsed()
+    );
+    wait_gone(&t, &alex, &parent).await;
+    for kid in &kids {
+        wait_gone(&t, &alex, &kid.to_string()).await;
+    }
+    assert_eq!(deletes_seen(&fake).len(), 17);
+}
+
+/// A chat's node that refuses the delete of a sub-agent's chat does not keep
+/// it: the chat and the one below it are gone from the mirror (and answer
+/// 404), and when the node next says hello with the chat still on it the
+/// master sends its `Delete` again (the tombstone path every deleted chat
+/// takes).
+#[tokio::test]
+async fn a_sub_agent_chat_its_node_refused_is_deleted_again_at_the_next_hello() {
     let dir = tempfile::tempdir().unwrap();
     let t = start(dir.path(), true).await;
     let fake = t.fake.clone().unwrap();
     let alex = alex(&t).await;
     let parent = plain_chat(&t, &alex, json!({"profile": "chat"})).await;
-    let (kid, grandkid) = (SessionId::new(), SessionId::new());
+    let kid = SessionId::new();
     fake.created(kid, "@scout: look", Some(&parent));
     wait_row(&t, &alex, &kid.to_string(), |_| true).await;
-    fake.created(grandkid, "@scout: look deeper", Some(&kid.to_string()));
-    wait_row(&t, &alex, &grandkid.to_string(), |_| true).await;
 
-    // The deepest goes first; the node refuses the middle one.
     fake.refuse_delete.lock().unwrap().insert(kid);
     let path = format!("/api/sessions/{parent}");
-    let (st, v) = req(&t, Method::DELETE, &path, None, &alex).await;
-    assert_eq!(st, StatusCode::CONFLICT, "{v}");
-    let status = |sid: &str| {
-        let path = format!("/api/sessions/{sid}");
-        let alex = alex.clone();
-        let t = &t;
-        async move { req(t, Method::GET, &path, None, &alex).await.0 }
-    };
-    assert_eq!(status(&grandkid.to_string()).await, StatusCode::NOT_FOUND);
-    assert_eq!(status(&kid.to_string()).await, StatusCode::OK, "kid went");
-    assert_eq!(status(&parent).await, StatusCode::OK, "the parent went");
-    let row = wait_row(&t, &alex, &kid.to_string(), |_| true).await;
-    assert_eq!(row["parent_id"], parent.as_str(), "{row}");
-    let asked = |f: &Fake| {
-        f.seen
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|m| matches!(m, MasterToNode::Delete { .. }))
-            .count()
-    };
-    assert_eq!(
-        asked(&fake),
-        2,
-        "the parent was never asked, only its children"
-    );
-
-    // Repeated with the node willing: what is left goes.
-    fake.refuse_delete.lock().unwrap().clear();
     assert_eq!(
         req(&t, Method::DELETE, &path, None, &alex).await.0,
         StatusCode::OK
     );
-    for gone in [parent.clone(), kid.to_string()] {
-        assert_eq!(status(&gone).await, StatusCode::NOT_FOUND, "{gone} stayed");
+    wait_gone(&t, &alex, &kid.to_string()).await;
+    wait_gone(&t, &alex, &parent).await;
+    let parent_id: SessionId = parent.parse().unwrap();
+    assert_eq!(deletes_seen(&fake), vec![parent_id, kid], "asked once");
+
+    // The node comes back with the chat it still has.
+    let (link, back) = fake_chat_node_with(vec![harness_protocol::SessionHead {
+        session_id: kid,
+        head_seq: 1,
+    }]);
+    t.master.add_link(link, true).await.unwrap();
+    for _ in 0..500 {
+        if deletes_seen(&back).contains(&kid) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    panic!("the node was never told again to delete the chat it kept");
+}
+
+/// The second look finds a chat that was added while the first delete ran: a
+/// `session_created` that reached the mirror after the first listing and
+/// before the chat's row was removed (here the node makes it as it sees the
+/// chat's `Delete`, before it answers). Without the sweep it stayed.
+#[tokio::test]
+async fn a_sub_agent_chat_added_while_its_parent_is_deleted_goes_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = start(dir.path(), true).await;
+    let fake = t.fake.clone().unwrap();
+    let alex = alex(&t).await;
+    let parent = plain_chat(&t, &alex, json!({"profile": "chat"})).await;
+    let parent_id: SessionId = parent.parse().unwrap();
+    let late = SessionId::new();
+    fake.create_on_delete
+        .lock()
+        .unwrap()
+        .push((parent_id, late, "@scout: late".into()));
+    let path = format!("/api/sessions/{parent}");
+    assert_eq!(
+        req(&t, Method::DELETE, &path, None, &alex).await.0,
+        StatusCode::OK
+    );
+    wait_gone(&t, &alex, &late.to_string()).await;
+    assert_eq!(deletes_seen(&fake), vec![parent_id, late]);
 }
 
 /// An owner who leaves the routine's workspace keeps the run's chat (it
