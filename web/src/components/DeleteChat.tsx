@@ -2,32 +2,15 @@
 // that also offers the viewer's Media files that came from the chat.
 import "../lib/i18nPages";
 import { useEffect, useRef, useState } from "react";
-import { api } from "../api";
 import { pageApi } from "../apiPages";
 import { dropDraft } from "../lib/drafts";
 import { t } from "../lib/i18n";
 import { mediaApi } from "../lib/media";
-import type { SessionRow } from "../types";
 
 /** The Media files from this chat: how many on the first page, and whether more follow. */
 interface FromChat {
   n: number;
   more: boolean;
-}
-
-/** How many sessions sit below `id` (sub-agents' sessions, theirs in turn): the ones deleted with it. */
-export function subSessionCount(rows: Pick<SessionRow, "session_id" | "parent_id">[], id: string): number {
-  const below = new Set<string>();
-  for (let grew = true; grew; ) {
-    grew = false;
-    for (const r of rows) {
-      if (r.parent_id && (r.parent_id === id || below.has(r.parent_id)) && r.session_id !== id && !below.has(r.session_id)) {
-        below.add(r.session_id);
-        grew = true;
-      }
-    }
-  }
-  return below.size;
 }
 
 export function DeleteChat(props: {
@@ -40,7 +23,6 @@ export function DeleteChat(props: {
   const { sessionId, workspaceId, incognito } = props;
   const dialog = useRef<HTMLDialogElement>(null);
   const [files, setFiles] = useState<FromChat | null>(null);
-  const [subs, setSubs] = useState(0);
   const [withMedia, setWithMedia] = useState(false);
   const [busy, setBusy] = useState(false);
 
@@ -61,19 +43,6 @@ export function DeleteChat(props: {
       live = false;
     };
   }, [incognito, workspaceId, sessionId]);
-
-  // Sub-agent sessions go with the chat: say so when there are any. The
-  // list is the sidebar's own; a failed read just leaves the plain question.
-  useEffect(() => {
-    let live = true;
-    Promise.resolve()
-      .then(() => api.sessions(workspaceId))
-      .then((r) => live && setSubs(subSessionCount(r.sessions, sessionId)))
-      .catch(() => {});
-    return () => {
-      live = false;
-    };
-  }, [workspaceId, sessionId]);
 
   const close = () => {
     dialog.current?.close?.();
@@ -100,7 +69,8 @@ export function DeleteChat(props: {
     >
       <div className="media-confirm stack">
         <p>{t("conv.deleteConfirm")}</p>
-        {subs > 0 && <p>{subs === 1 ? t("conv.deleteSub") : t("conv.deleteSubs", { n: String(subs) })}</p>}
+        {/* No number: the sidebar's list leaves some out (a routine's runs, another workspace). */}
+        <p>{t("conv.deleteSubs")}</p>
         {!!files?.n && (
           <label className="row">
             <input type="checkbox" checked={withMedia} onChange={(e) => setWithMedia(e.target.checked)} />
