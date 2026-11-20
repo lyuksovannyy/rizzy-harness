@@ -41,6 +41,7 @@ import { ChatTitle } from "./ChatTitle";
 import { ThinkingRow } from "./ThinkingRow";
 import { DeleteChat } from "./DeleteChat";
 import { useAvatarState } from "./avatarState";
+import { takesNoChat } from "../lib/agents";
 import { Markdown } from "./Markdown";
 import { Mentioned } from "./Mentioned";
 import { peersLeft } from "../lib/peers";
@@ -1013,6 +1014,14 @@ export default function Conversation(props: {
           )}
           {carryErr && <div className="error-text">{carryErr}</div>}
           {pickErr && <div className="error-text">{pickErr}</div>}
+          {props.row?.parent_id && takesNoChat(sessionAgent) ? (
+            <p className="muted small tag-only" role="note">
+              {agentName(activeAgent)} only takes tasks from other agents, so there is nobody to answer here.{" "}
+              <a className="link" href={`#/s/${props.row.parent_id}`}>
+                Back to the main session
+              </a>
+            </p>
+          ) : (
           <Composer
             where="session"
             agents={props.agents}
@@ -1077,6 +1086,7 @@ export default function Conversation(props: {
             held={held.map((o) => o.text).join("\n")}
             onSubmit={(s) => send(s)}
           />
+          )}
         </div>
       </div>
         </div>

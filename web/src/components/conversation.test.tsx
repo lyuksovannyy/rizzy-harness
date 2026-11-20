@@ -754,3 +754,34 @@ describe("usage in the header during a turn", () => {
     expect(header()).toContain("3.7k tokens");
   });
 });
+
+describe("a sub-agent's chat (X.41)", () => {
+  const agent = (id: string, as_agent: boolean) =>
+    ({ id, name: id === "advisor" ? "Advisor" : "General", features: { as_agent, as_subagent: true }, avatar: { shape: "circle", eyes: "round", accent: "blue" }, unavailable: [], fallbacks: [] }) as unknown as import("../types").Agent;
+  const render = async (row: SessionRow, agents: import("../types").Agent[]) => {
+    current = view([]);
+    await act(async () => root.render(<Conversation live={live} sessionId={SID} row={row} nodes={[]} agents={agents} models={[]} />));
+    await act(() => new Promise((r) => setTimeout(r, 0)));
+  };
+
+  test("an agent that works only as a sub-agent has no reply box, a line and a link to the parent chat instead", async () => {
+    await render(sessionRow({ agent_id: "advisor", parent_id: "parent-1" }), [agent("advisor", false), agent("general", true)]);
+    expect(host.querySelector("textarea")).toBeNull();
+    const line = host.querySelector(".tag-only")!;
+    expect(line.textContent).toContain("Advisor only takes tasks from other agents");
+    expect(line.querySelector("a")!.getAttribute("href")).toBe("#/s/parent-1");
+  });
+
+  test("a sub-agent chat whose agent can also answer a person keeps its reply box", async () => {
+    await render(sessionRow({ agent_id: "general", parent_id: "parent-1" }), [agent("advisor", false), agent("general", true)]);
+    expect(host.querySelector("textarea")).not.toBeNull();
+    expect(host.querySelector(".tag-only")).toBeNull();
+  });
+
+  test("an ordinary chat, and a chat whose agent is not known yet, keep theirs", async () => {
+    await render(sessionRow({ agent_id: "advisor", parent_id: null }), [agent("advisor", false)]);
+    expect(host.querySelector("textarea")).not.toBeNull();
+    await render(sessionRow({ agent_id: "advisor", parent_id: "parent-1" }), []);
+    expect(host.querySelector("textarea")).not.toBeNull();
+  });
+});
