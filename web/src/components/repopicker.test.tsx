@@ -431,6 +431,8 @@ describe("the sidebar's projects", () => {
         { ...base, project_id: "f1", state: "failed", reason: "the clone took longer than this node allows" },
       ]),
     );
+    // The rows' code is its own chunk, fetched when there is a pending project.
+    await act(async () => vi.dynamicImportSettled());
     const rows = [...host.querySelectorAll<HTMLElement>(".pending-project")];
     expect(rows.length).toBe(2);
     expect(rows[0]!.textContent).toContain("cloning github.com/ada/repo-1…");
