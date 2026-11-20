@@ -712,4 +712,45 @@ describe("usage in the header during a turn", () => {
     expect(header()).toContain("3.4k tokens");
     expect(header()).toContain("≈ $3.40");
   });
+  test("follows a running sub-agent's turn_usage while the parent's log is silent, and never dips when it ends", async () => {
+    const CHILD = "01a19bf2-0000-7000-8000-0000000000c1";
+    const push = (v: import("../types").SessionView, sid: string, kind: string, payload: object) => apply(v, { ...ev(v.head_seq + 1, kind, payload), session_id: sid });
+    const parent = emptyView();
+    push(parent, SID, "user_message", { turn_id: "t", text: "go" });
+    push(parent, SID, "turn_started", { turn_id: "t" });
+    push(parent, SID, "turn_usage", { turn_id: "t", usage: use(1000, 200) });
+    push(parent, SID, "tool_call_started", { turn_id: "t", call_id: "d1", tool: "delegate", input: { agent: "coder", task: "x" } });
+    push(parent, SID, "tool_output_delta", { call_id: "d1", stream: "stdout", text: `session: ${CHILD}\n` });
+    const kid = emptyView();
+    push(kid, CHILD, "turn_started", { turn_id: "ct" });
+    push(kid, CHILD, "turn_usage", { turn_id: "ct", usage: use(500, 100) });
+    const watched = vi.fn();
+    const both = { watch: watched, unwatch: vi.fn(), subscribe: () => () => {}, version: 0, view: (id: string) => (id === CHILD ? kid : parent), onTopic: vi.fn(() => () => {}) } as unknown as Live;
+    const draw = async () => {
+      await act(async () => root.render(<Conversation live={both} sessionId={SID} row={sessionRow()} nodes={[]} agents={[]} models={PRICED} />));
+      await act(() => new Promise((r) => setTimeout(r, 0)));
+    };
+    await draw();
+    // The parent's own 1.2k plus the child's running 0.6k.
+    expect(header()).toContain("1.8k tokens");
+    expect(header()).toContain("≈ $1.80");
+    expect(watched).toHaveBeenCalledWith(CHILD);
+    // The child goes on; the parent's log says nothing.
+    push(kid, CHILD, "turn_usage", { turn_id: "ct", usage: use(2000, 300) });
+    await draw();
+    expect(header()).toContain("3.5k tokens");
+    expect(header()).toContain("≈ $3.50");
+    // The child's end shows before the parent's result: no dip.
+    push(kid, CHILD, "turn_ended", { turn_id: "ct", reason: "completed", usage: use(2000, 300) });
+    await draw();
+    expect(header()).toContain("3.5k tokens");
+    // The parent catches up with the child's cost in its own figure.
+    push(parent, SID, "tool_call_finished", { call_id: "d1", ok: true, output: `session: ${CHILD}\nSub-agent @coder finished: done.` });
+    push(parent, SID, "turn_usage", { turn_id: "t", usage: use(3200, 500) });
+    await draw();
+    expect(header()).toContain("3.7k tokens");
+    push(parent, SID, "turn_ended", { turn_id: "t", reason: "completed" });
+    await draw();
+    expect(header()).toContain("3.7k tokens");
+  });
 });

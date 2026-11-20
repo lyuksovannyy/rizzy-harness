@@ -4519,12 +4519,6 @@ impl NativeBackend {
                     sub_tokens += u.input_tokens + u.output_tokens;
                     let before = usage.clone();
                     usage.add(&u);
-                    if live_usage::report(host, &ctx.turn_id, &before, &usage)
-                        .await
-                        .is_err()
-                    {
-                        return stopped(usage);
-                    }
                     // A sub-agent's work is a change, as an edit is (T.1).
                     if outcome.ok {
                         guard.restart();
@@ -4542,6 +4536,15 @@ impl NativeBackend {
                             sources: self.scrub_sources(outcome.sources),
                             note: None,
                         }))
+                        .await
+                        .is_err()
+                    {
+                        return stopped(usage);
+                    }
+                    // The total that takes the child in is reported AFTER the
+                    // call's result, so a header that adds a running child
+                    // until its row has a result never sees both.
+                    if live_usage::report(host, &ctx.turn_id, &before, &usage)
                         .await
                         .is_err()
                     {
@@ -8053,6 +8056,127 @@ mod tests {
         );
         let kinds = host.rec.kinds();
         assert!(!kinds.contains(&"tool_call_finished"), "{kinds:?}");
+    }
+
+    /// X.39 follow-up: the header adds a running sub-agent until its call
+    /// has a result, so the `turn_usage` that takes a child in must come
+    /// AFTER that call's `tool_call_finished`, for one delegate and for
+    /// parallel ones (each in call order); the last total is the outcome's.
+    #[tokio::test]
+    async fn a_delegates_usage_is_reported_after_its_result() {
+        struct Kids(RecHost);
+        #[async_trait::async_trait]
+        impl TurnHost for Kids {
+            async fn emit(&self, kind: EventKind) -> Result<(), harness_core::backend::LogError> {
+                self.0.emit(kind).await
+            }
+            async fn approve(&self, c: &str, t: &str, i: &Value, r: ToolRisk) -> Decision {
+                self.0.approve(c, t, i, r).await
+            }
+            async fn delegate(
+                &self,
+                agent: harness_core::agent::AgentSpec,
+                _task: String,
+                _refs: SharedRefs,
+                _observed: Arc<Vec<String>>,
+                _cancel: tokio_util::sync::CancellationToken,
+                _started: Box<dyn FnOnce(SessionId) + Send>,
+            ) -> Result<harness_core::backend::DelegateOutcome, String> {
+                let (input, wait) = if agent.agent_id == "a" {
+                    (7_000, 40)
+                } else {
+                    (13_000, 5)
+                };
+                tokio::time::sleep(Duration::from_millis(wait)).await;
+                Ok(harness_core::backend::DelegateOutcome {
+                    child: SessionId::new(),
+                    text: "done".into(),
+                    reason: TurnEndReason::Completed,
+                    usage: Some(Usage {
+                        input_tokens: input,
+                        output_tokens: 1,
+                        ..Default::default()
+                    }),
+                    sources: vec![],
+                    finish: None,
+                    error: None,
+                    note: None,
+                    unapplied: None,
+                    applied: true,
+                })
+            }
+        }
+        for (prompt, children) in [
+            ("delegate: a=one", vec![7_000u64]),
+            ("delegate: a=one | b=two", vec![7_000, 13_000]),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let host = Kids(RecHost::new(Decision::Allow));
+            let lead = harness_core::agent::AgentSpec {
+                agent_id: "lead".into(),
+                delegates: ["a", "b"]
+                    .map(|id| harness_core::agent::AgentSpec {
+                        agent_id: id.into(),
+                        ..scout()
+                    })
+                    .to_vec(),
+                ..scout()
+            };
+            let mut c = ctx(&host.0, prompt, dir.path());
+            c.agent = Some(lead);
+            c.host = &host;
+            let out = backend().run_turn(c).await;
+            assert_eq!(out.reason, TurnEndReason::Completed, "{prompt}");
+            let events = host.0.events.lock().unwrap().clone();
+            // After the model's request for the calls: result, total, result, total.
+            let from = events
+                .iter()
+                .rposition(|e| matches!(e, EventKind::ToolCallStarted(_)))
+                .unwrap();
+            let seen: Vec<&EventKind> = events[from..]
+                .iter()
+                .filter(|e| matches!(e, EventKind::ToolCallFinished(_) | EventKind::TurnUsage(_)))
+                .collect();
+            let mut totals = vec![];
+            for (i, want) in children.iter().enumerate() {
+                assert!(
+                    matches!(seen[2 * i], EventKind::ToolCallFinished(_)),
+                    "{prompt}: call {i}'s result must come first: {:?}",
+                    seen.iter().map(|e| e.name()).collect::<Vec<_>>()
+                );
+                let EventKind::TurnUsage(t) = seen[2 * i + 1] else {
+                    panic!("{prompt}: call {i}'s total must follow its result")
+                };
+                totals.push(t.usage.input_tokens);
+                let before = if i == 0 {
+                    // The total before any child: the request's own usage.
+                    events[..from]
+                        .iter()
+                        .rev()
+                        .find_map(|e| match e {
+                            EventKind::TurnUsage(t) => Some(t.usage.input_tokens),
+                            _ => None,
+                        })
+                        .unwrap()
+                } else {
+                    totals[i - 1]
+                };
+                assert_eq!(t.usage.input_tokens - before, *want, "{prompt}: call {i}");
+            }
+            let last = events
+                .iter()
+                .rev()
+                .find_map(|e| match e {
+                    EventKind::TurnUsage(t) => Some(t.usage.clone()),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(
+                Some(last),
+                out.usage,
+                "{prompt}: the last total is the outcome's"
+            );
+        }
     }
 
     #[test]
