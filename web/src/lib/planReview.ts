@@ -216,15 +216,29 @@ export interface Plan {
 }
 
 /** The plans proposed in a chat, oldest first: the last finished answer of
- * each turn that ended (what the plan-mode prompt asks the agent to end with).
- * Answers of a turn still running are not plans yet. */
-export function plansOf(items: readonly { type: string; message_id?: string; text?: string; done?: boolean }[]): Plan[] {
+ * each turn that ended WHILE THE CHAT WAS IN PLAN MODE (what the plan-mode
+ * prompt asks the agent to end with). An answer given in another mode is not
+ * a plan: without this, the first plan of a chat that switched to plan mode
+ * was shown as a revision of the last ordinary answer. Answers of a turn
+ * still running are not plans yet.
+ *
+ * The mode is followed through the chat's own `approval_mode_changed` items.
+ * Before the first of them the log does not say what the mode was: it was the
+ * chat's mode now (`now`) when there is no such item at all, and is taken as
+ * not plan otherwise (a chat created in plan mode and switched since loses
+ * only the comparison with its very first plan). */
+export function plansOf(
+  items: readonly { type: string; message_id?: string; text?: string; done?: boolean; mode?: string }[],
+  now: string = "plan",
+): Plan[] {
   const out: Plan[] = [];
   let last: Plan | null = null;
+  let plan = items.some((it) => it.type === "approval_mode_changed") ? false : now === "plan";
   for (const it of items) {
-    if (it.type === "assistant" && it.done && it.message_id && it.text?.trim()) last = { id: it.message_id, text: it.text };
+    if (it.type === "approval_mode_changed") plan = it.mode === "plan";
+    else if (it.type === "assistant" && it.done && it.message_id && it.text?.trim()) last = { id: it.message_id, text: it.text };
     else if (it.type === "turn_end") {
-      if (last) out.push(last);
+      if (last && plan) out.push(last);
       last = null;
     }
   }

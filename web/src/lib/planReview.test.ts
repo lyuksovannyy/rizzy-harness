@@ -169,6 +169,33 @@ describe("plansOf", () => {
       { id: "m3", text: "Plan two." },
     ]);
   });
+  test("only an answer that ended a turn in plan mode is a plan", () => {
+    const mode = (m: string) => ({ type: "approval_mode_changed", mode: m });
+    // An ordinary chat that switches to plan mode: the earlier answer is not
+    // a plan, so the first plan is not shown as a revision of it.
+    const items = [
+      { type: "user" },
+      a("m1", "Done: I fixed the typo."),
+      { type: "turn_end" },
+      mode("plan"),
+      { type: "user" },
+      a("m2", "Plan one."),
+      { type: "turn_end" },
+      mode("auto"),
+      { type: "user" },
+      a("m3", "Carried out."),
+      { type: "turn_end" },
+      mode("plan"),
+      { type: "user" },
+      a("m4", "Plan two."),
+      { type: "turn_end" },
+    ];
+    expect(plansOf(items, "plan").map((p) => p.id)).toEqual(["m2", "m4"]);
+    // No change in the log: the mode now is the mode it always had.
+    const plain = [{ type: "user" }, a("m1", "An answer."), { type: "turn_end" }];
+    expect(plansOf(plain, "plan").map((p) => p.id)).toEqual(["m1"]);
+    expect(plansOf(plain, "auto")).toEqual([]);
+  });
   test("a turn that said nothing proposed nothing", () => {
     expect(plansOf([a("m1", "  "), { type: "turn_end" }, a("m2", "streaming", false), { type: "turn_end" }])).toEqual([]);
   });
