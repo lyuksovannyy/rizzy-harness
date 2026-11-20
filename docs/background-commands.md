@@ -9,7 +9,7 @@ the code does differently from this note is in §11. **Step 2 is built** and mer
 turns) is built** on branch `feat/T.8d-step3-callbacks`, not merged and not yet reviewed; every
 difference from §4 is in §13. Task C.15 of `ADOPTION_PLAN.md`; the feature is task T.8d.
 
-**Update 2026-11-20 (the owner: "Yes, allow").** Background commands are also allowed in a `host` chat: the command runs under the same guard in its `--host` mode, without bubblewrap and so without a PID namespace of its own (`PLAN.md` T9 has the proof, the leftovers and the stop paths; `README.md` "Background commands"). Where this document says "contained" it describes a `sandbox` chat; a `host` chat's command is seen and can be signalled by later commands, and the node refuses a start where it has no sandbox wrapper to start the guard from (`[sandbox] mode = "off"`).
+**Update 2026-11-20 (the owner: "Yes, allow").** Background commands are also allowed in a `host` chat: the command runs under the same guard in its `--host` mode, without bubblewrap and so without a PID namespace of its own (`PLAN.md` T9 has the proof, the leftovers and the stop paths; `README.md` "Background commands"). Where this document says "contained" it describes a `sandbox` chat; a `host` chat's command is seen and can be signalled by later commands. On a node with `[sandbox] mode = "off"` (no wrapper) the guard is started directly from the node's own image, held at start (the owner, 2026-11-20: "dont, like if user selected host project workspace, why do we need to limit it? its his choice"); only a node that could not hold its image refuses a start (`NO_GUARD`). Background sub-agents are allowed there too (§14).
 
 **Summary.** `bash` gains `background: true`. The node starts the command in its own contained
 sandbox (T.8a to T.8c) under its own guard (T.8e), exactly as a foreground command, but holds it
@@ -1106,7 +1106,7 @@ it offers `finish` alone, so a child can overshoot its share by that one request
 its answer, as for the step cap). It counts as one of the turn's
 `max_subagents`. Depth one: `bound_delegation` clears the switch below the top, and a sub-agent's
 turn, a callback turn and a routine's chat (`no_callbacks`: nobody would read the result) are
-refused with the reason; a `host` chat is refused too (since 2026-11-20 it has a background table, for commands; the node refuses background sub-agents there by its mode, not by the missing table). The agent's own
+refused with the reason. A `host` chat gets background sub-agents like a `sandbox` chat (the owner, 2026-11-20: "dont, like if user selected host project workspace, why do we need to limit it? its his choice"; it was refused by mode before): the child is the parent's own kind of session, in the parent's execution mode (`host`: `start_child` copies the parent's recorded mode, no argument of `delegate` names one) and under its approval mode, and what it runs in the foreground is a plain process group: its stop kills that group, and a process the command detached with `setsid` is not reached (as for any foreground host command; the texts say "stopped", never that everything it started is gone). The agent's own
 switch is `DelegateCaps::background` (frontmatter `background_subagents`, the Agents page's
 "Background sub-agents"; on only for the built-in Senior Teamlead); with the switch off or the key
 at 0 `delegate` offers no `background`, and a forged one is refused before any child exists. The
@@ -1140,7 +1140,7 @@ card because the person can answer it and the wait is bounded and visible, and s
 | The chat deleted | cancelled; its folder removed unmerged | none (the log goes) | No |
 | The owner loses access | cancelled, then merged; no start until they write | `access_revoked` | No |
 | The node stops | cancelled, then merged within the stop's bound | `node_stopping` | No |
-| The node dies | its guards die with it; its folder is removed at the next start | `node_restarted`, once, at the start, no result | No |
+| The node dies | its guards die with it (in a `host` chat the child's foreground command has no guard: a `kill -9` of the node can leave it running, as for any foreground host command); its folder is removed at the next start | `node_restarted`, once, at the start, no result | No |
 | The master is away at its end | recorded on the node; replays at the next hello | as usual | Only within 60 min (§4.4) |
 
 After a restart its own turn is closed `interrupted` (its own log) and the note says how to go on:

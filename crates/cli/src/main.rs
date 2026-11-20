@@ -907,7 +907,7 @@ fn checkpoint_confinement(c: &harness_tools::sandbox::Confinement) -> &'static s
             "the node's git reads session folders in the sandbox (read-only on the folder, \
              write on its checkpoint store only)"
         }
-        Confinement::Unconfined => {
+        Confinement::Unconfined { .. } => {
             "NOT confined ([sandbox] mode = \"off\"): the node's git reads session folders \
              with every right of this OS user"
         }

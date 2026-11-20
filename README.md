@@ -2644,9 +2644,13 @@ then says the command and what it started MAY STILL BE RUNNING on this
 machine, because nothing looked for them. A deep chain of nested processes
 (hundreds of levels) is ended one level per pass, so its end can take
 seconds and the stop's result says "not ended yet" until the guard reports.
-Background commands in a host chat need `[sandbox] mode` other than `off`;
-with `off` the chat is not offered `background: true`, `bash_output` or
-`bash_stop`. The agent reads it with `bash_output { id }` (no id lists the chat's commands)
+A host chat's background commands also work on a node with `[sandbox] mode =
+"off"` (the owner, 2026-11-20: "dont, like if user selected host project
+workspace, why do we need to limit it? its his choice"): the guard starts
+directly from the node's own program, held at start, with no sandbox wrapper;
+the foreground call there is unchanged. Only a node that could not hold its
+own program refuses them (the chat is then not offered `background: true`,
+`bash_output` or `bash_stop`, and `doctor` says so). The agent reads it with `bash_output { id }` (no id lists the chat's commands)
 and stops it with `bash_stop { id }`. When a foreground call puts a job in
 the background by hand (an unquoted `&`, or `setsid`), the harness sends the agent
 one `[harness]` note after that call's result (recorded with the call, so a
@@ -4475,7 +4479,14 @@ places, so the caps a turn hands out never add up to more than the budget;
 one whose share would be 0 is refused). A child can pass its share by its last request, as a step can
 pass the step limit. They count against the turn's sub-agents.
 A sub-agent cannot start one, nor can a callback turn or a routine's chat
-(nobody would read the result), nor a `host` chat. A card it waits on shows
+(nobody would read the result). A `host` chat can: it gets no limit a sandbox
+chat does not have, and its sub-agent runs in the host mode too (as this
+node's own user, under the chat's approval mode, like any sub-agent of that
+chat). What is weaker there is what its commands leave behind: its foreground
+command is a plain process group, so Stop, its time limit, the chat's deletion
+and the node's stop kill that group, but a process the command detached
+(`setsid`, a double fork) is not reached, and a `kill -9` of the node can leave
+the command running; a sandbox chat's sub-agent has neither gap. A card it waits on shows
 in its chat ("Open its chat"), and its side panel row's activity line says
 "waiting for an approval"; it waits at most
 until its time limit; it is never answered because nobody watches. **The
