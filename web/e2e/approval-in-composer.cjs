@@ -1,6 +1,6 @@
 // The approval takes the composer's place (row W.6) against the real binary:
 // an Agentic chat in Ask. Two parallel calls wait while a draft is being
-// typed: the text field is replaced by the choice (the card above its
+// typed (continuously, across the moment the choice appears): the text field is replaced by the choice (the card above its
 // buttons), no button has focus, Enter and Space typed at once answer
 // nothing, Stop stays, and the buttons work after the guard; the calls come
 // one at a time ("1 of 2"), the second guarded again; once answered the field
@@ -94,24 +94,40 @@ async function turnsEnded(p, sid, n) {
     await p.keyboard.press('Enter');
     await p.waitForSelector('.conversation');
     const sid = (await p.evaluate(() => location.hash)).split('/').pop();
-    await p.fill('.composer textarea', 'a line being typed');
+    // The person types on, key after key, across the moment the choice
+    // appears (no screenshot, no fixed wait: the loop ends when the choice's
+    // element is there), then "/tmp/x" and Enter: a "/" that reached the page
+    // would open search, an Enter that reached a button would answer.
     await p.focus('.composer textarea');
-    await p.evaluate(() => document.querySelector('.composer textarea').setSelectionRange(3, 3));
-    await p.waitForSelector('.approval-choice');
+    let typed = 0;
+    while (!(await p.$('.approval-choice'))) {
+      check(typed++ < 400, 'the choice did not appear while typing');
+      await p.keyboard.type('a', { delay: 25 });
+    }
+    check(typed > 0, 'the choice appeared before any key was typed: the burst did not span it');
+    await p.keyboard.type('/tmp/x', { delay: 25 });
+    await p.keyboard.press('Enter');
+    await p.keyboard.type(' ', { delay: 25 });
     await p.screenshot({ path: `${S}/shots/choice.png` });
 
-    // 2. The field is replaced; no button has focus; keys at once answer nothing.
+    // 2. The field is replaced; no button has focus; the burst answered nothing.
     check(await p.isHidden('.composer textarea'), 'the text field is replaced by the choice');
-    check(await p.evaluate(() => !document.activeElement?.closest('.approval-choice') && document.activeElement?.tagName !== 'BUTTON'), 'no button has focus');
+    check(await p.evaluate(() => document.activeElement?.classList.contains('approval-choice')), 'focus waits on the choice container, not a button');
+    check(!(await p.$('dialog.search-panel[open]')), 'the typed "/" opened search');
+    const draft = await p.inputValue('.composer textarea');
+    check(/^a+$/.test(draft) && draft.length <= typed && draft.length >= typed - 1, 'the draft is what was typed before the choice, nothing after: ' + draft.length + ' of ' + typed);
     const shown = await p.innerText('.approval-choice');
     check(shown.includes('1 of 2'), 'the count is shown');
     check(shown.includes('first.txt'), 'the first call the node asked is shown, with what it runs');
-    await p.keyboard.press('Enter');
-    await p.keyboard.press('Space');
-    await sleep(150);
-    check((await events(p, sid)).every((e) => e.kind !== 'approval_resolved'), 'Enter and Space at once answered nothing');
+    const now = await events(p, sid);
+    check(now.every((e) => e.kind !== 'approval_resolved'), 'the burst answered an approval');
+    check(now.filter((e) => e.kind === 'user_message').length === 1, 'the burst sent a message');
     check((await p.$$('.composer button.stop')).length === 1, 'Stop stays reachable');
     check((await p.$$('.tool-waiting button.primary')).length === 0, 'the transcript does not repeat the buttons');
+    // The first Tab from the container reaches the first button.
+    await p.keyboard.press('Tab');
+    check(await p.evaluate(() => document.activeElement?.classList.contains('primary')), 'the first Tab reaches Allow once');
+    await p.focus('.approval-choice');
 
     // 3. Answer the first; the second comes alone, guarded again.
     await p.click('.approval-choice button.primary');
@@ -131,7 +147,7 @@ async function turnsEnded(p, sid, n) {
       const t = document.querySelector('.composer textarea');
       return { v: t.value, c: t.selectionStart, f: document.activeElement === t };
     });
-    check(back.v === 'a line being typed' && back.c === 3 && back.f, 'the draft, the caret and the focus are back: ' + JSON.stringify(back));
+    check(back.v === draft && back.c === draft.length && back.f, 'the draft, the caret and the focus are back: ' + JSON.stringify(back));
     check(exists('first.txt') && !exists('second.txt'), 'the first call ran, the denied second did not');
 
     check(errors.length === 0, 'page errors: ' + errors.join('; '));

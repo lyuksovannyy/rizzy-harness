@@ -3,12 +3,13 @@
 // composer's place (`place`: the open chat, one call at a time, key-guarded)
 // or in the call's card (a chat's other views, a sub-agent's request). The
 // answering is the same code either way. Loads with the conversation chunk.
-import { createContext, useEffect, useMemo, useState } from "react";
+import { createContext, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { pageApi } from "../apiPages";
+import { raise } from "../lib/choiceGuard";
 import { fields as fieldsOf, fmt, previewField, unseen } from "../lib/callText";
 import { t } from "../lib/i18n";
 import "../lib/i18nPages";
-import { showHidden } from "../md/hidden";
+import { shownName, showHidden } from "../md/hidden";
 import type { Decision, Item } from "../types";
 import { CallInput, useOpenFields } from "./CallInput";
 import "./approvalChoice.css";
@@ -48,6 +49,7 @@ export function ApprovalChoice({
   cwd,
   lead,
   place,
+  boxRef,
 }: {
   sessionId: string;
   item: Tool;
@@ -55,6 +57,8 @@ export function ApprovalChoice({
   cwd?: string;
   lead?: React.ReactNode;
   place?: { n: number; of: number };
+  /** The choice's own container, which takes focus when it appears (the composer hands it over). */
+  boxRef?: RefObject<HTMLDivElement | null>;
 }) {
   const ap = item.approval!;
   const [busy, setBusy] = useState(false);
@@ -72,9 +76,57 @@ export function ApprovalChoice({
     const id = setTimeout(() => setArmed(true), GUARD_MS);
     return () => clearTimeout(id);
   }, [!place]);
+  // The page knows a choice is up (global shortcuts that react to plain
+  // typing do nothing), from the first render in the composer's place.
+  useLayoutEffect(() => (place ? raise() : undefined), [!place]);
+  // While the guard runs, a key not aimed at a control of the choice is
+  // eaten before any shortcut sees it: a burst of typing that began in the
+  // field (now gone) must not open search, send or answer. Chords and keys
+  // that move (Tab, Esc, arrows) pass.
+  const box = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!place || armed) return;
+    const eat = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey || !(e.key.length === 1 || e.key === "Enter")) return;
+      const el = e.target instanceof Element ? e.target : null;
+      const own = box.current;
+      if (own && el && el !== own && own.contains(el) && el.closest("button, input, a")) return;
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    window.addEventListener("keydown", eat, true);
+    window.addEventListener("keyup", eat, true);
+    return () => {
+      window.removeEventListener("keydown", eat, true);
+      window.removeEventListener("keyup", eat, true);
+    };
+  }, [!place, armed]);
+  const setBox = useCallback(
+    (el: HTMLDivElement | null) => {
+      box.current = el;
+      if (boxRef) boxRef.current = el;
+    },
+    [boxRef],
+  );
+  // The command scrolls; whether more of it is below the cut is said under it.
+  const scroll = useRef<HTMLDivElement>(null);
+  const [more, setMore] = useState(false);
+  const measure = useCallback(() => {
+    const el = scroll.current;
+    setMore(!!el && el.scrollHeight - el.clientHeight - el.scrollTop > 1);
+  }, []);
+  useLayoutEffect(() => {
+    if (!place) return;
+    measure();
+    const el = scroll.current;
+    if (!el || typeof ResizeObserver !== "function") return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [!place, measure, shown, openFields]);
   // The announcement is put in an empty live region after it is there.
   const [said, setSaid] = useState("");
-  const words = place ? `${t("approval.waits")}${place.of > 1 ? ` (${t("approval.count", { n: String(place.n), of: String(place.of) })})` : ""}` : "";
+  const words = place ? `${t("approval.waits", { tool: shownName(item.tool) })}${place.of > 1 ? ` (${t("approval.count", { n: String(place.n), of: String(place.of) })})` : ""}` : "";
   useEffect(() => setSaid(words), [words]);
 
   const decide = async (d: Decision) => {
@@ -103,7 +155,24 @@ export function ApprovalChoice({
   return (
     <div
       className={`approval${place ? " approval-choice" : ""}`}
-      {...(place ? { role: "group", "aria-label": t("approval.label"), onKeyDownCapture: swallow, onKeyUpCapture: swallow } : {})}
+      {...(place
+        ? {
+            ref: setBox,
+            tabIndex: -1,
+            role: "group",
+            "aria-label": t("approval.label"),
+            onKeyDownCapture: swallow,
+            onKeyUpCapture: swallow,
+            // The first Tab from the container (where focus waits) reaches the first button.
+            onKeyDown: (e: React.KeyboardEvent<HTMLDivElement>) => {
+              if (e.key !== "Tab" || e.shiftKey || e.target !== e.currentTarget) return;
+              const first = e.currentTarget.querySelector<HTMLElement>(".approval-actions button");
+              if (!first) return;
+              e.preventDefault();
+              first.focus();
+            },
+          }
+        : {})}
     >
       {place && (
         <span className="sr-only" role="status">
@@ -115,25 +184,34 @@ export function ApprovalChoice({
           {t("approval.count", { n: String(place.n), of: String(place.of) })}
         </div>
       )}
-      <div className="approval-card">
+      <div
+        className="approval-scroll"
+        ref={scroll}
+        {...(place ? { role: "region", tabIndex: 0, "aria-label": t("approval.scroll"), onScroll: measure } : {})}
+      >
         {lead}
         <CallInput fields={shown} cwd={cwd} open={openFields} onToggle={toggleField} />
-        <div className="approval-reason">{showHidden(ap.reason)}</div>
-        {/* Allow stays usable while part of the input is collapsed; this
-            line says how much of it the click approves unseen. */}
-        {notExpanded > 0 && (
-          <div className="call-unseen" id={seen} role="note">
-            You are approving {fmt(notExpanded)} characters you have not expanded.
-          </div>
-        )}
-        {ap.chat_allow && !blocked && (
-          <div className="small muted chat-allow-said" id={`chat-${ap.approval_id}`} role="note">
-            &ldquo;For this chat&rdquo; lets this exact call run with no card for the rest of the chat, also after a
-            restart, and it runs whatever the files it uses say then: allowing <code>make test</code> allows whatever
-            the Makefile and the tests say, which the agent may change.
-          </div>
-        )}
       </div>
+      {place && more && (
+        <div className="approval-more small" aria-hidden="true">
+          {t("approval.more")}
+        </div>
+      )}
+      <div className="approval-reason">{showHidden(ap.reason)}</div>
+      {/* Allow stays usable while part of the input is collapsed; this
+          line says how much of it the click approves unseen. */}
+      {notExpanded > 0 && (
+        <div className="call-unseen" id={seen} role="note">
+          You are approving {fmt(notExpanded)} characters you have not expanded.
+        </div>
+      )}
+      {ap.chat_allow && !blocked && (
+        <div className="small muted chat-allow-said" id={`chat-${ap.approval_id}`} role="note">
+          &ldquo;For this chat&rdquo; lets this exact call run with no card for the rest of the chat, also after a
+          restart, and it runs whatever the files it uses say then: allowing <code>make test</code> allows whatever
+          the Makefile and the tests say, which the agent may change.
+        </div>
+      )}
       <div className={`approval-actions row wrap${armed ? "" : " guarded"}`}>
         {!blocked && (
           <>

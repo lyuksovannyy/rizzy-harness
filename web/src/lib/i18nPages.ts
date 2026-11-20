@@ -138,7 +138,10 @@ export const pages = {
   "settings.backdropChats": "Also in chats",
   "settings.backdropChatsHint": "A quiet, still version beside chats on wide screens.",
   "approval.rows": "Rows this changes",
-  "approval.waits": "A tool call waits for your answer",
+  "approval.waits": "A {tool} call waits for your answer. What it will run is above; the buttons are below it.",
+  "approval.scroll": "What the call will run (scrolls)",
+  "approval.more": "More below: scroll",
+  "approval.modeNote": "The call above still waits for your answer. A new mode applies from the next call; Plan denies it.",
   "approval.count": "{n} of {of}",
   "approval.label": "Allow or deny the tool call",
 } as const;

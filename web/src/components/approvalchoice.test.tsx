@@ -25,6 +25,7 @@ vi.mock("../lib/artifacts", async (original) => ({
 }));
 const { default: Conversation } = await import("./Conversation");
 const { ApprovalChoice, GUARD_MS } = await import("./ApprovalChoice");
+const { choiceUp } = await import("../lib/choiceGuard");
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -105,10 +106,10 @@ afterEach(() => {
   prompt.mockClear();
 });
 
-async function show(v: SessionView, over: { blocked?: string | null } = {}) {
+async function show(v: SessionView, over: { blocked?: string | null; nodes?: unknown[] } = {}) {
   current = v;
   await act(async () =>
-    root.render(<Conversation live={live} sessionId={SID} row={{ ...row, blocked: over.blocked ?? null } as SessionRow} nodes={[]} agents={agents} models={[]} />),
+    root.render(<Conversation live={live} sessionId={SID} row={{ ...row, blocked: over.blocked ?? null } as SessionRow} nodes={(over.nodes ?? []) as never} agents={agents} models={[]} />),
   );
 }
 const box = () => host.querySelector<HTMLTextAreaElement>(".composer textarea")!;
@@ -137,8 +138,8 @@ describe("the choice in the composer's place", () => {
     expect(c.textContent).toContain("<U+202E>");
     expect(c.textContent).toContain("in the host shell");
     expect(c.textContent).not.toContain(RLO);
-    // The card scrolls, the buttons stay: the buttons are outside the scroll region.
-    const card = c.querySelector(".approval-card")!;
+    // The command scrolls, the buttons stay: the buttons are outside the scroll region.
+    const card = c.querySelector(".approval-scroll")!;
     const actions = c.querySelector(".approval-actions")!;
     expect(card).not.toBeNull();
     expect(card.contains(actions)).toBe(false);
@@ -155,11 +156,12 @@ describe("the choice in the composer's place", () => {
     expect(choice()!.textContent).toContain("old row");
   });
 
-  test("announces itself in a live region without taking focus", async () => {
+  test("announces itself in a live region, naming the tool and where the buttons are, never the command", async () => {
     await show(view([tool(1)]));
     const live = choice()!.querySelector('[role="status"]')!;
-    expect(live.textContent).toMatch(/waits for your answer/);
-    expect(choice()!.contains(document.activeElement)).toBe(false);
+    expect(live.textContent).toMatch(/bash call waits for your answer/);
+    expect(live.textContent).toMatch(/buttons are below/i);
+    expect(live.textContent).not.toContain("make step1");
     expect(document.activeElement?.tagName).not.toBe("BUTTON");
   });
 
@@ -213,7 +215,8 @@ describe("the key guard", () => {
     }
     expect(approve).not.toHaveBeenCalled();
     expect(prompt).not.toHaveBeenCalled();
-    expect(choice()!.contains(document.activeElement)).toBe(false);
+    // Focus waits on the choice's own container, never on a button.
+    expect(document.activeElement).toBe(choice());
   });
 
   test("a key on a button is swallowed before GUARD_MS and works from it", async () => {
@@ -359,5 +362,150 @@ describe("a chat that is not the open one", () => {
     await show(view([]));
     expect(choice()).toBeNull();
     expect(box().hidden).toBe(false);
+  });
+});
+
+const longCall = () => {
+  const t = tool(1, { reason: "in the host shell: as this node's own user, without the sandbox" }, { command: `echo ${"x".repeat(5000)}` });
+  t.approval!.preview = Array.from({ length: 60 }, (_, i) => `+ row ${i}`).join("\n");
+  return t;
+};
+const follows = (a: Element, b: Element) => !!(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING);
+
+describe("what matters stays beside the buttons", () => {
+  test("only the command and the preview scroll: reason, unseen-characters warning and disclosure are outside, before the buttons", async () => {
+    await show(view([longCall()]));
+    const c = choice()!;
+    const scroll = c.querySelector(".approval-scroll")!;
+    const actions = c.querySelector(".approval-actions")!;
+    expect(scroll.textContent).toContain("echo xxx");
+    expect(scroll.textContent).toContain("row 0");
+    for (const sel of [".approval-reason", ".call-unseen", ".chat-allow-said"]) {
+      const el = c.querySelector(sel)!;
+      expect(el, sel).not.toBeNull();
+      expect(scroll.contains(el), sel).toBe(false);
+      expect(follows(scroll, el), sel).toBe(true);
+      expect(follows(el, actions), sel).toBe(true);
+    }
+    expect(c.querySelector(".approval-reason")!.textContent).toContain("without the sandbox");
+  });
+
+  test("the scroll box is a named region the keyboard can reach", async () => {
+    await show(view([longCall()]));
+    const scroll = choice()!.querySelector<HTMLElement>(".approval-scroll")!;
+    expect(scroll.getAttribute("tabindex")).toBe("0");
+    expect(scroll.getAttribute("role")).toBe("region");
+    expect(scroll.getAttribute("aria-label")).toBeTruthy();
+  });
+
+  test("a cue says there is more below the cut, only while there is", async () => {
+    const heights = { scrollHeight: 900, clientHeight: 200 };
+    const saved = ["scrollHeight", "clientHeight"].map((k) => [k, Object.getOwnPropertyDescriptor(HTMLElement.prototype, k)] as const);
+    for (const k of ["scrollHeight", "clientHeight"] as const) Object.defineProperty(HTMLElement.prototype, k, { configurable: true, get: () => heights[k] });
+    try {
+      await show(view([longCall()]));
+      expect(choice()!.querySelector(".approval-more")?.textContent).toMatch(/more below/i);
+      heights.scrollHeight = 200;
+      act(() => void choice()!.querySelector(".approval-scroll")!.dispatchEvent(new Event("scroll", { bubbles: true })));
+      expect(choice()!.querySelector(".approval-more")).toBeNull();
+    } finally {
+      for (const [k, d] of saved) d ? Object.defineProperty(HTMLElement.prototype, k, d) : delete (HTMLElement.prototype as never)[k];
+    }
+  });
+
+  test("a short command shows no cue", async () => {
+    await show(view([tool(1)]));
+    expect(choice()!.querySelector(".approval-more")).toBeNull();
+  });
+});
+
+describe("a typing burst across the moment the choice appears", () => {
+  // What Shell's own window listener sees (it opens search on "/" and Ctrl/Cmd+K).
+  let seen: KeyboardEvent[];
+  const spy = (e: KeyboardEvent) => void seen.push(e);
+  beforeEach(() => {
+    seen = [];
+    window.addEventListener("keydown", spy);
+  });
+  afterEach(() => window.removeEventListener("keydown", spy));
+  const typeBurst = (el: Element, text: string) => {
+    for (const ch of text) {
+      key(el, ch);
+      key(el, ch, "keyup");
+    }
+  };
+
+  test("/tmp/x then Enter, with focus on the container or the body: nothing reaches the page, nothing is sent or answered", async () => {
+    vi.useFakeTimers();
+    await show(view([]));
+    typeInto(box(), "draft");
+    act(() => box().focus());
+    await show(view([tool(1)]));
+    expect(document.activeElement).toBe(choice());
+    for (const el of [document.activeElement!, document.body]) {
+      typeBurst(el, "/tmp/x");
+      expect(key(el, "Enter").defaultPrevented).toBe(true);
+    }
+    expect(seen).toEqual([]);
+    expect(approve).not.toHaveBeenCalled();
+    expect(prompt).not.toHaveBeenCalled();
+    expect(box().value).toBe("draft");
+  });
+
+  test("a chord (Ctrl/Cmd+K) and Tab still reach the page during the guard", async () => {
+    vi.useFakeTimers();
+    await show(view([tool(1)]));
+    act(() => void document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true, cancelable: true })));
+    act(() => void document.body.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true })));
+    expect(seen.map((e) => e.key)).toEqual(["k", "Tab"]);
+  });
+
+  test("while the choice is up the flag is up; answered, it is down and keys flow again", async () => {
+    vi.useFakeTimers();
+    expect(choiceUp()).toBe(false);
+    await show(view([tool(1)]));
+    expect(choiceUp()).toBe(true);
+    await wait(GUARD_MS);
+    expect(choiceUp()).toBe(true);
+    await show(view([tool(1, { decision: "allow", by: "user" })]));
+    expect(choiceUp()).toBe(false);
+    key(document.body, "/");
+    expect(seen.map((e) => e.key)).toEqual(["/"]);
+  });
+
+  test("a key aimed at a control inside the choice is left to the choice (the note takes text)", async () => {
+    vi.useFakeTimers();
+    await show(view([tool(1)]));
+    const note = host.querySelector<HTMLInputElement>("input.deny-note")!;
+    expect(key(note, "a").defaultPrevented).toBe(false);
+  });
+});
+
+describe("the keyboard order", () => {
+  test("from the container the first Tab reaches the first button; reading order is command, reason, warning, buttons", async () => {
+    vi.useFakeTimers();
+    await show(view([]));
+    typeInto(box(), "draft");
+    act(() => box().focus());
+    await show(view([longCall()]));
+    const c = choice()!;
+    expect(document.activeElement).toBe(c);
+    expect(c.getAttribute("tabindex")).toBe("-1");
+    const e = key(c, "Tab");
+    expect(e.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(named("Allow once"));
+    const order = [".approval-scroll", ".approval-reason", ".call-unseen", ".chat-allow-said", "button.primary"].map((s) => c.querySelector(s)!);
+    for (let i = 1; i < order.length; i++) expect(follows(order[i - 1]!, order[i]!)).toBe(true);
+  });
+});
+
+describe("the mode picker while a choice is up", () => {
+  test("says the call above still waits (a mode change does not answer it)", async () => {
+    const nodes = [{ node_id: "master", hostname: "box", embedded: true, max_approval: "auto", exec_modes: ["sandbox"] }];
+    await show(view([]), { nodes });
+    expect(host.querySelector(".approval-pending-note")).toBeNull();
+    await show(view([tool(1)]), { nodes });
+    await act(async () => void (await new Promise((r) => setTimeout(r, 0))));
+    expect(host.querySelector(".composer .approval-pending-note")?.textContent).toMatch(/call above still waits for your answer/);
   });
 });

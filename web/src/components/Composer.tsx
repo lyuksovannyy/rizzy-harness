@@ -145,6 +145,11 @@ export function Composer(props: {
   /** Session: a call waits for approval and its choice is shown in the
    * field's place (row W.6): the field is hidden, its draft and caret kept. */
   choosing?: boolean;
+  /** Session: the choice's own container, which takes the focus the field
+   * had (or nobody had) when the choice appears. */
+  choiceBox?: React.RefObject<HTMLElement | null>;
+  /** Session: said next to the mode picker while a choice is up. */
+  modeNote?: string;
   /** Session: a /compact runs; Stop cancels it. */
   compacting?: boolean;
 }) {
@@ -336,8 +341,12 @@ export function Composer(props: {
   useLayoutEffect(() => {
     const el = ta.current;
     if (props.choosing) {
-      typing.current = document.activeElement === el;
+      const at = document.activeElement;
+      typing.current = at === el;
       if (typing.current) el!.blur();
+      // Focus waits on the choice's container (never a button): the rest of
+      // a typing burst lands there and is dropped, not in the page.
+      if (typing.current || at === document.body) props.choiceBox?.current?.focus({ preventScroll: true });
     } else if (typing.current) {
       typing.current = false;
       el?.focus();
@@ -840,10 +849,15 @@ export function Composer(props: {
                 onChange={(m) => {
                   setErr(null);
                   props.approval!.onChange(m).catch((x) => setErr(x instanceof Error ? x.message : String(x)));
-                  ta.current?.focus();
+                  if (!props.choosing) ta.current?.focus();
                 }}
               />
             </Suspense>
+          )}
+          {!home && props.approval && !props.readOnly && props.choosing && props.modeNote && (
+            <span className="approval-pending-note small muted" role="note">
+              {props.modeNote}
+            </span>
           )}
           {!home && props.steps && !props.readOnly && (
             <Suspense fallback={null}>

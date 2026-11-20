@@ -1,22 +1,29 @@
-/* The composer's place while a call waits (row W.6). The card scrolls and the
-   buttons stay: on a small window a long command must not push them out of
-   view, nor they it. */
+/* The composer's place while a call waits (row W.6). Only the command (and an
+   edit's rows) scrolls; the reason, the unseen-characters warning and the
+   "for this chat" disclosure stay between it and the buttons, always seen. */
 .approval-choice {
-  max-height: min(70vh, 34rem);
+  max-height: min(80vh, 40rem);
   border: 1px solid var(--warn);
   border-radius: var(--r-xl);
   min-height: 0;
 }
-.approval-choice .approval-card {
+.approval-choice:focus-visible { outline: 2px solid var(--warn); outline-offset: 2px; }
+.approval-choice .approval-scroll {
   flex: 1 1 auto;
-  min-height: 7rem;
+  min-height: 5rem;
   overflow-y: auto;
   overscroll-behavior: contain;
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
 }
+.approval-choice .approval-scroll:focus-visible { outline: 2px solid var(--accent, var(--warn)); outline-offset: 1px; }
+.approval-choice .approval-more { flex: none; margin-top: calc(var(--space-1-5) * -1); color: var(--warn); font-family: var(--sans); }
+.approval-choice .approval-reason,
+.approval-choice .call-unseen,
+.approval-choice .chat-allow-said { flex: none; }
 .approval-choice .approval-actions { flex: none; }
+.approval-pending-note { align-self: center; max-width: 24rem; }
 .approval-count { text-align: end; }
 .approval-actions.guarded button { opacity: 0.55; cursor: progress; }
 /* The text field is hidden, not removed: its draft and caret wait for the answer. */

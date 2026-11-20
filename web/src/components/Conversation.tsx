@@ -473,6 +473,7 @@ export default function Conversation(props: {
   const holding = subagentOnly
     ? []
     : (view?.pending_approvals ?? []).flatMap((id) => items.filter((x): x is Extract<typeof x, { type: "tool" }> => x.type === "tool" && x.approval?.approval_id === id));
+  const choiceBox = useRef<HTMLDivElement>(null);
   const routine = props.row?.routine;
   useRunSeen(routine);
   // What the server offers here: "Save as artifact" in agentic chats, images in any.
@@ -1073,6 +1074,7 @@ export default function Conversation(props: {
               blocked={!!blocked}
               cwd={meta?.cwd}
               place={{ n: 1, of: holding.length }}
+              boxRef={choiceBox}
             />
           )}
           {subagentOnly ? (
@@ -1142,6 +1144,8 @@ export default function Conversation(props: {
             readOnly={blocked}
             running={running}
             choosing={!!holding[0]}
+            choiceBox={choiceBox}
+            modeNote={t("approval.modeNote")}
             // While a /compact runs, Stop cancels it (the same route).
             compacting={summarise.compacting && !running}
             draft={keepsDraft ? sessionId : undefined}
