@@ -69,6 +69,8 @@ export function DeleteChat(props: {
     >
       <div className="media-confirm stack">
         <p>{t("conv.deleteConfirm")}</p>
+        {/* No number: the sidebar's list leaves some out (a routine's runs, another workspace). */}
+        <p>{t("conv.deleteSubs")}</p>
         {!!files?.n && (
           <label className="row">
             <input type="checkbox" checked={withMedia} onChange={(e) => setWithMedia(e.target.checked)} />

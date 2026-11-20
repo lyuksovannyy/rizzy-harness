@@ -712,6 +712,244 @@ fn a_parent_is_kept_only_under_the_same_node_and_owner() {
     assert_eq!(row.parent_id, None, "another user's chat is no parent");
 }
 
+/// `sub_sessions` lists every chat below one, at any depth, and only those:
+/// not the chat itself, not a sibling's chats, not a plain chat. The master
+/// deletes them with the chat, after its own row is gone, so the list must
+/// not need that row.
+#[test]
+fn sub_sessions_are_every_chat_below_one_also_once_it_is_deleted() {
+    let s = Store::open_in_memory().unwrap();
+    let child_of = |parent: SessionId| {
+        let sid = SessionId::new();
+        s.append(
+            "n1",
+            &raw(sid, 1, "session_created", created_json("t", Some(parent))),
+        )
+        .unwrap();
+        sid
+    };
+    let top = chat_of(&s, "n1", "alice");
+    let (kid, other_kid) = (child_of(top), child_of(top));
+    let grandkid = child_of(kid);
+    let plain = chat_of(&s, "n1", "alice");
+    let strangers_kid = child_of(plain);
+    let sorted = |mut v: Vec<SessionId>| {
+        v.sort();
+        v
+    };
+
+    let levels = below(&s, top, Some("alice"));
+    assert_eq!(levels.len(), 2, "one list per depth");
+    assert_eq!(sorted(levels[0].clone()), sorted(vec![kid, other_kid]));
+    assert_eq!(levels[1], vec![grandkid]);
+    assert!(below(&s, grandkid, Some("alice")).is_empty());
+    assert_eq!(below(&s, plain, Some("alice")), vec![vec![strangers_kid]]);
+
+    // Its own row gone, the children still name it.
+    assert!(s.delete_session(top, true).unwrap());
+    assert_eq!(below(&s, top, Some("alice")), levels);
+}
+
+/// The cascade deletes by owner as well as by `parent_id`: a row planted
+/// under a chat with another owner (the parent link rests on the node alone,
+/// the owner on other code) is not listed, and the walk does not pass through
+/// it to the chats below it. It stays readable by its own owner after the
+/// parent is deleted.
+#[test]
+fn sub_sessions_skip_a_chat_of_another_owner_and_what_is_below_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("h.db");
+    let s = Store::open(&path, Durability::Full).unwrap();
+    let child_of = |parent: SessionId| {
+        let sid = SessionId::new();
+        s.append(
+            "n1",
+            &raw(sid, 1, "session_created", created_json("t", Some(parent))),
+        )
+        .unwrap();
+        sid
+    };
+    let top = chat_of(&s, "n1", "alice");
+    let kid = child_of(top);
+    let planted = child_of(top);
+    let below_planted = child_of(planted);
+    drop(s);
+    let rawdb = rusqlite::Connection::open(&path).unwrap();
+    for sid in [planted, below_planted] {
+        rawdb
+            .execute(
+                "UPDATE sessions SET owner_id = 'bob' WHERE session_id = ?1",
+                [sid.to_string()],
+            )
+            .unwrap();
+    }
+    drop(rawdb);
+    let s = Store::open(&path, Durability::Full).unwrap();
+
+    let flat = |v: Vec<Vec<SessionId>>| v.into_iter().flatten().collect::<Vec<_>>();
+    assert_eq!(flat(below(&s, top, Some("alice"))), vec![kid]);
+    // Asked with the owner the root had, also once its row is gone.
+    assert!(s.delete_session(top, true).unwrap());
+    assert_eq!(flat(below(&s, top, Some("alice"))), vec![kid]);
+    // A chat with no owner matches only chats with none.
+    assert!(below(&s, top, None).is_empty());
+    for stays in [planted, below_planted] {
+        assert_eq!(
+            s.session(stays).unwrap().unwrap().owner_id.as_deref(),
+            Some("bob")
+        );
+    }
+}
+
+/// The levels of `sub_sessions`, the whole list (the old shape of the call).
+fn below(s: &Store, sid: SessionId, owner: Option<&str>) -> Vec<Vec<SessionId>> {
+    s.sub_sessions(sid, owner).unwrap().levels
+}
+
+/// The owner rule holds at every depth, not only at the first: alice's chat,
+/// alice's kid, a chat of bob below that (its own parent link kept: the
+/// store keeps a parent on the node alone), and below bob's a chat owned by
+/// alice again. Only the kid is listed: the walk neither lists bob's chat
+/// nor goes through it. (Mutation found by the review: the check in the
+/// recursive step alone removed, with every planted row owned by bob.)
+#[test]
+fn the_owner_rule_holds_below_the_first_level_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("h.db");
+    let s = Store::open(&path, Durability::Full).unwrap();
+    let child_of = |parent: SessionId| {
+        let sid = SessionId::new();
+        s.append(
+            "n1",
+            &raw(sid, 1, "session_created", created_json("t", Some(parent))),
+        )
+        .unwrap();
+        sid
+    };
+    let top = chat_of(&s, "n1", "alice");
+    let kid = child_of(top);
+    let bobs = child_of(kid);
+    let below_bobs = child_of(bobs);
+    drop(s);
+    let rawdb = rusqlite::Connection::open(&path).unwrap();
+    rawdb
+        .execute(
+            "UPDATE sessions SET owner_id = 'bob' WHERE session_id = ?1",
+            [bobs.to_string()],
+        )
+        .unwrap();
+    drop(rawdb);
+    let s = Store::open(&path, Durability::Full).unwrap();
+    assert_eq!(below(&s, top, Some("alice")), vec![vec![kid]]);
+    // The chat below bob's inherited bob's owner? No: it kept alice's (set at
+    // its own create), and still is not reached.
+    assert_eq!(
+        s.session(below_bobs).unwrap().unwrap().owner_id.as_deref(),
+        Some("alice")
+    );
+}
+
+/// The listing is one scan, not a join per level: 4,000 children under one
+/// chat among 10,000 other rows (the review's shape; the recursive query it
+/// replaces took 11.9 s on a debug build while holding the store's lock, so
+/// every mirror read and write waited). The bound is 1 s: the scan is a few
+/// milliseconds, so the margin is for a loaded machine and a slow disk, and
+/// the old time is twelve times over it.
+#[test]
+fn a_chat_with_thousands_of_children_is_listed_in_a_scan() {
+    let s = Store::open_in_memory().unwrap();
+    let root = chat_of(&s, "n1", "alice");
+    for _ in 0..10_000 {
+        chat_of(&s, "n1", "alice");
+    }
+    for _ in 0..4_000 {
+        let sid = SessionId::new();
+        s.append(
+            "n1",
+            &raw(sid, 1, "session_created", created_json("t", Some(root))),
+        )
+        .unwrap();
+    }
+    let started = std::time::Instant::now();
+    let levels = below(&s, root, Some("alice"));
+    let took = started.elapsed();
+    assert_eq!(levels.len(), 1);
+    assert_eq!(levels[0].len(), 4_000);
+    assert!(
+        took < std::time::Duration::from_secs(1),
+        "listing took {took:?}"
+    );
+}
+
+/// A cycle written to the file (a node cannot make one, raw SQL can) ends:
+/// each chat is listed once and the root is never listed.
+#[test]
+fn a_cycle_in_the_parent_links_ends_the_walk() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("h.db");
+    let s = Store::open(&path, Durability::Full).unwrap();
+    let top = chat_of(&s, "n1", "alice");
+    let mut chain = vec![top];
+    for _ in 0..3 {
+        let sid = SessionId::new();
+        s.append(
+            "n1",
+            &raw(
+                sid,
+                1,
+                "session_created",
+                created_json("t", chain.last().copied()),
+            ),
+        )
+        .unwrap();
+        chain.push(sid);
+    }
+    drop(s);
+    let rawdb = rusqlite::Connection::open(&path).unwrap();
+    // The root's parent is its own grandchild; the last chat's is the first.
+    rawdb
+        .execute(
+            "UPDATE sessions SET parent_id = ?2 WHERE session_id = ?1",
+            [chain[0].to_string(), chain[3].to_string()],
+        )
+        .unwrap();
+    drop(rawdb);
+    let s = Store::open(&path, Durability::Full).unwrap();
+    assert_eq!(
+        below(&s, top, Some("alice")),
+        vec![vec![chain[1]], vec![chain[2]], vec![chain[3]]]
+    );
+}
+
+/// Past the cap the list stops, says so, and a second call after those were
+/// deleted takes the rest.
+#[test]
+fn the_list_stops_at_its_cap_and_says_so() {
+    let s = Store::open_in_memory().unwrap();
+    let top = chat_of(&s, "n1", "alice");
+    for _ in 0..7 {
+        let sid = SessionId::new();
+        s.append(
+            "n1",
+            &raw(sid, 1, "session_created", created_json("t", Some(top))),
+        )
+        .unwrap();
+    }
+    let all = s.sub_sessions_up_to(top, Some("alice"), 7).unwrap();
+    assert!(!all.truncated);
+    assert_eq!(all.levels[0].len(), 7);
+    let cut = s.sub_sessions_up_to(top, Some("alice"), 3).unwrap();
+    assert!(cut.truncated);
+    assert_eq!(cut.levels.iter().map(Vec::len).sum::<usize>(), 3);
+    for sid in cut.levels.iter().flatten() {
+        s.delete_session(*sid, true).unwrap();
+    }
+    let rest = s.sub_sessions_up_to(top, Some("alice"), 3).unwrap();
+    assert_eq!(rest.levels.iter().map(Vec::len).sum::<usize>(), 3);
+    assert!(rest.truncated);
+    assert_eq!(harness_store::MAX_SUB_SESSIONS, 10_000);
+}
+
 /// L-3. A node's title is cut to a few hundred characters in the row, so
 /// a listing never carries megabytes per chat.
 #[test]

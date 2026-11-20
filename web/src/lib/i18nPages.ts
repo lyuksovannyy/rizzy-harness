@@ -24,6 +24,7 @@ export const pages = {
   "conv.exportOutputs": "Include tool outputs (can be long; they may hold file contents)",
   "conv.exportSave": "Download .md",
   "conv.deleteConfirm": "Delete this chat for good?",
+  "conv.deleteSubs": "Any sessions of sub-agents it started are deleted with it.",
   "conv.summary": "Earlier messages were summarised for the model",
   "conv.summaryManual": "The chat was summarised for the model at your request",
   "conv.summaryFocus": "Kept in focus: {focus}",

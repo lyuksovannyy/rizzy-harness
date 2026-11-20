@@ -19,8 +19,9 @@ const prompted = vi.fn((..._a: unknown[]) => Promise.resolve({ ok: true }));
 const call = vi.fn((..._a: unknown[]) => Promise.resolve({ ok: true }));
 const features = vi.fn<(scope: unknown) => Promise<Features>>();
 const agentsOf = vi.fn<(scope: unknown) => Promise<{ agents: unknown[] }>>(() => Promise.resolve({ agents: [] }));
+const sessionsOf = vi.fn<(scope: unknown) => Promise<unknown>>();
 vi.mock("../api", () => ({
-  api: { features: (s: unknown) => features(s), prompt: (...a: unknown[]) => prompted(...a), agents: (s: unknown) => agentsOf(s) },
+  api: { features: (s: unknown) => features(s), sessions: (s: unknown) => sessionsOf(s), prompt: (...a: unknown[]) => prompted(...a), agents: (s: unknown) => agentsOf(s) },
   call: (...a: unknown[]) => call(...a),
   HttpError: Error,
 }));
@@ -433,6 +434,20 @@ describe("media", () => {
     expect(api.deleteSession).toHaveBeenCalledWith(SID, { media: true });
     expect(ask).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
+  });
+
+  test("the dialog says sub-agent sessions go with the chat, without a number it cannot know", async () => {
+    mediaApi.list.mockRejectedValue(new Error("not found"));
+    await show([], sessionRow());
+    await act(async () => deleteButton().click());
+    await act(() => new Promise((r) => setTimeout(r, 0)));
+    const text = host.querySelector(".delete-chat")!.textContent!;
+    expect(text).toContain("Delete this chat for good?");
+    expect(text).toContain("Any sessions of sub-agents it started are deleted with it.");
+    expect(text).not.toMatch(/\d/);
+    // The sidebar's list can leave some out (a routine's runs, another
+    // workspace): the dialog does not read it.
+    expect(sessionsOf).not.toHaveBeenCalled();
   });
 
   test("with no Media files from the chat (or Media off) it is just the chat; Cancel keeps it", async () => {
