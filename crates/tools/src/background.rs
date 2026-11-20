@@ -1512,16 +1512,16 @@ impl Default for Access {
 pub const SUB_AGENT: &str = "background commands are not available to a sub-agent: its session \
      ends when it returns. Return, and the agent that delegated can start it";
 
-/// The refusal where there is no guard to hold the command: the node runs
-/// commands without its sandbox wrapper (`[sandbox] mode = "off"`), which
-/// holds the copy of the node's program the guard starts from. A `host`
-/// chat on a node with the sandbox on gets one without bubblewrap (the
-/// owner's decision of 2026-11-20, PLAN.md T9); a `sandbox` chat has the
-/// containment.
+/// The refusal where there is no guard to hold the command: the node holds
+/// no copy of its own program, which the guard starts from (it could not
+/// open `/proc/self/exe` at start; a node without its sandbox wrapper,
+/// `[sandbox] mode = "off"`, holds it too since the owner's decision of
+/// 2026-11-20, PLAN.md T9). A `sandbox` chat has the containment, a `host`
+/// chat the guard alone.
 pub const NO_GUARD: &str = "background commands need the node's guard (bubblewrap's containment, \
-     or in a host chat the guard alone), and this node runs commands without its sandbox \
-     wrapper ([sandbox] mode = \"off\"), which the guard starts from: nothing could confirm the \
-     command's end or stop what it starts. Run it in the foreground with a timeout";
+     or in a host chat the guard alone), and this node has none to start: it holds no copy of its \
+     own program, which the guard starts from, so nothing could confirm the command's end or stop \
+     what it starts. Run it in the foreground with a timeout";
 
 /// What the guard proves of a `host` chat's background command, in its end
 /// text (the same words everywhere it is told): descendants only. Another

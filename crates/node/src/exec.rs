@@ -319,10 +319,10 @@ mod tests {
             )
             .map(|_| ())
         };
-        let host = o.confinement_for(ExecMode::Host, Confinement::Unconfined);
+        let host = o.confinement_for(ExecMode::Host, Confinement::default());
         let e = shell(&host).unwrap_err();
         assert!(e.contains("[execution] host = false"), "{e}");
-        let sandbox = o.confinement_for(ExecMode::Sandbox, Confinement::Unconfined);
+        let sandbox = o.confinement_for(ExecMode::Sandbox, Confinement::default());
         assert!(shell(&sandbox).is_ok());
     }
 
@@ -380,7 +380,7 @@ mod tests {
         for (uncontained, abi, want) in [
             (landlock(None, Network::Off), 6, GAP_HOST_NETNS),
             (landlock(None, Network::Off), 0, GAP_HOST_NET_OPEN),
-            (Confinement::Unconfined, 0, GAP_HOST_NET_OPEN),
+            (Confinement::default(), 0, GAP_HOST_NET_OPEN),
         ] {
             let o = ExecOffers::from_start(&started(refused(), uncontained, abi), &p);
             assert_eq!(o.capabilities(), ["exec:host", want], "abi {abi}");

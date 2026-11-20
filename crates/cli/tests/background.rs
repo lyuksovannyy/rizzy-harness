@@ -2281,10 +2281,10 @@ async fn helper_holds_a_host_background_command() {
 }
 
 /// The refusals stay in a host chat: a sub-agent's session (no table),
-/// `background_per_session = 0`, and a shell with no sandbox wrapper to
-/// start the guard from (`[sandbox] mode = "off"`), whose text says so.
+/// `background_per_session = 0`, and a shell that holds no copy of the
+/// node's program to start the guard from, whose text says so.
 #[tokio::test]
-async fn a_host_chat_still_refuses_for_a_sub_agent_a_zero_table_and_no_wrapper() {
+async fn a_host_chat_still_refuses_for_a_sub_agent_a_zero_table_and_no_guard_to_start() {
     let f = fixture();
     let Some(sb) = f.host_sandbox() else { return };
     let _r = Reaper(vec![Mark(976_571)]);
@@ -2304,15 +2304,17 @@ async fn a_host_chat_still_refuses_for_a_sub_agent_a_zero_table_and_no_wrapper()
         "{}",
         r.output
     );
-    // `[sandbox] mode = "off"`: Confinement::Unconfined.
+    // A shell with no held image of the node's program to start the guard
+    // from (`Confinement::default()`; a node with `[sandbox] mode = "off"`
+    // holds it since 2026-11-20 and is the tests below).
     let (bg, _e) = table(on());
     let mut ctx = ToolCtx::new(&f.ws);
     ctx.background = Access::On(bg.clone());
     let r = run(&Bash, &ctx, input).await;
     assert!(
         !r.ok
-            && r.output.contains("mode = \"off\"")
-            && r.output.contains("without its sandbox wrapper"),
+            && r.output.contains("has none to start")
+            && r.output.contains("holds no copy of its own program"),
         "{}",
         r.output
     );
@@ -2596,10 +2598,24 @@ async fn a_host_chat_on_the_real_binary_stops_by_http_kill_9_and_sigterm() {
     if f.host_sandbox().is_none() {
         return;
     }
-    let mut s = real::serve(&data);
-    let (c1, one) = host_detached(976_700);
+    host_chat_stops_by_http_kill_9_and_sigterm(&data, &ws, 976_700).await;
+}
+
+/// The same on a node whose `[sandbox] mode = "off"`: the real binary holds
+/// its own image at start and starts the guard from it, without the sandbox
+/// wrapper (the owner's decision of 2026-11-20 lifted the refusal). Needs
+/// neither Landlock nor bubblewrap.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_chat_on_a_node_without_the_wrapper_stops_by_http_kill_9_and_sigterm() {
+    let (_dir, data, ws) = real::setup_host_off();
+    host_chat_stops_by_http_kill_9_and_sigterm(&data, &ws, 976_900).await;
+}
+
+async fn host_chat_stops_by_http_kill_9_and_sigterm(data: &Path, ws: &Path, base: u32) {
+    let mut s = real::serve(data);
+    let (c1, one) = host_detached(base);
     let sid = s
-        .with_background_in(&ws, &format!("{c1} sleep 1000"), Some("host"))
+        .with_background_in(ws, &format!("{c1} sleep 1000"), Some("host"))
         .await;
     all_started(&one).await;
     let (st, v) = s
@@ -2610,8 +2626,8 @@ async fn a_host_chat_on_the_real_binary_stops_by_http_kill_9_and_sigterm() {
     assert_eq!(real::ends(&evs), vec!["stopped_by_user"], "{evs:#?}");
     none_left(&one, "the person's stop, host chat").await;
     // Two more, then Stop all.
-    let (c2, two) = host_detached(976_710);
-    let (c3, three) = host_detached(976_720);
+    let (c2, two) = host_detached(base + 10);
+    let (c3, three) = host_detached(base + 20);
     let script = json!([
         bg(&format!("{c2} sleep 1000"), 3600),
         bg(&format!("{c3} sleep 1000"), 3600)
@@ -2642,7 +2658,7 @@ async fn a_host_chat_on_the_real_binary_stops_by_http_kill_9_and_sigterm() {
     none_left(&two, "Stop all, host chat").await;
     none_left(&three, "Stop all, host chat").await;
     // kill -9 with one running.
-    let (c4, four) = host_detached(976_730);
+    let (c4, four) = host_detached(base + 30);
     s.post(
         &format!("/api/sessions/{sid}/prompt"),
         json!({"text": format!("script: {}", json!([bg(&format!("{c4} sleep 1000"), 3600)]))}),
@@ -2663,7 +2679,7 @@ async fn a_host_chat_on_the_real_binary_stops_by_http_kill_9_and_sigterm() {
     s.signal(nix::sys::signal::Signal::SIGKILL);
     assert!(s.exited_within(Duration::from_secs(10)).is_some());
     none_left(&four, "kill -9 of serve, host chat").await;
-    let mut s2 = real::serve(&data);
+    let mut s2 = real::serve(data);
     s2.wait_for(&sid, |e| {
         e["kind"] == "background_ended" && e["payload"]["bg_id"] == "bg-4"
     })
@@ -2681,7 +2697,7 @@ async fn a_host_chat_on_the_real_binary_stops_by_http_kill_9_and_sigterm() {
         "a turn started after the restart"
     );
     // SIGTERM with one running.
-    let (c5, five) = host_detached(976_740);
+    let (c5, five) = host_detached(base + 40);
     s2.post(
         &format!("/api/sessions/{sid}/prompt"),
         json!({"text": format!("script: {}", json!([bg(&format!("{c5} sleep 1000"), 3600)]))}),
@@ -2696,12 +2712,219 @@ async fn a_host_chat_on_the_real_binary_stops_by_http_kill_9_and_sigterm() {
     let status = s2.exited_within(Duration::from_secs(60));
     assert_eq!(status.and_then(|s| s.code()), Some(0), "{}", s2.log());
     none_left(&five, "SIGTERM of serve, host chat").await;
-    let s3 = real::serve(&data);
+    let s3 = real::serve(data);
     let evs = s3.events(&sid).await;
     assert_eq!(
         real::ends(&evs).last().map(String::as_str),
         Some("node_stopping"),
         "{evs:#?}"
+    );
+}
+
+// ---- the `host` mode on a node without its sandbox wrapper (`[sandbox]
+// mode = "off"`; the owner, 2026-11-20): the guard alone, from the node's
+// held image, with no `sandbox-exec` in between ----
+
+/// The context of a host chat on such a node: `Confinement::Unconfined` with
+/// the held image of the binary under test (a node holds its own at start).
+fn off_ctx(f: &Fixture, bg: &Arc<SessionBg>) -> ToolCtx {
+    let mut ctx = ToolCtx::new(&f.ws);
+    ctx.protected = Arc::new(vec![f.data.clone()]);
+    ctx.sandbox = Confinement::Unconfined {
+        image: Some(harness_tools::sandbox::HeldImage::of(Path::new(EXE)).unwrap()),
+    };
+    ctx.background = Access::On(bg.clone());
+    ctx
+}
+
+/// A start is accepted, listed, read and stopped on such a node, and what is
+/// running is what the texts say: the command's parent is the host guard,
+/// started from the held image with `bash -c` straight after `--`, and
+/// nothing of `sandbox-exec` or bubblewrap is above it; `bash` is still
+/// called `bash`. Before the change the start was refused (`NO_GUARD`).
+#[tokio::test]
+async fn a_host_background_start_without_the_wrapper_is_accepted_listed_read_and_stopped() {
+    let f = fixture();
+    let (bg, mut ends) = table(on());
+    let ctx = off_ctx(&f, &bg);
+    let _r = Reaper(vec![Mark(976_801)]);
+    let r = run(
+        &Bash,
+        &ctx,
+        json!({"command": format!("echo name:$0; sleep {}", Mark(976_801)), "background": true, "timeout_secs": 600}),
+    )
+    .await;
+    assert!(r.ok && r.background.is_some(), "{}", r.output);
+    assert!(
+        r.output.contains("name:bash")
+            && r.output.contains("bg-1")
+            && r.output.contains("This chat runs on the host"),
+        "{}",
+        r.output
+    );
+    let pids = sleeps(Mark(976_801));
+    assert_eq!(pids.len(), 1, "it is not running");
+    assert_eq!(
+        std::fs::read_link(format!("/proc/{}/ns/pid", pids[0])).unwrap(),
+        std::fs::read_link("/proc/self/ns/pid").unwrap()
+    );
+    let above = ancestors(pids[0]);
+    assert!(
+        above
+            .iter()
+            .any(|c| c.contains("sandbox-guard") && c.contains("--host -- bash -c")),
+        "no host guard that starts bash directly: {above:?}"
+    );
+    assert!(
+        !above
+            .iter()
+            .any(|c| c.contains("bwrap") || c.contains("sandbox-exec") || c.contains("@rizzy")),
+        "{above:?}"
+    );
+    let o = run(&BashOutput, &ctx, json!({"id": "bg-1"})).await;
+    assert!(o.ok && o.output.contains("running"), "{}", o.output);
+    let s = run(&BashStop, &ctx, json!({"id": "bg-1"})).await;
+    assert!(s.ok, "{}", s.output);
+    assert_host_end_words("bash_stop, no wrapper", &s.output);
+    let e = next_end(&mut ends, Duration::from_secs(10)).await;
+    assert_eq!(e.reason, BackgroundReason::StoppedByAgent);
+    assert_eq!(e.confirmed, BackgroundConfirmed::Ended);
+    assert!(sleeps(Mark(976_801)).is_empty());
+}
+
+/// The escapers (`setsid`, `nohup`, a `setsid` double fork, a pure double
+/// fork, a child ignoring SIGTERM, a plain child) are gone, by pid, after the
+/// stop, the timeout and the table going, on a node without its sandbox
+/// wrapper; the end is confirmed.
+#[tokio::test]
+async fn host_escapers_without_the_wrapper_end_with_a_stop_a_timeout_and_a_delete() {
+    let f = fixture();
+    for (how, base) in [("stop", 976_810), ("timeout", 976_820), ("delete", 976_830)] {
+        let (bg, mut ends) = table(on());
+        let ctx = off_ctx(&f, &bg);
+        let (cmd, reaper) = host_detached(base);
+        let timeout = if how == "timeout" { 5 } else { 600 };
+        let r = run(
+            &Bash,
+            &ctx,
+            json!({"command": format!("{cmd} sleep 1000"), "background": true, "timeout_secs": timeout}),
+        )
+        .await;
+        assert!(r.background.is_some(), "{how}: {}", r.output);
+        all_started(&reaper).await;
+        let e = match how {
+            "stop" => {
+                let s = run(&BashStop, &ctx, json!({"id": "bg-1"})).await;
+                assert!(s.ok, "{}", s.output);
+                assert_host_end_words(how, &s.output);
+                next_end(&mut ends, Duration::from_secs(10)).await
+            }
+            "timeout" => next_end(&mut ends, Duration::from_secs(20)).await,
+            _ => {
+                drop(ctx);
+                let w = Arc::downgrade(&bg);
+                drop(bg);
+                assert!(w.upgrade().is_none());
+                let got = tokio::time::timeout(Duration::from_secs(10), ends.recv()).await;
+                assert!(matches!(got, Ok(None)), "{got:?}");
+                none_left(&reaper, how).await;
+                continue;
+            }
+        };
+        if how == "timeout" {
+            assert_eq!(e.reason, BackgroundReason::TimedOut, "{e:?}");
+        }
+        assert_eq!(e.confirmed, BackgroundConfirmed::Ended, "{how}: {e:?}");
+        none_left(&reaper, how).await;
+    }
+}
+
+/// `kill -9` of the node on such a node: this binary re-run as a helper holds
+/// a host background command (started from the held image, no wrapper) with
+/// its escapers and is SIGKILLed; nothing is left.
+#[tokio::test]
+async fn escapers_of_a_command_without_the_wrapper_end_when_the_node_is_killed() {
+    let (_, reaper) = host_detached(976_840);
+    let mut helper = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "helper_holds_a_host_background_command_without_the_wrapper",
+            "--nocapture",
+        ])
+        .env("T9_OFF_HELPER", "1")
+        .env(Mark::for_helper().0, Mark::for_helper().1)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    all_started(&reaper).await;
+    helper.kill().unwrap(); // SIGKILL, by the pid this test started
+    let _ = helper.wait();
+    none_left(&reaper, "kill -9 of the node, no wrapper").await;
+}
+
+#[tokio::test]
+async fn helper_holds_a_host_background_command_without_the_wrapper() {
+    if std::env::var_os("T9_OFF_HELPER").is_none() {
+        return;
+    }
+    let f = fixture();
+    let (bg, _ends) = table(on());
+    let ctx = off_ctx(&f, &bg);
+    let (cmd, reaper) = host_detached(976_840);
+    std::mem::forget(reaper);
+    let r = run(
+        &Bash,
+        &ctx,
+        json!({"command": format!("{cmd} sleep 1000"), "background": true, "timeout_secs": 600}),
+    )
+    .await;
+    assert!(r.background.is_some(), "{}", r.output);
+    tokio::time::sleep(Duration::from_secs(600)).await;
+}
+
+/// The foreground call on such a node is what it was: its command line has
+/// no `sandbox-guard` (a plain `bash -c` in a process group of its own), the
+/// guard is never started for it, and its note offers `background: true`
+/// now that a start works there.
+#[tokio::test]
+async fn the_foreground_call_without_the_wrapper_is_still_a_plain_bash() {
+    let f = fixture();
+    let (bg, _e) = table(on());
+    let ctx = off_ctx(&f, &bg);
+    let _r = Reaper(vec![Mark(976_850)]);
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let m = Mark(976_850);
+    let who = {
+        let seen = seen.clone();
+        std::thread::spawn(move || {
+            let by = Instant::now() + Duration::from_secs(20);
+            while Instant::now() < by {
+                if let Some(p) = sleeps(m).first() {
+                    *seen.lock().unwrap() = ancestors(*p);
+                    // The mark is the sleep's length in seconds: end it by pid.
+                    sigkill(*p);
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        })
+    };
+    let r = run(
+        &Bash,
+        &ctx,
+        json!({"command": format!("sleep {m}; echo done")}),
+    )
+    .await;
+    who.join().unwrap();
+    assert!(r.ok && r.output.contains("done"), "{}", r.output);
+    let above = seen.lock().unwrap().clone();
+    assert!(!above.is_empty(), "the command was never seen");
+    assert!(
+        !above.iter().any(|c| c.contains("sandbox-guard")
+            || c.contains("sandbox-exec")
+            || c.contains("bwrap")),
+        "a foreground call took the guard: {above:?}"
     );
 }
 
@@ -2870,6 +3093,16 @@ mod real {
                 let _ = c.wait();
             }
         }
+    }
+
+    /// As [`setup_host`], and the node runs commands without its sandbox
+    /// wrapper (`[sandbox] mode = "off"`): only the `host` mode is offered.
+    pub fn setup_host_off() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let (dir, data, ws) = setup_host();
+        let mut toml = std::fs::read_to_string(data.join("node.toml")).unwrap();
+        toml.push_str("\n[sandbox]\nmode = \"off\"\n");
+        std::fs::write(data.join("node.toml"), toml).unwrap();
+        (dir, data, ws)
     }
 
     /// As [`setup`], and the node offers the `host` mode too.

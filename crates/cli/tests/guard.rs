@@ -2005,6 +2005,39 @@ fn a_host_command_that_exits_leaves_nothing_behind_it() {
     none_of(&[m], "after the command exited");
 }
 
+/// A program the host guard starts directly (`bash`, for a host chat on a
+/// node without its sandbox wrapper) keeps its own name: it is not started
+/// under the guard's argv[0] (the node's binary), which `bash` would take
+/// for its own (`$0`, its error messages). On the branch head `$0` was the
+/// node's binary.
+#[test]
+fn the_host_guard_starts_a_plain_program_under_its_own_name() {
+    let out = std::env::temp_dir().join(format!("host-guard-name-{}", std::process::id()));
+    let _ = std::fs::remove_file(&out);
+    let (ours, theirs) = std::os::unix::net::UnixStream::pair().unwrap();
+    let status = std::process::Command::new(EXE)
+        .args(["sandbox-guard", "--node"])
+        .arg(std::process::id().to_string())
+        .args(["--host", "--", "sh", "-c"])
+        .arg(format!("echo \"$0\" > {}", out.display()))
+        .stdin(std::process::Stdio::from(std::os::fd::OwnedFd::from(
+            theirs,
+        )))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    drop(ours);
+    assert!(status.success(), "{status:?}");
+    let name = std::fs::read_to_string(&out).unwrap();
+    let _ = std::fs::remove_file(&out);
+    assert_eq!(
+        name.trim(),
+        "sh",
+        "the program was started under another name"
+    );
+}
+
 /// A guard whose node is gone (the parent is no longer `--node`) starts
 /// nothing: nothing is run for a node that died before this ran.
 #[test]

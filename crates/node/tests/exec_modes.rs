@@ -644,14 +644,11 @@ async fn a_host_session_is_offered_background_commands() {
     }
 }
 
-/// Review of PR 186: on a node that runs commands without its sandbox
-/// wrapper (`[sandbox] mode = "off"`: the host shell is not confined) every
-/// background start is refused (`NO_GUARD`), so a host chat is not offered
-/// `background: true`, `bash_output` or `bash_stop`; decided from the node's
-/// own shell, not from an argument. A sandbox chat of the same node keeps
-/// them.
-#[tokio::test]
-async fn a_host_session_on_a_node_without_the_wrapper_is_not_offered_background() {
+/// What a host chat and a sandbox chat are offered of `bash_output`,
+/// `bash_stop` and `background: true` on a node whose host shell is
+/// `host_shell` (the sandbox chat always has them): decided from the node's
+/// own shell, not from an argument.
+async fn background_offers(host_shell: harness_tools::sandbox::Confinement, host_offered: bool) {
     let dir = tempfile::tempdir().unwrap();
     let (spy, seen, bash) = spied_bash();
     let mut n = start_cfg(config_host(
@@ -660,10 +657,10 @@ async fn a_host_session_on_a_node_without_the_wrapper_is_not_offered_background(
         Profile::Agentic,
         spy,
         None,
-        harness_tools::sandbox::Confinement::Unconfined,
+        host_shell,
     ))
     .await;
-    for (mode, offered) in [(ExecMode::Host, false), (ExecMode::Sandbox, true)] {
+    for (mode, offered) in [(ExecMode::Host, host_offered), (ExecMode::Sandbox, true)] {
         let sid = SessionId::new();
         n.link
             .to_node
@@ -706,6 +703,29 @@ async fn a_host_session_on_a_node_without_the_wrapper_is_not_offered_background(
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
+}
+
+/// Review of PR 186: where the node holds no copy of its own program (a
+/// shell with no image to start the guard from) every background start is
+/// refused (`NO_GUARD`), so a host chat is not offered `background: true`,
+/// `bash_output` or `bash_stop`; a sandbox chat of the same node keeps them.
+#[tokio::test]
+async fn a_host_session_with_no_guard_to_start_is_not_offered_background() {
+    background_offers(harness_tools::sandbox::Confinement::default(), false).await;
+}
+
+/// The owner's decision of 2026-11-20: on a node without its sandbox wrapper
+/// (`[sandbox] mode = "off"`) that holds its own image, a host chat is
+/// offered them too (the guard starts directly from the held image).
+#[tokio::test]
+async fn a_host_session_on_a_node_without_the_wrapper_is_offered_background_with_the_image_held() {
+    let exe = std::env::current_exe().unwrap().canonicalize().unwrap();
+    let held = harness_tools::sandbox::HeldImage::of(&exe).unwrap();
+    background_offers(
+        harness_tools::sandbox::Confinement::Unconfined { image: Some(held) },
+        true,
+    )
+    .await;
 }
 
 /// A sub-agent's session gets its parent's mode, always: here `host`, on
