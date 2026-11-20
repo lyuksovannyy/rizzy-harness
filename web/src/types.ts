@@ -522,6 +522,8 @@ export interface Agent {
   scope?: AgentScope;
   /** What it can do; for built-in and file agents read off the definition. */
   features?: AgentFeatures;
+  /** The agents it may hand tasks to as resolved for a turn (absent in older fixtures). */
+  delegates?: string[];
 }
 
 /** Built into the server, a file on the server (`agents/<id>.md`), or made on the Agents page. */
@@ -579,6 +581,8 @@ export interface AgentDetail extends Agent {
   server_instructions?: string;
   /** Whether the caller may change agents in the scope it was read in. */
   may_edit?: boolean;
+  /** The stored "may delegate to" list of an agent made here (X.41): null means every sub-agent, a list only those (empty: none); entries may name agents that are gone. */
+  delegate_to?: string[] | null;
 }
 
 /** A new agent made on the Agents page. */
@@ -588,6 +592,8 @@ export interface NewAgent {
   summary: string;
   prompt: string;
   features: AgentFeatures;
+  /** Who it may delegate to; empty or absent: every sub-agent. */
+  delegate_to?: string[] | null;
 }
 
 export type AvatarShape = "circle" | "triangle" | "square" | "hexagon" | "diamond" | "drop";

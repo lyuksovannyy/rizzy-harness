@@ -80,7 +80,7 @@ export function activityWords(a: Activity): string {
 /** Follow the child while it works; an ended one once the card is seen
  * (an old chat with many delegate cards does not replay every child's log
  * at once). */
-function useFollow(running: boolean): [RefObject<HTMLSpanElement | null>, boolean] {
+export function useFollow(running: boolean): [RefObject<HTMLSpanElement | null>, boolean] {
   const ref = useRef<HTMLSpanElement>(null);
   const [seen, setSeen] = useState(false);
   useEffect(() => {
