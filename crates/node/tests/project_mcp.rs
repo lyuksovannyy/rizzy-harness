@@ -4,8 +4,8 @@
 //! refused); with `[mcp] project_servers = "ask"` a person approves each
 //! entry for their own chats, pinned to the entry they were shown, and the
 //! node's approved copy is what runs whatever the file says later; a new
-//! entry runs nothing, a removed one stops; never in a `host` chat, never
-//! in another person's chat; variables, remote servers and node.toml's
+//! entry runs nothing, a removed one stops; the same in a `host` chat (the
+//! owner, 2026-11-20), never in another person's chat; variables, remote servers and node.toml's
 //! names cannot be approved; `env` values never leave the node. Unconfined
 //! (no bubblewrap); the contained path is `cli/tests/project_mcp_e2e.rs`.
 
@@ -43,6 +43,7 @@ struct Node {
     rt: NodeRuntime,
     link: NodeLink,
     caps: Vec<String>,
+    opts: Opts,
     /// Each chat's owner, as the master puts it on every turn command.
     owners: std::collections::HashMap<SessionId, Option<String>>,
 }
@@ -156,7 +157,12 @@ async fn start_at(dir: tempfile::TempDir, o: Opts) -> Node {
                 delay: Duration::from_millis(1),
             }),
             harness_tools::builtin(),
-            NativeConfig::default(),
+            NativeConfig {
+                // A host chat's shell: the unconfined one (a node with
+                // `[sandbox] mode = "off"`); the default refuses it.
+                host_shell: harness_tools::sandbox::Confinement::default(),
+                ..NativeConfig::default()
+            },
         )),
         default_model: "mock".into(),
         secrets: Default::default(),
@@ -178,6 +184,7 @@ async fn start_at(dir: tempfile::TempDir, o: Opts) -> Node {
         rt,
         link,
         caps: capabilities,
+        opts: o,
         owners: Default::default(),
     }
 }
@@ -199,12 +206,13 @@ impl Node {
             rt,
             link,
             owners,
+            opts,
             ..
         } = self;
         drop(link);
         drop(rt);
         tokio::time::sleep(Duration::from_millis(200)).await;
-        let mut n = start_at(dir, ON).await;
+        let mut n = start_at(dir, opts).await;
         n.owners = owners;
         n
     }
@@ -619,37 +627,210 @@ async fn one_persons_approval_never_reaches_another_persons_chat() {
     n.rt.stop(Duration::from_secs(20)).await;
 }
 
-/// A `host` chat never starts a repository's server (the chat is told
-/// why); a node that offers only host chats refuses the list.
+/// A `host` chat starts an approved repository server (the owner,
+/// 2026-11-20: "if user selected host project workspace, why do we need to
+/// limit it? its his choice"); a node that offers only host chats answers
+/// the list and the approval.
 #[tokio::test]
-async fn a_host_chat_never_starts_a_repository_server() {
+async fn a_host_chat_starts_an_approved_repository_server() {
     let mut n = start(Opts { host: true, ..ON }).await;
     let root = n.root();
     write_mcp(&n.ws, serde_json::json!({ "proj": server(&root, "v1") }));
-    n.approve(ALICE, "proj").await;
+    // Not approved: nothing starts in a host chat either.
     let sid = n.create(Some(ALICE), Some(ExecMode::Host)).await;
-    let before = n.rt.store().events_after(sid, 0, 100_000).unwrap().len();
-    let log = n
-        .run(sid, r#"script: [{"tool": "mcp__proj__who", "input": {}}]"#)
-        .await;
-    let out = outputs(&log[before..]);
+    let out = n.call(sid, &["mcp__proj__who"]).await;
     assert!(unknown(&out[0], "mcp__proj__who"), "{out:?}");
+    n.approve(ALICE, "proj").await;
+    let out = n.call(sid, &["mcp__proj__who"]).await;
+    assert_eq!(out[0], (true, "served by v1 tool who".into()), "{out:?}");
+    let log = n.rt.store().events_after(sid, 0, 100_000).unwrap();
     assert!(
-        errors(&log).iter().any(|e| e.contains("runs on the host")),
+        !errors(&log).iter().any(|e| e.contains("runs on the host")),
         "{:?}",
         errors(&log)
     );
-    assert!(pids(&started(&root, "v1")).is_empty());
     n.rt.stop(Duration::from_secs(20)).await;
 
+    // A node that offers only host chats answers instead of refusing.
     let mut n = start(Opts {
         host: true,
         sandbox: false,
         ..ON
     })
     .await;
-    let e = n.ask(ALICE, ProjectMcpRequest::List).await.unwrap_err();
-    assert!(e.contains("only host chats"), "{e}");
+    let root = n.root();
+    write_mcp(&n.ws, serde_json::json!({ "proj": server(&root, "v2") }));
+    let l = n.approve(ALICE, "proj").await;
+    assert_eq!(entry(&l, "proj").state, ProjectMcpState::Approved, "{l:?}");
+    let sid = n.create(Some(ALICE), Some(ExecMode::Host)).await;
+    let out = n.call(sid, &["mcp__proj__who"]).await;
+    assert_eq!(out[0], (true, "served by v2 tool who".into()), "{out:?}");
+    n.rt.stop(Duration::from_secs(20)).await;
+}
+
+/// T82 (b), (c), (e), (h) and the removal, in a `host` chat on a node that
+/// offers only host chats: every rule of the approval holds there as it
+/// does in a sandboxed chat.
+#[tokio::test]
+async fn a_host_chat_keeps_every_rule_of_the_approval() {
+    let host_only = Opts {
+        host: true,
+        sandbox: false,
+        ..ON
+    };
+    let mut n = start(host_only).await;
+    let root = n.root();
+    write_mcp(&n.ws, serde_json::json!({ "proj": server(&root, "v1") }));
+    // (c) the file changes between the list and the click.
+    let l = n.ask(ALICE, ProjectMcpRequest::List).await.unwrap();
+    let shown = entry(&l, "proj").digest.clone().unwrap();
+    write_mcp(&n.ws, serde_json::json!({ "proj": server(&root, "evil") }));
+    let l = n
+        .ask(
+            ALICE,
+            ProjectMcpRequest::Approve {
+                name: "proj".into(),
+                digest: shown,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(l.note.as_deref().unwrap().contains("changed"), "{l:?}");
+    let sid = n.create(Some(ALICE), Some(ExecMode::Host)).await;
+    assert!(unknown(
+        &n.call(sid, &["mcp__proj__who"]).await[0],
+        "mcp__proj__who"
+    ));
+    assert!(pids(&started(&root, "evil")).is_empty());
+
+    // Approved as it is; (b) the agent rewrites the file: the approved
+    // copy runs, the new entry and the new text start nothing, in this
+    // chat, a new one and after a node restart.
+    write_mcp(&n.ws, serde_json::json!({ "proj": server(&root, "v1") }));
+    n.approve(ALICE, "proj").await;
+    assert_eq!(
+        n.call(sid, &["mcp__proj__who"]).await[0],
+        (true, "served by v1 tool who".into())
+    );
+    write_mcp(
+        &n.ws,
+        serde_json::json!({ "proj": server(&root, "v2"), "extra": server(&root, "extra") }),
+    );
+    let fresh = n.create(Some(ALICE), Some(ExecMode::Host)).await;
+    let out = n.call(fresh, &["mcp__proj__who", "mcp__extra__who"]).await;
+    assert_eq!(out[0], (true, "served by v1 tool who".into()), "{out:?}");
+    assert!(unknown(&out[1], "mcp__extra__who"), "{out:?}");
+    let mut n = n.restart().await;
+    let out = n.call(sid, &["mcp__proj__who", "mcp__extra__who"]).await;
+    assert_eq!(out[0], (true, "served by v1 tool who".into()), "{out:?}");
+    assert!(unknown(&out[1], "mcp__extra__who"), "{out:?}");
+    for m in ["v2", "extra", "evil"] {
+        assert!(pids(&started(&root, m)).is_empty(), "{m} started");
+    }
+
+    // (e) another person's host chat in the same folder, and a chat with
+    // no owner, start nothing Alice approved.
+    let bob = n.create(Some(BOB), Some(ExecMode::Host)).await;
+    assert!(unknown(
+        &n.call(bob, &["mcp__proj__who"]).await[0],
+        "mcp__proj__who"
+    ));
+    let token = n.create(None, Some(ExecMode::Host)).await;
+    assert!(unknown(
+        &n.call(token, &["mcp__proj__who"]).await[0],
+        "mcp__proj__who"
+    ));
+    let l = n.ask(BOB, ProjectMcpRequest::List).await.unwrap();
+    assert_eq!(entry(&l, "proj").state, ProjectMcpState::New);
+
+    // (h) an entry shadowing node.toml's `fake` cannot be approved and the
+    // host chat gets node.toml's server.
+    write_mcp(
+        &n.ws,
+        serde_json::json!({ "proj": server(&root, "v1"), "fake": server(&root, "shadow") }),
+    );
+    let l = n.ask(ALICE, ProjectMcpRequest::List).await.unwrap();
+    assert_eq!(entry(&l, "fake").state, ProjectMcpState::Hidden, "{l:?}");
+    let l = n
+        .ask(
+            ALICE,
+            ProjectMcpRequest::Approve {
+                name: "fake".into(),
+                digest: "a".repeat(64),
+            },
+        )
+        .await
+        .unwrap();
+    assert!(l.note.as_deref().unwrap().contains("not approved"), "{l:?}");
+    let out = n.call(sid, &["mcp__fake__who"]).await;
+    assert_eq!(out[0], (true, "served by node tool who".into()), "{out:?}");
+    assert!(pids(&started(&root, "shadow")).is_empty());
+
+    // The removal: Alice removes her approval and the host chat's server
+    // ends and does not come back.
+    let pid = *pids(&started(&root, "v1")).last().unwrap();
+    assert!(alive(pid));
+    n.ask(
+        ALICE,
+        ProjectMcpRequest::Remove {
+            name: "proj".into(),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(unknown(
+        &n.call(sid, &["mcp__proj__who"]).await[0],
+        "mcp__proj__who"
+    ));
+    assert!(gone(pid).await, "the removed server still runs");
+    n.rt.stop(Duration::from_secs(20)).await;
+}
+
+/// What a host chat's repository server leaves behind, as T47 says for
+/// node.toml's: it ends with its chat's deletion and with the node's stop.
+#[tokio::test]
+async fn a_host_chats_repository_server_ends_with_its_chat_and_the_nodes_stop() {
+    let mut n = start(Opts { host: true, ..ON }).await;
+    let root = n.root();
+    write_mcp(&n.ws, serde_json::json!({ "proj": server(&root, "v1") }));
+    n.approve(ALICE, "proj").await;
+    let sid = n.create(Some(ALICE), Some(ExecMode::Host)).await;
+    assert!(n.call(sid, &["mcp__proj__who"]).await[0].0);
+    let first = *pids(&started(&root, "v1")).last().unwrap();
+    assert!(alive(first));
+    n.link
+        .to_node
+        .try_send(MasterToNode::Delete {
+            req_id: "d".into(),
+            session_id: sid,
+        })
+        .unwrap();
+    n.ack("d").await.unwrap();
+    assert!(gone(first).await, "the deleted chat's server still runs");
+    let sid = n.create(Some(ALICE), Some(ExecMode::Host)).await;
+    assert!(n.call(sid, &["mcp__proj__who"]).await[0].0);
+    let second = *pids(&started(&root, "v1")).last().unwrap();
+    assert!(alive(second));
+    n.rt.stop(Duration::from_secs(20)).await;
+    assert!(gone(second).await, "the server outlived the node's stop");
+}
+
+fn alive(pid: i32) -> bool {
+    std::path::Path::new(&format!("/proc/{pid}")).exists()
+        && !std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .unwrap_or_default()
+            .contains(") Z")
+}
+
+async fn gone(pid: i32) -> bool {
+    let by = std::time::Instant::now() + Duration::from_secs(10);
+    while alive(pid) {
+        if std::time::Instant::now() > by {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    true
 }
 
 /// Variables, remote servers, a name node.toml has, a name of the wrong
@@ -831,10 +1012,61 @@ async fn env_values_are_shown_and_start_only_contained() {
     assert!(
         errors(&log)
             .iter()
-            .any(|e| e.contains("only in a contained sandbox")),
+            .any(|e| e.contains("envy") && e.contains("only inside a bubblewrap sandbox")),
         "{:?}",
         errors(&log)
     );
+    let raw: String = log.iter().map(|e| e.payload.to_string()).collect();
+    assert!(!raw.contains(CANARY));
+    n.rt.stop(Duration::from_secs(20)).await;
+    // A host chat has no bubblewrap either: the same refusal, in words
+    // that fit it, naming the server; an entry without values starts.
+    let mut n = start(Opts { host: true, ..ON }).await;
+    let root = n.root();
+    let mut plain = server(&root, "plain");
+    plain["env"] = serde_json::json!({});
+    write_mcp(
+        &n.ws,
+        serde_json::json!({
+            "envy": {"command": "python3", "args": [FAKE, "--tool-names", "who", "--marker", "envy",
+                     "--started", started(&root, "envy").display().to_string()],
+                     "env": {"MY_TOKEN": CANARY}},
+            "plain": plain,
+        }),
+    );
+    n.approve(ALICE, "envy").await;
+    n.approve(ALICE, "plain").await;
+    let sid = n.create(Some(ALICE), Some(ExecMode::Host)).await;
+    let before = n.rt.store().events_after(sid, 0, 100_000).unwrap().len();
+    let log = n
+        .run(
+            sid,
+            r#"script: [{"tool": "mcp__envy__who", "input": {}}, {"tool": "mcp__plain__who", "input": {}}]"#,
+        )
+        .await;
+    let out = outputs(&log[before..]);
+    assert!(unknown(&out[0], "mcp__envy__who"), "{out:?}");
+    assert_eq!(out[1], (true, "served by plain tool who".into()), "{out:?}");
+    let told = errors(&log);
+    assert!(
+        told.iter().any(|e| e.contains("envy")
+            && e.contains("env values")
+            && e.contains("a host chat never has one")
+            && !e.contains("which this chat does not have")),
+        "{told:?}"
+    );
+    assert!(pids(&started(&root, "envy")).is_empty(), "started with env");
+    let raw: String = log.iter().map(|e| e.payload.to_string()).collect();
+    assert!(!raw.contains(CANARY));
+    n.rt.stop(Duration::from_secs(20)).await;
+    let mut n = start(ON).await;
+    write_mcp(
+        &n.ws,
+        serde_json::json!({"envy": {"command": "python3", "args": [FAKE], "env": {"MY_TOKEN": CANARY}}}),
+    );
+    n.approve(ALICE, "envy").await;
+    let sid = n.create(Some(ALICE), None).await;
+    let log = n.run(sid, "hello").await;
     let raw: String = log.iter().map(|e| e.payload.to_string()).collect();
     assert!(!raw.contains(CANARY));
     // Not a secret of the node's: its own text is not blanked.

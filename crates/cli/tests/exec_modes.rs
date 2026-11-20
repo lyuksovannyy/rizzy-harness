@@ -481,6 +481,39 @@ async fn the_operators_file_in_the_data_directory_is_out_of_every_tools_reach() 
     }
 }
 
+/// With the default `[sandbox] mode = "required"` Landlock keeps the node's
+/// data directory out of a `host` chat's shell too (T82 case (i), T39): the
+/// store of approved servers cannot be read or changed from it, and the
+/// directory cannot be listed. (`mode = "off"` has no such rule: README and
+/// docs/execution-modes.md say so, and `doctor` warns.)
+#[tokio::test]
+async fn a_host_chats_shell_cannot_read_or_change_the_data_directory() {
+    let Some(mut n) = node().await else { return };
+    let store = n.data.join("project-mcp.json");
+    let secret = "{\"approved\": \"CANARY-STORE\"}\n";
+    std::fs::write(&store, secret).unwrap();
+    let (s, d) = (store.display().to_string(), n.data.display().to_string());
+    let shell = format!("cat {s} 2>&1; echo FORGED >> {s} 2>&1; ls {d} 2>&1; echo done");
+    let script = serde_json::json!([{"tool": "bash", "input": {"command": shell}}]);
+    for mode in [ExecMode::Host, ExecMode::Sandbox] {
+        let sid = n.create(mode).await;
+        let out = n.run(sid, &format!("script: {script}")).await;
+        assert_eq!(out.len(), 1, "{mode:?}: {out:?}");
+        assert!(out[0].contains("done"), "{mode:?}: {}", out[0]);
+        assert!(
+            !out[0].contains("CANARY-STORE") && !out[0].contains("project-mcp.json\n"),
+            "{mode:?}: the shell read the data directory: {}",
+            out[0]
+        );
+        assert!(
+            out[0].to_lowercase().contains("permission denied"),
+            "{mode:?}: {}",
+            out[0]
+        );
+        assert_eq!(std::fs::read_to_string(&store).unwrap(), secret, "{mode:?}");
+    }
+}
+
 /// Plan mode end to end (X.7, T.7): in both execution modes the chat's
 /// `bash` runs in the read-only shell, contained (a `host` chat's too, in
 /// a PID namespace of its own), reads work and nothing is written; after

@@ -6,8 +6,8 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useS
 import { api, HttpError } from "../api";
 import { Live } from "../live";
 import { t } from "../lib/i18n";
-import { type ClassifierState, decide, emptyState, parseState, record, serialize } from "../lib/classifier";
-import { agenticBlockReason, hostRightOf, type Mode } from "../lib/modes";
+import { useClassifier } from "../lib/useClassifier";
+import { agenticBlockReason, hostRightOf } from "../lib/modes";
 import { parseRoute, type Route, routeHash } from "../lib/routes";
 import { afterChange, followRoute, keepsRoute, switchRoute, workspaceName } from "../lib/workspaces";
 import { buildSearchUrl } from "../lib/searchUrl";
@@ -41,6 +41,7 @@ import { agentDefaults, type AgentDefaults } from "../lib/agentDefaults";
 // The chat's chunk and the fold's at once (live.ts loads the fold for a
 // watched chat): one wait, and a fold chunk that is gone fails the chat's
 // screen, which says so, instead of a chat that never loads.
+const saveClassifier = (st: unknown) => void api.saveClassifier(st).catch(() => {});
 const Conversation = lazy(() => Promise.all([import("./Conversation"), import("../fold")]).then(([m]) => m));
 const Settings = lazy(() => import("./Settings"));
 const Onboarding = lazy(() => import("./Onboarding"));
@@ -192,8 +193,6 @@ export function Shell(props: {
   // or New chat while already there (Home stays mounted then).
   const [home, setHome] = useState(() => ({ kind: route.kind, seed: newSeed() }));
   if (home.kind !== route.kind) setHome({ kind: route.kind, seed: route.kind === "home" ? newSeed() : home.seed });
-  const classifier = useRef<ClassifierState>(emptyState());
-  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const unauthorized = useCallback(
     (e: unknown) => {
@@ -339,7 +338,7 @@ export function Shell(props: {
     api
       .classifier()
       .then((v) => {
-        classifier.current = parseState(v);
+        loadClassifier(v);
       })
       .catch(() => {});
   }, [live, refreshSessions, refreshNodes, refreshModels, refreshProjects, refreshFeatures, workspacesChanged, unauthorized]);
@@ -497,23 +496,7 @@ export function Shell(props: {
     );
   };
 
-  const agenticAllowed = agenticBlocked === null;
-  const predict = useCallback(
-    (text: string) => decide(classifier.current, text, agenticAllowed).mode,
-    [agenticAllowed],
-  );
-  const learn = useCallback(
-    (text: string, mode: Mode) => {
-      record(classifier.current, text, mode, agenticAllowed);
-      // Only weights and accuracy counters are saved, never the text.
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-      saveTimer.current = setTimeout(() => {
-        void api.saveClassifier(serialize(classifier.current)).catch(() => {});
-      }, 1000);
-    },
-    [agenticAllowed],
-  );
-
+  const { predict, learn, load: loadClassifier } = useClassifier(agenticBlocked === null, saveClassifier);
   const navigate = (r: Route) => {
     setDrawer(false);
     if (r.kind === "home" && route.kind === "home") setHome({ kind: "home", seed: newSeed() });

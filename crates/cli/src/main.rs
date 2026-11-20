@@ -915,6 +915,21 @@ fn checkpoint_confinement(c: &harness_tools::sandbox::Confinement) -> &'static s
     }
 }
 
+/// The line for a node where a host chat's shell has no file rule at all:
+/// `[sandbox] mode = "off"` with the host mode offered (T82, T39). Nothing
+/// of a person, a path or a token goes in it.
+fn host_data_dir_line(
+    mode: harness_tools::sandbox::Mode,
+    o: &harness_node::exec::ExecOffers,
+) -> Option<&'static str> {
+    (mode == harness_tools::sandbox::Mode::Off && o.offers(harness_core::policy::ExecMode::Host))
+        .then_some(
+            "[sandbox] mode = \"off\" with [execution] host = true: a host chat on this node \
+             can read and change the node's data directory (other people's chats, the approved \
+             MCP servers, the node's keys and token)",
+        )
+}
+
 /// The one line on the execution modes, for the log and `doctor`: which
 /// modes this node offers, or the refusal of a node that offers none.
 fn exec_line(o: &harness_node::exec::ExecOffers) -> Result<String, String> {
@@ -1007,6 +1022,9 @@ fn start_sandbox(
             tracing::warn!("execution modes: {line}")
         }
         Ok(line) => tracing::info!("execution modes: {line}"),
+    }
+    if let Some(w) = host_data_dir_line(settings.mode, &offers) {
+        tracing::warn!("host chats: {w}");
     }
     if let Some(root) = &s.tmp_root {
         // Before it serves: what a dead node left that its guard could not
@@ -1324,6 +1342,12 @@ async fn doctor(dir: &Path) -> anyhow::Result<()> {
             line => check("execution modes", line),
         },
         Err(e) => check("execution modes", Err(e.clone())),
+    }
+    if let (Ok((_, o)), Ok(p)) = (&started, NodePolicy::load(&dir.join("node.toml")))
+        && let Ok(settings) = p.sandbox_settings()
+        && let Some(w) = host_data_dir_line(settings.mode, o)
+    {
+        println!("warn  host chats: {w}");
     }
     // Whether a host chat can push (X.40): from node.toml and this
     // process's environment alone, nothing contacted or read.
