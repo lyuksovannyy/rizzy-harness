@@ -160,7 +160,7 @@ webhook path answer 503 while `is_stopping()`; a `pending` run found at
 start whose last reason was the stop is launched, not ended. Or the
 sentences in README, PLAN and §7.0 say what happens.
 
-**Test.** `master/tests/routines_http.rs`: a run whose turn ends `stopped`
+**Test.** `master/tests/it/routines_http.rs`: a run whose turn ends `stopped`
 leaves `consecutive_failures` at 0; "run now" after `begin_stop()` is 503
 and adds no run.
 

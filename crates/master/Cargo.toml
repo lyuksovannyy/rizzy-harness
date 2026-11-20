@@ -64,11 +64,11 @@ tracing.workspace = true
 [dev-dependencies]
 # The tests build turn messages with `PromptMsg::test` and friends.
 harness-protocol = { workspace = true, features = ["test-support"] }
-# The fake MCP server of tests/custom_connectors_http.rs speaks TLS (the
+# The fake MCP server of tests/logs/custom_connectors_http.rs speaks TLS (the
 # link's crate, already in the tree).
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["aws_lc_rs", "tls12"] }
 axum = { workspace = true, features = ["multipart"] }
-# Breaks a table under a running master (tests/plugins_http.rs: settings
+# Breaks a table under a running master (tests/it/plugins_http.rs: settings
 # that cannot be read fail closed); already the store's dependency.
 rusqlite.workspace = true
 harness-link.workspace = true
@@ -79,5 +79,5 @@ harness-tools.workspace = true
 reqwest.workspace = true
 tempfile.workspace = true
 tokio-tungstenite.workspace = true
-# Captures log output in tests/temp_passwords_http.rs (already a workspace dependency).
+# Captures log output in tests/logs/temp_passwords_http.rs (already a workspace dependency).
 tracing-subscriber.workspace = true

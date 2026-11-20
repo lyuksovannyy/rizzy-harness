@@ -70,7 +70,7 @@ dual-stack, all fail with `EADDRINUSE`. Before the fix all but the dual-stack `[
   tested here only: a real bind would expose a port on the network), the decision on the bind
   error (a machine without IPv6 cannot be made here), the allowed hosts without `[::1]`, and
   the socket options of the real listeners.
-- `crates/master/tests/server_limits.rs`
+- `crates/master/tests/it/server_limits.rs`
   `two_listeners_share_the_app_the_cap_and_the_shutdown`.
 
 ## What is left
@@ -102,7 +102,7 @@ RIZZY=$PWD/target/debug/rizzy-harness T8D_TARGET=$PWD/target \
 
 The builder's tests at this head: `cargo test -p harness --test loopback_origin` 2 passed;
 `cargo test -p harness --bin rizzy-harness listen::` 4 passed;
-`cargo test -p harness-master --test server_limits` 14 passed.
+`cargo test -p harness-master --test it server_limits` 14 passed.
 
 ### Verdict
 

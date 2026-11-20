@@ -113,7 +113,7 @@ Two findings from the round-2 review (`final-review-ours.md`, missed 3 and 4):
 
 Tests: `crates/store/tests/event_log.rs` (identical resend, divergent resend,
 sticky refusal, key order and float round trips, revoked writer) and
-`crates/master/tests/link_hardening.rs` (two links with one key, eight frames
+`crates/master/tests/it/link_hardening.rs` (two links with one key, eight frames
 queued at revoke, a reconnect that replays). Not done here: a generation per
 connection and an epoch per session (ADOPTION_PLAN C.1).
 
@@ -144,7 +144,7 @@ Tests: `crates/store/tests/event_log.rs` (the inverted proof tests:
 `the_row_is_set_at_seq_1_and_its_owner_never_changes`,
 `a_parent_is_kept_only_under_the_same_node_and_owner`,
 `a_nodes_title_is_capped_in_the_row`; plus the size cap, identifiers and
-the per-owner listing), `crates/master/tests/link_hardening.rs` and
+the per-owner listing), `crates/master/tests/it/link_hardening.rs` and
 `hostile_node.rs` (a fake node sends the hostile frames to a real master).
 
 ## A refused node is told why (2026-11-12, ADOPTION_PLAN A.19)
@@ -164,7 +164,7 @@ so only the master's own nodes learn its protocol and crate version. Every
 `rejected` ends the node's reconnect loop (each needs a person); a master
 that is down, TLS and network errors are retried. `add_link` keeps its
 check for a `node.hello` that contradicts the `auth`. Tests:
-`crates/master/tests/version_refusal.rs`; the node's exit in
+`crates/master/tests/it/version_refusal.rs`; the node's exit in
 `crates/cli/tests/stop_signal.rs`. Since the re-check (R-5, R-6): only
 printable ASCII, runs of spaces folded, and the node accepts from its
 master only an id in the master's own shape (`wire::is_node_id`, the rule
