@@ -182,7 +182,7 @@ async function chat(p, text) {
     check(!(await p3.$('input[aria-label="New fact"]')), 'a member does not edit it by hand');
     await p3.screenshot({ path: `${S}/shots/workspace-memory-member-light.png` });
     // What a member's chat there is given is checked in
-    // crates/master/tests/memory_places_http.rs (the demo model does not echo it).
+    // crates/master/tests/it/memory_places_http.rs (the demo model does not echo it).
     PAGE = p;
     await ctx2.close();
 

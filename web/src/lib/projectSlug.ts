@@ -7,7 +7,7 @@
 // (crates/master/src/projects.rs `clean`): control characters and the
 // hidden set are dropped, not gaps, so "a\u200Bb" is "ab". The pairs in
 // projectSlug.fixture.json come from the real path (the Rust test
-// crates/master/tests/project_slug_parity.rs).
+// crates/master/tests/it/project_slug_parity.rs).
 import { HIDDEN_SRC } from "../md/hiddenChars";
 
 export const SLUG_MAX = 48;

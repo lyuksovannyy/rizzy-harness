@@ -276,7 +276,7 @@ describe("the Project button", () => {
 
 describe("the folder name preview", () => {
   test("is what the master's cleaning and the node's slug make of the name", () => {
-    // Pairs written by the real path (crates/master/tests/project_slug_parity.rs).
+    // Pairs written by the real path (crates/master/tests/it/project_slug_parity.rs).
     for (const [name, want] of fixture as [string, string][]) {
       expect([name, projectSlug(name)]).toEqual([name, want]);
     }
