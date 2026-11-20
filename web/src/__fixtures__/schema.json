@@ -1105,6 +1105,11 @@
         "type": "string"
       },
       {
+        "path": "notice",
+        "required": false,
+        "type": "boolean"
+      },
+      {
         "path": "turn_id",
         "required": false,
         "type": "string"
