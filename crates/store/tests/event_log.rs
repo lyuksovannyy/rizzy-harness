@@ -712,6 +712,42 @@ fn a_parent_is_kept_only_under_the_same_node_and_owner() {
     assert_eq!(row.parent_id, None, "another user's chat is no parent");
 }
 
+/// `sub_sessions` lists every chat below one, at any depth, and only those:
+/// not the chat itself, not a sibling's chats, not a plain chat. The master
+/// deletes them with the chat, after its own row is gone, so the list must
+/// not need that row.
+#[test]
+fn sub_sessions_are_every_chat_below_one_also_once_it_is_deleted() {
+    let s = Store::open_in_memory().unwrap();
+    let child_of = |parent: SessionId| {
+        let sid = SessionId::new();
+        s.append(
+            "n1",
+            &raw(sid, 1, "session_created", created_json("t", Some(parent))),
+        )
+        .unwrap();
+        sid
+    };
+    let top = chat_of(&s, "n1", "alice");
+    let (kid, other_kid) = (child_of(top), child_of(top));
+    let grandkid = child_of(kid);
+    let plain = chat_of(&s, "n1", "alice");
+    let strangers_kid = child_of(plain);
+    let sorted = |mut v: Vec<SessionId>| {
+        v.sort();
+        v
+    };
+
+    let below = sorted(s.sub_sessions(top).unwrap());
+    assert_eq!(below, sorted(vec![kid, other_kid, grandkid]));
+    assert!(s.sub_sessions(grandkid).unwrap().is_empty());
+    assert_eq!(s.sub_sessions(plain).unwrap(), vec![strangers_kid]);
+
+    // Its own row gone, the children still name it.
+    assert!(s.delete_session(top, true).unwrap());
+    assert_eq!(sorted(s.sub_sessions(top).unwrap()), below);
+}
+
 /// L-3. A node's title is cut to a few hundred characters in the row, so
 /// a listing never carries megabytes per chat.
 #[test]

@@ -1353,6 +1353,33 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Every chat below `sid` (the sub-agents' chats it started, theirs in
+    /// turn, and so on), nearest first. Works from the children's own
+    /// `parent_id`, so it still answers once `sid`'s row is deleted. A node
+    /// cannot make a cycle (a parent is an earlier session of the node),
+    /// but the walk is bounded anyway. No index on `parent_id`: it runs
+    /// once per deleted chat, over one small row per chat.
+    pub fn sub_sessions(&self, sid: SessionId) -> Result<Vec<SessionId>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "WITH RECURSIVE down(id, depth) AS (
+                 SELECT session_id, 1 FROM sessions WHERE parent_id = ?1
+                 UNION ALL
+                 SELECT s.session_id, down.depth + 1 FROM sessions s JOIN down ON s.parent_id = down.id
+                 WHERE down.depth < 64)
+             SELECT id FROM down WHERE id != ?1 GROUP BY id ORDER BY MIN(depth), id",
+        )?;
+        let ids = stmt
+            .query_map(params![sid.to_string()], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        ids.into_iter()
+            .map(|s| {
+                s.parse()
+                    .map_err(|_| StoreError::Corrupt(format!("session id {s}")))
+            })
+            .collect()
+    }
+
     /// The `seq` at which a second writer was caught, if one was.
     pub fn diverged_seq(&self, sid: SessionId) -> Result<Option<u64>> {
         let conn = self.lock();

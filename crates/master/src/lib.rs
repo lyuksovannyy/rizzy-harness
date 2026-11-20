@@ -3010,16 +3010,50 @@ impl Master {
         let this = self.clone();
         tokio::spawn(async move {
             for sid in sids {
-                if let Err(e) = this.delete_session(sid).await {
-                    tracing::warn!(session = %sid, error = %e, "could not delete a deleted user's chat");
+                match this.delete_session(sid).await {
+                    // Went with its parent's, earlier in this list.
+                    Ok(()) | Err(CommandError::UnknownSession) => {}
+                    Err(e) => {
+                        tracing::warn!(session = %sid, error = %e, "could not delete a deleted user's chat")
+                    }
                 }
             }
         });
     }
 
-    /// Delete a session everywhere. The mirror copy goes (with a tombstone)
-    /// even if the node is offline; the node is told again when it returns.
+    /// Delete a session everywhere, and with it the chats of the sub-agents
+    /// it started, at any depth (they have no way in once their parent is
+    /// gone). Those go first, the deepest first, then the chat: a delete
+    /// that fails part way leaves the chat in place with the chats still
+    /// below it, to be deleted again. A turn of the chat that ran until its
+    /// own delete may have started another sub-agent meanwhile, so what is
+    /// below it is looked at once more after; that sweep is best effort.
     pub async fn delete_session(&self, sid: SessionId) -> Result<(), CommandError> {
+        for kid in self.sub_sessions(sid).await?.into_iter().rev() {
+            match self.delete_one_session(kid).await {
+                // Gone meanwhile (its own delete, or its parent's).
+                Ok(()) | Err(CommandError::UnknownSession) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        self.delete_one_session(sid).await?;
+        for kid in self.sub_sessions(sid).await?.into_iter().rev() {
+            if let Err(e) = self.delete_one_session(kid).await {
+                tracing::warn!(session = %kid, error = %e, "could not delete a sub-agent chat started during its parent's delete");
+            }
+        }
+        Ok(())
+    }
+
+    /// The chats below `sid` in the mirror, nearest first.
+    async fn sub_sessions(&self, sid: SessionId) -> Result<Vec<SessionId>, CommandError> {
+        Ok(self.inner.mirror.call(move |s| s.sub_sessions(sid)).await?)
+    }
+
+    /// Delete one session everywhere. The mirror copy goes (with a
+    /// tombstone) even if the node is offline; the node is told again when
+    /// it returns.
+    async fn delete_one_session(&self, sid: SessionId) -> Result<(), CommandError> {
         let node = self.owner(sid).await?;
         let res = self
             .send_command(&node, |req_id| MasterToNode::Delete {

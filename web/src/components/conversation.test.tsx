@@ -19,8 +19,9 @@ const prompted = vi.fn((..._a: unknown[]) => Promise.resolve({ ok: true }));
 const call = vi.fn((..._a: unknown[]) => Promise.resolve({ ok: true }));
 const features = vi.fn<(scope: unknown) => Promise<Features>>();
 const agentsOf = vi.fn<(scope: unknown) => Promise<{ agents: unknown[] }>>(() => Promise.resolve({ agents: [] }));
+const sessionsOf = vi.fn<(scope: unknown) => Promise<{ sessions: Partial<SessionRow>[] }>>(() => Promise.reject(new Error("no list")));
 vi.mock("../api", () => ({
-  api: { features: (s: unknown) => features(s), prompt: (...a: unknown[]) => prompted(...a), agents: (s: unknown) => agentsOf(s) },
+  api: { features: (s: unknown) => features(s), sessions: (s: unknown) => sessionsOf(s), prompt: (...a: unknown[]) => prompted(...a), agents: (s: unknown) => agentsOf(s) },
   call: (...a: unknown[]) => call(...a),
   HttpError: Error,
 }));
@@ -433,6 +434,47 @@ describe("media", () => {
     expect(api.deleteSession).toHaveBeenCalledWith(SID, { media: true });
     expect(ask).not.toHaveBeenCalled();
     vi.unstubAllGlobals();
+  });
+
+  test("a chat with sub-agent sessions says they are deleted with it, at any depth", async () => {
+    mediaApi.list.mockRejectedValue(new Error("not found"));
+    const rows = [
+      { session_id: SID, parent_id: null },
+      { session_id: "kid-1", parent_id: SID },
+      { session_id: "kid-2", parent_id: SID },
+      { session_id: "grandkid", parent_id: "kid-1" },
+      { session_id: "other", parent_id: null },
+      { session_id: "others-kid", parent_id: "other" },
+    ];
+    sessionsOf.mockResolvedValue({ sessions: rows });
+    await show([], sessionRow());
+    await act(async () => deleteButton().click());
+    await act(() => new Promise((r) => setTimeout(r, 0)));
+    const text = host.querySelector(".delete-chat")!.textContent!;
+    expect(text).toContain("Delete this chat for good?");
+    expect(text).toContain("The 3 sessions of the sub-agents it started are deleted with it.");
+    await act(async () => inDialog("Cancel").click());
+
+    sessionsOf.mockResolvedValue({ sessions: rows.slice(0, 2) });
+    await act(async () => deleteButton().click());
+    await act(() => new Promise((r) => setTimeout(r, 0)));
+    expect(host.querySelector(".delete-chat")!.textContent).toContain("The session of the sub-agent it started is deleted with it.");
+    sessionsOf.mockReset();
+    sessionsOf.mockImplementation(() => Promise.reject(new Error("no list")));
+  });
+
+  test("a chat without sub-agent sessions (or an unreadable list) keeps the plain question", async () => {
+    mediaApi.list.mockRejectedValue(new Error("not found"));
+    sessionsOf.mockResolvedValue({ sessions: [{ session_id: SID, parent_id: null }, { session_id: "other", parent_id: null }] });
+    await show([], sessionRow());
+    await act(async () => deleteButton().click());
+    await act(() => new Promise((r) => setTimeout(r, 0)));
+    expect(host.querySelector(".delete-chat")!.textContent).not.toContain("sub-agent");
+    await act(async () => inDialog("Cancel").click());
+    sessionsOf.mockRejectedValue(new Error("no list"));
+    await act(async () => deleteButton().click());
+    await act(() => new Promise((r) => setTimeout(r, 0)));
+    expect(host.querySelector(".delete-chat")!.textContent).toBe("Delete this chat for good?CancelDelete");
   });
 
   test("with no Media files from the chat (or Media off) it is just the chat; Cancel keeps it", async () => {
