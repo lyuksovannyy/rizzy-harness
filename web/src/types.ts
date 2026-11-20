@@ -511,6 +511,10 @@ export interface Agent {
   id: string;
   name: string;
   description: string;
+  /** More `@handles` beside the id (absent in older fixtures). */
+  aliases?: string[];
+  /** A short label the UI could group agents by (the server sends it; nothing groups by it yet). */
+  category?: string;
   builtin: boolean;
   /** The admin's default model for this agent (prefixed); null when it has no chain of its own. */
   default_model: string | null;
@@ -601,9 +605,12 @@ export interface NewAgent {
   delegate_to?: string[] | null;
 }
 
-export type AvatarShape = "circle" | "triangle" | "square" | "hexagon" | "diamond" | "drop";
+export type AvatarShape =
+  | "circle" | "triangle" | "square" | "hexagon" | "diamond" | "drop" | "cloud" | "bean" | "heart" | "star" | "flower"
+  | "ghost" | "cat" | "bunny" | "mushroom" | "leaf" | "mug" | "shield" | "bubble" | "hat" | "rocket";
 export type AvatarEyes = "round" | "long" | "short" | "wide" | "sleepy";
-export type AvatarAccent = "blue" | "purple" | "pink" | "red" | "orange" | "yellow" | "green" | "graphite";
+export type AvatarAccent =
+  | "blue" | "purple" | "pink" | "red" | "orange" | "yellow" | "green" | "graphite" | "white" | "black" | "brown" | "teal";
 
 /** How an agent looks: a shape with eyes, in one of the accents. */
 export interface AgentAvatar {

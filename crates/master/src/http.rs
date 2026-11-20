@@ -39,6 +39,8 @@ mod sessions;
 mod skills;
 mod step_limit;
 mod storage;
+mod usage;
+pub(crate) use usage::TIME_LIMIT as USAGE_TIME_LIMIT;
 mod users;
 mod workspaces;
 
@@ -245,6 +247,7 @@ pub fn router_with(master: Master, timeouts: crate::limits::Timeouts) -> Router 
         .merge(compact::routes())
         .merge(retry::routes())
         .merge(storage::routes())
+        .merge(usage::routes())
         .merge(links::routes())
         .merge(profile::routes())
         .merge(connections::routes())

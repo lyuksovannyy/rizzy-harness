@@ -26,8 +26,8 @@ passes; `latest` and `X.Y.Z` will exist from the first release. Setup:
 
 A self-hosted coding-agent harness: one Rust binary that serves a web dashboard
 for coding agents, with the agent loop running on the machine that owns the
-code. See [`PLAN.md`](PLAN.md) for architecture, event schema, threat model and
-phase status.
+code. See [`PLAN.md`](PLAN.md) for architecture, event schema, threat model
+(one file per row in [`docs/threats/`](docs/threats/)) and phase status.
 
 **Status:** Phases 1–8 done and most of Phase 9 (checkpoints with undo, sub-agent
 worktrees, parallel answers, voice input), [rich messages](#rich-messages), and
@@ -707,6 +707,13 @@ for keeping the directory secret: whoever can read `master.db` can read every
 file, so use full-disk encryption for that. Old copies of `master.db` pages can
 survive on SSDs and copy-on-write filesystems ([docs/media.md](docs/media.md)).
 
+**A request id on every error.** Every answer from the server carries a
+request id (`x-request-id`, and `request_id` in an error's JSON). Where the
+page shows a failed request (renaming or deleting a chat, saving Settings, the
+account menu, retrying a turn) the message ends in `(request 3f2a…)`: send
+that id to whoever runs the server, who finds the same id on the log line of
+the failure. Errors that have none show nothing extra.
+
 **One process per data directory.** `serve`, `node run` and `node join` hold
 a lock on `<data>/lock` for as long as they run. A second one started on the
 same directory (typing `serve` twice, a `node run` pointed at the server's
@@ -747,10 +754,11 @@ default_model = "openrouter::openai/gpt-4o"   # unset: agent general's, else the
 model = "deepseek::deepseek-chat"
 fallbacks = ["openrouter::openai/gpt-4o"]   # tried in order (see below)
 
-[agent_avatars.coder]                # how the agent looks; unset: derived from its id
-shape = "hexagon"                    # circle | triangle | square | hexagon | diamond | drop
-eyes = "wide"                        # round | long | short | wide | sleepy
-accent = "green"                     # blue | purple | pink | red | orange | yellow | green | graphite
+[agent_avatars.coder]                # how the agent looks; unset: derived from its id (built-in agents have their own)
+shape = "hexagon"                    # circle | triangle | square | hexagon | diamond | drop | cloud | bean | heart | star | flower
+                                     # | ghost | cat | bunny | mushroom | leaf | mug | shield | bubble | hat | rocket
+eyes = "long"                        # long (tall pills, the default) | round | short | wide | sleepy
+accent = "green"                     # blue | purple | pink | red | orange | yellow | green | graphite | white | black | brown | teal
 
 [[providers]]
 id = "openrouter"                    # the prefix: a-z, 0-9, _ and -
@@ -866,6 +874,32 @@ prices cache writes only as the provider reports them (Anthropic's
 that reports none has its cache writes priced as plain input; and nothing
 limits or stops spending. The provider's own console has the real
 figure.
+
+#### Usage totals for server admins
+
+Settings → Server → **Usage** shows, for a period (this month, last month,
+last 30 days), how many tokens each person used per model (input, output,
+cached input, turns) and what that cost at the prices above, sortable by cost
+or tokens, and a second table per workspace (Personal chats are one row for
+everyone). It is numbers only: nothing says which chat, when a turn ran, how
+many chats there are or on which day; chats are private to their owner, admins
+too. The page prices the token sums with the same functions as the chat
+header, so a model without a price reads `+ unpriced` there as well. The API
+route is `GET /api/admin/usage?from=<ms>&to=<ms>` (from inclusive, to
+exclusive, at most 366 days), for server admins and the API token; a member or
+a workspace admin is refused.
+
+What is counted: each turn's final usage (the provider's count replaces the
+running figures), a turn stopped without one at its last running figure, the
+summaries of `/compact`, hand-off notes and background sub-agents. A
+sub-agent's own chat is not added: its cost is already in its parent's. What is
+not counted: chats that were deleted (their log goes with them, so the totals
+cover only "chats that still exist"); a turn that began before the period and
+ended without a usage record; a sub-agent whose parent turn was interrupted
+before it returned; prices as of today, not as of the call. The scan has a
+time limit (10 s): on a very large server the answer says it read only the
+most recently active share of the chats, and the numbers are then too low.
+Spending limits, caps and alerts are not built.
 
 An agent has one model; one model may serve several agents. A model call
 that fails before any output for a passing reason (rate limit 429, server
@@ -1631,6 +1665,28 @@ words, so you can say what to do instead. The field is never focused by
 itself and Enter in it answers nothing: only the Deny button sends it. If you
 allow while part of the input is collapsed, the card says how many characters
 you have not expanded.
+
+**Where the choice appears.** In the chat you have open, the composer's text
+field is replaced by the card and its buttons while a call waits, and comes
+back, with what you had typed and the caret where it was, once the call is
+answered (here or in another tab). The buttons ignore every answer, mouse and
+keys alike, for the first 0.7 seconds. Focus waits on the choice itself, never
+on a button, and for that moment keys typed anywhere on the page are dropped
+(so the end of a line you were typing, such as `/tmp/x` and Enter, opens
+nothing, sends nothing and answers nothing); the first Tab then reaches the
+first button. While a choice is up, `/` does not open search (Ctrl/Cmd+K
+still does). With several calls waiting, one shows at a time, in the order the
+agent asked ("1 of 3"); the others' cards say they come after. Only the
+command (or an edit's rows) scrolls, in a box you can reach with the keyboard
+and that says when there is more below; the reason, the warning about
+characters you have not expanded and the "for this chat" note stay between it
+and the buttons. Stop and the mode picker stay where they are; changing the
+mode does not answer the waiting call (Plan denies it), and the picker says
+so. The field itself is hidden, so nothing new can be queued until the call is
+answered. A screen reader is told which tool waits and where the buttons are,
+never the command. A chat you have not opened keeps showing its card in
+the transcript, and the browser notification (when the tab is hidden) carries
+fixed words and the chat's place in the list, never the command.
 
 `node.toml`: the node's own policy. It is authoritative: the master can only
 ask for stricter settings.
@@ -2592,11 +2648,17 @@ list of strings is a list of lines, one per string (an empty list is refused);
 (send the same number twice for one row), and so is a missing `text` (`"text":
 ""` deletes the rows). A call without `tag` is refused with the rows it names
 and the file's current tag. `old_string` and the line form cannot be given together. The tag is
-a lookup key, not a secret. It is normally four hex characters; when two versions of one
-file in a session would have the same four, the later one's is longer (five or more), and
-the tag is sent whole, as the header printed it. A tag names the version it was printed
-for, never another one, for the whole session: a version that was dropped from memory is
-unknown, not mistaken for a newer one.
+a lookup key, not a secret. It is normally six hex characters; when two versions of one
+file in a session would have the same six, the later one's is longer (seven or more), and
+the tag is sent whole, as the header printed it (or as `#TAG`, or as the whole header line of
+the same file: a header of another file is refused). A tag names the version it was printed
+for, never another one, while the file's entry is in the table and the node has not restarted:
+a version that was dropped from memory is unknown, not mistaken for a newer one. Two cases are
+not covered, each with a chance of 1 in 16,777,216 per later version that an old tag names a
+newer version by chance (its row numbers would then land on that version's rows): a file whose
+entry was dropped whole when the table was full (1,024 files in a chat, 4,096 on the node), and,
+after a node restart, a version that only a search, a refusal or a line edit on a file changed
+since had printed.
 The header names the file as the agent addresses it: relative to the chat's
 folder when the file is inside it. When a line edit asks for approval, its card
 lists the rows it replaces (or where it inserts) under "Rows this changes",
@@ -4408,7 +4470,10 @@ before the tool says it is busy.
 **Default agents per mode.** A chat gets the Assistant unless you pick
 another; an Agentic chat gets the Software Developer. A workspace overrides
 each (`default_agent` for chats, `default_agentic_agent` for Agentic), and
-your own preferences override the workspace's in the picker. An agent you
+your own preferences override the workspace's in the picker (Settings →
+Account → Preferences → New chats has one picker for chats and one for coding
+chats on a node, the second listing only agents that can change files or run
+commands). An agent you
 name for the chat always wins. The Agentic default must be able to change
 files or run commands: the Assistant, Smol and Researcher are refused there,
 saying why; so is an agent that runs only as a sub-agent or does not exist,

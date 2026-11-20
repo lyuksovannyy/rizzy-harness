@@ -30,10 +30,28 @@ export class HttpError extends Error {
     message: string,
     /** The error body's machine-readable `code`, when it has one. */
     public code?: string,
+    /** The server's request id for this answer: what to give whoever runs it. */
+    public id?: string,
+    /** Seconds from a `Retry-After` header (a 429's wait). */
+    public retry?: number,
   ) {
     super(message);
   }
 }
+
+/** The error for a refused answer: the body's text, else the status line;
+ * the request id from the body or the `x-request-id` header. */
+export const httpError = (res: Response, data: unknown): HttpError => {
+  const b = data as { error?: string; code?: string; request_id?: string } | null;
+  const h = res.headers;
+  return new HttpError(
+    res.status,
+    b?.error ?? `${res.status} ${res.statusText}`,
+    b?.code,
+    b?.request_id ?? h.get("x-request-id") ?? undefined,
+    Number(h.get("retry-after")) || undefined,
+  );
+};
 
 // The login key (Gate 3 P-1). Browsers send the login cookie to every port
 // of the host, so another local server (the agent's dev server) gets it
@@ -113,8 +131,7 @@ export async function call<T>(method: string, path: string, body?: unknown, sign
   }
   seen(res.status, data);
   if (!res.ok) {
-    const body = data as { error?: string; code?: string } | null;
-    throw new HttpError(res.status, body?.error ?? `${res.status} ${res.statusText}`, body?.code);
+    throw httpError(res, data);
   }
   return data as T;
 }
@@ -177,7 +194,7 @@ export const api = {
     );
     const data = (await res.json().catch(() => null)) as { text?: string; error?: string } | null;
     seen(res.status, data);
-    if (!res.ok) throw new HttpError(res.status, data?.error ?? `${res.status} ${res.statusText}`);
+    if (!res.ok) throw httpError(res, data);
     return data?.text ?? "";
   },
   prompt: (
@@ -206,7 +223,7 @@ export const api = {
     );
     const data = (await res.json().catch(() => null)) as UploadedAttachment & { error?: string };
     seen(res.status, data);
-    if (!res.ok) throw new HttpError(res.status, data?.error ?? `${res.status} ${res.statusText}`);
+    if (!res.ok) throw httpError(res, data);
     return data;
   },
   agents: (scope?: Scope | null) =>
