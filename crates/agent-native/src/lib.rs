@@ -4909,6 +4909,12 @@ impl NativeBackend {
                         (Some(a), Some(b)) => Some(format!("{a}\n\n{b}")),
                         (a, b) => a.or(b),
                     };
+                    // The tool's own line about the call (`bash`'s detached
+                    // job): first, then the loop's.
+                    let note = match (outcome.note.take(), note) {
+                        (Some(a), Some(b)) => Some(format!("{a}\n\n{b}")),
+                        (a, b) => a.or(b),
+                    };
                     let note = match (i + 1 == n_calls)
                         .then(|| step_note(person, steps, cap_now()))
                         .flatten()

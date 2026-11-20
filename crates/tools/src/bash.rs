@@ -264,6 +264,214 @@ pub fn workdir(ctx: &ToolCtx, w: &str) -> Result<std::path::PathBuf, String> {
     Ok(real)
 }
 
+/// Whether a command line tries to detach a job: an unquoted `&` that puts
+/// a job in the background, or `setsid` as a command word (a job in a
+/// session of its own is not reached by the group kill at a timeout; `nohup`
+/// and `disown` alone detach nothing, and with `&` the `&` already matches).
+/// A small scan, not a shell parser: quotes, `$'..'`, `$((..))`, `${..}`,
+/// comments and heredoc bodies are skipped; a false match costs one
+/// conditional sentence in the result, a missed exotic form (`A=1 setsid x`,
+/// `bash -c 'x &'`) costs nothing.
+pub(crate) fn detaches_job(command: &str) -> bool {
+    let c: Vec<char> = command.chars().collect();
+    // The word being read (unquoted text only counts), and whether the next
+    // word stands where a command name does.
+    let mut word = String::new();
+    let mut plain = true;
+    let mut at_cmd = true;
+    // The closing quote, and whether a backslash escapes inside it.
+    let mut quote: Option<(char, bool)> = None;
+    // Heredocs started on this line: the delimiter, and `<<-`'s tab strip.
+    let mut heredocs: Vec<(String, bool)> = Vec::new();
+    let mut i = 0;
+    // Ends the word: true when it is a detaching command word.
+    let flush = |word: &mut String, plain: &mut bool, at_cmd: &mut bool| -> bool {
+        let hit = *plain && *at_cmd && word == "setsid";
+        if !word.is_empty() {
+            *at_cmd = false;
+        }
+        word.clear();
+        *plain = true;
+        hit
+    };
+    // The index after the bracket that closes the one at `from`.
+    let skip_group = |from: usize, open: char, close: char| -> usize {
+        let mut depth = 0usize;
+        let mut j = from;
+        while j < c.len() {
+            if c[j] == open {
+                depth += 1;
+            } else if c[j] == close {
+                depth -= 1;
+                if depth == 0 {
+                    return j + 1;
+                }
+            }
+            j += 1;
+        }
+        j
+    };
+    while i < c.len() {
+        let ch = c[i];
+        if let Some((q, escapes)) = quote {
+            if escapes && ch == '\\' {
+                i += 1;
+            } else if ch == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        let next = c.get(i + 1).copied();
+        match ch {
+            '\\' => {
+                plain = false;
+                word.push(ch);
+                i += 2;
+                continue;
+            }
+            '\'' | '"' => {
+                quote = Some((ch, false));
+                plain = false;
+                word.push(ch);
+            }
+            '$' if next == Some('\'') => {
+                quote = Some(('\'', true));
+                plain = false;
+                word.push(ch);
+                i += 1;
+            }
+            '$' if next == Some('(') && c.get(i + 2) == Some(&'(') => {
+                plain = false;
+                word.push(ch);
+                i = skip_group(i + 1, '(', ')');
+                continue;
+            }
+            '$' if next == Some('{') => {
+                plain = false;
+                word.push(ch);
+                i = skip_group(i + 1, '{', '}');
+                continue;
+            }
+            '#' if word.is_empty() => {
+                while i < c.len() && c[i] != '\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            '<' if next == Some('<') && c.get(i + 2) != Some(&'<') => {
+                if flush(&mut word, &mut plain, &mut at_cmd) {
+                    return true;
+                }
+                i += 2;
+                let strip = c.get(i) == Some(&'-');
+                if strip {
+                    i += 1;
+                }
+                while matches!(c.get(i), Some(' ' | '\t')) {
+                    i += 1;
+                }
+                let mut delim = String::new();
+                let mut open: Option<char> = None;
+                while let Some(&d) = c.get(i) {
+                    match (open, d) {
+                        (Some(q), d) if d == q => open = None,
+                        (Some(_), d) => delim.push(d),
+                        (None, '\'' | '"') => open = Some(d),
+                        (None, '\\') => {}
+                        (None, d) if d.is_whitespace() || ";&|()<>".contains(d) => break,
+                        (None, d) => delim.push(d),
+                    }
+                    i += 1;
+                }
+                if !delim.is_empty() {
+                    heredocs.push((delim, strip));
+                }
+                continue;
+            }
+            '\n' => {
+                if flush(&mut word, &mut plain, &mut at_cmd) {
+                    return true;
+                }
+                at_cmd = true;
+                i += 1;
+                // The bodies of the heredocs this line started.
+                for (delim, strip) in std::mem::take(&mut heredocs) {
+                    while i < c.len() {
+                        let end = c[i..]
+                            .iter()
+                            .position(|&x| x == '\n')
+                            .map_or(c.len(), |n| i + n);
+                        let line: String = c[i..end].iter().collect();
+                        i = (end + 1).min(c.len());
+                        let line = if strip {
+                            line.trim_start_matches('\t')
+                        } else {
+                            &line
+                        };
+                        if line == delim {
+                            break;
+                        }
+                    }
+                }
+                continue;
+            }
+            '&' | ';' | '|' | '(' | ')' | ' ' | '\t' | '<' | '>' => {
+                if flush(&mut word, &mut plain, &mut at_cmd) {
+                    return true;
+                }
+                let prev = i.checked_sub(1).map(|j| c[j]);
+                match ch {
+                    '&' => {
+                        let operator = prev == Some('&')
+                            || next == Some('&')
+                            || next == Some('>')
+                            || matches!(prev, Some('>' | '<' | '|' | ';'));
+                        if !operator {
+                            return true;
+                        }
+                        at_cmd = true;
+                    }
+                    ';' | '|' | '(' | ')' => at_cmd = true,
+                    _ => {}
+                }
+            }
+            _ => word.push(ch),
+        }
+        i += 1;
+    }
+    flush(&mut word, &mut plain, &mut at_cmd)
+}
+
+/// The harness line for a foreground call that detaches a job. The mode's
+/// own truth first; the way out only where `background: true` is offered
+/// (a contained shell, a person's chat, the node's table not at zero).
+pub(crate) fn detach_note(contained: bool, background_offered: bool, max_secs: u64) -> String {
+    let (truth, way) = if contained {
+        (
+            "a job this command detaches (`&`, `setsid`) is killed when this \
+             call returns",
+            " To keep one running, use `background: true` with `timeout_secs`, then \
+             `bash_output` and `bash_stop`.",
+        )
+    } else {
+        (
+            "in this chat a job started with `&` ends when this call returns, and one that left \
+             its process group (`setsid`) can outlive it, but a later command may not be able to \
+             stop it",
+            "",
+        )
+    };
+    if !contained {
+        return format!(
+            "[harness] {truth}. Run it in the foreground with `timeout_secs` (up to {max_secs} s \
+             on this node)."
+        );
+    }
+    let way = if background_offered { way } else { "" };
+    format!("[harness] {truth}.{way}")
+}
+
 #[async_trait::async_trait]
 impl Tool for Bash {
     fn name(&self) -> &'static str {
@@ -396,6 +604,14 @@ impl Tool for Bash {
         if background && !contained {
             return ToolOutcome::err(crate::background::NOT_CONTAINED);
         }
+        // A foreground call that detaches a job by hand: one harness line
+        // in its result (a sentence in the description did not change the
+        // habit, a line in the result does).
+        let offered = contained
+            && matches!(&ctx.background,
+                crate::background::Access::On(bg) if bg.limits().per_session > 0);
+        let detach_line = (!background && detaches_job(&command))
+            .then(|| detach_note(contained, offered, ctx.bash_timeout_max.as_secs()));
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -713,28 +929,29 @@ impl Tool for Bash {
             }
             _ => cap(combined),
         };
-        match end {
+        let mut outcome = match end {
             End::Exited(status) => {
                 if output.is_empty() {
                     output = "(no output)".into();
                 }
                 if let Some(note) = guard_note {
                     // Not the command's own exit: no exit code to report.
-                    return ToolOutcome {
+                    ToolOutcome {
                         ok: false,
                         output: format!("{output}\n{note}"),
                         truncated,
                         ..Default::default()
-                    };
-                }
-                let code = status.and_then(|s| s.code());
-                let code_str = code.map_or("signal".to_string(), |c| c.to_string());
-                ToolOutcome {
-                    ok: code == Some(0),
-                    output: format!("{output}\n[exit code: {code_str}]"),
-                    exit_code: code,
-                    truncated,
-                    ..Default::default()
+                    }
+                } else {
+                    let code = status.and_then(|s| s.code());
+                    let code_str = code.map_or("signal".to_string(), |c| c.to_string());
+                    ToolOutcome {
+                        ok: code == Some(0),
+                        output: format!("{output}\n[exit code: {code_str}]"),
+                        exit_code: code,
+                        truncated,
+                        ..Default::default()
+                    }
                 }
             }
             End::Cancelled | End::TimedOut | End::Background => {
@@ -742,10 +959,14 @@ impl Tool for Bash {
                     "cancelled".to_string()
                 } else {
                     format!(
-                        "timed out after {}s (state `timeout_secs`, up to {} on this node, or \
-                         run it with `background: true`)",
+                        "timed out after {}s (state `timeout_secs`, up to {} on this node{})",
                         timeout.as_secs(),
-                        ctx.bash_timeout_max.as_secs()
+                        ctx.bash_timeout_max.as_secs(),
+                        if offered {
+                            ", or run it with `background: true`"
+                        } else {
+                            ""
+                        }
                     )
                 };
                 let note = match stopped {
@@ -786,7 +1007,9 @@ impl Tool for Bash {
                     ..Default::default()
                 }
             }
-        }
+        };
+        outcome.note = detach_line;
+        outcome
     }
 }
 
@@ -794,6 +1017,178 @@ impl Tool for Bash {
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    /// The detector's table. `no` includes the documented misses.
+    #[test]
+    fn detaches_job_table() {
+        let yes = [
+            "sleep 5 &",
+            "(a; b) &",
+            "a & b",
+            "setsid -f x",
+            "setsid sleep 300",
+            "x & disown",
+            "nohup x &",
+            "a && b &",
+            "curl http://h/?a=1&b=2",
+            "echo hi\nsleep 5 &\necho ok",
+            "(setsid nohup x >/dev/null 2>&1 &)",
+            "x; setsid y",
+            "echo $(x &)",
+            // The `&` is on the command line, the body follows.
+            "cat <<EOF > f &\nbody\nEOF",
+            "cat <<EOF\nbody\nEOF\nsleep 5 &",
+            "cat <<-EOF\n\tf(&x)\n\tEOF\nx &",
+            "cat <<A <<B\n&\nA\n&\nB\nfoo &",
+            "cat <<'EOF' > f\nx\nEOF\n(sleep 5 &)",
+        ];
+        let no = [
+            "a && b",
+            "a || b",
+            "a 2>&1 | tee f",
+            "a >&2",
+            "a <&3",
+            "a &> f",
+            "a &>> f",
+            "a |& b",
+            "echo \"a & b\"",
+            "echo 'x &'",
+            "curl 'http://h/?a=1&b=2'",
+            "curl http://h/?a=1\\&b=2",
+            "echo setsid",
+            "echo \"setsid\"",
+            "ls # run it in the background &",
+            "cargo test --workspace",
+            "",
+            // Detach nothing alone: killed with the call.
+            "nohup x",
+            "x; disown",
+            // Heredoc bodies, the way agents write C, Rust and Go files.
+            "cat <<EOF\nf(&x);\nEOF",
+            "cat <<'EOF' > f.rs\nlet r = &x; a & b\nEOF",
+            "cat <<\"EOF\"\n&\nEOF",
+            "cat <<-EOF\n\tf(&x)\n\tEOF",
+            "cat <<A <<B\n&\nA\n&\nB",
+            // Arithmetic, parameter expansion, ANSI quotes, case terminators.
+            "echo $((1&2))",
+            "echo ${a:-&}",
+            "echo $'it\\'s &'",
+            "case x in a) y;& b) z;; esac",
+            "case x in a) y;;& b) z;; esac",
+            // Documented misses (the reviewer's false negatives).
+            "A=1 setsid x",
+            "timeout 5 setsid x",
+            "bash -c 'x &'",
+        ];
+        for c in yes {
+            assert!(detaches_job(c), "should match: {c:?}");
+        }
+        for c in no {
+            assert!(!detaches_job(c), "should not match: {c:?}");
+        }
+    }
+
+    /// A foreground `setsid` is out of the group a timeout kills: the
+    /// reason it stays a trigger (host mode; contained, everything dies).
+    #[tokio::test]
+    async fn a_foreground_setsid_child_survives_timeout() {
+        let pf = tempfile::tempdir().unwrap();
+        let pidfile = pf.path().join("pid");
+        let cmd = format!("setsid {}; true", recording_sleep(&pidfile, 987_610));
+        let (_r, alive) = stop_and_look(cmd, &pidfile, 987_610, Stop::Timeout).await;
+        assert!(alive, "the foreground setsid child died: drop the trigger");
+    }
+
+    fn note_of(r: &ToolOutcome) -> bool {
+        r.note
+            .as_deref()
+            .is_some_and(|n| n.starts_with("[harness] "))
+            && !r.output.contains("[harness]")
+    }
+
+    /// The note is the call's typed `note`, not a line of its output, on
+    /// every way a call ends: exit 0, a failing exit, a timeout.
+    #[tokio::test]
+    async fn the_note_is_there_on_every_ending() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolCtx::new(dir.path());
+        for (cmd, ok) in [("sleep 30 & exit 3", false), ("sleep 30 & true", true)] {
+            let r = Bash
+                .run(&ctx, json!({"command": cmd, "timeout_secs": 10}))
+                .await;
+            assert_eq!(r.ok, ok, "{}", r.output);
+            assert!(note_of(&r), "{cmd}: {r:?}");
+        }
+        // Timed out: the process group dies, the note stays.
+        let r = Bash
+            .run(
+                &ctx,
+                json!({"command": "sleep 30 & wait", "timeout_secs": 5}),
+            )
+            .await;
+        assert!(r.output.contains("timed out after 5s"), "{}", r.output);
+        assert!(note_of(&r), "{r:?}");
+        // Cancelled.
+        let cancel = ctx.cancel.clone();
+        let h = tokio::spawn(
+            async move { Bash.run(&ctx, json!({"command": "sleep 30 & wait"})).await },
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        cancel.cancel();
+        let r = h.await.unwrap();
+        assert!(r.output.contains("cancelled"), "{}", r.output);
+        assert!(note_of(&r), "{r:?}");
+    }
+
+    /// A command that prints the sentence itself is output, not a note.
+    #[tokio::test]
+    async fn a_plain_call_has_no_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolCtx::new(dir.path());
+        let r = Bash.run(&ctx, json!({"command": "echo a && echo b"})).await;
+        assert!(r.note.is_none(), "{r:?}");
+    }
+
+    /// The timeout note names `background: true` only where it is offered.
+    #[tokio::test]
+    async fn the_timeout_note_names_background_only_where_it_is_offered() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolCtx::new(dir.path()); // not contained, background off
+        let r = Bash
+            .run(&ctx, json!({"command": "sleep 30", "timeout_secs": 5}))
+            .await;
+        assert!(r.output.contains("timed out after 5s"), "{}", r.output);
+        assert!(!r.output.contains("background: true"), "{}", r.output);
+        assert!(r.output.contains("on this node)"), "{}", r.output);
+    }
+
+    /// The host sentence names the node's ceiling.
+    #[test]
+    fn the_host_line_names_the_ceiling() {
+        let n = detach_note(false, false, 600);
+        assert!(
+            n.contains("`timeout_secs` (up to 600 s on this node)"),
+            "{n}"
+        );
+        assert!(!n.contains("background: true"), "{n}");
+    }
+
+    /// A real call: the detaching one carries the line, the plain one not.
+    /// (No containment here: the host mode's sentence.)
+    #[tokio::test]
+    async fn a_detaching_call_gets_the_harness_line_and_a_plain_one_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolCtx::new(dir.path());
+        let t = Instant::now();
+        let r = Bash
+            .run(&ctx, json!({"command": "sleep 30 &", "timeout_secs": 10}))
+            .await;
+        assert!(t.elapsed() < Duration::from_secs(8), "{}", r.output);
+        assert!(note_of(&r), "{}", r.output);
+        assert!(r.output.contains("[exit code: 0]"), "{}", r.output);
+        let r = Bash.run(&ctx, json!({"command": "echo a && echo b"})).await;
+        assert!(!note_of(&r), "{}", r.output);
+    }
 
     /// Alive and not a zombie.
     fn pid_alive(pid: i32) -> bool {

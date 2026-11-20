@@ -2627,7 +2627,13 @@ stop it and what it printed so far. It is the same contained command as any
 other (its own bubblewrap, guard, file view and, with the network off,
 network namespace), so later commands cannot see it in `ps` or signal it; the
 agent reads it with `bash_output { id }` (no id lists the chat's commands)
-and stops it with `bash_stop { id }`. Its output is kept in the node's memory
+and stops it with `bash_stop { id }`. When a foreground call puts a job in
+the background by hand (an unquoted `&`, or `setsid`), the harness sends the agent
+one `[harness]` note after that call's result (recorded with the call, so a
+restart sends the same text; not a line of the command's output, which the
+agent reads as the command's own) telling it what happens to that job and,
+where background commands are on, to use `background: true` instead; nothing is
+refused. Its output is kept in the node's memory
 only, never on disk, with the node's secrets taken out as it arrives: while
 it runs, the first and the last part, `background_output_kb` in all; once it
 ended, its first 16 KiB and last 16 KiB, for at most 30 minutes, and only for
