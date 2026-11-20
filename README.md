@@ -26,8 +26,8 @@ passes; `latest` and `X.Y.Z` will exist from the first release. Setup:
 
 A self-hosted coding-agent harness: one Rust binary that serves a web dashboard
 for coding agents, with the agent loop running on the machine that owns the
-code. See [`PLAN.md`](PLAN.md) for architecture, event schema, threat model and
-phase status.
+code. See [`PLAN.md`](PLAN.md) for architecture, event schema, threat model
+(one file per row in [`docs/threats/`](docs/threats/)) and phase status.
 
 **Status:** Phases 1–8 done and most of Phase 9 (checkpoints with undo, sub-agent
 worktrees, parallel answers, voice input), [rich messages](#rich-messages), and

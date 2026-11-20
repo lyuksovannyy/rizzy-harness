@@ -1,0 +1,25 @@
+# X.37 **sec**
+
+## Adds
+
+Agent peers (the owner, 2026-11-19: "add ability to run multiple agent peers, where in order for one agent to contact other one it must start it's message with agent mention, like: \"@coder @writer, yo how it is goin?\" or \"have anybody seen the gta6 release?\\n@coder @writer @usernameexample\" when message contains mentions in middle of text, it wont trigger anybody but lets know @agent(s) where they needs to have attention, so like \"my guy, the @coder have done good work, give him a raise\" wont trigger @coder agent, but \"my guy, the @coder have done good work, give him a raise\\n@coder @usernameexaple\" will trigger @coder and send notification to user"; and, on whether any agent may call any other, "Any other (agents with sub-agent only perm can be tagged but wont trigger, good to mention which agent must run as sub agent)").
+What exists: a leading `@agent` runs that one message's turn with that agent; a message to another agent while a turn runs is refused; nothing starts a second agent.
+
+## Safeguards and abuse tests
+
+**Step 1 done (2026-11-19, `feat/agent-peers-1`; PLAN.md T87, README "Calling several agents"):** one message from a person calls up to 4 agents by mention, in its opening (`@coder @writer, yo`) or in a last line of nothing but mentions (`…\\n@coder @writer @alex`); a mention anywhere else is a plain mention and calls nobody.
+One pure rule in `harness_core::mention` (mirrored exactly in `web/src/lib/mentionScan.ts`, 55 cases at this commit in one fixture both suites read), used by the master only for the chat owner's own signed-in message; the master resolves each agent in the chat's workspace set and sends the node one prompt with the first agent and the others as `peers` (capability `peers`); the node asks them one after another in the same log, each in a turn of its own (`turn_started.cause.mention {message_seq, by: person}`, no `user_message`; its opening is one harness paragraph built from the event alone), each under its own spec and reading the earlier answers; never two turns at once. `user_message.triggers` records who was called;
+Stop ends the turn and the rest and `peers_skipped` names who was not asked; a node restart says the same once (the specs are in memory only); a failed turn does not stop the next.
+The screen: chips for resolved mentions (called ones with the agent's mark, plain ones and your own name quieter), a quiet line "@writer, called by you", "N more after it" in the status line, the composer's order chips and its `@` popup at every position.
+First load +0.2 KB (the rule loads when the text holds an `@`).
+**Tags (the owner's decision of 2026-11-19, added to this step):** an agent available only as a sub-agent can be mentioned and is drawn as a mention (three looks: calls it, mentions it, sub-agent tag) but never triggers a turn, in any position; in the opening and the last line it is part of the run; tags do not count toward the 4, at most 16 resolved mentions per message (more is refused); `user_message.tags` records them, and the answering agent's turn (the first agent's context line, a later agent's opening, from `mention::tags_line`) names the tags it has among its own delegates and nothing else: no new right.
+The `@` popup offers them marked.
+**Choices:** the API token's, a routine's and a webhook's message keep today's single leading `@agent` (first only: the safer reading, no extra turn from text nobody typed); the later agents' turns get no connector, memory, `recall`, board tool or master context (no send of the master's: the connector grant never grants a turn with a `cause`), by the rule that rights are fixed when the message is sent; a mention turn cannot be retried.
+**Review of PR 166 (2026-11-19):** the browser's scanner is linear on long runs of white space; an agent called after the first is not told how `remember` works; each term of the master's gate has a test; a Retry or a message in the gap is refused.
+What a later agent knows and lacks is in README "Calling several agents".
+**The first thing step 2 needs:** master-made standing parts for each called agent (its own memory, workspace and project facts, recall, `remember`), so an agent called by another has what it would have had as the chat's own; this pull request builds none of it.
+**Step 2, left (not built; nothing lets model-written text start a turn):** an agent's own message calling other agents by the same rule, and notifying the person who is named (`@alex` in an agent's message).
+**Decided for step 2 (the owner, 2026-11-19, above):** any agent may call any other pickable agent by a mention, with no per-agent switch for calling or being called; sub-agent-only agents are never triggered by anyone.
+Open questions: a budget against loops (calls per turn, per chat and in a row, and a node `[limits]`), what a notification is (the chat's unread mark, a push, an email), what an agent-to-agent message is to the connector grant, memory and the board, and whether a called agent's answer returns to the caller or stands in the chat.
+**M.**
+
