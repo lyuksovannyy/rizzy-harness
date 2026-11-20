@@ -4516,7 +4516,9 @@ chat). What is weaker there is what its commands leave behind: its foreground
 command is a plain process group, so Stop, its time limit, the chat's deletion
 and the node's stop kill that group, but a process the command detached
 (`setsid`, a double fork) is not reached, and a `kill -9` of the node can leave
-the command running; a sandbox chat's sub-agent has neither gap. A card it waits on shows
+the command running: nothing ends it afterwards and no record names it (the
+next start only closes the turn as interrupted), so look for it yourself with
+`ps`. A sandbox chat's sub-agent has neither gap. A card it waits on shows
 in its chat ("Open its chat"), and its side panel row's activity line says
 "waiting for an approval"; it waits at most
 until its time limit; it is never answered because nobody watches. **The

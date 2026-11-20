@@ -1140,7 +1140,7 @@ card because the person can answer it and the wait is bounded and visible, and s
 | The chat deleted | cancelled; its folder removed unmerged | none (the log goes) | No |
 | The owner loses access | cancelled, then merged; no start until they write | `access_revoked` | No |
 | The node stops | cancelled, then merged within the stop's bound | `node_stopping` | No |
-| The node dies | its guards die with it (in a `host` chat the child's foreground command has no guard: a `kill -9` of the node can leave it running, as for any foreground host command); its folder is removed at the next start | `node_restarted`, once, at the start, no result | No |
+| The node dies | its guards die with it (in a `host` chat the child's foreground command has no guard: a `kill -9` of the node can leave it running, as for any foreground host command, and nothing ends it or names it afterwards); its folder is removed at the next start | `node_restarted`, once, at the start, no result | No |
 | The master is away at its end | recorded on the node; replays at the next hello | as usual | Only within 60 min (§4.4) |
 
 After a restart its own turn is closed `interrupted` (its own log) and the note says how to go on:
