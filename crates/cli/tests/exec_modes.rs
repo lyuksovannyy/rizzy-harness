@@ -4,7 +4,7 @@
 //! harness binary as the wrapper), the node runtime picks one per session
 //! from the mode its log recorded. A `sandbox` session's command runs in
 //! bubblewrap (its own PID namespace); a `host` session's, beside it in the
-//! same node, does not; its background command is refused.
+//! same node, does not; its background command runs under the guard alone.
 //!
 //! Needs bubblewrap; with `HARNESS_REQUIRE_BWRAP=1` a missing one fails.
 //! Temp folders are under the target directory.
@@ -304,26 +304,120 @@ async fn a_new_project_folder_runs_sessions_in_both_modes() {
     }
 }
 
-/// Background commands stay the `sandbox` mode's (R16): in a `host`
-/// session one is refused, with the reason, and nothing keeps running.
+/// The owner's decision of 2026-11-20 (PLAN.md T9): a `host` session's
+/// background command is accepted and runs under the node's guard without
+/// bubblewrap. It is in the node's PID namespace (a later command sees
+/// it), its start note says so, and `bash_stop` ends it with the guard's
+/// confirmation, in words that claim descendants only. (Before this the
+/// start was refused: R16, review N-c.)
 #[tokio::test]
-async fn a_host_session_gets_no_background_command() {
+async fn a_host_session_gets_a_background_command_under_the_guard() {
     let Some(mut n) = node().await else { return };
     let host = n.create(ExecMode::Host).await;
     let mark = Mark(976_321);
+    let alive = || {
+        std::fs::read_dir("/proc")
+            .unwrap()
+            .filter_map(|e| e.ok()?.file_name().to_str()?.parse::<i32>().ok())
+            .filter(|p| {
+                std::fs::read(format!("/proc/{p}/cmdline")).is_ok_and(|c| c == mark.cmdline())
+            })
+            .count()
+    };
     let text = format!(
-        r#"script: [{{"tool": "bash", "input": {{"command": "sleep {mark}", "background": true, "timeout_secs": 30}}}}]"#
+        r#"script: [{{"tool": "bash", "input": {{"command": "sleep {mark}", "background": true, "timeout_secs": 600}}}}]"#
     );
     let out = n.run(host, &text).await.join("\n");
     assert!(
-        out.contains(harness_tools::background::NOT_CONTAINED),
+        out.contains("running in the background as bg-1")
+            && out.contains("This chat runs on the host")
+            && !out.contains("Later commands cannot see it"),
         "{out}"
     );
-    let alive = std::fs::read_dir("/proc")
-        .unwrap()
-        .filter_map(|e| e.ok()?.file_name().to_str()?.parse::<i32>().ok())
-        .any(|p| std::fs::read(format!("/proc/{p}/cmdline")).is_ok_and(|c| c == mark.cmdline()));
-    assert!(!alive, "a background command of the host session runs");
+    assert_eq!(
+        alive(),
+        1,
+        "the host session's background command is not running"
+    );
+    // `run` returns at the first turn end it sees (the first turn's), so
+    // read the stop's result from the log as it arrives.
+    n.run(
+        host,
+        r#"script: [{"tool": "bash_stop", "input": {"id": "bg-1"}}]"#,
+    )
+    .await;
+    let by = std::time::Instant::now() + Duration::from_secs(30);
+    let out = loop {
+        let out: String =
+            n.rt.store()
+                .events_after(host, 0, 10_000)
+                .unwrap()
+                .iter()
+                .filter_map(|e| match e.typed() {
+                    Ok(EventKind::ToolCallFinished(f)) => Some(f.output),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+        if out.contains("its guard confirmed the end") || std::time::Instant::now() > by {
+            break out;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert!(
+        out.contains("every process descended from it were killed")
+            && out.contains("its guard confirmed the end"),
+        "{out}"
+    );
+    assert_eq!(alive(), 0, "bash_stop left the command running");
+}
+
+/// Review of PR 186 (the card of a host background start): with
+/// `[sandbox] network = "off"` the node's gaps say what THIS machine's
+/// Landlock does to a host command's TCP, and the card's sentence about
+/// the network follows exactly that gap (`ExecOffers::host_net_open`):
+/// listening is stopped where the kernel enforces Landlock's TCP rule (ABI
+/// 4 and up) and open where it does not. Skipped, loudly, where the node
+/// has no Landlock shell here.
+#[test]
+fn the_host_gap_for_a_network_off_node_follows_this_machines_landlock() {
+    let dir = tempfile::Builder::new()
+        .prefix("exec-modes-net-")
+        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+        .unwrap();
+    let data = dir.path().canonicalize().unwrap().join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    let settings = harness_tools::sandbox::Settings {
+        network: harness_tools::sandbox::Network::Off,
+        ..Default::default()
+    };
+    let s = harness_tools::sandbox::start_with_exe(
+        PathBuf::from(EXE),
+        &settings,
+        &data,
+        std::slice::from_ref(&data),
+        &data.join("node.toml"),
+    )
+    .unwrap();
+    if !matches!(
+        s.uncontained,
+        harness_tools::sandbox::Confinement::Confined { .. }
+    ) {
+        assert!(!bwrap::required(), "no Landlock shell on this machine");
+        eprintln!("SKIPPED: this machine has no Landlock host shell");
+        return;
+    }
+    let mut policy = harness_node::NodePolicy::default();
+    policy.execution.host = true;
+    policy.sandbox.network = harness_tools::sandbox::Network::Off;
+    let offers = harness_node::exec::ExecOffers::from_start(&s, &policy);
+    eprintln!(
+        "Landlock ABI {}: TCP stopped for a host command: {}",
+        s.landlock_abi,
+        s.host_tcp_stopped()
+    );
+    assert_eq!(s.host_tcp_stopped(), s.landlock_abi >= 4);
+    assert_eq!(offers.host_net_open(), !s.host_tcp_stopped());
 }
 
 /// X.2, T62: the node operator's instruction file in its default place,

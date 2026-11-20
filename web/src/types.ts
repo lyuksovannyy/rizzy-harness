@@ -302,6 +302,8 @@ export type Item =
       reason: string;
       exit_code: number | null;
       ran_ms: number;
+      /** Its end was not confirmed (`confirmed` other than `ended`/`unknown`): it may still run. */
+      open?: true;
       /** A background sub-agent's result instead (X.24): its report quoted, model text. */
       tail: string;
       /** Set for a background sub-agent: its agent's id. */

@@ -16,7 +16,7 @@ exist yet: `container` is a level that allows no mode until it does.
 | Mode | How a command runs | What still holds |
 |---|---|---|
 | `sandbox` | `sandbox-guard` → `bwrap` (its own PID namespace, its own file view built from the grants, `/proc` of its own where it can be mounted) → `sandbox-exec` (Landlock) → `bash` (T.8a to T.8f) | For the shell: nothing a command starts outlives it (from Landlock ABI 9; below, the socket gap `doctor` names); the file view; with `network = "off"`, a network namespace of its own; background commands. **Not** contained: what the node itself starts for the chat, under Landlock alone: `graph_query`'s graphify (review N-a, unchanged here: it runs `graphify update .` over the files the chat wrote, as the node's user), the node's checkpoint git and PDF reader |
-| `host` | `sandbox-exec` (Landlock, as `[sandbox] mode` says) → `bash`, as the node's OS user, no bubblewrap; with `[sandbox] mode = "off"` bash directly | Landlock's file rules where `[sandbox] mode` is `required` or `best-effort`: the session folder, its temp folder, the system folders and the `[sandbox] read`/`write` entries; TCP denied with `network = "off"`. **Not** held: no PID namespace (what a command starts can keep running after the call, the chat and the node), no file view (`/proc` lists every process, metadata of every path is visible), UDP and DNS go out with the network off, and below Landlock ABI 9 any service of the node's user reachable over a Unix socket (the session bus: `systemd-run --user`) runs anything with every right of that user. No background commands (the session has no background table, so they are not offered: review N-c). Any approval mode, `auto` included, within `max_approval_mode` (T50: review N-e's clamp to `ask` was removed by the owner's decision of 2026-11-14, in their words: "default accept mode is Auto for every chat type, no limits for apart chat types or agentic host access modes, so each can use auto, always accept, manual, etc..."); new chats start in `auto`, so a host chat on Auto runs every command as the node's user with no question asked and nothing stands between a prompt-injected agent and the machine. Its approval card, in Ask, says it runs in the host shell (review N-e) |
+| `host` | `sandbox-exec` (Landlock, as `[sandbox] mode` says) → `bash`, as the node's OS user, no bubblewrap; with `[sandbox] mode = "off"` bash directly | Landlock's file rules where `[sandbox] mode` is `required` or `best-effort`: the session folder, its temp folder, the system folders and the `[sandbox] read`/`write` entries; TCP denied with `network = "off"`. **Not** held: no PID namespace (what a foreground command starts can keep running after the call, the chat and the node; a background command, allowed since 2026-11-20, runs under the guard without bubblewrap, which ends it and what it started and confirms that, but not what it only asked another service to start), no file view (`/proc` lists every process, metadata of every path is visible), UDP and DNS go out with the network off, and below Landlock ABI 9 any service of the node's user reachable over a Unix socket (the session bus: `systemd-run --user`) runs anything with every right of that user. Background commands are allowed (the owner's decision of 2026-11-20, replacing review N-c's refusal): the session has a background table and its command runs under the node's guard without bubblewrap (`sandbox-guard --host`; PLAN.md T9), refused where the node has no sandbox wrapper to start it from (`[sandbox] mode = "off"`). Any approval mode, `auto` included, within `max_approval_mode` (T50: review N-e's clamp to `ask` was removed by the owner's decision of 2026-11-14, in their words: "default accept mode is Auto for every chat type, no limits for apart chat types or agentic host access modes, so each can use auto, always accept, manual, etc..."); new chats start in `auto`, so a host chat on Auto runs every command as the node's user with no question asked and nothing stands between a prompt-injected agent and the machine. Its approval card, in Ask, says it runs in the host shell (review N-e) |
 
 Landlock alone counts as `host`, not `sandbox` (the owner, 2026-11-13): it
 gives no PID namespace and no confirmed kill, which the rest of the sandbox
@@ -98,6 +98,10 @@ the gaps of those modes (`harness_protocol::GAPS`):
 * `gap:sandbox:sockets`: below Landlock ABI 9 (a socket in a granted
   folder reaches a service that starts processes outside);
 * `gap:sandbox:proc`: the shared-`/proc` form;
+* Background commands in a `host` chat need `[sandbox] mode` other than
+  `off` (the guard is started from the node's own image, held for the
+  sandbox wrapper): with `off` the chat is not offered `background: true`,
+  `bash_output` or `bash_stop` (a follow-up may start the guard directly);
 * `gap:host:netns`: network off, a `host` chat, Landlock stops TCP (UDP and
   DNS go out);
 * `gap:host:net-open`: network off, a `host` chat where nothing applies it
@@ -304,8 +308,9 @@ earlier build is refused at start as a schema mismatch (fix plan 4.3).
 * `agent-native/tests/host_forwarding.rs`
   `the_sessions_mode_picks_its_confinement_through_the_loop`.
 * `cli/tests/exec_modes.rs`: on one node offering both, a `host` session's
-  command runs outside bubblewrap and a `sandbox` session's inside; no
-  background command in `host`. `cli/tests/contain.rs`
+  command runs outside bubblewrap and a `sandbox` session's inside; a
+  background command in `host` is accepted and ended with the guard's
+  confirmation (`a_host_session_gets_a_background_command_under_the_guard`). `cli/tests/contain.rs`
   `doctor_marks_each_containment_state`, `cli/tests/network_off.rs`.
 * `master/tests/it/exec_mode_http.rs`: `host` needs the `host` level whatever one owns (H1), and the node list.
 * `web/src/components/execchoice.test.tsx`; `web/e2e/exec-modes.cjs`
@@ -331,7 +336,7 @@ earlier build is refused at start as a schema mismatch (fix plan 4.3).
   `master/tests/it/routines_http.rs` `a_routines_chat_is_always_in_the_sandbox`;
   `node/tests/exec_modes.rs` `host_is_never_the_default`,
   `a_host_session_takes_auto_within_the_nodes_ceiling` (it replaced `a_host_session_is_never_in_auto`
-  with the owner's decision of 2026-11-14), `a_host_session_is_not_offered_background_commands`,
+  with the owner's decision of 2026-11-14), `a_host_session_is_offered_background_commands` (the model is offered the tools since the owner's decision of 2026-11-20; before it was not: N-c),
   `an_agentic_session_without_a_recorded_mode_runs_nothing`; `node/src/exec.rs`
   `a_mode_not_offered_gets_a_confinement_that_runs_nothing`; `node/src/session.rs`
   `a_host_chats_card_says_the_host_shell`; `cli/tests/network_off.rs`

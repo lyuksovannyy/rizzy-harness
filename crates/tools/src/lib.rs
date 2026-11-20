@@ -49,8 +49,8 @@ use tokio_util::sync::CancellationToken;
 pub use approval::{CallKey, call_key};
 pub use background::{BashOutput, BashStop};
 pub use bash::{
-    Bash, ENDED_MS_LEAD, FOREGROUND_DESCRIPTION, KEPT_OUTPUT_LEAD, STILL_ALIVE_TAIL, ShellChild,
-    foreground_schema, read_only_note,
+    Bash, ENDED_MS_LEAD, FOREGROUND_DESCRIPTION, HOST_DESCRIPTION, KEPT_OUTPUT_LEAD,
+    STILL_ALIVE_TAIL, ShellChild, foreground_schema, read_only_note,
 };
 pub use board::{Board, BoardEdit, render as render_board};
 pub use edit::Edit;

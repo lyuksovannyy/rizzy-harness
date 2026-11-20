@@ -27,7 +27,7 @@ export function endWords(items: readonly Item[], ids: readonly string[]): string
             : e.exit_code != null
               ? ` (exit ${e.exit_code})`
               : ` (${e.reason.replace(/_/g, " ")})`;
-      return `${id} ended${how}`;
+      return `${id} ${e?.type === "background_ended" && e.open ? "may still be running" : "ended"}${how}`;
     })
     .join(", ");
 }

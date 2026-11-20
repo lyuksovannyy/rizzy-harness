@@ -1737,8 +1737,10 @@ names it):
   applies is the Landlock part of `[sandbox] mode` (which files a command
   can open; TCP with `network = "off"`), and nothing else: what a command
   starts can keep running after the call, the chat and the node; `/proc`
-  shows every process; with the network off UDP and DNS still go out; no
-  background commands; and below Linux 7.1 (Landlock ABI 9) a command can
+  shows every process; with the network off UDP and DNS still go out; a
+  background command (below) runs under the node's guard without
+  bubblewrap, so it is ended and its end confirmed, but it is not hidden
+  from later commands; and below Linux 7.1 (Landlock ABI 9) a command can
   ask any service of this user over a socket (the session bus:
   `systemd-run --user`) to run anything with every right of the user, its
   keys and other projects included. Treat it as a shell on this machine
@@ -2624,9 +2626,27 @@ is for a dev server, a watcher or a long build. The call waits 3 s: a command
 that ended by then is an ordinary result; one still running is kept by the
 node as `bg-1`, `bg-2`, … and the call returns its id, when its timeout will
 stop it and what it printed so far. It is the same contained command as any
-other (its own bubblewrap, guard, file view and, with the network off,
-network namespace), so later commands cannot see it in `ps` or signal it; the
-agent reads it with `bash_output { id }` (no id lists the chat's commands)
+other. In a sandbox chat that is its own bubblewrap, guard, file view and,
+with the network off, network namespace, so later commands cannot see it in
+`ps` or signal it. In a **host** chat (allowed there since the owner's
+decision of 2026-11-20: a steered agent can already leave a process behind
+from a foreground call, and a background command at least is listed, has a
+timeout and a Stop) it runs under the same guard without bubblewrap: a later
+command can see it in `ps` and signal it, but `bash_stop`, its timeout, the
+side panel and the chat's deletion end the command and every process
+descended from it, and the guard confirms that end; the node's stop does the
+same and records it, and after the node's death the guard ends it too, but
+nobody confirms it: the next start records `node_restarted`. What the command
+only asked another service to start (a container runtime, a systemd unit, an
+already running tmux server) is not covered. A guard killed with `kill -9`
+leaves what it ran behind (the node's start sweep does not find it): the chat
+then says the command and what it started MAY STILL BE RUNNING on this
+machine, because nothing looked for them. A deep chain of nested processes
+(hundreds of levels) is ended one level per pass, so its end can take
+seconds and the stop's result says "not ended yet" until the guard reports.
+Background commands in a host chat need `[sandbox] mode` other than `off`;
+with `off` the chat is not offered `background: true`, `bash_output` or
+`bash_stop`. The agent reads it with `bash_output { id }` (no id lists the chat's commands)
 and stops it with `bash_stop { id }`. When a foreground call puts a job in
 the background by hand (an unquoted `&`, or `setsid`), the harness sends the agent
 one `[harness]` note after that call's result (recorded with the call, so a
@@ -2653,11 +2673,12 @@ limits are node.toml's only: at most `background_per_session` per chat and
 `background_per_node` per node (a start over either is refused, naming the
 chat's running ids, never another chat's; nothing is stopped to make room;
 one user's chats can take every slot of the node). Background commands are
-refused in a sub-agent's session and in a `host` chat (no containment,
-see "Execution modes").
-**With `[sandbox] network = "off"` a server started in the background cannot
-be reached** by a later command: each command has a network namespace of its
-own; the start's result says so. A command stops at its timeout, with
+refused in a sub-agent's session, and on a node that runs commands without
+its sandbox wrapper (`[sandbox] mode = "off"`), which the guard starts from.
+**With `[sandbox] network = "off"` a server started in the background of a
+sandbox chat cannot be reached** by a later command: each command has a
+network namespace of its own; the start's result says so. (A host chat has no
+such namespace; see below.) A command stops at its timeout, with
 `bash_stop`, when the chat is deleted, when its owner loses access to it
 (the chat then starts none until its owner writes to it again), with the
 side panel's Stop, and when the node stops or dies; a turn's Stop leaves it

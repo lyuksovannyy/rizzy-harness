@@ -110,6 +110,14 @@ impl ExecOffers {
         self.of(mode).is_ok()
     }
 
+    /// Whether `[sandbox] network = "off"` leaves a `host` chat's TCP open
+    /// on this node (no Landlock, or one that does not enforce TCP rules:
+    /// [`GAP_HOST_NET_OPEN`]). Only set where the network is off and the
+    /// host mode is offered; the network on needs no gap.
+    pub fn host_net_open(&self) -> bool {
+        self.gaps.contains(&GAP_HOST_NET_OPEN)
+    }
+
     /// The modes offered, most confined first.
     pub fn offered(&self) -> Vec<ExecMode> {
         ExecMode::ALL

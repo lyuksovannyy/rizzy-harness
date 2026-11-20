@@ -817,7 +817,7 @@ export default function Conversation(props: {
                       <details key={i} className="divider">
                         <summary>
                           {it.agent ? `@${it.agent} ` : ""}
-                          {it.bg_id} ended ({it.reason.replace(/_/g, " ")}
+                          {it.bg_id} {it.open ? "may still be running" : "ended"} ({it.reason.replace(/_/g, " ")}
                           {it.exit_code != null ? `, code ${it.exit_code}` : ""}) after {Math.round(it.ran_ms / 1000)} s
                         </summary>
                         {it.tail && <pre>{showHidden(it.tail)}</pre>}
