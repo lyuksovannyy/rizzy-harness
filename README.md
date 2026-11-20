@@ -707,6 +707,13 @@ for keeping the directory secret: whoever can read `master.db` can read every
 file, so use full-disk encryption for that. Old copies of `master.db` pages can
 survive on SSDs and copy-on-write filesystems ([docs/media.md](docs/media.md)).
 
+**A request id on every error.** Every answer from the server carries a
+request id (`x-request-id`, and `request_id` in an error's JSON). Where the
+page shows a failed request (renaming or deleting a chat, saving Settings, the
+account menu, retrying a turn) the message ends in `(request 3f2a…)`: send
+that id to whoever runs the server, who finds the same id on the log line of
+the failure. Errors that have none show nothing extra.
+
 **One process per data directory.** `serve`, `node run` and `node join` hold
 a lock on `<data>/lock` for as long as they run. A second one started on the
 same directory (typing `serve` twice, a `node run` pointed at the server's
@@ -747,10 +754,11 @@ default_model = "openrouter::openai/gpt-4o"   # unset: agent general's, else the
 model = "deepseek::deepseek-chat"
 fallbacks = ["openrouter::openai/gpt-4o"]   # tried in order (see below)
 
-[agent_avatars.coder]                # how the agent looks; unset: derived from its id
-shape = "hexagon"                    # circle | triangle | square | hexagon | diamond | drop
-eyes = "wide"                        # round | long | short | wide | sleepy
-accent = "green"                     # blue | purple | pink | red | orange | yellow | green | graphite
+[agent_avatars.coder]                # how the agent looks; unset: derived from its id (built-in agents have their own)
+shape = "hexagon"                    # circle | triangle | square | hexagon | diamond | drop | cloud | bean | heart | star | flower
+                                     # | ghost | cat | bunny | mushroom | leaf | mug | shield | bubble | hat | rocket
+eyes = "long"                        # long (tall pills, the default) | round | short | wide | sleepy
+accent = "green"                     # blue | purple | pink | red | orange | yellow | green | graphite | white | black | brown | teal
 
 [[providers]]
 id = "openrouter"                    # the prefix: a-z, 0-9, _ and -
@@ -1658,6 +1666,28 @@ itself and Enter in it answers nothing: only the Deny button sends it. If you
 allow while part of the input is collapsed, the card says how many characters
 you have not expanded.
 
+**Where the choice appears.** In the chat you have open, the composer's text
+field is replaced by the card and its buttons while a call waits, and comes
+back, with what you had typed and the caret where it was, once the call is
+answered (here or in another tab). The buttons ignore every answer, mouse and
+keys alike, for the first 0.7 seconds. Focus waits on the choice itself, never
+on a button, and for that moment keys typed anywhere on the page are dropped
+(so the end of a line you were typing, such as `/tmp/x` and Enter, opens
+nothing, sends nothing and answers nothing); the first Tab then reaches the
+first button. While a choice is up, `/` does not open search (Ctrl/Cmd+K
+still does). With several calls waiting, one shows at a time, in the order the
+agent asked ("1 of 3"); the others' cards say they come after. Only the
+command (or an edit's rows) scrolls, in a box you can reach with the keyboard
+and that says when there is more below; the reason, the warning about
+characters you have not expanded and the "for this chat" note stay between it
+and the buttons. Stop and the mode picker stay where they are; changing the
+mode does not answer the waiting call (Plan denies it), and the picker says
+so. The field itself is hidden, so nothing new can be queued until the call is
+answered. A screen reader is told which tool waits and where the buttons are,
+never the command. A chat you have not opened keeps showing its card in
+the transcript, and the browser notification (when the tab is hidden) carries
+fixed words and the chat's place in the list, never the command.
+
 `node.toml`: the node's own policy. It is authoritative: the master can only
 ask for stricter settings.
 
@@ -2220,7 +2250,16 @@ are not the command's own (`/proc/$$` is another process); the log and
 sandbox mode. With `mode = "off"` there is no sandbox and no containment:
 the sandbox mode is not offered (`[execution] sandbox = "strict"` is
 refused at start), and a `host` chat's shell runs with every right of this
-OS user. Nothing in a request, a chat or an agent definition can turn the
+OS user and **has no file rule at all, so it can read and change the node's
+own data directory**: other people's chats kept on this node, the store of
+approved repository MCP servers (so it can approve a server for anyone, which
+then starts in their chats, sandboxed ones too, after the node restarts), the
+node's keys and its token. That is a property of this configuration: use
+`mode = "off"` with `[execution] host = true` only where everyone who may
+open a `host` chat is trusted like the node's owner. The start and `doctor`
+warn about the combination (`host chats: ...`). With the default `mode =
+"required"` the data directory is out of a `host` chat's reach (test: `cli/tests/exec_modes.rs`
+`a_host_chats_shell_cannot_read_or_change_the_data_directory`). Nothing in a request, a chat or an agent definition can turn the
 containment off: a chat's mode is chosen when it is created, from what
 the node offers. Only the agent's shell is contained; graphify
 and the node's own git and PDF reader keep the Landlock sandbox alone, in
@@ -2381,11 +2420,15 @@ tool_timeout_sec = 300                # one call (1 .. 3600)
   with the reason (and the end of its error output); the server is
   started again at its next use, at most 3 times in a row (a successful
   call starts the count again).
-- **It never outlives its chat.** A server is stopped when its chat is
-  deleted, when the node stops, and after 10 minutes without a call (it
-  starts again when needed). A `sandbox` chat's server also dies with the
-  node; a `host` chat's can outlive a `kill -9` of the node, like its
-  commands.
+- **It ends with its chat, as far as the chat's mode reaches.** A server is
+  stopped when its chat is deleted, when the node stops, and after 10
+  minutes without a call (it starts again when needed). In a `sandbox` chat
+  everything it started ends with it, and it also dies with the node (a
+  `kill -9` too). In a `host` chat the stop kills the server's own process
+  group: a process it detached (`setsid`, a double fork) is not reached and
+  keeps running. After a `kill -9` of the node a `host` chat's server can
+  stay too, as its foreground commands can; its background commands die with
+  the node (the guard).
 
 `rizzy-harness doctor` starts each server once and prints how many tools
 it offers, or why it did not start.
@@ -2447,20 +2490,36 @@ lists them for a project with a folder on such a node:
   over 64 KiB, more than 32 servers, not the standard shape) changes
   nothing.
 - **Where it runs:** in your own chats whose folder is the project's
-  folder, sandboxed ones only (a `host` chat starts none and says so; a
-  node that offers only host chats refuses the list), exactly like a
-  node.toml server there: in the chat's containment, its tools asked about
-  in `ask`, the same caps, the idle stop, the Connectors switch and the
-  Plugins and `denied_tools` lists by name. Another person's chat in the
-  same folder starts nothing you approved. **Its environment** is the core
+  folder, exactly like a node.toml server there: in a sandboxed chat
+  inside the chat's containment; in a `host` chat (the owner's decision of
+  2026-11-20: "if user selected host project workspace, why do we need to
+  limit it? its his choice") as the node's own user, **without the
+  sandbox**, with the reach of that user; a stop kills its process group
+  only, so a process it detached is not reached, and it can outlive a
+  `kill -9` of the node, as a node.toml server there does (see "It ends with
+  its chat" above). The project page says so beside the approval where the
+  node offers host chats. Its tools are asked about in `ask`, with the
+  same caps, the idle stop, the Connectors switch and the Plugins and
+  `denied_tools` lists by name. Another person's chat in the same folder
+  starts nothing you approved, with one exception that is a property of
+  `[sandbox] mode = "off"` and not of this feature: on such a node a `host`
+  chat's shell has no file rule and can write the node's store of approvals,
+  so it can approve a server for anyone (it then starts in their chats,
+  sandboxed ones too, after the node restarts). With the default `mode =
+  "required"` Landlock keeps the data directory out of a `host` chat's reach.
+  See the paragraph on `mode = "off"` in the sandbox section; the node warns
+  at start and `doctor` shows the combination. **Its environment** is the core
   list only (no `env_pass`, no `env_vars`) and the entry's `env` values.
   Those reach the server's own process and no other: the node hands them
   over in a private file the sandbox's guard passes on as an open
   descriptor, and the sandbox sets them right before it starts the
   server, after it confined itself; they are in no command line and on no
   process that sets the sandbox up. An entry with `env` values therefore
-  runs only where the chat is contained by bubblewrap. They are not
-  secrets of the node: nothing scrubs them from what the server prints.
+  runs only where the chat is contained by bubblewrap: **in a `host` chat
+  it is not started for now**, and the chat is told which server and why;
+  an entry without `env` starts there. Take the values out of the entry
+  and approve it again, or use a sandboxed chat. They are not secrets of
+  the node: nothing scrubs them from what the server prints.
 - **What an approval does not pin:** the files the command runs. An
   approved `./tools/server.py` or `npx some-package` runs whatever that
   file or package is at the time, with the chat's own sandbox and no
@@ -4405,7 +4464,10 @@ before the tool says it is busy.
 **Default agents per mode.** A chat gets the Assistant unless you pick
 another; an Agentic chat gets the Software Developer. A workspace overrides
 each (`default_agent` for chats, `default_agentic_agent` for Agentic), and
-your own preferences override the workspace's in the picker. An agent you
+your own preferences override the workspace's in the picker (Settings →
+Account → Preferences → New chats has one picker for chats and one for coding
+chats on a node, the second listing only agents that can change files or run
+commands). An agent you
 name for the chat always wins. The Agentic default must be able to change
 files or run commands: the Assistant, Smol and Researcher are refused there,
 saying why; so is an agent that runs only as a sub-agent or does not exist,

@@ -160,11 +160,26 @@ reads them for the person looking. Only on a node whose node.toml says `[mcp] pr
   has the name).
 - **Approve** (new or changed entries) sends the entry's name and the digest the list gave; the
   node approves only if the file's entry still has it, keeps its own copy (data directory, 0600)
-  and runs that copy in this person's sandboxed chats in this folder, never the file's text.
+  and runs that copy in this person's chats in this folder (in a `host` chat as the node's user,
+  without the sandbox, by the owner's decision of 2026-11-20; a node that offers only host chats
+  answers the list too), never the file's text. An entry with `env` values is not started in a
+  host chat for now (the chat is told which and why); it starts in a sandboxed one. The page says,
+  where the node offers host chats, that an approved server runs there without the sandbox. Like a
+  node.toml server's, a host chat's repository server is stopped with its chat, at the node's
+  stop and after 10 idle minutes: in a host chat the stop kills the server's own process group, a
+  process it detached (`setsid`, a double fork) is not reached, and the server can outlive a
+  `kill -9` of the node (PLAN.md T47); in a sandbox chat everything it started ends with it.
   **Remove** takes the person's approval away (always allowed; its server stops at once).
   **Reload** reads the file again; nothing else does but opening the list, an approve or a remove
   and, once per chat, its first turn since the node started (to leave out an entry gone from the
   file).
+- Open, host chats and `env` values: the values must reach only the server's own process. With
+  `[sandbox] mode = "off"` the node spawns the server itself, so values set on that spawn would be
+  enough and no argument carries them; with the Landlock wrapper (`sandbox-exec`, our own binary)
+  they would have to travel as the descriptor the guard hands over today for bubblewrap, so the
+  server would have to run under the host guard (`sandbox-guard --host`: a FIFO for its input, a
+  root for the env file; a side effect is that a `kill -9` of the node would end it). Neither is
+  built; until then the entry is not started in a host chat and the chat is told which and why.
 - An approval is the person's own: another member's chats in the folder start nothing of it. Who
   may ask: a member of the project's workspace who may run agent chats on its node (the rule of
   the project's folder), never the API token. Each approve and remove is an audit line.

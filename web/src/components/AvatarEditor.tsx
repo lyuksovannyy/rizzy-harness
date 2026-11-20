@@ -1,26 +1,39 @@
-// How an agent looks: shape, eyes and accent, with a live preview that also
-// plays the faces it makes while it works. Opened from the agent's page.
+// How an agent looks: a grid of shapes, a row of colours and the eyes, with
+// a live preview that also plays the faces it makes while it works. Opened from the agent's page.
 import { useEffect, useRef, useState } from "react";
 import { pageApi } from "../apiPages";
 import { radioKeys, radioTab } from "../lib/radios";
-import type { Agent, AgentAvatar as Avatar, AvatarState } from "../types";
-import { AgentAvatar, AVATAR_ACCENTS, EYES, SHAPES, STATES } from "./AgentAvatar";
+import type { Agent, AgentAvatar as Avatar, AvatarAccent, AvatarEyes, AvatarShape, AvatarState } from "../types";
+import { accentVar, AgentAvatar, AVATAR_ACCENTS, EYES, SHAPES, STATES } from "./AgentAvatar";
 
-/** One radio group of avatar choices, each drawn as the avatar it gives. */
+const SHAPE_NAME: Record<AvatarShape, string> = {
+  circle: "round blob", triangle: "rounded triangle", square: "soft square", hexagon: "hexagon", diamond: "diamond",
+  drop: "drop", cloud: "cloud", bean: "bean", heart: "heart", star: "star", flower: "flower", ghost: "ghost",
+  cat: "cat", bunny: "bunny", mushroom: "mushroom", leaf: "leaf", mug: "mug", shield: "shield",
+  bubble: "speech bubble", hat: "wizard hat", rocket: "rocket",
+};
+const EYES_NAME: Record<AvatarEyes, string> = { long: "tall", round: "round", short: "short", wide: "wide", sleepy: "sleepy" };
+const COLOUR_NAME: Partial<Record<AvatarAccent, string>> = { graphite: "grey" };
+
+/** One radio group of avatar choices; `draw` paints each as it will look. */
 function Picks<K extends keyof Avatar>(props: {
   label: string;
+  className: string;
   part: K;
   values: Avatar[K][];
+  names: (v: Avatar[K]) => string;
   avatar: Avatar;
   onPick: (a: Avatar) => void;
+  draw: (v: Avatar[K], next: Avatar) => React.ReactNode;
 }) {
   return (
     <div className="field">
       {props.label}
-      <div className="row wrap avatar-picks" role="radiogroup" aria-label={props.label} onKeyDown={radioKeys}>
+      <div className={`row wrap avatar-picks ${props.className}`} role="radiogroup" aria-label={props.label} onKeyDown={radioKeys}>
         {props.values.map((v) => {
           const on = props.avatar[props.part] === v;
           const next = { ...props.avatar, [props.part]: v };
+          const name = props.names(v);
           return (
             <button
               key={v}
@@ -28,12 +41,12 @@ function Picks<K extends keyof Avatar>(props: {
               role="radio"
               aria-checked={on}
               tabIndex={radioTab(on)}
-              aria-label={v}
-              title={v}
+              aria-label={name}
+              title={name}
               className={on ? "on" : ""}
               onClick={() => props.onPick(next)}
             >
-              <AgentAvatar avatar={next} size={28} />
+              {props.draw(v, next)}
             </button>
           );
         })}
@@ -47,9 +60,9 @@ export function AvatarEditor(props: { agent: Agent; onSaved: () => void; onClose
   const [state, setState] = useState<AvatarState>("idle");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  // Focus moves into the editor that opens, on the face picked.
+  // Focus moves into the editor that opens, on the shape picked.
   const box = useRef<HTMLDivElement>(null);
-  useEffect(() => box.current?.querySelector<HTMLElement>('[role="radio"][tabindex="0"]')?.focus(), []);
+  useEffect(() => box.current?.querySelector<HTMLElement>('[aria-label="Shape"] [role="radio"][tabindex="0"]')?.focus(), []);
   const save = async () => {
     setBusy(true);
     setErr(null);
@@ -83,9 +96,36 @@ export function AvatarEditor(props: { agent: Agent; onSaved: () => void; onClose
           ))}
         </div>
       </div>
-      <Picks label="Shape" part="shape" values={SHAPES} avatar={avatar} onPick={setAvatar} />
-      <Picks label="Eyes" part="eyes" values={EYES} avatar={avatar} onPick={setAvatar} />
-      <Picks label="Colour" part="accent" values={AVATAR_ACCENTS} avatar={avatar} onPick={setAvatar} />
+      <Picks
+        label="Shape"
+        className="avatar-shapes"
+        part="shape"
+        values={SHAPES}
+        names={(v) => SHAPE_NAME[v]}
+        avatar={avatar}
+        onPick={setAvatar}
+        draw={(_, next) => <AgentAvatar avatar={next} size={40} />}
+      />
+      <Picks
+        label="Colour"
+        className="avatar-swatches"
+        part="accent"
+        values={AVATAR_ACCENTS}
+        names={(v) => COLOUR_NAME[v] ?? v}
+        avatar={avatar}
+        onPick={setAvatar}
+        draw={(v) => <span className="avatar-swatch" data-accent={v} style={{ "--sw": accentVar(v) } as React.CSSProperties} />}
+      />
+      <Picks
+        label="Eyes"
+        className="avatar-eyes"
+        part="eyes"
+        values={EYES}
+        names={(v) => EYES_NAME[v]}
+        avatar={avatar}
+        onPick={setAvatar}
+        draw={(_, next) => <AgentAvatar avatar={next} size={32} />}
+      />
       {err && <div className="error-text">{err}</div>}
       <div className="row end">
         <button type="button" onClick={props.onClose}>

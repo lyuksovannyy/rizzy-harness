@@ -10,6 +10,8 @@ import type { Agent, AgentAvatar as Avatar, Item, SessionView } from "../types";
 import { AgentAvatar, AgentMark, agentAlert, AVATAR_ACCENTS, EYES, SHAPES, STATES } from "./AgentAvatar";
 import { DONE_MS, sessionFace, useAvatarState } from "./avatarState";
 import { Composer } from "./Composer";
+import css from "../styles.css?raw";
+import { bbox, edgeDistance, inside, pill, polygons, type Pt } from "./avatarGeometry";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -69,12 +71,134 @@ describe("AgentAvatar", () => {
     }
   });
 
-  test("the colour is an accent token, never a literal", () => {
-    for (const accent of AVATAR_ACCENTS) {
-      render(<AgentAvatar avatar={{ shape: "circle", eyes: "round", accent }} />);
-      expect(svg().getAttribute("style")).toContain(`--av-c: var(--ac-${accent}-2)`);
+  test("the colour is a theme token, never a literal: the UI accents' tone or the avatar's own", () => {
+    expect(AVATAR_ACCENTS).toHaveLength(12);
+    for (const accent of ["blue", "purple", "pink", "red", "orange", "yellow", "green", "graphite", "white", "black", "brown", "teal"] as const) {
+      expect(AVATAR_ACCENTS).toContain(accent);
+      render(<AgentAvatar avatar={{ shape: "circle", eyes: "long", accent }} />);
+      const own = ["white", "black", "brown", "teal", "yellow", "green"].includes(accent);
+      expect(svg().getAttribute("style")).toContain(own ? `--av-c: var(--av-c-${accent})` : `--av-c: var(--ac-${accent}-2)`);
+      expect(svg().dataset.accent).toBe(accent);
       expect(host.innerHTML).not.toMatch(/#[0-9a-f]{3,6}\b|rgb\(/i);
     }
+  });
+
+  test("an unknown shape, eyes or colour draws the default: a round blob with tall eyes, in blue", () => {
+    const bad = { shape: "toString", eyes: "constructor", accent: "#ff0000" } as unknown as Avatar;
+    render(<AgentAvatar avatar={bad} />);
+    expect(svg().getAttribute("style")).toContain("--av-c: var(--ac-blue-2)");
+    expect(svg().dataset.accent).toBe("blue");
+    expect(svg().querySelector(".av-face")!.getAttribute("d")).toBe(
+      (render(<AgentAvatar avatar={{ shape: "circle", eyes: "long", accent: "blue" }} />), svg().querySelector(".av-face")!.getAttribute("d")),
+    );
+    render(<AgentAvatar avatar={bad} />);
+    const tall = svg().querySelector(".av-pupil")!;
+    render(<AgentAvatar avatar={{ shape: "circle", eyes: "long", accent: "blue" }} />);
+    expect(svg().querySelector(".av-pupil")!.getAttribute("height")).toBe(tall.getAttribute("height"));
+  });
+
+  test("the shapes are twenty-one distinct, compact paths", () => {
+    expect(SHAPES).toHaveLength(21);
+    const paths = SHAPES.map((shape) => {
+      render(<AgentAvatar avatar={{ shape, eyes: "long", accent: "blue" }} />);
+      return svg().querySelector(".av-face")!.getAttribute("d")!;
+    });
+    expect(new Set(paths).size).toBe(21);
+    for (const d of paths) expect(d.length).toBeLessThan(260);
+  });
+
+  test("the eyes are pills with a glint (a sleepy one is too flat for it), the tall pill the default", () => {
+    const seen: Record<string, { w: number; h: number; glints: number }> = {};
+    for (const eyes of EYES) {
+      render(<AgentAvatar avatar={{ shape: "cloud", eyes, accent: "blue" }} />);
+      const p = svg().querySelector(".av-pupil")!;
+      expect(p.tagName).toBe("rect");
+      const [w, h] = [Number(p.getAttribute("width")), Number(p.getAttribute("height"))];
+      expect(Number(p.getAttribute("rx"))).toBe(Math.min(w, h) / 2);
+      seen[eyes] = { w, h, glints: svg().querySelectorAll(".av-glint").length };
+    }
+    expect(EYES[0]).toBe("long");
+    expect(seen.long!.h).toBeGreaterThan(seen.long!.w * 1.8);
+    expect(seen.round!.h).toBeLessThan(seen.round!.w * 1.4);
+    expect(seen.short!.h).toBeLessThan(seen.long!.h);
+    expect(seen.wide!.w).toBeGreaterThan(seen.wide!.h);
+    expect([seen.long!.glints, seen.sleepy!.glints]).toEqual([2, 0]);
+    expect(host.innerHTML).not.toMatch(/Gradient|av-shine|av-side/);
+  });
+
+  // The eyes, read from the drawing: each pill's centre and radii.
+  const eyesOf = () =>
+    [...svg().querySelectorAll<SVGGElement>(".av-eye")].map((g) => {
+      const [x, y] = g.getAttribute("transform")!.match(/-?[\d.]+/g)!.map(Number) as [number, number];
+      const r = g.querySelector(".av-pupil")!;
+      return { c: [x, y] as Pt, rx: Number(r.getAttribute("width")) / 2, ry: Number(r.getAttribute("height")) / 2 };
+    });
+  // How far the CSS moves the eyes: the pointer's reach and the thinking glance.
+  const reach = {
+    gx: Number(css.match(/--av-gx, 0\) \* ([\d.]+)px/)![1]),
+    gy: Number(css.match(/--av-gy, 0\) \* ([\d.]+)px/)![1]),
+    tx: Number(css.match(/"thinking"\] \.av-look \{ transform: translate\(([\d.]+)px, -([\d.]+)px/)![1]),
+    ty: Number(css.match(/"thinking"\] \.av-look \{ transform: translate\(([\d.]+)px, -([\d.]+)px/)![2]),
+  };
+
+  test("the eyes lie well inside every body: a margin at rest, and still inside when glancing and following the pointer", () => {
+    for (const shape of SHAPES) {
+      render(<AgentAvatar avatar={{ shape, eyes: "long", accent: "blue" }} />);
+      const body = polygons(svg().querySelector(".av-face")!.getAttribute("d")!);
+      for (const eyes of EYES) {
+        render(<AgentAvatar avatar={{ shape, eyes, accent: "blue" }} />);
+        for (const e of eyesOf()) {
+          // The default look keeps 0.8 units (of 36) clear of the edge; the others 0.3.
+          const margin = eyes === "long" ? 0.8 : 0.3;
+          for (const p of pill(e.c, e.rx + margin, e.ry + margin)) {
+            expect(inside(body, p), `${shape}/${eyes} at rest`).toBe(true);
+          }
+          if (eyes !== "long") continue;
+          // Looking up and aside while the pointer pulls the same way: the worst case.
+          for (const p of pill([e.c[0] + reach.tx + reach.gx, e.c[1] - reach.ty - reach.gy], e.rx, e.ry)) {
+            expect(inside(body, p), `${shape} thinking + pointer`).toBe(true);
+          }
+          for (const p of pill([e.c[0] - reach.gx, e.c[1] + reach.gy], e.rx, e.ry)) {
+            expect(inside(body, p), `${shape} pointer below`).toBe(true);
+          }
+          // The brow (error, unsure) stays on the body too.
+          const brow = e.c[1] - e.ry - 3.7;
+          expect(inside(body, [e.c[0], brow]), `${shape} brow`).toBe(true);
+        }
+      }
+    }
+  });
+
+  test("the default eyes are big: more than a quarter of the body's height, and the two stay apart", () => {
+    for (const shape of SHAPES) {
+      render(<AgentAvatar avatar={{ shape, eyes: "long", accent: "blue" }} />);
+      const box = bbox(polygons(svg().querySelector(".av-face")!.getAttribute("d")!));
+      // The mug's handle is not the body: its height is the cup's.
+      const height = shape === "mug" ? 27 : box.y1 - box.y0;
+      const [l, r] = eyesOf();
+      expect((2 * l!.ry) / height, shape).toBeGreaterThanOrEqual(0.29);
+      expect((2 * l!.rx) / (box.x1 - box.x0), shape).toBeGreaterThan(0.1);
+      // Two eyes, not one blob: a clear gap (3.1 units of 36 or more).
+      const gap = r!.c[0] - l!.c[0] - 2 * l!.rx;
+      expect(gap, shape).toBeGreaterThanOrEqual(3.1);
+      expect(edgeDistance(polygons(svg().querySelector(".av-face")!.getAttribute("d")!), l!.c), shape).toBeGreaterThan(l!.rx + 0.8);
+    }
+  });
+
+  test("the flat body has no gradient, and eyes are dark where white would not read", () => {
+    render(<AgentAvatar avatar={{ shape: "star", eyes: "long", accent: "yellow" }} />);
+    expect(svg().querySelectorAll("path.av-face")).toHaveLength(1);
+    expect(svg().querySelector("linearGradient, radialGradient, defs")).toBeNull();
+    // One rule gives the light colours their dark eyes; the rest keep white.
+    const rule = css.match(/\.agent-avatar:is\(([^)]*)\) \{ --av-on: var\(--on-dark-accent\); \}/);
+    expect(rule).not.toBeNull();
+    const dark = [...rule![1]!.matchAll(/data-accent="(\w+)"/g)].map((m) => m[1]);
+    expect(dark.sort()).toEqual(["graphite", "orange", "white", "yellow"]);
+    expect(css).toMatch(/\.agent-avatar \.av-pupil \{ fill: var\(--av-on, var\(--on-light-accent\)\); \}/);
+    expect(css).toMatch(/\.agent-avatar \.av-glint \{ fill: var\(--av-c\); \}/);
+    // White and black each carry the hairline their own ground needs.
+    expect(css).toMatch(/\[data-accent="white"\] \{ --av-edge: var\(--av-edge-white\); \}/);
+    expect(css).toMatch(/\[data-accent="black"\] \{ --av-edge: var\(--av-edge-black\); \}/);
   });
 
   test("a title makes it an image; without one it is decoration", () => {

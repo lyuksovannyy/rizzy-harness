@@ -2,7 +2,7 @@ import { ArrowUp, AtSign, CornerDownRight, FileText, Globe, Image, Loader2, Mic,
 import { type Dispatch, lazy, type SetStateAction, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { t } from "../lib/i18n";
 import { isTag, marked, mentionable, pickable } from "../lib/agents";
-import { activeMention, filterAgents, insertMention, isPathToken, leadingMention } from "../lib/mentions";
+import { activeMention, filterAgents, matchedAlias, insertMention, isPathToken, leadingMention } from "../lib/mentions";
 import { cycleMode, enabledModes, MODES, type Mode } from "../lib/modes";
 import { modelLabel, offeredModels, resolveModel } from "../lib/models";
 import { radioKeys, radioTab } from "../lib/radios";
@@ -142,6 +142,14 @@ export function Composer(props: {
   filesOf?: string;
   /** Session: `/compact [focus]` summarises the chat now instead of sending a message (X.20). */
   compact?: (focus: string) => Promise<unknown>;
+  /** Session: a call waits for approval and its choice is shown in the
+   * field's place (row W.6): the field is hidden, its draft and caret kept. */
+  choosing?: boolean;
+  /** Session: the choice's own container, which takes the focus the field
+   * had (or nobody had) when the choice appears. */
+  choiceBox?: React.RefObject<HTMLElement | null>;
+  /** Session: said next to the mode picker while a choice is up. */
+  modeNote?: string;
   /** Session: a /compact runs; Stop cancels it. */
   compacting?: boolean;
 }) {
@@ -326,6 +334,24 @@ export function Composer(props: {
   useEffect(() => {
     ta.current?.focus();
   }, []);
+  // The choice takes the field's place: whoever was typing is taken out of
+  // it (so no key lands in a hidden field) and put back, caret kept, when
+  // the call is answered; anyone elsewhere keeps their focus.
+  const typing = useRef(false);
+  useLayoutEffect(() => {
+    const el = ta.current;
+    if (props.choosing) {
+      const at = document.activeElement;
+      typing.current = at === el;
+      if (typing.current) el!.blur();
+      // Focus waits on the choice's container (never a button): the rest of
+      // a typing burst lands there and is dropped, not in the page.
+      if (typing.current || at === document.body) props.choiceBox?.current?.focus({ preventScroll: true });
+    } else if (typing.current) {
+      typing.current = false;
+      el?.focus();
+    }
+  }, [props.choosing]);
 
   const inProject = !!props.project;
   const enabled = useMemo(
@@ -433,7 +459,7 @@ export function Composer(props: {
       : filterAgents(mentionable(props.agents), mention.query).map((a) => ({
           id: a.id,
           title: a.id,
-          hint: [isTag(a) && t("composer.tagHint"), marked(a, a.description || a.name)].filter(Boolean).join(" · "),
+          hint: [isTag(a) && t("composer.tagHint"), matchedAlias(a, mention.query) && `@${matchedAlias(a, mention.query)}`, marked(a, a.description || a.name)].filter(Boolean).join(" · "),
           agent: a,
         }));
   const popupOpen = suggestions.length > 0;
@@ -674,7 +700,7 @@ export function Composer(props: {
         </ul>
       )}
       <div
-        className={`composer ${mode === "search" && home ? "is-search" : ""}`}
+        className={`composer ${mode === "search" && home ? "is-search" : ""}${props.choosing ? " choosing" : ""}`}
         onDragOver={(e) => canImage && e.preventDefault()}
         onDrop={(e) => takeImages(e, e.dataTransfer.files)}
       >
@@ -685,6 +711,7 @@ export function Composer(props: {
           placeholder={placeholder}
           aria-label={placeholder}
           disabled={!!props.readOnly}
+          hidden={props.choosing}
           onChange={(e) => {
             setText(e.target.value);
             setCaret(e.target.selectionStart);
@@ -822,10 +849,15 @@ export function Composer(props: {
                 onChange={(m) => {
                   setErr(null);
                   props.approval!.onChange(m).catch((x) => setErr(x instanceof Error ? x.message : String(x)));
-                  ta.current?.focus();
+                  if (!props.choosing) ta.current?.focus();
                 }}
               />
             </Suspense>
+          )}
+          {!home && props.approval && !props.readOnly && props.choosing && props.modeNote && (
+            <span className="approval-pending-note small muted" role="note">
+              {props.modeNote}
+            </span>
           )}
           {!home && props.steps && !props.readOnly && (
             <Suspense fallback={null}>

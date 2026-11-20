@@ -1,4 +1,4 @@
-// An agent's face: a small 2.5D shape with eyes, in one of the accents.
+// An agent's face: a flat, soft blob with two pill eyes, in one colour.
 // Drawn in SVG from theme tokens (styles.css, "Agent avatars"), so it
 // follows the theme; the face shows what the agent is doing. Motion is CSS
 // only and stops under reduced motion, where the expressions stay.
@@ -6,37 +6,67 @@ import { own } from "../emptyView";
 import { AlertTriangle } from "lucide-react";
 import { useId, useRef } from "react";
 import { useMedia } from "../bg/hooks";
-import { ACCENTS, normalizeAccent } from "../lib/appearance";
+import { normalizeAccent } from "../lib/appearance";
 import { fnv1a } from "../lib/fnv";
 import { rawModel } from "../lib/models";
 import type { Agent, AgentAvatar as Avatar, AvatarAccent, AvatarEyes, AvatarShape, AvatarState } from "../types";
 
-export const SHAPES: AvatarShape[] = ["circle", "triangle", "square", "hexagon", "diamond", "drop"];
-export const EYES: AvatarEyes[] = ["round", "long", "short", "wide", "sleepy"];
-export const AVATAR_ACCENTS: AvatarAccent[] = [...ACCENTS];
+export const SHAPES: AvatarShape[] = [
+  "circle", "triangle", "square", "hexagon", "diamond", "drop", "cloud", "bean", "heart", "star", "flower",
+  "ghost", "cat", "bunny", "mushroom", "leaf", "mug", "shield", "bubble", "hat", "rocket",
+];
+export const EYES: AvatarEyes[] = ["long", "round", "short", "wide", "sleepy"];
+/** The colours the avatar picker offers, in its order. */
+export const AVATAR_ACCENTS: AvatarAccent[] = [
+  "white", "brown", "red", "orange", "yellow", "green", "teal", "blue", "purple", "pink", "graphite", "black",
+];
 export const STATES: AvatarState[] = ["idle", "thinking", "working", "unsure", "done", "error"];
 
 const REDUCE = "(prefers-reduced-motion: reduce)";
+const OWN_ACCENTS = ["white", "black", "brown", "teal", "yellow", "green"];
 
-// The bodies in a 40×40 box, drawn with a round stroke of their own paint
-// so the corners soften. `eye` is where the eyes sit: their height and half
-// the gap between them.
-const BODY: Record<AvatarShape, { d: string; eye: [number, number] }> = {
-  circle: { d: "M20 6a13 13 0 1 1 0 26a13 13 0 1 1 0-26z", eye: [19, 5.4] },
-  triangle: { d: "M20 7.5L32.5 30H7.5Z", eye: [23.5, 4.4] },
-  square: { d: "M13 7h14a6 6 0 0 1 6 6v12a6 6 0 0 1-6 6H13a6 6 0 0 1-6-6V13a6 6 0 0 1 6-6z", eye: [18.5, 5.6] },
-  hexagon: { d: "M20 6.5L31.5 13V25.5L20 32L8.5 25.5V13Z", eye: [19, 5.2] },
-  diamond: { d: "M20 5.5L33.5 19L20 32.5L6.5 19Z", eye: [19, 4.8] },
-  drop: { d: "M20 5.5C24.5 11 31.5 16.5 31.5 22.5a11.5 11.5 0 0 1-23 0C8.5 16.5 15.5 11 20 5.5z", eye: [22.5, 4.8] },
+/** The theme token a colour is drawn in: the UI accents' graphics tone, or
+ * the avatar's own (white, black, brown, teal, and a yellow and a green that hold on a light or a dark page). Anything else is blue. */
+export function accentVar(accent: string | null | undefined): string {
+  if (accent && OWN_ACCENTS.includes(accent)) return `var(--av-c-${accent})`;
+  return `var(--ac-${normalizeAccent(accent) ?? "blue"}-2)`;
+}
+
+// The bodies in a 40×40 box, one flat fill. `eye` is where the eyes sit:
+// their height, half the gap between them and, when the body is not
+// centred, their middle.
+const BODY: Record<AvatarShape, { d: string; eye: [number, number, number?] }> = {
+  circle: { d: "M5.5 20a14.5 13.5 0 1 1 29 0a14.5 13.5 0 1 1-29 0z", eye: [19, 3.8] },
+  triangle: { d: "M17.5 8.2Q20 4.5 22.5 8.2L34.5 28.5Q36.5 33 31.5 33H8.5Q3.5 33 5.5 28.5Z", eye: [25, 3.8] },
+  square: { d: "M14 6h12c5 0 8 3 8 8v12c0 5-3 8-8 8H14c-5 0-8-3-8-8V14c0-5 3-8 8-8z", eye: [20, 3.8] },
+  hexagon: { d: "M16.9 6.7Q20 5 23.1 6.7l7.3 4.1Q33.5 12.5 33.5 16v8q0 3.5-3.1 5.2l-7.3 4.1Q20 35 16.9 33.3L9.6 29.2Q6.5 27.5 6.5 24v-8q0-3.5 3.1-5.2z", eye: [20, 3.8] },
+  diamond: { d: "M17 7.5Q20 4.5 23 7.5L32.5 17Q35.5 20 32.5 23L23 32.5Q20 35.5 17 32.5L7.5 23Q4.5 20 7.5 17Z", eye: [20, 3.8] },
+  drop: { d: "M20 5.5c2.5 0 3 1.5 4.5 4C28 15 33 18.5 33 24.5a13 13 0 0 1-26 0C7 18.5 12 15 15.5 9.5 17 7 17.5 5.5 20 5.5z", eye: [25, 3.8] },
+  cloud: { d: "M11 33a8 8 0 0 1-1.5-15.8A10 10 0 0 1 20 8a10 10 0 0 1 10 9.2A8 8 0 0 1 29 33z", eye: [23, 3.8] },
+  bean: { d: "M9 16a11 11 0 0 1 22 0v8a11 11 0 0 1-22 0z", eye: [17.5, 3.8] },
+  heart: { d: "M20 34C8 26 5 20 5 14.5a8.5 8.5 0 0 1 15-5.5a8.5 8.5 0 0 1 15 5.5C35 20 32 26 20 34z", eye: [18, 3.8] },
+  star: { d: "M17.9 8.1q2.1-3.6 4.3 0l2.4 4.1q1 1.7 3 2.2l4.6 1q4.1.9 1.3 4l-3.1 3.5q-1.3 1.5-1.1 3.5l.5 4.7q.4 4.2-3.4 2.5l-4.3-1.9q-1.8-.8-3.7 0l-4.3 1.9q-3.9 1.7-3.4-2.5l.5-4.7q.2-2-1.1-3.5l-3.1-3.5q-2.8-3.1 1.3-4l4.6-1q2-.4 3-2.2z", eye: [21.3, 3.7] },
+  flower: { d: "M32.4 25.6a5.2 5.2 0 0 1-7.3 7.3a5.2 5.2 0 0 1-10.3 0a5.2 5.2 0 0 1-7.3-7.3a5.2 5.2 0 0 1 0-10.3a5.2 5.2 0 0 1 7.3-7.3a5.2 5.2 0 0 1 10.3 0a5.2 5.2 0 0 1 7.3 7.3a5.2 5.2 0 0 1 0 10.3z", eye: [20.3, 3.8] },
+  ghost: { d: "M7 31V19a13 13 0 0 1 26 0v12a4.33 4.33 0 0 1-8.67 0a4.33 4.33 0 0 1-8.66 0a4.33 4.33 0 0 1-8.67 0z", eye: [19, 3.8] },
+  cat: { d: "M7 24Q7 14 8.5 7l8.5 5q3-1 6 0l8.5-5Q33 14 33 24a10 10 0 0 1-10 10H17A10 10 0 0 1 7 24z", eye: [22.5, 3.8] },
+  bunny: { d: "M12 18C9 12 9.5 4 13.5 4S18 11 18.5 15.5q1-.2 1.5-.2t1.5.2C22 11 23 4 26.5 4S31 12 28 18a11 11 0 1 1-16 0z", eye: [25.5, 3.8] },
+  mushroom: { d: "M5 20C5 11 11.5 5 20 5s15 6 15 15c0 1.5-1 2.5-2.5 2.5H28V30a4 4 0 0 1-4 4h-8a4 4 0 0 1-4-4v-7.5H7.5C6 22.5 5 21.5 5 20z", eye: [18.5, 3.8] },
+  leaf: { d: "M8 32C6 18 14 7 33 6c1 19-6 27-18 27-3 0-5-.5-7-1z", eye: [21, 3.8, 20.5] },
+  mug: { d: "M6 10a3 3 0 0 1 3-3h16a3 3 0 0 1 3 3v17a7 7 0 0 1-7 7H13a7 7 0 0 1-7-7zM28 13h2a6 6 0 0 1 0 12h-2v-3h2a3 3 0 0 0 0-6h-2z", eye: [20, 3.8, 17] },
+  shield: { d: "M20 5c4 3 9 4 14 4.5V20c0 8-6 13-14 16C12 33 6 28 6 20V9.5C11 9 16 8 20 5z", eye: [18.5, 3.8] },
+  bubble: { d: "M12 6h16a7 7 0 0 1 7 7v10a7 7 0 0 1-7 7H18l-8 6v-6.3A7 7 0 0 1 5 23V13a7 7 0 0 1 7-7z", eye: [17.5, 3.8] },
+  hat: { d: "M3.5 31Q3.5 27.5 8 26.5L14.5 10.5Q16 6 21 4.5Q25 3.5 31 6.5Q28 8 26.5 12L33 26.5Q36.5 27.5 36.5 31Q36.5 35 20 35Q3.5 35 3.5 31z", eye: [23, 3.8, 19.8] },
+  rocket: { d: "M10 20C10 13 14 7 17.5 3.8Q20 1.5 22.5 3.8C26 7 30 13 30 20V22Q35 23.5 37 32L30 29.5V34H10V29.5L3 32Q5 23.5 10 22z", eye: [17.5, 3.8] },
 };
 
-// Each eye style: the pupil's radii, and how much farther apart it sits.
+// Each eye style, a pill: its radii, how much farther apart it sits and how
+// much lower. `long`, the tall pill, is the default look.
 const EYE: Record<AvatarEyes, { rx: number; ry: number; spread: number; dy: number }> = {
-  round: { rx: 2.3, ry: 2.5, spread: 0, dy: 0 },
-  long: { rx: 1.5, ry: 3.4, spread: -0.3, dy: 0 },
-  short: { rx: 2, ry: 1.4, spread: -0.2, dy: 0.2 },
-  wide: { rx: 3.2, ry: 2, spread: 1, dy: 0 },
-  sleepy: { rx: 2.5, ry: 1, spread: 0.2, dy: 0.6 },
+  long: { rx: 2.1, ry: 5, spread: 0, dy: 0 },
+  round: { rx: 3.3, ry: 3.5, spread: 0.7, dy: 0.3 },
+  short: { rx: 2.3, ry: 3.3, spread: 0.1, dy: 0.7 },
+  wide: { rx: 3.6, ry: 2.5, spread: 1.3, dy: 0.5 },
+  sleepy: { rx: 3.2, ry: 1.2, spread: 0.8, dy: 1.3 },
 };
 
 /** Where the pointer is, -1..1 each way, for the eyes to follow. */
@@ -56,39 +86,38 @@ export function AgentAvatar(props: {
   title?: string;
 }) {
   const { shape, eyes } = props.avatar;
-  // Anything that is not a preset draws in the default.
-  const accent = normalizeAccent(props.avatar.accent) ?? "blue";
+  // Anything that is not a colour of ours draws in the default.
+  const accent = OWN_ACCENTS.includes(props.avatar.accent) ? props.avatar.accent : (normalizeAccent(props.avatar.accent) ?? "blue");
   const state = props.state ?? "idle";
   const size = props.size ?? 24;
   const still = useMedia(REDUCE);
   const raw = useId().replace(/[^a-zA-Z0-9_-]/g, "");
-  const shine = `av-shine-${raw}`;
-  const shade = `av-shade-${raw}`;
   const svg = useRef<SVGSVGElement>(null);
   const body = own(BODY, shape) ?? BODY.circle;
-  const eye = own(EYE, eyes) ?? EYE.round;
-  const [cy, half] = body.eye;
+  const eye = own(EYE, eyes) ?? EYE.long;
+  const [cy, half, cx = 20] = body.eye;
   const gap = half + eye.spread;
   // Agents side by side should not blink together.
   const delay = `${(fnv1a(`${shape}${eyes}${accent}${raw}`) % 4000) / 1000}s`;
   const one = (side: "l" | "r") => (
-    <g className={`av-eye ${side}`} transform={`translate(${20 + (side === "l" ? -gap : gap)} ${cy + eye.dy})`}>
+    <g className={`av-eye ${side}`} transform={`translate(${cx + (side === "l" ? -gap : gap)} ${cy + eye.dy})`}>
       <g className="av-gaze">
         <g className="av-look">
           <g className="av-lid">
-            <ellipse className="av-pupil" rx={eye.rx} ry={eye.ry} />
-            <path className="av-happy" d="M-2.5 0.9Q0 -2.3 2.5 0.9" />
+            <rect className="av-pupil" x={-eye.rx} y={-eye.ry} width={eye.rx * 2} height={eye.ry * 2} rx={Math.min(eye.rx, eye.ry)} />
+            {eye.ry > 1.5 && <circle className="av-glint" cx={eye.rx * 0.3} cy={-eye.ry * 0.4} r={eye.rx * 0.45} />}
+            <path className="av-happy" d="M-3 1.3Q0 -3 3 1.3" />
           </g>
         </g>
       </g>
-      <path className="av-brow" d={side === "l" ? "M-2.6 -4.2L2.3 -5.6" : "M2.6 -4.2L-2.3 -5.6"} />
+      <path className="av-brow" d={`M${side === "l" ? -3 : 3} ${-eye.ry - 2.3}L${side === "l" ? 2.4 : -2.4} ${-eye.ry - 3.7}`} />
     </g>
   );
   return (
     <svg
       ref={svg}
       className="agent-avatar"
-      viewBox="0 0 40 40"
+      viewBox="2 2.5 36 36"
       width={size}
       height={size}
       data-shape={shape}
@@ -99,7 +128,7 @@ export function AgentAvatar(props: {
       role={props.title ? "img" : undefined}
       aria-label={props.title}
       aria-hidden={props.title ? undefined : true}
-      style={{ "--av-c": `var(--ac-${accent}-2)`, "--av-delay": delay } as React.CSSProperties}
+      style={{ "--av-c": accentVar(accent), "--av-delay": delay } as React.CSSProperties}
       onPointerMove={still ? undefined : (e) => svg.current && gaze(svg.current, e)}
       onPointerLeave={() => {
         svg.current?.style.removeProperty("--av-gx");
@@ -107,24 +136,10 @@ export function AgentAvatar(props: {
       }}
     >
       {props.title && <title>{props.title}</title>}
-      <defs>
-        <radialGradient id={shine} cx="0.32" cy="0.26" r="0.62">
-          <stop offset="0" className="av-shine-0" />
-          <stop offset="1" className="av-shine-1" />
-        </radialGradient>
-        <linearGradient id={shade} x1="0" y1="0" x2="0.35" y2="1">
-          <stop offset="0.35" className="av-shade-0" />
-          <stop offset="1" className="av-shade-1" />
-        </linearGradient>
-      </defs>
       <ellipse className="av-ground" cx="20" cy="36.2" rx="10.5" ry="1.7" />
       <g className="av-figure">
         <g className="av-move">
-          {/* The side under the face, then the face, its shading and its light. */}
-          <path className="av-side" d={body.d} transform="translate(0 2.2)" />
           <path className="av-face" d={body.d} />
-          <path className="av-layer" d={body.d} fill={`url(#${shade})`} stroke={`url(#${shade})`} />
-          <path className="av-layer" d={body.d} fill={`url(#${shine})`} stroke={`url(#${shine})`} />
           {one("l")}
           {one("r")}
         </g>

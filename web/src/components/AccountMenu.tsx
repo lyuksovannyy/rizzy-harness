@@ -5,6 +5,7 @@
 // screen or a touch pointer. A new workspace is named in a small dialog: a
 // text field may not live inside a menu.
 import "../lib/i18nPages";
+import { errText } from "../lib/errorText";
 import { Building2, Check, ChevronLeft, ChevronRight, LogOut, Plus, Settings, UserRound, WandSparkles } from "lucide-react";
 import { type FormEvent, type KeyboardEvent, type ReactNode, type RefObject, useEffect, useRef, useState } from "react";
 import { pageApi } from "../apiPages";
@@ -42,7 +43,7 @@ const TEXT = { menu: "Account", profile: "Profile", personalisation: "Personalis
 /** Hover opens the submenu after this long (fine pointers only). */
 const HOVER_MS = 120;
 
-const message = (x: unknown) => (x instanceof Error ? x.message : String(x));
+const message = errText;
 
 /** Narrow screens and touch pointers drill into the submenu in place. */
 function drills(): boolean {

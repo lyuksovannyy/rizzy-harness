@@ -978,6 +978,36 @@ fn line<'a>(out: &'a str, name: &str) -> &'a str {
         .unwrap_or_else(|| panic!("no {name} line: {out}"))
 }
 
+/// `[execution] host = true` with `[sandbox] mode = "off"`: a host chat's
+/// shell is the node's own user with no file rule, so it reads and changes
+/// the node's data directory (T82, T39). `doctor` says so in one line, with
+/// no path and no token in it; every other combination says nothing.
+#[test]
+fn doctor_warns_where_a_host_chat_can_reach_the_data_directory() {
+    let f = fixture();
+    let dir = f.data.display().to_string();
+    let (out, _) = doctor(
+        &f.data,
+        Some("[sandbox]\nmode = \"off\"\n[execution]\nhost = true\n"),
+    );
+    let w = line(&out, "host chats");
+    assert_eq!(
+        w,
+        "warn  host chats: [sandbox] mode = \"off\" with [execution] host = true: a host chat \
+         on this node can read and change the node's data directory (other people's chats, \
+         the approved MCP servers, the node's keys and token)"
+    );
+    assert!(!w.contains(&dir), "{w}");
+    for t in [
+        "[sandbox]\nmode = \"off\"\n",
+        "[execution]\nhost = true\n",
+        "[sandbox]\nmode = \"best-effort\"\n[execution]\nhost = true\n",
+    ] {
+        let (out, _) = doctor(&f.data, Some(t));
+        assert!(!out.contains(" host chats: "), "{t}: {out}");
+    }
+}
+
 /// `doctor`'s containment and execution-modes lines in each state they
 /// can be put in from here: contained (ok from Landlock ABI 9, warn with
 /// the gap below; the sandbox mode offered); no bubblewrap with `host` off

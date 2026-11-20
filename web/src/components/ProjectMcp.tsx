@@ -6,12 +6,15 @@
 // (repository content, part of what runs), nothing joined, quoted or cut
 // (the node makes an entry it could not show so unsupported), and where
 // it stands for you. Approve and
-// Remove are yours alone: an approval covers your own sandboxed chats in
-// this folder. Reload asks the node to read the file again; nothing else
-// does. Part of the project page's lazy chunk.
+// Remove are yours alone: an approval covers your own chats in this
+// folder, and the page says where the node runs them (inside the sandbox,
+// or as the node's own user in a host chat, which the node offers or not),
+// above the list and beside each Approve. Reload asks the node to read the
+// file again; nothing else does. Part of the project page's lazy chunk.
 import { own } from "../emptyView";
 import { useCallback, useEffect, useState } from "react";
 import { call } from "../api";
+import type { ExecMode } from "../types";
 import "./ProjectMcp.css";
 
 export type McpState = "approved" | "changed" | "new" | "removed" | "unsupported" | "hidden";
@@ -51,8 +54,23 @@ const LABEL: Record<McpState, string> = {
   hidden: "Hidden",
 };
 
+/** Where an approved server runs, by the execution modes the node offers.
+ * Not known (no list yet, the node not in it, modes blanked): says so, never
+ * the sandbox, next to an Approve button. */
+export function whereItRuns(modes?: ExecMode[]): string {
+  if (!modes || modes.length === 0) {
+    return "Where an approved server runs is not known yet: this node's modes have not loaded.";
+  }
+  if (!modes.includes("host")) return "An approved server runs in your chats in this folder, inside the sandbox.";
+  if (!modes.includes("sandbox")) {
+    return "An approved server runs in your chats in this folder as the node's own user, without the sandbox: every chat on this node is a host chat.";
+  }
+  return "An approved server runs in your chats in this folder: inside the sandbox in a sandboxed chat, as the node's own user without the sandbox in a host chat.";
+}
+
+const HOST_ENV = "In a host chat this entry is not started while it has environment values: the chat is told so.";
+
 const WHAT: Partial<Record<McpState, string>> = {
-  approved: "Runs in your sandboxed chats in this folder.",
   changed: "Your approved copy keeps running until you approve the file's new entry.",
   new: "Does not run until you approve it.",
   removed: "Not started; remove your approval to forget it.",
@@ -84,7 +102,8 @@ function Runs(props: { command: string; args: string[]; env: McpEnv[]; label: st
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-export default function ProjectMcp(props: { projectId: string; hasFolder: boolean }) {
+export default function ProjectMcp(props: { projectId: string; hasFolder: boolean; modes?: ExecMode[] }) {
+  const host = !!props.modes?.includes("host");
   const [list, setList] = useState<McpList | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -111,10 +130,11 @@ export default function ProjectMcp(props: { projectId: string; hasFolder: boolea
       <h3>MCP servers from the repository</h3>
       <p className="field-hint">
         The servers this project's folder declares in <code>.mcp.json</code>. One runs only after you approve it,
-        only in your own sandboxed chats in this folder (never in a host chat), exactly as you approved it: a later
-        change to the file runs only once you approve it again. Approving pins the command, its arguments and its
-        environment as shown here, not the files it runs.
+        only in your own chats in this folder, exactly as you approved it: a later change to the file runs only once
+        you approve it again. Approving pins the command, its arguments and its environment as shown here, not the
+        files it runs.
       </p>
+      <p className="field-hint">{whereItRuns(props.modes)}</p>
       {!props.hasFolder && <p className="muted">This project has no folder on a node, so it has no .mcp.json.</p>}
       {error && <p className="error-text">{error}</p>}
       {list?.note && <p className="error-text">{list.note}</p>}
@@ -148,6 +168,10 @@ export default function ProjectMcp(props: { projectId: string; hasFolder: boolea
               </div>
               {e.reason && <p className="muted small">{e.reason}</p>}
               {own(WHAT, e.state) && <p className="muted small">{own(WHAT, e.state)}</p>}
+              {(e.state === "new" || e.state === "changed") && <p className="muted small">{whereItRuns(props.modes)}</p>}
+              {host && (e.env.length > 0 || (e.approved_env?.length ?? 0) > 0) && ["new", "approved", "changed"].includes(e.state) && (
+                <p className="muted small">{HOST_ENV}</p>
+              )}
               {e.command && <Runs label="In the file" command={e.command} args={e.args} env={e.env} />}
               {e.state === "changed" && e.approved_command && (
                 <>
