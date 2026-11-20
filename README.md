@@ -1616,6 +1616,21 @@ itself and Enter in it answers nothing: only the Deny button sends it. If you
 allow while part of the input is collapsed, the card says how many characters
 you have not expanded.
 
+**Where the choice appears.** In the chat you have open, the composer's text
+field is replaced by the card and its buttons while a call waits, and comes
+back, with what you had typed and the caret where it was, once the call is
+answered (here or in another tab). The buttons ignore every answer, mouse and
+keys alike, for the first 0.7 seconds, and no button has focus when they
+appear, so Enter or Space pressed at the end of a line you were typing answers
+nothing. With several calls waiting, one shows at a time, in the order the
+agent asked ("1 of 3"); the others' cards say they come after. A long call
+scrolls inside its card while the buttons stay in view. Stop and the mode
+pickers stay where they are; the field itself is hidden, so nothing new can be
+queued until the call is answered. A screen reader is told that a call waits,
+without focus being moved. A chat you have not opened keeps showing its card in
+the transcript, and the browser notification (when the tab is hidden) carries
+fixed words and the chat's place in the list, never the command.
+
 `node.toml`: the node's own policy. It is authoritative: the master can only
 ask for stricter settings.
 

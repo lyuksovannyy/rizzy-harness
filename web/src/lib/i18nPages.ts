@@ -138,6 +138,9 @@ export const pages = {
   "settings.backdropChats": "Also in chats",
   "settings.backdropChatsHint": "A quiet, still version beside chats on wide screens.",
   "approval.rows": "Rows this changes",
+  "approval.waits": "A tool call waits for your answer",
+  "approval.count": "{n} of {of}",
+  "approval.label": "Allow or deny the tool call",
 } as const;
 
 extend(pages);

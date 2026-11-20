@@ -142,6 +142,9 @@ export function Composer(props: {
   filesOf?: string;
   /** Session: `/compact [focus]` summarises the chat now instead of sending a message (X.20). */
   compact?: (focus: string) => Promise<unknown>;
+  /** Session: a call waits for approval and its choice is shown in the
+   * field's place (row W.6): the field is hidden, its draft and caret kept. */
+  choosing?: boolean;
   /** Session: a /compact runs; Stop cancels it. */
   compacting?: boolean;
 }) {
@@ -326,6 +329,20 @@ export function Composer(props: {
   useEffect(() => {
     ta.current?.focus();
   }, []);
+  // The choice takes the field's place: whoever was typing is taken out of
+  // it (so no key lands in a hidden field) and put back, caret kept, when
+  // the call is answered; anyone elsewhere keeps their focus.
+  const typing = useRef(false);
+  useLayoutEffect(() => {
+    const el = ta.current;
+    if (props.choosing) {
+      typing.current = document.activeElement === el;
+      if (typing.current) el!.blur();
+    } else if (typing.current) {
+      typing.current = false;
+      el?.focus();
+    }
+  }, [props.choosing]);
 
   const inProject = !!props.project;
   const enabled = useMemo(
@@ -674,7 +691,7 @@ export function Composer(props: {
         </ul>
       )}
       <div
-        className={`composer ${mode === "search" && home ? "is-search" : ""}`}
+        className={`composer ${mode === "search" && home ? "is-search" : ""}${props.choosing ? " choosing" : ""}`}
         onDragOver={(e) => canImage && e.preventDefault()}
         onDrop={(e) => takeImages(e, e.dataTransfer.files)}
       >
@@ -685,6 +702,7 @@ export function Composer(props: {
           placeholder={placeholder}
           aria-label={placeholder}
           disabled={!!props.readOnly}
+          hidden={props.choosing}
           onChange={(e) => {
             setText(e.target.value);
             setCaret(e.target.selectionStart);
