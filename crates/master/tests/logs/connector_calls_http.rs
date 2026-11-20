@@ -903,12 +903,14 @@ async fn a_list_not_read_yet_is_said_and_read_in_the_background() {
     let t = start().await;
     let [alex, bob] = users(&t).await;
     let ws = team(&t, &alex, "Team").await;
-    add(&t, &alex, &ws, "open", "slowinit/open", "none").await;
+    add(&t, &alex, &ws, "open", "lateinit/open", "none").await;
     let b = chat(&t, &bob, &ws).await;
     let at = std::time::Instant::now();
     let spec = turn(&t, b, "coder").await;
+    // The server answers `initialize` after 3 s; a turn that waited for it
+    // would take that long, one that did not takes milliseconds.
     assert!(
-        at.elapsed() < Duration::from_millis(500),
+        at.elapsed() < Duration::from_millis(2_000),
         "the turn did not wait for the server"
     );
     assert!(spec.connector_tools.is_empty());
@@ -917,7 +919,7 @@ async fn a_list_not_read_yet_is_said_and_read_in_the_background() {
         line.contains("The tools of connector(s) `open` are being read"),
         "{line}"
     );
-    for _ in 0..300 {
+    for _ in 0..3_000 {
         if t.master.connector_tool_sets().0 == 1 {
             break;
         }
