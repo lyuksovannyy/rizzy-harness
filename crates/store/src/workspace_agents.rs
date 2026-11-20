@@ -110,6 +110,25 @@ impl Store {
         )? > 0)
     }
 
+    /// Every workspace's `custom` document that names `agent_id` in quotes
+    /// (a cheap pre-filter: the master parses what comes back), as
+    /// (workspace, agent, doc). `agent_id` is a handle, so it needs no
+    /// escaping.
+    pub fn workspace_custom_docs_naming(
+        &self,
+        agent_id: &str,
+    ) -> Result<Vec<(String, String, String)>> {
+        let conn = self.lock();
+        let mut st = conn.prepare(
+            "SELECT workspace_id, agent_id, doc FROM workspace_agents
+             WHERE kind = 'custom' AND instr(doc, ?1) > 0",
+        )?;
+        let rows = st.query_map(params![format!("\"{agent_id}\"")], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Remove every workspace's overlay on agent `agent_id`: the server
     /// agent it was written for is gone, so it must not land on a later,
     /// unrelated agent with that id (PLAN.md T79). How many went.
