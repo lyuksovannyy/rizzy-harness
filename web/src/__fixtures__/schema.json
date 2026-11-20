@@ -92,6 +92,11 @@
         "type": "any"
       },
       {
+        "path": "preview",
+        "required": false,
+        "type": "string"
+      },
+      {
         "path": "reason",
         "required": true,
         "type": "string"

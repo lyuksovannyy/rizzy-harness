@@ -19,6 +19,8 @@ mod edit_lines;
 #[cfg(test)]
 mod edit_lines_tests;
 #[cfg(test)]
+mod edit_preview_tests;
+#[cfg(test)]
 mod edit_tests;
 pub mod env;
 pub mod filter;
@@ -450,6 +452,25 @@ impl ToolCtx {
         }
     }
 
+    /// A real path as the model addresses it, for the `[path#TAG]` header:
+    /// relative to the session folder when the file is inside it (the string
+    /// it passes as `path`, and fewer tokens in every read), else as it is.
+    /// Display only: the table of what was seen stays keyed by the real path.
+    pub(crate) fn model_path(&self, path: &Path) -> PathBuf {
+        let inside = |base: &Path| {
+            path.strip_prefix(base)
+                .ok()
+                .filter(|r| !r.as_os_str().is_empty())
+        };
+        inside(&self.workspace)
+            .map(Path::to_path_buf)
+            .or_else(|| {
+                let base = self.workspace.canonicalize().ok()?;
+                inside(&base).map(Path::to_path_buf)
+            })
+            .unwrap_or_else(|| path.to_path_buf())
+    }
+
     /// Refuse `real` (a real or normalized path) inside a protected folder.
     fn refuse_protected(&self, real: &Path, shown: &str) -> Result<(), String> {
         // A sub-agent's own folder lies in a protected folder by design;
@@ -749,6 +770,15 @@ pub trait Tool: Send + Sync {
     /// is no opinion. It only ever refuses earlier: `run` checks again, as
     /// the file system can change while a card waits.
     fn refusal(&self, _ctx: &ToolCtx, _input: &Value) -> Option<String> {
+        None
+    }
+    /// Text for the PERSON deciding on this call's approval card, computed
+    /// from the call and the files as they are now (the rows a line edit
+    /// replaces). Never sent to the model, never part of the approval key,
+    /// and it may be file content: shown as plain text only. Bounded by the
+    /// tool. Changes and records nothing. `None`, the default, is none; a
+    /// call `refusal` refuses gets none either (no card is shown).
+    fn preview(&self, _ctx: &ToolCtx, _input: &Value) -> Option<String> {
         None
     }
     async fn run(&self, ctx: &ToolCtx, input: Value) -> ToolOutcome;

@@ -47,11 +47,14 @@ pub(crate) fn is_cut(text: &str, max_chars: usize) -> bool {
 }
 
 /// The header line that starts a `read` result and ends an `edit` or
-/// `write` result: the file's path and the tag of the version just shown
+/// `write` result: the file's path as the model addresses it
+/// ([`ToolCtx::model_path`]: relative to the session folder when inside it,
+/// the string it passes as `path`) and the tag of the version just shown
 /// ([`crate::seen::tag`]), which the line form of `edit` names. Control
 /// characters of the path (a file name may hold any) are shown as `?`.
-pub(crate) fn header(path: &std::path::Path, sha: &crate::seen::Sha) -> String {
-    let p: String = path
+pub(crate) fn header(ctx: &ToolCtx, path: &std::path::Path, sha: &crate::seen::Sha) -> String {
+    let p: String = ctx
+        .model_path(path)
         .display()
         .to_string()
         .chars()
@@ -216,7 +219,7 @@ impl Tool for Read {
             });
         }
         if tagged {
-            out.insert_str(0, &format!("{}\n", header(&path, &sha)));
+            out.insert_str(0, &format!("{}\n", header(ctx, &path, &sha)));
         }
         let mut o = ToolOutcome::ok(out);
         o.seen = seen;
@@ -290,7 +293,7 @@ impl Tool for Write {
                     .record_shown(&key, content.as_bytes(), &[(1, usize::MAX)]);
                 let sha = crate::seen::sha256(content.as_bytes());
                 if ctx.seen.version(&key, &crate::seen::tag(&sha)).is_some() {
-                    report.push_str(&format!("\n{}", header(&path, &sha)));
+                    report.push_str(&format!("\n{}", header(ctx, &path, &sha)));
                 }
                 let mut o = ToolOutcome::ok(report);
                 seen.base = base;

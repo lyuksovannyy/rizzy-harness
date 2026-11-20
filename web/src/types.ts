@@ -173,6 +173,9 @@ export interface ApprovalState {
   turn_allow?: true;
   /** "This exact call for this chat" may be offered (T51); present only when true. */
   chat_allow?: true;
+  /** What the call would change (the rows a line edit replaces), plain text
+   * made from the file; it may be hostile: draw it as text only. */
+  preview?: string;
   decision: Decision | null;
   by: ResolvedBy | null;
   /** The person's note with a denial; absent otherwise. */

@@ -62,13 +62,12 @@ impl Tool for Edit {
          against the file as it was before this call, they must not overlap, and either all are \
          made or none. The result shows the changed lines numbered as `read` shows them, so you \
          need not read the file again. Refused if the file changed on disk since you read it, \
-         in the lines you are replacing. Or, by row, without retyping the old text: pass `tag` \
-         (the 4 characters after # in the `[path#TAG]` line of the latest `read`, `edit` or \
-         `write` result for the file) and `lines`, a list of {from, to, text} (replace rows \
-         from..to; empty text deletes them) or {after, text} (insert after row `after`; 0 is \
-         the top). `text` is whole lines. Row numbers are those of the tagged version, ranges \
-         must not overlap, and every row you name must have been shown to you (if not, they are \
-         shown and nothing changes). Not together with old_string."
+         in the lines you are replacing. Or by row, without retyping old text: pass `tag` (the 4 \
+         characters after # in the `[path#TAG]` header of the latest `read`, `edit` or `write` \
+         result) and `lines`: {from, to, text} replaces rows from..to (empty text deletes \
+         them), {after, text} inserts after row `after` (0 = top); `text` is whole lines. Rows \
+         are numbered as in the tagged version, must not overlap, and each must have been shown \
+         to you (else they are shown and nothing changes). Not with old_string."
     }
     fn schema(&self) -> Value {
         json!({
@@ -137,6 +136,16 @@ impl Tool for Edit {
             }
         })
     }
+    fn preview(&self, ctx: &ToolCtx, input: &Value) -> Option<String> {
+        // `refusal` itself may record rows it prints; the path check and the
+        // plan inside `preview` are pure, and a plan that is refused gives
+        // no preview.
+        if crate::edit_lines::wants(input) && crate::path_refusal(ctx, input, true).is_none() {
+            crate::edit_lines::preview(ctx, input)
+        } else {
+            None
+        }
+    }
     async fn run(&self, ctx: &ToolCtx, input: Value) -> ToolOutcome {
         if crate::edit_lines::wants(&input) {
             return crate::edit_lines::run(ctx, input).await;
@@ -160,7 +169,7 @@ impl Tool for Edit {
             Ok((updated, report, rows)) => match write_nofollow(&path, updated.as_bytes()).await {
                 Ok(()) => {
                     let sha = crate::seen::sha256(updated.as_bytes());
-                    let mut o = ToolOutcome::ok(format!("{report}\n{}", header(&path, &sha)));
+                    let mut o = ToolOutcome::ok(format!("{report}\n{}", header(ctx, &path, &sha)));
                     let mut seen = ctx.seen.record_shown(&key, updated.as_bytes(), &rows);
                     // What this edit replaced (T57).
                     seen.base = Some(crate::seen::hex(&crate::seen::sha256(text.as_bytes())));

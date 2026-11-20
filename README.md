@@ -2525,6 +2525,12 @@ the call refuse and print those rows, which then count as shown. If the file
 changed since the tag, the edit is made only where the rows it replaces did
 not change. `old_string` and the line form cannot be given together. The tag is
 a lookup key, not a secret.
+The header names the file as the agent addresses it: relative to the chat's
+folder when the file is inside it. When a line edit asks for approval, its card
+lists the rows it replaces (or where it inserts) under "Rows this changes",
+numbered as `read` numbers them, as plain text (at most 40 lines): the card
+otherwise holds only the row numbers and the new text. It is shown to you, not
+sent to the model.
 
 `write` and `edit` also read the names other harnesses use: `file_text` for
 `content`, `old_str` and `new_str` for `old_string` and `new_string`. The call

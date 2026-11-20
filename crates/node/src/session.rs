@@ -5569,7 +5569,8 @@ impl TurnHost for Session {
     }
 
     async fn approve(&self, call_id: &str, tool: &str, input: &Value, risk: ToolRisk) -> Decision {
-        self.approve_from(call_id, tool, input, risk, None).await
+        self.approve_from(call_id, tool, input, risk, None, None)
+            .await
     }
 
     async fn approve_from(
@@ -5579,6 +5580,7 @@ impl TurnHost for Session {
         input: &Value,
         risk: ToolRisk,
         origin: Option<&str>,
+        preview: Option<&str>,
     ) -> Decision {
         let policy = &self.node.cfg.policy;
         if policy.denies(tool) {
@@ -5593,6 +5595,7 @@ impl TurnHost for Session {
                     reason: format!("`{tool}` is denied by this node's policy"),
                     turn_allow: false,
                     chat_allow: false,
+                    preview: None,
                 }))
                 .await;
             if requested.is_ok() {
@@ -5711,6 +5714,9 @@ impl TurnHost for Session {
                 // turn (N-2): a background start is asked for each time.
                 turn_allow: !background_start,
                 chat_allow,
+                // Scrubbed with the rest of the event on its way into the log
+                // (`append`), like tool output; never sent to the model.
+                preview: preview.map(str::to_string),
             }))
             .await;
         if requested.is_ok() {

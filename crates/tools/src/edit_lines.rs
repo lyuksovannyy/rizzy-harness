@@ -417,8 +417,20 @@ struct Plan {
     landed: Vec<(usize, usize)>,
     /// The rows replaced, 1-based in the file as it was just before.
     replaced: Vec<(usize, usize)>,
+    /// Each operation as it lies in the file as it is, in the call's
+    /// (sorted) order.
+    spots: Vec<Spot>,
     /// The file was not the tagged version: the changed rows, as it is now.
     changed: Option<(usize, usize)>,
+}
+
+/// Where an operation lies in the file as it is.
+#[derive(Debug, Clone, Copy)]
+enum Spot {
+    /// Rows `from..=to`, 1-based.
+    Rows(usize, usize),
+    /// Below row `n` (0 is the top).
+    After(usize),
 }
 
 /// Check `call` against what the agent was shown and make the new text.
@@ -567,6 +579,7 @@ fn plan(ctx: &ToolCtx, key: &Path, shown: &str, live: &str, call: &Call) -> Resu
     };
     let mut pos = 0;
     let mut replaced = Vec::new();
+    let mut spots = Vec::new();
     for (k, op) in call.ops.iter().enumerate() {
         let (start, end, text, eol) = match op {
             Op::Replace { from, to, text } => {
@@ -576,6 +589,7 @@ fn plan(ctx: &ToolCtx, key: &Path, shown: &str, live: &str, call: &Call) -> Resu
                         .into());
                 };
                 replaced.push((f + 1, t + 1));
+                spots.push(Spot::Rows(f + 1, t + 1));
                 let eol = term(l_rows[f]).unwrap_or_else(|| eol_at(f));
                 (f, t + 1, text, eol)
             }
@@ -585,6 +599,7 @@ fn plan(ctx: &ToolCtx, key: &Path, shown: &str, live: &str, call: &Call) -> Resu
                         .to_string()
                         .into());
                 };
+                spots.push(Spot::After(b));
                 let eol = if b >= 1 {
                     eol_at(b - 1)
                 } else {
@@ -652,7 +667,7 @@ fn plan(ctx: &ToolCtx, key: &Path, shown: &str, live: &str, call: &Call) -> Resu
         return Err(format!(
             "That changes nothing: the rows already read as the text you gave, so nothing was written. \
              {}",
-            header(Path::new(shown), &live_sha)
+            header(ctx, Path::new(shown), &live_sha)
         )
         .into());
     }
@@ -660,6 +675,7 @@ fn plan(ctx: &ToolCtx, key: &Path, shown: &str, live: &str, call: &Call) -> Resu
         updated,
         landed,
         replaced,
+        spots,
         changed: changed_rows.filter(|(a, b)| b >= a),
     })
 }
@@ -719,7 +735,7 @@ fn refuse(ctx: &ToolCtx, key: &Path, shown: &str, live: &str, no: No, print: boo
             ctx.seen.add_shown(key, &v.sha, &shown_rows);
             out.push_str(&format!(
                 "These rows now count as shown: send the same call again with this tag:\n{}",
-                header(Path::new(shown), &v.sha)
+                header(ctx, Path::new(shown), &v.sha)
             ));
         }
         None => {
@@ -728,7 +744,7 @@ fn refuse(ctx: &ToolCtx, key: &Path, shown: &str, live: &str, no: No, print: boo
             out.push_str(&format!(
                 "These rows now count as shown. Send the call again with the tag of the file as \
                  it is, numbering the rows as listed here:\n{}",
-                header(Path::new(shown), &sha)
+                header(ctx, Path::new(shown), &sha)
             ));
         }
     }
@@ -759,6 +775,88 @@ pub(crate) fn refusal(ctx: &ToolCtx, input: &Value) -> Option<String> {
             Some(refuse(ctx, &key, shown, &live, no, print))
         }
     }
+}
+
+/// Rows the card's preview shows, leads included, at most.
+const PREVIEW_LINES: usize = 40;
+/// Characters of the card's preview, at most (a row is cut as `read` cuts it,
+/// and 40 rows of 2,000 characters would still be a wall).
+const PREVIEW_CHARS: usize = 8_000;
+
+/// A row of a preview: as `read` numbers it, with what a person's screen
+/// must not obey (control characters, bidirectional overrides) shown as `?`.
+fn preview_row(n: usize, text: &str, max_chars: usize, compact: bool) -> String {
+    let clean: String = text
+        .chars()
+        .map(|c| {
+            let bidi = matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}');
+            if (c.is_control() && c != '\t') || bidi {
+                '?'
+            } else {
+                c
+            }
+        })
+        .collect();
+    number_line(n, &clean, max_chars, compact)
+}
+
+/// What the person deciding on the card sees: for each operation, the rows
+/// it replaces or the place it inserts at, as the file is now, from the same
+/// plan `run` makes ([`plan`]). `None` where the plan is refused (the
+/// refusal answers; no card is shown). Writes nothing and records nothing.
+pub(crate) fn preview(ctx: &ToolCtx, input: &Value) -> Option<String> {
+    let call = parse(input).ok()?;
+    let shown = input.get("path")?.as_str()?;
+    let path = ctx.resolve_for_write(shown).ok()?;
+    let md = std::fs::symlink_metadata(&path).ok()?;
+    if !md.file_type().is_file() || md.len() > crate::seen::SNAPSHOT_MAX_FILE as u64 {
+        return None;
+    }
+    let key = ctx.seen_key(&path);
+    let live = read_small(&path)?;
+    let p = plan(ctx, &key, shown, &live, &call).ok()?;
+    let (max_chars, compact) = line_style(ctx);
+    let (_, rows) = split_rows(&live);
+    let mut out = String::new();
+    if p.changed.is_some() {
+        out.push_str("the file changed since the tagged version; rows are numbered as it is now\n");
+    }
+    let mut used = 0;
+    let mut chars = 0;
+    let mut left_rows = 0;
+    let mut left_ops = 0;
+    for spot in &p.spots {
+        // The lead and at least one row, or the operation is left out.
+        if used + 2 > PREVIEW_LINES || chars >= PREVIEW_CHARS {
+            left_ops += 1;
+            continue;
+        }
+        let (lead, from, to) = match *spot {
+            Spot::Rows(a, b) if a == b => (format!("row {a} is replaced:\n"), a, b),
+            Spot::Rows(a, b) => (format!("rows {a}-{b} are replaced:\n"), a, b),
+            Spot::After(0) => ("inserted at the top of the file:\n".to_string(), 1, 0),
+            Spot::After(n) => (format!("inserted after row {n}:\n"), n, n),
+        };
+        out.push_str(&lead);
+        used += 1;
+        for r in from..=to {
+            if used >= PREVIEW_LINES || chars >= PREVIEW_CHARS {
+                left_rows += 1;
+                continue;
+            }
+            let row = preview_row(r, content(rows[r - 1]), max_chars, compact);
+            chars += row.chars().count();
+            out.push_str(&row);
+            used += 1;
+        }
+    }
+    if left_rows > 0 {
+        out.push_str(&format!("[{left_rows} more rows are not shown]\n"));
+    }
+    if left_ops > 0 {
+        out.push_str(&format!("[{left_ops} more operations are not shown]\n"));
+    }
+    Some(out)
 }
 
 /// A regular file of at most the snapshot size as UTF-8, read without
@@ -872,7 +970,7 @@ pub(crate) async fn run(ctx: &ToolCtx, input: Value) -> ToolOutcome {
         report.push_str(&show(ctx, &live, start, end));
     }
     let new_sha = sha256(p.updated.as_bytes());
-    report.push_str(&format!("\n{}", header(&path, &new_sha)));
+    report.push_str(&format!("\n{}", header(ctx, &path, &new_sha)));
     let mut o = ToolOutcome::ok(report);
     // The guard moves on only from the hash it holds: a file changed under
     // the agent stays "changed since it was read" for the old form.

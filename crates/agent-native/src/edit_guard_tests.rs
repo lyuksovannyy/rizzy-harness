@@ -403,3 +403,116 @@ async fn a_line_form_edit_works_across_turns_and_after_a_restart_is_refused_with
         "one\nTWO\nTHREE\nfour\n"
     );
 }
+
+/// A host that asks (no call runs unasked) and keeps what it was given with
+/// each request: the preview of the person's card.
+#[derive(Default)]
+struct Asking {
+    events: Mutex<Vec<EventKind>>,
+    asked: Mutex<Vec<(String, Option<String>)>>,
+    unasked: bool,
+}
+
+#[async_trait::async_trait]
+impl TurnHost for Asking {
+    async fn emit(&self, kind: EventKind) -> Result<(), harness_core::backend::LogError> {
+        self.events.lock().unwrap().push(kind);
+        Ok(())
+    }
+    async fn approve(&self, _: &str, _: &str, _: &Value, _: ToolRisk) -> Decision {
+        Decision::Allow
+    }
+    async fn approve_from(
+        &self,
+        _: &str,
+        tool: &str,
+        _: &Value,
+        _: ToolRisk,
+        _: Option<&str>,
+        preview: Option<&str>,
+    ) -> Decision {
+        self.asked
+            .lock()
+            .unwrap()
+            .push((tool.to_string(), preview.map(str::to_string)));
+        Decision::Allow
+    }
+    fn runs_unasked(&self, _: &str, _: ToolRisk) -> bool {
+        self.unasked
+    }
+}
+
+async fn asking_turn(dir: &std::path::Path, unasked: bool, script: Value) -> Asking {
+    let host = Asking {
+        unasked,
+        ..Default::default()
+    };
+    backend()
+        .run_turn(TurnCtx {
+            session_id: harness_core::SessionId::new(),
+            turn_id: "t".into(),
+            history: vec![],
+            user_text: format!("script: {script}"),
+            cwd: dir.to_path_buf(),
+            model: "mock".into(),
+            agent: None,
+            compare: vec![],
+            parent_session: None,
+            extra: Default::default(),
+            cancel: Default::default(),
+            host: &host,
+        })
+        .await;
+    host
+}
+
+fn tag_of(text: &str) -> String {
+    harness_tools::seen::tag(&harness_tools::seen::sha256(text.as_bytes()))
+}
+
+/// The loop asks the tool for the card's text and hands it to the host with
+/// the request; it is for the person only: the model's result does not hold
+/// it, and a call that runs unasked is not asked for one.
+#[tokio::test]
+async fn the_loop_hands_the_tools_preview_to_the_host_with_the_request() {
+    let dir = tempfile::tempdir().unwrap();
+    let text = "one\ntwo\nthree\n";
+    std::fs::write(dir.path().join("f.txt"), text).unwrap();
+    let calls = json!([
+        call("read", json!({"path": "f.txt"})),
+        call(
+            "edit",
+            json!({"path": "f.txt", "tag": tag_of(text),
+                   "lines": [{"from": 2, "to": 2, "text": "TWO"}]})
+        ),
+        call(
+            "edit",
+            json!({"path": "f.txt", "old_string": "three", "new_string": "3"})
+        ),
+        call("bash", json!({"command": "echo hi"})),
+    ]);
+    let host = asking_turn(dir.path(), false, calls.clone()).await;
+    let asked = host.asked.lock().unwrap().clone();
+    let by_tool = |t: &str| asked.iter().filter(|(n, _)| n == t).collect::<Vec<_>>();
+    let line = by_tool("edit");
+    assert_eq!(line.len(), 2, "{asked:?}");
+    let p = line[0].1.as_deref().expect("the line form has a preview");
+    assert!(
+        p.contains("row 2 is replaced:") && p.contains("\ttwo\n"),
+        "{p}"
+    );
+    assert!(line[1].1.is_none(), "the old form has none: {asked:?}");
+    assert!(by_tool("bash")[0].1.is_none());
+    assert!(by_tool("read")[0].1.is_none());
+    // Not in anything the model is sent: the result of the call, nor the
+    // event of the call.
+    for e in host.events.lock().unwrap().iter() {
+        if let EventKind::ToolCallFinished(f) = e {
+            assert!(!f.output.contains("is replaced:"), "{}", f.output);
+        }
+    }
+    // A call that runs unasked is not asked for a preview at all.
+    std::fs::write(dir.path().join("f.txt"), text).unwrap();
+    let host = asking_turn(dir.path(), true, calls).await;
+    assert!(host.asked.lock().unwrap().iter().all(|(_, p)| p.is_none()));
+}

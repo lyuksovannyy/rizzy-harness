@@ -68,6 +68,57 @@ fn numbered(n: usize) -> String {
 // --- the header ----------------------------------------------------------
 
 #[tokio::test]
+async fn the_header_names_the_file_as_the_model_addresses_it() {
+    let (dir, mut ctx) = ws();
+    std::fs::create_dir(dir.path().join("sub")).unwrap();
+    put(&dir, "sub/a.txt", "one\ntwo\n");
+    // Inside the folder: the string the model passes as `path`.
+    let r = read(&ctx, "sub/a.txt").await;
+    assert_eq!(
+        r.output.lines().next().unwrap(),
+        format!("[sub/a.txt#{}]", tag_of("one\ntwo\n"))
+    );
+    // Also when it passes the absolute path: the header is still the short one.
+    let abs = dir.path().join("sub/a.txt");
+    let r = read(&ctx, abs.to_str().unwrap()).await;
+    assert!(r.output.starts_with("[sub/a.txt#"), "{}", r.output);
+    // The tag is looked up by the real path: the short header works.
+    let e = lines(
+        &ctx,
+        "sub/a.txt",
+        &first_tag(&r.output),
+        json!([{"from": 1, "to": 1, "text": "1"}]),
+    )
+    .await;
+    assert!(e.ok, "{}", e.output);
+    assert!(
+        e.output.lines().last().unwrap().starts_with("[sub/a.txt#"),
+        "{}",
+        e.output
+    );
+    // `write` ends with the same form.
+    let w = Write
+        .run(&ctx, json!({"path": "sub/b.txt", "content": "x\n"}))
+        .await;
+    assert!(
+        w.output.lines().last().unwrap().starts_with("[sub/b.txt#"),
+        "{}",
+        w.output
+    );
+    // Outside the folder: as before, the whole path.
+    let other = tempfile::tempdir().unwrap();
+    std::fs::write(other.path().join("o.txt"), "x\n").unwrap();
+    ctx.allow_outside_workspace = true;
+    let p = other.path().join("o.txt");
+    let r = read(&ctx, p.to_str().unwrap()).await;
+    let head = r.output.lines().next().unwrap();
+    assert!(
+        head.starts_with('[') && head.contains(&other.path().display().to_string()),
+        "{head}"
+    );
+}
+
+#[tokio::test]
 async fn read_starts_with_the_header_and_the_tag_is_the_hash_prefix() {
     let (dir, ctx) = ws();
     put(&dir, "a.txt", "one\ntwo\n");

@@ -137,6 +137,7 @@ export const pages = {
     "Each mode has its own background on the home screen. Still keeps them without motion; your system's reduce-motion setting does the same.",
   "settings.backdropChats": "Also in chats",
   "settings.backdropChatsHint": "A quiet, still version beside chats on wide screens.",
+  "approval.rows": "Rows this changes",
 } as const;
 
 extend(pages);
