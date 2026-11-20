@@ -370,6 +370,8 @@ pub struct MasterInner {
     /// Tests: how long a prompt waits after reading the chat's row, in ms
     /// (0 in use), so a pick can be made to land inside its dispatch.
     pub(crate) dispatch_delay_ms: std::sync::atomic::AtomicU64,
+    /// Tests: the admin usage scan's time limit in microseconds (0: the default).
+    pub(crate) usage_limit_us: std::sync::atomic::AtomicU64,
     /// One dispatch at a time per chat: a prompt, retry or callback from
     /// its row read to the node's answer, and an agent pick from asking
     /// the node to writing the row (see `Master::chat_lock`).
@@ -827,6 +829,7 @@ impl Master {
                 handoffs: Default::default(),
                 level_write_delay_ms: Default::default(),
                 dispatch_delay_ms: Default::default(),
+                usage_limit_us: Default::default(),
                 chat_locks: Mutex::default(),
                 agents: Mutex::new(agent_edits::Agents::new(
                     harness_agents::AgentSet::from_agents(
@@ -909,6 +912,27 @@ impl Master {
         self.inner
             .dispatch_delay_ms
             .store(d.as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Tests: cut the admin usage scan after `d` (a zero duration is the
+    /// default limit, not none).
+    #[doc(hidden)]
+    pub fn set_usage_time_limit(&self, d: Duration) {
+        self.inner
+            .usage_limit_us
+            .store(d.as_micros() as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The usage scan's time limit.
+    pub(crate) fn usage_time_limit(&self) -> Duration {
+        match self
+            .inner
+            .usage_limit_us
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            0 => http::USAGE_TIME_LIMIT,
+            us => Duration::from_micros(us),
+        }
     }
 
     /// The wait `set_level_write_delay` set; none in use.

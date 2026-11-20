@@ -25,6 +25,7 @@ mod projects;
 pub mod routines;
 pub mod session_images;
 pub mod stored_skills;
+pub mod usage;
 pub mod workspace_agents;
 pub use projects::{
     CardPatch, CardRow, ColumnRow, EarlierChat, EarlierSource, NewCard, NewColumn, NewProject,
