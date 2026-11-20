@@ -1632,6 +1632,28 @@ itself and Enter in it answers nothing: only the Deny button sends it. If you
 allow while part of the input is collapsed, the card says how many characters
 you have not expanded.
 
+**Where the choice appears.** In the chat you have open, the composer's text
+field is replaced by the card and its buttons while a call waits, and comes
+back, with what you had typed and the caret where it was, once the call is
+answered (here or in another tab). The buttons ignore every answer, mouse and
+keys alike, for the first 0.7 seconds. Focus waits on the choice itself, never
+on a button, and for that moment keys typed anywhere on the page are dropped
+(so the end of a line you were typing, such as `/tmp/x` and Enter, opens
+nothing, sends nothing and answers nothing); the first Tab then reaches the
+first button. While a choice is up, `/` does not open search (Ctrl/Cmd+K
+still does). With several calls waiting, one shows at a time, in the order the
+agent asked ("1 of 3"); the others' cards say they come after. Only the
+command (or an edit's rows) scrolls, in a box you can reach with the keyboard
+and that says when there is more below; the reason, the warning about
+characters you have not expanded and the "for this chat" note stay between it
+and the buttons. Stop and the mode picker stay where they are; changing the
+mode does not answer the waiting call (Plan denies it), and the picker says
+so. The field itself is hidden, so nothing new can be queued until the call is
+answered. A screen reader is told which tool waits and where the buttons are,
+never the command. A chat you have not opened keeps showing its card in
+the transcript, and the browser notification (when the tab is hidden) carries
+fixed words and the chat's place in the list, never the command.
+
 `node.toml`: the node's own policy. It is authoritative: the master can only
 ask for stricter settings.
 
