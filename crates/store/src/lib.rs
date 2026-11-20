@@ -74,6 +74,20 @@ impl<T, E: From<StoreError>> CallResult for std::result::Result<T, E> {
 
 pub type Result<T> = std::result::Result<T, StoreError>;
 
+/// The most chats [`Store::sub_sessions`] returns.
+pub const MAX_SUB_SESSIONS: usize = 10_000;
+/// How deep it looks.
+const MAX_SUB_DEPTH: usize = 64;
+
+/// The chats below a chat, as [`Store::sub_sessions`] finds them.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SubSessions {
+    /// One list per depth, nearest first.
+    pub levels: Vec<Vec<SessionId>>,
+    /// The cap was reached: there are more than `levels` holds.
+    pub truncated: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Durability {
     /// fsync every commit. Required for the authoritative (node) log.
@@ -1354,45 +1368,89 @@ impl Store {
     }
 
     /// The chats below `sid` (the sub-agents' chats it started, theirs in
-    /// turn, and so on) that belong to `owner`, one list per depth, nearest
-    /// first. A chat with another owner is left out and so is everything
-    /// below it: `parent_id` alone says whose chat is whose only as far as
-    /// the node goes, and a delete cannot be undone. `owner` is `sid`'s own,
-    /// read by the caller before anything is deleted (`IS`: no owner matches
-    /// only chats with none). Works from the children's own `parent_id`, so
-    /// it still answers once `sid`'s row is deleted. A node cannot make a
-    /// cycle (a parent is an earlier session of the node), but the walk is
-    /// bounded anyway. No index on `parent_id`: before the first tagged
-    /// release a schema change makes every existing data directory unusable
-    /// (`migrate.rs`), and this is one query per deleted chat.
-    pub fn sub_sessions(&self, sid: SessionId, owner: Option<&str>) -> Result<Vec<Vec<SessionId>>> {
-        let conn = self.lock();
-        let mut stmt = conn.prepare_cached(
-            "WITH RECURSIVE down(id, depth) AS (
-                 SELECT session_id, 1 FROM sessions WHERE parent_id = ?1 AND owner_id IS ?2
-                 UNION ALL
-                 SELECT s.session_id, down.depth + 1 FROM sessions s JOIN down ON s.parent_id = down.id
-                 WHERE down.depth < 64 AND s.owner_id IS ?2)
-             SELECT id, MIN(depth) FROM down WHERE id != ?1 GROUP BY id ORDER BY MIN(depth), id",
-        )?;
-        let rows = stmt
-            .query_map(params![sid.to_string(), owner], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let mut levels: Vec<Vec<SessionId>> = Vec::new();
-        let mut last = 0;
-        for (id, depth) in rows {
-            let id = id
-                .parse()
-                .map_err(|_| StoreError::Corrupt(format!("session id {id}")))?;
-            if depth != last {
-                levels.push(Vec::new());
-                last = depth;
+    /// turn, and so on) that belong to `owner`, at most [`MAX_SUB_SESSIONS`].
+    /// See [`Self::sub_sessions_up_to`].
+    pub fn sub_sessions(&self, sid: SessionId, owner: Option<&str>) -> Result<SubSessions> {
+        self.sub_sessions_up_to(sid, owner, MAX_SUB_SESSIONS)
+    }
+
+    /// The chats below `sid` that belong to `owner`, one list per depth,
+    /// nearest first, at most `max` of them (then `truncated` is set: the
+    /// caller says so and a later call takes the rest). A chat with another
+    /// owner is left out and so is everything below it: `parent_id` alone
+    /// says whose chat is whose only as far as the node goes, and a delete
+    /// cannot be undone. `owner` is `sid`'s own, read by the caller before
+    /// anything is deleted (`IS`: no owner matches only chats with none).
+    /// Works from the children's own `parent_id`, so it still answers once
+    /// `sid`'s row is deleted.
+    ///
+    /// One scan of the rows that have a parent and a walk in memory, not a
+    /// recursive query: that was a join per level without an index
+    /// (4,000 children took 12 s under the store's lock), and one linear
+    /// scan is enough for what is one query per deleted chat; so no index on
+    /// `parent_id` and no schema change. The walk is breadth first, 64 deep
+    /// at most, and takes a chat once, so a cycle written to the file ends.
+    pub fn sub_sessions_up_to(
+        &self,
+        sid: SessionId,
+        owner: Option<&str>,
+        max: usize,
+    ) -> Result<SubSessions> {
+        let mut children: HashMap<String, Vec<String>> = HashMap::new();
+        {
+            let conn = self.lock();
+            let mut stmt = conn.prepare_cached(
+                "SELECT session_id, parent_id FROM sessions
+                 WHERE parent_id IS NOT NULL AND owner_id IS ?1",
+            )?;
+            let rows = stmt.query_map(params![owner], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?;
+            for row in rows {
+                let (id, parent) = row?;
+                children.entry(parent).or_default().push(id);
             }
-            levels.last_mut().expect("a level was just pushed").push(id);
         }
-        Ok(levels)
+        let root = sid.to_string();
+        let mut seen: HashSet<String> = HashSet::from([root.clone()]);
+        let mut levels: Vec<Vec<String>> = Vec::new();
+        let mut found = 0;
+        let mut truncated = false;
+        let mut frontier = vec![root];
+        'depths: for _ in 0..MAX_SUB_DEPTH {
+            let mut next = Vec::new();
+            for parent in &frontier {
+                for id in children.get(parent).into_iter().flatten() {
+                    if !seen.insert(id.clone()) {
+                        continue;
+                    }
+                    if found == max {
+                        truncated = true;
+                        levels.push(next);
+                        break 'depths;
+                    }
+                    found += 1;
+                    next.push(id.clone());
+                }
+            }
+            if next.is_empty() {
+                break;
+            }
+            levels.push(next.clone());
+            frontier = next;
+        }
+        let mut out = SubSessions {
+            levels: Vec::new(),
+            truncated,
+        };
+        for level in levels {
+            // A malformed id cannot be a session of ours: skipped.
+            let ids: Vec<SessionId> = level.iter().filter_map(|s| s.parse().ok()).collect();
+            if !ids.is_empty() {
+                out.levels.push(ids);
+            }
+        }
+        Ok(out)
     }
 
     /// The `seq` at which a second writer was caught, if one was.
