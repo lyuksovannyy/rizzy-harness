@@ -127,6 +127,8 @@ export const pages = {
   "error.503": "The server or the node that does this is away or busy. Try again in a moment.",
   "error.later": "Try again in a little while.",
   "error.in": "Try again in {n} seconds.",
+  "settings.defaultChat": "Default agent for chats",
+  "settings.defaultAgentic": "Default agent for coding chats on a node",
   "settings.workspaceDefault": "Workspace default",
   "settings.defaultsHint": "Applies in every workspace; leave it on 'Workspace default' to follow each workspace.",
   "settings.appearance": "Appearance",

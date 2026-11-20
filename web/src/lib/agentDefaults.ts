@@ -5,7 +5,7 @@
 // agent that will run, and that agent is what is sent.
 import { useState } from "react";
 import type { Mode } from "./modes";
-import type { Prefs } from "../types";
+import type { Agent, Prefs } from "../types";
 
 export interface AgentDefaults {
   chat: string;
@@ -32,3 +32,8 @@ export function useNewChatAgent(d: AgentDefaults) {
   const [mode, onMode] = useState<Mode>("ask");
   return { agentId: picked ?? defaultFor(d, mode), pick, onMode };
 }
+
+/** The agents a coding-chat default may name: those that may answer a chat
+ * and can change files or run commands (the server's rule, `check_agentic_default`). */
+export const agenticCapable = (agents: Agent[]): Agent[] =>
+  agents.filter((a) => a.features?.as_agent !== false && !!(a.features?.edit_files || a.features?.commands));
