@@ -264,6 +264,112 @@ pub fn workdir(ctx: &ToolCtx, w: &str) -> Result<std::path::PathBuf, String> {
     Ok(real)
 }
 
+/// Whether a command line tries to detach a job: an unquoted `&` that puts
+/// a job in the background, or `nohup`, `setsid` or `disown` as a command
+/// word. A small scan, not a shell parser: a false match costs one
+/// conditional sentence in the result, a missed exotic form costs nothing.
+pub(crate) fn detaches_job(command: &str) -> bool {
+    let c: Vec<char> = command.chars().collect();
+    // The word being read (unquoted text only counts), and whether the next
+    // word stands where a command name does.
+    let mut word = String::new();
+    let mut plain = true;
+    let mut at_cmd = true;
+    let mut quote: Option<char> = None;
+    let mut i = 0;
+    // Ends the word: true when it is a detaching command word.
+    let flush = |word: &mut String, plain: &mut bool, at_cmd: &mut bool| -> bool {
+        let hit = *plain && *at_cmd && matches!(word.as_str(), "nohup" | "setsid" | "disown");
+        if !word.is_empty() {
+            *at_cmd = false;
+        }
+        word.clear();
+        *plain = true;
+        hit
+    };
+    while i < c.len() {
+        let ch = c[i];
+        if let Some(q) = quote {
+            if q == '"' && ch == '\\' {
+                i += 1;
+            } else if ch == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        match ch {
+            '\\' => {
+                plain = false;
+                word.push(ch);
+                i += 1;
+            }
+            '\'' | '"' => {
+                quote = Some(ch);
+                plain = false;
+                word.push(ch);
+            }
+            '#' if word.is_empty() => {
+                while i < c.len() && c[i] != '\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            '&' | ';' | '|' | '(' | ')' | '\n' | ' ' | '\t' | '<' | '>' => {
+                if flush(&mut word, &mut plain, &mut at_cmd) {
+                    return true;
+                }
+                let prev = i.checked_sub(1).map(|j| c[j]);
+                let next = c.get(i + 1).copied();
+                match ch {
+                    '&' => {
+                        let operator = prev == Some('&')
+                            || next == Some('&')
+                            || next == Some('>')
+                            || matches!(prev, Some('>' | '<' | '|'));
+                        if !operator {
+                            return true;
+                        }
+                        at_cmd = true;
+                    }
+                    ';' | '|' | '(' | ')' | '\n' => at_cmd = true,
+                    _ => {}
+                }
+            }
+            _ => word.push(ch),
+        }
+        i += 1;
+    }
+    flush(&mut word, &mut plain, &mut at_cmd)
+}
+
+/// The harness line for a foreground call that detaches a job. The mode's
+/// own truth first; the way out only where `background: true` is offered
+/// (a contained shell, a person's chat, the node's table not at zero).
+pub(crate) fn detach_note(contained: bool, background_offered: bool) -> String {
+    let (truth, way) = if contained {
+        (
+            "a job this command detaches (`&`, `nohup`, `setsid`, `disown`) is killed when this \
+             call returns",
+            " To keep one running, use `background: true` with `timeout_secs`, then \
+             `bash_output` and `bash_stop`.",
+        )
+    } else {
+        (
+            "in this chat a job started with `&` ends when this call returns, and one that left \
+             its process group (`setsid`) can outlive it, but a later command may not be able to \
+             stop it",
+            " Run it in the foreground with `timeout_secs`.",
+        )
+    };
+    let way = if background_offered || !contained {
+        way
+    } else {
+        ""
+    };
+    format!("[harness] {truth}.{way}")
+}
+
 #[async_trait::async_trait]
 impl Tool for Bash {
     fn name(&self) -> &'static str {
@@ -396,6 +502,14 @@ impl Tool for Bash {
         if background && !contained {
             return ToolOutcome::err(crate::background::NOT_CONTAINED);
         }
+        // A foreground call that detaches a job by hand: one harness line
+        // in its result (a sentence in the description did not change the
+        // habit, a line in the result does).
+        let detach_line = (!background && detaches_job(&command)).then(|| {
+            let offered = matches!(&ctx.background,
+                crate::background::Access::On(bg) if bg.limits().per_session > 0);
+            detach_note(contained, offered)
+        });
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -713,28 +827,29 @@ impl Tool for Bash {
             }
             _ => cap(combined),
         };
-        match end {
+        let mut outcome = match end {
             End::Exited(status) => {
                 if output.is_empty() {
                     output = "(no output)".into();
                 }
                 if let Some(note) = guard_note {
                     // Not the command's own exit: no exit code to report.
-                    return ToolOutcome {
+                    ToolOutcome {
                         ok: false,
                         output: format!("{output}\n{note}"),
                         truncated,
                         ..Default::default()
-                    };
-                }
-                let code = status.and_then(|s| s.code());
-                let code_str = code.map_or("signal".to_string(), |c| c.to_string());
-                ToolOutcome {
-                    ok: code == Some(0),
-                    output: format!("{output}\n[exit code: {code_str}]"),
-                    exit_code: code,
-                    truncated,
-                    ..Default::default()
+                    }
+                } else {
+                    let code = status.and_then(|s| s.code());
+                    let code_str = code.map_or("signal".to_string(), |c| c.to_string());
+                    ToolOutcome {
+                        ok: code == Some(0),
+                        output: format!("{output}\n[exit code: {code_str}]"),
+                        exit_code: code,
+                        truncated,
+                        ..Default::default()
+                    }
                 }
             }
             End::Cancelled | End::TimedOut | End::Background => {
@@ -786,7 +901,12 @@ impl Tool for Bash {
                     ..Default::default()
                 }
             }
+        };
+        if let Some(line) = detach_line {
+            outcome.output.push('\n');
+            outcome.output.push_str(&line);
         }
+        outcome
     }
 }
 
@@ -794,6 +914,71 @@ impl Tool for Bash {
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    /// The detector's table.
+    #[test]
+    fn detaches_job_table() {
+        let yes = [
+            "sleep 5 &",
+            "(a; b) &",
+            "a & b",
+            "nohup x",
+            "setsid -f x",
+            "x & disown",
+            "x; disown",
+            "a && b &",
+            "cat <<EOF\nfoo & bar\nEOF",
+            "curl http://h/?a=1&b=2",
+            "echo hi\nsleep 5 &\necho ok",
+            "(setsid nohup x >/dev/null 2>&1 &)",
+        ];
+        let no = [
+            "a && b",
+            "a || b",
+            "a 2>&1 | tee f",
+            "a >&2",
+            "a <&3",
+            "a &> f",
+            "a &>> f",
+            "a |& b",
+            "echo \"a & b\"",
+            "echo 'x &'",
+            "curl 'http://h/?a=1&b=2'",
+            "curl http://h/?a=1\\&b=2",
+            "echo nohup",
+            "echo \"setsid\"",
+            "ls # run it in the background &",
+            "cargo test --workspace",
+            "",
+        ];
+        for c in yes {
+            assert!(detaches_job(c), "should match: {c:?}");
+        }
+        for c in no {
+            assert!(!detaches_job(c), "should not match: {c:?}");
+        }
+    }
+
+    fn note_of(r: &ToolOutcome) -> bool {
+        r.output.contains("[harness] ")
+    }
+
+    /// A real call: the detaching one carries the line, the plain one not.
+    /// (No containment here: the host mode's sentence.)
+    #[tokio::test]
+    async fn a_detaching_call_gets_the_harness_line_and_a_plain_one_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolCtx::new(dir.path());
+        let t = Instant::now();
+        let r = Bash
+            .run(&ctx, json!({"command": "sleep 30 &", "timeout_secs": 10}))
+            .await;
+        assert!(t.elapsed() < Duration::from_secs(8), "{}", r.output);
+        assert!(note_of(&r), "{}", r.output);
+        assert!(r.output.contains("[exit code: 0]"), "{}", r.output);
+        let r = Bash.run(&ctx, json!({"command": "echo a && echo b"})).await;
+        assert!(!note_of(&r), "{}", r.output);
+    }
 
     /// Alive and not a zombie.
     fn pid_alive(pid: i32) -> bool {

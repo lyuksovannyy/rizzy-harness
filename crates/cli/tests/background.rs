@@ -573,6 +573,52 @@ async fn off_uncontained_and_unavailable_refuse() {
     assert!(bg.running().is_empty());
 }
 
+/// A foreground call that detaches a job by hand gets one harness line in
+/// its result: the contained mode's truth, and the way out where the table
+/// is offered; only the truth where it is not.
+#[tokio::test]
+async fn a_hand_detached_job_is_told_what_happens_to_it() {
+    let f = fixture();
+    let Some(sb) = f.sandbox() else { return };
+    let (bg, _e) = table(on());
+    let ctx = f.ctx(sb.clone(), &bg);
+    let started = std::time::Instant::now();
+    let r = run(
+        &Bash,
+        &ctx,
+        json!({"command": "sleep 30 &", "timeout_secs": 20}),
+    )
+    .await;
+    assert!(started.elapsed() < Duration::from_secs(15), "{}", r.output);
+    assert!(
+        r.output.contains("[harness] a job this command detaches")
+            && r.output.contains("is killed when this call returns")
+            && r.output.contains("`background: true` with `timeout_secs`")
+            && r.output.contains("`bash_stop`"),
+        "{}",
+        r.output
+    );
+    let r = run(&Bash, &ctx, json!({"command": "echo a && echo b"})).await;
+    assert!(!r.output.contains("[harness]"), "{}", r.output);
+    // The call itself asks for a background run: no line.
+    let r = run(
+        &Bash,
+        &ctx,
+        json!({"command": "sleep 1 &", "background": true, "timeout_secs": 20}),
+    )
+    .await;
+    assert!(!r.output.contains("[harness]"), "{}", r.output);
+    // A session without the table: the truth, no way out.
+    let mut ctx = f.ctx(sb, &bg);
+    ctx.background = Access::Off(harness_tools::background::SUB_AGENT.into());
+    let r = run(&Bash, &ctx, json!({"command": "nohup sleep 30 &"})).await;
+    assert!(
+        r.output.contains("is killed when this call returns") && !r.output.contains("bash_stop"),
+        "{}",
+        r.output
+    );
+}
+
 /// The tests that read this process's memory run one at a time.
 async fn memory_lock() -> tokio::sync::MutexGuard<'static, ()> {
     static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
