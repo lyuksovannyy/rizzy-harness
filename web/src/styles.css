@@ -5501,3 +5501,4 @@ button.pp-row:hover:not(:disabled),
 .delegate-picker:disabled { opacity: 0.6; }
 .delegate-list { list-style: none; margin: 4px 0 0; padding: 0; display: grid; gap: 4px; }
 .form label.delegate-option { display: flex; flex-direction: row; gap: 8px; align-items: baseline; font-weight: normal; }
+.tag-only-row { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
