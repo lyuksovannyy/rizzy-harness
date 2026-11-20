@@ -223,8 +223,23 @@ fn canon(fx: &mut Fx) {
     }
 }
 
+/// A context whose tags start with `tag_len` hex characters: 4 as shipped,
+/// 1 makes a collision of two versions' base tags common (1 in 16), so that
+/// the lengthened and the remembered tags are exercised in most cases.
+fn ctx_with(dir: &std::path::Path, tag_len: usize) -> ToolCtx {
+    let mut ctx = ToolCtx::new(dir);
+    ctx.seen = std::sync::Arc::new(crate::seen::SeenStore::with_tag_len(tag_len))
+        .session(harness_core::SessionId::new());
+    ctx
+}
+
 fn tag_of(out: &str) -> String {
     let l = out.lines().next().unwrap();
+    l[l.rfind('#').unwrap() + 1..l.len() - 1].to_string()
+}
+
+fn tag_of_last(out: &str) -> String {
+    let l = out.lines().last().unwrap();
     l[l.rfind('#').unwrap() + 1..l.len() - 1].to_string()
 }
 
@@ -356,6 +371,11 @@ struct Stats {
     cardrun_mismatch: usize,
     gap: usize,
     swallowed: usize,
+    /// Searches whose output left matched rows out (the result's budget).
+    cut: usize,
+    /// First edits whose result showed a tag longer than the base length:
+    /// the version's base tag was taken (collisions, the cause of seed 941788).
+    lengthened: usize,
 }
 
 async fn do_edit(ctx: &ToolCtx, input: &Value) -> (bool, String, Option<String>) {
@@ -368,13 +388,13 @@ async fn do_edit(ctx: &ToolCtx, input: &Value) -> (bool, String, Option<String>)
     (o.ok, o.output, preview)
 }
 
-async fn one(seed: u64, st: &mut Stats) {
+async fn one(seed: u64, st: &mut Stats, tag_len: usize) {
     let mut rng = Rng(seed.wrapping_mul(0x9E3779B97F4A7C15) | 1);
     for _ in 0..3 {
         rng.next();
     }
     let dir = tempfile::tempdir().unwrap();
-    let ctx = ToolCtx::new(dir.path());
+    let ctx = ctx_with(dir.path(), tag_len);
     let fx = gen_fx(&mut rng);
     let text = fx.render();
     let p = dir.path().join("f.txt");
@@ -409,6 +429,9 @@ async fn one(seed: u64, st: &mut Stats) {
             st.bad
                 .push(format!("{} EDIT1 refused but changed {out}", ctxinfo("")));
             return;
+        }
+        if ok && tag_of_last(&out).len() > tag_len {
+            st.lengthened += 1;
         }
         live = parse_fx(&now);
     } else if mode == 2 {
@@ -612,17 +635,17 @@ async fn one(seed: u64, st: &mut Stats) {
     }
 }
 
-async fn run_seeds(start: u64, n: u64) -> Stats {
+async fn run_seeds(start: u64, n: u64, tag_len: usize) -> Stats {
     let mut st = Stats::default();
     for seed in start..start + n {
-        one(seed, &mut st).await;
+        one(seed, &mut st, tag_len).await;
         if st.bad.len() >= 12 {
             break;
         }
     }
     eprintln!(
         "seeds {start}..{} cases {} wrote {} refused {} outside_weak {} false_refusals {} \
-         cardrun {} gap {} swallowed {}",
+         cardrun {} gap {} swallowed {} lengthened {}",
         start + n,
         st.cases,
         st.wrote,
@@ -631,7 +654,8 @@ async fn run_seeds(start: u64, n: u64) -> Stats {
         st.false_refusals,
         st.cardrun_mismatch,
         st.gap,
-        st.swallowed
+        st.swallowed,
+        st.lengthened
     );
     for b in &st.bad {
         eprintln!("---\n{b}");
@@ -648,22 +672,244 @@ fn env_u64(name: &str, default: u64) -> u64 {
 
 #[tokio::test]
 async fn fuzz_line_form() {
+    line_form(crate::seen::TAG_LEN).await;
+}
+
+/// The same with one-character base tags: with 16 of them a collision of two
+/// versions of the file is the usual case.
+#[tokio::test]
+async fn fuzz_line_form_with_one_character_tags() {
+    line_form(1).await;
+}
+
+async fn line_form(tag_len: usize) {
     let st = run_seeds(
         env_u64("HARNESS_EDIT_FUZZ_START", 1),
         env_u64("HARNESS_EDIT_FUZZ_N", 3000),
+        tag_len,
     )
     .await;
     assert!(st.bad.is_empty(), "{} problems", st.bad.len());
     // The generator reaches both outcomes, and the stale modes.
     assert!(st.wrote > 100 && st.refused > 100, "{st:?}");
+    // With one-character tags the first edit's result usually ends in a
+    // lengthened tag: the cases do reach the collision.
+    if tag_len == 1 && n_seeds() >= 1000 {
+        assert!(
+            st.lengthened as u64 * 100 > n_seeds(),
+            "no collisions were reached: {st:?}"
+        );
+    }
+}
+
+fn n_seeds() -> u64 {
+    env_u64("HARNESS_EDIT_FUZZ_N", 3000)
 }
 
 /// Seeds the review found rows swallowed with (a range spanning rows the
 /// agent's own earlier edit inserted, the first tag reused).
 #[tokio::test]
 async fn fuzz_seeds_of_the_review_stay_fixed() {
-    for seed in [90, 240, 1208] {
-        let st = run_seeds(seed, 1).await;
-        assert!(st.bad.is_empty(), "seed {seed}: {} problems", st.bad.len());
+    // 941788: the agent's own edit made a file with the tag it was read
+    // with, and the tag then named the new version.
+    for seed in [90, 240, 1208, 941788] {
+        for tag_len in [crate::seen::TAG_LEN, 1] {
+            let st = run_seeds(seed, 1, tag_len).await;
+            assert!(
+                st.bad.is_empty(),
+                "seed {seed} tag length {tag_len}: {} problems",
+                st.bad.len()
+            );
+        }
+    }
+}
+
+/// The same generator, with the tag and the shown rows coming from a search
+/// instead of a `read`: a pattern that matches a random subset of the
+/// file's row values. An edit that names a row the search did not print
+/// must be refused and change nothing; an edit of printed rows only must
+/// equal the reference (the file is the tagged version here, so there is
+/// no staleness to excuse a difference). A search with no match records
+/// nothing: the tag is then unknown and every call is refused.
+async fn one_search(seed: u64, st: &mut Stats, tag_len: usize) {
+    use crate::Grep;
+    let mut rng = Rng(seed.wrapping_mul(0x9E3779B97F4A7C15) ^ 0x5EA2C4_u64 | 1);
+    for _ in 0..3 {
+        rng.next();
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ctx_with(dir.path(), tag_len);
+    let mut fx = gen_fx(&mut rng);
+    // Some files are long, with long rows: a search that matches most of
+    // them prints more than a result may hold, so that some matched rows
+    // are left out of the output (the review of PR 188).
+    if rng.chance(15) {
+        let n = 80 + rng.below(160);
+        fx.rows = (0..n)
+            .map(|i| {
+                format!(
+                    "{}{i}{}",
+                    ALPHA[1 + rng.below(ALPHA.len() - 1)],
+                    "q".repeat(120 + rng.below(170))
+                )
+            })
+            .collect();
+        canon(&mut fx);
+    }
+    let text = fx.render();
+    let p = dir.path().join("f.txt");
+    std::fs::write(&p, &text).unwrap();
+    let t = parse_fx(&text);
+    st.cases += 1;
+    let info = |extra: &str| format!("seed {seed} search {extra}\nfile {:?}", text);
+    let mut values: Vec<&String> = t.rows.iter().collect();
+    values.sort();
+    values.dedup();
+    // How much of the file the pattern matches varies, so that calls naming
+    // only matched rows are common as well as calls that do not.
+    let pct = [30, 70, 95][rng.below(3)];
+    let chosen: Vec<&String> = values.into_iter().filter(|_| rng.chance(pct)).collect();
+    let pattern = if chosen.is_empty() {
+        "zzz-no-such-row".to_string()
+    } else {
+        let alt: Vec<String> = chosen.iter().map(|v| regex::escape(v)).collect();
+        format!("^\\x{{feff}}?(?:{})$", alt.join("|"))
+    };
+    let matched: Vec<bool> = t.rows.iter().map(|r| chosen.contains(&r)).collect();
+    let r = Grep.run(&ctx, json!({"pattern": pattern})).await;
+    assert!(r.ok, "{}", r.output);
+    let any = matched.iter().any(|m| *m);
+    let tag = match r.output.lines().next() {
+        Some(l) if l.starts_with("[f.txt#") => tag_of(&r.output),
+        _ => {
+            if any {
+                st.bad.push(format!(
+                    "{} MATCHED BUT NO TAG\n{}",
+                    info(&pattern),
+                    r.output
+                ));
+                return;
+            }
+            crate::seen::tag(&crate::seen::sha256(text.as_bytes()))
+        }
+    };
+    if !any && r.output.lines().next().is_some_and(|l| l.starts_with('[')) {
+        st.bad.push(format!(
+            "{} TAG WITHOUT A MATCH\n{}",
+            info(&pattern),
+            r.output
+        ));
+        return;
+    }
+    // The rows the output prints (`N:text` lines), which is what counts as
+    // shown: every matched row unless the output says it left some out, and
+    // then a prefix of them; never more, and never cut by the result cap.
+    let printed: Vec<bool> = {
+        let nums: std::collections::BTreeSet<usize> = r
+            .output
+            .lines()
+            .filter_map(|l| l.split_once(':')?.0.parse::<usize>().ok())
+            .collect();
+        (1..=t.rows.len()).map(|n| nums.contains(&n)).collect()
+    };
+    if r.truncated || r.output.chars().count() > crate::MAX_OUTPUT_CHARS {
+        st.bad
+            .push(format!("{} OUTPUT CUT BY THE CAP", info(&pattern)));
+        return;
+    }
+    let left_out = r.output.contains(" not shown: the result is limited");
+    st.cut += usize::from(left_out);
+    let last = printed.iter().rposition(|p| *p).map_or(0, |i| i + 1);
+    let expect: Vec<bool> = (1..=t.rows.len())
+        .map(|n| matched[n - 1] && (!left_out || n <= last))
+        .collect();
+    if printed != expect || (left_out && last == 0) {
+        st.bad.push(format!(
+            "{} PRINTED ROWS ARE NOT THE MATCHED ROWS (left out: {left_out})\nprinted {} matched {}",
+            info(&pattern),
+            printed.iter().filter(|p| **p).count(),
+            matched.iter().filter(|p| **p).count()
+        ));
+        return;
+    }
+    let matched = printed;
+    let ops = gen_ops(&mut rng, t.rows.len());
+    let named_ok = ops.iter().all(|o| match o {
+        O::Rep(f, to, _) => (*f..=*to).all(|r| matched[r - 1]),
+        O::Ins(a, _) => *a == 0 || matched[a - 1],
+    });
+    let exp = reference(&t, &ops).render();
+    let j = ops_json(&mut rng, &ops);
+    let input = json!({"path": "f.txt", "tag": tag, "lines": j});
+    let (ok, out, _) = do_edit(&ctx, &input).await;
+    let after = std::fs::read_to_string(&p).unwrap();
+    let expect_write = any && named_ok && exp != text;
+    if ok {
+        st.wrote += 1;
+        if !any || !named_ok {
+            st.bad.push(format!(
+                "{} WROTE ROWS THE SEARCH DID NOT SHOW\nmatched {matched:?}\nops {ops:?}\n{out}",
+                info(&pattern)
+            ));
+        } else if after != exp {
+            st.bad.push(format!(
+                "{} WRONG RESULT\nops {ops:?}\ngot {after:?}\nexp {exp:?}",
+                info(&pattern)
+            ));
+        }
+    } else {
+        st.refused += 1;
+        if after != text {
+            st.bad
+                .push(format!("{} REFUSED BUT CHANGED\n{out}", info(&pattern)));
+        }
+        if expect_write {
+            st.false_refusals += 1;
+            st.bad.push(format!(
+                "{} FALSE REFUSAL\nmatched {matched:?}\nops {ops:?}\n{out}",
+                info(&pattern)
+            ));
+        }
+    }
+}
+
+#[tokio::test]
+async fn fuzz_search_tags() {
+    search_tags(crate::seen::TAG_LEN).await;
+}
+
+#[tokio::test]
+async fn fuzz_search_tags_with_one_character_tags() {
+    search_tags(1).await;
+}
+
+async fn search_tags(tag_len: usize) {
+    let (start, n) = (
+        env_u64("HARNESS_EDIT_FUZZ_START", 1),
+        env_u64("HARNESS_EDIT_FUZZ_N", 3000),
+    );
+    let mut st = Stats::default();
+    for seed in start..start + n {
+        one_search(seed, &mut st, tag_len).await;
+        if st.bad.len() >= 12 {
+            break;
+        }
+    }
+    eprintln!(
+        "search seeds {start}..{} cases {} wrote {} refused {} false_refusals {} cut {}",
+        start + n,
+        st.cases,
+        st.wrote,
+        st.refused,
+        st.false_refusals,
+        st.cut
+    );
+    for b in &st.bad {
+        eprintln!("---\n{b}");
+    }
+    assert!(st.bad.is_empty(), "{} problems", st.bad.len());
+    assert!(st.wrote > 50 && st.refused > 50, "{st:?}");
+    if n >= 1000 {
+        assert!(st.cut > 5, "no search left rows out: {st:?}");
     }
 }

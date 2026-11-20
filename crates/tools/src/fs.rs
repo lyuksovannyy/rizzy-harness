@@ -50,9 +50,10 @@ pub(crate) fn is_cut(text: &str, max_chars: usize) -> bool {
 /// `write` result: the file's path as the model addresses it
 /// ([`ToolCtx::model_path`]: relative to the session folder when inside it,
 /// the string it passes as `path`) and the tag of the version just shown
-/// ([`crate::seen::tag`]), which the line form of `edit` names. Control
+/// ([`crate::seen::Version::tag`]: the one the version was issued, never
+/// recomputed from its hash), which the line form of `edit` names. Control
 /// characters of the path (a file name may hold any) are shown as `?`.
-pub(crate) fn header(ctx: &ToolCtx, path: &std::path::Path, sha: &crate::seen::Sha) -> String {
+pub(crate) fn header(ctx: &ToolCtx, path: &std::path::Path, tag: &str) -> String {
     let p: String = ctx
         .model_path(path)
         .display()
@@ -60,7 +61,23 @@ pub(crate) fn header(ctx: &ToolCtx, path: &std::path::Path, sha: &crate::seen::S
         .chars()
         .map(|c| if c.is_control() { '?' } else { c })
         .collect();
-    format!("[{p}#{}]", crate::seen::tag(sha))
+    format!("[{p}#{tag}]")
+}
+
+/// A tag as long as a tag can reasonably be, to reserve room for a header
+/// before its version has a tag: a header that comes out longer is cut by the
+/// result cap, and its rows then do not count as shown ([`crate::shown`]).
+pub(crate) const RESERVED_TAG: &str = "00000000";
+
+/// The header of the version of `path` (the table's `key`) with hash `sha`,
+/// with the tag that version has or is issued here.
+pub(crate) fn header_of(
+    ctx: &ToolCtx,
+    key: &std::path::Path,
+    path: &std::path::Path,
+    sha: &crate::seen::Sha,
+) -> String {
+    header(ctx, path, &ctx.seen.tag_for(key, sha))
 }
 
 /// The per-line cap and the compact form this call uses.
@@ -158,12 +175,15 @@ impl Tool for Read {
         let (max_chars, compact) = line_style(ctx);
         let cancel = ctx.cancel.clone();
         let p = path.clone();
+        // The header line is part of the result (a path can be thousands of
+        // characters long): the rows get what it leaves.
+        let head_chars = header(ctx, &path, RESERVED_TAG).chars().count() + 1;
         let window = Window {
             first: offset,
             limit,
             max_chars,
             compact,
-            budget: READ_BUDGET_CHARS,
+            budget: READ_BUDGET_CHARS.saturating_sub(head_chars),
         };
         let res = tokio::task::spawn_blocking(move || {
             read_window(&p, &window, crate::MAX_READ_BYTES, &cancel)
@@ -204,22 +224,29 @@ impl Tool for Read {
         // What the agent now knows of the file, for `edit` and `write`. A
         // file cut at the byte cap has no hash of all of it: not recorded.
         let mut seen = None;
-        let mut tagged = false;
+        let mut tagged: Option<String> = None;
+        let mut kept = false;
+        let key = ctx.seen_key(&path);
         if !capped {
-            let key = ctx.seen_key(&path);
             seen = Some(match bytes {
                 Some(b) => {
-                    let f = ctx.seen.record_shown(&key, &b, &rows);
+                    let f = ctx.seen.record(&key, &b);
                     // The header names a version the node keeps: a file too
                     // large or not UTF-8 has none, so no tag is offered.
-                    tagged = ctx.seen.version(&key, &crate::seen::tag(&sha)).is_some();
+                    tagged = ctx.seen.version_of(&key, &sha).map(|v| v.tag);
+                    kept = true;
                     f
                 }
                 None => ctx.seen.record_hash(&key, sha),
             });
         }
-        if tagged {
-            out.insert_str(0, &format!("{}\n", header(ctx, &path, &sha)));
+        if let Some(tag) = &tagged {
+            out.insert_str(0, &format!("{}\n", header(ctx, &path, tag)));
+        }
+        // The rows count as shown once the text that holds them is final and
+        // the cap does not cut it (`shown`).
+        if kept && let Some(proof) = crate::shown::seal(&out) {
+            ctx.seen.add_shown(&key, &sha, &rows, &proof);
         }
         let mut o = ToolOutcome::ok(out);
         o.seen = seen;
@@ -288,12 +315,16 @@ impl Tool for Write {
                     content.lines().count()
                 );
                 // All of it was written by the agent, so all of it is shown.
-                let mut seen = ctx
-                    .seen
-                    .record_shown(&key, content.as_bytes(), &[(1, usize::MAX)]);
+                let mut seen = ctx.seen.record(&key, content.as_bytes());
                 let sha = crate::seen::sha256(content.as_bytes());
-                if ctx.seen.version(&key, &crate::seen::tag(&sha)).is_some() {
-                    report.push_str(&format!("\n{}", header(ctx, &path, &sha)));
+                ctx.seen.add_shown(
+                    &key,
+                    &sha,
+                    &[(1, usize::MAX)],
+                    &crate::shown::Sealed::model_wrote(),
+                );
+                if let Some(v) = ctx.seen.version_of(&key, &sha) {
+                    report.push_str(&format!("\n{}", header(ctx, &path, &v.tag)));
                 }
                 let mut o = ToolOutcome::ok(report);
                 seen.base = base;

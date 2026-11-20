@@ -23,6 +23,8 @@ mod edit_lines_tests;
 #[cfg(test)]
 mod edit_preview_tests;
 #[cfg(test)]
+mod edit_tag_unique_tests;
+#[cfg(test)]
 mod edit_tests;
 pub mod env;
 pub mod filter;
@@ -38,7 +40,12 @@ pub mod outputs;
 mod publish;
 pub mod sandbox;
 mod search;
+#[cfg(test)]
+mod search_tag_tests;
 pub mod seen;
+mod shown;
+#[cfg(test)]
+mod shown_tests;
 pub mod skills;
 pub mod stream;
 pub mod todo;

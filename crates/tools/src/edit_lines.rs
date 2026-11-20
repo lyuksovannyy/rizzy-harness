@@ -36,9 +36,9 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::edit::{changed, show};
-use crate::fs::{header, is_cut, line_style, number_line, read_nofollow, write_nofollow};
-use crate::seen::{Version, sha256, tag};
+use crate::edit::changed;
+use crate::fs::{is_cut, line_style, number_line, read_nofollow, write_nofollow};
+use crate::seen::{Version, sha256};
 use crate::{ToolCtx, ToolOutcome};
 
 /// The highest row number a call may name: a file the line form handles is
@@ -98,13 +98,15 @@ pub(crate) fn wants(input: &Value) -> bool {
         .any(|k| input.get(k).is_some_and(|v| !v.is_null()))
 }
 
-/// The four characters of a tag as the model may send them: bare, or the
-/// whole header line, any letter case.
+/// A tag as the model may send it: bare, or the whole header line, any
+/// letter case (hex characters, any length up to a whole hash: tags are
+/// longer than four characters after a collision).
 pub(crate) fn norm_tag(s: &str) -> Option<String> {
     let s = s.trim();
     let s = s.rsplit('#').next().unwrap_or(s);
     let s = s.trim().trim_end_matches(']').trim();
-    (s.len() == 4 && s.bytes().all(|b| b.is_ascii_hexdigit())).then(|| s.to_ascii_uppercase())
+    (!s.is_empty() && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+        .then(|| s.to_ascii_uppercase())
 }
 
 /// What the call says, before any file is looked at.
@@ -120,7 +122,7 @@ pub(crate) fn parse(input: &Value) -> Result<Call, String> {
         Some(v) => {
             let Some(tag) = v.as_str().and_then(norm_tag) else {
                 return Err(format!(
-                    "`tag` must be the 4 hex characters after # in the header line of a `read`, \
+                    "`tag` must be the hex characters after # in the header line of a `read`, \
                      `edit` or `write` result, not {v}"
                 ));
             };
@@ -351,7 +353,7 @@ enum No {
         lead: String,
         /// Print from this older version (and mark it shown), else from the
         /// file as it is.
-        version: Option<Version>,
+        version: Option<Box<Version>>,
         /// Inclusive 1-based row ranges, widened by `context` rows.
         ranges: Vec<(usize, usize)>,
         context: usize,
@@ -566,7 +568,7 @@ fn plan(ctx: &ToolCtx, key: &Path, shown: &str, live: &str, call: &Call) -> Resu
         let n = split_rows(live).1.len();
         return Err(No::Rows {
             lead: format!(
-                "The line form needs `tag`: the 4 characters after # in the `[path#TAG]` header \
+                "The line form needs `tag`: the characters after # in the `[path#TAG]` header \
                  line of the latest `read`, `edit` or `write` result for {shown}, so nothing was \
                  changed. The file has {n} rows."
             ),
@@ -641,7 +643,7 @@ fn plan(ctx: &ToolCtx, key: &Path, shown: &str, live: &str, call: &Call) -> Resu
                  changed.",
                 list.join(", ")
             ),
-            version: Some(ver),
+            version: Some(Box::new(ver)),
             ranges: unshown,
             context: CONTEXT,
         });
@@ -786,7 +788,7 @@ fn plan(ctx: &ToolCtx, key: &Path, shown: &str, live: &str, call: &Call) -> Resu
         return Err(format!(
             "That changes nothing: the rows already read as the text you gave, so nothing was written. \
              {}",
-            header(ctx, Path::new(shown), &live_sha)
+            crate::fs::header_of(ctx, key, Path::new(shown), &live_sha)
         )
         .into());
     }
@@ -830,21 +832,56 @@ fn refuse(ctx: &ToolCtx, key: &Path, shown: &str, live: &str, no: No, print: boo
             .filter(|(a, b)| a <= b)
             .collect(),
     );
+    let (sha, tail) = match &version {
+        Some(v) => (
+            v.sha,
+            format!(
+                "These rows now count as shown: send the same call again with this tag:\n{}",
+                crate::fs::header(ctx, Path::new(shown), &v.tag)
+            ),
+        ),
+        None => {
+            let sha = sha256(live.as_bytes());
+            (
+                sha,
+                format!(
+                    "These rows now count as shown. Send the call again with the tag of the file \
+                     as it is, numbering the rows as listed here:\n{}",
+                    crate::fs::header_of(ctx, key, Path::new(shown), &sha)
+                ),
+            )
+        }
+    };
     let mut out = format!("{lead}\n");
+    // The whole result is under the cap, or the cap cuts its middle: the
+    // lead and the tail are paid first, the rows get what is left (and
+    // room for the line that says how many were left out).
+    let mut budget = crate::shown::Budget::new();
+    budget.spend(&out);
+    budget.spend(&tail);
+    budget.spend_n(FOOTER_ROOM);
     let mut shown_rows: Vec<(usize, usize)> = Vec::new();
     let mut used = 0;
     let mut left = 0;
+    let mut full = false;
     for (k, (a, b)) in wide.iter().enumerate() {
-        if k > 0 && used < MAX_ROWS {
+        if k > 0 && used < MAX_ROWS && !full {
+            budget.spend("--\n");
             out.push_str("--\n");
         }
         for r in *a..=*b {
-            if used >= MAX_ROWS {
+            if used >= MAX_ROWS || full {
                 left += 1;
                 continue;
             }
             let c = content(rows[r - 1]);
-            out.push_str(&number_line(r, c, max_chars, compact));
+            let row = number_line(r, c, max_chars, compact);
+            if !budget.take(&row) {
+                full = true;
+                left += 1;
+                continue;
+            }
+            out.push_str(&row);
             used += 1;
             if !is_cut(c, max_chars) {
                 shown_rows.push((r, r));
@@ -852,28 +889,25 @@ fn refuse(ctx: &ToolCtx, key: &Path, shown: &str, live: &str, no: No, print: boo
         }
     }
     if left > 0 {
-        out.push_str(&format!("[{left} more rows named, not shown: read them]\n"));
+        out.push_str(&format!(
+            "[{left} more rows named, not shown: send the call again for the next ones, or read \
+             them]\n"
+        ));
     }
-    match &version {
-        Some(v) => {
-            ctx.seen.add_shown(key, &v.sha, &shown_rows);
-            out.push_str(&format!(
-                "These rows now count as shown: send the same call again with this tag:\n{}",
-                header(ctx, Path::new(shown), &v.sha)
-            ));
-        }
-        None => {
-            ctx.seen.add_version(key, live.as_bytes(), &shown_rows);
-            let sha = sha256(live.as_bytes());
-            out.push_str(&format!(
-                "These rows now count as shown. Send the call again with the tag of the file as \
-                 it is, numbering the rows as listed here:\n{}",
-                header(ctx, Path::new(shown), &sha)
-            ));
-        }
+    if version.is_none() {
+        ctx.seen.add_version(key, live.as_bytes());
+    }
+    out.push_str(&tail);
+    // The rows printed count as shown, once the text is final and the cap
+    // does not cut it.
+    if let Some(proof) = crate::shown::seal(&out) {
+        ctx.seen.add_shown(key, &sha, &shown_rows, &proof);
     }
     out
 }
+
+/// Characters kept free in a result for the line that says what was left out.
+const FOOTER_ROOM: usize = 300;
 
 /// Before any card (T51): what is wrong with the call whatever anyone
 /// answers. Arguments first; then, like the old form's, what only the table
@@ -1036,7 +1070,7 @@ pub(crate) async fn run(ctx: &ToolCtx, input: Value) -> ToolOutcome {
     if let Err(e) = write_nofollow(&path, p.updated.as_bytes()).await {
         return ToolOutcome::err(e);
     }
-    let (rows_text, shown_rows) = crate::edit::changed_lines(ctx, &p.updated, &p.landed);
+    let new_sha = sha256(p.updated.as_bytes());
     let n = call.ops.len();
     let mut report = format!(
         "Edited {}: {n} operation{}",
@@ -1051,24 +1085,47 @@ pub(crate) async fn run(ctx: &ToolCtx, input: Value) -> ToolOutcome {
         ));
     }
     report.push_str(".\n");
+    // The whole result is under the cap: what is fixed is paid first, the
+    // changed lines take what they may, and what is left goes to the
+    // replaced rows and the note.
+    let tail = format!("\n{}", crate::fs::header_of(ctx, &key, &path, &new_sha));
+    let mut budget = crate::shown::Budget::new();
+    budget.spend(&report);
+    budget.spend(&tail);
+    let (rows_text, shown_rows) = crate::edit::changed_lines(
+        ctx,
+        &p.updated,
+        &p.landed,
+        budget.left().min(crate::edit::RESULT_ROWS_BUDGET),
+    );
+    budget.spend(&rows_text);
     report.push_str(&rows_text);
     if !p.replaced.is_empty() {
         let (max_chars, compact) = line_style(ctx);
         let (_, old) = split_rows(&live);
         let mut left = MAX_OLD_ROWS;
-        report.push_str(
-            "The replaced rows read, before this edit (numbered as the file was then):\n",
-        );
-        for (a, b) in &p.replaced {
+        let lead = "The replaced rows read, before this edit (numbered as the file was then):\n";
+        budget.spend(lead);
+        report.push_str(lead);
+        let mut cut = false;
+        'old: for (a, b) in &p.replaced {
             for r in *a..=*b {
                 if left == 0 {
-                    break;
+                    break 'old;
+                }
+                let row = number_line(r, content(old[r - 1]), max_chars, compact);
+                if !budget.take(&row) {
+                    cut = true;
+                    break 'old;
                 }
                 left -= 1;
-                report.push_str(&number_line(r, content(old[r - 1]), max_chars, compact));
+                report.push_str(&row);
             }
         }
-        if left == 0 && p.replaced.iter().map(|(a, b)| b - a + 1).sum::<usize>() > MAX_OLD_ROWS {
+        if cut
+            || (left == 0
+                && p.replaced.iter().map(|(a, b)| b - a + 1).sum::<usize>() > MAX_OLD_ROWS)
+        {
             report.push_str("[more replaced rows not repeated here]\n");
         }
     }
@@ -1076,7 +1133,7 @@ pub(crate) async fn run(ctx: &ToolCtx, input: Value) -> ToolOutcome {
     if let Some((a, b)) = p.changed
         && ctx
             .seen
-            .version(&key, &tag(&live_sha))
+            .version_of(&key, &live_sha)
             .is_none_or(|v| !v.covers(a, b))
     {
         // Rows of the file the agent had not seen.
@@ -1087,27 +1144,29 @@ pub(crate) async fn run(ctx: &ToolCtx, input: Value) -> ToolOutcome {
                 .iter()
                 .map(|r| r.len())
                 .sum::<usize>();
-        report.push_str(
-            "\nNote: the file had changed on disk since that version, in rows your edit did not \
-             touch. They read (numbered as the file was before this edit):\n",
-        );
-        report.push_str(&show(ctx, &live, start, end));
+        let note = "\nNote: the file had changed on disk since that version, in rows your edit did \
+                    not touch. They read (numbered as the file was before this edit):\n";
+        budget.spend(note);
+        report.push_str(note);
+        report.push_str(&crate::edit::show_in(ctx, &live, start, end, &mut budget).0);
     }
-    let new_sha = sha256(p.updated.as_bytes());
-    report.push_str(&format!("\n{}", header(ctx, &path, &new_sha)));
+    report.push_str(&tail);
+    // The rows the result printed count as shown once its text is final and
+    // the cap does not cut it.
+    let proof = crate::shown::seal(&report);
     let mut o = ToolOutcome::ok(report);
     // The guard moves on only from the hash it holds: a file changed under
     // the agent stays "changed since it was read" for the old form.
     let guard = ctx.seen.get(&key).map(|s| s.sha);
     if guard == Some(live_sha) {
-        let mut seen = ctx
-            .seen
-            .record_shown(&key, p.updated.as_bytes(), &shown_rows);
+        let mut seen = ctx.seen.record(&key, p.updated.as_bytes());
         seen.base = Some(crate::seen::hex(&live_sha));
         o.seen = Some(seen);
     } else {
-        ctx.seen
-            .add_version(&key, p.updated.as_bytes(), &shown_rows);
+        ctx.seen.add_version(&key, p.updated.as_bytes());
+    }
+    if let Some(proof) = proof {
+        ctx.seen.add_shown(&key, &new_sha, &shown_rows, &proof);
     }
     o
 }
