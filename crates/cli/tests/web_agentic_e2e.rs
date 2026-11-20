@@ -256,14 +256,17 @@ fn doctor_says_which_web_tools_a_node_has() {
     )
     .unwrap();
     let l = line(&doctor(&data, &[]));
-    assert!(l.contains("none") && l.contains("node.toml"), "{l}");
+    assert!(
+        l.contains("web_search off") && l.contains("web_fetch off") && l.contains("node.toml"),
+        "{l}"
+    );
     let nt = data.join("node.toml");
     let mut t = std::fs::read_to_string(&nt).unwrap();
     t.push_str("\n[web]\nfetch = true\n");
     std::fs::write(&nt, t).unwrap();
     let l = line(&doctor(&data, &[]));
     assert!(
-        l.contains("web_fetch") && !l.contains("web_search") && l.contains("node.toml"),
+        l.contains("web_fetch from [web] in node.toml") && l.contains("web_search off"),
         "{l}"
     );
     // A key that is not there is a failure that names the variable only.
@@ -280,4 +283,62 @@ fn doctor_says_which_web_tools_a_node_has() {
         l.starts_with("FAIL") && l.contains("HARNESS_NO_SUCH_KEY"),
         "{l}"
     );
+}
+
+/// "The node decides" on the server's own node: a `[web]` table in node.toml
+/// takes a tool away from what config.toml enables (`fetch = false` removes
+/// `web_fetch`) and cannot switch on what config.toml has off; `doctor` says
+/// which file decided.
+#[tokio::test(flavor = "multi_thread")]
+async fn node_toml_restricts_the_embedded_nodes_web_tools() {
+    let (port, _seen) = fake_web();
+    let web = format!(
+        "\n[web]\nsearch = \"searxng\"\nsearxng_url = \"http://127.0.0.1:{port}\"\nfetch = true\n"
+    );
+    let (_dir, data) = with(&web, "");
+    let nt = data.join("node.toml");
+    let mut t = std::fs::read_to_string(&nt).unwrap();
+    t.push_str(&format!(
+        "\n[web]\nsearch = \"searxng\"\nsearxng_url = \"http://127.0.0.1:{port}\"\nfetch = false\n"
+    ));
+    std::fs::write(&nt, t).unwrap();
+    let out = std::process::Command::new(real::EXE)
+        .args(["--data-dir", data.to_str().unwrap(), "doctor"])
+        .output()
+        .unwrap();
+    let out = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        out.contains("web_fetch off (node.toml [web] fetch = false)")
+            && out.contains("web_search (searxng) from [web] in config.toml"),
+        "{out}"
+    );
+    let ws = data.parent().unwrap().join("ws");
+    let s = real::serve(&data);
+    let r = run(
+        &s,
+        &ws,
+        &[
+            call("web_search", json!({"query": "docs"})),
+            call("web_fetch", json!({"url": "http://127.0.0.1:9/x"})),
+        ],
+    )
+    .await;
+    assert!(r[0].0, "{r:#?}");
+    assert!(r[1].1.contains("unknown tool `web_fetch`"), "{r:#?}");
+    drop(s);
+    // node.toml cannot switch on what config.toml has off.
+    let (_dir, data) = with("\n[web]\nfetch = false\n", "");
+    let nt = data.join("node.toml");
+    let mut t = std::fs::read_to_string(&nt).unwrap();
+    t.push_str("\n[web]\nfetch = true\n");
+    std::fs::write(&nt, t).unwrap();
+    let ws = data.parent().unwrap().join("ws");
+    let s = real::serve(&data);
+    let r = run(
+        &s,
+        &ws,
+        &[call("web_fetch", json!({"url": "http://127.0.0.1:9/x"}))],
+    )
+    .await;
+    assert!(r[0].1.contains("unknown tool `web_fetch`"), "{r:#?}");
 }

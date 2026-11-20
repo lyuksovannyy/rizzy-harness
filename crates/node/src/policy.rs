@@ -70,11 +70,14 @@ pub struct NodePolicy {
     /// ADOPTION_PLAN X.27 step 3, PLAN.md T86): the hosts this node clones
     /// from. Nothing the master sends adds one.
     pub forge: ForgePolicy,
-    /// The web tools a remote node's agentic chats have (`[web]`,
-    /// ADOPTION_PLAN T.3, PLAN.md T89): off unless this file turns them
-    /// on. The embedded node takes the server's `[web]` instead; nothing
-    /// the master sends switches either on.
-    pub web: WebPolicy,
+    /// The web tools this node's agentic chats have (`[web]`, ADOPTION_PLAN
+    /// T.3, PLAN.md T89). A remote node: this file is the only source, and no
+    /// table (or a key left out of it) means off. The server's own node: the
+    /// server's `[web]` decides what exists, and a table here can only take
+    /// away (`fetch = false`, `search = "none"`; a key left out counts as
+    /// off) and never switches on what the server has off. Nothing the
+    /// master sends switches either on.
+    pub web: Option<WebPolicy>,
     /// Folders no session may include and no file tool may touch, in every
     /// mode: the runtime's own data directory (keys, the API token,
     /// databases). Set by the runtime with [`NodePolicy::protect`], never
@@ -805,8 +808,8 @@ pub struct WebPolicy {
     pub brave_key_env: Option<String>,
     /// The Brave key's name in this node's `secrets.toml`.
     pub brave_key_secret: Option<String>,
-    /// `web_fetch`: public addresses only, URLs from the person, a search,
-    /// a fetched page or a file the agent read.
+    /// `web_fetch`: public addresses only, URLs from the person, a search
+    /// or a page it fetched (never a file the agent read).
     pub fetch: bool,
 }
 
@@ -1146,7 +1149,7 @@ impl Default for NodePolicy {
             mcp: McpPolicy::default(),
             projects: ProjectsPolicy::default(),
             forge: ForgePolicy::default(),
-            web: WebPolicy::default(),
+            web: None,
             protected_dirs: Vec::new(),
             exec: Default::default(),
             sandbox_tmp: None,
@@ -1210,7 +1213,9 @@ impl NodePolicy {
         self.skills.roots()?;
         self.instructions.user_file()?;
         self.projects.configured()?;
-        self.web.validate()?;
+        if let Some(w) = &self.web {
+            w.validate()?;
+        }
         let n = self.limits.tool_stream_bytes;
         let (min, max) = (
             harness_tools::stream::MIN_STREAM_BYTES,
