@@ -16,6 +16,7 @@
 //! the model's citations to links it did not write.
 
 pub mod favicon;
+mod scan;
 mod sources;
 
 use std::net::{IpAddr, SocketAddr};
@@ -33,6 +34,19 @@ use sources::cite_hint;
 pub const MAX_BODY: usize = 2 * 1024 * 1024;
 /// Largest text handed to the model from one page.
 pub const MAX_PAGE_CHARS: usize = 20_000;
+/// The most bytes of a page handed to the readability pass (it is the
+/// slowest parser; a larger page is read by `html2text`).
+const READABILITY_MAX: usize = 256 * 1024;
+/// The most bytes of a page handed to any tree-building parser; a larger
+/// page is read as plain text.
+const DOM_MAX: usize = 1024 * 1024;
+/// How long the caller waits for a parse. The scan and the caps above keep a
+/// parse far under this; it is the last guard, and a parse that overruns it
+/// is abandoned (its thread ends when it ends).
+const PARSE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Parsers recurse per level of nesting: they run on a thread with a stack
+/// of their own, never on an async worker.
+const PARSE_STACK: usize = 128 * 1024 * 1024;
 const TIMEOUT: Duration = Duration::from_secs(20);
 const USER_AGENT: &str = concat!("harness/", env!("CARGO_PKG_VERSION"), " (web_fetch)");
 
@@ -244,6 +258,26 @@ pub fn readable_markdown(html: &str, url: &str) -> Option<(String, String)> {
     Some((md.to_string(), article.title.trim().to_string()))
 }
 
+/// Run a parse on a thread of its own with a large stack, and wait for it
+/// for at most [`PARSE_TIMEOUT`].
+async fn on_parse_thread<T: Send + 'static>(
+    f: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::Builder::new()
+        .name("page-parse".into())
+        .stack_size(PARSE_STACK)
+        .spawn(move || {
+            let _ = tx.send(f());
+        })
+        .map_err(|e| format!("cannot read this page: {e}"))?;
+    match tokio::time::timeout(PARSE_TIMEOUT, rx).await {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(_)) => Err("this page could not be read".into()),
+        Err(_) => Err("this page took too long to read".into()),
+    }
+}
+
 /// A page as text, with the title the page gives itself (if any).
 struct Page {
     text: String,
@@ -281,24 +315,43 @@ async fn read_page(resp: reqwest::Response, readable: bool) -> Result<Page, Stri
         body.extend_from_slice(&chunk);
     }
     let (text, title) = if html {
-        let extracted = if readable {
+        // Before any parser: a page nested deeper than a parser can bear is
+        // refused; one that is too large for a tree, or built to confuse
+        // the scan, is read as plain text (no tree).
+        let verdict = scan::check(&body);
+        if verdict == scan::Verdict::TooDeep {
+            return Err(format!(
+                "this page is nested too deeply to read (more than {} levels of elements)",
+                scan::MAX_NESTING
+            ));
+        }
+        let tree = verdict == scan::Verdict::Ok && body.len() <= DOM_MAX;
+        let extracted = if readable && tree && body.len() <= READABILITY_MAX {
             let (b, u) = (
                 String::from_utf8_lossy(&body).into_owned(),
                 page_url.clone(),
             );
-            tokio::task::spawn_blocking(move || readable_markdown(&b, &u))
-                .await
-                .ok()
-                .flatten()
+            on_parse_thread(move || readable_markdown(&b, &u)).await?
         } else {
             None
         };
         match extracted {
             Some((md, title)) => (md, Some(title)),
-            None => (
-                html2text::from_read(&body[..], 100).map_err(|e| e.to_string())?,
-                sources::html_title(&body),
-            ),
+            None => {
+                let b = body.clone();
+                let text = on_parse_thread(move || {
+                    // A tree that cannot be rendered (nesting that leaves no
+                    // width for the text) is read as plain text instead.
+                    let rendered = if tree {
+                        html2text::from_read(&b[..], 100).ok()
+                    } else {
+                        None
+                    };
+                    Ok::<String, String>(rendered.unwrap_or_else(|| scan::plain_text(&b)))
+                })
+                .await??;
+                (text, sources::html_title(&body))
+            }
         }
     } else {
         (String::from_utf8_lossy(&body).into_owned(), None)
