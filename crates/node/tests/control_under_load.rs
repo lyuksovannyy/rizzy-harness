@@ -94,8 +94,13 @@ const STALLED: u64 = u64::MAX;
 /// How long a test waits, with the uplink taking nothing, for a command to
 /// end: a limit on waiting only (a loaded machine took 196 s for one of
 /// these tests), not a bound the node promises. What it catches does not
-/// end at all: before A.21 the command ran until the uplink moved.
-const STALL_LIMIT: Duration = Duration::from_secs(60);
+/// end at all: before A.21 the command ran until the uplink moved. It costs
+/// nothing when the node is prompt, so it is far past any loaded machine
+/// (the machine and the CI runner share their cores with other builds).
+const STALL_LIMIT: Duration = Duration::from_secs(180);
+/// The same kind of limit for what is waited for after the Stop: the ack,
+/// the end of the turn, the command's end once the uplink reads again.
+const AFTER_STOP_LIMIT: Duration = Duration::from_secs(180);
 
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -455,13 +460,13 @@ async fn stop_while_full(cmd: &str, before: Option<MasterToNode>) -> Stop {
     let t1 = Instant::now();
     let after_read = match stalled {
         Some(_) => None,
-        None => stopped_after(&dir, t1, Duration::from_secs(60)).await,
+        None => stopped_after(&dir, t1, AFTER_STOP_LIMIT).await,
     };
-    node.wait("the stop's ack", Duration::from_secs(60), |s| {
+    node.wait("the stop's ack", AFTER_STOP_LIMIT, |s| {
         s.acks.contains_key("stop")
     })
     .await;
-    node.wait("the watched turn's end", Duration::from_secs(60), |s| {
+    node.wait("the watched turn's end", AFTER_STOP_LIMIT, |s| {
         s.ended.contains_key(&sid)
     })
     .await;

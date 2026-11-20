@@ -303,22 +303,35 @@ mod tests {
     /// A fake `graphify` that prints its arguments one per line, starts a
     /// grandchild that writes its pid to `pidfile`, and then waits.
     fn fake(dir: &Path, pidfile: &Path, wait: bool) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
+        use std::io::Write;
+        use std::process::{Command, Stdio};
         let bin = dir.join("graphify");
         let tail = if wait {
             "sleep 1000 & echo $! > \"$PIDFILE\"; wait"
         } else {
             ""
         };
-        std::fs::write(
-            &bin,
-            format!(
-                "#!/bin/sh\nPIDFILE='{}'\nfor a in \"$@\"; do echo \"$a\"; done\n{tail}\n",
-                pidfile.display()
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let script = format!(
+            "#!/bin/sh\nPIDFILE='{}'\nfor a in \"$@\"; do echo \"$a\"; done\n{tail}\n",
+            pidfile.display()
+        );
+        // Not written by this process: while a thread of it holds the file
+        // open for writing, a fork on another thread (every test here starts
+        // programs) copies that handle, and executing the file fails with
+        // "Text file busy" until that child has exec'd. A short-lived `sh`
+        // opens, fills, closes and chmods it; nothing of ours is ever open.
+        let mut w = Command::new("sh")
+            .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+            .arg(&bin)
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        w.stdin
+            .take()
+            .unwrap()
+            .write_all(script.as_bytes())
+            .unwrap();
+        assert!(w.wait().unwrap().success());
         bin
     }
 

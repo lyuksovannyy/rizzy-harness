@@ -472,6 +472,14 @@ impl Node {
                         if a.turn_allow {
                             asked += 1;
                         }
+                        // Such a card is never pending: the node records it
+                        // and resolves it in the same breath, so an answer
+                        // to it is refused ("no such pending approval").
+                        // Whether it was already resolved when this loop
+                        // read the log is a race; its own words are not.
+                        if a.reason.ends_with("is denied by this node's policy") {
+                            continue;
+                        }
                         let _ = self.link.to_node.try_send(MasterToNode::ApprovalRespond {
                             req_id: "a".into(),
                             session_id: *s,
