@@ -1298,6 +1298,15 @@ the turn changed beside the chat: each file with its added and removed lines
 (three lines of context, line numbers, `+` and `−`), renames as renames,
 binary files and files over 512 KiB named with their sizes, hidden characters
 shown as `<U+…>` codes. "Include later turns" shows what "Rewind" would undo.
+A turn that moved your repository's `HEAD` (it ran `git checkout`, or made or
+moved commits) says so in one sentence on its row and in the changes panel:
+for example "This turn switched the branch from `main` to `feature-x`. The
+file count includes what the switch changed. Undo puts the files back as they
+were before the turn, on whichever branch is checked out now; it does not
+switch the branch back." For commits on the same branch it names the two
+commits and says they stay. It is a note; Undo works and refuses exactly as
+before. The node reads `HEAD` from the repository's files (no git process), and
+shows nothing for a folder that is not a plain repository directory.
 Changes made by shell commands show like any other. The node reads them from
 the turn's checkpoints when you ask; nothing is stored on the server. A very
 large turn is shown in part, marked "Cut" (at most 1,000 files are listed and
@@ -1391,7 +1400,11 @@ undo or rewind changes a file it saves the folder as it is, your own edits
 since the turn included, as a checkpoint of its own, so "Undo anyway" loses
 nothing: restoring that checkpoint (its id is in the chat's log, phase
 `before_restore`; `POST /api/sessions/<id>/turns/<that id>/restore`) undoes
-the undo. The chat has no button for it yet. At the end of each turn the
+the undo. The turn's row offers it after an undo as **Put back what this
+undo replaced**: the same restore, with the same checks and refusals (and
+"Undo anyway"); the turn's changes are then back and the row offers Undo again.
+If the node no longer keeps that checkpoint it says so and the button goes.
+At the end of each turn the
 old versions of the files it changed are copied into the private
 repository, and at the start of each turn so are your own changes since
 the previous one, so you can commit, rewrite history and `git gc`
