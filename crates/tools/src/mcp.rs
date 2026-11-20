@@ -894,8 +894,19 @@ impl Slot {
                 self.touch();
                 Ok(listed)
             }
+            // Refused before anything ran, and nothing the process does
+            // changes it: told as final, not counted, not started again.
+            Ok(Err(e)) if e.permanent => {
+                let msg = format!(
+                    "it did not start: {}. This will not change until the entry or the chat \
+                     does",
+                    e.why
+                );
+                *st = State::Failed(msg.clone());
+                Err(msg)
+            }
             Ok(Err(e)) => {
-                let msg = self.failed(&format!("it did not start: {e}"));
+                let msg = self.failed(&format!("it did not start: {}", e.why));
                 if self.fails.load(Ordering::SeqCst) > MAX_RESTARTS {
                     *st = State::Failed(msg.clone());
                 }
@@ -1126,6 +1137,29 @@ fn shorten(s: &str, max: usize) -> String {
 
 // ---- starting a server ----
 
+/// Why a start failed. `permanent` is a refusal raised before anything
+/// ran, which nothing about the process can change (only the entry or the
+/// chat): it is not counted and no restart is announced.
+struct StartError {
+    why: String,
+    permanent: bool,
+}
+
+impl From<String> for StartError {
+    fn from(why: String) -> Self {
+        StartError {
+            why,
+            permanent: false,
+        }
+    }
+}
+
+impl From<&str> for StartError {
+    fn from(why: &str) -> Self {
+        why.to_string().into()
+    }
+}
+
 /// Start `cfg` in its chat's `home` (its folder, its pin, its temp folder;
 /// nothing of a node-owned sub-agent folder) with `ctx`'s execution mode,
 /// environment and protected folders, or, without a home, in `ctx`'s
@@ -1135,7 +1169,7 @@ async fn start(
     cfg: &ServerConfig,
     ctx: &ToolCtx,
     home: Option<&Home>,
-) -> Result<Up, String> {
+) -> Result<Up, StartError> {
     let env = ctx.env.with_pass(&cfg.env_vars)?;
     let args: Vec<&OsStr> = cfg.args.iter().map(OsStr::new).collect();
     let (sandbox, workspace, pin, owned) = match home {
@@ -1177,15 +1211,22 @@ async fn start(
     // is its control channel); the folder holding it is the node's own.
     let mut fifo_dir = None;
     // A repository's server (X.36) with `env` values runs contained or
-    // not at all: the values reach only its own process, set by
+    // not at all (a `host` chat's is never contained: the owner's
+    // 2026-11-20 decision lets it start without values, and this refuses
+    // the rest until the values can be kept off our own wrapper, see the
+    // design note in docs/projects.md): the values reach only its own process, set by
     // `sandbox-exec` after the confinement (see below); no other way of
     // starting it keeps them off the processes before it.
     if cfg.env_inside && !cfg.env.0.is_empty() && !contained {
-        return Err(
-            "a repository's server with env values runs only in a contained sandbox \
-                    (bubblewrap), which this chat does not have"
+        return Err(StartError {
+            why: "its .mcp.json entry has env values, which reach a repository's server only \
+                  inside a bubblewrap sandbox, and this chat has none (a host chat never has \
+                  one): no other way of starting it keeps the values off the processes before \
+                  it. Take the env values out of the entry and approve it again, or use a \
+                  sandboxed chat"
                 .into(),
-        );
+            permanent: true,
+        });
     }
     let writer: Box<dyn tokio::io::AsyncWrite + Send + Unpin> = if contained {
         let root = sandbox
@@ -1286,7 +1327,7 @@ async fn start(
         .await
     {
         Ok(s) => s,
-        Err(_) if oversize.load(Ordering::SeqCst) => return Err(over_cap()),
+        Err(_) if oversize.load(Ordering::SeqCst) => return Err(over_cap().into()),
         Err(e) => {
             // Its stdout closed (it exited) or it answered wrong. Its error
             // output closes with it but is read by another task, which may
@@ -1302,7 +1343,8 @@ async fn start(
                 format!("initialize failed: {e}")
             } else {
                 format!("initialize failed: {e}; the end of its error output: {tail}")
-            });
+            }
+            .into());
         }
     };
     drop(fifo_dir);

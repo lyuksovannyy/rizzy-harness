@@ -179,7 +179,11 @@ export default function Project(props: {
         {tab === "settings" && (
           <>
             <ProjectSettings project={project} nodes={props.nodes} onSaved={setProject} onDeleted={props.onDeleted} />
-            <ProjectMcp projectId={project.project_id} hasFolder={!!(project.settings.node_id && project.settings.cwd)} />
+            <ProjectMcp
+              projectId={project.project_id}
+              hasFolder={!!(project.settings.node_id && project.settings.cwd)}
+              modes={props.nodes.find((n) => n.node_id === project.settings.node_id)?.exec_modes}
+            />
           </>
         )}
       </div>

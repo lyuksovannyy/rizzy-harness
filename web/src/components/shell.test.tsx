@@ -219,6 +219,22 @@ describe("Shell", () => {
     editable.remove();
   });
 
+  test("while a call's choice is up in the open chat, '/' opens nothing (Ctrl/Cmd+K, a chord, still does)", async () => {
+    const { raise } = await import("../lib/choiceGuard");
+    const ev = (init: KeyboardEventInit, target: HTMLElement) => {
+      const e = new KeyboardEvent("keydown", init);
+      Object.defineProperty(e, "target", { value: target });
+      return e;
+    };
+    const button = document.createElement("button");
+    const release = raise();
+    expect(opensSearch(ev({ key: "/" }, document.body))).toBe(false);
+    expect(opensSearch(ev({ key: "/" }, button))).toBe(false);
+    expect(opensSearch(ev({ key: "k", ctrlKey: true }, document.body))).toBe(true);
+    release();
+    expect(opensSearch(ev({ key: "/" }, document.body))).toBe(true);
+  });
+
   test("narrow: the drawer holds the whole sidebar, takes focus, makes the page inert and closes on Esc", async () => {
     const real = window.matchMedia;
     window.matchMedia = ((query: string) => ({ matches: true, media: query, addEventListener() {}, removeEventListener() {} }) as unknown as MediaQueryList) as typeof window.matchMedia;
