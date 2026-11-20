@@ -7,6 +7,7 @@ use std::sync::Arc;
 mod listen;
 mod lock;
 mod net;
+mod push_check;
 mod stop;
 
 use anyhow::{Context, bail};
@@ -1148,6 +1149,31 @@ async fn doctor(dir: &Path) -> anyhow::Result<()> {
             line => check("execution modes", line),
         },
         Err(e) => check("execution modes", Err(e.clone())),
+    }
+    // Whether a host chat can push (X.40): from node.toml and this
+    // process's environment alone, nothing contacted or read.
+    if let (Ok((_, o)), Ok(p)) = (&started, NodePolicy::load(&dir.join("node.toml")))
+        && let Ok(settings) = p.sandbox_settings()
+    {
+        let mut deny = harness_master::env::hidden_from_tools(&[]);
+        if let Ok(c) = Config::load(&dir.join(CONFIG_FILE)) {
+            deny.extend(c.providers.iter().filter_map(|x| x.api_key_env.clone()));
+        }
+        if let Ok(env) = p.tool_env(deny) {
+            let home = dirs::home_dir();
+            let get = |n: &str| std::env::var_os(n);
+            let view = push_check::PushView {
+                host_offered: o.offers(harness_core::policy::ExecMode::Host),
+                env: &env,
+                node_var: &get,
+                read: &settings.read,
+                write: &settings.write,
+                home: home.as_deref(),
+            };
+            for l in push_check::lines(&view) {
+                println!("info  push from a chat, {l}");
+            }
+        }
     }
     check(
         "checkpoint git",
