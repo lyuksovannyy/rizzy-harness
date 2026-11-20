@@ -19,9 +19,20 @@
 //! position not on that list is scrubbed: a field added later is scrubbed
 //! unless someone adds it on purpose.
 //!
+//! A class is learned from a node that can tell: a string, or an object or
+//! array with something in it. A `null`, an empty object or array, a number
+//! or a bool holds no text, so it is passed over and teaches nothing (an
+//! `Option<String>` that is `None` is written `null`, and the class learned
+//! from that `null` once left a later string there unscrubbed for the life
+//! of the process). A class is kept per path AND per shape of the node (a
+//! string, an object, an array), so a path that is a bare string in one
+//! variant of an enum and an object in another has each variant's own
+//! class, whichever came first. Where a class and the node do not fit, the
+//! node is scrubbed as free text: when in doubt, scrub.
+//!
 //! The classification rests on one assumption, checked by a test over
-//! every kind: a path has one class, whichever element of an array or entry
-//! of a map it is met in. Should it ever fail, the final check catches a
+//! every kind: a path has one class for each shape, whichever element of an
+//! array or entry of a map it is met in. Should it ever fail, the final check catches a
 //! result that does not decode, and the edits are then taken one path at a
 //! time, each checked ([`Outcome::Fallback`]).
 
@@ -302,7 +313,9 @@ struct Schema<'a> {
     keep: &'a dyn Fn(&str, &str) -> Keep,
 }
 
-/// How a probe of a position came out.
+/// How a probe of a position came out. Only called with a node that can
+/// tell (a string, or a non-empty object or array): any other is `Free`,
+/// which is scrubbed, never skipped (when in doubt, scrub).
 fn probe(s: &Schema, sk: &Value, path: &[Seg]) -> Class {
     let with = |f: &dyn Fn(&mut Value)| {
         let mut c = sk.clone();
@@ -336,14 +349,29 @@ fn probe(s: &Schema, sk: &Value, path: &[Seg]) -> Class {
                 });
                 if renamed { Class::Map } else { Class::Struct }
             }
-            None => Class::Struct,
+            // Nothing to rename: it cannot tell a struct from a map.
+            None => Class::Free,
         },
-        _ => Class::Seq,
+        Some(Value::Array(_)) => Class::Seq,
+        _ => Class::Free,
     }
 }
 
-/// The classes known, per kind and path, for the life of the process.
-type Cache = HashMap<String, HashMap<String, Class>>;
+/// Whether a node can tell its class, and the shape its class is kept
+/// under: a string, an object or an array with something in it. A `null`,
+/// `{}`, `[]`, number or bool has no text in it and no class to teach.
+fn shape(v: &Value) -> Option<usize> {
+    match v {
+        Value::String(_) => Some(0),
+        Value::Object(m) if !m.is_empty() => Some(1),
+        Value::Array(a) if !a.is_empty() => Some(2),
+        _ => None,
+    }
+}
+
+/// The classes known, per kind, path and shape of the node (see [`shape`]),
+/// for the life of the process.
+type Cache = HashMap<String, HashMap<String, [Option<Class>; 3]>>;
 static CLASSES: LazyLock<Mutex<Cache>> = LazyLock::new(Mutex::default);
 
 /// The payload is not as the typed event writes it: no probe can be read.
@@ -357,9 +385,20 @@ struct Classifier<'a, 'b> {
 }
 
 impl Classifier<'_, '_> {
-    fn class(&mut self, path: &[Seg], g: &str) -> Result<Class, NotWritten> {
-        if let Some(c) = self.cache.get(self.s.kind).and_then(|m| m.get(g)) {
-            return Ok(*c);
+    /// The class of `node`, at `path` of the payload: from the cache, or
+    /// probed and cached for nodes of its shape.
+    fn class(&mut self, node: &Value, path: &[Seg], g: &str) -> Result<Class, NotWritten> {
+        let Some(shape) = shape(node) else {
+            // Nothing to scrub in it, and nothing it can teach.
+            return Ok(Class::Free);
+        };
+        if let Some(c) = self
+            .cache
+            .get(self.s.kind)
+            .and_then(|m| m.get(g))
+            .and_then(|l| l[shape])
+        {
+            return Ok(c);
         }
         if self.sk.is_none() {
             // A probe is read against the payload as it is: only one the
@@ -375,7 +414,8 @@ impl Classifier<'_, '_> {
         self.cache
             .entry(self.s.kind.to_string())
             .or_default()
-            .insert(g.to_string(), c);
+            .entry(g.to_string())
+            .or_default()[shape] = Some(c);
         Ok(c)
     }
 
@@ -384,7 +424,8 @@ impl Classifier<'_, '_> {
     fn resolve(&mut self, path: &[Seg]) -> Result<(Class, String), NotWritten> {
         let mut g = String::new();
         for i in 0..=path.len() {
-            let c = self.class(&path[..i], &g)?;
+            let node = at(self.base, &path[..i]).unwrap_or(&Value::Null);
+            let c = self.class(node, &path[..i], &g)?;
             let Some(seg) = path.get(i) else {
                 return Ok((c, g));
             };
@@ -495,7 +536,16 @@ impl Walk<'_, '_, '_> {
         path: &mut Vec<Seg>,
         g: &mut String,
     ) -> Result<(), NotWritten> {
-        match self.cls.class(path, g)? {
+        let class = self.cls.class(v, path, g)?;
+        // A class that does not fit the node (none is learned from another
+        // shape, so none is expected): scrubbed as free text, never skipped.
+        let class = match (class, &*v) {
+            (Class::Text | Class::Fixed, Value::String(_))
+            | (Class::Seq, Value::Array(_))
+            | (Class::Struct | Class::Map, Value::Object(_)) => class,
+            _ => Class::Free,
+        };
+        match class {
             Class::Free => match self.allow {
                 // The first pass: one scan, as the old scrubber did.
                 None => {
@@ -729,8 +779,8 @@ impl SecretSet {
     }
 }
 
-/// Every string and object position of `payload` (below free JSON, only
-/// its root) with its general path and class, probed afresh, nothing
+/// Every string and non-empty object or array position of `payload` (below
+/// free JSON, only its root) with its general path and class, probed afresh, nothing
 /// cached: for the tests that compare classes across instances and the
 /// kept positions with [`KEPT`].
 #[doc(hidden)]
@@ -747,7 +797,10 @@ pub fn positions(kind: &str, payload: &Value) -> Vec<(String, Class)> {
         match v {
             Value::String(_) => out.push(path.clone()),
             Value::Array(a) => {
-                out.push(path.clone());
+                // An empty one tells nothing (see `shape`).
+                if !a.is_empty() {
+                    out.push(path.clone());
+                }
                 for (i, x) in a.iter().enumerate() {
                     path.push(Seg::Index(i));
                     walk(x, path, out);
@@ -755,7 +808,9 @@ pub fn positions(kind: &str, payload: &Value) -> Vec<(String, Class)> {
                 }
             }
             Value::Object(m) => {
-                out.push(path.clone());
+                if !m.is_empty() {
+                    out.push(path.clone());
+                }
                 for (k, x) in m {
                     path.push(Seg::Key(k.clone()));
                     walk(x, path, out);
@@ -854,6 +909,67 @@ mod tests {
                 v: Color::Longcolor
             }
         );
+    }
+
+    /// `Option<String>` written as `null`, and a list that can be empty.
+    #[derive(Serialize, Deserialize, PartialEq, Debug)]
+    struct T {
+        name: String,
+        packed: Option<String>,
+        tags: Vec<String>,
+    }
+
+    fn holds_t(v: Value) -> (bool, Value) {
+        let ok =
+            T::deserialize(&v).is_ok_and(|x| serde_json::to_value(&x).is_ok_and(|back| back == v));
+        (ok, v)
+    }
+
+    fn run_t(set: &SecretSet, v: &mut Value, cache: &mut Cache) -> Outcome {
+        let keep = |_: &str, _: &str| Keep::No;
+        let s = Schema {
+            kind: "t",
+            holds: &holds_t,
+            keep: &keep,
+        };
+        run(set, &s, v, cache).ok().expect("written as typed")
+    }
+
+    #[test]
+    fn a_node_that_cannot_tell_teaches_no_class() {
+        let set = SecretSet::new(vec![Secret::new("longsecret".into())]);
+        let mut cache = Cache::new();
+        let mut first = serde_json::json!({ "name": "a longsecret", "packed": null, "tags": [] });
+        run_t(&set, &mut first, &mut cache);
+        let known = &cache["t"];
+        assert!(known.contains_key("name"));
+        assert!(!known.contains_key("packed"), "{known:?}");
+        assert!(!known.contains_key("tags"), "{known:?}");
+        let mut later =
+            serde_json::json!({ "name": "x", "packed": "a longsecret", "tags": ["longsecret"] });
+        run_t(&set, &mut later, &mut cache);
+        assert_eq!(
+            later,
+            serde_json::json!({ "name": "x", "packed": "a [REDACTED]", "tags": ["[REDACTED]"] })
+        );
+    }
+
+    /// When in doubt, scrub: a class that does not fit the node (the cache
+    /// never holds one: it is kept per shape; this plants one) is not
+    /// taken as "nothing here".
+    #[test]
+    fn a_class_that_does_not_fit_the_node_scrubs_it_as_text() {
+        let set = SecretSet::new(vec![Secret::new("longsecret".into())]);
+        for wrong in [Class::Seq, Class::Struct, Class::Map] {
+            let mut cache = Cache::new();
+            cache
+                .entry("t".into())
+                .or_default()
+                .insert("packed".into(), [Some(wrong), None, None]);
+            let mut v = serde_json::json!({ "name": "x", "packed": "a longsecret", "tags": [] });
+            run_t(&set, &mut v, &mut cache);
+            assert_eq!(v["packed"], "a [REDACTED]", "{wrong:?}");
+        }
     }
 
     #[test]
