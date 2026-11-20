@@ -127,7 +127,7 @@ async fn fake() -> Fake {
                         "text/html",
                         format!(
                             "<html><body><p>{}</p></body></html>",
-                            "x".repeat(harness_web::MAX_BODY + 4096)
+                            "x".repeat(2 * 1024 * 1024 + 4096)
                         )
                         .into_bytes(),
                         String::new(),
@@ -137,7 +137,7 @@ async fn fake() -> Fake {
                         "text/html",
                         format!(
                             "<html><body><p>BEFORECAP</p><!--{}--><p>AFTERCAP</p></body></html>",
-                            "x".repeat(harness_web::MAX_BODY + 10)
+                            "x".repeat(2 * 1024 * 1024 + 10)
                         )
                         .into_bytes(),
                         String::new(),
