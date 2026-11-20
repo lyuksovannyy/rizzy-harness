@@ -196,13 +196,22 @@ two ways, both on purpose:
 
 Branch names are repository text: at most 200 bytes, control characters, line
 and paragraph separators and bidirectional controls replaced. The chat shows one
-sentence on the turn's Undo block (and, for a rewind, the later turns' moves)
-and in the changes panel: the branch switched; commits made or moved on the same
-branch; and the two detached variants. It is a note: undo does what it did and
+sentence on the turn's Undo block (and, for a rewind, the later turns' moves, a
+sentence each, most recent last) and in the changes panel: the checked-out
+branch changed; a branch moved to another commit (a commit, a reset); and the
+detached variants. The readings are of the folder's HEAD, so the words say what
+changed while the turn ran, not who did it (another chat in the folder counts).
+Nothing is recorded for a turn cut off by a restart (a Stop still gets a note),
+when HEAD ends where it began, for an unborn branch's first commit, `git init`,
+`rm -rf .git` or `git worktree add` in the turn; two names that differ only in
+characters the cleaner replaces read as one. It is a note: undo does what it did and
 refuses when it did, and it never moves HEAD. After an undo the turn's row also
 offers **Put back what this undo replaced**, which restores the checkpoint the
 undo saved first (`before_restore`, the pre-restore snapshot, A.9) through
-the same route with the same checks; the fold remembers that id as `saved`.
+the same route with the same checks. The fold remembers, per saved id (the
+last 100), which turns were undone just before that restore; restoring a saved
+id returns those flags, because it returns the folder to just before the
+restore that saved it.
 
 ### 2.3 The storage rule: the shadow holds only fresh edits
 
