@@ -1,0 +1,241 @@
+/* The plan-review pane (PlanReview.tsx): over the chat. Tokens only; a
+   changed block is marked by its word as well as its colour. */
+.plan-review-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-3);
+  background: color-mix(in srgb, var(--bg) 70%, transparent);
+}
+.plan-review {
+  display: flex;
+  flex-direction: column;
+  width: min(1100px, 100%);
+  max-height: 100%;
+  min-height: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-2);
+  color: var(--fg);
+  font-size: var(--text-sm);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}
+.pr-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--hairline);
+}
+.pr-title {
+  margin: 0;
+  font-size: var(--text-base, 1rem);
+  font-weight: var(--w-semibold);
+}
+.pr-banner {
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--hairline);
+  border-left: 3px solid var(--accent-2);
+  background: var(--bg);
+}
+.pr-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: var(--space-3);
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 10px 12px;
+}
+.pr-compose {
+  display: block;
+}
+.pr-plan,
+.pr-notes {
+  min-width: 0;
+}
+.pr-blocks,
+.pr-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.pr-block {
+  position: relative;
+  margin: 2px 0;
+  padding: 4px 8px;
+  border: 1px solid transparent;
+  border-left: 3px solid var(--hairline);
+  border-radius: var(--r-sm);
+}
+.pr-block:hover,
+.pr-block:focus-visible {
+  border-color: var(--hairline);
+  border-left-color: var(--accent-fg);
+  outline: none;
+}
+.pr-block:focus-visible {
+  box-shadow: 0 0 0 2px var(--accent-fg);
+}
+.pr-md > .md > :first-child {
+  margin-top: 0;
+}
+.pr-md > .md > :last-child {
+  margin-bottom: 0;
+}
+.pr-added {
+  border-left-color: var(--ok, #3a9d5d);
+}
+.pr-changed {
+  border-left-color: var(--accent-2);
+}
+.pr-removed {
+  border-left-color: var(--danger, #d0453b);
+  opacity: 0.75;
+}
+.pr-removed .pr-md {
+  text-decoration: line-through;
+}
+.pr-flag {
+  display: inline-block;
+  margin-bottom: 2px;
+  padding: 0 6px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  font-size: var(--text-xs, 0.75rem);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.pr-was {
+  margin-top: 4px;
+  color: var(--fg-2);
+}
+.pr-tools,
+.pr-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: 4px;
+}
+.pr-btn {
+  padding: 2px 10px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  background: none;
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+}
+.pr-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.pr-btn:focus-visible {
+  outline: 2px solid var(--accent-fg);
+}
+.pr-primary {
+  border-color: var(--accent-fg);
+  font-weight: var(--w-semibold);
+}
+.pr-form {
+  margin-top: 6px;
+  padding: 8px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+  background: var(--bg);
+}
+.pr-kinds {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin: 0 0 6px;
+  padding: 0;
+  border: 0;
+}
+.pr-field {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.pr-text {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  resize: vertical;
+}
+.pr-message {
+  font-family: var(--mono, monospace);
+}
+.pr-quote {
+  margin: 2px 0;
+  padding-left: 8px;
+  border-left: 2px solid var(--hairline);
+  color: var(--fg-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+q.pr-quote {
+  display: inline;
+  border: 0;
+  padding: 0;
+}
+.pr-h {
+  margin: 0 0 6px;
+  font-weight: var(--w-semibold);
+}
+.pr-note {
+  margin-bottom: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--r-sm);
+}
+.pr-kind {
+  font-weight: var(--w-semibold);
+}
+.pr-notetext {
+  margin: 2px 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.pr-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 8px 12px;
+  border-top: 1px solid var(--hairline);
+}
+.pr-carry {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+.pr-err {
+  padding: 4px 12px;
+}
+@media (max-width: 760px) {
+  .pr-body {
+    grid-template-columns: 1fr;
+  }
+}
+/* "Add a note" is quiet until the block is hovered or focused. */
+.pr-tools .pr-btn {
+  border-color: transparent;
+  color: var(--fg-2);
+  font-size: var(--text-xs, 0.75rem);
+  padding: 0 6px;
+}
+.pr-block:hover .pr-tools .pr-btn,
+.pr-block:focus-within .pr-tools .pr-btn,
+.pr-tools .pr-btn:focus-visible {
+  border-color: var(--hairline);
+  color: var(--fg);
+}
+.pr-tools {
+  margin-top: 0;
+}
