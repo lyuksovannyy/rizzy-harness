@@ -28,7 +28,7 @@ pub(crate) const READ_BUDGET_CHARS: usize = crate::MAX_OUTPUT_CHARS - 1_000;
 pub(crate) fn number_line(n: usize, text: &str, max_chars: usize, compact: bool) -> String {
     let text = text.strip_suffix('\r').unwrap_or(text);
     let mut shown: String = text.chars().take(max_chars).collect();
-    if text.chars().count() > max_chars {
+    if is_cut(text, max_chars) {
         shown.push('…');
     }
     if compact {
@@ -37,6 +37,30 @@ pub(crate) fn number_line(n: usize, text: &str, max_chars: usize, compact: bool)
     } else {
         format!("{n:>6}\t{shown}\n")
     }
+}
+
+/// `text` (a row, a trailing `\r` ignored) is longer than `max_chars`, so
+/// [`number_line`] shows it cut: such a row does not count as shown.
+pub(crate) fn is_cut(text: &str, max_chars: usize) -> bool {
+    let text = text.strip_suffix('\r').unwrap_or(text);
+    text.chars().count() > max_chars
+}
+
+/// The header line that starts a `read` result and ends an `edit` or
+/// `write` result: the file's path as the model addresses it
+/// ([`ToolCtx::model_path`]: relative to the session folder when inside it,
+/// the string it passes as `path`) and the tag of the version just shown
+/// ([`crate::seen::tag`]), which the line form of `edit` names. Control
+/// characters of the path (a file name may hold any) are shown as `?`.
+pub(crate) fn header(ctx: &ToolCtx, path: &std::path::Path, sha: &crate::seen::Sha) -> String {
+    let p: String = ctx
+        .model_path(path)
+        .display()
+        .to_string()
+        .chars()
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect();
+    format!("[{p}#{}]", crate::seen::tag(sha))
 }
 
 /// The per-line cap and the compact form this call uses.
@@ -152,6 +176,7 @@ impl Tool for Read {
             last,
             sha,
             bytes,
+            rows,
         } = match res {
             Ok(Ok(l)) => l,
             Ok(Err(e)) => return ToolOutcome::err(e),
@@ -176,16 +201,28 @@ impl Tool for Read {
                 }
             ));
         }
-        let mut o = ToolOutcome::ok(out);
         // What the agent now knows of the file, for `edit` and `write`. A
         // file cut at the byte cap has no hash of all of it: not recorded.
+        let mut seen = None;
+        let mut tagged = false;
         if !capped {
             let key = ctx.seen_key(&path);
-            o.seen = Some(match bytes {
-                Some(b) => ctx.seen.record(&key, &b),
+            seen = Some(match bytes {
+                Some(b) => {
+                    let f = ctx.seen.record_shown(&key, &b, &rows);
+                    // The header names a version the node keeps: a file too
+                    // large or not UTF-8 has none, so no tag is offered.
+                    tagged = ctx.seen.version(&key, &crate::seen::tag(&sha)).is_some();
+                    f
+                }
                 None => ctx.seen.record_hash(&key, sha),
             });
         }
+        if tagged {
+            out.insert_str(0, &format!("{}\n", header(ctx, &path, &sha)));
+        }
+        let mut o = ToolOutcome::ok(out);
+        o.seen = seen;
         o
     }
 }
@@ -245,12 +282,20 @@ impl Tool for Write {
         };
         match write_nofollow(&path, content.as_bytes()).await {
             Ok(()) => {
-                let mut o = ToolOutcome::ok(format!(
+                let mut report = format!(
                     "Wrote {} ({} lines)",
                     path.display(),
                     content.lines().count()
-                ));
-                let mut seen = ctx.seen.record(&key, content.as_bytes());
+                );
+                // All of it was written by the agent, so all of it is shown.
+                let mut seen = ctx
+                    .seen
+                    .record_shown(&key, content.as_bytes(), &[(1, usize::MAX)]);
+                let sha = crate::seen::sha256(content.as_bytes());
+                if ctx.seen.version(&key, &crate::seen::tag(&sha)).is_some() {
+                    report.push_str(&format!("\n{}", header(ctx, &path, &sha)));
+                }
+                let mut o = ToolOutcome::ok(report);
                 seen.base = base;
                 o.seen = Some(seen);
                 o
@@ -675,6 +720,8 @@ struct Lines {
     sha: crate::seen::Sha,
     /// The bytes themselves, when the file is small enough to snapshot.
     bytes: Option<Vec<u8>>,
+    /// The lines shown whole (a line cut at the cap is not one).
+    rows: Vec<(usize, usize)>,
 }
 
 /// Stream a regular file line by line through a fixed buffer, keeping only
@@ -707,6 +754,7 @@ fn read_window(
         chars: 0,
         last: w.first.saturating_sub(1).saturating_add(w.limit),
         shown: w.first.saturating_sub(1),
+        rows: Vec::new(),
     };
     let mut line: Vec<u8> = Vec::new();
     let mut long = false;
@@ -768,6 +816,7 @@ fn read_window(
         last: s.shown,
         sha: hasher.finalize().into(),
         bytes: bytes.filter(|_| !capped),
+        rows: s.rows,
     })
 }
 
@@ -780,6 +829,8 @@ struct Shown {
     last: usize,
     /// The last line shown.
     shown: usize,
+    /// The lines shown whole, as inclusive ranges.
+    rows: Vec<(usize, usize)>,
 }
 
 impl Shown {
@@ -800,6 +851,12 @@ impl Shown {
                 self.chars += chars;
                 self.out.push_str(&one);
                 self.shown = n;
+                if !long && !is_cut(&text, w.max_chars) {
+                    match self.rows.last_mut() {
+                        Some(r) if r.1 + 1 == n => r.1 = n,
+                        _ => self.rows.push((n, n)),
+                    }
+                }
             }
         }
         line.clear();

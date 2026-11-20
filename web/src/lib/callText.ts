@@ -310,7 +310,46 @@ export function fields(tool: string, input: unknown): Field[] {
     if (s.as === "path") out.push({ kind: "path", key, label: s.label, depth: 0, value: v });
     else out.push({ kind: "text", key, label: s.label, depth: 0, value: v, mode: s.as, tone: s.tone, cut: cut(v, s.as) });
   }
-  for (const [k, v] of Object.entries(rec)) if (!done.has(k)) walk(out, [k], k, v, 0);
+  const rows = tool === "edit" ? lineOps(rec.lines) : null;
+  for (const [k, v] of Object.entries(rec)) {
+    if (done.has(k)) continue;
+    if (k === "lines" && rows) {
+      // The line form of `edit`: rows and the new text, not raw JSON.
+      rows.forEach((op, i) => {
+        const value = op.text;
+        out.push({ kind: "text", key: keyOf([k, i]), label: op.label, depth: 0, value, mode: "text", tone: "add", cut: cut(value, "text") });
+      });
+    } else walk(out, [k], k, v, 0);
+  }
+  return out;
+}
+
+/** The text the card's preview (the rows a call changes, made by the tool
+ * from the file) is drawn with: plain text in a monospace block like any
+ * other text field, with the card's hidden-character marks and cut. */
+export function previewField(text: string, label: string): Field {
+  return { kind: "text", key: "preview", label, depth: 0, value: text, mode: "text", cut: cut(text, "text") };
+}
+
+/** `lines` of an `edit` call, if every item is exactly `{from, to, text}` or
+ * `{after, text}` with whole numbers (else null: the generic fields show
+ * whatever it is). */
+function lineOps(v: unknown): { label: string; text: string }[] | null {
+  if (!Array.isArray(v) || v.length === 0) return null;
+  const out: { label: string; text: string }[] = [];
+  const num = (x: unknown): x is number => typeof x === "number" && Number.isSafeInteger(x) && x >= 0;
+  for (const o of v) {
+    if (!o || typeof o !== "object" || Array.isArray(o)) return null;
+    const r = o as Record<string, unknown>;
+    if (typeof r.text !== "string" || Object.keys(r).some((k) => !["from", "to", "after", "text"].includes(k))) return null;
+    const del = r.text === "" ? " deleted" : "";
+    if (num(r.from) && num(r.to) && !("after" in r)) {
+      const at = r.from === r.to ? `row ${r.from}` : `rows ${r.from}-${r.to}`;
+      out.push({ label: del ? `${at} →${del}` : `${at} →`, text: r.text });
+    } else if (num(r.after) && !("from" in r) && !("to" in r)) {
+      out.push({ label: r.after === 0 ? "at the top, insert →" : `after row ${r.after}, insert →`, text: r.text });
+    } else return null;
+  }
   return out;
 }
 

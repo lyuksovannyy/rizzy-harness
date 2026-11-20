@@ -24,10 +24,13 @@ use std::path::Path;
 use harness_core::policy::ToolRisk;
 use serde_json::{Value, json};
 
-use crate::fs::{line_style, number_line, read_nofollow, write_nofollow};
+use crate::fs::{header, is_cut, line_style, number_line, read_nofollow, write_nofollow};
 use crate::{Tool, ToolCtx, ToolOutcome, str_arg};
 
 pub struct Edit;
+
+/// Inclusive 1-based row ranges.
+type RowRanges = Vec<(usize, usize)>;
 
 /// Lines of context around each change in the result.
 const CONTEXT: usize = 2;
@@ -59,7 +62,12 @@ impl Tool for Edit {
          against the file as it was before this call, they must not overlap, and either all are \
          made or none. The result shows the changed lines numbered as `read` shows them, so you \
          need not read the file again. Refused if the file changed on disk since you read it, \
-         in the lines you are replacing."
+         in the lines you are replacing. Or by row, without retyping old text: pass `tag` (the 4 \
+         characters after # in the `[path#TAG]` header of the latest `read`, `edit` or `write` \
+         result) and `lines`: {from, to, text} replaces rows from..to (empty text deletes \
+         them), {after, text} inserts after row `after` (0 = top); `text` is whole lines. Rows \
+         are numbered as in the tagged version, must not overlap, and each must have been shown \
+         to you (else they are shown and nothing changes). Not with old_string."
     }
     fn schema(&self) -> Value {
         json!({
@@ -69,6 +77,21 @@ impl Tool for Edit {
                 "old_string": {"type": "string"},
                 "new_string": {"type": "string"},
                 "replace_all": {"type": "boolean"},
+                "tag": {"type": "string", "description": "Version tag of the file, for `lines`"},
+                "lines": {
+                    "type": "array",
+                    "description": "Row operations on the tagged version, instead of old_string",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "from": {"type": "integer"},
+                            "to": {"type": "integer"},
+                            "after": {"type": "integer"},
+                            "text": {"type": "string"}
+                        },
+                        "required": ["text"]
+                    }
+                },
                 "edits": {
                     "type": "array",
                     "description": "Several replacements in this file, instead of old_string/new_string",
@@ -94,12 +117,41 @@ impl Tool for Edit {
     /// this way).
     fn normalize_args(&self, input: &mut Value) -> Result<(), String> {
         crate::args::alias(input, "old_str", "old_string")?;
-        crate::args::alias(input, "new_str", "new_string")
+        crate::args::alias(input, "new_str", "new_string")?;
+        // A tag pasted as the whole header line, or in lower case: the
+        // card and the approval key see the four characters.
+        if let Some(t) = input.get_mut("tag")
+            && let Some(n) = t.as_str().and_then(crate::edit_lines::norm_tag)
+        {
+            *t = Value::String(n);
+        }
+        // `lines` as one object, `text` as a list of strings: the shapes
+        // the schema takes; a missing `text` refused with how to delete.
+        crate::edit_lines::normalize(input)
     }
     fn refusal(&self, ctx: &ToolCtx, input: &Value) -> Option<String> {
-        crate::path_refusal(ctx, input, true).or_else(|| unread_now(ctx, input))
+        crate::path_refusal(ctx, input, true).or_else(|| {
+            if crate::edit_lines::wants(input) {
+                crate::edit_lines::refusal(ctx, input)
+            } else {
+                unread_now(ctx, input)
+            }
+        })
+    }
+    fn preview(&self, ctx: &ToolCtx, input: &Value) -> Option<String> {
+        // `refusal` itself may record rows it prints; the path check and the
+        // plan inside `preview` are pure, and a plan that is refused gives
+        // no preview.
+        if crate::edit_lines::wants(input) && crate::path_refusal(ctx, input, true).is_none() {
+            crate::edit_lines::preview(ctx, input)
+        } else {
+            None
+        }
     }
     async fn run(&self, ctx: &ToolCtx, input: Value) -> ToolOutcome {
+        if crate::edit_lines::wants(&input) {
+            return crate::edit_lines::run(ctx, input).await;
+        }
         let shown = str_arg(&input, "path").unwrap_or_default().to_string();
         let path = match str_arg(&input, "path").and_then(|p| ctx.resolve_for_write(p)) {
             Ok(p) => p,
@@ -116,10 +168,11 @@ impl Tool for Edit {
             Err(e) => return ToolOutcome::err(e),
         };
         match edit(ctx, &path, &key, &shown, &text, &specs) {
-            Ok((updated, report)) => match write_nofollow(&path, updated.as_bytes()).await {
+            Ok((updated, report, rows)) => match write_nofollow(&path, updated.as_bytes()).await {
                 Ok(()) => {
-                    let mut o = ToolOutcome::ok(report);
-                    let mut seen = ctx.seen.record(&key, updated.as_bytes());
+                    let sha = crate::seen::sha256(updated.as_bytes());
+                    let mut o = ToolOutcome::ok(format!("{report}\n{}", header(ctx, &path, &sha)));
+                    let mut seen = ctx.seen.record_shown(&key, updated.as_bytes(), &rows);
                     // What this edit replaced (T57).
                     seen.base = Some(crate::seen::hex(&crate::seen::sha256(text.as_bytes())));
                     o.seen = Some(seen);
@@ -394,7 +447,7 @@ fn strip_gutter_where_present(s: &str) -> String {
 }
 
 /// 1-based line of byte `off` in `text`.
-fn line_of(text: &str, off: usize) -> usize {
+pub(crate) fn line_of(text: &str, off: usize) -> usize {
     1 + text.as_bytes()[..off.min(text.len())]
         .iter()
         .filter(|b| **b == b'\n')
@@ -585,7 +638,7 @@ fn miss(v: &View, spec: &Spec, old: &str) -> String {
 
 /// The changed lines of `live` against `snapshot`, widened to whole lines:
 /// byte range in `live`.
-fn changed(snapshot: &str, live: &str) -> (usize, usize) {
+pub(crate) fn changed(snapshot: &str, live: &str) -> (usize, usize) {
     let (s, l) = (snapshot.as_bytes(), live.as_bytes());
     let p = s.iter().zip(l).take_while(|(a, b)| a == b).count();
     let room = s.len().min(l.len()) - p;
@@ -611,7 +664,7 @@ fn changed(snapshot: &str, live: &str) -> (usize, usize) {
 
 /// Lines `[start, end)` (byte range on line boundaries) of `text`, numbered
 /// as `read` numbers them, at most [`MAX_CHANGED_LINES`].
-fn show(ctx: &ToolCtx, text: &str, start: usize, end: usize) -> String {
+pub(crate) fn show(ctx: &ToolCtx, text: &str, start: usize, end: usize) -> String {
     let (max_chars, compact) = line_style(ctx);
     let first = line_of(text, start);
     let part = &text[start..end];
@@ -721,7 +774,16 @@ fn unread_refusal(ctx: &ToolCtx, key: &Path, shown: &str, text: &str, specs: &[S
         .max(first);
     let start = starts[first - 1];
     let end = starts.get(last).copied().unwrap_or(text.len());
-    ctx.seen.record(key, text.as_bytes());
+    let (max_chars, _) = line_style(ctx);
+    let rows: Vec<(usize, usize)> = (first..=last)
+        .filter(|n| {
+            let a = starts[n - 1];
+            let b = starts.get(*n).copied().unwrap_or(text.len());
+            !is_cut(text[a..b].trim_end_matches('\n'), max_chars)
+        })
+        .map(|n| (n, n))
+        .collect();
+    ctx.seen.record_shown(key, text.as_bytes(), &rows);
     format!(
         "{shown} has not been read with `read` in this session (reading it with `cat`, `head` \
          or `sed` in `bash` does not count), so nothing was changed. Its lines around \
@@ -812,7 +874,7 @@ fn edit(
     shown: &str,
     text: &str,
     specs: &[Spec],
-) -> Result<(String, String), String> {
+) -> Result<(String, String, RowRanges), String> {
     let Some(seen) = ctx.seen.get(key) else {
         return Err(unread_refusal(ctx, key, shown, text, specs));
     };
@@ -943,7 +1005,8 @@ fn edit(
         report.push_str(&format!(" ({})", notes.join("; ")));
     }
     report.push_str(".\n");
-    report.push_str(&changed_lines(ctx, &updated, &landed));
+    let (lines, rows) = changed_lines(ctx, &updated, &landed);
+    report.push_str(&lines);
     if let Some((ra, rb)) = region {
         let a = (ra as isize + region_shift) as usize;
         let b = (rb as isize + region_shift) as usize;
@@ -953,12 +1016,16 @@ fn edit(
         );
         report.push_str(&show(ctx, &updated, a, b));
     }
-    Ok((updated, report))
+    Ok((updated, report, rows))
 }
 
 /// The lines around each replacement in `text` (the new file), numbered as
 /// `read` numbers them, nearby ones merged.
-fn changed_lines(ctx: &ToolCtx, text: &str, landed: &[(usize, usize)]) -> String {
+pub(crate) fn changed_lines(
+    ctx: &ToolCtx,
+    text: &str,
+    landed: &[(usize, usize)],
+) -> (String, RowRanges) {
     let (max_chars, compact) = line_style(ctx);
     let mut starts = vec![0];
     starts.extend(text.match_indices('\n').map(|(i, _)| i + 1));
@@ -967,7 +1034,7 @@ fn changed_lines(ctx: &ToolCtx, text: &str, landed: &[(usize, usize)]) -> String
     }
     let total = starts.len();
     if total == 0 {
-        return "The file is now empty.\n".to_string();
+        return ("The file is now empty.\n".to_string(), Vec::new());
     }
     let line = |off: usize| starts.partition_point(|s| *s <= off).max(1);
     let mut ranges: Vec<(usize, usize)> = Vec::new();
@@ -988,6 +1055,7 @@ fn changed_lines(ctx: &ToolCtx, text: &str, landed: &[(usize, usize)]) -> String
             .unwrap_or(&text[a..b.max(a)])
     };
     let mut out = String::from("The changed lines now read (numbered as `read` numbers them):\n");
+    let mut shown: Vec<(usize, usize)> = Vec::new();
     let mut used = 0;
     for (k, (lo, hi)) in ranges.iter().enumerate() {
         if used >= MAX_RESULT_LINES {
@@ -1011,7 +1079,11 @@ fn changed_lines(ctx: &ToolCtx, text: &str, landed: &[(usize, usize)]) -> String
             }
             out.push_str(&number_line(n, text_of(n), max_chars, compact));
             used += 1;
+            // A row shown cut is not a row the agent has seen.
+            if !is_cut(text_of(n), max_chars) {
+                shown.push((n, n));
+            }
         }
     }
-    out
+    (out, shown)
 }

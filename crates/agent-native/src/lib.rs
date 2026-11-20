@@ -264,12 +264,13 @@ impl harness_core::backend::TurnHost for Logged<'_> {
         input: &serde_json::Value,
         risk: harness_core::policy::ToolRisk,
         origin: Option<&str>,
+        preview: Option<&str>,
     ) -> harness_core::policy::Decision {
         if self.failure().is_some() {
             return harness_core::policy::Decision::Deny;
         }
         self.host
-            .approve_from(call_id, tool, input, risk, origin)
+            .approve_from(call_id, tool, input, risk, origin, preview)
             .await
     }
 
@@ -5850,6 +5851,13 @@ impl NativeBackend {
             } else {
                 tool.risk()
             };
+            // For the person's card only: the rows a line edit replaces, from
+            // the files as they are now (asked only where a card may come).
+            let preview = if host.runs_unasked(tool.name(), risk) {
+                None
+            } else {
+                tool.preview(&self.refusal_ctx(ctx, host), &call.input)
+            };
             let decision = host
                 .approve_from(
                     &call.call_id,
@@ -5857,6 +5865,7 @@ impl NativeBackend {
                     &call.input,
                     risk,
                     origin.as_deref(),
+                    preview.as_deref(),
                 )
                 .await;
             match decision {

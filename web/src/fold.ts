@@ -237,7 +237,7 @@ const KINDS: Record<string, string> = {
   tool_call_started: "turn_id call_id tool input:j ?author",
   tool_output_delta: "call_id stream:=stream text",
   tool_call_finished: "call_id ok:b output ?exit_code:n ?sources:[@source",
-  approval_requested: "approval_id call_id tool input:j reason ?turn_allow:b ?chat_allow:b",
+  approval_requested: "approval_id call_id tool input:j reason ?turn_allow:b ?chat_allow:b ?preview",
   approval_resolved: "approval_id decision:=decision by:=resolvedBy ?note",
   checkpoint: "turn_id phase:=phase git_ref ?files:[s ?head_moved:@headMoved",
   turn_ended: "turn_id reason:=turnEnd ?usage:@usage",
@@ -604,6 +604,7 @@ function fold1(v: SessionView, e: RawEvent, p: any): void {
         // As the Rust view: the key only when true.
         if (p.turn_allow === true) t.approval.turn_allow = true;
         if (p.chat_allow === true) t.approval.chat_allow = true;
+        if (typeof p.preview === "string") t.approval.preview = p.preview;
       }
       break;
     }

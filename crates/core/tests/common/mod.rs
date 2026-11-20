@@ -237,6 +237,7 @@ pub fn every_kind(w: &str) -> Vec<EventKind> {
             reason: s(),
             turn_allow: true,
             chat_allow: true,
+            preview: Some(s()),
         }),
         EventKind::ApprovalResolved(ApprovalResolved {
             approval_id: s(),

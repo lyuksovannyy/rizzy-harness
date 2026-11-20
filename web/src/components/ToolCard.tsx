@@ -3,7 +3,9 @@ import { ChevronDown, ChevronRight, Globe, Search } from "lucide-react";
 import { useMemo, useState } from "react";
 import { pageApi } from "../apiPages";
 import type { WebGroup } from "../lib/rich";
-import { fields as fieldsOf, fmt, markedText, unseen } from "../lib/callText";
+import { fields as fieldsOf, fmt, markedText, previewField, unseen } from "../lib/callText";
+import { t } from "../lib/i18n";
+import "../lib/i18nPages";
 import { showHidden, shownName, stripHidden } from "../md/hidden";
 import { hostOf, parseUrl } from "../md/links";
 import { rt } from "../md/strings";
@@ -188,7 +190,12 @@ export function ToolCard({
   // sends the approval the same value it sent with tool_call_started
   // (agent-native: both are `call.input`).
   const input = item.input;
-  const shown = useMemo(() => fieldsOf(item.tool, input), [item.tool, input]);
+  const preview = item.approval?.preview;
+  const shown = useMemo(() => {
+    const f = fieldsOf(item.tool, input);
+    // What a line edit replaces: made by the tool from the file, plain text.
+    return preview ? [...f, previewField(preview, t("approval.rows"))] : f;
+  }, [item.tool, input, preview]);
   const notExpanded = unseen(shown, openFields);
   const web = item.tool === "web_search" || item.tool === "web_fetch";
   // Open while it matters; collapse finished successful calls by default. A

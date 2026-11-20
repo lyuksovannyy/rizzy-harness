@@ -1866,6 +1866,13 @@ pub struct ApprovalRequested {
     /// a background start.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub chat_allow: bool,
+    /// What the call would change, for the person deciding (`Tool::preview`:
+    /// the rows a line edit replaces), as plain text made from the file as
+    /// it is now. File content, so it may be hostile: shown as text only,
+    /// scrubbed of secrets like every event's text, never sent to the model
+    /// and never part of the key "allow for this turn/chat" covers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
